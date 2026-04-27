@@ -361,7 +361,7 @@ Record results in `docs/test-games.md` (game name, version, backend, pass/fail, 
 
 | Decision | Choice |
 |----------|--------|
-| Architecture support | **x64-only** (no 32-bit Unity games) |
+| Architecture support | **x64-only for v1**; x86 reserved for v2. Phase 5 (IL2CPP metadata deep parse) must be bitness-parameterized from day one (`MetadataView<arch::x64/x86>`, `using ptr_t = std::uintptr_t`) so a future x86 port is mechanical. v2 work: 32-bit `inject-x86.exe` helper, CMake x86 toolchain, build matrix doubles to 4 variants, proxy DLLs duplicated. |
 | Cheat Engine compat | **CE 7.5+** (lower bound, was 7.6+) |
 | UI theme | **Follow system** only — no in-app dark/light toggle |
 | Proxy DLL variants | **`version.dll` + `winmm.dll` + `dxgi.dll`** (all three) |
