@@ -1,9 +1,24 @@
-# 開個 notepad，預設注入 Mono 變體
+# .\tools\Inject-Dll.ps1
+
+## 開個 notepad，預設注入 Mono 變體
 notepad
 .\tools\Inject-Dll.ps1 -Target notepad
 
-# 指定 PID + IL2CPP 變體
+## 指定 PID + IL2CPP 變體
 .\tools\Inject-Dll.ps1 -Target 12345 -Backend IL2CPP
 
-# 自訂 DLL 路徑
+## 自訂 DLL 路徑
 .\tools\Inject-Dll.ps1 -Target notepad -DllPath C:\path\to\my.dll
+
+
+#簡易測試
+# 1) 列出當前可注入的 Unity 遊戲（自動分 Mono / IL2CPP）
+.\tools\List-UnityProcs.ps1
+# 輸出表格：PID / Backend / ProcessName / Title
+
+# 2) 給 PID 跑完整 acceptance（注入 + ping + handshake + scan + PASS/FAIL）
+.\tools\Test-Handshake.ps1 -ProcessId 12345
+# Backend 預設 Auto（讀 target loaded modules 自動判斷）
+# 也可強制：-Backend Mono / -Backend IL2CPP
+# DLL 已經注入過：加 -SkipInject
+# 沒帶任何參數：印 help

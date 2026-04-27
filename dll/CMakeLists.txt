@@ -2,6 +2,8 @@
 
 set(DLL_SHARED_SOURCES
     src/main.cpp
+    src/shared/BackendDetector.cpp
+    src/shared/BackendDetector.h
     src/shared/Logger.cpp
     src/shared/Logger.h
     src/shared/MagicStrings.h

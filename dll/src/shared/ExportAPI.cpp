@@ -3,13 +3,17 @@
 #define UNITYCEDUMPER_BUILDING_DLL
 #include "ExportAPI.h"
 
+#include "BackendDetector.h"
 #include "Logger.h"
 #include "MagicStrings.h"
 #include "PipeServer.h"
 
 #include <nlohmann/json.hpp>
 
+#include <windows.h>
+
 #include <atomic>
+#include <string>
 
 using nlohmann::json;
 
@@ -35,17 +39,46 @@ constexpr const char* BackendName(UnityDumperBackend b) {
     }
 }
 
+std::string Utf8FromWide(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                                  nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string out(static_cast<std::size_t>(n), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                          out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+json BuildHandshakeJson() {
+    using namespace UnityCEDumper;
+    auto d = BackendDetector::Detect();
+
+    json j;
+    j["engine"]       = "Unity";
+    j["backend"]      = BackendDetector::BackendName(d.backend);
+    j["dll_variant"]  = BackendName(BackendOfBuild());
+    j["game_module"]  = Utf8FromWide(d.gameModule);
+    j["unity_version"]    = d.unityVersion ? json(*d.unityVersion) : json(nullptr);
+    j["metadata_version"] = d.metadataVersion ? json(*d.metadataVersion) : json(nullptr);
+    // Populated in Phase 3 (Mono) / Phase 4 (IL2CPP); 0 means "not yet enumerated".
+    j["assemblies_count"] = 0;
+    j["build"]    = static_cast<std::uint32_t>(UNITYCEDUMPER_BUILD_NUMBER);
+    j["protocol"] = 1;
+    return j;
+}
+
 void RegisterCoreHandlers() {
     using namespace UnityCEDumper;
     PipeServer::RegisterHandler("ping", [](const json&) -> json {
         return json{{"pong", true}};
     });
     PipeServer::RegisterHandler(MagicStrings::CmdHandshake, [](const json&) -> json {
-        return json{
-            {"backend", BackendName(BackendOfBuild())},
-            {"build",   static_cast<std::uint32_t>(UNITYCEDUMPER_BUILD_NUMBER)},
-            {"protocol", 1},
-        };
+        return BuildHandshakeJson();
+    });
+    // Phase 2: `scan` re-runs backend detection and returns the same shape as handshake.
+    PipeServer::RegisterHandler(MagicStrings::CmdScan, [](const json&) -> json {
+        return BuildHandshakeJson();
     });
 }
 

@@ -4,16 +4,20 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-04-27
-**Current phase**: Phase 2 — Backend Detection + Handshake (Phase 1 acceptance ✅)
+**Current phase**: Phase 3 — Mono Backend (Phase 2 acceptance ✅)
 
 ## Hand-off notes (latest)
 
-- Phase 1 green: pipe server up, `ping` → `{"pong":true}`, `handshake` → `{"backend":"Mono","build":7,"protocol":1}`, unknown cmd returns proper error envelope
-- DLL auto-starts pipe server from `DllMain`; `pipe` category log captures connect/disconnect; logger writes to `<pid>/<category>/current.log` with rotation at 8 MB × 4 files
-- nlohmann/json vendored at `dll/vendor/nlohmann_json` (v3.11.2-419-g98386eb08)
-- Build #7 OK on PC2: zero warnings, both Mono + IL2CPP variants link clean
-- Next step: Phase 2 — `BackendDetector` (sniff `mono-2.0-bdwgc.dll` / `mono.dll` / `GameAssembly.dll`), Unity version extraction, IL2CPP metadata version read, full handshake JSON shape per Architecture
-- Watch out: linker LNK1104 means a previous notepad still has the DLL mapped — close it before rebuilding
+- Phase 2 green (build #9): `BackendDetector` sniffs `GameAssembly.dll` / `mono-2.0-bdwgc.dll` / `mono.dll`; Unity version read from `data.unity3d` (UnityFS bundle revision) or `globalgamemanagers` (regex `\d+\.\d+\.\d+[abfp]\d+`); IL2CPP `global-metadata.dat` magic (0xFAB11BAF) + version validated
+- `handshake` / `scan` shape: `{engine, backend, dll_variant, game_module, unity_version, metadata_version, assemblies_count, build, protocol}` — `assemblies_count` stays 0 until Phase 3/4
+- Real-game acceptance results:
+  - **Mono**: Farthest Frontier — `backend=Mono unity=2022.3.62f3 metadata=null` ✅
+  - **IL2CPP**: SaGa Frontier 2 Remastered — `backend=IL2CPP unity=2021.3.39f1 metadata=29` ✅
+- New helper scripts:
+  - `tools/List-UnityProcs.ps1` — list candidate Mono / IL2CPP processes by inspecting loaded modules
+  - `tools/Test-Handshake.ps1 -ProcessId <pid>` — auto-detect backend, inject, run ping/handshake/scan, print pass/fail
+- Watch out: Bitdefender flags injected DLLs as virus → add `D:\Github\discrete\build\` and `%LOCALAPPDATA%\UnityCEDumper\` to AV exclusions on each dev PC
+- Watch out: linker LNK1104 means a previous host still has the DLL mapped — close it before rebuilding
 - Lessons learned (still applicable):
   - VS DevShell loading must use `Import-Module Microsoft.VisualStudio.DevShell.dll` + `Enter-VsDevShell` cmdlet (NOT `Launch-VsDevShell.ps1` — recurses on VS 18)
   - `Avalonia.ReactiveUI` has no v12 release; use `CommunityToolkit.Mvvm` 8.x for AOT-friendly MVVM
@@ -28,8 +32,8 @@
 |---|-------|------|--------|
 | 0 | Bootstrap | Repo skeleton, build script, logging | ✅ |
 | 1 | Shared C++ Foundation | Memory / Logger / ModuleHelper / Pipe server | ✅ |
-| 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | 🟡 In progress |
-| 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | ⬜ |
+| 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | ✅ |
+| 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | 🟡 Next |
 | 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ⬜ |
 | 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | ⬜ |
 | 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ⬜ |
@@ -91,10 +95,10 @@
 
 ## Phase 2 — Backend Detection + Handshake
 
-- [ ] `BackendDetector.{h,cpp}` — module sniff (`mono-2.0-bdwgc.dll` / `mono.dll` / `GameAssembly.dll`)
-- [ ] Unity version extraction from `globalgamemanagers` or `data.unity3d`
-- [ ] IL2CPP metadata version read (first 8 bytes of `global-metadata.dat`)
-- [ ] `handshake` command returns spec-shaped JSON (engine/backend/unity_version/metadata_version/game_module/assemblies_count)
+- [x] `BackendDetector.{h,cpp}` — module sniff (`mono-2.0-bdwgc.dll` / `mono.dll` / `GameAssembly.dll`)
+- [x] Unity version extraction from `globalgamemanagers` or `data.unity3d`
+- [x] IL2CPP metadata version read (first 8 bytes of `global-metadata.dat`)
+- [x] `handshake` command returns spec-shaped JSON (engine/backend/unity_version/metadata_version/game_module/assemblies_count)
 
 **Acceptance**:
 - Test against ≥1 Mono game and ≥1 IL2CPP game; both return correct `backend` and `unity_version`
