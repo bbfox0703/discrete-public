@@ -1,0 +1,234 @@
+// IL2CPPClassWalker.cpp — implementation.
+
+#include "IL2CPPClassWalker.h"
+
+#include "../shared/Logger.h"
+#include "../shared/MagicStrings.h"
+#include "IL2CPPDomain.h"
+#include "IL2CPPResolver.h"
+#include "IL2CPPThreadAttach.h"
+#include "IL2CPPTypeParser.h"
+
+#include <windows.h>
+
+namespace UnityCEDumper::IL2CPP {
+
+namespace {
+
+const char* SafeStr(const char* s) { return s ? s : ""; }
+
+bool DescribeClass(Il2CppClass* klass, ClassEntry& out) {
+    if (klass == nullptr) return false;
+    const auto& r = GetResolver();
+    out.klass = klass;
+    if (r.class_get_name != nullptr)      out.name = SafeStr(r.class_get_name(klass));
+    if (r.class_get_namespace != nullptr) out.ns   = SafeStr(r.class_get_namespace(klass));
+    return true;
+}
+
+#pragma warning(push)
+#pragma warning(disable: 4509)
+std::size_t SehClassCount(fn_image_get_class_count fn, const Il2CppImage* img) {
+    __try { return fn(img); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+Il2CppClass* SehClassByIdx(fn_image_get_class fn, const Il2CppImage* img, std::size_t i) {
+    __try { return fn(img, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+Il2CppClass* SehClassFromName(fn_class_from_name fn, const Il2CppImage* img,
+                              const char* ns, const char* nm) {
+    __try { return fn(img, ns, nm); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+Il2CppClass* SehParent(fn_class_get_parent fn, Il2CppClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+FieldInfo* SehNextField(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
+    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+const MethodInfo* SehNextMethod(fn_class_get_methods fn, Il2CppClass* k, void** iter) {
+    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+void* SehStaticData(fn_class_get_static_data fn, Il2CppClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+void* SehMethodPtr(fn_method_get_pointer fn, const MethodInfo* m) {
+    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+#pragma warning(pop)
+
+}  // namespace
+
+std::vector<ClassEntry> EnumerateClasses(const Il2CppImage* image) {
+    std::vector<ClassEntry> out;
+    if (image == nullptr) return out;
+
+    const auto& r = GetResolver();
+    if (!r.resolved || r.image_get_class_count == nullptr || r.image_get_class == nullptr) {
+        return out;
+    }
+
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return out;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return out;
+
+    std::size_t n = SehClassCount(r.image_get_class_count, image);
+    if (n == 0) return out;
+
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        Il2CppClass* k = SehClassByIdx(r.image_get_class, image, i);
+        ClassEntry e;
+        if (DescribeClass(k, e)) out.push_back(std::move(e));
+    }
+    return out;
+}
+
+Il2CppClass* FindClass(const Il2CppImage* image,
+                       const std::string& ns, const std::string& name) {
+    if (image == nullptr || name.empty()) return nullptr;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_from_name == nullptr) return nullptr;
+
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return nullptr;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return nullptr;
+
+    return SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+}
+
+ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
+    ClassInfoResult result;
+    if (klass == nullptr) return result;
+
+    const auto& r = GetResolver();
+    if (!r.resolved) return result;
+
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return result;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return result;
+
+    DescribeClass(klass, result.info.self);
+    if (r.class_get_parent != nullptr) {
+        if (Il2CppClass* p = SehParent(r.class_get_parent, klass)) {
+            DescribeClass(p, result.info.parent);
+        }
+    }
+
+    if (r.class_get_fields != nullptr) {
+        void* iter = nullptr;
+        for (;;) {
+            FieldInfo* f = SehNextField(r.class_get_fields, klass, &iter);
+            if (f == nullptr) break;
+            FieldEntry fe;
+            if (r.field_get_name != nullptr)   fe.name   = SafeStr(r.field_get_name(f));
+            if (r.field_get_offset != nullptr) fe.offset = r.field_get_offset(f);
+            if (r.field_get_flags != nullptr)  fe.flags  = static_cast<std::uint32_t>(r.field_get_flags(f));
+            if (r.field_get_type != nullptr)   fe.typeName = TypeName(r.field_get_type(f));
+            result.info.fields.push_back(std::move(fe));
+        }
+    }
+
+    if (r.class_get_methods != nullptr) {
+        void* iter = nullptr;
+        for (;;) {
+            const MethodInfo* m = SehNextMethod(r.class_get_methods, klass, &iter);
+            if (m == nullptr) break;
+            MethodEntry me;
+            if (r.method_get_name != nullptr)    me.name = SafeStr(r.method_get_name(m));
+            if (r.method_get_token != nullptr)   me.token = r.method_get_token(m);
+            if (r.method_get_flags != nullptr) {
+                std::uint32_t iflags = 0;
+                me.flags = r.method_get_flags(m, &iflags);
+            }
+            if (r.method_get_pointer != nullptr) me.pointer = SehMethodPtr(r.method_get_pointer, m);
+            result.info.methods.push_back(std::move(me));
+        }
+    }
+
+    result.ok = true;
+    return result;
+}
+
+StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::string& fieldName) {
+    StaticFieldAddress out;
+    if (klass == nullptr || fieldName.empty()) return out;
+
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_static_data == nullptr || r.class_get_fields == nullptr) {
+        return out;
+    }
+
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return out;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return out;
+
+    FieldInfo* match = nullptr;
+    void* iter = nullptr;
+    for (;;) {
+        FieldInfo* f = SehNextField(r.class_get_fields, klass, &iter);
+        if (f == nullptr) break;
+        const char* n = (r.field_get_name != nullptr) ? r.field_get_name(f) : nullptr;
+        if (n != nullptr && fieldName == n) { match = f; break; }
+    }
+    if (match == nullptr) return out;
+
+    std::uint32_t flags = (r.field_get_flags != nullptr)
+                          ? static_cast<std::uint32_t>(r.field_get_flags(match)) : 0u;
+    if ((flags & 0x10u) == 0) {
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+            "IL2CPP::ResolveStaticFieldAddress: field is not static");
+        return out;
+    }
+    std::size_t offset = (r.field_get_offset != nullptr) ? r.field_get_offset(match) : 0u;
+    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
+
+    void* base = SehStaticData(r.class_get_static_data, klass);
+    if (base == nullptr) {
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+            "IL2CPP::ResolveStaticFieldAddress: class_get_static_field_data returned null");
+        return out;
+    }
+
+    out.ok       = true;
+    out.address  = static_cast<std::uint8_t*>(base) + offset;
+    out.offset   = offset;
+    out.flags    = flags;
+    out.typeName = std::move(typeName);
+    return out;
+}
+
+MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& methodName) {
+    MethodPointer out;
+    if (klass == nullptr || methodName.empty()) return out;
+
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_methods == nullptr || r.method_get_pointer == nullptr) {
+        return out;
+    }
+
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return out;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return out;
+
+    const MethodInfo* match = nullptr;
+    void* iter = nullptr;
+    for (;;) {
+        const MethodInfo* m = SehNextMethod(r.class_get_methods, klass, &iter);
+        if (m == nullptr) break;
+        const char* n = (r.method_get_name != nullptr) ? r.method_get_name(m) : nullptr;
+        if (n != nullptr && methodName == n) { match = m; break; }
+    }
+    if (match == nullptr) return out;
+
+    out.name  = methodName;
+    out.token = (r.method_get_token != nullptr) ? r.method_get_token(match) : 0u;
+    out.address = SehMethodPtr(r.method_get_pointer, match);
+    out.ok = (out.address != nullptr);
+    return out;
+}
+
+}  // namespace UnityCEDumper::IL2CPP

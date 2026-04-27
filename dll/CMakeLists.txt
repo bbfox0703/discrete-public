@@ -33,7 +33,16 @@ set(DLL_MONO_SOURCES
 
 # IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
 set(DLL_IL2CPP_SOURCES
-    # populated in Phase 4
+    src/il2cpp/IL2CPPTypes.h
+    src/il2cpp/IL2CPPResolver.cpp
+    src/il2cpp/IL2CPPResolver.h
+    src/il2cpp/IL2CPPThreadAttach.h
+    src/il2cpp/IL2CPPDomain.cpp
+    src/il2cpp/IL2CPPDomain.h
+    src/il2cpp/IL2CPPTypeParser.cpp
+    src/il2cpp/IL2CPPTypeParser.h
+    src/il2cpp/IL2CPPClassWalker.cpp
+    src/il2cpp/IL2CPPClassWalker.h
 )
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,10 @@
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
 #  include "../mono/MonoResolver.h"
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#  include "../il2cpp/IL2CPPClassWalker.h"
+#  include "../il2cpp/IL2CPPDomain.h"
+#  include "../il2cpp/IL2CPPResolver.h"
 #endif
 
 #include <nlohmann/json.hpp>
@@ -73,8 +77,11 @@ json BuildHandshakeJson() {
     if (d.backend == BackendDetector::Backend::Mono && Mono::IsResolved()) {
         assembliesCount = static_cast<std::uint32_t>(Mono::EnumerateAssemblies().size());
     }
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+    if (d.backend == BackendDetector::Backend::IL2CPP && IL2CPP::IsResolved()) {
+        assembliesCount = static_cast<std::uint32_t>(IL2CPP::EnumerateAssemblies().size());
+    }
 #endif
-    // IL2CPP path lands in Phase 4.
     j["assemblies_count"] = assembliesCount;
     j["build"]    = static_cast<std::uint32_t>(UNITYCEDUMPER_BUILD_NUMBER);
     j["protocol"] = 1;
@@ -293,6 +300,169 @@ void RegisterCoreHandlers() {
             {"method",  cm.name},
             {"token",   cm.token},
             {"address", formatHex(reinterpret_cast<std::uintptr_t>(cm.address))},
+        };
+    });
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+    // Phase 4: IL2CPP API path. Same command names as the Mono variant.
+    auto formatHex = [](std::uintptr_t v) {
+        char buf[32];
+        ::_snprintf_s(buf, sizeof(buf), _TRUNCATE, "0x%016llX",
+                      static_cast<unsigned long long>(v));
+        return std::string(buf);
+    };
+
+    PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
+        if (!IL2CPP::IsResolved()) {
+            return json{
+                {"error", "il2cpp runtime not resolved"},
+                {"assemblies", json::array()},
+                {"count", 0},
+            };
+        }
+        auto vec = IL2CPP::EnumerateAssemblies();
+        json arr = json::array();
+        for (const auto& a : vec) {
+            arr.push_back({{"name", a.name}, {"path", a.path}});
+        }
+        return json{
+            {"assemblies", std::move(arr)},
+            {"count", vec.size()},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdGetClasses, [](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string assemblyName = args.value("assembly", std::string{});
+        if (assemblyName.empty()) return json{{"error", "missing 'assembly' arg"}};
+        const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
+        if (img == nullptr) return json{{"error", "assembly not found: " + assemblyName}};
+
+        auto classes = IL2CPP::EnumerateClasses(img);
+        json arr = json::array();
+        for (const auto& c : classes) {
+            arr.push_back({{"namespace", c.ns}, {"name", c.name}});
+        }
+        return json{
+            {"assembly", assemblyName},
+            {"count", classes.size()},
+            {"classes", std::move(arr)},
+        };
+    });
+
+    auto resolveClassFromArgs = [](const json& args, std::string& errOut) -> IL2CPP::Il2CppClass* {
+        std::string assemblyName = args.value("assembly", std::string{});
+        std::string ns           = args.value("namespace", std::string{});
+        std::string name         = args.value("name", std::string{});
+        if (assemblyName.empty() || name.empty()) {
+            errOut = "missing 'assembly' or 'name' arg"; return nullptr;
+        }
+        const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
+        if (img == nullptr) { errOut = "assembly not found: " + assemblyName; return nullptr; }
+        IL2CPP::Il2CppClass* k = IL2CPP::FindClass(img, ns, name);
+        if (k == nullptr) { errOut = "class not found: " + ns + "." + name; return nullptr; }
+        return k;
+    };
+
+    PipeServer::RegisterHandler(MagicStrings::CmdGetClassInfo,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto res = IL2CPP::ReadClassInfo(k);
+        if (!res.ok) return json{{"error", "ReadClassInfo failed"}};
+
+        json fields = json::array();
+        for (const auto& f : res.info.fields) {
+            fields.push_back({
+                {"name", f.name}, {"type", f.typeName},
+                {"offset", f.offset}, {"flags", f.flags},
+                {"static", (f.flags & 0x10u) != 0},
+            });
+        }
+        json methods = json::array();
+        for (const auto& m : res.info.methods) {
+            methods.push_back({
+                {"name", m.name}, {"token", m.token}, {"flags", m.flags},
+                {"static", (m.flags & 0x10u) != 0},
+                {"address", formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
+            });
+        }
+        json parent = nullptr;
+        if (!res.info.parent.name.empty()) {
+            parent = json{{"namespace", res.info.parent.ns}, {"name", res.info.parent.name}};
+        }
+        return json{
+            {"namespace", res.info.self.ns}, {"name", res.info.self.name},
+            {"parent", parent},
+            {"fields", std::move(fields)}, {"methods", std::move(methods)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,
+        [resolveClassFromArgs](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string fieldName = args.value("field", std::string{});
+        if (fieldName.empty()) return json{{"error", "missing 'field' arg"}};
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto res = IL2CPP::ReadClassInfo(k);
+        if (!res.ok) return json{{"error", "ReadClassInfo failed"}};
+        for (const auto& f : res.info.fields) {
+            if (f.name == fieldName) {
+                return json{
+                    {"name", f.name}, {"type", f.typeName},
+                    {"offset", f.offset}, {"flags", f.flags},
+                    {"static", (f.flags & 0x10u) != 0},
+                };
+            }
+        }
+        return json{{"error", "field not found: " + fieldName}};
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdGetMethodInfo,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string methodName = args.value("method", std::string{});
+        if (methodName.empty()) return json{{"error", "missing 'method' arg"}};
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto res = IL2CPP::ReadClassInfo(k);
+        if (!res.ok) return json{{"error", "ReadClassInfo failed"}};
+        json matches = json::array();
+        for (const auto& m : res.info.methods) {
+            if (m.name == methodName) {
+                matches.push_back({
+                    {"name", m.name}, {"token", m.token}, {"flags", m.flags},
+                    {"static", (m.flags & 0x10u) != 0},
+                    {"address", formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
+                });
+            }
+        }
+        if (matches.empty()) return json{{"error", "method not found: " + methodName}};
+        return json{{"matches", std::move(matches)}};
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdGetStaticFieldData,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string fieldName = args.value("field", std::string{});
+        if (fieldName.empty()) return json{{"error", "missing 'field' arg"}};
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto sa = IL2CPP::ResolveStaticFieldAddress(k, fieldName);
+        if (!sa.ok) return json{{"error", "static field not resolvable: " + fieldName}};
+        return json{
+            {"field", fieldName}, {"type", sa.typeName},
+            {"offset", sa.offset}, {"flags", sa.flags},
+            {"address", formatHex(reinterpret_cast<std::uintptr_t>(sa.address))},
         };
     });
 #endif

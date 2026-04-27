@@ -4,10 +4,18 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-04-27
-**Current phase**: Phase 4 — IL2CPP Backend (API path) (Phase 3 acceptance ✅)
+**Current phase**: Phase 5 — IL2CPP Metadata Deep Parse (Phase 4 acceptance ✅)
 
 ## Hand-off notes (latest)
 
+- Phase 4 green (build #19, target: SaGa Frontier 2 Remastered / Unity 2021.3.39f1 IL2CPP):
+  - `IL2CPPResolver` splits exports into required (18) vs optional (9); `resolved=yes` requires only the 18 critical ones — newer Unity drops a handful of nice-to-haves
+  - `il2cpp_method_get_pointer` is **not exported** in Unity 2021.3+ → IL2CPP `getClassInfo.methods[].address` and `getMethodInfo.matches[].address` come back as `0x0`. Phase 14 will read it from `MethodInfo` struct offset instead
+  - `il2cpp_image_get_name` returns `"Assembly-CSharp.dll"` (with `.dll` suffix); `EnumerateAssemblies` strips it so pipe args stay backend-agnostic
+  - 57 assemblies / 2451 classes in `Assembly-CSharp` for SaGa F2R; `UnityEngine.GameObject` parent/methods correct; `UnityEngine.Object.objectIsNullMessage` static field address resolves to a valid string pointer
+  - IL2CPP **doesn't** keep `const` literal fields in the runtime field table (Mono does, for reflection) — `kInstanceID_None` style probes will say "field not found" on IL2CPP. Use `static readonly` fields for spot checks
+- Same 7 pipe commands (`getAssemblies` … `getStaticFieldData`) work on the IL2CPP variant via the `#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)` branch in `ExportAPI.cpp`. `monoCompileMethod` is Mono-only by design (IL2CPP is AOT — address belongs in `getClassInfo`).
+- **build.ps1 caveat**: `-Backend IL2CPP` outputs to `build/dll-il2cpp-release/bin/`, but `Inject-Dll.ps1` reads from `build/dll-both-release/bin/`. Use `-Backend Both` for any test you plan to inject. Or pass `-DllPath` to the injector explicitly.
 - Phase 3 green (build #14, target: BongoCat / Unity Mono 2022.x):
   - `MonoResolver` binds 23/23 exports from `mono-2.0-bdwgc.dll`, all categories logged
   - `MonoThreadAttach` RAII wraps every mono API call from the pipe worker
@@ -43,8 +51,8 @@
 | 1 | Shared C++ Foundation | Memory / Logger / ModuleHelper / Pipe server | ✅ |
 | 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | ✅ |
 | 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | ✅ |
-| 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | 🟡 Next |
-| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | ⬜ |
+| 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ✅ |
+| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | 🟡 Next |
 | 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ⬜ |
 | 7 | UI Skeleton (Avalonia + AOT) | Single-instance app, pipe client, handshake | ⬜ |
 | 8 | UI Panels — Tree & Browse | AssemblyTree, ClassBrowser, FieldStruct, MethodList | ⬜ |
@@ -132,13 +140,13 @@
 
 ## Phase 4 — IL2CPP Backend (API path)
 
-- [ ] `il2cpp/IL2CPPResolver.{h,cpp}` — resolve every export in Architecture §IL2CPP table from `GameAssembly.dll`
-- [ ] `il2cpp/IL2CPPDomain.{h,cpp}` — `il2cpp_domain_get` → assemblies → images
-- [ ] `il2cpp/IL2CPPClassWalker.{h,cpp}` — `il2cpp_image_get_class_count` + `il2cpp_image_get_class(idx)`; field / method iterators
-- [ ] `il2cpp/IL2CPPTypeParser.{h,cpp}` — `Il2CppType*` → string, handle generic instantiations
-- [ ] Static field block via `il2cpp_class_get_static_field_data`
-- [ ] Method native address (AOT pointer in `Il2CppMethodInfo`)
-- [ ] Inheritance via `il2cpp_class_get_parent`
+- [x] `il2cpp/IL2CPPResolver.{h,cpp}` — resolve every export in Architecture §IL2CPP table from `GameAssembly.dll`
+- [x] `il2cpp/IL2CPPDomain.{h,cpp}` — `il2cpp_domain_get` → assemblies → images
+- [x] `il2cpp/IL2CPPClassWalker.{h,cpp}` — `il2cpp_image_get_class_count` + `il2cpp_image_get_class(idx)`; field / method iterators
+- [x] `il2cpp/IL2CPPTypeParser.{h,cpp}` — `Il2CppType*` → string, handle generic instantiations
+- [x] Static field block via `il2cpp_class_get_static_field_data`
+- [ ] Method native address (AOT pointer in `Il2CppMethodInfo`) — deferred to Phase 14: `il2cpp_method_get_pointer` is not exported in Unity 2021.3+; must read from `MethodInfo` struct offset
+- [x] Inheritance via `il2cpp_class_get_parent`
 
 **Acceptance**:
 - Dump a known IL2CPP game; verify a Vector3 field offset against in-memory inspection
