@@ -3,6 +3,10 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# CMake / Ninja build trees (build.ps1 outputs)
+/build/
+
+
 # User-specific files
 *.rsuser
 *.suo

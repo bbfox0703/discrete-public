@@ -3,7 +3,16 @@
 set(DLL_SHARED_SOURCES
     src/main.cpp
     src/shared/Logger.cpp
+    src/shared/Logger.h
     src/shared/MagicStrings.h
+    src/shared/Memory.cpp
+    src/shared/Memory.h
+    src/shared/ModuleHelper.cpp
+    src/shared/ModuleHelper.h
+    src/shared/PipeServer.cpp
+    src/shared/PipeServer.h
+    src/shared/ExportAPI.cpp
+    src/shared/ExportAPI.h
 )
 
 # ---------------------------------------------------------------------------

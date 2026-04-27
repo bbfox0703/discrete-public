@@ -4,16 +4,17 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-04-27
-**Current phase**: Phase 0 — Bootstrap (DLL + UI build OK on PC1; needs DLL injection verification)
+**Current phase**: Phase 2 — Backend Detection + Handshake (Phase 1 acceptance ✅)
 
-## Hand-off notes (PC1 → PC2)
+## Hand-off notes (latest)
 
-- `build.ps1 -Target All -Mode Release` succeeds: produces `UnityDumper-Mono.dll` + `UnityDumper-IL2CPP.dll` + `UnityDumpUI.exe`
-- UI launches and shows the bootstrap banner; Mutex single-instance verified
-- DLL injection NOT yet verified — `tools/Inject-Dll.ps1` ready but not run end-to-end
-- Next step on PC2: `notepad.exe` → `.\tools\Inject-Dll.ps1 -Target notepad` → confirm `%LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\init\current.log` appears
-- After that passes, tick the remaining Phase 0 checkboxes and move to Phase 1
-- Lessons learned this session, captured for PC2:
+- Phase 1 green: pipe server up, `ping` → `{"pong":true}`, `handshake` → `{"backend":"Mono","build":7,"protocol":1}`, unknown cmd returns proper error envelope
+- DLL auto-starts pipe server from `DllMain`; `pipe` category log captures connect/disconnect; logger writes to `<pid>/<category>/current.log` with rotation at 8 MB × 4 files
+- nlohmann/json vendored at `dll/vendor/nlohmann_json` (v3.11.2-419-g98386eb08)
+- Build #7 OK on PC2: zero warnings, both Mono + IL2CPP variants link clean
+- Next step: Phase 2 — `BackendDetector` (sniff `mono-2.0-bdwgc.dll` / `mono.dll` / `GameAssembly.dll`), Unity version extraction, IL2CPP metadata version read, full handshake JSON shape per Architecture
+- Watch out: linker LNK1104 means a previous notepad still has the DLL mapped — close it before rebuilding
+- Lessons learned (still applicable):
   - VS DevShell loading must use `Import-Module Microsoft.VisualStudio.DevShell.dll` + `Enter-VsDevShell` cmdlet (NOT `Launch-VsDevShell.ps1` — recurses on VS 18)
   - `Avalonia.ReactiveUI` has no v12 release; use `CommunityToolkit.Mvvm` 8.x for AOT-friendly MVVM
   - `Tmds.DBus.Protocol` 0.9x triggers NU1903; pin to `0.92.0` in every csproj
@@ -25,9 +26,9 @@
 
 | # | Phase | Goal | Status |
 |---|-------|------|--------|
-| 0 | Bootstrap | Repo skeleton, build script, logging | 🟡 Skeleton in place — needs first-build verification |
-| 1 | Shared C++ Foundation | Memory / Logger / ModuleHelper / Pipe server | ⬜ |
-| 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | ⬜ |
+| 0 | Bootstrap | Repo skeleton, build script, logging | ✅ |
+| 1 | Shared C++ Foundation | Memory / Logger / ModuleHelper / Pipe server | ✅ |
+| 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | 🟡 In progress |
 | 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | ⬜ |
 | 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ⬜ |
 | 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | ⬜ |
@@ -59,9 +60,9 @@
 - [x] `ui/UnityDumpUI/` — Avalonia 12 template, AOT publish profile, `Mutex` single-instance
 - [x] `ui/UnityDumpUI.Tests/` — xUnit v3 project with smoke tests
 - [x] `scripts/unity_dump.lua` — stub with version banner
-- [ ] **First-build verification**: run `build.ps1 -Target All -Mode Release` on dev PC
-- [ ] Add `nlohmann/json` submodule (`git submodule add https://github.com/nlohmann/json.git dll/vendor/nlohmann_json`)
-- [ ] Inject built DLL into `notepad.exe` and confirm log file appears
+- [x] **First-build verification**: run `build.ps1 -Target All -Mode Release` on dev PC
+- [x] Add `nlohmann/json` submodule (`git submodule add https://github.com/nlohmann/json.git dll/vendor/nlohmann_json`)
+- [x] Inject built DLL into `notepad.exe` and confirm log file appears
 
 **Acceptance**:
 - `build.ps1 -Target All -Mode Release` produces `UnityDumper-Mono.dll`, `UnityDumper-IL2CPP.dll`, `UnityDumpUI.exe`, `version.dll`
@@ -74,13 +75,13 @@
 
 **Goal**: Reusable modules used by both Mono and IL2CPP backends.
 
-- [ ] `shared/Logger.{h,cpp}` — 5 categories (init/scan/metadata/pipe/walk), per-PID subfolder, 4-file rotation, 8MB cap
-- [ ] `shared/Memory.{h,cpp}` — `AOBScan(pattern, mask)`, `SafeRead<T>(addr)` with SEH, `SafeWrite`, `IsReadable`
-- [ ] `shared/ModuleHelper.{h,cpp}` — `GetModuleBase(name)`, `ResolveExport(module, name)`, `EnumerateModules()`
-- [ ] `PipeServer.{h,cpp}` — async overlapped IO, newline-delimited JSON, per-connection thread, dispatch table
-- [ ] `ExportAPI.{h,cpp}` — C ABI: `Init()`, `Shutdown()`, `StartPipe()`, `StopPipe()`, `GetBackendType()`
-- [ ] `vendor/nlohmann/json.hpp` (single header)
-- [ ] Magic-words header `shared/MagicStrings.h` (pipe name, log folder name, all command strings)
+- [x] `shared/Logger.{h,cpp}` — 5 categories (init/scan/metadata/pipe/walk), per-PID subfolder, 4-file rotation, 8MB cap
+- [x] `shared/Memory.{h,cpp}` — `AOBScan(pattern, mask)`, `SafeRead<T>(addr)` with SEH, `SafeWrite`, `IsReadable`
+- [x] `shared/ModuleHelper.{h,cpp}` — `GetModuleBase(name)`, `ResolveExport(module, name)`, `EnumerateModules()`
+- [x] `PipeServer.{h,cpp}` — async overlapped IO, newline-delimited JSON, per-connection thread, dispatch table
+- [x] `ExportAPI.{h,cpp}` — C ABI: `Init()`, `Shutdown()`, `StartPipe()`, `StopPipe()`, `GetBackendType()`
+- [x] `vendor/nlohmann/json.hpp` (single header)
+- [x] Magic-words header `shared/MagicStrings.h` (pipe name, log folder name, all command strings)
 
 **Acceptance**:
 - Pipe server accepts handshake `{"cmd":"ping"}` → `{"pong":true}` from a Python smoke test

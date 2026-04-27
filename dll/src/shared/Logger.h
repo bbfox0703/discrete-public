@@ -1,4 +1,7 @@
-// Logger.h — Phase 0 minimal stub. Full 5-category rotation logger lands in Phase 1.
+// Logger.h — 5-category, per-PID, rotating file logger.
+// Categories: init / scan / metadata / pipe / walk (see MagicStrings.h).
+// Each category writes to %LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\<category>\current.log.
+// On reaching LogMaxFileBytes the file is rotated; up to LogRotationFileCount files kept.
 #pragma once
 
 #include <string>
@@ -6,15 +9,12 @@
 
 namespace UnityCEDumper::Log {
 
-// Initialize logging. Creates %LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\<category>\.
 void Init();
+void Shutdown();
 
-// Write a single line to the named category log file.
 void Write(std::wstring_view category, std::string_view message);
 
 // Convenience: write to "init" category.
 void Init(std::string_view message);
-
-void Shutdown();
 
 }  // namespace UnityCEDumper::Log

@@ -1,5 +1,4 @@
-// Logger.cpp — Phase 0 stub: write to per-PID category subfolder.
-// Full rotation + 5-category enforcement is Phase 1.
+// Logger.cpp — 5-category rotating logger implementation.
 
 #include "Logger.h"
 #include "MagicStrings.h"
@@ -11,6 +10,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -21,6 +21,17 @@ namespace {
 std::mutex g_mutex;
 fs::path g_logRoot;
 bool g_initialized = false;
+
+const std::unordered_set<std::wstring>& KnownCategories() {
+    static const std::unordered_set<std::wstring> s = {
+        MagicStrings::LogCategoryInit,
+        MagicStrings::LogCategoryScan,
+        MagicStrings::LogCategoryMetadata,
+        MagicStrings::LogCategoryPipe,
+        MagicStrings::LogCategoryWalk,
+    };
+    return s;
+}
 
 fs::path LogRootForCurrentProcess() {
     wchar_t buf[MAX_PATH];
@@ -44,6 +55,26 @@ std::string Timestamp() {
     return buf;
 }
 
+// Rotate <dir>/current.log → current.1.log → current.2.log → ...
+// Drop the oldest beyond LogRotationFileCount. Caller holds g_mutex.
+void RotateIfNeeded(const fs::path& dir) {
+    fs::path current = dir / L"current.log";
+    std::error_code ec;
+    if (!fs::exists(current, ec)) return;
+    auto size = fs::file_size(current, ec);
+    if (ec || size < MagicStrings::LogMaxFileBytes) return;
+
+    fs::path oldest = dir / (L"current." + std::to_wstring(MagicStrings::LogRotationFileCount - 1) + L".log");
+    if (fs::exists(oldest, ec)) fs::remove(oldest, ec);
+
+    for (int i = MagicStrings::LogRotationFileCount - 2; i >= 1; --i) {
+        fs::path src = dir / (L"current." + std::to_wstring(i) + L".log");
+        fs::path dst = dir / (L"current." + std::to_wstring(i + 1) + L".log");
+        if (fs::exists(src, ec)) fs::rename(src, dst, ec);
+    }
+    fs::rename(current, dir / L"current.1.log", ec);
+}
+
 }  // namespace
 
 void Init() {
@@ -58,9 +89,18 @@ void Init() {
 void Write(std::wstring_view category, std::string_view message) {
     std::lock_guard lock(g_mutex);
     if (!g_initialized) return;
-    fs::path dir = g_logRoot / std::wstring(category);
+
+    std::wstring cat(category);
+    if (!KnownCategories().contains(cat)) {
+        cat = MagicStrings::LogCategoryInit;
+    }
+
+    fs::path dir = g_logRoot / cat;
     std::error_code ec;
     fs::create_directories(dir, ec);
+
+    RotateIfNeeded(dir);
+
     fs::path file = dir / L"current.log";
     std::ofstream out(file, std::ios::app | std::ios::binary);
     if (!out) return;

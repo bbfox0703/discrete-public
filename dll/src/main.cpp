@@ -1,8 +1,10 @@
 // main.cpp — DllMain entry point.
-// Phase 0: logs DLL load, identifies which backend variant was built, lists loaded modules.
+// Logs DLL load, lists modules, auto-starts the pipe server (Phase 1).
 
+#include "shared/ExportAPI.h"
 #include "shared/Logger.h"
 #include "shared/MagicStrings.h"
+#include "shared/PipeServer.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -60,11 +62,20 @@ void OnAttach(HMODULE self) {
 
     // Suppress DLL_THREAD_ATTACH/DETACH for performance.
     ::DisableThreadLibraryCalls(self);
+
+    // Auto-bring up the pipe server. Doing real work in DllMain is risky, so
+    // UnityDumper_StartPipe just spawns a worker thread — the actual pipe
+    // creation happens off DllMain.
+    if (UnityDumper_Init() == 0 && UnityDumper_StartPipe() == 0) {
+        UnityCEDumper::Log::Init("Pipe server thread started");
+    } else {
+        UnityCEDumper::Log::Init("Pipe server failed to start");
+    }
 }
 
 void OnDetach() {
     UnityCEDumper::Log::Init("UnityDumper DLL detaching");
-    UnityCEDumper::Log::Shutdown();
+    UnityDumper_Shutdown();
 }
 
 }  // namespace
