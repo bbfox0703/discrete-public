@@ -17,11 +17,36 @@ set(DLL_SHARED_SOURCES
     src/shared/ExportAPI.h
 )
 
+# Mono-specific sources: only compiled into UnityDumper-Mono.dll.
+set(DLL_MONO_SOURCES
+    src/mono/MonoTypes.h
+    src/mono/MonoResolver.cpp
+    src/mono/MonoResolver.h
+    src/mono/MonoThreadAttach.h
+    src/mono/MonoDomain.cpp
+    src/mono/MonoDomain.h
+    src/mono/MonoTypeParser.cpp
+    src/mono/MonoTypeParser.h
+    src/mono/MonoClassWalker.cpp
+    src/mono/MonoClassWalker.h
+)
+
+# IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
+set(DLL_IL2CPP_SOURCES
+    # populated in Phase 4
+)
+
 # ---------------------------------------------------------------------------
 # Helper: configure a backend DLL target
 # ---------------------------------------------------------------------------
 function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
-    add_library(${TARGET_NAME} SHARED ${DLL_SHARED_SOURCES})
+    set(SOURCES ${DLL_SHARED_SOURCES})
+    if(BACKEND_DEFINE STREQUAL "UNITYCEDUMPER_BACKEND_MONO")
+        list(APPEND SOURCES ${DLL_MONO_SOURCES})
+    elseif(BACKEND_DEFINE STREQUAL "UNITYCEDUMPER_BACKEND_IL2CPP")
+        list(APPEND SOURCES ${DLL_IL2CPP_SOURCES})
+    endif()
+    add_library(${TARGET_NAME} SHARED ${SOURCES})
     target_include_directories(${TARGET_NAME} PRIVATE src)
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
     set_target_properties(${TARGET_NAME} PROPERTIES

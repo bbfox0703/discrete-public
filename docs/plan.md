@@ -4,20 +4,29 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-04-27
-**Current phase**: Phase 3 — Mono Backend (Phase 2 acceptance ✅)
+**Current phase**: Phase 4 — IL2CPP Backend (API path) (Phase 3 acceptance ✅)
 
 ## Hand-off notes (latest)
 
-- Phase 2 green (build #9): `BackendDetector` sniffs `GameAssembly.dll` / `mono-2.0-bdwgc.dll` / `mono.dll`; Unity version read from `data.unity3d` (UnityFS bundle revision) or `globalgamemanagers` (regex `\d+\.\d+\.\d+[abfp]\d+`); IL2CPP `global-metadata.dat` magic (0xFAB11BAF) + version validated
-- `handshake` / `scan` shape: `{engine, backend, dll_variant, game_module, unity_version, metadata_version, assemblies_count, build, protocol}` — `assemblies_count` stays 0 until Phase 3/4
-- Real-game acceptance results:
-  - **Mono**: Farthest Frontier — `backend=Mono unity=2022.3.62f3 metadata=null` ✅
-  - **IL2CPP**: SaGa Frontier 2 Remastered — `backend=IL2CPP unity=2021.3.39f1 metadata=29` ✅
+- Phase 3 green (build #14, target: BongoCat / Unity Mono 2022.x):
+  - `MonoResolver` binds 23/23 exports from `mono-2.0-bdwgc.dll`, all categories logged
+  - `MonoThreadAttach` RAII wraps every mono API call from the pipe worker
+  - `MonoDomain` enumerates 56 assemblies in BongoCat (`Assembly-CSharp`, `mscorlib`, etc.)
+  - `MonoClassWalker` enumerates 448 classes in `Assembly-CSharp`; reads parent / fields (with type+offset+flags) / methods (token+flags)
+  - `MonoTypeParser` returns clean type strings via `mono_type_get_name` + `mono_free`
+  - **Static fields**: `mono_class_vtable` + `mono_vtable_get_static_field_data` resolves to a real address (verified `UnityEngine.Object.kInstanceID_None` at non-zero process address)
+  - **Method JIT**: `mono_compile_method` returns native code pointer (verified `UnityEngine.Object.GetInstanceID`)
+  - **Field offset spot-check**: `UnityEngine.Object.m_CachedPtr` at 0x10 (matches MonoObject header on x64); `BongoCat.AdventsDrawer.date` at 0x38 (consistent MonoBehaviour layout)
+  - Class name `GetClassInfo` → `ReadClassInfo` to dodge `winuser.h` macro collision (`UNICODE` makes `GetClassInfo` → `GetClassInfoW`)
+- New pipe commands wired: `getAssemblies`, `getClasses`, `getClassInfo`, `getFieldInfo`, `getMethodInfo`, `getStaticFieldData`, `monoCompileMethod`. Handshake `assemblies_count` is now live for Mono builds.
 - New helper scripts:
-  - `tools/List-UnityProcs.ps1` — list candidate Mono / IL2CPP processes by inspecting loaded modules
-  - `tools/Test-Handshake.ps1 -ProcessId <pid>` — auto-detect backend, inject, run ping/handshake/scan, print pass/fail
+  - `tools/Test-MonoWalk.ps1` — exercises segment 2 (getClasses / getClassInfo / getFieldInfo / getMethodInfo)
+  - `tools/Test-MonoOps.ps1` — exercises segment 3 (getStaticFieldData / monoCompileMethod)
+- CMake split: Mono-only sources live in `dll/src/mono/` and only compile into `UnityDumper-Mono.dll`. IL2CPP DLL stays minimal until Phase 4.
+- Watch out: SEH `__try`/`__except` cannot share a frame with destructors — every Mono runtime call goes through a leaf `Seh*` helper (`#pragma warning(disable: 4509)`)
 - Watch out: Bitdefender flags injected DLLs as virus → add `D:\Github\discrete\build\` and `%LOCALAPPDATA%\UnityCEDumper\` to AV exclusions on each dev PC
 - Watch out: linker LNK1104 means a previous host still has the DLL mapped — close it before rebuilding
+- Watch out: PowerShell `try {} catch {}` is a statement, not an expression — cannot inline inside `[pscustomobject]@{}`
 - Lessons learned (still applicable):
   - VS DevShell loading must use `Import-Module Microsoft.VisualStudio.DevShell.dll` + `Enter-VsDevShell` cmdlet (NOT `Launch-VsDevShell.ps1` — recurses on VS 18)
   - `Avalonia.ReactiveUI` has no v12 release; use `CommunityToolkit.Mvvm` 8.x for AOT-friendly MVVM
@@ -33,8 +42,8 @@
 | 0 | Bootstrap | Repo skeleton, build script, logging | ✅ |
 | 1 | Shared C++ Foundation | Memory / Logger / ModuleHelper / Pipe server | ✅ |
 | 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | ✅ |
-| 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | 🟡 Next |
-| 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ⬜ |
+| 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | ✅ |
+| 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | 🟡 Next |
 | 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | ⬜ |
 | 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ⬜ |
 | 7 | UI Skeleton (Avalonia + AOT) | Single-instance app, pipe client, handshake | ⬜ |
@@ -107,14 +116,14 @@
 
 ## Phase 3 — Mono Backend
 
-- [ ] `mono/MonoResolver.{h,cpp}` — resolve every export in Architecture §Mono Entry Point Resolution table; lazy bind, log missing
-- [ ] `mono/MonoDomain.{h,cpp}` — `mono_get_root_domain` → `mono_domain_get_assemblies` → image list with name/path
-- [ ] `mono_thread_attach` wrapper (RAII guard for any Mono call from injected thread)
-- [ ] `mono/MonoClassWalker.{h,cpp}` — iterate types via `MONO_TABLE_TYPEDEF`, expose Field / Method / Property iterators (handle the `void* iter = NULL` pattern)
-- [ ] `mono/MonoTypeParser.{h,cpp}` — `MonoType*` → readable string (`int`, `System.Single`, `MyNs.Foo[]`, `List<T>` etc.)
-- [ ] Inheritance chain walk (`mono_class_get_parent`)
-- [ ] Static field address: `mono_class_vtable` + `mono_vtable_get_static_field_data`
-- [ ] `mono_compile_method` → native address (with try/except)
+- [x] `mono/MonoResolver.{h,cpp}` — resolve every export in Architecture §Mono Entry Point Resolution table; lazy bind, log missing
+- [x] `mono/MonoDomain.{h,cpp}` — `mono_get_root_domain` → `mono_assembly_foreach` → image list with name/path
+- [x] `mono_thread_attach` wrapper (RAII guard for any Mono call from injected thread)
+- [x] `mono/MonoClassWalker.{h,cpp}` — iterate types via `MONO_TABLE_TYPEDEF`, expose Field / Method iterators
+- [x] `mono/MonoTypeParser.{h,cpp}` — `MonoType*` → readable string (`int`, `System.Single`, `MyNs.Foo[]`, `List<T>` etc.)
+- [x] Inheritance chain walk (`mono_class_get_parent`)
+- [x] Static field address: `mono_class_vtable` + `mono_vtable_get_static_field_data`
+- [x] `mono_compile_method` → native address (with try/except)
 
 **Acceptance**:
 - Dump `Assembly-CSharp` of a known Mono game (e.g., a 2018 Unity build) — produce JSON list with assembly count, total class count, and sampled field offsets matching dnSpy / Cheat Engine manual probes

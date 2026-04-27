@@ -38,12 +38,14 @@ foreach ($p in Get-Process) {
         continue
     }
     if ($backend) {
+        $exePath = '<denied>'
+        try { $exePath = $p.MainModule.FileName } catch { }
         $results += [pscustomobject]@{
             PID         = $p.Id
             Backend     = $backend
             ProcessName = $p.ProcessName
             Title       = $p.MainWindowTitle
-            ExePath     = try { $p.MainModule.FileName } catch { '<denied>' }
+            ExePath     = $exePath
             UnityModule = $unityModule
         }
     }
