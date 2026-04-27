@@ -1,0 +1,9 @@
+# 開個 notepad，預設注入 Mono 變體
+notepad
+.\tools\Inject-Dll.ps1 -Target notepad
+
+# 指定 PID + IL2CPP 變體
+.\tools\Inject-Dll.ps1 -Target 12345 -Backend IL2CPP
+
+# 自訂 DLL 路徑
+.\tools\Inject-Dll.ps1 -Target notepad -DllPath C:\path\to\my.dll

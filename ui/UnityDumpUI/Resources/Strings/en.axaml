@@ -1,0 +1,10 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+  <!--
+    All UI strings live here. Reference via {StaticResource Key} in XAML.
+    English only per Architecture.md Rule "UI Strings".
+  -->
+  <sys:String x:Key="App.Title">Unity CE Dumper</sys:String>
+  <sys:String x:Key="App.BootstrapBanner">Phase 0 — Bootstrap. Ready.</sys:String>
+</ResourceDictionary>

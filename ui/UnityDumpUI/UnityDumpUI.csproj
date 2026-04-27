@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>UnityDumpUI</RootNamespace>
+    <AssemblyName>UnityDumpUI</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+
+    <!-- Native AOT (per docs/plan.md). Off during normal `dotnet build`,
+         enabled with -p:PublishAot=true on `dotnet publish`. -->
+    <PublishAot Condition="'$(PublishAot)' == ''">false</PublishAot>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <TrimMode>partial</TrimMode>
+
+    <!-- Avalonia 12 requirement: must be false for Native AOT. -->
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+
+    <!-- Compiled XAML bindings only (no reflection — required for AOT). -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+
+    <!-- IL3053: third-party AOT analysis warnings from Avalonia/MicroCom (safe; covered by TrimmerRootAssembly).
+         IL2104: DataGrid trim warning — preserved via TrimmerRootAssembly below. -->
+    <NoWarn>$(NoWarn);IL3053;IL2104</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Avalonia 12 -->
+    <PackageReference Include="Avalonia"               Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Desktop"       Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Fonts.Inter"   Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.0.0" />
+
+    <!-- AOT-friendly MVVM via source generators ([ObservableProperty], [RelayCommand]).
+         Avalonia.ReactiveUI is NOT used: it has no v12 release and depends on reflection. -->
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.*" />
+
+    <!-- Override transitive Tmds.DBus.Protocol to dodge NU1903 (CVE in 0.90.x).
+         Linux-only dependency; we ship win-x64 but NuGet still audits it. -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.92.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\UnityDumpUI.Core\UnityDumpUI.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Resources\**" />
+  </ItemGroup>
+
+  <!-- AOT trimmer roots: Avalonia loads platform/render backends via reflection;
+       without these, the trimmer drops them and the app NREs at startup. -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="Avalonia" />
+    <TrimmerRootAssembly Include="Avalonia.Base" />
+    <TrimmerRootAssembly Include="Avalonia.Markup" />
+    <TrimmerRootAssembly Include="Avalonia.Markup.Xaml" />
+    <TrimmerRootAssembly Include="Avalonia.MicroCom" />
+    <TrimmerRootAssembly Include="Avalonia.Controls" />
+    <TrimmerRootAssembly Include="Avalonia.Controls.DataGrid" />
+    <TrimmerRootAssembly Include="Avalonia.Themes.Fluent" />
+    <TrimmerRootAssembly Include="Avalonia.Desktop" />
+    <TrimmerRootAssembly Include="Avalonia.Win32" />
+    <TrimmerRootAssembly Include="Avalonia.Win32.Automation" />
+    <TrimmerRootAssembly Include="Avalonia.Skia" />
+    <TrimmerRootAssembly Include="Avalonia.Fonts.Inter" />
+    <TrimmerRootAssembly Include="MicroCom.Runtime" />
+  </ItemGroup>
+</Project>

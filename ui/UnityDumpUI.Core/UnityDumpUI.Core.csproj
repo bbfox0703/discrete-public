@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Core: engine-agnostic models, services, platform interfaces.
+    Per Architecture.md Rule "Platform Abstraction": Core must NEVER contain
+    direct platform-specific code. P/Invoke, Registry, OS commands all live
+    behind interfaces declared here and implemented in UnityDumpUI.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>UnityDumpUI.Core</RootNamespace>
+    <AssemblyName>UnityDumpUI.Core</AssemblyName>
+  </PropertyGroup>
+</Project>
