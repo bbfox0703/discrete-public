@@ -16,6 +16,7 @@
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
 #  include "../il2cpp/IL2CPPResolver.h"
+#  include "../il2cpp/MetadataParser.h"
 #endif
 
 #include <nlohmann/json.hpp>
@@ -463,6 +464,46 @@ void RegisterCoreHandlers() {
             {"field", fieldName}, {"type", sa.typeName},
             {"offset", sa.offset}, {"flags", sa.flags},
             {"address", formatHex(reinterpret_cast<std::uintptr_t>(sa.address))},
+        };
+    });
+
+    // Phase 5: global-metadata.dat string literal dump.
+    PipeServer::RegisterHandler(MagicStrings::CmdIL2CPPGetMetadataStrings,
+        [](const json& args) -> json {
+        const auto& mp = IL2CPP::Metadata::Parser::Get();
+        if (!mp.loaded()) {
+            return json{{"error", "global-metadata.dat not loaded"}};
+        }
+        std::uint32_t limit = 0;
+        if (args.contains("limit") && args["limit"].is_number_unsigned()) {
+            limit = args["limit"].get<std::uint32_t>();
+        }
+        std::uint32_t offset = 0;
+        if (args.contains("offset") && args["offset"].is_number_unsigned()) {
+            offset = args["offset"].get<std::uint32_t>();
+        }
+        std::uint32_t total = mp.StringLiteralCount();
+        if (offset >= total) {
+            return json{
+                {"version", mp.version()},
+                {"count", total}, {"offset", offset},
+                {"strings", json::array()},
+            };
+        }
+        std::uint32_t available = total - offset;
+        std::uint32_t take = (limit == 0) ? available : std::min(limit, available);
+
+        json arr = json::array();
+        for (std::uint32_t i = 0; i < take; ++i) {
+            if (auto s = mp.GetStringLiteral(offset + i)) arr.push_back(*s);
+            else                                          arr.push_back(nullptr);
+        }
+        return json{
+            {"version", mp.version()},
+            {"count", total},
+            {"offset", offset},
+            {"returned", take},
+            {"strings", std::move(arr)},
         };
     });
 #endif

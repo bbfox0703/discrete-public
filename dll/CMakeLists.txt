@@ -43,6 +43,9 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPTypeParser.h
     src/il2cpp/IL2CPPClassWalker.cpp
     src/il2cpp/IL2CPPClassWalker.h
+    src/il2cpp/MetadataLayout.h
+    src/il2cpp/MetadataParser.cpp
+    src/il2cpp/MetadataParser.h
 )
 
 # ---------------------------------------------------------------------------

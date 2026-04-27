@@ -4,10 +4,17 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-04-27
-**Current phase**: Phase 5 — IL2CPP Metadata Deep Parse (Phase 4 acceptance ✅)
+**Current phase**: Phase 5 — IL2CPP Metadata Deep Parse (segment 1 ✅: string literals)
 
 ## Hand-off notes (latest)
 
+- Phase 5 segment 1 green (build #23, SaGa F2R / Unity 2021.3.39f1 / metadata v29):
+  - `MetadataParser` reads the entire `global-metadata.dat` into memory (capped at 256 MB), validates magic `0xFAB11BAF`, caches the prefix offsets (sanity → version → stringLiteral{Offset,Size} → stringLiteralData{Offset,Size} → string{Offset,Size})
+  - `il2cppGetMetadataStrings` pipe command: `{ "limit": N, "offset": M }` (limit 0 = all). Returns `{ "version", "count", "offset", "returned", "strings" }`
+  - 11,392 string literals enumerated end-to-end on SaGa F2R. First ~500 are mscorlib Unicode category tables (looks like garbage but is valid). Game-readable strings start ~5000 (`Megalith/CombatAreaGrid` shader names), `__content`-style UIToolkit USS classes around 8000
+  - Bitness note: `global-metadata.dat` is purely 32-bit-offset blob, layout is bitness-neutral. Pointer-bitness concern surfaces only when cross-linking to runtime `Il2CppClass*` (segment 2)
+  - Currently only v29 layout has been exercised. v24 / v27 / v31 still parse the shared prefix and emit a warning so we know we're guessing
+  - Pipe handler script: `tools/Test-MetadataStrings.ps1`
 - Phase 4 green (build #19, target: SaGa Frontier 2 Remastered / Unity 2021.3.39f1 IL2CPP):
   - `IL2CPPResolver` splits exports into required (18) vs optional (9); `resolved=yes` requires only the 18 critical ones — newer Unity drops a handful of nice-to-haves
   - `il2cpp_method_get_pointer` is **not exported** in Unity 2021.3+ → IL2CPP `getClassInfo.methods[].address` and `getMethodInfo.matches[].address` come back as `0x0`. Phase 14 will read it from `MethodInfo` struct offset instead
@@ -155,12 +162,12 @@
 
 ## Phase 5 — IL2CPP Backend (Metadata Deep Parse)
 
-- [ ] `il2cpp/MetadataParser.{h,cpp}` — locate `global-metadata.dat`, validate magic `0xFAB11BAF`, version dispatch
-- [ ] Version-specific header structs (v24 / v27 / v29 / v31) — `Il2CppGlobalMetadataHeader_v##`
-- [ ] String heap reader (`nameIndex` → UTF-8 string)
-- [ ] Tables: TypeDefinitions, FieldDefinitions, MethodDefinitions, StringLiterals, FieldDefaults
+- [x] `il2cpp/MetadataParser.{h,cpp}` — locate `global-metadata.dat`, validate magic `0xFAB11BAF`, version dispatch
+- [partial] Version-specific header structs — only v29 prefix is exposed today; v24 / v27 / v31 fall through with a warning but still parse the prefix
+- [x] String heap reader (`nameIndex` → UTF-8 string)
+- [ ] Tables: TypeDefinitions, FieldDefinitions, MethodDefinitions, **StringLiterals ✅**, FieldDefaults
 - [ ] Cross-link metadata index ↔ runtime `Il2CppClass*` (via `il2cpp_class_from_type` or sequential mapping)
-- [ ] Enum default values, string literal extraction
+- [ ] Enum default values, **string literal extraction ✅**
 - [ ] Detection of stripped / obfuscated metadata (heuristic: % of single-letter names)
 
 **Acceptance**:
