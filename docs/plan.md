@@ -4,10 +4,22 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-04-27
-**Current phase**: Phase 5 — IL2CPP Metadata Deep Parse (segment 1 ✅: string literals)
+**Current phase**: Phase 5 — IL2CPP Metadata Deep Parse (segment 2 ✅: types/fields/defaults; segment 2c next: typed value decode)
 
 ## Hand-off notes (latest)
 
+- Phase 5 segment 2 green (build #25, SaGa F2R):
+  - `MetadataLayout.h`: full v29 prefix `HeaderV29` (168 bytes), `TypeDefinition_v29` (88), `FieldDefinition_v29` (12), `FieldDefaultValue_v29` (12)
+  - `MetadataParser` exposes `TypeDefinitionCount` / `GetTypeDefinition(idx)` / `FindTypeByName(ns, name)` / `EnumerateTypeFields(td)` / `FindFieldDefault(globalFieldIdx)`
+  - `il2cppGetMetadataTypeFields` pipe command: returns every metadata field of a type plus first 16 bytes hex of each FieldDefault blob
+  - Verified results on SaGa F2R:
+    - `UnityEngine.Object` recovers `objectIsNullMessage`, `cloneDestroyedMessage` as CONST (with raw string blobs) — `kInstanceID_None` is GONE in this build because IL2CPP fully inlines `const int = 0` and removes it from FieldDefinition table too
+    - `UnityEngine.Vector3` recovers `kEpsilon` / `kEpsilonNormalSqrt` (float consts, 4 bytes LE direct: `AC C5 27 37` → `~1e-5`)
+    - `System.Int32` recovers `MaxValue` / `MinValue` (int consts use IL2CPP compressed encoding, NOT direct 4-byte LE — typed decode needed for these)
+  - Encoding observations to remember for segment 2c:
+    - `float` const → 4 raw bytes LE
+    - `string` const → `[1-byte-or-multi-byte-length][utf8 content]` (ECMA-335 compressed unsigned)
+    - `int32` const → leading non-trivial byte then big-endian-ish? (need types[] table to decode by `Il2CppTypeEnum`)
 - Phase 5 segment 1 green (build #23, SaGa F2R / Unity 2021.3.39f1 / metadata v29):
   - `MetadataParser` reads the entire `global-metadata.dat` into memory (capped at 256 MB), validates magic `0xFAB11BAF`, caches the prefix offsets (sanity → version → stringLiteral{Offset,Size} → stringLiteralData{Offset,Size} → string{Offset,Size})
   - `il2cppGetMetadataStrings` pipe command: `{ "limit": N, "offset": M }` (limit 0 = all). Returns `{ "version", "count", "offset", "returned", "strings" }`

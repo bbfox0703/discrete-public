@@ -81,14 +81,54 @@ void Parser::Load() {
         data_.clear();
         return;
     }
+    if (version_ == 29) {
+        v29Tables_ = LoadV29Tables();
+    }
 
-    char line[256];
+    char line[320];
     ::_snprintf_s(line, sizeof(line), _TRUNCATE,
-        "MetadataParser: loaded version=%d size=%zu strLitTable=%d strLitData=%d nameHeap=%d",
+        "MetadataParser: loaded version=%d size=%zu strLitTable=%d strLitData=%d nameHeap=%d "
+        "typeDefs=%d fields=%d fieldDefaults=%d (v29Tables=%s)",
         version_, data_.size(),
-        stringLiteralSize_, stringLiteralDataSize_, stringSize_);
+        stringLiteralSize_, stringLiteralDataSize_, stringSize_,
+        typeDefinitionsSize_, fieldsSize_, fieldDefaultsSize_,
+        v29Tables_ ? "yes" : "no");
     UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
     loaded_ = true;
+}
+
+bool Parser::LoadV29Tables() {
+    if (data_.size() < sizeof(HeaderV29)) {
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+            "MetadataParser: file too small for v29 header");
+        return false;
+    }
+    HeaderV29 h{};
+    std::memcpy(&h, data_.data(), sizeof(h));
+
+    typeDefinitionsOffset_  = h.typeDefinitionsOffset;
+    typeDefinitionsSize_    = h.typeDefinitionsSize;
+    fieldsOffset_           = h.fieldsOffset;
+    fieldsSize_             = h.fieldsSize;
+    fieldDefaultsOffset_    = h.fieldDefaultValuesOffset;
+    fieldDefaultsSize_      = h.fieldDefaultValuesSize;
+    fieldDefaultDataOffset_ = h.fieldAndParameterDefaultValueDataOffset;
+    fieldDefaultDataSize_   = h.fieldAndParameterDefaultValueDataSize;
+
+    auto inBounds = [&](std::int32_t off, std::int32_t sz) {
+        if (off < 0 || sz < 0) return false;
+        std::uint64_t end = static_cast<std::uint64_t>(off) + static_cast<std::uint64_t>(sz);
+        return end <= data_.size();
+    };
+    if (!inBounds(typeDefinitionsOffset_,  typeDefinitionsSize_)  ||
+        !inBounds(fieldsOffset_,           fieldsSize_)           ||
+        !inBounds(fieldDefaultsOffset_,    fieldDefaultsSize_)    ||
+        !inBounds(fieldDefaultDataOffset_, fieldDefaultDataSize_)) {
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+            "MetadataParser: v29 tables out of bounds");
+        return false;
+    }
+    return true;
 }
 
 bool Parser::LoadHeader() {
@@ -184,6 +224,116 @@ std::string Parser::GetHeapString(std::int32_t nameIndex) const {
     std::int32_t len = 0;
     while (len < maxLen && p[len] != '\0') ++len;
     return std::string(p, static_cast<std::size_t>(len));
+}
+
+// --- segment 2 ---------------------------------------------------------------
+
+std::uint32_t Parser::TypeDefinitionCount() const noexcept {
+    if (!v29Tables_) return 0;
+    return static_cast<std::uint32_t>(typeDefinitionsSize_) / sizeof(TypeDefinition_v29);
+}
+
+std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) const {
+    if (!v29Tables_) return std::nullopt;
+    std::uint32_t count = TypeDefinitionCount();
+    if (idx < 0 || static_cast<std::uint32_t>(idx) >= count) return std::nullopt;
+
+    TypeDefinition_v29 td{};
+    std::memcpy(&td,
+                data_.data() + typeDefinitionsOffset_ +
+                    static_cast<std::size_t>(idx) * sizeof(TypeDefinition_v29),
+                sizeof(td));
+
+    TypeDefView v;
+    v.index       = idx;
+    v.ns          = GetHeapString(td.namespaceIndex);
+    v.name        = GetHeapString(td.nameIndex);
+    v.fieldStart  = td.fieldStart;
+    v.fieldCount  = td.field_count;
+    v.methodStart = td.methodStart;
+    v.methodCount = td.method_count;
+    v.flags       = td.flags;
+    v.token       = td.token;
+    return v;
+}
+
+std::optional<Parser::TypeDefView>
+Parser::FindTypeByName(const std::string& ns, const std::string& name) const {
+    if (!v29Tables_) return std::nullopt;
+    std::uint32_t count = TypeDefinitionCount();
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (auto v = GetTypeDefinition(static_cast<std::int32_t>(i))) {
+            if (v->name == name && v->ns == ns) return v;
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<Parser::FieldDefView>
+Parser::EnumerateTypeFields(const TypeDefView& type) const {
+    std::vector<FieldDefView> out;
+    if (!v29Tables_) return out;
+    if (type.fieldCount == 0) return out;
+
+    std::uint32_t fieldRowCount = static_cast<std::uint32_t>(fieldsSize_) /
+                                   sizeof(FieldDefinition_v29);
+    out.reserve(type.fieldCount);
+    for (std::uint16_t k = 0; k < type.fieldCount; ++k) {
+        std::int32_t globalIdx = type.fieldStart + k;
+        if (globalIdx < 0 || static_cast<std::uint32_t>(globalIdx) >= fieldRowCount) break;
+
+        FieldDefinition_v29 f{};
+        std::memcpy(&f,
+                    data_.data() + fieldsOffset_ +
+                        static_cast<std::size_t>(globalIdx) * sizeof(FieldDefinition_v29),
+                    sizeof(f));
+
+        FieldDefView v;
+        v.index     = globalIdx;
+        v.name      = GetHeapString(f.nameIndex);
+        v.typeIndex = f.typeIndex;
+        v.token     = f.token;
+        out.push_back(std::move(v));
+    }
+    return out;
+}
+
+std::optional<Parser::FieldDefaultBlob>
+Parser::FindFieldDefault(std::int32_t globalFieldIndex) const {
+    if (!v29Tables_) return std::nullopt;
+    std::uint32_t rowCount = static_cast<std::uint32_t>(fieldDefaultsSize_) /
+                              sizeof(FieldDefaultValue_v29);
+    if (rowCount == 0) return std::nullopt;
+
+    // FieldDefaults is sparse and (per IL2CPP source) sorted by fieldIndex.
+    // Linear scan is fine here — type lookup is the dominant cost. A future
+    // optimization can lazily build an index map.
+    for (std::uint32_t i = 0; i < rowCount; ++i) {
+        FieldDefaultValue_v29 d{};
+        std::memcpy(&d,
+                    data_.data() + fieldDefaultsOffset_ +
+                        static_cast<std::size_t>(i) * sizeof(FieldDefaultValue_v29),
+                    sizeof(d));
+        if (d.fieldIndex != globalFieldIndex) continue;
+
+        FieldDefaultBlob b;
+        b.fieldIndex = d.fieldIndex;
+        b.typeIndex  = d.typeIndex;
+        b.dataIndex  = d.dataIndex;
+        if (d.dataIndex >= 0 && d.dataIndex < fieldDefaultDataSize_) {
+            // The blob is variable-length; without parsing the types[] table
+            // we don't know the exact size. Capture up to the next FieldDefault
+            // boundary or 256 bytes, whichever is smaller. Type-aware decode
+            // will land in segment 2c.
+            std::int32_t maxAvail = fieldDefaultDataSize_ - d.dataIndex;
+            std::int32_t take = (maxAvail < 256) ? maxAvail : 256;
+            const std::uint8_t* p =
+                data_.data() + fieldDefaultDataOffset_ + d.dataIndex;
+            b.data.assign(p, p + take);
+        }
+        return b;
+    }
+    return std::nullopt;
 }
 
 }  // namespace UnityCEDumper::IL2CPP::Metadata

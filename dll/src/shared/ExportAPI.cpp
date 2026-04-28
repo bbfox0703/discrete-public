@@ -467,6 +467,58 @@ void RegisterCoreHandlers() {
         };
     });
 
+    // Phase 5 segment 2: list metadata fields (including const literals stripped
+    // from the runtime field iterator) for a given type.
+    PipeServer::RegisterHandler("il2cppGetMetadataTypeFields",
+        [formatHex](const json& args) -> json {
+        const auto& mp = IL2CPP::Metadata::Parser::Get();
+        if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
+        std::string ns   = args.value("namespace", std::string{});
+        std::string name = args.value("name", std::string{});
+        if (name.empty()) return json{{"error", "missing 'name' arg"}};
+
+        auto td = mp.FindTypeByName(ns, name);
+        if (!td) return json{{"error", "type not found in metadata: " + ns + "." + name}};
+
+        auto fields = mp.EnumerateTypeFields(*td);
+        json arr = json::array();
+        for (const auto& f : fields) {
+            json entry = {
+                {"name", f.name},
+                {"index", f.index},
+                {"type_index", f.typeIndex},
+                {"token", f.token},
+            };
+            if (auto def = mp.FindFieldDefault(f.index)) {
+                std::string hex;
+                hex.reserve(def->data.size() * 2);
+                static const char* kHex = "0123456789ABCDEF";
+                std::size_t take = std::min<std::size_t>(def->data.size(), 16);
+                for (std::size_t i = 0; i < take; ++i) {
+                    hex.push_back(kHex[def->data[i] >> 4]);
+                    hex.push_back(kHex[def->data[i] & 0xF]);
+                }
+                entry["default"] = {
+                    {"type_index", def->typeIndex},
+                    {"data_index", def->dataIndex},
+                    {"raw_hex_first16", hex},
+                    {"raw_size", def->data.size()},
+                };
+            }
+            arr.push_back(std::move(entry));
+        }
+        return json{
+            {"namespace", td->ns},
+            {"name", td->name},
+            {"type_index", td->index},
+            {"flags", td->flags},
+            {"token", td->token},
+            {"field_start", td->fieldStart},
+            {"field_count", td->fieldCount},
+            {"fields", std::move(arr)},
+        };
+    });
+
     // Phase 5: global-metadata.dat string literal dump.
     PipeServer::RegisterHandler(MagicStrings::CmdIL2CPPGetMetadataStrings,
         [](const json& args) -> json {
