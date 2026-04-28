@@ -74,6 +74,14 @@ public:
     // if that field has no default. (FieldDefaults is sparse — most fields don't.)
     std::optional<FieldDefaultBlob> FindFieldDefault(std::int32_t globalFieldIndex) const;
 
+    // Tries to decode the FieldDefault data at `dataIndex` as an
+    // ECMA-335 compressed-length UTF-8 string. Returns std::nullopt when the
+    // bytes don't look string-shaped (length out of range, content not mostly
+    // printable). Call sites should treat success as "almost certainly a string
+    // const"; numeric / enum const decoding requires the runtime types[] table
+    // (segment 2d).
+    std::optional<std::string> TryDecodeStringDefault(std::int32_t dataIndex) const;
+
     // Internal — invoked once by Get(). Public so the singleton helper in the
     // .cpp can construct/initialise without `friend` boilerplate.
     Parser() = default;

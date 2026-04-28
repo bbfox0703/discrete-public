@@ -60,6 +60,11 @@ try {
         if ($f.default) {
             ('         hex16 = {0}   (raw_size={1}, data#{2})' -f `
                 $f.default.raw_hex_first16, $f.default.raw_size, $f.default.data_index) | Write-Host
+            if ($f.default.decoded_string) {
+                $s = $f.default.decoded_string
+                if ($s.Length -gt 100) { $s = $s.Substring(0, 97) + '...' }
+                '         string = "{0}"' -f $s | Write-Host -ForegroundColor Green
+            }
         }
     }
 }

@@ -6,6 +6,10 @@
 # CMake / Ninja build trees (build.ps1 outputs)
 /build/
 
+# Local debug artefacts (raw pipe responses captured during dev)
+/raw.json
+/raw*.json
+
 
 # User-specific files
 *.rsuser

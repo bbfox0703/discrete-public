@@ -89,7 +89,9 @@ if (-not $SkipInject) {
     Write-Host ''
     Write-Host "==[ Injecting UnityDumper-$Backend.dll into PID $ProcessId ]==" -ForegroundColor Green
     & $injectScript -Target $ProcessId -Backend $Backend
-    if ($LASTEXITCODE -ne 0) { throw 'Injection failed.' }
+    # Don't trust $LASTEXITCODE: it tracks native EXE exit codes, not .ps1
+    # return values, so it can be stale from a previous command. The pipe
+    # connect below is the real success check.
 } else {
     Write-Host '(SkipInject set -- assuming DLL is already loaded)' -ForegroundColor DarkGray
 }

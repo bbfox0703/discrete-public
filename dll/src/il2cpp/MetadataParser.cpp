@@ -298,6 +298,104 @@ Parser::EnumerateTypeFields(const TypeDefView& type) const {
     return out;
 }
 
+std::optional<std::string> Parser::TryDecodeStringDefault(std::int32_t dataIndex) const {
+    if (!v29Tables_) return std::nullopt;
+    if (dataIndex < 0 || dataIndex >= fieldDefaultDataSize_) return std::nullopt;
+
+    const std::uint8_t* base = data_.data() + fieldDefaultDataOffset_ + dataIndex;
+    std::int32_t avail = fieldDefaultDataSize_ - dataIndex;
+    if (avail < 1) return std::nullopt;
+
+    // ECMA-335 §II.23.2 compressed *signed* integer — IL2CPP encodes string
+    // default lengths this way. The unsigned bits give 2*length (low bit is
+    // the sign; always 0 for non-negative lengths), so we right-shift by 1.
+    std::uint32_t encoded = 0;
+    std::int32_t  headerLen = 0;
+    std::uint8_t  b0 = base[0];
+
+    if (b0 == 0xFFu) return std::string{};  // null-string sentinel
+    if ((b0 & 0x80u) == 0u) {
+        encoded = b0;
+        headerLen = 1;
+    } else if ((b0 & 0xC0u) == 0x80u) {
+        if (avail < 2) return std::nullopt;
+        encoded = (static_cast<std::uint32_t>(b0 & 0x3Fu) << 8) | base[1];
+        headerLen = 2;
+    } else if ((b0 & 0xE0u) == 0xC0u) {
+        if (avail < 4) return std::nullopt;
+        encoded = (static_cast<std::uint32_t>(b0 & 0x1Fu) << 24) |
+                  (static_cast<std::uint32_t>(base[1]) << 16) |
+                  (static_cast<std::uint32_t>(base[2]) << 8)  |
+                   static_cast<std::uint32_t>(base[3]);
+        headerLen = 4;
+    } else {
+        return std::nullopt;
+    }
+    // Decode signed: bit 0 == 0 → positive (length = encoded >> 1).
+    // bit 0 == 1 means negative — invalid for a string length, reject.
+    if ((encoded & 1u) != 0u) return std::nullopt;
+    std::uint32_t length = encoded >> 1;
+
+    if (length == 0) return std::string{};
+    if (length > 1 * 1024 * 1024) return std::nullopt;
+    if (static_cast<std::int64_t>(headerLen) + length >
+        static_cast<std::int64_t>(avail)) {
+        return std::nullopt;
+    }
+
+    const std::uint8_t* p = base + headerLen;
+
+    // Heuristic on the first 32 bytes only — guards against random non-string
+    // blobs whose length math happens to look reasonable.
+    std::uint32_t sample = (length < 32u) ? length : 32u;
+    std::uint32_t printable = 0;
+    std::uint32_t controlBad = 0;
+    for (std::uint32_t i = 0; i < sample; ++i) {
+        std::uint8_t c = p[i];
+        if (c == 0)                                           ++controlBad;
+        else if (c < 0x20u && c != '\t' && c != '\n' && c != '\r') ++controlBad;
+        else                                                  ++printable;
+    }
+    if (sample > 0) {
+        if (controlBad * 4 > sample) return std::nullopt;       // > 25% control chars
+        if (printable * 10 < sample * 7) return std::nullopt;   // < 70% printable
+    }
+
+    // Sanitize to valid UTF-8: malformed sequences become U+FFFD so nlohmann's
+    // serializer never sees an invalid byte. Latin-1 / partial UTF-8 / weird
+    // encodings end up readable enough to inspect.
+    std::string out;
+    out.reserve(length);
+    auto pushReplacement = [&]() {
+        out.push_back('\xEF'); out.push_back('\xBF'); out.push_back('\xBD');
+    };
+    for (std::uint32_t i = 0; i < length; ) {
+        std::uint8_t c = p[i];
+        if (c < 0x80u) {
+            out.push_back(static_cast<char>(c));
+            ++i;
+            continue;
+        }
+        std::uint32_t need = 0;
+        if      ((c & 0xE0u) == 0xC0u && c >= 0xC2u) need = 1;
+        else if ((c & 0xF0u) == 0xE0u)               need = 2;
+        else if ((c & 0xF8u) == 0xF0u && c <= 0xF4u) need = 3;
+        else { pushReplacement(); ++i; continue; }
+
+        if (i + need >= length) { pushReplacement(); ++i; continue; }
+        bool ok = true;
+        for (std::uint32_t k = 1; k <= need; ++k) {
+            if ((p[i + k] & 0xC0u) != 0x80u) { ok = false; break; }
+        }
+        if (!ok) { pushReplacement(); ++i; continue; }
+        for (std::uint32_t k = 0; k <= need; ++k) {
+            out.push_back(static_cast<char>(p[i + k]));
+        }
+        i += need + 1;
+    }
+    return out;
+}
+
 std::optional<Parser::FieldDefaultBlob>
 Parser::FindFieldDefault(std::int32_t globalFieldIndex) const {
     if (!v29Tables_) return std::nullopt;

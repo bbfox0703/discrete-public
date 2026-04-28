@@ -151,7 +151,19 @@ void ServeClient(HANDLE pipe) {
         }
 
         json response = Dispatch(request);
-        if (!WriteLine(pipe, response.dump())) break;
+        // Use error_handler_t::replace so invalid UTF-8 in any field becomes
+        // U+FFFD instead of throwing. Also wrap in try/catch as a final
+        // safety net — uncaught exceptions in the pipe worker would otherwise
+        // tear down the host process.
+        std::string serialized;
+        try {
+            serialized = response.dump(-1, ' ', false, json::error_handler_t::replace);
+        } catch (const std::exception& ex) {
+            LogPipe(std::string("response dump failed: ") + ex.what());
+            serialized = BuildError(nullptr, -32603,
+                                    std::string("response serialization failed: ") + ex.what()).dump();
+        }
+        if (!WriteLine(pipe, serialized)) break;
     }
     LogPipe("client disconnected");
 }

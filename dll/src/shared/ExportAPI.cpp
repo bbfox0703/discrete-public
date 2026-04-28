@@ -498,12 +498,18 @@ void RegisterCoreHandlers() {
                     hex.push_back(kHex[def->data[i] >> 4]);
                     hex.push_back(kHex[def->data[i] & 0xF]);
                 }
-                entry["default"] = {
+                json defaultJson = {
                     {"type_index", def->typeIndex},
                     {"data_index", def->dataIndex},
                     {"raw_hex_first16", hex},
                     {"raw_size", def->data.size()},
                 };
+                // Best-effort string decode (ECMA-335 length-prefix + UTF-8).
+                // Pure-disk path; numeric / enum decode waits on segment 2d.
+                if (auto s = mp.TryDecodeStringDefault(def->dataIndex)) {
+                    defaultJson["decoded_string"] = *s;
+                }
+                entry["default"] = std::move(defaultJson);
             }
             arr.push_back(std::move(entry));
         }
