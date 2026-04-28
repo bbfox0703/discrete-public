@@ -6,6 +6,7 @@
 #include "BackendDetector.h"
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "Memory.h"
 #include "PipeServer.h"
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
@@ -100,6 +101,191 @@ void RegisterCoreHandlers() {
     // Phase 2: `scan` re-runs backend detection and returns the same shape as handshake.
     PipeServer::RegisterHandler(MagicStrings::CmdScan, [](const json&) -> json {
         return BuildHandshakeJson();
+    });
+
+    // ----------------------------------------------------------------------
+    // Phase 6 — backend-agnostic memory ops.
+    // readMemory / writeMemory / resolvePointer act on the host process's
+    // address space. They use SEH-protected primitives in Memory.cpp so a
+    // bad pointer returns an error envelope instead of crashing the game.
+    // ----------------------------------------------------------------------
+
+    auto parseAddr = [](const json& v, std::uintptr_t& out) -> bool {
+        if (v.is_string()) {
+            const std::string s = v.get<std::string>();
+            const char* p = s.c_str();
+            if (s.size() >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+            char* end = nullptr;
+            unsigned long long val = ::_strtoui64(p, &end, 16);
+            if (end == p) return false;
+            out = static_cast<std::uintptr_t>(val);
+            return true;
+        }
+        if (v.is_number_unsigned()) {
+            out = static_cast<std::uintptr_t>(v.get<std::uint64_t>());
+            return true;
+        }
+        if (v.is_number_integer()) {
+            out = static_cast<std::uintptr_t>(v.get<std::int64_t>());
+            return true;
+        }
+        return false;
+    };
+
+    auto bytesToHex = [](const std::uint8_t* data, std::size_t n) {
+        static const char* kHex = "0123456789ABCDEF";
+        std::string out;
+        out.reserve(n * 2);
+        for (std::size_t i = 0; i < n; ++i) {
+            out.push_back(kHex[data[i] >> 4]);
+            out.push_back(kHex[data[i] & 0xF]);
+        }
+        return out;
+    };
+
+    auto hexToBytes = [](const std::string& hex, std::vector<std::uint8_t>& out) -> bool {
+        std::string clean;
+        clean.reserve(hex.size());
+        for (char c : hex) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',') continue;
+            clean.push_back(c);
+        }
+        if (clean.size() % 2 != 0) return false;
+        out.clear();
+        out.reserve(clean.size() / 2);
+        auto hexNibble = [](char c, std::uint8_t& n) {
+            if (c >= '0' && c <= '9') { n = c - '0';      return true; }
+            if (c >= 'a' && c <= 'f') { n = 10 + c - 'a'; return true; }
+            if (c >= 'A' && c <= 'F') { n = 10 + c - 'A'; return true; }
+            return false;
+        };
+        for (std::size_t i = 0; i + 1 < clean.size(); i += 2) {
+            std::uint8_t hi = 0, lo = 0;
+            if (!hexNibble(clean[i], hi) || !hexNibble(clean[i + 1], lo)) return false;
+            out.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+        }
+        return true;
+    };
+
+    auto formatHex = [](std::uintptr_t v) {
+        char buf[32];
+        ::_snprintf_s(buf, sizeof(buf), _TRUNCATE, "0x%016llX",
+                      static_cast<unsigned long long>(v));
+        return std::string(buf);
+    };
+
+    PipeServer::RegisterHandler(MagicStrings::CmdReadMemory,
+        [parseAddr, bytesToHex, formatHex](const json& args) -> json {
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address' (hex string or integer)"}};
+        }
+        std::size_t size = 0;
+        if (args.contains("size") && args["size"].is_number_unsigned()) {
+            size = args["size"].get<std::size_t>();
+        }
+        if (size == 0 || size > 1 * 1024 * 1024) {
+            return json{{"error", "'size' must be in [1, 1048576]"}};
+        }
+        std::vector<std::uint8_t> buf(size);
+        if (!Memory::SafeReadBytes(reinterpret_cast<void*>(addr), buf.data(), size)) {
+            return json{
+                {"error", "memory not readable"},
+                {"address", formatHex(addr)},
+                {"size", size},
+            };
+        }
+        return json{
+            {"address", formatHex(addr)},
+            {"size", size},
+            {"hex", bytesToHex(buf.data(), buf.size())},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdWriteMemory,
+        [parseAddr, hexToBytes, formatHex](const json& args) -> json {
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        if (!args.contains("hex") || !args["hex"].is_string()) {
+            return json{{"error", "missing 'hex' (compact hex string)"}};
+        }
+        std::vector<std::uint8_t> bytes;
+        if (!hexToBytes(args["hex"].get<std::string>(), bytes)) {
+            return json{{"error", "'hex' is not valid hex"}};
+        }
+        if (bytes.empty() || bytes.size() > 1 * 1024 * 1024) {
+            return json{{"error", "byte length must be in [1, 1048576]"}};
+        }
+        if (!Memory::SafeWriteBytes(reinterpret_cast<void*>(addr), bytes.data(), bytes.size())) {
+            return json{
+                {"error", "memory not writable"},
+                {"address", formatHex(addr)},
+                {"size", bytes.size()},
+            };
+        }
+        return json{
+            {"address", formatHex(addr)},
+            {"written", bytes.size()},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdResolvePointer,
+        [parseAddr, bytesToHex, formatHex](const json& args) -> json {
+        std::uintptr_t base = 0;
+        if (!args.contains("base") || !parseAddr(args["base"], base)) {
+            return json{{"error", "missing/invalid 'base'"}};
+        }
+        std::vector<std::int64_t> offsets;
+        if (args.contains("offsets") && args["offsets"].is_array()) {
+            for (const auto& o : args["offsets"]) {
+                if      (o.is_number_integer())  offsets.push_back(o.get<std::int64_t>());
+                else if (o.is_number_unsigned()) offsets.push_back(static_cast<std::int64_t>(o.get<std::uint64_t>()));
+                else return json{{"error", "offsets[] must be integers"}};
+            }
+        }
+        // Resolve: at each step except the last, dereference (base + offset) as
+        // a pointer; the final offset is added but NOT dereferenced. This is
+        // the standard Cheat Engine pointer-chain semantics.
+        std::vector<std::string> trace;
+        trace.reserve(offsets.size() + 1);
+        std::uintptr_t cur = base;
+        trace.push_back(formatHex(cur));
+        for (std::size_t i = 0; i < offsets.size(); ++i) {
+            std::uintptr_t addr = static_cast<std::uintptr_t>(
+                static_cast<std::int64_t>(cur) + offsets[i]);
+            if (i + 1 < offsets.size()) {
+                auto deref = Memory::SafeRead<std::uintptr_t>(reinterpret_cast<void*>(addr));
+                if (!deref) {
+                    return json{
+                        {"error", "deref failed at step"},
+                        {"step", i},
+                        {"address", formatHex(addr)},
+                        {"trace", trace},
+                    };
+                }
+                cur = *deref;
+            } else {
+                cur = addr;  // last offset is just added, not dereferenced
+            }
+            trace.push_back(formatHex(cur));
+        }
+        json result{
+            {"final_address", formatHex(cur)},
+            {"trace", trace},
+        };
+        if (args.contains("size") && args["size"].is_number_unsigned()) {
+            std::size_t size = args["size"].get<std::size_t>();
+            if (size > 0 && size <= 4096) {
+                std::vector<std::uint8_t> buf(size);
+                if (Memory::SafeReadBytes(reinterpret_cast<void*>(cur), buf.data(), size)) {
+                    result["size"] = size;
+                    result["hex"] = bytesToHex(buf.data(), buf.size());
+                }
+            }
+        }
+        return result;
     });
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
@@ -259,12 +445,7 @@ void RegisterCoreHandlers() {
     });
 
     // Phase 3 segment 3: static field address + JIT method native address.
-    auto formatHex = [](std::uintptr_t v) {
-        char buf[32];
-        ::_snprintf_s(buf, sizeof(buf), _TRUNCATE, "0x%016llX",
-                      static_cast<unsigned long long>(v));
-        return std::string(buf);
-    };
+    // (formatHex is the shared lambda declared in the backend-agnostic block above.)
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetStaticFieldData,
         [resolveClassFromArgs, formatHex](const json& args) -> json {
@@ -305,12 +486,7 @@ void RegisterCoreHandlers() {
     });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
-    auto formatHex = [](std::uintptr_t v) {
-        char buf[32];
-        ::_snprintf_s(buf, sizeof(buf), _TRUNCATE, "0x%016llX",
-                      static_cast<unsigned long long>(v));
-        return std::string(buf);
-    };
+    // (formatHex is the shared lambda declared in the backend-agnostic block above.)
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
         if (!IL2CPP::IsResolved()) {
