@@ -27,6 +27,8 @@
 #include <windows.h>
 
 #include <atomic>
+#include <map>
+#include <mutex>
 #include <string>
 
 using nlohmann::json;
@@ -402,6 +404,60 @@ void RegisterCoreHandlers() {
         return result;
     });
 
+    // ------------------------------------------------------------------------
+    // Phase 6 segment D — symbol registry (CE-style named pointers).
+    // Backend-agnostic in-memory map. Survives until the DLL unloads. Useful
+    // for stashing addresses returned by getStaticFieldData / findInstances /
+    // walkInstance and recalling them by a friendly name from later commands.
+    // ------------------------------------------------------------------------
+    static std::mutex g_symbolMutex;
+    static std::map<std::string, std::uintptr_t> g_symbolMap;
+
+    PipeServer::RegisterHandler(MagicStrings::CmdRegisterSymbol,
+        [parseAddr, formatHex](const json& args) -> json {
+        std::string name = args.value("name", std::string{});
+        if (name.empty()) return json{{"error", "missing 'name'"}};
+        // Action: "set" (default), "delete", "get". Symmetric with CE.
+        std::string action = args.value("action", std::string{"set"});
+        std::lock_guard<std::mutex> lk(g_symbolMutex);
+        if (action == "delete") {
+            std::size_t n = g_symbolMap.erase(name);
+            return json{{"name", name}, {"deleted", n != 0}};
+        }
+        if (action == "get") {
+            auto it = g_symbolMap.find(name);
+            if (it == g_symbolMap.end()) return json{{"error", "symbol not found"}, {"name", name}};
+            return json{{"name", name}, {"address", formatHex(it->second)}};
+        }
+        // Default: set.
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        g_symbolMap[name] = addr;
+        return json{{"name", name}, {"address", formatHex(addr)}, {"set", true}};
+    });
+
+    PipeServer::RegisterHandler("lookupSymbol",
+        [formatHex](const json& args) -> json {
+        std::string name = args.value("name", std::string{});
+        if (name.empty()) return json{{"error", "missing 'name'"}};
+        std::lock_guard<std::mutex> lk(g_symbolMutex);
+        auto it = g_symbolMap.find(name);
+        if (it == g_symbolMap.end()) return json{{"error", "symbol not found"}, {"name", name}};
+        return json{{"name", name}, {"address", formatHex(it->second)}};
+    });
+
+    PipeServer::RegisterHandler("listSymbols",
+        [formatHex](const json&) -> json {
+        std::lock_guard<std::mutex> lk(g_symbolMutex);
+        json arr = json::array();
+        for (const auto& [k, v] : g_symbolMap) {
+            arr.push_back({{"name", k}, {"address", formatHex(v)}});
+        }
+        return json{{"count", arr.size()}, {"symbols", std::move(arr)}};
+    });
+
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
     // Phase 3 segment 1: list every Mono-loaded assembly.
     PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
@@ -708,6 +764,46 @@ void RegisterCoreHandlers() {
             {"depth",     chain.size()},
             {"count",     fields.size()},
             {"fields",    std::move(fields)},
+        };
+    });
+
+    // Phase 6 segment D — monoGetVTable.
+    // Resolves the MonoVTable* for a class in the root domain. The same call
+    // findInstances uses internally, exposed for callers that want to do their
+    // own pointer scans or to feed registerSymbol.
+    PipeServer::RegisterHandler(MagicStrings::CmdMonoGetVTable,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        std::string err;
+        Mono::MonoClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        const auto& r = Mono::GetResolver();
+        if (r.class_vtable == nullptr) return json{{"error", "mono_class_vtable not exported"}};
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        if (domain == nullptr) return json{{"error", "no mono root domain"}};
+
+        Mono::MonoVTable* vt = nullptr;
+        {
+            Mono::ThreadAttachGuard guard(domain);
+            if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            vt = r.class_vtable(domain, k);
+        }
+        if (vt == nullptr) return json{{"error", "mono_class_vtable returned null"}};
+        return json{
+            {"vtable", formatHex(reinterpret_cast<std::uintptr_t>(vt))},
+        };
+    });
+
+    // Phase 6 segment D — getEnumValues (Mono stub).
+    // Mono enum decode requires extra resolver bindings (mono_class_is_enum,
+    // mono_class_enum_basetype, mono_field_get_data) which we haven't bound
+    // yet. IL2CPP path goes via the metadata parser. For now report the gap
+    // explicitly so callers can branch.
+    PipeServer::RegisterHandler(MagicStrings::CmdGetEnumValues, [](const json&) -> json {
+        return json{
+            {"error", "getEnumValues not yet implemented for Mono backend"},
+            {"hint",  "needs mono_field_get_data + mono_class_enum_basetype bindings"},
         };
     });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
@@ -1057,6 +1153,112 @@ void RegisterCoreHandlers() {
             {"depth",     chain.size()},
             {"count",     fields.size()},
             {"fields",    std::move(fields)},
+        };
+    });
+
+    // Phase 6 segment D — getEnumValues (IL2CPP).
+    // Combines runtime + metadata: confirm the class is an enum via the runtime
+    // (parent.name == "Enum"), then read FieldDefault data for each declared
+    // field through the metadata Parser. The underlying type isn't recorded
+    // in metadata without the runtime types[] table (Phase 5 segment 2d), so
+    // we report a best-effort Int32 decode (which fits the vast majority of
+    // Unity enums) and the raw bytes — callers can re-decode once 2d lands.
+    PipeServer::RegisterHandler(MagicStrings::CmdGetEnumValues,
+        [resolveClassFromArgs](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto info = IL2CPP::ReadClassInfo(k);
+        if (!info.ok) return json{{"error", "ReadClassInfo failed"}};
+        const bool isEnum = (info.info.parent.name == "Enum");
+        if (!isEnum) return json{{"error", "class is not an enum"},
+                                 {"parent", info.info.parent.name}};
+
+        const auto& mp = IL2CPP::Metadata::Parser::Get();
+        if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
+        std::string ns   = args.value("namespace", std::string{});
+        std::string name = args.value("name", std::string{});
+        auto td = mp.FindTypeByName(ns, name);
+        if (!td) return json{{"error", "type not found in metadata: " + ns + "." + name}};
+
+        // Decode one ECMA-335 §II.23.2 compressed signed int from `p`.
+        // Used by IL2CPP for FieldDefault numeric blobs (verified empirically:
+        // CameraType / DayOfWeek values match Unity's published enum values
+        // when decoded this way, but produce garbage as raw LE Int32).
+        auto decodeCompressedSigned = [](const std::uint8_t* p, std::size_t avail,
+                                          std::int64_t& outValue,
+                                          std::size_t&  outBytes) -> bool {
+            if (avail < 1) return false;
+            std::uint8_t b0 = p[0];
+            std::uint32_t enc = 0;
+            std::size_t   width = 0;
+            std::int64_t  bias = 0;
+            if ((b0 & 0x80u) == 0u) {
+                enc = b0;
+                width = 1;
+                bias = 0x40;
+            } else if ((b0 & 0xC0u) == 0x80u) {
+                if (avail < 2) return false;
+                enc = (static_cast<std::uint32_t>(b0 & 0x3Fu) << 8) | p[1];
+                width = 2;
+                bias = 0x2000;
+            } else if ((b0 & 0xE0u) == 0xC0u) {
+                if (avail < 4) return false;
+                enc = (static_cast<std::uint32_t>(b0 & 0x1Fu) << 24)
+                    | (static_cast<std::uint32_t>(p[1])       << 16)
+                    | (static_cast<std::uint32_t>(p[2])       <<  8)
+                    |  static_cast<std::uint32_t>(p[3]);
+                width = 4;
+                bias = 0x10000000;
+            } else {
+                return false;  // 0xE0–0xFF reserved
+            }
+            std::int64_t magnitude = static_cast<std::int64_t>(enc >> 1);
+            outValue = (enc & 1u) ? (magnitude - bias) : magnitude;
+            outBytes = width;
+            return true;
+        };
+
+        json values = json::array();
+        auto fields = mp.EnumerateTypeFields(*td);
+        static const char* kHex = "0123456789ABCDEF";
+        for (const auto& f : fields) {
+            // Enums have one instance field "value__" plus a literal per member.
+            // Skip the storage field; its FieldDefault is absent anyway.
+            if (f.name == "value__") continue;
+            auto def = mp.FindFieldDefault(f.index);
+            if (!def) continue;
+            json entry = {
+                {"name", f.name},
+                {"field_index", f.index},
+            };
+            std::int64_t v = 0;
+            std::size_t  width = 0;
+            if (!def->data.empty() &&
+                decodeCompressedSigned(def->data.data(), def->data.size(), v, width)) {
+                entry["value"]    = v;
+                entry["enc_bytes"] = width;
+            } else {
+                entry["decode_error"] = "compressed-int parse failed";
+            }
+            // Raw first 8 bytes for callers that need to verify or re-decode
+            // (the full blob spans many members; data here is shifted per-member).
+            std::string hex;
+            std::size_t take = std::min<std::size_t>(def->data.size(), 8);
+            for (std::size_t i = 0; i < take; ++i) {
+                hex.push_back(kHex[def->data[i] >> 4]);
+                hex.push_back(kHex[def->data[i] & 0xF]);
+            }
+            entry["raw_hex"] = hex;
+            values.push_back(std::move(entry));
+        }
+        return json{
+            {"namespace", td->ns},
+            {"name",      td->name},
+            {"count",     values.size()},
+            {"values",    std::move(values)},
         };
     });
 #endif
