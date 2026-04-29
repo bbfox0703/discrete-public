@@ -69,7 +69,8 @@ try {
             Write-Host "==[ getEnumValues $Namespace.$Name ]==" -ForegroundColor Green
             $r = Invoke-Cmd 'getEnumValues' @{ assembly = $ClassAssembly; namespace = $Namespace; name = $Name }
             if ($r.error) { Write-Host "ERROR: $($r.error)  $($r.hint)" -ForegroundColor Red; return }
-            Write-Host ("  type   : {0}.{1}  ({2} members)" -f $r.namespace, $r.name, $r.count) -ForegroundColor Cyan
+            $under = if ($r.underlying_type) { "  underlying=$($r.underlying_type)" } else { '' }
+            Write-Host ("  type   : {0}.{1}  ({2} members){3}" -f $r.namespace, $r.name, $r.count, $under) -ForegroundColor Cyan
             foreach ($v in $r.values) {
                 $valTxt = if ($null -ne $v.value) { "= $($v.value)" }
                           elseif ($v.decode_error) { "? ($($v.decode_error))" }

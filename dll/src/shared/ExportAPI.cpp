@@ -1156,13 +1156,19 @@ void RegisterCoreHandlers() {
         };
     });
 
-    // Phase 6 segment D — getEnumValues (IL2CPP).
-    // Combines runtime + metadata: confirm the class is an enum via the runtime
-    // (parent.name == "Enum"), then read FieldDefault data for each declared
-    // field through the metadata Parser. The underlying type isn't recorded
-    // in metadata without the runtime types[] table (Phase 5 segment 2d), so
-    // we report a best-effort Int32 decode (which fits the vast majority of
-    // Unity enums) and the raw bytes — callers can re-decode once 2d lands.
+    // Phase 5 segment 2d + Phase 6 segment D — getEnumValues (IL2CPP).
+    // Type-aware decode: detects the enum's underlying integer width from
+    // the runtime `value__` field, then decodes each FieldDefault blob using
+    // the matching IL2CPP encoding rules (verified against Unity's IL2CPP
+    // FieldDefaultValueWriter — encoded form depends on type):
+    //   I1/U1/I2/U2/I4/U4 → ECMA-335 §II.23.2 compressed signed int, then
+    //                       sign-extended / clamped to the target width.
+    //   I8/U8             → 8 bytes raw little-endian.
+    //   R4 / R8           → 4 / 8 bytes raw little-endian (float / double).
+    //   Boolean           → 1 byte (0 / 1).
+    //   Char              → 2 bytes raw little-endian (UTF-16 code unit).
+    // Full Il2CppMetadataRegistration AOB scan (so non-enum const literals
+    // can also be type-aware) is still pending — see plan.md.
     PipeServer::RegisterHandler(MagicStrings::CmdGetEnumValues,
         [resolveClassFromArgs](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
@@ -1176,6 +1182,14 @@ void RegisterCoreHandlers() {
         if (!isEnum) return json{{"error", "class is not an enum"},
                                  {"parent", info.info.parent.name}};
 
+        // Find the storage field `value__` — its CLR type is the enum's
+        // underlying integer type. Default to System.Int32 if missing
+        // (ECMA-335 §I.8.5.2 says int32 is the default underlying type).
+        std::string underlying = "System.Int32";
+        for (const auto& f : info.info.fields) {
+            if (f.name == "value__") { underlying = f.typeName; break; }
+        }
+
         const auto& mp = IL2CPP::Metadata::Parser::Get();
         if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
         std::string ns   = args.value("namespace", std::string{});
@@ -1183,10 +1197,8 @@ void RegisterCoreHandlers() {
         auto td = mp.FindTypeByName(ns, name);
         if (!td) return json{{"error", "type not found in metadata: " + ns + "." + name}};
 
-        // Decode one ECMA-335 §II.23.2 compressed signed int from `p`.
-        // Used by IL2CPP for FieldDefault numeric blobs (verified empirically:
-        // CameraType / DayOfWeek values match Unity's published enum values
-        // when decoded this way, but produce garbage as raw LE Int32).
+        // Decode one ECMA-335 §II.23.2 compressed signed int. Used for I1..U4
+        // FieldDefaults (IL2CPP packs all integer literals ≤32-bit this way).
         auto decodeCompressedSigned = [](const std::uint8_t* p, std::size_t avail,
                                           std::int64_t& outValue,
                                           std::size_t&  outBytes) -> bool {
@@ -1196,22 +1208,18 @@ void RegisterCoreHandlers() {
             std::size_t   width = 0;
             std::int64_t  bias = 0;
             if ((b0 & 0x80u) == 0u) {
-                enc = b0;
-                width = 1;
-                bias = 0x40;
+                enc = b0; width = 1; bias = 0x40;
             } else if ((b0 & 0xC0u) == 0x80u) {
                 if (avail < 2) return false;
                 enc = (static_cast<std::uint32_t>(b0 & 0x3Fu) << 8) | p[1];
-                width = 2;
-                bias = 0x2000;
+                width = 2; bias = 0x2000;
             } else if ((b0 & 0xE0u) == 0xC0u) {
                 if (avail < 4) return false;
                 enc = (static_cast<std::uint32_t>(b0 & 0x1Fu) << 24)
                     | (static_cast<std::uint32_t>(p[1])       << 16)
                     | (static_cast<std::uint32_t>(p[2])       <<  8)
                     |  static_cast<std::uint32_t>(p[3]);
-                width = 4;
-                bias = 0x10000000;
+                width = 4; bias = 0x10000000;
             } else {
                 return false;  // 0xE0–0xFF reserved
             }
@@ -1219,6 +1227,69 @@ void RegisterCoreHandlers() {
             outValue = (enc & 1u) ? (magnitude - bias) : magnitude;
             outBytes = width;
             return true;
+        };
+
+        // Type-aware decode: takes the underlying enum type name and a
+        // FieldDefault blob, fills `entry` with `value` (typed) +
+        // `enc_bytes`. Returns false on shape mismatch.
+        auto decodeTyped = [&decodeCompressedSigned]
+            (const std::string& typeName, const std::uint8_t* p, std::size_t avail,
+             json& entry) -> bool {
+            auto compressed = [&](auto&& signCast, auto&& finalCast) -> bool {
+                std::int64_t raw = 0; std::size_t w = 0;
+                if (!decodeCompressedSigned(p, avail, raw, w)) return false;
+                entry["value"]     = finalCast(signCast(raw));
+                entry["enc_bytes"] = w;
+                return true;
+            };
+            if (typeName == "System.SByte")
+                return compressed([](std::int64_t x){ return static_cast<std::int8_t>(x);  },
+                                  [](std::int8_t x){ return static_cast<std::int64_t>(x); });
+            if (typeName == "System.Byte")
+                return compressed([](std::int64_t x){ return static_cast<std::uint8_t>(x); },
+                                  [](std::uint8_t x){ return static_cast<std::uint64_t>(x); });
+            if (typeName == "System.Int16")
+                return compressed([](std::int64_t x){ return static_cast<std::int16_t>(x); },
+                                  [](std::int16_t x){ return static_cast<std::int64_t>(x); });
+            if (typeName == "System.UInt16")
+                return compressed([](std::int64_t x){ return static_cast<std::uint16_t>(x); },
+                                  [](std::uint16_t x){ return static_cast<std::uint64_t>(x); });
+            if (typeName == "System.Int32")
+                return compressed([](std::int64_t x){ return static_cast<std::int32_t>(x); },
+                                  [](std::int32_t x){ return static_cast<std::int64_t>(x); });
+            if (typeName == "System.UInt32")
+                return compressed([](std::int64_t x){ return static_cast<std::uint32_t>(x); },
+                                  [](std::uint32_t x){ return static_cast<std::uint64_t>(x); });
+            if (typeName == "System.Int64") {
+                if (avail < 8) return false;
+                std::int64_t v = 0; std::memcpy(&v, p, 8);
+                entry["value"] = v; entry["enc_bytes"] = 8; return true;
+            }
+            if (typeName == "System.UInt64") {
+                if (avail < 8) return false;
+                std::uint64_t v = 0; std::memcpy(&v, p, 8);
+                entry["value"] = v; entry["enc_bytes"] = 8; return true;
+            }
+            if (typeName == "System.Single") {
+                if (avail < 4) return false;
+                float v = 0.f; std::memcpy(&v, p, 4);
+                entry["value"] = v; entry["enc_bytes"] = 4; return true;
+            }
+            if (typeName == "System.Double") {
+                if (avail < 8) return false;
+                double v = 0.0; std::memcpy(&v, p, 8);
+                entry["value"] = v; entry["enc_bytes"] = 8; return true;
+            }
+            if (typeName == "System.Boolean") {
+                if (avail < 1) return false;
+                entry["value"] = (p[0] != 0); entry["enc_bytes"] = 1; return true;
+            }
+            if (typeName == "System.Char") {
+                if (avail < 2) return false;
+                std::uint16_t v = 0; std::memcpy(&v, p, 2);
+                entry["value"] = v; entry["enc_bytes"] = 2; return true;
+            }
+            return false;
         };
 
         json values = json::array();
@@ -1234,17 +1305,10 @@ void RegisterCoreHandlers() {
                 {"name", f.name},
                 {"field_index", f.index},
             };
-            std::int64_t v = 0;
-            std::size_t  width = 0;
-            if (!def->data.empty() &&
-                decodeCompressedSigned(def->data.data(), def->data.size(), v, width)) {
-                entry["value"]    = v;
-                entry["enc_bytes"] = width;
-            } else {
-                entry["decode_error"] = "compressed-int parse failed";
+            if (def->data.empty() ||
+                !decodeTyped(underlying, def->data.data(), def->data.size(), entry)) {
+                entry["decode_error"] = "type-aware decode failed for " + underlying;
             }
-            // Raw first 8 bytes for callers that need to verify or re-decode
-            // (the full blob spans many members; data here is shifted per-member).
             std::string hex;
             std::size_t take = std::min<std::size_t>(def->data.size(), 8);
             for (std::size_t i = 0; i < take; ++i) {
@@ -1255,10 +1319,11 @@ void RegisterCoreHandlers() {
             values.push_back(std::move(entry));
         }
         return json{
-            {"namespace", td->ns},
-            {"name",      td->name},
-            {"count",     values.size()},
-            {"values",    std::move(values)},
+            {"namespace",       td->ns},
+            {"name",            td->name},
+            {"underlying_type", underlying},
+            {"count",           values.size()},
+            {"values",          std::move(values)},
         };
     });
 #endif

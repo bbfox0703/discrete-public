@@ -178,10 +178,18 @@
 - [x] `il2cpp/MetadataParser.{h,cpp}` — locate `global-metadata.dat`, validate magic `0xFAB11BAF`, version dispatch
 - [partial] Version-specific header structs — only v29 prefix is exposed today; v24 / v27 / v31 fall through with a warning but still parse the prefix
 - [x] String heap reader (`nameIndex` → UTF-8 string)
-- [ ] Tables: TypeDefinitions, FieldDefinitions, MethodDefinitions, **StringLiterals ✅**, FieldDefaults
-- [ ] Cross-link metadata index ↔ runtime `Il2CppClass*` (via `il2cpp_class_from_type` or sequential mapping)
-- [ ] Enum default values, **string literal extraction ✅**
+- [partial] Tables: TypeDefinitions ✅, FieldDefinitions ✅, **StringLiterals ✅**, FieldDefaults ✅; MethodDefinitions still TBD
+- [ ] Cross-link metadata index ↔ runtime `Il2CppClass*` via `Il2CppMetadataRegistration` AOB (deferred — see "2d follow-up")
+- [x] Enum default values (segment 2d v1: type-aware decode using runtime `value__` underlying type), **string literal extraction ✅**
 - [ ] Detection of stripped / obfuscated metadata (heuristic: % of single-letter names)
+
+**2d follow-up** (not yet started): full `Il2CppMetadataRegistration` discovery
+in `GameAssembly.dll` so non-enum const literals (e.g. `const int kFoo = 42`)
+in `il2cppGetMetadataTypeFields` can also be type-aware-decoded. Likely
+approach: AOB scan the `.data` section for the registration struct shape
+(positive `typesCount`, all sub-pointers fall inside the module range). The
+runtime types[] table dereference lets `FieldDefault.typeIndex` map to a
+primitive type tag without going through `value__`.
 
 **Acceptance**:
 - Same game as Phase 4 — extra info (string literals, enum names) appears in `getClassInfo` result
