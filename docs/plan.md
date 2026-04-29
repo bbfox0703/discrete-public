@@ -181,7 +181,7 @@
 - [partial] Tables: TypeDefinitions ✅, FieldDefinitions ✅, **StringLiterals ✅**, FieldDefaults ✅; MethodDefinitions still TBD
 - [ ] Cross-link metadata index ↔ runtime `Il2CppClass*` via `Il2CppMetadataRegistration` AOB (deferred — see "2d follow-up")
 - [x] Enum default values (segment 2d v1: type-aware decode using runtime `value__` underlying type), **string literal extraction ✅**
-- [ ] Detection of stripped / obfuscated metadata (heuristic: % of single-letter names)
+- [x] Detection of stripped / obfuscated metadata (segment 3): `getMetadataStats` pipe command. Counts single-char / two-char user-type names (excluding `<...>` compiler-generated) and emits a verdict — `clean` / `partial_strip` / `heavy_strip`. IL2CPP path reads from `global-metadata.dat` directly; Mono path walks runtime classes.
 
 **2d follow-up** (not yet started): full `Il2CppMetadataRegistration` discovery
 in `GameAssembly.dll` so non-enum const literals (e.g. `const int kFoo = 42`)

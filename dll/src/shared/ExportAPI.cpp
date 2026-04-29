@@ -459,6 +459,81 @@ void RegisterCoreHandlers() {
         return json{{"count", arr.size()}, {"symbols", std::move(arr)}};
     });
 
+    // ------------------------------------------------------------------------
+    // Phase 5 segment 3 — stripped / obfuscated metadata heuristic.
+    // Backend-agnostic helpers; each backend block below registers its own
+    // `getMetadataStats` handler that feeds the shared collectors.
+    // Heuristic: count single-letter / two-letter type names (excluding the
+    // C# compiler-generated `<...>` types) as a fraction of all "user"
+    // names. Vanilla Unity sits well under 5%; Beebyte / Eazfuscator builds
+    // routinely exceed 30%.
+    // ------------------------------------------------------------------------
+    struct NameStats {
+        std::size_t total            = 0;
+        std::size_t with_namespace   = 0;
+        std::size_t single_char      = 0;
+        std::size_t short_two_char   = 0;
+        std::size_t compiler_gen     = 0;
+        std::size_t numeric_lead     = 0;
+        std::uint64_t total_name_len = 0;
+        std::size_t min_name_len     = static_cast<std::size_t>(-1);
+        std::size_t max_name_len     = 0;
+    };
+    auto updateStats = [](NameStats& s, const std::string& ns,
+                           const std::string& name) {
+        s.total++;
+        if (!ns.empty()) s.with_namespace++;
+        if (name.empty()) return;
+        if (name[0] == '<') { s.compiler_gen++; return; }  // <PrivateImpl> etc.
+        if (name[0] >= '0' && name[0] <= '9') s.numeric_lead++;
+        if      (name.size() == 1) s.single_char++;
+        else if (name.size() == 2) s.short_two_char++;
+        s.total_name_len += name.size();
+        if (name.size() < s.min_name_len) s.min_name_len = name.size();
+        if (name.size() > s.max_name_len) s.max_name_len = name.size();
+    };
+    auto buildStatsJson = [](const NameStats& s) -> json {
+        json out = {
+            {"total_classes",      s.total},
+            {"with_namespace",     s.with_namespace},
+            {"single_char_names",  s.single_char},
+            {"short_names_2",      s.short_two_char},
+            {"compiler_generated", s.compiler_gen},
+            {"numeric_lead",       s.numeric_lead},
+        };
+        if (s.total > 0) {
+            // Average / min / max are reported over non-compiler-generated
+            // names since `total_name_len` excludes those by construction.
+            std::size_t denom = (s.total > s.compiler_gen) ?
+                                (s.total - s.compiler_gen) : 0;
+            if (denom > 0) {
+                out["avg_name_length"] =
+                    static_cast<double>(s.total_name_len) / static_cast<double>(denom);
+            }
+        }
+        if (s.min_name_len != static_cast<std::size_t>(-1)) {
+            out["min_name_length"] = s.min_name_len;
+        }
+        out["max_name_length"] = s.max_name_len;
+
+        // Verdict: ratio of "stripped-shape" names over user (non compiler-
+        // generated) types. Thresholds calibrated against vanilla Unity
+        // (~1-2%) and typical commercial obfuscators (>30%).
+        std::size_t denom = (s.total > s.compiler_gen) ?
+                            (s.total - s.compiler_gen) : 0;
+        if (denom > 0) {
+            double ratio = static_cast<double>(s.single_char + s.short_two_char) /
+                           static_cast<double>(denom);
+            out["strip_ratio"] = ratio;
+            std::string verdict;
+            if      (ratio > 0.30) verdict = "heavy_strip";
+            else if (ratio > 0.10) verdict = "partial_strip";
+            else                   verdict = "clean";
+            out["verdict"] = verdict;
+        }
+        return out;
+    };
+
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
     // Phase 3 segment 1: list every Mono-loaded assembly.
     PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
@@ -794,6 +869,30 @@ void RegisterCoreHandlers() {
         return json{
             {"vtable", formatHex(reinterpret_cast<std::uintptr_t>(vt))},
         };
+    });
+
+    // Phase 5 segment 3 — getMetadataStats (Mono).
+    // Walks every class across every loaded assembly. Each Mono helper does
+    // its own thread attach, so we deliberately don't hold an outer guard
+    // (nested attach/detach destroyed BongoCat in build #54).
+    PipeServer::RegisterHandler("getMetadataStats",
+        [updateStats, buildStatsJson](const json&) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        NameStats s;
+        auto assemblies = Mono::EnumerateAssemblies();
+        std::size_t scanned = 0;
+        for (const auto& a : assemblies) {
+            Mono::MonoImage* img = Mono::FindImageByName(a.name);
+            if (img == nullptr) continue;
+            auto classes = Mono::EnumerateClasses(img);
+            for (const auto& c : classes) updateStats(s, c.ns, c.name);
+            ++scanned;
+        }
+        json out = buildStatsJson(s);
+        out["scope"]              = "all_assemblies";
+        out["assemblies_scanned"] = scanned;
+        return out;
     });
 
     // Phase 6 segment D — getEnumValues (Mono stub).
@@ -1174,6 +1273,26 @@ void RegisterCoreHandlers() {
             {"registration_found", regOk},
             {"fields", std::move(arr)},
         };
+    });
+
+    // Phase 5 segment 3 — getMetadataStats (IL2CPP).
+    // Reads from global-metadata.dat directly — faster than the runtime path
+    // and includes literal-only types stripped from the runtime field
+    // iterator.
+    PipeServer::RegisterHandler("getMetadataStats",
+        [updateStats, buildStatsJson](const json&) -> json {
+        const auto& mp = IL2CPP::Metadata::Parser::Get();
+        if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
+        NameStats s;
+        std::uint32_t count = mp.TypeDefinitionCount();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            auto td = mp.GetTypeDefinition(static_cast<std::int32_t>(i));
+            if (!td) continue;
+            updateStats(s, td->ns, td->name);
+        }
+        json out = buildStatsJson(s);
+        out["scope"] = "metadata_all";
+        return out;
     });
 
     // Phase 5 segment 2d follow-up — diagnostics for the runtime
