@@ -43,4 +43,21 @@ const std::uint8_t* AOBScan(const std::uint8_t* base, std::size_t size,
 const std::uint8_t* AOBScanModule(const wchar_t* moduleName,
                                   const std::uint8_t* pattern, std::string_view mask) noexcept;
 
+// One committed memory region as reported by VirtualQueryEx.
+struct CommittedRegion {
+    const std::uint8_t* base;
+    std::size_t         size;
+    unsigned long       protect;   // PAGE_* protection mask
+};
+
+// Enumerates committed, readable, non-guarded regions in the host process.
+std::vector<CommittedRegion> EnumerateCommittedRegions();
+
+// Scans every committed RW region for pointer-sized values equal to `target`,
+// at 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an
+// object is its Il2CppClass*; in Mono it's a MonoVTable*. Returns at most
+// `limit` matches (use SIZE_MAX for unbounded).
+std::vector<const void*> ScanForPointer(std::uintptr_t target,
+                                        std::size_t   limit = 256);
+
 }  // namespace UnityCEDumper::Memory

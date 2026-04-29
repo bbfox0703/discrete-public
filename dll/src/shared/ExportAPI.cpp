@@ -13,6 +13,7 @@
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
 #  include "../mono/MonoResolver.h"
+#  include "../mono/MonoThreadAttach.h"
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
@@ -484,6 +485,47 @@ void RegisterCoreHandlers() {
             {"address", formatHex(reinterpret_cast<std::uintptr_t>(cm.address))},
         };
     });
+
+    // Phase 6 segment C — findInstances (Mono).
+    // Each MonoObject's first qword is its MonoVTable*. We resolve the class's
+    // VTable for the root domain and scan committed RW pages for that pointer.
+    PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        std::string err;
+        Mono::MonoClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        const auto& r = Mono::GetResolver();
+        if (r.class_vtable == nullptr) return json{{"error", "mono_class_vtable not exported"}};
+
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        if (domain == nullptr) return json{{"error", "no mono root domain"}};
+
+        Mono::MonoVTable* vtable = nullptr;
+        {
+            Mono::ThreadAttachGuard guard(domain);
+            if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            vtable = r.class_vtable(domain, k);
+        }
+        if (vtable == nullptr) return json{{"error", "mono_class_vtable returned null"}};
+
+        std::size_t limit = 256;
+        if (args.contains("limit") && args["limit"].is_number_unsigned()) {
+            limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
+        }
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit);
+        json arr = json::array();
+        for (const void* p : matches) {
+            arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
+        }
+        return json{
+            {"vtable",  formatHex(reinterpret_cast<std::uintptr_t>(vtable))},
+            {"count",   arr.size()},
+            {"limit",   limit},
+            {"matches", std::move(arr)},
+        };
+    });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
@@ -738,6 +780,33 @@ void RegisterCoreHandlers() {
             {"offset", offset},
             {"returned", take},
             {"strings", std::move(arr)},
+        };
+    });
+
+    // Phase 6 segment C — findInstances (IL2CPP).
+    // Each Il2CppObject's first qword is its Il2CppClass*. Resolve the class
+    // and scan committed RW pages for that pointer.
+    PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        std::size_t limit = 256;
+        if (args.contains("limit") && args["limit"].is_number_unsigned()) {
+            limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
+        }
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit);
+        json arr = json::array();
+        for (const void* p : matches) {
+            arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
+        }
+        return json{
+            {"class_ptr", formatHex(reinterpret_cast<std::uintptr_t>(k))},
+            {"count",     arr.size()},
+            {"limit",     limit},
+            {"matches",   std::move(arr)},
         };
     });
 #endif

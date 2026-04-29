@@ -109,4 +109,80 @@ const std::uint8_t* AOBScanModule(const wchar_t* moduleName,
     return AOBScan(base, size, pattern, mask);
 }
 
+std::vector<CommittedRegion> EnumerateCommittedRegions() {
+    std::vector<CommittedRegion> out;
+    SYSTEM_INFO si{};
+    ::GetSystemInfo(&si);
+
+    const std::uint8_t* p   = static_cast<const std::uint8_t*>(si.lpMinimumApplicationAddress);
+    const std::uint8_t* end = static_cast<const std::uint8_t*>(si.lpMaximumApplicationAddress);
+
+    while (p < end) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (::VirtualQuery(p, &mbi, sizeof(mbi)) == 0) break;
+
+        const std::uint8_t* regionEnd =
+            static_cast<const std::uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+
+        if (mbi.State == MEM_COMMIT &&
+            !(mbi.Protect & PAGE_GUARD) &&
+            !(mbi.Protect & PAGE_NOACCESS)) {
+            CommittedRegion r{};
+            r.base    = static_cast<const std::uint8_t*>(mbi.BaseAddress);
+            r.size    = static_cast<std::size_t>(mbi.RegionSize);
+            r.protect = mbi.Protect;
+            out.push_back(r);
+        }
+
+        if (regionEnd <= p) break;
+        p = regionEnd;
+    }
+    return out;
+}
+
+#pragma warning(push)
+#pragma warning(disable: 4509)
+namespace {
+// Inner SEH helper: scans one memory region for an aligned pointer match.
+// Out parameter `matches` is appended to. Returns false on AV (region skipped).
+bool SehScanRegion(const std::uint8_t* base, std::size_t size,
+                   std::uintptr_t target,
+                   std::vector<const void*>& matches,
+                   std::size_t limit) {
+    __try {
+        const std::size_t count = size / sizeof(std::uintptr_t);
+        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
+        for (std::size_t i = 0; i < count; ++i) {
+            if (arr[i] == target) {
+                matches.push_back(static_cast<const void*>(base + i * sizeof(std::uintptr_t)));
+                if (matches.size() >= limit) return true;
+            }
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+}  // namespace
+#pragma warning(pop)
+
+std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit) {
+    std::vector<const void*> matches;
+    if (target == 0 || limit == 0) return matches;
+
+    constexpr DWORD kRW =
+        PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    auto regions = EnumerateCommittedRegions();
+    for (const auto& r : regions) {
+        if (matches.size() >= limit) break;
+        // Heap allocations live in RW pages. Skip RO / X-only regions to cut
+        // noise (and avoid scanning module .text / .rdata sections).
+        if ((r.protect & kRW) == 0) continue;
+        SehScanRegion(r.base, r.size, target, matches, limit);
+    }
+    return matches;
+}
+
 }  // namespace UnityCEDumper::Memory
