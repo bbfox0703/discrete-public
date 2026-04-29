@@ -52,6 +52,11 @@ try {
         $resp.result.field_start,
         ($resp.result.field_start + $resp.result.field_count),
         $resp.result.field_count)
+    if ($null -ne $resp.result.registration_found) {
+        $regTxt = if ($resp.result.registration_found) { 'YES' } else { 'no' }
+        $clr = if ($resp.result.registration_found) { 'Green' } else { 'DarkYellow' }
+        Write-Host ("  Il2CppMetadataRegistration: {0}" -f $regTxt) -ForegroundColor $clr
+    }
     Write-Host ''
 
     foreach ($f in $resp.result.fields) {
@@ -60,6 +65,12 @@ try {
         if ($f.default) {
             ('         hex16 = {0}   (raw_size={1}, data#{2})' -f `
                 $f.default.raw_hex_first16, $f.default.raw_size, $f.default.data_index) | Write-Host
+            if ($null -ne $f.default.type_tag) {
+                $valTxt = if ($null -ne $f.default.value) { "= $($f.default.value)" } else { '(no decode)' }
+                $encTxt = if ($f.default.enc_bytes) { "  enc=$($f.default.enc_bytes)B" } else { '' }
+                ('         tag=0x{0:X2}  {1}{2}' -f $f.default.type_tag, $valTxt, $encTxt) `
+                    | Write-Host -ForegroundColor Cyan
+            }
             if ($f.default.decoded_string) {
                 $s = $f.default.decoded_string
                 if ($s.Length -gt 100) { $s = $s.Substring(0, 97) + '...' }

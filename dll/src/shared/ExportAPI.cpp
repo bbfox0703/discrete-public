@@ -17,6 +17,7 @@
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
+#  include "../il2cpp/IL2CPPMetadataRegistration.h"
 #  include "../il2cpp/IL2CPPResolver.h"
 #  include "../il2cpp/IL2CPPThreadAttach.h"
 #  include "../il2cpp/MetadataParser.h"
@@ -978,6 +979,140 @@ void RegisterCoreHandlers() {
         auto td = mp.FindTypeByName(ns, name);
         if (!td) return json{{"error", "type not found in metadata: " + ns + "." + name}};
 
+        // Local: ECMA-335 §II.23.2 compressed signed int decoder (same logic
+        // as in getEnumValues; duplicated to keep handlers self-contained).
+        auto decodeCompressedSigned = [](const std::uint8_t* p, std::size_t avail,
+                                          std::int64_t& outValue,
+                                          std::size_t&  outBytes) -> bool {
+            if (avail < 1) return false;
+            std::uint8_t b0 = p[0];
+            std::uint32_t enc = 0; std::size_t w = 0; std::int64_t bias = 0;
+            if ((b0 & 0x80u) == 0u) { enc = b0; w = 1; bias = 0x40; }
+            else if ((b0 & 0xC0u) == 0x80u) {
+                if (avail < 2) return false;
+                enc = (static_cast<std::uint32_t>(b0 & 0x3Fu) << 8) | p[1];
+                w = 2; bias = 0x2000;
+            } else if ((b0 & 0xE0u) == 0xC0u) {
+                if (avail < 4) return false;
+                enc = (static_cast<std::uint32_t>(b0 & 0x1Fu) << 24)
+                    | (static_cast<std::uint32_t>(p[1])       << 16)
+                    | (static_cast<std::uint32_t>(p[2])       <<  8)
+                    |  static_cast<std::uint32_t>(p[3]);
+                w = 4; bias = 0x10000000;
+            } else { return false; }
+            std::int64_t mag = static_cast<std::int64_t>(enc >> 1);
+            outValue = (enc & 1u) ? (mag - bias) : mag;
+            outBytes = w;
+            return true;
+        };
+        // Decode a FieldDefault blob given the IL2CPP type-tag byte
+        // (from MetadataRegistration::GetTypeTag). Returns true on success
+        // and fills `out` with `value` + `enc_bytes`.
+        //
+        // Integer encoding observed empirically against System.Int32 in
+        // SaGa Frontier 2 Remastered:
+        //   * lead byte 0xFE = type-max sentinel (1 byte total)
+        //   * lead byte 0xFF = type-min sentinel (1 byte total)
+        //   * else §II.23.2 compressed signed int (zigzag-style, 1/2/4 bytes)
+        // The §II.23.2 form maxes at ±2^28; values like Int32.MaxValue
+        // (2147483647) fall outside that range, hence the sentinels.
+        auto decodeByTag = [&decodeCompressedSigned]
+            (std::uint8_t tag, const std::uint8_t* p, std::size_t avail,
+             json& out) -> bool {
+            auto cmp = [&](auto&& cast1, auto&& cast2,
+                           std::int64_t maxVal, std::int64_t minVal) -> bool {
+                if (avail >= 1) {
+                    if (p[0] == 0xFE) {
+                        out["value"] = cast2(cast1(maxVal));
+                        out["enc_bytes"] = 1;
+                        out["sentinel"] = "type_max";
+                        return true;
+                    }
+                    if (p[0] == 0xFF) {
+                        out["value"] = cast2(cast1(minVal));
+                        out["enc_bytes"] = 1;
+                        out["sentinel"] = "type_min";
+                        return true;
+                    }
+                }
+                std::int64_t raw = 0; std::size_t w = 0;
+                if (!decodeCompressedSigned(p, avail, raw, w)) return false;
+                out["value"] = cast2(cast1(raw));
+                out["enc_bytes"] = w;
+                return true;
+            };
+            switch (tag) {
+                case 0x02:  // Boolean
+                    if (avail < 1) return false;
+                    out["value"] = (p[0] != 0); out["enc_bytes"] = 1; return true;
+                case 0x03:  // Char
+                    if (avail < 2) return false;
+                    {
+                        std::uint16_t v = 0; std::memcpy(&v, p, 2);
+                        out["value"] = v; out["enc_bytes"] = 2;
+                    }
+                    return true;
+                case 0x04:  // I1
+                    return cmp([](std::int64_t x){ return static_cast<std::int8_t>(x); },
+                               [](std::int8_t x){ return static_cast<std::int64_t>(x); },
+                               0x7F, -0x80);
+                case 0x05:  // U1
+                    return cmp([](std::int64_t x){ return static_cast<std::uint8_t>(x); },
+                               [](std::uint8_t x){ return static_cast<std::uint64_t>(x); },
+                               0xFF, 0);
+                case 0x06:  // I2
+                    return cmp([](std::int64_t x){ return static_cast<std::int16_t>(x); },
+                               [](std::int16_t x){ return static_cast<std::int64_t>(x); },
+                               0x7FFF, -0x8000);
+                case 0x07:  // U2
+                    return cmp([](std::int64_t x){ return static_cast<std::uint16_t>(x); },
+                               [](std::uint16_t x){ return static_cast<std::uint64_t>(x); },
+                               0xFFFF, 0);
+                case 0x08:  // I4
+                    return cmp([](std::int64_t x){ return static_cast<std::int32_t>(x); },
+                               [](std::int32_t x){ return static_cast<std::int64_t>(x); },
+                               0x7FFFFFFFLL, -0x80000000LL);
+                case 0x09:  // U4
+                    return cmp([](std::int64_t x){ return static_cast<std::uint32_t>(x); },
+                               [](std::uint32_t x){ return static_cast<std::uint64_t>(x); },
+                               0xFFFFFFFFLL, 0);
+                case 0x0A:  // I8
+                    if (avail < 8) return false;
+                    {
+                        std::int64_t v = 0; std::memcpy(&v, p, 8);
+                        out["value"] = v; out["enc_bytes"] = 8;
+                    }
+                    return true;
+                case 0x0B:  // U8
+                    if (avail < 8) return false;
+                    {
+                        std::uint64_t v = 0; std::memcpy(&v, p, 8);
+                        out["value"] = v; out["enc_bytes"] = 8;
+                    }
+                    return true;
+                case 0x0C:  // R4
+                    if (avail < 4) return false;
+                    {
+                        float v = 0.f; std::memcpy(&v, p, 4);
+                        out["value"] = v; out["enc_bytes"] = 4;
+                    }
+                    return true;
+                case 0x0D:  // R8
+                    if (avail < 8) return false;
+                    {
+                        double v = 0.0; std::memcpy(&v, p, 8);
+                        out["value"] = v; out["enc_bytes"] = 8;
+                    }
+                    return true;
+                case 0x0E:  // String — handled separately via TryDecodeStringDefault
+                    return false;
+                default:
+                    return false;
+            }
+        };
+
+        const bool regOk = IL2CPP::MetadataRegistration::Find();
+
         auto fields = mp.EnumerateTypeFields(*td);
         json arr = json::array();
         for (const auto& f : fields) {
@@ -1002,10 +1137,27 @@ void RegisterCoreHandlers() {
                     {"raw_hex_first16", hex},
                     {"raw_size", def->data.size()},
                 };
-                // Best-effort string decode (ECMA-335 length-prefix + UTF-8).
-                // Pure-disk path; numeric / enum decode waits on segment 2d.
+                // String decode is metadata-only; doesn't need the runtime types[] table.
                 if (auto s = mp.TryDecodeStringDefault(def->dataIndex)) {
                     defaultJson["decoded_string"] = *s;
+                }
+                // Type-aware numeric / float / bool decode (Phase 5 segment 2d
+                // follow-up): lookup the FieldDefault's runtime type tag via
+                // MetadataRegistration and decode the blob accordingly.
+                if (regOk && !def->data.empty()) {
+                    std::uint8_t tag =
+                        IL2CPP::MetadataRegistration::GetTypeTag(def->typeIndex);
+                    if (tag != 0) {
+                        defaultJson["type_tag"] = tag;
+                        json decoded;
+                        if (decodeByTag(tag, def->data.data(), def->data.size(),
+                                        decoded)) {
+                            for (auto kv = decoded.begin(); kv != decoded.end();
+                                 ++kv) {
+                                defaultJson[kv.key()] = kv.value();
+                            }
+                        }
+                    }
                 }
                 entry["default"] = std::move(defaultJson);
             }
@@ -1019,8 +1171,25 @@ void RegisterCoreHandlers() {
             {"token", td->token},
             {"field_start", td->fieldStart},
             {"field_count", td->fieldCount},
+            {"registration_found", regOk},
             {"fields", std::move(arr)},
         };
+    });
+
+    // Phase 5 segment 2d follow-up — diagnostics for the runtime
+    // Il2CppMetadataRegistration AOB scan.
+    PipeServer::RegisterHandler("il2cppGetMetadataRegistration",
+        [formatHex](const json&) -> json {
+        const bool ok = IL2CPP::MetadataRegistration::Find();
+        json result = {{"found", ok}};
+        if (ok) {
+            result["address"]     = formatHex(reinterpret_cast<std::uintptr_t>(
+                IL2CPP::MetadataRegistration::GetBase()));
+            result["types_array"] = formatHex(reinterpret_cast<std::uintptr_t>(
+                IL2CPP::MetadataRegistration::TypesArray()));
+            result["types_count"] = IL2CPP::MetadataRegistration::TypesCount();
+        }
+        return result;
     });
 
     // Phase 5: global-metadata.dat string literal dump.
