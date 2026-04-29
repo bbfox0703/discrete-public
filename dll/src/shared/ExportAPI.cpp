@@ -18,6 +18,7 @@
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
 #  include "../il2cpp/IL2CPPResolver.h"
+#  include "../il2cpp/IL2CPPThreadAttach.h"
 #  include "../il2cpp/MetadataParser.h"
 #endif
 
@@ -173,6 +174,118 @@ void RegisterCoreHandlers() {
         ::_snprintf_s(buf, sizeof(buf), _TRUNCATE, "0x%016llX",
                       static_cast<unsigned long long>(v));
         return std::string(buf);
+    };
+
+    // Decode one field's value given its CLR type name and starting address.
+    // Returns a JSON object whose keys are merged into the per-field entry by
+    // the caller. On unreadable memory, returns {"error": "unreadable"}.
+    //
+    // The .NET String layout is identical between Mono (Unity bdwgc) and IL2CPP
+    // — header is 16 bytes (vtable + sync), then int32 length at +0x10, then
+    // UTF-16 chars at +0x14. So this decoder is backend-agnostic.
+    auto decodeField = [formatHex, bytesToHex](const std::string& typeName,
+                                               std::uintptr_t addr) -> json {
+        json out;
+        auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
+            return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+        };
+
+        if (typeName == "System.Boolean") {
+            std::uint8_t v = 0;
+            if (rd(addr, &v, 1)) out["value"] = (v != 0); else out["error"] = "unreadable";
+        } else if (typeName == "System.Byte") {
+            std::uint8_t v = 0;
+            if (rd(addr, &v, 1)) out["value"] = static_cast<unsigned>(v); else out["error"] = "unreadable";
+        } else if (typeName == "System.SByte") {
+            std::int8_t v = 0;
+            if (rd(addr, &v, 1)) out["value"] = static_cast<int>(v); else out["error"] = "unreadable";
+        } else if (typeName == "System.Int16") {
+            std::int16_t v = 0;
+            if (rd(addr, &v, 2)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.UInt16" || typeName == "System.Char") {
+            std::uint16_t v = 0;
+            if (rd(addr, &v, 2)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.Int32") {
+            std::int32_t v = 0;
+            if (rd(addr, &v, 4)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.UInt32") {
+            std::uint32_t v = 0;
+            if (rd(addr, &v, 4)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.Int64") {
+            std::int64_t v = 0;
+            if (rd(addr, &v, 8)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.UInt64") {
+            std::uint64_t v = 0;
+            if (rd(addr, &v, 8)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.Single") {
+            float v = 0.f;
+            if (rd(addr, &v, 4)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.Double") {
+            double v = 0.0;
+            if (rd(addr, &v, 8)) out["value"] = v; else out["error"] = "unreadable";
+        } else if (typeName == "System.IntPtr" || typeName == "System.UIntPtr") {
+            std::uintptr_t v = 0;
+            if (rd(addr, &v, 8)) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
+        } else if (typeName == "System.String") {
+            // Reference to MonoString / Il2CppString. Follow the pointer if non-null
+            // and decode the inline UTF-16 buffer to UTF-8.
+            std::uintptr_t sptr = 0;
+            if (!rd(addr, &sptr, 8)) { out["error"] = "unreadable"; return out; }
+            out["ptr"] = formatHex(sptr);
+            if (sptr == 0) { out["string"] = nullptr; return out; }
+            std::int32_t len = 0;
+            if (!rd(sptr + 0x10, &len, 4)) { out["string_error"] = "header unreadable"; return out; }
+            if (len < 0 || len > 65536)    { out["string_error"] = "implausible length"; out["string_length"] = len; return out; }
+            std::vector<std::uint16_t> chars(static_cast<std::size_t>(len));
+            if (len > 0 && !rd(sptr + 0x14, chars.data(),
+                               static_cast<std::size_t>(len) * 2u)) {
+                out["string_error"] = "chars unreadable";
+                return out;
+            }
+            // UTF-16 → UTF-8 with U+FFFD on lone surrogates.
+            std::string utf8;
+            utf8.reserve(static_cast<std::size_t>(len));
+            auto pushCp = [&utf8](std::uint32_t cp) {
+                if (cp < 0x80u) utf8.push_back(static_cast<char>(cp));
+                else if (cp < 0x800u) {
+                    utf8.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+                    utf8.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                } else if (cp < 0x10000u) {
+                    utf8.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+                    utf8.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                    utf8.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                } else {
+                    utf8.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+                    utf8.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+                    utf8.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                    utf8.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                }
+            };
+            for (std::size_t i = 0; i < chars.size(); ++i) {
+                std::uint32_t cp = chars[i];
+                if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < chars.size()) {
+                    std::uint32_t lo = chars[i + 1];
+                    if (lo >= 0xDC00u && lo <= 0xDFFFu) {
+                        cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                        ++i;
+                    } else {
+                        cp = 0xFFFDu;
+                    }
+                } else if (cp >= 0xDC00u && cp <= 0xDFFFu) {
+                    cp = 0xFFFDu;
+                }
+                pushCp(cp);
+            }
+            out["string"] = std::move(utf8);
+            out["string_length"] = len;
+        } else {
+            // Reference / unknown value type: report the raw pointer-sized qword.
+            // Caller can resolvePointer or walkInstance again on it.
+            std::uintptr_t v = 0;
+            if (rd(addr, &v, 8)) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
+        }
+        (void)bytesToHex;  // reserved for future raw-bytes inclusion
+        return out;
     };
 
     PipeServer::RegisterHandler(MagicStrings::CmdReadMemory,
@@ -526,6 +639,77 @@ void RegisterCoreHandlers() {
             {"matches", std::move(arr)},
         };
     });
+
+    // Phase 6 segment B — walkInstance (Mono).
+    // Given an instance address + class spec, walk the inheritance chain and
+    // decode every instance field's value. Each MonoObject's first 16 bytes
+    // are the header (vtable + sync); field offsets returned by
+    // mono_field_get_offset are absolute from the object start, so
+    // address + offset is ready to read.
+    PipeServer::RegisterHandler(MagicStrings::CmdWalkInstance,
+        [parseAddr, formatHex, decodeField, resolveClassFromArgs](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        std::string err;
+        Mono::MonoClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        const auto& r = Mono::GetResolver();
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        if (domain == nullptr) return json{{"error", "no mono root domain"}};
+
+        // Walk parent chain (cap at 16 levels — defends against pathological loops).
+        std::vector<Mono::MonoClass*> chain;
+        {
+            Mono::ThreadAttachGuard guard(domain);
+            if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                chain.push_back(cur);
+                if (r.class_get_parent == nullptr) break;
+                cur = r.class_get_parent(cur);
+            }
+        }
+
+        // Walk base-class first so derived fields appear last (typical layout).
+        json fields = json::array();
+        std::string selfNs, selfName;
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            auto res = Mono::ReadClassInfo(*it);
+            if (!res.ok) continue;
+            const bool isSelf = (*it == k);
+            if (isSelf) { selfNs = res.info.self.ns; selfName = res.info.self.name; }
+            for (const auto& f : res.info.fields) {
+                if (f.flags & 0x10u) continue;  // skip static
+                std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(f.offset);
+                json entry = {
+                    {"name",    f.name},
+                    {"type",    f.typeName},
+                    {"offset",  f.offset},
+                    {"from",    res.info.self.name},
+                    {"address", formatHex(fieldAddr)},
+                };
+                json decoded = decodeField(f.typeName, fieldAddr);
+                for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
+                    entry[kv.key()] = kv.value();
+                }
+                fields.push_back(std::move(entry));
+                if (fields.size() >= 4096) break;
+            }
+            if (fields.size() >= 4096) break;
+        }
+
+        return json{
+            {"address",   formatHex(addr)},
+            {"namespace", selfNs},
+            {"name",      selfName},
+            {"depth",     chain.size()},
+            {"count",     fields.size()},
+            {"fields",    std::move(fields)},
+        };
+    });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
@@ -807,6 +991,72 @@ void RegisterCoreHandlers() {
             {"count",     arr.size()},
             {"limit",     limit},
             {"matches",   std::move(arr)},
+        };
+    });
+
+    // Phase 6 segment B — walkInstance (IL2CPP). Same shape as the Mono handler
+    // above; the .NET object layout (16-byte header, then fields by offset) is
+    // shared between both backends.
+    PipeServer::RegisterHandler(MagicStrings::CmdWalkInstance,
+        [parseAddr, formatHex, decodeField, resolveClassFromArgs](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        const auto& r = IL2CPP::GetResolver();
+        IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
+        if (domain == nullptr) return json{{"error", "no il2cpp domain"}};
+
+        std::vector<IL2CPP::Il2CppClass*> chain;
+        {
+            IL2CPP::ThreadAttachGuard guard(domain);
+            if (!guard.Attached()) return json{{"error", "il2cpp_thread_attach failed"}};
+            for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                chain.push_back(cur);
+                if (r.class_get_parent == nullptr) break;
+                cur = r.class_get_parent(cur);
+            }
+        }
+
+        json fields = json::array();
+        std::string selfNs, selfName;
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            auto res = IL2CPP::ReadClassInfo(*it);
+            if (!res.ok) continue;
+            const bool isSelf = (*it == k);
+            if (isSelf) { selfNs = res.info.self.ns; selfName = res.info.self.name; }
+            for (const auto& f : res.info.fields) {
+                if (f.flags & 0x10u) continue;
+                std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(f.offset);
+                json entry = {
+                    {"name",    f.name},
+                    {"type",    f.typeName},
+                    {"offset",  f.offset},
+                    {"from",    res.info.self.name},
+                    {"address", formatHex(fieldAddr)},
+                };
+                json decoded = decodeField(f.typeName, fieldAddr);
+                for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
+                    entry[kv.key()] = kv.value();
+                }
+                fields.push_back(std::move(entry));
+                if (fields.size() >= 4096) break;
+            }
+            if (fields.size() >= 4096) break;
+        }
+
+        return json{
+            {"address",   formatHex(addr)},
+            {"namespace", selfNs},
+            {"name",      selfName},
+            {"depth",     chain.size()},
+            {"count",     fields.size()},
+            {"fields",    std::move(fields)},
         };
     });
 #endif
