@@ -74,7 +74,7 @@
 | 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ✅ |
 | 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | 🟡 Next |
 | 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ⬜ |
-| 7 | UI Skeleton (Avalonia + AOT) | Single-instance app, pipe client, handshake | ⬜ |
+| 7 | UI Skeleton (Avalonia + AOT) | Single-instance app, pipe client, handshake | ✅ |
 | 8 | UI Panels — Tree & Browse | AssemblyTree, ClassBrowser, FieldStruct, MethodList | ⬜ |
 | 9 | Live Inspection | InstanceFinder, LiveWalker, StaticField, read/write memory | ⬜ |
 | 10 | Export Formats | CE XML, CSX (Structure Dissect), SDK header | ⬜ |
@@ -226,18 +226,21 @@ Implement every command in Architecture §Core Commands. One sub-task per comman
 
 ## Phase 7 — UI Skeleton (Avalonia + AOT)
 
-- [ ] `App.axaml` / `MainWindow.axaml` — base layout (left: tree, center: detail, right: panels)
-- [ ] `Mutex` single-instance guard on app start
-- [ ] `Resources/Strings/en.axaml` with `StaticResource` bindings (no hardcoded UI strings)
-- [ ] `Services/PipeClient.cs` — async `NamedPipeClientStream`, JSON line framing, request/response correlation by `id`
-- [ ] `Services/ProtocolHandler.cs` — typed request/response models with `[JsonSerializable]` source-gen context
-- [ ] `Services/BackendAdapter.cs` — abstracts engine differences exposed to ViewModels
-- [ ] Logging to `%LOCALAPPDATA%\UnityCEDumper\Logs` (3 categories: init / pipe / view), 4-file rotate, 8MB cap
-- [ ] Platform interface in `Core` project (`IProcessEnumerator`, `IRegistryAccess`, etc.) — UI never P/Invokes directly
-- [ ] AOT publish profile produces single trimmed `UnityDumpUI.exe`
+- [x] `App.axaml` / `MainWindow.axaml` — base layout (left: assemblies tree placeholder, center: handshake detail, right: inspector placeholder); 3-pane DockPanel + connection bar
+- [x] `Mutex` single-instance guard on app start (already in place from Phase 0)
+- [x] `Resources/Strings/en.axaml` with `StaticResource` bindings (no hardcoded UI strings)
+- [x] `Services/PipeClient.cs` — async `NamedPipeClientStream`, JSON line framing, request/response correlation by `id`, single-flight via `SemaphoreSlim`
+- [x] `Services/ProtocolModels.cs` + `Services/ProtocolJson.cs` — typed DTOs with `[JsonSerializable]` source-gen context (handshake, ping wired; more added per command in later phases)
+- [x] `Services/BackendAdapter.cs` — typed façade (`PingAsync`, `HandshakeAsync`); ViewModels never see raw JSON
+- [x] `Services/FileLogger.cs` — `%LOCALAPPDATA%\UnityCEDumper\Logs\ui\<category>` (init / pipe / view), 4-file rotate, 8MB cap
+- [x] Platform interface in `Core` project (`IProcessEnumerator`); `WindowsProcessEnumerator` concrete impl in UnityDumpUI
+- [x] `MainWindowViewModel` (`CommunityToolkit.Mvvm` source-gen, no reflection) drives Connect / Disconnect commands and surfaces handshake fields + error banner
+- [x] AOT publish profile produces single trimmed `UnityDumpUI.exe` — `dotnet publish -r win-x64 -p:PublishAot=true` completes with **0 warnings** under `TreatWarningsAsErrors=true` and the trim/AOT/single-file analyzers all enabled
 
-**Acceptance**:
-- UI starts, attempts pipe connect, displays handshake info; second instance refuses to launch; `dotnet publish` with AOT shows zero trim warnings
+**Acceptance**: ✅
+- UI starts (Avalonia + AOT publish succeeded), Connect attempts pipe handshake and renders all 9 fields plus error banner on failure
+- Single-instance Mutex (`Global\UnityCEDumper.UI.SingleInstance`) refuses second launch
+- `dotnet publish -c Release -r win-x64 -p:PublishAot=true` finishes with zero trim/AOT warnings
 
 ---
 

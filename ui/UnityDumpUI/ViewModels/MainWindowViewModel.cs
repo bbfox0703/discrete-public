@@ -16,12 +16,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 {
     private readonly PipeClient _pipe;
     private readonly BackendAdapter _backend;
+    private readonly FileLogger _logger;
     private CancellationTokenSource? _connectCts;
 
     public MainWindowViewModel()
     {
         _pipe    = new PipeClient();
         _backend = new BackendAdapter(_pipe);
+        _logger  = new FileLogger();
+        _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
     }
 
     [ObservableProperty]
@@ -75,16 +78,21 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
             IsConnected      = true;
             ConnectionStatus = $"Connected — build {hs.Build}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"connected backend={hs.Backend} build={hs.Build} unity={hs.UnityVersion}");
         }
         catch (OperationCanceledException)
         {
             ConnectionStatus = "Cancelled";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe, "connect cancelled");
         }
         catch (Exception ex)
         {
             ConnectionStatus = "Error";
             ErrorMessage     = ex.Message;
             IsConnected      = false;
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"connect failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -125,5 +133,6 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _connectCts?.Cancel();
         _connectCts?.Dispose();
         _ = _pipe.DisposeAsync();
+        _logger.Dispose();
     }
 }
