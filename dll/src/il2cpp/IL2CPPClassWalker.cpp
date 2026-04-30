@@ -53,7 +53,27 @@ void* SehStaticData(fn_class_get_static_data fn, Il2CppClass* k) {
 void* SehMethodPtr(fn_method_get_pointer fn, const MethodInfo* m) {
     __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+// MethodInfo's first qword (`methodPointer` field) is the AOT native entry
+// point. Reading it directly is the only path on Unity 2021.3+ where
+// il2cpp_method_get_pointer is no longer exported.
+void* SehMethodPtrFromStruct(const MethodInfo* m) {
+    __try { return *reinterpret_cast<void* const*>(m); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 #pragma warning(pop)
+
+void* ReadMethodPointer(const MethodInfo* m) {
+    if (m == nullptr) return nullptr;
+    const auto& r = GetResolver();
+    // Prefer the runtime-exported helper when present; on older Unity it's
+    // always there and gives the canonical pointer.
+    if (r.method_get_pointer != nullptr) {
+        if (void* p = SehMethodPtr(r.method_get_pointer, m)) return p;
+    }
+    // Fallback: read MethodInfo->methodPointer directly. Layout has been
+    // stable across the Unity 2018-2023 IL2CPP versions we target.
+    return SehMethodPtrFromStruct(m);
+}
 
 }  // namespace
 
@@ -142,7 +162,7 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
                 std::uint32_t iflags = 0;
                 me.flags = r.method_get_flags(m, &iflags);
             }
-            if (r.method_get_pointer != nullptr) me.pointer = SehMethodPtr(r.method_get_pointer, m);
+            me.pointer = ReadMethodPointer(m);  // works on Unity 2021.3+ via direct struct read
             result.info.methods.push_back(std::move(me));
         }
     }
@@ -205,7 +225,9 @@ MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& meth
     if (klass == nullptr || methodName.empty()) return out;
 
     const auto& r = GetResolver();
-    if (!r.resolved || r.class_get_methods == nullptr || r.method_get_pointer == nullptr) {
+    // method_get_pointer is no longer required — we fall back to reading
+    // MethodInfo->methodPointer directly (Unity 2021.3+ doesn't export it).
+    if (!r.resolved || r.class_get_methods == nullptr) {
         return out;
     }
 
@@ -226,7 +248,7 @@ MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& meth
 
     out.name  = methodName;
     out.token = (r.method_get_token != nullptr) ? r.method_get_token(match) : 0u;
-    out.address = SehMethodPtr(r.method_get_pointer, match);
+    out.address = ReadMethodPointer(match);
     out.ok = (out.address != nullptr);
     return out;
 }

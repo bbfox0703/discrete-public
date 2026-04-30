@@ -165,7 +165,7 @@
 - [x] `il2cpp/IL2CPPClassWalker.{h,cpp}` — `il2cpp_image_get_class_count` + `il2cpp_image_get_class(idx)`; field / method iterators
 - [x] `il2cpp/IL2CPPTypeParser.{h,cpp}` — `Il2CppType*` → string, handle generic instantiations
 - [x] Static field block via `il2cpp_class_get_static_field_data`
-- [ ] Method native address (AOT pointer in `Il2CppMethodInfo`) — deferred to Phase 14: `il2cpp_method_get_pointer` is not exported in Unity 2021.3+; must read from `MethodInfo` struct offset
+- [x] Method native address (AOT pointer in `Il2CppMethodInfo`) — `ReadMethodPointer` falls back to reading `*(void**)methodInfo` (the `methodPointer` field at offset 0) when `il2cpp_method_get_pointer` is missing, which it is on Unity 2021.3+. Wired into both `getClassInfo.methods[].address` and `getMethodInfo.matches[].address`.
 - [x] Inheritance via `il2cpp_class_get_parent`
 
 **Acceptance**:
