@@ -7,4 +7,27 @@
   -->
   <sys:String x:Key="App.Title">Unity CE Dumper</sys:String>
   <sys:String x:Key="App.BootstrapBanner">Phase 0 — Bootstrap. Ready.</sys:String>
+
+  <!-- Main shell — three-pane layout. -->
+  <sys:String x:Key="Main.LeftPaneTitle">Assemblies</sys:String>
+  <sys:String x:Key="Main.LeftPanePlaceholder">Tree lands in Phase 8.</sys:String>
+  <sys:String x:Key="Main.RightPaneTitle">Inspector</sys:String>
+  <sys:String x:Key="Main.RightPanePlaceholder">Field / method panels land in Phase 8.</sys:String>
+
+  <!-- Connection bar. -->
+  <sys:String x:Key="Conn.Connect">Connect</sys:String>
+  <sys:String x:Key="Conn.Disconnect">Disconnect</sys:String>
+  <sys:String x:Key="Conn.StatusLabel">Status:</sys:String>
+
+  <!-- Handshake panel labels. -->
+  <sys:String x:Key="Handshake.Title">Handshake</sys:String>
+  <sys:String x:Key="Handshake.Engine">Engine</sys:String>
+  <sys:String x:Key="Handshake.Backend">Backend</sys:String>
+  <sys:String x:Key="Handshake.DllVariant">DLL variant</sys:String>
+  <sys:String x:Key="Handshake.GameModule">Game module</sys:String>
+  <sys:String x:Key="Handshake.UnityVersion">Unity version</sys:String>
+  <sys:String x:Key="Handshake.MetadataVersion">Metadata version</sys:String>
+  <sys:String x:Key="Handshake.AssembliesCount">Assemblies</sys:String>
+  <sys:String x:Key="Handshake.Build">Build</sys:String>
+  <sys:String x:Key="Handshake.Protocol">Protocol</sys:String>
 </ResourceDictionary>

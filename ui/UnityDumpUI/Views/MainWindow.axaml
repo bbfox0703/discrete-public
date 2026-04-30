@@ -1,12 +1,118 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
         x:Class="UnityDumpUI.Views.MainWindow"
-        Width="900" Height="600"
+        x:DataType="vm:MainWindowViewModel"
+        Width="1100" Height="700"
         Title="{StaticResource App.Title}">
-  <Grid>
-    <TextBlock Text="{StaticResource App.BootstrapBanner}"
-               HorizontalAlignment="Center"
-               VerticalAlignment="Center"
-               FontSize="16" />
-  </Grid>
+  <!-- Three-pane shell: assemblies (left) | detail (center) | inspector (right).
+       Phase 7 fills the center with the Connection bar + Handshake panel.
+       Phase 8 will populate the side panes. -->
+  <DockPanel LastChildFill="True">
+
+    <!-- Top connection bar -->
+    <Border DockPanel.Dock="Top"
+            BorderBrush="#22000000" BorderThickness="0,0,0,1"
+            Padding="12,8">
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <Button Content="{StaticResource Conn.Connect}"
+                Command="{Binding ConnectCommand}" />
+        <Button Content="{StaticResource Conn.Disconnect}"
+                Command="{Binding DisconnectCommand}" />
+        <TextBlock Text="{StaticResource Conn.StatusLabel}"
+                   VerticalAlignment="Center"
+                   Opacity="0.7" />
+        <TextBlock Text="{Binding ConnectionStatus}"
+                   VerticalAlignment="Center"
+                   FontWeight="SemiBold" />
+        <ProgressBar IsIndeterminate="True"
+                     IsVisible="{Binding IsBusy}"
+                     Width="120" Height="6"
+                     VerticalAlignment="Center" />
+      </StackPanel>
+    </Border>
+
+    <!-- Three-column body -->
+    <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="220" />
+        <ColumnDefinition Width="2" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="2" />
+        <ColumnDefinition Width="280" />
+      </Grid.ColumnDefinitions>
+
+      <!-- Left pane (Phase 8 placeholder) -->
+      <Border Grid.Column="0" Padding="12">
+        <StackPanel Spacing="6">
+          <TextBlock Text="{StaticResource Main.LeftPaneTitle}"
+                     FontWeight="SemiBold" />
+          <TextBlock Text="{StaticResource Main.LeftPanePlaceholder}"
+                     Opacity="0.6" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Column="1" Background="#22000000" />
+
+      <!-- Center: handshake card -->
+      <ScrollViewer Grid.Column="2" Padding="16">
+        <StackPanel Spacing="14">
+          <TextBlock Text="{StaticResource Handshake.Title}"
+                     FontSize="18" FontWeight="SemiBold" />
+
+          <Grid ColumnDefinitions="160,*"
+                RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                RowSpacing="6" Margin="0,4,0,0">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="{StaticResource Handshake.Engine}" Opacity="0.7" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Engine}" />
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="{StaticResource Handshake.Backend}" Opacity="0.7" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Backend2}" />
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="{StaticResource Handshake.DllVariant}" Opacity="0.7" />
+            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding DllVariant}" />
+
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="{StaticResource Handshake.GameModule}" Opacity="0.7" />
+            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding GameModule}" />
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="{StaticResource Handshake.UnityVersion}" Opacity="0.7" />
+            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding UnityVersion}" />
+
+            <TextBlock Grid.Row="5" Grid.Column="0" Text="{StaticResource Handshake.MetadataVersion}" Opacity="0.7" />
+            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding MetadataVersion}" />
+
+            <TextBlock Grid.Row="6" Grid.Column="0" Text="{StaticResource Handshake.AssembliesCount}" Opacity="0.7" />
+            <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding AssembliesCount}" />
+
+            <TextBlock Grid.Row="7" Grid.Column="0" Text="{StaticResource Handshake.Build}" Opacity="0.7" />
+            <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding Build}" />
+
+            <TextBlock Grid.Row="8" Grid.Column="0" Text="{StaticResource Handshake.Protocol}" Opacity="0.7" />
+            <TextBlock Grid.Row="8" Grid.Column="1" Text="{Binding Protocol}" />
+          </Grid>
+
+          <Border IsVisible="{Binding ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+                  Background="#33D32F2F" BorderBrush="#88D32F2F"
+                  BorderThickness="1" CornerRadius="4" Padding="10,6"
+                  Margin="0,8,0,0">
+            <TextBlock Text="{Binding ErrorMessage}"
+                       Foreground="#FFD32F2F"
+                       TextWrapping="Wrap" />
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+
+      <Border Grid.Column="3" Background="#22000000" />
+
+      <!-- Right pane (Phase 8 placeholder) -->
+      <Border Grid.Column="4" Padding="12">
+        <StackPanel Spacing="6">
+          <TextBlock Text="{StaticResource Main.RightPaneTitle}"
+                     FontWeight="SemiBold" />
+          <TextBlock Text="{StaticResource Main.RightPanePlaceholder}"
+                     Opacity="0.6" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+    </Grid>
+  </DockPanel>
 </Window>
