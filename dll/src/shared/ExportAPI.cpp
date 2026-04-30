@@ -895,15 +895,114 @@ void RegisterCoreHandlers() {
         return out;
     });
 
-    // Phase 6 segment D — getEnumValues (Mono stub).
-    // Mono enum decode requires extra resolver bindings (mono_class_is_enum,
-    // mono_class_enum_basetype, mono_field_get_data) which we haven't bound
-    // yet. IL2CPP path goes via the metadata parser. For now report the gap
-    // explicitly so callers can branch.
-    PipeServer::RegisterHandler(MagicStrings::CmdGetEnumValues, [](const json&) -> json {
+    // Phase 5 follow-up — getEnumValues (Mono).
+    // Mono stores const literal defaults as raw little-endian bytes (no
+    // type / length prefix and no compressed-int trickery — that's an
+    // IL2CPP-specific encoding). The width is determined by the enum's
+    // underlying type, which we read from the runtime `value__` field
+    // (same trick getEnumValues uses on IL2CPP).
+    PipeServer::RegisterHandler(MagicStrings::CmdGetEnumValues,
+        [resolveClassFromArgs](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        const auto& r = Mono::GetResolver();
+        if (r.field_get_data == nullptr) {
+            return json{
+                {"error", "mono_field_get_data not exported in this Mono build"},
+                {"hint",  "rebuild against a Unity Mono with the standard public API"},
+            };
+        }
+        std::string err;
+        Mono::MonoClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto info = Mono::ReadClassInfo(k);
+        if (!info.ok) return json{{"error", "ReadClassInfo failed"}};
+        if (info.info.parent.name != "Enum") {
+            return json{
+                {"error", "class is not an enum"},
+                {"parent", info.info.parent.name},
+            };
+        }
+
+        // Underlying integer width comes from the value__ field's type name.
+        std::string underlying = "System.Int32";
+        for (const auto& f : info.info.fields) {
+            if (f.name == "value__") { underlying = f.typeName; break; }
+        }
+
+        // Per-type raw-LE decoder.
+        //
+        // mono_field_get_data returns a pointer that includes the blob's
+        // ECMA-335 §II.23.2 compressed length prefix (1, 2, or 4 bytes).
+        // Empirical: DayOfWeek.Sunday came back as 4 instead of 0 because we
+        // were reading the prefix byte (0x04 — the length, not the value)
+        // as the first byte of the int32. Skipping the prefix puts us on
+        // the actual raw LE value bytes.
+        auto decodeRaw = [](const std::string& typeName, const std::uint8_t* raw,
+                            json& out) -> bool {
+            if (raw == nullptr) { out["error"] = "no default data"; return false; }
+            std::size_t prefix = 0;
+            std::uint8_t b0 = raw[0];
+            if      ((b0 & 0x80u) == 0u)    prefix = 1;
+            else if ((b0 & 0xC0u) == 0x80u) prefix = 2;
+            else if ((b0 & 0xE0u) == 0xC0u) prefix = 4;
+            else { out["error"] = "invalid blob length prefix"; return false; }
+            out["blob_prefix_bytes"] = prefix;
+            const std::uint8_t* p = raw + prefix;
+
+            auto put = [&](auto v, std::size_t bytes) {
+                out["value"] = v;
+                out["enc_bytes"] = bytes;
+            };
+            if (typeName == "System.SByte")   { put(static_cast<std::int64_t>(static_cast<std::int8_t>(*p)),   1); return true; }
+            if (typeName == "System.Byte")    { put(static_cast<std::uint64_t>(*p),                            1); return true; }
+            if (typeName == "System.Boolean") { out["value"] = (*p != 0); out["enc_bytes"] = 1;                   return true; }
+            if (typeName == "System.Int16")   { std::int16_t v = 0;  std::memcpy(&v, p, 2); put(static_cast<std::int64_t>(v),  2); return true; }
+            if (typeName == "System.UInt16" ||
+                typeName == "System.Char")    { std::uint16_t v = 0; std::memcpy(&v, p, 2); put(static_cast<std::uint64_t>(v), 2); return true; }
+            if (typeName == "System.Int32")   { std::int32_t v = 0;  std::memcpy(&v, p, 4); put(static_cast<std::int64_t>(v),  4); return true; }
+            if (typeName == "System.UInt32")  { std::uint32_t v = 0; std::memcpy(&v, p, 4); put(static_cast<std::uint64_t>(v), 4); return true; }
+            if (typeName == "System.Int64")   { std::int64_t v = 0;  std::memcpy(&v, p, 8); put(v, 8);                             return true; }
+            if (typeName == "System.UInt64")  { std::uint64_t v = 0; std::memcpy(&v, p, 8); put(v, 8);                             return true; }
+            if (typeName == "System.Single")  { float  v = 0.f;      std::memcpy(&v, p, 4); put(v, 4);                             return true; }
+            if (typeName == "System.Double")  { double v = 0.0;      std::memcpy(&v, p, 8); put(v, 8);                             return true; }
+            return false;
+        };
+
+        static const char* kHex = "0123456789ABCDEF";
+        json values = json::array();
+        auto literals = Mono::EnumerateLiteralFields(k);
+        for (const auto& lit : literals) {
+            if (lit.name == "value__") continue;  // storage field, not a member
+            json entry = {
+                {"name", lit.name},
+                {"type", lit.typeName},
+            };
+            // Diagnostic: show the first ~16 bytes of the blob (length prefix
+            // + value) so the encoding is auditable from the pipe response.
+            if (lit.data != nullptr) {
+                std::string hex;
+                auto* bp = reinterpret_cast<const std::uint8_t*>(lit.data);
+                for (std::size_t i = 0; i < 16; ++i) {
+                    hex.push_back(kHex[bp[i] >> 4]);
+                    hex.push_back(kHex[bp[i] & 0xF]);
+                }
+                entry["raw_hex"] = hex;
+            }
+            if (!decodeRaw(underlying,
+                           reinterpret_cast<const std::uint8_t*>(lit.data),
+                           entry)) {
+                entry.erase("error");
+                entry["decode_error"] = "unsupported underlying type: " + underlying;
+            }
+            values.push_back(std::move(entry));
+        }
         return json{
-            {"error", "getEnumValues not yet implemented for Mono backend"},
-            {"hint",  "needs mono_field_get_data + mono_class_enum_basetype bindings"},
+            {"namespace",       info.info.self.ns},
+            {"name",            info.info.self.name},
+            {"underlying_type", underlying},
+            {"count",           values.size()},
+            {"values",          std::move(values)},
         };
     });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)

@@ -51,6 +51,11 @@ using fn_class_vtable           = MonoVTable*    (*)(MonoDomain*, MonoClass*);
 using fn_vtable_get_static_data = void*          (*)(MonoVTable*);
 using fn_compile_method         = void*          (*)(MonoMethod*);
 
+// --- Mono enum decode (Phase 5 follow-up) -----------------------------------
+using fn_field_get_data         = const char*    (*)(MonoClassField*);
+using fn_class_is_enum          = int            (*)(MonoClass*);
+using fn_class_enum_basetype    = MonoType*      (*)(MonoClass*);
+
 // MONO_TABLE_TYPEDEF row index in a MonoImage; pass to image_get_table_info.
 inline constexpr int          MonoTableTypedef = 2;
 // CLI metadata token base for TypeDef rows.
@@ -96,6 +101,11 @@ struct Resolver {
     fn_class_vtable           class_vtable           = nullptr;
     fn_vtable_get_static_data vtable_get_static_data = nullptr;
     fn_compile_method         compile_method         = nullptr;
+
+    // Enum decode — Phase 5 follow-up.
+    fn_field_get_data         field_get_data         = nullptr;
+    fn_class_is_enum          class_is_enum          = nullptr;
+    fn_class_enum_basetype    class_enum_basetype    = nullptr;
 };
 
 // Singleton accessor. First call probes the loaded mono module and binds every

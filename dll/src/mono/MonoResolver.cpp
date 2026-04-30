@@ -57,6 +57,12 @@ void DoResolve() {
         ++total;
         if (Bind(module, name, slot)) ++ok;
     };
+    // optBind binds an export but does NOT count toward `resolved`. Use for
+    // exports that older Mono builds may genuinely lack — missing here just
+    // means the dependent feature degrades, not that the whole runtime is off.
+    auto optBind = [&](const char* name, auto& slot) {
+        (void)Bind(module, name, slot);
+    };
 
     tryBind("mono_get_root_domain",        g_resolver.get_root_domain);
     tryBind("mono_domain_get",             g_resolver.domain_get);
@@ -94,6 +100,12 @@ void DoResolve() {
     tryBind("mono_class_vtable",                g_resolver.class_vtable);
     tryBind("mono_vtable_get_static_field_data", g_resolver.vtable_get_static_data);
     tryBind("mono_compile_method",              g_resolver.compile_method);
+
+    // Phase 5 follow-up: enum decode (true-optional — missing exports just
+    // disable getEnumValues, don't take the whole resolver offline).
+    optBind("mono_field_get_data",              g_resolver.field_get_data);
+    optBind("mono_class_is_enum",               g_resolver.class_is_enum);
+    optBind("mono_class_enum_basetype",         g_resolver.class_enum_basetype);
 
     g_resolver.resolved = (ok == total);
 

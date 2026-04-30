@@ -77,4 +77,19 @@ struct CompiledMethodAddress {
 // entry-point. Wrapped in SEH; failure logs and returns ok=false.
 CompiledMethodAddress CompileMethodByName(MonoClass* klass, const std::string& methodName);
 
+// --- Phase 5 follow-up: enum decode -----------------------------------------
+
+struct LiteralFieldEntry {
+    std::string name;
+    std::string typeName;        // e.g. "System.Int32"
+    const void* data = nullptr;  // mono_field_get_data result; nullptr on failure
+};
+
+// Iterate every LITERAL (`const`) field on `klass`, returning each one's
+// name, declared type, and the raw constant blob pointer (per ECMA-335:
+// raw little-endian bytes of the appropriate width — no type prefix, no
+// length prefix for non-string defaults). Empty vector if the runtime is
+// unavailable, the class is null, or `mono_field_get_data` is unbound.
+std::vector<LiteralFieldEntry> EnumerateLiteralFields(MonoClass* klass);
+
 }  // namespace UnityCEDumper::Mono

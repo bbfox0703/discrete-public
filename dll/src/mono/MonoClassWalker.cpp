@@ -266,4 +266,45 @@ CompiledMethodAddress CompileMethodByName(MonoClass* klass, const std::string& m
     return out;
 }
 
+namespace {
+#pragma warning(push)
+#pragma warning(disable: 4509)
+const char* SehFieldData(fn_field_get_data fn, MonoClassField* f) {
+    __try { return fn(f); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+#pragma warning(pop)
+}  // namespace
+
+std::vector<LiteralFieldEntry> EnumerateLiteralFields(MonoClass* klass) {
+    std::vector<LiteralFieldEntry> out;
+    if (klass == nullptr) return out;
+
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_fields == nullptr) return out;
+    if (r.field_get_data == nullptr) return out;  // optional export missing
+
+    MonoDomain* domain = GetRootDomain();
+    if (domain == nullptr) return out;
+
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return out;
+
+    void* iter = nullptr;
+    for (;;) {
+        MonoClassField* f = SehNextField(r.class_get_fields, klass, &iter);
+        if (f == nullptr) break;
+        std::uint32_t flags = (r.field_get_flags != nullptr) ? r.field_get_flags(f) : 0u;
+        // FIELD_ATTRIBUTE_LITERAL = 0x40 (ECMA-335 §II.23.1.5).
+        if (!(flags & 0x40u)) continue;
+
+        LiteralFieldEntry e;
+        if (r.field_get_name != nullptr)  e.name     = SafeStr(r.field_get_name(f));
+        if (r.field_get_type != nullptr)  e.typeName = TypeName(r.field_get_type(f));
+        e.data = SehFieldData(r.field_get_data, f);
+        if (e.name.empty()) continue;
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
 }  // namespace UnityCEDumper::Mono
