@@ -8,6 +8,10 @@
   -->
   <Application.Styles>
     <FluentTheme />
+    <!-- DataGrid theme: Phase 8 needs it for the Fields/Methods grids.
+         Avalonia.Controls.DataGrid ships its own Fluent xaml that the
+         FluentTheme alone does not pull in. -->
+    <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
   </Application.Styles>
 
   <Application.Resources>

@@ -8,11 +8,22 @@
   <sys:String x:Key="App.Title">Unity CE Dumper</sys:String>
   <sys:String x:Key="App.BootstrapBanner">Phase 0 — Bootstrap. Ready.</sys:String>
 
-  <!-- Main shell — three-pane layout. -->
-  <sys:String x:Key="Main.LeftPaneTitle">Assemblies</sys:String>
-  <sys:String x:Key="Main.LeftPanePlaceholder">Tree lands in Phase 8.</sys:String>
-  <sys:String x:Key="Main.RightPaneTitle">Inspector</sys:String>
-  <sys:String x:Key="Main.RightPanePlaceholder">Field / method panels land in Phase 8.</sys:String>
+  <!-- Phase 8 browser panels. -->
+  <sys:String x:Key="Browser.AssembliesTitle">Assemblies</sys:String>
+  <sys:String x:Key="Browser.ClassesTitle">Classes</sys:String>
+  <sys:String x:Key="Browser.FilterWatermark">filter…</sys:String>
+  <sys:String x:Key="Browser.Refresh">↻</sys:String>
+  <sys:String x:Key="Browser.ShowInherited">Show inherited members</sys:String>
+  <sys:String x:Key="Browser.FieldsTab">Fields</sys:String>
+  <sys:String x:Key="Browser.MethodsTab">Methods</sys:String>
+  <sys:String x:Key="Browser.ColName">Name</sys:String>
+  <sys:String x:Key="Browser.ColOffset">Offset</sys:String>
+  <sys:String x:Key="Browser.ColType">Type</sys:String>
+  <sys:String x:Key="Browser.ColFlags">Flags</sys:String>
+  <sys:String x:Key="Browser.ColStatic">static</sys:String>
+  <sys:String x:Key="Browser.ColDeclaredIn">Declared in</sys:String>
+  <sys:String x:Key="Browser.ColAddress">Address</sys:String>
+  <sys:String x:Key="Browser.ColToken">Token</sys:String>
 
   <!-- Connection bar. -->
   <sys:String x:Key="Conn.Connect">Connect</sys:String>

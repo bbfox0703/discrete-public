@@ -14,10 +14,22 @@ namespace UnityDumpUI.Core.Services;
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(RpcEnvelope<HandshakeResult>))]
 [JsonSerializable(typeof(RpcEnvelope<PingResult>))]
+[JsonSerializable(typeof(RpcEnvelope<GetAssembliesResult>))]
+[JsonSerializable(typeof(RpcEnvelope<GetClassesResult>))]
+[JsonSerializable(typeof(RpcEnvelope<GetClassInfoResult>))]
 [JsonSerializable(typeof(HandshakeResult))]
 [JsonSerializable(typeof(PingResult))]
+[JsonSerializable(typeof(GetAssembliesResult))]
+[JsonSerializable(typeof(GetClassesResult))]
+[JsonSerializable(typeof(GetClassInfoResult))]
+[JsonSerializable(typeof(AssemblyEntry))]
+[JsonSerializable(typeof(ClassEntry))]
+[JsonSerializable(typeof(ClassRef))]
+[JsonSerializable(typeof(FieldEntry))]
+[JsonSerializable(typeof(MethodEntry))]
 [JsonSerializable(typeof(RpcError))]
 [JsonSerializable(typeof(PipeRequest))]
+[JsonSerializable(typeof(string))]
 internal sealed partial class ProtocolJsonContext : JsonSerializerContext
 {
 }

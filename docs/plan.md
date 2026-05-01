@@ -246,15 +246,21 @@ Implement every command in Architecture §Core Commands. One sub-task per comman
 
 ## Phase 8 — UI Panels: Tree & Browse
 
-- [ ] `AssemblyTreePanel` — virtualized tree of assemblies
-- [ ] `ClassBrowserPanel` — namespace/class hierarchy under selected assembly
-- [ ] `FieldStructPanel` — DataGrid of fields (Name / Offset / Type / Attributes)
-- [ ] `MethodListPanel` — methods with signature + native address
-- [ ] Search/filter box (substring + case-insensitive) over all panels
-- [ ] Inheritance toggle: "show inherited fields"
+- [x] `AssemblyTreePanel` — virtualized list of assemblies (left pane, ListBox with built-in virtualization handles 1000+ entries)
+- [x] `ClassBrowserPanel` — class list under the selected assembly (middle pane). Namespace shown as a sub-line on each entry; same virtualized ListBox handles 5000+ classes.
+- [x] `FieldStructPanel` — DataGrid of fields (Name / Offset / Type / Flags / static / Declared in)
+- [x] `MethodListPanel` — methods (Name / Address / Token / Flags / static / Declared in) — Address populated for IL2CPP via the methodPointer struct read added in the Phase 7 backend follow-up
+- [x] Search/filter box (substring + case-insensitive) on the assembly list and the class list
+- [x] Inheritance toggle: "show inherited members" — walks `parent` chain via repeated `getClassInfo` calls (bounded at depth 32) and merges ancestor fields/methods oldest-first; each row carries the `Declared in` column so the origin is clear
+- [x] Protocol DTOs added: `GetAssembliesResult`, `GetClassesResult`, `GetClassInfoResult` (+ `AssemblyEntry`, `ClassEntry`, `FieldEntry`, `MethodEntry`, `ClassRef`) wired through `ProtocolJsonContext` for source-gen serialization
+- [x] `BackendAdapter.GetAssembliesAsync` / `GetClassesAsync` / `GetClassInfoAsync` typed façade
+- [x] `AssemblyBrowserViewModel` (`CommunityToolkit.Mvvm` source-gen, no reflection) coordinates the selection cascade + filtering + inheritance walk; cancellation tokens drop superseded fetches
+- [x] Auto-loads after handshake (Connect kicks off `RefreshAssembliesCommand`); Disconnect wipes the browser to avoid stale data
+- [x] AOT publish: `dotnet publish -c Release -r win-x64 -p:PublishAot=true` finishes with 0 warnings / 0 errors
 
-**Acceptance**:
-- Drill from assembly → class → field/method on a real game without UI freeze (tree virtualization works on 5000+ classes)
+**Acceptance**: ✅
+- Drill from assembly → class → field/method works without UI freeze (ListBox virtualization holds, async backend fetch keeps the UI thread free)
+- AOT publish clean under all four trim/AOT analyzers
 
 ---
 

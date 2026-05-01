@@ -24,8 +24,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _pipe    = new PipeClient();
         _backend = new BackendAdapter(_pipe);
         _logger  = new FileLogger();
+        Browser  = new AssemblyBrowserViewModel(_backend, _logger);
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
     }
+
+    /// <summary>
+    /// Phase 8 panels — assembly tree / class browser / field+method grids.
+    /// Populated automatically after a successful handshake.
+    /// </summary>
+    public AssemblyBrowserViewModel Browser { get; }
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -80,6 +87,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             ConnectionStatus = $"Connected — build {hs.Build}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
                 $"connected backend={hs.Backend} build={hs.Build} unity={hs.UnityVersion}");
+
+            // Phase 8: kick off assembly fetch so the left pane populates
+            // without an extra click. Failures surface on Browser.ErrorMessage.
+            _ = Browser.RefreshAssembliesCommand.ExecuteAsync(null);
         }
         catch (OperationCanceledException)
         {
@@ -123,6 +134,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             AssembliesCount = 0;
             Build           = 0;
             Protocol        = 0;
+
+            // Phase 8: stale data is misleading — wipe the browser too.
+            Browser.Assemblies.Clear();
+            Browser.FilteredAssemblies.Clear();
+            Browser.Classes.Clear();
+            Browser.FilteredClasses.Clear();
+            Browser.Fields.Clear();
+            Browser.Methods.Clear();
+            Browser.SelectedAssembly = null;
+            Browser.SelectedClass    = null;
+            Browser.ParentChain      = string.Empty;
         }
     }
 
