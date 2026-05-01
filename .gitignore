@@ -5,6 +5,10 @@
 
 # CMake / Ninja build trees (build.ps1 outputs)
 /build/
+# Final shippable artifacts (DLLs + UI exe + side-DLLs); build.ps1 produces this
+/dist/
+# Build transcript captured by build.cmd via Start-Transcript
+/build_log.txt
 
 # Local debug artefacts (raw pipe responses captured during dev)
 /raw.json

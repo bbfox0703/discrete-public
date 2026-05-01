@@ -1,21 +1,24 @@
 <#
 .SYNOPSIS
-    Unified build script for UnityCEDumper.
+    Unified build script for UnityCEDumper (DLL + UI + tests).
 
 .DESCRIPTION
-    Builds the C++ DLL (Mono / IL2CPP / both), the Avalonia UI (with Native AOT),
-    the proxy DLLs (version / winmm / dxgi), and the xUnit v3 test runner.
+    Builds the C++ injected DLL (Mono / IL2CPP / both), the Avalonia UI
+    (Native AOT publish), and the xUnit v3 test runner. All shippable
+    artifacts land in dist\ regardless of target — same convention as
+    UE5CEDumper, so the output folder is the only thing you need to copy
+    onto the target machine.
 
-    Always invoke through this script — bare cmake / dotnet calls will fail
-    because they need the Visual Studio Developer Shell environment.
+    Always invoke through this script (or build.cmd) — bare cmake/dotnet
+    calls won't see the Visual Studio Developer Shell environment.
 
 .PARAMETER Target
     What to build. Default: All.
         DLL        — C++ injected DLL (uses -Backend)
-        UI         — Avalonia UI app
-        Test       — Run xUnit v3 test suite
-        ProxyDLL   — Proxy DLLs (Phase 12 — placeholder)
-        MetadataCli— Offline metadata CLI (Phase 13 — placeholder)
+        UI         — Avalonia UI app (publish)
+        Test       — xUnit v3 test suite
+        ProxyDLL   — Proxy DLLs (Phase 12 placeholder)
+        MetadataCli— Offline metadata CLI (Phase 13 placeholder)
         All        — Everything
 
 .PARAMETER Backend
@@ -26,14 +29,19 @@
     Build configuration. Default: Release.
         Debug | Release | Publish
     Publish runs `dotnet publish` (Native AOT) for the UI.
+    Debug / Release run a self-contained single-file publish.
 
 .PARAMETER Clean
-    Wipe build/ before configuring.
+    Wipe build\ and dist\ before configuring.
+
+.PARAMETER LogFile
+    Optional transcript path. build.cmd uses this to capture the full
+    log without piping through cmd.exe (which mangles CJK output).
 
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
-    powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Target DLL -Backend Mono
-    powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Mode Publish -Clean
+    .\build.ps1
+    .\build.ps1 -Target DLL -Backend Mono
+    .\build.ps1 -Mode Publish -Clean
 #>
 
 [CmdletBinding()]
@@ -47,19 +55,64 @@ param(
     [ValidateSet('Debug','Release','Publish')]
     [string]$Mode = 'Release',
 
-    [switch]$Clean
+    [switch]$Clean,
+
+    [string]$LogFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Force UTF-8 for console + .NET subprocesses (avoids CJK garbling).
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+$env:DOTNET_CLI_UI_LANGUAGE = 'en'
+
+# Optional transcript — replaces an out-of-process Tee-Object pipe so
+# cmd.exe's codepage can't corrupt the log.
+$script:transcriptActive = $false
+if ($LogFile) {
+    try {
+        Start-Transcript -Path $LogFile -Force | Out-Null
+        $script:transcriptActive = $true
+    } catch {
+        Write-Warning "Could not start transcript to $LogFile : $_"
+    }
+}
+
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $RepoRoot
+
+$BUILD_DIR = Join-Path $RepoRoot 'build'
+$DIST_DIR  = Join-Path $RepoRoot 'dist'
+$UI_DIR    = Join-Path $RepoRoot 'ui'
+$UI_PROJ   = Join-Path $UI_DIR   'UnityDumpUI\UnityDumpUI.csproj'
+$TEST_PROJ = Join-Path $UI_DIR   'UnityDumpUI.Tests\UnityDumpUI.Tests.csproj'
+$SLN       = Join-Path $UI_DIR   'UnityCEDumper.sln'
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-function Write-Section($msg) {
+function Write-Banner([string]$Text) {
+    $line = '=' * 60
     Write-Host ''
-    Write-Host "==[ $msg ]==" -ForegroundColor Cyan
+    Write-Host $line -ForegroundColor Cyan
+    Write-Host "  $Text" -ForegroundColor Cyan
+    Write-Host $line -ForegroundColor Cyan
+}
+function Write-Step([string]$Text) { Write-Host ">> $Text" -ForegroundColor Yellow }
+function Write-Ok  ([string]$Text) { Write-Host "   [OK] $Text" -ForegroundColor Green }
+function Write-Fail([string]$Text) { Write-Host "   [FAIL] $Text" -ForegroundColor Red }
+function Write-Info([string]$Text) { Write-Host "   $Text" -ForegroundColor Gray }
+
+function Get-FileSize([string]$Path) {
+    if (Test-Path $Path) {
+        $size = (Get-Item $Path).Length
+        if ($size -gt 1MB) { return '{0:N1} MB' -f ($size / 1MB) }
+        if ($size -gt 1KB) { return '{0:N1} KB' -f ($size / 1KB) }
+        return "$size B"
+    }
+    return 'N/A'
 }
 
 function Bump-BuildNumber {
@@ -67,17 +120,17 @@ function Bump-BuildNumber {
     if (-not (Test-Path $path)) { Set-Content -Path $path -Value '1'; return 1 }
     $n = [int](Get-Content -Path $path -TotalCount 1)
     $n++
-    Set-Content -Path $path -Value "$n"
+    # LF line ending so git's autocrlf doesn't whine.
+    [System.IO.File]::WriteAllText($path, "$n`n")
     return $n
 }
 
 $script:DevShellLoaded = $false
-$script:VsInstallPath = $null
+$script:VsInstallPath  = $null
 
 function Resolve-VsInstallPath {
     if ($script:VsInstallPath) { return $script:VsInstallPath }
 
-    # Search every known vswhere.exe location (matches UE5CEDumper's resilient probe).
     $candidates = [System.Collections.Generic.List[string]]::new()
     $inPath = Get-Command vswhere -ErrorAction SilentlyContinue
     if ($inPath) { $candidates.Add($inPath.Source) }
@@ -87,23 +140,19 @@ function Resolve-VsInstallPath {
     if ($env:LOCALAPPDATA)        { $candidates.Add((Join-Path $env:LOCALAPPDATA        'Microsoft\VisualStudio\Installer\vswhere.exe')) }
 
     $vswhere = $candidates | Where-Object { $_ -and (Test-Path $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1
-    if (-not $vswhere) { throw "vswhere.exe not found. Install Visual Studio or Microsoft.VisualStudio.Locator." }
+    if (-not $vswhere) { throw 'vswhere.exe not found. Install Visual Studio or Microsoft.VisualStudio.Locator.' }
 
     $vsPath = & $vswhere -latest -prerelease -property installationPath
     if (-not $vsPath) {
         $vsPath = & $vswhere -latest -prerelease -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     }
-    if (-not $vsPath) { throw "No Visual Studio installation found (need C++ Desktop workload)." }
+    if (-not $vsPath) { throw 'No Visual Studio installation found (need C++ Desktop workload).' }
 
     $script:VsInstallPath = $vsPath
     return $vsPath
 }
 
 function Enter-VsDevEnvironment {
-    # Idempotent — only loads once per build.ps1 invocation.
-    # Mirrors UE5CEDumper's pattern: import the DevShell DLL and call the
-    # Enter-VsDevShell cmdlet directly. We deliberately do NOT use
-    # Launch-VsDevShell.ps1, which can recursively re-invoke itself in VS 18.
     if ($script:DevShellLoaded) { return }
 
     $vsPath = Resolve-VsInstallPath
@@ -112,114 +161,268 @@ function Enter-VsDevEnvironment {
         throw "Microsoft.VisualStudio.DevShell.dll not found at $devShellDll."
     }
 
-    Write-Host "Loading VS DevShell from $vsPath ..." -ForegroundColor DarkGray
+    Write-Info "Loading VS DevShell from $vsPath"
     Import-Module $devShellDll
     Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 
     $script:DevShellLoaded = $true
-    Write-Host "  VS DevShell ready" -ForegroundColor DarkGray
+    Write-Ok 'MSVC x64 environment loaded'
 }
 
 # ---------------------------------------------------------------------------
-# DLL build (CMake + Ninja)
+# Preamble
+# ---------------------------------------------------------------------------
+Write-Banner "UnityCEDumper Build  |  Mode: $Mode  |  Target: $Target  |  Backend: $Backend"
+Write-Info "Root:   $RepoRoot"
+Write-Info "Clean:  $Clean"
+
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    Write-Fail 'dotnet SDK not found in PATH'
+    exit 1
+}
+Write-Info "dotnet: $(dotnet --version)"
+
+# ---------------------------------------------------------------------------
+# Clean
+# ---------------------------------------------------------------------------
+if ($Clean) {
+    Write-Step 'Cleaning build/ and dist/ ...'
+    if (Test-Path $BUILD_DIR) { Remove-Item $BUILD_DIR -Recurse -Force }
+    if (Test-Path $DIST_DIR)  { Remove-Item $DIST_DIR  -Recurse -Force }
+    Write-Ok 'Clean complete'
+}
+
+New-Item -ItemType Directory -Path $DIST_DIR  -Force | Out-Null
+New-Item -ItemType Directory -Path $BUILD_DIR -Force | Out-Null
+
+$buildNum = Bump-BuildNumber
+Write-Info "Build#: $buildNum"
+
+$exitCode = 0
+
+# ---------------------------------------------------------------------------
+# DLL build (CMake + Ninja, MSVC)
 # ---------------------------------------------------------------------------
 function Build-Dll {
     Enter-VsDevEnvironment
 
     $cfg = if ($Mode -eq 'Debug') { 'Debug' } else { 'Release' }
-    $buildDir = Join-Path $RepoRoot "build/dll-$($Backend.ToLower())-$($cfg.ToLower())"
+    $dllBuildDir = Join-Path $BUILD_DIR "dll-$($Backend.ToLower())-$($cfg.ToLower())"
 
-    if ($Clean -and (Test-Path $buildDir)) {
-        Write-Host "Cleaning $buildDir ..." -ForegroundColor DarkGray
-        Remove-Item -Recurse -Force $buildDir
+    Write-Banner "C++ DLL  |  Backend=$Backend  Mode=$cfg"
+
+    # Always do a clean configure — same rule as UE5CEDumper. CMake's cache
+    # is fragile across BACKEND swaps, so wipe before reconfigure.
+    if (Test-Path $dllBuildDir) {
+        Write-Step "Removing CMake cache for clean configure ($dllBuildDir)"
+        Remove-Item $dllBuildDir -Recurse -Force
     }
 
-    Write-Section "Configure DLL  (Backend=$Backend, Mode=$cfg)"
-    & cmake -S $RepoRoot -B $buildDir -G Ninja `
+    Write-Step 'Configuring CMake (Ninja + MSVC)'
+    & cmake -S $RepoRoot -B $dllBuildDir -G Ninja `
         "-DCMAKE_BUILD_TYPE=$cfg" `
         "-DBACKEND=$Backend"
-    if ($LASTEXITCODE -ne 0) { throw "cmake configure failed." }
+    if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
+    Write-Ok 'CMake configured'
 
-    Write-Section "Build DLL"
-    & cmake --build $buildDir --parallel
-    if ($LASTEXITCODE -ne 0) { throw "cmake build failed." }
+    Write-Step "Building DLL ($cfg)"
+    & cmake --build $dllBuildDir --parallel
+    if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake build failed'; return $false }
 
-    $outDir = Join-Path $buildDir 'bin'
-    if (Test-Path $outDir) {
-        Get-ChildItem $outDir -Filter '*.dll' | ForEach-Object {
-            Write-Host ("  produced: {0}  ({1:N0} bytes)" -f $_.Name, $_.Length) -ForegroundColor Green
+    # Copy every produced .dll + .pdb into dist\.
+    $outDir = Join-Path $dllBuildDir 'bin'
+    if (-not (Test-Path $outDir)) {
+        Write-Fail "DLL output dir not found: $outDir"
+        return $false
+    }
+
+    $produced = 0
+    Get-ChildItem $outDir -File | Where-Object { $_.Extension -in '.dll', '.pdb' } | ForEach-Object {
+        Copy-Item $_.FullName -Destination $DIST_DIR -Force
+        if ($_.Extension -eq '.dll') {
+            $sz = Get-FileSize (Join-Path $DIST_DIR $_.Name)
+            Write-Ok "$($_.Name) ($sz) -> dist\"
+            $produced++
         }
     }
+    if ($produced -eq 0) {
+        Write-Fail 'No DLLs found in build output'
+        return $false
+    }
+    return $true
 }
 
 # ---------------------------------------------------------------------------
-# UI build (.NET 10 + Avalonia 12)
+# UI build (.NET 10 + Avalonia 12) — always publishes to dist\
 # ---------------------------------------------------------------------------
 function Build-Ui {
-    Write-Section "Build UI  (Mode=$Mode)"
-    $uiDir = Join-Path $RepoRoot 'ui'
-    Push-Location $uiDir
-    try {
-        if ($Mode -eq 'Publish') {
-            & dotnet publish 'UnityDumpUI/UnityDumpUI.csproj' -c Release -r win-x64
-        } elseif ($Mode -eq 'Debug') {
-            & dotnet build 'UnityCEDumper.sln' -c Debug
-        } else {
-            & dotnet build 'UnityCEDumper.sln' -c Release
+    $csCfg = if ($Mode -eq 'Debug') { 'Debug' } else { 'Release' }
+    Write-Banner "C# Avalonia UI  |  $csCfg ($Mode)"
+
+    # UE5CEDumper rule: always wipe bin/obj for the UI csproj before publish.
+    $uiProjDir = Split-Path $UI_PROJ -Parent
+    foreach ($subdir in @('bin', 'obj')) {
+        $p = Join-Path $uiProjDir $subdir
+        if (Test-Path $p) {
+            Write-Step "Removing $subdir for clean build"
+            Remove-Item $p -Recurse -Force
         }
-        if ($LASTEXITCODE -ne 0) { throw "dotnet build failed." }
-    } finally {
-        Pop-Location
     }
+
+    $publishDir = Join-Path $BUILD_DIR 'ui-publish'
+    if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
+
+    if ($Mode -eq 'Publish') {
+        Write-Step 'Publishing UnityDumpUI (Native AOT, Release)'
+        & dotnet publish $UI_PROJ `
+            -c Release `
+            -r win-x64 `
+            -p:PublishAot=true `
+            -o $publishDir `
+            --nologo
+    }
+    else {
+        # Self-contained single-file for Debug/Release iteration. The .NET
+        # runtime is bundled (~96 MB) but no AOT compile step, so iteration
+        # stays fast.
+        Write-Step "Publishing UnityDumpUI ($csCfg, self-contained single-file)"
+        & dotnet publish $UI_PROJ `
+            -c $csCfg `
+            -r win-x64 `
+            --self-contained `
+            -p:PublishSingleFile=true `
+            -p:PublishAot=false `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:IncludeAllContentForSelfExtract=true `
+            -o $publishDir `
+            --nologo
+    }
+    if ($LASTEXITCODE -ne 0) { Write-Fail 'UI publish failed'; return $false }
+
+    $exeFile = Get-ChildItem -Path $publishDir -Filter 'UnityDumpUI.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $exeFile) {
+        Write-Fail 'No UI build output found'
+        return $false
+    }
+
+    if ($Mode -eq 'Publish') {
+        # AOT publish drops a few native side-DLLs (Skia/HarfBuzz/ANGLE) — copy
+        # everything that isn't a build artifact reference.
+        Get-ChildItem -Path $publishDir -File |
+            Where-Object { $_.Extension -in '.exe', '.dll', '.pdb' } |
+            ForEach-Object { Copy-Item $_.FullName -Destination $DIST_DIR -Force }
+    }
+    else {
+        # Self-contained single-file: just the exe + (debug only) pdb.
+        Copy-Item $exeFile.FullName -Destination $DIST_DIR -Force
+        if ($Mode -eq 'Debug') {
+            $pdb = Join-Path $exeFile.DirectoryName 'UnityDumpUI.pdb'
+            if (Test-Path $pdb) { Copy-Item $pdb -Destination $DIST_DIR -Force }
+        }
+    }
+
+    Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    $exeSize = Get-FileSize (Join-Path $DIST_DIR 'UnityDumpUI.exe')
+    Write-Ok "UnityDumpUI.exe ($exeSize) -> dist\"
+    return $true
 }
 
 # ---------------------------------------------------------------------------
-# Tests (xUnit v3 — runs as standalone exe)
+# Tests (xUnit v3 standalone exe runner)
 # ---------------------------------------------------------------------------
 function Run-Tests {
-    Write-Section "Run Tests  (xUnit v3)"
-    $uiDir = Join-Path $RepoRoot 'ui'
-    Push-Location $uiDir
-    try {
-        & dotnet test 'UnityDumpUI.Tests/UnityDumpUI.Tests.csproj' -c Release
-        if ($LASTEXITCODE -ne 0) { throw "dotnet test failed." }
-    } finally {
-        Pop-Location
+    Write-Banner 'Unit Tests  |  xUnit v3'
+    if (-not (Test-Path $TEST_PROJ)) {
+        Write-Info 'Test project not found, skipping'
+        return $true
     }
+    Write-Step 'Building + running tests'
+    & dotnet test $TEST_PROJ -c Release --nologo -v minimal
+    if ($LASTEXITCODE -ne 0) { Write-Fail 'Tests failed'; return $false }
+    Write-Ok 'All tests passed'
+    return $true
 }
 
 # ---------------------------------------------------------------------------
-# ProxyDLL / MetadataCli — Phase 12 / 13 placeholders
+# Phase 12 / 13 placeholders
 # ---------------------------------------------------------------------------
 function Build-ProxyDll {
-    Write-Section "Build ProxyDLL (Phase 12 — not yet implemented)"
-    Write-Host "  Skipping: proxy targets land in Phase 12." -ForegroundColor Yellow
+    Write-Banner 'Proxy DLL (Phase 12 — not yet implemented)'
+    Write-Info 'Skipping: proxy targets land in Phase 12.'
+    return $true
 }
 function Build-MetadataCli {
-    Write-Section "Build MetadataCli (Phase 13 — not yet implemented)"
-    Write-Host "  Skipping: CLI lands in Phase 13." -ForegroundColor Yellow
+    Write-Banner 'Metadata CLI (Phase 13 — not yet implemented)'
+    Write-Info 'Skipping: CLI lands in Phase 13.'
+    return $true
+}
+
+# ---------------------------------------------------------------------------
+# Companion artifacts (build_number.txt, scripts/ when present)
+# ---------------------------------------------------------------------------
+function Copy-CompanionArtifacts {
+    $bn = Join-Path $RepoRoot 'build_number.txt'
+    if (Test-Path $bn) { Copy-Item $bn -Destination $DIST_DIR -Force }
+
+    # Optional scripts (CE Lua bridge lands in Phase 11; copy when present).
+    $scriptsDir = Join-Path $RepoRoot 'scripts'
+    if (Test-Path $scriptsDir) {
+        Get-ChildItem $scriptsDir -File -Filter '*.lua' -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName -Destination $DIST_DIR -Force
+        }
+        Get-ChildItem $scriptsDir -File -Filter '*.CT' -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName -Destination $DIST_DIR -Force
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
-$buildNum = Bump-BuildNumber
-Write-Host "UnityCEDumper build #$buildNum  (Target=$Target, Backend=$Backend, Mode=$Mode)" -ForegroundColor Magenta
-
 switch ($Target) {
-    'DLL'         { Build-Dll }
-    'UI'          { Build-Ui }
-    'Test'        { Run-Tests }
-    'ProxyDLL'    { Build-ProxyDll }
-    'MetadataCli' { Build-MetadataCli }
+    'DLL'         { if (-not (Build-Dll))         { $exitCode = 1 } }
+    'UI'          { if (-not (Build-Ui))          { $exitCode = 1 } }
+    'Test'        { if (-not (Run-Tests))         { $exitCode = 1 } }
+    'ProxyDLL'    { if (-not (Build-ProxyDll))    { $exitCode = 1 } }
+    'MetadataCli' { if (-not (Build-MetadataCli)) { $exitCode = 1 } }
     'All' {
-        Build-Dll
-        Build-Ui
-        Run-Tests
-        Build-ProxyDll
-        Build-MetadataCli
+        if (-not (Build-Dll))         { $exitCode = 1 }
+        if (-not (Build-Ui))          { $exitCode = 1 }
+        if (-not (Run-Tests))         { $exitCode = 1 }
+        if (-not (Build-ProxyDll))    { $exitCode = 1 }
+        if (-not (Build-MetadataCli)) { $exitCode = 1 }
+    }
+}
+
+Copy-CompanionArtifacts
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+$sw.Stop()
+Write-Banner 'Build Summary'
+Write-Host ''
+Write-Host "  Mode:    $Mode"     -ForegroundColor White
+Write-Host "  Target:  $Target"   -ForegroundColor White
+Write-Host "  Backend: $Backend"  -ForegroundColor White
+Write-Host "  Build#:  $buildNum" -ForegroundColor White
+Write-Host "  Time:    $($sw.Elapsed.ToString('mm\:ss\.ff'))" -ForegroundColor White
+
+$statusColor = if ($exitCode -eq 0) { 'Green' } else { 'Red' }
+$statusText  = if ($exitCode -eq 0) { 'SUCCESS' } else { 'FAILED' }
+Write-Host "  Status:  $statusText" -ForegroundColor $statusColor
+Write-Host ''
+
+if (Test-Path $DIST_DIR) {
+    Write-Host "  Output: $DIST_DIR" -ForegroundColor White
+    Get-ChildItem $DIST_DIR -File -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+        $sz = Get-FileSize $_.FullName
+        Write-Host ("    {0,-32}  {1}" -f $_.Name, $sz) -ForegroundColor Gray
     }
 }
 
 Write-Host ''
-Write-Host "Build #$buildNum complete." -ForegroundColor Green
+
+if ($script:transcriptActive) { try { Stop-Transcript | Out-Null } catch { } }
+exit $exitCode
