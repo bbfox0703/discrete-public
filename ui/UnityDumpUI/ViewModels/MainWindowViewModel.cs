@@ -4,30 +4,52 @@
 // observable properties + commands per the AOT mandate.
 
 using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using UnityDumpUI.Core.Platform;
 using UnityDumpUI.Core.Services;
 
 namespace UnityDumpUI.ViewModels;
 
 public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 {
-    private readonly PipeClient _pipe;
-    private readonly BackendAdapter _backend;
-    private readonly FileLogger _logger;
-    private CancellationTokenSource? _connectCts;
+    private readonly PipeClient         _pipe;
+    private readonly BackendAdapter     _backend;
+    private readonly FileLogger         _logger;
+    private readonly IProcessEnumerator _processes;
+    private readonly IDllInjector       _injector;
+    private CancellationTokenSource?    _connectCts;
+
+    /// <summary>
+    /// View-supplied factory that opens the process picker dialog and returns
+    /// the chosen row (null = user cancelled). Decoupled like this so the VM
+    /// has no reference to Avalonia <c>Window</c> types — the View wires it
+    /// up at construction time. Default no-op until configured.
+    /// </summary>
+    public Func<Task<ProcessRow?>>? PickProcessAsync { get; set; }
 
     public MainWindowViewModel()
+        : this(new UnityDumpUI.Platform.WindowsProcessEnumerator(),
+               new UnityDumpUI.Platform.WindowsDllInjector())
     {
-        _pipe     = new PipeClient();
-        _backend  = new BackendAdapter(_pipe);
-        _logger   = new FileLogger();
-        Browser   = new AssemblyBrowserViewModel(_backend, _logger);
-        Inspector = new LiveInspectionViewModel(_backend, _logger);
+    }
+
+    public MainWindowViewModel(IProcessEnumerator processes, IDllInjector injector)
+    {
+        _pipe       = new PipeClient();
+        _backend    = new BackendAdapter(_pipe);
+        _logger     = new FileLogger();
+        _processes  = processes;
+        _injector   = injector;
+        Browser     = new AssemblyBrowserViewModel(_backend, _logger);
+        Inspector   = new LiveInspectionViewModel(_backend, _logger);
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
     }
+
+    public IProcessEnumerator ProcessEnumerator => _processes;
 
     /// <summary>
     /// Phase 8 panels — assembly tree / class browser / field+method grids.
@@ -44,15 +66,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(DisconnectCommand))]
+    [NotifyCanExecuteChangedFor(nameof(InjectAndConnectCommand))]
     private string _connectionStatus = "Disconnected";
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(DisconnectCommand))]
+    [NotifyCanExecuteChangedFor(nameof(InjectAndConnectCommand))]
     private bool _isConnected;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
+    [NotifyCanExecuteChangedFor(nameof(InjectAndConnectCommand))]
     private bool _isBusy;
 
     [ObservableProperty] private string? _engine;
@@ -159,6 +184,68 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     private bool CanDisconnect() => IsConnected;
+
+    /// <summary>
+    /// Open the process picker, inject the matching <c>UnityDumper-&lt;Backend&gt;.dll</c>
+    /// (looked up next to the running exe), then kick the existing Connect
+    /// flow. One-click replacement for <c>tools\Test-Handshake.ps1</c>.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanInject))]
+    private async Task InjectAndConnectAsync()
+    {
+        if (PickProcessAsync is null) return;
+
+        ProcessRow? row;
+        try
+        {
+            row = await PickProcessAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"picker failed: {ex.Message}";
+            return;
+        }
+        if (row is null) return;
+
+        if (row.Backend == UnityBackend.None)
+        {
+            ErrorMessage = $"PID {row.Pid} ({row.Name}) — no Unity backend detected. " +
+                           "Pick another process or check that the game has finished loading.";
+            return;
+        }
+
+        string dllName = row.Backend == UnityBackend.IL2CPP
+            ? "UnityDumper-IL2CPP.dll"
+            : "UnityDumper-Mono.dll";
+        string dllPath = Path.Combine(AppContext.BaseDirectory, dllName);
+
+        ErrorMessage = null;
+        IsBusy = true;
+        ConnectionStatus = $"Injecting {dllName} into PID {row.Pid}…";
+        try
+        {
+            InjectResult result = await _injector.InjectAsync(row.Pid, dllPath).ConfigureAwait(true);
+            if (!result.Ok)
+            {
+                ErrorMessage = result.ErrorMessage;
+                ConnectionStatus = "Inject failed";
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                    $"inject {dllPath} -> PID {row.Pid} failed: {result.ErrorMessage}");
+                return;
+            }
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"inject {dllName} -> PID {row.Pid} ok (LoadLibrary=0x{result.LoadLibraryExitCode:X8})");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+
+        // Hand off to the existing connect flow — same pipe, same handshake.
+        await ConnectAsync().ConfigureAwait(true);
+    }
+
+    private bool CanInject() => !IsBusy && !IsConnected;
 
     /// <summary>
     /// Hand the currently selected class off to the inspector and kick a

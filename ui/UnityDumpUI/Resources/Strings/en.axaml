@@ -49,6 +49,19 @@
   <sys:String x:Key="Conn.Connect">Connect</sys:String>
   <sys:String x:Key="Conn.Disconnect">Disconnect</sys:String>
   <sys:String x:Key="Conn.StatusLabel">Status:</sys:String>
+  <sys:String x:Key="Conn.Inject">Pick &amp; inject…</sys:String>
+
+  <!-- Process picker dialog. -->
+  <sys:String x:Key="Picker.Title">Pick Unity process</sys:String>
+  <sys:String x:Key="Picker.FilterWatermark">filter (name or PID)…</sys:String>
+  <sys:String x:Key="Picker.ShowAll">Show all processes</sys:String>
+  <sys:String x:Key="Picker.Refresh">↻ Refresh</sys:String>
+  <sys:String x:Key="Picker.InjectAndConnect">Inject &amp; Connect</sys:String>
+  <sys:String x:Key="Picker.Cancel">Cancel</sys:String>
+  <sys:String x:Key="Picker.ColPid">PID</sys:String>
+  <sys:String x:Key="Picker.ColName">Process</sys:String>
+  <sys:String x:Key="Picker.ColBackend">Backend</sys:String>
+  <sys:String x:Key="Picker.ColPath">Path</sys:String>
 
   <!-- Handshake panel labels. -->
   <sys:String x:Key="Handshake.Title">Handshake</sys:String>

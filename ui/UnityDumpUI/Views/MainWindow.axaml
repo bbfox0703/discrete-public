@@ -16,6 +16,8 @@
             BorderBrush="#22000000" BorderThickness="0,0,0,1"
             Padding="12,8">
       <StackPanel Orientation="Horizontal" Spacing="12">
+        <Button Content="{StaticResource Conn.Inject}"
+                Command="{Binding InjectAndConnectCommand}" />
         <Button Content="{StaticResource Conn.Connect}"
                 Command="{Binding ConnectCommand}" />
         <Button Content="{StaticResource Conn.Disconnect}"

@@ -20,6 +20,10 @@
     <!-- Compiled XAML bindings only (no reflection — required for AOT). -->
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
 
+    <!-- LibraryImport source generator (WindowsDllInjector / WindowsProcessEnumerator)
+         emits unsafe blocks. Required so its generated code compiles. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
     <!-- IL3053: third-party AOT analysis warnings from Avalonia/MicroCom (safe; covered by TrimmerRootAssembly).
          IL2104: DataGrid trim warning — preserved via TrimmerRootAssembly below. -->
     <NoWarn>$(NoWarn);IL3053;IL2104</NoWarn>
