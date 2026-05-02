@@ -274,6 +274,13 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
             // you inherited" then "what you added".
             chain.Reverse();
             _currentChain = chain;
+            // The chain is what the export commands actually consume; ping
+            // their CanExecute so any UI bindings that latched the disabled
+            // state during the brief load window flip to enabled now.
+            ExportSdkHeaderCommand.NotifyCanExecuteChanged();
+            ExportCsxCommand.NotifyCanExecuteChanged();
+            ExportCeXmlCommand.NotifyCanExecuteChanged();
+            CopyCeXmlCommand.NotifyCanExecuteChanged();
             Fields.Clear();
             Methods.Clear();
             ParentChain = BuildParentChainLabel(chain);
@@ -417,8 +424,13 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         }
     }
 
-    private bool CanCopyField() => SelectedFieldRow is not null && _currentChain.Count > 0;
-    private bool CanExport()    => SelectedClass is not null && _currentChain.Count > 0;
+    // CanExport / CanCopyField only gate on the *visible* selection state —
+    // _currentChain is populated asynchronously after SelectedClass changes,
+    // and there's no observable signal to drive a CanExecute re-evaluation
+    // on a private field. Each command no-ops safely when the chain is
+    // momentarily empty (rare race window during initial load).
+    private bool CanCopyField() => SelectedFieldRow is not null;
+    private bool CanExport()    => SelectedClass is not null;
 
     private async Task ExportAsync(
         string ext, string description,
