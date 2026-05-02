@@ -125,10 +125,15 @@ public sealed partial class WindowsDllInjector : IDllInjector
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool WriteProcessMemory(IntPtr hProc, IntPtr addr, byte[] buf, UIntPtr size, out UIntPtr written);
 
-    [LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    // LibraryImport does NOT auto-suffix A/W like classic DllImport does —
+    // we must name the real export explicitly. GetModuleHandleW is the wide
+    // variant; GetProcAddress takes ANSI symbol names (no W variant exists).
+    [LibraryImport("kernel32.dll", EntryPoint = "GetModuleHandleW", SetLastError = true,
+                   StringMarshalling = StringMarshalling.Utf16)]
     private static partial IntPtr GetModuleHandle(string name);
 
-    [LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Custom,
+    [LibraryImport("kernel32.dll", EntryPoint = "GetProcAddress", SetLastError = true,
+                   StringMarshalling = StringMarshalling.Custom,
                    StringMarshallingCustomType = typeof(System.Runtime.InteropServices.Marshalling.AnsiStringMarshaller))]
     private static partial IntPtr GetProcAddress(IntPtr hMod, string name);
 
