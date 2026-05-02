@@ -17,15 +17,58 @@ namespace {
 
 const char* SafeStr(const char* s) { return s ? s : ""; }
 
-// Fill a ClassEntry from a live MonoClass*. Returns false on null inputs.
+#pragma warning(push)
+#pragma warning(disable: 4509)
+MonoClass* SehNesting(fn_class_get_nesting_type fn, MonoClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+MonoClass* SehNextNested(fn_class_get_nested_types fn, MonoClass* k, void** iter) {
+    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+#pragma warning(pop)
+
+// Fill a ClassEntry. Nested classes are surfaced as `Outer/Inner` so
+// FindClass can round-trip them via mono_class_get_nested_types. Namespace
+// is taken from the outermost class — Mono only attaches a namespace there.
 bool DescribeClass(MonoClass* klass, std::uint32_t token, ClassEntry& out) {
     if (klass == nullptr) return false;
     const auto& r = GetResolver();
     out.klass = klass;
     out.token = token;
-    if (r.class_get_name != nullptr)      out.name = SafeStr(r.class_get_name(klass));
-    if (r.class_get_namespace != nullptr) out.ns   = SafeStr(r.class_get_namespace(klass));
+    if (r.class_get_name == nullptr) return true;
+
+    std::string leaf = SafeStr(r.class_get_name(klass));
+
+    MonoClass* cur = klass;
+    MonoClass* outer = klass;
+    if (r.class_get_nesting_type != nullptr) {
+        for (int i = 0; i < 16; ++i) {
+            MonoClass* n = SehNesting(r.class_get_nesting_type, cur);
+            if (n == nullptr) break;
+            std::string nm = SafeStr(r.class_get_name(n));
+            if (!nm.empty()) leaf = nm + "/" + leaf;
+            outer = n;
+            cur = n;
+        }
+    }
+    out.name = std::move(leaf);
+    if (r.class_get_namespace != nullptr) out.ns = SafeStr(r.class_get_namespace(outer));
     return true;
+}
+
+// Search direct nested children of `outer` for a name match.
+MonoClass* FindNestedByName(MonoClass* outer, const std::string& nestedName) {
+    const auto& r = GetResolver();
+    if (outer == nullptr || r.class_get_nested_types == nullptr || r.class_get_name == nullptr) {
+        return nullptr;
+    }
+    void* iter = nullptr;
+    for (;;) {
+        MonoClass* k = SehNextNested(r.class_get_nested_types, outer, &iter);
+        if (k == nullptr) return nullptr;
+        const char* n = r.class_get_name(k);
+        if (n != nullptr && nestedName == n) return k;
+    }
 }
 
 #pragma warning(push)
@@ -115,7 +158,28 @@ MonoClass* FindClass(MonoImage* image, const std::string& ns, const std::string&
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return nullptr;
 
-    return SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+    // Fast path: simple top-level type.
+    std::size_t slash = name.find('/');
+    if (slash == std::string::npos) {
+        return SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+    }
+
+    // Nested form: walk Outer/Mid/Inner via mono_class_get_nested_types.
+    std::string outerName = name.substr(0, slash);
+    MonoClass* cur = SehClassFromName(r.class_from_name, image, ns.c_str(), outerName.c_str());
+    if (cur == nullptr) return nullptr;
+
+    std::size_t pos = slash + 1;
+    while (pos < name.size() && cur != nullptr) {
+        std::size_t next = name.find('/', pos);
+        std::string segment = (next == std::string::npos)
+            ? name.substr(pos)
+            : name.substr(pos, next - pos);
+        cur = FindNestedByName(cur, segment);
+        if (next == std::string::npos) break;
+        pos = next + 1;
+    }
+    return cur;
 }
 
 ClassInfoResult ReadClassInfo(MonoClass* klass) {

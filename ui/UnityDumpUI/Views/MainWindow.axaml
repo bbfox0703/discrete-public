@@ -35,12 +35,15 @@
 
     <!-- Body -->
     <Grid>
+      <!-- Column widths are user-resizable via the GridSplitters between
+           panes. MinWidth keeps each pane usable; "*" lets the right pane
+           absorb whatever's left. -->
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="240" />
-        <ColumnDefinition Width="2" />
-        <ColumnDefinition Width="280" />
-        <ColumnDefinition Width="2" />
-        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="240" MinWidth="120" />
+        <ColumnDefinition Width="4" />
+        <ColumnDefinition Width="280" MinWidth="160" />
+        <ColumnDefinition Width="4" />
+        <ColumnDefinition Width="*"   MinWidth="320" />
       </Grid.ColumnDefinitions>
 
       <!-- Pane 1: Assemblies -->
@@ -66,13 +69,18 @@
                  x:DataType="vm:MainWindowViewModel">
           <ListBox.ItemTemplate>
             <DataTemplate x:DataType="vm:AssemblyItem">
-              <TextBlock Text="{Binding Name}" />
+              <TextBlock Text="{Binding Name}"
+                         TextTrimming="CharacterEllipsis"
+                         ToolTip.Tip="{Binding Name}" />
             </DataTemplate>
           </ListBox.ItemTemplate>
         </ListBox>
       </DockPanel>
 
-      <Border Grid.Column="1" Background="#22000000" />
+      <GridSplitter Grid.Column="1" Width="4"
+                    Background="#22000000"
+                    HorizontalAlignment="Stretch"
+                    ResizeDirection="Columns" />
 
       <!-- Pane 2: Classes -->
       <DockPanel Grid.Column="2" Margin="8">
@@ -101,16 +109,23 @@
           </ListBox.ContextMenu>
           <ListBox.ItemTemplate>
             <DataTemplate x:DataType="vm:ClassItem">
-              <StackPanel>
-                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                <TextBlock Text="{Binding Namespace}" Opacity="0.55" FontSize="11" />
+              <StackPanel ToolTip.Tip="{Binding DisplayName}">
+                <TextBlock Text="{Binding Name}"
+                           FontWeight="SemiBold"
+                           TextTrimming="CharacterEllipsis" />
+                <TextBlock Text="{Binding Namespace}"
+                           Opacity="0.55" FontSize="11"
+                           TextTrimming="CharacterEllipsis" />
               </StackPanel>
             </DataTemplate>
           </ListBox.ItemTemplate>
         </ListBox>
       </DockPanel>
 
-      <Border Grid.Column="3" Background="#22000000" />
+      <GridSplitter Grid.Column="3" Width="4"
+                    Background="#22000000"
+                    HorizontalAlignment="Stretch"
+                    ResizeDirection="Columns" />
 
       <!-- Pane 3: Detail (handshake summary on top, then fields/methods) -->
       <DockPanel Grid.Column="4" Margin="8">
@@ -282,8 +297,13 @@
                            Foreground="#FFD32F2F" TextWrapping="Wrap" />
               </Border>
 
-              <!-- Instances + walked-fields split -->
-              <Grid ColumnDefinitions="240,2,*">
+              <!-- Instances + walked-fields split (resizable). -->
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="240" MinWidth="160" />
+                  <ColumnDefinition Width="4" />
+                  <ColumnDefinition Width="*"   MinWidth="240" />
+                </Grid.ColumnDefinitions>
                 <DockPanel Grid.Column="0">
                   <TextBlock DockPanel.Dock="Top"
                              Text="{StaticResource Inspector.InstancesTitle}"
@@ -303,7 +323,10 @@
                   </ListBox>
                 </DockPanel>
 
-                <Border Grid.Column="1" Background="#22000000" />
+                <GridSplitter Grid.Column="1" Width="4"
+                              Background="#22000000"
+                              HorizontalAlignment="Stretch"
+                              ResizeDirection="Columns" />
 
                 <DockPanel Grid.Column="2" Margin="6,0,0,0">
                   <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto">

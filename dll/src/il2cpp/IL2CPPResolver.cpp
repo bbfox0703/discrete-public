@@ -80,6 +80,10 @@ void DoResolve() {
     bindOpt("il2cpp_image_get_filename",        g_resolver.image_get_filename);
     bindOpt("il2cpp_class_get_parent",          g_resolver.class_get_parent);
     bindOpt("il2cpp_class_get_image",           g_resolver.class_get_image);
+    // Nested-type support — required to resolve `Outer/Inner` style names
+    // emitted by EnumerateClasses for nested classes.
+    bindOpt("il2cpp_class_get_declaring_type",  g_resolver.class_get_declaring);
+    bindOpt("il2cpp_class_get_nested_types",    g_resolver.class_get_nested_types);
     bindOpt("il2cpp_class_get_static_field_data", g_resolver.class_get_static_data);
     bindOpt("il2cpp_field_get_flags",           g_resolver.field_get_flags);
     bindOpt("il2cpp_method_get_token",          g_resolver.method_get_token);

@@ -107,6 +107,11 @@ void DoResolve() {
     optBind("mono_class_is_enum",               g_resolver.class_is_enum);
     optBind("mono_class_enum_basetype",         g_resolver.class_enum_basetype);
 
+    // Nested-type support — required to resolve `Outer/Inner` style names
+    // emitted by EnumerateClasses for nested classes.
+    optBind("mono_class_get_nesting_type",      g_resolver.class_get_nesting_type);
+    optBind("mono_class_get_nested_types",      g_resolver.class_get_nested_types);
+
     g_resolver.resolved = (ok == total);
 
     char line[256];

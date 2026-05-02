@@ -24,6 +24,8 @@ using fn_class_get_name         = const char*     (*)(Il2CppClass*);
 using fn_class_get_namespace    = const char*     (*)(Il2CppClass*);
 using fn_class_get_parent       = Il2CppClass*    (*)(Il2CppClass*);
 using fn_class_get_image        = const Il2CppImage* (*)(Il2CppClass*);
+using fn_class_get_declaring    = Il2CppClass*    (*)(Il2CppClass*);
+using fn_class_get_nested_types = Il2CppClass*    (*)(Il2CppClass*, void** /*iter*/);
 using fn_class_get_fields       = FieldInfo*      (*)(Il2CppClass*, void** /*iter*/);
 using fn_class_get_methods      = const MethodInfo* (*)(Il2CppClass*, void** /*iter*/);
 using fn_class_get_static_data  = void*           (*)(Il2CppClass*);
@@ -56,6 +58,8 @@ struct Resolver {
     fn_class_get_namespace    class_get_namespace    = nullptr;
     fn_class_get_parent       class_get_parent       = nullptr;
     fn_class_get_image        class_get_image        = nullptr;
+    fn_class_get_declaring    class_get_declaring    = nullptr;
+    fn_class_get_nested_types class_get_nested_types = nullptr;
     fn_class_get_fields       class_get_fields       = nullptr;
     fn_class_get_methods      class_get_methods      = nullptr;
     fn_class_get_static_data  class_get_static_data  = nullptr;

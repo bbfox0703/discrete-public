@@ -17,13 +17,59 @@ namespace {
 
 const char* SafeStr(const char* s) { return s ? s : ""; }
 
+#pragma warning(push)
+#pragma warning(disable: 4509)
+Il2CppClass* SehDeclaring(fn_class_get_declaring fn, Il2CppClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+Il2CppClass* SehNextNested(fn_class_get_nested_types fn, Il2CppClass* k, void** iter) {
+    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+#pragma warning(pop)
+
+// Fill (name, ns) for a class. For nested types, walks the declaring chain
+// and emits `Outer/Inner` (or deeper) so the lookup path can round-trip via
+// FindClass + il2cpp_class_get_nested_types. Namespace is taken from the
+// outermost type — IL2CPP/Mono only attach a namespace to top-level classes.
 bool DescribeClass(Il2CppClass* klass, ClassEntry& out) {
     if (klass == nullptr) return false;
     const auto& r = GetResolver();
     out.klass = klass;
-    if (r.class_get_name != nullptr)      out.name = SafeStr(r.class_get_name(klass));
-    if (r.class_get_namespace != nullptr) out.ns   = SafeStr(r.class_get_namespace(klass));
+    if (r.class_get_name == nullptr) return true;
+
+    std::string leaf = SafeStr(r.class_get_name(klass));
+
+    // Walk declaring chain (depth cap 16 — same as walkInstance).
+    Il2CppClass* cur = klass;
+    Il2CppClass* outer = klass;
+    if (r.class_get_declaring != nullptr) {
+        for (int i = 0; i < 16; ++i) {
+            Il2CppClass* d = SehDeclaring(r.class_get_declaring, cur);
+            if (d == nullptr) break;
+            std::string n = (r.class_get_name != nullptr) ? SafeStr(r.class_get_name(d)) : std::string{};
+            if (!n.empty()) leaf = n + "/" + leaf;
+            outer = d;
+            cur = d;
+        }
+    }
+    out.name = std::move(leaf);
+    if (r.class_get_namespace != nullptr) out.ns = SafeStr(r.class_get_namespace(outer));
     return true;
+}
+
+// Search the nested-types of `outer` for one whose simple name matches.
+Il2CppClass* FindNestedByName(Il2CppClass* outer, const std::string& nestedName) {
+    const auto& r = GetResolver();
+    if (outer == nullptr || r.class_get_nested_types == nullptr || r.class_get_name == nullptr) {
+        return nullptr;
+    }
+    void* iter = nullptr;
+    for (;;) {
+        Il2CppClass* k = SehNextNested(r.class_get_nested_types, outer, &iter);
+        if (k == nullptr) return nullptr;
+        const char* n = r.class_get_name(k);
+        if (n != nullptr && nestedName == n) return k;
+    }
 }
 
 #pragma warning(push)
@@ -114,7 +160,28 @@ Il2CppClass* FindClass(const Il2CppImage* image,
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return nullptr;
 
-    return SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+    // Fast path: simple top-level type.
+    std::size_t slash = name.find('/');
+    if (slash == std::string::npos) {
+        return SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+    }
+
+    // Nested form: walk Outer/Mid/Inner via class_get_nested_types.
+    std::string outerName = name.substr(0, slash);
+    Il2CppClass* cur = SehClassFromName(r.class_from_name, image, ns.c_str(), outerName.c_str());
+    if (cur == nullptr) return nullptr;
+
+    std::size_t pos = slash + 1;
+    while (pos < name.size() && cur != nullptr) {
+        std::size_t next = name.find('/', pos);
+        std::string segment = (next == std::string::npos)
+            ? name.substr(pos)
+            : name.substr(pos, next - pos);
+        cur = FindNestedByName(cur, segment);
+        if (next == std::string::npos) break;
+        pos = next + 1;
+    }
+    return cur;
 }
 
 ClassInfoResult ReadClassInfo(Il2CppClass* klass) {

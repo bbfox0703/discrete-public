@@ -34,6 +34,8 @@ using fn_class_get_name         = const char*    (*)(MonoClass*);
 using fn_class_get_namespace    = const char*    (*)(MonoClass*);
 using fn_class_get_parent       = MonoClass*     (*)(MonoClass*);
 using fn_class_get_image        = MonoImage*     (*)(MonoClass*);
+using fn_class_get_nesting_type = MonoClass*     (*)(MonoClass*);
+using fn_class_get_nested_types = MonoClass*     (*)(MonoClass*, void** /*iter*/);
 using fn_class_get_fields       = MonoClassField*(*)(MonoClass*, void** /*iter*/);
 using fn_class_get_methods      = MonoMethod*    (*)(MonoClass*, void** /*iter*/);
 using fn_field_get_name         = const char*    (*)(MonoClassField*);
@@ -85,6 +87,8 @@ struct Resolver {
     fn_class_get_namespace    class_get_namespace    = nullptr;
     fn_class_get_parent       class_get_parent       = nullptr;
     fn_class_get_image        class_get_image        = nullptr;
+    fn_class_get_nesting_type class_get_nesting_type = nullptr;
+    fn_class_get_nested_types class_get_nested_types = nullptr;
     fn_class_get_fields       class_get_fields       = nullptr;
     fn_class_get_methods      class_get_methods      = nullptr;
     fn_field_get_name         field_get_name         = nullptr;
