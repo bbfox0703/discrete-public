@@ -46,6 +46,20 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _injector   = injector;
         Browser     = new AssemblyBrowserViewModel(_backend, _logger);
         Inspector   = new LiveInspectionViewModel(_backend, _logger);
+
+        // Bridge: when the user picks a live instance in the Inspector tab,
+        // mirror its address into the export base so the next "Export .CT"
+        // roots the cheat table at that instance. User can still override
+        // by typing in the Export-options flyout.
+        Inspector.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(LiveInspectionViewModel.SelectedInstance)
+                && Inspector.SelectedInstance is { } row)
+            {
+                Browser.CeXmlBaseAddress = row.Address;
+            }
+        };
+
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
     }
 
