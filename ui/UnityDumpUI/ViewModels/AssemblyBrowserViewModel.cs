@@ -22,11 +22,13 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core.Services;
+using UnityDumpUI.Core.Services.Export;
 
 namespace UnityDumpUI.ViewModels;
 
@@ -36,6 +38,20 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     private readonly FileLogger     _logger;
     private CancellationTokenSource? _detailCts;
     private CancellationTokenSource? _classesCts;
+
+    /// <summary>
+    /// Most recent class-info chain (oldest-first ancestors + self at the
+    /// end), captured by <see cref="LoadClassDetailAsync"/>. Drives the
+    /// export commands without re-issuing pipe calls.
+    /// </summary>
+    private List<GetClassInfoResult> _currentChain = new();
+
+    /// <summary>
+    /// View-supplied save-file picker. Returns the chosen absolute path or
+    /// null if the user cancelled. Decouples the VM from Avalonia
+    /// <c>Window</c> / <c>StorageProvider</c> types.
+    /// </summary>
+    public Func<string /*suggestedName*/, string /*description*/, string /*ext*/, Task<string?>>? SaveFileAsync { get; set; }
 
     public AssemblyBrowserViewModel(BackendAdapter backend, FileLogger logger)
     {
@@ -76,6 +92,8 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSelectedClass))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSdkHeaderCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportCsxCommand))]
     private ClassItem? _selectedClass;
     public bool HasSelectedClass => SelectedClass is not null;
 
@@ -227,6 +245,7 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
             // grids — a familiar layout when reading top-to-bottom is "what
             // you inherited" then "what you added".
             chain.Reverse();
+            _currentChain = chain;
             Fields.Clear();
             Methods.Clear();
             ParentChain = BuildParentChainLabel(chain);
@@ -266,6 +285,73 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         {
             IsLoadingDetail = false;
         }
+    }
+
+    // ---------- Export (Phase 10) ----------------------------------------
+
+    [RelayCommand(CanExecute = nameof(CanExport))]
+    private Task ExportSdkHeaderAsync() =>
+        ExportAsync(SdkHeaderExporter.Render, "h", "C/C++ header");
+
+    [RelayCommand(CanExecute = nameof(CanExport))]
+    private Task ExportCsxAsync() =>
+        ExportAsync(CsxExporter.Render, "csx", "CE Structure Dissect");
+
+    private bool CanExport() => SelectedClass is not null && _currentChain.Count > 0;
+
+    private async Task ExportAsync(
+        Func<GetClassInfoResult, IReadOnlyList<GetClassInfoResult>?, string?, string> renderer,
+        string ext, string description)
+    {
+        if (SaveFileAsync is null) return;
+        if (_currentChain.Count == 0) return;
+
+        // _currentChain is oldest-first (root → … → self). Self = last entry;
+        // the rest are ancestors and only feed export when ShowInherited is on
+        // (matches what the user is currently looking at in the grid).
+        GetClassInfoResult self = _currentChain[^1];
+        IReadOnlyList<GetClassInfoResult>? ancestors =
+            (ShowInherited && _currentChain.Count > 1)
+                ? _currentChain.GetRange(0, _currentChain.Count - 1)
+                : null;
+
+        string assembly = SelectedAssembly?.Name ?? "Assembly";
+        string suggested = SafeFilename(
+            $"{assembly}_{(self.Namespace is { Length: > 0 } ns ? ns + "." : "")}{self.Name}.{ext}");
+
+        string? path;
+        try
+        {
+            path = await SaveFileAsync(suggested, description, ext).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"save dialog failed: {ex.Message}";
+            return;
+        }
+        if (path is null) return;
+
+        try
+        {
+            string text = renderer(self, ancestors, assembly);
+            await File.WriteAllTextAsync(path, text).ConfigureAwait(true);
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"export {ext} -> {path} ({text.Length} bytes)");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"export failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"export {ext} failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static string SafeFilename(string raw)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(raw.Length);
+        foreach (char c in raw) sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+        return sb.ToString();
     }
 
     private static string BuildParentChainLabel(List<GetClassInfoResult> oldestFirst)

@@ -1,7 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
 **Branch**: `dev`
-**Current phase**: **Phase 9 closed** ✅ — live inspection verified against a real IL2CPP target (SaGa F2R). `MainGame/PLY_WORK` walked instance reproduces the Cheat Engine "Get stat" reference table value-for-value (chrNo / objNoF / objNoM / id / purse / hpNow / lpNow / lpMax / wpNow all match). Phase 10 (export formats) is next.
+**Current phase**: **Phase 10 in flight** — UI-side export formats (SDK header + CSX). Built on top of closed Phase 9 (live inspection) and the in-app process picker / DLL injector that ships in [WindowsDllInjector.cs](ui/UnityDumpUI/Platform/WindowsDllInjector.cs).
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants).
 
@@ -20,6 +20,7 @@
 | 6 — Live memory + walking | ✅ | `readMemory` / `writeMemory` / `resolvePointer` / `findInstances` / `walkInstance` / symbol registry / `monoGetVTable` / `getEnumValues` |
 | 7 — UI skeleton | ✅ | Avalonia 12 + Native AOT, `PipeClient`, `BackendAdapter`, `FileLogger`, `WindowsProcessEnumerator`, 3-pane shell with handshake card |
 | 8 — UI panels (tree & browse) | ✅ | `AssemblyBrowserViewModel`, 5-column shell, virtualized assembly + class lists, fields/methods DataGrids, substring filter, **show inherited members** toggle |
+| 9.5 — In-app process picker + injector | ✅ | `IProcessEnumerator.ListUnityProcesses()` filters by detected Mono/IL2CPP modules; `IDllInjector` is an AOT-friendly C# port of `tools/Inject-Dll.ps1` using `LibraryImport` source-gen P/Invokes (caveat: `LibraryImport` needs explicit `EntryPoint=GetModuleHandleW` — does not auto-resolve A/W like classic `DllImport`). New `ProcessPickerWindow` modal + "Pick & inject…" button on the connection bar replaces `Test-Handshake.ps1` for the launch-and-attach workflow. |
 | 9 — Live inspection | ✅ | Phase-9 protocol DTOs (`FindInstancesResult` / `WalkInstanceResult` / `GetStaticFieldDataResult` / `ReadMemoryResult`), `BackendAdapter` typed methods, `LiveInspectionViewModel` (find → walk cascade, `PeriodicTimer` auto-refresh, static-field bridge), Inspector tab + right-click "Inspect" on the class list. **Nested-type support** in DLL (Mono + IL2CPP): classes surface as `Outer/Inner`, `FindClass` walks via `class_get_nested_types`. **Verified live**: `MainGame/PLY_WORK` decode matches a CE reference table value-for-value (build #68, SaGa F2R). DataGrids gained resize/reorder/sort; panes split by `GridSplitter`s; long names get hover tooltips. |
 
 ### Phase 8 specifics (just landed)

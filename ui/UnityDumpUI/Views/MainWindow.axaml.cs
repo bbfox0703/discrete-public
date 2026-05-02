@@ -1,6 +1,8 @@
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Markup.Xaml;
+using Avalonia.Platform.Storage;
 using UnityDumpUI.ViewModels;
 
 namespace UnityDumpUI.Views;
@@ -11,9 +13,10 @@ public partial class MainWindow : Window
     {
         AvaloniaXamlLoader.Load(this);
         var vm = new MainWindowViewModel();
-        // Hand the VM a callback that opens the picker dialog scoped to this
-        // window. Keeps the VM free of Avalonia Window types.
-        vm.PickProcessAsync = ShowPickerDialogAsync;
+        // Hand the VM the View-scoped callbacks. Keeps the VM free of
+        // Avalonia Window / StorageProvider types.
+        vm.PickProcessAsync     = ShowPickerDialogAsync;
+        vm.Browser.SaveFileAsync = SaveFileAsync;
         DataContext = vm;
     }
 
@@ -22,8 +25,26 @@ public partial class MainWindow : Window
         if (DataContext is not MainWindowViewModel vm) return null;
         var pickerVm = new ProcessPickerViewModel(vm.ProcessEnumerator);
         var picker   = new ProcessPickerWindow(pickerVm);
-        // Kick the initial refresh so the dialog opens with content visible.
         _ = pickerVm.RefreshCommand.ExecuteAsync(null);
         return await picker.ShowDialog<ProcessRow?>(this);
+    }
+
+    /// <summary>
+    /// Open a Save File dialog scoped to this window. Returns the chosen
+    /// absolute path or null on cancel. Wired into AssemblyBrowserViewModel
+    /// for the Phase 10 export commands.
+    /// </summary>
+    private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)
+    {
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            SuggestedFileName = suggestedName,
+            DefaultExtension  = ext,
+            FileTypeChoices   = new List<FilePickerFileType>
+            {
+                new(description) { Patterns = new[] { "*." + ext } },
+            },
+        });
+        return file?.TryGetLocalPath();
     }
 }

@@ -25,6 +25,8 @@
   <sys:String x:Key="Browser.ColAddress">Address</sys:String>
   <sys:String x:Key="Browser.ColToken">Token</sys:String>
   <sys:String x:Key="Browser.InspectMenuItem">Inspect (find instances)…</sys:String>
+  <sys:String x:Key="Browser.ExportSdkHeader">Export .h…</sys:String>
+  <sys:String x:Key="Browser.ExportCsx">Export .csx…</sys:String>
 
   <!-- Phase 9 inspector panels. -->
   <sys:String x:Key="Inspector.Tab">Inspector</sys:String>

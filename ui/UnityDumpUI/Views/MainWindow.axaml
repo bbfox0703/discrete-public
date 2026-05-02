@@ -196,6 +196,10 @@
                     Spacing="12" Margin="0,0,0,6">
           <CheckBox Content="{StaticResource Browser.ShowInherited}"
                     IsChecked="{Binding Browser.ShowInherited, Mode=TwoWay}" />
+          <Button Content="{StaticResource Browser.ExportSdkHeader}"
+                  Command="{Binding Browser.ExportSdkHeaderCommand}" />
+          <Button Content="{StaticResource Browser.ExportCsx}"
+                  Command="{Binding Browser.ExportCsxCommand}" />
           <ProgressBar IsIndeterminate="True"
                        IsVisible="{Binding Browser.IsLoadingDetail}"
                        Width="120" Height="4"
