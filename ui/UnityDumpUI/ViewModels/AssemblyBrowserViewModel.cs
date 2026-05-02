@@ -53,6 +53,21 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// </summary>
     public Func<string /*suggestedName*/, string /*description*/, string /*ext*/, Task<string?>>? SaveFileAsync { get; set; }
 
+    // ---------- Export options (Phase 10b) ------------------------------
+
+    [ObservableProperty] private int  _drilldownDepth       = 1;
+    [ObservableProperty] private int  _arrayLimit           = 16;
+    [ObservableProperty] private bool _collapsePointerNodes = true;
+    /// <summary>Base address used by CE XML root entry. User can paste an
+    /// instance address from <c>findInstances</c>; defaults to a placeholder
+    /// the user can find/replace in CE.</summary>
+    [ObservableProperty] private string _ceXmlBaseAddress = "INSTANCE_ADDRESS";
+
+    private ExportOptions CurrentExportOptions => new(
+        DrilldownDepth: Math.Max(0, DrilldownDepth),
+        ArrayLimit:     Math.Max(0, ArrayLimit),
+        CollapsePointerNodes: CollapsePointerNodes);
+
     public AssemblyBrowserViewModel(BackendAdapter backend, FileLogger logger)
     {
         _backend = backend;
@@ -94,6 +109,7 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(HasSelectedClass))]
     [NotifyCanExecuteChangedFor(nameof(ExportSdkHeaderCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportCsxCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportCeXmlCommand))]
     private ClassItem? _selectedClass;
     public bool HasSelectedClass => SelectedClass is not null;
 
@@ -291,24 +307,30 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     [RelayCommand(CanExecute = nameof(CanExport))]
     private Task ExportSdkHeaderAsync() =>
-        ExportAsync(SdkHeaderExporter.Render, "h", "C/C++ header");
+        ExportAsync("h", "C/C++ header", (self, ancestors, assembly, _, _, _) =>
+            Task.FromResult(SdkHeaderExporter.Render(self, ancestors, assembly)));
 
     [RelayCommand(CanExecute = nameof(CanExport))]
     private Task ExportCsxAsync() =>
-        ExportAsync(CsxExporter.Render, "csx", "CE Structure Dissect");
+        ExportAsync("csx", "CE Structure Dissect", (self, ancestors, assembly, options, lookup, ct) =>
+            CsxExporter.RenderAsync(self, ancestors, assembly, options, lookup, ct));
+
+    [RelayCommand(CanExecute = nameof(CanExport))]
+    private Task ExportCeXmlAsync() =>
+        ExportAsync("CT", "CE cheat table", (self, ancestors, assembly, options, lookup, ct) =>
+            CeXmlExporter.RenderAsync(CeXmlBaseAddress, self, ancestors, assembly, options, lookup, ct));
 
     private bool CanExport() => SelectedClass is not null && _currentChain.Count > 0;
 
     private async Task ExportAsync(
-        Func<GetClassInfoResult, IReadOnlyList<GetClassInfoResult>?, string?, string> renderer,
-        string ext, string description)
+        string ext, string description,
+        Func<GetClassInfoResult, IReadOnlyList<GetClassInfoResult>?, string,
+             ExportOptions, IClassInfoLookup, CancellationToken,
+             Task<string>> renderer)
     {
         if (SaveFileAsync is null) return;
         if (_currentChain.Count == 0) return;
 
-        // _currentChain is oldest-first (root → … → self). Self = last entry;
-        // the rest are ancestors and only feed export when ShowInherited is on
-        // (matches what the user is currently looking at in the grid).
         GetClassInfoResult self = _currentChain[^1];
         IReadOnlyList<GetClassInfoResult>? ancestors =
             (ShowInherited && _currentChain.Count > 1)
@@ -333,10 +355,11 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
         try
         {
-            string text = renderer(self, ancestors, assembly);
+            string text = await renderer(self, ancestors, assembly,
+                CurrentExportOptions, _backend, default).ConfigureAwait(true);
             await File.WriteAllTextAsync(path, text).ConfigureAwait(true);
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
-                $"export {ext} -> {path} ({text.Length} bytes)");
+                $"export {ext} -> {path} ({text.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit} collapse={CollapsePointerNodes})");
         }
         catch (Exception ex)
         {

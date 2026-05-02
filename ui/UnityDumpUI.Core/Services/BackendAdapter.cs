@@ -8,10 +8,17 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using UnityDumpUI.Core.Services.Export;
 
 namespace UnityDumpUI.Core.Services;
 
-public sealed class BackendAdapter
+/// <summary>
+/// Adapter that exposes <see cref="GetClassInfoAsync(string,string?,string,CancellationToken)"/>
+/// to exporters via the <see cref="IClassInfoLookup"/> contract — soft-fails
+/// to null on either pipe error or handler-level <c>result.error</c> so
+/// drilldown can fall through to opaque pointers gracefully.
+/// </summary>
+public sealed class BackendAdapter : IClassInfoLookup
 {
     private readonly PipeClient _pipe;
 
@@ -75,6 +82,24 @@ public sealed class BackendAdapter
             ProtocolJsonContext.Default.RpcEnvelopeGetClassesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getClasses returned no result");
+    }
+
+    /// <summary>
+    /// <see cref="IClassInfoLookup"/> implementation: soft-fails to null on
+    /// pipe error so exporter recursion doesn't tear the whole render down.
+    /// </summary>
+    async Task<GetClassInfoResult?> IClassInfoLookup.GetClassInfoAsync(
+        string assembly, string @namespace, string name, CancellationToken ct)
+    {
+        try
+        {
+            GetClassInfoResult info = await GetClassInfoAsync(assembly, @namespace, name, ct).ConfigureAwait(false);
+            return string.IsNullOrEmpty(info.Error) ? info : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>

@@ -90,4 +90,75 @@ public static class UnityTypeMap
         => new(size, false, ce, c);
     private static ManagedTypeShape Pointer(string c)
         => new(8, true, "Pointer", c);
+
+    // ---------- Drilldown helpers ----------------------------------------
+
+    /// <summary>
+    /// For a Unity-managed type string, extract the referenced "user" class
+    /// (namespace + simple name) we should recurse into during drilldown
+    /// export. Strips arrays (<c>T[]</c>), <c>List`1&lt;T&gt;</c>, and any
+    /// generic instantiation (using the outer generic for non-list types).
+    /// Returns null for primitives, framework types
+    /// (System.* / UnityEngine.*), or anything we don't recognize.
+    /// </summary>
+    public static (string Namespace, string Name)? ExtractElementClass(string? unityType)
+    {
+        if (string.IsNullOrWhiteSpace(unityType)) return null;
+        string t = unityType.Trim();
+
+        // Array suffix: T[] -> T
+        while (t.EndsWith("[]", System.StringComparison.Ordinal))
+            t = t.Substring(0, t.Length - 2);
+
+        // Generic: pull the inner argument when the outer is List`1, otherwise
+        // recurse into the outer (which is the actual storage type).
+        int lt = t.IndexOf('<');
+        if (lt > 0 && t.EndsWith(">", System.StringComparison.Ordinal))
+        {
+            string outer = t.Substring(0, lt);
+            string inner = t.Substring(lt + 1, t.Length - lt - 2).Trim();
+            if (outer == "System.Collections.Generic.List`1" ||
+                outer == "System.Collections.Generic.IList`1" ||
+                outer == "System.Collections.Generic.IEnumerable`1" ||
+                outer == "System.Collections.Generic.HashSet`1" ||
+                outer == "System.Collections.Generic.IReadOnlyList`1")
+            {
+                return ExtractElementClass(inner);
+            }
+            // Custom generic container (e.g. MainGame.ClassAry<T>) — recurse on inner.
+            return ExtractElementClass(inner);
+        }
+
+        // Skip framework / value types — UnityTypeMap.Resolve handles those inline.
+        if (t.StartsWith("System.",      System.StringComparison.Ordinal)) return null;
+        if (t.StartsWith("UnityEngine.", System.StringComparison.Ordinal)) return null;
+        if (t.IndexOf('.') < 0)
+        {
+            // Top-level (no namespace) user type — fine to drill.
+            return (string.Empty, t);
+        }
+
+        int dot = t.LastIndexOf('.');
+        return (t.Substring(0, dot), t.Substring(dot + 1));
+    }
+
+    /// <summary>True when the type referred to is a managed reference (8-byte pointer).</summary>
+    public static bool IsPointerType(string? unityType)
+        => Resolve(unityType).IsPointer;
+
+    /// <summary>True when the type is a collection-shaped pointer (T[], List`1, etc.).</summary>
+    public static bool IsCollectionType(string? unityType)
+    {
+        if (string.IsNullOrWhiteSpace(unityType)) return false;
+        if (unityType.EndsWith("[]", System.StringComparison.Ordinal)) return true;
+        int lt = unityType.IndexOf('<');
+        if (lt < 0) return false;
+        string outer = unityType.Substring(0, lt);
+        return outer.EndsWith("List`1",            System.StringComparison.Ordinal)
+            || outer.EndsWith("IList`1",           System.StringComparison.Ordinal)
+            || outer.EndsWith("IEnumerable`1",     System.StringComparison.Ordinal)
+            || outer.EndsWith("HashSet`1",         System.StringComparison.Ordinal)
+            || outer.EndsWith("IReadOnlyList`1",   System.StringComparison.Ordinal)
+            || outer.EndsWith("ClassAry",          System.StringComparison.Ordinal);
+    }
 }

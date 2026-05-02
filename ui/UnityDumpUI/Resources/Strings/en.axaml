@@ -27,6 +27,12 @@
   <sys:String x:Key="Browser.InspectMenuItem">Inspect (find instances)…</sys:String>
   <sys:String x:Key="Browser.ExportSdkHeader">Export .h…</sys:String>
   <sys:String x:Key="Browser.ExportCsx">Export .csx…</sys:String>
+  <sys:String x:Key="Browser.ExportCeXml">Export .CT…</sys:String>
+  <sys:String x:Key="Browser.ExportOptions">Export options ▾</sys:String>
+  <sys:String x:Key="Browser.OptDrilldownDepth">Drilldown depth</sys:String>
+  <sys:String x:Key="Browser.OptArrayLimit">Array element limit</sys:String>
+  <sys:String x:Key="Browser.OptCollapse">Collapse pointer/array nodes (CE XML)</sys:String>
+  <sys:String x:Key="Browser.OptCeXmlBase">CE XML base address</sys:String>
 
   <!-- Phase 9 inspector panels. -->
   <sys:String x:Key="Inspector.Tab">Inspector</sys:String>
