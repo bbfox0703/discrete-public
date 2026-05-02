@@ -93,43 +93,41 @@ public static class CeXmlExporter
     }
 
     /// <summary>
-    /// Single-field "pointer chain" export: emits a CE entry rooted at
-    /// <paramref name="baseAddress"/> that drills exactly one field, useful
-    /// for "right-click → Export pointer chain" workflows.
+    /// Single-field "pointer chain" export with optional drilldown — emits a
+    /// CE table containing one root entry rooted at <paramref name="baseAddress"/>
+    /// for the given field. Honors <paramref name="options"/> the same way the
+    /// full export does, so a depth=1 ArrayLimit=8 export of a class-pointer
+    /// field will resolve to the same nested structure shown in the full
+    /// table. Useful for "right-click on field → Copy CE field" workflows
+    /// where the user only wants one record pasted into CE.
     /// </summary>
-    public static string RenderField(
+    public static async Task<string> RenderFieldAsync(
         string             baseAddress,
         FieldEntry         field,
         GetClassInfoResult declaringClass,
-        string?            assemblyName)
+        string?            assemblyName,
+        ExportOptions      options,
+        IClassInfoLookup?  lookup,
+        CancellationToken  ct = default)
     {
         var sb = new StringBuilder(1024);
         var idGen = new IdGen();
-        ManagedTypeShape shape = UnityTypeMap.Resolve(field.Type);
+        var visited = new HashSet<string>();
 
         sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
         string rootName = $"{StructLabel(declaringClass, assemblyName)}.{field.Name}";
-        if (shape.IsPointer)
-        {
-            // Pointer chain: base + [+0xNN] -> Offsets=[0] dereferences, child shows the value.
-            OpenGroup(sb, "    ", idGen, rootName, baseAddress,
-                      offsets: null, collapsed: false, varType: "8 Bytes", showAsHex: true);
-            EmitLeaf(sb, "      ", idGen, $"{field.Name} (deref)",
-                     vartype: "8 Bytes", showAsHex: true,
-                     address: $"+{field.Offset:X}",
-                     offsets: new[] { 0 });
-            CloseGroup(sb, "    ");
-        }
-        else
-        {
-            EmitLeaf(sb, "    ", idGen, rootName,
-                     vartype: shape.CeTypeKeyword, showAsHex: false,
-                     address: $"{baseAddress}+{field.Offset:X}",
-                     offsets: null);
-        }
+        // Wrap in a base-address group so the field's relative +0xNN address
+        // resolves correctly without polluting the user's existing CE table.
+        OpenGroup(sb, "    ", idGen, rootName, baseAddress,
+                  offsets: null, collapsed: false, varType: "8 Bytes", showAsHex: true);
+        await EmitOneFieldAsync(sb, "      ", idGen, field,
+                                isInherited: false, assemblyName,
+                                options, lookup, visited,
+                                currentDepth: 0, ct).ConfigureAwait(false);
+        CloseGroup(sb, "    ");
 
         sb.Append("  </CheatEntries>\n");
         sb.Append("</CheatTable>\n");
@@ -146,100 +144,113 @@ public static class CeXmlExporter
         int currentDepth, CancellationToken ct)
     {
         if (info.Fields is not { Count: > 0 } fields) return;
-
         foreach (FieldEntry f in fields.Where(x => !x.Static))
         {
-            ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
-            string desc = isInherited
-                ? $"{f.Name} : {f.Type ?? "?"}  (inherited)"
-                : $"{f.Name} : {f.Type ?? "?"}";
-            string addr = $"+{f.Offset:X}";
+            await EmitOneFieldAsync(sb, indent, ids, f, isInherited,
+                                    assemblyName, options, lookup, visited,
+                                    currentDepth, ct).ConfigureAwait(false);
+        }
+    }
 
-            if (!shape.IsPointer)
+    /// <summary>
+    /// Per-field emit. Shared between <see cref="EmitFieldsAsync"/> (which
+    /// loops a class's fields) and <see cref="RenderFieldAsync"/> (which
+    /// emits exactly one). Handles scalar leaves, pointer GroupHeaders with
+    /// <c>Offsets=[0]</c> dereference, optional drilldown into the resolved
+    /// element class, and per-index expansion for collection-typed fields.
+    /// </summary>
+    private static async Task EmitOneFieldAsync(
+        StringBuilder sb, string indent, IdGen ids,
+        FieldEntry f, bool isInherited,
+        string? assemblyName, ExportOptions options,
+        IClassInfoLookup? lookup, HashSet<string> visited,
+        int currentDepth, CancellationToken ct)
+    {
+        ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
+        string desc = isInherited
+            ? $"{f.Name} : {f.Type ?? "?"}  (inherited)"
+            : $"{f.Name} : {f.Type ?? "?"}";
+        string addr = $"+{f.Offset:X}";
+
+        if (!shape.IsPointer)
+        {
+            EmitLeaf(sb, indent, ids, desc,
+                     vartype: shape.CeTypeKeyword,
+                     showAsHex: shape.CeTypeKeyword.EndsWith("Bytes"),
+                     address: addr, offsets: null);
+            return;
+        }
+
+        // Pointer field — GroupHeader with Offsets=[0] dereference.
+        bool isCollection = UnityTypeMap.IsCollectionType(f.Type);
+        bool canDrill = lookup is not null
+                        && currentDepth < options.DrilldownDepth
+                        && !string.IsNullOrEmpty(f.Type);
+
+        (string ns, string name)? target = canDrill
+            ? UnityTypeMap.ExtractElementClass(f.Type)
+            : null;
+
+        GetClassInfoResult? child = null;
+        string? cycleKey = null;
+        if (target is not null)
+        {
+            cycleKey = $"{assemblyName ?? "?"}!{target.Value.ns}.{target.Value.name}";
+            if (visited.Add(cycleKey))
             {
-                EmitLeaf(sb, indent, ids, desc,
-                         vartype: shape.CeTypeKeyword,
-                         showAsHex: shape.CeTypeKeyword.EndsWith("Bytes"),
-                         address: addr, offsets: null);
-                continue;
-            }
-
-            // Pointer field — emit a GroupHeader that dereferences via Offsets=[0].
-            // Drilldown depth and resolvability decide whether children are emitted.
-            bool isCollection = UnityTypeMap.IsCollectionType(f.Type);
-            bool canDrill = lookup is not null
-                            && currentDepth < options.DrilldownDepth
-                            && !string.IsNullOrEmpty(f.Type);
-
-            (string ns, string name)? target = canDrill
-                ? UnityTypeMap.ExtractElementClass(f.Type)
-                : null;
-
-            GetClassInfoResult? child = null;
-            string? cycleKey = null;
-            if (target is not null)
-            {
-                cycleKey = $"{assemblyName ?? "?"}!{target.Value.ns}.{target.Value.name}";
-                if (visited.Add(cycleKey))
+                try
                 {
-                    try
-                    {
-                        child = await lookup!.GetClassInfoAsync(
-                            assemblyName ?? string.Empty,
-                            target.Value.ns, target.Value.name, ct).ConfigureAwait(false);
-                    }
-                    catch { /* tolerate */ }
-                    if (child is null || !string.IsNullOrEmpty(child.Error))
-                    {
-                        visited.Remove(cycleKey);
-                        child = null;
-                    }
+                    child = await lookup!.GetClassInfoAsync(
+                        assemblyName ?? string.Empty,
+                        target.Value.ns, target.Value.name, ct).ConfigureAwait(false);
                 }
-                else
+                catch { /* tolerate */ }
+                if (child is null || !string.IsNullOrEmpty(child.Error))
                 {
-                    cycleKey = null; // already visited; emit placeholder only
-                }
-            }
-
-            // Open the pointer group.
-            OpenGroup(sb, indent, ids, desc, addr,
-                      offsets: new[] { 0 },
-                      collapsed: options.CollapsePointerNodes,
-                      varType: null, showAsHex: true);
-
-            if (child is not null && isCollection && options.ArrayLimit > 0)
-            {
-                // Array-of-class drilldown: per-element entry at offset
-                // i*childSize, each containing the resolved struct's fields.
-                int elemSize = ComputeStructSize(child);
-                if (elemSize <= 0) elemSize = 8;
-                for (int i = 0; i < options.ArrayLimit; ++i)
-                {
-                    int elemOffset = i * elemSize;
-                    OpenGroup(sb, indent + "  ", ids,
-                              $"[{i}]", $"+{elemOffset:X}",
-                              offsets: null,
-                              collapsed: options.CollapsePointerNodes,
-                              varType: null, showAsHex: true);
-                    await EmitFieldsAsync(sb, indent + "    ", ids, child,
-                                          isInherited: false, assemblyName,
-                                          options, lookup, visited,
-                                          currentDepth + 1, ct).ConfigureAwait(false);
-                    CloseGroup(sb, indent + "  ");
+                    visited.Remove(cycleKey);
+                    child = null;
                 }
             }
-            else if (child is not null)
+            else
             {
-                // Single-instance pointer drilldown.
-                await EmitFieldsAsync(sb, indent + "  ", ids, child,
+                cycleKey = null;
+            }
+        }
+
+        OpenGroup(sb, indent, ids, desc, addr,
+                  offsets: new[] { 0 },
+                  collapsed: options.CollapsePointerNodes,
+                  varType: null, showAsHex: true);
+
+        if (child is not null && isCollection && options.ArrayLimit > 0)
+        {
+            int elemSize = ComputeStructSize(child);
+            if (elemSize <= 0) elemSize = 8;
+            for (int i = 0; i < options.ArrayLimit; ++i)
+            {
+                int elemOffset = i * elemSize;
+                OpenGroup(sb, indent + "  ", ids,
+                          $"[{i}]", $"+{elemOffset:X}",
+                          offsets: null,
+                          collapsed: options.CollapsePointerNodes,
+                          varType: null, showAsHex: true);
+                await EmitFieldsAsync(sb, indent + "    ", ids, child,
                                       isInherited: false, assemblyName,
                                       options, lookup, visited,
                                       currentDepth + 1, ct).ConfigureAwait(false);
+                CloseGroup(sb, indent + "  ");
             }
-
-            CloseGroup(sb, indent);
-            if (cycleKey is not null) visited.Remove(cycleKey);
         }
+        else if (child is not null)
+        {
+            await EmitFieldsAsync(sb, indent + "  ", ids, child,
+                                  isInherited: false, assemblyName,
+                                  options, lookup, visited,
+                                  currentDepth + 1, ct).ConfigureAwait(false);
+        }
+
+        CloseGroup(sb, indent);
+        if (cycleKey is not null) visited.Remove(cycleKey);
     }
 
     // ---------- Emission primitives --------------------------------------

@@ -202,6 +202,8 @@
                   Command="{Binding Browser.ExportCsxCommand}" />
           <Button Content="{StaticResource Browser.ExportCeXml}"
                   Command="{Binding Browser.ExportCeXmlCommand}" />
+          <Button Content="{StaticResource Browser.CopyCeXml}"
+                  Command="{Binding Browser.CopyCeXmlCommand}" />
           <Button Content="{StaticResource Browser.ExportOptions}">
             <Button.Flyout>
               <Flyout Placement="BottomEdgeAlignedLeft">
@@ -245,6 +247,7 @@
         <TabControl>
           <TabItem Header="{StaticResource Browser.FieldsTab}">
             <DataGrid ItemsSource="{Binding Browser.Fields}"
+                      SelectedItem="{Binding Browser.SelectedFieldRow, Mode=TwoWay}"
                       IsReadOnly="True"
                       AutoGenerateColumns="False"
                       CanUserResizeColumns="True"
@@ -252,6 +255,12 @@
                       CanUserSortColumns="True"
                       GridLinesVisibility="Horizontal"
                       x:DataType="vm:MainWindowViewModel">
+              <DataGrid.ContextMenu>
+                <ContextMenu>
+                  <MenuItem Header="{StaticResource Browser.CopyCeField}"
+                            Command="{Binding Browser.CopyCeFieldCommand}" />
+                </ContextMenu>
+              </DataGrid.ContextMenu>
               <DataGrid.Columns>
                 <DataGridTextColumn Header="{StaticResource Browser.ColName}"   Width="*"
                                     Binding="{Binding Name, x:DataType=vm:FieldRow}" />

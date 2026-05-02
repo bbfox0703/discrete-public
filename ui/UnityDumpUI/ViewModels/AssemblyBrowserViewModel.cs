@@ -53,6 +53,12 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// </summary>
     public Func<string /*suggestedName*/, string /*description*/, string /*ext*/, Task<string?>>? SaveFileAsync { get; set; }
 
+    /// <summary>
+    /// View-supplied clipboard write. Wired by MainWindow code-behind to
+    /// the Avalonia top-level Clipboard so the VM stays UI-agnostic.
+    /// </summary>
+    public Func<string, Task>? CopyToClipboardAsync { get; set; }
+
     // ---------- Export options (Phase 10b) ------------------------------
 
     [ObservableProperty] private int  _drilldownDepth       = 1;
@@ -110,6 +116,7 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(ExportSdkHeaderCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportCsxCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportCeXmlCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CopyCeXmlCommand))]
     private ClassItem? _selectedClass;
     public bool HasSelectedClass => SelectedClass is not null;
 
@@ -126,6 +133,11 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     public ObservableCollection<FieldRow>  Fields  { get; } = new();
     public ObservableCollection<MethodRow> Methods { get; } = new();
+
+    /// <summary>Currently selected row in the Fields DataGrid — drives "Copy CE field".</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(CopyCeFieldCommand))]
+    private FieldRow? _selectedFieldRow;
 
     [ObservableProperty] private string _parentChain = string.Empty;
 
@@ -320,7 +332,93 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         ExportAsync("CT", "CE cheat table", (self, ancestors, assembly, options, lookup, ct) =>
             CeXmlExporter.RenderAsync(CeXmlBaseAddress, self, ancestors, assembly, options, lookup, ct));
 
-    private bool CanExport() => SelectedClass is not null && _currentChain.Count > 0;
+    /// <summary>
+    /// Copy CE XML for the whole class to the clipboard — paste straight into
+    /// CE's address-list pane (Edit → Paste, or Ctrl+V on the entry list).
+    /// Honors all export options (depth / arrayLimit / collapse) and uses the
+    /// current CeXmlBaseAddress as the root anchor.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanExport))]
+    private async Task CopyCeXmlAsync()
+    {
+        if (CopyToClipboardAsync is null || _currentChain.Count == 0) return;
+
+        GetClassInfoResult self = _currentChain[^1];
+        IReadOnlyList<GetClassInfoResult>? ancestors =
+            (ShowInherited && _currentChain.Count > 1)
+                ? _currentChain.GetRange(0, _currentChain.Count - 1)
+                : null;
+        string assembly = SelectedAssembly?.Name ?? "Assembly";
+
+        try
+        {
+            string xml = await CeXmlExporter.RenderAsync(
+                CeXmlBaseAddress, self, ancestors, assembly,
+                CurrentExportOptions, _backend, default).ConfigureAwait(true);
+            await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"copy CE XML clipboard ({xml.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit} collapse={CollapsePointerNodes})");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"copy CE XML failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"copy CE XML failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Copy a single field's CE XML pointer-chain to the clipboard. Uses the
+    /// currently-selected row in the Fields DataGrid; when the field is a
+    /// pointer/array and drilldown is configured, the resolved nested struct
+    /// is included so pasting one entry into CE gives the full sub-tree.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanCopyField))]
+    private async Task CopyCeFieldAsync()
+    {
+        if (CopyToClipboardAsync is null || SelectedFieldRow is null || _currentChain.Count == 0) return;
+
+        // Find the FieldEntry + the GetClassInfoResult that declared it (so
+        // RenderField can label the entry with the right declaring class).
+        FieldRow row = SelectedFieldRow;
+        FieldEntry? entry = null;
+        GetClassInfoResult declaring = _currentChain[^1];
+        foreach (GetClassInfoResult info in _currentChain)
+        {
+            if (info.Fields is null) continue;
+            foreach (FieldEntry f in info.Fields)
+            {
+                if (f.Name == row.Name && f.Offset == row.Offset && f.Static == row.IsStatic)
+                {
+                    entry = f;
+                    declaring = info;
+                    break;
+                }
+            }
+            if (entry is not null) break;
+        }
+        if (entry is null) return;
+
+        string assembly = SelectedAssembly?.Name ?? "Assembly";
+        try
+        {
+            string xml = await CeXmlExporter.RenderFieldAsync(
+                CeXmlBaseAddress, entry, declaring, assembly,
+                CurrentExportOptions, _backend, default).ConfigureAwait(true);
+            await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"copy CE field {entry.Name} clipboard ({xml.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit})");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"copy CE field failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"copy CE field failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private bool CanCopyField() => SelectedFieldRow is not null && _currentChain.Count > 0;
+    private bool CanExport()    => SelectedClass is not null && _currentChain.Count > 0;
 
     private async Task ExportAsync(
         string ext, string description,
