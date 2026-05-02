@@ -1,8 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (up to date with `origin/dev`)
-**Latest commit**: `66240c4` — `build: UE5-style build.cmd wrapper + dist/ for all outputs`
-**Current phase**: **Phase 8 closed** ✅ — assembly browser panels shipped. Phase 9 (Live Inspection) is next.
+**Branch**: `dev`
+**Current phase**: **Phase 9 in flight** — UI scaffold shipped (DTOs, adapter, VM, panel + context menu). Awaiting live verification on a real IL2CPP / Mono target before closing.
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants).
 
@@ -21,6 +20,7 @@
 | 6 — Live memory + walking | ✅ | `readMemory` / `writeMemory` / `resolvePointer` / `findInstances` / `walkInstance` / symbol registry / `monoGetVTable` / `getEnumValues` |
 | 7 — UI skeleton | ✅ | Avalonia 12 + Native AOT, `PipeClient`, `BackendAdapter`, `FileLogger`, `WindowsProcessEnumerator`, 3-pane shell with handshake card |
 | 8 — UI panels (tree & browse) | ✅ | `AssemblyBrowserViewModel`, 5-column shell, virtualized assembly + class lists, fields/methods DataGrids, substring filter, **show inherited members** toggle |
+| 9 — Live inspection (UI scaffold) | 🟡 | Phase-9 protocol DTOs (`FindInstancesResult` / `WalkInstanceResult` / `GetStaticFieldDataResult` / `ReadMemoryResult`), `BackendAdapter` typed methods, `LiveInspectionViewModel` (find → walk cascade, `PeriodicTimer` auto-refresh, static-field bridge), Inspector tab + right-click "Inspect" on the class list. Connected against a real IL2CPP target (build #66, BattleCharacterParamTextData fields visible). DataGrids gained resize / reorder / sort. Pending: live-value verification on a known field (e.g. `PlayerController.health`). |
 
 ### Phase 8 specifics (just landed)
 

@@ -6,6 +6,7 @@
 // first-pass serializer to silently drop fields).
 
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace UnityDumpUI.Core.Services;
@@ -130,4 +131,87 @@ public sealed class MethodEntry
     [JsonPropertyName("static")]  public bool    Static  { get; set; }
     // IL2CPP only — Mono path returns the JIT entry from monoCompileMethod on demand.
     [JsonPropertyName("address")] public string? Address { get; set; }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9 — live inspection (instance discovery, instance walking,
+// static field data, raw memory read).
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// `findInstances` result. IL2CPP fills <see cref="ClassPtr"/>; Mono fills
+/// <see cref="VTable"/>. Both backends share <see cref="Matches"/>.
+/// </summary>
+public sealed class FindInstancesResult
+{
+    [JsonPropertyName("class_ptr")] public string?       ClassPtr { get; set; }
+    [JsonPropertyName("vtable")]    public string?       VTable   { get; set; }
+    [JsonPropertyName("count")]     public int           Count    { get; set; }
+    [JsonPropertyName("limit")]     public int           Limit    { get; set; }
+    [JsonPropertyName("matches")]   public List<string>  Matches  { get; set; } = new();
+    [JsonPropertyName("error")]     public string?       Error    { get; set; }
+}
+
+/// <summary>
+/// `walkInstance` result. Decodes managed instance fields up the inheritance
+/// chain (depth capped at 16, count capped at 4096 by the DLL).
+/// </summary>
+public sealed class WalkInstanceResult
+{
+    [JsonPropertyName("address")]   public string?               Address   { get; set; }
+    [JsonPropertyName("namespace")] public string?               Namespace { get; set; }
+    [JsonPropertyName("name")]      public string?               Name      { get; set; }
+    [JsonPropertyName("depth")]     public int                   Depth     { get; set; }
+    [JsonPropertyName("count")]     public int                   Count     { get; set; }
+    [JsonPropertyName("fields")]    public List<WalkedField>?    Fields    { get; set; }
+    [JsonPropertyName("error")]     public string?               Error     { get; set; }
+}
+
+/// <summary>
+/// One decoded field from <c>walkInstance</c>. Per pipe-protocol.md the per-type
+/// payload is heterogeneous (bool / int / number / hex string / decoded UTF-16
+/// string / unreadable marker), so <see cref="Value"/> is a raw
+/// <see cref="JsonElement"/> the UI inspects at render time.
+/// </summary>
+public sealed class WalkedField
+{
+    [JsonPropertyName("name")]          public string       Name         { get; set; } = string.Empty;
+    [JsonPropertyName("type")]          public string?      Type         { get; set; }
+    [JsonPropertyName("offset")]        public int          Offset       { get; set; }
+    [JsonPropertyName("from")]          public string?      From         { get; set; }
+    [JsonPropertyName("address")]       public string?      Address      { get; set; }
+
+    // Decoded payload — exactly one of these is meaningful per row.
+    [JsonPropertyName("value")]         public JsonElement? Value        { get; set; }
+    [JsonPropertyName("ptr")]           public string?      Ptr          { get; set; }
+    [JsonPropertyName("string")]        public string?      String       { get; set; }
+    [JsonPropertyName("string_length")] public int?         StringLength { get; set; }
+    [JsonPropertyName("string_error")]  public string?      StringError  { get; set; }
+    [JsonPropertyName("error")]         public string?      Error        { get; set; }
+}
+
+/// <summary>
+/// `getStaticFieldData` result — runtime address of the static field's storage
+/// so callers can <c>readMemory</c> it directly.
+/// </summary>
+public sealed class GetStaticFieldDataResult
+{
+    [JsonPropertyName("field")]   public string? Field   { get; set; }
+    [JsonPropertyName("type")]    public string? Type    { get; set; }
+    [JsonPropertyName("offset")]  public int     Offset  { get; set; }
+    [JsonPropertyName("flags")]   public uint    Flags   { get; set; }
+    [JsonPropertyName("address")] public string? Address { get; set; }
+    [JsonPropertyName("error")]   public string? Error   { get; set; }
+}
+
+/// <summary>
+/// `readMemory` result. Soft errors land in <see cref="Error"/>
+/// (e.g. "memory not readable").
+/// </summary>
+public sealed class ReadMemoryResult
+{
+    [JsonPropertyName("address")] public string? Address { get; set; }
+    [JsonPropertyName("size")]    public int     Size    { get; set; }
+    [JsonPropertyName("hex")]     public string? Hex     { get; set; }
+    [JsonPropertyName("error")]   public string? Error   { get; set; }
 }

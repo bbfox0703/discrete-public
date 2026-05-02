@@ -93,6 +93,12 @@
         <ListBox ItemsSource="{Binding Browser.FilteredClasses}"
                  SelectedItem="{Binding Browser.SelectedClass, Mode=TwoWay}"
                  x:DataType="vm:MainWindowViewModel">
+          <ListBox.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="{StaticResource Browser.InspectMenuItem}"
+                        Command="{Binding InspectSelectedClassCommand}" />
+            </ContextMenu>
+          </ListBox.ContextMenu>
           <ListBox.ItemTemplate>
             <DataTemplate x:DataType="vm:ClassItem">
               <StackPanel>
@@ -185,6 +191,9 @@
             <DataGrid ItemsSource="{Binding Browser.Fields}"
                       IsReadOnly="True"
                       AutoGenerateColumns="False"
+                      CanUserResizeColumns="True"
+                      CanUserReorderColumns="True"
+                      CanUserSortColumns="True"
                       GridLinesVisibility="Horizontal"
                       x:DataType="vm:MainWindowViewModel">
               <DataGrid.Columns>
@@ -203,10 +212,140 @@
               </DataGrid.Columns>
             </DataGrid>
           </TabItem>
+          <TabItem Header="{StaticResource Inspector.Tab}">
+            <DockPanel Margin="0,4,0,0">
+
+              <!-- Inspector toolbar -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="8" Margin="0,0,0,6">
+                <Button Content="{StaticResource Inspector.SetTarget}"
+                        Command="{Binding InspectSelectedClassCommand}" />
+                <Button Content="{StaticResource Inspector.Find}"
+                        Command="{Binding Inspector.FindInstancesCommand}" />
+                <Button Content="{StaticResource Inspector.RefreshWalk}"
+                        Command="{Binding Inspector.RefreshWalkCommand}" />
+                <Button Content="{StaticResource Inspector.Clear}"
+                        Command="{Binding Inspector.ClearCommand}" />
+                <TextBlock Text="{StaticResource Inspector.LimitLabel}"
+                           VerticalAlignment="Center" Opacity="0.7" Margin="8,0,0,0" />
+                <NumericUpDown Value="{Binding Inspector.InstanceLimit, Mode=TwoWay}"
+                               Minimum="1" Maximum="4096" Increment="64"
+                               Width="110" />
+                <ProgressBar IsIndeterminate="True"
+                             IsVisible="{Binding Inspector.IsLoadingInstances}"
+                             Width="80" Height="4" VerticalAlignment="Center" />
+              </StackPanel>
+
+              <!-- Auto-refresh row -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="6" Margin="0,0,0,6">
+                <TextBlock Text="{StaticResource Inspector.AutoRefreshLabel}"
+                           VerticalAlignment="Center" Opacity="0.7" />
+                <Button Content="{StaticResource Inspector.AutoRefreshOff}"
+                        Command="{Binding Inspector.AutoRefreshOffCommand}" />
+                <Button Content="{StaticResource Inspector.AutoRefresh250}"
+                        Command="{Binding Inspector.AutoRefreshFastCommand}" />
+                <Button Content="{StaticResource Inspector.AutoRefresh1000}"
+                        Command="{Binding Inspector.AutoRefreshSlowCommand}" />
+                <TextBlock Text="{Binding Inspector.AutoRefreshIntervalMs, StringFormat='= \{0\} ms'}"
+                           VerticalAlignment="Center" Opacity="0.6"
+                           Margin="6,0,0,0" />
+              </StackPanel>
+
+              <!-- Target / status header -->
+              <StackPanel DockPanel.Dock="Top" Spacing="2" Margin="0,0,0,6">
+                <TextBlock Text="{Binding Inspector.TargetLabel}"
+                           FontWeight="SemiBold"
+                           IsVisible="{Binding Inspector.HasTarget}" />
+                <TextBlock Text="{StaticResource Inspector.NoTarget}"
+                           Opacity="0.6"
+                           IsVisible="{Binding !Inspector.HasTarget}" />
+                <StackPanel Orientation="Horizontal" Spacing="8"
+                            IsVisible="{Binding Inspector.ClassPointer, Converter={x:Static ObjectConverters.IsNotNull}}">
+                  <TextBlock Text="{StaticResource Inspector.ClassPointerLabel}"
+                             Opacity="0.7" />
+                  <TextBlock Text="{Binding Inspector.ClassPointer}"
+                             FontFamily="Consolas,Cascadia Mono,monospace" />
+                </StackPanel>
+                <TextBlock Text="{Binding Inspector.WalkSummary}"
+                           Opacity="0.6" FontSize="11"
+                           IsVisible="{Binding Inspector.HasSelectedInstance}" />
+              </StackPanel>
+
+              <!-- Inspector error banner -->
+              <Border DockPanel.Dock="Top"
+                      IsVisible="{Binding Inspector.ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+                      Background="#33D32F2F" BorderBrush="#88D32F2F"
+                      BorderThickness="1" CornerRadius="4" Padding="10,6"
+                      Margin="0,0,0,6">
+                <TextBlock Text="{Binding Inspector.ErrorMessage}"
+                           Foreground="#FFD32F2F" TextWrapping="Wrap" />
+              </Border>
+
+              <!-- Instances + walked-fields split -->
+              <Grid ColumnDefinitions="240,2,*">
+                <DockPanel Grid.Column="0">
+                  <TextBlock DockPanel.Dock="Top"
+                             Text="{StaticResource Inspector.InstancesTitle}"
+                             FontWeight="SemiBold" Margin="0,0,0,4" />
+                  <TextBlock DockPanel.Dock="Bottom"
+                             Text="{Binding Inspector.Instances.Count, StringFormat='\{0\} matches'}"
+                             Opacity="0.6" FontSize="11" Margin="0,4,0,0" />
+                  <ListBox ItemsSource="{Binding Inspector.Instances}"
+                           SelectedItem="{Binding Inspector.SelectedInstance, Mode=TwoWay}"
+                           x:DataType="vm:MainWindowViewModel">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:InstanceItem">
+                        <TextBlock Text="{Binding Label}"
+                                   FontFamily="Consolas,Cascadia Mono,monospace" />
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                </DockPanel>
+
+                <Border Grid.Column="1" Background="#22000000" />
+
+                <DockPanel Grid.Column="2" Margin="6,0,0,0">
+                  <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto">
+                    <TextBlock Grid.Column="0"
+                               Text="{StaticResource Inspector.FieldsTitle}"
+                               FontWeight="SemiBold" Margin="0,0,0,4" />
+                    <ProgressBar Grid.Column="1" IsIndeterminate="True"
+                                 IsVisible="{Binding Inspector.IsLoadingWalk}"
+                                 Width="80" Height="4" VerticalAlignment="Center" />
+                  </Grid>
+                  <DataGrid ItemsSource="{Binding Inspector.Fields}"
+                            IsReadOnly="True"
+                            AutoGenerateColumns="False"
+                            CanUserResizeColumns="True"
+                            CanUserReorderColumns="True"
+                            CanUserSortColumns="True"
+                            GridLinesVisibility="Horizontal"
+                            x:DataType="vm:MainWindowViewModel">
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="{StaticResource Browser.ColName}"   Width="*"
+                                          Binding="{Binding Name, x:DataType=vm:WalkedFieldRow}" />
+                      <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
+                                          Binding="{Binding OffsetHex, x:DataType=vm:WalkedFieldRow}" />
+                      <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
+                                          Binding="{Binding Type, x:DataType=vm:WalkedFieldRow}" />
+                      <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
+                                          Binding="{Binding DisplayValue, x:DataType=vm:WalkedFieldRow}" />
+                      <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
+                                          Binding="{Binding DeclaredIn, x:DataType=vm:WalkedFieldRow}" />
+                    </DataGrid.Columns>
+                  </DataGrid>
+                </DockPanel>
+              </Grid>
+            </DockPanel>
+          </TabItem>
           <TabItem Header="{StaticResource Browser.MethodsTab}">
             <DataGrid ItemsSource="{Binding Browser.Methods}"
                       IsReadOnly="True"
                       AutoGenerateColumns="False"
+                      CanUserResizeColumns="True"
+                      CanUserReorderColumns="True"
+                      CanUserSortColumns="True"
                       GridLinesVisibility="Horizontal"
                       x:DataType="vm:MainWindowViewModel">
               <DataGrid.Columns>

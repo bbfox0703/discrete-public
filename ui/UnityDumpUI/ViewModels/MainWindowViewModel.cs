@@ -21,10 +21,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public MainWindowViewModel()
     {
-        _pipe    = new PipeClient();
-        _backend = new BackendAdapter(_pipe);
-        _logger  = new FileLogger();
-        Browser  = new AssemblyBrowserViewModel(_backend, _logger);
+        _pipe     = new PipeClient();
+        _backend  = new BackendAdapter(_pipe);
+        _logger   = new FileLogger();
+        Browser   = new AssemblyBrowserViewModel(_backend, _logger);
+        Inspector = new LiveInspectionViewModel(_backend, _logger);
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
     }
 
@@ -33,6 +34,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// Populated automatically after a successful handshake.
     /// </summary>
     public AssemblyBrowserViewModel Browser { get; }
+
+    /// <summary>
+    /// Phase 9 panels — instance finder + live walker. Targeted via
+    /// <see cref="InspectSelectedClassCommand"/> from the class list selection.
+    /// </summary>
+    public LiveInspectionViewModel Inspector { get; }
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -145,15 +152,35 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             Browser.SelectedAssembly = null;
             Browser.SelectedClass    = null;
             Browser.ParentChain      = string.Empty;
+
+            // Phase 9: drop inspector state too.
+            Inspector.ClearCommand.Execute(null);
         }
     }
 
     private bool CanDisconnect() => IsConnected;
 
+    /// <summary>
+    /// Hand the currently selected class off to the inspector and kick a
+    /// `findInstances`. Wired to the "Inspect" button on the Phase 9 tab and
+    /// the right-click menu on the Classes list.
+    /// </summary>
+    [RelayCommand]
+    private async Task InspectSelectedClassAsync()
+    {
+        if (Browser.SelectedAssembly is null || Browser.SelectedClass is null) return;
+        Inspector.SetTarget(
+            Browser.SelectedAssembly.Name,
+            Browser.SelectedClass.Namespace,
+            Browser.SelectedClass.Name);
+        await Inspector.FindInstancesCommand.ExecuteAsync(null).ConfigureAwait(true);
+    }
+
     public void Dispose()
     {
         _connectCts?.Cancel();
         _connectCts?.Dispose();
+        _ = Inspector.DisposeAsync();
         _ = _pipe.DisposeAsync();
         _logger.Dispose();
     }

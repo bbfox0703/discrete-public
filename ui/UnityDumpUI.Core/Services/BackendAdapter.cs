@@ -97,6 +97,99 @@ public sealed class BackendAdapter
         return env.Result ?? throw new PipeProtocolException("getClassInfo returned no result");
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 9 — live inspection.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// `findInstances` — heap-scan for class header pointers matching the given
+    /// class spec. Returns up to <paramref name="limit"/> matches (DLL caps at
+    /// 4096; default 256 if null).
+    /// </summary>
+    public async Task<FindInstancesResult> FindInstancesAsync(
+        string assembly, string? @namespace, string name,
+        int? limit = null, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["assembly"]  = Str(assembly),
+            ["namespace"] = Str(@namespace ?? string.Empty),
+            ["name"]      = Str(name),
+        };
+        if (limit is int l) args["limit"] = Int(l);
+
+        var env = await _pipe.SendAsync(
+            "findInstances", args,
+            ProtocolJsonContext.Default.RpcEnvelopeFindInstancesResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("findInstances returned no result");
+    }
+
+    /// <summary>
+    /// `walkInstance` — decode every managed instance field at
+    /// <paramref name="address"/> for the given class spec.
+    /// <paramref name="address"/> is passed through verbatim; protocol accepts
+    /// hex with or without `0x` prefix or a decimal integer.
+    /// </summary>
+    public async Task<WalkInstanceResult> WalkInstanceAsync(
+        string address, string assembly, string? @namespace, string name,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["address"]   = Str(address),
+            ["assembly"]  = Str(assembly),
+            ["namespace"] = Str(@namespace ?? string.Empty),
+            ["name"]      = Str(name),
+        };
+        var env = await _pipe.SendAsync(
+            "walkInstance", args,
+            ProtocolJsonContext.Default.RpcEnvelopeWalkInstanceResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("walkInstance returned no result");
+    }
+
+    /// <summary>
+    /// `getStaticFieldData` — runtime address of a static field's storage,
+    /// suitable for a follow-up <see cref="ReadMemoryAsync"/>.
+    /// </summary>
+    public async Task<GetStaticFieldDataResult> GetStaticFieldDataAsync(
+        string assembly, string? @namespace, string name, string field,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["assembly"]  = Str(assembly),
+            ["namespace"] = Str(@namespace ?? string.Empty),
+            ["name"]      = Str(name),
+            ["field"]     = Str(field),
+        };
+        var env = await _pipe.SendAsync(
+            "getStaticFieldData", args,
+            ProtocolJsonContext.Default.RpcEnvelopeGetStaticFieldDataResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("getStaticFieldData returned no result");
+    }
+
+    /// <summary>
+    /// `readMemory` — raw byte read. <paramref name="size"/> must be in
+    /// [1, 1048576]; soft errors land in <see cref="ReadMemoryResult.Error"/>.
+    /// </summary>
+    public async Task<ReadMemoryResult> ReadMemoryAsync(
+        string address, int size, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["address"] = Str(address),
+            ["size"]    = Int(size),
+        };
+        var env = await _pipe.SendAsync(
+            "readMemory", args,
+            ProtocolJsonContext.Default.RpcEnvelopeReadMemoryResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("readMemory returned no result");
+    }
+
     /// <summary>
     /// AOT-safe wrapper that serializes a string into a <see cref="JsonElement"/>
     /// via the source-gen context. The reflection-based
@@ -104,6 +197,10 @@ public sealed class BackendAdapter
     /// </summary>
     private static JsonElement Str(string value) =>
         JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.String);
+
+    /// <summary>AOT-safe int → <see cref="JsonElement"/>.</summary>
+    private static JsonElement Int(int value) =>
+        JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.Int32);
 
     private static void ThrowIfError(RpcError? error)
     {
