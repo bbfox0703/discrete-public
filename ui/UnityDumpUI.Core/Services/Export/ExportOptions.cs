@@ -10,7 +10,8 @@ namespace UnityDumpUI.Core.Services.Export;
 public sealed record ExportOptions(
     int  DrilldownDepth        = 1,
     int  ArrayLimit            = 16,
-    bool CollapsePointerNodes  = true)
+    bool CollapsePointerNodes  = true,
+    bool LiveData              = false)
 {
     public static ExportOptions Defaults { get; } = new();
 }

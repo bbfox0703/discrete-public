@@ -64,6 +64,10 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     [ObservableProperty] private int  _drilldownDepth       = 1;
     [ObservableProperty] private int  _arrayLimit           = 16;
     [ObservableProperty] private bool _collapsePointerNodes = true;
+    /// <summary>When set, CE XML render does live <c>readMemory</c>/<c>walkArray</c> calls so
+    /// every node carries an absolute address (no <c>Offsets</c> chain). Requires
+    /// <see cref="CeXmlBaseAddress"/> to be a real hex address.</summary>
+    [ObservableProperty] private bool _useLiveData          = true;
     /// <summary>Base address used by CE XML root entry. User can paste an
     /// instance address from <c>findInstances</c>; defaults to a placeholder
     /// the user can find/replace in CE.</summary>
@@ -72,7 +76,8 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     private ExportOptions CurrentExportOptions => new(
         DrilldownDepth: Math.Max(0, DrilldownDepth),
         ArrayLimit:     Math.Max(0, ArrayLimit),
-        CollapsePointerNodes: CollapsePointerNodes);
+        CollapsePointerNodes: CollapsePointerNodes,
+        LiveData: UseLiveData);
 
     public AssemblyBrowserViewModel(BackendAdapter backend, FileLogger logger)
     {

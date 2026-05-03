@@ -16,9 +16,11 @@ namespace UnityDumpUI.Core.Services;
 /// Adapter that exposes <see cref="GetClassInfoAsync(string,string?,string,CancellationToken)"/>
 /// to exporters via the <see cref="IClassInfoLookup"/> contract — soft-fails
 /// to null on either pipe error or handler-level <c>result.error</c> so
-/// drilldown can fall through to opaque pointers gracefully.
+/// drilldown can fall through to opaque pointers gracefully. Also exposes
+/// the live-process surfaces (<see cref="ILiveExportSource"/>) for the CE
+/// XML live-data render mode.
 /// </summary>
-public sealed class BackendAdapter : IClassInfoLookup
+public sealed class BackendAdapter : ILiveExportSource
 {
     private readonly PipeClient _pipe;
 

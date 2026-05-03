@@ -207,33 +207,38 @@
           <Button Content="{StaticResource Browser.ExportOptions}">
             <Button.Flyout>
               <Flyout Placement="BottomEdgeAlignedLeft">
-                <Grid ColumnDefinitions="200,160" RowDefinitions="Auto,Auto,Auto,Auto"
-                      RowSpacing="6" Margin="6">
-                  <TextBlock Grid.Row="0" Grid.Column="0"
-                             Text="{StaticResource Browser.OptDrilldownDepth}"
-                             VerticalAlignment="Center" Opacity="0.8" />
-                  <NumericUpDown Grid.Row="0" Grid.Column="1"
-                                 Value="{Binding Browser.DrilldownDepth, Mode=TwoWay}"
-                                 Minimum="0" Maximum="5" Increment="1" />
+                <StackPanel Margin="6" Spacing="6">
+                  <Grid ColumnDefinitions="200,160" RowDefinitions="Auto,Auto"
+                        RowSpacing="6">
+                    <TextBlock Grid.Row="0" Grid.Column="0"
+                               Text="{StaticResource Browser.OptDrilldownDepth}"
+                               VerticalAlignment="Center" Opacity="0.8" />
+                    <NumericUpDown Grid.Row="0" Grid.Column="1"
+                                   Value="{Binding Browser.DrilldownDepth, Mode=TwoWay}"
+                                   Minimum="0" Maximum="5" Increment="1" />
 
-                  <TextBlock Grid.Row="1" Grid.Column="0"
-                             Text="{StaticResource Browser.OptArrayLimit}"
-                             VerticalAlignment="Center" Opacity="0.8" />
-                  <NumericUpDown Grid.Row="1" Grid.Column="1"
-                                 Value="{Binding Browser.ArrayLimit, Mode=TwoWay}"
-                                 Minimum="0" Maximum="256" Increment="8" />
+                    <TextBlock Grid.Row="1" Grid.Column="0"
+                               Text="{StaticResource Browser.OptArrayLimit}"
+                               VerticalAlignment="Center" Opacity="0.8" />
+                    <NumericUpDown Grid.Row="1" Grid.Column="1"
+                                   Value="{Binding Browser.ArrayLimit, Mode=TwoWay}"
+                                   Minimum="0" Maximum="256" Increment="8" />
+                  </Grid>
 
-                  <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
-                            Content="{StaticResource Browser.OptCollapse}"
+                  <CheckBox Content="{StaticResource Browser.OptCollapse}"
                             IsChecked="{Binding Browser.CollapsePointerNodes, Mode=TwoWay}" />
+                  <CheckBox Content="{StaticResource Browser.OptUseLiveData}"
+                            IsChecked="{Binding Browser.UseLiveData, Mode=TwoWay}" />
 
-                  <TextBlock Grid.Row="3" Grid.Column="0"
-                             Text="{StaticResource Browser.OptCeXmlBase}"
-                             VerticalAlignment="Center" Opacity="0.8" />
-                  <TextBox  Grid.Row="3" Grid.Column="1"
-                            Text="{Binding Browser.CeXmlBaseAddress, Mode=TwoWay}"
-                            FontFamily="Consolas,Cascadia Mono,monospace" />
-                </Grid>
+                  <Grid ColumnDefinitions="200,160">
+                    <TextBlock Grid.Column="0"
+                               Text="{StaticResource Browser.OptCeXmlBase}"
+                               VerticalAlignment="Center" Opacity="0.8" />
+                    <TextBox  Grid.Column="1"
+                              Text="{Binding Browser.CeXmlBaseAddress, Mode=TwoWay}"
+                              FontFamily="Consolas,Cascadia Mono,monospace" />
+                  </Grid>
+                </StackPanel>
               </Flyout>
             </Button.Flyout>
           </Button>

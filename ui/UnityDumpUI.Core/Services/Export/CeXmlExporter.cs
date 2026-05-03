@@ -35,6 +35,7 @@
 //
 // Drilldown shares the IClassInfoLookup contract with CsxExporter.
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -61,6 +62,17 @@ public static class CeXmlExporter
         IClassInfoLookup?  lookup,
         CancellationToken  ct = default)
     {
+        // Live mode: real instance address + ILiveExportSource hookup.
+        // Falls through to template mode if either pre-condition is missing.
+        if (options.LiveData
+            && lookup is ILiveExportSource live
+            && TryParseHexAddress(baseAddress, out ulong baseAbs))
+        {
+            return await RenderLiveAsync(
+                baseAbs, self, ancestors, assemblyName, options, live, ct)
+                .ConfigureAwait(false);
+        }
+
         var sb = new StringBuilder(4096);
         var idGen = new IdGen();
         var visited = new HashSet<string>();
@@ -90,6 +102,390 @@ public static class CeXmlExporter
         sb.Append("  </CheatEntries>\n");
         sb.Append("</CheatTable>\n");
         return sb.ToString();
+    }
+
+    // ---------- Live-data mode -------------------------------------------
+
+    /// <summary>
+    /// Live render: every entry uses an absolute address, no <c>+offset</c>
+    /// chains, no <c>&lt;Offsets&gt;</c> dereferences. For pointer fields the
+    /// exporter <c>readMemory</c>s the qword and recurses into the pointed-to
+    /// object; for collection fields it <c>walkArray</c>s and emits one
+    /// concrete-rooted child per slot. Caller is responsible for keeping
+    /// the game running while the export executes — every node on the wire
+    /// becomes one or two pipe RPCs.
+    /// </summary>
+    private static async Task<string> RenderLiveAsync(
+        ulong              baseAbs,
+        GetClassInfoResult self,
+        IReadOnlyList<GetClassInfoResult>? ancestors,
+        string?            assemblyName,
+        ExportOptions      options,
+        ILiveExportSource  live,
+        CancellationToken  ct)
+    {
+        var sb = new StringBuilder(8192);
+        var idGen = new IdGen();
+        var visited = new HashSet<string>();
+
+        sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+        sb.Append("<CheatTable>\n");
+        sb.Append("  <CheatEntries>\n");
+
+        string rootName  = $"{StructLabel(self, assemblyName)} @ 0x{baseAbs:X16}";
+        OpenGroup(sb, "    ", idGen, rootName, $"0x{baseAbs:X16}",
+                  offsets: null, collapsed: false, varType: "8 Bytes", showAsHex: true);
+
+        if (ancestors is { Count: > 0 })
+        {
+            foreach (GetClassInfoResult anc in ancestors)
+                await EmitFieldsLiveAsync(sb, "      ", idGen, anc, baseAbs,
+                                          isInherited: true, assemblyName, options,
+                                          live, visited, currentDepth: 0, ct)
+                    .ConfigureAwait(false);
+        }
+        await EmitFieldsLiveAsync(sb, "      ", idGen, self, baseAbs,
+                                  isInherited: false, assemblyName, options,
+                                  live, visited, currentDepth: 0, ct)
+            .ConfigureAwait(false);
+
+        CloseGroup(sb, "    ");
+        sb.Append("  </CheatEntries>\n");
+        sb.Append("</CheatTable>\n");
+        return sb.ToString();
+    }
+
+    private static async Task EmitFieldsLiveAsync(
+        StringBuilder sb, string indent, IdGen ids,
+        GetClassInfoResult info, ulong parentAbs,
+        bool isInherited, string? assemblyName, ExportOptions options,
+        ILiveExportSource live, HashSet<string> visited,
+        int currentDepth, CancellationToken ct)
+    {
+        if (info.Fields is not { Count: > 0 } fields) return;
+        foreach (FieldEntry f in fields.Where(x => !x.Static))
+        {
+            await EmitOneFieldLiveAsync(sb, indent, ids, f, parentAbs,
+                                        isInherited, assemblyName, options,
+                                        live, visited, currentDepth, ct)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async Task EmitOneFieldLiveAsync(
+        StringBuilder sb, string indent, IdGen ids,
+        FieldEntry f, ulong parentAbs,
+        bool isInherited, string? assemblyName, ExportOptions options,
+        ILiveExportSource live, HashSet<string> visited,
+        int currentDepth, CancellationToken ct)
+    {
+        ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
+        ulong fieldAbs = parentAbs + (ulong)(uint)f.Offset;
+        string fieldAddr = $"0x{fieldAbs:X16}";
+        string desc = isInherited
+            ? $"{f.Name} : {f.Type ?? "?"}  (inherited)"
+            : $"{f.Name} : {f.Type ?? "?"}";
+
+        // Scalar leaf — emit at absolute address, no chain.
+        if (!shape.IsPointer)
+        {
+            EmitLeaf(sb, indent, ids, desc,
+                     vartype: shape.CeTypeKeyword,
+                     showAsHex: shape.CeTypeKeyword.EndsWith("Bytes"),
+                     address: fieldAddr, offsets: null);
+            return;
+        }
+
+        // Pointer field — read the qword to get the deref'd value.
+        ReadMemoryResult mem;
+        try
+        {
+            mem = await live.ReadMemoryAsync(fieldAddr, 8, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Pipe error — fall back to template-style group with deref offsets.
+            OpenGroup(sb, indent, ids, desc + "  (read failed)", fieldAddr,
+                      offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                      varType: null, showAsHex: true);
+            CloseGroup(sb, indent);
+            return;
+        }
+        if (!string.IsNullOrEmpty(mem.Error) || string.IsNullOrEmpty(mem.Hex))
+        {
+            EmitLeaf(sb, indent, ids, desc + "  <unreadable>",
+                     vartype: "8 Bytes", showAsHex: true,
+                     address: fieldAddr, offsets: null);
+            return;
+        }
+        ulong derefAbs = ParseLeQword(mem.Hex!);
+        if (derefAbs == 0)
+        {
+            EmitLeaf(sb, indent, ids, desc + "  <null>",
+                     vartype: "8 Bytes", showAsHex: true,
+                     address: fieldAddr, offsets: null);
+            return;
+        }
+
+        bool isCollection = UnityTypeMap.IsCollectionType(f.Type);
+        bool canDrill = currentDepth < options.DrilldownDepth;
+
+        // Collection field: walkArray and emit per-slot entries with real
+        // absolute addresses. List<T> needs an extra +0x10 dereference to
+        // reach the inner T[] header.
+        if (isCollection && canDrill && options.ArrayLimit > 0)
+        {
+            ulong arrayAbs = derefAbs;
+            bool isList = f.Type is { Length: > 0 } t
+                          && t.StartsWith("System.Collections.Generic.List`1<", StringComparison.Ordinal);
+            if (isList)
+            {
+                try
+                {
+                    ReadMemoryResult itemsMem = await live.ReadMemoryAsync(
+                        $"0x{(derefAbs + 0x10):X16}", 8, ct).ConfigureAwait(false);
+                    if (string.IsNullOrEmpty(itemsMem.Error) && !string.IsNullOrEmpty(itemsMem.Hex))
+                        arrayAbs = ParseLeQword(itemsMem.Hex!);
+                    else
+                        arrayAbs = 0;
+                }
+                catch { arrayAbs = 0; }
+            }
+
+            if (arrayAbs == 0)
+            {
+                EmitLeaf(sb, indent, ids, desc + "  <empty>",
+                         vartype: "8 Bytes", showAsHex: true,
+                         address: fieldAddr, offsets: null);
+                return;
+            }
+
+            // Resolve element class hint from the field type.
+            (string ns, string name)? elemSpec = SplitElementClass(f.Type);
+            string elemType = elemSpec is { } es
+                ? (string.IsNullOrEmpty(es.ns) ? es.name : $"{es.ns}.{es.name}")
+                : (f.Type ?? string.Empty);
+
+            WalkArrayResult? walk = null;
+            try
+            {
+                walk = await live.WalkArrayAsync(
+                    $"0x{arrayAbs:X16}",
+                    elementType:      elemType,
+                    limit:            options.ArrayLimit,
+                    elementSize:      null,
+                    elementAssembly:  elemSpec is null ? null : (assemblyName ?? string.Empty),
+                    elementNamespace: elemSpec?.ns,
+                    elementName:      elemSpec?.name,
+                    ct).ConfigureAwait(false);
+            }
+            catch { /* tolerate */ }
+
+            string headerLabel = walk is null
+                ? $"{desc}  (walk failed)"
+                : $"{desc}  [{walk.Length} of {(walk.ElementClassName ?? elemType)}, showing {walk.Count}]";
+            OpenGroup(sb, indent, ids, headerLabel, $"0x{arrayAbs:X16}",
+                      offsets: null, collapsed: options.CollapsePointerNodes,
+                      varType: null, showAsHex: true);
+
+            if (walk?.Elements is { } elems)
+            {
+                // For ref-type slots, recurse into each pointed-to object.
+                // For value-type slots, lay out the element class fields at
+                // slot.Address. Cycle-detect on element class name so an
+                // array of self doesn't unroll forever.
+                GetClassInfoResult? elemClass = null;
+                string? cycleKey = null;
+                if (canDrill && elemSpec is { } e0)
+                {
+                    cycleKey = $"{assemblyName ?? "?"}!{e0.ns}.{e0.name}";
+                    if (visited.Add(cycleKey))
+                    {
+                        try
+                        {
+                            elemClass = await live.GetClassInfoAsync(
+                                assemblyName ?? string.Empty, e0.ns, e0.name, ct)
+                                .ConfigureAwait(false);
+                        }
+                        catch { /* tolerate */ }
+                    }
+                    else
+                    {
+                        cycleKey = null;
+                    }
+                }
+
+                foreach (WalkedArrayElement elem in elems)
+                {
+                    if (walk.IsPointer)
+                    {
+                        ulong slotPtr = ParseHexLoose(elem.Ptr ?? "0");
+                        if (slotPtr == 0 || elemClass is null)
+                        {
+                            EmitLeaf(sb, indent + "  ", ids,
+                                     $"[{elem.Index}]",
+                                     vartype: "8 Bytes", showAsHex: true,
+                                     address: elem.Address ?? "?", offsets: null);
+                            continue;
+                        }
+                        OpenGroup(sb, indent + "  ", ids,
+                                  $"[{elem.Index}] @ {elem.Ptr}",
+                                  $"0x{slotPtr:X16}",
+                                  offsets: null,
+                                  collapsed: options.CollapsePointerNodes,
+                                  varType: null, showAsHex: true);
+                        await EmitFieldsLiveAsync(sb, indent + "    ", ids,
+                                                  elemClass, slotPtr,
+                                                  isInherited: false, assemblyName,
+                                                  options, live, visited,
+                                                  currentDepth + 1, ct)
+                            .ConfigureAwait(false);
+                        CloseGroup(sb, indent + "  ");
+                    }
+                    else
+                    {
+                        ulong slotAbs = ParseHexLoose(elem.Address ?? "0");
+                        if (elemClass is null || slotAbs == 0)
+                        {
+                            EmitLeaf(sb, indent + "  ", ids,
+                                     $"[{elem.Index}]",
+                                     vartype: PrimitiveVartype(elemType),
+                                     showAsHex: false,
+                                     address: elem.Address ?? "?", offsets: null);
+                            continue;
+                        }
+                        OpenGroup(sb, indent + "  ", ids,
+                                  $"[{elem.Index}]",
+                                  $"0x{slotAbs:X16}",
+                                  offsets: null,
+                                  collapsed: options.CollapsePointerNodes,
+                                  varType: null, showAsHex: true);
+                        await EmitFieldsLiveAsync(sb, indent + "    ", ids,
+                                                  elemClass, slotAbs,
+                                                  isInherited: false, assemblyName,
+                                                  options, live, visited,
+                                                  currentDepth + 1, ct)
+                            .ConfigureAwait(false);
+                        CloseGroup(sb, indent + "  ");
+                    }
+                }
+
+                if (cycleKey is not null) visited.Remove(cycleKey);
+            }
+            CloseGroup(sb, indent);
+            return;
+        }
+
+        // Plain reference field — drill into the pointed-to object if the
+        // class resolves and we still have depth budget.
+        (string ns, string name)? target = canDrill
+            ? UnityTypeMap.ExtractElementClass(f.Type)
+            : null;
+
+        GetClassInfoResult? child = null;
+        string? cycleKey2 = null;
+        if (target is not null)
+        {
+            cycleKey2 = $"{assemblyName ?? "?"}!{target.Value.ns}.{target.Value.name}";
+            if (visited.Add(cycleKey2))
+            {
+                try
+                {
+                    child = await live.GetClassInfoAsync(
+                        assemblyName ?? string.Empty,
+                        target.Value.ns, target.Value.name, ct)
+                        .ConfigureAwait(false);
+                }
+                catch { /* tolerate */ }
+                if (child is null || !string.IsNullOrEmpty(child.Error))
+                {
+                    visited.Remove(cycleKey2);
+                    child = null;
+                }
+            }
+            else
+            {
+                cycleKey2 = null;
+            }
+        }
+
+        OpenGroup(sb, indent, ids, $"{desc}  -> 0x{derefAbs:X16}",
+                  $"0x{derefAbs:X16}",
+                  offsets: null,
+                  collapsed: options.CollapsePointerNodes,
+                  varType: null, showAsHex: true);
+        if (child is not null)
+        {
+            await EmitFieldsLiveAsync(sb, indent + "  ", ids, child, derefAbs,
+                                      isInherited: false, assemblyName,
+                                      options, live, visited,
+                                      currentDepth + 1, ct).ConfigureAwait(false);
+        }
+        CloseGroup(sb, indent);
+        if (cycleKey2 is not null) visited.Remove(cycleKey2);
+    }
+
+    // ---------- Hex / type helpers ---------------------------------------
+
+    /// <summary>Try to parse an address argument as a real hex pointer (0x... or bare hex).</summary>
+    private static bool TryParseHexAddress(string? input, out ulong value)
+    {
+        value = 0;
+        if (string.IsNullOrWhiteSpace(input)) return false;
+        string s = input.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
+        return ulong.TryParse(s, NumberStyles.HexNumber,
+                              CultureInfo.InvariantCulture, out value);
+    }
+
+    private static ulong ParseHexLoose(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return 0;
+        string t = s.Trim();
+        if (t.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) t = t.Substring(2);
+        return ulong.TryParse(t, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong v) ? v : 0;
+    }
+
+    /// <summary>Reorder an 8-byte little-endian hex blob into a host-order qword.</summary>
+    private static ulong ParseLeQword(string leHex)
+    {
+        if (leHex.Length < 16) return 0;
+        Span<byte> bytes = stackalloc byte[8];
+        for (int i = 0; i < 8; ++i)
+        {
+            if (!byte.TryParse(leHex.AsSpan(i * 2, 2), NumberStyles.HexNumber,
+                               CultureInfo.InvariantCulture, out bytes[i]))
+                return 0;
+        }
+        ulong v = 0;
+        for (int i = 7; i >= 0; --i) v = (v << 8) | bytes[i];
+        return v;
+    }
+
+    /// <summary>
+    /// Like <see cref="UnityTypeMap.ExtractElementClass"/> but also returns
+    /// primitive-class hints (System.Int32 etc.) so the live walker can emit
+    /// per-slot scalar leaves without losing the type label.
+    /// </summary>
+    private static (string ns, string name)? SplitElementClass(string? type)
+    {
+        if (string.IsNullOrEmpty(type)) return null;
+        string t = type;
+        while (t.EndsWith("[]", StringComparison.Ordinal))
+            t = t.Substring(0, t.Length - 2);
+        const string listPrefix = "System.Collections.Generic.List`1<";
+        if (t.StartsWith(listPrefix, StringComparison.Ordinal) && t.EndsWith(">", StringComparison.Ordinal))
+            t = t.Substring(listPrefix.Length, t.Length - listPrefix.Length - 1).Trim();
+        if (t.StartsWith("System.", StringComparison.Ordinal)) return null; // primitives — let DLL table handle
+        if (t.IndexOf('.') < 0) return (string.Empty, t);
+        int dot = t.LastIndexOf('.');
+        return (t.Substring(0, dot), t.Substring(dot + 1));
+    }
+
+    private static string PrimitiveVartype(string? type)
+    {
+        ManagedTypeShape s = UnityTypeMap.Resolve(type);
+        return s.CeTypeKeyword;
     }
 
     /// <summary>
