@@ -3,7 +3,10 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>UnityDumpUI</RootNamespace>
-    <AssemblyName>UnityDumpUI</AssemblyName>
+    <!-- Repo is "discrete"; ship the EXE under that name. The C# root
+         namespace + project directory stay UnityDumpUI to keep the
+         existing using-tree and source-gen contracts intact. -->
+    <AssemblyName>DiscreteUI</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
 

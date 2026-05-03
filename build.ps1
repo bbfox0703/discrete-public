@@ -299,7 +299,7 @@ function Build-Ui {
     }
     if ($LASTEXITCODE -ne 0) { Write-Fail 'UI publish failed'; return $false }
 
-    $exeFile = Get-ChildItem -Path $publishDir -Filter 'UnityDumpUI.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $exeFile = Get-ChildItem -Path $publishDir -Filter 'DiscreteUI.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $exeFile) {
         Write-Fail 'No UI build output found'
         return $false
@@ -316,15 +316,15 @@ function Build-Ui {
         # Self-contained single-file: just the exe + (debug only) pdb.
         Copy-Item $exeFile.FullName -Destination $DIST_DIR -Force
         if ($Mode -eq 'Debug') {
-            $pdb = Join-Path $exeFile.DirectoryName 'UnityDumpUI.pdb'
+            $pdb = Join-Path $exeFile.DirectoryName 'DiscreteUI.pdb'
             if (Test-Path $pdb) { Copy-Item $pdb -Destination $DIST_DIR -Force }
         }
     }
 
     Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
 
-    $exeSize = Get-FileSize (Join-Path $DIST_DIR 'UnityDumpUI.exe')
-    Write-Ok "UnityDumpUI.exe ($exeSize) -> dist\"
+    $exeSize = Get-FileSize (Join-Path $DIST_DIR 'DiscreteUI.exe')
+    Write-Ok "DiscreteUI.exe ($exeSize) -> dist\"
     return $true
 }
 
