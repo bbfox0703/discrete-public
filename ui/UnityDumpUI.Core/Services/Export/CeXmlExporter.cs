@@ -261,10 +261,17 @@ public static class CeXmlExporter
             }
 
             // Resolve element class hint from the field type.
+            // SplitElementClass returns null for primitive (System.*) element
+            // types because the DLL primitive table covers them — but we
+            // still need the bare element name (e.g. "System.Byte" for
+            // System.Byte[]) to feed into PrimitiveVartype below. Compute
+            // both: a runtime-class spec (may be null) and a type-string
+            // hint that's always the unwrapped element type.
             (string ns, string name)? elemSpec = SplitElementClass(f.Type);
-            string elemType = elemSpec is { } es
-                ? (string.IsNullOrEmpty(es.ns) ? es.name : $"{es.ns}.{es.name}")
-                : (f.Type ?? string.Empty);
+            string elemType = StripCollectionSuffix(f.Type)
+                              ?? (elemSpec is { } es
+                                  ? (string.IsNullOrEmpty(es.ns) ? es.name : $"{es.ns}.{es.name}")
+                                  : (f.Type ?? string.Empty));
 
             WalkArrayResult? walk = null;
             try
@@ -467,6 +474,31 @@ public static class CeXmlExporter
     /// primitive-class hints (System.Int32 etc.) so the live walker can emit
     /// per-slot scalar leaves without losing the type label.
     /// </summary>
+    /// <summary>
+    /// Strip <c>[]</c> / <c>List`1&lt;…&gt;</c> wrapping from a managed type
+    /// string and return the bare element type (e.g. <c>System.Byte[]</c> →
+    /// <c>System.Byte</c>). Returns null when the input isn't recognisably
+    /// a collection so callers can short-circuit.
+    /// </summary>
+    private static string? StripCollectionSuffix(string? type)
+    {
+        if (string.IsNullOrEmpty(type)) return null;
+        string t = type;
+        bool changed = false;
+        while (t.EndsWith("[]", StringComparison.Ordinal))
+        {
+            t = t.Substring(0, t.Length - 2);
+            changed = true;
+        }
+        const string listPrefix = "System.Collections.Generic.List`1<";
+        if (t.StartsWith(listPrefix, StringComparison.Ordinal) && t.EndsWith(">", StringComparison.Ordinal))
+        {
+            t = t.Substring(listPrefix.Length, t.Length - listPrefix.Length - 1).Trim();
+            changed = true;
+        }
+        return changed ? t : null;
+    }
+
     private static (string ns, string name)? SplitElementClass(string? type)
     {
         if (string.IsNullOrEmpty(type)) return null;
