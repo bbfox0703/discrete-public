@@ -365,14 +365,15 @@ function Copy-CompanionArtifacts {
     $bn = Join-Path $RepoRoot 'build_number.txt'
     if (Test-Path $bn) { Copy-Item $bn -Destination $DIST_DIR -Force }
 
-    # Optional scripts (CE Lua bridge lands in Phase 11; copy when present).
+    # CE Lua bridge (Phase 11) — ship every .lua + .CT + the README so
+    # users only need the dist/ folder, not a checked-out repo.
     $scriptsDir = Join-Path $RepoRoot 'scripts'
     if (Test-Path $scriptsDir) {
-        Get-ChildItem $scriptsDir -File -Filter '*.lua' -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item $_.FullName -Destination $DIST_DIR -Force
-        }
-        Get-ChildItem $scriptsDir -File -Filter '*.CT' -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item $_.FullName -Destination $DIST_DIR -Force
+        foreach ($pattern in @('*.lua', '*.CT', 'README.md')) {
+            Get-ChildItem $scriptsDir -File -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+                # README.md keeps its name; the user reads it next to the scripts.
+                Copy-Item $_.FullName -Destination $DIST_DIR -Force
+            }
         }
     }
 }
