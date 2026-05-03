@@ -277,6 +277,25 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         await Inspector.FindInstancesCommand.ExecuteAsync(null).ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// "Find instances" button on the Inspector tab. When the inspector
+    /// already has a target, this re-runs the existing find. When not, it
+    /// auto-promotes the currently-selected class (same flow as
+    /// <see cref="InspectSelectedClassAsync"/>) so the button is never a
+    /// silent no-op for users who picked a class but never used the
+    /// right-click "Inspect" menu first.
+    /// </summary>
+    [RelayCommand]
+    private async Task FindInspectorInstancesAsync()
+    {
+        if (!Inspector.HasTarget)
+        {
+            await InspectSelectedClassAsync().ConfigureAwait(true);
+            return;
+        }
+        await Inspector.FindInstancesCommand.ExecuteAsync(null).ConfigureAwait(true);
+    }
+
     public void Dispose()
     {
         _connectCts?.Cancel();

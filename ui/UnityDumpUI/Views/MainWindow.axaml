@@ -291,7 +291,7 @@
                 <Button Content="{StaticResource Inspector.SetTarget}"
                         Command="{Binding InspectSelectedClassCommand}" />
                 <Button Content="{StaticResource Inspector.Find}"
-                        Command="{Binding Inspector.FindInstancesCommand}" />
+                        Command="{Binding FindInspectorInstancesCommand}" />
                 <Button Content="{StaticResource Inspector.RefreshWalk}"
                         Command="{Binding Inspector.RefreshWalkCommand}" />
                 <Button Content="{StaticResource Inspector.Clear}"
