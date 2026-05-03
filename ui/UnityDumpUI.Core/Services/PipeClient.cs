@@ -83,6 +83,10 @@ public sealed class PipeClient : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(cmd);
         ArgumentNullException.ThrowIfNull(envelopeType);
 
+        // Honour cancellation while waiting for the gate (caller can still
+        // bail before they own the wire); once we own the gate we deliberately
+        // run the actual write+read uncancellable so we never abandon a
+        // response in the pipe buffer for the next caller to misread.
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -91,14 +95,22 @@ public sealed class PipeClient : IAsyncDisposable
                 throw new InvalidOperationException("PipeClient is not connected.");
             }
 
+            // Last chance to bail without committing anything to the wire.
+            ct.ThrowIfCancellationRequested();
+
             int id = Interlocked.Increment(ref _nextId);
             var request = new PipeRequest { Id = id, Cmd = cmd, Args = args };
             string requestLine = JsonSerializer.Serialize(
                 request, ProtocolJsonContext.Default.PipeRequest);
 
-            await _writer.WriteLineAsync(requestLine.AsMemory(), ct).ConfigureAwait(false);
+            // CRITICAL: do not pass `ct` past this point. If the caller cancels
+            // between our write and our read, the DLL's response for `id` ends
+            // up sitting unread in the pipe buffer and the *next* SendAsync
+            // (different `id`) reads our stale response → id-mismatch crash.
+            // We always drain the response and check `ct` after.
+            await _writer.WriteLineAsync(requestLine.AsMemory()).ConfigureAwait(false);
 
-            string? responseLine = await _reader.ReadLineAsync(ct).ConfigureAwait(false);
+            string? responseLine = await _reader.ReadLineAsync().ConfigureAwait(false);
             if (responseLine is null)
             {
                 throw new PipeProtocolException("Server closed pipe before responding.");
@@ -114,6 +126,8 @@ public sealed class PipeClient : IAsyncDisposable
                 throw new PipeProtocolException(
                     $"Response id mismatch: expected {id}, got {envelope.Id}.");
             }
+            // Honour the late cancel now — pipe is back in a clean state.
+            ct.ThrowIfCancellationRequested();
             return envelope;
         }
         finally
