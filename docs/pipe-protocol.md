@@ -426,6 +426,55 @@ If the address is unreadable, the decoded entry carries `"error":
 The string layout (`length` at `+0x10`, UTF-16 chars at `+0x14`) is identical
 between Mono-bdwgc and IL2CPP, so the same decoder serves both backends.
 
+### `walkArray` *(Both)*
+
+Reads a managed `T[]` header at `address` and returns up to `limit` per-element
+entries. Element addresses are slot-relative (`data_address + i * element_size`);
+primitive elements decode inline using the same per-type table as
+`walkInstance`.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `address` | address | required; start of the `MonoArray` / `Il2CppArray` header |
+| `elementType` | string | optional managed-type name, e.g. `"System.Int32"`, `"MainGame.CARRYITEM"`. Required for primitive decoding. |
+| `limit` | uint | optional, default 256, capped at 4096 |
+| `elementSize` | uint | optional width hint for struct arrays the decoder can't introspect |
+
+Header layout (identical between Mono-bdwgc and IL2CPP, x64):
+
+```
++0x00 vtable*       +0x10 bounds*        (NULL for SZARRAY)
++0x08 sync          +0x18 max_length     (uintptr_t — total length)
+                    +0x20 vector[0]      (first element)
+```
+
+`List<T>` handling stays client-side: the caller `readMemory`s the
+`List._items` pointer at `+0x10` of the List object first, then `walkArray`s
+that pointer.
+
+```jsonc
+// → {
+//   "address":      "0x...",        // echoed
+//   "data_address": "0x...",        // start of vector (header + 0x20)
+//   "length":       42,             // total length read from header
+//   "limit":        256,
+//   "element_type": "MainGame.CARRYITEM",
+//   "element_size": 8,              // sizeof(T) for value, 8 for ref
+//   "is_pointer":   true,           // each slot is an 8-byte qword
+//   "count":        42,             // how many were emitted (≤ length, ≤ limit)
+//   "elements": [
+//     { "index": 0, "address": "0x...", "ptr": "0x..." },
+//     { "index": 1, "address": "0x...", "ptr": "0x..." },
+//     ...
+//   ]
+// }
+```
+
+For primitive arrays the per-element shape carries `value` (or `string` /
+`error` etc., same shape as `walkInstance.fields[]`). Soft errors land in the
+top-level `error` (e.g. `"header unreadable"`, `"implausible length — not a
+managed array?"` when the qword at `+0x18` exceeds 16 Mi).
+
 ---
 
 ## Enum decoding

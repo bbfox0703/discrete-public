@@ -128,6 +128,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// <summary>Short "depth=N count=M" line shown above the field grid.</summary>
     [ObservableProperty] private string _walkSummary = string.Empty;
 
+    // ---------- Array walk (Phase 10 follow-up) --------------------------
+
+    public ObservableCollection<ArrayElementRow> ArrayElements { get; } = new();
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(WalkArrayCommand))]
+    private WalkedFieldRow? _selectedField;
+
+    /// <summary>"[N elements of T]" header shown over the array grid.</summary>
+    [ObservableProperty] private string _arrayWalkSummary = string.Empty;
+
+    [ObservableProperty] private bool _isLoadingArray;
+    private CancellationTokenSource? _arrayCts;
+
     // ---------- Auto refresh ---------------------------------------------
 
     /// <summary>0 = off, 250, 1000.</summary>
@@ -203,6 +217,133 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     [RelayCommand] private void AutoRefreshOff()  => AutoRefreshIntervalMs = 0;
     [RelayCommand] private void AutoRefreshFast() => AutoRefreshIntervalMs = 250;
     [RelayCommand] private void AutoRefreshSlow() => AutoRefreshIntervalMs = 1000;
+
+    [RelayCommand(CanExecute = nameof(CanWalkArray))]
+    private async Task WalkArrayAsync()
+    {
+        if (SelectedField is not { } row) return;
+        if (string.IsNullOrEmpty(row.Type) || string.IsNullOrEmpty(row.Ptr)) return;
+
+        // Decide T[] vs List<T> from the field type. List<T> stores its
+        // backing array pointer at offset 0x10 of the List object — we
+        // dereference that here and treat the result as a plain array.
+        if (!TryParseCollectionType(row.Type!, out string elementType, out bool isList))
+        {
+            ErrorMessage = $"not a recognised collection type: {row.Type}";
+            return;
+        }
+
+        _arrayCts?.Cancel();
+        _arrayCts = new CancellationTokenSource();
+        CancellationToken ct = _arrayCts.Token;
+
+        ErrorMessage = null;
+        IsLoadingArray = true;
+        ArrayElements.Clear();
+        ArrayWalkSummary = string.Empty;
+        try
+        {
+            string arrayAddr = row.Ptr!;
+            if (isList)
+            {
+                // List<T>._items is at +0x10; fetch the inner T[] pointer.
+                ReadMemoryResult mem = await _backend.ReadMemoryAsync(
+                    HexAdd(row.Ptr!, 0x10), 8, ct).ConfigureAwait(true);
+                if (!string.IsNullOrEmpty(mem.Error) || string.IsNullOrEmpty(mem.Hex))
+                {
+                    ErrorMessage = $"List._items unreadable: {mem.Error ?? "no hex"}";
+                    return;
+                }
+                arrayAddr = "0x" + ParseLittleEndianHexQword(mem.Hex!);
+            }
+
+            WalkArrayResult result = await _backend.WalkArrayAsync(
+                arrayAddr, elementType, limit: 256, elementSize: null, ct).ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(result.Error))
+            {
+                ErrorMessage = $"walkArray: {result.Error}";
+                return;
+            }
+            if (result.Elements is { } elems)
+            {
+                foreach (WalkedArrayElement e in elems)
+                    ArrayElements.Add(ArrayElementRow.From(e));
+            }
+            ArrayWalkSummary =
+                $"[{result.Length} of {elementType}, showing {result.Count}, " +
+                $"data @ {result.DataAddress}]";
+            _logger.Write(Constants.LogCategoryView,
+                $"walkArray {row.Name} ({elementType}) {arrayAddr} length={result.Length} shown={result.Count}");
+        }
+        catch (OperationCanceledException) { /* superseded */ }
+        catch (Exception ex)
+        {
+            ErrorMessage = ex.Message;
+            _logger.Write(Constants.LogCategoryView,
+                $"walkArray({row.Name}) failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsLoadingArray = false;
+        }
+    }
+
+    private bool CanWalkArray() =>
+        SelectedField is { } row
+        && !string.IsNullOrEmpty(row.Type)
+        && !string.IsNullOrEmpty(row.Ptr)
+        && row.Ptr != "0x0000000000000000"
+        && TryParseCollectionType(row.Type!, out _, out _);
+
+    /// <summary>
+    /// Recognises <c>T[]</c> and <c>System.Collections.Generic.List`1&lt;T&gt;</c>.
+    /// Sets <paramref name="elementType"/> to the inner managed type name and
+    /// <paramref name="isList"/> when one List dereference is needed.
+    /// </summary>
+    private static bool TryParseCollectionType(string typeName, out string elementType, out bool isList)
+    {
+        isList = false;
+        elementType = string.Empty;
+        if (typeName.EndsWith("[]", StringComparison.Ordinal))
+        {
+            elementType = typeName.Substring(0, typeName.Length - 2);
+            return true;
+        }
+        const string listPrefix = "System.Collections.Generic.List`1<";
+        if (typeName.StartsWith(listPrefix, StringComparison.Ordinal)
+            && typeName.EndsWith(">", StringComparison.Ordinal))
+        {
+            elementType = typeName.Substring(listPrefix.Length, typeName.Length - listPrefix.Length - 1).Trim();
+            isList = true;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Add a byte offset to a hex-string address; preserves the "0x" prefix.</summary>
+    private static string HexAdd(string hexAddr, long delta)
+    {
+        string trimmed = hexAddr.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? hexAddr.Substring(2) : hexAddr;
+        if (!ulong.TryParse(trimmed, System.Globalization.NumberStyles.HexNumber,
+                            CultureInfo.InvariantCulture, out ulong v))
+            return hexAddr;
+        return "0x" + (v + (ulong)delta).ToString("X16", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Reorders an 8-byte little-endian hex blob (e.g.
+    /// <c>"40FA0E5DA9010000"</c>) into a big-endian hex string suitable for
+    /// concatenation with "0x".
+    /// </summary>
+    private static string ParseLittleEndianHexQword(string leHex)
+    {
+        if (leHex.Length < 16) return leHex;
+        var sb = new System.Text.StringBuilder(16);
+        for (int i = 14; i >= 0; i -= 2)
+            sb.Append(leHex, i, 2);
+        return sb.ToString();
+    }
 
     [RelayCommand]
     private void Clear()
@@ -381,7 +522,7 @@ public sealed class InstanceItem
 public sealed class WalkedFieldRow
 {
     public WalkedFieldRow(string name, string type, int offset, string declaredIn,
-                          string? address, string displayValue, bool isPointer)
+                          string? address, string displayValue, bool isPointer, string? ptr)
     {
         Name         = name;
         Type         = type;
@@ -390,6 +531,7 @@ public sealed class WalkedFieldRow
         Address      = address;
         DisplayValue = displayValue;
         IsPointer    = isPointer;
+        Ptr          = ptr;
     }
 
     public string  Name         { get; }
@@ -401,6 +543,8 @@ public sealed class WalkedFieldRow
     public string  DisplayValue { get; }
     /// <summary>True when the value is a pointer (qword) — UI can offer click-to-walk.</summary>
     public bool    IsPointer    { get; }
+    /// <summary>Raw qword from the wire (hex, with leading 0x); needed to feed walkArray etc.</summary>
+    public string? Ptr          { get; }
 
     public static WalkedFieldRow From(WalkedField f)
     {
@@ -412,7 +556,8 @@ public sealed class WalkedFieldRow
             f.From ?? string.Empty,
             f.Address,
             display,
-            isPtr);
+            isPtr,
+            f.Ptr);
     }
 
     private static string FormatDisplay(WalkedField f, out bool isPointer)
@@ -448,6 +593,60 @@ public sealed class WalkedFieldRow
         }
 
         return string.Empty;
+    }
+}
+
+/// <summary>
+/// Row projection for one slot of a walked <c>T[]</c> / <c>List&lt;T&gt;</c>.
+/// Computes a single human-readable <see cref="DisplayValue"/> from the
+/// heterogeneous wire payload; <see cref="IsPointer"/> flags pointer slots
+/// so the view can offer "click to walk this object".
+/// </summary>
+public sealed class ArrayElementRow
+{
+    public ArrayElementRow(int index, string? address, string displayValue, bool isPointer)
+    {
+        Index        = index;
+        Address      = address;
+        DisplayValue = displayValue;
+        IsPointer    = isPointer;
+    }
+    public int     Index        { get; }
+    public string? Address      { get; }
+    public string  DisplayValue { get; }
+    public bool    IsPointer    { get; }
+
+    public static ArrayElementRow From(WalkedArrayElement e)
+    {
+        bool isPtr = false;
+        string display;
+        if (!string.IsNullOrEmpty(e.Error))      display = $"<error: {e.Error}>";
+        else if (!string.IsNullOrEmpty(e.StringError)) display = $"<string_error: {e.StringError}>";
+        else if (e.String is not null)
+        {
+            string len = e.StringLength is int sl ? $" (len {sl})" : string.Empty;
+            display = $"\"{e.String}\"{len}";
+        }
+        else if (e.Value is System.Text.Json.JsonElement v)
+        {
+            display = v.ValueKind switch
+            {
+                System.Text.Json.JsonValueKind.True   => "true",
+                System.Text.Json.JsonValueKind.False  => "false",
+                System.Text.Json.JsonValueKind.String => v.GetString() ?? string.Empty,
+                System.Text.Json.JsonValueKind.Null   => "null",
+                _                                     => v.GetRawText(),
+            };
+        }
+        else if (!string.IsNullOrEmpty(e.Ptr))
+        {
+            isPtr   = true;
+            display = e.Ptr!;
+        }
+        else if (!string.IsNullOrEmpty(e.Hex)) display = e.Hex!;
+        else                                    display = string.Empty;
+
+        return new ArrayElementRow(e.Index, e.Address, display, isPtr);
     }
 }
 

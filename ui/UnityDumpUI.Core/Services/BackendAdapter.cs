@@ -197,6 +197,33 @@ public sealed class BackendAdapter : IClassInfoLookup
     }
 
     /// <summary>
+    /// `walkArray` — read a managed <c>T[]</c> header at <paramref name="address"/>
+    /// and return up to <paramref name="limit"/> per-element entries. Pass
+    /// <paramref name="elementType"/> when the element type is known so
+    /// primitives decode inline; pass <paramref name="elementSize"/> as a
+    /// width hint for struct arrays whose layout the DLL can't introspect.
+    /// </summary>
+    public async Task<WalkArrayResult> WalkArrayAsync(
+        string address, string? elementType = null,
+        int? limit = null, int? elementSize = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["address"] = Str(address),
+        };
+        if (!string.IsNullOrEmpty(elementType)) args["elementType"] = Str(elementType);
+        if (limit       is int l) args["limit"]       = Int(l);
+        if (elementSize is int s) args["elementSize"] = Int(s);
+
+        var env = await _pipe.SendAsync(
+            "walkArray", args,
+            ProtocolJsonContext.Default.RpcEnvelopeWalkArrayResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("walkArray returned no result");
+    }
+
+    /// <summary>
     /// `readMemory` — raw byte read. <paramref name="size"/> must be in
     /// [1, 1048576]; soft errors land in <see cref="ReadMemoryResult.Error"/>.
     /// </summary>

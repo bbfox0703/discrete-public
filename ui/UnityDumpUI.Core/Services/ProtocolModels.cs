@@ -215,3 +215,43 @@ public sealed class ReadMemoryResult
     [JsonPropertyName("hex")]     public string? Hex     { get; set; }
     [JsonPropertyName("error")]   public string? Error   { get; set; }
 }
+
+/// <summary>
+/// `walkArray` result — one entry per slot in a managed <c>T[]</c>, capped
+/// by the request limit. Pointer-typed arrays come back with <c>ptr</c>
+/// set per slot (the dereferenced object pointer); primitive arrays come
+/// back with the same per-type fields the field decoder uses
+/// (<c>value</c> / <c>string</c> / etc.).
+/// </summary>
+public sealed class WalkArrayResult
+{
+    [JsonPropertyName("address")]       public string?               Address      { get; set; }
+    [JsonPropertyName("data_address")]  public string?               DataAddress  { get; set; }
+    /// <summary>Array length read from the header — may exceed <see cref="Count"/> when capped.</summary>
+    [JsonPropertyName("length")]        public ulong                 Length       { get; set; }
+    [JsonPropertyName("limit")]         public int                   Limit        { get; set; }
+    [JsonPropertyName("element_type")]  public string?               ElementType  { get; set; }
+    [JsonPropertyName("element_size")]  public int                   ElementSize  { get; set; }
+    [JsonPropertyName("is_pointer")]    public bool                  IsPointer    { get; set; }
+    [JsonPropertyName("count")]         public int                   Count        { get; set; }
+    [JsonPropertyName("elements")]      public List<WalkedArrayElement>? Elements { get; set; }
+    [JsonPropertyName("error")]         public string?               Error        { get; set; }
+}
+
+/// <summary>
+/// One slot in a <see cref="WalkArrayResult"/>. Same per-type payload model
+/// as <see cref="WalkedField"/> — exactly one of <c>value</c> / <c>ptr</c> /
+/// <c>string</c> / <c>error</c> is meaningful per row.
+/// </summary>
+public sealed class WalkedArrayElement
+{
+    [JsonPropertyName("index")]         public int          Index        { get; set; }
+    [JsonPropertyName("address")]       public string?      Address      { get; set; }
+    [JsonPropertyName("value")]         public JsonElement? Value        { get; set; }
+    [JsonPropertyName("ptr")]           public string?      Ptr          { get; set; }
+    [JsonPropertyName("string")]        public string?      String       { get; set; }
+    [JsonPropertyName("string_length")] public int?         StringLength { get; set; }
+    [JsonPropertyName("string_error")]  public string?      StringError  { get; set; }
+    [JsonPropertyName("hex")]           public string?      Hex          { get; set; }
+    [JsonPropertyName("error")]         public string?      Error        { get; set; }
+}

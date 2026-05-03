@@ -387,7 +387,46 @@
                                  IsVisible="{Binding Inspector.IsLoadingWalk}"
                                  Width="80" Height="4" VerticalAlignment="Center" />
                   </Grid>
+
+                  <!-- Array elements panel — collapsed unless populated. -->
+                  <Expander DockPanel.Dock="Bottom"
+                            Header="{StaticResource Inspector.ArrayElementsTitle}"
+                            IsExpanded="{Binding Inspector.ArrayElements.Count, Mode=OneWay,
+                                                 Converter={x:Static ObjectConverters.IsNotNull}}"
+                            IsVisible="{Binding Inspector.ArrayElements.Count, Mode=OneWay,
+                                                Converter={x:Static ObjectConverters.IsNotNull}}"
+                            Margin="0,6,0,0">
+                    <DockPanel>
+                      <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                  Spacing="8" Margin="0,0,0,4">
+                        <TextBlock Text="{Binding Inspector.ArrayWalkSummary}"
+                                   Opacity="0.7" FontSize="11" VerticalAlignment="Center" />
+                        <ProgressBar IsIndeterminate="True"
+                                     IsVisible="{Binding Inspector.IsLoadingArray}"
+                                     Width="80" Height="4" VerticalAlignment="Center" />
+                      </StackPanel>
+                      <DataGrid ItemsSource="{Binding Inspector.ArrayElements}"
+                                IsReadOnly="True"
+                                AutoGenerateColumns="False"
+                                CanUserResizeColumns="True"
+                                CanUserSortColumns="True"
+                                GridLinesVisibility="Horizontal"
+                                Height="200"
+                                x:DataType="vm:MainWindowViewModel">
+                        <DataGrid.Columns>
+                          <DataGridTextColumn Header="{StaticResource Inspector.ColIndex2}" Width="60"
+                                              Binding="{Binding Index, x:DataType=vm:ArrayElementRow}" />
+                          <DataGridTextColumn Header="{StaticResource Inspector.ColAddress}" Width="180"
+                                              Binding="{Binding Address, x:DataType=vm:ArrayElementRow}" />
+                          <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
+                                              Binding="{Binding DisplayValue, x:DataType=vm:ArrayElementRow}" />
+                        </DataGrid.Columns>
+                      </DataGrid>
+                    </DockPanel>
+                  </Expander>
+
                   <DataGrid ItemsSource="{Binding Inspector.Fields}"
+                            SelectedItem="{Binding Inspector.SelectedField, Mode=TwoWay}"
                             IsReadOnly="True"
                             AutoGenerateColumns="False"
                             CanUserResizeColumns="True"
@@ -395,6 +434,12 @@
                             CanUserSortColumns="True"
                             GridLinesVisibility="Horizontal"
                             x:DataType="vm:MainWindowViewModel">
+                    <DataGrid.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="{StaticResource Inspector.WalkArray}"
+                                  Command="{Binding Inspector.WalkArrayCommand}" />
+                      </ContextMenu>
+                    </DataGrid.ContextMenu>
                     <DataGrid.Columns>
                       <DataGridTextColumn Header="{StaticResource Browser.ColName}"   Width="*"
                                           Binding="{Binding Name, x:DataType=vm:WalkedFieldRow}" />

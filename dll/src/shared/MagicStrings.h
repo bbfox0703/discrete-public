@@ -47,6 +47,7 @@ inline constexpr const char* CmdExportSdkHeader    = "exportSdkHeader";
 inline constexpr const char* CmdGetEnumValues      = "getEnumValues";
 inline constexpr const char* CmdResolvePointer     = "resolvePointer";
 inline constexpr const char* CmdWalkInstance       = "walkInstance";
+inline constexpr const char* CmdWalkArray          = "walkArray";
 inline constexpr const char* CmdMonoCompileMethod  = "monoCompileMethod";
 inline constexpr const char* CmdMonoGetVTable      = "monoGetVTable";
 inline constexpr const char* CmdIL2CPPGetMetadataStrings = "il2cppGetMetadataStrings";

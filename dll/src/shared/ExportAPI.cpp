@@ -406,6 +406,122 @@ void RegisterCoreHandlers() {
     });
 
     // ------------------------------------------------------------------------
+    // Phase 10 follow-up — walkArray (Both backends).
+    // Reads a Mono / IL2CPP managed array (T[]) header and returns up to
+    // `limit` element addresses. Decodes primitive elements inline; for
+    // reference-type arrays (8-byte slots) returns the dereferenced object
+    // pointer per slot so callers can chain into walkInstance.
+    //
+    // Array layout (identical between Mono bdwgc and IL2CPP, x64):
+    //   +0x00 vtable*   |   +0x10 bounds*    (NULL for SZARRAY)
+    //   +0x08 sync      |   +0x18 max_length (uintptr_t — total length)
+    //                       +0x20 vector[0]  (first element)
+    //
+    // List<T> handling stays client-side — caller readMemory()s the
+    // List._items pointer at offset 0x10 first, then walkArray()s that.
+    // ------------------------------------------------------------------------
+    PipeServer::RegisterHandler(MagicStrings::CmdWalkArray,
+        [parseAddr, formatHex, decodeField, bytesToHex](const json& args) -> json {
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        std::string elementType = args.value("elementType", std::string{});
+        std::size_t limit = 256;
+        if (args.contains("limit") && args["limit"].is_number_unsigned()) {
+            limit = args["limit"].get<std::size_t>();
+        }
+        if (limit == 0)    limit = 256;
+        if (limit > 4096)  limit = 4096;
+
+        // Element width: well-known primitive table first, caller hint as
+        // override / fallback for struct arrays we can't introspect from
+        // here.
+        auto knownElemSize = [](const std::string& t) -> std::size_t {
+            if (t == "System.Boolean" || t == "System.Byte" || t == "System.SByte") return 1;
+            if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
+            if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
+            if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
+            if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+            return 0;  // unknown / reference type
+        };
+
+        std::size_t elemSize = knownElemSize(elementType);
+        bool        isPointer = false;
+        if (elemSize == 0) {
+            // Reference type or struct without a hint. Treat as pointer
+            // unless caller forces a width via elementSize (struct arrays).
+            if (args.contains("elementSize") && args["elementSize"].is_number_unsigned()) {
+                elemSize = args["elementSize"].get<std::size_t>();
+            } else {
+                elemSize = 8;
+                isPointer = true;
+            }
+        }
+
+        // Read array header — bounds (validate SZARRAY) + max_length.
+        auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
+            return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+        };
+        std::uintptr_t bounds = 0;
+        std::uintptr_t length = 0;
+        if (!rd(addr + 0x10, &bounds, 8) || !rd(addr + 0x18, &length, 8)) {
+            return json{{"error", "header unreadable"}, {"address", formatHex(addr)}};
+        }
+        // Sanity: a real managed array has length below ~16M for our use
+        // (anything bigger is almost certainly a bad pointer / not an array).
+        if (length > 16u * 1024u * 1024u) {
+            return json{
+                {"error",   "implausible length — not a managed array?"},
+                {"address", formatHex(addr)},
+                {"length",  length},
+            };
+        }
+
+        std::uintptr_t dataAddr = addr + 0x20;
+        std::size_t    n = (length < limit) ? static_cast<std::size_t>(length) : limit;
+
+        json elements = json::array();
+        for (std::size_t i = 0; i < n; ++i) {
+            std::uintptr_t slotAddr = dataAddr + i * elemSize;
+            json e = {
+                {"index",   i},
+                {"address", formatHex(slotAddr)},
+            };
+            if (isPointer) {
+                std::uintptr_t v = 0;
+                if (rd(slotAddr, &v, 8)) e["ptr"] = formatHex(v);
+                else                     e["error"] = "unreadable";
+            } else if (!elementType.empty()) {
+                // Decode primitive inline using the existing field decoder.
+                json decoded = decodeField(elementType, slotAddr);
+                for (auto kv = decoded.begin(); kv != decoded.end(); ++kv)
+                    e[kv.key()] = kv.value();
+            } else {
+                // Caller gave us a struct width but no name — return raw bytes.
+                std::vector<std::uint8_t> buf(elemSize);
+                if (rd(slotAddr, buf.data(), elemSize))
+                    e["hex"] = bytesToHex(buf.data(), buf.size());
+                else
+                    e["error"] = "unreadable";
+            }
+            elements.push_back(std::move(e));
+        }
+
+        return json{
+            {"address",      formatHex(addr)},
+            {"data_address", formatHex(dataAddr)},
+            {"length",       length},
+            {"limit",        limit},
+            {"element_type", elementType},
+            {"element_size", elemSize},
+            {"is_pointer",   isPointer},
+            {"count",        n},
+            {"elements",     std::move(elements)},
+        };
+    });
+
+    // ------------------------------------------------------------------------
     // Phase 6 segment D — symbol registry (CE-style named pointers).
     // Backend-agnostic in-memory map. Survives until the DLL unloads. Useful
     // for stashing addresses returned by getStaticFieldData / findInstances /
