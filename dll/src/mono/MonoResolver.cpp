@@ -106,6 +106,10 @@ void DoResolve() {
     optBind("mono_field_get_data",              g_resolver.field_get_data);
     optBind("mono_class_is_enum",               g_resolver.class_is_enum);
     optBind("mono_class_enum_basetype",         g_resolver.class_enum_basetype);
+    // Phase 10 follow-up: array element-class metadata for walkArray.
+    optBind("mono_class_get_element_class",     g_resolver.class_get_element_class);
+    optBind("mono_class_value_size",            g_resolver.class_value_size);
+    optBind("mono_class_is_valuetype",          g_resolver.class_is_valuetype);
 
     // Nested-type support — required to resolve `Outer/Inner` style names
     // emitted by EnumerateClasses for nested classes.

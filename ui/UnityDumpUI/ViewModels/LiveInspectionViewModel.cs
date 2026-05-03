@@ -257,8 +257,23 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 arrayAddr = "0x" + ParseLittleEndianHexQword(mem.Hex!);
             }
 
+            // Hand the DLL the element class spec so it can resolve the
+            // element class via class_from_name, derive the right
+            // element_size from class_value_size (handles struct arrays
+            // like Vector3[] correctly), and tag value-type vs ref-type.
+            // Falls through to the primitive table on the DLL side when
+            // the element type is a System primitive that doesn't need
+            // runtime lookup.
+            (string ns, string name)? elemSpec = SplitFullName(elementType);
             WalkArrayResult result = await _backend.WalkArrayAsync(
-                arrayAddr, elementType, limit: 256, elementSize: null, ct).ConfigureAwait(true);
+                arrayAddr,
+                elementType: elementType,
+                limit: 256,
+                elementSize: null,
+                elementAssembly:  elemSpec is null ? null : (TargetAssembly ?? string.Empty),
+                elementNamespace: elemSpec?.ns,
+                elementName:      elemSpec?.name,
+                ct).ConfigureAwait(true);
             if (!string.IsNullOrEmpty(result.Error))
             {
                 ErrorMessage = $"walkArray: {result.Error}";
@@ -269,11 +284,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 foreach (WalkedArrayElement e in elems)
                     ArrayElements.Add(ArrayElementRow.From(e));
             }
+            string elemLabel = result.ElementClassName is { Length: > 0 }
+                ? (string.IsNullOrEmpty(result.ElementClassNamespace)
+                    ? result.ElementClassName!
+                    : $"{result.ElementClassNamespace}.{result.ElementClassName}")
+                : elementType;
+            string vtTag = result.ElementIsValueType is true ? " (value)" :
+                           result.ElementIsValueType is false ? " (ref)"   : string.Empty;
             ArrayWalkSummary =
-                $"[{result.Length} of {elementType}, showing {result.Count}, " +
-                $"data @ {result.DataAddress}]";
+                $"[{result.Length} of {elemLabel}{vtTag}, showing {result.Count}, " +
+                $"sizeof={result.ElementSize}, data @ {result.DataAddress}]";
             _logger.Write(Constants.LogCategoryView,
-                $"walkArray {row.Name} ({elementType}) {arrayAddr} length={result.Length} shown={result.Count}");
+                $"walkArray {row.Name} ({elemLabel}) {arrayAddr} length={result.Length} shown={result.Count} sizeof={result.ElementSize}");
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
@@ -318,6 +340,24 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Split a managed full-name like <c>"MainGame.PLY_WORK"</c> into
+    /// <c>(ns: "MainGame", name: "PLY_WORK")</c>. Returns null for plain
+    /// primitive names where DLL-side runtime lookup is not useful (the
+    /// in-handler primitive table covers them); names without a namespace
+    /// (top-level user types) come back with an empty <c>ns</c>.
+    /// </summary>
+    private static (string ns, string name)? SplitFullName(string? full)
+    {
+        if (string.IsNullOrWhiteSpace(full)) return null;
+        // Skip primitives — DLL primitive table handles them without a
+        // runtime class lookup.
+        if (full.StartsWith("System.", StringComparison.Ordinal)) return null;
+        int dot = full.LastIndexOf('.');
+        if (dot < 0) return (string.Empty, full);
+        return (full.Substring(0, dot), full.Substring(dot + 1));
     }
 
     /// <summary>Add a byte offset to a hex-string address; preserves the "0x" prefix.</summary>

@@ -236,6 +236,12 @@ public sealed class WalkArrayResult
     [JsonPropertyName("count")]         public int                   Count        { get; set; }
     [JsonPropertyName("elements")]      public List<WalkedArrayElement>? Elements { get; set; }
     [JsonPropertyName("error")]         public string?               Error        { get; set; }
+    // ↓ populated only when the caller supplied an elementAssembly/Namespace/Name
+    //   triple AND the runtime resolver had class_value_size / class_is_valuetype
+    //   bound (Unity 2021.3+ exports both for IL2CPP; Mono bdwgc usually too).
+    [JsonPropertyName("element_class_namespace")] public string? ElementClassNamespace { get; set; }
+    [JsonPropertyName("element_class_name")]      public string? ElementClassName      { get; set; }
+    [JsonPropertyName("element_is_value_type")]   public bool?   ElementIsValueType    { get; set; }
 }
 
 /// <summary>

@@ -439,6 +439,9 @@ primitive elements decode inline using the same per-type table as
 | `elementType` | string | optional managed-type name, e.g. `"System.Int32"`, `"MainGame.CARRYITEM"`. Required for primitive decoding. |
 | `limit` | uint | optional, default 256, capped at 4096 |
 | `elementSize` | uint | optional width hint for struct arrays the decoder can't introspect |
+| `elementAssembly` | string | optional element-class spec; when supplied the active backend resolves the class via `class_from_name` and fills `element_size` / `is_pointer` / `element_class_*` from `class_value_size` + `class_is_valuetype`. Lets the caller skip width hints for struct arrays. |
+| `elementNamespace` | string | empty string for top-level types |
+| `elementName` | string | element class simple name |
 
 Header layout (identical between Mono-bdwgc and IL2CPP, x64):
 
@@ -466,7 +469,12 @@ that pointer.
 //     { "index": 0, "address": "0x...", "ptr": "0x..." },
 //     { "index": 1, "address": "0x...", "ptr": "0x..." },
 //     ...
-//   ]
+//   ],
+//   // present only when elementAssembly + elementName were supplied AND
+//   // the runtime had class_value_size / class_is_valuetype bound:
+//   "element_class_namespace": "MainGame",
+//   "element_class_name":      "CARRYITEM",
+//   "element_is_value_type":   false
 // }
 ```
 

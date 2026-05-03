@@ -206,15 +206,21 @@ public sealed class BackendAdapter : IClassInfoLookup
     public async Task<WalkArrayResult> WalkArrayAsync(
         string address, string? elementType = null,
         int? limit = null, int? elementSize = null,
+        string? elementAssembly = null,
+        string? elementNamespace = null,
+        string? elementName = null,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
         {
             ["address"] = Str(address),
         };
-        if (!string.IsNullOrEmpty(elementType)) args["elementType"] = Str(elementType);
+        if (!string.IsNullOrEmpty(elementType))      args["elementType"]      = Str(elementType);
         if (limit       is int l) args["limit"]       = Int(l);
         if (elementSize is int s) args["elementSize"] = Int(s);
+        if (!string.IsNullOrEmpty(elementAssembly))  args["elementAssembly"]  = Str(elementAssembly);
+        if (elementNamespace is not null)            args["elementNamespace"] = Str(elementNamespace);
+        if (!string.IsNullOrEmpty(elementName))      args["elementName"]      = Str(elementName);
 
         var env = await _pipe.SendAsync(
             "walkArray", args,

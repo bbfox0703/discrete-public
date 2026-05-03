@@ -58,6 +58,11 @@ using fn_field_get_data         = const char*    (*)(MonoClassField*);
 using fn_class_is_enum          = int            (*)(MonoClass*);
 using fn_class_enum_basetype    = MonoType*      (*)(MonoClass*);
 
+// --- Mono array element metadata (Phase 10 follow-up) ----------------------
+using fn_class_get_element_class = MonoClass*    (*)(MonoClass*);
+using fn_class_value_size       = int            (*)(MonoClass*, std::uint32_t* /*align*/);
+using fn_class_is_valuetype     = int            (*)(MonoClass*);
+
 // MONO_TABLE_TYPEDEF row index in a MonoImage; pass to image_get_table_info.
 inline constexpr int          MonoTableTypedef = 2;
 // CLI metadata token base for TypeDef rows.
@@ -110,6 +115,9 @@ struct Resolver {
     fn_field_get_data         field_get_data         = nullptr;
     fn_class_is_enum          class_is_enum          = nullptr;
     fn_class_enum_basetype    class_enum_basetype    = nullptr;
+    fn_class_get_element_class class_get_element_class = nullptr;
+    fn_class_value_size       class_value_size       = nullptr;
+    fn_class_is_valuetype     class_is_valuetype     = nullptr;
 };
 
 // Singleton accessor. First call probes the loaded mono module and binds every

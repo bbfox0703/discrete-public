@@ -419,6 +419,13 @@ void RegisterCoreHandlers() {
     //
     // List<T> handling stays client-side — caller readMemory()s the
     // List._items pointer at offset 0x10 first, then walkArray()s that.
+    //
+    // Phase 10d follow-up: when the caller supplies an
+    // `elementAssembly`/`elementNamespace`/`elementName` triple, the active
+    // backend resolves the element class and fills element_size +
+    // is_pointer + element_class_* from class_value_size /
+    // class_is_valuetype. Lets the UI walk struct arrays (Vector3[] etc.)
+    // correctly without needing to hand-hint the stride.
     // ------------------------------------------------------------------------
     PipeServer::RegisterHandler(MagicStrings::CmdWalkArray,
         [parseAddr, formatHex, decodeField, bytesToHex](const json& args) -> json {
@@ -448,9 +455,68 @@ void RegisterCoreHandlers() {
 
         std::size_t elemSize = knownElemSize(elementType);
         bool        isPointer = false;
+        bool        elemClassResolved = false;
+        std::string elemClassNs, elemClassName;
+        bool        elemIsValueType = false;
+
+        // Optional: caller-supplied element-class spec for runtime lookup.
+        // The active backend (this DLL is built for one or the other) drives
+        // the resolution. Falls through cleanly when not supplied or when
+        // the resolver doesn't have the optional exports bound.
+        std::string elemAsm = args.value("elementAssembly",  std::string{});
+        std::string elemNs  = args.value("elementNamespace", std::string{});
+        std::string elemNm  = args.value("elementName",      std::string{});
+        if (!elemAsm.empty() && !elemNm.empty()) {
+#if defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+            const auto& r = IL2CPP::GetResolver();
+            if (r.resolved) {
+                const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(elemAsm);
+                IL2CPP::Il2CppClass* k = (img != nullptr) ? IL2CPP::FindClass(img, elemNs, elemNm) : nullptr;
+                if (k != nullptr) {
+                    elemClassResolved = true;
+                    if (r.class_get_name      != nullptr) elemClassName = r.class_get_name(k)      ? r.class_get_name(k)      : "";
+                    if (r.class_get_namespace != nullptr) elemClassNs   = r.class_get_namespace(k) ? r.class_get_namespace(k) : "";
+                    if (r.class_is_valuetype != nullptr) elemIsValueType = r.class_is_valuetype(k) != 0;
+                    if (r.class_value_size != nullptr) {
+                        std::uint32_t align = 0;
+                        int sz = r.class_value_size(k, &align);
+                        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                    }
+                }
+            }
+#elif defined(UNITYCEDUMPER_BACKEND_MONO)
+            const auto& r = Mono::GetResolver();
+            if (r.resolved) {
+                Mono::MonoImage* img = Mono::FindImageByName(elemAsm);
+                Mono::MonoClass* k = (img != nullptr) ? Mono::FindClass(img, elemNs, elemNm) : nullptr;
+                if (k != nullptr) {
+                    elemClassResolved = true;
+                    if (r.class_get_name      != nullptr) elemClassName = r.class_get_name(k)      ? r.class_get_name(k)      : "";
+                    if (r.class_get_namespace != nullptr) elemClassNs   = r.class_get_namespace(k) ? r.class_get_namespace(k) : "";
+                    if (r.class_is_valuetype != nullptr) elemIsValueType = r.class_is_valuetype(k) != 0;
+                    if (r.class_value_size != nullptr) {
+                        std::uint32_t align = 0;
+                        int sz = r.class_value_size(k, &align);
+                        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                    }
+                }
+            }
+#endif
+            // If resolver bound + class found + we got a value-type, leave
+            // is_pointer=false. Otherwise treat as ref by default below.
+            if (elemClassResolved) {
+                isPointer = !elemIsValueType;
+                if (elementType.empty()) {
+                    elementType = elemClassNs.empty()
+                        ? elemClassName
+                        : (elemClassNs + "." + elemClassName);
+                }
+            }
+        }
+
+        // If element-class lookup didn't fire / failed, fall back to the
+        // primitive table + caller hints / pointer default.
         if (elemSize == 0) {
-            // Reference type or struct without a hint. Treat as pointer
-            // unless caller forces a width via elementSize (struct arrays).
             if (args.contains("elementSize") && args["elementSize"].is_number_unsigned()) {
                 elemSize = args["elementSize"].get<std::size_t>();
             } else {
@@ -508,7 +574,7 @@ void RegisterCoreHandlers() {
             elements.push_back(std::move(e));
         }
 
-        return json{
+        json out = {
             {"address",      formatHex(addr)},
             {"data_address", formatHex(dataAddr)},
             {"length",       length},
@@ -519,6 +585,12 @@ void RegisterCoreHandlers() {
             {"count",        n},
             {"elements",     std::move(elements)},
         };
+        if (elemClassResolved) {
+            out["element_class_namespace"] = elemClassNs;
+            out["element_class_name"]      = elemClassName;
+            out["element_is_value_type"]   = elemIsValueType;
+        }
+        return out;
     });
 
     // ------------------------------------------------------------------------

@@ -85,6 +85,10 @@ void DoResolve() {
     bindOpt("il2cpp_class_get_declaring_type",  g_resolver.class_get_declaring);
     bindOpt("il2cpp_class_get_nested_types",    g_resolver.class_get_nested_types);
     bindOpt("il2cpp_class_get_static_field_data", g_resolver.class_get_static_data);
+    // Phase 10 follow-up: array element-class metadata for walkArray.
+    bindOpt("il2cpp_class_get_element_class",   g_resolver.class_get_element_class);
+    bindOpt("il2cpp_class_value_size",          g_resolver.class_value_size);
+    bindOpt("il2cpp_class_is_valuetype",        g_resolver.class_is_valuetype);
     bindOpt("il2cpp_field_get_flags",           g_resolver.field_get_flags);
     bindOpt("il2cpp_method_get_token",          g_resolver.method_get_token);
     bindOpt("il2cpp_method_get_flags",          g_resolver.method_get_flags);
