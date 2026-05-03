@@ -83,7 +83,8 @@ public static class CeXmlExporter
 
         string rootName  = StructLabel(self, assemblyName);
         OpenGroup(sb, "    ", idGen, rootName, baseAddress,
-                  offsets: null, collapsed: false, varType: "8 Bytes", showAsHex: true);
+                  offsets: null, collapsed: options.CollapsePointerNodes,
+                  varType: "8 Bytes", showAsHex: true);
 
         // Inherited fields first, then self's declared fields.
         if (ancestors is { Count: > 0 })
@@ -134,7 +135,8 @@ public static class CeXmlExporter
 
         string rootName  = $"{StructLabel(self, assemblyName)} @ 0x{baseAbs:X16}";
         OpenGroup(sb, "    ", idGen, rootName, $"0x{baseAbs:X16}",
-                  offsets: null, collapsed: false, varType: "8 Bytes", showAsHex: true);
+                  offsets: null, collapsed: options.CollapsePointerNodes,
+                  varType: "8 Bytes", showAsHex: true);
 
         if (ancestors is { Count: > 0 })
         {
@@ -691,12 +693,16 @@ public static class CeXmlExporter
         sb.Append(indent).Append("<CheatEntry>\n");
         sb.Append(indent).Append("  <ID>").Append(ids.Next()).Append("</ID>\n");
         sb.Append(indent).Append("  <Description>\"").Append(XmlEscape(description)).Append("\"</Description>\n");
+        // <Options moHideChildren=...> goes on every collapsed group node
+        // regardless of addressing mode — CE keys off the GroupHeader, not
+        // off the Offsets chain. Previous version restricted this to
+        // relative+offset entries and silently dropped it in live mode.
+        if (collapsed)
+            sb.Append(indent).Append("  <Options moHideChildren=\"1\" moDeactivateChildrenAsWell=\"1\"/>\n");
         if (showAsHex)
             sb.Append(indent).Append("  <ShowAsHex>1</ShowAsHex>\n");
         sb.Append(indent).Append("  <ShowAsSigned>0</ShowAsSigned>\n");
         sb.Append(indent).Append("  <GroupHeader>1</GroupHeader>\n");
-        if (collapsed && offsets is not null && address.StartsWith("+"))
-            sb.Append(indent).Append("  <Options moHideChildren=\"1\" moDeactivateChildrenAsWell=\"1\"/>\n");
         if (varType is not null)
             sb.Append(indent).Append("  <VariableType>").Append(varType).Append("</VariableType>\n");
         sb.Append(indent).Append("  <Address>").Append(XmlEscape(address)).Append("</Address>\n");
