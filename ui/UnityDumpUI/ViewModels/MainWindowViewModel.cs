@@ -231,7 +231,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         string dllName = row.Backend == UnityBackend.IL2CPP
             ? "UnityDumper-IL2CPP.dll"
             : "UnityDumper-Mono.dll";
-        string dllPath = Path.Combine(AppContext.BaseDirectory, dllName);
+        // Resolve next to the actual DiscreteUI.exe on disk, NOT
+        // AppContext.BaseDirectory: for the self-extracting single-file
+        // build mode (build.cmd ui) the latter points at a per-launch temp
+        // dir under %LOCALAPPDATA%\Temp\.net\... where the side-DLL never
+        // lands. Environment.ProcessPath gives the real .exe path in both
+        // self-contained-single-file and Native AOT publish modes.
+        string? baseDir = Environment.ProcessPath is { Length: > 0 } pp
+                          ? Path.GetDirectoryName(pp) : null;
+        if (string.IsNullOrEmpty(baseDir)) baseDir = AppContext.BaseDirectory;
+        string dllPath = Path.Combine(baseDir, dllName);
 
         ErrorMessage = null;
         IsBusy = true;
