@@ -393,69 +393,63 @@
                                  Width="80" Height="4" VerticalAlignment="Center" />
                   </Grid>
 
-                  <!-- Array elements panel — collapsed unless populated. -->
-                  <Expander DockPanel.Dock="Bottom"
-                            Header="{StaticResource Inspector.ArrayElementsTitle}"
-                            IsExpanded="{Binding Inspector.ArrayElements.Count, Mode=OneWay,
-                                                 Converter={x:Static ObjectConverters.IsNotNull}}"
-                            IsVisible="{Binding Inspector.ArrayElements.Count, Mode=OneWay,
-                                                Converter={x:Static ObjectConverters.IsNotNull}}"
-                            Margin="0,6,0,0">
-                    <DockPanel>
-                      <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                                  Spacing="8" Margin="0,0,0,4">
-                        <TextBlock Text="{Binding Inspector.ArrayWalkSummary}"
-                                   Opacity="0.7" FontSize="11" VerticalAlignment="Center" />
-                        <ProgressBar IsIndeterminate="True"
-                                     IsVisible="{Binding Inspector.IsLoadingArray}"
-                                     Width="80" Height="4" VerticalAlignment="Center" />
-                      </StackPanel>
-                      <DataGrid ItemsSource="{Binding Inspector.ArrayElements}"
-                                IsReadOnly="True"
-                                AutoGenerateColumns="False"
-                                CanUserResizeColumns="True"
-                                CanUserSortColumns="True"
-                                GridLinesVisibility="Horizontal"
-                                Height="200"
-                                x:DataType="vm:MainWindowViewModel">
-                        <DataGrid.Columns>
-                          <DataGridTextColumn Header="{StaticResource Inspector.ColIndex2}" Width="60"
-                                              Binding="{Binding Index, x:DataType=vm:ArrayElementRow}" />
-                          <DataGridTextColumn Header="{StaticResource Inspector.ColAddress}" Width="180"
-                                              Binding="{Binding Address, x:DataType=vm:ArrayElementRow}" />
-                          <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
-                                              Binding="{Binding DisplayValue, x:DataType=vm:ArrayElementRow}" />
-                        </DataGrid.Columns>
-                      </DataGrid>
-                    </DockPanel>
-                  </Expander>
-
+                  <!-- Phase 11.5: hierarchical field grid. Sorting is OFF
+                       because rows are positioned relative to their parent
+                       (parent first, then indented children). Expand chevron
+                       lives in the Name column; right-click any row to copy
+                       a CE XML / CE field rooted at that node's effective
+                       address. -->
                   <DataGrid ItemsSource="{Binding Inspector.Fields}"
-                            SelectedItem="{Binding Inspector.SelectedField, Mode=TwoWay}"
+                            SelectedItem="{Binding Inspector.SelectedNode, Mode=TwoWay}"
                             IsReadOnly="True"
                             AutoGenerateColumns="False"
                             CanUserResizeColumns="True"
                             CanUserReorderColumns="True"
-                            CanUserSortColumns="True"
+                            CanUserSortColumns="False"
                             GridLinesVisibility="Horizontal"
                             x:DataType="vm:MainWindowViewModel">
                     <DataGrid.ContextMenu>
                       <ContextMenu>
-                        <MenuItem Header="{StaticResource Inspector.WalkArray}"
-                                  Command="{Binding Inspector.WalkArrayCommand}" />
+                        <MenuItem Header="{StaticResource Inspector.CopyCeXmlNode}"
+                                  Command="{Binding Inspector.CopyCeXmlNodeCommand}" />
+                        <MenuItem Header="{StaticResource Inspector.CopyCeFieldNode}"
+                                  Command="{Binding Inspector.CopyCeFieldNodeCommand}" />
                       </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
-                      <DataGridTextColumn Header="{StaticResource Browser.ColName}"   Width="*"
-                                          Binding="{Binding Name, x:DataType=vm:WalkedFieldRow}" />
+                      <DataGridTemplateColumn Header="{StaticResource Browser.ColName}" Width="*">
+                        <DataGridTemplateColumn.CellTemplate>
+                          <DataTemplate x:DataType="vm:WalkedFieldNode">
+                            <StackPanel Orientation="Horizontal" Spacing="2">
+                              <Border Width="{Binding IndentPx}" />
+                              <Button Content="{Binding ExpandGlyph}"
+                                      Command="{Binding ToggleCommand}"
+                                      Padding="2,0"
+                                      MinWidth="18" Height="18"
+                                      FontSize="10"
+                                      Background="Transparent"
+                                      BorderThickness="0"
+                                      IsEnabled="{Binding CanExpand}"
+                                      VerticalAlignment="Center" />
+                              <TextBlock Text="{Binding Name}"
+                                         VerticalAlignment="Center" />
+                              <TextBlock Text="{Binding LoadHint}"
+                                         Opacity="0.55"
+                                         FontSize="11"
+                                         Margin="6,0,0,0"
+                                         VerticalAlignment="Center" />
+                            </StackPanel>
+                          </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                      </DataGridTemplateColumn>
                       <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
-                                          Binding="{Binding OffsetHex, x:DataType=vm:WalkedFieldRow}" />
+                                          Binding="{Binding OffsetHex, x:DataType=vm:WalkedFieldNode}" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
-                                          Binding="{Binding Type, x:DataType=vm:WalkedFieldRow}" />
+                                          Binding="{Binding Type, x:DataType=vm:WalkedFieldNode}" />
                       <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
-                                          Binding="{Binding DisplayValue, x:DataType=vm:WalkedFieldRow}" />
+                                          Binding="{Binding DisplayValue, x:DataType=vm:WalkedFieldNode}" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                          Binding="{Binding DeclaredIn, x:DataType=vm:WalkedFieldRow}" />
+                                          Binding="{Binding DeclaredIn, x:DataType=vm:WalkedFieldNode}" />
                     </DataGrid.Columns>
                   </DataGrid>
                 </DockPanel>

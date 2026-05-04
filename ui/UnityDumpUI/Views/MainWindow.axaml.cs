@@ -18,7 +18,8 @@ public partial class MainWindow : Window
         // Avalonia Window / StorageProvider types.
         vm.PickProcessAsync          = ShowPickerDialogAsync;
         vm.Browser.SaveFileAsync     = SaveFileAsync;
-        vm.Browser.CopyToClipboardAsync = CopyToClipboardAsync;
+        vm.Browser.CopyToClipboardAsync   = CopyToClipboardAsync;
+        vm.Inspector.CopyToClipboardAsync = CopyToClipboardAsync;
         DataContext = vm;
     }
 

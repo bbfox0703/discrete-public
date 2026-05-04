@@ -55,9 +55,8 @@
   <sys:String x:Key="Inspector.ColAddress">Address</sys:String>
   <sys:String x:Key="Inspector.ColValue">Value</sys:String>
   <sys:String x:Key="Inspector.NoTarget">No target — pick a class and press "Inspect selected class".</sys:String>
-  <sys:String x:Key="Inspector.WalkArray">Walk array</sys:String>
-  <sys:String x:Key="Inspector.ArrayElementsTitle">Array elements</sys:String>
-  <sys:String x:Key="Inspector.ColIndex2">#</sys:String>
+  <sys:String x:Key="Inspector.CopyCeXmlNode">Copy CE XML rooted here</sys:String>
+  <sys:String x:Key="Inspector.CopyCeFieldNode">Copy CE field</sys:String>
 
   <!-- Connection bar. -->
   <sys:String x:Key="Conn.Connect">Connect</sys:String>
