@@ -18,12 +18,36 @@
 --   [UnityCEDumper] Pipe ready: \\.\pipe\UnityDumpBfx
 
 -- Resolve sibling utils.lua. CE's package.path doesn't include the
--- script directory by default, so we extend it before requiring.
-local thisDir
-if getMainForm and getMainForm() and getMainForm().SaveDialog1 then
-    local p = getMainForm().SaveDialog1.FileName or ""
-    thisDir = p:match("(.*[\\/])") or ""
+-- script directory by default, so we have to teach it. Try (in order):
+--   1. debug.getinfo — Lua's own "where is the running file?" query.
+--      This is the only one that survives `dofile([[…]])` invocations.
+--   2. <CE-install>/discrete/  — the documented install layout.
+--   3. The CE-form's SaveDialog1.FileName (only populated when the user
+--      manually opened the script via the editor, not via dofile()).
+local function discoverScriptDir()
+    -- (1) debug.getinfo: source is "@<absolute path>" when loaded from
+    --     a file. Falls back to nil for inlined chunks.
+    local src = debug and debug.getinfo and debug.getinfo(1, "S")
+    if src and src.source and src.source:sub(1, 1) == "@" then
+        local p = src.source:sub(2)
+        local d = p:match("(.*[\\/])")
+        if d and #d > 0 then return d end
+    end
+    -- (2) Standard install layout.
+    if getCheatEngineDir then
+        local d = getCheatEngineDir() .. "discrete\\"
+        return d
+    end
+    -- (3) Editor-opened path.
+    if getMainForm and getMainForm() and getMainForm().SaveDialog1 then
+        local p = getMainForm().SaveDialog1.FileName or ""
+        local d = p:match("(.*[\\/])")
+        if d and #d > 0 then return d end
+    end
+    return nil
 end
+
+local thisDir = discoverScriptDir()
 if thisDir then
     package.path = thisDir .. "?.lua;" .. package.path
 end
@@ -32,6 +56,7 @@ local ok, U = pcall(require, "utils")
 if not ok then
     print("[UnityCEDumper] FATAL: utils.lua not found alongside this script")
     print("[UnityCEDumper]   tried path: " .. tostring(thisDir) .. "utils.lua")
+    print("[UnityCEDumper]   require error: " .. tostring(U))
     return
 end
 
