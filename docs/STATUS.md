@@ -1,8 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (clean, up to date with `origin/dev`)
-**Latest commit**: `2d0641d` — `fix(scripts): unity_dump.lua loses script-dir when launched via dofile()`
-**Current phase**: **Phase 11 in flight** — CE Lua bridge scripts shipped, awaiting live in-CE verification. Phases 0–10 + 9.5 (in-app process picker / DLL injector) closed and verified end-to-end against SaGa F2R.
+**Branch**: `dev`
+**Current phase**: **Phase 11 closed** — CE Lua bridge verified live against SaGa F2R (IL2CPP, build 101). DLL injects from CE, pipe handshakes, `DiscreteUI.exe` Connect populates assemblies. Phases 0–11 + 9.5 all closed.
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants).
 
@@ -25,7 +24,7 @@
 | 9.5 — In-app process picker + injector | ✅ | `IProcessEnumerator.ListUnityProcesses()` filters by detected modules; `IDllInjector` is an AOT-friendly C# port of `tools/Inject-Dll.ps1` using `LibraryImport` source-gen P/Invokes. `ProcessPickerWindow` modal + "Pick & inject…" button replace `Test-Handshake.ps1` for the launch-and-attach workflow. **AOT caveat captured**: `LibraryImport` needs explicit `EntryPoint=GetModuleHandleW` — does not auto-resolve A/W like classic `DllImport`. |
 | 10 — Export formats (UI-side) | ✅ | `UnityTypeMap` (managed type → CE / C type, with `ExtractElementClass` + `IsCollectionType`). Three exporters under [ui/UnityDumpUI.Core/Services/Export/](../ui/UnityDumpUI.Core/Services/Export/): `SdkHeaderExporter`, `CsxExporter` (nested `<Structure>` for pointer drilldown), `CeXmlExporter` (hierarchical CheatEntries with `GroupHeader=1` + `Offsets=[0]` deref + `<Options moHideChildren=1/>` collapse, **plus live-data mode** that turns the tree into absolute-rooted real-instance CE entries by chaining `readMemory` + `walkArray` per node). Five UI surfaces share one `ExportOptions` knob set (depth / arrayLimit / collapse / baseAddress / liveData) plumbed through an `Export options ▾` flyout: Export `.h` / `.csx` / `.CT` to file, Copy CE XML to clipboard, Copy CE field via right-click. |
 | 10.x — `walkArray` + element-class metadata | ✅ | Backend-agnostic pipe command reads array header (`+0x10 bounds*`, `+0x18 max_length`, `+0x20 vector[0]`) and returns per-slot data. Optional `elementAssembly`/`Namespace`/`Name` triple resolves the element class via `class_value_size` + `class_is_valuetype` (new optional resolver binds in both backends), so struct arrays (`Vector3[]`) walk with the right stride and per-slot drilldown gets correct value-vs-ref semantics. |
-| 11 — CE Lua bridge | 🟡 | **Code shipped, awaiting live in-CE verification.** Four scripts in [scripts/](../scripts/): `utils.lua` (callDLL helper + backend module probe + DLL path resolver), `unity_dump.lua` (detect Mono / IL2CPP, `loadLibrary` `<CE>/discrete/UnityDumper-{Backend}.dll`, call `UnityDumper_StartPipe`, banner with build #), `unity_dissect.lua` (open `\\.\pipe\UnityDumpBfx` directly via `io.open` + tiny purpose-built JSON parser, build CE Structure Dissect entries with managed-type → Vartype map matching `CsxExporter`), `unity_symbols.lua` (batch-register CE symbols for static fields + IL2CPP method addresses per Architecture.md naming). README + scripts ship in `dist/`. **Last fix (`2d0641d`)**: `discoverScriptDir()` now uses `debug.getinfo(1,"S").source` so `dofile([[…]])` invocations resolve `utils.lua` correctly (previous `getMainForm().SaveDialog1.FileName` was empty for dofile callers). |
+| 11 — CE Lua bridge | ✅ | Four scripts in [scripts/](../scripts/): `utils.lua` (callDLL helper + backend module probe + DLL path resolver), `unity_dump.lua` (detect Mono / IL2CPP, inject DLL, banner with build #), `unity_dissect.lua` (open `\\.\pipe\UnityDumpBfx` directly via `io.open` + tiny purpose-built JSON parser, build CE Structure Dissect entries with managed-type → Vartype map matching `CsxExporter`), `unity_symbols.lua` (batch-register CE symbols for static fields + IL2CPP method addresses per Architecture.md naming). **Verified live** against SaGa F2R: dofile → DLL injects → handshake reports `IL2CPP / 2021.3.39f1 / metadata 29 / 57 assemblies / build 101`. CE-portability fixes: backend detection now uses `enumModules()` (direct OS query) instead of `getModule()` (which lags behind symbolhandler) and accepts `UserAssembly.dll` + `mono-2.0-{sgen,boehm}.dll`; injection uses `injectDLL()` (modern CE) with `loadLibrary` fallback; `reinitializeSymbolhandler()` is forced after injection so `getAddress()` can resolve fresh exports. Optional StartPipe / GetBuildNumber calls degrade to soft warns (DllMain auto-starts the pipe, so they're nice-to-haves). |
 
 ### Repo / build tweaks landed alongside
 
@@ -64,18 +63,9 @@ fc3eb4b Phase 9: live inspection UI scaffold (find / walk / static-field bridge)
 
 ## What's open
 
-### Phase 11 acceptance (just one click away)
+### Phase 11 follow-up (optional)
 
-Per `plan.md`:
-> Open CE → load `unity_dump.lua` → DLL injected → UI's pipe handshakes successfully
-
-User just installed `<CE>/discrete/{4× .lua + 2× DLL}` and ran:
-```lua
-dofile([[C:\Program Files\Cheat Engine\discrete\unity_dump.lua]])
-```
-First attempt failed with "utils.lua not found". Fix shipped in `2d0641d`. **Next session: have user re-run after a fresh build/copy and confirm the banner prints + `DiscreteUI.exe` Connect handshakes successfully.** Then mark Phase 11 closed.
-
-If the dissect script also works (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")` → CE Structure Dissect populates), Phase 11 is fully done.
+Phase 11 closed via live verification: `DiscreteUI.exe` Connect against SaGa F2R after `dofile([[…unity_dump.lua]])` populated the assemblies pane and reported `Connected — build 101`. The dissect-script path (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) hasn't been re-exercised since the CE-API portability fixes — worth a single sanity run before the next session leans on it heavily, but not blocking.
 
 ### Phases not started
 

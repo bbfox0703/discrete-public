@@ -73,34 +73,81 @@ local function main()
     local backend = U.detectBackend()
     if backend == nil then
         U.err("No Unity backend detected.")
-        U.err("Looked for: GameAssembly.dll (IL2CPP), mono-2.0-bdwgc.dll / mono.dll (Mono).")
+        U.err("Looked for: GameAssembly.dll / UserAssembly.dll (IL2CPP),")
+        U.err("            mono-2.0-bdwgc.dll / mono-2.0-sgen.dll / mono-2.0-boehm.dll / mono.dll (Mono).")
         U.err("Wait for the game to finish loading, then re-run.")
+        -- Diagnostic: dump every module CE *did* see so we can spot the
+        -- real Unity DLL name (or confirm enumeration came back empty).
+        if enumModules ~= nil then
+            local mods = enumModules() or {}
+            U.err("enumModules() returned %d entries. Suspect candidates:", #mods)
+            local hits = 0
+            for _, m in ipairs(mods) do
+                local raw = m.Name or m.name or ""
+                local low = raw:lower()
+                if low:find("mono") or low:find("il2cpp")
+                   or low:find("unity") or low:find("assembly") then
+                    print(string.format("  %s", raw))
+                    hits = hits + 1
+                end
+            end
+            if hits == 0 then
+                U.err("(no module names contained mono/il2cpp/unity/assembly —")
+                U.err(" enumeration likely returned the wrong process or is empty)")
+            end
+        end
         return
     end
     U.log("Backend detected: %s", backend)
 
-    -- 3. Inject the matching DLL via CE's loadLibrary helper.
+    -- 3. Inject the matching DLL into the *target* process. Modern CE
+    --    (7.x) exposes `injectDLL(path)` for this; older builds had
+    --    `loadLibrary` as an alias. Prefer injectDLL when available.
     local dll = U.dllPath(backend)
     U.log("DLL path: %s", dll)
 
-    local handle = loadLibrary(dll)
-    if handle == nil or handle == 0 then
-        U.err("loadLibrary returned NULL — DLL not found or LoadLibraryW failed.")
-        U.err("Check %%LOCALAPPDATA%%\\UnityCEDumper\\Logs\\<pid>\\init\\current.log")
+    local injected = false
+    if injectDLL ~= nil then
+        local ok = injectDLL(dll)
+        if ok == nil then
+            U.err("injectDLL returned nil — DLL not found or injection failed.")
+            U.err("Check %%LOCALAPPDATA%%\\UnityCEDumper\\Logs\\<pid>\\init\\current.log")
+            return
+        end
+        injected = true
+    elseif loadLibrary ~= nil then
+        local handle = loadLibrary(dll)
+        if handle == nil or handle == 0 then
+            U.err("loadLibrary returned NULL — DLL not found or LoadLibraryW failed.")
+            U.err("Check %%LOCALAPPDATA%%\\UnityCEDumper\\Logs\\<pid>\\init\\current.log")
+            return
+        end
+        injected = true
+    else
+        U.err("Neither injectDLL nor loadLibrary is available in this CE build.")
         return
     end
 
     -- DllMain auto-runs UnityDumper_Init + UnityDumper_StartPipe, so the
-    -- pipe is usually up by the time loadLibrary returns. Give it a beat
+    -- pipe is usually up by the time injectDLL returns. Give it a beat
     -- to settle and to flush the init log line.
     if sleep then sleep(300) end
 
-    -- 4. Belt-and-braces: explicitly call StartPipe so the script reports
-    -- a definitive ready state instead of trusting auto-start. Both calls
-    -- are idempotent on the DLL side.
+    -- Force CE to re-scan symbols so getAddress() can resolve the freshly-
+    -- injected DLL's exports. Without this, getAddress returns garbage
+    -- (often 0 or stale), executeCodeEx then returns nil, and downstream
+    -- formatters (e.g. "%d") crash on the nil return value.
+    if reinitializeSymbolhandler ~= nil then
+        pcall(reinitializeSymbolhandler)
+    end
+
+    -- 4. Optional: explicitly call StartPipe + GetBuildNumber. These are
+    --    pure nice-to-haves — DllMain has already started the pipe — so
+    --    we treat any failure (e.g. CE can't resolve the export) as a
+    --    soft warn rather than aborting the script.
     local ok2, err = pcall(function()
         local startRet = U.callDLL("UnityDumper_StartPipe", "int32")
-        if startRet ~= 0 then
+        if startRet ~= nil and startRet ~= 0 then
             U.warn("UnityDumper_StartPipe returned %d (non-zero); pipe may still be running from auto-start.", startRet)
         end
     end)
@@ -112,10 +159,10 @@ local function main()
     local buildOk, build = pcall(function()
         return U.callDLL("UnityDumper_GetBuildNumber", "uint32")
     end)
-    if buildOk then
+    if buildOk and type(build) == "number" then
         U.log("Backend: %s — DLL injected (build %d)", backend, build)
     else
-        U.log("Backend: %s — DLL injected (build unknown — old build?)", backend)
+        U.log("Backend: %s — DLL injected (build unknown — symbol not yet resolvable)", backend)
     end
     U.log("Pipe ready: \\\\.\\pipe\\UnityDumpBfx")
     U.log("Launch DiscreteUI.exe and click Connect.")

@@ -36,9 +36,10 @@ end
 --- @param ...      any     Function arguments (CE handles primitive marshaling)
 --- @return         any     Return value
 function M.callDLL(funcName, retType, ...)
-    local fn = getAddress(funcName)
-    if fn == nil or fn == 0 then
-        error(TAG .. " export not found: " .. funcName .. " — DLL injected?")
+    local ok, fn = pcall(getAddress, funcName)
+    if not ok or fn == nil or fn == 0 then
+        error(TAG .. " export not found: " .. funcName ..
+              " — symbolhandler may not have scanned the new DLL yet.")
     end
 
     -- executeCodeEx: arg 1 = calling-convention flag.
@@ -47,22 +48,67 @@ function M.callDLL(funcName, retType, ...)
     -- as Microsoft's __fastcall/x64 calling convention CE assumes.
     local conv = (retType == "void") and 0 or 1
     local ret  = executeCodeEx(conv, fn, ...)
-    if retType == "bool"  then return ret ~= 0 end
-    if retType == "void"  then return nil end
+    if retType == "void" then return nil end
+    if ret == nil then
+        error(TAG .. " " .. funcName .. " call returned nil (executeCodeEx failed).")
+    end
+    if retType == "bool" then return ret ~= 0 end
     return ret
 end
 
 -- ---------- Backend detection (which DLL to inject) -------------------
 
 --- Determine which Unity scripting backend the *currently-attached* CE
---- target process uses. CE exposes loaded modules via `getModule(name)`.
+--- target process uses. We prefer `enumModules()` (queries the OS module
+--- table directly) over `getModule()` (which reads CE's symbolhandler
+--- list — that one lags behind the OS right after attach, before symbol
+--- loading finishes, and was the cause of false-negative detections on
+--- IL2CPP titles like SaGa F2R).
 --- Returns "IL2CPP" / "Mono" / nil. Backend nil means we couldn't find
 --- a recognised module — caller should bail with a helpful message.
 function M.detectBackend()
-    if getModule == nil then return nil end
-    if getModule("GameAssembly.dll")   ~= nil then return "IL2CPP" end
-    if getModule("mono-2.0-bdwgc.dll") ~= nil then return "Mono"   end
-    if getModule("mono.dll")           ~= nil then return "Mono"   end
+    -- Known module names per backend, lowercased for matching.
+    local IL2CPP_NAMES = {
+        ["gameassembly.dll"] = true,
+        ["userassembly.dll"] = true, -- some Unity titles ship under this name
+    }
+    local MONO_NAMES = {
+        ["mono-2.0-bdwgc.dll"] = true,
+        ["mono-2.0-sgen.dll"]  = true,
+        ["mono-2.0-boehm.dll"] = true,
+        ["mono.dll"]           = true,
+    }
+
+    -- Primary path: enumModules() — direct OS query, no symbolhandler lag.
+    -- CE's symbolhandler can be stale right after attach; force a refresh
+    -- before enumerating, otherwise we miss freshly-loaded Unity DLLs.
+    if reinitializeSymbolhandler ~= nil then
+        pcall(reinitializeSymbolhandler)
+    end
+    if enumModules ~= nil then
+        local mods = enumModules()
+        if mods then
+            for _, m in ipairs(mods) do
+                -- Some CE builds expose .Name, others .name; some return
+                -- the full path. Normalise both.
+                local raw = m.Name or m.name or ""
+                local base = raw:match("([^\\/]+)$") or raw
+                local name = base:lower()
+                if IL2CPP_NAMES[name] then return "IL2CPP" end
+                if MONO_NAMES[name]   then return "Mono"   end
+            end
+        end
+    end
+
+    -- Fallback: getModule() if enumModules isn't available (very old CE).
+    if getModule ~= nil then
+        if getModule("GameAssembly.dll")     ~= nil then return "IL2CPP" end
+        if getModule("UserAssembly.dll")     ~= nil then return "IL2CPP" end
+        if getModule("mono-2.0-bdwgc.dll")   ~= nil then return "Mono"   end
+        if getModule("mono-2.0-sgen.dll")    ~= nil then return "Mono"   end
+        if getModule("mono-2.0-boehm.dll")   ~= nil then return "Mono"   end
+        if getModule("mono.dll")             ~= nil then return "Mono"   end
+    end
     return nil
 end
 
