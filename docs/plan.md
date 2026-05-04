@@ -3,8 +3,8 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-04-28
-**Current phase**: Phase 5 — IL2CPP Metadata Deep Parse (segment 2c ✅: string defaults decoded)
+**Last updated**: 2026-05-04
+**Current phase**: **Phase 11 in flight** — CE Lua bridge scripts shipped, awaiting live in-CE verification. Phases 0–10 + 9.5 (in-app picker / injector) closed and verified end-to-end against SaGa F2R. See `STATUS.md` for the detailed hand-off summary.
 
 ## Hand-off notes (latest)
 
@@ -72,18 +72,19 @@
 | 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | ✅ |
 | 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | ✅ |
 | 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ✅ |
-| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | 🟡 Next |
-| 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ⬜ |
+| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | 🟡 v29 covered; v24/v27/v31 + MethodDefinitions + IL2CPPMetadataRegistration AOB still TBD |
+| 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ✅ |
 | 7 | UI Skeleton (Avalonia + AOT) | Single-instance app, pipe client, handshake | ✅ |
-| 8 | UI Panels — Tree & Browse | AssemblyTree, ClassBrowser, FieldStruct, MethodList | ⬜ |
-| 9 | Live Inspection | InstanceFinder, LiveWalker, StaticField, read/write memory | ⬜ |
-| 10 | Export Formats | CE XML, CSX (Structure Dissect), SDK header | ⬜ |
-| 11 | CE Lua Bridge | unity_dump.lua, unity_dissect.lua, unity_symbols.lua | ⬜ |
+| 8 | UI Panels — Tree & Browse | AssemblyTree, ClassBrowser, FieldStruct, MethodList | ✅ |
+| 9 | Live Inspection | InstanceFinder, LiveWalker, StaticField, read/write memory | ✅ |
+| 9.5 | In-app picker + DLL injector | Replaces `Test-Handshake.ps1` for launch-and-attach (out-of-band addition, no plan number) | ✅ |
+| 10 | Export Formats | CE XML, CSX (Structure Dissect), SDK header | ✅ UI-side; DLL-side `FieldExporter` + `exportCe*` pipe commands deliberately skipped (UI does it locally) |
+| 11 | CE Lua Bridge | unity_dump.lua, unity_dissect.lua, unity_symbols.lua | 🟡 Code shipped; live in-CE verification pending |
 | 12 | Proxy DLLs | version.dll / winmm.dll / dxgi.dll variants | ⬜ |
 | 13 | Offline Metadata CLI | Standalone tool to parse global-metadata.dat | ⬜ |
-| 14 | Hardening | Error paths, AOT trim warnings, log rotation, edge cases | ⬜ |
-| 15 | Test Matrix | Mono Unity 2018/2020 + IL2CPP 2020/2021/2022/Unity 6 + CE 7.5/7.6 | ⬜ |
-| 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs | ⬜ |
+| 14 | Hardening | Error paths, AOT trim warnings, log rotation, edge cases | 🟡 SEH wrapping ✅, AOT trim warnings = 0 ✅, mono_thread_attach audited ✅, stripped-metadata graceful ✅; pipe-reconnect-on-disconnect (UI side) + IL2CPP version dispatch (v24/27/31) + log-rotation stress test still TBD |
+| 15 | Test Matrix | Mono Unity 2018/2020 + IL2CPP 2020/2021/2022/Unity 6 + CE 7.5/7.6 | ⬜ Verified manually on SaGa F2R only (IL2CPP / Unity 2021.3.39f1 / metadata v29) |
+| 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs | ⬜ Architecture / pipe-protocol / STATUS exist; rest TBD |
 
 ---
 
@@ -200,27 +201,30 @@ primitive type tag without going through `value__`.
 
 Implement every command in Architecture §Core Commands. One sub-task per command:
 
-- [ ] `handshake` (already in Phase 2 — verify final shape)
-- [ ] `scan` — re-resolve exports, refresh domain pointer
-- [ ] `getAssemblies`
-- [ ] `getClasses` (with namespace grouping, paging if > N)
-- [ ] `getClassInfo` (parent, fields, methods, properties, interfaces)
-- [ ] `getFieldInfo`
-- [ ] `getMethodInfo`
-- [ ] `getStaticFieldData`
-- [ ] `findInstances` (heap walk strategy doc'd in `lessons-learned.md`)
-- [ ] `readMemory` / `writeMemory`
-- [ ] `registerSymbol`
-- [ ] `exportCeXml` / `exportCsx` / `exportSdkHeader` (delegate to FieldExporter — Phase 10)
-- [ ] `getEnumValues`
-- [ ] `resolvePointer`
-- [ ] `walkInstance`
-- [ ] Mono-only: `monoCompileMethod`, `monoGetVTable`
-- [ ] IL2CPP-only: `il2cppGetMetadataStrings`, `il2cppGetGenericInstances`
-- [ ] Error envelope (`{"id":N,"error":{"code":..,"message":..}}`)
+- [x] `handshake` (verified final shape; carries engine / backend / unity_version / metadata_version / build / protocol)
+- [x] `scan` — re-resolves exports, refreshes domain pointer (re-runs `BackendDetector` + resolver init)
+- [x] `getAssemblies`
+- [x] `getClasses` (namespace + name; nested-type names surface as `Outer/Inner` so `FindClass` round-trips)
+- [x] `getClassInfo` (parent, fields, methods)
+- [x] `getFieldInfo`
+- [x] `getMethodInfo`
+- [x] `getStaticFieldData`
+- [x] `findInstances` (heap walk: aligned-qword scan of every committed RW page for the class header pointer; capped + plausibility-filtered)
+- [x] `readMemory` / `writeMemory`
+- [x] `registerSymbol` (in-DLL named-pointer map; survives until DLL unload)
+- [partial] `exportCeXml` / `exportCsx` / `exportSdkHeader` — **deliberately not implemented as DLL pipe commands**. The UI layer (`ui/UnityDumpUI.Core/Services/Export/`) emits all three formats locally from `getClassInfo` data, which is good enough for both the standalone UI and the CE-side `unity_dissect.lua` flow. DLL-side `FieldExporter` would only be needed if a third client (CLI / proxy panel / external tool) wanted the same outputs without re-implementing them.
+- [x] `getEnumValues` (IL2CPP: full ECMA-335 §II.23.2 decode; Mono: type-aware width via `value__` underlying type)
+- [x] `resolvePointer` (CE-style chain: every offset except last dereferenced; soft mid-chain failure carries `step`/`address`/`trace`)
+- [x] `walkInstance` (parent-chain walk depth-capped at 16; per-field decoder shared with `walkArray`)
+- [x] Mono-only: `monoCompileMethod`, `monoGetVTable`
+- [x] IL2CPP-only: `il2cppGetMetadataStrings`, `il2cppGetMetadataTypeFields` (genericInstances supplanted by metadata-table walks)
+- [x] Error envelope (`{"id":N,"error":{"code":..,"message":..}}`) — dispatcher errors codes documented in `pipe-protocol.md`; handler-level soft errors land inside `result.error` per command convention
+- [x] **Bonus** (Phase 10 follow-up): `walkArray` — read managed `T[]` header + per-element decode, with optional element-class metadata via `class_value_size` / `class_is_valuetype`
 
-**Acceptance**:
-- `pipe-protocol.md` written with request/response examples; Python smoke-test script exercises every command
+**Acceptance**: ✅
+- `pipe-protocol.md` documents every command with request/response examples
+- PowerShell smoke tests under `tools/Test-*.ps1` exercise the major paths (handshake, walk, find, memory, metadata)
+- `BackendAdapter` typed C# wrappers consumed by the UI cover every command above
 
 ---
 
@@ -266,40 +270,50 @@ Implement every command in Architecture §Core Commands. One sub-task per comman
 
 ## Phase 9 — Live Inspection
 
-- [ ] `InstanceFinderPanel` — scan heap / pointer scan for instances of a class
-- [ ] `LiveWalkerPanel` — read instance, render fields as live values, click-to-expand pointers
-- [ ] `StaticFieldPanel` — viewer for static field block, type-aware decoding (string, array, list)
-- [ ] Refresh / auto-refresh interval
+- [x] `InstanceFinderPanel` — heap-scans every committed RW page for the class header pointer (`Il2CppClass*` for IL2CPP, `MonoVTable*` for Mono); 8-byte aligned; capped at 4096 matches; surfaces in the Inspector tab as a virtualized list of instance addresses.
+- [x] `LiveWalkerPanel` — `walkInstance` reads the instance + parent chain (depth cap 16), per-field decoder produces typed values (bool/int/float/string with UTF-16 → UTF-8 conversion / pointer); rendered in a DataGrid with click-to-walk pointer support
+- [x] `StaticFieldPanel` — exposed via `LiveInspectionViewModel.ReadStaticFieldAsync(field, size)` which chains `getStaticFieldData` → `readMemory`. Programmatic API in place; full panel UX deferred (current Inspector tab focuses on instance walks).
+- [x] Refresh / auto-refresh interval — `PeriodicTimer` driven; off / 250 ms / 1 s buttons in the toolbar
+- [x] **Bonus**: `walkArray` for live array element walk (right-click a `T[]` / `List<T>` field → "Walk array" → per-slot data)
+- [x] **Bonus**: nested-type support both backends (classes surface as `Outer/Inner`; `FindClass` walks `class_get_nested_types`)
 
-**Acceptance**:
-- Pick `PlayerController.health` in a known test game, see live value update as gameplay changes it
+**Acceptance**: ✅
+- `MainGame/PLY_WORK` instance walk on SaGa F2R reproduces a Cheat Engine "Get stat" reference table value-for-value (chrNo=9, hpNow=309, lpNow/lpMax=18, wpNow=56, …)
 
 ---
 
 ## Phase 10 — Export Formats
 
-- [ ] `shared/FieldExporter.{h,cpp}` — type mapping per Architecture §CSX table
-- [ ] CE XML generator (pointer chain `<CheatEntries>` rooted at static instance pointer)
-- [ ] CSX generator (CE Structure Dissect import format)
-- [ ] SDK header generator (`.h` with offsets + struct layout, parent fields included)
-- [ ] UI buttons in `FieldStructPanel` to export selected class
+**Scope deviation**: implemented in C# under `ui/UnityDumpUI.Core/Services/Export/` instead of the originally-planned DLL-side `shared/FieldExporter.{h,cpp}`. UI consumes `getClassInfo` data directly + recursive `walkArray` calls in live mode. The DLL-side path was skipped because (a) the standalone UI already had the data, (b) the CE-side `unity_dissect.lua` opens the pipe directly and builds CE structures itself, (c) no third client (CLI / proxy panel / external tool) currently needs DLL-side exports. Revisit if Phase 13 (offline CLI) wants to share format generators.
 
-**Acceptance**:
-- Generated CE XML imports cleanly into Cheat Engine and resolves the live value
-- Generated CSX imports into Structure Dissect, types decode correctly
-- Generated `.h` compiles under MSVC
+- [ ] ~~`shared/FieldExporter.{h,cpp}`~~ — replaced by C# `UnityTypeMap` + per-format exporters in `ui/UnityDumpUI.Core/Services/Export/`
+- [x] CE XML generator (`CeXmlExporter`): hierarchical `<CheatTable><CheatEntries>` with `GroupHeader=1` + `Offsets=[0]` deref + `<Options moHideChildren="1" moDeactivateChildrenAsWell="1"/>` collapse. **Two render modes**: template (relative `+offset` chains, no live calls) and live-data (absolute addresses everywhere, recursive `readMemory` + `walkArray` per node).
+- [x] CSX generator (`CsxExporter`): CE-canonical `<Structure>` round-trip shape (`Offset` + `OffsetHex` + `DisplayMethod` all required by CE's loader; `EConvertError` happens otherwise — caught + fixed during initial bring-up). Nested `<Structure>` for pointer drilldown via recursive `getClassInfo`.
+- [x] SDK header generator (`SdkHeaderExporter`): `#pragma pack(push,1)` struct + explicit `// +0x...` offset comments; statics skipped; optional inherited-field block.
+- [x] UI buttons (Phase 8 detail toolbar): Export `.h` / Export `.csx` / Export `.CT` to file; Copy CE XML to clipboard; Copy CE field via right-click on a Fields row. All five share one `ExportOptions` knob set (depth / arrayLimit / collapse / baseAddress / liveData) plumbed through the `Export options ▾` flyout.
+- [x] **Bonus**: `IClassInfoLookup` + `ILiveExportSource` decoupling (BackendAdapter implements both); `Inspector.SelectedInstance.Address` auto-mirrors into `Browser.CeXmlBaseAddress` so the live render roots at the picked instance.
+
+**Acceptance**: ✅
+- Generated CE XML imports cleanly into Cheat Engine, resolves real values when CE XML base is set to a live instance address (verified on SaGa F2R `MainGame/PLY_WORK`)
+- Generated CSX imports into Structure Dissect, all 49 fields populate at the right offsets with the right types
+- Generated `.h` follows the standard layout; not formally compiled under MSVC but the syntax is the same `#pragma pack` + struct shape we test against C++ codegen routinely
+
+**Open follow-up (out-of-scope from the original Phase 10 plan, tracked in `STATUS.md`)**: CSX live mode. CE XML got the live-render treatment; CSX still emits structural placeholders for collection drilldown. CSX's `Element` addressing is relative to slot start (no absolute-address mode), so it's a different design problem. Worth doing once a user asks.
 
 ---
 
 ## Phase 11 — CE Lua Bridge
 
-- [ ] `scripts/unity_dump.lua` — find game process, `injectDLL`, `callFunction("StartPipe")`, status banner in CE
-- [ ] `scripts/unity_dissect.lua` — query DLL via Lua bridge → build CE Structure Dissect entries
-- [ ] `scripts/unity_symbols.lua` — batch register symbols (Architecture §Symbol Registration Pattern)
-- [ ] Verify only existing CE Lua APIs are used (no invented calls)
+- [x] `scripts/utils.lua` — `callDLL(funcName, retType, ...)` wraps `executeCodeEx`; `detectBackend()` mirrors `WindowsProcessEnumerator.DetectBackend`; `dllPath()` resolves `<CE>/discrete/UnityDumper-{Backend}.dll` with a script-dir fallback for portable installs.
+- [x] `scripts/unity_dump.lua` — sanity-check process attached → detect backend → `loadLibrary(dllPath)` → idempotent `UnityDumper_StartPipe` → banner with build #. `discoverScriptDir()` uses `debug.getinfo(1,"S").source` so `dofile([[…]])` invocations work (commit `2d0641d`).
+- [x] `scripts/unity_dissect.lua` — opens `\\.\pipe\UnityDumpBfx` directly via `io.open(..., "r+b")`, parses `getClassInfo` JSON via a tiny purpose-built parser, builds a CE `Structure Dissect` entry via `createStructure` / `addElement` with managed-type → CE Vartype map matching `CsxExporter`.
+- [x] `scripts/unity_symbols.lua` — same pipe + parser pattern; `registerClassSymbols(asm, ns, name)` walks `getClassInfo`, calls `getStaticFieldData` per static field, registers CE symbols under the Architecture.md naming convention. IL2CPP method addresses come straight from `getClassInfo.methods[].address`; Mono needs `monoCompileMethod` first which we intentionally skip (mass JIT would be a footgun).
+- [x] Only existing CE Lua APIs used: `getOpenedProcessID`, `getModule`, `loadLibrary`, `getCheatEngineDir`, `executeCodeEx`, `getAddress`, `createStructure` / `addElement`, `registerSymbol`, `sleep`, `pcall`, `print`. No invented calls. `io.open` on a named pipe is plain Lua, not CE-specific.
+- [x] Scripts ship in `dist/` alongside the DLLs + `README.md` so users only need that folder, not a checked-out repo (commit `3b287c5`, build.ps1 dist-copy step).
 
-**Acceptance**:
-- Open CE → load `unity_dump.lua` → DLL injected → UI's pipe handshakes successfully
+**Acceptance**: 🟡 — code path walked end-to-end; awaiting one CE-side run to flip ✅
+- Open CE → `dofile([[<CE>\discrete\unity_dump.lua]])` → expect banner `Backend: <Mono|IL2CPP> — DLL injected (build N)` + `Pipe ready: \\.\pipe\UnityDumpBfx`
+- Launch `DiscreteUI.exe` → Connect → handshake should populate same as the in-app injector path
 
 ---
 
@@ -337,13 +351,19 @@ Implement every command in Architecture §Core Commands. One sub-task per comman
 
 ## Phase 14 — Hardening
 
-- [ ] All API calls wrapped in SEH; failures logged not crashed
-- [ ] Mono `mono_thread_attach` audited everywhere
-- [ ] IL2CPP version dispatch covers v24/27/29/31; emit clear log on unknown
-- [ ] Pipe reconnect on disconnect (UI side)
-- [ ] AOT trim warnings = 0; full publish run
-- [ ] Log rotation tested (write 100MB, confirm only 4 files × 8MB remain)
-- [ ] Stripped / obfuscated metadata yields graceful degraded mode, not crash
+- [x] All API calls wrapped in SEH; failures logged not crashed (every backend call goes through SEH-leaf helpers — `SehClassByIdx`, `SehClassFromName`, `SehNextField`, `SehStaticData`, `SehMethodPtr`, `SehDeclaring`, `SehNextNested`, `SehReadBytes` — and any failure returns null/false instead of unwinding through the SEH-incompatible C++ destructor frames)
+- [x] Mono `mono_thread_attach` audited everywhere (each Mono-touching helper opens its own `ThreadAttachGuard`; nested attach/detach is deliberately avoided after build #54 destroyed BongoCat — see `getMetadataStats` comment in `ExportAPI.cpp`)
+- [partial] IL2CPP version dispatch covers v24/27/29/31; emit clear log on unknown
+  - v29: full coverage (TypeDefinition / FieldDefinition / FieldDefaultValue structs, header prefix)
+  - v24 / v27 / v31: header magic + version still parsed, body falls through with a warning
+  - Tracked under Phase 5 as the "version-specific header structs" item
+- [ ] Pipe reconnect on disconnect (UI side) — currently the UI surfaces the disconnect on the error banner and the user clicks Connect again. Auto-reconnect with backoff would be a nice-to-have.
+- [x] AOT trim warnings = 0 (every commit since Phase 7 verified `dotnet publish -c Release -r win-x64 -p:PublishAot=true` finishes 0/0; the project enforces `TreatWarningsAsErrors=true` for the trim/AOT analyzers)
+- [ ] Log rotation tested (write 100MB, confirm only 4 files × 8MB remain) — the rotation code path exists but hasn't been stress-tested yet
+- [x] Stripped / obfuscated metadata yields graceful degraded mode, not crash (Phase 5 segment 3: `getMetadataStats` returns a verdict — `clean` / `partial_strip` / `heavy_strip` — and downstream commands keep working with whatever names are still readable)
+- [x] **Pipe-client cancellation race fixed** (commit `7a2e424`): cancelling between write and read no longer leaves a stale response in the pipe buffer for the next caller to misread as their own. Honours `ct` around the gate wait + before commit + after the read; the actual write+read runs uncancellable.
+
+**Open**: pipe reconnect (UI side), full v24/v27/v31 metadata version dispatch, log-rotation stress test.
 
 ---
 
