@@ -11,10 +11,23 @@
 -- Usage from CE's Lua console:
 --   dofile([[<CE-install>\discrete\unity_symbols.lua]])
 --   registerClassSymbols("Assembly-CSharp", "MainGame", "PLY_WORK")
+--   -- Mono targets: pass {compileMethods=false} to skip JIT-on-register
+--   --   if you don't want unused methods compiled into the address space.
+--   registerClassSymbols("Assembly-CSharp", "", "Player", {compileMethods=false})
 --
 -- Naming convention (Architecture.md §"Symbol Registration Pattern"):
 --   Unity:{Asm}:{Ns}.{Cls}.s_{Field}    -> static field absolute address
 --   Unity:{Asm}:{Ns}.{Cls}::{Method}    -> method native address (when known)
+--
+-- Backend differences:
+--   IL2CPP: every method has a baked-in address; getClassInfo returns it
+--           directly. Method-symbol registration is essentially free.
+--   Mono:   methods are JIT-compiled on first call. We invoke
+--           monoCompileMethod per method to force compilation and read
+--           the returned native entry point. This means a `registerClass-
+--           Symbols` call against a 50-method class triggers 50 JITs.
+--           Override via opts.compileMethods=false to register only the
+--           statics + already-JIT'd methods (m.address already populated).
 --
 -- Reuses the JSON parser from unity_dissect.lua via require if available;
 -- otherwise an inline copy keeps the file standalone.
@@ -95,9 +108,32 @@ end
 
 -- ---------- Symbol registration ---------------------------------------
 
+-- Backend cache — handshake is cheap but we only need to ask once per
+-- session; subsequent registerClassSymbols calls reuse the value.
+local cachedBackend = nil
+
+local function detectBackend()
+    if cachedBackend ~= nil then return cachedBackend end
+    local hs = rpc("handshake", {})
+    cachedBackend = (hs.result and hs.result.backend) or "?"
+    return cachedBackend
+end
+
 --- Register CE symbols for every static field and method of the given
 --- class. Returns counts so callers can verify how much landed.
-function registerClassSymbols(assembly, ns, name)
+---
+--- @param assembly string
+--- @param ns       string|nil  Namespace ("" if top-level)
+--- @param name     string      Class name
+--- @param opts     table|nil   {compileMethods=true|false}
+function registerClassSymbols(assembly, ns, name, opts)
+    opts = opts or {}
+    local compileMethods = opts.compileMethods
+    if compileMethods == nil then compileMethods = true end
+
+    local backend = detectBackend()
+    local isMono  = backend == "Mono"
+
     local clsResp = rpc("getClassInfo",
                         { assembly = assembly, namespace = ns or "", name = name })
     if clsResp.error or (clsResp.result and clsResp.result.error) then
@@ -109,9 +145,9 @@ function registerClassSymbols(assembly, ns, name)
 
     local prefix = string.format("Unity:%s:%s%s%s",
         assembly, (ns and ns ~= "" and (ns .. ".") or ""), name, "")
-    log("Registering symbols under '%s.*'", prefix)
+    log("Registering symbols under '%s.*' (backend=%s)", prefix, backend)
 
-    local statics, methods = 0, 0
+    local statics, methods, methodFails = 0, 0, 0
 
     -- 1. Static fields — query the DLL for each field's runtime address.
     for _, f in ipairs(info.fields or {}) do
@@ -133,20 +169,41 @@ function registerClassSymbols(assembly, ns, name)
         end
     end
 
-    -- 2. Methods — IL2CPP only; Mono needs an explicit JIT compile call
-    -- which we skip here. The address comes back from getMethodInfo.
+    -- 2. Methods — IL2CPP returns the address baked into the metadata via
+    --    getClassInfo. Mono only knows the address after JIT compile, so
+    --    we issue monoCompileMethod per method to force compilation. The
+    --    address-already-populated check still runs first because Mono
+    --    can pre-JIT some methods (e.g. ones called during scene load).
     for _, m in ipairs(info.methods or {}) do
-        if m.address and m.address ~= "0x0" and m.address ~= "" then
-            local sym = prefix .. "::" .. m.name
-            local addrInt = tonumber(m.address:gsub("^0x", ""), 16)
+        local addr = m.address
+        if (not addr or addr == "0x0" or addr == "") and isMono and compileMethods then
+            local cm = rpc("monoCompileMethod",
+                { assembly = assembly, namespace = ns or "", name = name, method = m.name })
+            if cm.result and cm.result.address and #cm.result.address > 0 then
+                addr = cm.result.address
+            else
+                -- Compile failures are common: abstract methods, generic
+                -- definitions without instantiation, methods that touch
+                -- unresolved AOT slots. Tally them but don't bail.
+                methodFails = methodFails + 1
+            end
+        end
+        if addr and addr ~= "0x0" and addr ~= "" then
+            local addrInt = tonumber(addr:gsub("^0x", ""), 16)
             if addrInt and addrInt ~= 0 and registerSymbol then
+                local sym = prefix .. "::" .. m.name
                 registerSymbol(sym, addrInt, true)
                 methods = methods + 1
             end
         end
     end
 
-    log("Done: %d static-field + %d method symbols.", statics, methods)
+    if methodFails > 0 then
+        log("Done: %d static-field + %d method symbols (%d method JITs failed).",
+            statics, methods, methodFails)
+    else
+        log("Done: %d static-field + %d method symbols.", statics, methods)
+    end
     return statics, methods
 end
 
