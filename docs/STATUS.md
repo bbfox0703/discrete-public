@@ -1,7 +1,8 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev`
-**Current phase**: **Phase 11 in flight** — CE Lua bridge scripts shipped. Phases 9.5 / 10 closed (UI-side exports + clipboard variants verified against SaGa F2R; live-data CE XML mode walks real array elements via the new `walkArray` pipe command + element-class metadata helpers). UI exe renamed to `DiscreteUI.exe` to match the repo. Next on the plan ledger: Phase 12 (proxy DLLs) or Phase 13 (offline metadata CLI).
+**Branch**: `dev` (clean, up to date with `origin/dev`)
+**Latest commit**: `2d0641d` — `fix(scripts): unity_dump.lua loses script-dir when launched via dofile()`
+**Current phase**: **Phase 11 in flight** — CE Lua bridge scripts shipped, awaiting live in-CE verification. Phases 0–10 + 9.5 (in-app process picker / DLL injector) closed and verified end-to-end against SaGa F2R.
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants).
 
@@ -11,103 +12,84 @@
 
 | Phase | Status | Highlights |
 |---|---|---|
-| 0 — Bootstrap | ✅ | repo skeleton, build scripts, single-instance mutex |
-| 1 — DLL skeleton | ✅ | named pipe `\\.\pipe\UnityDumpBfx`, JSON-RPC dispatcher, SEH-leaf helpers |
-| 2 — Pipe protocol v1 | ✅ | line-delimited JSON, error codes, `ping` / `handshake` / `scan` |
-| 3 — Mono backend | ✅ | `MonoResolver` (23/23 exports), 7 introspection commands |
-| 4 — IL2CPP backend | ✅ | required/optional split, runtime walker, method-pointer fallback |
+| 0 — Bootstrap | ✅ | Repo skeleton, build scripts, single-instance mutex |
+| 1 — DLL skeleton | ✅ | Named pipe `\\.\pipe\UnityDumpBfx`, JSON-RPC dispatcher, SEH-leaf helpers |
+| 2 — Pipe protocol v1 | ✅ | Line-delimited JSON, error codes, `ping` / `handshake` / `scan` |
+| 3 — Mono backend | ✅ | `MonoResolver` (23/23 + nested-type + element-class exports), 7 introspection commands |
+| 4 — IL2CPP backend | ✅ | Required/optional split, runtime walker, method-pointer fallback (Unity 2021.3+ doesn't export `method_get_pointer`; we read `MethodInfo.methodPointer` directly) |
 | 5 — IL2CPP metadata deep parse | ✅ | `MetadataParser` for v29, `Il2CppMetadataRegistration` AOB scan, type-aware FieldDefault decode (incl. ECMA-335 §II.23.2 sentinels), strip/obfuscation heuristic |
-| 6 — Live memory + walking | ✅ | `readMemory` / `writeMemory` / `resolvePointer` / `findInstances` / `walkInstance` / symbol registry / `monoGetVTable` / `getEnumValues` |
-| 7 — UI skeleton | ✅ | Avalonia 12 + Native AOT, `PipeClient`, `BackendAdapter`, `FileLogger`, `WindowsProcessEnumerator`, 3-pane shell with handshake card |
-| 8 — UI panels (tree & browse) | ✅ | `AssemblyBrowserViewModel`, 5-column shell, virtualized assembly + class lists, fields/methods DataGrids, substring filter, **show inherited members** toggle |
-| 11 — CE Lua bridge | 🟡 | `scripts/utils.lua` (callDLL helper, backend module probe, DLL path resolver), `scripts/unity_dump.lua` (the main entry point — detect Mono / IL2CPP, `loadLibrary` the matching `UnityDumper-{Backend}.dll` from `<CE>/discrete/`, call `UnityDumper_StartPipe`, banner with build #), `scripts/unity_dissect.lua` (open the named pipe directly via `io.open([[\\.\pipe\UnityDumpBfx]], "r+b")`, parse `getClassInfo` JSON via a tiny purpose-built parser, build a CE `Structure Dissect` entry with mapped types), `scripts/unity_symbols.lua` (batch-register CE symbols for static fields + IL2CPP method addresses following Architecture.md naming convention). README + scripts ship in `dist/` so users only need that folder, not the repo. Pending live verification inside CE itself. |
-| 10 — Export formats (UI-side) | ✅ | `UnityTypeMap` (Unity managed type → CE / C type, with `ExtractElementClass` for generics + `IsCollectionType` heuristic). Three exporters under [ui/UnityDumpUI.Core/Services/Export/](ui/UnityDumpUI.Core/Services/Export/): `SdkHeaderExporter` (`#pragma pack(push,1)` struct + offset comments), `CsxExporter` (CE Structure Dissect XML with nested `<Structure>` for pointer drilldown), `CeXmlExporter` (CE cheat-table hierarchy with `GroupHeader=1` + `Offsets=[0]` deref + `<Options moHideChildren=1/>` collapse). Five UI surfaces share one `ExportOptions` knob set (depth / arrayLimit / collapse / baseAddress) plumbed through an `Export options ▾` flyout: Export .h / .csx / .CT to file, Copy CE XML to clipboard, Copy CE field via right-click. `IClassInfoLookup` lets exporters recurse via `BackendAdapter`; soft-fails to opaque pointers on pipe error. Avalonia 12 clipboard caveat: `IClipboard.SetDataAsync(IAsyncDataTransfer)` is the only writer (legacy `DataObject` / `SetTextAsync` are gone). Open follow-up: `walkInstance` doesn't yet expose live array/list element addresses (UE5CEDumper's `ArrayElements` / `MapElements`), so collection drilldown emits structural placeholders rather than per-element live data — needs a DLL extension to deliver. |
-| 9.5 — In-app process picker + injector | ✅ | `IProcessEnumerator.ListUnityProcesses()` filters by detected Mono/IL2CPP modules; `IDllInjector` is an AOT-friendly C# port of `tools/Inject-Dll.ps1` using `LibraryImport` source-gen P/Invokes (caveat: `LibraryImport` needs explicit `EntryPoint=GetModuleHandleW` — does not auto-resolve A/W like classic `DllImport`). New `ProcessPickerWindow` modal + "Pick & inject…" button on the connection bar replaces `Test-Handshake.ps1` for the launch-and-attach workflow. |
-| 9 — Live inspection | ✅ | Phase-9 protocol DTOs (`FindInstancesResult` / `WalkInstanceResult` / `GetStaticFieldDataResult` / `ReadMemoryResult`), `BackendAdapter` typed methods, `LiveInspectionViewModel` (find → walk cascade, `PeriodicTimer` auto-refresh, static-field bridge), Inspector tab + right-click "Inspect" on the class list. **Nested-type support** in DLL (Mono + IL2CPP): classes surface as `Outer/Inner`, `FindClass` walks via `class_get_nested_types`. **Verified live**: `MainGame/PLY_WORK` decode matches a CE reference table value-for-value (build #68, SaGa F2R). DataGrids gained resize/reorder/sort; panes split by `GridSplitter`s; long names get hover tooltips. |
+| 6 — Live memory + walking | ✅ | `readMemory` / `writeMemory` / `resolvePointer` / `findInstances` / `walkInstance` / `walkArray` / symbol registry / `monoGetVTable` / `getEnumValues` |
+| 7 — UI skeleton | ✅ | Avalonia 12 + Native AOT, `PipeClient`, `BackendAdapter`, `FileLogger`, `WindowsProcessEnumerator`, 5-pane shell |
+| 8 — UI panels (tree & browse) | ✅ | `AssemblyBrowserViewModel`, virtualized assembly + class lists, fields/methods DataGrids, substring filter, "show inherited members" toggle, GridSplitter resizable panes, hover tooltips for long names |
+| 9 — Live inspection | ✅ | DTOs (`FindInstancesResult` / `WalkInstanceResult` / `GetStaticFieldDataResult` / `ReadMemoryResult` / `WalkArrayResult`), `LiveInspectionViewModel` (find → walk cascade, `PeriodicTimer` auto-refresh, static-field bridge), Inspector tab, right-click "Inspect" + "Walk array". Nested-type support (Mono + IL2CPP): classes surface as `Outer/Inner`; `FindClass` walks `class_get_nested_types`. **Verified live**: `MainGame/PLY_WORK` decode matches a CE reference table value-for-value (SaGa F2R, IL2CPP). |
+| 9.5 — In-app process picker + injector | ✅ | `IProcessEnumerator.ListUnityProcesses()` filters by detected modules; `IDllInjector` is an AOT-friendly C# port of `tools/Inject-Dll.ps1` using `LibraryImport` source-gen P/Invokes. `ProcessPickerWindow` modal + "Pick & inject…" button replace `Test-Handshake.ps1` for the launch-and-attach workflow. **AOT caveat captured**: `LibraryImport` needs explicit `EntryPoint=GetModuleHandleW` — does not auto-resolve A/W like classic `DllImport`. |
+| 10 — Export formats (UI-side) | ✅ | `UnityTypeMap` (managed type → CE / C type, with `ExtractElementClass` + `IsCollectionType`). Three exporters under [ui/UnityDumpUI.Core/Services/Export/](../ui/UnityDumpUI.Core/Services/Export/): `SdkHeaderExporter`, `CsxExporter` (nested `<Structure>` for pointer drilldown), `CeXmlExporter` (hierarchical CheatEntries with `GroupHeader=1` + `Offsets=[0]` deref + `<Options moHideChildren=1/>` collapse, **plus live-data mode** that turns the tree into absolute-rooted real-instance CE entries by chaining `readMemory` + `walkArray` per node). Five UI surfaces share one `ExportOptions` knob set (depth / arrayLimit / collapse / baseAddress / liveData) plumbed through an `Export options ▾` flyout: Export `.h` / `.csx` / `.CT` to file, Copy CE XML to clipboard, Copy CE field via right-click. |
+| 10.x — `walkArray` + element-class metadata | ✅ | Backend-agnostic pipe command reads array header (`+0x10 bounds*`, `+0x18 max_length`, `+0x20 vector[0]`) and returns per-slot data. Optional `elementAssembly`/`Namespace`/`Name` triple resolves the element class via `class_value_size` + `class_is_valuetype` (new optional resolver binds in both backends), so struct arrays (`Vector3[]`) walk with the right stride and per-slot drilldown gets correct value-vs-ref semantics. |
+| 11 — CE Lua bridge | 🟡 | **Code shipped, awaiting live in-CE verification.** Four scripts in [scripts/](../scripts/): `utils.lua` (callDLL helper + backend module probe + DLL path resolver), `unity_dump.lua` (detect Mono / IL2CPP, `loadLibrary` `<CE>/discrete/UnityDumper-{Backend}.dll`, call `UnityDumper_StartPipe`, banner with build #), `unity_dissect.lua` (open `\\.\pipe\UnityDumpBfx` directly via `io.open` + tiny purpose-built JSON parser, build CE Structure Dissect entries with managed-type → Vartype map matching `CsxExporter`), `unity_symbols.lua` (batch-register CE symbols for static fields + IL2CPP method addresses per Architecture.md naming). README + scripts ship in `dist/`. **Last fix (`2d0641d`)**: `discoverScriptDir()` now uses `debug.getinfo(1,"S").source` so `dofile([[…]])` invocations resolve `utils.lua` correctly (previous `getMainForm().SaveDialog1.FileName` was empty for dofile callers). |
 
-### Phase 8 specifics (just landed)
+### Repo / build tweaks landed alongside
 
-- **Protocol DTOs** in `ui/UnityDumpUI.Core/Services/ProtocolModels.cs`:
-  `GetAssembliesResult`, `GetClassesResult`, `GetClassInfoResult`,
-  `AssemblyEntry`, `ClassEntry`, `FieldEntry`, `MethodEntry`, `ClassRef` —
-  all wired through `ProtocolJsonContext` for source-gen serialization.
-- **`BackendAdapter`** gained `GetAssembliesAsync` / `GetClassesAsync` /
-  `GetClassInfoAsync`. AOT-safe `Str()` helper serializes string args via
-  `ProtocolJsonContext.Default.String` — the reflection-based
-  `SerializeToElement<T>` overload trips IL2026 / IL3050.
-- **`AssemblyBrowserViewModel`** (`ui/UnityDumpUI/ViewModels/`) coordinates
-  the assembly → class → fields+methods cascade. Per-list substring filter,
-  cancellation tokens drop superseded fetches, `ShowInherited` walks the
-  parent chain (depth cap 32) via repeated `getClassInfo` and merges
-  ancestor members oldest-first; every row carries a `Declared in` column.
-- **`MainWindow.axaml`** is a 5-column body: Assemblies | Classes | Detail.
-  Detail stacks a collapsible Handshake Expander, error banners, the
-  selected class header + parent chain, the inheritance toggle, and a
-  `TabControl` with Fields / Methods DataGrids. `App.axaml` now includes
-  `Avalonia.Controls.DataGrid`'s Fluent theme.
-- **`MainWindowViewModel`** auto-kicks `RefreshAssembliesCommand` after
-  handshake and wipes browser state on Disconnect.
-
-### Build infra (also just landed)
-
-- **`build.cmd`** — UE5CEDumper-style argument parser. Examples: `build`,
-  `build debug`, `build publish clean`, `build mono`, `build il2cpp`,
-  `build ui`, `build test`, `build --help`. Logs to `build_log.txt` via
-  `Start-Transcript` so the cmd→PowerShell encoding boundary doesn't
-  mangle CJK output.
-- **`build.ps1`** — every shippable artifact lands in `dist\` regardless
-  of target:
-  - DLL build copies `*.dll` + `*.pdb` from
-    `build\dll-<backend>-<cfg>\bin\` to `dist\`. Per-backend build dir is
-    always wiped before cmake configure to dodge cache poisoning across
-    `-DBACKEND=` swaps.
-  - UI Publish: AOT publish to `build\ui-publish\`, then exe + Skia /
-    HarfBuzz / ANGLE side-DLLs + pdbs into `dist\`.
-  - UI Debug/Release: self-contained single-file publish, exe (+ pdb in
-    Debug) into `dist\`.
-  - `build_number.txt`, `scripts\*.lua`, `scripts\*.CT` pulled alongside.
-  - End-of-run banner lists every file in `dist\` with its size.
-- **`.gitignore`** now excludes `/dist/` and `/build_log.txt`.
-
-### Acceptance verification
-
-- AOT publish: `dotnet publish -c Release -r win-x64 -p:PublishAot=true`
-  finishes with **0 warnings, 0 errors** under all four trim/AOT
-  analyzers.
-- Full build via `build.cmd publish clean` (~60 s) produces in `dist\`:
-  - `UnityDumper-IL2CPP.dll` (419 KB), `UnityDumper-Mono.dll` (388 KB)
-  - `UnityDumpUI.exe` (43.2 MB Native AOT)
-  - `libSkiaSharp.dll`, `libHarfBuzzSharp.dll`, `av_libglesv2.dll`,
-    pdbs, `build_number.txt`, `unity_dump.lua`
+- **UI exe renamed** to `DiscreteUI.exe` (`AssemblyName` change in csproj, `App.axaml` `avares://` updated to match — Avalonia 12 keys the resource scheme off AssemblyName not RootNamespace). Project directory + RootNamespace stay `UnityDumpUI` to keep the source-gen / `using` tree intact. DLLs (`UnityDumper-*.dll`) keep their existing names.
+- **`PipeClient` cancellation race fixed**: previously, a caller cancelling between write and read would leave the response in the pipe buffer for the next caller to misread (`Response id mismatch: expected N, got N-1`). Cancellation now only honoured around the gate wait + final pre-commit check; the actual write+read runs uncancellable so the protocol pairing stays consistent. After read, `ct` is re-checked and `OperationCanceledException` is thrown then.
+- **`build.cmd publish`** clean takes ~60–70s. AOT publish stays at **0 warnings, 0 errors** under all four trim/AOT analyzers. `dist/` ships the full set: 2× DLL + `DiscreteUI.exe` + Skia/HarfBuzz/ANGLE side-DLLs + pdbs + 4× `.lua` + `README.md` + `unity_dump.lua` + `build_number.txt`.
 
 ---
 
-## What's next — Phase 9: Live Inspection
+## Recent commit history (most recent first)
 
-From `plan.md` lines 261–269:
+```
+2d0641d fix(scripts): unity_dump.lua loses script-dir when launched via dofile()
+3b287c5 Phase 11: CE Lua bridge — inject + dissect + register-symbols scripts
+a8fa2d1 fix(inspector): Find instances button no-op when target unset
+97288f3 ui: rename executable to DiscreteUI.exe (matches repo name)
+61f9a7e fix(export): collapse not honoured on root + live-mode group nodes
+7f591da fix(export): primitive array slots emitted as 8 Bytes instead of element type
+9759bea Phase 10 (f): live-data CE XML export — real per-element addresses
+7a2e424 fix(pipe): id-mismatch race when caller cancels mid-request
+fd49342 Phase 10 (e): walkArray element-class metadata via runtime lookup
+de50449 Phase 10 (d): walkArray pipe command + Inspector UI for live array drilldown
+4f4efcc fix(export): export buttons stayed disabled (CanExecute race)
+296c415 Phase 10 (c): Copy CE XML / Copy CE field clipboard commands
+d50d180 fix(export): bridge Inspector.SelectedInstance -> Browser.CeXmlBaseAddress
+2fea770 Phase 10 (b): nested CSX + CE XML exporter + tunable export options
+db0ed92 fix(export): CSX needs Offset (decimal) + DisplayMethod for CE loader
+091f9f0 Phase 10 (a): UI-side SDK header + CSX export
+0ca3c0a fix(injector): explicit EntryPoint=GetModuleHandleW (LibraryImport AOT crash)
+2939143 ui: in-app process picker + DLL injection (replaces Test-Handshake.ps1)
+b84fba0 Phase 9 close: nested-type lookup + resizable panes; live walk verified
+fc3eb4b Phase 9: live inspection UI scaffold (find / walk / static-field bridge)
+```
 
-- [ ] `InstanceFinderPanel` — scan heap / pointer scan for instances of a class
-- [ ] `LiveWalkerPanel` — read instance, render fields as live values, click-to-expand pointers
-- [ ] `StaticFieldPanel` — viewer for static field block, type-aware decoding (string, array, list)
-- [ ] Refresh / auto-refresh interval
+---
 
-**Acceptance**: pick `PlayerController.health` in a known test game, see live value update as gameplay changes it.
+## What's open
 
-### Suggested first steps for the new session
+### Phase 11 acceptance (just one click away)
 
-1. Extend `ProtocolModels.cs` with DTOs for `findInstances`, `walkInstance`,
-   `getStaticFieldData`, `readMemory`. Wire each into `ProtocolJsonContext`.
-2. Extend `BackendAdapter` with the matching typed methods.
-3. New ViewModel: `LiveInspectionViewModel` (or split into
-   `InstanceFinderViewModel` + `LiveWalkerViewModel`). Trigger from a
-   right-click on a class in the existing class list (cleanest UX
-   integration with Phase 8).
-4. New panel(s) under `ui/UnityDumpUI/Views/`. Reuse the DataGrid pattern
-   from Phase 8. Auto-refresh via `DispatcherTimer`; user-configurable
-   interval (off / 250 ms / 1 s).
-5. Test target: any IL2CPP game where we can reach a known live value via
-   `findInstances` → `walkInstance`. SaGa F2R / BongoCat are the
-   already-validated test rigs (see `plan.md` hand-off notes).
+Per `plan.md`:
+> Open CE → load `unity_dump.lua` → DLL injected → UI's pipe handshakes successfully
+
+User just installed `<CE>/discrete/{4× .lua + 2× DLL}` and ran:
+```lua
+dofile([[C:\Program Files\Cheat Engine\discrete\unity_dump.lua]])
+```
+First attempt failed with "utils.lua not found". Fix shipped in `2d0641d`. **Next session: have user re-run after a fresh build/copy and confirm the banner prints + `DiscreteUI.exe` Connect handshakes successfully.** Then mark Phase 11 closed.
+
+If the dissect script also works (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")` → CE Structure Dissect populates), Phase 11 is fully done.
+
+### Phases not started
+
+| Phase | Scope sketch |
+|---|---|
+| 12 — Proxy DLLs | `version.dll` / `winmm.dll` / `dxgi.dll` proxy that auto-loads the dumper on game start. Useful for games where runtime injection is awkward. New `dll/src/proxy/` tree + `.def` forwarders + UI deploy panel. |
+| 13 — Offline metadata CLI | Standalone `metadata-cli` that parses `global-metadata.dat` without injection. Reuses `MetadataParser` as a static lib. Useful for CI dumping / static analysis. |
+| 14 — Hardening | Polish: SEH audit, Mono `mono_thread_attach` audit, IL2CPP version dispatch covering v24/27/29/31, pipe reconnect on disconnect (UI side), AOT trim warnings = 0 (already there), log rotation tested, stripped-metadata graceful degrade. |
+| 15 — Test matrix | Game/Engine combinations + CE version compat table in `plan.md`. |
+
+### Open follow-ups (not blocking any phase)
+
+- **CSX live mode** — CE XML got the live-render treatment (real per-element addresses + walkArray-driven children); CSX still emits structural placeholders. CSX `Element` addressing is relative to slot start (no absolute mode), so it's a different design problem. Worth doing once a user actually asks.
+- **Mono method-address registration** in `unity_symbols.lua`. Currently we only register IL2CPP method addresses (which `getClassInfo` returns directly). Mono needs an explicit `monoCompileMethod` JIT call before the address is known; the script intentionally skips this rather than mass-JIT every method.
 
 ---
 
@@ -115,63 +97,90 @@ From `plan.md` lines 261–269:
 
 ```
 discrete/
-├── build.cmd / build.ps1       <- new UE5-style wrapper (commit 66240c4)
+├── build.cmd / build.ps1       <- UE5-style wrapper; dist-copy step ships scripts/ + README
 ├── build_number.txt
-├── dist/                       <- ignored; built artifacts land here
+├── dist/                       <- gitignored; built artifacts land here
 ├── docs/
 │   ├── plan.md                 <- full phase ledger
-│   ├── pipe-protocol.md        <- DLL ↔ UI contract (current: protocol v1)
-│   ├── Archiutecture.md        <- rules / invariants (note: typo in name)
+│   ├── pipe-protocol.md        <- DLL ↔ UI contract (current: protocol v1; walkArray documented)
+│   ├── Archiutecture.md        <- rules / invariants (note: filename typo preserved)
 │   └── STATUS.md               <- this file
-├── dll/                        <- C++20 injected DLL (Mono + IL2CPP variants)
+├── dll/
+│   ├── src/main.cpp            <- DllMain auto-runs Init + StartPipe
+│   ├── src/shared/
+│   │   ├── ExportAPI.h/.cpp    <- C ABI: Init/StartPipe/StopPipe/GetBackendType/GetBuildNumber
+│   │   │                          + every pipe handler (readMemory, walkInstance, walkArray, ...)
+│   │   ├── MagicStrings.h      <- pipe name + command name constants
+│   │   ├── Memory.h            <- SEH-protected SafeReadBytes
+│   │   ├── PipeServer.h/.cpp   <- threaded named-pipe server
+│   │   └── Logger.h            <- per-PID rotated log files
+│   ├── src/mono/               <- MonoResolver/Domain/ClassWalker/ThreadAttach/TypeParser
+│   └── src/il2cpp/             <- IL2CPPResolver/Domain/ClassWalker/MetadataParser/...
 ├── ui/
-│   ├── UnityDumpUI/            <- Avalonia 12 app (AOT)
+│   ├── UnityDumpUI/            <- Avalonia 12 app (AOT). AssemblyName=DiscreteUI.
+│   │   ├── App.axaml           <- avares://DiscreteUI/Resources/Strings/en.axaml
 │   │   ├── ViewModels/
-│   │   │   ├── MainWindowViewModel.cs
-│   │   │   └── AssemblyBrowserViewModel.cs   <- new in Phase 8
-│   │   ├── Views/MainWindow.axaml
-│   │   ├── Resources/Strings/en.axaml
-│   │   └── Platform/WindowsProcessEnumerator.cs
-│   ├── UnityDumpUI.Core/       <- protocol + services (cross-platform-shaped)
+│   │   │   ├── MainWindowViewModel.cs           <- top-level; bridges Inspector→Browser base addr
+│   │   │   ├── AssemblyBrowserViewModel.cs      <- Phase 8 + Phase 10 export commands
+│   │   │   ├── LiveInspectionViewModel.cs       <- Phase 9 find/walk + walkArray
+│   │   │   └── ProcessPickerViewModel.cs        <- Phase 9.5 picker dialog
+│   │   ├── Views/
+│   │   │   ├── MainWindow.axaml + .cs           <- 5-pane shell, Inspector tab, export flyout
+│   │   │   └── ProcessPickerWindow.axaml + .cs  <- modal picker
+│   │   ├── Platform/
+│   │   │   ├── WindowsProcessEnumerator.cs      <- module probe → backend detect
+│   │   │   └── WindowsDllInjector.cs            <- LibraryImport CreateRemoteThread+LoadLibraryW
+│   │   └── Resources/Strings/en.axaml
+│   ├── UnityDumpUI.Core/       <- Protocol + services (AOT-safe).
+│   │   ├── Constants.cs
+│   │   ├── Platform/
+│   │   │   ├── IProcessEnumerator.cs            <- + ProcessInfo + UnityBackend enum
+│   │   │   └── IDllInjector.cs
 │   │   └── Services/
-│   │       ├── PipeClient.cs
-│   │       ├── BackendAdapter.cs   <- extend here for Phase 9
-│   │       ├── ProtocolModels.cs   <- extend here for Phase 9
-│   │       ├── ProtocolJson.cs     <- add JsonSerializable entries here
-│   │       └── FileLogger.cs
-│   └── UnityDumpUI.Tests/      <- xUnit v3
-├── tools/                      <- PowerShell pipe test helpers
-└── scripts/                    <- CE Lua bridge (Phase 11)
+│   │       ├── PipeClient.cs                    <- cancellation race fix lives here
+│   │       ├── BackendAdapter.cs                <- typed pipe API; implements IClassInfoLookup + ILiveExportSource
+│   │       ├── ProtocolModels.cs                <- every DTO (extend here for new commands)
+│   │       ├── ProtocolJson.cs                  <- source-gen JsonContext (register here)
+│   │       ├── FileLogger.cs
+│   │       └── Export/
+│   │           ├── ExportOptions.cs
+│   │           ├── IClassInfoLookup.cs          <- + ILiveExportSource (live render contract)
+│   │           ├── UnityTypeMap.cs              <- managed type → CE/C type table
+│   │           ├── SdkHeaderExporter.cs
+│   │           ├── CsxExporter.cs
+│   │           └── CeXmlExporter.cs             <- template + live render paths
+│   └── UnityDumpUI.Tests/       <- xUnit v3
+├── tools/                       <- PowerShell pipe test helpers (still useful for one-shot RPCs)
+└── scripts/                     <- CE Lua bridge (Phase 11)
+    ├── README.md                <- install layout + workflow
+    ├── utils.lua                <- callDLL, detectBackend, dllPath, log
+    ├── unity_dump.lua           <- main entry; injects DLL + StartPipe
+    ├── unity_dissect.lua        <- pipe RPC + tiny JSON parser → createStructure
+    └── unity_symbols.lua        <- registerSymbol for static fields + IL2CPP methods
 ```
 
 ---
 
-## Known caveats / things to watch
+## Known caveats / things to watch (carried forward)
 
-- **AOT analyzers are strict.** Any new JSON serialization path must go
-  through the source-gen `ProtocolJsonContext`. Reflection-based
-  `JsonSerializer.SerializeToElement<T>(value)` trips IL2026 + IL3050.
-  Pattern to copy: the `Str(string)` helper in `BackendAdapter.cs`.
-- **`CommunityToolkit.Mvvm` source-gen name collision**: a property named
-  `Backend` collides with the generated field name. The handshake VM uses
-  `Backend2` to dodge it (see `MainWindowViewModel.cs`).
-- **`IL2CPP method_get_pointer`** is not exported in Unity 2021.3+. We
-  read `MethodInfo.methodPointer` directly via SEH-protected struct read
-  (commit `b3dd16c`). Don't reintroduce the export-only path.
-- **`-DBACKEND=` cache poisoning**: cmake's cache hates being switched
-  between `Mono` / `IL2CPP` / `Both` in the same build dir. `build.ps1`
-  wipes the per-backend build dir on every configure for this reason.
-- **CJK Windows console** munges em-dashes printed by the script
-  unless we route through `Start-Transcript`. `build.cmd` already does.
-- **Game must be closed** before rebuilding the DLL — LNK1104 if the DLL
-  is still mapped from a previous injection.
+- **AOT analyzers are strict.** Any new JSON serialization path must go through the source-gen `ProtocolJsonContext`. Reflection-based `JsonSerializer.SerializeToElement<T>(value)` trips IL2026 + IL3050. Pattern to copy: the `Str(string)` / `Int(int)` helpers in `BackendAdapter.cs`.
+- **`LibraryImport` does NOT auto-resolve A/W**. Unlike classic `DllImport` with `CharSet`, every entry point name is taken literally. Use explicit `EntryPoint = "FooW"` for any function that has A/W variants. We learned this the hard way with `GetModuleHandle` (commit `0ca3c0a`).
+- **Avalonia 12 clipboard API churn**: `DataObject` / `DataFormats` deprecated, `IClipboard.SetTextAsync` / `SetDataObjectAsync` removed. The only supported writer is `IClipboard.SetDataAsync(IAsyncDataTransfer)` — wrap a `DataFormat.Text` item in a `DataTransfer` (see `MainWindow.axaml.cs.CopyToClipboardAsync`).
+- **Avalonia 12 `avares://` keys off AssemblyName, not RootNamespace.** Renamed the exe? Update `App.axaml`'s `ResourceInclude Source="avares://{AssemblyName}/..."` too. (Caught when renaming to `DiscreteUI`.)
+- **`CommunityToolkit.Mvvm` source-gen name collision**: a property named `Backend` collides with the generated field name. The handshake VM uses `Backend2` (see `MainWindowViewModel.cs`).
+- **IL2CPP `method_get_pointer`** is not exported in Unity 2021.3+. We read `MethodInfo.methodPointer` directly via SEH-protected struct read. Don't reintroduce the export-only path.
+- **`-DBACKEND=` cmake cache poisoning**: cmake hates being switched between `Mono` / `IL2CPP` / `Both` in the same build dir. `build.ps1` wipes the per-backend build dir on every configure for this reason.
+- **CJK Windows console** munges em-dashes printed by the script unless we route through `Start-Transcript`. `build.cmd` already does.
+- **Game must be closed** before rebuilding the DLL — LNK1104 if the DLL is still mapped from a previous injection.
+- **Antivirus** flags freshly-built `DiscreteUI.exe` (lots of LibraryImport native calls + remote thread injection P/Invokes). User has `dist/` excluded in their AV; mention this if a fresh dev hits a quarantine error after `build.cmd publish`.
+- **`PipeClient` write+read runs uncancellable past commit.** Don't "fix" this back to passing `ct` everywhere — the race it solves (id-mismatch when caller cancels mid-request) is not theoretical, it broke rapid Find Instances clicks. Caller's `ct` is honoured around the gate wait + before commit + after the read returns.
 
 ---
 
 ## Quick reference
 
 ```powershell
-# Run a clean full build (DLL + UI AOT + tests) -> dist/
+# Full clean build (DLL + UI AOT + tests) -> dist/
 .\build.cmd publish clean
 
 # UI only, fast iteration (self-contained single-file in dist\)
@@ -184,5 +193,26 @@ discrete/
 .\build.cmd test
 ```
 
-Pipe commands documented in `docs/pipe-protocol.md`. PowerShell smoke tests
-under `tools/Test-*.ps1`.
+Pipe protocol contract (current: protocol v1, includes `walkArray`): `docs/pipe-protocol.md`.
+PowerShell smoke tests: `tools/Test-*.ps1` — still useful for one-shot pipe RPCs while iterating on the DLL.
+CE-side workflow: `scripts/README.md` — install layout + dofile invocations.
+
+---
+
+## Suggested first steps for the new session
+
+1. **Close out Phase 11**: have user re-run `dofile([[<CE>\discrete\unity_dump.lua]])` after pulling commit `2d0641d` and copying the refreshed `dist/*.lua` into `<CE>/discrete/`. Expect:
+   ```
+   [UnityCEDumper] Attached PID: <pid>
+   [UnityCEDumper] Backend detected: IL2CPP
+   [UnityCEDumper] DLL path: C:\Program Files\Cheat Engine\discrete\UnityDumper-IL2CPP.dll
+   [UnityCEDumper] Backend: IL2CPP — DLL injected (build N)
+   [UnityCEDumper] Pipe ready: \\.\pipe\UnityDumpBfx
+   ```
+   Then `DiscreteUI.exe` → Connect → handshake. Optional: `dofile(...unity_dissect.lua)` then `dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`.
+
+2. **Pick the next phase**:
+   - **Phase 12 (proxy DLLs)** if you have a target game blocking direct injection or want the "drop next to .exe and launch" workflow.
+   - **Phase 13 (offline CLI)** if you want CI dumping / static analysis from a game backup.
+   - **Phase 14 (hardening)** if you'd rather polish what's shipped before adding more surface.
+   - **Skip ahead to the open follow-ups** (CSX live mode, Mono method symbols) if you want quick wins without committing to a new phase.
