@@ -191,9 +191,10 @@ public static class CeXmlExporter
         // Scalar leaf — emit at absolute address, no chain.
         if (!shape.IsPointer)
         {
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(f.Type);
             EmitLeaf(sb, indent, ids, desc,
                      vartype: shape.CeTypeKeyword,
-                     showAsHex: shape.CeTypeKeyword.EndsWith("Bytes"),
+                     showAsHex: hex, showAsSigned: signed,
                      address: fieldAddr, offsets: null);
             return;
         }
@@ -356,10 +357,11 @@ public static class CeXmlExporter
                         ulong slotAbs = ParseHexLoose(elem.Address ?? "0");
                         if (elemClass is null || slotAbs == 0)
                         {
+                            (bool h, bool s) = UnityTypeMap.CeDisplay(elemType);
                             EmitLeaf(sb, indent + "  ", ids,
                                      $"[{elem.Index}]",
                                      vartype: PrimitiveVartype(elemType),
-                                     showAsHex: false,
+                                     showAsHex: h, showAsSigned: s,
                                      address: elem.Address ?? "?", offsets: null);
                             continue;
                         }
@@ -604,9 +606,10 @@ public static class CeXmlExporter
 
         if (!shape.IsPointer)
         {
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(f.Type);
             EmitLeaf(sb, indent, ids, desc,
                      vartype: shape.CeTypeKeyword,
-                     showAsHex: shape.CeTypeKeyword.EndsWith("Bytes"),
+                     showAsHex: hex, showAsSigned: signed,
                      address: addr, offsets: null);
             return;
         }
@@ -719,14 +722,14 @@ public static class CeXmlExporter
     private static void EmitLeaf(
         StringBuilder sb, string indent, IdGen ids,
         string description, string vartype, bool showAsHex,
-        string address, int[]? offsets)
+        string address, int[]? offsets, bool showAsSigned = false)
     {
         sb.Append(indent).Append("<CheatEntry>\n");
         sb.Append(indent).Append("  <ID>").Append(ids.Next()).Append("</ID>\n");
         sb.Append(indent).Append("  <Description>\"").Append(XmlEscape(description)).Append("\"</Description>\n");
         if (showAsHex)
             sb.Append(indent).Append("  <ShowAsHex>1</ShowAsHex>\n");
-        sb.Append(indent).Append("  <ShowAsSigned>0</ShowAsSigned>\n");
+        sb.Append(indent).Append("  <ShowAsSigned>").Append(showAsSigned ? '1' : '0').Append("</ShowAsSigned>\n");
         sb.Append(indent).Append("  <VariableType>").Append(vartype).Append("</VariableType>\n");
         sb.Append(indent).Append("  <Address>").Append(XmlEscape(address)).Append("</Address>\n");
         EmitOffsets(sb, indent + "  ", offsets);

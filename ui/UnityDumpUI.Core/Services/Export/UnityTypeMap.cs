@@ -146,6 +146,47 @@ public static class UnityTypeMap
     public static bool IsPointerType(string? unityType)
         => Resolve(unityType).IsPointer;
 
+    /// <summary>
+    /// CE display preferences for a leaf field of <paramref name="unityType"/>.
+    /// Decides <c>&lt;ShowAsHex&gt;</c> + <c>&lt;ShowAsSigned&gt;</c> per CE
+    /// convention so paste-into-CE renders the value correctly without manual
+    /// fixup. Signed integers (Int16/32/64, SByte) get ShowAsSigned=1 and
+    /// non-hex; unsigned integers and pointer-shaped opaque blobs ("4 Bytes"
+    /// for an opaque qword/dword field) get hex; floats/bool/named-vector
+    /// types fall through to plain decimal display.
+    /// </summary>
+    public static (bool ShowAsHex, bool ShowAsSigned) CeDisplay(string? unityType)
+    {
+        if (string.IsNullOrWhiteSpace(unityType)) return (true, false); // opaque pointer
+
+        // Trim generic suffix and array suffix the same way Resolve does.
+        int lt = unityType.IndexOf('<');
+        string root = lt > 0 ? unityType.Substring(0, lt) : unityType;
+        if (root.EndsWith("[]", StringComparison.Ordinal)) return (true, false);
+
+        return root switch
+        {
+            "System.SByte"  or
+            "System.Int16"  or
+            "System.Int32"  or
+            "System.Int64"  => (false, true),
+
+            "System.Boolean" or
+            "System.Byte"    or
+            "System.Char"    or
+            "System.UInt16"  or
+            "System.UInt32"  or
+            "System.UInt64"  => (false, false),
+
+            "System.Single" or
+            "System.Double" => (false, false),
+
+            // Pointers and opaque structs (Vectors, Quaternion, Color, etc.):
+            // CE shows their qword/byte payload more usefully in hex.
+            _ => (true, false),
+        };
+    }
+
     /// <summary>True when the type is a collection-shaped pointer (T[], List`1, etc.).</summary>
     public static bool IsCollectionType(string? unityType)
     {
