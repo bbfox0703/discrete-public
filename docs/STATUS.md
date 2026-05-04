@@ -1,7 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
 **Branch**: `dev`
-**Current phase**: **Phase 11 closed** — CE Lua bridge verified live against SaGa F2R (IL2CPP, build 101). DLL injects from CE, pipe handshakes, `DiscreteUI.exe` Connect populates assemblies. Phases 0–11 + 9.5 all closed.
+**Current phase**: **Phase 11.5 closed** — Inspector field grid is now hierarchical: pointer/array fields drill in inline (chevron in the Name column, indented children, recursive expansion); right-click any node copies a CE XML / CE field rooted at that node. Phases 0–11.5 + 9.5 all closed and verified live against SaGa F2R (IL2CPP, build 105+).
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants).
 
@@ -25,6 +25,7 @@
 | 10 — Export formats (UI-side) | ✅ | `UnityTypeMap` (managed type → CE / C type, with `ExtractElementClass` + `IsCollectionType`). Three exporters under [ui/UnityDumpUI.Core/Services/Export/](../ui/UnityDumpUI.Core/Services/Export/): `SdkHeaderExporter`, `CsxExporter` (nested `<Structure>` for pointer drilldown), `CeXmlExporter` (hierarchical CheatEntries with `GroupHeader=1` + `Offsets=[0]` deref + `<Options moHideChildren=1/>` collapse, **plus live-data mode** that turns the tree into absolute-rooted real-instance CE entries by chaining `readMemory` + `walkArray` per node). Five UI surfaces share one `ExportOptions` knob set (depth / arrayLimit / collapse / baseAddress / liveData) plumbed through an `Export options ▾` flyout: Export `.h` / `.csx` / `.CT` to file, Copy CE XML to clipboard, Copy CE field via right-click. |
 | 10.x — `walkArray` + element-class metadata | ✅ | Backend-agnostic pipe command reads array header (`+0x10 bounds*`, `+0x18 max_length`, `+0x20 vector[0]`) and returns per-slot data. Optional `elementAssembly`/`Namespace`/`Name` triple resolves the element class via `class_value_size` + `class_is_valuetype` (new optional resolver binds in both backends), so struct arrays (`Vector3[]`) walk with the right stride and per-slot drilldown gets correct value-vs-ref semantics. |
 | 11 — CE Lua bridge | ✅ | Four scripts in [scripts/](../scripts/): `utils.lua` (callDLL helper + backend module probe + DLL path resolver), `unity_dump.lua` (detect Mono / IL2CPP, inject DLL, banner with build #), `unity_dissect.lua` (open `\\.\pipe\UnityDumpBfx` directly via `io.open` + tiny purpose-built JSON parser, build CE Structure Dissect entries with managed-type → Vartype map matching `CsxExporter`), `unity_symbols.lua` (batch-register CE symbols for static fields + IL2CPP method addresses per Architecture.md naming). **Verified live** against SaGa F2R: dofile → DLL injects → handshake reports `IL2CPP / 2021.3.39f1 / metadata 29 / 57 assemblies / build 101`. CE-portability fixes: backend detection now uses `enumModules()` (direct OS query) instead of `getModule()` (which lags behind symbolhandler) and accepts `UserAssembly.dll` + `mono-2.0-{sgen,boehm}.dll`; injection uses `injectDLL()` (modern CE) with `loadLibrary` fallback; `reinitializeSymbolhandler()` is forced after injection so `getAddress()` can resolve fresh exports. Optional StartPipe / GetBuildNumber calls degrade to soft warns (DllMain auto-starts the pipe, so they're nice-to-haves). |
+| 11.5 — Inspector inline drilldown | ✅ | `WalkedFieldRow` → `WalkedFieldNode` (hierarchical, observable). Field grid is now a flat-with-indent `DataGrid` (`DataGridTemplateColumn` for Name with indent border + chevron Button + load hint, `CanUserSortColumns="False"` so parent-child adjacency survives). Five node kinds — `Leaf` / `PointerToClass` / `Collection` / `ArraySlotPointer` / `ArraySlotLeaf` — drive lazy expansion: pointer-to-class → `walkInstance(ptr, classType)`, `T[]` / `List<T>` → `walkArray` (List auto-deref's `_items` at +0x10), pointer-array slots recurse. Collapse walks the Parent chain (robust against odd indent layouts). Auto-refresh snapshots top-level expanded names + replays expansion after each fresh `walkInstance`, bounded one-RPC-per-expanded-root cost. Right-click any node → Copy CE XML rooted at that node (reuses `CeXmlExporter.RenderAsync` live mode at `EffectiveAddress`) / Copy CE field (single-leaf XML). The separate "Array elements" Expander + "Walk array" button from Phase 10 are gone. **Ride-along fixes**: `UnityTypeMap.CeDisplay(type) → (hex, signed)` centralises CE leaf flags so `Int32` leaves emit `<ShowAsSigned>1</ShowAsSigned>` (was hardcoded 0 + hex-via-`EndsWith("Bytes")`); DLL path resolution switched to `Environment.ProcessPath` so `Pick & inject` works under self-extracting single-file mode (`AppContext.BaseDirectory` was pointing at the per-launch `%LOCALAPPDATA%\Temp\.net\…` extraction dir). |
 
 ### Repo / build tweaks landed alongside
 
@@ -37,6 +38,10 @@
 ## Recent commit history (most recent first)
 
 ```
+4626c08 fix(inject): resolve DLL via Environment.ProcessPath, not BaseDirectory
+2f9f3c4 Phase 11.5: inline drilldown in Inspector field grid
+1a11f9a fix(export): CE leaf flags type-aware (signed Int32 not hex)
+b8ce152 fix(scripts): CE-API portability — detection, injection, symbol resolve
 2d0641d fix(scripts): unity_dump.lua loses script-dir when launched via dofile()
 3b287c5 Phase 11: CE Lua bridge — inject + dissect + register-symbols scripts
 a8fa2d1 fix(inspector): Find instances button no-op when target unset
@@ -51,21 +56,16 @@ de50449 Phase 10 (d): walkArray pipe command + Inspector UI for live array drill
 296c415 Phase 10 (c): Copy CE XML / Copy CE field clipboard commands
 d50d180 fix(export): bridge Inspector.SelectedInstance -> Browser.CeXmlBaseAddress
 2fea770 Phase 10 (b): nested CSX + CE XML exporter + tunable export options
-db0ed92 fix(export): CSX needs Offset (decimal) + DisplayMethod for CE loader
-091f9f0 Phase 10 (a): UI-side SDK header + CSX export
-0ca3c0a fix(injector): explicit EntryPoint=GetModuleHandleW (LibraryImport AOT crash)
-2939143 ui: in-app process picker + DLL injection (replaces Test-Handshake.ps1)
-b84fba0 Phase 9 close: nested-type lookup + resizable panes; live walk verified
-fc3eb4b Phase 9: live inspection UI scaffold (find / walk / static-field bridge)
 ```
 
 ---
 
 ## What's open
 
-### Phase 11 follow-up (optional)
+### Phase 11 / 11.5 follow-ups (optional)
 
-Phase 11 closed via live verification: `DiscreteUI.exe` Connect against SaGa F2R after `dofile([[…unity_dump.lua]])` populated the assemblies pane and reported `Connected — build 101`. The dissect-script path (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) hasn't been re-exercised since the CE-API portability fixes — worth a single sanity run before the next session leans on it heavily, but not blocking.
+- **Dissect-script path** (`unity_dissect.lua` → `dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) hasn't been re-exercised since the CE-API portability fixes — worth a single sanity run before the next session leans on it heavily, but not blocking.
+- **Inspector value-type substruct expansion** — Phase 11.5 only expands pointer-to-class and array fields. Inline value-type struct fields (e.g. `Vector3`) still render as opaque values; expanding them would need a `walkInstance(parentAddr + offset, structType)` call without the managed-object header (DLL-side currently expects a header). Defer until a user actually asks.
 
 ### Phases not started
 
@@ -112,7 +112,7 @@ discrete/
 │   │   ├── ViewModels/
 │   │   │   ├── MainWindowViewModel.cs           <- top-level; bridges Inspector→Browser base addr
 │   │   │   ├── AssemblyBrowserViewModel.cs      <- Phase 8 + Phase 10 export commands
-│   │   │   ├── LiveInspectionViewModel.cs       <- Phase 9 find/walk + walkArray
+│   │   │   ├── LiveInspectionViewModel.cs       <- Phase 9 find/walk + Phase 11.5 hierarchical tree
 │   │   │   └── ProcessPickerViewModel.cs        <- Phase 9.5 picker dialog
 │   │   ├── Views/
 │   │   │   ├── MainWindow.axaml + .cs           <- 5-pane shell, Inspector tab, export flyout
@@ -191,18 +191,13 @@ CE-side workflow: `scripts/README.md` — install layout + dofile invocations.
 
 ## Suggested first steps for the new session
 
-1. **Close out Phase 11**: have user re-run `dofile([[<CE>\discrete\unity_dump.lua]])` after pulling commit `2d0641d` and copying the refreshed `dist/*.lua` into `<CE>/discrete/`. Expect:
-   ```
-   [UnityCEDumper] Attached PID: <pid>
-   [UnityCEDumper] Backend detected: IL2CPP
-   [UnityCEDumper] DLL path: C:\Program Files\Cheat Engine\discrete\UnityDumper-IL2CPP.dll
-   [UnityCEDumper] Backend: IL2CPP — DLL injected (build N)
-   [UnityCEDumper] Pipe ready: \\.\pipe\UnityDumpBfx
-   ```
-   Then `DiscreteUI.exe` → Connect → handshake. Optional: `dofile(...unity_dissect.lua)` then `dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`.
+1. **Pick the next phase** (or open follow-up):
+   - **Phase 12 (proxy DLLs)** — `version.dll` / `winmm.dll` / `dxgi.dll` proxy that auto-loads the dumper on game start. Useful for games where runtime injection is awkward.
+   - **Phase 13 (offline CLI)** — standalone `metadata-cli` parsing `global-metadata.dat` without injection. Reuses `MetadataParser` as a static lib.
+   - **Phase 14 (hardening)** — SEH audit, IL2CPP version dispatch covering v24/27/29/31, pipe reconnect on disconnect (UI side), log rotation tested, stripped-metadata graceful degrade.
+   - **Open follow-ups** for quick wins:
+     - CSX live mode (CE XML already has it; CSX `Element` addressing is relative to slot start so it's a different design problem)
+     - Mono method-address registration in `unity_symbols.lua` (needs `monoCompileMethod` JIT before address is known; script intentionally skips rather than mass-JIT every method)
+     - Inspector value-type substruct expansion (Phase 11.5 deferred this; would need DLL-side header-less walkInstance variant)
 
-2. **Pick the next phase**:
-   - **Phase 12 (proxy DLLs)** if you have a target game blocking direct injection or want the "drop next to .exe and launch" workflow.
-   - **Phase 13 (offline CLI)** if you want CI dumping / static analysis from a game backup.
-   - **Phase 14 (hardening)** if you'd rather polish what's shipped before adding more surface.
-   - **Skip ahead to the open follow-ups** (CSX live mode, Mono method symbols) if you want quick wins without committing to a new phase.
+2. **Optional sanity check**: re-exercise `unity_dissect.lua` (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) — hasn't been run since the CE-API portability fixes in `b8ce152`.
