@@ -171,14 +171,30 @@ void ServeClient(HANDLE pipe) {
 void WorkerThread() {
     LogPipe("pipe server started");
     while (g_running.load()) {
+        // Single instance only. If we used PIPE_UNLIMITED_INSTANCES, each
+        // crashed/exited game would leave its own instance lingering in the
+        // kernel namespace until full process cleanup — accumulating across
+        // many test cycles. A new client connecting to the name then gets
+        // routed to whichever ghost instance the kernel finds first, the
+        // first IO fails with "Pipe is broken.", and the live game's instance
+        // is unreachable for tens of seconds. With nMaxInstances=1 the kernel
+        // refuses to create a second instance while any previous one still
+        // exists; CreateNamedPipeW returns ERROR_PIPE_BUSY and we retry below
+        // until the old one is fully released. The client always sees a
+        // single instance — the live one — so connect lands cleanly.
         HANDLE pipe = ::CreateNamedPipeW(
             MagicStrings::PipeName,
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
+            1,                                                  // nMaxInstances
             kPipeBufferSize, kPipeBufferSize, 0, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) {
-            LogPipe("CreateNamedPipeW failed: " + std::to_string(::GetLastError()));
+            DWORD err = ::GetLastError();
+            // ERROR_PIPE_BUSY (231) and ERROR_ACCESS_DENIED (5) are the
+            // expected results when a previous game's instance hasn't been
+            // released yet — log once at info level, then keep retrying.
+            LogPipe("CreateNamedPipeW failed: " + std::to_string(err)
+                    + (err == 231 ? " (ERROR_PIPE_BUSY — previous instance not yet released)" : ""));
             ::Sleep(500);
             continue;
         }
