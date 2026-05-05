@@ -287,7 +287,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 lastEx = ex;
                 _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
                     $"connect attempt {attempt}/{maxAttempts} failed transiently: {ex.GetType().Name}: {ex.Message}; retrying after 250ms");
-                try { await _pipe.DisposeAsync().ConfigureAwait(true); } catch { /* ignore */ }
+                // Do NOT call _pipe.DisposeAsync() here — that disposes the
+                // SemaphoreSlim gate permanently, which would brick the
+                // PipeClient for any future Connect (the next attempt or any
+                // user-initiated reconnect throws ObjectDisposedException on
+                // the gate). PipeClient.ConnectAsync already calls
+                // DisposeStreamsAsync() internally to reset stream state on
+                // each call, which is exactly what we need.
                 await Task.Delay(250, ct).ConfigureAwait(true);
             }
         }
@@ -355,7 +361,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         try
         {
             _connectCts?.Cancel();
-            await _pipe.DisposeAsync().ConfigureAwait(true);
+            // Use DisconnectAsync rather than DisposeAsync so the gate
+            // semaphore stays alive for a future Connect. DisposeAsync is
+            // reserved for app shutdown (see Dispose() at the bottom).
+            await _pipe.DisconnectAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {

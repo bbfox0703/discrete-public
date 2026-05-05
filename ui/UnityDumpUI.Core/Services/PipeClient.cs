@@ -204,6 +204,20 @@ public sealed class PipeClient : IAsyncDisposable
         ObjectDisposedException or
         EndOfStreamException;
 
+    /// <summary>
+    /// Tear down the underlying pipe + reader + writer without disposing
+    /// the client itself — caller can re-enter <see cref="ConnectAsync"/>
+    /// afterwards. Intended for user-initiated Disconnect (DLL still alive
+    /// in the target, user just wants to stop talking to it). Pairs with
+    /// <see cref="DisposeAsync"/>, which is for final teardown only.
+    /// </summary>
+    public async Task DisconnectAsync()
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try { await DisposeStreamsAsync().ConfigureAwait(false); }
+        finally { _gate.Release(); }
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _gate.WaitAsync().ConfigureAwait(false);
