@@ -21,6 +21,7 @@ public partial class MainWindow : Window
         vm.Browser.CopyToClipboardAsync   = CopyToClipboardAsync;
         vm.Inspector.CopyToClipboardAsync = CopyToClipboardAsync;
         vm.PickFileAsync                  = PickFileAsync;
+        vm.PickUnityGameAsync             = ShowUnityGamePickerAsync;
         DataContext = vm;
     }
 
@@ -51,6 +52,18 @@ public partial class MainWindow : Window
         var picker   = new ProcessPickerWindow(pickerVm);
         _ = pickerVm.RefreshCommand.ExecuteAsync(null);
         return await picker.ShowDialog<ProcessRow?>(this);
+    }
+
+    /// <summary>
+    /// Opens the Unity game picker (Steam scan) modally. The VM is supplied
+    /// by the caller (MainWindowViewModel.ScanUnityGamesAsync) — keeps the
+    /// scanner injection point in the VM rather than duplicating it here.
+    /// </summary>
+    private async Task<UnityDumpUI.Core.Platform.UnityGameEntry?> ShowUnityGamePickerAsync(
+        UnityDumpUI.ViewModels.UnityGamePickerViewModel vm)
+    {
+        var win = new UnityGamePickerWindow(vm);
+        return await win.ShowDialog<UnityDumpUI.Core.Platform.UnityGameEntry?>(this);
     }
 
     /// <summary>

@@ -1,0 +1,79 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        xmlns:plat="using:UnityDumpUI.Core.Platform"
+        x:Class="UnityDumpUI.Views.UnityGamePickerWindow"
+        x:DataType="vm:UnityGamePickerViewModel"
+        Width="900" Height="540"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Title="{StaticResource GamePicker.Title}">
+  <DockPanel LastChildFill="True" Margin="12">
+
+    <!-- Top bar: filter + show-unsupported + refresh -->
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto" Margin="0,0,0,8">
+      <TextBox Grid.Column="0"
+               PlaceholderText="{StaticResource GamePicker.FilterWatermark}"
+               Text="{Binding Filter, Mode=TwoWay}" />
+      <CheckBox Grid.Column="1"
+                Content="{StaticResource GamePicker.ShowUnsupported}"
+                IsChecked="{Binding ShowUnsupported, Mode=TwoWay}"
+                Margin="8,0,0,0" VerticalAlignment="Center" />
+      <Button   Grid.Column="2"
+                Content="{StaticResource GamePicker.Refresh}"
+                Command="{Binding RefreshCommand}"
+                Margin="8,0,0,0" />
+    </Grid>
+
+    <ProgressBar DockPanel.Dock="Top"
+                 IsIndeterminate="True"
+                 IsVisible="{Binding IsLoading}"
+                 Height="3" Margin="0,0,0,4" />
+
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+            Background="#33D32F2F" BorderBrush="#88D32F2F"
+            BorderThickness="1" CornerRadius="4" Padding="10,6"
+            Margin="0,0,0,8">
+      <TextBlock Text="{Binding ErrorMessage}"
+                 Foreground="#FFD32F2F" TextWrapping="Wrap" />
+    </Border>
+
+    <!-- Bottom: cancel + accept -->
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                HorizontalAlignment="Right" Spacing="8" Margin="0,8,0,0">
+      <TextBlock Text="{StaticResource GamePicker.UnsupportedHint}"
+                 Opacity="0.55" FontSize="11" VerticalAlignment="Center"
+                 Margin="0,0,12,0" />
+      <Button Content="{StaticResource GamePicker.Cancel}"
+              Click="OnCancelClicked" />
+      <Button Content="{StaticResource GamePicker.Accept}"
+              IsEnabled="{Binding HasSelection}"
+              Classes="accent"
+              Click="OnAcceptClicked" />
+    </StackPanel>
+
+    <!-- Game grid -->
+    <DataGrid ItemsSource="{Binding FilteredGames}"
+              SelectedItem="{Binding Selected, Mode=TwoWay}"
+              IsReadOnly="True"
+              AutoGenerateColumns="False"
+              CanUserResizeColumns="True"
+              CanUserSortColumns="True"
+              GridLinesVisibility="Horizontal"
+              x:DataType="vm:UnityGamePickerViewModel">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="{StaticResource GamePicker.ColName}"     Width="240"
+                            Binding="{Binding DisplayName, x:DataType=plat:UnityGameEntry}" />
+        <DataGridTextColumn Header="{StaticResource GamePicker.ColBackend}"  Width="80"
+                            Binding="{Binding BackendLabel, x:DataType=plat:UnityGameEntry}" />
+        <DataGridTextColumn Header="{StaticResource GamePicker.ColBitness}"  Width="60"
+                            Binding="{Binding BitnessLabel, x:DataType=plat:UnityGameEntry}" />
+        <DataGridTextColumn Header="{StaticResource GamePicker.ColProxy}"    Width="100"
+                            Binding="{Binding ProxyLabel, x:DataType=plat:UnityGameEntry}" />
+        <DataGridTextColumn Header="{StaticResource GamePicker.ColPath}"     Width="*"
+                            Binding="{Binding ExePath, x:DataType=plat:UnityGameEntry}" />
+      </DataGrid.Columns>
+    </DataGrid>
+  </DockPanel>
+</Window>

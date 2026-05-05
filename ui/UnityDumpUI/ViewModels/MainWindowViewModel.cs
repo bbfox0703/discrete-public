@@ -22,6 +22,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IProcessEnumerator _processes;
     private readonly IDllInjector       _injector;
     private readonly IProxyInstaller    _proxyInstaller;
+    private readonly IUnityGameScanner  _gameScanner;
     private CancellationTokenSource?    _connectCts;
 
     /// <summary>
@@ -35,13 +36,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public MainWindowViewModel()
         : this(new UnityDumpUI.Platform.WindowsProcessEnumerator(),
                new UnityDumpUI.Platform.WindowsDllInjector(),
-               new UnityDumpUI.Platform.WindowsProxyInstaller())
+               new UnityDumpUI.Platform.WindowsProxyInstaller(),
+               null)
     {
+        // Scanner is constructed AFTER the proxy installer so it can hand
+        // it through. Done in the field-initialiser after `this(...)`.
     }
 
     public MainWindowViewModel(IProcessEnumerator processes,
                                 IDllInjector injector,
-                                IProxyInstaller proxyInstaller)
+                                IProxyInstaller proxyInstaller,
+                                IUnityGameScanner? gameScanner)
     {
         _pipe           = new PipeClient();
         _backend        = new BackendAdapter(_pipe);
@@ -49,6 +54,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _processes      = processes;
         _injector       = injector;
         _proxyInstaller = proxyInstaller;
+        _gameScanner    = gameScanner ?? new UnityDumpUI.Platform.SteamGameScanner(proxyInstaller);
         Browser         = new AssemblyBrowserViewModel(_backend, _logger);
         Inspector       = new LiveInspectionViewModel(_backend, _logger);
 
@@ -388,6 +394,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     public Func<string /*title*/, string /*pattern*/, Task<string?>>? PickFileAsync { get; set; }
 
+    /// <summary>
+    /// View-supplied factory that opens the Unity game picker dialog. Wired
+    /// by MainWindow code-behind. Returns the picked entry (or null on
+    /// cancel). Decoupled from Avalonia Window types same as PickProcessAsync.
+    /// </summary>
+    public Func<UnityGamePickerViewModel, Task<UnityGameEntry?>>? PickUnityGameAsync { get; set; }
+
+    public IUnityGameScanner GameScanner => _gameScanner;
+
     [ObservableProperty] private string  _proxyGameExePath = string.Empty;
     [ObservableProperty] private bool    _proxyKindVersion = true;   // radio default
     [ObservableProperty] private bool    _proxyKindWinmm;
@@ -401,6 +416,38 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         string? path = await PickFileAsync("Pick game executable", "*.exe").ConfigureAwait(true);
         if (string.IsNullOrEmpty(path)) return;
         ProxyGameExePath = path;
+        await RefreshProxyStatusAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Opens the Unity-game-picker dialog (Steam scan). On accept, the
+    /// chosen game's .exe path is dropped into <see cref="ProxyGameExePath"/>
+    /// + an additional pre-select hint sets the radio button based on whether
+    /// a proxy is already installed (so re-installing matches the existing
+    /// flavour).
+    /// </summary>
+    [RelayCommand]
+    private async Task ScanUnityGamesAsync()
+    {
+        if (PickUnityGameAsync is null) return;
+        var pickerVm = new UnityGamePickerViewModel(_gameScanner);
+        // Kick off the initial scan eagerly so the dialog isn't empty.
+        _ = pickerVm.RefreshCommand.ExecuteAsync(null);
+        UnityGameEntry? picked = await PickUnityGameAsync(pickerVm).ConfigureAwait(true);
+        if (picked is null) return;
+        ProxyGameExePath = picked.ExePath;
+        // Pre-select the radio that matches what's already installed; if
+        // nothing's installed, leave the default (version.dll) alone.
+        if (picked.InstalledProxy == ProxyKind.Winmm)
+        {
+            ProxyKindWinmm   = true;
+            ProxyKindVersion = false;
+        }
+        else if (picked.InstalledProxy == ProxyKind.Version)
+        {
+            ProxyKindVersion = true;
+            ProxyKindWinmm   = false;
+        }
         await RefreshProxyStatusAsync().ConfigureAwait(true);
     }
 

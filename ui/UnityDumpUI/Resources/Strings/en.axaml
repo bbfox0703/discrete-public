@@ -71,6 +71,21 @@
   <sys:String x:Key="Conn.ProxyInstall">Install</sys:String>
   <sys:String x:Key="Conn.ProxyUninstall">Uninstall</sys:String>
   <sys:String x:Key="Conn.ProxyRefresh">↻</sys:String>
+  <sys:String x:Key="Conn.ProxyScan">Scan Steam…</sys:String>
+
+  <!-- Unity game picker dialog (auto-scan). -->
+  <sys:String x:Key="GamePicker.Title">Pick Unity game (Steam scan)</sys:String>
+  <sys:String x:Key="GamePicker.FilterWatermark">filter (name or path)…</sys:String>
+  <sys:String x:Key="GamePicker.ShowUnsupported">Show unsupported (32-bit, unknown backend)</sys:String>
+  <sys:String x:Key="GamePicker.Refresh">↻ Rescan</sys:String>
+  <sys:String x:Key="GamePicker.Accept">Use this game</sys:String>
+  <sys:String x:Key="GamePicker.Cancel">Cancel</sys:String>
+  <sys:String x:Key="GamePicker.UnsupportedHint">32-bit and Unknown rows are read-only — Phase 12d.</sys:String>
+  <sys:String x:Key="GamePicker.ColName">Game</sys:String>
+  <sys:String x:Key="GamePicker.ColBackend">Backend</sys:String>
+  <sys:String x:Key="GamePicker.ColBitness">Bits</sys:String>
+  <sys:String x:Key="GamePicker.ColProxy">Proxy</sys:String>
+  <sys:String x:Key="GamePicker.ColPath">Game .exe path</sys:String>
 
   <!-- Process picker dialog. -->
   <sys:String x:Key="Picker.Title">Pick Unity process</sys:String>

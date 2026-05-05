@@ -34,11 +34,15 @@
                 <TextBlock Text="{StaticResource Conn.ProxyHint}"
                            Opacity="0.7" FontSize="11" TextWrapping="Wrap" />
 
-                <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+                <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,4,0,0">
                   <TextBox Grid.Column="0"
                            PlaceholderText="{StaticResource Conn.ProxyExeWatermark}"
                            Text="{Binding ProxyGameExePath, Mode=TwoWay}" />
                   <Button Grid.Column="1" Margin="6,0,0,0"
+                          Content="{StaticResource Conn.ProxyScan}"
+                          Command="{Binding ScanUnityGamesCommand}"
+                          ToolTip.Tip="Scan installed Steam libraries for Unity games" />
+                  <Button Grid.Column="2" Margin="6,0,0,0"
                           Content="{StaticResource Conn.ProxyBrowse}"
                           Command="{Binding BrowseProxyTargetCommand}" />
                 </Grid>
