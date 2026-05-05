@@ -389,142 +389,28 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     // ---------- Phase 12c: proxy install/uninstall ----------------------
 
     /// <summary>
-    /// View-supplied open-file picker. Wired by MainWindow code-behind so
-    /// the VM stays UI-agnostic. Returns absolute path or null on cancel.
+    /// View-supplied factory that opens the Proxy Deploy window non-modally.
+    /// Returns once the window is shown (the window then runs independently
+    /// — closing it doesn't tie back to the VM). Decoupled from Avalonia
+    /// Window types same as <see cref="PickProcessAsync"/>.
     /// </summary>
-    public Func<string /*title*/, string /*pattern*/, Task<string?>>? PickFileAsync { get; set; }
-
-    /// <summary>
-    /// View-supplied factory that opens the Unity game picker dialog. Wired
-    /// by MainWindow code-behind. Returns the picked entry (or null on
-    /// cancel). Decoupled from Avalonia Window types same as PickProcessAsync.
-    /// </summary>
-    public Func<UnityGamePickerViewModel, Task<UnityGameEntry?>>? PickUnityGameAsync { get; set; }
+    public Action<ProxyDeployViewModel>? ShowProxyDeploy { get; set; }
 
     public IUnityGameScanner GameScanner => _gameScanner;
 
-    [ObservableProperty] private string  _proxyGameExePath = string.Empty;
-    [ObservableProperty] private bool    _proxyKindVersion = true;   // radio default
-    [ObservableProperty] private bool    _proxyKindWinmm;
-    [ObservableProperty] private string? _proxyStatusText;
-    [ObservableProperty] private string? _proxyOperationMessage;
-
-    [RelayCommand]
-    private async Task BrowseProxyTargetAsync()
-    {
-        if (PickFileAsync is null) return;
-        string? path = await PickFileAsync("Pick game executable", "*.exe").ConfigureAwait(true);
-        if (string.IsNullOrEmpty(path)) return;
-        ProxyGameExePath = path;
-        await RefreshProxyStatusAsync().ConfigureAwait(true);
-    }
-
     /// <summary>
-    /// Opens the Unity-game-picker dialog (Steam scan). On accept, the
-    /// chosen game's .exe path is dropped into <see cref="ProxyGameExePath"/>
-    /// + an additional pre-select hint sets the radio button based on whether
-    /// a proxy is already installed (so re-installing matches the existing
-    /// flavour).
+    /// "Proxy Deploy…" button on the connection bar. Builds the panel VM
+    /// fresh each time and hands it to the view-supplied opener; the
+    /// window's first action is to kick a Steam scan so the grid isn't
+    /// empty when it appears.
     /// </summary>
     [RelayCommand]
-    private async Task ScanUnityGamesAsync()
+    private void OpenProxyDeploy()
     {
-        if (PickUnityGameAsync is null) return;
-        var pickerVm = new UnityGamePickerViewModel(_gameScanner);
-        // Kick off the initial scan eagerly so the dialog isn't empty.
-        _ = pickerVm.RefreshCommand.ExecuteAsync(null);
-        UnityGameEntry? picked = await PickUnityGameAsync(pickerVm).ConfigureAwait(true);
-        if (picked is null) return;
-        ProxyGameExePath = picked.ExePath;
-        // Pre-select the radio that matches what's already installed; if
-        // nothing's installed, leave the default (version.dll) alone.
-        if (picked.InstalledProxy == ProxyKind.Winmm)
-        {
-            ProxyKindWinmm   = true;
-            ProxyKindVersion = false;
-        }
-        else if (picked.InstalledProxy == ProxyKind.Version)
-        {
-            ProxyKindVersion = true;
-            ProxyKindWinmm   = false;
-        }
-        await RefreshProxyStatusAsync().ConfigureAwait(true);
-    }
-
-    [RelayCommand]
-    private async Task RefreshProxyStatusAsync()
-    {
-        if (string.IsNullOrEmpty(ProxyGameExePath)) { ProxyStatusText = null; return; }
-        try
-        {
-            ProxyInstallStatus st = await _proxyInstaller
-                .DetectAsync(ProxyGameExePath, default).ConfigureAwait(true);
-            ProxyStatusText = FormatProxyStatus(st);
-        }
-        catch (Exception ex)
-        {
-            ProxyStatusText = $"detect failed: {ex.Message}";
-        }
-    }
-
-    [RelayCommand]
-    private async Task InstallProxyAsync()
-    {
-        if (string.IsNullOrEmpty(ProxyGameExePath)) return;
-        ProxyKind kind = ProxyKindWinmm ? ProxyKind.Winmm : ProxyKind.Version;
-        ProxyOperationMessage = "Installing…";
-        try
-        {
-            ProxyOperationResult r = await _proxyInstaller
-                .InstallAsync(ProxyGameExePath, kind, default).ConfigureAwait(true);
-            ProxyOperationMessage = r.Message;
-            ProxyStatusText = FormatProxyStatus(r.Status);
-            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
-                $"proxy install {kind} -> {ProxyGameExePath}: {(r.Ok ? "ok" : "fail")} ({r.Message})");
-        }
-        catch (Exception ex)
-        {
-            ProxyOperationMessage = $"install failed: {ex.Message}";
-        }
-    }
-
-    [RelayCommand]
-    private async Task UninstallProxyAsync()
-    {
-        if (string.IsNullOrEmpty(ProxyGameExePath)) return;
-        ProxyOperationMessage = "Uninstalling…";
-        try
-        {
-            ProxyOperationResult r = await _proxyInstaller
-                .UninstallAsync(ProxyGameExePath, default).ConfigureAwait(true);
-            ProxyOperationMessage = r.Message;
-            ProxyStatusText = FormatProxyStatus(r.Status);
-            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
-                $"proxy uninstall -> {ProxyGameExePath}: {(r.Ok ? "ok" : "fail")} ({r.Message})");
-        }
-        catch (Exception ex)
-        {
-            ProxyOperationMessage = $"uninstall failed: {ex.Message}";
-        }
-    }
-
-    private static string FormatProxyStatus(ProxyInstallStatus s)
-    {
-        if (!string.IsNullOrEmpty(s.ErrorMessage)) return s.ErrorMessage;
-        string proxy = s.Kind switch
-        {
-            ProxyKind.Version => "version.dll installed",
-            ProxyKind.Winmm   => "winmm.dll installed",
-            _                 => "no proxy installed",
-        };
-        string backends = (s.HasMonoBackend, s.HasIl2cppBackend) switch
-        {
-            (true, true)   => "Mono+IL2CPP backends present",
-            (true, false)  => "Mono backend present",
-            (false, true)  => "IL2CPP backend present",
-            _              => "no backend DLLs",
-        };
-        return s.IsInstalled ? $"{proxy}, {backends}" : $"{proxy} ({backends})";
+        if (ShowProxyDeploy is null) return;
+        var vm = new ProxyDeployViewModel(_gameScanner, _proxyInstaller);
+        _ = vm.RefreshCommand.ExecuteAsync(null);
+        ShowProxyDeploy(vm);
     }
 
     /// <summary>

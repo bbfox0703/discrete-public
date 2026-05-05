@@ -20,8 +20,7 @@ public partial class MainWindow : Window
         vm.Browser.SaveFileAsync     = SaveFileAsync;
         vm.Browser.CopyToClipboardAsync   = CopyToClipboardAsync;
         vm.Inspector.CopyToClipboardAsync = CopyToClipboardAsync;
-        vm.PickFileAsync                  = PickFileAsync;
-        vm.PickUnityGameAsync             = ShowUnityGamePickerAsync;
+        vm.ShowProxyDeploy                = ShowProxyDeployWindow;
         DataContext = vm;
     }
 
@@ -55,40 +54,15 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Opens the Unity game picker (Steam scan) modally. The VM is supplied
-    /// by the caller (MainWindowViewModel.ScanUnityGamesAsync) — keeps the
-    /// scanner injection point in the VM rather than duplicating it here.
+    /// Show the Proxy Deploy panel. Non-modal so the user can keep it open
+    /// alongside the main window while connecting / browsing other panels.
+    /// VM lifetime tracks the window — when the user closes it, the VM is
+    /// dropped (a fresh one is built next time the user clicks the button).
     /// </summary>
-    private async Task<UnityDumpUI.Core.Platform.UnityGameEntry?> ShowUnityGamePickerAsync(
-        UnityDumpUI.ViewModels.UnityGamePickerViewModel vm)
+    private void ShowProxyDeployWindow(ProxyDeployViewModel vm)
     {
-        var win = new UnityGamePickerWindow(vm);
-        return await win.ShowDialog<UnityDumpUI.Core.Platform.UnityGameEntry?>(this);
-    }
-
-    /// <summary>
-    /// Open a Save File dialog scoped to this window. Returns the chosen
-    /// absolute path or null on cancel. Wired into AssemblyBrowserViewModel
-    /// for the Phase 10 export commands.
-    /// </summary>
-    /// <summary>
-    /// Phase 12c: open-file picker scoped to this window. Returns the
-    /// chosen absolute path or null on cancel. Wired into
-    /// MainWindowViewModel.PickFileAsync for the proxy install flow.
-    /// </summary>
-    private async Task<string?> PickFileAsync(string title, string pattern)
-    {
-        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title           = title,
-            AllowMultiple   = false,
-            FileTypeFilter  = new List<FilePickerFileType>
-            {
-                new(pattern) { Patterns = new[] { pattern } },
-            },
-        });
-        if (files is null || files.Count == 0) return null;
-        return files[0].TryGetLocalPath();
+        var win = new ProxyDeployWindow(vm);
+        win.Show(this);
     }
 
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)

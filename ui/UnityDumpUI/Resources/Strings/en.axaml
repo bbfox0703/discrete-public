@@ -63,29 +63,29 @@
   <sys:String x:Key="Conn.Disconnect">Disconnect</sys:String>
   <sys:String x:Key="Conn.StatusLabel">Status:</sys:String>
   <sys:String x:Key="Conn.Inject">Pick &amp; inject…</sys:String>
-  <sys:String x:Key="Conn.ProxyMenu">Proxy DLL ▾</sys:String>
-  <sys:String x:Key="Conn.ProxyTitle">Install proxy DLL next to game .exe</sys:String>
-  <sys:String x:Key="Conn.ProxyHint">Auto-loads UnityCEDumper at the next game launch. Pick the game .exe and choose version.dll or winmm.dll (only one can be installed at a time).</sys:String>
-  <sys:String x:Key="Conn.ProxyExeWatermark">path to game .exe…</sys:String>
-  <sys:String x:Key="Conn.ProxyBrowse">Browse…</sys:String>
-  <sys:String x:Key="Conn.ProxyInstall">Install</sys:String>
-  <sys:String x:Key="Conn.ProxyUninstall">Uninstall</sys:String>
-  <sys:String x:Key="Conn.ProxyRefresh">↻</sys:String>
-  <sys:String x:Key="Conn.ProxyScan">Scan Steam…</sys:String>
+  <sys:String x:Key="Conn.ProxyDeploy">Proxy Deploy…</sys:String>
 
-  <!-- Unity game picker dialog (auto-scan). -->
-  <sys:String x:Key="GamePicker.Title">Pick Unity game (Steam scan)</sys:String>
-  <sys:String x:Key="GamePicker.FilterWatermark">filter (name or path)…</sys:String>
-  <sys:String x:Key="GamePicker.ShowUnsupported">Show unsupported (32-bit, unknown backend)</sys:String>
-  <sys:String x:Key="GamePicker.Refresh">↻ Rescan</sys:String>
-  <sys:String x:Key="GamePicker.Accept">Use this game</sys:String>
-  <sys:String x:Key="GamePicker.Cancel">Cancel</sys:String>
-  <sys:String x:Key="GamePicker.UnsupportedHint">32-bit and Unknown rows are read-only — Phase 12d.</sys:String>
-  <sys:String x:Key="GamePicker.ColName">Game</sys:String>
-  <sys:String x:Key="GamePicker.ColBackend">Backend</sys:String>
-  <sys:String x:Key="GamePicker.ColBitness">Bits</sys:String>
-  <sys:String x:Key="GamePicker.ColProxy">Proxy</sys:String>
-  <sys:String x:Key="GamePicker.ColPath">Game .exe path</sys:String>
+  <!-- Proxy Deploy window (Phase 12c, redesigned to UE5CEDumper-style
+       multi-select bulk panel). -->
+  <sys:String x:Key="Deploy.Title">Proxy DLL Deploy</sys:String>
+  <sys:String x:Key="Deploy.FilterWatermark">filter (name or path)…</sys:String>
+  <sys:String x:Key="Deploy.ShowUnsupported">Show 32-bit / unsupported</sys:String>
+  <sys:String x:Key="Deploy.Refresh">↻ Rescan</sys:String>
+  <sys:String x:Key="Deploy.SelectAll">Select all</sys:String>
+  <sys:String x:Key="Deploy.UnselectAll">Unselect all</sys:String>
+  <sys:String x:Key="Deploy.InvertSelection">Invert</sys:String>
+  <sys:String x:Key="Deploy.DefaultKindLabel">When installing:</sys:String>
+  <sys:String x:Key="Deploy.InstallSelected">Install selected</sys:String>
+  <sys:String x:Key="Deploy.UninstallSelected">Uninstall selected</sys:String>
+  <sys:String x:Key="Deploy.UpdateAll">Update all deployed</sys:String>
+  <sys:String x:Key="Deploy.UpdateAllTooltip">Re-install with the proxy kind currently in place — push fresh DLLs after rebuilding DiscreteUI.</sys:String>
+  <sys:String x:Key="Deploy.ColName">Game</sys:String>
+  <sys:String x:Key="Deploy.ColBackend">Backend</sys:String>
+  <sys:String x:Key="Deploy.ColBitness">Bits</sys:String>
+  <sys:String x:Key="Deploy.ColProxy">Proxy</sys:String>
+  <sys:String x:Key="Deploy.ColStatus">Status</sys:String>
+  <sys:String x:Key="Deploy.ColLastMessage">Last operation</sys:String>
+  <sys:String x:Key="Deploy.ColPath">Game .exe path</sys:String>
 
   <!-- Process picker dialog. -->
   <sys:String x:Key="Picker.Title">Pick Unity process</sys:String>

@@ -1,0 +1,145 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        xmlns:m="using:UnityDumpUI.Models"
+        x:Class="UnityDumpUI.Views.ProxyDeployWindow"
+        x:DataType="vm:ProxyDeployViewModel"
+        Width="1100" Height="620"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Title="{StaticResource Deploy.Title}">
+  <!-- UE5CEDumper-style proxy deploy panel.
+         Top toolbar  : filter + showUnsupported + Refresh + select-all/none/invert
+                        + default-kind radios.
+         Middle       : multi-select DataGrid of detected Steam Unity games.
+         Bottom action: Install / Uninstall / UpdateAll + summary + last-op msg.
+       Window is non-modal so the user can keep it open while connecting /
+       browsing other panels. -->
+  <DockPanel LastChildFill="True" Margin="12">
+
+    <!-- Top toolbar -->
+    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                Spacing="6" Margin="0,0,0,8">
+      <Button Content="{StaticResource Deploy.Refresh}"
+              Command="{Binding RefreshCommand}"
+              IsEnabled="{Binding !IsScanning}" />
+      <Border Width="1" Background="#444" Margin="4,2" />
+      <Button Content="{StaticResource Deploy.SelectAll}"
+              Command="{Binding SelectAllCommand}" />
+      <Button Content="{StaticResource Deploy.UnselectAll}"
+              Command="{Binding UnselectAllCommand}" />
+      <Button Content="{StaticResource Deploy.InvertSelection}"
+              Command="{Binding InvertSelectionCommand}" />
+      <Border Width="1" Background="#444" Margin="4,2" />
+      <TextBlock Text="{StaticResource Deploy.DefaultKindLabel}"
+                 VerticalAlignment="Center" Opacity="0.7" Margin="2,0,4,0" />
+      <RadioButton GroupName="DefaultKind"
+                   Content="version.dll"
+                   IsChecked="{Binding DefaultKindVersion, Mode=TwoWay}"
+                   VerticalAlignment="Center" />
+      <RadioButton GroupName="DefaultKind"
+                   Content="winmm.dll"
+                   IsChecked="{Binding DefaultKindWinmm, Mode=TwoWay}"
+                   VerticalAlignment="Center" Margin="6,0,0,0" />
+      <Border Width="1" Background="#444" Margin="4,2" />
+      <CheckBox Content="{StaticResource Deploy.ShowUnsupported}"
+                IsChecked="{Binding ShowUnsupported, Mode=TwoWay}"
+                VerticalAlignment="Center" />
+    </StackPanel>
+
+    <!-- Filter row -->
+    <TextBox DockPanel.Dock="Top"
+             PlaceholderText="{StaticResource Deploy.FilterWatermark}"
+             Text="{Binding Filter, Mode=TwoWay}"
+             Margin="0,0,0,8" />
+
+    <ProgressBar DockPanel.Dock="Top"
+                 IsIndeterminate="True"
+                 IsVisible="{Binding IsScanning}"
+                 Height="3" Margin="0,0,0,4" />
+
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+            Background="#33D32F2F" BorderBrush="#88D32F2F"
+            BorderThickness="1" CornerRadius="4" Padding="10,6"
+            Margin="0,0,0,8">
+      <TextBlock Text="{Binding ErrorMessage}"
+                 Foreground="#FFD32F2F" TextWrapping="Wrap" />
+    </Border>
+
+    <!-- Bottom action row -->
+    <Border DockPanel.Dock="Bottom" Background="#1A000000"
+            CornerRadius="4" Padding="10,8" Margin="0,8,0,0">
+      <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" ColumnSpacing="8">
+        <Button Grid.Column="0"
+                Content="{StaticResource Deploy.InstallSelected}"
+                Command="{Binding InstallSelectedCommand}"
+                IsEnabled="{Binding !IsBusy}"
+                Classes="accent" />
+        <Button Grid.Column="1"
+                Content="{StaticResource Deploy.UninstallSelected}"
+                Command="{Binding UninstallSelectedCommand}"
+                IsEnabled="{Binding !IsBusy}" />
+        <Button Grid.Column="2"
+                Content="{StaticResource Deploy.UpdateAll}"
+                Command="{Binding UpdateAllDeployedCommand}"
+                IsEnabled="{Binding !IsBusy}"
+                ToolTip.Tip="{StaticResource Deploy.UpdateAllTooltip}" />
+
+        <StackPanel Grid.Column="3" Orientation="Vertical"
+                    VerticalAlignment="Center" Margin="12,0,0,0">
+          <TextBlock Text="{Binding SummaryText}"
+                     Opacity="0.75" FontSize="12" />
+          <TextBlock Text="{Binding LastBulkMessage}"
+                     Opacity="0.6" FontSize="11"
+                     IsVisible="{Binding LastBulkMessage, Converter={x:Static ObjectConverters.IsNotNull}}" />
+        </StackPanel>
+
+        <ProgressBar Grid.Column="4" IsIndeterminate="True"
+                     IsVisible="{Binding IsBusy}"
+                     Width="120" Height="6" VerticalAlignment="Center" />
+      </Grid>
+    </Border>
+
+    <!-- Game list -->
+    <DataGrid ItemsSource="{Binding FilteredGames}"
+              AutoGenerateColumns="False"
+              CanUserResizeColumns="True"
+              CanUserSortColumns="True"
+              CanUserReorderColumns="True"
+              IsReadOnly="True"
+              GridLinesVisibility="Horizontal"
+              x:DataType="vm:ProxyDeployViewModel">
+      <DataGrid.Columns>
+        <!-- Per-row checkbox. Template column so the box stays interactive
+             even with IsReadOnly=True on the DataGrid. -->
+        <DataGridTemplateColumn Header="" Width="36" CanUserResize="False" CanUserSort="False">
+          <DataGridTemplateColumn.CellTemplate>
+            <DataTemplate x:DataType="m:ProxyGameRow">
+              <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                        IsEnabled="{Binding IsSupported}"
+                        Focusable="False"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+            </DataTemplate>
+          </DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
+
+        <DataGridTextColumn Header="{StaticResource Deploy.ColName}"     Width="240"
+                            Binding="{Binding DisplayName, x:DataType=m:ProxyGameRow}" />
+        <DataGridTextColumn Header="{StaticResource Deploy.ColBackend}"  Width="80"
+                            Binding="{Binding BackendLabel, x:DataType=m:ProxyGameRow}" />
+        <DataGridTextColumn Header="{StaticResource Deploy.ColBitness}"  Width="60"
+                            Binding="{Binding BitnessLabel, x:DataType=m:ProxyGameRow}" />
+        <DataGridTextColumn Header="{StaticResource Deploy.ColProxy}"    Width="100"
+                            Binding="{Binding ProxyLabel, x:DataType=m:ProxyGameRow}" />
+        <DataGridTextColumn Header="{StaticResource Deploy.ColStatus}"   Width="160"
+                            Binding="{Binding DeployStatusLabel, x:DataType=m:ProxyGameRow}" />
+        <DataGridTextColumn Header="{StaticResource Deploy.ColLastMessage}" Width="240"
+                            Binding="{Binding LastOperationMessage, x:DataType=m:ProxyGameRow}" />
+        <DataGridTextColumn Header="{StaticResource Deploy.ColPath}"     Width="*"
+                            Binding="{Binding ExePath, x:DataType=m:ProxyGameRow}" />
+      </DataGrid.Columns>
+    </DataGrid>
+  </DockPanel>
+</Window>
