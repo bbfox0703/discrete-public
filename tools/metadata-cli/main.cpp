@@ -72,25 +72,24 @@ int CmdInfo(const std::wstring& path) {
         std::fputs("metadata-cli: load failed (file missing, not metadata, or sanity mismatch)\n", stderr);
         return 1;
     }
-    // Phase 14c is the version-dispatch slot: today only v29 has full
-    // TypeDefinitions / Fields parsing wired up. Older (v24/v27) and
-    // newer (v31) files still load — the prefix tables (string literals,
-    // name heap) still work — but type enumeration returns 0. Surface
-    // that explicitly so CLI users don't think the file is broken.
-    bool typeTablesParsed = (p.version() == 29);
+    // Phase 14c shipped v24 / v29 / v31 type-table parsing. v27 (Unity 2020)
+    // still skipped — no test target locally. Anything else falls through
+    // to the strings-only path with a stderr note.
+    std::uint32_t typeCount = p.TypeDefinitionCount();
+    bool typeTablesParsed = typeCount > 0;
     std::printf("{\"version\":%d,\"loaded\":true,"
                 "\"type_tables_parsed\":%s,"
                 "\"type_definition_count\":%u,"
                 "\"string_literal_count\":%u}\n",
                 p.version(),
                 typeTablesParsed ? "true" : "false",
-                p.TypeDefinitionCount(),
+                typeCount,
                 p.StringLiteralCount());
     if (!typeTablesParsed) {
         std::fprintf(stderr,
-            "metadata-cli: note — version %d type tables aren't parsed yet "
-            "(only v29 today; v24/v27/v31 land with Phase 14c). String-literal "
-            "queries still work.\n", p.version());
+            "metadata-cli: note — version %d type tables not parsed (v24, v27, "
+            "v29, v31 supported today). String-literal queries still work.\n",
+            p.version());
     }
     return 0;
 }

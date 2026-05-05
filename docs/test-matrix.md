@@ -10,8 +10,12 @@ Phase 15. Compatibility ledger for the games + tooling versions UnityCEDumper ha
 
 | Game | Unity | Backend | Metadata ver | Bitness | DLL build verified | Workflow | Notes |
 |---|---|---|---|---|---|---|---|
-| **SaGa Frontier 2 Remastered** | `2021.3.39f1` | IL2CPP | v29 | x64 | 101 (Phase 11), 108 (Phase 14), 110+ (Phase 12) | Pick & inject AND proxy install | **Primary verification target.** All phases 6–14 were validated against this game. `MainGame.PLY_WORK` decode round-trips against a manual CE Structure Dissect, including the `Vector3`/`reserv2[]` substruct expansion (Phase 11.5 follow-up). |
-| **SaGa Frontier Remastered** | `2019.4.16f1` | IL2CPP | v24 | x64 | metadata-cli only (Phase 13) | Static metadata only | Type-tables NOT parsed (Phase 14c gate — only v29 wired up today). Prefix tables work: 15182 string literals readable via `metadata-cli info`. Live walkInstance has not been exercised; backend resolver may need offset adjustments for the older IL2CPP runtime. |
+| **SaGa Frontier 2 Remastered** | `2021.3.39f1` | IL2CPP | v29 | x64 | 101 (Phase 11), 108 (Phase 14), 110+ (Phase 12), 150 (Phase 14c) | Pick & inject AND proxy install | **Primary verification target.** All phases 6–14 were validated against this game. `MainGame.PLY_WORK` decode round-trips against a manual CE Structure Dissect, including the `Vector3`/`reserv2[]` substruct expansion (Phase 11.5 follow-up). `metadata-cli info`: 10001 type defs, 11392 string literals. |
+| **SaGa Frontier Remastered** | `2019.4.16f1` | IL2CPP | **v24** | x64 | 150 (Phase 14c) | Static metadata only (`metadata-cli`) | Phase 14c verification target: 7,514 type defs parse cleanly, canonical leading types (`<Module>`, `<>f__AnonymousType0\`1`, `Locale`, `SR`, `Mono.Runtime`) with correct IL tokens. Live walkInstance not yet exercised against this older IL2CPP runtime. |
+| **FINAL FANTASY VI PR** | `2019.4.26f1` | IL2CPP | **v24** | x64 | 150 (Phase 14c) | Static metadata only | Second v24 fixture — confirms layout works across Unity 2019.4 sub-versions. 11,438 type defs, 11,537 string literals. |
+| **Townscaper** | `2020.3.4f1` | IL2CPP | **v27** ✨ | **x86** | 150 (Phase 14c) | Static metadata only | Phase 14c v27 target — only 32-bit IL2CPP build in the corpus. Its `global-metadata.dat` parses identically to v29 (88-byte stride, IL token at +84). 8,132 type defs match canonical leading types — confirming the metadata format is bitness-neutral even when the game runtime is x86. Live runtime support deferred to Phase 12d. |
+| **Farthest Frontier** | `2022.3.62f1` | IL2CPP | **v31** | x64 | 150 (Phase 14c) | Static metadata only | Phase 14c v31 target #1: 15,848 type defs, 20,788 string literals. Layout empirically verified to match v29 exactly (same 88-byte stride). |
+| **Emberward** | `2022.3.62f2` | IL2CPP | **v31** | x64 | 150 (Phase 14c) | Static metadata only | Phase 14c v31 target #2: 23,982 type defs, 23,828 string literals. Largest type table in the corpus. |
 | **Hollow Knight Silksong** | `6000.0.50f1` | Mono | n/a | x64 | not yet exercised | n/a | Unity 6 era. MonoBleedingEdge present. The `unity_symbols.lua` Mono-method registration path (using `monoCompileMethod`) hasn't been validated against a Unity 6 bdwgc binary — would be a worthwhile next test. |
 
 ## Steam scan recall
@@ -43,8 +47,6 @@ These are the failure modes the test matrix doesn't cover *yet* — useful when 
 
 | Gap | Need a target with… | Owning phase |
 |---|---|---|
-| IL2CPP metadata v27 (Unity 2018-19) | A Unity 2018 / 2019.x IL2CPP game | 14c |
-| IL2CPP metadata v31 (Unity 2023+) | A Unity 2023.x IL2CPP game | 14c |
 | 32-bit Mono (legacy Unity ≤ 2017) | A Unity 5.x / 2017.x x86 Mono game | 12d |
 | Heavy obfuscator output | A Beebyte / Eazfuscator-built target | 14b banner — already wired, just needs a real test |
 | `getMetadataStats` `partial_strip` verdict | Same as above (or a partial-strip game) | 14b |

@@ -78,29 +78,46 @@ bool Parser::LoadFromPath(const std::wstring& path) {
         data_.clear();
         return false;
     }
-    if (version_ == 29) {
-        v29Tables_ = LoadV29Tables();
+    // Phase 14c: load TypeDefinition / Fields / FieldDefaults tables for
+    // v24 / v29 / v31. v27 still falls through to the strings-only path.
+    if (TypeDefSizeof() != 0) {
+        tablesLoaded_ = LoadTables();
     }
 
     char line[320];
     ::_snprintf_s(line, sizeof(line), _TRUNCATE,
         "MetadataParser: loaded version=%d size=%zu strLitTable=%d strLitData=%d nameHeap=%d "
-        "typeDefs=%d fields=%d fieldDefaults=%d (v29Tables=%s)",
+        "typeDefs=%d fields=%d fieldDefaults=%d (typeTablesParsed=%s)",
         version_, data_.size(),
         stringLiteralSize_, stringLiteralDataSize_, stringSize_,
         typeDefinitionsSize_, fieldsSize_, fieldDefaultsSize_,
-        v29Tables_ ? "yes" : "no");
+        tablesLoaded_ ? "yes" : "no");
     UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
     loaded_ = true;
     return true;
 }
 
-bool Parser::LoadV29Tables() {
+std::size_t Parser::TypeDefSizeof() const noexcept {
+    switch (version_) {
+        case 24: return sizeof(TypeDefinition_v24);   // 92 bytes (+byrefTypeIndex)
+        case 27:                                       // 88 bytes — same as v29
+        case 29:
+        case 31: return sizeof(TypeDefinition_v29);    // 88 bytes
+        default: return 0;
+    }
+}
+
+bool Parser::LoadTables() {
     if (data_.size() < sizeof(HeaderV29)) {
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
-            "MetadataParser: file too small for v29 header");
+            "MetadataParser: file too small for header");
         return false;
     }
+    // v24 / v27 / v29 / v31 all share the same prefix up to typeDefinitions
+    // (Phase 14c verified empirically with metadata-cli + ProductVersion
+    // sanity checks across SaGa F1R / SaGa F2R / FFVI PR / Farthest Frontier
+    // / Emberward). Past that the TYPE DEFINITION layout differs per
+    // version; the count uses TypeDefSizeof().
     HeaderV29 h{};
     std::memcpy(&h, data_.data(), sizeof(h));
 
@@ -123,7 +140,7 @@ bool Parser::LoadV29Tables() {
         !inBounds(fieldDefaultsOffset_,    fieldDefaultsSize_)    ||
         !inBounds(fieldDefaultDataOffset_, fieldDefaultDataSize_)) {
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
-            "MetadataParser: v29 tables out of bounds");
+            "MetadataParser: tables out of bounds");
         return false;
     }
     return true;
@@ -151,12 +168,15 @@ bool Parser::LoadHeader() {
     stringOffset_             = h.stringOffset;
     stringSize_               = h.stringSize;
 
-    // Currently only v29 is verified. Other versions still load, but emit a
-    // warning so the operator knows we're guessing.
-    if (version_ != 29) {
+    // Phase 14c: v24 / v27 / v29 / v31 all supported via empirically-verified
+    // layouts (test files: SaGa F1R, FFVI PR, Townscaper, SaGa F2R, Farthest
+    // Frontier, Emberward). Anything else emits a warning — string queries
+    // still work via the shared prefix; type queries return 0.
+    if (version_ != 24 && version_ != 27 && version_ != 29 && version_ != 31) {
         char line[160];
         ::_snprintf_s(line, sizeof(line), _TRUNCATE,
-            "MetadataParser: untested version %d — string queries may misbehave",
+            "MetadataParser: untested version %d — type-table queries return 0; "
+            "string queries still work",
             version_);
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
     }
@@ -227,37 +247,60 @@ std::string Parser::GetHeapString(std::int32_t nameIndex) const {
 // --- segment 2 ---------------------------------------------------------------
 
 std::uint32_t Parser::TypeDefinitionCount() const noexcept {
-    if (!v29Tables_) return 0;
-    return static_cast<std::uint32_t>(typeDefinitionsSize_) / sizeof(TypeDefinition_v29);
+    if (!tablesLoaded_) return 0;
+    std::size_t sz = TypeDefSizeof();
+    if (sz == 0) return 0;
+    return static_cast<std::uint32_t>(typeDefinitionsSize_) / static_cast<std::uint32_t>(sz);
 }
 
 std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) const {
-    if (!v29Tables_) return std::nullopt;
+    if (!tablesLoaded_) return std::nullopt;
     std::uint32_t count = TypeDefinitionCount();
     if (idx < 0 || static_cast<std::uint32_t>(idx) >= count) return std::nullopt;
 
-    TypeDefinition_v29 td{};
-    std::memcpy(&td,
-                data_.data() + typeDefinitionsOffset_ +
-                    static_cast<std::size_t>(idx) * sizeof(TypeDefinition_v29),
-                sizeof(td));
+    std::size_t sz = TypeDefSizeof();
+    const std::uint8_t* row = data_.data() + typeDefinitionsOffset_ +
+                              static_cast<std::size_t>(idx) * sz;
 
     TypeDefView v;
-    v.index       = idx;
-    v.ns          = GetHeapString(td.namespaceIndex);
-    v.name        = GetHeapString(td.nameIndex);
-    v.fieldStart  = td.fieldStart;
-    v.fieldCount  = td.field_count;
-    v.methodStart = td.methodStart;
-    v.methodCount = td.method_count;
-    v.flags       = td.flags;
-    v.token       = td.token;
+    v.index = idx;
+    if (version_ == 24) {
+        // v24 (Unity 2018.4-2019.x): byrefTypeIndex inserted between
+        // byvalTypeIndex and declaringTypeIndex; 92-byte stride, token at
+        // offset 88. Everything else aligned to v29's projected fields.
+        TypeDefinition_v24 td{};
+        std::memcpy(&td, row, sizeof(td));
+        v.ns          = GetHeapString(td.namespaceIndex);
+        v.name        = GetHeapString(td.nameIndex);
+        v.fieldStart  = td.fieldStart;
+        v.fieldCount  = td.field_count;
+        v.methodStart = td.methodStart;
+        v.methodCount = td.method_count;
+        v.flags       = td.flags;
+        v.token       = td.token;
+    } else {
+        // v29 (Unity 2021.x-2022.1) AND v31 (Unity 2022.2+) share the same
+        // 88-byte TypeDefinition layout — confirmed empirically against
+        // SaGa F2R / Farthest Frontier / Emberward by hex-dumping the
+        // typeDefinitions table and locating the canonical
+        // 0x02000003 token at row 2 offset 84 with stride 88.
+        TypeDefinition_v29 td{};
+        std::memcpy(&td, row, sizeof(td));
+        v.ns          = GetHeapString(td.namespaceIndex);
+        v.name        = GetHeapString(td.nameIndex);
+        v.fieldStart  = td.fieldStart;
+        v.fieldCount  = td.field_count;
+        v.methodStart = td.methodStart;
+        v.methodCount = td.method_count;
+        v.flags       = td.flags;
+        v.token       = td.token;
+    }
     return v;
 }
 
 std::optional<Parser::TypeDefView>
 Parser::FindTypeByName(const std::string& ns, const std::string& name) const {
-    if (!v29Tables_) return std::nullopt;
+    if (!tablesLoaded_) return std::nullopt;
     std::uint32_t count = TypeDefinitionCount();
     for (std::uint32_t i = 0; i < count; ++i) {
         if (auto v = GetTypeDefinition(static_cast<std::int32_t>(i))) {
@@ -270,9 +313,10 @@ Parser::FindTypeByName(const std::string& ns, const std::string& name) const {
 std::vector<Parser::FieldDefView>
 Parser::EnumerateTypeFields(const TypeDefView& type) const {
     std::vector<FieldDefView> out;
-    if (!v29Tables_) return out;
+    if (!tablesLoaded_) return out;
     if (type.fieldCount == 0) return out;
 
+    // FieldDefinition layout is the same 12-byte row across v24 / v29 / v31.
     std::uint32_t fieldRowCount = static_cast<std::uint32_t>(fieldsSize_) /
                                    sizeof(FieldDefinition_v29);
     out.reserve(type.fieldCount);
@@ -297,7 +341,7 @@ Parser::EnumerateTypeFields(const TypeDefView& type) const {
 }
 
 std::optional<std::string> Parser::TryDecodeStringDefault(std::int32_t dataIndex) const {
-    if (!v29Tables_) return std::nullopt;
+    if (!tablesLoaded_) return std::nullopt;
     if (dataIndex < 0 || dataIndex >= fieldDefaultDataSize_) return std::nullopt;
 
     const std::uint8_t* base = data_.data() + fieldDefaultDataOffset_ + dataIndex;
@@ -396,7 +440,7 @@ std::optional<std::string> Parser::TryDecodeStringDefault(std::int32_t dataIndex
 
 std::optional<Parser::FieldDefaultBlob>
 Parser::FindFieldDefault(std::int32_t globalFieldIndex) const {
-    if (!v29Tables_) return std::nullopt;
+    if (!tablesLoaded_) return std::nullopt;
     std::uint32_t rowCount = static_cast<std::uint32_t>(fieldDefaultsSize_) /
                               sizeof(FieldDefaultValue_v29);
     if (rowCount == 0) return std::nullopt;

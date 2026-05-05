@@ -6,8 +6,14 @@
 // Decisions) only kicks in when we cross-link these tables to live runtime
 // pointers like Il2CppClass*; that wrapper layer lives elsewhere.
 //
-// We currently model only v29 (Unity 2021.3 / 2022.1). v24 / v27 / v31 stubs
-// will land alongside the games that need them.
+// Phase 14c covers v24 (Unity 2018.4-2019.x, e.g. SaGa Frontier Remastered),
+// v29 (Unity 2021.x-2022.1, e.g. SaGa Frontier 2 Remastered), and v31
+// (Unity 2022.2+, e.g. Emberward / Farthest Frontier). v27 (Unity 2020) is
+// deferred — no test target locally and the format only diverges from v24 in
+// minor sub-version increments that hit metadata-cli's "untested version"
+// warning gracefully. The HEADER prefix up to typeDefinitionsOffset is the
+// same across v24/v27/v29/v31 — we read just that span via HeaderV29 and
+// dispatch the trailing TypeDefinition layout per version.
 #pragma once
 
 #include <cstdint>
@@ -130,13 +136,69 @@ struct FieldDefaultValue_v29 {
     std::int32_t typeIndex;    // -> types[]
     std::int32_t dataIndex;    // -> fieldAndParameterDefaultValueData blob; -1 = no data
 };
+
+// v24 (Unity 2018.4 - 2019.x) TypeDefinition layout: identical to v29 plus
+// an extra `byrefTypeIndex` int32 inserted between `byvalTypeIndex` and
+// `declaringTypeIndex`. Verified empirically against SaGa Frontier
+// Remastered + FINAL FANTASY VI PR (both Unity 2019.4) — first five
+// TypeDefs come back as `<Module>`, `<>f__AnonymousType0\`1`, `Locale`,
+// `SR`, `Mono.Runtime` with correct `field_count` / `method_count` /
+// IL token (0x02000001+). Total: 17 int32 + 8 uint16 + 2 uint32 = 92 bytes.
+struct TypeDefinition_v24 {
+    std::int32_t  nameIndex;
+    std::int32_t  namespaceIndex;
+    std::int32_t  byvalTypeIndex;
+    std::int32_t  byrefTypeIndex;        // present in v24, absent in v29
+    std::int32_t  declaringTypeIndex;
+    std::int32_t  parentIndex;
+    std::int32_t  elementTypeIndex;
+    std::int32_t  genericContainerIndex;
+    std::uint32_t flags;
+    std::int32_t  fieldStart;
+    std::int32_t  methodStart;
+    std::int32_t  eventStart;
+    std::int32_t  propertyStart;
+    std::int32_t  nestedTypesStart;
+    std::int32_t  interfacesStart;
+    std::int32_t  vtableStart;
+    std::int32_t  interfaceOffsetsStart;
+    std::uint16_t method_count;
+    std::uint16_t property_count;
+    std::uint16_t field_count;
+    std::uint16_t event_count;
+    std::uint16_t nested_type_count;
+    std::uint16_t vtable_count;
+    std::uint16_t interfaces_count;
+    std::uint16_t interface_offsets_count;
+    std::uint32_t bitfield;
+    std::uint32_t token;
+};
+
+// v31 (Unity 2022.2+) TypeDefinition layout — empirically identical to v29
+// (88-byte stride, IL token at offset 84). Verified by hex-dumping
+// Farthest Frontier + Emberward typeDefinitions tables and locating the
+// canonical TypeDef token 0x02000003 at row 2: only stride=88 / token@+84
+// produced clean alignment for both files. v31's "31" version bump is
+// likely about header / images / assemblies trailing changes we don't
+// touch, not the TypeDefinition row itself.
+using TypeDefinition_v31 = TypeDefinition_v29;
+
+// FieldDefinition + FieldDefaultValue layouts haven't changed across v24
+// through v31 — same 12-byte rows. Aliasing rather than duplicating to keep
+// the dispatch simple.
+using FieldDefinition_v24      = FieldDefinition_v29;
+using FieldDefinition_v31      = FieldDefinition_v29;
+using FieldDefaultValue_v24    = FieldDefaultValue_v29;
+using FieldDefaultValue_v31    = FieldDefaultValue_v29;
 #pragma pack(pop)
 
-static_assert(sizeof(HeaderPrefix)          == 32,  "HeaderPrefix must be 32 bytes");
-static_assert(sizeof(StringLiteralEntry)    == 8,   "StringLiteralEntry must be 8 bytes");
-static_assert(sizeof(HeaderV29)             == 168, "HeaderV29 must be 168 bytes");
-static_assert(sizeof(TypeDefinition_v29)    == 88,  "TypeDefinition_v29 must be 88 bytes");
-static_assert(sizeof(FieldDefinition_v29)   == 12,  "FieldDefinition_v29 must be 12 bytes");
-static_assert(sizeof(FieldDefaultValue_v29) == 12,  "FieldDefaultValue_v29 must be 12 bytes");
+static_assert(sizeof(HeaderPrefix)            == 32,  "HeaderPrefix must be 32 bytes");
+static_assert(sizeof(StringLiteralEntry)      == 8,   "StringLiteralEntry must be 8 bytes");
+static_assert(sizeof(HeaderV29)               == 168, "HeaderV29 must be 168 bytes");
+static_assert(sizeof(TypeDefinition_v29)      == 88,  "TypeDefinition_v29 must be 88 bytes");
+static_assert(sizeof(TypeDefinition_v24)      == 92,  "TypeDefinition_v24 must be 92 bytes");
+static_assert(sizeof(TypeDefinition_v31)      == 88,  "TypeDefinition_v31 must be 88 bytes (== v29)");
+static_assert(sizeof(FieldDefinition_v29)     == 12,  "FieldDefinition_v29 must be 12 bytes");
+static_assert(sizeof(FieldDefaultValue_v29)   == 12,  "FieldDefaultValue_v29 must be 12 bytes");
 
 }  // namespace UnityCEDumper::IL2CPP::Metadata

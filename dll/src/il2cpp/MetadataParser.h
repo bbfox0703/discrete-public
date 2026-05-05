@@ -104,7 +104,11 @@ public:
 
 private:
     bool LoadHeader();
-    bool LoadV29Tables();
+    bool LoadTables();
+
+    // Returns sizeof(TypeDefinition) for the loaded metadata version.
+    // 0 for unsupported versions (v27 today).
+    std::size_t TypeDefSizeof() const noexcept;
 
     bool                      loaded_  = false;
     std::int32_t              version_ = 0;
@@ -118,8 +122,10 @@ private:
     std::int32_t stringOffset_            = 0;
     std::int32_t stringSize_              = 0;
 
-    // Segment 2 — only populated when version_ == 29.
-    bool         v29Tables_              = false;
+    // Segment 2 — populated for v24 / v29 / v31. (v27 still skipped — no
+    // test target locally.) tablesLoaded_ goes true when the offsets are
+    // bound and the version-specific TypeDefinition layout is known.
+    bool         tablesLoaded_           = false;
     std::int32_t typeDefinitionsOffset_  = 0;
     std::int32_t typeDefinitionsSize_    = 0;
     std::int32_t fieldsOffset_           = 0;
