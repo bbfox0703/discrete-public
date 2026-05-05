@@ -21,6 +21,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly FileLogger         _logger;
     private readonly IProcessEnumerator _processes;
     private readonly IDllInjector       _injector;
+    private readonly IProxyInstaller    _proxyInstaller;
     private CancellationTokenSource?    _connectCts;
 
     /// <summary>
@@ -33,19 +34,23 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public MainWindowViewModel()
         : this(new UnityDumpUI.Platform.WindowsProcessEnumerator(),
-               new UnityDumpUI.Platform.WindowsDllInjector())
+               new UnityDumpUI.Platform.WindowsDllInjector(),
+               new UnityDumpUI.Platform.WindowsProxyInstaller())
     {
     }
 
-    public MainWindowViewModel(IProcessEnumerator processes, IDllInjector injector)
+    public MainWindowViewModel(IProcessEnumerator processes,
+                                IDllInjector injector,
+                                IProxyInstaller proxyInstaller)
     {
-        _pipe       = new PipeClient();
-        _backend    = new BackendAdapter(_pipe);
-        _logger     = new FileLogger();
-        _processes  = processes;
-        _injector   = injector;
-        Browser     = new AssemblyBrowserViewModel(_backend, _logger);
-        Inspector   = new LiveInspectionViewModel(_backend, _logger);
+        _pipe           = new PipeClient();
+        _backend        = new BackendAdapter(_pipe);
+        _logger         = new FileLogger();
+        _processes      = processes;
+        _injector       = injector;
+        _proxyInstaller = proxyInstaller;
+        Browser         = new AssemblyBrowserViewModel(_backend, _logger);
+        Inspector       = new LiveInspectionViewModel(_backend, _logger);
 
         // Bridge: when the user picks a live instance in the Inspector tab,
         // mirror its address into the export base so the next "Export .CT"
@@ -374,6 +379,106 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     private bool CanInject() => !IsBusy && !IsConnected;
+
+    // ---------- Phase 12c: proxy install/uninstall ----------------------
+
+    /// <summary>
+    /// View-supplied open-file picker. Wired by MainWindow code-behind so
+    /// the VM stays UI-agnostic. Returns absolute path or null on cancel.
+    /// </summary>
+    public Func<string /*title*/, string /*pattern*/, Task<string?>>? PickFileAsync { get; set; }
+
+    [ObservableProperty] private string  _proxyGameExePath = string.Empty;
+    [ObservableProperty] private bool    _proxyKindVersion = true;   // radio default
+    [ObservableProperty] private bool    _proxyKindWinmm;
+    [ObservableProperty] private string? _proxyStatusText;
+    [ObservableProperty] private string? _proxyOperationMessage;
+
+    [RelayCommand]
+    private async Task BrowseProxyTargetAsync()
+    {
+        if (PickFileAsync is null) return;
+        string? path = await PickFileAsync("Pick game executable", "*.exe").ConfigureAwait(true);
+        if (string.IsNullOrEmpty(path)) return;
+        ProxyGameExePath = path;
+        await RefreshProxyStatusAsync().ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task RefreshProxyStatusAsync()
+    {
+        if (string.IsNullOrEmpty(ProxyGameExePath)) { ProxyStatusText = null; return; }
+        try
+        {
+            ProxyInstallStatus st = await _proxyInstaller
+                .DetectAsync(ProxyGameExePath, default).ConfigureAwait(true);
+            ProxyStatusText = FormatProxyStatus(st);
+        }
+        catch (Exception ex)
+        {
+            ProxyStatusText = $"detect failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task InstallProxyAsync()
+    {
+        if (string.IsNullOrEmpty(ProxyGameExePath)) return;
+        ProxyKind kind = ProxyKindWinmm ? ProxyKind.Winmm : ProxyKind.Version;
+        ProxyOperationMessage = "Installing…";
+        try
+        {
+            ProxyOperationResult r = await _proxyInstaller
+                .InstallAsync(ProxyGameExePath, kind, default).ConfigureAwait(true);
+            ProxyOperationMessage = r.Message;
+            ProxyStatusText = FormatProxyStatus(r.Status);
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"proxy install {kind} -> {ProxyGameExePath}: {(r.Ok ? "ok" : "fail")} ({r.Message})");
+        }
+        catch (Exception ex)
+        {
+            ProxyOperationMessage = $"install failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task UninstallProxyAsync()
+    {
+        if (string.IsNullOrEmpty(ProxyGameExePath)) return;
+        ProxyOperationMessage = "Uninstalling…";
+        try
+        {
+            ProxyOperationResult r = await _proxyInstaller
+                .UninstallAsync(ProxyGameExePath, default).ConfigureAwait(true);
+            ProxyOperationMessage = r.Message;
+            ProxyStatusText = FormatProxyStatus(r.Status);
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"proxy uninstall -> {ProxyGameExePath}: {(r.Ok ? "ok" : "fail")} ({r.Message})");
+        }
+        catch (Exception ex)
+        {
+            ProxyOperationMessage = $"uninstall failed: {ex.Message}";
+        }
+    }
+
+    private static string FormatProxyStatus(ProxyInstallStatus s)
+    {
+        if (!string.IsNullOrEmpty(s.ErrorMessage)) return s.ErrorMessage;
+        string proxy = s.Kind switch
+        {
+            ProxyKind.Version => "version.dll installed",
+            ProxyKind.Winmm   => "winmm.dll installed",
+            _                 => "no proxy installed",
+        };
+        string backends = (s.HasMonoBackend, s.HasIl2cppBackend) switch
+        {
+            (true, true)   => "Mono+IL2CPP backends present",
+            (true, false)  => "Mono backend present",
+            (false, true)  => "IL2CPP backend present",
+            _              => "no backend DLLs",
+        };
+        return s.IsInstalled ? $"{proxy}, {backends}" : $"{proxy} ({backends})";
+    }
 
     /// <summary>
     /// Hand the currently selected class off to the inspector and kick a

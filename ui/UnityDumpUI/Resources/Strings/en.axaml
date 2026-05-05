@@ -63,6 +63,14 @@
   <sys:String x:Key="Conn.Disconnect">Disconnect</sys:String>
   <sys:String x:Key="Conn.StatusLabel">Status:</sys:String>
   <sys:String x:Key="Conn.Inject">Pick &amp; inject…</sys:String>
+  <sys:String x:Key="Conn.ProxyMenu">Proxy DLL ▾</sys:String>
+  <sys:String x:Key="Conn.ProxyTitle">Install proxy DLL next to game .exe</sys:String>
+  <sys:String x:Key="Conn.ProxyHint">Auto-loads UnityCEDumper at the next game launch. Pick the game .exe and choose version.dll or winmm.dll (only one can be installed at a time).</sys:String>
+  <sys:String x:Key="Conn.ProxyExeWatermark">path to game .exe…</sys:String>
+  <sys:String x:Key="Conn.ProxyBrowse">Browse…</sys:String>
+  <sys:String x:Key="Conn.ProxyInstall">Install</sys:String>
+  <sys:String x:Key="Conn.ProxyUninstall">Uninstall</sys:String>
+  <sys:String x:Key="Conn.ProxyRefresh">↻</sys:String>
 
   <!-- Process picker dialog. -->
   <sys:String x:Key="Picker.Title">Pick Unity process</sys:String>

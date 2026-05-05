@@ -20,6 +20,7 @@ public partial class MainWindow : Window
         vm.Browser.SaveFileAsync     = SaveFileAsync;
         vm.Browser.CopyToClipboardAsync   = CopyToClipboardAsync;
         vm.Inspector.CopyToClipboardAsync = CopyToClipboardAsync;
+        vm.PickFileAsync                  = PickFileAsync;
         DataContext = vm;
     }
 
@@ -57,6 +58,26 @@ public partial class MainWindow : Window
     /// absolute path or null on cancel. Wired into AssemblyBrowserViewModel
     /// for the Phase 10 export commands.
     /// </summary>
+    /// <summary>
+    /// Phase 12c: open-file picker scoped to this window. Returns the
+    /// chosen absolute path or null on cancel. Wired into
+    /// MainWindowViewModel.PickFileAsync for the proxy install flow.
+    /// </summary>
+    private async Task<string?> PickFileAsync(string title, string pattern)
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title           = title,
+            AllowMultiple   = false,
+            FileTypeFilter  = new List<FilePickerFileType>
+            {
+                new(pattern) { Patterns = new[] { pattern } },
+            },
+        });
+        if (files is null || files.Count == 0) return null;
+        return files[0].TryGetLocalPath();
+    }
+
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions

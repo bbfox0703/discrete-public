@@ -22,6 +22,56 @@
                 Command="{Binding ConnectCommand}" />
         <Button Content="{StaticResource Conn.Disconnect}"
                 Command="{Binding DisconnectCommand}" />
+
+        <!-- Phase 12c: proxy install/uninstall. Auto-loads our pipe at the
+             next game launch — the alternative to runtime Pick & inject for
+             games where injection is awkward. -->
+        <Button Content="{StaticResource Conn.ProxyMenu}">
+          <Button.Flyout>
+            <Flyout Placement="Bottom">
+              <StackPanel Spacing="6" MinWidth="500">
+                <TextBlock Text="{StaticResource Conn.ProxyTitle}" FontWeight="SemiBold" />
+                <TextBlock Text="{StaticResource Conn.ProxyHint}"
+                           Opacity="0.7" FontSize="11" TextWrapping="Wrap" />
+
+                <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+                  <TextBox Grid.Column="0"
+                           PlaceholderText="{StaticResource Conn.ProxyExeWatermark}"
+                           Text="{Binding ProxyGameExePath, Mode=TwoWay}" />
+                  <Button Grid.Column="1" Margin="6,0,0,0"
+                          Content="{StaticResource Conn.ProxyBrowse}"
+                          Command="{Binding BrowseProxyTargetCommand}" />
+                </Grid>
+
+                <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0">
+                  <RadioButton GroupName="ProxyKind"
+                               Content="version.dll"
+                               IsChecked="{Binding ProxyKindVersion, Mode=TwoWay}" />
+                  <RadioButton GroupName="ProxyKind"
+                               Content="winmm.dll"
+                               IsChecked="{Binding ProxyKindWinmm, Mode=TwoWay}" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,4,0,0">
+                  <Button Content="{StaticResource Conn.ProxyInstall}"
+                          Command="{Binding InstallProxyCommand}" />
+                  <Button Content="{StaticResource Conn.ProxyUninstall}"
+                          Command="{Binding UninstallProxyCommand}" />
+                  <Button Content="{StaticResource Conn.ProxyRefresh}"
+                          Command="{Binding RefreshProxyStatusCommand}" />
+                </StackPanel>
+
+                <TextBlock Text="{Binding ProxyStatusText}"
+                           Opacity="0.85" FontSize="12"
+                           IsVisible="{Binding ProxyStatusText, Converter={x:Static ObjectConverters.IsNotNull}}"
+                           Margin="0,4,0,0" />
+                <TextBlock Text="{Binding ProxyOperationMessage}"
+                           Opacity="0.6" FontSize="11" TextWrapping="Wrap"
+                           IsVisible="{Binding ProxyOperationMessage, Converter={x:Static ObjectConverters.IsNotNull}}" />
+              </StackPanel>
+            </Flyout>
+          </Button.Flyout>
+        </Button>
         <TextBlock Text="{StaticResource Conn.StatusLabel}"
                    VerticalAlignment="Center"
                    Opacity="0.7" />
