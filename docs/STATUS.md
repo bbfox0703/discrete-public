@@ -1,7 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
 **Branch**: `dev`
-**Current phase**: **Phase 13 closed** — `metadata-cli.exe` ships in `dist/` (offline `global-metadata.dat` parser). Subcommands: `info` / `stats` / `types` / `type <ns> <name>`. Reuses `MetadataParser` from the DLL tree via a split — backend-agnostic core in `MetadataParser.cpp`, host-process singleton (`Get()`/`Load()`) in `MetadataParserHostPath.cpp` only. CLI links the core + Logger, no `BackendDetector` pull-in. Phases 0–11.5 + 9.5 + 13 + 14 all closed.
+**Current phase**: **Inspector value-type substruct expansion landed** (open follow-up from Phase 11.5). Inline `Vector3` / `Quaternion` / custom struct fields in the field grid now expand inline like pointer-to-class fields — chevron, indented children, recursive. Phases 0–11.5 + 9.5 + 13 + 14 all closed; this open follow-up now done.
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants).
 
@@ -83,7 +83,7 @@ d50d180 fix(export): bridge Inspector.SelectedInstance -> Browser.CeXmlBaseAddre
 ### Open follow-ups (not blocking any phase)
 
 - **CSX live mode** — CE XML got the live-render treatment (real per-element addresses + walkArray-driven children); CSX still emits structural placeholders. CSX `Element` addressing is relative to slot start (no absolute mode), so it's a different design problem. Worth doing once a user actually asks.
-- **Inspector value-type substruct expansion** — Phase 11.5 expands pointer-to-class and array fields. Inline value-type struct fields (e.g. `Vector3`) still render as opaque values. Would need a DLL-side header-less `walkInstance` variant (current path expects a managed object header).
+- ~~**Inspector value-type substruct expansion**~~ — landed: `WalkedFieldKind.ValueStruct` + classifier uses `UnityTypeMap.IsPointerType` to distinguish value types from references; `walkInstance(addr, type)` works for inline value types because the DLL handler doesn't dereference the address (just iterates fields by offset). Assembly-resolution fallback added for `UnityEngine.*` / `System.*` types whose class lives in a different assembly than the parent. Bonus fix: the misleading garbage `ptr` value (decodeField's catch-all) is replaced with `(struct — expand)` on the row.
 
 ---
 

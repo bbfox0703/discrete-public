@@ -364,6 +364,16 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 await LoadPointerChildrenAsync(node, ct).ConfigureAwait(true);
                 break;
 
+            // Inline value-type substruct: same RPC as PointerToClass —
+            // walkInstance(addr, type) — but EffectiveAddress is the field's
+            // own storage (no deref). The DLL's walkInstance iterates
+            // fields by offset starting at the supplied address, no header
+            // dereference, so this works for both class instances (with
+            // header) and inline value types (without).
+            case WalkedFieldKind.ValueStruct:
+                await LoadPointerChildrenAsync(node, ct).ConfigureAwait(true);
+                break;
+
             case WalkedFieldKind.Collection:
                 await LoadArrayChildrenAsync(node, ct).ConfigureAwait(true);
                 break;
@@ -381,11 +391,24 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         // stored on the row is the field's declared managed type; ignore
         // collection wrappers (those go through Collection above).
         if (TryParseClassName(node.Type, out string ns, out string name) is false) return;
-        WalkInstanceResult res = await _backend
-            .WalkInstanceAsync(node.EffectiveAddress!, TargetAssembly ?? string.Empty,
-                               ns, name, ct).ConfigureAwait(true);
-        if (!string.IsNullOrEmpty(res.Error)) return;
-        if (res.Fields is null) return;
+
+        // Assembly resolution: walkInstance searches ONLY the named image,
+        // so UnityEngine.Vector3 won't be found in Assembly-CSharp even
+        // though the field lives in an Assembly-CSharp class. Try the
+        // parent's assembly first, then fall back to common Unity assemblies
+        // for well-known namespaces. The DLL doesn't currently expose a
+        // "search all images" mode — that would be the cleaner long-term
+        // fix (logged as a future follow-up).
+        string[] candidates = BuildAssemblyCandidates(TargetAssembly, ns);
+        WalkInstanceResult? res = null;
+        foreach (string asm in candidates)
+        {
+            WalkInstanceResult attempt = await _backend
+                .WalkInstanceAsync(node.EffectiveAddress!, asm, ns, name, ct)
+                .ConfigureAwait(true);
+            if (string.IsNullOrEmpty(attempt.Error)) { res = attempt; break; }
+        }
+        if (res is null || res.Fields is null) return;
         foreach (WalkedField f in res.Fields)
         {
             WalkedFieldNode child = WalkedFieldNode.FromInstanceField(
@@ -393,6 +416,32 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             child.Parent = node;
             node.Children.Add(child);
         }
+    }
+
+    /// <summary>
+    /// Order to try when looking up a managed type for expansion. The
+    /// caller's assembly first (covers user-defined types in
+    /// Assembly-CSharp), then well-known fallbacks based on the namespace
+    /// — UnityEngine types live across CoreModule / IMGUIModule / etc.,
+    /// System types live in mscorlib / System.Runtime.
+    /// </summary>
+    internal static string[] BuildAssemblyCandidates(string? primaryAssembly, string @namespace)
+    {
+        List<string> list = new(4);
+        if (!string.IsNullOrEmpty(primaryAssembly)) list.Add(primaryAssembly);
+        if (@namespace.StartsWith("UnityEngine", StringComparison.Ordinal))
+        {
+            // Most Unity primitives live in CoreModule. Add fallbacks for
+            // the common splits without enumerating every UnityEngine.*.dll.
+            if (!list.Contains("UnityEngine.CoreModule")) list.Add("UnityEngine.CoreModule");
+            if (!list.Contains("UnityEngine"))            list.Add("UnityEngine");
+        }
+        else if (@namespace.StartsWith("System", StringComparison.Ordinal))
+        {
+            if (!list.Contains("mscorlib"))       list.Add("mscorlib");
+            if (!list.Contains("System.Runtime")) list.Add("System.Runtime");
+        }
+        return list.ToArray();
     }
 
     private async Task LoadArrayChildrenAsync(WalkedFieldNode node, CancellationToken ct)
@@ -511,12 +560,22 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
         try
         {
-            GetClassInfoResult info = await _backend
-                .GetClassInfoAsync(TargetAssembly ?? string.Empty, ns, name, default)
-                .ConfigureAwait(true);
-            if (!string.IsNullOrEmpty(info.Error))
+            // Same assembly-resolution fallback as the inspector's expansion
+            // path: try the parent's assembly first, then well-known
+            // fallbacks. Critical for value-type substructs whose type
+            // (UnityEngine.Vector3 etc.) lives in a different assembly.
+            string[] candidates = BuildAssemblyCandidates(TargetAssembly, ns);
+            GetClassInfoResult? info = null;
+            string usedAssembly = TargetAssembly ?? "Assembly";
+            foreach (string asm in candidates)
             {
-                ErrorMessage = $"getClassInfo({ns}.{name}): {info.Error}";
+                GetClassInfoResult attempt = await _backend
+                    .GetClassInfoAsync(asm, ns, name, default).ConfigureAwait(true);
+                if (string.IsNullOrEmpty(attempt.Error)) { info = attempt; usedAssembly = asm; break; }
+            }
+            if (info is null)
+            {
+                ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
                 return;
             }
             ExportOptions options = new(
@@ -526,7 +585,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 LiveData: true);
             string xml = await CeXmlExporter.RenderAsync(
                 SelectedNode.EffectiveAddress!, info, ancestors: null,
-                TargetAssembly ?? "Assembly", options, _backend, default)
+                usedAssembly, options, _backend, default)
                 .ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
             _logger.Write(Constants.LogCategoryView,
@@ -762,8 +821,16 @@ public enum WalkedFieldKind
 {
     /// <summary>Primitive value or unrecognised pointer; no children.</summary>
     Leaf,
-    /// <summary>Pointer to a managed class instance — expand via walkInstance.</summary>
+    /// <summary>Pointer to a managed class instance — expand via walkInstance on the dereferenced address.</summary>
     PointerToClass,
+    /// <summary>
+    /// Inline value-type struct (e.g. <c>Vector3</c>, custom struct) — its fields
+    /// live at the parent address + offset (no header). Expand via
+    /// <c>walkInstance</c> at the field's storage address; the DLL's
+    /// walkInstance iterates fields by offset starting there, so it works
+    /// for both class instances (with header) and value types (without).
+    /// </summary>
+    ValueStruct,
     /// <summary>T[] / List&lt;T&gt; — expand via walkArray.</summary>
     Collection,
     /// <summary>Pointer slot inside an expanded array — recursively expandable like PointerToClass.</summary>
@@ -837,6 +904,7 @@ public sealed partial class WalkedFieldNode : ObservableObject
 
     public bool CanExpand => Kind is
         WalkedFieldKind.PointerToClass or
+        WalkedFieldKind.ValueStruct    or
         WalkedFieldKind.Collection     or
         WalkedFieldKind.ArraySlotPointer;
 
@@ -865,6 +933,13 @@ public sealed partial class WalkedFieldNode : ObservableObject
         string display = FormatDisplay(f, out bool isPointerValue);
         WalkedFieldKind kind = ClassifyInstanceField(f, isPointerValue);
         string? effective = ComputeEffectiveAddress(f, kind);
+        // For inline value-type structs the wire `ptr` is meaningless garbage
+        // (decodeField's catch-all reads 8 bytes opaque) — replace the
+        // misleading hex value with a hint that the row is expandable.
+        if (kind == WalkedFieldKind.ValueStruct)
+        {
+            display = "(struct — expand)";
+        }
         return new WalkedFieldNode(
             f.Name,
             f.Type ?? string.Empty,
@@ -929,6 +1004,22 @@ public sealed partial class WalkedFieldNode : ObservableObject
                 return WalkedFieldKind.Leaf;
             return WalkedFieldKind.Collection;
         }
+        // Inline value-type substruct: when UnityTypeMap classifies the
+        // managed type as a value type (Vector3, Quaternion, Color, Bounds,
+        // …) the field's storage IS the struct — no pointer to deref. The
+        // DLL still emits a `ptr` field for it (decodeField's catch-all
+        // reads 8 bytes as opaque pointer), but that's misleading garbage
+        // for value types. Override before the pointer-classification path
+        // so the chevron points at walkInstance(field.Address, type) for
+        // these — which the DLL handles correctly because its walkInstance
+        // doesn't assume an object header.
+        if (!string.IsNullOrEmpty(f.Type)
+            && !UnityTypeMap.IsPointerType(f.Type)
+            && LiveInspectionViewModel.TryParseClassName(f.Type, out _, out _)
+            && !string.IsNullOrEmpty(f.Address))
+        {
+            return WalkedFieldKind.ValueStruct;
+        }
         // Pointer-to-class: the wire layer reports a Ptr value AND the
         // field type resolves to a non-primitive class.
         if (isPointerValue
@@ -944,7 +1035,11 @@ public sealed partial class WalkedFieldNode : ObservableObject
     private static string? ComputeEffectiveAddress(WalkedField f, WalkedFieldKind kind)
         => kind switch
         {
+            // PointerToClass / Collection follow the deref'd pointer.
             WalkedFieldKind.PointerToClass or WalkedFieldKind.Collection => f.Ptr,
+            // ValueStruct uses the field's own storage address — no deref,
+            // since the value type IS the data at that location.
+            WalkedFieldKind.ValueStruct => f.Address,
             _ => f.Address ?? f.Ptr,
         };
 
