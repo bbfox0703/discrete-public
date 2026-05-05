@@ -31,13 +31,17 @@ public sealed class ProxyInstallStatus
 {
     public ProxyInstallStatus(string gameExePath, ProxyKind kind,
                               bool hasMonoBackend, bool hasIl2cppBackend,
-                              string? errorMessage)
+                              string? errorMessage,
+                              string? installedProxyVersion = null,
+                              string? sourceProxyVersion    = null)
     {
-        GameExePath      = gameExePath;
-        Kind             = kind;
-        HasMonoBackend   = hasMonoBackend;
-        HasIl2cppBackend = hasIl2cppBackend;
-        ErrorMessage     = errorMessage;
+        GameExePath           = gameExePath;
+        Kind                  = kind;
+        HasMonoBackend        = hasMonoBackend;
+        HasIl2cppBackend      = hasIl2cppBackend;
+        ErrorMessage          = errorMessage;
+        InstalledProxyVersion = installedProxyVersion;
+        SourceProxyVersion    = sourceProxyVersion;
     }
 
     public string    GameExePath      { get; }
@@ -46,8 +50,27 @@ public sealed class ProxyInstallStatus
     public bool      HasIl2cppBackend { get; }
     public string?   ErrorMessage     { get; }
 
+    /// <summary>PE FileVersion of the installed proxy DLL (e.g. "0.1.0.135").
+    /// <c>null</c> when nothing is installed or the file's version info
+    /// couldn't be read.</summary>
+    public string?   InstalledProxyVersion { get; }
+
+    /// <summary>PE FileVersion of the proxy DLL we'd install from
+    /// <c>dist/</c> (matching <see cref="Kind"/> if installed, else version.dll).
+    /// <c>null</c> when the source DLL is missing — should never happen in
+    /// a normal build but covers the dev-side "DLL not yet built" case.</summary>
+    public string?   SourceProxyVersion { get; }
+
     /// <summary>True when at least one proxy file lives next to the .exe.</summary>
     public bool IsInstalled => Kind != ProxyKind.None;
+
+    /// <summary>True when an installed proxy has the same version as the
+    /// one in <c>dist/</c>. False if either version is unknown or they
+    /// differ. Used by the deploy panel's "Update all deployed" badge.</summary>
+    public bool IsCurrent => IsInstalled
+        && !string.IsNullOrEmpty(InstalledProxyVersion)
+        && !string.IsNullOrEmpty(SourceProxyVersion)
+        && string.Equals(InstalledProxyVersion, SourceProxyVersion, System.StringComparison.Ordinal);
 }
 
 /// <summary>

@@ -43,16 +43,20 @@ public sealed class UnityGameEntry
                            UnityBackend backend, ExeBitness bitness,
                            string? dataDirectoryName,
                            ProxyKind installedProxy,
-                           string source)
+                           string source,
+                           string? installedProxyVersion = null,
+                           string? sourceProxyVersion    = null)
     {
-        ExePath           = exePath;
-        GameDirectory     = gameDirectory;
-        DisplayName       = displayName;
-        Backend           = backend;
-        Bitness           = bitness;
-        DataDirectoryName = dataDirectoryName;
-        InstalledProxy    = installedProxy;
-        Source            = source;
+        ExePath               = exePath;
+        GameDirectory         = gameDirectory;
+        DisplayName           = displayName;
+        Backend               = backend;
+        Bitness               = bitness;
+        DataDirectoryName     = dataDirectoryName;
+        InstalledProxy        = installedProxy;
+        Source                = source;
+        InstalledProxyVersion = installedProxyVersion;
+        SourceProxyVersion    = sourceProxyVersion;
     }
 
     public string       ExePath           { get; }
@@ -65,6 +69,13 @@ public sealed class UnityGameEntry
     public ProxyKind    InstalledProxy    { get; }
     /// <summary>Free-form provenance string ("Steam library: D:\…", "Manual", …).</summary>
     public string       Source            { get; }
+    /// <summary>PE FileVersion of the installed proxy DLL, or null.</summary>
+    public string?      InstalledProxyVersion { get; }
+    /// <summary>PE FileVersion of the proxy DLL in <c>dist/</c> we'd install,
+    /// or null if the source DLL is missing. Same string for every row in a
+    /// given scan — surfaced per-row so the deploy grid can show the
+    /// installed/source comparison directly.</summary>
+    public string?      SourceProxyVersion    { get; }
 
     public string BackendLabel => Backend switch
     {

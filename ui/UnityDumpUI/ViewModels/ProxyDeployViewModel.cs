@@ -151,8 +151,11 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     {
         await RunBulkAsync("Update", row => _installer
             .InstallAsync(row.ExePath, row.Game.InstalledProxy, default),
-            row => row.DeployStatus == ProxyDeployStatus.Deployed
-                && row.Game.InstalledProxy != ProxyKind.None).ConfigureAwait(true);
+            row => row.Game.InstalledProxy != ProxyKind.None
+                && row.DeployStatus is ProxyDeployStatus.Deployed
+                                    or  ProxyDeployStatus.DeployedCurrent
+                                    or  ProxyDeployStatus.DeployedOutdated)
+            .ConfigureAwait(true);
     }
 
     // ---------- Helpers --------------------------------------------------
@@ -189,11 +192,16 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
                     row.LastOperationMessage = r.Message;
                     // Refresh status from the post-op snapshot the installer
                     // attached to the result — cheaper than a second Detect.
+                    // Pass r.Status into UpdateFrom so the row's
+                    // InstalledVersion / SourceVersion / DeployStatus all
+                    // reflect the version comparison after the op.
                     var fresh = new UnityGameEntry(
                         row.Game.ExePath, row.Game.GameDirectory, row.Game.DisplayName,
                         row.Game.Backend, row.Game.Bitness,
-                        row.Game.DataDirectoryName, r.Status.Kind, row.Game.Source);
-                    row.UpdateFrom(fresh);
+                        row.Game.DataDirectoryName, r.Status.Kind, row.Game.Source,
+                        installedProxyVersion: r.Status.InstalledProxyVersion,
+                        sourceProxyVersion:    r.Status.SourceProxyVersion);
+                    row.UpdateFrom(fresh, r.Status);
                     if (r.Ok) ++ok; else ++fail;
                 }
                 catch (Exception ex)
@@ -234,13 +242,17 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
 
     private void UpdateSummary()
     {
-        int selected = 0, deployed = 0;
+        int selected = 0, deployed = 0, outdated = 0;
         foreach (ProxyGameRow r in Games)
         {
             if (r.IsSelected) ++selected;
-            if (r.DeployStatus == ProxyDeployStatus.Deployed) ++deployed;
+            if (r.DeployStatus is ProxyDeployStatus.Deployed
+                              or  ProxyDeployStatus.DeployedCurrent
+                              or  ProxyDeployStatus.DeployedOutdated) ++deployed;
+            if (r.DeployStatus == ProxyDeployStatus.DeployedOutdated) ++outdated;
         }
-        SummaryText = $"{selected} selected · {deployed} deployed · {Games.Count} total";
+        string outdatedSuffix = outdated > 0 ? $" ({outdated} outdated)" : string.Empty;
+        SummaryText = $"{selected} selected · {deployed} deployed{outdatedSuffix} · {Games.Count} total";
     }
 
     private void OnRowPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)

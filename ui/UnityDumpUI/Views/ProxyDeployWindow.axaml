@@ -133,8 +133,10 @@
                             Binding="{Binding BitnessLabel, x:DataType=m:ProxyGameRow}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColProxy}"    Width="100"
                             Binding="{Binding ProxyLabel, x:DataType=m:ProxyGameRow}" />
-        <DataGridTextColumn Header="{StaticResource Deploy.ColStatus}"   Width="160"
+        <DataGridTextColumn Header="{StaticResource Deploy.ColStatus}"   Width="200"
                             Binding="{Binding DeployStatusLabel, x:DataType=m:ProxyGameRow}" />
+        <DataGridTextColumn Header="{StaticResource Deploy.ColVersion}"  Width="180"
+                            Binding="{Binding VersionLabel, x:DataType=m:ProxyGameRow}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColLastMessage}" Width="240"
                             Binding="{Binding LastOperationMessage, x:DataType=m:ProxyGameRow}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColPath}"     Width="*"

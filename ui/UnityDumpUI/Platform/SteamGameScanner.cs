@@ -210,19 +210,27 @@ public sealed class SteamGameScanner : IUnityGameScanner
         ExeBitness bitness = ReadPeBitness(exePath);
 
         // Existing-proxy check is synchronous via the installer's
-        // detection helper. Soft-fail to "no proxy" on errors.
+        // detection helper. Soft-fail to "no proxy" on errors. The
+        // InstalledProxyVersion / SourceProxyVersion strings come along
+        // for the ride so the deploy UI can flag outdated installs.
         ProxyKind installedProxy = ProxyKind.None;
+        string?   installedVer   = null;
+        string?   sourceVer      = null;
         try
         {
             ProxyInstallStatus s = _proxyInstaller.DetectAsync(exePath).GetAwaiter().GetResult();
             installedProxy = s.Kind;
+            installedVer   = s.InstalledProxyVersion;
+            sourceVer      = s.SourceProxyVersion;
         }
         catch { /* tolerate */ }
 
         string display = Path.GetFileName(gameDir);
         return new UnityGameEntry(
             exePath, gameDir, display,
-            backend, bitness, dataDirName, installedProxy, source);
+            backend, bitness, dataDirName, installedProxy, source,
+            installedProxyVersion: installedVer,
+            sourceProxyVersion:    sourceVer);
     }
 
     // ---------- PE header bitness ----------------------------------------

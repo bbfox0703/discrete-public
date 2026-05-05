@@ -84,6 +84,7 @@
   <sys:String x:Key="Deploy.ColBitness">Bits</sys:String>
   <sys:String x:Key="Deploy.ColProxy">Proxy</sys:String>
   <sys:String x:Key="Deploy.ColStatus">Status</sys:String>
+  <sys:String x:Key="Deploy.ColVersion">Version</sys:String>
   <sys:String x:Key="Deploy.ColLastMessage">Last operation</sys:String>
   <sys:String x:Key="Deploy.ColPath">Game .exe path</sys:String>
 

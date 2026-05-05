@@ -8,6 +8,7 @@
 // AOT-safe: pure file IO + Environment APIs, no reflection.
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -69,7 +70,47 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
         ProxyKind kind = hasVersion ? ProxyKind.Version
                        : hasWinmm   ? ProxyKind.Winmm
                        :              ProxyKind.None;
-        return new ProxyInstallStatus(gameExePath, kind, hasMono, hasIl2cpp, null);
+
+        // Read PE FileVersion off both sides so the deploy UI can flag
+        // outdated installs. We always compare against the SAME proxy
+        // kind that's currently in place — `dist/version.dll` vs game's
+        // version.dll, etc. — because the two dist proxies share the
+        // same build number anyway.
+        string proxyName = kind switch
+        {
+            ProxyKind.Version => VersionDll,
+            ProxyKind.Winmm   => WinmmDll,
+            _                 => VersionDll,   // sensible default for the source-side read
+        };
+        string? installedVersion = (kind == ProxyKind.None)
+            ? null
+            : ReadFileVersion(Path.Combine(dir, proxyName));
+        string? sourceVersion = ReadFileVersion(Path.Combine(SourceDir(), proxyName));
+
+        return new ProxyInstallStatus(gameExePath, kind, hasMono, hasIl2cpp,
+            errorMessage: null,
+            installedProxyVersion: installedVersion,
+            sourceProxyVersion:    sourceVersion);
+    }
+
+    /// <summary>
+    /// Read the PE FileVersion string ("major.minor.patch.build") from a
+    /// DLL or exe via System.Diagnostics.FileVersionInfo. Returns null
+    /// when the file is missing or has no version resource (rare; would
+    /// indicate a build that didn't pick up version.rc).
+    /// </summary>
+    private static string? ReadFileVersion(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            FileVersionInfo info = FileVersionInfo.GetVersionInfo(path);
+            return string.IsNullOrEmpty(info.FileVersion) ? null : info.FileVersion;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static ProxyOperationResult InstallSync(string gameExePath, ProxyKind kind)
