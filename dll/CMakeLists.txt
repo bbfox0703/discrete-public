@@ -1,5 +1,25 @@
 # UnityDumper DLL — builds Mono and/or IL2CPP variants + ProxyDLLs
 
+# ---------------------------------------------------------------------------
+# Helper: configure_file the shared version.rc.in template per target with
+# the right InternalName / OriginalFilename / FileDescription, then add the
+# generated .rc to the target's sources. Each DLL gets its own VERSIONINFO
+# resource embedded at build time — File Explorer / Get-ItemProperty / log
+# banners all see the same version string.
+# ---------------------------------------------------------------------------
+function(add_versioned_rc TARGET_NAME INTERNAL_NAME ORIGINAL_FILENAME DESCRIPTION)
+    set(RC_INTERNAL_NAME     "${INTERNAL_NAME}")
+    set(RC_ORIGINAL_FILENAME "${ORIGINAL_FILENAME}")
+    set(RC_DESCRIPTION       "${DESCRIPTION}")
+    set(RC_COMPANY           "UnityCEDumper")
+    set(GEN_RC ${CMAKE_BINARY_DIR}/generated/${TARGET_NAME}_version.rc)
+    configure_file(
+        ${CMAKE_SOURCE_DIR}/dll/src/shared/version.rc.in
+        ${GEN_RC}
+        @ONLY)
+    target_sources(${TARGET_NAME} PRIVATE ${GEN_RC})
+endfunction()
+
 set(DLL_SHARED_SOURCES
     src/main.cpp
     src/shared/BackendDetector.cpp
@@ -73,10 +93,18 @@ endfunction()
 
 if(BACKEND STREQUAL "Mono" OR BACKEND STREQUAL "Both")
     add_backend_dll(UnityDumper-Mono UNITYCEDUMPER_BACKEND_MONO)
+    add_versioned_rc(UnityDumper-Mono
+        "UnityDumper-Mono"
+        "UnityDumper-Mono.dll"
+        "Unity Mono Engine Dumper DLL")
 endif()
 
 if(BACKEND STREQUAL "IL2CPP" OR BACKEND STREQUAL "Both")
     add_backend_dll(UnityDumper-IL2CPP UNITYCEDUMPER_BACKEND_IL2CPP)
+    add_versioned_rc(UnityDumper-IL2CPP
+        "UnityDumper-IL2CPP"
+        "UnityDumper-IL2CPP.dll"
+        "Unity IL2CPP Engine Dumper DLL")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -134,7 +162,16 @@ if(BUILD_PROXIES)
     add_proxy_dll(UnityDumperProxy-version version
         src/proxy/version/version.cpp
         src/proxy/version/version.def)
+    add_versioned_rc(UnityDumperProxy-version
+        "UnityDumper-version-proxy"
+        "version.dll"
+        "UnityCEDumper version.dll proxy (auto-loads UnityDumper-{Backend}.dll)")
+
     add_proxy_dll(UnityDumperProxy-winmm   winmm
         src/proxy/winmm/winmm.cpp
         src/proxy/winmm/winmm.def)
+    add_versioned_rc(UnityDumperProxy-winmm
+        "UnityDumper-winmm-proxy"
+        "winmm.dll"
+        "UnityCEDumper winmm.dll proxy (auto-loads UnityDumper-{Backend}.dll)")
 endif()

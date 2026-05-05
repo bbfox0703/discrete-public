@@ -85,6 +85,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // from whichever pool thread happened to be doing the failing read.
         _pipe.Disconnected += OnPipeDisconnected;
 
+        // Banner first so each ui/init/current.log clearly identifies the
+        // build that wrote it. Same scheme as the C++ DLL's main.cpp.
+        _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+            $"{VersionInfo.Banner} session start");
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
 
         // One-shot housekeeping: each game injection creates a new

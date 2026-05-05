@@ -1,0 +1,45 @@
+// version.rc.in — PE VERSIONINFO resource template.
+//
+// CMake's add_versioned_rc() helper (see dll/CMakeLists.txt) configure_file's
+// this template per target with the matching InternalName / OriginalFilename /
+// FileDescription. The result is one generated .rc per DLL, compiled into the
+// PE and visible to File Explorer's "Properties → Details" pane and to
+// PowerShell's Get-ItemProperty.
+
+#include <winresrc.h>
+#include "BuildInfo.h"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    UNITYCEDUMPER_VER_MAJOR, UNITYCEDUMPER_VER_MINOR, UNITYCEDUMPER_VER_PATCH, UNITYCEDUMPER_VER_BUILD
+    PRODUCTVERSION UNITYCEDUMPER_VER_MAJOR, UNITYCEDUMPER_VER_MINOR, UNITYCEDUMPER_VER_PATCH, UNITYCEDUMPER_VER_BUILD
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+    FILEFLAGS      VS_FF_DEBUG
+#else
+    FILEFLAGS      0x0L
+#endif
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_DLL
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"  // English (US), Unicode
+        BEGIN
+            VALUE "CompanyName",      "@RC_COMPANY@"
+            VALUE "FileDescription",  "@RC_DESCRIPTION@"
+            VALUE "FileVersion",      UNITYCEDUMPER_FILE_VERSION_STRING
+            VALUE "InternalName",     "@RC_INTERNAL_NAME@"
+            VALUE "OriginalFilename", "@RC_ORIGINAL_FILENAME@"
+            VALUE "ProductName",      "UnityCEDumper"
+            VALUE "ProductVersion",   UNITYCEDUMPER_FILE_VERSION_STRING
+            VALUE "GitCommit",        UNITYCEDUMPER_GIT_HASH
+            VALUE "GitShort",         UNITYCEDUMPER_GIT_SHORT
+            VALUE "BuildTimestamp",   UNITYCEDUMPER_BUILD_TIMESTAMP
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200  // English (US), Unicode
+    END
+END

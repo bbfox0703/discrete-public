@@ -1,6 +1,7 @@
 // main.cpp — DllMain entry point.
 // Logs DLL load, lists modules, auto-starts the pipe server (Phase 1).
 
+#include "BuildInfo.h"
 #include "shared/ExportAPI.h"
 #include "shared/Logger.h"
 #include "shared/MagicStrings.h"
@@ -82,17 +83,22 @@ void OnAttach(HMODULE self) {
         std::ostringstream os;
         os << "UnityDumper DLL skipping init: another backend already "
               "claimed PID " << ::GetCurrentProcessId()
-           << " (this build=" << UNITYCEDUMPER_BUILD_NUMBER
+           << " (this build=" UNITYCEDUMPER_BUILD_BANNER
            << ", backend=" << BackendName() << ")";
         UnityCEDumper::Log::Init(os.str());
         ::DisableThreadLibraryCalls(self);
         return;
     }
 
+    // Banner with full version + git short + build timestamp + Debug/Release
+    // so each per-PID init log unambiguously identifies which DLL build wrote
+    // it. The same string is embedded into the PE's VERSIONINFO resource via
+    // dll/src/shared/version.rc.in.
     std::ostringstream os;
-    os << "UnityDumper DLL attached (backend=" << BackendName()
-       << ", build=" << UNITYCEDUMPER_BUILD_NUMBER
-       << ", pid=" << ::GetCurrentProcessId() << ")";
+    os << "UnityDumper DLL attached "
+       << UNITYCEDUMPER_BUILD_BANNER
+       << " backend=" << BackendName()
+       << " pid=" << ::GetCurrentProcessId();
     UnityCEDumper::Log::Init(os.str());
 
     UnityCEDumper::Log::Write(L"init", "Loaded modules:");

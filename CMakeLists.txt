@@ -36,10 +36,65 @@ set_property(CACHE BACKEND PROPERTY STRINGS Mono IL2CPP Both)
 file(STRINGS "${CMAKE_SOURCE_DIR}/build_number.txt" BUILD_NUMBER LIMIT_COUNT 1)
 add_compile_definitions(UNITYCEDUMPER_BUILD_NUMBER=${BUILD_NUMBER})
 
+# ---------------------------------------------------------------------------
+# Version metadata — populates BuildInfo.h + every PE's VERSIONINFO resource.
+# Major/Minor/Patch come from the project() VERSION clause above; Build is
+# the auto-incremented build_number.txt value. Git commit + dirty flag +
+# build timestamp embed at configure time so the binary itself can identify
+# its provenance — File Explorer's Properties pane and `dumpbin /headers`
+# will both show this, and the DLL/UI log banners print the same string.
+# ---------------------------------------------------------------------------
+set(VER_MAJOR ${PROJECT_VERSION_MAJOR})
+set(VER_MINOR ${PROJECT_VERSION_MINOR})
+set(VER_PATCH ${PROJECT_VERSION_PATCH})
+
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_COMMIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_COMMIT_SHORT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} status --porcelain
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_DIRTY_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(GIT_DIRTY_OUTPUT)
+        set(GIT_IS_DIRTY 1)
+    else()
+        set(GIT_IS_DIRTY 0)
+    endif()
+endif()
+if(NOT GIT_COMMIT_HASH)
+    set(GIT_COMMIT_HASH  "unknown")
+    set(GIT_COMMIT_SHORT "unknown")
+    set(GIT_IS_DIRTY 0)
+endif()
+
+string(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+
+# Generate BuildInfo.h once into a shared dir every C++ target picks up.
+configure_file(
+    ${CMAKE_SOURCE_DIR}/dll/src/shared/BuildInfo.h.in
+    ${CMAKE_BINARY_DIR}/generated/BuildInfo.h
+    @ONLY)
+
+message(STATUS "Version: ${VER_MAJOR}.${VER_MINOR}.${VER_PATCH}.${BUILD_NUMBER} ${GIT_COMMIT_SHORT} (dirty=${GIT_IS_DIRTY})")
+
 # Vendored headers (nlohmann/json submodule)
 include_directories(SYSTEM
     ${CMAKE_SOURCE_DIR}/dll/vendor/nlohmann_json/single_include
 )
+include_directories(${CMAKE_BINARY_DIR}/generated)
 
 add_subdirectory(dll)
 

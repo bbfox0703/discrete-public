@@ -9,5 +9,23 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>UnityDumpUI.Core</RootNamespace>
     <AssemblyName>UnityDumpUI.Core</AssemblyName>
+
+    <!-- Version metadata mirrors UnityDumpUI.csproj — synced with the
+         project() VERSION in the root CMakeLists.txt + build_number.txt. -->
+    <VerMajor>0</VerMajor>
+    <VerMinor>1</VerMinor>
+    <VerPatch>0</VerPatch>
+    <BuildNumberFile>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\build_number.txt'))</BuildNumberFile>
+    <VerBuild Condition="Exists('$(BuildNumberFile)')">$([System.IO.File]::ReadAllText('$(BuildNumberFile)').Trim())</VerBuild>
+    <VerBuild Condition="'$(VerBuild)' == ''">0</VerBuild>
+
+    <Version>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</Version>
+    <AssemblyVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</AssemblyVersion>
+    <FileVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</FileVersion>
+    <InformationalVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</InformationalVersion>
+    <Product>UnityCEDumper</Product>
+    <Company>UnityCEDumper</Company>
+    <Description>Unity Engine Dumper UI core (engine-agnostic models, services, platform interfaces)</Description>
+    <AssemblyTitle>UnityCEDumper UI core</AssemblyTitle>
   </PropertyGroup>
 </Project>

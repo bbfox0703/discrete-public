@@ -30,6 +30,34 @@
     <!-- IL3053: third-party AOT analysis warnings from Avalonia/MicroCom (safe; covered by TrimmerRootAssembly).
          IL2104: DataGrid trim warning — preserved via TrimmerRootAssembly below. -->
     <NoWarn>$(NoWarn);IL3053;IL2104</NoWarn>
+
+    <!-- =====================================================================
+         Version metadata. Major/Minor/Patch must stay in sync with the
+         project() VERSION clause in the root CMakeLists.txt — both sides
+         read build_number.txt for the auto-incremented 4th digit. The
+         resulting string is embedded as the PE FileVersion (visible in File
+         Explorer's Properties pane), as the AssemblyVersion / FileVersion /
+         InformationalVersion attributes (readable at runtime via reflection),
+         and printed at UI startup as a log banner so each ui/init/current.log
+         unambiguously identifies which DiscreteUI.exe build wrote it.
+         ===================================================================== -->
+    <VerMajor>0</VerMajor>
+    <VerMinor>1</VerMinor>
+    <VerPatch>0</VerPatch>
+    <BuildNumberFile>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\build_number.txt'))</BuildNumberFile>
+    <VerBuild Condition="Exists('$(BuildNumberFile)')">$([System.IO.File]::ReadAllText('$(BuildNumberFile)').Trim())</VerBuild>
+    <VerBuild Condition="'$(VerBuild)' == ''">0</VerBuild>
+
+    <Version>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</Version>
+    <AssemblyVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</AssemblyVersion>
+    <FileVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</FileVersion>
+    <InformationalVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</InformationalVersion>
+    <Product>UnityCEDumper</Product>
+    <Company>UnityCEDumper</Company>
+    <Description>Unity Engine Dumper UI (Mono + IL2CPP backends, Cheat Engine bridge)</Description>
+    <!-- AssemblyTitle drives the PE FileDescription field (Description column
+         in File Explorer); defaults to AssemblyName otherwise. -->
+    <AssemblyTitle>UnityCEDumper UI (Mono + IL2CPP)</AssemblyTitle>
   </PropertyGroup>
 
   <ItemGroup>
