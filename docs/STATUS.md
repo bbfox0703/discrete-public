@@ -1,7 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
 **Branch**: `dev` (clean, pushed)
-**Current state**: **Phases 0–15 + 9.5 + 11.5 all closed** for x64. Two phases stay deferred and have NOT been started: **Phase 12d (32-bit Mono)** and **Phase 14c (IL2CPP version dispatch v24/v27/v31)**. Phase 12d is blocked on engineering effort (parallel x86 build pipeline + cross-bitness inject); Phase 14c is blocked on having Unity 2017 / 2018 / 2023 target games to validate against. Last commit: `b52c5b4` (Phase 15 test matrix).
+**Current state**: **Phases 0–15 + 9.5 + 11.5 all closed** for x64. Two phases stay deferred: **Phase 12d (32-bit Mono)** and **Phase 14c (IL2CPP version dispatch v24/v27/v31)**. Phase 12d is blocked on engineering effort (parallel x86 build pipeline + cross-bitness inject); Phase 14c is blocked on having Unity 2017 / 2018 / 2023 target games to validate against. Last commit: `9f7c067` (proxy-deploy version comparison). This session also closed a long-standing Connect-after-disconnect bug (PipeClient lifecycle + DLL pipe single-instance + UI-side fresh-PipeClient swap) and shipped version stamping across every DLL/exe.
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants), `test-matrix.md` (verified games + tooling versions).
 
@@ -52,6 +52,15 @@
 ## Recent commit history (most recent first)
 
 ```
+9f7c067 ui(deploy): show installed-vs-source version comparison per row
+976ebff build: version stamping across DLLs + UI (PE VERSIONINFO + log banners)
+261b0f2 ui: recreate PipeClient on every disconnect — empirical workaround
+3ef8a0b dll(pipe): single-instance pipe — kill ghost-accumulation reconnect bug
+8f41ecb ui: extend connect retry to ~7s to cover proxy DLL startup
+694efa3 ui: fix Connect-after-Disconnect throwing ObjectDisposedException
+417448b ui: log prune + connect retry + error-banner hygiene
+6be6eaf Phase 12c (deploy): UE5CEDumper-style multi-select bulk deploy panel
+cf36431 docs: refresh STATUS.md as a clean session-handoff
 b52c5b4 Phase 15: test matrix — verified games + tooling versions ledger
 05ea52d Phase 12c (auto): Steam scan + Unity game picker for proxy install
 47d969d Phase 12c: UI install/uninstall flyout + 32-bit deferral notes
@@ -62,18 +71,9 @@ d813339 Phase 13 (a): split MetadataParser core / host-path adapter
 b31e74e docs: STATUS.md reflects Phase 14 closure
 8b9485c Phase 14d/e/f: Mono attach fix, SEH+attach rules, log-stats tool
 978a926 Phase 14a + 14b: pipe reconnect + stripped-metadata banner
-87add44 scripts(symbols): Mono method registration via monoCompileMethod
-4626c08 fix(inject): resolve DLL via Environment.ProcessPath, not BaseDirectory
-2f9f3c4 Phase 11.5: inline drilldown in Inspector field grid
-1a11f9a fix(export): CE leaf flags type-aware (signed Int32 not hex)
-b8ce152 fix(scripts): CE-API portability — detection, injection, symbol resolve
-2d0641d fix(scripts): unity_dump.lua loses script-dir when launched via dofile()
-3b287c5 Phase 11: CE Lua bridge — inject + dissect + register-symbols scripts
-a8fa2d1 fix(inspector): Find instances button no-op when target unset
-97288f3 ui: rename executable to DiscreteUI.exe (matches repo name)
 ```
 
-This session shipped (in commit order): Phase 14 hardening (a/b/d/e/f) → Mono symbol JIT'ing → Phase 13 offline CLI → inspector value-type substructs → Phase 12 (proxy DLLs + double-inject mutex + UI install flyout + Steam auto-scan picker) → Phase 15 test matrix.
+This session shipped (in commit order): UE5CEDumper-style multi-select bulk deploy panel → log prune on UI startup + connect retry + error-banner hygiene → Connect-after-Disconnect ObjectDisposedException fix (PipeClient lifecycle split) → connect-retry budget bumped to 7 s → DLL pipe set to single-instance to kill ghost accumulation → fresh PipeClient swap on every disconnect (matches the "restart UI" workaround empirically) → version stamping across every DLL/exe (PE VERSIONINFO + UI/DLL log banners) → proxy-deploy panel surfaces installed-vs-source version comparison.
 
 ---
 
@@ -217,23 +217,21 @@ Pick from this menu — none are blockers, all are independent:
 | **Dissect-script sanity** | Small (~5 min) | None | Re-run `dofile([[...unity_dissect.lua]])` then `dissectClass("Assembly-CSharp","MainGame","PLY_WORK")` against SaGa F2R to confirm the CE-API portability fix in `b8ce152` didn't regress the Structure Dissect path. |
 | **CSX live mode** | Medium, fuzzy value | Design call | See open-follow-ups note. Defer until a user asks. |
 
-### Live verifications still owed against SaGa F2R
+### Live verifications
 
-These are paths that landed THIS session but haven't been clicked through with the game running. None are blocking; just smoke tests if the user has 5 minutes:
+Confirmed clicked-through this session against SaGa F2R / SaGa F1R:
 
-1. **Phase 14a — pipe auto-disconnect**: kill SaGa F2R while `DiscreteUI.exe` is connected. Status should flip to `Disconnected (game exited)`; Connect / Pick & inject should re-enable. Re-launch + re-inject should work without restarting the UI. Run `tools/Get-LogStats.ps1` afterwards to confirm log caps.
+- ✅ **Phase 13 — metadata-cli** against SaGa F2R global-metadata.dat: `info` returns `version=29, type_tables_parsed=true, type_definition_count=10001, string_literal_count=11392`; `stats` reports `verdict=clean, strip_ratio=0.0011`. v24 path against SaGa F1R loads + reports the v29-gate warning as designed.
+- ✅ **Phase 14a — pipe auto-disconnect**: game-exit flips status to `Disconnected (write failed: Pipe is broken.)`. Reconnect after re-launching the game lands cleanly (took several iterations to get there — see the four UI commits below).
+- ✅ **Connect-after-disconnect cycle in same UI session**: PipeClient lifecycle bug (`ObjectDisposedException: SemaphoreSlim`) closed by [PipeClientLifecycleTests](../ui/UnityDumpUI.Tests/PipeClientLifecycleTests.cs); ghost-pipe routing fixed by single-instance pipe + fresh-PipeClient swap on every disconnect.
+- ✅ **Phase 12 — Proxy Deploy panel**: bulk install/uninstall/update-all flow exercised end-to-end on multiple games (Steam scan finds 23, install lands fresh proxy + both backend DLLs, version comparison column flags pre-stamping installs as `OUTDATED` with `unknown → 0.1.0.146` and stamped-but-old as `0.1.0.139 → 0.1.0.146`).
 
-2. **Phase 13 — metadata-cli against SaGa F2R**:
-   ```pwsh
-   .\dist\metadata-cli.exe info  "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat"
-   .\dist\metadata-cli.exe types "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat" | findstr "MainGame.PLY_WORK"
-   ```
-   Should report `version=29`, `type_tables_parsed=true`, and the type listing should include `MainGame.PLY_WORK` — matching what the live DLL's `getClassInfo` returned during Phase 9.
+Still owed (not blocking):
 
-3. **Phase 12 — proxy DLL install**: open `DiscreteUI.exe` → click `Proxy Deploy…` on the connection bar. The new bulk panel opens with a Steam scan already running. Tick SaGa F2R's row → Install selected (default kind: version.dll) → Launch the game — proxy should auto-start the pipe (no `Pick & inject` needed). Connect → handshake should succeed. Tick the row again → Uninstall selected to clean up. Bonus smoke test for `Update all deployed`: install proxies into 2-3 games, then click `Update all deployed` and confirm each row's "Last operation" column reads "Installed …" without you re-selecting anything.
-
-4. **Phase 11.5 follow-up — value-type substruct expansion**: in the Inspector, expand a `MainGame.PLY_WORK` instance, find an inline value-type field (e.g. a `Vector3` if any are exposed at this layer), click the chevron. Should walk the substruct fields without errors. Right-click → Copy CE XML rooted there should produce a CE table whose components are at consecutive offsets from the struct base.
+- **Phase 11.5 follow-up — value-type substruct expansion**: in the Inspector, expand a `MainGame.PLY_WORK` instance, find an inline value-type field (e.g. a `Vector3` if any are exposed at this layer), click the chevron. Should walk the substruct fields without errors. Right-click → Copy CE XML rooted there should produce a CE table whose components are at consecutive offsets from the struct base.
+- **Hollow Knight Silksong live walk**: would validate the Unity 6 Mono bdwgc binding + Phase 11 `unity_symbols.lua` Mono `monoCompileMethod` path against a non-SaGa target.
+- **Dissect-script path** (`unity_dissect.lua` → `dissectClass(...)`) hasn't been re-exercised since `b8ce152`. Sanity run worth ~5 minutes.
 
 ### How to wrap up the session
 
-If everything above looks done and the live verifications pass, the next session can pick from the deferred-phases menu (12d / 14c) or the small-but-useful items (Hollow Knight walk / dissect-script sanity).
+If the remaining smoke tests look done, the next session can pick from the deferred-phases menu (**12d** / **14c**) or the small-but-useful items (Hollow Knight walk / dissect-script sanity / value-type substruct verification).
