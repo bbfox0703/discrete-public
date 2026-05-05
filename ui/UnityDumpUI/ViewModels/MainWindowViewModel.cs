@@ -262,17 +262,24 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private bool CanConnect() => !IsBusy && !IsConnected;
 
     /// <summary>
-    /// Connect + handshake with a small retry loop. When the user re-launches
-    /// a game and the first connect fires during the brief window where the
-    /// crashed game's stale pipe instance is still listed, the kernel hands
-    /// us a connected-but-broken pipe handle and the handshake write fails
-    /// with "Pipe is broken." Retrying after a short pause lets the new game's
-    /// DLL settle into accepting the connection. Bail out fast on cancellation
-    /// or genuine timeouts (no server at all).
+    /// Connect + handshake with a retry loop that covers the proxy DLL's
+    /// startup window. When a game re-launches under the proxy, two things
+    /// happen in parallel for several seconds:
+    ///   - the dying process's ghost named-pipe instance lingers in the
+    ///     kernel namespace and `NamedPipeClientStream.ConnectAsync` happily
+    ///     opens it, then the first IO fails with "Pipe is broken.";
+    ///   - the proxy DLL's <c>BackendLoaderThread</c> polls for the engine
+    ///     DLL for up to ~5 seconds before <c>LoadLibraryW</c>'ing the
+    ///     backend, which is the only thing that starts the pipe server
+    ///     (see dll/src/proxy/loader.cpp:65).
+    /// Total realistic window: ~5–7 seconds. Budget the retry loop a bit
+    /// past that. Bail fast on cancellation or genuine timeouts (no server
+    /// reachable at all).
     /// </summary>
     private async Task<HandshakeResult> ConnectWithRetryAsync(CancellationToken ct)
     {
-        const int maxAttempts = 3;
+        const int maxAttempts = 12;
+        const int delayMs     = 600;   // ~7.2 s total budget — covers proxy's 5 s detect + slack
         Exception? lastEx = null;
         for (int attempt = 1; attempt <= maxAttempts; ++attempt)
         {
@@ -280,13 +287,21 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             try
             {
                 await _backend.ConnectAsync(timeoutMs: 3000, ct).ConfigureAwait(true);
+                if (attempt > 1)
+                {
+                    _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                        $"connect attempt {attempt}/{maxAttempts} succeeded");
+                }
                 return await _backend.HandshakeAsync(ct).ConfigureAwait(true);
             }
             catch (Exception ex) when (IsTransientPipeError(ex) && attempt < maxAttempts)
             {
                 lastEx = ex;
+                // Surface progress on the connection-bar status so the
+                // user can see we're not stuck — e.g., "Connecting… (3/12)".
+                ConnectionStatus = $"Connecting… ({attempt}/{maxAttempts})";
                 _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
-                    $"connect attempt {attempt}/{maxAttempts} failed transiently: {ex.GetType().Name}: {ex.Message}; retrying after 250ms");
+                    $"connect attempt {attempt}/{maxAttempts} failed transiently: {ex.GetType().Name}: {ex.Message}; retrying after {delayMs}ms");
                 // Do NOT call _pipe.DisposeAsync() here — that disposes the
                 // SemaphoreSlim gate permanently, which would brick the
                 // PipeClient for any future Connect (the next attempt or any
@@ -294,10 +309,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 // the gate). PipeClient.ConnectAsync already calls
                 // DisposeStreamsAsync() internally to reset stream state on
                 // each call, which is exactly what we need.
-                await Task.Delay(250, ct).ConfigureAwait(true);
+                await Task.Delay(delayMs, ct).ConfigureAwait(true);
             }
         }
-        throw lastEx ?? new InvalidOperationException("connect retry exhausted without a captured exception");
+        // Retry budget exhausted. Wrap the original error in something
+        // actionable so the user knows what to try next.
+        throw new IOException(
+            $"Could not connect after {maxAttempts} attempts ({maxAttempts * delayMs / 1000.0:F1}s). " +
+            "If the game just launched, give the proxy DLL a few more seconds to initialize and click Connect again. " +
+            $"Underlying error: {lastEx?.Message ?? "unknown"}",
+            lastEx);
     }
 
     /// <summary>
