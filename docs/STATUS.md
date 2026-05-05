@@ -1,7 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev`
-**Current phase**: **Phase 12 (x64) closed** — proxy DLLs (`version.dll` + `winmm.dll`) build, double-inject mutex in `DllMain`, UI install/uninstall flyout next to the connection bar. Phases 0–14 + 9.5 all closed except **Phase 12d (32-bit Mono)** which is deliberately deferred — see below. **None of the 32-bit support is started.**
+**Branch**: `dev` (clean, pushed)
+**Current state**: **Phases 0–15 + 9.5 + 11.5 all closed** for x64. Two phases stay deferred and have NOT been started: **Phase 12d (32-bit Mono)** and **Phase 14c (IL2CPP version dispatch v24/v27/v31)**. Phase 12d is blocked on engineering effort (parallel x86 build pipeline + cross-bitness inject); Phase 14c is blocked on having Unity 2017 / 2018 / 2023 target games to validate against. Last commit: `b52c5b4` (Phase 15 test matrix).
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants), `test-matrix.md` (verified games + tooling versions).
 
@@ -43,6 +43,14 @@
 ## Recent commit history (most recent first)
 
 ```
+b52c5b4 Phase 15: test matrix — verified games + tooling versions ledger
+05ea52d Phase 12c (auto): Steam scan + Unity game picker for proxy install
+47d969d Phase 12c: UI install/uninstall flyout + 32-bit deferral notes
+a93706b Phase 12a + 12b: proxy DLLs (version.dll, winmm.dll) + double-inject mutex
+375806c inspector: inline value-type substruct expansion + classifier fix
+8527f22 Phase 13 (b): metadata-cli — offline global-metadata.dat parser
+d813339 Phase 13 (a): split MetadataParser core / host-path adapter
+b31e74e docs: STATUS.md reflects Phase 14 closure
 8b9485c Phase 14d/e/f: Mono attach fix, SEH+attach rules, log-stats tool
 978a926 Phase 14a + 14b: pipe reconnect + stripped-metadata banner
 87add44 scripts(symbols): Mono method registration via monoCompileMethod
@@ -54,37 +62,26 @@ b8ce152 fix(scripts): CE-API portability — detection, injection, symbol resolv
 3b287c5 Phase 11: CE Lua bridge — inject + dissect + register-symbols scripts
 a8fa2d1 fix(inspector): Find instances button no-op when target unset
 97288f3 ui: rename executable to DiscreteUI.exe (matches repo name)
-61f9a7e fix(export): collapse not honoured on root + live-mode group nodes
-7f591da fix(export): primitive array slots emitted as 8 Bytes instead of element type
-9759bea Phase 10 (f): live-data CE XML export — real per-element addresses
-7a2e424 fix(pipe): id-mismatch race when caller cancels mid-request
-fd49342 Phase 10 (e): walkArray element-class metadata via runtime lookup
-de50449 Phase 10 (d): walkArray pipe command + Inspector UI for live array drilldown
-4f4efcc fix(export): export buttons stayed disabled (CanExecute race)
-296c415 Phase 10 (c): Copy CE XML / Copy CE field clipboard commands
-d50d180 fix(export): bridge Inspector.SelectedInstance -> Browser.CeXmlBaseAddress
-2fea770 Phase 10 (b): nested CSX + CE XML exporter + tunable export options
 ```
+
+This session shipped (in commit order): Phase 14 hardening (a/b/d/e/f) → Mono symbol JIT'ing → Phase 13 offline CLI → inspector value-type substructs → Phase 12 (proxy DLLs + double-inject mutex + UI install flyout + Steam auto-scan picker) → Phase 15 test matrix.
 
 ---
 
 ## What's open
 
-### Phase 11 / 11.5 follow-ups (optional)
+### Phases / sub-phases NOT started (deferred)
 
-- **Dissect-script path** (`unity_dissect.lua` → `dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) hasn't been re-exercised since the CE-API portability fixes — worth a single sanity run before the next session leans on it heavily, but not blocking.
-- **Inspector value-type substruct expansion** — Phase 11.5 only expands pointer-to-class and array fields. Inline value-type struct fields (e.g. `Vector3`) still render as opaque values; expanding them would need a `walkInstance(parentAddr + offset, structType)` call without the managed-object header (DLL-side currently expects a header). Defer until a user actually asks.
+| Item | Why deferred | Required to unblock |
+|---|---|---|
+| **Phase 12d — 32-bit Mono** | All 32-bit support is unstarted. CMake currently enforces x64-only (`CMAKE_SIZEOF_VOID_P EQUAL 8` is a fatal); UI's `WindowsDllInjector` runs `CreateRemoteThread` from a 64-bit process and won't cross to 32-bit targets; we ship x64 proxy DLLs only, which a 32-bit game can't load. | Engineering effort: parallel x86 build config in cmake, x86 builds of `UnityDumper-Mono.dll` + both proxy variants with Mono 32-bit struct offsets verified, cross-bitness inject (or document "proxy install only" for x86), x86/x64 selection in the install flyout based on detected target architecture. IL2CPP-32 is moot — Unity 2018+ ships IL2CPP x64-only. |
+| **Phase 14c — IL2CPP version dispatch (v24/v27/v31)** | `MetadataParser` is hardcoded for v29. Older / newer files load (prefix tables work), but type tables aren't parsed — `metadata-cli info` reports `type_tables_parsed: false` and surfaces a stderr hint. | Need Unity 2017 (v24), 2018-19 (v27), and 2023+ (v31) IL2CPP target games to validate per-version `Il2CppGlobalMetadataHeader` layouts against. Have Unity 2019.4 IL2CPP locally (SaGa Frontier 1 Remastered) which gives v24 — could start there. |
 
-### Phases not started
+### Open follow-ups (not blocking)
 
-| Phase | Scope sketch |
-|---|---|
-| 14c — IL2CPP version dispatch (deferred from Phase 14) | Per-version `Il2CppGlobalMetadataHeader` layouts for v24 (Unity 2017) / v27 (Unity 2018-19) / v29 (current) / v31 (Unity 2023+). Currently hardcoded to v29. Now visibly impacts Phase 13's CLI (returns `type_tables_parsed: false` on non-v29 input) — extra motivation. Needs Unity 2017 / 2018 / 2023 target games to validate against. |
-
-### Open follow-ups (not blocking any phase)
-
-- **CSX live mode** — CE XML got the live-render treatment (real per-element addresses + walkArray-driven children); CSX still emits structural placeholders. CSX `Element` addressing is relative to slot start (no absolute mode), so it's a different design problem. Worth doing once a user actually asks.
-- ~~**Inspector value-type substruct expansion**~~ — landed: `WalkedFieldKind.ValueStruct` + classifier uses `UnityTypeMap.IsPointerType` to distinguish value types from references; `walkInstance(addr, type)` works for inline value types because the DLL handler doesn't dereference the address (just iterates fields by offset). Assembly-resolution fallback added for `UnityEngine.*` / `System.*` types whose class lives in a different assembly than the parent. Bonus fix: the misleading garbage `ptr` value (decodeField's catch-all) is replaced with `(struct — expand)` on the row.
+- **CSX live mode** — investigated, design dead-end as scoped. CSX is fundamentally an offset-relative *structure* format; "live" only makes sense as a snapshot-derived layout (fix array counts to live values, inline pointer-chain targets). CE XML already provides true absolute-address live mode, so the CSX equivalent's value is fuzzy. Defer until a user explicitly asks.
+- **Hollow Knight Silksong live walk** — listed in [test-matrix.md](test-matrix.md). Would validate the Unity 6 Mono bdwgc binding plus the Phase 11 `unity_symbols.lua` Mono `monoCompileMethod` path. Quick win if the user has time to run the game.
+- **Dissect-script path** (`unity_dissect.lua` → `dissectClass(...)`) hasn't been re-exercised since the CE-API portability fixes (`b8ce152`). Sanity run worth ~5 minutes; not blocking.
 
 ---
 
@@ -199,21 +196,35 @@ CE-side workflow: `scripts/README.md` — install layout + dofile invocations.
 
 ## Suggested first steps for the new session
 
-1. **Pick the next phase** (or open follow-up):
-   - **Phase 12d (32-bit Mono)** — high-impact; required for any pre-Unity-2018 Mono game. Real work: x86 build pipeline + cross-bitness inject. None of the 32-bit support is started yet.
-   - **Phase 14c (deferred)** — Phase 13 made the gap visible (non-v29 metadata returns `type_tables_parsed: false`). Worth doing once a Unity 2017 / 2018 / 2023 target shows up.
-   - **Open follow-ups** for quick wins:
-     - CSX live mode (CE XML already has it; CSX `Element` addressing is relative to slot start so it's a different design problem)
+### What's left to ship
 
-2. **Live verification of Phase 14**: kill SaGa F2R while `DiscreteUI.exe` is connected — should flip to `Disconnected (game exited)` and re-enable Connect / Pick & inject. Re-launch + re-inject should work without restarting the UI. Then run `tools/Get-LogStats.ps1` to confirm log dirs are within caps.
+Pick from this menu — none are blockers, all are independent:
 
-3. **Live verification of Phase 13**: with SaGa F2R installed, run
-   ```
-   dist\metadata-cli.exe info  "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat"
-   dist\metadata-cli.exe types "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat" | findstr "MainGame.PLY_WORK"
+| Option | Effort | Blocked on | Why pick this |
+|---|---|---|---|
+| **Phase 12d** — 32-bit Mono support | Real (multi-day) | Engineering only — no external blockers | Required for any pre-Unity-2018 Mono game. User explicitly flagged this in the Phase 12 conversation as wanted but deferred. Inventory of TODOs in the deferred-phases table above. |
+| **Phase 14c** — IL2CPP version dispatch (v24/v27/v31) | Medium | Need target games to validate against. Have **Unity 2019.4 v24** locally (SaGa F1R) so v24 path can start now; v27 and v31 still need games | Phase 13's CLI surfaces the gate clearly today. v24 path alone would let `metadata-cli` and `getClassInfo` work against SaGa F1R — concrete value. |
+| **Hollow Knight Silksong live walk** | Small (~30 min if game runs) | None | Validates Unity 6 Mono binding + the new `monoCompileMethod` path in `unity_symbols.lua` against a non-SaGa target. Pure verification, no code changes expected. |
+| **Dissect-script sanity** | Small (~5 min) | None | Re-run `dofile([[...unity_dissect.lua]])` then `dissectClass("Assembly-CSharp","MainGame","PLY_WORK")` against SaGa F2R to confirm the CE-API portability fix in `b8ce152` didn't regress the Structure Dissect path. |
+| **CSX live mode** | Medium, fuzzy value | Design call | See open-follow-ups note. Defer until a user asks. |
+
+### Live verifications still owed against SaGa F2R
+
+These are paths that landed THIS session but haven't been clicked through with the game running. None are blocking; just smoke tests if the user has 5 minutes:
+
+1. **Phase 14a — pipe auto-disconnect**: kill SaGa F2R while `DiscreteUI.exe` is connected. Status should flip to `Disconnected (game exited)`; Connect / Pick & inject should re-enable. Re-launch + re-inject should work without restarting the UI. Run `tools/Get-LogStats.ps1` afterwards to confirm log caps.
+
+2. **Phase 13 — metadata-cli against SaGa F2R**:
+   ```pwsh
+   .\dist\metadata-cli.exe info  "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat"
+   .\dist\metadata-cli.exe types "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat" | findstr "MainGame.PLY_WORK"
    ```
    Should report `version=29`, `type_tables_parsed=true`, and the type listing should include `MainGame.PLY_WORK` — matching what the live DLL's `getClassInfo` returned during Phase 9.
 
-4. **Live verification of Phase 12 (proxy DLL install)**: in `DiscreteUI.exe` open the `Proxy DLL ▾` flyout, Browse → pick `SaGa Frontier 2 Remastered.exe`, leave `version.dll` selected, click Install. Status should flip to `version.dll installed, Mono+IL2CPP backends present`. Launch the game — the proxy should auto-start the pipe (no `Pick & inject` needed). Then click Connect; handshake should succeed. Click Uninstall to clean up.
+3. **Phase 12 — proxy DLL install**: open `DiscreteUI.exe` → `Proxy DLL ▾` flyout → `Scan Steam…` → pick SaGa F2R from the list. Click Install (version.dll). Launch the game — proxy should auto-start the pipe (no `Pick & inject` needed). Connect → handshake should succeed. Click Uninstall to clean up.
 
-5. **Optional sanity check**: re-exercise `unity_dissect.lua` (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) — hasn't been run since the CE-API portability fixes in `b8ce152`.
+4. **Phase 11.5 follow-up — value-type substruct expansion**: in the Inspector, expand a `MainGame.PLY_WORK` instance, find an inline value-type field (e.g. a `Vector3` if any are exposed at this layer), click the chevron. Should walk the substruct fields without errors. Right-click → Copy CE XML rooted there should produce a CE table whose components are at consecutive offsets from the struct base.
+
+### How to wrap up the session
+
+If everything above looks done and the live verifications pass, the next session can pick from the deferred-phases menu (12d / 14c) or the small-but-useful items (Hollow Knight walk / dissect-script sanity).
