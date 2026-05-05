@@ -77,6 +77,25 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _pipe.Disconnected += OnPipeDisconnected;
 
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
+
+        // One-shot housekeeping: each game injection creates a new
+        // %LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\ tree. They accumulate
+        // forever otherwise. Keep the 10 most-recent + the `ui` folder.
+        try
+        {
+            int pruned = FileLogger.PruneOldDllPidDirectories(keepCount: 10);
+            if (pruned > 0)
+            {
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+                    $"pruned {pruned} stale DLL log directories (kept newest 10)");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Best-effort housekeeping must never block UI start.
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+                $"log prune failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private void OnPipeDisconnected(object? sender, PipeDisconnectedInfo info)
@@ -104,6 +123,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         Build           = 0;
         Protocol        = 0;
         MetadataWarning = null;
+        // ConnectionStatus already carries the disconnect reason; suppress
+        // the redundant red banner so the user only sees one row of state.
+        ErrorMessage = null;
 
         Browser.Assemblies.Clear();
         Browser.FilteredAssemblies.Clear();
@@ -114,8 +136,14 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         Browser.SelectedAssembly = null;
         Browser.SelectedClass    = null;
         Browser.ParentChain      = string.Empty;
+        // The Browser tab fires its own RefreshAssemblies during the
+        // teardown which may have raced and set its own "Pipe is broken"
+        // banner. Wipe it — the connection-bar status is the authoritative
+        // disconnect indicator.
+        Browser.ErrorMessage     = null;
 
         Inspector.ClearCommand.Execute(null);
+        Inspector.ErrorMessage = null;
     }
 
     public IProcessEnumerator ProcessEnumerator => _processes;
@@ -175,15 +203,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanConnect))]
     private async Task ConnectAsync()
     {
-        ErrorMessage = null;
+        // Wipe every red banner so a fresh attempt isn't visually polluted
+        // by leftovers from the last failed/torn-down session.
+        ErrorMessage           = null;
+        Browser.ErrorMessage   = null;
+        Inspector.ErrorMessage = null;
         IsBusy = true;
         ConnectionStatus = "Connecting…";
         _connectCts?.Cancel();
         _connectCts = new CancellationTokenSource();
         try
         {
-            await _backend.ConnectAsync(timeoutMs: 3000, _connectCts.Token).ConfigureAwait(true);
-            HandshakeResult hs = await _backend.HandshakeAsync(_connectCts.Token).ConfigureAwait(true);
+            HandshakeResult hs = await ConnectWithRetryAsync(_connectCts.Token).ConfigureAwait(true);
 
             Engine          = hs.Engine;
             Backend2        = hs.Backend;
@@ -229,6 +260,50 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     private bool CanConnect() => !IsBusy && !IsConnected;
+
+    /// <summary>
+    /// Connect + handshake with a small retry loop. When the user re-launches
+    /// a game and the first connect fires during the brief window where the
+    /// crashed game's stale pipe instance is still listed, the kernel hands
+    /// us a connected-but-broken pipe handle and the handshake write fails
+    /// with "Pipe is broken." Retrying after a short pause lets the new game's
+    /// DLL settle into accepting the connection. Bail out fast on cancellation
+    /// or genuine timeouts (no server at all).
+    /// </summary>
+    private async Task<HandshakeResult> ConnectWithRetryAsync(CancellationToken ct)
+    {
+        const int maxAttempts = 3;
+        Exception? lastEx = null;
+        for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await _backend.ConnectAsync(timeoutMs: 3000, ct).ConfigureAwait(true);
+                return await _backend.HandshakeAsync(ct).ConfigureAwait(true);
+            }
+            catch (Exception ex) when (IsTransientPipeError(ex) && attempt < maxAttempts)
+            {
+                lastEx = ex;
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                    $"connect attempt {attempt}/{maxAttempts} failed transiently: {ex.GetType().Name}: {ex.Message}; retrying after 250ms");
+                try { await _pipe.DisposeAsync().ConfigureAwait(true); } catch { /* ignore */ }
+                await Task.Delay(250, ct).ConfigureAwait(true);
+            }
+        }
+        throw lastEx ?? new InvalidOperationException("connect retry exhausted without a captured exception");
+    }
+
+    /// <summary>
+    /// Distinguishes "stale handle, retry me" failures from "no server at
+    /// all, surface the error" failures. Pipe-broken / EOF errors are the
+    /// former; <see cref="TimeoutException"/> is the latter and bubbles
+    /// straight to the user.
+    /// </summary>
+    private static bool IsTransientPipeError(Exception ex) =>
+        ex is PipeDisconnectedException
+           or System.IO.IOException
+           or System.IO.EndOfStreamException;
 
     /// <summary>
     /// Fire-and-forget post-handshake call to <c>getMetadataStats</c>. A
@@ -307,9 +382,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             Browser.SelectedAssembly = null;
             Browser.SelectedClass    = null;
             Browser.ParentChain      = string.Empty;
+            Browser.ErrorMessage     = null;
 
             // Phase 9: drop inspector state too.
             Inspector.ClearCommand.Execute(null);
+            Inspector.ErrorMessage = null;
         }
     }
 

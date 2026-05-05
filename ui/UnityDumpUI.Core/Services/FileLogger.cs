@@ -9,8 +9,10 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace UnityDumpUI.Core.Services;
@@ -58,6 +60,56 @@ public sealed class FileLogger : IDisposable
         // Match the DLL: %LOCALAPPDATA%\UnityCEDumper\Logs\ui (Logs/<pid>/<cat> for the DLL,
         // Logs/ui/<cat> for the UI — disjoint trees by design).
         return Path.Combine(local, Constants.LogRootSubpath, "ui");
+    }
+
+    /// <summary>
+    /// Trim the DLL-side per-PID log tree to the most-recent
+    /// <paramref name="keepCount"/> directories. Each game injection (Pick &amp; inject
+    /// or proxy auto-load) creates a new PID folder under
+    /// <c>%LOCALAPPDATA%\UnityCEDumper\Logs\&lt;pid&gt;\</c>; over months these
+    /// accumulate to hundreds of dead folders. Run on UI startup.
+    ///
+    /// The <c>ui</c> directory is preserved. Anything that isn't a numeric
+    /// PID folder is left alone. Best-effort: failures (file locked by another
+    /// running game, permission denied) are swallowed so logging itself never
+    /// faults the UI start path.
+    /// </summary>
+    public static int PruneOldDllPidDirectories(int keepCount = 10, string? logRootOverride = null)
+    {
+        if (keepCount < 0) keepCount = 0;
+        string root = logRootOverride ?? Path.GetDirectoryName(DefaultRoot()) ?? string.Empty;
+        if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return 0;
+
+        List<DirectoryInfo> pidDirs;
+        try
+        {
+            pidDirs = Directory.EnumerateDirectories(root)
+                .Select(p => new DirectoryInfo(p))
+                .Where(d => int.TryParse(d.Name, out _))   // numeric PID only — skips "ui"
+                .OrderByDescending(d => d.LastWriteTimeUtc)
+                .ToList();
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+
+        int deleted = 0;
+        foreach (DirectoryInfo d in pidDirs.Skip(keepCount))
+        {
+            try
+            {
+                d.Delete(recursive: true);
+                ++deleted;
+            }
+            catch (Exception)
+            {
+                // Best-effort. PID may belong to a still-running game (proxy
+                // auto-loaded, log files held open) — leave it alone, retry
+                // next UI launch.
+            }
+        }
+        return deleted;
     }
 
     private sealed class CategoryWriter : IDisposable
