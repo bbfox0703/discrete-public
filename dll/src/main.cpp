@@ -48,8 +48,46 @@ void LogLoadedModules() {
     }
 }
 
+// Phase 12b: per-process named mutex used as a "first injection wins"
+// gate. Both UnityDumper-Mono.dll and UnityDumper-IL2CPP.dll, plus the
+// proxy DLLs, all run this same OnAttach. Without the gate, two
+// concurrently-loaded backend DLLs would each try to bind the named pipe
+// and the second would fail noisily; or worse, the second copy of the
+// same DLL (loaded via the proxy and also via the UI's Pick & inject)
+// would re-init handler tables. The mutex makes Init exactly-once per
+// host PID regardless of who loaded us.
+HANDLE g_initMutex = nullptr;
+
+bool TryClaimSingleInit() noexcept {
+    wchar_t name[64];
+    ::_snwprintf_s(name, _countof(name), _TRUNCATE,
+                   L"Global\\UnityCEDumper-Init-PID-%lu",
+                   ::GetCurrentProcessId());
+    g_initMutex = ::CreateMutexW(nullptr, /*bInitialOwner*/ TRUE, name);
+    if (g_initMutex == nullptr) return false;
+    if (::GetLastError() == ERROR_ALREADY_EXISTS) {
+        // Someone else (a different backend DLL, or a re-injection) has
+        // already initialised this process. Release our handle and bail.
+        ::CloseHandle(g_initMutex);
+        g_initMutex = nullptr;
+        return false;
+    }
+    return true;
+}
+
 void OnAttach(HMODULE self) {
     UnityCEDumper::Log::Init();
+
+    if (!TryClaimSingleInit()) {
+        std::ostringstream os;
+        os << "UnityDumper DLL skipping init: another backend already "
+              "claimed PID " << ::GetCurrentProcessId()
+           << " (this build=" << UNITYCEDUMPER_BUILD_NUMBER
+           << ", backend=" << BackendName() << ")";
+        UnityCEDumper::Log::Init(os.str());
+        ::DisableThreadLibraryCalls(self);
+        return;
+    }
 
     std::ostringstream os;
     os << "UnityDumper DLL attached (backend=" << BackendName()
@@ -76,6 +114,11 @@ void OnAttach(HMODULE self) {
 void OnDetach() {
     UnityCEDumper::Log::Init("UnityDumper DLL detaching");
     UnityDumper_Shutdown();
+    if (g_initMutex != nullptr) {
+        ::ReleaseMutex(g_initMutex);
+        ::CloseHandle(g_initMutex);
+        g_initMutex = nullptr;
+    }
 }
 
 }  // namespace

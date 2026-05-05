@@ -1,0 +1,47 @@
+; winmm.def — public exports for the winmm.dll proxy. Aliases the
+; Proxy_<symbol> internal C functions defined in winmm.cpp to their
+; public winmm.dll names. See version.def for the why.
+
+LIBRARY winmm
+
+EXPORTS
+    timeGetTime              = Proxy_timeGetTime
+    timeBeginPeriod          = Proxy_timeBeginPeriod
+    timeEndPeriod            = Proxy_timeEndPeriod
+    timeGetDevCaps           = Proxy_timeGetDevCaps
+    timeGetSystemTime        = Proxy_timeGetSystemTime
+    timeKillEvent            = Proxy_timeKillEvent
+    timeSetEvent             = Proxy_timeSetEvent
+
+    mciSendStringA           = Proxy_mciSendStringA
+    mciSendStringW           = Proxy_mciSendStringW
+    mciSendCommandA          = Proxy_mciSendCommandA
+    mciSendCommandW          = Proxy_mciSendCommandW
+    mciGetDeviceIDA          = Proxy_mciGetDeviceIDA
+    mciGetDeviceIDW          = Proxy_mciGetDeviceIDW
+
+    waveOutOpen              = Proxy_waveOutOpen
+    waveOutClose             = Proxy_waveOutClose
+    waveOutPrepareHeader     = Proxy_waveOutPrepareHeader
+    waveOutUnprepareHeader   = Proxy_waveOutUnprepareHeader
+    waveOutWrite             = Proxy_waveOutWrite
+    waveOutReset             = Proxy_waveOutReset
+    waveOutGetNumDevs        = Proxy_waveOutGetNumDevs
+
+    midiOutOpen              = Proxy_midiOutOpen
+    midiOutClose             = Proxy_midiOutClose
+    midiOutShortMsg          = Proxy_midiOutShortMsg
+    midiOutLongMsg           = Proxy_midiOutLongMsg
+    midiOutPrepareHeader     = Proxy_midiOutPrepareHeader
+    midiOutUnprepareHeader   = Proxy_midiOutUnprepareHeader
+    midiOutReset             = Proxy_midiOutReset
+
+    joyGetNumDevs            = Proxy_joyGetNumDevs
+    joyGetPosEx              = Proxy_joyGetPosEx
+    joyGetDevCapsW           = Proxy_joyGetDevCapsW
+
+    mmioOpenW                = Proxy_mmioOpenW
+    mmioClose                = Proxy_mmioClose
+
+    PlaySoundA               = Proxy_PlaySoundA
+    PlaySoundW               = Proxy_PlaySoundW

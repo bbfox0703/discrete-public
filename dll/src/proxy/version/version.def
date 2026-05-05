@@ -1,0 +1,23 @@
+; version.def — public exports for the version.dll proxy.
+;
+; Phase 12a. We name the internal C functions Proxy_<symbol> in
+; version.cpp (so they don't clash with the system header's
+; __declspec(dllimport) decls) and alias them to the public symbol
+; here. The right-hand side is the internal name; the left is what
+; the host game's import resolver looks up.
+
+LIBRARY version
+
+EXPORTS
+    GetFileVersionInfoA       = Proxy_GetFileVersionInfoA
+    GetFileVersionInfoW       = Proxy_GetFileVersionInfoW
+    GetFileVersionInfoExA     = Proxy_GetFileVersionInfoExA
+    GetFileVersionInfoExW     = Proxy_GetFileVersionInfoExW
+    GetFileVersionInfoSizeA   = Proxy_GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeW   = Proxy_GetFileVersionInfoSizeW
+    GetFileVersionInfoSizeExA = Proxy_GetFileVersionInfoSizeExA
+    GetFileVersionInfoSizeExW = Proxy_GetFileVersionInfoSizeExW
+    VerQueryValueA            = Proxy_VerQueryValueA
+    VerQueryValueW            = Proxy_VerQueryValueW
+    VerLanguageNameA          = Proxy_VerLanguageNameA
+    VerLanguageNameW          = Proxy_VerLanguageNameW
