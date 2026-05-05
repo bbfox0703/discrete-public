@@ -16,7 +16,16 @@ namespace UnityDumpUI.ViewModels;
 
 public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 {
-    private readonly PipeClient         _pipe;
+    // _pipe is mutable: after every involuntary disconnect we replace it
+    // with a fresh PipeClient instance. Empirically, even with our
+    // single-instance DLL pipe + retry loop, the same .NET process can't
+    // reliably re-Connect to a re-launched game's DLL — the kernel keeps
+    // routing the client to a residual ghost instance from the dying
+    // game until enough wall-clock has passed for cleanup. A brand-new
+    // PipeClient (which is what "restart the UI" effectively gives you)
+    // bypasses this. _backend is stable; we swap its inner pipe via
+    // ReplacePipe so Browser/Inspector references stay valid.
+    private PipeClient                  _pipe;
     private readonly BackendAdapter     _backend;
     private readonly FileLogger         _logger;
     private readonly IProcessEnumerator _processes;
@@ -115,6 +124,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private void HandleInvoluntaryDisconnect(string reason)
     {
         if (!IsConnected) return; // already torn down by an explicit click
+
+        // Swap in a fresh PipeClient. Same-process re-Connect to a
+        // re-launched game has been observed to keep hitting "Pipe is
+        // broken." for tens of seconds even though the new game's DLL
+        // is up and waiting for clients — something between .NET's
+        // pipe handle layer and the kernel's pipe-instance namespace
+        // prefers the dying game's residual ghost over the live one.
+        // A fresh PipeClient + NamedPipeClientStream chain bypasses
+        // it (matches the "close UI and restart" workaround exactly).
+        ReplacePipeForFreshConnect();
+
         IsConnected      = false;
         ConnectionStatus = $"Disconnected ({reason})";
         Engine = Backend2 = DllVariant = GameModule = UnityVersion = null;
@@ -260,6 +280,30 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     private bool CanConnect() => !IsBusy && !IsConnected;
+
+    /// <summary>
+    /// Dispose the current <see cref="PipeClient"/> and install a fresh
+    /// instance into <see cref="_backend"/>. Re-subscribes the
+    /// Disconnected event handler. Called from every disconnect path so
+    /// the next Connect attempt runs against a completely fresh
+    /// .NET-side pipe stack — matches the "restart UI and try again"
+    /// workaround empirically.
+    /// </summary>
+    private void ReplacePipeForFreshConnect()
+    {
+        PipeClient old = _pipe;
+        old.Disconnected -= OnPipeDisconnected;
+        // Fire-and-forget dispose. Holding it on the UI thread would block
+        // for the gate semaphore; the old streams are already torn down by
+        // whatever event got us here, so dispose is just bookkeeping.
+        _ = old.DisposeAsync();
+
+        _pipe = new PipeClient();
+        _pipe.Disconnected += OnPipeDisconnected;
+        _backend.ReplacePipe(_pipe);
+        _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+            "PipeClient recreated for next Connect");
+    }
 
     /// <summary>
     /// Connect + handshake with a retry loop that covers the proxy DLL's
@@ -417,6 +461,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // Phase 9: drop inspector state too.
             Inspector.ClearCommand.Execute(null);
             Inspector.ErrorMessage = null;
+
+            // Same fresh-PipeClient policy as HandleInvoluntaryDisconnect:
+            // never re-use a PipeClient instance across Connect cycles in
+            // this UI process.
+            ReplacePipeForFreshConnect();
         }
     }
 

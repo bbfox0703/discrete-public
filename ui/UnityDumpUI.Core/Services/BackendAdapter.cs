@@ -22,7 +22,7 @@ namespace UnityDumpUI.Core.Services;
 /// </summary>
 public sealed class BackendAdapter : ILiveExportSource
 {
-    private readonly PipeClient _pipe;
+    private PipeClient _pipe;
 
     public BackendAdapter(PipeClient pipe)
     {
@@ -33,6 +33,19 @@ public sealed class BackendAdapter : ILiveExportSource
 
     public Task ConnectAsync(int timeoutMs, CancellationToken ct = default)
         => _pipe.ConnectAsync(timeoutMs, ct);
+
+    /// <summary>
+    /// Swap the underlying <see cref="PipeClient"/>. Caller is responsible
+    /// for disposing the previous one. Used by <c>MainWindowViewModel</c>
+    /// after an involuntary disconnect so the next Connect attempt runs
+    /// against fresh .NET pipe state — empirically the only thing that
+    /// reliably clears whatever .NET / kernel cache is preferring the
+    /// dead instance over the live one in the same UI process.
+    /// </summary>
+    public void ReplacePipe(PipeClient newPipe)
+    {
+        _pipe = newPipe;
+    }
 
     /// <summary>
     /// Round-trip liveness check.
