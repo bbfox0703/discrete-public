@@ -49,6 +49,7 @@ if "!UPPER!"=="IL2CPP"  ( set "TARGET=DLL"     & set "BACKEND=IL2CPP" & shift & 
 if "!UPPER!"=="UI"      ( set "TARGET=UI"      & shift & goto :parse_args )
 if "!UPPER!"=="TEST"    ( set "TARGET=Test"    & shift & goto :parse_args )
 if "!UPPER!"=="PROXY"   ( set "TARGET=ProxyDLL" & shift & goto :parse_args )
+if "!UPPER!"=="CLI"     ( set "TARGET=MetadataCli" & shift & goto :parse_args )
 if "!UPPER!"=="ALL"     ( set "TARGET=All"     & shift & goto :parse_args )
 if "!UPPER!"=="/?"      goto :usage
 if "!UPPER!"=="-H"      goto :usage
@@ -122,6 +123,7 @@ echo    il2cpp      IL2CPP DLL only
 echo    ui          C# Avalonia UI only
 echo    test        Build + run xUnit tests
 echo    proxy       Proxy DLLs (Phase 12 placeholder)
+echo    cli         Offline metadata-cli (Phase 13)
 echo.
 echo  Options:
 echo    clean       Wipe build/ + dist/ first

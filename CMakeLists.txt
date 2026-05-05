@@ -42,3 +42,10 @@ include_directories(SYSTEM
 )
 
 add_subdirectory(dll)
+
+# Phase 13 — offline metadata-cli. Built only when -DBUILD_CLI=ON; gated
+# so the regular DLL build doesn't grow an extra target by default.
+option(BUILD_CLI "Build the offline metadata-cli (Phase 13)" OFF)
+if(BUILD_CLI)
+    add_subdirectory(tools/metadata-cli)
+endif()

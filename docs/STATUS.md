@@ -1,7 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
 **Branch**: `dev`
-**Current phase**: **Phase 14 closed** (14a/b/d/e/f — 14c IL2CPP version dispatch deferred until Unity 2017/2023 targets are available). Hardening pass: pipe auto-recovers on game exit, stripped-metadata banner up front, Mono walkArray attach gap fixed, SEH+attach rules now codified in Architecture.md. Phases 0–11.5 + 9.5 + 14 all closed; verified live against SaGa F2R (IL2CPP, build 108+).
+**Current phase**: **Phase 13 closed** — `metadata-cli.exe` ships in `dist/` (offline `global-metadata.dat` parser). Subcommands: `info` / `stats` / `types` / `type <ns> <name>`. Reuses `MetadataParser` from the DLL tree via a split — backend-agnostic core in `MetadataParser.cpp`, host-process singleton (`Get()`/`Load()`) in `MetadataParserHostPath.cpp` only. CLI links the core + Logger, no `BackendDetector` pull-in. Phases 0–11.5 + 9.5 + 13 + 14 all closed.
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants).
 
@@ -26,6 +26,7 @@
 | 10.x — `walkArray` + element-class metadata | ✅ | Backend-agnostic pipe command reads array header (`+0x10 bounds*`, `+0x18 max_length`, `+0x20 vector[0]`) and returns per-slot data. Optional `elementAssembly`/`Namespace`/`Name` triple resolves the element class via `class_value_size` + `class_is_valuetype` (new optional resolver binds in both backends), so struct arrays (`Vector3[]`) walk with the right stride and per-slot drilldown gets correct value-vs-ref semantics. |
 | 11 — CE Lua bridge | ✅ | Four scripts in [scripts/](../scripts/): `utils.lua` (callDLL helper + backend module probe + DLL path resolver), `unity_dump.lua` (detect Mono / IL2CPP, inject DLL, banner with build #), `unity_dissect.lua` (open `\\.\pipe\UnityDumpBfx` directly via `io.open` + tiny purpose-built JSON parser, build CE Structure Dissect entries with managed-type → Vartype map matching `CsxExporter`), `unity_symbols.lua` (batch-register CE symbols for static fields + method addresses; IL2CPP reads addresses straight from `getClassInfo`, Mono auto-issues `monoCompileMethod` per method to JIT and register — opt-out via `{compileMethods=false}`). **Verified live** against SaGa F2R: dofile → DLL injects → handshake reports `IL2CPP / 2021.3.39f1 / metadata 29 / 57 assemblies / build 101`. CE-portability fixes: backend detection now uses `enumModules()` (direct OS query) instead of `getModule()` (which lags behind symbolhandler) and accepts `UserAssembly.dll` + `mono-2.0-{sgen,boehm}.dll`; injection uses `injectDLL()` (modern CE) with `loadLibrary` fallback; `reinitializeSymbolhandler()` is forced after injection so `getAddress()` can resolve fresh exports. Optional StartPipe / GetBuildNumber calls degrade to soft warns (DllMain auto-starts the pipe, so they're nice-to-haves). |
 | 11.5 — Inspector inline drilldown | ✅ | `WalkedFieldRow` → `WalkedFieldNode` (hierarchical, observable). Field grid is now a flat-with-indent `DataGrid` (`DataGridTemplateColumn` for Name with indent border + chevron Button + load hint, `CanUserSortColumns="False"` so parent-child adjacency survives). Five node kinds — `Leaf` / `PointerToClass` / `Collection` / `ArraySlotPointer` / `ArraySlotLeaf` — drive lazy expansion: pointer-to-class → `walkInstance(ptr, classType)`, `T[]` / `List<T>` → `walkArray` (List auto-deref's `_items` at +0x10), pointer-array slots recurse. Collapse walks the Parent chain (robust against odd indent layouts). Auto-refresh snapshots top-level expanded names + replays expansion after each fresh `walkInstance`, bounded one-RPC-per-expanded-root cost. Right-click any node → Copy CE XML rooted at that node (reuses `CeXmlExporter.RenderAsync` live mode at `EffectiveAddress`) / Copy CE field (single-leaf XML). The separate "Array elements" Expander + "Walk array" button from Phase 10 are gone. **Ride-along fixes**: `UnityTypeMap.CeDisplay(type) → (hex, signed)` centralises CE leaf flags so `Int32` leaves emit `<ShowAsSigned>1</ShowAsSigned>` (was hardcoded 0 + hex-via-`EndsWith("Bytes")`); DLL path resolution switched to `Environment.ProcessPath` so `Pick & inject` works under self-extracting single-file mode (`AppContext.BaseDirectory` was pointing at the per-launch `%LOCALAPPDATA%\Temp\.net\…` extraction dir). |
+| 13 — Offline metadata CLI | ✅ | `tools/metadata-cli/main.cpp` + new `BUILD_CLI=ON` cmake option produces a 67 KB Release exe (`dist/metadata-cli.exe`). Subcommands: `info` (version + counts), `stats` (replicates the `getMetadataStats` strip-heuristic verbatim — `clean` / `partial_strip` / `heavy_strip`), `types` (one JSON record per type def to stdout), `type <ns> <name>` (fields + decoded string defaults). Output is line-oriented JSON to stdout; errors → stderr, exit 1 on failure. **Refactor**: `MetadataParser.cpp` now backend-agnostic core; `BackendDetector` dependency moved to `MetadataParserHostPath.cpp` (DLL-only). The CLI links the core + Logger only. **v29-gate** surfaced explicitly: `info` reports `type_tables_parsed: false` + a stderr note when running against v24/v27/v31 metadata (string-literal queries still work; full type-table support lands with Phase 14c). Smoke-tested against SaGa Frontier 1 Remastered (v24): loads, 15182 string literals, type-tables 0 with the hint. Build wiring: `build.cmd cli` / `build.ps1 -Target MetadataCli`. |
 | 14 — Hardening | ✅ | **14a** auto-disconnect on pipe teardown: `PipeClient` raises a `Disconnected` event when next read fails (IO / null); `MainWindowViewModel` runs the same teardown the explicit Disconnect does, tagged `(game exited)`, so Connect / Pick & inject re-enable automatically. Previously: target exit broke every subsequent RPC, only recovery was UI restart. **14b** stripped-metadata banner: opportunistic post-handshake `getMetadataStats` call surfaces `partial_strip` / `heavy_strip` verdicts as a yellow banner, so users hitting an obfuscated build see the warning before they spend an hour wondering why every class is `a`/`b`/`c`. **14d** Mono thread-attach audit: every direct `r.<runtime_fn>` call in pipe handlers reviewed; the only gap (walkArray's Mono element-class lookup running un-attached) fixed by adding a guard around the bare resolver calls (single attach, after `Find*` returns — not nested, per build #54). **14e** log rotation: code review confirmed `RotateIfNeeded` is correct (4 files × 8 MB caps); shipped `tools/Get-LogStats.ps1` for post-session spot checks. **14f** SEH-leaf audit: every `__try` body in `dll/src/` verified leaf-shape (one fn call or one memcpy). Both rules (SEH-leaf + Mono attach policy) now codified in `Archiutecture.md`'s "Rules (MUST follow)". **14c IL2CPP version dispatch (v24/27/31)** deferred — needs Unity 2017 / 2018 / 2023 target games to validate against. |
 
 ### Repo / build tweaks landed alongside
@@ -76,8 +77,7 @@ d50d180 fix(export): bridge Inspector.SelectedInstance -> Browser.CeXmlBaseAddre
 | Phase | Scope sketch |
 |---|---|
 | 12 — Proxy DLLs | `version.dll` / `winmm.dll` / `dxgi.dll` proxy that auto-loads the dumper on game start. Useful for games where runtime injection is awkward. New `dll/src/proxy/` tree + `.def` forwarders + UI deploy panel. |
-| 13 — Offline metadata CLI | Standalone `metadata-cli` that parses `global-metadata.dat` without injection. Reuses `MetadataParser` as a static lib. Useful for CI dumping / static analysis. |
-| 14c — IL2CPP version dispatch (deferred from Phase 14) | Per-version `Il2CppGlobalMetadataHeader` layouts for v24 (Unity 2017) / v27 (Unity 2018-19) / v29 (current) / v31 (Unity 2023+). Currently hardcoded to v29. Real work; needs Unity 2017 / 2018 / 2023 target games to validate against — defer until one shows up. |
+| 14c — IL2CPP version dispatch (deferred from Phase 14) | Per-version `Il2CppGlobalMetadataHeader` layouts for v24 (Unity 2017) / v27 (Unity 2018-19) / v29 (current) / v31 (Unity 2023+). Currently hardcoded to v29. Now visibly impacts Phase 13's CLI (returns `type_tables_parsed: false` on non-v29 input) — extra motivation. Needs Unity 2017 / 2018 / 2023 target games to validate against. |
 | 15 — Test matrix | Game/Engine combinations + CE version compat table in `plan.md`. |
 
 ### Open follow-ups (not blocking any phase)
@@ -109,7 +109,7 @@ discrete/
 │   │   ├── PipeServer.h/.cpp   <- threaded named-pipe server
 │   │   └── Logger.h            <- per-PID rotated log files
 │   ├── src/mono/               <- MonoResolver/Domain/ClassWalker/ThreadAttach/TypeParser
-│   └── src/il2cpp/             <- IL2CPPResolver/Domain/ClassWalker/MetadataParser/...
+│   └── src/il2cpp/             <- IL2CPPResolver/Domain/ClassWalker/MetadataParser{,HostPath}/...
 ├── ui/
 │   ├── UnityDumpUI/            <- Avalonia 12 app (AOT). AssemblyName=DiscreteUI.
 │   │   ├── App.axaml           <- avares://DiscreteUI/Resources/Strings/en.axaml
@@ -144,7 +144,10 @@ discrete/
 │   │           ├── CsxExporter.cs
 │   │           └── CeXmlExporter.cs             <- template + live render paths
 │   └── UnityDumpUI.Tests/       <- xUnit v3
-├── tools/                       <- PowerShell pipe test helpers (still useful for one-shot RPCs)
+├── tools/                       <- PowerShell pipe helpers + Phase 13 metadata-cli
+│   ├── metadata-cli/            <- Phase 13: offline global-metadata.dat parser
+│   ├── Get-LogStats.ps1         <- Phase 14e: per-PID log-dir size/cap report
+│   └── Test-*.ps1, *.ps1        <- pipe smoke tests (one-shot RPCs)
 └── scripts/                     <- CE Lua bridge (Phase 11)
     ├── README.md                <- install layout + workflow
     ├── utils.lua                <- callDLL, detectBackend, dllPath, log
@@ -197,13 +200,19 @@ CE-side workflow: `scripts/README.md` — install layout + dofile invocations.
 
 1. **Pick the next phase** (or open follow-up):
    - **Phase 12 (proxy DLLs)** — `version.dll` / `winmm.dll` / `dxgi.dll` proxy that auto-loads the dumper on game start. Useful for games where runtime injection is awkward.
-   - **Phase 13 (offline CLI)** — standalone `metadata-cli` parsing `global-metadata.dat` without injection. Reuses `MetadataParser` as a static lib.
-   - **Phase 15 (test matrix)** — game/engine combinations + CE version compat table in `plan.md`.
-   - **Phase 14c (deferred)** — only if you have Unity 2017 / 2018 / 2023 target games to validate against; otherwise leave it.
+   - **Phase 15 (test matrix)** — game/engine combinations + CE version compat table in `plan.md`. Phase 13's CLI gives a clean way to enumerate samples (run `metadata-cli info` against every game backup you have).
+   - **Phase 14c (deferred)** — Phase 13 made the gap visible (non-v29 metadata returns `type_tables_parsed: false`). Worth doing once a Unity 2017 / 2018 / 2023 target shows up.
    - **Open follow-ups** for quick wins:
      - CSX live mode (CE XML already has it; CSX `Element` addressing is relative to slot start so it's a different design problem)
      - Inspector value-type substruct expansion (Phase 11.5 deferred this; would need DLL-side header-less walkInstance variant)
 
 2. **Live verification of Phase 14**: kill SaGa F2R while `DiscreteUI.exe` is connected — should flip to `Disconnected (game exited)` and re-enable Connect / Pick & inject. Re-launch + re-inject should work without restarting the UI. Then run `tools/Get-LogStats.ps1` to confirm log dirs are within caps.
 
-3. **Optional sanity check**: re-exercise `unity_dissect.lua` (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) — hasn't been run since the CE-API portability fixes in `b8ce152`.
+3. **Live verification of Phase 13**: with SaGa F2R installed, run
+   ```
+   dist\metadata-cli.exe info  "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat"
+   dist\metadata-cli.exe types "<...>\SaGa Frontier 2 Remastered_Data\il2cpp_data\Metadata\global-metadata.dat" | findstr "MainGame.PLY_WORK"
+   ```
+   Should report `version=29`, `type_tables_parsed=true`, and the type listing should include `MainGame.PLY_WORK` — matching what the live DLL's `getClassInfo` returned during Phase 9.
+
+4. **Optional sanity check**: re-exercise `unity_dissect.lua` (`dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")`) — hasn't been run since the CE-API portability fixes in `b8ce152`.

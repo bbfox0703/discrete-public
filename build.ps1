@@ -353,8 +353,40 @@ function Build-ProxyDll {
     return $true
 }
 function Build-MetadataCli {
-    Write-Banner 'Metadata CLI (Phase 13 — not yet implemented)'
-    Write-Info 'Skipping: CLI lands in Phase 13.'
+    Enter-VsDevEnvironment
+
+    $cfg = if ($Mode -eq 'Debug') { 'Debug' } else { 'Release' }
+    $cliBuildDir = Join-Path $BUILD_DIR "cli-$($cfg.ToLower())"
+
+    Write-Banner "Metadata CLI (Phase 13)  |  Mode=$cfg"
+
+    # Same clean-configure rule as Build-Dll: cmake's cache is fragile
+    # across reconfigures, so wipe before each pass. Cheap (~1s) since
+    # the CLI compiles three .cpp files.
+    if (Test-Path $cliBuildDir) {
+        Write-Step "Removing CMake cache for clean configure ($cliBuildDir)"
+        Remove-Item $cliBuildDir -Recurse -Force
+    }
+
+    Write-Step 'Configuring CMake (Ninja + MSVC, BUILD_CLI=ON)'
+    & cmake -S $RepoRoot -B $cliBuildDir -G Ninja `
+        "-DCMAKE_BUILD_TYPE=$cfg" `
+        "-DBUILD_CLI=ON" `
+        "-DBACKEND=IL2CPP"
+    if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
+
+    Write-Step "Building metadata-cli ($cfg)"
+    & cmake --build $cliBuildDir --target metadata-cli --parallel
+    if ($LASTEXITCODE -ne 0) { Write-Fail 'metadata-cli build failed'; return $false }
+
+    $exe = Join-Path $cliBuildDir 'bin\metadata-cli.exe'
+    if (-not (Test-Path $exe)) {
+        Write-Fail "metadata-cli.exe not produced at: $exe"
+        return $false
+    }
+    Copy-Item $exe -Destination $DIST_DIR -Force
+    $sz = Get-FileSize (Join-Path $DIST_DIR 'metadata-cli.exe')
+    Write-Ok "metadata-cli.exe ($sz) -> dist\"
     return $true
 }
 
