@@ -2,6 +2,19 @@
 // Wrap any call into Mono runtime exports made from a thread that the runtime
 // did not create (i.e. our pipe worker) with one of these. Forgetting this
 // is the #1 source of crashes when calling Mono APIs from injected code.
+//
+// Policy (Phase 14d audit):
+//   - Every Mono helper function in dll/src/mono/ that calls into the
+//     runtime opens its own ThreadAttachGuard internally. Callers should
+//     NOT wrap those helpers in an outer guard — nested attach/detach
+//     destroyed BongoCat in build #54.
+//   - Pipe handlers (ExportAPI.cpp) that call resolver functions DIRECTLY
+//     (e.g. r.class_get_name, r.class_value_size) must hold their own
+//     guard around the batch of direct calls. Find* / Enumerate* helpers
+//     are called BEFORE that guard opens, since they manage their own.
+//   - Each guard handles one attach + one detach. A failed attach
+//     (Attached() == false) means "skip the runtime calls and bail" —
+//     don't try to use the resolver pointer anyway.
 #pragma once
 
 #include "MonoResolver.h"

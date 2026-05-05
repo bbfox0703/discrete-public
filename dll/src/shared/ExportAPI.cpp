@@ -487,17 +487,28 @@ void RegisterCoreHandlers() {
 #elif defined(UNITYCEDUMPER_BACKEND_MONO)
             const auto& r = Mono::GetResolver();
             if (r.resolved) {
+                // Phase 14d: Mono::Find* helpers do their own attach/detach,
+                // so call them OUTSIDE of any guard (avoids the nested
+                // attach pattern noted in build #54's BongoCat regression).
+                // The bare runtime calls below (class_get_name, etc.) ARE
+                // direct resolver invocations on a thread Mono never
+                // created, so they need their own attach scope. We open
+                // one guard for the whole batch — single attach, not four.
                 Mono::MonoImage* img = Mono::FindImageByName(elemAsm);
                 Mono::MonoClass* k = (img != nullptr) ? Mono::FindClass(img, elemNs, elemNm) : nullptr;
                 if (k != nullptr) {
-                    elemClassResolved = true;
-                    if (r.class_get_name      != nullptr) elemClassName = r.class_get_name(k)      ? r.class_get_name(k)      : "";
-                    if (r.class_get_namespace != nullptr) elemClassNs   = r.class_get_namespace(k) ? r.class_get_namespace(k) : "";
-                    if (r.class_is_valuetype != nullptr) elemIsValueType = r.class_is_valuetype(k) != 0;
-                    if (r.class_value_size != nullptr) {
-                        std::uint32_t align = 0;
-                        int sz = r.class_value_size(k, &align);
-                        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                    Mono::MonoDomain* domain = Mono::GetRootDomain();
+                    Mono::ThreadAttachGuard guard(domain);
+                    if (guard.Attached()) {
+                        elemClassResolved = true;
+                        if (r.class_get_name      != nullptr) elemClassName = r.class_get_name(k)      ? r.class_get_name(k)      : "";
+                        if (r.class_get_namespace != nullptr) elemClassNs   = r.class_get_namespace(k) ? r.class_get_namespace(k) : "";
+                        if (r.class_is_valuetype != nullptr) elemIsValueType = r.class_is_valuetype(k) != 0;
+                        if (r.class_value_size != nullptr) {
+                            std::uint32_t align = 0;
+                            int sz = r.class_value_size(k, &align);
+                            if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                        }
                     }
                 }
             }
