@@ -1,8 +1,17 @@
 // MetadataParser.cpp — implementation.
+//
+// Backend-agnostic core: parses an in-memory copy of global-metadata.dat
+// and exposes the prefix tables (string literals, name heap) plus the v29
+// TypeDefinitions / Fields / FieldDefaults tables. No dependency on
+// BackendDetector — that lives in MetadataParserHostPath.cpp so the
+// metadata-cli (Phase 13) can link this file alone.
+//
+// Logger calls are safe whether or not Log::Init() has run; the writer
+// no-ops when uninitialised, so the CLI just doesn't initialise the
+// logger and these calls disappear at runtime.
 
 #include "MetadataParser.h"
 
-#include "../shared/BackendDetector.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "MetadataLayout.h"
@@ -47,39 +56,27 @@ bool ReadEntireFile(const std::wstring& path, std::vector<std::uint8_t>& out) {
     return true;
 }
 
-std::wstring MetadataPathForCurrentProcess() {
-    auto d = BackendDetector::Detect();
-    if (d.gameDataDir.empty()) return {};
-    return d.gameDataDir + L"\\il2cpp_data\\Metadata\\global-metadata.dat";
-}
-
 }  // namespace
 
-const Parser& Parser::Get() {
-    static Parser instance = [] {
-        Parser p;
-        p.Load();
-        return p;
-    }();
-    return instance;
-}
+// Note: Parser::Get() (the host-process singleton) lives in
+// MetadataParserHostPath.cpp because it depends on Parser::Load() which in
+// turn calls BackendDetector. The CLI build doesn't link either symbol.
 
-void Parser::Load() {
-    std::wstring path = MetadataPathForCurrentProcess();
+bool Parser::LoadFromPath(const std::wstring& path) {
     if (path.empty()) {
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
-            "MetadataParser: no game data dir resolved");
-        return;
+            "MetadataParser: empty path");
+        return false;
     }
     if (!ReadEntireFile(path, data_)) {
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: failed to read global-metadata.dat");
         data_.clear();
-        return;
+        return false;
     }
     if (!LoadHeader()) {
         data_.clear();
-        return;
+        return false;
     }
     if (version_ == 29) {
         v29Tables_ = LoadV29Tables();
@@ -95,6 +92,7 @@ void Parser::Load() {
         v29Tables_ ? "yes" : "no");
     UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
     loaded_ = true;
+    return true;
 }
 
 bool Parser::LoadV29Tables() {

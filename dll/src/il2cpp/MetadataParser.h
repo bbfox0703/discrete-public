@@ -85,7 +85,22 @@ public:
     // Internal — invoked once by Get(). Public so the singleton helper in the
     // .cpp can construct/initialise without `friend` boilerplate.
     Parser() = default;
+
+    /// <summary>
+    /// In-process ctor: resolves the current process's
+    /// <c>&lt;gameDir&gt;/il2cpp_data/Metadata/global-metadata.dat</c> via
+    /// <see cref="BackendDetector"/> and loads it. Used by the DLL build.
+    /// CLI builds (Phase 13) skip this and call <see cref="LoadFromPath"/>
+    /// directly so they don't pull <c>BackendDetector</c> into the link.
+    /// </summary>
     void Load();
+
+    /// <summary>
+    /// Load the parser from an explicit path on disk. Returns true on
+    /// success (header validated, file cached). Also used by the offline
+    /// <c>metadata-cli</c> tool which has no host process to detect.
+    /// </summary>
+    bool LoadFromPath(const std::wstring& path);
 
 private:
     bool LoadHeader();
