@@ -4,7 +4,15 @@
 // client at a time and requests are handled one-at-a-time on the server, so
 // we serialize concurrent callers with a SemaphoreSlim and correlate every
 // response by `id` for sanity (mismatches are bugs, not normal).
+//
+// Phase 14a: surfaces pipe teardown to subscribers via the
+// <see cref="Disconnected"/> event. When the target game exits, the next
+// SendAsync read returns null / throws IOException; the client catches it,
+// disposes streams, raises Disconnected, and rethrows as
+// <see cref="PipeDisconnectedException"/> so callers can react (the
+// MainWindowViewModel handler resets UI state + re-enables Connect).
 
+using System;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -22,6 +30,19 @@ public sealed class PipeClient : IAsyncDisposable
     private StreamReader?           _reader;
     private StreamWriter?           _writer;
     private int                     _nextId;
+    /// <summary>1 once we've already raised Disconnected for the current
+    /// connection — guards against double-fires when both write and read
+    /// fail in quick succession.</summary>
+    private int                     _disconnectFired;
+
+    /// <summary>
+    /// Raised exactly once per connection when the pipe is detected to be
+    /// gone (server closed, IO error). Fired off-gate so subscribers can
+    /// safely call back into the VM (and the VM can re-issue ConnectAsync).
+    /// Subscribers should not assume any UI thread context — marshal as
+    /// needed (MainWindowViewModel uses Dispatcher.UIThread.Post).
+    /// </summary>
+    public event EventHandler<PipeDisconnectedInfo>? Disconnected;
 
     public PipeClient(string pipeName = Constants.PipeName)
     {
@@ -36,6 +57,10 @@ public sealed class PipeClient : IAsyncDisposable
         try
         {
             await DisposeStreamsAsync().ConfigureAwait(false);
+            // Reset the one-shot Disconnected guard so the next teardown
+            // fires the event exactly once (the subscriber may have
+            // re-Connected after a previous disconnect).
+            Interlocked.Exchange(ref _disconnectFired, 0);
             var pipe = new NamedPipeClientStream(
                 serverName:   ".",
                 pipeName:     _pipeName,
@@ -88,6 +113,10 @@ public sealed class PipeClient : IAsyncDisposable
         // run the actual write+read uncancellable so we never abandon a
         // response in the pipe buffer for the next caller to misread.
         await _gate.WaitAsync(ct).ConfigureAwait(false);
+        // Set inside the gate when an IO failure tells us the pipe is gone;
+        // the actual event fire happens after we release the gate so handlers
+        // can call back into the client without deadlocking.
+        PipeDisconnectedInfo? disconnectInfo = null;
         try
         {
             if (_pipe is null || _writer is null || _reader is null || !_pipe.IsConnected)
@@ -108,12 +137,33 @@ public sealed class PipeClient : IAsyncDisposable
             // up sitting unread in the pipe buffer and the *next* SendAsync
             // (different `id`) reads our stale response → id-mismatch crash.
             // We always drain the response and check `ct` after.
-            await _writer.WriteLineAsync(requestLine.AsMemory()).ConfigureAwait(false);
+            try
+            {
+                await _writer.WriteLineAsync(requestLine.AsMemory()).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsPipeBrokenException(ex))
+            {
+                disconnectInfo = new PipeDisconnectedInfo("write failed: " + ex.Message);
+                await DisposeStreamsAsync().ConfigureAwait(false);
+                throw new PipeDisconnectedException(disconnectInfo.Reason, ex);
+            }
 
-            string? responseLine = await _reader.ReadLineAsync().ConfigureAwait(false);
+            string? responseLine;
+            try
+            {
+                responseLine = await _reader.ReadLineAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsPipeBrokenException(ex))
+            {
+                disconnectInfo = new PipeDisconnectedInfo("read failed: " + ex.Message);
+                await DisposeStreamsAsync().ConfigureAwait(false);
+                throw new PipeDisconnectedException(disconnectInfo.Reason, ex);
+            }
             if (responseLine is null)
             {
-                throw new PipeProtocolException("Server closed pipe before responding.");
+                disconnectInfo = new PipeDisconnectedInfo("server closed pipe before responding");
+                await DisposeStreamsAsync().ConfigureAwait(false);
+                throw new PipeDisconnectedException(disconnectInfo.Reason);
             }
             RpcEnvelope<TResult>? envelope =
                 JsonSerializer.Deserialize(responseLine, envelopeType);
@@ -133,8 +183,26 @@ public sealed class PipeClient : IAsyncDisposable
         finally
         {
             _gate.Release();
+            // Off-gate: fire Disconnected exactly once. Subscribers may
+            // re-enter the pipe (e.g. ConnectAsync) without deadlocking.
+            if (disconnectInfo is not null
+                && Interlocked.Exchange(ref _disconnectFired, 1) == 0)
+            {
+                Disconnected?.Invoke(this, disconnectInfo);
+            }
         }
     }
+
+    /// <summary>
+    /// Recognises the exception shapes Windows raises when a peer pipe goes
+    /// away mid-IO (target process exited, server thread closed handle, etc.)
+    /// so the catch sites can distinguish "real" exceptions (caller bug,
+    /// JSON deserialisation issue) from pipe teardown.
+    /// </summary>
+    private static bool IsPipeBrokenException(Exception ex) => ex is
+        IOException or
+        ObjectDisposedException or
+        EndOfStreamException;
 
     public async ValueTask DisposeAsync()
     {
@@ -155,4 +223,26 @@ public sealed class PipeProtocolException : Exception
 {
     public PipeProtocolException(string message) : base(message) { }
     public PipeProtocolException(string message, Exception inner) : base(message, inner) { }
+}
+
+/// <summary>
+/// Thrown when the named pipe is detected to be gone mid-request (target
+/// process exited, server handle closed). The corresponding
+/// <see cref="PipeClient.Disconnected"/> event fires once before the
+/// exception surfaces; subscribers should reset UI state.
+/// </summary>
+public sealed class PipeDisconnectedException : Exception
+{
+    public PipeDisconnectedException(string reason) : base(reason) { }
+    public PipeDisconnectedException(string reason, Exception inner) : base(reason, inner) { }
+}
+
+/// <summary>
+/// Payload for <see cref="PipeClient.Disconnected"/>: human-readable
+/// reason captured at detection time.
+/// </summary>
+public sealed class PipeDisconnectedInfo
+{
+    public PipeDisconnectedInfo(string reason) { Reason = reason; }
+    public string Reason { get; }
 }

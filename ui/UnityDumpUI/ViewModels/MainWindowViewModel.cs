@@ -60,7 +60,51 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             }
         };
 
+        // Phase 14a: react to involuntary pipe teardown (target game exited,
+        // pipe closed). Marshals onto the UI thread because the event fires
+        // from whichever pool thread happened to be doing the failing read.
+        _pipe.Disconnected += OnPipeDisconnected;
+
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
+    }
+
+    private void OnPipeDisconnected(object? sender, PipeDisconnectedInfo info)
+    {
+        _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+            $"pipe disconnected: {info.Reason}");
+        Avalonia.Threading.Dispatcher.UIThread.Post(() => HandleInvoluntaryDisconnect(info.Reason));
+    }
+
+    /// <summary>
+    /// Runs the same teardown the explicit <see cref="DisconnectAsync"/>
+    /// command does, but tagged with a "(game exited)" status string so the
+    /// user can tell apart "I clicked Disconnect" from "the game went away".
+    /// Connect / Pick & inject re-enable automatically because their
+    /// CanExecute keys on <see cref="IsConnected"/>.
+    /// </summary>
+    private void HandleInvoluntaryDisconnect(string reason)
+    {
+        if (!IsConnected) return; // already torn down by an explicit click
+        IsConnected      = false;
+        ConnectionStatus = $"Disconnected ({reason})";
+        Engine = Backend2 = DllVariant = GameModule = UnityVersion = null;
+        MetadataVersion = null;
+        AssembliesCount = 0;
+        Build           = 0;
+        Protocol        = 0;
+        MetadataWarning = null;
+
+        Browser.Assemblies.Clear();
+        Browser.FilteredAssemblies.Clear();
+        Browser.Classes.Clear();
+        Browser.FilteredClasses.Clear();
+        Browser.Fields.Clear();
+        Browser.Methods.Clear();
+        Browser.SelectedAssembly = null;
+        Browser.SelectedClass    = null;
+        Browser.ParentChain      = string.Empty;
+
+        Inspector.ClearCommand.Execute(null);
     }
 
     public IProcessEnumerator ProcessEnumerator => _processes;
@@ -104,6 +148,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty] private uint    _build;
     [ObservableProperty] private int     _protocol;
 
+    /// <summary>
+    /// Phase 14b: stripped/obfuscated metadata banner. Populated from
+    /// <c>getMetadataStats</c>'s <c>verdict</c> field; null when metadata
+    /// is clean or the heuristic call failed.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasStripWarning))]
+    private string? _metadataWarning;
+
+    public bool HasStripWarning => !string.IsNullOrEmpty(MetadataWarning);
+
     [ObservableProperty] private string? _errorMessage;
 
     [RelayCommand(CanExecute = nameof(CanConnect))]
@@ -137,6 +192,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // Phase 8: kick off assembly fetch so the left pane populates
             // without an extra click. Failures surface on Browser.ErrorMessage.
             _ = Browser.RefreshAssembliesCommand.ExecuteAsync(null);
+
+            // Phase 14b: opportunistic metadata-stats call so the user
+            // sees a "stripped/obfuscated" banner up front rather than
+            // discovering it through garbled class names. Soft-fail.
+            _ = LoadMetadataStatsAsync();
         }
         catch (OperationCanceledException)
         {
@@ -159,6 +219,50 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private bool CanConnect() => !IsBusy && !IsConnected;
 
+    /// <summary>
+    /// Fire-and-forget post-handshake call to <c>getMetadataStats</c>. A
+    /// non-clean verdict (single-letter / two-letter type names dominating
+    /// the metadata) raises a banner so the user knows the field/method
+    /// names they see may be obfuscator output, not the original symbols.
+    /// </summary>
+    private async Task LoadMetadataStatsAsync()
+    {
+        try
+        {
+            MetadataStatsResult? stats = await _backend
+                .GetMetadataStatsAsync(default).ConfigureAwait(true);
+            if (stats is null) return;
+            string verdict = stats.Verdict ?? string.Empty;
+            if (verdict == "heavy_strip")
+            {
+                double ratio = stats.StripRatio ?? 0.0;
+                MetadataWarning =
+                    $"Metadata appears heavily stripped/obfuscated " +
+                    $"({ratio * 100:F0}% short type names). Class & method " +
+                    $"names may be obfuscator output, not the originals.";
+            }
+            else if (verdict == "partial_strip")
+            {
+                double ratio = stats.StripRatio ?? 0.0;
+                MetadataWarning =
+                    $"Metadata partially stripped ({ratio * 100:F0}% short " +
+                    $"type names). Some type names may be uninformative.";
+            }
+            else
+            {
+                MetadataWarning = null;
+            }
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"metadata stats: verdict={verdict} ratio={stats.StripRatio:F3} total={stats.TotalClasses}");
+        }
+        catch (Exception ex)
+        {
+            // Soft-fail — banner stays empty.
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"getMetadataStats failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     [RelayCommand(CanExecute = nameof(CanDisconnect))]
     private async Task DisconnectAsync()
     {
@@ -180,6 +284,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             AssembliesCount = 0;
             Build           = 0;
             Protocol        = 0;
+            MetadataWarning = null;
 
             // Phase 8: stale data is misleading — wipe the browser too.
             Browser.Assemblies.Clear();

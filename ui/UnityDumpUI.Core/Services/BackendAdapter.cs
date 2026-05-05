@@ -59,6 +59,29 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `getMetadataStats` — name-shape statistics over the loaded metadata.
+    /// Phase 14b uses the <c>verdict</c> field to surface a stripped /
+    /// obfuscated banner. Soft-fails to <c>null</c> on pipe errors so a
+    /// post-handshake call doesn't gate the rest of the connect flow.
+    /// </summary>
+    public async Task<MetadataStatsResult?> GetMetadataStatsAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var env = await _pipe.SendAsync(
+                "getMetadataStats", args: null,
+                ProtocolJsonContext.Default.RpcEnvelopeMetadataStatsResult, ct)
+                .ConfigureAwait(false);
+            if (env.Error is not null) return null;
+            return env.Result;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// `getAssemblies` — list of loaded managed assemblies.
     /// </summary>
     public async Task<GetAssembliesResult> GetAssembliesAsync(CancellationToken ct = default)

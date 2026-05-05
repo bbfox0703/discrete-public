@@ -35,6 +35,18 @@
       </StackPanel>
     </Border>
 
+    <!-- Phase 14b: stripped/obfuscated metadata warning. Yellow strip
+         appears below the connection bar when getMetadataStats reports
+         partial_strip / heavy_strip; cleared on disconnect. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding HasStripWarning}"
+            Background="#33D4A017" BorderBrush="#88D4A017"
+            BorderThickness="0,0,0,1" Padding="12,6">
+      <TextBlock Text="{Binding MetadataWarning}"
+                 Foreground="#FFD4A017" TextWrapping="Wrap"
+                 FontWeight="SemiBold" />
+    </Border>
+
     <!-- Body -->
     <Grid>
       <!-- Column widths are user-resizable via the GridSplitters between

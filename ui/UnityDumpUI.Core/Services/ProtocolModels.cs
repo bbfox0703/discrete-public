@@ -261,3 +261,26 @@ public sealed class WalkedArrayElement
     [JsonPropertyName("hex")]           public string?      Hex          { get; set; }
     [JsonPropertyName("error")]         public string?      Error        { get; set; }
 }
+
+/// <summary>
+/// `getMetadataStats` result — name-shape stats over all type definitions
+/// the backend can see. Drives the Phase 14b stripped-metadata banner;
+/// <see cref="Verdict"/> is one of "clean" / "partial_strip" /
+/// "heavy_strip" (or null when the metadata isn't loaded).
+/// </summary>
+public sealed class MetadataStatsResult
+{
+    [JsonPropertyName("scope")]              public string?  Scope             { get; set; }
+    [JsonPropertyName("total_classes")]      public int      TotalClasses      { get; set; }
+    [JsonPropertyName("with_namespace")]     public int      WithNamespace     { get; set; }
+    [JsonPropertyName("single_char_names")]  public int      SingleCharNames   { get; set; }
+    [JsonPropertyName("short_names_2")]      public int      ShortNames2       { get; set; }
+    [JsonPropertyName("compiler_generated")] public int      CompilerGenerated { get; set; }
+    [JsonPropertyName("numeric_lead")]       public int      NumericLead       { get; set; }
+    [JsonPropertyName("avg_name_length")]    public double?  AvgNameLength     { get; set; }
+    [JsonPropertyName("min_name_length")]    public int?     MinNameLength     { get; set; }
+    [JsonPropertyName("max_name_length")]    public int      MaxNameLength     { get; set; }
+    [JsonPropertyName("strip_ratio")]        public double?  StripRatio        { get; set; }
+    [JsonPropertyName("verdict")]            public string?  Verdict           { get; set; }
+    [JsonPropertyName("error")]              public string?  Error             { get; set; }
+}
