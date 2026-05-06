@@ -29,3 +29,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Single Instance**: UI app uses Mutex to ensure only one instance runs
 - **Async everywhere**: All I/O, pipe operations, and alert actions must be async
 - **AOT compatible**: All C# code must be Native AOT / trimming compatible. No reflection-based APIs — use source generators instead (e.g. `[JsonSerializable]` context for `System.Text.Json`, `[ObservableProperty]` for MVVM)
+
+-----
+
+## Project Goal
+
+Develop a **C++ DLL + Cheat Engine Lua Bridge** Unity Dumper.
+Target: Support Mono 32/64 bits, 64 bites IL2CPP games, build complete class/object/struct/method hierarchy, integrate with CE. Instance walker/export and find method instances. Jump to instance/method disassembler code in CE. Helping tool to create CE AA inject code to map to right overload method. Also lua call Unity methods. Address finder to find from CE searched address is beloging to which Unity instance and class.
+
+-----
