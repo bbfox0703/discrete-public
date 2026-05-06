@@ -3,7 +3,23 @@
 ## Project Goal
 
 Develop a **C++ DLL + Cheat Engine Lua Bridge** Unity Engine Dumper.
-Target: Support **Unity Mono** (mono-2.0-bdwgc.dll) and **Unity IL2CPP** (GameAssembly.dll) backends. Find runtime metadata entry points, build complete Assembly → Class → Field/Method hierarchy, integrate with CE for symbol registration, table building, and live structure inspection.
+Target backends: **Unity Mono** 32-bit + 64-bit (mono-2.0-bdwgc.dll) and
+**Unity IL2CPP** 64-bit (GameAssembly.dll, metadata v24/v27/v29/v31).
+Find runtime metadata entry points, build complete Assembly → Class →
+Field/Method hierarchy, integrate with CE for symbol registration, table
+building, and live structure inspection.
+
+Headline capabilities (single source of truth: [CLAUDE.md](../CLAUDE.md)):
+- Full hierarchy walk (live + offline `metadata-cli`).
+- Instance walker + exporter (CE XML / CSX / SDK header / live tables).
+- Find method instances by signature (Phase 16 candidate).
+- Jump-to-disassembly via the AOBMaker bridge.
+- CE Auto-Assembler scaffolding for overload-correct injection.
+- Lua-callable Unity methods (Mono JIT / IL2CPP AOT).
+- **Address finder (reverse lookup)** — given any CE-scanned address,
+  identify the containing managed instance + class + field. Inverse of
+  `findInstances`. See [address-finder.md](address-finder.md) for the
+  design spec.
 
 The architecture mirrors **UE5CEDumper**: injected C++ DLL communicates via Named Pipe JSON-RPC with an external Avalonia UI. The UI is **engine-agnostic** — a single binary handles both Mono and IL2CPP backends, auto-detected at connection time.
 
