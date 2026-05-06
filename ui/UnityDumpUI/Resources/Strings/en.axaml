@@ -12,6 +12,9 @@
   <sys:String x:Key="Browser.AssembliesTitle">Assemblies</sys:String>
   <sys:String x:Key="Browser.ClassesTitle">Classes</sys:String>
   <sys:String x:Key="Browser.FilterWatermark">filter…</sys:String>
+  <sys:String x:Key="Browser.FilterFieldsWatermark">filter fields (name or type)…</sys:String>
+  <sys:String x:Key="Browser.FilterMethodsWatermark">filter methods (name)…</sys:String>
+  <sys:String x:Key="Inspector.FilterWatermark">filter walked fields (name or type)…</sys:String>
   <sys:String x:Key="Browser.Refresh">↻</sys:String>
   <sys:String x:Key="Browser.ShowInherited">Show inherited members</sys:String>
   <sys:String x:Key="Browser.FieldsTab">Fields</sys:String>

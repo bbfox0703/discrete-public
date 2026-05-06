@@ -53,6 +53,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         _backend = backend;
         _logger  = logger;
+        // Keep FilteredFields in lockstep with Fields. Every mutation path
+        // (walk repopulate, expand insert, collapse remove, target/clear)
+        // funnels through this so we don't have to remember to refilter at
+        // each call site.
+        Fields.CollectionChanged += (_, _) => RefilterFields();
     }
 
     /// <summary>
@@ -139,13 +144,31 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     // ---------- Walked fields (hierarchical, flat-with-indent) -----------
 
     /// <summary>
-    /// Visible rows in display order. Children of an expanded node are
-    /// inserted as siblings immediately after the parent and removed on
-    /// collapse. Each row's <see cref="WalkedFieldNode.IndentLevel"/> drives
-    /// the visual indent; sorting is intentionally disabled in the view to
-    /// preserve parent-child adjacency.
+    /// Canonical tree of walked fields in display order — the authority for
+    /// expand / collapse / scroll-into-view operations. Children of an
+    /// expanded node are inserted as siblings immediately after the parent
+    /// and removed on collapse. Each row's
+    /// <see cref="WalkedFieldNode.IndentLevel"/> drives the visual indent.
+    /// The DataGrid does NOT bind to this collection directly — it binds to
+    /// <see cref="FilteredFields"/>, which is a filtered mirror so the user
+    /// can substring-search by name / type without disturbing the
+    /// expand-state machinery (which operates on Fields).
     /// </summary>
     public ObservableCollection<WalkedFieldNode> Fields { get; } = new();
+
+    /// <summary>
+    /// View-side filtered mirror of <see cref="Fields"/>, driven by
+    /// <see cref="Filter"/>. Empty filter mirrors Fields exactly. UI-only
+    /// — Copy CE XML / Copy CE field still operate on the unfiltered tree.
+    /// </summary>
+    public ObservableCollection<WalkedFieldNode> FilteredFields { get; } = new();
+
+    /// <summary>
+    /// Substring filter applied to <see cref="FilteredFields"/>. Matches
+    /// against Name OR Type (case-insensitive). Empty = show all.
+    /// </summary>
+    [ObservableProperty] private string _filter = string.Empty;
+    partial void OnFilterChanged(string value) => RefilterFields();
 
     [ObservableProperty] private string _walkSummary = string.Empty;
 
@@ -829,6 +852,32 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         await StopAutoRefreshAsync().ConfigureAwait(false);
         _findCts?.Cancel();
         _walkCts?.Cancel();
+    }
+
+    // ---------- Filter ---------------------------------------------------
+
+    /// <summary>
+    /// Rebuild <see cref="FilteredFields"/> from <see cref="Fields"/> using
+    /// a substring match against Name OR Type (case-insensitive). Filter
+    /// applies uniformly to top-level rows AND any expanded children — a
+    /// child whose parent doesn't match still appears (with its indent), so
+    /// targeted sub-tree searches stay legible. Empty filter mirrors Fields
+    /// exactly.
+    /// </summary>
+    private void RefilterFields()
+    {
+        FilteredFields.Clear();
+        string filter = Filter ?? string.Empty;
+        bool unfiltered = filter.Length == 0;
+        foreach (WalkedFieldNode n in Fields)
+        {
+            if (unfiltered ||
+                n.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                (n.Type?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false))
+            {
+                FilteredFields.Add(n);
+            }
+        }
     }
 
     // ---------- Static helpers (type / hex parsing) ----------------------

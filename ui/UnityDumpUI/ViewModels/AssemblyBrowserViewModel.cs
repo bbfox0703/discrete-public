@@ -130,6 +130,8 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     {
         Fields.Clear();
         Methods.Clear();
+        FilteredFields.Clear();
+        FilteredMethods.Clear();
         ParentChain = string.Empty;
         if (value is null || SelectedAssembly is null) return;
         _ = LoadClassDetailAsync(SelectedAssembly.Name, value.Namespace, value.Name);
@@ -139,6 +141,18 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     public ObservableCollection<FieldRow>  Fields  { get; } = new();
     public ObservableCollection<MethodRow> Methods { get; } = new();
+
+    /// <summary>Filtered view of <see cref="Fields"/> driven by
+    /// <see cref="FieldFilter"/>. UI-only — export commands and "Copy CE
+    /// field" still operate on the full <see cref="Fields"/> /
+    /// <c>_currentChain</c> data.</summary>
+    public ObservableCollection<FieldRow>  FilteredFields  { get; } = new();
+    public ObservableCollection<MethodRow> FilteredMethods { get; } = new();
+
+    [ObservableProperty] private string _fieldFilter  = string.Empty;
+    [ObservableProperty] private string _methodFilter = string.Empty;
+    partial void OnFieldFilterChanged(string value)  => RefilterFields();
+    partial void OnMethodFilterChanged(string value) => RefilterMethods();
 
     /// <summary>Currently selected row in the Fields DataGrid — drives "Copy CE field".</summary>
     [ObservableProperty]
@@ -321,6 +335,8 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
                     }
                 }
             }
+            RefilterFields();
+            RefilterMethods();
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"classInfo {assembly}!{@namespace}.{name} fields={Fields.Count} methods={Methods.Count} inherited={ShowInherited}");
         }
@@ -543,6 +559,46 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
                 c.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase))
             {
                 FilteredClasses.Add(c);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rebuild <see cref="FilteredFields"/> from <see cref="Fields"/>
+    /// using a substring match against the row's name (case-insensitive).
+    /// UI-only — exports + Copy CE field still walk the unfiltered Fields
+    /// / current parent chain.
+    /// </summary>
+    private void RefilterFields()
+    {
+        FilteredFields.Clear();
+        string filter = FieldFilter ?? string.Empty;
+        bool unfiltered = filter.Length == 0;
+        foreach (FieldRow f in Fields)
+        {
+            if (unfiltered ||
+                f.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                (f.Type?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false))
+            {
+                FilteredFields.Add(f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Same shape as <see cref="RefilterFields"/> for the Methods grid.
+    /// </summary>
+    private void RefilterMethods()
+    {
+        FilteredMethods.Clear();
+        string filter = MethodFilter ?? string.Empty;
+        bool unfiltered = filter.Length == 0;
+        foreach (MethodRow m in Methods)
+        {
+            if (unfiltered ||
+                m.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            {
+                FilteredMethods.Add(m);
             }
         }
     }

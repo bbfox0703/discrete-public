@@ -269,36 +269,47 @@
         <!-- Tabs: Fields / Methods -->
         <TabControl>
           <TabItem Header="{StaticResource Browser.FieldsTab}">
-            <DataGrid ItemsSource="{Binding Browser.Fields}"
-                      SelectedItem="{Binding Browser.SelectedFieldRow, Mode=TwoWay}"
-                      IsReadOnly="True"
-                      AutoGenerateColumns="False"
-                      CanUserResizeColumns="True"
-                      CanUserReorderColumns="True"
-                      CanUserSortColumns="True"
-                      GridLinesVisibility="Horizontal"
-                      x:DataType="vm:MainWindowViewModel">
-              <DataGrid.ContextMenu>
-                <ContextMenu>
-                  <MenuItem Header="{StaticResource Browser.CopyCeField}"
-                            Command="{Binding Browser.CopyCeFieldCommand}" />
-                </ContextMenu>
-              </DataGrid.ContextMenu>
-              <DataGrid.Columns>
-                <DataGridTextColumn Header="{StaticResource Browser.ColName}"   Width="*"
-                                    Binding="{Binding Name, x:DataType=vm:FieldRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
-                                    Binding="{Binding OffsetHex, x:DataType=vm:FieldRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
-                                    Binding="{Binding Type, x:DataType=vm:FieldRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"  Width="80"
-                                    Binding="{Binding FlagsHex, x:DataType=vm:FieldRow}" />
-                <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
-                                        Binding="{Binding IsStatic, x:DataType=vm:FieldRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                    Binding="{Binding DeclaredIn, x:DataType=vm:FieldRow}" />
-              </DataGrid.Columns>
-            </DataGrid>
+            <DockPanel>
+              <!-- Filter is UI-only — exports + Copy CE field operate on
+                   the unfiltered Fields collection. Matches name OR type
+                   (case-insensitive substring) so a search like "vector"
+                   surfaces every Vector3 field across the inheritance chain. -->
+              <TextBox DockPanel.Dock="Top"
+                       PlaceholderText="{StaticResource Browser.FilterFieldsWatermark}"
+                       Text="{Binding Browser.FieldFilter, Mode=TwoWay}"
+                       Margin="0,0,0,4" />
+              <DataGrid ItemsSource="{Binding Browser.FilteredFields}"
+                        SelectedItem="{Binding Browser.SelectedFieldRow, Mode=TwoWay}"
+                        IsReadOnly="True"
+                        AutoGenerateColumns="False"
+                        CanUserResizeColumns="True"
+                        CanUserReorderColumns="True"
+                        CanUserSortColumns="True"
+                        GridLinesVisibility="Horizontal"
+                        x:DataType="vm:MainWindowViewModel">
+                <DataGrid.ContextMenu>
+                  <ContextMenu>
+                    <MenuItem Header="{StaticResource Browser.CopyCeField}"
+                              Command="{Binding Browser.CopyCeFieldCommand}" />
+                  </ContextMenu>
+                </DataGrid.ContextMenu>
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="{StaticResource Browser.ColName}"   Width="*"
+                                      Binding="{Binding Name, x:DataType=vm:FieldRow}" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
+                                      Binding="{Binding OffsetHex, x:DataType=vm:FieldRow}"
+                                      SortMemberPath="Offset" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
+                                      Binding="{Binding Type, x:DataType=vm:FieldRow}" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"  Width="80"
+                                      Binding="{Binding FlagsHex, x:DataType=vm:FieldRow}" />
+                  <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
+                                          Binding="{Binding IsStatic, x:DataType=vm:FieldRow}" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
+                                      Binding="{Binding DeclaredIn, x:DataType=vm:FieldRow}" />
+                </DataGrid.Columns>
+              </DataGrid>
+            </DockPanel>
           </TabItem>
           <TabItem Header="{StaticResource Inspector.Tab}">
             <DockPanel Margin="0,4,0,0">
@@ -411,6 +422,16 @@
                                  Width="80" Height="4" VerticalAlignment="Center" />
                   </Grid>
 
+                  <!-- Field filter is UI-only — Copy CE XML / Copy CE field
+                       still operate on the unfiltered tree, mirroring the
+                       Assemblies / Classes filter precedent. Substring match
+                       on Name OR Type, applied uniformly across top-level
+                       and any expanded children rows. -->
+                  <TextBox DockPanel.Dock="Top"
+                           PlaceholderText="{StaticResource Inspector.FilterWatermark}"
+                           Text="{Binding Inspector.Filter, Mode=TwoWay}"
+                           Margin="0,0,0,4" />
+
                   <!-- Phase 11.5: hierarchical field grid. Sorting is OFF
                        because rows are positioned relative to their parent
                        (parent first, then indented children). Expand chevron
@@ -429,7 +450,7 @@
                        would otherwise sort lexicographically ("0x100" before
                        "0x80"). -->
                   <DataGrid x:Name="FieldsDataGrid"
-                            ItemsSource="{Binding Inspector.Fields}"
+                            ItemsSource="{Binding Inspector.FilteredFields}"
                             SelectedItem="{Binding Inspector.SelectedNode, Mode=TwoWay}"
                             IsReadOnly="True"
                             AutoGenerateColumns="False"
@@ -489,29 +510,35 @@
             </DockPanel>
           </TabItem>
           <TabItem Header="{StaticResource Browser.MethodsTab}">
-            <DataGrid ItemsSource="{Binding Browser.Methods}"
-                      IsReadOnly="True"
-                      AutoGenerateColumns="False"
-                      CanUserResizeColumns="True"
-                      CanUserReorderColumns="True"
-                      CanUserSortColumns="True"
-                      GridLinesVisibility="Horizontal"
-                      x:DataType="vm:MainWindowViewModel">
-              <DataGrid.Columns>
-                <DataGridTextColumn Header="{StaticResource Browser.ColName}"    Width="*"
-                                    Binding="{Binding Name, x:DataType=vm:MethodRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColAddress}" Width="160"
-                                    Binding="{Binding Address, x:DataType=vm:MethodRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColToken}"   Width="100"
-                                    Binding="{Binding TokenHex, x:DataType=vm:MethodRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"   Width="80"
-                                    Binding="{Binding FlagsHex, x:DataType=vm:MethodRow}" />
-                <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
-                                        Binding="{Binding IsStatic, x:DataType=vm:MethodRow}" />
-                <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                    Binding="{Binding DeclaredIn, x:DataType=vm:MethodRow}" />
-              </DataGrid.Columns>
-            </DataGrid>
+            <DockPanel>
+              <TextBox DockPanel.Dock="Top"
+                       PlaceholderText="{StaticResource Browser.FilterMethodsWatermark}"
+                       Text="{Binding Browser.MethodFilter, Mode=TwoWay}"
+                       Margin="0,0,0,4" />
+              <DataGrid ItemsSource="{Binding Browser.FilteredMethods}"
+                        IsReadOnly="True"
+                        AutoGenerateColumns="False"
+                        CanUserResizeColumns="True"
+                        CanUserReorderColumns="True"
+                        CanUserSortColumns="True"
+                        GridLinesVisibility="Horizontal"
+                        x:DataType="vm:MainWindowViewModel">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="{StaticResource Browser.ColName}"    Width="*"
+                                      Binding="{Binding Name, x:DataType=vm:MethodRow}" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColAddress}" Width="160"
+                                      Binding="{Binding Address, x:DataType=vm:MethodRow}" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColToken}"   Width="100"
+                                      Binding="{Binding TokenHex, x:DataType=vm:MethodRow}" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"   Width="80"
+                                      Binding="{Binding FlagsHex, x:DataType=vm:MethodRow}" />
+                  <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
+                                          Binding="{Binding IsStatic, x:DataType=vm:MethodRow}" />
+                  <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
+                                      Binding="{Binding DeclaredIn, x:DataType=vm:MethodRow}" />
+                </DataGrid.Columns>
+              </DataGrid>
+            </DockPanel>
           </TabItem>
         </TabControl>
       </DockPanel>
