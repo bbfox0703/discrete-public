@@ -46,7 +46,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('DLL','UI','Test','ProxyDLL','MetadataCli','All')]
+    [ValidateSet('DLL','UI','Test','ProxyDLL','MetadataCli','Deploy','DeployScripts','All')]
     [string]$Target = 'All',
 
     [ValidateSet('Mono','IL2CPP','Both')]
@@ -421,12 +421,30 @@ function Copy-CompanionArtifacts {
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
+function Invoke-Deploy {
+    param([string]$DeployMode)
+    $script = Join-Path $RepoRoot 'tools\Install-CEScripts.ps1'
+    if (-not (Test-Path $script)) {
+        Write-Fail "Install-CEScripts.ps1 not found at $script"
+        return $false
+    }
+    # Refresh dist\ from scripts\ + build_number.txt before deploying so the
+    # release-mode copy (dist\ -> CE) picks up live edits without requiring
+    # a full build. Cheap; touches only Lua + companion files.
+    Copy-CompanionArtifacts
+    Write-Banner "Deploying to Cheat Engine ($DeployMode)"
+    & $script -Mode $DeployMode | Out-Host
+    return ($LASTEXITCODE -eq 0)
+}
+
 switch ($Target) {
-    'DLL'         { if (-not (Build-Dll))         { $exitCode = 1 } }
-    'UI'          { if (-not (Build-Ui))          { $exitCode = 1 } }
-    'Test'        { if (-not (Run-Tests))         { $exitCode = 1 } }
-    'ProxyDLL'    { if (-not (Build-ProxyDll))    { $exitCode = 1 } }
-    'MetadataCli' { if (-not (Build-MetadataCli)) { $exitCode = 1 } }
+    'DLL'           { if (-not (Build-Dll))         { $exitCode = 1 } }
+    'UI'            { if (-not (Build-Ui))          { $exitCode = 1 } }
+    'Test'          { if (-not (Run-Tests))         { $exitCode = 1 } }
+    'ProxyDLL'      { if (-not (Build-ProxyDll))    { $exitCode = 1 } }
+    'MetadataCli'   { if (-not (Build-MetadataCli)) { $exitCode = 1 } }
+    'Deploy'        { if (-not (Invoke-Deploy 'release')) { $exitCode = 1 } }
+    'DeployScripts' { if (-not (Invoke-Deploy 'scripts')) { $exitCode = 1 } }
     'All' {
         if (-not (Build-Dll))         { $exitCode = 1 }
         if (-not (Build-Ui))          { $exitCode = 1 }

@@ -399,10 +399,18 @@ Unity:{AssemblyName}:{Namespace}.{ClassName}._static            → pointer to s
 Unity:{AssemblyName}:{Namespace}.{ClassName}.s_{FieldName}      → offset within static block
 
 // Methods:
-Unity:{AssemblyName}:{Namespace}.{ClassName}::{MethodName}      → native address
+Unity:{AssemblyName}:{Namespace}.{ClassName}.m_{MethodName}     → native address
 
 // Class metadata pointer:
 Unity:{AssemblyName}:{Namespace}.{ClassName}._klass             → MonoClass* or Il2CppClass*
+
+// NOTE: methods previously used `::` as the separator. CE's symbol resolver
+// treats `::` as ambiguous and falls through to a slow Mono-runtime
+// enumeration that hangs the UI for minutes when called against a large
+// game (Hollow Knight Silksong's Mono runtime, ~half a million symbols).
+// The `.m_` form mirrors the `.s_` static-field convention and resolves
+// through the fast local-symbol path. unity_symbols.lua emits `.m_` since
+// build #159+; older cheat tables hardcoding `::` will need updating.
 ```
 
 ### CE Table Structure

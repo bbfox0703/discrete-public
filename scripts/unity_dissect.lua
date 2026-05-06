@@ -111,6 +111,11 @@ local PIPE = [[\\.\pipe\UnityDumpBfx]]
 local nextId = 0
 
 local function rpc(cmd, args)
+    -- Yield to CE's Windows message pump every RPC. Belt-and-suspenders
+    -- keeping both Lua scripts symmetric — even though dissectClass currently
+    -- makes only one RPC per invocation, future multi-RPC additions
+    -- shouldn't have to rediscover the main-thread starvation trap.
+    if processMessages then processMessages() end
     nextId = nextId + 1
     local id = nextId
 
@@ -130,7 +135,15 @@ local function rpc(cmd, args)
     end
     local line = string.format('{"id":%d,"cmd":%s,"args":%s}', id, quote(cmd), argsJson)
 
-    local f, fe = io.open(PIPE, "r+b")
+    -- The DLL's pipe-server worker thread may not have called CreateNamedPipeW
+    -- yet by the time the inject script returns "Pipe ready". Retry up to ~3s
+    -- before giving up — same race the C# UI's PipeClient handles with retry.
+    local f, fe
+    for attempt = 1, 15 do
+        f, fe = io.open(PIPE, "r+b")
+        if f then break end
+        sleep(200)
+    end
     if f == nil then
         error("Cannot open pipe " .. PIPE .. ": " .. tostring(fe) ..
               " — run unity_dump.lua first to inject the DLL.")

@@ -17,7 +17,12 @@
 --
 -- Naming convention (Architecture.md §"Symbol Registration Pattern"):
 --   Unity:{Asm}:{Ns}.{Cls}.s_{Field}    -> static field absolute address
---   Unity:{Asm}:{Ns}.{Cls}::{Method}    -> method native address (when known)
+--   Unity:{Asm}:{Ns}.{Cls}.m_{Method}   -> method native address (when known)
+--
+-- Method names previously used `::` as the separator. CE's symbol resolver
+-- treats `::` as ambiguous and falls through to a slow Mono-runtime
+-- enumeration that can hang the UI for minutes. The `.m_` form mirrors
+-- `.s_` for static fields and resolves through the fast local-symbol path.
 --
 -- Backend differences:
 --   IL2CPP: every method has a baked-in address; getClassInfo returns it
@@ -88,6 +93,14 @@ local function parseValue(s, i)
 end
 
 local function rpc(cmd, args)
+    -- Yield to CE's Windows message pump every RPC. registerClassSymbols on
+    -- a 300+ method class issues that many back-to-back pipe round-trips on
+    -- CE's main thread; without this CE appears hung for the duration of
+    -- the loop. processMessages() alone proved insufficient — empirically
+    -- a kernel-level sleep(1) is required to actually let the message pump
+    -- breathe. Per-method cost is ~1 ms, so 330 methods ~= +330 ms total.
+    if processMessages then processMessages() end
+    sleep(1)
     nextId = nextId + 1
     local function quote(x) return '"' .. tostring(x):gsub('"', '\\"') .. '"' end
     local parts = {}
@@ -99,7 +112,15 @@ local function rpc(cmd, args)
     end
     local argsJson = next(parts) and ("{" .. table.concat(parts, ",") .. "}") or "{}"
     local line = string.format('{"id":%d,"cmd":%s,"args":%s}', nextId, quote(cmd), argsJson)
-    local f, fe = io.open(PIPE, "r+b")
+    -- The DLL's pipe-server worker thread may not have called CreateNamedPipeW
+    -- yet by the time the inject script returns "Pipe ready". Retry up to ~3s
+    -- before giving up — same race the C# UI's PipeClient handles with retry.
+    local f, fe
+    for attempt = 1, 15 do
+        f, fe = io.open(PIPE, "r+b")
+        if f then break end
+        sleep(200)
+    end
     if f == nil then error("pipe open: " .. tostring(fe)) end
     f:write(line .. "\n"); f:flush()
     local resp = f:read("*l"); f:close()
@@ -125,11 +146,12 @@ end
 --- @param assembly string
 --- @param ns       string|nil  Namespace ("" if top-level)
 --- @param name     string      Class name
---- @param opts     table|nil   {compileMethods=true|false}
+--- @param opts     table|nil   {compileMethods=true|false, verbose=false}
 function registerClassSymbols(assembly, ns, name, opts)
     opts = opts or {}
     local compileMethods = opts.compileMethods
     if compileMethods == nil then compileMethods = true end
+    local verbose = opts.verbose == true
 
     local backend = detectBackend()
     local isMono  = backend == "Mono"
@@ -174,9 +196,19 @@ function registerClassSymbols(assembly, ns, name, opts)
     --    we issue monoCompileMethod per method to force compilation. The
     --    address-already-populated check still runs first because Mono
     --    can pre-JIT some methods (e.g. ones called during scene load).
-    for _, m in ipairs(info.methods or {}) do
+    --
+    -- IMPORTANT: large classes (300+ methods) issue hundreds of back-to-back
+    -- pipe RPCs, which starves CE's main-thread message pump and makes CE
+    -- *appear* hung even though Lua is making forward progress. The progress
+    -- log every 25 methods is a yield point — print writes to CE's console
+    -- widget and lets CE service paint/input events between batches.
+    local methodList = info.methods or {}
+    local methodTotal = #methodList
+    for i, m in ipairs(methodList) do
+        if i % 25 == 0 then log("  progress: %d / %d methods", i, methodTotal) end
         local addr = m.address
         if (not addr or addr == "0x0" or addr == "") and isMono and compileMethods then
+            if verbose then log("  JIT: %s", m.name) end
             local cm = rpc("monoCompileMethod",
                 { assembly = assembly, namespace = ns or "", name = name, method = m.name })
             if cm.result and cm.result.address and #cm.result.address > 0 then
@@ -191,7 +223,7 @@ function registerClassSymbols(assembly, ns, name, opts)
         if addr and addr ~= "0x0" and addr ~= "" then
             local addrInt = tonumber(addr:gsub("^0x", ""), 16)
             if addrInt and addrInt ~= 0 and registerSymbol then
-                local sym = prefix .. "::" .. m.name
+                local sym = prefix .. ".m_" .. m.name
                 registerSymbol(sym, addrInt, true)
                 methods = methods + 1
             end

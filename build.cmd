@@ -50,6 +50,8 @@ if "!UPPER!"=="UI"      ( set "TARGET=UI"      & shift & goto :parse_args )
 if "!UPPER!"=="TEST"    ( set "TARGET=Test"    & shift & goto :parse_args )
 if "!UPPER!"=="PROXY"   ( set "TARGET=ProxyDLL" & shift & goto :parse_args )
 if "!UPPER!"=="CLI"     ( set "TARGET=MetadataCli" & shift & goto :parse_args )
+if "!UPPER!"=="DEPLOY"  ( set "TARGET=Deploy"  & shift & goto :parse_args )
+if "!UPPER!"=="DEPLOY-SCRIPTS" ( set "TARGET=DeployScripts" & shift & goto :parse_args )
 if "!UPPER!"=="ALL"     ( set "TARGET=All"     & shift & goto :parse_args )
 if "!UPPER!"=="/?"      goto :usage
 if "!UPPER!"=="-H"      goto :usage
@@ -116,14 +118,16 @@ echo    release     Optimized build (default)
 echo    publish     Optimized Native AOT single-file exe (distribution)
 echo.
 echo  Targets:
-echo    all         Build everything (default)
-echo    dll         C++ DLLs (both Mono + IL2CPP)
-echo    mono        Mono DLL only
-echo    il2cpp      IL2CPP DLL only
-echo    ui          C# Avalonia UI only
-echo    test        Build + run xUnit tests
-echo    proxy       Proxy DLLs (Phase 12 placeholder)
-echo    cli         Offline metadata-cli (Phase 13)
+echo    all              Build everything (default)
+echo    dll              C++ DLLs (both Mono + IL2CPP)
+echo    mono             Mono DLL only
+echo    il2cpp           IL2CPP DLL only
+echo    ui               C# Avalonia UI only
+echo    test             Build + run xUnit tests
+echo    proxy            Proxy DLLs (Phase 12 placeholder)
+echo    cli              Offline metadata-cli (Phase 13)
+echo    deploy           Copy dist\*.lua + DLLs into CE\discrete\ (post-build)
+echo    deploy-scripts   Copy scripts\*.lua + dist\DLLs (live iteration)
 echo.
 echo  Options:
 echo    clean       Wipe build/ + dist/ first
@@ -134,6 +138,8 @@ echo    build debug             Debug build
 echo    build publish clean     Clean + AOT publish
 echo    build mono              Mono DLL only
 echo    build test              Run tests
+echo    build deploy            Install dist\ artifacts to CE\discrete\
+echo    build deploy-scripts    Sync scripts\ edits to CE\discrete\ (no rebuild)
 echo.
 echo  All output lands in dist\ alongside build_number.txt.
 echo.
