@@ -392,6 +392,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         // collection wrappers (those go through Collection above).
         if (TryParseClassName(node.Type, out string ns, out string name) is false) return;
 
+        // Generic instances need the IL-form name (with backtick suffix) for
+        // FindClass to match — the wire-side `il2cpp_type_get_name` strips it
+        // ("ClassAry`1<T>" → "ClassAry<T>"), but the runtime class registry
+        // keeps the suffix. Try the bare name first (covers non-generic
+        // types), then arity 1..3 fallbacks.
+        bool isGeneric = node.Type is { Length: > 0 } t && t.IndexOf('<') > 0;
+        var nameVariants = new List<string> { name };
+        if (isGeneric)
+        {
+            nameVariants.Add(name + "`1");
+            nameVariants.Add(name + "`2");
+            nameVariants.Add(name + "`3");
+        }
+
         // Assembly resolution: walkInstance searches ONLY the named image,
         // so UnityEngine.Vector3 won't be found in Assembly-CSharp even
         // though the field lives in an Assembly-CSharp class. Try the
@@ -401,14 +415,28 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         // fix (logged as a future follow-up).
         string[] candidates = BuildAssemblyCandidates(TargetAssembly, ns);
         WalkInstanceResult? res = null;
-        foreach (string asm in candidates)
+        string? lastErr = null;
+        foreach (string nv in nameVariants)
         {
-            WalkInstanceResult attempt = await _backend
-                .WalkInstanceAsync(node.EffectiveAddress!, asm, ns, name, ct)
-                .ConfigureAwait(true);
-            if (string.IsNullOrEmpty(attempt.Error)) { res = attempt; break; }
+            foreach (string asm in candidates)
+            {
+                WalkInstanceResult attempt = await _backend
+                    .WalkInstanceAsync(node.EffectiveAddress!, asm, ns, nv, ct)
+                    .ConfigureAwait(true);
+                if (string.IsNullOrEmpty(attempt.Error)) { res = attempt; break; }
+                lastErr = attempt.Error;
+            }
+            if (res is not null) break;
         }
-        if (res is null || res.Fields is null) return;
+        if (res is null || res.Fields is null)
+        {
+            // Surface the failure so the chevron-clicked-but-no-children
+            // case isn't silent. Common cause: a generic instance whose
+            // arity-suffixed name doesn't exist in any candidate assembly.
+            ErrorMessage = $"expand {node.Name} ({node.Type}): "
+                         + (lastErr ?? "class not resolved in any candidate assembly");
+            return;
+        }
         foreach (WalkedField f in res.Fields)
         {
             WalkedFieldNode child = WalkedFieldNode.FromInstanceField(
@@ -783,14 +811,23 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         if (string.IsNullOrWhiteSpace(type)) return false;
         if (type.StartsWith("System.", StringComparison.Ordinal)) return false;
         if (type.EndsWith("[]", StringComparison.Ordinal)) return false;
-        int dot = type.LastIndexOf('.');
+
+        // Strip the generic instantiation suffix BEFORE splitting at the dot —
+        // for `MainGame.ClassAry<MainGame.CARRYITEM>` we want the last `.` in
+        // `MainGame.ClassAry`, not the one inside the generic argument. Without
+        // this, ns/name come out as `MainGame.ClassAry<MainGame` / `CARRYITEM>`
+        // and the DLL's FindClass(ns, name) lookup fails silently.
+        int lt = type.IndexOf('<');
+        string outer = lt > 0 ? type.Substring(0, lt) : type;
+
+        int dot = outer.LastIndexOf('.');
         if (dot < 0)
         {
-            name = type;
+            name = outer;
             return true;
         }
-        ns = type.Substring(0, dot);
-        name = type.Substring(dot + 1);
+        ns = outer.Substring(0, dot);
+        name = outer.Substring(dot + 1);
         return true;
     }
 
