@@ -53,12 +53,23 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         _backend = backend;
         _logger  = logger;
-        // Keep FilteredFields in lockstep with Fields. Every mutation path
-        // (walk repopulate, expand insert, collapse remove, target/clear)
-        // funnels through this so we don't have to remember to refilter at
-        // each call site.
+        // Keep FilteredFields in lockstep with Fields. Every singleton
+        // mutation funnels through this; bulk paths (walk repopulate,
+        // expand-children insert, subtree collapse) bracket their loops
+        // with `_refilterSuppressionDepth++` and call RefilterFields once
+        // at the end — otherwise a 1350-field PlayerData walk would do
+        // 1350 * O(N) refilters and 1350 DataGrid layout passes.
         Fields.CollectionChanged += (_, _) => RefilterFields();
     }
+
+    /// <summary>
+    /// Bulk-mutation re-entry guard. >0 means a caller is in the middle
+    /// of adding / removing many rows at once and prefers to refilter
+    /// once at the end. Counter (not bool) so nested batches compose
+    /// correctly — e.g. WalkInstanceAsync's repopulate loop wrapping
+    /// ToggleExpandAsync's InsertChildrenIntoFields during expansion replay.
+    /// </summary>
+    private int _refilterSuppressionDepth;
 
     /// <summary>
     /// View-supplied clipboard write — wired by MainWindow code-behind.
@@ -310,30 +321,45 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 ErrorMessage = $"walkInstance: {result.Error}";
                 return;
             }
-            Fields.Clear();
-            if (result.Fields is { } fields)
+            // Bulk repopulate: suppress the per-Add CollectionChanged
+            // refilter so a 1350-field PlayerData walk doesn't trigger
+            // 1350 refilter passes + 1350 DataGrid layout passes (was
+            // making instance-switch take several seconds). Final
+            // refilter is invoked once after the loop AND any expansion
+            // replay completes.
+            _refilterSuppressionDepth++;
+            try
             {
-                foreach (WalkedField f in fields)
+                Fields.Clear();
+                if (result.Fields is { } fields)
                 {
-                    Fields.Add(WalkedFieldNode.FromInstanceField(f, indent: 0,
-                                                                 toggle: ToggleExpandAsync));
-                }
-            }
-            WalkSummary = $"depth={result.Depth} count={result.Count}";
-
-            // Replay top-level expansions only. Deeper-than-one expansions
-            // come back collapsed — keeping the auto-refresh cost bounded
-            // (one extra pipe RPC per expanded root, not the whole tree).
-            if (expandedRoots.Count > 0)
-            {
-                foreach (WalkedFieldNode n in Fields.ToArray())
-                {
-                    if (n.IndentLevel == 0 && expandedRoots.Contains(n.Name) && n.CanExpand)
+                    foreach (WalkedField f in fields)
                     {
-                        await ToggleExpandAsync(n).ConfigureAwait(true);
+                        Fields.Add(WalkedFieldNode.FromInstanceField(f, indent: 0,
+                                                                     toggle: ToggleExpandAsync));
+                    }
+                }
+                WalkSummary = $"depth={result.Depth} count={result.Count}";
+
+                // Replay top-level expansions only. Deeper-than-one expansions
+                // come back collapsed — keeping the auto-refresh cost bounded
+                // (one extra pipe RPC per expanded root, not the whole tree).
+                if (expandedRoots.Count > 0)
+                {
+                    foreach (WalkedFieldNode n in Fields.ToArray())
+                    {
+                        if (n.IndentLevel == 0 && expandedRoots.Contains(n.Name) && n.CanExpand)
+                        {
+                            await ToggleExpandAsync(n).ConfigureAwait(true);
+                        }
                     }
                 }
             }
+            finally
+            {
+                _refilterSuppressionDepth--;
+            }
+            RefilterFields();
 
             // Re-select the previously-focused field by Name + DeclaredIn so
             // the user keeps their viewport when flipping between instances
@@ -617,16 +643,27 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// <summary>
     /// Insert the children list into <see cref="Fields"/> immediately after
     /// the parent. Caller must have already populated <c>node.Children</c>.
+    /// Suppresses per-Insert refilter — for a deep array expansion a 256-
+    /// slot Insert loop would otherwise hammer the DataGrid 256 times.
     /// </summary>
     private void InsertChildrenIntoFields(WalkedFieldNode node)
     {
         int parentIdx = Fields.IndexOf(node);
         if (parentIdx < 0) return;
-        int insertAt = parentIdx + 1;
-        foreach (WalkedFieldNode c in node.Children)
+        _refilterSuppressionDepth++;
+        try
         {
-            Fields.Insert(insertAt++, c);
+            int insertAt = parentIdx + 1;
+            foreach (WalkedFieldNode c in node.Children)
+            {
+                Fields.Insert(insertAt++, c);
+            }
         }
+        finally
+        {
+            _refilterSuppressionDepth--;
+        }
+        RefilterFields();
     }
 
     /// <summary>
@@ -638,14 +675,23 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         int parentIdx = Fields.IndexOf(node);
         if (parentIdx < 0) return;
-        int i = parentIdx + 1;
-        while (i < Fields.Count && IsDescendant(Fields[i], node))
+        _refilterSuppressionDepth++;
+        try
         {
-            // Mark the row collapsed too so nested expand state doesn't
-            // leak when re-expanding the ancestor.
-            Fields[i].IsExpanded = false;
-            Fields.RemoveAt(i);
+            int i = parentIdx + 1;
+            while (i < Fields.Count && IsDescendant(Fields[i], node))
+            {
+                // Mark the row collapsed too so nested expand state doesn't
+                // leak when re-expanding the ancestor.
+                Fields[i].IsExpanded = false;
+                Fields.RemoveAt(i);
+            }
         }
+        finally
+        {
+            _refilterSuppressionDepth--;
+        }
+        RefilterFields();
     }
 
     private static bool IsDescendant(WalkedFieldNode candidate, WalkedFieldNode ancestor)
@@ -866,6 +912,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// </summary>
     private void RefilterFields()
     {
+        if (_refilterSuppressionDepth > 0) return;
         FilteredFields.Clear();
         string filter = Filter ?? string.Empty;
         bool unfiltered = filter.Length == 0;
