@@ -20,8 +20,28 @@ public partial class MainWindow : Window
         vm.Browser.SaveFileAsync     = SaveFileAsync;
         vm.Browser.CopyToClipboardAsync   = CopyToClipboardAsync;
         vm.Inspector.CopyToClipboardAsync = CopyToClipboardAsync;
+        vm.Inspector.ScrollFieldIntoView  = ScrollInspectorFieldIntoView;
         vm.ShowProxyDeploy                = ShowProxyDeployWindow;
         DataContext = vm;
+    }
+
+    /// <summary>
+    /// Bring an inspector field row into the visible portion of the Walked
+    /// fields DataGrid. Called by the VM after re-walking (instance switch
+    /// or auto-refresh tick) so the user's previously-focused row stays
+    /// visible without manual re-scroll. Lookup is by x:Name on the grid.
+    /// </summary>
+    private void ScrollInspectorFieldIntoView(WalkedFieldNode node)
+    {
+        // Defer to the next dispatcher pass — at the moment SelectedNode is
+        // set, the DataGrid hasn't necessarily realised the new row container,
+        // so ScrollIntoView would no-op. Posting it back through the
+        // dispatcher gives the layout pass a chance to materialise the row.
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            var grid = this.FindControl<DataGrid>("FieldsDataGrid");
+            grid?.ScrollIntoView(node, null);
+        }, Avalonia.Threading.DispatcherPriority.Background);
     }
 
     /// <summary>

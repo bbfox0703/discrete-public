@@ -61,6 +61,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// </summary>
     public Func<string, Task>? CopyToClipboardAsync { get; set; }
 
+    /// <summary>
+    /// View-supplied DataGrid scroll-into-view bridge. Invoked by the VM
+    /// after a fresh walk repopulates <see cref="Fields"/> so the
+    /// previously-selected field stays visible across instance switches
+    /// (and auto-refresh ticks). Null is fine — VM falls back to plain
+    /// SelectedNode reassignment and the user just sees the scroll reset.
+    /// </summary>
+    public Action<WalkedFieldNode>? ScrollFieldIntoView { get; set; }
+
     // ---------- Target ----------------------------------------------------
 
     [ObservableProperty]
@@ -261,6 +270,13 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 if (n.IndentLevel == 0 && n.IsExpanded)
                     expandedRoots.Add(n.Name);
             }
+            // Snapshot the currently-selected field's identity so we can
+            // restore selection (and scroll position) after the rebuild.
+            // Same class = same field schema, so a name+from match almost
+            // always succeeds; falls back to top when the user changed
+            // class entirely.
+            string? selectedName = SelectedNode?.Name;
+            string? selectedFrom = SelectedNode?.DeclaredIn;
 
             WalkInstanceResult result = await _backend
                 .WalkInstanceAsync(address, TargetAssembly!, TargetNamespace, TargetName!, ct)
@@ -293,6 +309,29 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                     {
                         await ToggleExpandAsync(n).ConfigureAwait(true);
                     }
+                }
+            }
+
+            // Re-select the previously-focused field by Name + DeclaredIn so
+            // the user keeps their viewport when flipping between instances
+            // of the same class. DeclaredIn disambiguates when a derived
+            // class shadows a base member with the same name.
+            if (!string.IsNullOrEmpty(selectedName))
+            {
+                WalkedFieldNode? match = null;
+                foreach (WalkedFieldNode n in Fields)
+                {
+                    if (n.Name == selectedName
+                        && (string.IsNullOrEmpty(selectedFrom) || n.DeclaredIn == selectedFrom))
+                    {
+                        match = n;
+                        break;
+                    }
+                }
+                if (match is not null)
+                {
+                    SelectedNode = match;
+                    ScrollFieldIntoView?.Invoke(match);
                 }
             }
 

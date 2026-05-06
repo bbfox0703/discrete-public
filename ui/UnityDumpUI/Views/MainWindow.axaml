@@ -417,13 +417,25 @@
                        lives in the Name column; right-click any row to copy
                        a CE XML / CE field rooted at that node's effective
                        address. -->
-                  <DataGrid ItemsSource="{Binding Inspector.Fields}"
+                  <!-- CanUserSortColumns=True drives Avalonia's built-in sort
+                       through a DataGridCollectionView wrapper, which sorts
+                       the visual layer only — the underlying `Fields`
+                       observable stays in offset order so the VM's
+                       expand / collapse / scroll-into-view logic (which
+                       indexes into Fields directly) continues to work.
+                       SortMemberPath on the Offset and Name columns points
+                       at the int / string properties so numeric / textual
+                       sort behaves naturally; the OffsetHex display string
+                       would otherwise sort lexicographically ("0x100" before
+                       "0x80"). -->
+                  <DataGrid x:Name="FieldsDataGrid"
+                            ItemsSource="{Binding Inspector.Fields}"
                             SelectedItem="{Binding Inspector.SelectedNode, Mode=TwoWay}"
                             IsReadOnly="True"
                             AutoGenerateColumns="False"
                             CanUserResizeColumns="True"
                             CanUserReorderColumns="True"
-                            CanUserSortColumns="False"
+                            CanUserSortColumns="True"
                             GridLinesVisibility="Horizontal"
                             x:DataType="vm:MainWindowViewModel">
                     <DataGrid.ContextMenu>
@@ -435,7 +447,8 @@
                       </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
-                      <DataGridTemplateColumn Header="{StaticResource Browser.ColName}" Width="*">
+                      <DataGridTemplateColumn Header="{StaticResource Browser.ColName}" Width="*"
+                                              SortMemberPath="Name">
                         <DataGridTemplateColumn.CellTemplate>
                           <DataTemplate x:DataType="vm:WalkedFieldNode">
                             <StackPanel Orientation="Horizontal" Spacing="2">
@@ -461,7 +474,8 @@
                         </DataGridTemplateColumn.CellTemplate>
                       </DataGridTemplateColumn>
                       <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
-                                          Binding="{Binding OffsetHex, x:DataType=vm:WalkedFieldNode}" />
+                                          Binding="{Binding OffsetHex, x:DataType=vm:WalkedFieldNode}"
+                                          SortMemberPath="Offset" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
                                           Binding="{Binding Type, x:DataType=vm:WalkedFieldNode}" />
                       <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"

@@ -23,6 +23,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -177,7 +178,11 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         {
             GetAssembliesResult result = await _backend.GetAssembliesAsync().ConfigureAwait(true);
             Assemblies.Clear();
-            foreach (AssemblyEntry entry in result.Assemblies)
+            // Sort alphabetically (case-insensitive). Backend order is image-load
+            // order which is engine-implementation-defined; the user expects
+            // Assembly-CSharp / common engine assemblies easy to find.
+            foreach (AssemblyEntry entry in result.Assemblies
+                .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
             {
                 Assemblies.Add(new AssemblyItem(entry.Name, entry.Path));
             }
@@ -215,7 +220,12 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
                 return;
             }
             Classes.Clear();
-            foreach (ClassEntry entry in result.Classes)
+            // Sort alphabetically by full name ("Namespace.Name") so PlayerData
+            // (etc.) are easy to scroll to. Token order from the backend is
+            // metadata declaration order which is rarely useful for browsing.
+            foreach (ClassEntry entry in result.Classes
+                .OrderBy(e => string.IsNullOrEmpty(e.Namespace) ? e.Name : $"{e.Namespace}.{e.Name}",
+                         StringComparer.OrdinalIgnoreCase))
             {
                 Classes.Add(new ClassItem(entry.Namespace ?? string.Empty, entry.Name, entry.Token));
             }
