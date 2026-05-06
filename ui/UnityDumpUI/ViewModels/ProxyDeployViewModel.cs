@@ -135,10 +135,13 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     [RelayCommand]
     private async Task UninstallSelectedAsync()
     {
+        // Match every "currently deployed" state, not just the unverifiable
+        // fallback. After the version-stamping work most rows live in
+        // DeployedCurrent / DeployedOutdated — earlier code checked only
+        // ProxyDeployStatus.Deployed and silently skipped them all.
         await RunBulkAsync("Uninstall", row => _installer
             .UninstallAsync(row.ExePath, default),
-            row => row.IsSelected && row.DeployStatus == ProxyDeployStatus.Deployed)
-            .ConfigureAwait(true);
+            row => row.IsSelected && IsDeployed(row)).ConfigureAwait(true);
     }
 
     /// <summary>
@@ -151,12 +154,20 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     {
         await RunBulkAsync("Update", row => _installer
             .InstallAsync(row.ExePath, row.Game.InstalledProxy, default),
-            row => row.Game.InstalledProxy != ProxyKind.None
-                && row.DeployStatus is ProxyDeployStatus.Deployed
-                                    or  ProxyDeployStatus.DeployedCurrent
-                                    or  ProxyDeployStatus.DeployedOutdated)
+            row => row.Game.InstalledProxy != ProxyKind.None && IsDeployed(row))
             .ConfigureAwait(true);
     }
+
+    /// <summary>
+    /// True when a row's proxy DLL is on disk in any form — the version-
+    /// stamped <c>DeployedCurrent</c> / <c>DeployedOutdated</c> states plus
+    /// the unverifiable <c>Deployed</c> fallback. Used by every "act on
+    /// deployed rows" filter so they stay in sync.
+    /// </summary>
+    private static bool IsDeployed(ProxyGameRow row) =>
+        row.DeployStatus is ProxyDeployStatus.Deployed
+                         or ProxyDeployStatus.DeployedCurrent
+                         or ProxyDeployStatus.DeployedOutdated;
 
     // ---------- Helpers --------------------------------------------------
 
@@ -246,9 +257,7 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         foreach (ProxyGameRow r in Games)
         {
             if (r.IsSelected) ++selected;
-            if (r.DeployStatus is ProxyDeployStatus.Deployed
-                              or  ProxyDeployStatus.DeployedCurrent
-                              or  ProxyDeployStatus.DeployedOutdated) ++deployed;
+            if (IsDeployed(r)) ++deployed;
             if (r.DeployStatus == ProxyDeployStatus.DeployedOutdated) ++outdated;
         }
         string outdatedSuffix = outdated > 0 ? $" ({outdated} outdated)" : string.Empty;
