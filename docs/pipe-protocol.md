@@ -551,13 +551,14 @@ Dump the string-literal pool.
 
 ## Address finder *(Both)*
 
-Phase 17a — inverse of `findInstances`. Given an arbitrary process address
-(typically from CE's *Find what writes / accesses*, pointer scan, or manual
-probe), identify which managed instance + class it sits inside. v1 reports
-the instance + class + raw `fieldOffset`; the field-name resolution arrives
-in Phase 17b. Algorithm: backward 8-byte stride scan from the queried
+Phases 17a + 17b — inverse of `findInstances`. Given an arbitrary process
+address (typically from CE's *Find what writes / accesses*, pointer scan,
+or manual probe), identify which managed instance + class + declared field
+it sits inside. Algorithm: backward 8-byte stride scan from the queried
 address looking for an object header whose first qword is a valid runtime
-class pointer (IL2CPP) or vtable pointer (Mono).
+class pointer (IL2CPP) or vtable pointer (Mono); then walk the parent
+chain and match the queried byte offset against each declared field's
+`[offset, offset+size)` range.
 
 ### `whatIsAt`
 
@@ -582,10 +583,33 @@ Response — managed instance found:
 //   "namespace":   "MainGame",
 //   "class":       "PLY_WORK",
 //   "fieldOffset": 8,                 // bytes from instance base to queried address
+//   "field": {                        // 17b — field whose [offset, offset+size) contains fieldOffset
+//     "name":           "HP",
+//     "type":           "System.Int32",
+//     "offset":         8,
+//     "size":           4,
+//     "isStatic":       false,
+//     "isValueType":    true,
+//     "isEnum":         false,
+//     "declaredIn":     "PLY_WORK",   // class name where this field is declared
+//     "kind":           "leaf",       // leaf | value-struct | pointer | interior
+//     "interiorOffset": 0             // present only when kind == "interior"
+//     // "underlying_type": "System.Int32"   // present only when isEnum == true
+//   },
+//   "nearestField":      null,        // populated only when field == null (no exact range hit)
+//   // "nearestFieldDelta": <int>     // present only when nearestField != null
 //   "scannedRange": { "from": "0x...", "to": "0x..." },
 //   "scannedSteps": <uint>            // number of 8-byte probes taken
 // }
 ```
+
+**Field kinds**:
+- `leaf` — primitive type at the field's exact offset (`System.Int32`, `System.Single`, `System.Boolean`, …) or an `enum`.
+- `value-struct` — value type at the field's exact offset (`Vector3`, `Color`, user struct, …).
+- `pointer` — reference type at the field's exact offset (`System.String`, an array, a class).
+- `interior` — queried offset falls inside the field's storage but not at its boundary; `interiorOffset` reports bytes from the field's start.
+
+When no declared field's range contains the queried offset (e.g. inside compiler padding or the unmanaged tail of a class), `field` is `null` and the closest declared field below the offset is returned in `nearestField` along with `nearestFieldDelta` (queriedOffset − field.offset).
 
 Response — no managed instance in the scanned range:
 

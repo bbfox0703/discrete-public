@@ -1235,12 +1235,14 @@ void RegisterCoreHandlers() {
         };
     });
 
-    // Phase 17a — address finder (Mono).
+    // Phase 17a — address finder (Mono); 17b adds field-offset resolution.
     // Backward 8-byte stride scan from the queried address; matches MonoVTable*
     // candidates against a cache built lazily on first call. The cache walks
     // every assembly's classes once and resolves a vtable per class via
-    // mono_class_vtable, then maps vtable→class for the lookup. Field-offset
-    // resolution lands in Phase 17b — for now we report instance + class.
+    // mono_class_vtable, then maps vtable→class for the lookup. The 17b
+    // pass walks the parent chain inside the same attach scope and resolves
+    // the queried byte offset back to a declared field (or the nearest one
+    // below it).
     PipeServer::RegisterHandler(MagicStrings::CmdWhatIsAt,
         [parseAddr, formatHex](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
@@ -1265,7 +1267,26 @@ void RegisterCoreHandlers() {
                 {"scannedSteps", hit.scannedSteps},
             };
         }
-        return json{
+        // Phase 17b — render FieldHit (shared shape across backends).
+        auto fieldToJson = [](const Mono::FieldHit& f) -> json {
+            json out = {
+                {"name",         f.name},
+                {"type",         f.typeName},
+                {"offset",       f.offset},
+                {"size",         f.size},
+                {"isStatic",     f.isStatic},
+                {"isValueType",  f.isValueType},
+                {"isEnum",       f.isEnum},
+                {"declaredIn",   f.declaredIn},
+                {"kind",         f.kind},
+            };
+            if (!f.underlyingTypeName.empty())
+                out["underlying_type"] = f.underlyingTypeName;
+            if (f.kind == "interior")
+                out["interiorOffset"] = static_cast<std::int64_t>(f.interiorOffset);
+            return out;
+        };
+        json result = {
             {"found",       true},
             {"address",     formatHex(hit.queriedAddr)},
             {"instance",    formatHex(hit.instance)},
@@ -1281,6 +1302,12 @@ void RegisterCoreHandlers() {
             }},
             {"scannedSteps", hit.scannedSteps},
         };
+        result["field"]        = hit.field.present        ? fieldToJson(hit.field)        : json(nullptr);
+        result["nearestField"] = hit.nearestField.present ? fieldToJson(hit.nearestField) : json(nullptr);
+        if (hit.nearestField.present) {
+            result["nearestFieldDelta"] = static_cast<std::int64_t>(hit.nearestFieldDelta);
+        }
+        return result;
     });
 
     // Phase 17a follow-up: diagnostics for the class-pointer cache. Lets the
@@ -2065,11 +2092,13 @@ void RegisterCoreHandlers() {
         };
     });
 
-    // Phase 17a — address finder (IL2CPP).
+    // Phase 17a — address finder (IL2CPP); 17b adds field-offset resolution.
     // Backward 8-byte stride scan; matches Il2CppClass* candidates against a
     // cache built lazily on first call. Cache is one full
     // EnumerateAssemblies → EnumerateClasses pass through every image; ~tens
-    // of ms on first hit, sub-ms on subsequent ones.
+    // of ms on first hit, sub-ms on subsequent ones. The 17b pass walks the
+    // parent chain inside the same attach scope and resolves the queried byte
+    // offset back to a declared field (or the nearest one below it).
     PipeServer::RegisterHandler(MagicStrings::CmdWhatIsAt,
         [parseAddr, formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
@@ -2094,7 +2123,26 @@ void RegisterCoreHandlers() {
                 {"scannedSteps", hit.scannedSteps},
             };
         }
-        return json{
+        // Phase 17b — render FieldHit (shared shape across backends).
+        auto fieldToJson = [](const IL2CPP::FieldHit& f) -> json {
+            json out = {
+                {"name",         f.name},
+                {"type",         f.typeName},
+                {"offset",       f.offset},
+                {"size",         f.size},
+                {"isStatic",     f.isStatic},
+                {"isValueType",  f.isValueType},
+                {"isEnum",       f.isEnum},
+                {"declaredIn",   f.declaredIn},
+                {"kind",         f.kind},
+            };
+            if (!f.underlyingTypeName.empty())
+                out["underlying_type"] = f.underlyingTypeName;
+            if (f.kind == "interior")
+                out["interiorOffset"] = static_cast<std::int64_t>(f.interiorOffset);
+            return out;
+        };
+        json result = {
             {"found",       true},
             {"address",     formatHex(hit.queriedAddr)},
             {"instance",    formatHex(hit.instance)},
@@ -2109,6 +2157,12 @@ void RegisterCoreHandlers() {
             }},
             {"scannedSteps", hit.scannedSteps},
         };
+        result["field"]        = hit.field.present        ? fieldToJson(hit.field)        : json(nullptr);
+        result["nearestField"] = hit.nearestField.present ? fieldToJson(hit.nearestField) : json(nullptr);
+        if (hit.nearestField.present) {
+            result["nearestFieldDelta"] = static_cast<std::int64_t>(hit.nearestFieldDelta);
+        }
+        return result;
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetClassRangeStats,

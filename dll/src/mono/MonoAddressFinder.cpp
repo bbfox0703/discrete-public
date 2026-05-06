@@ -9,10 +9,12 @@
 #include "MonoDomain.h"
 #include "MonoResolver.h"
 #include "MonoThreadAttach.h"
+#include "MonoTypeParser.h"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -54,6 +56,51 @@ MonoVTable* SehGetVtable(fn_class_vtable fn, MonoDomain* d, MonoClass* k) {
     __try { return fn(d, k); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+// Phase 17b — SEH-protected field-walk primitives.
+MonoClass* SehParentLookup(fn_class_get_parent fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+MonoClassField* SehNextFieldProbe(fn_class_get_fields fn, MonoClass* k, void** iter) {
+    __try { return fn(k, iter); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+const char* SehFieldNameProbe(fn_field_get_name fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+int SehFieldOffsetProbe(fn_field_get_offset fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+std::uint32_t SehFieldFlagsProbe(fn_field_get_flags fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+}
+MonoType* SehFieldTypeProbe(fn_field_get_type fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+MonoClass* SehClassFromMonoType(fn_class_from_mono_type fn, MonoType* t) {
+    __try { return fn(t); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+int SehIsValueTypeProbe(fn_class_is_valuetype fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int SehIsEnumProbe(fn_class_is_enum fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+MonoType* SehEnumBasetypeProbe(fn_class_enum_basetype fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+int SehValueSizeProbe(fn_class_value_size fn, MonoClass* k) {
+    __try { std::uint32_t a = 0; return fn(k, &a); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 #pragma warning(pop)
 
 bool ContainsKlass(std::uintptr_t p) {
@@ -74,6 +121,179 @@ std::string StripDllSuffix(const std::string& s) {
         if (tail == ".dll" || tail == ".DLL") return s.substr(0, s.size() - 4);
     }
     return s;
+}
+
+// Phase 17b — see il2cpp/IL2CPPAddressFinder.cpp for the design rationale
+// (the two implementations are kept symmetric except where the Mono and
+// IL2CPP runtime APIs diverge).
+struct ResolvedField {
+    std::string   name;
+    std::string   typeName;
+    std::size_t   offset      = 0;
+    std::size_t   size        = 0;
+    std::uint32_t flags       = 0;
+    bool          isValueType = false;
+    bool          isEnum      = false;
+    std::string   underlyingTypeName;
+    std::string   declaredIn;
+};
+
+std::size_t SizeOfPrimitive(const std::string& t) {
+    if (t == "System.Boolean" || t == "System.Byte" || t == "System.SByte") return 1;
+    if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
+    if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
+    if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
+    if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+    return 0;
+}
+
+bool TypeNameIsPrimitive(const std::string& t) {
+    return SizeOfPrimitive(t) != 0;
+}
+
+// Caller MUST hold a ThreadAttachGuard. mono_field_get_offset returns
+// offsets relative to MonoObject's start (header included), so they
+// map directly against `addr - instance_base`.
+std::vector<ResolvedField> EnumerateInstanceFields(MonoClass* klass) {
+    std::vector<ResolvedField> out;
+    if (klass == nullptr) return out;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_fields == nullptr) return out;
+
+    std::vector<MonoClass*> chain;
+    for (MonoClass* cur = klass; cur != nullptr && chain.size() < 16; ) {
+        chain.push_back(cur);
+        if (r.class_get_parent == nullptr) break;
+        cur = SehParentLookup(r.class_get_parent, cur);
+    }
+
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        MonoClass* cur = *it;
+        std::string declaredIn;
+        if (r.class_get_name != nullptr) {
+            const char* n = SehClassNameProbe(r.class_get_name, cur);
+            if (n != nullptr) declaredIn = n;
+        }
+
+        void* iter = nullptr;
+        for (;;) {
+            MonoClassField* f = SehNextFieldProbe(r.class_get_fields, cur, &iter);
+            if (f == nullptr) break;
+
+            ResolvedField rf;
+            rf.declaredIn = declaredIn;
+            if (r.field_get_name != nullptr) {
+                const char* n = SehFieldNameProbe(r.field_get_name, f);
+                if (n != nullptr) rf.name = n;
+            }
+            if (r.field_get_offset != nullptr) {
+                rf.offset = static_cast<std::size_t>(
+                    SehFieldOffsetProbe(r.field_get_offset, f));
+            }
+            if (r.field_get_flags != nullptr) {
+                rf.flags = SehFieldFlagsProbe(r.field_get_flags, f);
+            }
+            constexpr std::uint32_t kStatic = 0x10u;
+            if ((rf.flags & kStatic) != 0u) continue;
+
+            MonoType* ft = (r.field_get_type != nullptr)
+                ? SehFieldTypeProbe(r.field_get_type, f) : nullptr;
+            if (ft != nullptr) rf.typeName = TypeName(ft);
+
+            std::size_t sz = 0;
+            if (ft != nullptr && r.class_from_mono_type != nullptr) {
+                MonoClass* fc = SehClassFromMonoType(r.class_from_mono_type, ft);
+                if (fc != nullptr) {
+                    if (r.class_is_valuetype != nullptr) {
+                        rf.isValueType =
+                            SehIsValueTypeProbe(r.class_is_valuetype, fc) != 0;
+                    }
+                    if (r.class_is_enum != nullptr &&
+                        SehIsEnumProbe(r.class_is_enum, fc) != 0) {
+                        rf.isEnum = true;
+                        if (r.class_enum_basetype != nullptr) {
+                            MonoType* ut = SehEnumBasetypeProbe(r.class_enum_basetype, fc);
+                            if (ut != nullptr) rf.underlyingTypeName = TypeName(ut);
+                        }
+                    }
+                    if (rf.isValueType && r.class_value_size != nullptr) {
+                        int s = SehValueSizeProbe(r.class_value_size, fc);
+                        if (s > 0) sz = static_cast<std::size_t>(s);
+                    }
+                }
+            }
+            if (sz == 0) sz = SizeOfPrimitive(rf.typeName);
+            if (sz == 0) sz = 8;
+            rf.size = sz;
+            out.push_back(std::move(rf));
+        }
+    }
+
+    std::sort(out.begin(), out.end(),
+              [](const ResolvedField& a, const ResolvedField& b) {
+                  return a.offset < b.offset;
+              });
+    return out;
+}
+
+std::string ClassifyKind(const ResolvedField& rf, std::ptrdiff_t fieldOffset) {
+    bool exact = (fieldOffset == static_cast<std::ptrdiff_t>(rf.offset));
+    if (!exact) return "interior";
+    if (rf.isEnum) return "leaf";
+    if (rf.isValueType) {
+        return TypeNameIsPrimitive(rf.typeName) ? "leaf" : "value-struct";
+    }
+    return "pointer";
+}
+
+FieldHit MakeFieldHit(const ResolvedField& rf, std::ptrdiff_t fieldOffset, bool exact) {
+    FieldHit fh;
+    fh.present     = true;
+    fh.name        = rf.name;
+    fh.typeName    = rf.typeName;
+    fh.offset      = rf.offset;
+    fh.size        = rf.size;
+    fh.flags       = rf.flags;
+    fh.isStatic    = false;
+    fh.isValueType = rf.isValueType;
+    fh.isEnum      = rf.isEnum;
+    fh.underlyingTypeName = rf.underlyingTypeName;
+    fh.declaredIn  = rf.declaredIn;
+    fh.kind        = exact ? ClassifyKind(rf, fieldOffset) : "interior";
+    fh.interiorOffset = (fh.kind == "interior")
+        ? (fieldOffset - static_cast<std::ptrdiff_t>(rf.offset))
+        : 0;
+    return fh;
+}
+
+void ResolveFieldAt(MonoClass* klass, std::ptrdiff_t fieldOffset,
+                    FieldHit& outField, FieldHit& outNearest,
+                    std::ptrdiff_t& outNearestDelta) {
+    auto fields = EnumerateInstanceFields(klass);
+    if (fields.empty()) return;
+
+    const ResolvedField* exact = nullptr;
+    const ResolvedField* nearest = nullptr;
+    for (const auto& rf : fields) {
+        auto begin = static_cast<std::ptrdiff_t>(rf.offset);
+        auto end   = begin + static_cast<std::ptrdiff_t>(rf.size);
+        if (fieldOffset >= begin && fieldOffset < end) {
+            if (exact == nullptr || rf.size < exact->size) exact = &rf;
+        }
+        if (begin <= fieldOffset) {
+            if (nearest == nullptr ||
+                static_cast<std::ptrdiff_t>(nearest->offset) < begin) {
+                nearest = &rf;
+            }
+        }
+    }
+
+    if (exact != nullptr) {
+        outField = MakeFieldHit(*exact, fieldOffset, /*exact=*/true);
+    } else if (nearest != nullptr) {
+        outNearest      = MakeFieldHit(*nearest, fieldOffset, /*exact=*/false);
+        outNearestDelta = fieldOffset - static_cast<std::ptrdiff_t>(nearest->offset);
+    }
 }
 
 }  // namespace
@@ -290,6 +510,11 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
                 if (imgName != nullptr) out.assembly = StripDllSuffix(imgName);
             }
         }
+
+        // Phase 17b — resolve which declared field contains the queried
+        // offset. Reuses the same outer ThreadAttachGuard scope.
+        ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
+                       out.nearestFieldDelta);
         return out;
     }
 

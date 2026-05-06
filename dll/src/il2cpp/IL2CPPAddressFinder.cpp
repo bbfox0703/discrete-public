@@ -9,10 +9,12 @@
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPThreadAttach.h"
+#include "IL2CPPTypeParser.h"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <vector>
 
@@ -50,6 +52,45 @@ const char* SehImageNameProbe(fn_image_get_name fn, const Il2CppImage* img) {
     __try { return fn(img); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+// Phase 17b — SEH-protected field-walk primitives. Used by ResolveFieldAt
+// to enumerate a class's instance fields and compute each field's storage
+// size without crashing on ill-formed metadata.
+Il2CppClass* SehParentLookup(fn_class_get_parent fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+FieldInfo* SehNextFieldProbe(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
+    __try { return fn(k, iter); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+const char* SehFieldNameProbe(fn_field_get_name fn, FieldInfo* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+std::size_t SehFieldOffsetProbe(fn_field_get_offset fn, FieldInfo* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int SehFieldFlagsProbe(fn_field_get_flags fn, FieldInfo* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+const Il2CppType* SehFieldTypeProbe(fn_field_get_type fn, FieldInfo* f) {
+    __try { return fn(f); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+Il2CppClass* SehClassFromTypeProbe(fn_class_from_il2cpp_type fn, const Il2CppType* t) {
+    __try { return fn(t); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+int SehIsValueTypeProbe(fn_class_is_valuetype fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int SehValueSizeProbe(fn_class_value_size fn, Il2CppClass* k) {
+    __try { std::uint32_t a = 0; return fn(k, &a); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 #pragma warning(pop)
 
 bool ContainsClass(std::uintptr_t p) {
@@ -66,6 +107,234 @@ std::string StripDllSuffix(const std::string& s) {
         if (tail == ".dll" || tail == ".DLL") return s.substr(0, s.size() - 4);
     }
     return s;
+}
+
+// Phase 17b — resolved field row used by ResolveFieldAt. Same shape as
+// FieldHit but without the offset-classifier yet (fillin happens after we
+// pick a winner).
+struct ResolvedField {
+    std::string   name;
+    std::string   typeName;
+    std::size_t   offset      = 0;
+    std::size_t   size        = 0;
+    std::uint32_t flags       = 0;
+    bool          isValueType = false;
+    bool          isEnum      = false;
+    std::string   underlyingTypeName;
+    std::string   declaredIn;
+};
+
+// Sizing rule for a primitive type by managed name. Used as a sanity check
+// against class_value_size and a fallback when the type → class bridge
+// isn't bound (older Unity / unusual builds).
+std::size_t SizeOfPrimitive(const std::string& t) {
+    if (t == "System.Boolean" || t == "System.Byte" || t == "System.SByte") return 1;
+    if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
+    if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
+    if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
+    if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+    return 0;
+}
+
+bool TypeNameIsPrimitive(const std::string& t) {
+    return SizeOfPrimitive(t) != 0;
+}
+
+// Walk the parent chain (depth-capped, mirrors walkInstance) and emit a flat
+// list of every INSTANCE field in offset order, oldest-class fields first.
+// Caller must hold a ThreadAttachGuard.
+std::vector<ResolvedField> EnumerateInstanceFields(Il2CppClass* klass) {
+    std::vector<ResolvedField> out;
+    if (klass == nullptr) return out;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_fields == nullptr) return out;
+
+    std::vector<Il2CppClass*> chain;
+    for (Il2CppClass* cur = klass; cur != nullptr && chain.size() < 16; ) {
+        chain.push_back(cur);
+        if (r.class_get_parent == nullptr) break;
+        cur = SehParentLookup(r.class_get_parent, cur);
+    }
+
+    // Base class first so derived layout follows in memory order.
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        Il2CppClass* cur = *it;
+        std::string declaredIn = (r.class_get_name != nullptr)
+            ? (SehClassNameProbe(r.class_get_name, cur) ?
+               SehClassNameProbe(r.class_get_name, cur) : "")
+            : "";
+
+        void* iter = nullptr;
+        for (;;) {
+            FieldInfo* f = SehNextFieldProbe(r.class_get_fields, cur, &iter);
+            if (f == nullptr) break;
+
+            ResolvedField rf;
+            rf.declaredIn = declaredIn;
+            if (r.field_get_name != nullptr) {
+                const char* n = SehFieldNameProbe(r.field_get_name, f);
+                if (n != nullptr) rf.name = n;
+            }
+            if (r.field_get_offset != nullptr) {
+                rf.offset = SehFieldOffsetProbe(r.field_get_offset, f);
+            }
+            if (r.field_get_flags != nullptr) {
+                rf.flags = static_cast<std::uint32_t>(
+                    SehFieldFlagsProbe(r.field_get_flags, f));
+            }
+            // Skip statics — they live outside the instance and would
+            // otherwise pollute the offset match (their offsets are relative
+            // to the static block, not the object base).
+            constexpr std::uint32_t kStatic = 0x10u;
+            if ((rf.flags & kStatic) != 0u) continue;
+
+            const Il2CppType* ft = (r.field_get_type != nullptr)
+                ? SehFieldTypeProbe(r.field_get_type, f) : nullptr;
+            if (ft != nullptr) rf.typeName = TypeName(ft);
+
+            // Determine size + value-type-ness from the field's runtime
+            // class. Falls back to a primitive-name table when the
+            // type → class bridge isn't bound; final fallback is 8.
+            std::size_t sz = 0;
+            if (ft != nullptr && r.class_from_il2cpp_type != nullptr) {
+                Il2CppClass* fc = SehClassFromTypeProbe(r.class_from_il2cpp_type, ft);
+                if (fc != nullptr) {
+                    if (r.class_is_valuetype != nullptr) {
+                        rf.isValueType =
+                            SehIsValueTypeProbe(r.class_is_valuetype, fc) != 0;
+                    }
+                    // Detect enum (no `class_is_enum` export — every enum
+                    // derives from System.Enum, same trick as ReadClassInfo).
+                    if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
+                        Il2CppClass* parent = SehParentLookup(r.class_get_parent, fc);
+                        if (parent != nullptr) {
+                            const char* pn = SehClassNameProbe(r.class_get_name, parent);
+                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0) {
+                                rf.isEnum = true;
+                                // Underlying type lives in the enum's
+                                // `value__` instance field.
+                                void* fit = nullptr;
+                                for (;;) {
+                                    FieldInfo* uf = SehNextFieldProbe(
+                                        r.class_get_fields, fc, &fit);
+                                    if (uf == nullptr) break;
+                                    const char* un = (r.field_get_name != nullptr)
+                                        ? SehFieldNameProbe(r.field_get_name, uf) : nullptr;
+                                    if (un != nullptr && std::strcmp(un, "value__") == 0) {
+                                        const Il2CppType* ut = (r.field_get_type != nullptr)
+                                            ? SehFieldTypeProbe(r.field_get_type, uf)
+                                            : nullptr;
+                                        if (ut != nullptr) rf.underlyingTypeName = TypeName(ut);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (rf.isValueType && r.class_value_size != nullptr) {
+                        int s = SehValueSizeProbe(r.class_value_size, fc);
+                        if (s > 0) sz = static_cast<std::size_t>(s);
+                    }
+                }
+            }
+            if (sz == 0) {
+                // Primitive-name fallback (covers BCL types when the
+                // type → class bridge can't resolve the field).
+                sz = SizeOfPrimitive(rf.typeName);
+            }
+            if (sz == 0) {
+                // Reference type or unresolved type → pointer width.
+                sz = 8;
+            }
+            rf.size = sz;
+            out.push_back(std::move(rf));
+        }
+    }
+
+    // Sort by offset so the contains-check + nearestField search are linear.
+    std::sort(out.begin(), out.end(),
+              [](const ResolvedField& a, const ResolvedField& b) {
+                  return a.offset < b.offset;
+              });
+    return out;
+}
+
+// Pick the kind classifier for a matched field at the queried offset.
+std::string ClassifyKind(const ResolvedField& rf, std::ptrdiff_t fieldOffset) {
+    bool exact = (fieldOffset == static_cast<std::ptrdiff_t>(rf.offset));
+    if (!exact) return "interior";
+    if (rf.isEnum) return "leaf";
+    if (rf.isValueType) {
+        // Treat known primitive-shaped value types as "leaf" for caller
+        // ergonomics (so a System.Int32 hit isn't reported as
+        // "value-struct"). Anything else (Vector3, Color, Quaternion,
+        // user struct …) → "value-struct".
+        return TypeNameIsPrimitive(rf.typeName) ? "leaf" : "value-struct";
+    }
+    return "pointer";
+}
+
+// Project a ResolvedField + classifier back into the public FieldHit shape.
+FieldHit MakeFieldHit(const ResolvedField& rf, std::ptrdiff_t fieldOffset, bool exact) {
+    FieldHit fh;
+    fh.present     = true;
+    fh.name        = rf.name;
+    fh.typeName    = rf.typeName;
+    fh.offset      = rf.offset;
+    fh.size        = rf.size;
+    fh.flags       = rf.flags;
+    fh.isStatic    = false;  // statics filtered out during enumeration
+    fh.isValueType = rf.isValueType;
+    fh.isEnum      = rf.isEnum;
+    fh.underlyingTypeName = rf.underlyingTypeName;
+    fh.declaredIn  = rf.declaredIn;
+    fh.kind        = exact ? ClassifyKind(rf, fieldOffset) : "interior";
+    fh.interiorOffset = (fh.kind == "interior")
+        ? (fieldOffset - static_cast<std::ptrdiff_t>(rf.offset))
+        : 0;
+    return fh;
+}
+
+// Walks a class's full instance-field layout (parent chain included) and
+// resolves the queried offset to either:
+//   * A field whose [offset, offset+size) range contains the queried offset
+//     — populated into `outField`, with `kind` classifier.
+//   * The closest field whose offset <= queried offset — populated into
+//     `outNearest`, with `outNearestDelta = queriedOffset - field.offset`.
+// Both flags can be false if the class has no instance fields at all.
+//
+// Caller must hold a ThreadAttachGuard.
+void ResolveFieldAt(Il2CppClass* klass, std::ptrdiff_t fieldOffset,
+                    FieldHit& outField, FieldHit& outNearest,
+                    std::ptrdiff_t& outNearestDelta) {
+    auto fields = EnumerateInstanceFields(klass);
+    if (fields.empty()) return;
+
+    const ResolvedField* exact = nullptr;
+    const ResolvedField* nearest = nullptr;
+    for (const auto& rf : fields) {
+        auto begin = static_cast<std::ptrdiff_t>(rf.offset);
+        auto end   = begin + static_cast<std::ptrdiff_t>(rf.size);
+        if (fieldOffset >= begin && fieldOffset < end) {
+            // Prefer the first innermost match — ties broken by the smaller
+            // size (more specific field wins). With static-field skip + size
+            // fallback to 8 the typical case has no overlap.
+            if (exact == nullptr || rf.size < exact->size) exact = &rf;
+        }
+        if (begin <= fieldOffset) {
+            if (nearest == nullptr ||
+                static_cast<std::ptrdiff_t>(nearest->offset) < begin) {
+                nearest = &rf;
+            }
+        }
+    }
+
+    if (exact != nullptr) {
+        outField = MakeFieldHit(*exact, fieldOffset, /*exact=*/true);
+    } else if (nearest != nullptr) {
+        outNearest      = MakeFieldHit(*nearest, fieldOffset, /*exact=*/false);
+        outNearestDelta = fieldOffset - static_cast<std::ptrdiff_t>(nearest->offset);
+    }
 }
 
 }  // namespace
@@ -223,6 +492,12 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
                 if (imgName != nullptr) out.assembly = StripDllSuffix(imgName);
             }
         }
+
+        // Phase 17b — resolve which declared field contains the queried
+        // offset. Reuses the same ThreadAttachGuard scope so the runtime
+        // calls inside EnumerateInstanceFields don't have to re-attach.
+        ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
+                       out.nearestFieldDelta);
         return out;
     }
 

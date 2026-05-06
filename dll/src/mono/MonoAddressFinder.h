@@ -19,6 +19,24 @@
 
 namespace UnityCEDumper::Mono {
 
+// Phase 17b — same shape as the IL2CPP `FieldHit`. Documented in detail in
+// il2cpp/IL2CPPAddressFinder.h.
+struct FieldHit {
+    bool          present = false;
+    std::string   name;
+    std::string   typeName;
+    std::size_t   offset      = 0;
+    std::size_t   size        = 0;
+    std::uint32_t flags       = 0;
+    bool          isStatic    = false;
+    bool          isValueType = false;
+    bool          isEnum      = false;
+    std::string   underlyingTypeName;
+    std::string   declaredIn;
+    std::string   kind;
+    std::ptrdiff_t interiorOffset = 0;
+};
+
 struct AddressLookup {
     bool         found = false;
     std::string  reason;
@@ -29,6 +47,10 @@ struct AddressLookup {
     std::string  ns;
     std::string  className;
     std::ptrdiff_t fieldOffset = 0;
+    // Phase 17b
+    FieldHit       field;
+    FieldHit       nearestField;
+    std::ptrdiff_t nearestFieldDelta = 0;
     std::uintptr_t queriedAddr = 0;
     std::uintptr_t scannedFrom = 0;
     std::uintptr_t scannedTo   = 0;

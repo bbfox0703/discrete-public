@@ -19,6 +19,31 @@
 
 namespace UnityCEDumper::IL2CPP {
 
+// Phase 17b — field-offset resolution result. One declared field that the
+// queried address falls inside (or the closest one below it for the
+// "no-exact-match" case). Populated by ResolveFieldAt(klass, fieldOffset);
+// surfaced through the AddressLookup result below.
+struct FieldHit {
+    bool          present = false;
+    std::string   name;
+    std::string   typeName;
+    std::size_t   offset      = 0;       // declared offset inside the instance
+    std::size_t   size        = 0;       // size of this field's storage
+    std::uint32_t flags       = 0;
+    bool          isStatic    = false;
+    bool          isValueType = false;
+    bool          isEnum      = false;
+    std::string   underlyingTypeName;     // when isEnum == true
+    std::string   declaredIn;             // class name where this field was declared
+    // Classifier for the queried address:
+    //   "leaf"           — exact match on a primitive-sized value-type field
+    //   "value-struct"   — exact match on a multi-field value type (Vector3 etc.)
+    //   "pointer"        — exact match on a reference-type field (string / class / array)
+    //   "interior"       — address falls inside the field but not at its boundary
+    std::string   kind;
+    std::ptrdiff_t interiorOffset = 0;    // when kind == "interior", offset within the field
+};
+
 struct AddressLookup {
     bool         found = false;          // true → scan landed on a managed instance
     std::string  reason;                  // populated when found == false
@@ -29,6 +54,13 @@ struct AddressLookup {
     std::string  ns;                      // namespace; "" for global
     std::string  className;               // e.g. "PLY_WORK"
     std::ptrdiff_t fieldOffset = 0;      // bytes from instance base to queried address
+    // Phase 17b — field resolution. `field` carries the matching declared
+    // field when the queried offset falls inside one; otherwise `field.present`
+    // is false and `nearestField` carries the closest field below the offset
+    // (with `nearestFieldDelta` measuring the gap).
+    FieldHit       field;
+    FieldHit       nearestField;
+    std::ptrdiff_t nearestFieldDelta = 0;
     // Always populated:
     std::uintptr_t queriedAddr = 0;
     std::uintptr_t scannedFrom = 0;       // inclusive
