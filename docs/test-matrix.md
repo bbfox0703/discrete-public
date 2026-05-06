@@ -16,7 +16,7 @@ Phase 15. Compatibility ledger for the games + tooling versions UnityCEDumper ha
 | **Townscaper** | `2020.3.4f1` | IL2CPP | **v27** ✨ | **x86** | 150 (Phase 14c) | Static metadata only | Phase 14c v27 target — only 32-bit IL2CPP build in the corpus. Its `global-metadata.dat` parses identically to v29 (88-byte stride, IL token at +84). 8,132 type defs match canonical leading types — confirming the metadata format is bitness-neutral even when the game runtime is x86. Live runtime support deferred to Phase 12d. |
 | **Farthest Frontier** | `2022.3.62f1` | IL2CPP | **v31** | x64 | 150 (Phase 14c) | Static metadata only | Phase 14c v31 target #1: 15,848 type defs, 20,788 string literals. Layout empirically verified to match v29 exactly (same 88-byte stride). |
 | **Emberward** | `2022.3.62f2` | IL2CPP | **v31** | x64 | 150 (Phase 14c) | Static metadata only | Phase 14c v31 target #2: 23,982 type defs, 23,828 string literals. Largest type table in the corpus. |
-| **Hollow Knight Silksong** | `6000.0.50f1` | Mono | n/a | x64 | not yet exercised | n/a | Unity 6 era. MonoBleedingEdge present. The `unity_symbols.lua` Mono-method registration path (using `monoCompileMethod`) hasn't been validated against a Unity 6 bdwgc binary — would be a worthwhile next test. |
+| **Hollow Knight Silksong** | `6000.0.50f1` | Mono | n/a | x64 | 161+ (Phase 16-prep session) | Pick & inject | **Mono bdwgc verification target.** `PlayerData` (1350 fields, 3-level inheritance chain) walks end-to-end. Validates: (a) Mono walkInstance against Unity 6 bdwgc; (b) server-side enum detection (`mapZone : GlobalEnums.MapZone` decodes via `class_is_enum` + `class_enum_basetype` to its underlying `System.Int32`, returns `value: 6` instead of the catch-all 8-byte ptr); (c) sort-by-offset, instance-switch selection preservation, refilter perf at scale. **Still un-exercised**: `unity_symbols.lua` Mono `monoCompileMethod` registration path — last piece needed to fully close out "Mono bdwgc end-to-end" coverage. |
 
 ## Steam scan recall
 
@@ -38,6 +38,8 @@ All three Unity games above show up in the picker output with backend, bitness, 
 | MSVC | `14.50` (Visual Studio 18 / Build Tools) | DLL targets x64 only. SEH-leaf rule documented in [Archiutecture.md](Archiutecture.md). |
 | CMake | bundled with VS 18 (`3.30+`) | Phase 12 proxies + Phase 13 CLI go through the same Ninja generator. |
 | Cheat Engine | `7.5.1` confirmed | Lua-side `enumModules()` + `injectDLL()` paths used by `unity_dump.lua` (Phase 11). Older CE versions may not export `injectDLL` — script falls back to `loadLibrary` per the CE-portability fix in `b8ce152`. |
+| AOBMaker (CE plugin) | optional | Listens on `\\.\pipe\AOBMakerCEBridge`. Used by the Inspector's per-row `HEX` button to navigate CE's Memory View. When not running, the button no-ops (logs to `ui/view`); rest of the inspector keeps working. |
+| Vendor sources | tracked by `sync_vendor.ps1` | `dll/vendor/nlohmann/` (json single-header), `dll/vendor/minihook/` are build deps. `vendor/{libil2cpp,Il2CppDumper,BepInEx,mono,UnityExplorer,Il2CppAssemblyUnhollower}/` are reference repos for cross-checking IL2CPP layouts. Both subtrees gitignored — re-run the script when you want to refresh upstream. |
 
 ---
 
@@ -51,6 +53,9 @@ These are the failure modes the test matrix doesn't cover *yet* — useful when 
 | Heavy obfuscator output | A Beebyte / Eazfuscator-built target | 14b banner — already wired, just needs a real test |
 | `getMetadataStats` `partial_strip` verdict | Same as above (or a partial-strip game) | 14b |
 | Stripped metadata via mismatched magic | An encrypted / packed `global-metadata.dat` | error-banner verification only |
+| Unity 6 Mono `monoCompileMethod` symbol registration | Silksong (already in the matrix) — just need to run `unity_symbols.lua` against it | Mono coverage closure |
+| `findMethodInstances` overload disambiguation (Phase 16 candidate) | Any class with overloaded methods (most CE-side workflows hit this) | Phase 16 |
+| AOBMaker bridge integration | CE running with the AOBMaker plugin loaded | Manual smoke only — the per-row `HEX` button calls `\\.\pipe\AOBMakerCEBridge` |
 
 ---
 

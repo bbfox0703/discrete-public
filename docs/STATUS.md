@@ -1,7 +1,18 @@
 # UnityCEDumper — Session Hand-off
 
 **Branch**: `dev` (clean, pushed)
-**Current state**: **Phases 0–15 + 9.5 + 11.5 + 14c all closed** for x64. One phase stays deferred: **Phase 12d (32-bit Mono)** — blocked on engineering effort (parallel x86 build pipeline + cross-bitness inject). Phase 14c (IL2CPP metadata v24/v27/v29/v31 dispatch) closed this session against six local games covering all four versions. Last commit: `9f7c067` (proxy-deploy version comparison). This session also closed a long-standing Connect-after-disconnect bug (PipeClient lifecycle + DLL pipe single-instance + UI-side fresh-PipeClient swap) and shipped version stamping across every DLL/exe.
+**Last commit**: `fe079b6` (build fix — Native AOT publish + visible cmake/dotnet output).
+**Current state**: **Phases 0–15 + 9.5 + 11.5 + 14c all closed** for x64. **Phase 12d (32-bit Mono)** stays deferred (blocked on engineering effort — parallel x86 pipeline + cross-bitness inject).
+
+This session was a long polish + bug-hunt run on top of the prior phases — no new phase numbers, but enough behavioural changes that the inspector / browser are now usable for serious live-game work. Headline fixes:
+
+- IL2CPP generic instantiations (e.g. `MainGame.ClassAry<MainGame.CARRYITEM>`) now expand correctly — name-based `il2cpp_class_from_name` doesn't index concrete instantiations, so the inspector reads the runtime class pointer out of the object header instead.
+- Server-side enum detection + decode using the underlying integer type. Silksong's `mapZone : GlobalEnums.MapZone` now displays as `6` instead of an opaque `0x0000000500000006` qword.
+- Walked-fields output is sorted by memory offset; columns are user-sortable; row selection survives instance switches; scroll is preserved.
+- Inspector has new per-row action buttons (`addr` / `ptr` / `name` / `HEX`) — the first three copy to clipboard, `HEX` hands off to AOBMaker's CE plugin via `\\.\pipe\AOBMakerCEBridge`.
+- Substring filter on Fields / Methods / Inspector grids; collapsible Assemblies / Classes panes; Address column; window icon; classes filter ranks exact match > prefix > substring.
+- Vendor refactor: `nlohmann/json` is no longer a git submodule; cloned by `sync_vendor.ps1` into `dll/vendor/nlohmann/`. Same script also pulls reference repos (libil2cpp, Il2CppDumper, BepInEx, mono, …) under `vendor/`.
+- Build script no longer swallows `cmake` / `dotnet publish` output and no longer reports `Status: SUCCESS` when a sub-step actually failed (PowerShell function return-stream pollution, fixed by piping native commands through `Out-Host`).
 
 > Companion files in this folder: `plan.md` (full phase ledger), `pipe-protocol.md` (DLL ↔ UI contract), `Archiutecture.md` (rules / invariants), `test-matrix.md` (verified games + tooling versions).
 
@@ -35,6 +46,40 @@
 
 ### Repo / build tweaks landed alongside
 
+#### Inspector + browser polish (this session)
+
+- **Generic-type expansion via object header (`klass-from-header`)**: `MainGame.ClassAry<MainGame.CARRYITEM>` (and any other generic instantiation) couldn't be expanded — `il2cpp_class_from_name` doesn't index concrete instantiations, only the open generic definition (`ClassAry\`1`), and the open definition doesn't have per-instantiation field offsets. Wire-side: `walkInstance` now accepts a `klass_from_header_addr` arg that tells the DLL "read the class pointer from `*(uintptr_t*)addr` instead of looking up by name". Sanity-checked via a new SEH-leaf `IL2CPP::ProbeKlassValid` helper before the walker uses it. Inspector tries the header path first for `PointerToClass` / `ArraySlotPointer` kinds; falls back to the legacy assembly/ns/name resolver for `ValueStruct` (no header at the field's storage) and Mono (which ignores the unknown arg). See [LiveInspectionViewModel.LoadPointerChildrenAsync](../ui/UnityDumpUI/ViewModels/LiveInspectionViewModel.cs).
+- **Server-side enum detection + decode** (Silksong's `GlobalEnums.MapZone` etc.): added `mono_class_from_mono_type` / `il2cpp_class_from_il2cpp_type` to the resolvers; `ReadClassInfo` now bridges the field's type pointer to a class, then probes `class_is_enum` (Mono) / `class_get_parent.name == "Enum"` (IL2CPP), and reads the `value__` field's underlying type. Wire payload gains `is_enum` / `is_value_type` / `underlying_type`. The walkInstance handler decodes enum fields using the underlying type so an int4 enum comes back as `value: 6`, not `ptr: 0x0000000500000006`. Inspector classifier short-circuits `IsEnum=true` to `Leaf`.
+- **walkInstance fields are sorted by offset** before serialisation (DLL-side). Walker emits parent-class fields first, then derived; metadata declaration order doesn't match memory layout, so the post-walk `std::sort` by offset gives the user a monotonic Offset column. Affects auto-refresh and "Copy CE XML" rooted on a walked node too.
+- **Sortable Inspector DataGrid columns** with `CanUserSortColumns="True"` + `SortMemberPath="Offset"` (int) so 0x100 sorts after 0x80, not before. Avalonia's `DataGridCollectionView` wrapper sorts the visual layer only — the underlying `Fields` ObservableCollection stays in offset order so the VM's expand / collapse / scroll-into-view logic (which indexes into `Fields` directly) keeps working.
+- **Selection + scroll preservation across instance switches**. The inspector's `WalkInstanceAsync` snapshots `SelectedNode.Name` + `DeclaredIn` before the rebuild, then re-finds the matching node in the fresh tree and calls a `ScrollFieldIntoView` callback that posts a `DataGrid.ScrollIntoView` through `Dispatcher.UIThread.Post(..., Background)` so it lands after the new row containers materialise. Latent bug fixed alongside: `OnSelectedInstanceChanged` was eagerly calling `Fields.Clear()` BEFORE `WalkInstanceAsync` ran, which fired `SelectedItem = null` through the TwoWay binding and nulled `SelectedNode` before snapshotting — dropped the eager clear, walk handles it after snapshot.
+- **Substring filter on Fields / Methods / Inspector grids** (UI-only — Copy CE XML / `.h` / `.csx` / `.CT` exports keep walking the unfiltered data). Mirrors the existing Assemblies / Classes filter pattern: `FieldFilter` / `MethodFilter` / `Filter` ObservableProperties + `FilteredFields` / `FilteredMethods` ObservableCollection mirrors. The Inspector filter is the trickiest: `Fields` stays the canonical hierarchical tree (since expand/collapse indexes into it), `FilteredFields` is rebuilt from `Fields.CollectionChanged`. **Perf fix on top**: a 1350-field `PlayerData` walk fired CollectionChanged 1350 times during the Add loop, cumulatively ~900k filter iterations + 1350 DataGrid layout passes. Added a `_refilterSuppressionDepth` counter so bulk paths (walk repopulate, expand-children insert, subtree collapse) bracket their loops with `++ / try / -- / RefilterFields()` and refilter once at the end.
+- **Per-row action buttons (`addr / ptr / name / HEX`)** in the Inspector. First three copy the relevant string to clipboard. **HEX hands the row's effective address to AOBMaker's Cheat Engine plugin** via a named pipe (`\\.\pipe\AOBMakerCEBridge`) — CE's open Memory View jumps to the address. New [`AobMakerBridge`](../ui/UnityDumpUI.Core/Services/AobMakerBridge.cs) in Core: System.IO.Pipes client speaking AOBMaker's wire format (4-byte LE length prefix + UTF-8 JSON, per-request reconnect, source-gen `JsonSerializerContext` for AOT). Fail-soft — pipe-unreachable / timeout / failure all return `false` + log to `ui/view`; rest of inspector keeps working when AOBMaker isn't installed. `WalkedFieldNode` ctor takes a `WalkedFieldActions` bag (Toggle + CopyText + NavigateHex) instead of just the toggle Func.
+- **Window icon**: `Assets/MainIcon.ico` is wired both as the PE `<ApplicationIcon>` (File Explorer / taskbar / alt-tab) and as the Avalonia `Window.Icon` on all three windows (`MainWindow`, `ProcessPickerWindow`, `ProxyDeployWindow`) via `avares://DiscreteUI/Assets/MainIcon.ico`. `Assets/**` added to the `AvaloniaResource` glob.
+- **Classes filter ranking**: when the user types a query, exact matches come first, then simple-name prefix matches (so typing `PlayerData` lands on the type itself before `PlayerDataBase` / `SetPlayerDataBool`), then the rest of the substring matches, all preserving alphabetical order within each bucket.
+- **Assemblies + Classes alphabetically sorted at populate** — backend image-load order is engine-defined, which left `Assembly-CSharp` floating somewhere arbitrary in the list.
+- **Collapsible Assemblies / Classes panes**: each pane gets a `◀` / `▶` chevron in its title row; click to collapse to a 28 px rail (just title-letter `A` / `C` + the now-`▶` reopen button), giving the width back to the Inspector / Detail pane. MainWindow code-behind snapshots the live `ColumnDefinition.Width` before collapse so a GridSplitter-resized state survives round trips.
+- **New `Address` column** in the Inspector grid (155 px monospace, between Offset and Type). Shows the field's storage address per-instance. Pointer-deref values stay in the Value column; not duplicated.
+- **Uninstall-selected fix**: `ProxyDeployViewModel.UninstallSelectedAsync` filtered on `DeployStatus == ProxyDeployStatus.Deployed`, but after the version-stamping work most rows live in `DeployedCurrent` / `DeployedOutdated`. Result: selecting any deployed game and clicking "Uninstall selected" produced "nothing to do (no matching rows)". Extracted an `IsDeployed(row)` helper that returns true for all three deployed states, used in Uninstall, UpdateAll, and the summary counter so the three sites can't drift again.
+
+#### Vendor refactor (this session)
+
+- **`nlohmann/json` no longer a git submodule.** Submodule registration retired; the headers now live at `dll/vendor/nlohmann/` (single `include/` + `single_include/` layout) cloned by [`sync_vendor.ps1`](../sync_vendor.ps1). Reason: every clone of the parent repo was dragging ~150 MB of nlohmann history through `--recurse-submodules`, and contributors kept forgetting the flag. CMake's include path moved accordingly. `.gitmodules` keeps a stub header explaining the switch.
+- **`sync_vendor.ps1`** anchors itself to `$PSScriptRoot` (runs from anywhere), uses `--depth 1` on initial clone (history isn't useful for vendoring), `git pull --ff-only` on update, header doc explaining the two buckets:
+  * **`dll/vendor/`** — C++ build dependencies (`nlohmann/`, `minihook/`).
+  * **`vendor/`** — reference repos kept around for cross-checking IL2CPP struct layouts and looking up Mono runtime exports. **Most useful**: `vendor/libil2cpp/` has Unity's actual IL2CPP runtime source organised as `Unity_<major.minor>/<exact.version>/` — handy for verifying struct layouts (TypeDefinition, Il2CppClass, etc.) for any future v32+ target without empirical hex-dumping. Also: `Il2CppDumper` (C# reference parser), `BepInEx`, `Il2CppAssemblyUnhollower`, `mono`, `UnityExplorer` (mostly background reading; not directly imported).
+- Both subtrees added to `.gitignore` so the cloned trees stay out of `git status`.
+
+#### Build script fixes (this session)
+
+- **`build.cmd publish` no longer silently fails.** Two compounding bugs were masking each other:
+  1. **XAML AOT compiler rejects `x:Name` on `ColumnDefinition`** (it's not a Control with a NameScope). The collapsible-pane commit added two such names so code-behind could grab them; under `build.cmd ui` (Release single-file) the compiler tolerated it, but under `build.cmd publish` (Native AOT) it failed with `AVLN2000`. Fix: drop the names; code-behind reaches columns via `BodyGrid.ColumnDefinitions[index]` instead.
+  2. **build.ps1 swallowed every native command's stdout.** PowerShell collects native-command output (`& cmake ...`, `& dotnet ...`) inside a function into the function's return-value pipeline. Three knock-on effects: (a) the user never sees compiler output — neither in the console nor the transcript log; (b) `return $false` after a failure becomes part of an array `@(...stdout..., $false)` which evaluates as truthy, so the dispatch's `if (-not (Build-Ui)) { $exitCode = 1 }` never trips; (c) final summary therefore reads `Status: SUCCESS` even when a step actually failed — exactly what masked bug #1. Fix: pipe every `& cmake` / `& dotnet` invocation to `| Out-Host`. Out-Host writes to the host display stream (also captured by `Start-Transcript`) and returns nothing, so per-step return values are no longer polluted. Touched: Build-Dll (configure + build), Build-Ui (both publish branches), Run-Tests, Build-MetadataCli.
+
+---
+
+### Carried-forward Phase 12 work
+
 - **Proxy Deploy panel surfaces installed-vs-source version comparison**: builds on the version-stamping infrastructure below. `WindowsProxyInstaller.DetectSync` now reads `FileVersionInfo.GetVersionInfo` off both the installed proxy DLL and `dist/`'s copy, attaches both strings to `ProxyInstallStatus`, and hands them through to `ProxyGameRow`. The row's `DeployStatus` enum gained `DeployedCurrent` and `DeployedOutdated` variants; the Status column now reads e.g. `Deployed (version.dll, OUTDATED)` and a new `Version` column shows `0.1.0.139 → 0.1.0.146` for outdated rows, `(would install 0.1.0.146)` for not-deployed rows. Special case: an installed proxy with no readable FileVersion (deployed by a pre-stamping build, ≤140 or so) is treated as outdated since the verdict is otherwise indeterminate. The bottom-bar summary appends `(N outdated)` when any deployed row is stale, so a glance at the panel says "you have N games to update." The existing `Update all deployed` button now matches all three deployed states (`Deployed`, `DeployedCurrent`, `DeployedOutdated`) so re-installs always cover everything.
 - **Version stamping across every binary**: each shipped DLL/exe now carries a Windows PE VERSIONINFO resource and a runtime log banner with the same string. CMake reads `VER_MAJOR/MINOR/PATCH` from `project(... VERSION 0.1.0 ...)`, the 4th digit from `build_number.txt`, plus `git rev-parse HEAD/--short HEAD`, dirty flag, and `string(TIMESTAMP ... UTC)`, then `configure_file`s [BuildInfo.h.in](../dll/src/shared/BuildInfo.h.in) and per-target [version.rc.in](../dll/src/shared/version.rc.in) into the build dir. Both backend DLLs (`UnityDumper-Mono.dll`, `UnityDumper-IL2CPP.dll`) and both proxy DLLs (`version.dll`, `winmm.dll`) embed FileVersion `0.1.0.<build>` plus custom string-table entries `GitShort`, `GitCommit`, `BuildTimestamp` — visible in File Explorer's Properties pane and via `Get-ItemProperty`. The DLL's `OnAttach` log now reads `UnityDumper DLL attached 0.1.0.139 261b0f2 (Release, 2026-05-05T14:00:28Z) backend=IL2CPP pid=…` instead of the old bare `build=139`. UI csprojs (`UnityDumpUI`, `UnityDumpUI.Core`) read the same `build_number.txt` via MSBuild expressions and stamp `Version` / `AssemblyVersion` / `FileVersion` / `InformationalVersion` / `Product` / `Company` / `AssemblyTitle`. New [VersionInfo.cs](../ui/UnityDumpUI.Core/Services/VersionInfo.cs) reads the assembly attributes (AOT-safe) and shortens the `+<full-sha>` SourceRevisionId suffix down to 7 chars; `MainWindowViewModel` writes `DiscreteUI 0.1.0.139+261b0f2 session start` as the first line of every UI session's `ui/init/current.log`. Both the C++ regen + the C# version property only re-evaluate after a clean configure / build, which matches the existing build.ps1 behaviour (it already wipes per-backend build dir + UI bin/obj before each pass — same rule as UE5CEDumper).
 
@@ -53,6 +98,18 @@
 ## Recent commit history (most recent first)
 
 ```
+fe079b6 fix(build): unbreak Native AOT publish + visible build output
+5891b0b vendor + ui: sync_vendor script, collapsible browser panes, address column
+3355c52 ui: window icon, per-row action buttons, classes filter ranking, focus fix
+88bb880 ui(inspector): batch-suppress refilter so 1350-field walks stay snappy
+dfe419d ui: substring filter for Fields / Methods / Inspector tabs (UI-only)
+a4e6666 ui: sortable inspector + alpha-sorted browser + scroll preservation
+7e3f35d inspector: enum decode + sort by offset (fixes Silksong walk)
+fe0f258 inspector: expand pointer-to-class via object header (fixes generics)
+e9b4db3 ui(deploy): fix Uninstall selected skipping version-stamped rows
+712549e ui(inspector): fix expand on generic types like ClassAry<T>
+afc09a6 Phase 14c: IL2CPP metadata v24/v27/v29/v31 dispatch
+5d61c8e docs: refresh STATUS.md for end-of-session — open items + verifications
 9f7c067 ui(deploy): show installed-vs-source version comparison per row
 976ebff build: version stamping across DLLs + UI (PE VERSIONINFO + log banners)
 261b0f2 ui: recreate PipeClient on every disconnect — empirical workaround
@@ -61,20 +118,10 @@
 694efa3 ui: fix Connect-after-Disconnect throwing ObjectDisposedException
 417448b ui: log prune + connect retry + error-banner hygiene
 6be6eaf Phase 12c (deploy): UE5CEDumper-style multi-select bulk deploy panel
-cf36431 docs: refresh STATUS.md as a clean session-handoff
 b52c5b4 Phase 15: test matrix — verified games + tooling versions ledger
-05ea52d Phase 12c (auto): Steam scan + Unity game picker for proxy install
-47d969d Phase 12c: UI install/uninstall flyout + 32-bit deferral notes
-a93706b Phase 12a + 12b: proxy DLLs (version.dll, winmm.dll) + double-inject mutex
-375806c inspector: inline value-type substruct expansion + classifier fix
-8527f22 Phase 13 (b): metadata-cli — offline global-metadata.dat parser
-d813339 Phase 13 (a): split MetadataParser core / host-path adapter
-b31e74e docs: STATUS.md reflects Phase 14 closure
-8b9485c Phase 14d/e/f: Mono attach fix, SEH+attach rules, log-stats tool
-978a926 Phase 14a + 14b: pipe reconnect + stripped-metadata banner
 ```
 
-This session shipped (in commit order): UE5CEDumper-style multi-select bulk deploy panel → log prune on UI startup + connect retry + error-banner hygiene → Connect-after-Disconnect ObjectDisposedException fix (PipeClient lifecycle split) → connect-retry budget bumped to 7 s → DLL pipe set to single-instance to kill ghost accumulation → fresh PipeClient swap on every disconnect (matches the "restart UI" workaround empirically) → version stamping across every DLL/exe (PE VERSIONINFO + UI/DLL log banners) → proxy-deploy panel surfaces installed-vs-source version comparison.
+This session shipped (in commit order): generic-type expansion (`ClassAry<T>`) via klass-from-header → uninstall-selected fix for version-stamped rows → enum decode + sort-by-offset (fixes Silksong walk) → sortable inspector columns + alpha-sorted browser + scroll preservation → substring filter for Fields / Methods / Inspector → refilter perf fix (1350-field PlayerData) → window icon + per-row addr/ptr/name/HEX buttons + AobMakerBridge + classes filter ranking + focus-after-instance-switch fix → vendor refactor (sync_vendor.ps1, drop nlohmann submodule) + collapsible browser panes + Address column → Native AOT publish unblock (XAML AOT + Out-Host).
 
 ---
 
@@ -88,11 +135,13 @@ This session shipped (in commit order): UE5CEDumper-style multi-select bulk depl
 ### Open follow-ups (not blocking)
 
 - **CSX live mode** — investigated, design dead-end as scoped. CSX is fundamentally an offset-relative *structure* format; "live" only makes sense as a snapshot-derived layout (fix array counts to live values, inline pointer-chain targets). CE XML already provides true absolute-address live mode, so the CSX equivalent's value is fuzzy. Defer until a user explicitly asks.
-- **Hollow Knight Silksong live walk** — partial. PlayerData walk now decodes correctly: enums (`mapZone : GlobalEnums.MapZone`, `extraRestZone`) come back as ints via the server-side enum-detection + underlying-type decode landed this session; fields render in offset order; instance-switch preserves the user's selected field row. The `unity_symbols.lua` Mono `monoCompileMethod` path is still un-exercised (worthwhile follow-up, would close out the "Mono bdwgc end-to-end" verification).
+- **Hollow Knight Silksong live walk** — `PlayerData` walks correctly now: enums (`mapZone : GlobalEnums.MapZone`, `extraRestZone`) come back as ints; fields render in offset order; instance-switch preserves the focused row; column sort works. **Still un-exercised**: the `unity_symbols.lua` Mono `monoCompileMethod` registration path against Unity 6 bdwgc — would be the last piece needed to close out "Mono bdwgc end-to-end" verification.
 - **Dissect-script path** (`unity_dissect.lua` → `dissectClass(...)`) hasn't been re-exercised since the CE-API portability fixes (`b8ce152`). Sanity run worth ~5 minutes; not blocking.
-- **Inspector / Methods search box** — Fields and Methods grids don't yet have a substring filter like the Assemblies and Classes lists do. Add per-tab `TextBox` bound to a new `Filter` property on `LiveInspectionViewModel`/`AssemblyBrowserViewModel`'s methods state, mirroring the `RefilterAssemblies` / `RefilterClasses` pattern. Open question: does the filter affect "Copy CE XML / CSX" output (filter as a *visibility* control) or stay UI-only (export keeps every field)? The Assembly browser's filter is UI-only — natural to follow the same precedent. Highlight matched substring in a different colour as a polish step.
-- **More automated test coverage** — current test suite (`ui/UnityDumpUI.Tests/`) covers protocol, exporters, pipe lifecycle, and a few inspector helpers. Big gaps: classifier (enum vs value-type vs pointer routing — easy unit tests against constructed `WalkedField` payloads), end-to-end `MetadataParser` round-trips per version (already partially covered), CE-XML live-mode rendering against a deterministic fixture instance. Each test reduces "verify by running the game" cycles. Not a single change — ongoing chore tracked here so it doesn't slip.
+- **More automated test coverage** — current test suite (`ui/UnityDumpUI.Tests/`) covers protocol, exporters, pipe lifecycle, and a few inspector helpers. Big gaps: classifier (enum vs value-type vs pointer routing — easy unit tests against constructed `WalkedField` payloads with the new `IsEnum` / `IsValueType` flags), end-to-end `MetadataParser` round-trips per version (already partially covered), CE-XML live-mode rendering against a deterministic fixture instance, AobMakerBridge happy + sad-path with a fake pipe server. Each test reduces "verify by running the game" cycles. Not a single change — ongoing chore tracked here so it doesn't slip.
 - **Find method instances (Phase 16 candidate)** — CE has a "find method instances" feature with overload disambiguation; we'd add a wire command `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` to mirror it. Server side: enumerate matching `MethodInfo*` (Mono / IL2CPP), compile + return native pointers, optionally match by signature for overloads. UI: new tab on the class browser surfacing all overloads with their addresses. Useful for the existing `unity_symbols.lua` flow (currently registers all methods of the class wholesale; per-method targeting is finer-grained). Scope: ~one phase. Not started.
+- **`vendor/libil2cpp/` cross-check pass** — the new sync script pulls Unity's actual IL2CPP source by version. Spend ~1 hour confirming our v24 / v27 / v29 / v31 TypeDefinition struct layouts in `dll/src/il2cpp/MetadataLayout.h` match the upstream `Il2CppMetadata.h` for those versions, and document any deltas. Currently those layouts came from empirical hex-dumps; cross-checking against upstream closes the loop and unblocks future v32+ targets without re-dumping.
+- **Highlight matching substring** in the Fields / Methods / Inspector filter results — pure polish on top of the substring filter that landed this session.
+- **Inspector classifier unit tests** — easiest concrete test addition: feed `WalkedField` records with `IsEnum=true` / various pointer values into `WalkedFieldNode.FromInstanceField` and assert `Kind`. Catches regressions like the recent enum→ValueStruct misclassification before the user has to launch a game.
 
 ---
 
@@ -213,28 +262,36 @@ Pick from this menu — none are blockers, all are independent:
 
 | Option | Effort | Blocked on | Why pick this |
 |---|---|---|---|
-| **Phase 12d** — 32-bit Mono support | Real (multi-day) | Engineering only — no external blockers | Required for any pre-Unity-2018 Mono game. User explicitly flagged this in the Phase 12 conversation as wanted but deferred. Inventory of TODOs in the deferred-phases table above. |
-| **Phase 14c** — IL2CPP version dispatch (v24/v27/v31) | Medium | Need target games to validate against. Have **Unity 2019.4 v24** locally (SaGa F1R) so v24 path can start now; v27 and v31 still need games | Phase 13's CLI surfaces the gate clearly today. v24 path alone would let `metadata-cli` and `getClassInfo` work against SaGa F1R — concrete value. |
-| **Hollow Knight Silksong live walk** | Small (~30 min if game runs) | None | Validates Unity 6 Mono binding + the new `monoCompileMethod` path in `unity_symbols.lua` against a non-SaGa target. Pure verification, no code changes expected. |
+| **Phase 16 candidate — find method instances** | One phase | None | New wire command `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` to mirror CE's feature. Inventory in the open-follow-ups list above. Useful follow-up to the per-row HEX → AOBMaker pipeline since it gives users a way to navigate to actual native code addresses, not just data. |
+| **Phase 12d** — 32-bit Mono support | Real (multi-day) | Engineering only — no external blockers | Required for any pre-Unity-2018 Mono game. Inventory of TODOs in the deferred-phases table above. |
+| **Hollow Knight Silksong — `unity_symbols.lua` Mono path** | Small (~30 min if game runs) | None | Last un-exercised piece of the Mono bdwgc binding. PlayerData walk already works end-to-end; just need to confirm `monoCompileMethod` JIT registration drives CE symbols correctly against Unity 6. |
 | **Dissect-script sanity** | Small (~5 min) | None | Re-run `dofile([[...unity_dissect.lua]])` then `dissectClass("Assembly-CSharp","MainGame","PLY_WORK")` against SaGa F2R to confirm the CE-API portability fix in `b8ce152` didn't regress the Structure Dissect path. |
+| **`vendor/libil2cpp/` cross-check** | Small (~1 hour) | None | Confirm our `MetadataLayout.h` v24/v27/v29/v31 TypeDefinition layouts match upstream Unity. Replaces empirical hex-dumping for future versions. |
+| **Inspector classifier unit tests** | Small | None | Cheapest test win — feed `WalkedField` records into `FromInstanceField`, assert Kind. Catches regressions like the recent enum→ValueStruct misclassification offline. |
 | **CSX live mode** | Medium, fuzzy value | Design call | See open-follow-ups note. Defer until a user asks. |
 
 ### Live verifications
 
-Confirmed clicked-through this session against SaGa F2R / SaGa F1R:
+Confirmed clicked-through against SaGa F2R (IL2CPP v29) and Hollow Knight Silksong (Unity 6 Mono):
 
+- ✅ **Generic-type expansion (`ClassAry<T>`)** — clicking the chevron on `eqpItm: MainGame.ClassAry<MainGame.CARRYITEM>` in SaGa F2R `PLY_WORK` walks the concrete instantiation's fields via the new klass-from-header path. Previously failed with `class not found: MainGame.ClassAry\`3`.
+- ✅ **Silksong `PlayerData` walk** — 1350 fields, depth=3 inheritance chain. `mapZone : GlobalEnums.MapZone` shows the int value (e.g. `6`) instead of the catch-all 8-byte ptr. Fields render in offset order. Switching between #11/#12/#13 instances keeps `ProfileID` (offset `0x1F4`) scrolled into view.
+- ✅ **DataGrid column sort** — clicking Offset reverses, clicking Name sorts by name. Avalonia's `DataGridCollectionView` sorts the visual layer only; expand/collapse continues to operate on the underlying `Fields` collection.
+- ✅ **Substring filter** on Fields / Methods / Inspector — typing `respawn` in the Inspector filter narrows to the respawn-prefixed rows; clearing the filter restores the full view with expand state intact.
+- ✅ **Inspector instance-switch perf** — same Silksong session: switching between PlayerData instances dropped from 2-6 s gaps to ~100-300 ms after the refilter-suppression fix.
+- ✅ **Per-row buttons** — `addr` / `ptr` / `name` copy correctly. `HEX` (with AOBMaker + CE running) jumps the Memory View to the row's address.
+- ✅ **Build script** — `build.cmd publish` now compiles + AOT-publishes in ~67 s; full cmake / dotnet output visible in the transcript log; final `Status: SUCCESS` reflects reality.
+- ✅ **Phase 14c — IL2CPP metadata v24 / v27 / v29 / v31** dispatch verified end-to-end against six local games covering all four versions: SaGa F1R (v24, 7,514 types), FFVI PR (v24, 11,438), Townscaper (v27, 8,132 — x86 IL2CPP), SaGa F2R (v29, 10,001), Farthest Frontier (v31, 15,848), Emberward (v31, 23,982). All six leading types match canonical IL tokens (`0x02000001+`).
 - ✅ **Phase 13 — metadata-cli** against SaGa F2R global-metadata.dat: `info` returns `version=29, type_tables_parsed=true, type_definition_count=10001, string_literal_count=11392`; `stats` reports `verdict=clean, strip_ratio=0.0011`.
-- ✅ **Phase 14c — IL2CPP metadata v24 / v27 / v29 / v31** dispatch verified end-to-end against six local games covering all four versions: SaGa F1R (v24, 7,514 types), FFVI PR (v24, 11,438), Townscaper (v27, 8,132 — x86 IL2CPP), SaGa F2R (v29, 10,001), Farthest Frontier (v31, 15,848), Emberward (v31, 23,982). All six leading types match canonical IL tokens (`0x02000001+`). Layout discovery: hex-dumped each typeDefinitions table and located row-2 token at +84 to validate stride.
-- ✅ **Phase 14a — pipe auto-disconnect**: game-exit flips status to `Disconnected (write failed: Pipe is broken.)`. Reconnect after re-launching the game lands cleanly (took several iterations to get there — see the four UI commits below).
-- ✅ **Connect-after-disconnect cycle in same UI session**: PipeClient lifecycle bug (`ObjectDisposedException: SemaphoreSlim`) closed by [PipeClientLifecycleTests](../ui/UnityDumpUI.Tests/PipeClientLifecycleTests.cs); ghost-pipe routing fixed by single-instance pipe + fresh-PipeClient swap on every disconnect.
-- ✅ **Phase 12 — Proxy Deploy panel**: bulk install/uninstall/update-all flow exercised end-to-end on multiple games (Steam scan finds 23, install lands fresh proxy + both backend DLLs, version comparison column flags pre-stamping installs as `OUTDATED` with `unknown → 0.1.0.146` and stamped-but-old as `0.1.0.139 → 0.1.0.146`).
+- ✅ **Phase 14a — pipe auto-disconnect**: game-exit flips status to `Disconnected (write failed: Pipe is broken.)`. Reconnect after re-launching the game lands cleanly.
+- ✅ **Connect-after-disconnect cycle in same UI session**: PipeClient lifecycle bug closed by [PipeClientLifecycleTests](../ui/UnityDumpUI.Tests/PipeClientLifecycleTests.cs); ghost-pipe routing fixed by single-instance pipe + fresh-PipeClient swap on every disconnect.
+- ✅ **Phase 12 — Proxy Deploy panel**: bulk install/uninstall/update-all flow exercised end-to-end. The earlier "Uninstall selected: nothing to do (no matching rows)" bug after version-stamping landed is also closed (`IsDeployed(row)` matches all three deployed states).
 
 Still owed (not blocking):
 
-- **Phase 11.5 follow-up — value-type substruct expansion**: in the Inspector, expand a `MainGame.PLY_WORK` instance, find an inline value-type field (e.g. a `Vector3` if any are exposed at this layer), click the chevron. Should walk the substruct fields without errors. Right-click → Copy CE XML rooted there should produce a CE table whose components are at consecutive offsets from the struct base.
-- **Hollow Knight Silksong live walk**: would validate the Unity 6 Mono bdwgc binding + Phase 11 `unity_symbols.lua` Mono `monoCompileMethod` path against a non-SaGa target.
+- **`unity_symbols.lua` Mono path** against Silksong — last piece of the Mono bdwgc binding.
 - **Dissect-script path** (`unity_dissect.lua` → `dissectClass(...)`) hasn't been re-exercised since `b8ce152`. Sanity run worth ~5 minutes.
 
 ### How to wrap up the session
 
-If the remaining smoke tests look done, the next session can pick from the deferred-phases menu (**12d** is the only one left now) or the small-but-useful items (Hollow Knight walk / dissect-script sanity / value-type substruct verification).
+Next session can pick from the deferred-phases menu (**12d** stays the only formally-deferred phase) or the smaller items in the table above. Phase 16 candidate (**find method instances**) is the most natural next phase since it complements the per-row HEX → AOBMaker pipeline that landed this session.
