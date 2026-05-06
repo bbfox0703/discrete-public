@@ -188,6 +188,15 @@ public sealed class WalkedField
     [JsonPropertyName("string_length")] public int?         StringLength { get; set; }
     [JsonPropertyName("string_error")]  public string?      StringError  { get; set; }
     [JsonPropertyName("error")]         public string?      Error        { get; set; }
+
+    // Phase 11.5 follow-up: server-side type classification so the inspector
+    // can route enums to a Leaf row (showing the int) and reserve ValueStruct
+    // expansion for actual value-type structs (Vector3, custom structs, …).
+    // Both default to false; populated only when the runtime resolver has
+    // the right exports bound (see MonoResolver / IL2CPPResolver).
+    [JsonPropertyName("is_enum")]         public bool    IsEnum         { get; set; }
+    [JsonPropertyName("is_value_type")]   public bool    IsValueType    { get; set; }
+    [JsonPropertyName("underlying_type")] public string? UnderlyingType { get; set; }
 }
 
 /// <summary>

@@ -94,6 +94,8 @@ void DoResolve() {
     bindOpt("il2cpp_method_get_flags",          g_resolver.method_get_flags);
     bindOpt("il2cpp_method_get_pointer",        g_resolver.method_get_pointer);
     bindOpt("il2cpp_free",                      g_resolver.free);
+    // Type → class bridge for inspector enum / value-type detection.
+    bindOpt("il2cpp_class_from_il2cpp_type",    g_resolver.class_from_il2cpp_type);
 
     g_resolver.resolved = (okReq == totalReq);
 

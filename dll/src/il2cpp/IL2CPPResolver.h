@@ -42,6 +42,10 @@ using fn_method_get_flags       = std::uint32_t   (*)(const MethodInfo*, std::ui
 using fn_method_get_pointer     = void*           (*)(const MethodInfo*);
 using fn_type_get_name          = char*           (*)(const Il2CppType*);
 using fn_free                   = void            (*)(void*);
+// Il2CppType -> Il2CppClass bridge. Lets the field walker detect enum /
+// value-type on a field's declared type without parsing the type name.
+// Optional — falls back to the catch-all decode when unbound.
+using fn_class_from_il2cpp_type = Il2CppClass*    (*)(const Il2CppType*);
 
 struct Resolver {
     bool         resolved = false;
@@ -79,6 +83,7 @@ struct Resolver {
     fn_method_get_pointer     method_get_pointer     = nullptr;
     fn_type_get_name          type_get_name          = nullptr;
     fn_free                   free                   = nullptr;
+    fn_class_from_il2cpp_type class_from_il2cpp_type = nullptr;
 };
 
 const Resolver& GetResolver();

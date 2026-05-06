@@ -23,6 +23,12 @@ struct FieldEntry {
     std::string   typeName;
     std::size_t   offset = 0;
     std::uint32_t flags  = 0;
+    // Phase 11.5 follow-up: enum / value-type detection — see Mono walker
+    // for the full rationale. Defaults to false; populated only when the
+    // type → class bridge (il2cpp_class_from_il2cpp_type) is available.
+    bool          isEnum             = false;
+    bool          isValueType        = false;
+    std::string   underlyingTypeName;
 };
 
 struct MethodEntry {

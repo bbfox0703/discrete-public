@@ -96,6 +96,18 @@ MonoClassField* SehNextField(fn_class_get_fields fn, MonoClass* k, void** iter) 
 MonoMethod* SehNextMethod(fn_class_get_methods fn, MonoClass* k, void** iter) {
     __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+MonoClass* SehClassFromMonoType(fn_class_from_mono_type fn, MonoType* t) {
+    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+int SehClassIsEnum(fn_class_is_enum fn, MonoClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int SehClassIsValueType(fn_class_is_valuetype fn, MonoClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+MonoType* SehEnumBasetype(fn_class_enum_basetype fn, MonoClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 MonoVTable* SehVTable(fn_class_vtable fn, MonoDomain* d, MonoClass* k) {
     __try { return fn(d, k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
@@ -212,7 +224,29 @@ ClassInfoResult ReadClassInfo(MonoClass* klass) {
             if (r.field_get_name != nullptr)   fe.name = SafeStr(r.field_get_name(f));
             if (r.field_get_offset != nullptr) fe.offset = r.field_get_offset(f);
             if (r.field_get_flags != nullptr)  fe.flags = r.field_get_flags(f);
-            if (r.field_get_type != nullptr)   fe.typeName = TypeName(r.field_get_type(f));
+            MonoType* ft = (r.field_get_type != nullptr) ? r.field_get_type(f) : nullptr;
+            if (ft != nullptr) fe.typeName = TypeName(ft);
+            // Field-class introspection — drives the inspector's classifier.
+            // Skipped for STATIC fields (they're filtered out at emit time
+            // anyway) and when the runtime export isn't available. Without
+            // class_from_mono_type we can't bridge MonoType*→MonoClass*, so
+            // is_enum / is_value_type stay false and the UI keeps its old
+            // best-effort behaviour.
+            if (ft != nullptr && r.class_from_mono_type != nullptr) {
+                MonoClass* fc = SehClassFromMonoType(r.class_from_mono_type, ft);
+                if (fc != nullptr) {
+                    if (r.class_is_valuetype != nullptr) {
+                        fe.isValueType = SehClassIsValueType(r.class_is_valuetype, fc) != 0;
+                    }
+                    if (r.class_is_enum != nullptr) {
+                        fe.isEnum = SehClassIsEnum(r.class_is_enum, fc) != 0;
+                    }
+                    if (fe.isEnum && r.class_enum_basetype != nullptr) {
+                        MonoType* base = SehEnumBasetype(r.class_enum_basetype, fc);
+                        if (base != nullptr) fe.underlyingTypeName = TypeName(base);
+                    }
+                }
+            }
             result.info.fields.push_back(std::move(fe));
         }
     }

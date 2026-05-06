@@ -1055,6 +1055,14 @@ public sealed partial class WalkedFieldNode : ObservableObject
 
     private static WalkedFieldKind ClassifyInstanceField(WalkedField f, bool isPointerValue)
     {
+        // Server-side enum classification trumps everything else — enums
+        // come back with the underlying integer already decoded into Value,
+        // so the row is a Leaf showing that int. Without this short-circuit,
+        // the catch-all 8-byte-ptr decode + the heuristic below would route
+        // them to ValueStruct ("expand") which fails because enums have no
+        // walkable inner fields.
+        if (f.IsEnum) return WalkedFieldKind.Leaf;
+
         // Collection takes priority — its Type is `T[]` / `List<T>`,
         // distinguishable without inspecting the wire payload.
         if (!string.IsNullOrEmpty(f.Type) &&
@@ -1065,22 +1073,31 @@ public sealed partial class WalkedFieldNode : ObservableObject
                 return WalkedFieldKind.Leaf;
             return WalkedFieldKind.Collection;
         }
-        // Inline value-type substruct: when UnityTypeMap classifies the
-        // managed type as a value type (Vector3, Quaternion, Color, Bounds,
-        // …) the field's storage IS the struct — no pointer to deref. The
-        // DLL still emits a `ptr` field for it (decodeField's catch-all
-        // reads 8 bytes as opaque pointer), but that's misleading garbage
-        // for value types. Override before the pointer-classification path
-        // so the chevron points at walkInstance(field.Address, type) for
-        // these — which the DLL handles correctly because its walkInstance
-        // doesn't assume an object header.
-        if (!string.IsNullOrEmpty(f.Type)
+
+        // A primitive that the DLL already decoded inline (`value` or
+        // `string`) is a Leaf even when the runtime says IsValueType=true
+        // (every primitive is technically a value type). Without this
+        // short-circuit, server-side value-type flags would route Int32s
+        // / floats to ValueStruct.
+        bool primitiveDecoded = f.Value.HasValue || f.String is not null;
+
+        // Inline value-type substruct (Vector3, Quaternion, custom struct,
+        // …). The field's storage IS the struct — no pointer to deref —
+        // and walkInstance can iterate its fields by offset starting at
+        // the field's own address. The server-side `IsValueType` flag is
+        // the authoritative signal when populated; we fall back to the
+        // legacy UnityTypeMap heuristic for older runtimes that didn't
+        // bind the type→class bridge.
+        bool serverStruct = f.IsValueType && !primitiveDecoded;
+        bool legacyStruct = !primitiveDecoded
+            && !string.IsNullOrEmpty(f.Type)
             && !UnityTypeMap.IsPointerType(f.Type)
-            && LiveInspectionViewModel.TryParseClassName(f.Type, out _, out _)
-            && !string.IsNullOrEmpty(f.Address))
+            && LiveInspectionViewModel.TryParseClassName(f.Type, out _, out _);
+        if ((serverStruct || legacyStruct) && !string.IsNullOrEmpty(f.Address))
         {
             return WalkedFieldKind.ValueStruct;
         }
+
         // Pointer-to-class: the wire layer reports a Ptr value AND the
         // field type resolves to a non-primitive class.
         if (isPointerValue

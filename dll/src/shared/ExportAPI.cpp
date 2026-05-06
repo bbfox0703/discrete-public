@@ -27,6 +27,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -1022,7 +1023,17 @@ void RegisterCoreHandlers() {
                     {"from",    res.info.self.name},
                     {"address", formatHex(fieldAddr)},
                 };
-                json decoded = decodeField(f.typeName, fieldAddr);
+                if (f.isEnum)      entry["is_enum"]       = true;
+                if (f.isValueType) entry["is_value_type"] = true;
+                if (!f.underlyingTypeName.empty())
+                    entry["underlying_type"] = f.underlyingTypeName;
+                // For enums, decode using the underlying integer type so the
+                // value comes back as an int instead of the catch-all 8-byte
+                // ptr. Falls back to the original typeName when the underlying
+                // wasn't detected (older runtimes without class_enum_basetype).
+                const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                    ? f.underlyingTypeName : f.typeName;
+                json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
                 }
@@ -1031,6 +1042,16 @@ void RegisterCoreHandlers() {
             }
             if (fields.size() >= 4096) break;
         }
+
+        // Sort by offset so the inspector grid displays fields in memory
+        // order regardless of metadata declaration order or parent-chain
+        // traversal direction. Inherited fields naturally fall before the
+        // class's own fields because base-class layout always precedes
+        // derived-class layout in .NET.
+        std::sort(fields.begin(), fields.end(),
+                  [](const json& a, const json& b) {
+                      return a.value("offset", 0) < b.value("offset", 0);
+                  });
 
         return json{
             {"address",   formatHex(addr)},
@@ -1764,7 +1785,13 @@ void RegisterCoreHandlers() {
                     {"from",    res.info.self.name},
                     {"address", formatHex(fieldAddr)},
                 };
-                json decoded = decodeField(f.typeName, fieldAddr);
+                if (f.isEnum)      entry["is_enum"]       = true;
+                if (f.isValueType) entry["is_value_type"] = true;
+                if (!f.underlyingTypeName.empty())
+                    entry["underlying_type"] = f.underlyingTypeName;
+                const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                    ? f.underlyingTypeName : f.typeName;
+                json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
                 }
@@ -1773,6 +1800,12 @@ void RegisterCoreHandlers() {
             }
             if (fields.size() >= 4096) break;
         }
+
+        // Sort by offset — see Mono walkInstance for rationale.
+        std::sort(fields.begin(), fields.end(),
+                  [](const json& a, const json& b) {
+                      return a.value("offset", 0) < b.value("offset", 0);
+                  });
 
         return json{
             {"address",   formatHex(addr)},

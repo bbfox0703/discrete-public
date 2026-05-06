@@ -57,6 +57,10 @@ using fn_compile_method         = void*          (*)(MonoMethod*);
 using fn_field_get_data         = const char*    (*)(MonoClassField*);
 using fn_class_is_enum          = int            (*)(MonoClass*);
 using fn_class_enum_basetype    = MonoType*      (*)(MonoClass*);
+// MonoType -> MonoClass bridge. Lets the field walker detect enum / value-type
+// on a field's declared type without re-parsing the type name. Optional: when
+// unbound, walkInstance falls back to its existing catch-all decode.
+using fn_class_from_mono_type   = MonoClass*     (*)(MonoType*);
 
 // --- Mono array element metadata (Phase 10 follow-up) ----------------------
 using fn_class_get_element_class = MonoClass*    (*)(MonoClass*);
@@ -115,6 +119,7 @@ struct Resolver {
     fn_field_get_data         field_get_data         = nullptr;
     fn_class_is_enum          class_is_enum          = nullptr;
     fn_class_enum_basetype    class_enum_basetype    = nullptr;
+    fn_class_from_mono_type   class_from_mono_type   = nullptr;
     fn_class_get_element_class class_get_element_class = nullptr;
     fn_class_value_size       class_value_size       = nullptr;
     fn_class_is_valuetype     class_is_valuetype     = nullptr;

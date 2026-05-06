@@ -11,6 +11,8 @@
 
 #include <windows.h>
 
+#include <cstring>
+
 namespace UnityCEDumper::IL2CPP {
 
 namespace {
@@ -108,6 +110,12 @@ void* SehMethodPtrFromStruct(const MethodInfo* m) {
 }
 const char* SehClassName(fn_class_get_name fn, Il2CppClass* k) {
     __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+Il2CppClass* SehClassFromIl2CppType(fn_class_from_il2cpp_type fn, const Il2CppType* t) {
+    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+int SehClassIsValueType(fn_class_is_valuetype fn, Il2CppClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 #pragma warning(pop)
 
@@ -227,7 +235,46 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
             if (r.field_get_name != nullptr)   fe.name   = SafeStr(r.field_get_name(f));
             if (r.field_get_offset != nullptr) fe.offset = r.field_get_offset(f);
             if (r.field_get_flags != nullptr)  fe.flags  = static_cast<std::uint32_t>(r.field_get_flags(f));
-            if (r.field_get_type != nullptr)   fe.typeName = TypeName(r.field_get_type(f));
+            const Il2CppType* ft = (r.field_get_type != nullptr) ? r.field_get_type(f) : nullptr;
+            if (ft != nullptr) fe.typeName = TypeName(ft);
+            // Field-class introspection — IL2CPP doesn't export `class_is_enum`,
+            // so we detect enums by checking the field class's parent (every
+            // enum derives from System.Enum). Skipped when the type→class
+            // bridge isn't bound (older runtimes).
+            if (ft != nullptr && r.class_from_il2cpp_type != nullptr) {
+                Il2CppClass* fc = SehClassFromIl2CppType(r.class_from_il2cpp_type, ft);
+                if (fc != nullptr) {
+                    if (r.class_is_valuetype != nullptr) {
+                        fe.isValueType = SehClassIsValueType(r.class_is_valuetype, fc) != 0;
+                    }
+                    if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
+                        Il2CppClass* parent = SehParent(r.class_get_parent, fc);
+                        if (parent != nullptr) {
+                            const char* pn = SehClassName(r.class_get_name, parent);
+                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0) {
+                                fe.isEnum = true;
+                                // Underlying type lives in the enum's `value__`
+                                // instance field — same trick getEnumValues uses.
+                                if (r.class_get_fields != nullptr) {
+                                    void* fit = nullptr;
+                                    for (;;) {
+                                        FieldInfo* uf = SehNextField(r.class_get_fields, fc, &fit);
+                                        if (uf == nullptr) break;
+                                        const char* un = (r.field_get_name != nullptr)
+                                            ? r.field_get_name(uf) : nullptr;
+                                        if (un != nullptr && std::strcmp(un, "value__") == 0) {
+                                            const Il2CppType* ut = (r.field_get_type != nullptr)
+                                                ? r.field_get_type(uf) : nullptr;
+                                            if (ut != nullptr) fe.underlyingTypeName = TypeName(ut);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             result.info.fields.push_back(std::move(fe));
         }
     }

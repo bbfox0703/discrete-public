@@ -21,6 +21,15 @@ struct FieldEntry {
     std::string   typeName;
     int           offset = 0;          // offset from MonoObject start (raw)
     std::uint32_t flags  = 0;          // FieldAttributes (Static = 0x10, etc.)
+    // Phase 11.5 follow-up: enum / value-type detection so the inspector can
+    // classify a field as Leaf (enum/primitive) vs ValueStruct (Vector3 etc.)
+    // vs PointerToClass without re-parsing the runtime metadata. Both default
+    // to false; populated when the resolver has the right exports bound.
+    bool          isEnum             = false;
+    bool          isValueType        = false;
+    // For enum fields: the underlying integer type name (e.g.
+    // "System.Int32"). Empty when isEnum=false or detection failed.
+    std::string   underlyingTypeName;
 };
 
 struct MethodEntry {
