@@ -7,13 +7,17 @@
 // pointers like Il2CppClass*; that wrapper layer lives elsewhere.
 //
 // Phase 14c covers v24 (Unity 2018.4-2019.x, e.g. SaGa Frontier Remastered),
-// v29 (Unity 2021.x-2022.1, e.g. SaGa Frontier 2 Remastered), and v31
-// (Unity 2022.2+, e.g. Emberward / Farthest Frontier). v27 (Unity 2020) is
-// deferred — no test target locally and the format only diverges from v24 in
-// minor sub-version increments that hit metadata-cli's "untested version"
-// warning gracefully. The HEADER prefix up to typeDefinitionsOffset is the
-// same across v24/v27/v29/v31 — we read just that span via HeaderV29 and
-// dispatch the trailing TypeDefinition layout per version.
+// v29 (Unity 2021.x-2022.1 AND Unity 6 / 6000.0.x — Unity 6 reverted to v29,
+// e.g. SaGa Frontier 2 Remastered), and v31 (Unity 2022.2-2023.x, e.g.
+// Emberward / Farthest Frontier). v27 (Unity 2020) is deferred — no test
+// target locally and the format shares the v29 layout per upstream sources.
+// The HEADER prefix up to typeDefinitionsOffset is the same across
+// v24/v27/v29/v31 — we read just that span via HeaderV29 and dispatch the
+// trailing TypeDefinition layout per version.
+//
+// All four layouts cross-checked against Unity's official IL2CPP source in
+// vendor/libil2cpp/ — see docs/il2cpp-metadata-crosscheck.md for the
+// field-by-field comparison and source-line citations.
 #pragma once
 
 #include <cstdint>
