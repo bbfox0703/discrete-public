@@ -163,7 +163,19 @@ function dissectClass(assembly, ns, name)
         assembly, (ns and ns ~= "" and (ns .. ".") or ""), name, "")
     log("Building structure '%s' (%d fields)", label, #(info.fields or {}))
 
-    -- CE: createStructure / structure:addElement is the API.
+    -- CE 7.5.x: createStructure returns an unregistered TDissectedStruct.
+    -- It only appears in the Structure dissect window after we explicitly
+    -- call addToGlobalStructureList() at the end. Drop any prior structure
+    -- with the same label first so re-runs don't accumulate duplicates.
+    if getStructureCount and getStructure then
+        for i = getStructureCount() - 1, 0, -1 do
+            local existing = getStructure(i)
+            if existing and existing.Name == label and existing.removeFromGlobalStructureList then
+                existing.removeFromGlobalStructureList()
+            end
+        end
+    end
+
     local s = createStructure(label)
     if s == nil then err("createStructure returned nil"); return end
 
@@ -188,6 +200,12 @@ function dissectClass(assembly, ns, name)
             elem.Vartype  = vartype
             elem.Bytesize = bytesize
         end
+    end
+
+    if s.addToGlobalStructureList then
+        s.addToGlobalStructureList()
+    else
+        err("TDissectedStruct.addToGlobalStructureList missing on this CE build — structure won't appear in the dissect menu.")
     end
 
     log("Done. Open Memory View → Tools → Dissect Data → pick '%s'.", label)
