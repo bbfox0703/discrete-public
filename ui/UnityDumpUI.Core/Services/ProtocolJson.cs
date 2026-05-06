@@ -23,6 +23,8 @@ namespace UnityDumpUI.Core.Services;
 [JsonSerializable(typeof(RpcEnvelope<ReadMemoryResult>))]
 [JsonSerializable(typeof(RpcEnvelope<WalkArrayResult>))]
 [JsonSerializable(typeof(RpcEnvelope<MetadataStatsResult>))]
+[JsonSerializable(typeof(RpcEnvelope<WhatIsAtResult>))]
+[JsonSerializable(typeof(RpcEnvelope<ClassRangeStatsResult>))]
 [JsonSerializable(typeof(HandshakeResult))]
 [JsonSerializable(typeof(PingResult))]
 [JsonSerializable(typeof(GetAssembliesResult))]
@@ -41,11 +43,16 @@ namespace UnityDumpUI.Core.Services;
 [JsonSerializable(typeof(MethodEntry))]
 [JsonSerializable(typeof(WalkedField))]
 [JsonSerializable(typeof(MetadataStatsResult))]
+[JsonSerializable(typeof(WhatIsAtResult))]
+[JsonSerializable(typeof(WhatIsAtField))]
+[JsonSerializable(typeof(WhatIsAtScanRange))]
+[JsonSerializable(typeof(ClassRangeStatsResult))]
 [JsonSerializable(typeof(RpcError))]
 [JsonSerializable(typeof(PipeRequest))]
 [JsonSerializable(typeof(string))]
 [JsonSerializable(typeof(int))]
 [JsonSerializable(typeof(uint))]
+[JsonSerializable(typeof(bool))]
 internal sealed partial class ProtocolJsonContext : JsonSerializerContext
 {
 }

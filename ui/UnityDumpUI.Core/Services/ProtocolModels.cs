@@ -271,6 +271,79 @@ public sealed class WalkedArrayElement
     [JsonPropertyName("error")]         public string?      Error        { get; set; }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 17a + 17b — address finder (reverse lookup).
+//
+// `whatIsAt` is the inverse of `findInstances`: given any process address,
+// walk backwards looking for an object header whose first qword is a valid
+// runtime class pointer (IL2CPP) or vtable pointer (Mono); then resolve the
+// queried byte offset back to the declared field whose [offset, offset+size)
+// range contains it (or the closest one below).
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// `whatIsAt` result. <see cref="Found"/> = true means the backward scan
+/// landed inside a managed instance; <see cref="Field"/> /
+/// <see cref="NearestField"/> carry the Phase 17b field-offset resolution.
+/// </summary>
+public sealed class WhatIsAtResult
+{
+    [JsonPropertyName("found")]              public bool                  Found             { get; set; }
+    [JsonPropertyName("reason")]             public string?               Reason            { get; set; }
+    [JsonPropertyName("address")]            public string?               Address           { get; set; }
+    [JsonPropertyName("instance")]           public string?               Instance          { get; set; }
+    [JsonPropertyName("class_ptr")]          public string?               ClassPtr          { get; set; }
+    [JsonPropertyName("vtable_ptr")]         public string?               VTablePtr         { get; set; }
+    [JsonPropertyName("assembly")]           public string?               Assembly          { get; set; }
+    [JsonPropertyName("namespace")]          public string?               Namespace         { get; set; }
+    [JsonPropertyName("class")]              public string?               Class             { get; set; }
+    [JsonPropertyName("fieldOffset")]        public long                  FieldOffset       { get; set; }
+    [JsonPropertyName("field")]              public WhatIsAtField?        Field             { get; set; }
+    [JsonPropertyName("nearestField")]       public WhatIsAtField?        NearestField      { get; set; }
+    [JsonPropertyName("nearestFieldDelta")]  public long?                 NearestFieldDelta { get; set; }
+    [JsonPropertyName("scannedRange")]       public WhatIsAtScanRange?    ScannedRange      { get; set; }
+    [JsonPropertyName("scannedSteps")]       public int                   ScannedSteps      { get; set; }
+    [JsonPropertyName("error")]              public string?               Error             { get; set; }
+}
+
+public sealed class WhatIsAtField
+{
+    [JsonPropertyName("name")]            public string  Name             { get; set; } = string.Empty;
+    [JsonPropertyName("type")]            public string? Type             { get; set; }
+    [JsonPropertyName("offset")]          public int     Offset           { get; set; }
+    [JsonPropertyName("size")]            public int     Size             { get; set; }
+    [JsonPropertyName("isStatic")]        public bool    IsStatic         { get; set; }
+    [JsonPropertyName("isValueType")]     public bool    IsValueType      { get; set; }
+    [JsonPropertyName("isEnum")]          public bool    IsEnum           { get; set; }
+    [JsonPropertyName("declaredIn")]      public string? DeclaredIn       { get; set; }
+    /// <summary>"leaf" | "value-struct" | "pointer" | "interior".</summary>
+    [JsonPropertyName("kind")]            public string? Kind             { get; set; }
+    [JsonPropertyName("interiorOffset")]  public int?    InteriorOffset   { get; set; }
+    [JsonPropertyName("underlying_type")] public string? UnderlyingType   { get; set; }
+}
+
+public sealed class WhatIsAtScanRange
+{
+    [JsonPropertyName("from")] public string? From { get; set; }
+    [JsonPropertyName("to")]   public string? To   { get; set; }
+}
+
+/// <summary>
+/// `getClassRangeStats` result — diagnostic for the address-finder cache.
+/// Mono populates the vtable counters; IL2CPP leaves them null.
+/// </summary>
+public sealed class ClassRangeStatsResult
+{
+    [JsonPropertyName("backend")]      public string? Backend     { get; set; }
+    [JsonPropertyName("built")]        public bool    Built       { get; set; }
+    [JsonPropertyName("class_count")]  public int     ClassCount  { get; set; }
+    [JsonPropertyName("vtable_count")] public int?    VtableCount { get; set; }
+    [JsonPropertyName("min_klass")]    public string? MinKlass    { get; set; }
+    [JsonPropertyName("max_klass")]    public string? MaxKlass    { get; set; }
+    [JsonPropertyName("min_vtable")]   public string? MinVtable   { get; set; }
+    [JsonPropertyName("max_vtable")]   public string? MaxVtable   { get; set; }
+}
+
 /// <summary>
 /// `getMetadataStats` result — name-shape stats over all type definitions
 /// the backend can see. Drives the Phase 14b stripped-metadata banner;

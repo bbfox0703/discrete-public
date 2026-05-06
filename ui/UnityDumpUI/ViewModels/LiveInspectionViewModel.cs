@@ -154,6 +154,36 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         WalkSummary  = string.Empty;
     }
 
+    /// <summary>
+    /// Phase 17c — cross-tab handoff entry point. Pushes
+    /// <paramref name="address"/> into the Instances list (head) and
+    /// selects it so the existing <see cref="OnSelectedInstanceChanged"/>
+    /// cascade fires <c>walkInstance</c>. Caller must <see cref="SetTarget"/>
+    /// first so the walk has a class spec; otherwise this is a no-op.
+    /// Returns immediately — the walk runs in the background per the
+    /// existing convention (auto-refresh and FindInstances both behave the
+    /// same way).
+    /// </summary>
+    public void FocusOnInstance(string address)
+    {
+        if (!HasTarget || string.IsNullOrWhiteSpace(address)) return;
+        InstanceItem? existing = null;
+        foreach (var i in Instances)
+        {
+            if (string.Equals(i.Address, address, StringComparison.OrdinalIgnoreCase))
+            {
+                existing = i;
+                break;
+            }
+        }
+        if (existing is null)
+        {
+            existing = new InstanceItem(Instances.Count, address);
+            Instances.Insert(0, existing);
+        }
+        SelectedInstance = existing;  // setter fires WalkInstanceAsync
+    }
+
     // ---------- Instances -------------------------------------------------
 
     public ObservableCollection<InstanceItem> Instances { get; } = new();

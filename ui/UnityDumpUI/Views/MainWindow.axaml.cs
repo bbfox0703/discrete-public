@@ -19,10 +19,13 @@ public partial class MainWindow : Window
         // Avalonia Window / StorageProvider types.
         vm.PickProcessAsync          = ShowPickerDialogAsync;
         vm.Browser.SaveFileAsync     = SaveFileAsync;
-        vm.Browser.CopyToClipboardAsync   = CopyToClipboardAsync;
-        vm.Inspector.CopyToClipboardAsync = CopyToClipboardAsync;
-        vm.Inspector.ScrollFieldIntoView  = ScrollInspectorFieldIntoView;
-        vm.ShowProxyDeploy                = ShowProxyDeployWindow;
+        vm.Browser.CopyToClipboardAsync       = CopyToClipboardAsync;
+        vm.Inspector.CopyToClipboardAsync     = CopyToClipboardAsync;
+        vm.Inspector.ScrollFieldIntoView      = ScrollInspectorFieldIntoView;
+        // Phase 17c — clipboard hook for the "Copy instance address" button
+        // on the Address Lookup tab.
+        vm.AddressLookup.CopyToClipboardAsync = CopyToClipboardAsync;
+        vm.ShowProxyDeploy                    = ShowProxyDeployWindow;
         DataContext = vm;
         // Pane-collapse plumbing — IsVisible bindings on the panes' content
         // hide the body, but the column itself only shrinks if we mutate
@@ -136,6 +139,30 @@ public partial class MainWindow : Window
     {
         var win = new ProxyDeployWindow(vm);
         win.Show(this);
+    }
+
+    /// <summary>
+    /// Phase 17c — Inspector "Find what's at this address" right-click
+    /// handler. Reads the right-clicked row's effective address out of the
+    /// Inspector VM (it's the same node the existing Copy CE XML / Copy CE
+    /// field commands operate on — i.e. <c>SelectedNode</c> at the time the
+    /// context menu opened) and hands it to the Address Lookup VM via
+    /// <see cref="MainWindowViewModel.LookupInspectorAddressAsync"/>, which
+    /// also flips the right-pane TabControl over.
+    /// </summary>
+    private async void OnLookupInspectorAddressClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var node = vm.Inspector.SelectedNode;
+        if (node is null) return;
+        // Prefer the dereferenced pointer for pointer-typed rows so the
+        // lookup lands inside the target object, not at the field that
+        // holds the pointer. Falls back to the field's storage address
+        // for primitive / value-struct rows where EffectiveAddress IS
+        // the storage address.
+        string? addr = node.EffectiveAddress ?? node.Address;
+        if (string.IsNullOrEmpty(addr)) return;
+        await vm.LookupInspectorAddressAsync(addr).ConfigureAwait(true);
     }
 
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)

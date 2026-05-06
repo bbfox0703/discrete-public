@@ -320,8 +320,11 @@
                        VerticalAlignment="Center" />
         </StackPanel>
 
-        <!-- Tabs: Fields / Methods -->
-        <TabControl>
+        <!-- Tabs: Fields / Inspector / Methods / Address Lookup. SelectedIndex
+             is bound to the VM so cross-tab handoffs (Inspector right-click
+             → Address Lookup, Address Lookup → Inspector) can switch tabs
+             from the VM layer. -->
+        <TabControl SelectedIndex="{Binding SelectedDetailTabIndex, Mode=TwoWay}">
           <TabItem Header="{StaticResource Browser.FieldsTab}">
             <DockPanel>
               <!-- Filter is UI-only — exports + Copy CE field operate on
@@ -519,6 +522,17 @@
                                   Command="{Binding Inspector.CopyCeXmlNodeCommand}" />
                         <MenuItem Header="{StaticResource Inspector.CopyCeFieldNode}"
                                   Command="{Binding Inspector.CopyCeFieldNodeCommand}" />
+                        <Separator />
+                        <!-- Phase 17c — Inspector right-click reverse address
+                             lookup. Pre-fills the Address Lookup tab's input
+                             with the row's effective address (deref pointer
+                             for pointer rows, storage address otherwise) and
+                             switches tabs. Code-behind reads the right-clicked
+                             row's Address from the DataGrid since the menu
+                             command can't easily bind to the row context
+                             through MainWindowViewModel. -->
+                        <MenuItem Header="{StaticResource Inspector.LookupAddressMenu}"
+                                  Click="OnLookupInspectorAddressClicked" />
                       </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
@@ -636,6 +650,163 @@
                                       Binding="{Binding DeclaredIn, x:DataType=vm:MethodRow}" />
                 </DataGrid.Columns>
               </DataGrid>
+            </DockPanel>
+          </TabItem>
+
+          <!-- Phase 17c — Address Lookup tab. Wraps the `whatIsAt` RPC:
+               paste any process address (typically from CE's *Find what
+               writes / accesses* or pointer scan) and the backend walks
+               back to identify the containing managed instance + class +
+               declared field. The "Inspect this instance" button hands
+               the result over to the Inspector tab via
+               AddressLookupViewModel.InspectInstanceRequested. -->
+          <TabItem Header="{StaticResource AddrLookup.Tab}">
+            <DockPanel Margin="0,4,0,0">
+              <!-- Input row -->
+              <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,*,Auto,Auto"
+                    Margin="0,0,0,8">
+                <TextBlock Grid.Column="0"
+                           Text="{StaticResource AddrLookup.AddressLabel}"
+                           VerticalAlignment="Center" Margin="0,0,8,0" />
+                <TextBox Grid.Column="1"
+                         PlaceholderText="{StaticResource AddrLookup.AddressWatermark}"
+                         Text="{Binding AddressLookup.AddressInput, Mode=TwoWay}"
+                         FontFamily="Consolas,Cascadia Mono,monospace" />
+                <Button Grid.Column="2"
+                        Content="{StaticResource AddrLookup.LookupButton}"
+                        Command="{Binding AddressLookup.LookupCommand}"
+                        Margin="6,0,0,0" />
+                <Button Grid.Column="3"
+                        Content="{StaticResource AddrLookup.ClearButton}"
+                        Command="{Binding AddressLookup.ClearCommand}"
+                        Margin="6,0,0,0" />
+              </Grid>
+
+              <!-- Tunables row -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="8" Margin="0,0,0,8">
+                <TextBlock Text="{StaticResource AddrLookup.ScanLabel}"
+                           VerticalAlignment="Center" Opacity="0.7"
+                           ToolTip.Tip="{StaticResource AddrLookup.ScanTooltip}" />
+                <NumericUpDown Value="{Binding AddressLookup.MaxBackwardScan, Mode=TwoWay}"
+                               Minimum="64" Maximum="16384" Increment="1024"
+                               Width="130"
+                               ToolTip.Tip="{StaticResource AddrLookup.ScanTooltip}" />
+                <ProgressBar IsIndeterminate="True"
+                             IsVisible="{Binding AddressLookup.IsBusy}"
+                             Width="80" Height="4" VerticalAlignment="Center" />
+              </StackPanel>
+
+              <!-- Error banner -->
+              <Border DockPanel.Dock="Top"
+                      IsVisible="{Binding AddressLookup.ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                      Background="#33D44017" BorderBrush="#88D44017"
+                      BorderThickness="1" Padding="8,4" Margin="0,0,0,8"
+                      CornerRadius="3">
+                <TextBlock Text="{Binding AddressLookup.ErrorMessage}"
+                           Foreground="#FFD44017" TextWrapping="Wrap" />
+              </Border>
+
+              <!-- Result panel -->
+              <ScrollViewer>
+                <StackPanel Spacing="6">
+
+                  <!-- "no result" hint when the backend returned !found -->
+                  <Border Background="#22808080" BorderBrush="#44808080"
+                          BorderThickness="1" Padding="10,6" CornerRadius="3"
+                          IsVisible="{Binding AddressLookup.Result.Found, Converter={x:Static BoolConverters.Not}, FallbackValue=False}">
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="{StaticResource AddrLookup.NoResult}"
+                                 TextWrapping="Wrap" Opacity="0.85" />
+                      <StackPanel Orientation="Horizontal" Spacing="6"
+                                  IsVisible="{Binding AddressLookup.Result.Reason, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{StaticResource AddrLookup.NotFoundReason}"
+                                   Opacity="0.7" />
+                        <TextBlock Text="{Binding AddressLookup.Result.Reason}"
+                                   FontFamily="Consolas,Cascadia Mono,monospace" />
+                      </StackPanel>
+                      <TextBlock Text="{Binding AddressLookup.ScannedLabel}"
+                                 Opacity="0.6" FontSize="11" />
+                    </StackPanel>
+                  </Border>
+
+                  <!-- Found result -->
+                  <Border BorderBrush="#44808080" BorderThickness="1"
+                          Padding="10" CornerRadius="3"
+                          IsVisible="{Binding AddressLookup.HasResult}">
+                    <StackPanel Spacing="6">
+                      <TextBlock Text="{StaticResource AddrLookup.ResultHeader}"
+                                 FontWeight="SemiBold" />
+                      <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
+                            Margin="0,4,0,0">
+                        <TextBlock Grid.Row="0" Grid.Column="0"
+                                   Text="{StaticResource AddrLookup.InstanceLabel}"
+                                   Opacity="0.7" />
+                        <TextBlock Grid.Row="0" Grid.Column="1"
+                                   Text="{Binding AddressLookup.InstanceLabel}"
+                                   FontFamily="Consolas,Cascadia Mono,monospace" />
+                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                   Text="{StaticResource AddrLookup.ClassLabel}"
+                                   Opacity="0.7" Margin="0,4,0,0" />
+                        <TextBlock Grid.Row="1" Grid.Column="1"
+                                   Text="{Binding AddressLookup.ClassLabel}"
+                                   Margin="0,4,0,0" />
+                        <TextBlock Grid.Row="2" Grid.Column="0"
+                                   Text="{StaticResource AddrLookup.OffsetLabel}"
+                                   Opacity="0.7" Margin="0,4,0,0" />
+                        <TextBlock Grid.Row="2" Grid.Column="1"
+                                   Text="{Binding AddressLookup.FieldOffsetLabel}"
+                                   FontFamily="Consolas,Cascadia Mono,monospace"
+                                   Margin="0,4,0,0" />
+
+                        <!-- Field row (exact match) -->
+                        <TextBlock Grid.Row="3" Grid.Column="0"
+                                   Text="{StaticResource AddrLookup.FieldLabel}"
+                                   Opacity="0.7" Margin="0,4,0,0"
+                                   IsVisible="{Binding AddressLookup.HasField}" />
+                        <TextBlock Grid.Row="3" Grid.Column="1"
+                                   Text="{Binding AddressLookup.FieldLabel}"
+                                   Margin="0,4,0,0"
+                                   IsVisible="{Binding AddressLookup.HasField}" />
+
+                        <!-- Nearest field row (no exact match) -->
+                        <TextBlock Grid.Row="3" Grid.Column="0"
+                                   Text="{StaticResource AddrLookup.NearestLabel}"
+                                   Opacity="0.7" Margin="0,4,0,0"
+                                   IsVisible="{Binding AddressLookup.HasNearestField}" />
+                        <TextBlock Grid.Row="3" Grid.Column="1"
+                                   Text="{Binding AddressLookup.NearestFieldLabel}"
+                                   Margin="0,4,0,0" Opacity="0.85"
+                                   IsVisible="{Binding AddressLookup.HasNearestField}" />
+
+                        <TextBlock Grid.Row="4" Grid.Column="0"
+                                   Text="{StaticResource AddrLookup.KindLabel}"
+                                   Opacity="0.7" Margin="0,4,0,0"
+                                   IsVisible="{Binding AddressLookup.HasField}" />
+                        <TextBlock Grid.Row="4" Grid.Column="1"
+                                   Text="{Binding AddressLookup.KindLabel}"
+                                   Margin="0,4,0,0"
+                                   IsVisible="{Binding AddressLookup.HasField}" />
+
+                        <TextBlock Grid.Row="5" Grid.Column="0"
+                                   Text="{StaticResource AddrLookup.ScannedLabel}"
+                                   Opacity="0.7" Margin="0,4,0,0" />
+                        <TextBlock Grid.Row="5" Grid.Column="1"
+                                   Text="{Binding AddressLookup.ScannedLabel}"
+                                   Opacity="0.6" FontSize="11"
+                                   Margin="0,4,0,0" />
+                      </Grid>
+
+                      <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                        <Button Content="{StaticResource AddrLookup.InspectInstance}"
+                                Command="{Binding AddressLookup.InspectInstanceCommand}" />
+                        <Button Content="{StaticResource AddrLookup.CopyInstance}"
+                                Command="{Binding AddressLookup.CopyInstanceAddrCommand}" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </ScrollViewer>
             </DockPanel>
           </TabItem>
         </TabControl>

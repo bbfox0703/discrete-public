@@ -294,6 +294,54 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `whatIsAt` — Phase 17a + 17b reverse address lookup. Strategy A
+    /// backward 8-byte stride scan from <paramref name="address"/> until a
+    /// managed object header turns up; the resolver then walks the parent
+    /// chain to locate the declared field whose
+    /// <c>[offset, offset+size)</c> range contains the queried byte offset.
+    /// Soft outcomes (no class found in range, address unreadable, etc.)
+    /// land on <see cref="WhatIsAtResult.Found"/> = false rather than
+    /// throwing — pipe-level errors still throw.
+    /// </summary>
+    public async Task<WhatIsAtResult> WhatIsAtAsync(
+        string address, int? maxBackwardScan = null, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["address"] = Str(address),
+        };
+        if (maxBackwardScan is int n) args["maxBackwardScan"] = Int(n);
+
+        var env = await _pipe.SendAsync(
+            "whatIsAt", args,
+            ProtocolJsonContext.Default.RpcEnvelopeWhatIsAtResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("whatIsAt returned no result");
+    }
+
+    /// <summary>
+    /// `getClassRangeStats` — diagnostic for the address-finder cache. Pre-warms
+    /// the cache as a side effect (BuildClassRangeCache is idempotent in the
+    /// backend; first call after handshake takes ~tens of ms, every subsequent
+    /// call sub-ms). Pass <paramref name="rebuild"/> to drop + rebuild.
+    /// </summary>
+    public async Task<ClassRangeStatsResult> GetClassRangeStatsAsync(
+        bool rebuild = false, CancellationToken ct = default)
+    {
+        var args = rebuild
+            ? new Dictionary<string, JsonElement>
+              {
+                  ["rebuild"] = JsonSerializer.SerializeToElement(true, ProtocolJsonContext.Default.Boolean),
+              }
+            : null;
+        var env = await _pipe.SendAsync(
+            "getClassRangeStats", args,
+            ProtocolJsonContext.Default.RpcEnvelopeClassRangeStatsResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("getClassRangeStats returned no result");
+    }
+
+    /// <summary>
     /// `readMemory` — raw byte read. <paramref name="size"/> must be in
     /// [1, 1048576]; soft errors land in <see cref="ReadMemoryResult.Error"/>.
     /// </summary>

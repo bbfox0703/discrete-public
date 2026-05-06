@@ -66,10 +66,19 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _gameScanner    = gameScanner ?? new UnityDumpUI.Platform.SteamGameScanner(proxyInstaller);
         Browser         = new AssemblyBrowserViewModel(_backend, _logger);
         Inspector       = new LiveInspectionViewModel(_backend, _logger);
+        AddressLookup   = new AddressLookupViewModel(_backend, _logger);
         // Optional bridge to AOBMaker's Cheat Engine plugin — drives the
         // per-row "HEX" button in the Inspector grid (CE Memory View
         // navigation). Bridge no-ops when AOBMaker / CE aren't running.
         Inspector.AobMaker = new AobMakerBridge(_logger);
+
+        // Phase 17c — handoff from the Address Lookup tab back to the
+        // Inspector tab. The VM raises this when the user clicks
+        // "Inspect this instance" with a found result; MainWindow's
+        // code-behind hooks the event to switch tabs + push the address
+        // into LiveInspectionViewModel. Done here (instead of in the
+        // view) so unit tests can drive it without an Avalonia loop.
+        AddressLookup.InspectInstanceRequested += OnInspectInstanceRequested;
 
         // Bridge: when the user picks a live instance in the Inspector tab,
         // mirror its address into the export base so the next "Export .CT"
@@ -172,6 +181,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
         Inspector.ClearCommand.Execute(null);
         Inspector.ErrorMessage = null;
+
+        // Phase 17c: drop the address-lookup state too. Result block (if
+        // any) refers to a class pointer that the freshly-relaunched game
+        // will have at a different address, so leaving it visible would
+        // be misleading.
+        AddressLookup.ClearCommand.Execute(null);
     }
 
     public IProcessEnumerator ProcessEnumerator => _processes;
@@ -187,6 +202,33 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <see cref="InspectSelectedClassCommand"/> from the class list selection.
     /// </summary>
     public LiveInspectionViewModel Inspector { get; }
+
+    /// <summary>
+    /// Phase 17c — Address Lookup tab. Wraps the <c>whatIsAt</c> RPC; emits
+    /// <see cref="AddressLookupViewModel.InspectInstanceRequested"/> when the
+    /// user clicks "Inspect this instance" with a found result.
+    /// </summary>
+    public AddressLookupViewModel AddressLookup { get; }
+
+    /// <summary>
+    /// Selected index of the right-pane TabControl. The Address Lookup tab
+    /// is index 3 (Fields=0 / Inspector=1 / Methods=2 / AddressLookup=3).
+    /// Bound TwoWay so cross-tab handoff (e.g. the inspector's right-click
+    /// "Find what's at this address" or the lookup's "Inspect this
+    /// instance" buttons) can switch tabs from the VM layer without
+    /// touching the view.
+    /// </summary>
+    [ObservableProperty]
+    private int _selectedDetailTabIndex;
+
+    /// <summary>
+    /// Tab indices for <see cref="SelectedDetailTabIndex"/>. Kept here so
+    /// callers don't need magic numbers.
+    /// </summary>
+    public const int TabIndexFields        = 0;
+    public const int TabIndexInspector     = 1;
+    public const int TabIndexMethods       = 2;
+    public const int TabIndexAddressLookup = 3;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -605,6 +647,41 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             Browser.SelectedClass.Namespace,
             Browser.SelectedClass.Name);
         await Inspector.FindInstancesCommand.ExecuteAsync(null).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Phase 17c — handoff from the Address Lookup tab back to the
+    /// Inspector tab. Loads the identified instance into the Inspector
+    /// VM and switches the right-pane TabControl. The walk fires
+    /// asynchronously via the Inspector's existing
+    /// <c>OnSelectedInstanceChanged</c> cascade.
+    /// </summary>
+    private void OnInspectInstanceRequested(object? sender, InspectInstanceRequest req)
+    {
+        try
+        {
+            Inspector.SetTarget(req.Assembly, req.Namespace, req.Class);
+            Inspector.FocusOnInstance(req.Instance);
+            SelectedDetailTabIndex = TabIndexInspector;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Inspect handoff failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnInspectInstanceRequested: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Phase 17c — Inspector "Find what's at this address" right-click
+    /// action. Pre-fills the Address Lookup tab's input with the queried
+    /// row's effective address, runs the lookup, and switches tabs.
+    /// </summary>
+    public async Task LookupInspectorAddressAsync(string address)
+    {
+        if (string.IsNullOrEmpty(address)) return;
+        SelectedDetailTabIndex = TabIndexAddressLookup;
+        await AddressLookup.PrefillAndLookupAsync(address).ConfigureAwait(true);
     }
 
     /// <summary>

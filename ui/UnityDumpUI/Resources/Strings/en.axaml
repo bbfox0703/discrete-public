@@ -67,6 +67,28 @@
   <sys:String x:Key="Inspector.CopyPtrTooltip">Copy pointer value (only meaningful for pointer-typed rows)</sys:String>
   <sys:String x:Key="Inspector.CopyNameTooltip">Copy field name</sys:String>
   <sys:String x:Key="Inspector.NavigateHexTooltip">Open Cheat Engine's Memory View at this address (requires AOBMaker plugin)</sys:String>
+  <sys:String x:Key="Inspector.LookupAddressMenu">Find what's at this address…</sys:String>
+
+  <!-- Phase 17c — Address Lookup tab (reverse address lookup; whatIsAt RPC). -->
+  <sys:String x:Key="AddrLookup.Tab">Address Lookup</sys:String>
+  <sys:String x:Key="AddrLookup.AddressLabel">Address:</sys:String>
+  <sys:String x:Key="AddrLookup.AddressWatermark">paste a hex address (e.g. 0x000001E55B2518F0)…</sys:String>
+  <sys:String x:Key="AddrLookup.LookupButton">Lookup</sys:String>
+  <sys:String x:Key="AddrLookup.ClearButton">Clear</sys:String>
+  <sys:String x:Key="AddrLookup.ScanLabel">Backward scan (bytes)</sys:String>
+  <sys:String x:Key="AddrLookup.ScanTooltip">How far back from the queried address to look for an object header. 4 KB matches the DLL default; raise (capped at 16 KB) only if a known-large class isn't getting matched.</sys:String>
+  <sys:String x:Key="AddrLookup.ResultHeader">Result</sys:String>
+  <sys:String x:Key="AddrLookup.InstanceLabel">Instance:</sys:String>
+  <sys:String x:Key="AddrLookup.ClassLabel">Class:</sys:String>
+  <sys:String x:Key="AddrLookup.OffsetLabel">Field offset:</sys:String>
+  <sys:String x:Key="AddrLookup.FieldLabel">Field:</sys:String>
+  <sys:String x:Key="AddrLookup.NearestLabel">Nearest field:</sys:String>
+  <sys:String x:Key="AddrLookup.KindLabel">Kind:</sys:String>
+  <sys:String x:Key="AddrLookup.ScannedLabel">Scan:</sys:String>
+  <sys:String x:Key="AddrLookup.InspectInstance">Inspect this instance</sys:String>
+  <sys:String x:Key="AddrLookup.CopyInstance">Copy instance address</sys:String>
+  <sys:String x:Key="AddrLookup.NoResult">No managed instance found in the scanned window. Try raising the backward scan, or check the address is from a live heap-resident object.</sys:String>
+  <sys:String x:Key="AddrLookup.NotFoundReason">Reason:</sys:String>
 
   <!-- Connection bar. -->
   <sys:String x:Key="Conn.Connect">Connect</sys:String>
