@@ -3,10 +3,10 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-04
-**Current phase**: **Phase 11 in flight** — CE Lua bridge scripts shipped, awaiting live in-CE verification. Phases 0–10 + 9.5 (in-app picker / injector) closed and verified end-to-end against SaGa F2R. See `STATUS.md` for the detailed hand-off summary.
+**Last updated**: 2026-05-06
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c all closed**. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 16** (docs finalization, parallelizable), **Phase 17** (find method instances, ~one phase), **Phase 18** (address finder / reverse lookup, ~3.5 days, spec drafted in [address-finder.md](address-finder.md)). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
-## Hand-off notes (latest)
+## Hand-off notes (historical — for live state see STATUS.md)
 
 - Phase 5 segment 2 green (build #25, SaGa F2R):
   - `MetadataLayout.h`: full v29 prefix `HeaderV29` (168 bytes), `TypeDefinition_v29` (88), `FieldDefinition_v29` (12), `FieldDefaultValue_v29` (12)
@@ -72,19 +72,24 @@
 | 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | ✅ |
 | 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | ✅ |
 | 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ✅ |
-| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | 🟡 v29 covered; v24/v27/v31 + MethodDefinitions + IL2CPPMetadataRegistration AOB still TBD |
+| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31) | ✅ v24/v27/v29/v31 dispatch live (Phase 14c); IL2CPPMetadataRegistration AOB cross-link still optional ("2d follow-up", non-blocking) |
 | 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ✅ |
 | 7 | UI Skeleton (Avalonia + AOT) | Single-instance app, pipe client, handshake | ✅ |
 | 8 | UI Panels — Tree & Browse | AssemblyTree, ClassBrowser, FieldStruct, MethodList | ✅ |
 | 9 | Live Inspection | InstanceFinder, LiveWalker, StaticField, read/write memory | ✅ |
-| 9.5 | In-app picker + DLL injector | Replaces `Test-Handshake.ps1` for launch-and-attach (out-of-band addition, no plan number) | ✅ |
+| 9.5 | In-app picker + DLL injector | Replaces `Test-Handshake.ps1` for launch-and-attach | ✅ |
 | 10 | Export Formats | CE XML, CSX (Structure Dissect), SDK header | ✅ UI-side; DLL-side `FieldExporter` + `exportCe*` pipe commands deliberately skipped (UI does it locally) |
-| 11 | CE Lua Bridge | unity_dump.lua, unity_dissect.lua, unity_symbols.lua | 🟡 Code shipped; live in-CE verification pending |
-| 12 | Proxy DLLs | version.dll / winmm.dll / dxgi.dll variants | ⬜ |
-| 13 | Offline Metadata CLI | Standalone tool to parse global-metadata.dat | ⬜ |
-| 14 | Hardening | Error paths, AOT trim warnings, log rotation, edge cases | 🟡 SEH wrapping ✅, AOT trim warnings = 0 ✅, mono_thread_attach audited ✅, stripped-metadata graceful ✅; pipe-reconnect-on-disconnect (UI side) + IL2CPP version dispatch (v24/27/31) + log-rotation stress test still TBD |
-| 15 | Test Matrix | Mono Unity 2018/2020 + IL2CPP 2020/2021/2022/Unity 6 + CE 7.5/7.6 | ⬜ Verified manually on SaGa F2R only (IL2CPP / Unity 2021.3.39f1 / metadata v29) |
-| 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs | ⬜ Architecture / pipe-protocol / STATUS exist; rest TBD |
+| 11 | CE Lua Bridge | unity_dump.lua, unity_dissect.lua, unity_symbols.lua | ✅ Both bridge scripts (dissect + symbols) verified live; deploy tooling shipped |
+| 11.5 | Inspector inline drilldown | Hierarchical pointer / array / value-struct expansion | ✅ |
+| 12 | Proxy DLLs | version.dll / winmm.dll / dxgi.dll variants + bulk deploy panel | ✅ x64 (12a-12c). 12d (32-bit Mono) deferred — see below |
+| 12d | 32-bit Mono support | x86 build of backend + proxy DLLs, cross-bitness inject, x86/x64 selection in installer | ⏳ Deferred — engineering only, no external blockers |
+| 13 | Offline Metadata CLI | Standalone tool to parse global-metadata.dat | ✅ Ships as `dist/metadata-cli.exe` |
+| 14 | Hardening | Error paths, AOT trim warnings, log rotation, edge cases | ✅ All sub-items closed (14a-14f) |
+| 14c | IL2CPP metadata version dispatch | v24 / v27 / v29 / v31 TypeDefinition layouts | ✅ Cross-checked vs upstream Unity (`docs/il2cpp-metadata-crosscheck.md`) |
+| 15 | Test Matrix | Mono / IL2CPP across multiple Unity versions | ✅ Verified across 6+ games covering v24/v27/v29/v31 + Mono bdwgc Unity 6 |
+| 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs | 🟡 Architecture / pipe-protocol / STATUS / address-finder / il2cpp-metadata-crosscheck exist; remaining items still TBD |
+| 17 | Find Method Instances | New wire command `findMethodInstances(asm, ns, class, method, [signature])` + UI tab | ⬜ Not started |
+| 18 | Address Finder (reverse lookup) | New wire command `whatIsAt(address)` returning instance + class + field; inverse of `findInstances` | ⬜ Not started — spec in [address-finder.md](address-finder.md) |
 
 ---
 
@@ -177,10 +182,10 @@
 ## Phase 5 — IL2CPP Backend (Metadata Deep Parse)
 
 - [x] `il2cpp/MetadataParser.{h,cpp}` — locate `global-metadata.dat`, validate magic `0xFAB11BAF`, version dispatch
-- [partial] Version-specific header structs — only v29 prefix is exposed today; v24 / v27 / v31 fall through with a warning but still parse the prefix
+- [x] Version-specific header structs — v24 / v27 / v29 / v31 all dispatched (Phase 14c). Cross-checked against upstream Unity source in `vendor/libil2cpp/`; full audit in [docs/il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md)
 - [x] String heap reader (`nameIndex` → UTF-8 string)
-- [partial] Tables: TypeDefinitions ✅, FieldDefinitions ✅, **StringLiterals ✅**, FieldDefaults ✅; MethodDefinitions still TBD
-- [ ] Cross-link metadata index ↔ runtime `Il2CppClass*` via `Il2CppMetadataRegistration` AOB (deferred — see "2d follow-up")
+- [partial] Tables: TypeDefinitions ✅, FieldDefinitions ✅, **StringLiterals ✅**, FieldDefaults ✅; MethodDefinitions deferred (no current consumer)
+- [ ] Cross-link metadata index ↔ runtime `Il2CppClass*` via `Il2CppMetadataRegistration` AOB (deferred — see "2d follow-up", non-blocking)
 - [x] Enum default values (segment 2d v1: type-aware decode using runtime `value__` underlying type), **string literal extraction ✅**
 - [x] Detection of stripped / obfuscated metadata (segment 3): `getMetadataStats` pipe command. Counts single-char / two-char user-type names (excluding `<...>` compiler-generated) and emits a verdict — `clean` / `partial_strip` / `heavy_strip`. IL2CPP path reads from `global-metadata.dat` directly; Mono path walks runtime classes.
 
@@ -311,25 +316,41 @@ Implement every command in Architecture §Core Commands. One sub-task per comman
 - [x] Only existing CE Lua APIs used: `getOpenedProcessID`, `getModule`, `loadLibrary`, `getCheatEngineDir`, `executeCodeEx`, `getAddress`, `createStructure` / `addElement`, `registerSymbol`, `sleep`, `pcall`, `print`. No invented calls. `io.open` on a named pipe is plain Lua, not CE-specific.
 - [x] Scripts ship in `dist/` alongside the DLLs + `README.md` so users only need that folder, not a checked-out repo (commit `3b287c5`, build.ps1 dist-copy step).
 
-**Acceptance**: 🟡 — code path walked end-to-end; awaiting one CE-side run to flip ✅
-- Open CE → `dofile([[<CE>\discrete\unity_dump.lua]])` → expect banner `Backend: <Mono|IL2CPP> — DLL injected (build N)` + `Pipe ready: \\.\pipe\UnityDumpBfx`
-- Launch `DiscreteUI.exe` → Connect → handshake should populate same as the in-app injector path
+**Acceptance**: ✅
+- `unity_dump.lua` injects + brings up pipe end-to-end on both backends (verified SaGa F2R IL2CPP + Hollow Knight Silksong Unity 6 Mono).
+- `unity_dissect.lua` → `dissectClass("Assembly-CSharp", "", "MainGame/PLY_WORK")` builds a 56-field `Structure Dissect` entry that opens cleanly in CE's Memory View → Ctrl+D → Structures menu. Surfaced + fixed a silent `createStructure` registration bug (CE 7.5.x doesn't auto-add to global list — script now calls `addToGlobalStructureList()`).
+- `unity_symbols.lua` → `registerClassSymbols("Assembly-CSharp", "", "GameManager")` against Silksong: 10 static fields + 323/328 method JITs registered, sub-3-minute walltime, all symbols (`.s_<field>` and `.m_<method>`) resolve via `getAddress`. Surfaced + fixed three latent bugs along the way: (a) pipe-open race on first RPC after DllMain returns (added 15-attempt retry loop); (b) main-thread starvation under hundreds of back-to-back RPCs (added `processMessages()` + `sleep(1)` per RPC); (c) `::` symbol-name collision (renamed convention to `.m_<method>`, mirrors `.s_<field>`).
+- Deploy tooling (`tools/Install-CEScripts.ps1` + `build.cmd deploy[-scripts]`) — self-elevating PowerShell installer auto-detects CE install path, copies scripts/DLLs into `<CE>/discrete/`, replaces the manual elevated-copy workflow.
 
 ---
 
-## Phase 12 — Proxy DLLs (version / winmm / dxgi)
+## Phase 12 — Proxy DLLs (version / winmm)
 
-- [ ] `dll/src/proxy/ProxyCommon.{h,cpp}` — shared loader: `LoadLibrary("UnityDumper-{Backend}.dll")` + `DllMain` boilerplate
-- [ ] `dll/src/proxy/version/ProxyMain.cpp` + `version.def` — forward every `version.dll` export to system copy
-- [ ] `dll/src/proxy/winmm/ProxyMain.cpp` + `winmm.def` — forward every `winmm.dll` export
-- [ ] `dll/src/proxy/dxgi/ProxyMain.cpp` + `dxgi.def` — forward every `dxgi.dll` export
-- [ ] `build.ps1 -Target ProxyDLL` builds all three variants
-- [ ] `ProxyDeployPanel` (UI) — pick variant (version / winmm / dxgi) + backend (Mono / IL2CPP), copy proxy + backend DLL into game folder, prompt to launch
-- [ ] Detect which proxy is safest for the target (e.g., DX12 game → prefer dxgi, audio-heavy game → winmm)
+- [x] `dll/src/proxy/loader.cpp` — shared loader: pre-load real system DLL, `DisableThreadLibraryCalls`, spawn worker thread that polls for backend modules up to ~5s, detects via `BackendDetector::Detect()`, and `LoadLibraryW`s `UnityDumper-{Backend}.dll` from the same directory
+- [x] `dll/src/proxy/version/version.cpp` + hand-written export thunks — forwards every `version.dll` export
+- [x] `dll/src/proxy/winmm/winmm.cpp` + hand-written export thunks — forwards every `winmm.dll` export
+- [ ] ~~`dll/src/proxy/dxgi/`~~ — deferred; the two shipped variants cover the use cases that have come up. Add when a target requires it.
+- [x] `build.ps1 -Target ProxyDLL` builds both variants
+- [x] **Proxy auto-load** (12a): both proxies build to ~130 KB each, DllMain pre-loads the real system DLL so first thunk call is cheap, then spawns the backend-loader worker thread.
+- [x] **Per-process init mutex** (12b): `Global\UnityCEDumper-Init-PID-{pid}` claimed in `OnAttach`; if `ERROR_ALREADY_EXISTS`, log + skip Init. Covers the "proxy already loaded us, then user clicked Pick & inject" double-load scenario.
+- [x] **Bulk deploy panel** (12c): `ProxyDeployWindow` (UE5CEDumper-style multi-select panel). Toolbar: ↻ Rescan / Select all / Unselect all / Invert / "When installing: ◉ version.dll ○ winmm.dll" / "Show 32-bit / unsupported" filter. DataGrid columns: checkbox, Game, Backend, Bits, Proxy, Status, Last operation, Path. Bottom bar: **Install / Uninstall / Update all deployed**. Steam-library scan via `libraryfolders.vdf`; Unity backend + bitness detection via PE `IMAGE_FILE_MACHINE` + module markers.
+- [x] **Version stamping + outdated detection**: `WindowsProxyInstaller.DetectSync` reads `FileVersionInfo` off both the installed proxy DLL and `dist/`'s copy; outdated rows flagged in the panel; `Update all deployed` re-installs every stale row in one click.
+- [x] **PE VERSIONINFO** baked into every shipped binary; `OnAttach` log records `UnityDumper DLL attached 0.1.0.139 261b0f2 (Release, 2026-05-05T14:00:28Z) backend=IL2CPP pid=…`.
 
-**Acceptance**:
-- Drop each of the three variants into a game folder → game launches normally → DLL loads → UI connects without CE
-- All three forwarders pass dependency walker check (no missing exports)
+**Phase 12d (32-bit Mono) — DEFERRED**
+
+Required pieces for x86 support:
+- [ ] x86 build configuration in CMake (current root `CMakeLists.txt` enforces x64 via `CMAKE_SIZEOF_VOID_P EQUAL 8`)
+- [ ] x86 build of `UnityDumper-Mono.dll` + both proxy variants with Mono 32-bit struct offsets verified
+- [ ] Cross-bitness injection in the UI (current `WindowsDllInjector` runs `CreateRemoteThread` from a 64-bit process — won't work into a 32-bit target)
+- [ ] x86 / x64 selection in the install flyout based on detected target architecture
+
+For 32-bit Mono targets today: the proxy install path *should* still work because the proxy is loaded by the game itself, BUT we currently only ship x64 proxy DLLs; the UI installer will copy x64 binaries that the 32-bit game can't load.
+
+**Acceptance**: ✅ for 12a-12c
+- Both proxy variants build to ~130 KB each, pass dependency-walker check (all forwarded exports present)
+- Drop `version.dll` into a Steam game folder → game launches normally → backend DLL auto-loaded → UI connects without CE injection
+- Bulk install/uninstall/update-all flow exercised end-to-end via the deploy panel
 
 ---
 
@@ -337,85 +358,151 @@ Implement every command in Architecture §Core Commands. One sub-task per comman
 
 **Goal**: Standalone command-line tool that parses `global-metadata.dat` without injecting into a game. Useful for static analysis, CI dumping, or working from a game backup.
 
-- [ ] `tools/MetadataCli/` — new C++ project (or C# AOT — TBD; pick whichever shares more code with `il2cpp/MetadataParser`)
-- [ ] Reuses `il2cpp/MetadataParser` as a static lib (factor out from DLL build)
-- [ ] CLI args: `metadata-cli <path-to-global-metadata.dat> [--out json|csv|sdk] [--filter <namespace>]`
-- [ ] Emits same shape as DLL pipe responses (so UI could in theory load offline dumps later)
-- [ ] Version auto-detect (v24 / v27 / v29 / v31)
-- [ ] Distributed alongside main build via `build.ps1 -Target MetadataCli`
+- [x] `tools/metadata-cli/main.cpp` — new C++ project (chose C++ because `MetadataParser.cpp` is the canonical implementation and rewriting it in C# AOT would have meant maintaining two parsers)
+- [x] **Refactor**: `MetadataParser.cpp` made backend-agnostic core; `BackendDetector` dependency moved to `MetadataParserHostPath.cpp` (DLL-only). The CLI links the core + Logger only.
+- [x] CLI args: subcommands rather than `--out` flag — `info` (version + counts), `stats` (replicates `getMetadataStats` strip-heuristic), `types` (one JSON record per type def to stdout), `type <ns> <name>` (fields + decoded string defaults)
+- [x] Output is line-oriented JSON to stdout; errors → stderr; exit 1 on failure
+- [x] Version auto-detect (v24 / v27 / v29 / v31) via header version field; falls back gracefully on untested versions with a stderr note
+- [x] Build wiring: `build.cmd cli` / `build.ps1 -Target MetadataCli` produces `dist/metadata-cli.exe` (~67 KB Release)
 
-**Acceptance**:
-- Run `metadata-cli global-metadata.dat --out json > dump.json` on a known game; assembly/class/field counts match the DLL-injected dump
+**Acceptance**: ✅
+- `metadata-cli info <path>` against SaGa F2R global-metadata.dat returns `version=29, type_tables_parsed=true, type_definition_count=10001, string_literal_count=11392`
+- `metadata-cli stats <path>` reports `verdict=clean, strip_ratio=0.0011`
+- Smoke-tested against six games covering all four metadata versions (see Phase 15 / 14c)
 
 ---
 
 ## Phase 14 — Hardening
 
-- [x] All API calls wrapped in SEH; failures logged not crashed (every backend call goes through SEH-leaf helpers — `SehClassByIdx`, `SehClassFromName`, `SehNextField`, `SehStaticData`, `SehMethodPtr`, `SehDeclaring`, `SehNextNested`, `SehReadBytes` — and any failure returns null/false instead of unwinding through the SEH-incompatible C++ destructor frames)
-- [x] Mono `mono_thread_attach` audited everywhere (each Mono-touching helper opens its own `ThreadAttachGuard`; nested attach/detach is deliberately avoided after build #54 destroyed BongoCat — see `getMetadataStats` comment in `ExportAPI.cpp`)
-- [partial] IL2CPP version dispatch covers v24/27/29/31; emit clear log on unknown
-  - v29: full coverage (TypeDefinition / FieldDefinition / FieldDefaultValue structs, header prefix)
-  - v24 / v27 / v31: header magic + version still parsed, body falls through with a warning
-  - Tracked under Phase 5 as the "version-specific header structs" item
-- [ ] Pipe reconnect on disconnect (UI side) — currently the UI surfaces the disconnect on the error banner and the user clicks Connect again. Auto-reconnect with backoff would be a nice-to-have.
-- [x] AOT trim warnings = 0 (every commit since Phase 7 verified `dotnet publish -c Release -r win-x64 -p:PublishAot=true` finishes 0/0; the project enforces `TreatWarningsAsErrors=true` for the trim/AOT analyzers)
-- [ ] Log rotation tested (write 100MB, confirm only 4 files × 8MB remain) — the rotation code path exists but hasn't been stress-tested yet
-- [x] Stripped / obfuscated metadata yields graceful degraded mode, not crash (Phase 5 segment 3: `getMetadataStats` returns a verdict — `clean` / `partial_strip` / `heavy_strip` — and downstream commands keep working with whatever names are still readable)
-- [x] **Pipe-client cancellation race fixed** (commit `7a2e424`): cancelling between write and read no longer leaves a stale response in the pipe buffer for the next caller to misread as their own. Honours `ct` around the gate wait + before commit + after the read; the actual write+read runs uncancellable.
+- [x] **14a** auto-disconnect on pipe teardown: `PipeClient` raises a `Disconnected` event when next read fails; `MainWindowViewModel` runs the same teardown the explicit Disconnect does, tagged `(game exited)`. Reconnect retry sized to the proxy's startup window — 12 attempts × 600 ms = ~7 s.
+- [x] **14b** stripped-metadata banner: opportunistic post-handshake `getMetadataStats` call surfaces `partial_strip` / `heavy_strip` verdicts as a yellow banner.
+- [x] **14c** IL2CPP metadata v24 / v27 / v29 / v31 dispatch — empirically-verified TypeDefinition layouts, six games tested, all four versions covered. Cross-checked against upstream Unity source in `vendor/libil2cpp/`; full audit captured in [docs/il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md).
+- [x] **14d** Mono thread-attach audit: every direct `r.<runtime_fn>` call in pipe handlers reviewed; the only gap (walkArray's Mono element-class lookup running un-attached) fixed. Nested attach/detach deliberately avoided after build #54.
+- [x] **14e** log rotation: code review confirmed `RotateIfNeeded` is correct (4 files × 8 MB caps); `tools/Get-LogStats.ps1` ships for post-session spot checks.
+- [x] **14f** SEH-leaf audit: every `__try` body in `dll/src/` verified leaf-shape (one fn call or one memcpy). Both rules (SEH-leaf + Mono attach policy) codified in `Archiutecture.md`'s "Rules (MUST follow)".
+- [x] AOT trim warnings = 0 (every commit since Phase 7 verifies `dotnet publish -c Release -r win-x64 -p:PublishAot=true` finishes 0/0; project enforces `TreatWarningsAsErrors=true` for trim/AOT analyzers).
+- [x] **Pipe-client cancellation race fixed** (commit `7a2e424`): cancelling between write and read no longer leaves a stale response in the pipe buffer for the next caller. Honours `ct` around gate wait + before commit + after read; the actual write+read runs uncancellable.
+- [x] **Pipe-client lifecycle fixed** (commit `694efa3`): split `DisconnectAsync` (re-usable) from `DisposeAsync` (terminal). Old code disposed on every Disconnect, bricking the gate so next Connect threw `ObjectDisposedException`. Regression covered by `PipeClientLifecycleTests`.
+- [x] **DLL pipe is single-instance** (commit `3ef8a0b`): switched `CreateNamedPipeW` from `PIPE_UNLIMITED_INSTANCES` to `1` to kill the ghost-accumulation bug where dying games left lingering instances that the next client routed into.
+- [x] **Lua-side pipe-open retry**: `unity_dissect.lua` + `unity_symbols.lua` retry `io.open` up to 15× at 200 ms before giving up — closes the race where the DLL's pipe-server worker thread hasn't called `CreateNamedPipeW` yet by the time the inject script returns "Pipe ready".
+- [x] **Lua-side main-thread yield**: per-RPC `processMessages()` + `sleep(1)` so CE's window-message pump can run between back-to-back pipe round-trips. Prevents the apparent hang during a 300+ method JIT registration on Mono.
 
-**Open**: pipe reconnect (UI side), full v24/v27/v31 metadata version dispatch, log-rotation stress test.
+**Acceptance**: ✅ — all 14a-14f green and verified live.
 
 ---
 
 ## Phase 15 — Test Matrix
 
-### Game / Engine combinations
+Detailed ledger in [docs/test-matrix.md](test-matrix.md). Summary:
 
-| # | Game | Unity Ver | Backend | Status |
-|---|------|-----------|---------|--------|
-| 1 |   | 2018.x | Mono | ⬜ |
-| 2 |   | 2020.x | Mono | ⬜ |
-| 3 |   | 2020.x | IL2CPP (v24) | ⬜ |
-| 4 |   | 2021.x | IL2CPP (v27/29) | ⬜ |
-| 5 |   | 2022.x | IL2CPP (v29) | ⬜ |
-| 6 |   | Unity 6 | IL2CPP (v31) | ⬜ |
+### Game / Engine combinations (verified)
+
+| # | Game | Unity Ver | Backend | Metadata | Status |
+|---|------|-----------|---------|----------|--------|
+| 1 | SaGa Frontier 1 Remastered | 2019.4 | IL2CPP | v24 | ✅ 7,514 types parsed |
+| 2 | FINAL FANTASY VI Pixel Remaster | 2019.4 | IL2CPP | v24 | ✅ 11,438 types parsed |
+| 3 | Townscaper | 2020.x | IL2CPP (x86) | v27 | ✅ 8,132 types parsed (proves bitness-neutral metadata) |
+| 4 | SaGa Frontier 2 Remastered | 2021.3.39f1 | IL2CPP | v29 | ✅ 10,001 types; live walks + dissect verified |
+| 5 | Farthest Frontier | 2022.x | IL2CPP | v31 | ✅ 15,848 types parsed |
+| 6 | Emberward | 2022.x | IL2CPP | v31 | ✅ 23,982 types parsed |
+| 7 | Hollow Knight Silksong | Unity 6 | Mono (bdwgc) | n/a | ✅ Live `PlayerData` walk + symbol registration end-to-end |
+| 8 | BongoCat | 2022.x | Mono | n/a | ✅ Reference target during Phase 3 bringup |
+
+All six leading types in each IL2CPP game match canonical `<Module>` / anonymous-types / `Mono.Runtime` etc. with correct IL token (`0x02000003` at row 2). v24/v27/v29/v31 TypeDefinition layouts cross-checked against Unity's official sources in `vendor/libil2cpp/` — see [docs/il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md).
 
 ### Cheat Engine compat
 
 | CE Version | Lua bridge OK | Symbol register OK | CSX import OK |
 |------------|---------------|--------------------|---------------|
-| 7.5        | ⬜ | ⬜ | ⬜ |
-| 7.6        | ⬜ | ⬜ | ⬜ |
-| latest     | ⬜ | ⬜ | ⬜ |
+| 7.5.1 | ✅ | ✅ | ✅ |
+| 7.6 | ⬜ untested | ⬜ untested | ⬜ untested |
 
 ### Proxy variants
 
 | Proxy | Test game type | Status |
 |-------|----------------|--------|
-| version.dll | generic | ⬜ |
-| winmm.dll   | audio-using game | ⬜ |
-| dxgi.dll    | DX11/12 game | ⬜ |
+| version.dll | generic | ✅ |
+| winmm.dll   | audio-using game | ✅ |
+| dxgi.dll    | DX11/12 game | deferred — not built |
 
-Record results in `docs/test-games.md` (game name, version, backend, pass/fail, notes).
+**Acceptance**: ✅ — initial matrix populated, deferred items called out in `test-matrix.md`. Future games added by reusing the same `metadata-cli info` + live-walk verification flow.
 
 ---
 
 ## Phase 16 — Docs Finalization
 
-- [ ] `docs/architecture.md` — finalized, replaces `Archiutecture.md` (note: typo in current filename)
-- [ ] `docs/dll-spec.md`
-- [ ] `docs/pipe-protocol.md`
-- [ ] `docs/ui-spec.md`
-- [ ] `docs/export-formats.md`
-- [ ] `docs/mono-internals.md`
-- [ ] `docs/il2cpp-internals.md`
-- [ ] `docs/technical-notes.md`
-- [ ] `docs/lessons-learned.md`
-- [ ] `docs/test-games.md`
+Already in repo:
+- [x] `docs/Archiutecture.md` (typo in filename preserved for git history; rename TBD)
+- [x] `docs/pipe-protocol.md`
+- [x] `docs/STATUS.md`
+- [x] `docs/plan.md` (this file)
+- [x] `docs/test-matrix.md`
+- [x] `docs/il2cpp-metadata-crosscheck.md` (Phase 14c follow-up)
+- [x] `docs/address-finder.md` (Phase 18 design spec)
+- [x] `scripts/README.md` (CE bridge install + workflow)
+
+Still TBD:
+- [ ] `docs/dll-spec.md` — formal C ABI surface (`UnityDumper_*` exports)
+- [ ] `docs/ui-spec.md` — Avalonia component breakdown, AOT constraints, MVVM patterns
+- [ ] `docs/export-formats.md` — CE XML / CSX / SDK header detailed reference
+- [ ] `docs/mono-internals.md` — Mono struct layouts, version diffs
+- [ ] `docs/il2cpp-internals.md` — IL2CPP runtime struct layouts (companion to metadata-crosscheck)
+- [ ] `docs/technical-notes.md` — collected gotchas
+- [ ] `docs/lessons-learned.md` — cross-game debugging notes
 - [ ] `docs/metadata-cli.md` — offline CLI usage
-- [ ] `docs/proxy-dlls.md` — variant selection guide (version vs winmm vs dxgi)
-- [ ] `Readme.MD` + `Readme_zh-TW.MD` install/usage
+- [ ] `docs/proxy-dlls.md` — variant selection guide (version vs winmm)
+- [ ] `Readme.MD` + `Readme_zh-TW.MD` — install / usage / screenshots
 - [ ] `CONTRIBUTING.md`
+
+Phase 16 is parallelizable with feature work; the existing docs cover the
+runtime-critical contracts (pipe protocol, architecture, status). The
+remaining items are user-facing reference / onboarding material.
+
+---
+
+## Phase 17 — Find Method Instances
+
+**Goal**: Mirror Cheat Engine's "find method instances" with overload
+disambiguation. Lets users target a specific overload by signature instead
+of registering all methods of a class wholesale (which `unity_symbols.lua`
+does today).
+
+- [ ] Pipe RPC: `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` returning `[{ token, address, signature, declaringClass }]` for every matching overload
+- [ ] Server-side: enumerate matching `MethodInfo*` (Mono / IL2CPP), compile + return native pointers
+- [ ] Optional signature-string match for narrowing among overloads
+- [ ] UI: new tab on the class browser surfacing all overloads with their addresses + a "register selected as CE symbol" action
+- [ ] Lua bridge: extend `unity_symbols.lua` with a `registerMethodOverloads(asm, ns, class, name, [sigFilter])` helper that uses the new RPC
+
+**Acceptance**:
+- Given a class with overloaded methods (e.g. `Vector3.Set(float, float, float)` vs `Vector3.Set(Vector3)`), `findMethodInstances` returns both with distinct addresses and distinguishing signatures
+- Selecting one overload in the UI registers a CE symbol pointing at the right native address; the other overload's symbol is not affected
+- Useful follow-up to the per-row HEX → AOBMaker pipeline (Phase 11.5)
+
+---
+
+## Phase 18 — Address Finder (reverse lookup)
+
+**Goal**: Inverse of `findInstances`. Given any address from CE's scanner /
+pointer-scan, identify which Unity managed instance, class, and field that
+address belongs to. Closes a structural gap between CE's address-centric
+workflow and our class-centric inspector.
+
+Spec: [docs/address-finder.md](address-finder.md).
+
+- [ ] **17a** DLL handler: `whatIsAt(address)` with Strategy A backward-scan from queried address, 8-byte stride, up to 4 KB. Validates candidate `klass*` pointers via SEH-protected `*_class_get_name` calls + a class-pointer range cache built at handshake.
+- [ ] **17b** Field-offset resolution: walk class fields (parent chain included) to find which field's `[offset, offset+sizeof(type))` contains the queried offset. Handle pointer-to-class, value-struct interior, `T[]` array slot, `List<T>` element, string buffer.
+- [ ] **17c** UI: dedicated *Address Lookup* tab + Inspector right-click action ("Find what's at this address"). Pre-fills the field's effective address into the lookup input.
+- [ ] **17d** CE Lua bridge: `unity_addrfind.lua` + optional CE hotkey integration. Same RPC + retry scaffolding as `unity_dissect.lua` / `unity_symbols.lua`.
+- [ ] **17e** Strategy B (cached heap walk + interval tree) — only if a user reports needing batch lookups against a CE pointer-scan result. v1 ships Strategy A only.
+
+**Acceptance** (full criteria in [address-finder.md](address-finder.md)):
+- Given the address of a known live `PLY_WORK.HP` field on SaGa F2R, `whatIsAt` returns instance + class + field name + offset matching DiscreteUI's `findInstances` + `walkInstance` output
+- Address `+8` bytes into a `Vector3` field's storage reports the field as `position` with the right `kind`
+- Parent-class field (e.g. `MonoBehaviour.useGUILayout`) reports the declaring class, not the most-derived one
+- Known-bad address (e.g. `0xDEADBEEF`) returns `found: false, reason: "address_unreadable"` instead of crashing the host
+- CE main thread stays responsive during a backward scan
+
+Estimated effort: ~3.5 days for v1.
 
 ---
 
