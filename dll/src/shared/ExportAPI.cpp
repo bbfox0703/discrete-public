@@ -1246,7 +1246,49 @@ void RegisterCoreHandlers() {
         };
     });
 
-    auto resolveClassFromArgs = [](const json& args, std::string& errOut) -> IL2CPP::Il2CppClass* {
+    auto resolveClassFromArgs = [parseAddr](const json& args, std::string& errOut) -> IL2CPP::Il2CppClass* {
+        // Header-based path: caller hands us the address of an Il2CppObject
+        // whose first qword is the runtime Il2CppClass*. Used by the inspector
+        // to expand pointer-to-class fields whose declared type is a generic
+        // INSTANTIATION (e.g. ClassAry<CARRYITEM>) — those aren't registered
+        // by name in the image's class table, so il2cpp_class_from_name can't
+        // find them. The runtime always stamps the concrete instantiation's
+        // class into the object header, so reading it bypasses the name
+        // lookup entirely.
+        if (args.contains("klass_from_header_addr")) {
+            std::uintptr_t hdrAddr = 0;
+            if (!parseAddr(args["klass_from_header_addr"], hdrAddr)) {
+                errOut = "invalid 'klass_from_header_addr'"; return nullptr;
+            }
+            std::uintptr_t klassPtr = 0;
+            if (!Memory::SafeReadBytes(reinterpret_cast<void*>(hdrAddr),
+                                       &klassPtr, sizeof(klassPtr))) {
+                errOut = "object header unreadable"; return nullptr;
+            }
+            if (klassPtr == 0) { errOut = "object header klass is null"; return nullptr; }
+            auto* k = reinterpret_cast<IL2CPP::Il2CppClass*>(klassPtr);
+            if (!IL2CPP::ProbeKlassValid(k)) {
+                errOut = "klass pointer in header looks invalid";
+                return nullptr;
+            }
+            return k;
+        }
+
+        // Direct class-pointer path: caller already knows the Il2CppClass*
+        // (e.g. cached from an earlier walk). Same validation as above.
+        if (args.contains("class_ptr")) {
+            std::uintptr_t klassPtr = 0;
+            if (!parseAddr(args["class_ptr"], klassPtr) || klassPtr == 0) {
+                errOut = "invalid 'class_ptr'"; return nullptr;
+            }
+            auto* k = reinterpret_cast<IL2CPP::Il2CppClass*>(klassPtr);
+            if (!IL2CPP::ProbeKlassValid(k)) {
+                errOut = "class_ptr does not look valid";
+                return nullptr;
+            }
+            return k;
+        }
+
         std::string assemblyName = args.value("assembly", std::string{});
         std::string ns           = args.value("namespace", std::string{});
         std::string name         = args.value("name", std::string{});

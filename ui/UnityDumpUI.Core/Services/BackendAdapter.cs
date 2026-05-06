@@ -213,6 +213,32 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `walkInstance` — header-resolved variant. Caller hands us the address
+    /// of an Il2CppObject; the DLL reads the first qword (the runtime class
+    /// pointer stamped by IL2CPP) and walks fields against that exact class.
+    /// Required for generic instantiations like <c>ClassAry&lt;T&gt;</c>:
+    /// concrete instantiations aren't registered by name in the image's
+    /// class table, so <c>il2cpp_class_from_name</c> can't find them — but
+    /// the runtime always stamps the concrete <c>Il2CppClass*</c> into the
+    /// header, so reading it bypasses the name lookup entirely. IL2CPP only;
+    /// Mono backend still uses the named overload.
+    /// </summary>
+    public async Task<WalkInstanceResult> WalkInstanceFromHeaderAsync(
+        string address, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["address"]                = Str(address),
+            ["klass_from_header_addr"] = Str(address),
+        };
+        var env = await _pipe.SendAsync(
+            "walkInstance", args,
+            ProtocolJsonContext.Default.RpcEnvelopeWalkInstanceResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("walkInstance returned no result");
+    }
+
+    /// <summary>
     /// `getStaticFieldData` — runtime address of a static field's storage,
     /// suitable for a follow-up <see cref="ReadMemoryAsync"/>.
     /// </summary>

@@ -49,6 +49,13 @@ Il2CppClass*            FindClass(const Il2CppImage* image,
                                   const std::string& ns, const std::string& name);
 ClassInfoResult         ReadClassInfo(Il2CppClass* klass);
 
+/// SEH-guarded sanity probe used by callers that resolve an
+/// <c>Il2CppClass*</c> from an unverified source — e.g. the first qword of
+/// an object header (klass-from-header expand path). Returns true when
+/// <c>il2cpp_class_get_name(klass)</c> yields a non-empty C string without
+/// access-violating. Falls back to false on any SEH or null-export.
+bool ProbeKlassValid(Il2CppClass* klass);
+
 struct StaticFieldAddress {
     bool          ok      = false;
     void*         address = nullptr;

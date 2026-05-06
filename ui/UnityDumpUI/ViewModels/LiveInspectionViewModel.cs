@@ -387,54 +387,78 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private async Task LoadPointerChildrenAsync(WalkedFieldNode node, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(node.EffectiveAddress)) return;
+
+        // Header-resolve preferred path (IL2CPP only, but harmless for Mono —
+        // its walkInstance handler ignores the extra arg and errors out, after
+        // which we fall through to the name-based path below). For pointer
+        // fields the EffectiveAddress IS the heap pointer to the managed
+        // object, so the runtime class is stamped at *(uintptr_t*)addr — this
+        // works for ANY class, including generic instantiations like
+        // `ClassAry<CARRYITEM>` that il2cpp_class_from_name can't resolve
+        // because concrete instantiations aren't registered by name.
+        // ValueStruct doesn't reach this path — it has no header (the field
+        // storage IS the value, no class pointer at offset 0) — and is
+        // routed to LoadPointerChildrenAsync separately with name-based
+        // resolution still required.
+        WalkInstanceResult? res = null;
+        string? lastErr = null;
+        if (node.Kind is WalkedFieldKind.PointerToClass or WalkedFieldKind.ArraySlotPointer)
+        {
+            WalkInstanceResult attempt = await _backend
+                .WalkInstanceFromHeaderAsync(node.EffectiveAddress!, ct)
+                .ConfigureAwait(true);
+            if (string.IsNullOrEmpty(attempt.Error)) res = attempt;
+            else lastErr = attempt.Error;
+        }
+
         // Resolve the managed type to walk. For pointer fields the type
         // stored on the row is the field's declared managed type; ignore
         // collection wrappers (those go through Collection above).
-        if (TryParseClassName(node.Type, out string ns, out string name) is false) return;
-
-        // Generic instances need the IL-form name (with backtick suffix) for
-        // FindClass to match — the wire-side `il2cpp_type_get_name` strips it
-        // ("ClassAry`1<T>" → "ClassAry<T>"), but the runtime class registry
-        // keeps the suffix. Try the bare name first (covers non-generic
-        // types), then arity 1..3 fallbacks.
-        bool isGeneric = node.Type is { Length: > 0 } t && t.IndexOf('<') > 0;
-        var nameVariants = new List<string> { name };
-        if (isGeneric)
+        if (res is null && TryParseClassName(node.Type, out string ns, out string name))
         {
-            nameVariants.Add(name + "`1");
-            nameVariants.Add(name + "`2");
-            nameVariants.Add(name + "`3");
-        }
-
-        // Assembly resolution: walkInstance searches ONLY the named image,
-        // so UnityEngine.Vector3 won't be found in Assembly-CSharp even
-        // though the field lives in an Assembly-CSharp class. Try the
-        // parent's assembly first, then fall back to common Unity assemblies
-        // for well-known namespaces. The DLL doesn't currently expose a
-        // "search all images" mode — that would be the cleaner long-term
-        // fix (logged as a future follow-up).
-        string[] candidates = BuildAssemblyCandidates(TargetAssembly, ns);
-        WalkInstanceResult? res = null;
-        string? lastErr = null;
-        foreach (string nv in nameVariants)
-        {
-            foreach (string asm in candidates)
+            // Generic instances need the IL-form name (with backtick suffix) for
+            // FindClass to match — the wire-side `il2cpp_type_get_name` strips it
+            // ("ClassAry`1<T>" → "ClassAry<T>"), but the runtime class registry
+            // keeps the suffix. Try the bare name first (covers non-generic
+            // types), then arity 1..3 fallbacks. NOTE: name-based lookup of an
+            // open generic definition still won't yield the concrete
+            // instantiation's field layout — the header path above is the
+            // primary fix for generics. This block stays as the legacy fallback
+            // for value-type substructs whose header path doesn't apply.
+            bool isGeneric = node.Type is { Length: > 0 } t && t.IndexOf('<') > 0;
+            var nameVariants = new List<string> { name };
+            if (isGeneric)
             {
-                WalkInstanceResult attempt = await _backend
-                    .WalkInstanceAsync(node.EffectiveAddress!, asm, ns, nv, ct)
-                    .ConfigureAwait(true);
-                if (string.IsNullOrEmpty(attempt.Error)) { res = attempt; break; }
-                lastErr = attempt.Error;
+                nameVariants.Add(name + "`1");
+                nameVariants.Add(name + "`2");
+                nameVariants.Add(name + "`3");
             }
-            if (res is not null) break;
+
+            // Assembly resolution: walkInstance searches ONLY the named image,
+            // so UnityEngine.Vector3 won't be found in Assembly-CSharp even
+            // though the field lives in an Assembly-CSharp class. Try the
+            // parent's assembly first, then fall back to common Unity assemblies
+            // for well-known namespaces.
+            string[] candidates = BuildAssemblyCandidates(TargetAssembly, ns);
+            foreach (string nv in nameVariants)
+            {
+                foreach (string asm in candidates)
+                {
+                    WalkInstanceResult attempt = await _backend
+                        .WalkInstanceAsync(node.EffectiveAddress!, asm, ns, nv, ct)
+                        .ConfigureAwait(true);
+                    if (string.IsNullOrEmpty(attempt.Error)) { res = attempt; break; }
+                    lastErr = attempt.Error;
+                }
+                if (res is not null) break;
+            }
         }
         if (res is null || res.Fields is null)
         {
             // Surface the failure so the chevron-clicked-but-no-children
-            // case isn't silent. Common cause: a generic instance whose
-            // arity-suffixed name doesn't exist in any candidate assembly.
+            // case isn't silent.
             ErrorMessage = $"expand {node.Name} ({node.Type}): "
-                         + (lastErr ?? "class not resolved in any candidate assembly");
+                         + (lastErr ?? "class not resolved");
             return;
         }
         foreach (WalkedField f in res.Fields)

@@ -106,6 +106,9 @@ void* SehMethodPtrFromStruct(const MethodInfo* m) {
     __try { return *reinterpret_cast<void* const*>(m); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+const char* SehClassName(fn_class_get_name fn, Il2CppClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 #pragma warning(pop)
 
 void* ReadMethodPointer(const MethodInfo* m) {
@@ -122,6 +125,18 @@ void* ReadMethodPointer(const MethodInfo* m) {
 }
 
 }  // namespace
+
+bool ProbeKlassValid(Il2CppClass* klass) {
+    if (klass == nullptr) return false;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_name == nullptr) return false;
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return false;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return false;
+    const char* nm = SehClassName(r.class_get_name, klass);
+    return nm != nullptr && *nm != '\0';
+}
 
 std::vector<ClassEntry> EnumerateClasses(const Il2CppImage* image) {
     std::vector<ClassEntry> out;
