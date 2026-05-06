@@ -11,6 +11,8 @@
   <!-- Phase 8 browser panels. -->
   <sys:String x:Key="Browser.AssembliesTitle">Assemblies</sys:String>
   <sys:String x:Key="Browser.ClassesTitle">Classes</sys:String>
+  <sys:String x:Key="Browser.CollapsePaneTooltip">Collapse this pane (gives the space to the Inspector / Detail pane)</sys:String>
+  <sys:String x:Key="Browser.ExpandPaneTooltip">Expand pane back</sys:String>
   <sys:String x:Key="Browser.FilterWatermark">filter…</sys:String>
   <sys:String x:Key="Browser.FilterFieldsWatermark">filter fields (name or type)…</sys:String>
   <sys:String x:Key="Browser.FilterMethodsWatermark">filter methods (name)…</sys:String>

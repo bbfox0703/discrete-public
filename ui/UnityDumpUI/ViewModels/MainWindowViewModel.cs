@@ -216,6 +216,20 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty] private int     _protocol;
 
     /// <summary>
+    /// User-collapsed state for the Assemblies / Classes panes. When true,
+    /// the pane shrinks to a thin rail (just title + reopen chevron) and
+    /// gives its width back to the Inspector / Detail pane on the right.
+    /// MainWindow code-behind subscribes to these and rewrites the
+    /// corresponding <c>ColumnDefinition.Width</c> on toggle, remembering
+    /// the user's last expanded width via the GridSplitter.
+    /// </summary>
+    [ObservableProperty] private bool _isAssembliesPaneCollapsed;
+    [ObservableProperty] private bool _isClassesPaneCollapsed;
+
+    [RelayCommand] private void ToggleAssembliesPane() => IsAssembliesPaneCollapsed = !IsAssembliesPaneCollapsed;
+    [RelayCommand] private void ToggleClassesPane()    => IsClassesPaneCollapsed    = !IsClassesPaneCollapsed;
+
+    /// <summary>
     /// Phase 14b: stripped/obfuscated metadata banner. Populated from
     /// <c>getMetadataStats</c>'s <c>verdict</c> field; null when metadata
     /// is clean or the heuristic call failed.

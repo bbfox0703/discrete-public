@@ -90,9 +90,11 @@ configure_file(
 
 message(STATUS "Version: ${VER_MAJOR}.${VER_MINOR}.${VER_PATCH}.${BUILD_NUMBER} ${GIT_COMMIT_SHORT} (dirty=${GIT_IS_DIRTY})")
 
-# Vendored headers (nlohmann/json submodule)
+# Vendored headers — cloned by `sync_vendor.ps1` (see .gitmodules note).
+# Path was `dll/vendor/nlohmann_json/` until the submodule was retired in
+# favour of the sync-script approach.
 include_directories(SYSTEM
-    ${CMAKE_SOURCE_DIR}/dll/vendor/nlohmann_json/single_include
+    ${CMAKE_SOURCE_DIR}/dll/vendor/nlohmann/single_include
 )
 include_directories(${CMAKE_BINARY_DIR}/generated)
 

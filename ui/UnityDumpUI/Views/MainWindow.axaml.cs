@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -23,6 +24,58 @@ public partial class MainWindow : Window
         vm.Inspector.ScrollFieldIntoView  = ScrollInspectorFieldIntoView;
         vm.ShowProxyDeploy                = ShowProxyDeployWindow;
         DataContext = vm;
+        // Pane-collapse plumbing — IsVisible bindings on the panes' content
+        // hide the body, but the column itself only shrinks if we mutate
+        // ColumnDefinition.Width. Listen to the VM's bool property so the
+        // column collapses to a thin rail (28 px) and remembers the user's
+        // last expanded width via the GridSplitter for restoration.
+        vm.PropertyChanged += OnMainViewModelPropertyChanged;
+    }
+
+    /// <summary>Last expanded widths for the Assemblies / Classes columns.
+    /// Captured immediately before collapse so the pane restores to the
+    /// width the user actually had (which may differ from the XAML default
+    /// thanks to the GridSplitter).</summary>
+    private GridLength _assembliesPaneExpandedWidth = new GridLength(240);
+    private GridLength _classesPaneExpandedWidth    = new GridLength(280);
+
+    private void OnMainViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (sender is not MainWindowViewModel vm) return;
+        if (e.PropertyName == nameof(MainWindowViewModel.IsAssembliesPaneCollapsed))
+        {
+            ApplyPaneCollapse(columnIndex: 0, vm.IsAssembliesPaneCollapsed,
+                              ref _assembliesPaneExpandedWidth);
+        }
+        else if (e.PropertyName == nameof(MainWindowViewModel.IsClassesPaneCollapsed))
+        {
+            ApplyPaneCollapse(columnIndex: 2, vm.IsClassesPaneCollapsed,
+                              ref _classesPaneExpandedWidth);
+        }
+    }
+
+    private void ApplyPaneCollapse(int columnIndex, bool collapsed, ref GridLength expandedWidth)
+    {
+        // ColumnDefinition isn't a regular control so FindControl by x:Name
+        // doesn't reach it reliably across Avalonia versions. Reach it via
+        // the parent Grid + index instead — index is documented at the
+        // ColumnDefinitions block in MainWindow.axaml (0=Assemblies,
+        // 2=Classes; odd indices are GridSplitters).
+        var grid = this.FindControl<Grid>("BodyGrid");
+        if (grid is null || columnIndex >= grid.ColumnDefinitions.Count) return;
+        ColumnDefinition column = grid.ColumnDefinitions[columnIndex];
+        if (collapsed)
+        {
+            // Snapshot the live width — the user may have dragged the
+            // GridSplitter since the last toggle, so the XAML-default
+            // value would be wrong on restore.
+            expandedWidth = column.Width;
+            column.Width  = new GridLength(28);
+        }
+        else
+        {
+            column.Width = expandedWidth;
+        }
     }
 
     /// <summary>

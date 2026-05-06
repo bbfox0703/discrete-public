@@ -55,24 +55,51 @@
     </Border>
 
     <!-- Body -->
-    <Grid>
+    <Grid x:Name="BodyGrid">
       <!-- Column widths are user-resizable via the GridSplitters between
            panes. MinWidth keeps each pane usable; "*" lets the right pane
            absorb whatever's left. -->
+      <!-- Column widths get rewritten by MainWindow code-behind on
+           IsAssembliesPaneCollapsed / IsClassesPaneCollapsed toggle so
+           the user can reclaim the space for the Inspector / Detail pane.
+           Initial widths match the historical layout; named columns let
+           the code-behind grab and resize them. -->
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="240" MinWidth="120" />
+        <ColumnDefinition x:Name="AssembliesCol" Width="240" MinWidth="28" />
         <ColumnDefinition Width="4" />
-        <ColumnDefinition Width="280" MinWidth="160" />
+        <ColumnDefinition x:Name="ClassesCol"    Width="280" MinWidth="28" />
         <ColumnDefinition Width="4" />
         <ColumnDefinition Width="*"   MinWidth="320" />
       </Grid.ColumnDefinitions>
 
       <!-- Pane 1: Assemblies -->
       <DockPanel Grid.Column="0" Margin="8">
-        <TextBlock DockPanel.Dock="Top"
-                   Text="{StaticResource Browser.AssembliesTitle}"
-                   FontWeight="SemiBold" Margin="0,0,0,4" />
+        <!-- Header row: title + collapse toggle. The chevron flips between
+             ◀ (collapse) and ▶ (expand). Title text is replaced with a
+             vertical "A" mnemonic when collapsed so the rail still
+             communicates "this is the Assemblies pane". -->
         <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+          <TextBlock Grid.Column="0"
+                     Text="{StaticResource Browser.AssembliesTitle}"
+                     FontWeight="SemiBold"
+                     IsVisible="{Binding !IsAssembliesPaneCollapsed}" />
+          <TextBlock Grid.Column="0"
+                     Text="A" FontWeight="Bold" Opacity="0.6"
+                     HorizontalAlignment="Center"
+                     IsVisible="{Binding IsAssembliesPaneCollapsed}" />
+          <Button    Grid.Column="1"
+                     Content="◀" FontSize="10" Padding="4,0" MinHeight="20"
+                     Command="{Binding ToggleAssembliesPaneCommand}"
+                     ToolTip.Tip="{StaticResource Browser.CollapsePaneTooltip}"
+                     IsVisible="{Binding !IsAssembliesPaneCollapsed}" />
+          <Button    Grid.Column="1"
+                     Content="▶" FontSize="10" Padding="4,0" MinHeight="20"
+                     Command="{Binding ToggleAssembliesPaneCommand}"
+                     ToolTip.Tip="{StaticResource Browser.ExpandPaneTooltip}"
+                     IsVisible="{Binding IsAssembliesPaneCollapsed}" />
+        </Grid>
+        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,4"
+              IsVisible="{Binding !IsAssembliesPaneCollapsed}">
           <TextBox Grid.Column="0"
                    PlaceholderText="{StaticResource Browser.FilterWatermark}"
                    Text="{Binding Browser.AssemblyFilter, Mode=TwoWay}" />
@@ -87,6 +114,7 @@
                      Height="3" Margin="0,0,0,4" />
         <ListBox ItemsSource="{Binding Browser.FilteredAssemblies}"
                  SelectedItem="{Binding Browser.SelectedAssembly, Mode=TwoWay}"
+                 IsVisible="{Binding !IsAssembliesPaneCollapsed}"
                  x:DataType="vm:MainWindowViewModel">
           <ListBox.ItemTemplate>
             <DataTemplate x:DataType="vm:AssemblyItem">
@@ -101,16 +129,35 @@
       <GridSplitter Grid.Column="1" Width="4"
                     Background="#22000000"
                     HorizontalAlignment="Stretch"
-                    ResizeDirection="Columns" />
+                    ResizeDirection="Columns"
+                    IsVisible="{Binding !IsAssembliesPaneCollapsed}" />
 
       <!-- Pane 2: Classes -->
       <DockPanel Grid.Column="2" Margin="8">
-        <TextBlock DockPanel.Dock="Top"
-                   Text="{StaticResource Browser.ClassesTitle}"
-                   FontWeight="SemiBold" Margin="0,0,0,4" />
+        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+          <TextBlock Grid.Column="0"
+                     Text="{StaticResource Browser.ClassesTitle}"
+                     FontWeight="SemiBold"
+                     IsVisible="{Binding !IsClassesPaneCollapsed}" />
+          <TextBlock Grid.Column="0"
+                     Text="C" FontWeight="Bold" Opacity="0.6"
+                     HorizontalAlignment="Center"
+                     IsVisible="{Binding IsClassesPaneCollapsed}" />
+          <Button    Grid.Column="1"
+                     Content="◀" FontSize="10" Padding="4,0" MinHeight="20"
+                     Command="{Binding ToggleClassesPaneCommand}"
+                     ToolTip.Tip="{StaticResource Browser.CollapsePaneTooltip}"
+                     IsVisible="{Binding !IsClassesPaneCollapsed}" />
+          <Button    Grid.Column="1"
+                     Content="▶" FontSize="10" Padding="4,0" MinHeight="20"
+                     Command="{Binding ToggleClassesPaneCommand}"
+                     ToolTip.Tip="{StaticResource Browser.ExpandPaneTooltip}"
+                     IsVisible="{Binding IsClassesPaneCollapsed}" />
+        </Grid>
         <TextBox DockPanel.Dock="Top"
                  PlaceholderText="{StaticResource Browser.FilterWatermark}"
                  Text="{Binding Browser.ClassFilter, Mode=TwoWay}"
+                 IsVisible="{Binding !IsClassesPaneCollapsed}"
                  Margin="0,0,0,4" />
         <ProgressBar DockPanel.Dock="Top"
                      IsIndeterminate="True"
@@ -118,9 +165,11 @@
                      Height="3" Margin="0,0,0,4" />
         <TextBlock DockPanel.Dock="Bottom"
                    Text="{Binding Browser.FilteredClasses.Count, StringFormat='\{0\} classes'}"
+                   IsVisible="{Binding !IsClassesPaneCollapsed}"
                    Opacity="0.6" FontSize="11" Margin="0,4,0,0" />
         <ListBox ItemsSource="{Binding Browser.FilteredClasses}"
                  SelectedItem="{Binding Browser.SelectedClass, Mode=TwoWay}"
+                 IsVisible="{Binding !IsClassesPaneCollapsed}"
                  x:DataType="vm:MainWindowViewModel">
           <ListBox.ContextMenu>
             <ContextMenu>
@@ -146,7 +195,8 @@
       <GridSplitter Grid.Column="3" Width="4"
                     Background="#22000000"
                     HorizontalAlignment="Stretch"
-                    ResizeDirection="Columns" />
+                    ResizeDirection="Columns"
+                    IsVisible="{Binding !IsClassesPaneCollapsed}" />
 
       <!-- Pane 3: Detail (handshake summary on top, then fields/methods) -->
       <DockPanel Grid.Column="4" Margin="8">
@@ -498,6 +548,15 @@
                       <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
                                           Binding="{Binding OffsetHex, x:DataType=vm:WalkedFieldNode}"
                                           SortMemberPath="Offset" />
+                      <!-- Field storage address. Live + per-instance, so a
+                           glance at the column lets the user spot which
+                           rows share an instance memory page (handy when
+                           cross-referencing with CE's memory viewer). The
+                           pointer dereference value, when relevant, lives
+                           in the Value column so it's not duplicated here. -->
+                      <DataGridTextColumn Header="{StaticResource Inspector.ColAddress}" Width="155"
+                                          Binding="{Binding Address, x:DataType=vm:WalkedFieldNode}"
+                                          FontFamily="Consolas,Cascadia Mono,monospace" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
                                           Binding="{Binding Type, x:DataType=vm:WalkedFieldNode}" />
                       <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"

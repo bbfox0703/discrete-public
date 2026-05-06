@@ -1,6 +1,9 @@
-# Git submodules (third-party C++ vendored sources)
-# Add with:
-#   git submodule add https://github.com/nlohmann/json.git dll/vendor/nlohmann_json
-[submodule "dll/vendor/nlohmann_json"]
-	path = dll/vendor/nlohmann_json
-	url = https://github.com/nlohmann/json.git
+# Git submodules — currently empty.
+#
+# Vendored C++ dependencies (nlohmann/json, MinHook, ...) and the
+# IL2CPP / BepInEx / Mono reference repos are cloned by `sync_vendor.ps1`
+# into `dll/vendor/<name>/` and `vendor/<name>/` respectively, both
+# ignored by .gitignore. Run that script when you want to refresh the
+# upstream sources. Submodules were avoided because every clone of this
+# repo would otherwise drag down 150+ MB of nlohmann history through
+# `--recurse-submodules`.

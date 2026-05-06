@@ -97,13 +97,13 @@
 - [x] `build.cmd` thin wrapper
 - [x] `build_number.txt` auto-increment hook (in `build.ps1`)
 - [x] Directory layout per Architecture §Directory Structure (empty `.keep` placeholders OK)
-- [x] `.gitignore`, `.gitmodules` (vendor submodules: nlohmann/json — placeholder, real submodule add deferred)
+- [x] `.gitignore`, `.gitmodules` (vendor submodules: nlohmann/json — submodule retired in favour of `sync_vendor.ps1` cloning into `dll/vendor/nlohmann/`, see Phase 16 follow-ups)
 - [x] `dll/src/main.cpp` — minimal `DllMain` that opens log file
 - [x] `ui/UnityDumpUI/` — Avalonia 12 template, AOT publish profile, `Mutex` single-instance
 - [x] `ui/UnityDumpUI.Tests/` — xUnit v3 project with smoke tests
 - [x] `scripts/unity_dump.lua` — stub with version banner
 - [x] **First-build verification**: run `build.ps1 -Target All -Mode Release` on dev PC
-- [x] Add `nlohmann/json` submodule (`git submodule add https://github.com/nlohmann/json.git dll/vendor/nlohmann_json`)
+- [x] Vendor `nlohmann/json` (now via `sync_vendor.ps1` → `dll/vendor/nlohmann/`; the original git-submodule registration was removed when the script-based approach landed)
 - [x] Inject built DLL into `notepad.exe` and confirm log file appears
 
 **Acceptance**:
@@ -122,7 +122,7 @@
 - [x] `shared/ModuleHelper.{h,cpp}` — `GetModuleBase(name)`, `ResolveExport(module, name)`, `EnumerateModules()`
 - [x] `PipeServer.{h,cpp}` — async overlapped IO, newline-delimited JSON, per-connection thread, dispatch table
 - [x] `ExportAPI.{h,cpp}` — C ABI: `Init()`, `Shutdown()`, `StartPipe()`, `StopPipe()`, `GetBackendType()`
-- [x] `vendor/nlohmann/json.hpp` (single header)
+- [x] `dll/vendor/nlohmann/single_include/nlohmann/json.hpp` (synced by `sync_vendor.ps1`)
 - [x] Magic-words header `shared/MagicStrings.h` (pipe name, log folder name, all command strings)
 
 **Acceptance**:

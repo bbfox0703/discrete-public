@@ -10,6 +10,15 @@
 # Build transcript captured by build.cmd via Start-Transcript
 /build_log.txt
 
+# Vendored third-party sources cloned by sync_vendor.ps1. Each subdir is its
+# own git checkout so we never want to track them inside this repo. The
+# script clones into:
+#   * dll/vendor/<dep>/   — C++ build dependencies (nlohmann/json, MinHook, ...)
+#   * vendor/<dep>/       — reference repos for cross-checking (libil2cpp,
+#                           Il2CppDumper, BepInEx, mono, ...)
+/dll/vendor/*/
+/vendor/*/
+
 # Local debug artefacts (raw pipe responses captured during dev)
 /raw.json
 /raw*.json
