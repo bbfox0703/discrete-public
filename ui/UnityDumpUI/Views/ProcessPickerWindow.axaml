@@ -6,6 +6,7 @@
         Width="640" Height="500"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
+        Icon="avares://DiscreteUI/Assets/MainIcon.ico"
         Title="{StaticResource Picker.Title}">
   <DockPanel LastChildFill="True" Margin="12">
 

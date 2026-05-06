@@ -4,6 +4,7 @@
         x:Class="UnityDumpUI.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1280" Height="780"
+        Icon="avares://DiscreteUI/Assets/MainIcon.ico"
         Title="{StaticResource App.Title}">
   <!-- Five-pane shell:
          Assemblies | Classes | Fields/Methods detail (with handshake summary on top)
@@ -503,6 +504,41 @@
                                           Binding="{Binding DisplayValue, x:DataType=vm:WalkedFieldNode}" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
                                           Binding="{Binding DeclaredIn, x:DataType=vm:WalkedFieldNode}" />
+                      <!-- Phase 11.6: per-row action buttons. addr / ptr /
+                           name copy the corresponding string to clipboard;
+                           HEX hands the row's effective address to AOBMaker's
+                           CE plugin (named pipe \\.\pipe\AOBMakerCEBridge)
+                           so the open Memory View jumps to it. AOBMaker is
+                           optional — when not running the HEX call no-ops
+                           and logs to ui/view; the other three work
+                           unconditionally. IsEnabled bindings hide the
+                           buttons that have no payload (e.g. ptr is
+                           disabled for primitive rows whose Ptr is empty). -->
+                      <DataGridTemplateColumn Header="{StaticResource Inspector.ColActions}"
+                                              Width="155" CanUserSort="False">
+                        <DataGridTemplateColumn.CellTemplate>
+                          <DataTemplate x:DataType="vm:WalkedFieldNode">
+                            <StackPanel Orientation="Horizontal" Spacing="2"
+                                        VerticalAlignment="Center">
+                              <Button Content="addr" FontSize="10" Padding="4,0" MinHeight="20"
+                                      Command="{Binding CopyAddrCommand}"
+                                      IsEnabled="{Binding CanCopyAddr}"
+                                      ToolTip.Tip="{StaticResource Inspector.CopyAddrTooltip}" />
+                              <Button Content="ptr"  FontSize="10" Padding="4,0" MinHeight="20"
+                                      Command="{Binding CopyPtrCommand}"
+                                      IsEnabled="{Binding CanCopyPtr}"
+                                      ToolTip.Tip="{StaticResource Inspector.CopyPtrTooltip}" />
+                              <Button Content="name" FontSize="10" Padding="4,0" MinHeight="20"
+                                      Command="{Binding CopyNameCommand}"
+                                      ToolTip.Tip="{StaticResource Inspector.CopyNameTooltip}" />
+                              <Button Content="HEX"  FontSize="10" Padding="4,0" MinHeight="20"
+                                      Command="{Binding NavigateHexCommand}"
+                                      IsEnabled="{Binding CanNavigateHex}"
+                                      ToolTip.Tip="{StaticResource Inspector.NavigateHexTooltip}" />
+                            </StackPanel>
+                          </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                      </DataGridTemplateColumn>
                     </DataGrid.Columns>
                   </DataGrid>
                 </DockPanel>

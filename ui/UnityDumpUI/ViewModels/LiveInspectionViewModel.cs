@@ -53,6 +53,21 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         _backend = backend;
         _logger  = logger;
+        // Per-row action callbacks. Built once and reused by every
+        // WalkedFieldNode the VM creates so the row-action buttons
+        // (addr / ptr / name / HEX) reach the right helpers without each
+        // node holding its own copy of the lambdas. CopyText and
+        // NavigateHex resolve to whatever's wired on the VM at call time
+        // (CopyToClipboardAsync is set late by the View; AobMaker is
+        // optional), so the closures degrade to no-op when absent.
+        _actions = new WalkedFieldActions
+        {
+            Toggle      = ToggleExpandAsync,
+            CopyText    = s => CopyToClipboardAsync?.Invoke(s ?? string.Empty)
+                                    ?? Task.CompletedTask,
+            NavigateHex = (addr, ct) => AobMaker?.NavigateHexViewAsync(addr, ct)
+                                    ?? Task.FromResult(false),
+        };
         // Keep FilteredFields in lockstep with Fields. Every singleton
         // mutation funnels through this; bulk paths (walk repopulate,
         // expand-children insert, subtree collapse) bracket their loops
@@ -61,6 +76,8 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         // 1350 * O(N) refilters and 1350 DataGrid layout passes.
         Fields.CollectionChanged += (_, _) => RefilterFields();
     }
+
+    private readonly WalkedFieldActions _actions;
 
     /// <summary>
     /// Bulk-mutation re-entry guard. >0 means a caller is in the middle
@@ -85,6 +102,13 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// SelectedNode reassignment and the user just sees the scroll reset.
     /// </summary>
     public Action<WalkedFieldNode>? ScrollFieldIntoView { get; set; }
+
+    /// <summary>
+    /// Optional AOBMaker CE-plugin bridge. Wired from MainWindowViewModel
+    /// once at startup. Null when the host hasn't supplied one (also fine —
+    /// the per-row HEX button just no-ops, no error surfaced).
+    /// </summary>
+    public IAobMakerBridge? AobMaker { get; set; }
 
     // ---------- Target ----------------------------------------------------
 
@@ -146,7 +170,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     partial void OnSelectedInstanceChanged(InstanceItem? value)
     {
-        Fields.Clear();
+        // Don't eagerly Fields.Clear() here — emptying the bound collection
+        // forces the DataGrid to drop SelectedItem, which propagates back
+        // through the TwoWay binding and nulls out SelectedNode BEFORE
+        // WalkInstanceAsync gets a chance to snapshot it. Result: the
+        // "preserve selected field across instance switches" logic loses
+        // its target. WalkInstanceAsync clears Fields itself, AFTER the
+        // snapshot, so the user briefly sees the previous instance's
+        // values during the walk RPC — that's fine (it's also what
+        // auto-refresh shows).
         WalkSummary = string.Empty;
         if (value is null || !HasTarget) return;
         _ = WalkInstanceAsync(value.Address);
@@ -336,7 +368,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                     foreach (WalkedField f in fields)
                     {
                         Fields.Add(WalkedFieldNode.FromInstanceField(f, indent: 0,
-                                                                     toggle: ToggleExpandAsync));
+                                                                     actions: _actions));
                     }
                 }
                 WalkSummary = $"depth={result.Depth} count={result.Count}";
@@ -552,7 +584,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         foreach (WalkedField f in res.Fields)
         {
             WalkedFieldNode child = WalkedFieldNode.FromInstanceField(
-                f, indent: node.IndentLevel + 1, toggle: ToggleExpandAsync);
+                f, indent: node.IndentLevel + 1, actions: _actions);
             child.Parent = node;
             node.Children.Add(child);
         }
@@ -634,7 +666,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         {
             WalkedFieldNode child = WalkedFieldNode.FromArrayElement(
                 e, elementType, result.IsPointer,
-                indent: node.IndentLevel + 1, toggle: ToggleExpandAsync);
+                indent: node.IndentLevel + 1, actions: _actions);
             child.Parent = node;
             node.Children.Add(child);
         }
@@ -1036,6 +1068,31 @@ public enum WalkedFieldKind
 }
 
 /// <summary>
+/// Per-row UI callbacks for a <see cref="WalkedFieldNode"/>. Bundles the
+/// existing expand toggle with the Phase 11.6 row-action callbacks (copy
+/// hex address / pointer / field name to clipboard, hand off to AOBMaker
+/// for CE Memory-View navigation). One shared instance per VM lifetime —
+/// nodes hold a reference; nulls degrade gracefully (button command is a
+/// no-op rather than throwing).
+/// </summary>
+public sealed class WalkedFieldActions
+{
+    /// <summary>Expand / collapse a node — drives the chevron in the Name column.</summary>
+    public Func<WalkedFieldNode, Task>? Toggle { get; init; }
+
+    /// <summary>Copy a string to the clipboard. Wired to the same helper
+    /// the existing Copy CE XML / Copy CE field commands use.</summary>
+    public Func<string, Task>? CopyText { get; init; }
+
+    /// <summary>
+    /// Navigate Cheat Engine's open Memory View hex pane to the given
+    /// address via the AOBMaker bridge (named pipe). Returns false when
+    /// AOBMaker isn't running. Null when the bridge isn't wired at all.
+    /// </summary>
+    public Func<string, CancellationToken, Task<bool>>? NavigateHex { get; init; }
+}
+
+/// <summary>
 /// One row in the hierarchical field grid. Doubles as both top-level
 /// instance fields and child rows produced by lazy expansion.
 /// </summary>
@@ -1045,7 +1102,7 @@ public sealed partial class WalkedFieldNode : ObservableObject
                             string? address, string displayValue, string? ptr,
                             int indentLevel, WalkedFieldKind kind,
                             string? effectiveAddress,
-                            Func<WalkedFieldNode, Task>? toggle)
+                            WalkedFieldActions? actions)
     {
         Name             = name;
         Type             = type;
@@ -1057,10 +1114,10 @@ public sealed partial class WalkedFieldNode : ObservableObject
         IndentLevel      = indentLevel;
         Kind             = kind;
         EffectiveAddress = effectiveAddress;
-        _toggle          = toggle;
+        _actions         = actions;
     }
 
-    private readonly Func<WalkedFieldNode, Task>? _toggle;
+    private readonly WalkedFieldActions? _actions;
 
     public string  Name         { get; }
     public string  Type         { get; }
@@ -1119,12 +1176,53 @@ public sealed partial class WalkedFieldNode : ObservableObject
     public double IndentPx => IndentLevel * 14.0;
 
     [RelayCommand]
-    private Task ToggleAsync() => _toggle?.Invoke(this) ?? Task.CompletedTask;
+    private Task ToggleAsync() => _actions?.Toggle?.Invoke(this) ?? Task.CompletedTask;
+
+    // ---------- Per-row action commands (Phase 11.6) ---------------------
+
+    /// <summary>True when the field has a readable storage address — drives
+    /// the addr / HEX button IsEnabled bindings.</summary>
+    public bool CanCopyAddr => !string.IsNullOrEmpty(Address);
+
+    /// <summary>True when the wire payload reported a non-null pointer
+    /// value (string fields, pointer-to-class fields, T[] / List handles).
+    /// Drives the ptr button IsEnabled binding.</summary>
+    public bool CanCopyPtr =>
+        !string.IsNullOrEmpty(Ptr) && Ptr != "0x0000000000000000";
+
+    /// <summary>True when there's a row-rooted address worth handing to CE
+    /// (Address for ordinary fields, dereferenced pointer for
+    /// PointerToClass / Collection rows). Drives the HEX button.</summary>
+    public bool CanNavigateHex => !string.IsNullOrEmpty(EffectiveAddress);
+
+    [RelayCommand]
+    private Task CopyAddrAsync() =>
+        (_actions?.CopyText is { } f && !string.IsNullOrEmpty(Address))
+            ? f(Address!)
+            : Task.CompletedTask;
+
+    [RelayCommand]
+    private Task CopyPtrAsync() =>
+        (_actions?.CopyText is { } f && CanCopyPtr)
+            ? f(Ptr!)
+            : Task.CompletedTask;
+
+    [RelayCommand]
+    private Task CopyNameAsync() =>
+        (_actions?.CopyText is { } f && !string.IsNullOrEmpty(Name))
+            ? f(Name)
+            : Task.CompletedTask;
+
+    [RelayCommand]
+    private Task NavigateHexAsync() =>
+        (_actions?.NavigateHex is { } f && !string.IsNullOrEmpty(EffectiveAddress))
+            ? f(EffectiveAddress!, default)
+            : Task.FromResult(false);
 
     // ---------- Constructors from wire payloads --------------------------
 
     public static WalkedFieldNode FromInstanceField(
-        WalkedField f, int indent, Func<WalkedFieldNode, Task> toggle)
+        WalkedField f, int indent, WalkedFieldActions actions)
     {
         string display = FormatDisplay(f, out bool isPointerValue);
         WalkedFieldKind kind = ClassifyInstanceField(f, isPointerValue);
@@ -1147,12 +1245,12 @@ public sealed partial class WalkedFieldNode : ObservableObject
             indent,
             kind,
             effective,
-            toggle);
+            actions);
     }
 
     public static WalkedFieldNode FromArrayElement(
         WalkedArrayElement e, string elementType, bool isPointerArray,
-        int indent, Func<WalkedFieldNode, Task> toggle)
+        int indent, WalkedFieldActions actions)
     {
         string display = FormatArrayElement(e);
         WalkedFieldKind kind;
@@ -1185,7 +1283,7 @@ public sealed partial class WalkedFieldNode : ObservableObject
             indentLevel: indent,
             kind:        kind,
             effectiveAddress: effective,
-            toggle:      toggle);
+            actions:     actions);
     }
 
     private static WalkedFieldKind ClassifyInstanceField(WalkedField f, bool isPointerValue)

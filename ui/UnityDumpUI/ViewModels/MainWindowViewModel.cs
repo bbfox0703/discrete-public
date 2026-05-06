@@ -66,6 +66,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _gameScanner    = gameScanner ?? new UnityDumpUI.Platform.SteamGameScanner(proxyInstaller);
         Browser         = new AssemblyBrowserViewModel(_backend, _logger);
         Inspector       = new LiveInspectionViewModel(_backend, _logger);
+        // Optional bridge to AOBMaker's Cheat Engine plugin — drives the
+        // per-row "HEX" button in the Inspector grid (CE Memory View
+        // navigation). Bridge no-ops when AOBMaker / CE aren't running.
+        Inspector.AobMaker = new AobMakerBridge(_logger);
 
         // Bridge: when the user picks a live instance in the Inspector tab,
         // mirror its address into the export base so the next "Export .CT"

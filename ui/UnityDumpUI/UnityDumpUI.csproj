@@ -8,6 +8,11 @@
          existing using-tree and source-gen contracts intact. -->
     <AssemblyName>DiscreteUI</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- PE icon resource — surfaces in File Explorer, taskbar, alt-tab
+         (before the window-level Icon property loads). The same .ico is
+         also packaged as an avares resource below so runtime XAML can
+         set Window.Icon to it. -->
+    <ApplicationIcon>Assets\MainIcon.ico</ApplicationIcon>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
 
     <!-- Native AOT (per docs/plan.md). Off during normal `dotnet build`,
@@ -83,6 +88,7 @@
 
   <ItemGroup>
     <AvaloniaResource Include="Resources\**" />
+    <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
 
   <!-- AOT trimmer roots: Avalonia loads platform/render backends via reflection;

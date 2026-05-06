@@ -552,15 +552,40 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     {
         FilteredClasses.Clear();
         string filter = ClassFilter ?? string.Empty;
-        bool unfiltered = filter.Length == 0;
+        if (filter.Length == 0)
+        {
+            // No filter — Classes is already sorted alphabetically by full
+            // name in LoadClassesAsync, just mirror it.
+            foreach (ClassItem c in Classes) FilteredClasses.Add(c);
+            return;
+        }
+
+        // With a filter: rank by relevance so an exact-name search lands on
+        // top. Three buckets, each kept in the source's alphabetical order:
+        //   0. Exact match on simple name OR full name (case-insensitive)
+        //   1. Simple name STARTS with the filter (also covers "PlayerData"
+        //      vs "PlayerDataBase" — the prefix match wins over the
+        //      same-substring "SetPlayerDataBool")
+        //   2. Anywhere-in-DisplayName substring match
+        // Anything that doesn't even substring-match is filtered out.
+        var bucket0 = new List<ClassItem>();
+        var bucket1 = new List<ClassItem>();
+        var bucket2 = new List<ClassItem>();
         foreach (ClassItem c in Classes)
         {
-            if (unfiltered ||
-                c.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            bool nameExact = string.Equals(c.Name, filter, StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(c.DisplayName, filter, StringComparison.OrdinalIgnoreCase);
+            if (nameExact) { bucket0.Add(c); continue; }
+            bool simplePrefix = c.Name.StartsWith(filter, StringComparison.OrdinalIgnoreCase);
+            if (simplePrefix) { bucket1.Add(c); continue; }
+            if (c.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase))
             {
-                FilteredClasses.Add(c);
+                bucket2.Add(c);
             }
         }
+        foreach (ClassItem c in bucket0) FilteredClasses.Add(c);
+        foreach (ClassItem c in bucket1) FilteredClasses.Add(c);
+        foreach (ClassItem c in bucket2) FilteredClasses.Add(c);
     }
 
     /// <summary>
