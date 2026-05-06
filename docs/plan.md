@@ -4,10 +4,18 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-06
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c all closed**. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 16** (docs finalization, parallelizable), **Phase 17** (find method instances, ~one phase), **Phase 18** (address finder / reverse lookup, ~3.5 days, spec drafted in [address-finder.md](address-finder.md)). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c all closed**. **Phase 18 sub-phase 17a** (DLL `whatIsAt` handler + class-pointer cache) landed on 2026-05-06 — see Phase 18 below. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 16** (docs finalization, parallelizable), **Phase 17** (find method instances, ~one phase), **Phase 18 (17b–17d)** (field-offset resolution, UI tab, CE Lua bridge — building on the 17a DLL handler that just shipped). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 ## Hand-off notes (historical — for live state see STATUS.md)
 
+- Phase 18 sub-phase 17a green (build #188, 2026-05-06):
+  - New module pair `dll/src/{mono,il2cpp}/{Mono,IL2CPP}AddressFinder.{h,cpp}` implementing the Strategy A backward scan from `address-finder.md`. Each backend exposes `BuildClassRangeCache()` / `InvalidateClassRangeCache()` / `GetClassRangeStats()` / `WhatIsAt(addr, maxBackwardScan)`.
+  - Two new pipe commands: `whatIsAt` (the lookup itself) and `getClassRangeStats` (diagnostic / pre-warm). Wired in both backend blocks of `dll/src/shared/ExportAPI.cpp`. The `scan` command was extended to drop the cache so newly-loaded assemblies get picked up by the next lookup.
+  - IL2CPP cache is a sorted vector of `Il2CppClass*` (one entry per enumerated class) with min/max bounds for fast range rejection. Mono cache is two parallel sorted vectors — `MonoClass*` and `MonoVTable*` — plus a `vtable → klass` `unordered_map`, since the Mono object header points at a vtable, not the class. `mono_class_vtable` is called for every class during cache build inside one `ThreadAttachGuard` scope (avoids the nested-attach footgun from build #54).
+  - Validation pipeline: `(addr & 7) == 0` → range bounds → set membership → SEH-protected `*_class_get_name` probe returns non-empty. Anything that fails any of those steps is skipped silently and the scan walks back another 8 bytes.
+  - Build cost on first call is one full `EnumerateAssemblies → EnumerateClasses` pass (~tens of ms even for SaGa F2R's 10k IL2CPP classes / Silksong's many Mono classes); subsequent `whatIsAt` calls are sub-ms because they only do the binary-search membership test + one name-probe per candidate.
+  - Smoke test: `tools/Test-WhatIsAt.ps1`. Pulls a live instance address via `findInstances`, then probes `whatIsAt` at base + a few offsets to verify round-trip; also probes `0xDEADBEEF` to confirm the negative path returns `found:false` cleanly.
+  - Field-offset resolution lands in 17b — for now `whatIsAt` reports the raw `fieldOffset` (instance base → queried address) without resolving it to a field name.
 - Phase 5 segment 2 green (build #25, SaGa F2R):
   - `MetadataLayout.h`: full v29 prefix `HeaderV29` (168 bytes), `TypeDefinition_v29` (88), `FieldDefinition_v29` (12), `FieldDefaultValue_v29` (12)
   - `MetadataParser` exposes `TypeDefinitionCount` / `GetTypeDefinition(idx)` / `FindTypeByName(ns, name)` / `EnumerateTypeFields(td)` / `FindFieldDefault(globalFieldIdx)`
@@ -489,7 +497,7 @@ workflow and our class-centric inspector.
 
 Spec: [docs/address-finder.md](address-finder.md).
 
-- [ ] **17a** DLL handler: `whatIsAt(address)` with Strategy A backward-scan from queried address, 8-byte stride, up to 4 KB. Validates candidate `klass*` pointers via SEH-protected `*_class_get_name` calls + a class-pointer range cache built at handshake.
+- [x] **17a** DLL handler: `whatIsAt(address)` with Strategy A backward-scan from queried address, 8-byte stride, up to 4 KB (capped at 16 KB). Validates candidate `klass*` pointers via SEH-protected `*_class_get_name` calls + a class-pointer range cache built lazily on first use (and invalidated on `scan`). Mono-side cache also tracks the `MonoVTable*` set + a `vtable→klass` map since the object header points at a vtable, not the class. `getClassRangeStats` companion command exposes cache size for diagnostics. Smoke test: `tools/Test-WhatIsAt.ps1`.
 - [ ] **17b** Field-offset resolution: walk class fields (parent chain included) to find which field's `[offset, offset+sizeof(type))` contains the queried offset. Handle pointer-to-class, value-struct interior, `T[]` array slot, `List<T>` element, string buffer.
 - [ ] **17c** UI: dedicated *Address Lookup* tab + Inspector right-click action ("Find what's at this address"). Pre-fills the field's effective address into the lookup input.
 - [ ] **17d** CE Lua bridge: `unity_addrfind.lua` + optional CE hotkey integration. Same RPC + retry scaffolding as `unity_dissect.lua` / `unity_symbols.lua`.

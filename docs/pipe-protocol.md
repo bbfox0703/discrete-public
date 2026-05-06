@@ -547,6 +547,77 @@ Dump the string-literal pool.
 
 `null` entries mean a string failed bounds validation (extremely rare).
 
+---
+
+## Address finder *(Both)*
+
+Phase 17a — inverse of `findInstances`. Given an arbitrary process address
+(typically from CE's *Find what writes / accesses*, pointer scan, or manual
+probe), identify which managed instance + class it sits inside. v1 reports
+the instance + class + raw `fieldOffset`; the field-name resolution arrives
+in Phase 17b. Algorithm: backward 8-byte stride scan from the queried
+address looking for an object header whose first qword is a valid runtime
+class pointer (IL2CPP) or vtable pointer (Mono).
+
+### `whatIsAt`
+
+Strategy A backward scan. Builds the class-pointer cache implicitly on first
+call; subsequent calls reuse the cache.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `address` | hex string / int | required — the address to look up |
+| `maxBackwardScan` | uint | optional, default 4096; capped at 16384 |
+
+Response — managed instance found:
+
+```jsonc
+// → {
+//   "found": true,
+//   "address":     "0x1FB9D39D8",     // queried address
+//   "instance":    "0x1FB9D39D0",     // base of containing managed object
+//   "class_ptr":   "0x7FF5...",       // Il2CppClass* / MonoClass*
+//   "vtable_ptr":  "0x...",           // Mono only — MonoVTable* in object header
+//   "assembly":    "Assembly-CSharp",
+//   "namespace":   "MainGame",
+//   "class":       "PLY_WORK",
+//   "fieldOffset": 8,                 // bytes from instance base to queried address
+//   "scannedRange": { "from": "0x...", "to": "0x..." },
+//   "scannedSteps": <uint>            // number of 8-byte probes taken
+// }
+```
+
+Response — no managed instance in the scanned range:
+
+```jsonc
+// → {
+//   "found":   false,
+//   "reason":  "no_klass_in_range",   // or class_range_cache_unavailable / no_il2cpp_domain / ...
+//   "address": "0xDEADBEEF",
+//   "scannedRange": { "from": "0x...", "to": "0x..." },
+//   "scannedSteps": <uint>
+// }
+```
+
+### `getClassRangeStats`
+
+Diagnostic for the class-pointer cache. Exposed mostly for smoke tests; the
+production caller never needs it (the cache builds on demand).
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `rebuild` | bool | optional, default false — drops + rebuilds the cache |
+
+```jsonc
+// IL2CPP → { "backend": "IL2CPP", "built": true, "class_count": 10001,
+//            "min_klass": "0x7FF...", "max_klass": "0x7FF..." }
+// Mono   → { "backend": "Mono",   "built": true, "class_count": 12345,
+//            "vtable_count": 11234, "min_klass": "...", "max_klass": "...",
+//            "min_vtable": "...", "max_vtable": "..." }
+```
+
+---
+
 ### `il2cppGetMetadataTypeFields` *(IL2CPP)*
 
 Per-type field listing including const literals (which don't appear in the
@@ -591,6 +662,7 @@ present, with a best-effort string decode.
 | Stash an address for later | `registerSymbol` / `lookupSymbol` |
 | List enum members | `getEnumValues` (IL2CPP today) |
 | Read `const` literals stripped by IL2CPP | `il2cppGetMetadataTypeFields` |
+| Identify the instance + class at an address (CE *what writes here*) | `whatIsAt` |
 
 ---
 

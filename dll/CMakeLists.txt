@@ -49,6 +49,8 @@ set(DLL_MONO_SOURCES
     src/mono/MonoTypeParser.h
     src/mono/MonoClassWalker.cpp
     src/mono/MonoClassWalker.h
+    src/mono/MonoAddressFinder.cpp
+    src/mono/MonoAddressFinder.h
 )
 
 # IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
@@ -69,6 +71,8 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/MetadataParserHostPath.cpp  # DLL-only: BackendDetector adapter for Parser::Load()
     src/il2cpp/IL2CPPMetadataRegistration.cpp
     src/il2cpp/IL2CPPMetadataRegistration.h
+    src/il2cpp/IL2CPPAddressFinder.cpp
+    src/il2cpp/IL2CPPAddressFinder.h
 )
 
 # ---------------------------------------------------------------------------

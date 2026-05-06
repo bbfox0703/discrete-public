@@ -10,11 +10,13 @@
 #include "PipeServer.h"
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
+#  include "../mono/MonoAddressFinder.h"
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
 #  include "../mono/MonoResolver.h"
 #  include "../mono/MonoThreadAttach.h"
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#  include "../il2cpp/IL2CPPAddressFinder.h"
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
 #  include "../il2cpp/IL2CPPMetadataRegistration.h"
@@ -105,7 +107,14 @@ void RegisterCoreHandlers() {
         return BuildHandshakeJson();
     });
     // Phase 2: `scan` re-runs backend detection and returns the same shape as handshake.
+    // Phase 17a follow-up: also drops the address-finder class-pointer cache so
+    // newly-loaded assemblies get picked up by the next whatIsAt call.
     PipeServer::RegisterHandler(MagicStrings::CmdScan, [](const json&) -> json {
+#if defined(UNITYCEDUMPER_BACKEND_MONO)
+        Mono::InvalidateClassRangeCache();
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+        IL2CPP::InvalidateClassRangeCache();
+#endif
         return BuildHandshakeJson();
     });
 
@@ -1225,6 +1234,74 @@ void RegisterCoreHandlers() {
             {"values",          std::move(values)},
         };
     });
+
+    // Phase 17a — address finder (Mono).
+    // Backward 8-byte stride scan from the queried address; matches MonoVTable*
+    // candidates against a cache built lazily on first call. The cache walks
+    // every assembly's classes once and resolves a vtable per class via
+    // mono_class_vtable, then maps vtable→class for the lookup. Field-offset
+    // resolution lands in Phase 17b — for now we report instance + class.
+    PipeServer::RegisterHandler(MagicStrings::CmdWhatIsAt,
+        [parseAddr, formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        std::size_t maxBackward = 4096;
+        if (args.contains("maxBackwardScan") && args["maxBackwardScan"].is_number_unsigned()) {
+            maxBackward = args["maxBackwardScan"].get<std::size_t>();
+        }
+        auto hit = Mono::WhatIsAt(addr, maxBackward);
+        if (!hit.found) {
+            return json{
+                {"found",   false},
+                {"reason",  hit.reason},
+                {"address", formatHex(hit.queriedAddr)},
+                {"scannedRange", json{
+                    {"from", formatHex(hit.scannedFrom)},
+                    {"to",   formatHex(hit.scannedTo)},
+                }},
+                {"scannedSteps", hit.scannedSteps},
+            };
+        }
+        return json{
+            {"found",       true},
+            {"address",     formatHex(hit.queriedAddr)},
+            {"instance",    formatHex(hit.instance)},
+            {"vtable_ptr",  formatHex(hit.vtablePtr)},
+            {"class_ptr",   formatHex(hit.klassPtr)},
+            {"assembly",    hit.assembly},
+            {"namespace",   hit.ns},
+            {"class",       hit.className},
+            {"fieldOffset", static_cast<std::int64_t>(hit.fieldOffset)},
+            {"scannedRange", json{
+                {"from", formatHex(hit.scannedFrom)},
+                {"to",   formatHex(hit.scannedTo)},
+            }},
+            {"scannedSteps", hit.scannedSteps},
+        };
+    });
+
+    // Phase 17a follow-up: diagnostics for the class-pointer cache. Lets the
+    // user / smoke test confirm the cache is populated and inspect its bounds
+    // before issuing a whatIsAt query.
+    PipeServer::RegisterHandler(MagicStrings::CmdGetClassRangeStats,
+        [formatHex](const json& args) -> json {
+        if (args.value("rebuild", false)) Mono::InvalidateClassRangeCache();
+        Mono::BuildClassRangeCache();
+        auto s = Mono::GetClassRangeStats();
+        return json{
+            {"backend",      "Mono"},
+            {"built",        s.built},
+            {"class_count",  s.classCount},
+            {"vtable_count", s.vtableCount},
+            {"min_klass",    formatHex(s.minKlass)},
+            {"max_klass",    formatHex(s.maxKlass)},
+            {"min_vtable",   formatHex(s.minVtable)},
+            {"max_vtable",   formatHex(s.maxVtable)},
+        };
+    });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
@@ -1985,6 +2062,66 @@ void RegisterCoreHandlers() {
             {"underlying_type", underlying},
             {"count",           values.size()},
             {"values",          std::move(values)},
+        };
+    });
+
+    // Phase 17a — address finder (IL2CPP).
+    // Backward 8-byte stride scan; matches Il2CppClass* candidates against a
+    // cache built lazily on first call. Cache is one full
+    // EnumerateAssemblies → EnumerateClasses pass through every image; ~tens
+    // of ms on first hit, sub-ms on subsequent ones.
+    PipeServer::RegisterHandler(MagicStrings::CmdWhatIsAt,
+        [parseAddr, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        std::size_t maxBackward = 4096;
+        if (args.contains("maxBackwardScan") && args["maxBackwardScan"].is_number_unsigned()) {
+            maxBackward = args["maxBackwardScan"].get<std::size_t>();
+        }
+        auto hit = IL2CPP::WhatIsAt(addr, maxBackward);
+        if (!hit.found) {
+            return json{
+                {"found",   false},
+                {"reason",  hit.reason},
+                {"address", formatHex(hit.queriedAddr)},
+                {"scannedRange", json{
+                    {"from", formatHex(hit.scannedFrom)},
+                    {"to",   formatHex(hit.scannedTo)},
+                }},
+                {"scannedSteps", hit.scannedSteps},
+            };
+        }
+        return json{
+            {"found",       true},
+            {"address",     formatHex(hit.queriedAddr)},
+            {"instance",    formatHex(hit.instance)},
+            {"class_ptr",   formatHex(hit.klassPtr)},
+            {"assembly",    hit.assembly},
+            {"namespace",   hit.ns},
+            {"class",       hit.className},
+            {"fieldOffset", static_cast<std::int64_t>(hit.fieldOffset)},
+            {"scannedRange", json{
+                {"from", formatHex(hit.scannedFrom)},
+                {"to",   formatHex(hit.scannedTo)},
+            }},
+            {"scannedSteps", hit.scannedSteps},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdGetClassRangeStats,
+        [formatHex](const json& args) -> json {
+        if (args.value("rebuild", false)) IL2CPP::InvalidateClassRangeCache();
+        IL2CPP::BuildClassRangeCache();
+        auto s = IL2CPP::GetClassRangeStats();
+        return json{
+            {"backend",     "IL2CPP"},
+            {"built",       s.built},
+            {"class_count", s.classCount},
+            {"min_klass",   formatHex(s.minKlass)},
+            {"max_klass",   formatHex(s.maxKlass)},
         };
     });
 #endif

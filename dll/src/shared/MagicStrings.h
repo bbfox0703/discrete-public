@@ -53,4 +53,10 @@ inline constexpr const char* CmdMonoGetVTable      = "monoGetVTable";
 inline constexpr const char* CmdIL2CPPGetMetadataStrings = "il2cppGetMetadataStrings";
 inline constexpr const char* CmdIL2CPPGetGenericInstances = "il2cppGetGenericInstances";
 
+// Phase 17a — address finder (reverse lookup): identify which managed
+// instance + class an arbitrary process address belongs to. Inverse of
+// findInstances.
+inline constexpr const char* CmdWhatIsAt              = "whatIsAt";
+inline constexpr const char* CmdGetClassRangeStats    = "getClassRangeStats";
+
 }  // namespace UnityCEDumper::MagicStrings
