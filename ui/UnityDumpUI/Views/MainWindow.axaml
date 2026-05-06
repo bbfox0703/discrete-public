@@ -62,12 +62,15 @@
       <!-- Column widths get rewritten by MainWindow code-behind on
            IsAssembliesPaneCollapsed / IsClassesPaneCollapsed toggle so
            the user can reclaim the space for the Inspector / Detail pane.
-           Initial widths match the historical layout; named columns let
-           the code-behind grab and resize them. -->
+           Initial widths match the historical layout. The code-behind
+           reaches each ColumnDefinition by index (0=Assemblies,
+           2=Classes) — Avalonia's compiled XAML rejects x:Name on
+           ColumnDefinition under Native AOT (it's not a Control with a
+           NameScope), hence the index-based access. -->
       <Grid.ColumnDefinitions>
-        <ColumnDefinition x:Name="AssembliesCol" Width="240" MinWidth="28" />
+        <ColumnDefinition Width="240" MinWidth="28" />
         <ColumnDefinition Width="4" />
-        <ColumnDefinition x:Name="ClassesCol"    Width="280" MinWidth="28" />
+        <ColumnDefinition Width="280" MinWidth="28" />
         <ColumnDefinition Width="4" />
         <ColumnDefinition Width="*"   MinWidth="320" />
       </Grid.ColumnDefinitions>

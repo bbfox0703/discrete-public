@@ -219,14 +219,22 @@ function Build-Dll {
     }
 
     Write-Step 'Configuring CMake (Ninja + MSVC)'
+    # NOTE: `| Out-Host` is intentional. Without it, native-command stdout
+    # inside a function is collected as part of the function's return-value
+    # array, so (a) the user never sees cmake / dotnet output and (b) when
+    # we later `return $false`, the return value is `@(...stdout..., $false)`
+    # which evaluates as truthy in `if (-not (Build-X))` — the caller then
+    # thinks the step succeeded. Out-Host writes to the host display stream
+    # (also captured by Start-Transcript) and returns nothing, which fixes
+    # both. Same trick applied to every other native call below.
     & cmake -S $RepoRoot -B $dllBuildDir -G Ninja `
         "-DCMAKE_BUILD_TYPE=$cfg" `
-        "-DBACKEND=$Backend"
+        "-DBACKEND=$Backend" | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
     Write-Ok 'CMake configured'
 
     Write-Step "Building DLL ($cfg)"
-    & cmake --build $dllBuildDir --parallel
+    & cmake --build $dllBuildDir --parallel | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake build failed'; return $false }
 
     # Copy every produced .dll + .pdb into dist\.
@@ -279,7 +287,7 @@ function Build-Ui {
             -r win-x64 `
             -p:PublishAot=true `
             -o $publishDir `
-            --nologo
+            --nologo | Out-Host
     }
     else {
         # Self-contained single-file for Debug/Release iteration. The .NET
@@ -295,7 +303,7 @@ function Build-Ui {
             -p:IncludeNativeLibrariesForSelfExtract=true `
             -p:IncludeAllContentForSelfExtract=true `
             -o $publishDir `
-            --nologo
+            --nologo | Out-Host
     }
     if ($LASTEXITCODE -ne 0) { Write-Fail 'UI publish failed'; return $false }
 
@@ -338,7 +346,7 @@ function Run-Tests {
         return $true
     }
     Write-Step 'Building + running tests'
-    & dotnet test $TEST_PROJ -c Release --nologo -v minimal
+    & dotnet test $TEST_PROJ -c Release --nologo -v minimal | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'Tests failed'; return $false }
     Write-Ok 'All tests passed'
     return $true
@@ -372,11 +380,11 @@ function Build-MetadataCli {
     & cmake -S $RepoRoot -B $cliBuildDir -G Ninja `
         "-DCMAKE_BUILD_TYPE=$cfg" `
         "-DBUILD_CLI=ON" `
-        "-DBACKEND=IL2CPP"
+        "-DBACKEND=IL2CPP" | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
 
     Write-Step "Building metadata-cli ($cfg)"
-    & cmake --build $cliBuildDir --target metadata-cli --parallel
+    & cmake --build $cliBuildDir --target metadata-cli --parallel | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'metadata-cli build failed'; return $false }
 
     $exe = Join-Path $cliBuildDir 'bin\metadata-cli.exe'
