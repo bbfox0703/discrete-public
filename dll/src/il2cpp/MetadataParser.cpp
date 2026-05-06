@@ -160,7 +160,31 @@ bool Parser::LoadHeader() {
         return false;
     }
 
-    version_                  = h.version;
+    version_ = h.version;
+
+    // Phase 17a defensive guard: reject metadata files newer than the
+    // empirically-verified range. Per upstream Il2CppDumperV35plus (see
+    // docs/il2cpp-metadata-crosscheck.md "v35-v39 future work"), v38
+    // rewrote the header into a section-based layout
+    // (Il2CppSectionMetadata { offset, size, count } per table). Reading
+    // a v38 header through HeaderPrefix's flat (offset, size, offset,
+    // size, ...) shape yields silently-wrong offsets — the third int32
+    // is a `count`, not the expected `stringLiteralDataOffset`. Failing
+    // load here is much safer than emitting garbage. v32-v37 are
+    // unverified but the upstream fork suggests the old flat header
+    // still applies; surface a hard error anyway until a real test file
+    // lands.
+    if (version_ < 16 || version_ > 31) {
+        char line[256];
+        ::_snprintf_s(line, sizeof(line), _TRUNCATE,
+            "MetadataParser: unsupported metadata version %d (supported range "
+            "is 16..31; v32+ requires the v38 section-based header — see "
+            "docs/il2cpp-metadata-crosscheck.md)",
+            version_);
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+        return false;
+    }
+
     stringLiteralOffset_      = h.stringLiteralOffset;
     stringLiteralSize_        = h.stringLiteralSize;
     stringLiteralDataOffset_  = h.stringLiteralDataOffset;
@@ -170,13 +194,14 @@ bool Parser::LoadHeader() {
 
     // Phase 14c: v24 / v27 / v29 / v31 all supported via empirically-verified
     // layouts (test files: SaGa F1R, FFVI PR, Townscaper, SaGa F2R, Farthest
-    // Frontier, Emberward). Anything else emits a warning — string queries
-    // still work via the shared prefix; type queries return 0.
+    // Frontier, Emberward). Other versions in [16, 31] share the prefix layout
+    // per upstream sources; we accept them with a soft warning since string
+    // queries should work but type-table dispatch may need attention.
     if (version_ != 24 && version_ != 27 && version_ != 29 && version_ != 31) {
         char line[160];
         ::_snprintf_s(line, sizeof(line), _TRUNCATE,
-            "MetadataParser: untested version %d — type-table queries return 0; "
-            "string queries still work",
+            "MetadataParser: untested version %d (within supported range) — "
+            "type-table queries return 0; string queries still work",
             version_);
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
     }

@@ -190,3 +190,109 @@ widths still match, no code changes needed.
 hex-dumping methodology used originally produced exactly the right answer.
 Future v32+ targets can start from this same diffing approach without needing
 to re-dump anything.
+
+---
+
+## v35-v39 future work
+
+A community fork of Il2CppDumper has shipped v35-v39 support — see
+[Perfare/Il2CppDumper#903](https://github.com/Perfare/Il2CppDumper/pull/903)
+and our cloned snapshot at `vendor/Il2CppDumperV35plus/`. As of this
+writing **no game in our test matrix uses v32+ metadata** (Unity 6.0 reverted
+to v29; Unity 6.1+ is unreleased). We deliberately defer implementation
+until a real test target appears.
+
+This section captures what would change so the next implementer doesn't
+have to re-discover it.
+
+### v36-v37: incremental within the v35 window
+
+The upstream fork's `[Version(Min = ..., Max = 35)]` attributes on
+[Il2CppGlobalMetadataHeader](../vendor/Il2CppDumperV35plus/Il2CppDumper/Il2Cpp/MetadataClass.cs)
+indicate the **flat header layout** (parallel `xxxOffset` / `xxxSize`
+int32 pairs) survived through v35. v36-v37 are within this same
+window — same prefix shape as our `HeaderV29`. Nothing to do for these
+two beyond bumping `LoadHeader`'s allowed range.
+
+### v38: section-based header rewrite
+
+This is the disruptive bump. Every `(offset, size)` pair in the header
+becomes an `Il2CppSectionMetadata { offset, size, count }` struct (12
+bytes). Affects 28+ tables: `stringLiterals`, `stringLiteralData`,
+`strings`, `events`, `properties`, `methods`, `parameterDefaultValues`,
+`fieldDefaultValues`, `fieldAndParameterDefaultValueData`,
+`fieldMarshaledSizes`, `parameters`, `fields`, `genericParameters`,
+`genericParameterConstraints`, `genericContainers`, `nestedTypes`,
+`interfaces`, `vtableMethods`, `interfaceOffsets`, `typeDefinitions`,
+`images`, `assemblies`, `fieldRefs`, `referencedAssemblies`,
+`attributeData`, `attributeDataRanges`,
+`unresolvedIndirectCallParameterTypes`,
+`unresolvedIndirectCallParameterRanges`, `windowsRuntimeTypeNames`,
+`windowsRuntimeStrings`, `exportedTypeDefinitions`.
+
+**Critical**: reading a v38 header through our flat `HeaderPrefix`
+yields silently-wrong offsets. The third int32 in our struct is
+`stringLiteralDataOffset`; in v38 it is `stringLiterals.count` — a
+count, not an offset. Address arithmetic that follows would land in
+random memory. This is why we now hard-reject `version > 31` in
+`LoadHeader` rather than letting "string queries still work" be the
+default.
+
+To support v38, add `HeaderV38` with one `Il2CppSectionMetadata`
+(12-byte struct: `uint32 offset; uint32 size; uint32 count;`) per
+table, plus a per-version branch in `LoadHeader` / `LoadTables`.
+
+### v38: variable-width metadata indices
+
+Pre-v38, `TypeIndex`, `TypeDefinitionIndex`, `GenericContainerIndex`,
+and `ParameterIndex` were always 4-byte int32 fields in
+`Il2CppFieldDefinition` / `Il2CppTypeDefinition` / etc. v38 compresses
+them to 1, 2, or 4 bytes per field based on each table's row count
+(small tables get small indices). The widths are computed at load time
+from the section sizes:
+
+```cs
+// from Il2CppDumperV35plus/Il2CpDumper/Il2Cpp/Metadata.cs:101-114
+int sizeOfIl2CppParameterDefinition = (int)(header.parameters.size / header.parameters.count);
+typeIndexSize = sizeOfIl2CppParameterDefinition - 8;
+typeDefinitionIndexSize = GetIndexSize((int)header.typeDefinitions.count);
+genericContainerIndexSize = GetIndexSize((int)header.genericContainers.count);
+parameterIndexSize = GetIndexSize((int)header.parameters.count);
+```
+
+Our parser would need a per-load `IndexSizes` struct, and every place
+that today reads an int32 typed-index would need to consult it. Affects
+`FieldDefinition`, `TypeDefinition`, `FieldDefaultValue`, and a few
+others.
+
+### v39: incremental from v38
+
+The fork has only one v39-specific gate (`Version < 39` in
+[BinaryStream.cs:220](../vendor/Il2CppDumperV35plus/Il2CppDumper/IO/BinaryStream.cs)).
+Likely a single new field in some struct — diff against v38 once a v39
+target lands.
+
+### Approximate effort
+
+When a real test game appears: ~1.5-2 days.
+
+1. New `HeaderV38` struct + version-aware dispatch in `LoadHeader` /
+   `LoadTables` — half a day.
+2. Variable-width index plumbing through `EnumerateTypeFields` /
+   `FindFieldDefault` / `GetTypeDefinition` — half a day.
+3. Empirical verification against the test game (first 5 type defs match
+   canonical names + tokens; field defaults decode) — half a day.
+4. Phase 14c-style cross-check pass against
+   `vendor/libil2cpp/Unity_6.1+/<exact>/vm/GlobalMetadataFileInternals.h`
+   once that's available in `sync_vendor.ps1` — quarter day.
+
+### Defensive guard live today
+
+[MetadataParser::LoadHeader](../dll/src/il2cpp/MetadataParser.cpp)
+rejects `version < 16 || version > 31` outright with a clear log line.
+[metadata-cli](../tools/metadata-cli/main.cpp)'s "load failed" stderr
+message points users back here. Better to fail loud on a v38 file than
+silently produce nonsense offsets. When v32-v37 turn out to be
+backwards-compatible (which the upstream fork's `Max = 35` window
+suggests), the guard widens to `version > 35`; when v38 lands its real
+implementation, the guard goes away.

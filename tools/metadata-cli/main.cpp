@@ -69,7 +69,9 @@ void PutJsonString(const std::string& s) {
 int CmdInfo(const std::wstring& path) {
     Parser p;
     if (!p.LoadFromPath(path)) {
-        std::fputs("metadata-cli: load failed (file missing, not metadata, or sanity mismatch)\n", stderr);
+        std::fputs("metadata-cli: load failed — file missing, not metadata, sanity mismatch, "
+                   "or unsupported version (>31 needs the v38 section-based header — see "
+                   "docs/il2cpp-metadata-crosscheck.md)\n", stderr);
         return 1;
     }
     // Phase 14c shipped v24 / v29 / v31 type-table parsing. v27 (Unity 2020)
@@ -97,7 +99,8 @@ int CmdInfo(const std::wstring& path) {
 int CmdStats(const std::wstring& path) {
     Parser p;
     if (!p.LoadFromPath(path)) {
-        std::fputs("metadata-cli: load failed\n", stderr);
+        std::fputs("metadata-cli: load failed — see `info` subcommand for diagnostics, "
+                   "or check version is in [16, 31]\n", stderr);
         return 1;
     }
     // Replicates the heuristic from ExportAPI.cpp's getMetadataStats so a
@@ -155,7 +158,8 @@ int CmdStats(const std::wstring& path) {
 int CmdTypes(const std::wstring& path) {
     Parser p;
     if (!p.LoadFromPath(path)) {
-        std::fputs("metadata-cli: load failed\n", stderr);
+        std::fputs("metadata-cli: load failed — see `info` subcommand for diagnostics, "
+                   "or check version is in [16, 31]\n", stderr);
         return 1;
     }
     std::uint32_t count = p.TypeDefinitionCount();
@@ -176,7 +180,8 @@ int CmdTypes(const std::wstring& path) {
 int CmdType(const std::wstring& path, const std::string& ns, const std::string& name) {
     Parser p;
     if (!p.LoadFromPath(path)) {
-        std::fputs("metadata-cli: load failed\n", stderr);
+        std::fputs("metadata-cli: load failed — see `info` subcommand for diagnostics, "
+                   "or check version is in [16, 31]\n", stderr);
         return 1;
     }
     auto td = p.FindTypeByName(ns, name);
