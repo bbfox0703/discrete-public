@@ -25,6 +25,7 @@ $dll_deps = @{
 
 $deps = @{
     "Il2CppDumper"             = "https://github.com/Perfare/Il2CppDumper"
+	"Il2CppDumperV35plus"      = "https://github.com/roytu/Il2CppDumper"
     "UnityExplorer"            = "https://github.com/sinai-dev/UnityExplorer"
     "Il2CppAssemblyUnhollower" = "https://github.com/knah/Il2CppAssemblyUnhollower"
     "BepInEx"                  = "https://github.com/BepInEx/BepInEx"
