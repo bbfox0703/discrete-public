@@ -4,19 +4,21 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-07
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 18 (17a/b/c/d) all closed**. **Phase 18** (address-finder reverse lookup) closed on 2026-05-07 with the `unity_addrfind.lua` CE Lua bridge — `whatIsAt` ships end-to-end across DLL → UI → CE. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 16** (docs finalization, parallelizable), **Phase 17** (find method instances, ~one phase). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 (17a/b/c/d) all closed**. **Phase 17** (address-finder reverse lookup) closed on 2026-05-07 with the `unity_addrfind.lua` CE Lua bridge — `whatIsAt` ships end-to-end across DLL → UI → CE. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 16** (docs finalization, parallelizable), **Phase 18** (find method instances, ~one phase). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+
+**2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
 ## Hand-off notes (historical — for live state see STATUS.md)
 
-- Phase 18 sub-phase 17d green (build #198, 2026-05-07):
-  - New [scripts/unity_addrfind.lua](../scripts/unity_addrfind.lua) (13.6 KB) — closes out Phase 18's address-finder track on the CE side. Public API: `whatIsAt(addr, maxBackwardScan?)` (low-level, returns parsed table); `lookupAddress(addr)` (pretty-prints to console, mirrors `Test-WhatIsAt.ps1`'s output format); `getClassRangeStats(rebuild?)` (diagnostic / cache pre-warm); `lookupSelectedAddress()` (memview-or-prompt entry point); `bindAddrLookupHotkey(keys)` (optional global hotkey that fires `lookupSelectedAddress`).
+- Phase 17 sub-phase 17d green (build #198, 2026-05-07):
+  - New [scripts/unity_addrfind.lua](../scripts/unity_addrfind.lua) (13.6 KB) — closes out Phase 17's address-finder track on the CE side. Public API: `whatIsAt(addr, maxBackwardScan?)` (low-level, returns parsed table); `lookupAddress(addr)` (pretty-prints to console, mirrors `Test-WhatIsAt.ps1`'s output format); `getClassRangeStats(rebuild?)` (diagnostic / cache pre-warm); `lookupSelectedAddress()` (memview-or-prompt entry point); `bindAddrLookupHotkey(keys)` (optional global hotkey that fires `lookupSelectedAddress`).
   - Memory-view selection: tries `getMemoryViewForm().HexadecimalView.SelectionStart` first, falls back to `.TopAddress`, then `inputQuery` when neither is available — every accessor is `pcall`-wrapped so older CE builds (and weird forks) degrade gracefully.
   - JSON parser + RPC helper deliberately duplicated from `unity_dissect.lua` (instead of `require`-ing utils) so the file remains drop-in standalone — users who already pasted the dissect / symbols scripts only need to add this one. ~3 s pipe-open retry budget + per-RPC `processMessages()` / `sleep(1)` yield are identical to the sibling scripts.
   - `scripts/README.md` gains a Phase 17d step in the workflow + entry in the install layout block. Existing build script's `*.lua` glob in `Invoke-CompanionCopy` (`build.ps1:412`) means no build-script changes were needed.
-  - **Phase 18 closed** — addresses 17a (DLL handler), 17b (field resolution), 17c (UI tab), 17d (CE Lua bridge) all green.
+  - **Phase 17 closed** — addresses 17a (DLL handler), 17b (field resolution), 17c (UI tab), 17d (CE Lua bridge) all green.
   - **NuGet bumps landed in this session**: Avalonia 12.0.1 → 12.0.2 (UnityDumpUI.csproj inlined the version literal, removing the `$(AvaloniaVersion)` MSBuild property), `Tmds.DBus.Protocol` 0.92.0 → 0.93.0, `Microsoft.NET.Test.Sdk` 18.4.0 → 18.5.1. AOT publish stays clean (0 warnings under all four trim/AOT analyzers); `DiscreteUI.exe` actually shrank from 45.2 MB → 39.0 MB after the bumps, suggesting Avalonia 12.0.2 brought trim improvements.
 
-- Phase 18 sub-phase 17c green (build #197, 2026-05-06):
+- Phase 17 sub-phase 17c green (build #197, 2026-05-06):
   - New `AddressLookupViewModel` ([ui/UnityDumpUI/ViewModels/AddressLookupViewModel.cs](../ui/UnityDumpUI/ViewModels/AddressLookupViewModel.cs)) wraps the `whatIsAt` RPC with CommunityToolkit.Mvvm source-gen (no reflection) and exposes presentation-friendly labels (`InstanceLabel`, `ClassLabel`, `FieldOffsetLabel`, `FieldLabel`, `NearestFieldLabel`, `KindLabel`, `ScannedLabel`). Cancellation-safe — supersedes prior in-flight lookups so a fast-typing user doesn't get out-of-order results.
   - New DTOs in `ProtocolModels.cs`: `WhatIsAtResult` / `WhatIsAtField` / `WhatIsAtScanRange` / `ClassRangeStatsResult`. Registered with the source-gen `ProtocolJsonContext` alongside the existing types so AOT publish stays at zero IL2026 / IL3050 warnings.
   - `BackendAdapter` gains `WhatIsAtAsync(address, maxBackwardScan)` and `GetClassRangeStatsAsync(rebuild)`. The `Boolean` JSON serializer is now registered too (used by `getClassRangeStats`'s optional `rebuild` arg).
@@ -26,14 +28,14 @@
   - `MainWindow` code-behind hook `OnLookupInspectorAddressClicked` reads `Inspector.SelectedNode.EffectiveAddress` (deref pointer for pointer-typed rows; field's storage address otherwise) and hands it to `LookupInspectorAddressAsync`. Sits alongside the existing `Copy CE XML rooted here` / `Copy CE field` context-menu items on the Inspector grid, separated by a `<Separator />` for visual grouping.
   - Strings live in `Resources/Strings/en.axaml` under the new `AddrLookup.*` keys, plus the `Inspector.LookupAddressMenu` entry. Mirrors the existing `Inspector.*` / `Browser.*` namespacing so locale-swappable for free when a translation lands.
   - Native AOT publish clean: `dotnet publish -c Release -r win-x64 -p:PublishAot=true` finishes 0 warnings under all four trim/AOT analyzers; `DiscreteUI.exe` lands in `dist/` at 45.2 MB (vs ~45 MB before, no measurable size impact from the new tab + VM).
-- Phase 18 sub-phase 17b green (build #194, 2026-05-06):
+- Phase 17 sub-phase 17b green (build #194, 2026-05-06):
   - Field-offset resolution layered on top of 17a's instance + class identification. New `FieldHit` struct in both backends carries `name` / `type` / `offset` / `size` / `kind` / `declaredIn` plus enum / value-type flags; `whatIsAt` populates either `field` (exact `[offset, offset+size)` hit) or `nearestField` (closest declared field below the queried offset, with `nearestFieldDelta`).
   - `EnumerateInstanceFields(klass)` — new internal helper in `IL2CPPAddressFinder.cpp` and `MonoAddressFinder.cpp`. Walks the parent chain (depth cap 16 like `walkInstance`), iterates each class's instance fields directly via the resolver (skipping statics), and computes per-field size via `class_from_*_type` → `class_value_size` for value types, an inline primitive-name table as fallback, 8 bytes for reference types. Mono uses `class_is_enum` + `class_enum_basetype`; IL2CPP uses the parent-class-name `Enum` trick + `value__` field walk (same approach as `ReadClassInfo`).
   - Kind classifier: `leaf` (primitive at exact offset, includes enums), `value-struct` (multi-field value type at exact offset — Vector3, Color, Quaternion, user struct), `pointer` (reference type at exact offset — System.String, T[], class), `interior` (queried offset falls inside the field but not at its boundary — exposes `interiorOffset` for the byte-offset within the field).
   - All ResolveFieldAt SEH-leaf primitives sit alongside the existing 17a probes. Single `ThreadAttachGuard` scope covers both the backward scan AND the field walk so the field-resolution pass doesn't pay an extra attach round-trip. Static fields are filtered at enumeration time so their offsets (which are relative to the static block, not the instance base) can't pollute the offset match.
   - `tools/Test-WhatIsAt.ps1` extended with a follow-up line per probe showing the resolved field — name, type, offset, size, kind, declaredIn.
   - Out of scope for 17b (deferred): pointer-to-class recursion (drill into a pointer field's target instance), `T[]` / `List<T>` array-slot resolution, `System.String` UTF-16 buffer interior detection. The wire format leaves room for these in `field.kind` (could add `array-slot` / `array-element`) without breaking existing callers.
-- Phase 18 sub-phase 17a green (build #188, 2026-05-06):
+- Phase 17 sub-phase 17a green (build #188, 2026-05-06):
   - New module pair `dll/src/{mono,il2cpp}/{Mono,IL2CPP}AddressFinder.{h,cpp}` implementing the Strategy A backward scan from `address-finder.md`. Each backend exposes `BuildClassRangeCache()` / `InvalidateClassRangeCache()` / `GetClassRangeStats()` / `WhatIsAt(addr, maxBackwardScan)`.
   - Two new pipe commands: `whatIsAt` (the lookup itself) and `getClassRangeStats` (diagnostic / pre-warm). Wired in both backend blocks of `dll/src/shared/ExportAPI.cpp`. The `scan` command was extended to drop the cache so newly-loaded assemblies get picked up by the next lookup.
   - IL2CPP cache is a sorted vector of `Il2CppClass*` (one entry per enumerated class) with min/max bounds for fast range rejection. Mono cache is two parallel sorted vectors — `MonoClass*` and `MonoVTable*` — plus a `vtable → klass` `unordered_map`, since the Mono object header points at a vtable, not the class. `mono_class_vtable` is called for every class during cache build inside one `ThreadAttachGuard` scope (avoids the nested-attach footgun from build #54).
@@ -121,8 +123,8 @@
 | 14c | IL2CPP metadata version dispatch | v24 / v27 / v29 / v31 TypeDefinition layouts | ✅ Cross-checked vs upstream Unity (`docs/il2cpp-metadata-crosscheck.md`) |
 | 15 | Test Matrix | Mono / IL2CPP across multiple Unity versions | ✅ Verified across 6+ games covering v24/v27/v29/v31 + Mono bdwgc Unity 6 |
 | 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs | 🟡 Architecture / pipe-protocol / STATUS / address-finder / il2cpp-metadata-crosscheck exist; remaining items still TBD |
-| 17 | Find Method Instances | New wire command `findMethodInstances(asm, ns, class, method, [signature])` + UI tab | ⬜ Not started |
-| 18 | Address Finder (reverse lookup) | New wire command `whatIsAt(address)` returning instance + class + field; inverse of `findInstances` | ✅ All four sub-phases shipped (17a DLL handler / 17b field resolution / 17c UI Address Lookup tab / 17d CE Lua bridge). Spec in [address-finder.md](address-finder.md). |
+| 17 | Address Finder (reverse lookup) | New wire command `whatIsAt(address)` returning instance + class + field; inverse of `findInstances` | ✅ All four sub-phases shipped (17a DLL handler / 17b field resolution / 17c UI Address Lookup tab / 17d CE Lua bridge). Spec in [address-finder.md](address-finder.md). |
+| 18 | Find Method Instances | New wire command `findMethodInstances(asm, ns, class, method, [signature])` + UI tab | ⬜ Not started |
 
 ---
 
@@ -471,7 +473,7 @@ Already in repo:
 - [x] `docs/plan.md` (this file)
 - [x] `docs/test-matrix.md`
 - [x] `docs/il2cpp-metadata-crosscheck.md` (Phase 14c follow-up)
-- [x] `docs/address-finder.md` (Phase 18 design spec)
+- [x] `docs/address-finder.md` (Phase 17 design spec)
 - [x] `scripts/README.md` (CE bridge install + workflow)
 
 Still TBD:
@@ -493,27 +495,7 @@ remaining items are user-facing reference / onboarding material.
 
 ---
 
-## Phase 17 — Find Method Instances
-
-**Goal**: Mirror Cheat Engine's "find method instances" with overload
-disambiguation. Lets users target a specific overload by signature instead
-of registering all methods of a class wholesale (which `unity_symbols.lua`
-does today).
-
-- [ ] Pipe RPC: `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` returning `[{ token, address, signature, declaringClass }]` for every matching overload
-- [ ] Server-side: enumerate matching `MethodInfo*` (Mono / IL2CPP), compile + return native pointers
-- [ ] Optional signature-string match for narrowing among overloads
-- [ ] UI: new tab on the class browser surfacing all overloads with their addresses + a "register selected as CE symbol" action
-- [ ] Lua bridge: extend `unity_symbols.lua` with a `registerMethodOverloads(asm, ns, class, name, [sigFilter])` helper that uses the new RPC
-
-**Acceptance**:
-- Given a class with overloaded methods (e.g. `Vector3.Set(float, float, float)` vs `Vector3.Set(Vector3)`), `findMethodInstances` returns both with distinct addresses and distinguishing signatures
-- Selecting one overload in the UI registers a CE symbol pointing at the right native address; the other overload's symbol is not affected
-- Useful follow-up to the per-row HEX → AOBMaker pipeline (Phase 11.5)
-
----
-
-## Phase 18 — Address Finder (reverse lookup)
+## Phase 17 — Address Finder (reverse lookup)
 
 **Goal**: Inverse of `findInstances`. Given any address from CE's scanner /
 pointer-scan, identify which Unity managed instance, class, and field that
@@ -536,6 +518,26 @@ Spec: [docs/address-finder.md](address-finder.md).
 - CE main thread stays responsive during a backward scan
 
 Estimated effort: ~3.5 days for v1.
+
+---
+
+## Phase 18 — Find Method Instances
+
+**Goal**: Mirror Cheat Engine's "find method instances" with overload
+disambiguation. Lets users target a specific overload by signature instead
+of registering all methods of a class wholesale (which `unity_symbols.lua`
+does today).
+
+- [ ] Pipe RPC: `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` returning `[{ token, address, signature, declaringClass }]` for every matching overload
+- [ ] Server-side: enumerate matching `MethodInfo*` (Mono / IL2CPP), compile + return native pointers
+- [ ] Optional signature-string match for narrowing among overloads
+- [ ] UI: new tab on the class browser surfacing all overloads with their addresses + a "register selected as CE symbol" action
+- [ ] Lua bridge: extend `unity_symbols.lua` with a `registerMethodOverloads(asm, ns, class, name, [sigFilter])` helper that uses the new RPC
+
+**Acceptance**:
+- Given a class with overloaded methods (e.g. `Vector3.Set(float, float, float)` vs `Vector3.Set(Vector3)`), `findMethodInstances` returns both with distinct addresses and distinguishing signatures
+- Selecting one overload in the UI registers a CE symbol pointing at the right native address; the other overload's symbol is not affected
+- Useful follow-up to the per-row HEX → AOBMaker pipeline (Phase 11.5)
 
 ---
 

@@ -305,7 +305,7 @@ Estimated total: ~3.5 days for v1.
       leaf primitives + per-RPC `processMessages()` + `sleep(1)` yield
       in `unity_addrfind.lua` (mirrors the dissect / symbols scripts).*
 
-**Phase 18 closed** — all four sub-phases shipped:
+**Phase 17 closed** — all four sub-phases shipped:
 17a DLL handler + class-pointer cache (build #188);
 17b field-offset resolution + kind classifier (build #194);
 17c UI Address Lookup tab + Inspector right-click handoff (build #197);
