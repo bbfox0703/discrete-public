@@ -103,7 +103,7 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 ### Open follow-ups (not blocking, drip-feed)
 
 - **Phase 16 docs** — ✅ closed 2026-05-07. All planned doc files now exist (see Phase Overview table for the per-file list).
-- **Phase 5 segment 2d** (long-deferred, non-blocking) — full `Il2CppMetadataRegistration` AOB scan in `GameAssembly.dll` so non-enum const literals in `il2cppGetMetadataTypeFields` can be type-aware-decoded. Half-day.
+- **Phase 5 segment 2d** — ✅ already shipped commit `5c59077` (2026-04-29). Doc was stale through Phases 17–19; corrected 2026-05-07. v29 verified live (SaGa F2R); cross-version smoke against v24 / v27 / v31 still pending — recipe in [§Phase 5 segment 2d cross-version smoke](#phase-5-segment-2d-cross-version-smoke).
 - **Phase 17e — Strategy B address finder** — only-if-asked. Cached heap walk + interval tree for batch CE pointer-scan lookups. Skip until requested.
 - **Phase 18 multi-overload AA-script user-click smoke** — Farthest Frontier `ItemBundle.AddItems` exposes 2 overloads (verified via `findMethodInstances`); end-to-end "Copy AOB AA script" against the multi-overload result not yet user-clicked through.
 - **More automated test coverage** — current test suite covers protocol, exporters, pipe lifecycle, a few inspector helpers. Big gaps: classifier (enum vs value-type vs pointer routing), end-to-end `MetadataParser` round-trips per version, CE-XML live-mode rendering against a deterministic fixture, AobMakerBridge happy + sad-path with a fake pipe server. Drip-feed.
@@ -116,6 +116,7 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 
 | Option | Effort | Why pick this |
 |---|---|---|
+| **Phase 5 segment 2d cross-version smoke** | <10 min per target | Run `Test-MetadataFields.ps1` against v24 / v27 / v31 IL2CPP games — recipe in §"Pending verification" below. Closes the last formal gap. |
 | **Inspector classifier unit tests** | <½ day | Cheapest test win. Offline regression coverage for the classifier kind-routing logic. |
 | **Highlight matching substring** | <½ day | Pure UI polish — small but visible improvement for users who filter heavily. |
 | **Phase 12d (32-bit Mono)** | Multi-day | Required for any pre-Unity-2018 Mono game. No user has asked yet (no 32-bit Unity game in test matrix). |
@@ -137,7 +138,40 @@ These remain confirmed clicked-through on the dev box:
 
 ### Pending verification (small)
 
-_(none — every shipped phase has a live click-through on the dev box.)_
+- **Phase 5 segment 2d — cross-version smoke**. v29 (SaGa F2R) verified; v24 / v27 / v31 structural-shape scan + typed-decode still uncovered. ~10 min per target — recipe below.
+
+### Phase 5 segment 2d cross-version smoke
+
+The `Il2CppMetadataRegistration` discovery uses a structural-shape scan (not a literal-byte AOB) — see [plan.md §Phase 5 "2d follow-up"](plan.md) for the full algorithm. Should work version-agnostically, but only v29 is formally validated. Quick recipe to cover the remaining versions:
+
+**Pre-flight** (per target):
+
+1. Inject `UnityDumper-IL2CPP.dll` into the game (DiscreteUI Pick & Inject or `Test-Handshake.ps1`). Confirm `handshake` reports `metadata_version`.
+2. Identify a class with at least one **non-enum** field that has a `const` literal initializer — pretty much any user-defined class with `private const int kFoo = 42;` will do. Generic candidates: `UnityEngine.Mathf` (PI / Deg2Rad / Epsilon), `System.Math` (PI / E), or any game-specific class with tunable constants.
+
+**Run the smoke**:
+
+```powershell
+.\tools\Test-MetadataFields.ps1 -Namespace UnityEngine -Name Mathf
+```
+
+**Pass criteria**:
+
+- Banner near the top reads `Il2CppMetadataRegistration: YES` (green).
+- For each field with a `default`, the line reads `tag=0x.. = <value>  enc=NB` in cyan — NOT just `hex16 = ... raw_size=N data#X` alone.
+- `value` is sane for the type (e.g. `Mathf.PI` → `3.141593`, `Mathf.Deg2Rad` → `0.0174533`).
+- No process crash; no near-miss spam in `%LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\init\`.
+
+**Targets to cover**:
+
+| Metadata version | Target | Status |
+|---|---|---|
+| v24 | (any Unity 2018 game in the test matrix) | ⏳ |
+| v27 | (any Unity 2020 game in the test matrix) | ⏳ |
+| v29 | SaGa F2R | ✅ verified |
+| v31 | Farthest Frontier / Hollow Knight: Silksong | ⏳ |
+
+If `Il2CppMetadataRegistration: no` shows up on any version, the registration's PE-section layout or struct shape changed between versions — would need a per-version layout dispatch in `IL2CPPMetadataRegistration.cpp` (currently hardcoded `kRegBytes = 0x80` for v29). The init log will have `MetadataRegistration: near-miss @0x.. typesCount=N: <reason>` lines pointing at what failed the heuristic.
 
 ---
 

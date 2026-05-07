@@ -221,17 +221,54 @@
 - [x] Version-specific header structs — v24 / v27 / v29 / v31 all dispatched (Phase 14c). Cross-checked against upstream Unity source in `vendor/libil2cpp/`; full audit in [docs/il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md)
 - [x] String heap reader (`nameIndex` → UTF-8 string)
 - [partial] Tables: TypeDefinitions ✅, FieldDefinitions ✅, **StringLiterals ✅**, FieldDefaults ✅; MethodDefinitions deferred (no current consumer)
-- [ ] Cross-link metadata index ↔ runtime `Il2CppClass*` via `Il2CppMetadataRegistration` AOB (deferred — see "2d follow-up", non-blocking)
+- [x] Cross-link metadata index ↔ runtime `Il2CppClass*` via `Il2CppMetadataRegistration` AOB — landed commit `5c59077` (2026-04-29). See "2d follow-up" below for the full description.
 - [x] Enum default values (segment 2d v1: type-aware decode using runtime `value__` underlying type), **string literal extraction ✅**
 - [x] Detection of stripped / obfuscated metadata (segment 3): `getMetadataStats` pipe command. Counts single-char / two-char user-type names (excluding `<...>` compiler-generated) and emits a verdict — `clean` / `partial_strip` / `heavy_strip`. IL2CPP path reads from `global-metadata.dat` directly; Mono path walks runtime classes.
 
-**2d follow-up** (not yet started): full `Il2CppMetadataRegistration` discovery
-in `GameAssembly.dll` so non-enum const literals (e.g. `const int kFoo = 42`)
-in `il2cppGetMetadataTypeFields` can also be type-aware-decoded. Likely
-approach: AOB scan the `.data` section for the registration struct shape
-(positive `typesCount`, all sub-pointers fall inside the module range). The
-runtime types[] table dereference lets `FieldDefault.typeIndex` map to a
-primitive type tag without going through `value__`.
+**2d follow-up** (✅ shipped 2026-04-29, commit `5c59077`): full
+`Il2CppMetadataRegistration` discovery in `GameAssembly.dll` so non-enum
+const literals (e.g. `const int kFoo = 42`) in
+`il2cppGetMetadataTypeFields` can also be type-aware-decoded.
+
+**Approach used** — *structure-shape* scan, not a literal-byte AOB. See
+[IL2CPPMetadataRegistration.cpp](../dll/src/il2cpp/IL2CPPMetadataRegistration.cpp):
+
+1. Enumerate every readable / non-executable / data PE section in
+   `GameAssembly.dll`.
+2. Step 8 bytes at a time through each section, testing whether the
+   next 0x80 bytes match the `Il2CppMetadataRegistration` shape (v29 /
+   x64 layout): seven `(int32 count, int32 zero-pad, ptr64-aligned)`
+   slot pairs, then one `(uint64 count, ptr)` pair.
+3. Reject candidates where any padding word is non-zero, any pointer
+   is mis-aligned, count exceeds 134 M, or `typesCount < 100`.
+4. Final verification: sample 5 spread indices into `types[]` and
+   require ≥ 3 to point at valid `Il2CppType*` (8-byte-aligned, tag
+   byte at +10 in `[0x01..0x20]`).
+5. Cache the hit; subsequent `GetTypeTag(typeIndex)` reads
+   `*(uint8_t*)(types[idx] + 10)` via SEH-protected read.
+
+**Wired into** `il2cppGetMetadataTypeFields` (ExportAPI.cpp:1945).
+Per-field FieldDefault decode now produces typed `value` + `enc_bytes`
++ `type_tag` for tags 0x02 (Boolean), 0x03 (Char), 0x04–0x0B (signed /
+unsigned int8…int64), 0x0C–0x0D (R4 / R8 float / double), 0x0E
+(String — handled separately, doesn't need the runtime types[] table).
+
+**Smoke test**: [Test-MetadataFields.ps1](../tools/Test-MetadataFields.ps1)
+prints `Il2CppMetadataRegistration: YES/no` banner + per-field
+`tag=0x.. value=.. enc=NB` for every field with a default.
+
+**Cross-version validation status**:
+- v29 (SaGa F2R / IL2CPP) — ✅ verified live; banner shows YES, type
+  tags decoded correctly.
+- v24 / v27 / v31 — ⏳ not formally validated. Structural-shape
+  heuristic theoretically version-independent, but unverified.
+  Quick win — recipe in
+  [STATUS.md §"Mono-side smoke procedure" pattern](STATUS.md).
+
+**Tag coverage extension** (out of scope, drip-feed): tags 0x11
+(ValueType), 0x12 (Class), 0x1C (Object) etc. for non-primitive const
+literals are not decoded today. Practically rare in shipping game
+code; defer until a user asks.
 
 **Acceptance**:
 - Same game as Phase 4 — extra info (string literals, enum names) appears in `getClassInfo` result
