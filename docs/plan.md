@@ -528,16 +528,20 @@ disambiguation. Lets users target a specific overload by signature instead
 of registering all methods of a class wholesale (which `unity_symbols.lua`
 does today).
 
-- [ ] Pipe RPC: `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` returning `[{ token, address, signature, declaringClass }]` for every matching overload
-- [ ] Server-side: enumerate matching `MethodInfo*` (Mono / IL2CPP), compile + return native pointers
-- [ ] Optional signature-string match for narrowing among overloads
-- [ ] UI: new tab on the class browser surfacing all overloads with their addresses + a "register selected as CE symbol" action
-- [ ] Lua bridge: extend `unity_symbols.lua` with a `registerMethodOverloads(asm, ns, class, name, [sigFilter])` helper that uses the new RPC
+Broken into four sub-phases that mirror the Phase 17 shape (DLL → server
+parsing → UI → CE Lua). Sub-phase letters use the parent number per the
+2026-05-07 renumbering convention.
+
+- [ ] **18a** DLL handler: new pipe RPC `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` returning `[{ token, address, signature, declaringClass }]` for every matching overload. Server-side enumerates matching `MethodInfo*` via the existing `class_get_methods` iterator (parent chain included, depth cap mirrors `walkInstance`). Native address comes from the existing `ReadMethodPointer` helper for IL2CPP (handles the Unity 2021.3+ no-`il2cpp_method_get_pointer` path) and `monoCompileMethod` for Mono. SEH-leaf primitives reuse the AddressFinder pattern. Smoke test: `tools/Test-FindMethodInstances.ps1` (mirrors `Test-WhatIsAt.ps1`).
+- [ ] **18b** Signature decoding: walk each `MethodInfo*`'s parameter list to emit a human-readable signature string (e.g. `(System.Single, System.Single, System.Single)` vs `(UnityEngine.Vector3)`). Optional `signatureMatch` arg narrows the result set to the closest match. Required for the canonical `Vector3.Set` test case (3-arg float overload vs 1-arg Vector3 overload). IL2CPP path uses `il2cpp_method_get_param_count` + `il2cpp_method_get_param`; Mono path uses `mono_signature_get_params`. Both export typedefs already exist in the resolver headers — extend, don't redesign.
+- [ ] **18c** UI: new "Methods" sub-view (tab or drawer) surfacing all overloads of the currently-selected method with their native addresses + signatures. Right-click any overload → "Register as CE symbol" reuses the existing `registerSymbol` RPC (chosen overload only — the other overloads stay unregistered). Cross-tab handoff: clicking an overload's address copies it to clipboard / fires AOBMaker bridge same way the Inspector's per-row HEX button does. New `MethodOverloadsViewModel` + DTOs in `ProtocolModels.cs` + source-gen JSON registration. Native AOT publish must stay 0 warnings.
+- [ ] **18d** CE Lua bridge: extend `scripts/unity_symbols.lua` (don't add a new file — this is just one more verb in the symbols workflow) with `registerMethodOverloads(assembly, ns, class, methodName, [sigFilter])`. Same `\\.\pipe\UnityDumpBfx` RPC + retry scaffolding as the existing `registerClassSymbols`. Names follow the existing convention: `Unity:{Asm}:{Ns}.{Cls}.m_{Method}__{sigHash}` when there's more than one overload to disambiguate, plain `.m_{Method}` when there's only one.
 
 **Acceptance**:
-- Given a class with overloaded methods (e.g. `Vector3.Set(float, float, float)` vs `Vector3.Set(Vector3)`), `findMethodInstances` returns both with distinct addresses and distinguishing signatures
-- Selecting one overload in the UI registers a CE symbol pointing at the right native address; the other overload's symbol is not affected
-- Useful follow-up to the per-row HEX → AOBMaker pipeline (Phase 11.5)
+- Given a class with overloaded methods (e.g. `Vector3.Set(float, float, float)` vs `Vector3.Set(Vector3)`), `findMethodInstances` returns both with distinct addresses and distinguishing signatures.
+- Selecting one overload in the UI registers a CE symbol pointing at the right native address; the other overload's symbol is not affected.
+- The Lua `registerMethodOverloads` helper round-trips against a known overloaded method and the resulting symbol resolves via CE's `getAddress` fast-path (no `::` in the name, mirrors the Phase 11 fix).
+- Useful follow-up to the per-row HEX → AOBMaker pipeline (Phase 11.5).
 
 ---
 
