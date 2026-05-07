@@ -40,22 +40,26 @@ Backend support targets:
 - Unity **Mono** 32-bit and 64-bit (mono-2.0-bdwgc.dll / mono.dll)
 - Unity **IL2CPP** 64-bit (GameAssembly.dll, metadata v24/v27/v29/v31)
 
-Headline capabilities:
+Headline capabilities (all shipped — see [docs/plan.md](docs/plan.md) for the canonical phase ledger):
 - Build the full **Assembly → Class/Struct → Field/Method** hierarchy from the
   live runtime (and offline, via `metadata-cli`, for IL2CPP).
 - **Instance walker / exporter** — find live instances of a class, dump fields
   with live values, drill down through pointer chains, export as CE XML / CSX
   / SDK header / live cheat tables.
 - **Find method instances** — locate every overload of a method by signature,
-  return native addresses (Phase 16 candidate).
+  return native addresses (Phase 18).
 - **Jump to instance / method disassembly** — hand an address off to CE's
-  Memory View so the user lands on the right code/data immediately (via the
-  AOBMaker bridge today; deeper integration possible).
+  Memory View via the AOBMaker bridge (`NavigateHexView` / `NavigateDisassembler` /
+  `CreateAAScript` over `\\.\pipe\AOBMakerCEBridge`).
 - **CE AA inject scaffolding** — given a class + overloaded method, generate
   CE Auto-Assembler boilerplate that targets the correct overload by
-  signature, not just by name.
+  signature, not just by name (Phase 18c). One-click "Create AA in CE"
+  pushes the script straight into CE's address list.
 - **Lua-callable Unity methods** — invoke managed methods (Mono JIT or
-  IL2CPP AOT entry points) from CE Lua with marshaled args / return values.
+  IL2CPP AOT entry points) from CE Lua with marshaled args / return values
+  (Phase 19; spec at [docs/lua-invoke.md](docs/lua-invoke.md)). Three
+  surfaces: `callMethod` pipe RPC (DLL), `MethodCallWindow` (UI), and
+  `scripts/unity_invoke.lua` (CE Lua bridge).
 - **Address finder (reverse lookup)** — given any address from CE's scanner /
   pointer-scan, identify which Unity managed instance, class, and field it
   belongs to. The inverse of `findInstances`. See
