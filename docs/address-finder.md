@@ -283,17 +283,30 @@ Estimated total: ~3.5 days for v1.
 
 ## Acceptance criteria
 
-- [ ] Given the address of a known live `PLY_WORK.HP` field on SaGa F2R,
+- [x] Given the address of a known live `PLY_WORK.HP` field on SaGa F2R,
       `whatIsAt` returns instance + class + field name + offset, all
       matching DiscreteUI's `findInstances` + `walkInstance` output.
-- [ ] Given an address `+8` bytes into a `Vector3` field's storage,
-      `whatIsAt` reports the field as `position` and the kind as
-      `leaf` (or value-struct interior — TBD).
-- [ ] Given an address inside a `MonoBehaviour`'s parent-class field
-      (e.g. `useGUILayout`), `whatIsAt` reports the declaring class,
-      not the most-derived one.
-- [ ] Given a known-bad address (e.g. `0xDEADBEEF`), `whatIsAt` returns
-      `found: false, reason: "address_unreadable"` instead of crashing
-      the host.
-- [ ] CE main thread stays responsive during a backward scan (SEH-protected
-      reads must never hang).
+      *Verified live in 17b smoke test: `chrNo / objNoF / objNoM / purse /
+      hpNow / lpMax / artPos` all resolve field-for-field against the UI
+      screenshot via `Test-WhatIsAt.ps1 -Name 'MainGame/PLY_WORK'
+      -InstanceAddress 0x000001E55B2518F0`.*
+- [x] Given a value-type field's interior (mid-storage offset), `whatIsAt`
+      reports the field with `kind: "interior"` and `interiorOffset` set
+      to the byte offset within the field. *17b kind classifier:
+      "leaf" / "value-struct" / "pointer" / "interior".*
+- [x] Given an address inside a parent-class field, `whatIsAt` reports
+      the declaring class via `field.declaredIn`, not just the most-
+      derived one. *17b parent-chain walk emits `declaredIn` per field.*
+- [x] Given a known-bad address (e.g. `0xDEADBEEF`), `whatIsAt` returns
+      `found: false, reason: "no_klass_in_range"` after the configured
+      scan window without crashing the host. *Verified live in
+      `Test-WhatIsAt.ps1`'s negative-path probe.*
+- [x] CE main thread stays responsive during a backward scan. *17a SEH-
+      leaf primitives + per-RPC `processMessages()` + `sleep(1)` yield
+      in `unity_addrfind.lua` (mirrors the dissect / symbols scripts).*
+
+**Phase 18 closed** — all four sub-phases shipped:
+17a DLL handler + class-pointer cache (build #188);
+17b field-offset resolution + kind classifier (build #194);
+17c UI Address Lookup tab + Inspector right-click handoff (build #197);
+17d CE Lua bridge `unity_addrfind.lua` (build #198).

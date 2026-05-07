@@ -1,8 +1,8 @@
 # UnityCEDumper — CE Lua Bridge
 
-Four Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
-of the project; CE-side equivalent of running `DiscreteUI.exe` + the
-in-app process picker.
+Five Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
+of the project (Phase 17d added `unity_addrfind.lua`); CE-side equivalent
+of running `DiscreteUI.exe` + the in-app process picker.
 
 ## Install
 
@@ -43,6 +43,7 @@ Engine`. Override with `-CePath`:
     ├── unity_dump.lua
     ├── unity_dissect.lua
     ├── unity_symbols.lua
+    ├── unity_addrfind.lua
     └── utils.lua
 ```
 
@@ -97,7 +98,29 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
    collides with CE's symbol resolver and is no longer emitted —
    migrate any hardcoded references in cheat tables to `.m_`.)*
 
-5. **Switching to the standalone UI** — the DLL pipe server is
+5. **(Optional) Reverse address lookup** — given any process address
+   (e.g. from CE's *Find what writes / accesses* hit, a pointer-scan
+   result, or anything you've highlighted in the memory view),
+   identify which managed instance + class + declared field it sits
+   inside:
+   ```lua
+   dofile([[<CE>\discrete\unity_addrfind.lua]])
+   lookupAddress(0x000001E55B2518F0)        -- pretty-prints to console
+   local hit = whatIsAt(0x000001E55B2518F0) -- programmatic; returns table
+   ```
+   Output (Phase 17b shape):
+   ```
+   [UnityCEDumper.addrfind] address 0x000001E55B2518F0 -> instance=0x000001E55B2518F0  class=MainGame.PLY_WORK  fieldOffset=16
+     field: chrNo  type=System.Byte  @+0x10  size=1  kind=leaf  declaredIn=PLY_WORK
+   ```
+   Optional: bind a global hotkey that picks up whatever address is
+   currently selected in CE's memory view (or pops `inputQuery` for a
+   manual paste when no memory view is open):
+   ```lua
+   bindAddrLookupHotkey({ VK_CONTROL, VK_F2 })
+   ```
+
+6. **Switching to the standalone UI** — the DLL pipe server is
    single-instance, so the desktop UI (`DiscreteUI.exe`) and CE Lua
    bridge are **mutually exclusive while connected**. To swap:
    - In Lua, just stop sending RPCs (no Disconnect needed).
@@ -112,10 +135,11 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
   as the standalone UI's `WindowsDllInjector` (CreateRemoteThread →
   LoadLibraryW). Logs land at
   `%LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\init\current.log`.
-* `unity_dissect.lua` and `unity_symbols.lua` open the named pipe
-  directly via `io.open([[\\.\pipe\UnityDumpBfx]], "r+b")`. Both ship
-  a tiny purpose-built JSON parser (no external Lua deps); good enough
-  for the DLL's response shape, not a general JSON library.
+* `unity_dissect.lua`, `unity_symbols.lua`, and `unity_addrfind.lua`
+  open the named pipe directly via
+  `io.open([[\\.\pipe\UnityDumpBfx]], "r+b")`. All three ship a tiny
+  purpose-built JSON parser (no external Lua deps); good enough for
+  the DLL's response shape, not a general JSON library.
 * **Pipe-open retry**: both scripts retry `io.open` up to 15× at 200 ms
   intervals before giving up (~3 s budget). The DLL's pipe-server
   worker thread may not have finished `CreateNamedPipeW` by the time
