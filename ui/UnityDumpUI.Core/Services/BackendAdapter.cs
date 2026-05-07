@@ -411,6 +411,47 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `callMethod` — Phase 19. Invokes a managed method via the runtime's
+    /// runtime_invoke entry point with marshaled args + a typed return.
+    /// Pass <paramref name="instanceAddress"/> = null/empty for static
+    /// methods; the DLL silently ignores it on a static overload but
+    /// requires it on a non-static one (returns
+    /// <c>instance_required_for_non_static</c>). Soft errors (resolution,
+    /// arg shape, missing exports) land in
+    /// <see cref="CallMethodResult.Error"/>; managed exceptions land in
+    /// <see cref="CallMethodResult.Exception"/> with <see cref="CallMethodResult.Ok"/>=false.
+    /// </summary>
+    public async Task<CallMethodResult> CallMethodAsync(
+        string assembly, string @namespace, string className, string method,
+        IReadOnlyList<CallArgRequest> args,
+        string? signatureMatch = null, string? instanceAddress = null,
+        CancellationToken ct = default)
+    {
+        // Source-gen serialize the args list — keeps AOT clean (the
+        // List<CallArgRequest> + CallArgRequest types are registered in
+        // ProtocolJsonContext). Each arg's `Value` is already a JsonElement
+        // built by the caller via JsonSerializer.SerializeToElement against
+        // the appropriate primitive context entry.
+        var argsArr = JsonSerializer.SerializeToElement(
+            args, ProtocolJsonContext.Default.ListCallArgRequest);
+        var d = new Dictionary<string, JsonElement>
+        {
+            ["assembly"]  = Str(assembly),
+            ["namespace"] = Str(@namespace ?? string.Empty),
+            ["name"]      = Str(className),
+            ["method"]    = Str(method),
+            ["args"]      = argsArr,
+        };
+        if (!string.IsNullOrEmpty(signatureMatch)) d["signatureMatch"] = Str(signatureMatch);
+        if (!string.IsNullOrEmpty(instanceAddress)) d["instance"]      = Str(instanceAddress);
+        var env = await _pipe.SendAsync(
+            "callMethod", d,
+            ProtocolJsonContext.Default.RpcEnvelopeCallMethodResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("callMethod returned no result");
+    }
+
+    /// <summary>
     /// AOT-safe wrapper that serializes a string into a <see cref="JsonElement"/>
     /// via the source-gen context. The reflection-based
     /// <c>SerializeToElement&lt;T&gt;</c> overload trips IL2026 / IL3050.

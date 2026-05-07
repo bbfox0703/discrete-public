@@ -1,28 +1,40 @@
 // MethodOverloadsWindow.axaml.cs — Phase 18c modal dialog code-behind.
 //
-// Wires the VM's clipboard delegate to Avalonia's top-level Clipboard, and
-// kicks off the initial findMethodInstances pass when the window opens.
+// Wires the VM's clipboard delegate to Avalonia's top-level Clipboard, kicks
+// off the initial findMethodInstances pass when the window opens, and (Phase
+// 19d) opens the MethodCallWindow when the user picks "Call method…" from
+// the per-row context menu.
 
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using UnityDumpUI.Core.Services;
 using UnityDumpUI.ViewModels;
 
 namespace UnityDumpUI.Views;
 
 public partial class MethodOverloadsWindow : Window
 {
+    private BackendAdapter? _backend;
+    private FileLogger?     _logger;
+
     public MethodOverloadsWindow()
     {
         AvaloniaXamlLoader.Load(this);
     }
 
-    public MethodOverloadsWindow(MethodOverloadsViewModel vm) : this()
+    public MethodOverloadsWindow(MethodOverloadsViewModel vm,
+                                 BackendAdapter backend,
+                                 FileLogger logger) : this()
     {
+        _backend = backend;
+        _logger  = logger;
+
         DataContext = vm;
-        vm.CopyToClipboardAsync = CopyToClipboardAsync;
+        vm.CopyToClipboardAsync       = CopyToClipboardAsync;
+        vm.OpenCallMethodDialogAsync  = OpenCallMethodDialogAsync;
         // Kick off the search as soon as the window is shown so the grid
         // populates without an extra click. Errors land in vm.ErrorMessage.
         Opened += async (_, _) =>
@@ -30,6 +42,43 @@ public partial class MethodOverloadsWindow : Window
             try { await vm.RefreshAsync(); }
             catch { /* surfaced via VM */ }
         };
+    }
+
+    /// <summary>
+    /// Phase 19d — open the MethodCallWindow seeded from the right-clicked
+    /// row. Constructs a MethodCallViewModel from the row's signature info
+    /// (paramTypes / paramNames / returnType / isStatic) and shows it as a
+    /// modal owned by this window.
+    /// </summary>
+    private async Task OpenCallMethodDialogAsync(MethodOverloadRow row)
+    {
+        if (DataContext is not MethodOverloadsViewModel parentVm) return;
+        if (_backend is null || _logger is null) return;
+
+        // Pin the signature to the picked overload's exact signature string,
+        // so the DLL resolves the same overload the user just clicked even
+        // when other overloads share the method name. Empty signature ()
+        // matches every nullary overload — defaulting to "()" is fine here
+        // because the DLL would then reject as ambiguous if more than one
+        // exists, prompting the user to refine.
+        string sigMatch = string.IsNullOrEmpty(row.Signature) ? "()" : row.Signature;
+
+        var callVm = new MethodCallViewModel(
+            _backend, _logger,
+            parentVm.Assembly, parentVm.Namespace, parentVm.ClassName, parentVm.MethodName,
+            signatureMatch:   sigMatch,
+            signatureDisplay: row.SignatureLabel,
+            paramTypes:       row.ParamTypes is System.Collections.Generic.List<string> lt
+                                ? lt
+                                : new System.Collections.Generic.List<string>(row.ParamTypes),
+            paramNames:       row.ParamNames is System.Collections.Generic.List<string> ln
+                                ? ln
+                                : new System.Collections.Generic.List<string>(row.ParamNames),
+            returnType:       row.ReturnType ?? "System.Void",
+            isStatic:         row.IsStatic);
+
+        var win = new MethodCallWindow(callVm);
+        await win.ShowDialog(this);
     }
 
     private async Task CopyToClipboardAsync(string text)

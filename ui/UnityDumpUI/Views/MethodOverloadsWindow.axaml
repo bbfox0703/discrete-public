@@ -84,6 +84,18 @@
               CanUserSortColumns="False"
               GridLinesVisibility="Horizontal"
               x:DataType="vm:MethodOverloadsViewModel">
+      <!-- Phase 19d: right-click any row → "Call method…" opens the
+           MethodCallWindow seeded from that overload's signature. The
+           CommandParameter is the row VM via $parent[DataGrid].SelectedItem
+           (works because Avalonia's DataGrid auto-selects the right-clicked
+           row before showing the context menu). -->
+      <DataGrid.ContextMenu>
+        <ContextMenu>
+          <MenuItem Header="{StaticResource MethodOverloads.CallMethodMenu}"
+                    Command="{Binding CallMethodCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+        </ContextMenu>
+      </DataGrid.ContextMenu>
       <DataGrid.Columns>
         <!-- DataGridCheckBoxColumn requires entering edit mode before the
              checkbox responds (double-click). Use a template column with a

@@ -4,7 +4,7 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-07
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c fully closed and verified live across both backends**. Build #220 — static + instance + string args/return + managed exception capture all green. Verified targets: SaGa F2R (IL2CPP), BongoCat (Mono), Farthest Frontier (both backends — instance dispatch via `ItemBundle.get_numberOfItems()`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c fully closed and verified live across both backends; 19d (UI MethodCallWindow) implemented in tree and AOT-publish-clean (build #222), awaiting hands-on UI verification**. Build #220 — static + instance + string args/return + managed exception capture all green. Verified targets: SaGa F2R (IL2CPP), BongoCat (Mono), Farthest Frontier (both backends — instance dispatch via `ItemBundle.get_numberOfItems()`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -698,19 +698,43 @@ Out (v2 follow-ups, deliberately not started):
     reference types pass the object pointer **directly** in params[i].
     Fixed in build #220.
 
-- [ ] **19d** UI surface — "Call method…" entry on the `MethodOverloadsWindow`
-  context menu (right-click an overload row). Opens a `MethodCallDialog`
-  with one input row per declared parameter, typed by formal parameter
-  type: numeric spinner for ints, double-precision text for floats, plain
-  text for strings, hex input for addresses, dropdown for enums (when the
-  parameter type is an enum we can resolve via `getEnumValues`). "Call"
-  button fires `callMethod`, displays return value + exception in a
-  result panel. Cross-tab from the Inspector: right-click any walked
-  instance → "Call instance method…" pre-fills the `this` address and
-  opens the dialog scoped to the instance's class. New
-  `MethodCallViewModel` + DTOs (`CallMethodResult`, `CallArg`) in
-  `ProtocolModels.cs` + source-gen JSON registrations. Native AOT must
-  stay 0 warnings.
+- [x] **19d** UI surface — landed 2026-05-07, build #222. Right-click any
+  row in the `MethodOverloadsWindow` grid → "Call method…" opens the new
+  `MethodCallWindow` modal seeded from that overload's signature
+  (`signatureMatch` pinned to the row's exact signature string, paramTypes
+  + paramNames threaded into one editor row each). Result panel renders
+  the typed return value (UTF-8 string for `System.String`, signed/unsigned
+  int / float for primitives, hex address for reference types), captured
+  managed exception ("Type: message"), or protocol error per the
+  switch-on-`returnType` rule from `lua-invoke.md`.
+  * **Architecture**: new `CallArgFactory` in `UnityDumpUI.Core` wraps the
+    AOT-safe per-primitive `JsonSerializer.SerializeToElement` calls so
+    `ProtocolJsonContext` stays internal — VMs in `UnityDumpUI` build wire
+    payloads via a public seam (`Null()` / `Bool(bool)` / `Int(tag, long)`
+    / `UInt(tag, ulong)` / `Float(tag, double)` / `String(string)` /
+    `Address(hex)`). One method per wire `type` tag from `lua-invoke.md`.
+  * **Editors**: v1 uses a single TextBox per param row plus a "null"
+    checkbox enabled for reference types. Parsing happens client-side
+    against the formal type (range-checked for int/uint widths, culture-
+    invariant for floats, `bool.TryParse` for booleans, single-character
+    or numeric code-unit for `System.Char`). Invalid input surfaces as
+    `arg '<name>' (<type>): <reason>` in the result panel before the
+    request leaves the UI. Smart-typed editors (NumericUpDown for ints,
+    ComboBox for enums via `getEnumValues`) deferred to 19d-2.
+  * **Instance address** field is pre-bound TwoWay; empty = static call
+    (DLL ignores on a static overload, requires on a non-static one).
+  * **AOT publish stays clean** — 0/0 trim/AOT analyzer warnings under
+    all four analyzers; `DiscreteUI.exe` 38.1 MB.
+  * **Inspector cross-tab** ("Call instance method…" right-click on a
+    walked instance → pre-fills the `this` address and opens dialog
+    scoped to the instance's class) deferred to 19d-2 — the dialog
+    accepts an instance address typed manually for now, which covers the
+    direct workflow.
+  * Files: new [`MethodCallWindow.axaml{,.cs}`](../ui/UnityDumpUI/Views/MethodCallWindow.axaml),
+    new [`MethodCallViewModel.cs`](../ui/UnityDumpUI/ViewModels/MethodCallViewModel.cs),
+    new [`CallArgFactory.cs`](../ui/UnityDumpUI.Core/Services/CallArgFactory.cs), DTOs
+    in `ProtocolModels.cs` (`CallArgRequest` / `CallMethodResult` /
+    `CallMethodMethodInfo`) + matching `ProtocolJsonContext` registrations.
 
 - [ ] **19e** Lua bridge — new `scripts/unity_invoke.lua` (separate
   file rather than extending `unity_symbols.lua` because the API surface

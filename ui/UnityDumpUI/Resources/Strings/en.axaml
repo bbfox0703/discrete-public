@@ -163,4 +163,28 @@
   <sys:String x:Key="MethodOverloads.CreateAaInCe">Create AA in CE</sys:String>
   <sys:String x:Key="MethodOverloads.AutoActivate">Auto-activate</sys:String>
   <sys:String x:Key="MethodOverloads.Close">Close</sys:String>
+  <sys:String x:Key="MethodOverloads.CallMethodMenu">Call method…</sys:String>
+
+  <!-- Phase 19d — Call Method dialog -->
+  <sys:String x:Key="MethodCall.Title">Call method</sys:String>
+  <sys:String x:Key="MethodCall.ClassLabel">Class</sys:String>
+  <sys:String x:Key="MethodCall.MethodLabel">Method</sys:String>
+  <sys:String x:Key="MethodCall.SignatureLabel">Signature</sys:String>
+  <sys:String x:Key="MethodCall.InstanceLabel">Instance address</sys:String>
+  <sys:String x:Key="MethodCall.InstanceWatermark">0x... — leave empty for static methods</sys:String>
+  <sys:String x:Key="MethodCall.ParamsHeader">Parameters</sys:String>
+  <sys:String x:Key="MethodCall.ParamColType">Type</sys:String>
+  <sys:String x:Key="MethodCall.ParamColName">Name</sys:String>
+  <sys:String x:Key="MethodCall.ParamColValue">Value</sys:String>
+  <sys:String x:Key="MethodCall.ParamColNull">null</sys:String>
+  <sys:String x:Key="MethodCall.NoParams">(no parameters)</sys:String>
+  <sys:String x:Key="MethodCall.CallButton">Call</sys:String>
+  <sys:String x:Key="MethodCall.CloseButton">Close</sys:String>
+  <sys:String x:Key="MethodCall.ResultHeader">Result</sys:String>
+  <sys:String x:Key="MethodCall.ResultOk">Returned</sys:String>
+  <sys:String x:Key="MethodCall.ResultException">Managed exception</sys:String>
+  <sys:String x:Key="MethodCall.ResultError">Error</sys:String>
+  <sys:String x:Key="MethodCall.ResultElapsed">elapsed</sys:String>
+  <sys:String x:Key="MethodCall.ResultNull">(null)</sys:String>
+  <sys:String x:Key="MethodCall.ResultVoid">(void)</sys:String>
 </ResourceDictionary>

@@ -72,6 +72,32 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// </summary>
     public Func<string, Task>? CopyToClipboardAsync { get; set; }
 
+    /// <summary>
+    /// View-supplied "Call method dialog opener" — wired by the Window
+    /// code-behind. Takes the row whose context menu was clicked, opens
+    /// the modal MethodCallWindow seeded from that row's signature /
+    /// param types / static-ness. The VM stays AOT-clean by handing out
+    /// the typed view-model instead of opening windows itself.
+    /// </summary>
+    public Func<MethodOverloadRow, Task>? OpenCallMethodDialogAsync { get; set; }
+
+    /// <summary>
+    /// Right-click context-menu command on each overload row → opens the
+    /// MethodCallWindow seeded from this row.
+    /// </summary>
+    [RelayCommand]
+    public async Task CallMethodAsync(MethodOverloadRow? row)
+    {
+        if (row is null || OpenCallMethodDialogAsync is null) return;
+        try { await OpenCallMethodDialogAsync(row); }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"MethodOverloadsViewModel: opening call dialog for {row.Name}{row.SignatureLabel} failed: {ex.Message}");
+        }
+    }
+
     public ObservableCollection<MethodOverloadRow> Overloads { get; } = new();
 
     [ObservableProperty]

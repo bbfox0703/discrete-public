@@ -428,3 +428,61 @@ public sealed class AobPatternStats
     [JsonPropertyName("relBranches")]  public int RelBranches  { get; set; }
     [JsonPropertyName("ripRel")]       public int RipRel       { get; set; }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 19 — callMethod (Lua-callable Unity methods).
+//
+// Wire shape mirrors docs/lua-invoke.md. Request carries:
+//   * class triple (assembly + namespace + name) — same as getClassInfo
+//   * method name + optional signatureMatch substring
+//   * optional instance hex address (null/omit = static)
+//   * args array of {type, value} pairs
+// Response is the typed return value (decoded per the resolved method's
+// formal returnType — see lua-invoke.md "returnValue encoding by
+// returnType" table) plus any captured managed exception.
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// One {type, value} pair in the wire `args` array. `Value` is polymorphic
+/// (string for "string", number for primitives, hex string for "address",
+/// JsonValueKind.Null for "null") — kept as <see cref="JsonElement"/> so
+/// the source-gen serializer doesn't need a polymorphic shape.
+/// </summary>
+public sealed class CallArgRequest
+{
+    [JsonPropertyName("type")]  public string      Type  { get; set; } = string.Empty;
+    [JsonPropertyName("value")] public JsonElement Value { get; set; }
+}
+
+public sealed class CallMethodResult
+{
+    /// <summary>True iff the call ran AND no managed exception was raised.</summary>
+    [JsonPropertyName("ok")]          public bool                  Ok          { get; set; }
+    /// <summary>Protocol-level error (resolution / arg / config). Empty if call ran.</summary>
+    [JsonPropertyName("error")]       public string?               Error       { get; set; }
+    /// <summary>The resolved method's formal return type (e.g. "System.Int32").</summary>
+    [JsonPropertyName("returnType")]  public string?               ReturnType  { get; set; }
+    /// <summary>
+    /// Polymorphic — number for primitives, string for System.String (decoded
+    /// UTF-8) and address-encoded reference types ("0x..."), null for void
+    /// or value-type-by-value returns. Caller should switch on
+    /// <see cref="ReturnType"/>, not on the JSON kind.
+    /// </summary>
+    [JsonPropertyName("returnValue")] public JsonElement           ReturnValue { get; set; }
+    /// <summary>"Type: message" if a managed exception was caught; null otherwise.</summary>
+    [JsonPropertyName("exception")]   public string?               Exception   { get; set; }
+    [JsonPropertyName("elapsedMs")]   public long                  ElapsedMs   { get; set; }
+    /// <summary>
+    /// Diagnostic note (e.g. "value-type-by-value returns are not decoded
+    /// in 19a/19b/19c; pass an out-buffer in v2 or read the address").
+    /// </summary>
+    [JsonPropertyName("note")]        public string?               Note        { get; set; }
+    [JsonPropertyName("method")]      public CallMethodMethodInfo? Method      { get; set; }
+}
+
+public sealed class CallMethodMethodInfo
+{
+    [JsonPropertyName("address")]     public string? Address     { get; set; }
+    [JsonPropertyName("signature")]   public string? Signature   { get; set; }
+    [JsonPropertyName("humanSuffix")] public string? HumanSuffix { get; set; }
+}

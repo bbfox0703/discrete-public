@@ -208,7 +208,7 @@ public partial class MainWindow : Window
             // the user just sees the "AOBMaker pipe unavailable" status
             // line — same behaviour as the Inspector's HEX button.
             vm.Inspector.AobMaker);
-        var win = new MethodOverloadsWindow(overloadsVm);
+        var win = new MethodOverloadsWindow(overloadsVm, vm.BackendAdapter, vm.Logger);
         await win.ShowDialog(this);
     }
 
