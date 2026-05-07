@@ -119,7 +119,6 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 | **Phase 16 docs** | Variable, parallelizable | No user-facing feature gain but important for adoption / contributor onboarding. Pick one of: `lessons-learned.md` (consolidates the memory entries we've accumulated — runtime_invoke marshaling, signatureMatch substring trap, PowerShell ConvertTo-Json unwrap, Avalonia 12 Win-only trio), `Readme.MD` (en+zh-TW), or `CONTRIBUTING.md`. |
 | **Inspector classifier unit tests** | <½ day | Cheapest test win. Offline regression coverage for the classifier kind-routing logic. |
 | **Highlight matching substring** | <½ day | Pure UI polish — small but visible improvement for users who filter heavily. |
-| **Phase 18 multi-overload AA-script user-click** | <½ hour | Last open verification — Farthest Frontier `ItemBundle.AddItems` (2 overloads). |
 | **Phase 12d (32-bit Mono)** | Multi-day | Required for any pre-Unity-2018 Mono game. No user has asked yet (no 32-bit Unity game in test matrix). |
 
 ### Live verifications (carried forward — still green)
@@ -131,6 +130,7 @@ These remain confirmed clicked-through on the dev box:
 - ✅ Phase 14c — IL2CPP metadata v24/v27/v29/v31 dispatch verified against six games covering all four versions.
 - ✅ Phase 17 — `whatIsAt` round-trips against SaGa F2R `PLY_WORK.HP` field address; lookup latency sub-ms after first cache build (~tens of ms).
 - ✅ Phase 18 — single-overload AA-script generation against SaGa F2R `MainGame/PLY_WORK.AddGrowHpMax(int)`. AOBMaker `CreateAAScript` direct push.
+- ✅ Phase 18 multi-overload — Farthest Frontier `ItemBundle.AddItems` (2 overloads: `(System.UInt32, System.UInt32)` + `(ItemBundle)`) — both AOB patterns scan-clean from CE, both `registersymbol` succeed, addresses resolve in `GameAssembly.dll+0xB20900` / `+0xB20980`. The two-symbol `[ENABLE]` block enables idempotent re-runs. Verified 2026-05-07.
 - ✅ **Phase 19a/b/c** — both backends, three games. SaGa F2R (IL2CPP) + BongoCat (Mono) + Farthest Frontier (both — instance dispatch via `ItemBundle.get_numberOfItems()`). PowerShell smoke (`Test-CallMethod.ps1`) covers Mathf.Abs(int/float) + Convert.ToByte(int) + Int32.Parse(string) + String.Concat(string,string) + Instance + Custom scenarios.
 - ✅ **Phase 19d** — UI MethodCallWindow user-tested via the Methods grid context menu.
 - ✅ **Phase 19e** — `unity_invoke.lua` dofile + 4 scenarios green from CE Lua console on **both backends**: IL2CPP / SaGa F2R + Mono / BongoCat (2026-05-07). Mono-side run of the BongoCat recipe: `Math.Abs(-7) → 7` (0 ms), `String.Concat("Hello, ", "World") → "Hello, World"` (0 ms), `Convert.ToByte(-1) → System.OverflowException` (host stayed alive, message decoded from `MonoException + 0x18`), `prettyPrint(r)` round-trip clean. Wire layer was already byte-identical via the 19b PowerShell smoke; this confirms the Lua wrapper side too.
@@ -138,7 +138,7 @@ These remain confirmed clicked-through on the dev box:
 
 ### Pending verification (small)
 
-- **Phase 18 multi-overload AA-script generation user-click** — Farthest Frontier `ItemBundle.AddItems` (2 overloads) is the canonical target now that we have a real multi-overload class. Single-overload path verified earlier.
+_(none — every shipped phase has a live click-through on the dev box.)_
 
 ---
 
