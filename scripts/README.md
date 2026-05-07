@@ -98,6 +98,19 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
    collides with CE's symbol resolver and is no longer emitted —
    migrate any hardcoded references in cheat tables to `.m_`.)*
 
+   **Phase 18 — overload-aware registration**: when a class has
+   overloaded methods, `registerClassSymbols` only catches the first
+   match (CE rejects duplicates). Use `registerMethodOverloads` to
+   register every overload with a parameter-type suffix:
+   ```lua
+   registerMethodOverloads("UnityEngine.CoreModule", "UnityEngine", "Vector3", "Set")
+   -- Optional sigFilter narrows on the rendered signature substring:
+   registerMethodOverloads("Assembly-CSharp", "", "Foo", "Bar", {sigFilter="Vector3"})
+   ```
+   Symbol shape: `Unity:{Asm}:{Ns}.{Cls}.m_{Method}__{ParamSuffix}`
+   where `ParamSuffix` matches DiscreteUI's overload picker:
+   `__3float` / `__Vector3` / `__noargs` / `__string_Card_Point` etc.
+
 5. **(Optional) Reverse address lookup** — given any process address
    (e.g. from CE's *Find what writes / accesses* hit, a pointer-scan
    result, or anything you've highlighted in the memory view),

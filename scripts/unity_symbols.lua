@@ -15,6 +15,12 @@
 --   --   if you don't want unused methods compiled into the address space.
 --   registerClassSymbols("Assembly-CSharp", "", "Player", {compileMethods=false})
 --
+--   -- Phase 18: register every overload of a single method, with each
+--   -- one disambiguated by its parameter types:
+--   registerMethodOverloads("UnityEngine.CoreModule", "UnityEngine", "Vector3", "Set")
+--   -- Optional sigFilter narrows on the rendered signature substring:
+--   registerMethodOverloads("Assembly-CSharp", "", "Foo", "Bar", {sigFilter="Vector3"})
+--
 -- Naming convention (Architecture.md §"Symbol Registration Pattern"):
 --   Unity:{Asm}:{Ns}.{Cls}.s_{Field}    -> static field absolute address
 --   Unity:{Asm}:{Ns}.{Cls}.m_{Method}   -> method native address (when known)
@@ -239,4 +245,88 @@ function registerClassSymbols(assembly, ns, name, opts)
     return statics, methods
 end
 
-log("Loaded. Call registerClassSymbols('Assembly-CSharp', '', 'YourClass') to register.")
+--- Register CE symbols for every overload of a single method, with each
+--- overload disambiguated by its parameter-type suffix. Used when a class
+--- has overloaded methods and `registerClassSymbols` would only catch the
+--- first match (CE rejects duplicate symbol registrations within one
+--- session).
+---
+--- Backend differences:
+---   IL2CPP: addresses come from the AOT MethodInfo->methodPointer field —
+---           every overload has a real address.
+---   Mono:   the DLL JIT-compiles each match server-side via
+---           mono_compile_method as part of findMethodInstances. Abstract
+---           methods / generic definitions without instantiation come back
+---           with compiled=false and are skipped here (matching the same
+---           rule registerClassSymbols already applies).
+---
+--- Symbol shape:
+---   Unity:{Asm}:{Ns}.{Cls}.m_{Method}__{HumanSuffix}
+---
+--- HumanSuffix is the symbol-safe parameter-type fingerprint emitted by
+--- the DLL's MethodSignatureFormat.h — same convention the
+--- DiscreteUI overload picker uses for AA-script symbols, e.g.:
+---   Vector3.Set(float, float, float)   → __3float
+---   Vector3.Set(Vector3)               → __Vector3
+---   Foo.Bar()                          → __noargs
+---   Foo.Bar(string, Card, Point)       → __string_Card_Point
+---
+--- @param assembly  string
+--- @param ns        string|nil   Namespace ("" if top-level)
+--- @param name      string       Class name
+--- @param method    string       Method name to enumerate overloads for
+--- @param opts      table|nil    {sigFilter=string, verbose=bool}
+---                               sigFilter narrows on the rendered signature
+---                               substring (e.g. "Vector3" picks only the
+---                               Vector3-arg overload).
+--- @return integer  Number of symbols actually registered.
+function registerMethodOverloads(assembly, ns, name, method, opts)
+    opts = opts or {}
+    local sigFilter = opts.sigFilter
+    local verbose   = opts.verbose == true
+
+    local args = { assembly = assembly, namespace = ns or "", name = name, method = method }
+    if sigFilter and sigFilter ~= "" then args.signatureMatch = sigFilter end
+
+    local resp = rpc("findMethodInstances", args)
+    if resp.error or (resp.result and resp.result.error) then
+        err("findMethodInstances failed: %s", resp.error or resp.result.error)
+        return 0
+    end
+    local r = resp.result
+    if r == nil or r.matches == nil then err("no result"); return 0 end
+
+    local prefix = string.format("Unity:%s:%s%s.m_%s",
+        assembly, (ns and ns ~= "" and (ns .. ".") or ""), name, method)
+    log("Registering %d overload(s) under '%s__*' (sigFilter=%s)",
+        tonumber(r.count) or 0, prefix, tostring(sigFilter or "—"))
+
+    local registered, skipped = 0, 0
+    for i, m in ipairs(r.matches or {}) do
+        local addr = m.address
+        local suffix = m.humanSuffix or ("ovl" .. tostring(i))
+        if (not m.compiled) or (not addr) or addr == "0x0" or addr == "" then
+            skipped = skipped + 1
+            if verbose then warn("skip uncompiled overload: %s%s", method, m.signature or "") end
+        else
+            local addrInt = tonumber(addr:gsub("^0x", ""), 16)
+            if addrInt and addrInt ~= 0 and registerSymbol then
+                local sym = prefix .. "__" .. suffix
+                registerSymbol(sym, addrInt, true)
+                registered = registered + 1
+                if verbose then log("  %s = %X  // %s%s", sym, addrInt, method, m.signature or "") end
+            end
+        end
+    end
+
+    if skipped > 0 then
+        log("Done: %d overload(s) registered, %d skipped (abstract / uncompilable).",
+            registered, skipped)
+    else
+        log("Done: %d overload(s) registered.", registered)
+    end
+    return registered
+end
+
+log("Loaded. registerClassSymbols(asm, ns, cls) — bulk class symbols.")
+log("        registerMethodOverloads(asm, ns, cls, method [, {sigFilter=...}]) — overload-disambiguated symbols.")
