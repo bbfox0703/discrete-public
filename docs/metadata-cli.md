@@ -1,0 +1,231 @@
+# `metadata-cli` — Offline IL2CPP Metadata Parser
+
+> Standalone CLI tool that parses `global-metadata.dat` from any
+> IL2CPP Unity game **without injecting into a process**. Useful for
+> CI dumping, static analysis of stripped/obfuscated metadata, and
+> sanity-checking `MetadataParser` against the live runtime.
+
+Phase 13. Ships as `dist/metadata-cli.exe` (~70 KB).
+
+---
+
+## Why offline parsing
+
+The DLL backend's `MetadataParser` runs against a live process —
+locating `global-metadata.dat` in memory, dispatching by version,
+walking type tables. Useful, but:
+
+- **You may not want to launch the game** (especially for malware
+  analysis, anti-cheat-protected titles, or just diff-checking
+  metadata across versions).
+- **CI / batch dumping** wants a one-shot tool that takes a file
+  path, emits JSON, and exits.
+- **Sanity checks**: when adding a new metadata version (v32, v38…)
+  the CLI lets you verify `MetadataParser` produces the same view as
+  the live runtime would, without reproducing the whole inject + RPC
+  flow.
+
+`metadata-cli` is a thin wrapper around the same `MetadataParser`
+the DLL uses. Identical version dispatch, identical type-table
+parsing, identical strip-ratio heuristic — so live and offline
+results are directly comparable.
+
+## Install
+
+Built as part of `.\build.cmd publish`. Lands in
+`dist\metadata-cli.exe`. Standalone — no DLL dependencies beyond the
+standard MSVC runtime.
+
+To build just the CLI:
+
+```powershell
+.\build.cmd cli
+```
+
+## Usage
+
+```
+metadata-cli <subcommand> <path-to-global-metadata.dat> [args]
+```
+
+Output is **line-oriented JSON** to stdout. Errors and diagnostic
+notes go to stderr. Exit code 0 on success, non-zero on parse
+failure.
+
+### Subcommands
+
+#### `info` — version + table sizes
+
+Prints one JSON object describing the metadata header:
+
+```powershell
+metadata-cli info "C:\Path\To\game_Data\il2cpp_data\Metadata\global-metadata.dat"
+```
+
+```json
+{
+  "version": 31,
+  "loaded": true,
+  "type_tables_parsed": true,
+  "type_definition_count": 45123,
+  "string_literal_count": 89342
+}
+```
+
+If `type_tables_parsed` is `false`, the version is recognized but
+the type-table layout for that version isn't shipped yet (currently
+v24/v27/v29/v31 are dispatched; older / newer versions only get the
+string-literal path).
+
+#### `stats` — strip / obfuscation heuristic
+
+Same heuristic as the DLL's `getMetadataStats` RPC. Counts single-
+char and two-char user-type names (excluding `<...>` compiler-
+generated types) and emits a verdict.
+
+```powershell
+metadata-cli stats "C:\...\global-metadata.dat"
+```
+
+```json
+{
+  "total_classes": 45123,
+  "with_namespace": 32104,
+  "single_char_names": 124,
+  "short_names_2": 893,
+  "compiler_generated": 5421,
+  "numeric_lead": 12,
+  "min_name_length": 1,
+  "max_name_length": 87,
+  "avg_name_length": 18.42,
+  "strip_ratio": 0.0256,
+  "verdict": "clean"
+}
+```
+
+Verdict mapping:
+
+| `strip_ratio` | Verdict | Meaning |
+|---|---|---|
+| > 0.30 | `heavy_strip` | Most class names are 1–2 chars — usable but UI shows scary banner |
+| > 0.10 | `partial_strip` | Some stripping detected — most names readable, some single-char clutter |
+| ≤ 0.10 | `clean` | Production build with debug symbols intact (typical for early-access games / mods) |
+
+#### `types` — JSON-line per type
+
+One JSON object per line for every TypeDefinition. Useful for `jq` /
+text-tool diffing.
+
+```powershell
+metadata-cli types "C:\...\global-metadata.dat" > types.jsonl
+```
+
+Each line:
+
+```json
+{"index":0,"namespace":"","name":"<Module>","field_count":0,"method_count":0,"token":33554432}
+{"index":1,"namespace":"System","name":"Object","field_count":0,"method_count":7,"token":33554433}
+{"index":2,"namespace":"System","name":"ValueType","field_count":0,"method_count":3,"token":33554434}
+...
+```
+
+Filter with `jq` for ad-hoc queries:
+
+```powershell
+# Count types per namespace
+metadata-cli types game-metadata.dat | jq -s 'group_by(.namespace) | map({ns: .[0].namespace, n: length}) | sort_by(-.n)'
+
+# Find types with > 100 fields (interesting candidates for inspection)
+metadata-cli types game-metadata.dat | jq 'select(.field_count > 100)'
+```
+
+#### `type` — fields + defaults of one type
+
+Drill into a single type by namespace + name:
+
+```powershell
+metadata-cli type "C:\...\global-metadata.dat" "MainGame" "PLY_WORK"
+```
+
+```json
+{
+  "namespace": "MainGame",
+  "name": "PLY_WORK",
+  "index": 12345,
+  "token": 33567778,
+  "fields": [
+    {"index": 0, "name": "HP", "type_index": 4321, "offset": 16, "is_static": false},
+    {"index": 1, "name": "MAX_HP", "type_index": 4321, "offset": 20, "is_static": false},
+    {"index": 2, "name": "LV", "type_index": 4322, "offset": 24, "is_static": false},
+    ...
+  ]
+}
+```
+
+For enums, fields with `FieldDefaultValue` entries also include the
+typed default value.
+
+## Comparing CLI output to live RPC
+
+Quick sanity check: the CLI's `info` output should match the DLL's
+`handshake` (for `metadata_version`) and `getMetadataStats` (for the
+verdict).
+
+```powershell
+# Offline:
+metadata-cli stats "$gamedir\game_Data\il2cpp_data\Metadata\global-metadata.dat"
+
+# Live (with the game running + DLL injected):
+.\tools\Test-Handshake.ps1                    # gets metadata_version
+.\tools\Test-Send.ps1 -Cmd getMetadataStats   # gets verdict
+```
+
+Mismatch indicates one of:
+
+- The live runtime sees a remapped / decrypted metadata.dat (some
+  protectors decrypt at runtime).
+- The version dispatcher in `MetadataParser` is reading offset
+  layouts wrong for a new version.
+- The on-disk file was extracted from a different build than what's
+  running.
+
+## Caveats
+
+- **Versions supported for type-table parsing**: v24, v27, v29, v31.
+  Other versions in the [16, 31] range load (string heap works) but
+  return `type_definition_count: 0`. v32+ uses a section-based header
+  format documented in
+  [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md);
+  not yet shipped.
+- **Encrypted metadata** (some commercial protectors): the CLI parses
+  the on-disk bytes literally. If they're encrypted, parse fails
+  with `sanity_mismatch`. Use the live DLL path (which sees the
+  decrypted in-memory copy).
+- **No method bodies**. The CLI parses TypeDefinitions, FieldDefinitions,
+  StringLiterals, FieldDefaults. MethodDefinitions are deferred (no
+  current consumer). For method information, use the live DLL with
+  `findMethodInstances` — it reads from the runtime `Il2CppClass*`
+  tables, not metadata.dat.
+- **No console truncation**. The `types` subcommand can emit tens of
+  thousands of lines for large games. Pipe to a file or `jq`.
+
+## Source
+
+- [tools/metadata-cli/main.cpp](../tools/metadata-cli/main.cpp) —
+  CLI entry point + JSON formatting.
+- [tools/metadata-cli/CMakeLists.txt](../tools/metadata-cli/CMakeLists.txt)
+  — build target (links against the same `MetadataParser` source the
+  DLL uses).
+- [dll/src/il2cpp/MetadataParser.h](../dll/src/il2cpp/MetadataParser.h)
+  / [.cpp](../dll/src/il2cpp/MetadataParser.cpp) — version dispatcher
+  + per-version type-table parsing.
+- [dll/src/il2cpp/MetadataLayout.h](../dll/src/il2cpp/MetadataLayout.h)
+  — per-version struct layouts (cross-checked vs upstream Unity in
+  `vendor/libil2cpp/`).
+
+## Related
+
+- [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md) —
+  audit of our metadata layouts against upstream Unity sources.
+- [il2cpp-internals.md](il2cpp-internals.md) — IL2CPP backend deep
+  dive (live runtime path, complementary to the offline path).

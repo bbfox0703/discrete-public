@@ -24,7 +24,7 @@
 | 18 (a/b/c/d) | ✅ | **Find Method Instances + AOB AA-script generator + AOBMaker direct push.** New wire commands `findMethodInstances` + `getMethodAobPattern`, hand-rolled x64 LDE, UI overloads modal, `unity_symbols.lua` overload-aware extension, `CreateAAScript` integration over `\\.\pipe\AOBMakerCEBridge`. |
 | **19 (a/b/c/d/e)** | ✅ | **Lua-callable Unity methods.** New wire RPC `callMethod(asm, ns, class, method, [signatureMatch], [instance], [args])` invoking Mono / IL2CPP methods with marshaled primitive + null + address + string args + boxed-primitive / address / UTF-8-decoded-string returns + managed exception capture. Static AND instance dispatch on both backends. UI MethodCallWindow (right-click any overload row → Call method…) + `scripts/unity_invoke.lua` Lua bridge with full arg-builder set. Spec: [lua-invoke.md](lua-invoke.md). |
 | **19d-2** | ✅ | **UI polish.** Methods grid "Call method… (pick overload)" auto-skips the picker modal when `findMethodInstances` returns exactly one overload — single-overload user methods (`AddItems`, `get_numberOfItems`, `Save`) become one click. Inspector right-click on any instance → "Call method on this instance… (switch to Methods)" snaps `SelectedInstance` to that row + flips to the Methods tab; the subsequent Methods-grid right-click then pre-fills the `Instance address` textbox in `MethodCallWindow` (scope-checked: only when Browser.SelectedClass matches Inspector.TargetClass on assembly + namespace + name). |
-| 16 (docs) | 🟡 Partial | `plan` / `STATUS` / `pipe-protocol` / `Archiutecture` / `test-matrix` / `address-finder` / `lua-invoke` / `il2cpp-metadata-crosscheck` exist; `dll-spec`, `ui-spec`, `mono-internals`, `il2cpp-internals`, `export-formats`, `technical-notes`, `lessons-learned`, `metadata-cli`, `proxy-dlls`, `Readme.MD` (en+zh-TW), `CONTRIBUTING.md` still TBD. |
+| 16 (docs) | ✅ | All planned files exist. New in this batch: `lessons-learned.md`, `README.md` + `README.zh-TW.md` (root), `CONTRIBUTING.md` (root), `proxy-dlls.md`, `metadata-cli.md`, `export-formats.md`, `mono-internals.md`, `il2cpp-internals.md`, `dll-spec.md`, `ui-spec.md`, `technical-notes.md`. |
 
 ---
 
@@ -102,7 +102,7 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 
 ### Open follow-ups (not blocking, drip-feed)
 
-- **Phase 16 — remaining docs** — `dll-spec.md`, `ui-spec.md`, `mono-internals.md`, `il2cpp-internals.md`, `export-formats.md`, `technical-notes.md`, `lessons-learned.md`, `metadata-cli.md`, `proxy-dlls.md`, `Readme.MD` (en + zh-TW), `CONTRIBUTING.md`. Parallelizable with feature work.
+- **Phase 16 docs** — ✅ closed 2026-05-07. All planned doc files now exist (see Phase Overview table for the per-file list).
 - **Phase 5 segment 2d** (long-deferred, non-blocking) — full `Il2CppMetadataRegistration` AOB scan in `GameAssembly.dll` so non-enum const literals in `il2cppGetMetadataTypeFields` can be type-aware-decoded. Half-day.
 - **Phase 17e — Strategy B address finder** — only-if-asked. Cached heap walk + interval tree for batch CE pointer-scan lookups. Skip until requested.
 - **Phase 18 multi-overload AA-script user-click smoke** — Farthest Frontier `ItemBundle.AddItems` exposes 2 overloads (verified via `findMethodInstances`); end-to-end "Copy AOB AA script" against the multi-overload result not yet user-clicked through.
@@ -116,7 +116,6 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 
 | Option | Effort | Why pick this |
 |---|---|---|
-| **Phase 16 docs** | Variable, parallelizable | No user-facing feature gain but important for adoption / contributor onboarding. Pick one of: `lessons-learned.md` (consolidates the memory entries we've accumulated — runtime_invoke marshaling, signatureMatch substring trap, PowerShell ConvertTo-Json unwrap, Avalonia 12 Win-only trio), `Readme.MD` (en+zh-TW), or `CONTRIBUTING.md`. |
 | **Inspector classifier unit tests** | <½ day | Cheapest test win. Offline regression coverage for the classifier kind-routing logic. |
 | **Highlight matching substring** | <½ day | Pure UI polish — small but visible improvement for users who filter heavily. |
 | **Phase 12d (32-bit Mono)** | Multi-day | Required for any pre-Unity-2018 Mono game. No user has asked yet (no 32-bit Unity game in test matrix). |

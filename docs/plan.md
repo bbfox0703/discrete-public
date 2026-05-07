@@ -122,7 +122,7 @@
 | 14 | Hardening | Error paths, AOT trim warnings, log rotation, edge cases | ✅ All sub-items closed (14a-14f) |
 | 14c | IL2CPP metadata version dispatch | v24 / v27 / v29 / v31 TypeDefinition layouts | ✅ Cross-checked vs upstream Unity (`docs/il2cpp-metadata-crosscheck.md`) |
 | 15 | Test Matrix | Mono / IL2CPP across multiple Unity versions | ✅ Verified across 6+ games covering v24/v27/v29/v31 + Mono bdwgc Unity 6 |
-| 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs | 🟡 Architecture / pipe-protocol / STATUS / address-finder / il2cpp-metadata-crosscheck exist; remaining items still TBD |
+| 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs + READMEs + CONTRIBUTING | ✅ Closed 2026-05-07 — all planned files now exist (lessons-learned, README.md + zh-TW, CONTRIBUTING.md, proxy-dlls, metadata-cli, export-formats, mono-internals, il2cpp-internals, dll-spec, ui-spec, technical-notes) |
 | 17 | Address Finder (reverse lookup) | New wire command `whatIsAt(address)` returning instance + class + field; inverse of `findInstances` | ✅ All four sub-phases shipped (17a DLL handler / 17b field resolution / 17c UI Address Lookup tab / 17d CE Lua bridge). Spec in [address-finder.md](address-finder.md). |
 | 18 | Find Method Instances | New wire commands `findMethodInstances` + `getMethodAobPattern` + UI overloads modal + AOB AA-script generator + AOBMaker `CreateAAScript` direct push | ✅ All four sub-phases shipped (18a DLL handler + signature decoding / 18a-3 hand-rolled x64 LDE for AOB wildcarding / 18c UI overloads picker + AobAaScriptGenerator + AOBMaker direct push / 18d `unity_symbols.lua` extension `registerMethodOverloads`). |
 | 19 | Lua-callable Unity methods | New wire command `callMethod(asm, ns, class, method, [args], [instance])` invoking Mono / IL2CPP methods with marshaled primitive + string args; closes the long-standing CLAUDE.md goal | ✅ All five sub-phases shipped (19a IL2CPP DLL / 19b Mono port / 19c instance dispatch + string in/out / 19d UI MethodCallWindow / 19e `scripts/unity_invoke.lua` Lua bridge). Verified live across SaGa F2R + BongoCat + Farthest Frontier. Spec: [lua-invoke.md](lua-invoke.md). |
@@ -477,22 +477,22 @@ Already in repo:
 - [x] `docs/address-finder.md` (Phase 17 design spec)
 - [x] `scripts/README.md` (CE bridge install + workflow)
 
-Still TBD:
-- [ ] `docs/dll-spec.md` — formal C ABI surface (`UnityDumper_*` exports)
-- [ ] `docs/ui-spec.md` — Avalonia component breakdown, AOT constraints, MVVM patterns
-- [ ] `docs/export-formats.md` — CE XML / CSX / SDK header detailed reference
-- [ ] `docs/mono-internals.md` — Mono struct layouts, version diffs
-- [ ] `docs/il2cpp-internals.md` — IL2CPP runtime struct layouts (companion to metadata-crosscheck)
-- [ ] `docs/technical-notes.md` — collected gotchas
-- [ ] `docs/lessons-learned.md` — cross-game debugging notes
-- [ ] `docs/metadata-cli.md` — offline CLI usage
-- [ ] `docs/proxy-dlls.md` — variant selection guide (version vs winmm)
-- [ ] `Readme.MD` + `Readme_zh-TW.MD` — install / usage / screenshots
-- [ ] `CONTRIBUTING.md`
+Closed 2026-05-07 — every planned doc now exists:
+- [x] `docs/dll-spec.md` — C ABI surface + module map + lifecycle + SEH leaf list
+- [x] `docs/ui-spec.md` — Avalonia 12 AOT app breakdown, ViewModel organization, services + bridges
+- [x] `docs/export-formats.md` — CE XML / CSX / SDK header schemas + live-mode rules
+- [x] `docs/mono-internals.md` — Mono backend deep dive (resolver / domain / walker / invoker / runtime ops)
+- [x] `docs/il2cpp-internals.md` — IL2CPP backend deep dive (runtime path + metadata-parser version dispatch)
+- [x] `docs/technical-notes.md` — drip-feed catch-all (build numbering, log channels, cmake cache, CJK console, AV)
+- [x] `docs/lessons-learned.md` — consolidates the memory entries + STATUS caveats (runtime_invoke marshaling, signatureMatch trap, Avalonia 12 trio, GC root, PowerShell ConvertTo-Json, etc.)
+- [x] `docs/metadata-cli.md` — offline CLI usage + comparison vs live runtime
+- [x] `docs/proxy-dlls.md` — version/winmm selection guide + ProxyDeployWindow walkthrough
+- [x] `README.md` (root, English) + `README.zh-TW.md` (root, Traditional Chinese)
+- [x] `CONTRIBUTING.md` (root) — build / test / code conventions / PR style
 
-Phase 16 is parallelizable with feature work; the existing docs cover the
-runtime-critical contracts (pipe protocol, architecture, status). The
-remaining items are user-facing reference / onboarding material.
+Phase 16 was parallelizable with feature work; landing it closed the
+last "soft" item before declaring the repo presentable for outside
+contributors.
 
 ---
 
