@@ -157,7 +157,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
             }
             StatusMessage = result.Count == 0
                 ? "No overloads matched."
-                : $"{result.Count} overload(s) found.";
+                : $"{result.Count} overload(s) found.  Right-click a row → Call method…";
             // CommandToolkit.Mvvm doesn't auto-re-evaluate CanExecute when a
             // child observable item changes — refresh selection-dependent
             // commands explicitly so a freshly-loaded grid starts in the

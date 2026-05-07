@@ -637,11 +637,20 @@
                         GridLinesVisibility="Horizontal"
                         x:DataType="vm:MainWindowViewModel">
                 <DataGrid.ContextMenu>
-                  <!-- Phase 18c: right-click any row → enumerate every overload
-                       of this method on the selected class, generate AOB AA
-                       script for one (or many) selected overloads. -->
+                  <!-- Phase 18c / 19d: right-click any row → enumerate every
+                       overload of this method on the selected class. From
+                       the modal that opens, the user can either generate AOB
+                       AA scripts for one (or many) overloads (Phase 18c) or
+                       right-click a single overload row to invoke it via
+                       `callMethod` (Phase 19d). The "Call method…" entry
+                       below is a shortcut that opens the same modal — users
+                       can't call directly from the Methods grid because we
+                       don't know which overload to target until the user
+                       picks one in the overloads window. -->
                   <ContextMenu>
                     <MenuItem Header="{StaticResource Browser.MethodFindOverloadsMenu}"
+                              Click="OnMethodFindOverloadsClicked" />
+                    <MenuItem Header="{StaticResource Browser.MethodCallMethodMenu}"
                               Click="OnMethodFindOverloadsClicked" />
                   </ContextMenu>
                 </DataGrid.ContextMenu>

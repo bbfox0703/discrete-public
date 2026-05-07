@@ -144,8 +144,9 @@
   <sys:String x:Key="Handshake.Build">Build</sys:String>
   <sys:String x:Key="Handshake.Protocol">Protocol</sys:String>
 
-  <!-- Phase 18c — Methods grid context menu + Method Overloads modal. -->
+  <!-- Phase 18c / 19d — Methods grid context menu + Method Overloads modal. -->
   <sys:String x:Key="Browser.MethodFindOverloadsMenu">Find overloads…</sys:String>
+  <sys:String x:Key="Browser.MethodCallMethodMenu">Call method… (pick overload)</sys:String>
 
   <sys:String x:Key="MethodOverloads.Title">Method overloads</sys:String>
   <sys:String x:Key="MethodOverloads.Refresh">Refresh</sys:String>
