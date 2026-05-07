@@ -4,7 +4,7 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-07
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 (17a/b/c/d) all closed**. **Phase 17** (address-finder reverse lookup) closed on 2026-05-07 with the `unity_addrfind.lua` CE Lua bridge — `whatIsAt` ships end-to-end across DLL → UI → CE. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 16** (docs finalization, parallelizable), **Phase 18** (find method instances, ~one phase). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 (17a/b/c/d) + 18 (18a/b/c/d) all closed**. **Phase 18** (find method instances + AOB AA-script generator + AOBMaker direct push) closed on 2026-05-07 — `findMethodInstances` + `getMethodAobPattern` ship end-to-end across DLL → UI → CE; `unity_symbols.lua` gains `registerMethodOverloads`. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 19** (Lua-callable Unity methods — newly drafted, the long-standing "invoke managed methods from Lua with marshaled args" goal), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -124,7 +124,8 @@
 | 15 | Test Matrix | Mono / IL2CPP across multiple Unity versions | ✅ Verified across 6+ games covering v24/v27/v29/v31 + Mono bdwgc Unity 6 |
 | 16 | Docs Finalization | dll-spec / pipe-protocol / ui-spec / internals docs | 🟡 Architecture / pipe-protocol / STATUS / address-finder / il2cpp-metadata-crosscheck exist; remaining items still TBD |
 | 17 | Address Finder (reverse lookup) | New wire command `whatIsAt(address)` returning instance + class + field; inverse of `findInstances` | ✅ All four sub-phases shipped (17a DLL handler / 17b field resolution / 17c UI Address Lookup tab / 17d CE Lua bridge). Spec in [address-finder.md](address-finder.md). |
-| 18 | Find Method Instances | New wire command `findMethodInstances(asm, ns, class, method, [signature])` + UI tab | ⬜ Not started |
+| 18 | Find Method Instances | New wire commands `findMethodInstances` + `getMethodAobPattern` + UI overloads modal + AOB AA-script generator + AOBMaker `CreateAAScript` direct push | ✅ All four sub-phases shipped (18a DLL handler + signature decoding / 18a-3 hand-rolled x64 LDE for AOB wildcarding / 18c UI overloads picker + AobAaScriptGenerator + AOBMaker direct push / 18d `unity_symbols.lua` extension `registerMethodOverloads`). |
+| 19 | Lua-callable Unity methods | New wire command `callMethod(asm, ns, class, method, [args], [instance])` invoking Mono / IL2CPP methods with marshaled primitive + string args; closes the long-standing CLAUDE.md goal | ⬜ Drafted, not started |
 
 ---
 
@@ -532,16 +533,238 @@ Broken into four sub-phases that mirror the Phase 17 shape (DLL → server
 parsing → UI → CE Lua). Sub-phase letters use the parent number per the
 2026-05-07 renumbering convention.
 
-- [ ] **18a** DLL handler: new pipe RPC `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` returning `[{ token, address, signature, declaringClass }]` for every matching overload. Server-side enumerates matching `MethodInfo*` via the existing `class_get_methods` iterator (parent chain included, depth cap mirrors `walkInstance`). Native address comes from the existing `ReadMethodPointer` helper for IL2CPP (handles the Unity 2021.3+ no-`il2cpp_method_get_pointer` path) and `monoCompileMethod` for Mono. SEH-leaf primitives reuse the AddressFinder pattern. Smoke test: `tools/Test-FindMethodInstances.ps1` (mirrors `Test-WhatIsAt.ps1`).
-- [ ] **18b** Signature decoding: walk each `MethodInfo*`'s parameter list to emit a human-readable signature string (e.g. `(System.Single, System.Single, System.Single)` vs `(UnityEngine.Vector3)`). Optional `signatureMatch` arg narrows the result set to the closest match. Required for the canonical `Vector3.Set` test case (3-arg float overload vs 1-arg Vector3 overload). IL2CPP path uses `il2cpp_method_get_param_count` + `il2cpp_method_get_param`; Mono path uses `mono_signature_get_params`. Both export typedefs already exist in the resolver headers — extend, don't redesign.
-- [ ] **18c** UI: new "Methods" sub-view (tab or drawer) surfacing all overloads of the currently-selected method with their native addresses + signatures. Right-click any overload → "Register as CE symbol" reuses the existing `registerSymbol` RPC (chosen overload only — the other overloads stay unregistered). Cross-tab handoff: clicking an overload's address copies it to clipboard / fires AOBMaker bridge same way the Inspector's per-row HEX button does. New `MethodOverloadsViewModel` + DTOs in `ProtocolModels.cs` + source-gen JSON registration. Native AOT publish must stay 0 warnings.
-- [ ] **18d** CE Lua bridge: extend `scripts/unity_symbols.lua` (don't add a new file — this is just one more verb in the symbols workflow) with `registerMethodOverloads(assembly, ns, class, methodName, [sigFilter])`. Same `\\.\pipe\UnityDumpBfx` RPC + retry scaffolding as the existing `registerClassSymbols`. Names follow the existing convention: `Unity:{Asm}:{Ns}.{Cls}.m_{Method}__{sigHash}` when there's more than one overload to disambiguate, plain `.m_{Method}` when there's only one.
+- [x] **18a** DLL handler: new pipe RPC `findMethodInstances(assembly, ns, class, methodName, [signatureMatch])` returning `[{ token, address, signature, paramTypes, paramNames, returnType, humanSuffix, declaringClass, ... }]` for every matching overload. Server-side enumerates matching `MethodInfo*` via the existing `class_get_methods` iterator. Native address comes from `ReadMethodPointer` for IL2CPP and `monoCompileMethod` for Mono. SEH-leaf primitives reuse the AddressFinder pattern. Shared `MethodSignatureFormat.h` produces the symbol-safe `humanSuffix` (`3float` / `Vector3` / `noargs` / `string_Card_Point`) used by both UI and Lua bridge. Smoke test: `tools/Test-FindMethodInstances.ps1`.
+- [x] **18b** Signature decoding: each `MethodInfo*`'s parameter list emits a human-readable signature string (e.g. `(System.Single, System.Single, System.Single)`). Optional `signatureMatch` arg narrows results. IL2CPP uses `il2cpp_method_get_param_count` + `il2cpp_method_get_param`; Mono uses `mono_method_signature` + `mono_signature_get_params`. All five new resolver bindings are optional — old runtimes degrade gracefully (empty paramTypes / returnType, address still ships). **Bonus 18a-3** added a hand-rolled minimal x64 length disassembler (`shared/AobPattern.{h,cpp}`) + `getMethodAobPattern` RPC that reads N bytes (default 32, capped 128) from any address, walks them with conservative wildcarding (rel8/rel32 immediates + RIP-relative ModRM disp32 → `??`), returns CE-style pattern + module name/offset.
+- [x] **18c** UI overloads modal + AOB AA-script generator. Right-click any row in the Methods grid → "Find overloads…" opens a multi-select `MethodOverloadsWindow`. Three clipboard outputs share the symbol-naming convention `{Class}_{Method}_{Suffix}`: **Copy AOB AA script** (per-overload `getMethodAobPattern` → CE Auto-Assembler script with `aobscanmodule` + `registersymbol` lines, idempotent `discrete_logScan` Lua helper guarded with `if _G.discrete_logScan == nil then`), **Copy registerSymbol script** (hardcoded-address path), **Copy addresses** (newline-separated). **Plus**: "Create AA in CE" button uses AOBMaker's `CreateAAScript` verb (`\\.\pipe\AOBMakerCEBridge`) to push the generated AA script directly into CE's address list as a vtAutoAssembler memory record, with optional auto-activate. AOT publish at build #207 stays 0/0 warnings.
+- [x] **18d** CE Lua bridge: extended `scripts/unity_symbols.lua` with `registerMethodOverloads(assembly, ns, class, methodName, [sigFilter])`. Symbol shape `Unity:{Asm}:{Ns}.{Cls}.m_{Method}__{HumanSuffix}` (e.g. `__3float`, `__Vector3`). Reuses the existing inline `rpc()` / `parseValue()` JSON parser + 15-attempt `io.open` retry + per-RPC `processMessages()`+`sleep(1)` yield pattern.
 
-**Acceptance**:
-- Given a class with overloaded methods (e.g. `Vector3.Set(float, float, float)` vs `Vector3.Set(Vector3)`), `findMethodInstances` returns both with distinct addresses and distinguishing signatures.
-- Selecting one overload in the UI registers a CE symbol pointing at the right native address; the other overload's symbol is not affected.
-- The Lua `registerMethodOverloads` helper round-trips against a known overloaded method and the resulting symbol resolves via CE's `getAddress` fast-path (no `::` in the name, mirrors the Phase 11 fix).
-- Useful follow-up to the per-row HEX → AOBMaker pipeline (Phase 11.5).
+**Acceptance**: ✅
+- IL2CPP — verified live against SaGa F2R `UnityEngine.Vector3.Set` (single 3-float overload, address resolves, suffix `3float`, params `newX/newY/newZ` ship through). AA-script path tested against `MainGame/PLY_WORK.AddGrowHpMax(int)` — single-click checkbox toggle works, "Copy AOB AA script" writes a 32-byte pattern script to clipboard.
+- Mono — JIT-compile path runs server-side via `mono_compile_method`; abstract / generic-without-args overloads come back with `compiled=false` and are skipped.
+- AOBMaker direct push — generates AA script and pushes via `CreateAAScript` ({type, description, script, autoActivate}) over `\\.\pipe\AOBMakerCEBridge`, falls back to "AOBMaker pipe unavailable" status when CE plugin isn't loaded.
+- Symbol-name uniqueness — `MakeSymbolName` carries a `taken` set so within-batch collisions auto-suffix `_2` / `_3`.
+
+---
+
+## Phase 19 — Lua-callable Unity methods (Lua → managed invocation)
+
+**Goal**: Invoke managed methods (Mono JIT or IL2CPP AOT entry points) from
+CE Lua with marshaled args + return values. Closes the long-standing
+"Lua-callable Unity methods" goal in [CLAUDE.md](#) §"Headline capabilities"
+and lets cheat-table authors call e.g. `Player.AddItem(99)` or
+`Vector3.ToString()` from a CE hotkey without hand-writing native-ABI
+Auto-Assembler.
+
+Spec: [docs/lua-invoke.md](lua-invoke.md) (TBD — write alongside 19a).
+
+### Why now
+
+Phase 18 just landed — users have addresses + AOB scripts. The next missing
+capability is *calling* methods cleanly. Today CE Lua can dispatch to a
+registered symbol via `executeCodeEx`, but only with raw native ABI
+(RCX/RDX/R8/R9 for x64, no struct-by-value rules, no string marshaling).
+That's fine for methods taking a single int; painful for anything that
+takes `string`, returns a managed type, or might throw.
+
+### Scope (v1)
+
+In:
+- Static and instance methods
+- Primitive args: `bool` / `byte` / `sbyte` / `int16` / `uint16` /
+  `int32` / `uint32` / `int64` / `uint64` / `float` / `double` / `char`
+- `string` arg (UTF-8 over the wire → `MonoString*` /
+  `Il2CppString*` server-side via `mono_string_new_utf8` /
+  `il2cpp_string_new_utf8`)
+- Raw `address` arg for `IntPtr` / `void*` / pre-resolved object pointers
+- `null` arg
+- Primitive return value (boxed `MonoObject*` → unbox → JSON number/bool)
+- `string` return value (managed string → UTF-8 over the wire, mirrors
+  the existing `walkInstance` String decoder)
+- Reference-type return value as raw address — caller chains
+  `whatIsAt` / `walkInstance` for further inspection
+- Exception capture: `result.exception = "Type: message"` instead of
+  crashing the host; methods that `try`/`catch` internally still succeed
+
+Out (v2 follow-ups, deliberately not started):
+- `ref` / `out` parameters
+- Open-generic methods (need explicit instantiation from CE side)
+- Boxed value-type args (`Vector3`, `Color`, user struct) — pass by
+  pre-allocated address only in v1; full marshaling later
+- `async` / `Task<T>` methods — call the sync entry point directly
+- Delegates / events
+- Marshaling back to the game's main thread (Unity scene-graph APIs
+  assume main-thread execution; v1 invokes on the pipe worker thread)
+
+### Sub-phases (mirror Phase 17/18 shape)
+
+- [ ] **19a** DLL handler — IL2CPP first (simpler: AOT `methodPointer`
+  ready, no JIT step). New pipe RPC `callMethod(assembly, ns, class,
+  method, [signatureMatch], [args])` for **static** methods only in 19a.
+  Server-side: locate the `MethodInfo*` via the same parent-chain walk
+  Phase 18a uses (depth cap 16 + `signatureMatch` substring filter).
+  Marshal each arg per the wire `type` tag against the resolved formal
+  parameter type; build the `void**` params array; call
+  `il2cpp_runtime_invoke(method, NULL, params, &exc)` inside a
+  `ThreadAttachGuard`. Capture exception + boxed return value. SEH-leaf
+  primitives reuse the MethodFinder pattern. New required IL2CPP resolver
+  bindings: `il2cpp_runtime_invoke`, `il2cpp_object_unbox`,
+  `il2cpp_string_new`, `il2cpp_string_chars`, `il2cpp_string_length`,
+  `il2cpp_exception_get_message_internal` (or read `Il2CppException`
+  layout directly). Smoke: `tools/Test-CallMethod.ps1` (mirrors
+  `Test-FindMethodInstances.ps1`).
+
+- [ ] **19b** Mono port — `mono_runtime_invoke(method, NULL, void**,
+  &exc)` with the same arg-marshaling semantics as 19a. New required
+  Mono resolver bindings: `mono_runtime_invoke`, `mono_object_unbox`,
+  `mono_string_new`, `mono_string_to_utf8`, `mono_string_chars`,
+  `mono_string_length`. Reuses the existing `monoCompileMethod` path
+  internally before invoke (both backends now reach feature parity
+  for static methods).
+
+- [ ] **19c** Instance methods + string marshaling. Adds:
+  * `instance` arg parsed as hex address; passed as `this` to runtime
+    invoke
+  * String args: alloc `MonoString*` / `Il2CppString*` via
+    `*_string_new_utf8`, pass the boxed pointer to the method
+  * String return values: read length + UTF-16 → UTF-8 (both runtimes
+    share the same `String` layout: vtable + sync at +0, length at
+    +0x10, UTF-16 chars at +0x14 — already used by the existing String
+    decoder in `walkInstance`, factor out into a shared helper)
+  * Reference return values surface as
+    `{type: "address", value: "0x..."}`
+  * GC-root caveat documented in `lua-invoke.md`: a returned address is
+    valid only until the next GC. Mono is moving-GC; IL2CPP is largely
+    non-moving but not guaranteed for all generations. Callers wanting
+    to outlive a GC should chain `findInstances` → `walkInstance` rather
+    than holding the raw pointer indefinitely.
+
+- [ ] **19d** UI surface — "Call method…" entry on the `MethodOverloadsWindow`
+  context menu (right-click an overload row). Opens a `MethodCallDialog`
+  with one input row per declared parameter, typed by formal parameter
+  type: numeric spinner for ints, double-precision text for floats, plain
+  text for strings, hex input for addresses, dropdown for enums (when the
+  parameter type is an enum we can resolve via `getEnumValues`). "Call"
+  button fires `callMethod`, displays return value + exception in a
+  result panel. Cross-tab from the Inspector: right-click any walked
+  instance → "Call instance method…" pre-fills the `this` address and
+  opens the dialog scoped to the instance's class. New
+  `MethodCallViewModel` + DTOs (`CallMethodResult`, `CallArg`) in
+  `ProtocolModels.cs` + source-gen JSON registrations. Native AOT must
+  stay 0 warnings.
+
+- [ ] **19e** Lua bridge — new `scripts/unity_invoke.lua` (separate
+  file rather than extending `unity_symbols.lua` because the API surface
+  is meaningfully different — typed args + return values vs symbol
+  bookkeeping). Public API:
+  ```lua
+  -- Static call:
+  local r = callUnityMethod("UnityEngine.CoreModule", "UnityEngine",
+                            "Mathf", "Abs",
+                            { {type="int32", value=-7} })
+  -- → r.ok=true, r.returnValue=7, r.returnType="System.Int32"
+
+  -- Instance call:
+  local r = callUnityMethod("Assembly-CSharp", "MainGame", "PLY_WORK",
+                            "AddGrowHpMax",
+                            { {type="int32", value=10} },
+                            { instance = "0x16F8CEA0BE0" })
+  ```
+  Same `\\.\pipe\UnityDumpBfx` retry scaffolding + per-RPC
+  `processMessages()` + `sleep(1)` yield as the sibling scripts.
+
+### Wire shape
+
+```jsonc
+// Request
+{
+  "id": 1,
+  "cmd": "callMethod",
+  "args": {
+    "assembly":       "Assembly-CSharp",
+    "namespace":      "MainGame",
+    "name":           "Player",
+    "method":         "TakeDamage",
+    "signatureMatch": "Int32, String",   // optional; same semantics as Phase 18
+    "instance":       "0x16F8CEA0BE0",   // null/omit for static methods
+    "args": [
+      { "type": "int32",  "value": 10 },
+      { "type": "string", "value": "fire" }
+    ]
+  }
+}
+
+// Response (success)
+{
+  "id": 1,
+  "result": {
+    "ok":          true,
+    "returnType":  "System.Void",
+    "returnValue": null,
+    "exception":   null,
+    "elapsedMs":   3
+  }
+}
+
+// Response (managed exception caught)
+{
+  "id": 1,
+  "result": {
+    "ok":          false,
+    "returnType":  "System.Int32",
+    "returnValue": null,
+    "exception":   "System.NullReferenceException: Object reference not set to an instance of an object."
+  }
+}
+```
+
+Wire `type` tags for v1: `bool`, `byte`, `sbyte`, `int16`, `uint16`,
+`int32`, `uint32`, `int64`, `uint64`, `float`, `double`, `char`,
+`string`, `address`, `null`.
+
+### Acceptance
+
+- IL2CPP: `callMethod("UnityEngine.CoreModule", "UnityEngine", "Mathf",
+  "Abs", [{int32:-7}])` returns `{ok:true, returnValue:7,
+  returnType:"System.Int32"}` on SaGa F2R.
+- Mono: same shape against a Mono game's `System.Math.Abs(int)`.
+- Instance call: `Vector3.ToString()` against a live instance returns a
+  formatted string (e.g. `"(1.0, 2.0, 3.0)"`).
+- String round-trip: any method that accepts `string` and returns
+  `string` echoes the input correctly across the wire.
+- Exception path: calling `Convert.ToInt32` on a non-numeric string
+  returns `ok:false` + the exception's `Type: message` shape — host
+  process stays alive, no log scrubbing required.
+- `signatureMatch` disambiguates between overloads exactly as Phase 18
+  does (e.g. picks `Vector3.Set(float, float, float)` over
+  `Vector3.Set(Vector3)`).
+- `tools/Test-CallMethod.ps1` covers the canonical positive (return
+  value), negative (managed exception), and overload-disambiguation
+  cases.
+- AOT publish stays 0/0 warnings under all four trim/AOT analyzers.
+
+### Caveats / non-goals
+
+- **GC roots**: an instance address obtained from `findInstances` /
+  `walkInstance` is valid for the call you make right now; a previous
+  GC that ran between the address read and the invoke can have moved
+  the object (Mono moving GC). `lua-invoke.md` will document the
+  recommended chain `findInstances` → `callMethod` in a single Lua
+  block when correctness matters.
+- **Thread**: invoke runs on the pipe worker thread inside a single
+  `ThreadAttachGuard` scope. Methods that assume the Unity main thread
+  (most engine APIs touching the scene graph) will misbehave. v1
+  doesn't marshal back to the game's main thread; users should target
+  methods that don't touch Unity engine state. v2 follow-up could add a
+  "queue on next Update" path via a hook — out of scope.
+- **`ref` / `out` parameters**: deferred. Unity gameplay code rarely
+  uses these; we'll add when a user asks.
+- **Generic method instantiations**: deferred. The IL2CPP runtime
+  registers concrete instantiations; v2 could expose a way to pick one,
+  but v1 only invokes non-generic methods (or already-instantiated
+  generics whose `MethodInfo*` is in the class's method table).
+
+Estimated effort: ~3 days for v1 (19a + 19b in one day, 19c in one day,
+19d + 19e in one day).
 
 ---
 
