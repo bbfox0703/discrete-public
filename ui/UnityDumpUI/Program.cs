@@ -26,6 +26,9 @@ internal static class Program
 
     public static AppBuilder BuildAvaloniaApp() =>
         AppBuilder.Configure<App>()
-            .UsePlatformDetect()
+            // Windows-only build (see UnityDumpUI.csproj — Avalonia.Desktop
+            // metapackage is intentionally NOT referenced). UsePlatformDetect
+            // lives in Avalonia.Desktop, so call UseWin32 directly instead.
+            .UseWin32()
             .WithInterFont();
 }

@@ -66,9 +66,19 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Avalonia 12 -->
+    <!-- Avalonia 12 — Windows-only build. We deliberately do NOT reference
+         Avalonia.Desktop (the cross-platform metapackage), because it drags
+         in Avalonia.X11 + Avalonia.FreeDesktop + Tmds.DBus.Protocol — all
+         dead on win-x64 but still present in the trimmed assembly graph,
+         which makes ILC emit "will always throw" diagnostics for the
+         Linux entry points whose DBus types were trimmed away. Avalonia.Win32
+         is the bare Windows backend. -->
     <PackageReference Include="Avalonia" Version="12.0.2" />
-    <PackageReference Include="Avalonia.Desktop" Version="12.0.2" />
+    <PackageReference Include="Avalonia.Win32" Version="12.0.2" />
+    <!-- Avalonia.Desktop used to bring Avalonia.Skia in transitively. With
+         Desktop dropped, we have to reference Skia explicitly — it's the
+         rendering backend for every Avalonia window on every platform. -->
+    <PackageReference Include="Avalonia.Skia" Version="12.0.2" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.2" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.2" />
     <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.0.0" />
@@ -76,10 +86,6 @@
     <!-- AOT-friendly MVVM via source generators ([ObservableProperty], [RelayCommand]).
          Avalonia.ReactiveUI is NOT used: it has no v12 release and depends on reflection. -->
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.*" />
-
-    <!-- Override transitive Tmds.DBus.Protocol to dodge NU1903 (CVE in 0.90.x).
-         Linux-only dependency; we ship win-x64 but NuGet still audits it. -->
-    <PackageReference Include="Tmds.DBus.Protocol" Version="0.93.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -102,7 +108,6 @@
     <TrimmerRootAssembly Include="Avalonia.Controls" />
     <TrimmerRootAssembly Include="Avalonia.Controls.DataGrid" />
     <TrimmerRootAssembly Include="Avalonia.Themes.Fluent" />
-    <TrimmerRootAssembly Include="Avalonia.Desktop" />
     <TrimmerRootAssembly Include="Avalonia.Win32" />
     <TrimmerRootAssembly Include="Avalonia.Win32.Automation" />
     <TrimmerRootAssembly Include="Avalonia.Skia" />
