@@ -13,6 +13,7 @@ struct MonoImage;
 struct MonoClass;
 struct MonoClassField;
 struct MonoMethod;
+struct MonoMethodSignature;
 struct MonoType;
 struct MonoVTable;
 

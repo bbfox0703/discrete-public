@@ -117,6 +117,15 @@ void DoResolve() {
     optBind("mono_class_get_nesting_type",      g_resolver.class_get_nesting_type);
     optBind("mono_class_get_nested_types",      g_resolver.class_get_nested_types);
 
+    // Phase 18 — method signature decoding. Optional: missing exports just
+    // disable findMethodInstances signature output, the rest of the resolver
+    // still works.
+    optBind("mono_method_signature",            g_resolver.method_signature);
+    optBind("mono_signature_get_param_count",   g_resolver.signature_get_param_count);
+    optBind("mono_signature_get_params",        g_resolver.signature_get_params);
+    optBind("mono_signature_get_return_type",   g_resolver.signature_get_return_type);
+    optBind("mono_method_get_param_names",      g_resolver.method_get_param_names);
+
     g_resolver.resolved = (ok == total);
 
     char line[256];

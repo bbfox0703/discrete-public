@@ -45,6 +45,16 @@ using fn_field_get_flags        = std::uint32_t  (*)(MonoClassField*);
 using fn_method_get_name        = const char*    (*)(MonoMethod*);
 using fn_method_get_token       = std::uint32_t  (*)(MonoMethod*);
 using fn_method_get_flags       = std::uint32_t  (*)(MonoMethod*, std::uint32_t* /*iflags*/);
+// Phase 18 — method signature decoding. mono_method_signature returns the
+// per-method signature handle; the *_signature_get_* family iterates params
+// and returns the return type. mono_method_get_param_names is optional and
+// fills a caller-supplied array of `const char*` (one slot per declared
+// parameter) — older Mono builds may not export it.
+using fn_method_signature       = MonoMethodSignature* (*)(MonoMethod*);
+using fn_signature_get_param_count = std::uint32_t (*)(MonoMethodSignature*);
+using fn_signature_get_params   = MonoType*      (*)(MonoMethodSignature*, void** /*iter*/);
+using fn_signature_get_return_type = MonoType*   (*)(MonoMethodSignature*);
+using fn_method_get_param_names = void           (*)(MonoMethod*, const char** /*names*/);
 using fn_type_get_name          = char*          (*)(MonoType*);
 using fn_free                   = void           (*)(void*);
 
@@ -107,6 +117,12 @@ struct Resolver {
     fn_method_get_name        method_get_name        = nullptr;
     fn_method_get_token       method_get_token       = nullptr;
     fn_method_get_flags       method_get_flags       = nullptr;
+    // Phase 18 — method signature decoding (param types + return type).
+    fn_method_signature           method_signature           = nullptr;
+    fn_signature_get_param_count  signature_get_param_count  = nullptr;
+    fn_signature_get_params       signature_get_params       = nullptr;
+    fn_signature_get_return_type  signature_get_return_type  = nullptr;
+    fn_method_get_param_names     method_get_param_names     = nullptr;
     fn_type_get_name          type_get_name          = nullptr;
     fn_free                   free                   = nullptr;
 

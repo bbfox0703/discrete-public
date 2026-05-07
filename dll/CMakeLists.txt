@@ -35,6 +35,7 @@ set(DLL_SHARED_SOURCES
     src/shared/PipeServer.h
     src/shared/ExportAPI.cpp
     src/shared/ExportAPI.h
+    src/shared/MethodSignatureFormat.h
 )
 
 # Mono-specific sources: only compiled into UnityDumper-Mono.dll.
@@ -51,6 +52,8 @@ set(DLL_MONO_SOURCES
     src/mono/MonoClassWalker.h
     src/mono/MonoAddressFinder.cpp
     src/mono/MonoAddressFinder.h
+    src/mono/MonoMethodFinder.cpp
+    src/mono/MonoMethodFinder.h
 )
 
 # IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
@@ -73,6 +76,8 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPMetadataRegistration.h
     src/il2cpp/IL2CPPAddressFinder.cpp
     src/il2cpp/IL2CPPAddressFinder.h
+    src/il2cpp/IL2CPPMethodFinder.cpp
+    src/il2cpp/IL2CPPMethodFinder.h
 )
 
 # ---------------------------------------------------------------------------

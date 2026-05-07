@@ -93,6 +93,11 @@ void DoResolve() {
     bindOpt("il2cpp_method_get_token",          g_resolver.method_get_token);
     bindOpt("il2cpp_method_get_flags",          g_resolver.method_get_flags);
     bindOpt("il2cpp_method_get_pointer",        g_resolver.method_get_pointer);
+    // Phase 18 — method signature decoding.
+    bindOpt("il2cpp_method_get_param_count",    g_resolver.method_get_param_count);
+    bindOpt("il2cpp_method_get_param",          g_resolver.method_get_param);
+    bindOpt("il2cpp_method_get_param_name",     g_resolver.method_get_param_name);
+    bindOpt("il2cpp_method_get_return_type",    g_resolver.method_get_return_type);
     bindOpt("il2cpp_free",                      g_resolver.free);
     // Type → class bridge for inspector enum / value-type detection.
     bindOpt("il2cpp_class_from_il2cpp_type",    g_resolver.class_from_il2cpp_type);

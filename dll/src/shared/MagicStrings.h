@@ -59,4 +59,13 @@ inline constexpr const char* CmdIL2CPPGetGenericInstances = "il2cppGetGenericIns
 inline constexpr const char* CmdWhatIsAt              = "whatIsAt";
 inline constexpr const char* CmdGetClassRangeStats    = "getClassRangeStats";
 
+// Phase 18 — find method instances + AOB pattern generator.
+// findMethodInstances enumerates every overload of a named method on a class
+// and returns each one's native address + decoded signature + a symbol-safe
+// human-readable suffix used for AA script symbol naming.
+// getMethodAobPattern reads N bytes at the supplied address and returns an
+// AOB pattern string with rel32/RIP-relative byte slots wildcarded.
+inline constexpr const char* CmdFindMethodInstances   = "findMethodInstances";
+inline constexpr const char* CmdGetMethodAobPattern   = "getMethodAobPattern";
+
 }  // namespace UnityCEDumper::MagicStrings

@@ -13,12 +13,14 @@
 #  include "../mono/MonoAddressFinder.h"
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
+#  include "../mono/MonoMethodFinder.h"
 #  include "../mono/MonoResolver.h"
 #  include "../mono/MonoThreadAttach.h"
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
 #  include "../il2cpp/IL2CPPAddressFinder.h"
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
+#  include "../il2cpp/IL2CPPMethodFinder.h"
 #  include "../il2cpp/IL2CPPMetadataRegistration.h"
 #  include "../il2cpp/IL2CPPResolver.h"
 #  include "../il2cpp/IL2CPPThreadAttach.h"
@@ -1329,6 +1331,54 @@ void RegisterCoreHandlers() {
             {"max_vtable",   formatHex(s.maxVtable)},
         };
     });
+
+    // Phase 18 — find method instances (Mono). Walks the supplied class's
+    // declared methods, returns every overload of `method` with native
+    // address (post-JIT) + decoded signature + symbol-safe humanSuffix.
+    PipeServer::RegisterHandler(MagicStrings::CmdFindMethodInstances,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        std::string methodName = args.value("method", std::string{});
+        if (methodName.empty()) return json{{"error", "missing 'method' arg"}};
+        std::string sigMatch = args.value("signatureMatch", std::string{});
+        std::string err;
+        Mono::MonoClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto fr = Mono::FindMethodInstances(k, methodName, sigMatch);
+        if (!fr.ok) return json{{"error", fr.error}};
+
+        json matches = json::array();
+        for (const auto& ov : fr.matches) {
+            json names = json::array();
+            for (const auto& s : ov.paramNames) names.push_back(s);
+            json types = json::array();
+            for (const auto& s : ov.paramTypes) types.push_back(s);
+            matches.push_back({
+                {"name",          ov.name},
+                {"token",         ov.token},
+                {"flags",         ov.flags},
+                {"iflags",        ov.iflags},
+                {"isStatic",      ov.isStatic},
+                {"isVirtual",     ov.isVirtual},
+                {"isAbstract",    ov.isAbstract},
+                {"compiled",      ov.compiled},
+                {"address",       formatHex(reinterpret_cast<std::uintptr_t>(ov.address))},
+                {"paramTypes",    std::move(types)},
+                {"paramNames",    std::move(names)},
+                {"returnType",    ov.returnType},
+                {"declaringClass",     ov.declaringClass},
+                {"declaringNamespace", ov.declaringNamespace},
+                {"signature",     ov.signatureString},
+                {"humanSuffix",   ov.humanSuffix},
+            });
+        }
+        return json{
+            {"method",  methodName},
+            {"count",   matches.size()},
+            {"matches", std::move(matches)},
+        };
+    });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
@@ -2176,6 +2226,55 @@ void RegisterCoreHandlers() {
             {"class_count", s.classCount},
             {"min_klass",   formatHex(s.minKlass)},
             {"max_klass",   formatHex(s.maxKlass)},
+        };
+    });
+
+    // Phase 18 — find method instances (IL2CPP). Returns every overload of
+    // `method` on the supplied class, with the AOT native address read out
+    // of MethodInfo->methodPointer (or il2cpp_method_get_pointer where
+    // bound). No JIT step — IL2CPP is AOT.
+    PipeServer::RegisterHandler(MagicStrings::CmdFindMethodInstances,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string methodName = args.value("method", std::string{});
+        if (methodName.empty()) return json{{"error", "missing 'method' arg"}};
+        std::string sigMatch = args.value("signatureMatch", std::string{});
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        auto fr = IL2CPP::FindMethodInstances(k, methodName, sigMatch);
+        if (!fr.ok) return json{{"error", fr.error}};
+
+        json matches = json::array();
+        for (const auto& ov : fr.matches) {
+            json names = json::array();
+            for (const auto& s : ov.paramNames) names.push_back(s);
+            json types = json::array();
+            for (const auto& s : ov.paramTypes) types.push_back(s);
+            matches.push_back({
+                {"name",          ov.name},
+                {"token",         ov.token},
+                {"flags",         ov.flags},
+                {"iflags",        ov.iflags},
+                {"isStatic",      ov.isStatic},
+                {"isVirtual",     ov.isVirtual},
+                {"isAbstract",    ov.isAbstract},
+                {"compiled",      ov.compiled},
+                {"address",       formatHex(reinterpret_cast<std::uintptr_t>(ov.address))},
+                {"paramTypes",    std::move(types)},
+                {"paramNames",    std::move(names)},
+                {"returnType",    ov.returnType},
+                {"declaringClass",     ov.declaringClass},
+                {"declaringNamespace", ov.declaringNamespace},
+                {"signature",     ov.signatureString},
+                {"humanSuffix",   ov.humanSuffix},
+            });
+        }
+        return json{
+            {"method",  methodName},
+            {"count",   matches.size()},
+            {"matches", std::move(matches)},
         };
     });
 #endif

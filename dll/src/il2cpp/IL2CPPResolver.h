@@ -40,6 +40,13 @@ using fn_method_get_name        = const char*     (*)(const MethodInfo*);
 using fn_method_get_token       = std::uint32_t   (*)(const MethodInfo*);
 using fn_method_get_flags       = std::uint32_t   (*)(const MethodInfo*, std::uint32_t* /*iflags*/);
 using fn_method_get_pointer     = void*           (*)(const MethodInfo*);
+// Phase 18 — method signature decoding for findMethodInstances. All four
+// are optional: missing on a given runtime just means the response carries
+// no signature breakdown, the address still ships.
+using fn_method_get_param_count = std::uint32_t   (*)(const MethodInfo*);
+using fn_method_get_param       = const Il2CppType* (*)(const MethodInfo*, std::uint32_t /*idx*/);
+using fn_method_get_param_name  = const char*     (*)(const MethodInfo*, std::uint32_t /*idx*/);
+using fn_method_get_return_type = const Il2CppType* (*)(const MethodInfo*);
 using fn_type_get_name          = char*           (*)(const Il2CppType*);
 using fn_free                   = void            (*)(void*);
 // Il2CppType -> Il2CppClass bridge. Lets the field walker detect enum /
@@ -81,6 +88,11 @@ struct Resolver {
     fn_method_get_token       method_get_token       = nullptr;
     fn_method_get_flags       method_get_flags       = nullptr;
     fn_method_get_pointer     method_get_pointer     = nullptr;
+    // Phase 18 — method signature decoding.
+    fn_method_get_param_count method_get_param_count = nullptr;
+    fn_method_get_param       method_get_param       = nullptr;
+    fn_method_get_param_name  method_get_param_name  = nullptr;
+    fn_method_get_return_type method_get_return_type = nullptr;
     fn_type_get_name          type_get_name          = nullptr;
     fn_free                   free                   = nullptr;
     fn_class_from_il2cpp_type class_from_il2cpp_type = nullptr;
