@@ -1,9 +1,9 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (clean — pushed)
-**Last commit**: `fix(deploy): glob *.lua in Install-CEScripts so new bridge scripts ship`
-**Build**: 224
-**Current state**: **Phase 19 fully shipped end-to-end and verified live across both backends.** The original CLAUDE.md goal "invoke managed Unity methods from CE Lua with marshaled args / return values" is closed across DLL → UI → CE Lua bridge. **Phase 12d** (32-bit Mono) stays the only formally-deferred phase.
+**Branch**: `dev` (Phase 19d-2 + Mono-side smoke verified live, changes uncommitted)
+**Last committed**: `fix(deploy): glob *.lua in Install-CEScripts so new bridge scripts ship`
+**Build**: 234 (after the 19d-2 AOT publish)
+**Current state**: **Phase 19 fully shipped (19a–19e) AND verified live on both backends across DLL + UI + Lua bridge, plus 19d-2 polish landed and click-through verified.** Mono-side `unity_invoke.lua` smoke ran 2026-05-07 against BongoCat — all 4 scenarios green, including managed-exception capture (host stayed alive). The original CLAUDE.md goal "invoke managed Unity methods from CE Lua with marshaled args / return values" is closed end-to-end on both Mono and IL2CPP. **Phase 12d** (32-bit Mono) is now the only formally-deferred phase.
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
 
@@ -23,11 +23,26 @@
 | 17 (a/b/c/d) | ✅ | **Address Finder (reverse lookup).** New wire command `whatIsAt(addr)` returning instance + class + declared field. DLL backward-scan + class-pointer cache, UI Address Lookup tab, CE Lua bridge `unity_addrfind.lua`. Spec: [address-finder.md](address-finder.md). |
 | 18 (a/b/c/d) | ✅ | **Find Method Instances + AOB AA-script generator + AOBMaker direct push.** New wire commands `findMethodInstances` + `getMethodAobPattern`, hand-rolled x64 LDE, UI overloads modal, `unity_symbols.lua` overload-aware extension, `CreateAAScript` integration over `\\.\pipe\AOBMakerCEBridge`. |
 | **19 (a/b/c/d/e)** | ✅ | **Lua-callable Unity methods.** New wire RPC `callMethod(asm, ns, class, method, [signatureMatch], [instance], [args])` invoking Mono / IL2CPP methods with marshaled primitive + null + address + string args + boxed-primitive / address / UTF-8-decoded-string returns + managed exception capture. Static AND instance dispatch on both backends. UI MethodCallWindow (right-click any overload row → Call method…) + `scripts/unity_invoke.lua` Lua bridge with full arg-builder set. Spec: [lua-invoke.md](lua-invoke.md). |
+| **19d-2** | ✅ | **UI polish.** Methods grid "Call method… (pick overload)" auto-skips the picker modal when `findMethodInstances` returns exactly one overload — single-overload user methods (`AddItems`, `get_numberOfItems`, `Save`) become one click. Inspector right-click on any instance → "Call method on this instance… (switch to Methods)" snaps `SelectedInstance` to that row + flips to the Methods tab; the subsequent Methods-grid right-click then pre-fills the `Instance address` textbox in `MethodCallWindow` (scope-checked: only when Browser.SelectedClass matches Inspector.TargetClass on assembly + namespace + name). |
 | 16 (docs) | 🟡 Partial | `plan` / `STATUS` / `pipe-protocol` / `Archiutecture` / `test-matrix` / `address-finder` / `lua-invoke` / `il2cpp-metadata-crosscheck` exist; `dll-spec`, `ui-spec`, `mono-internals`, `il2cpp-internals`, `export-formats`, `technical-notes`, `lessons-learned`, `metadata-cli`, `proxy-dlls`, `Readme.MD` (en+zh-TW), `CONTRIBUTING.md` still TBD. |
 
 ---
 
-## What landed in this session — Phase 19 (full vertical) + UI Windows-only cleanup
+## What landed in this session — Phase 19d-2 polish (auto-skip picker + Inspector cross-tab)
+
+Two UX improvements on top of the freshly-shipped Phase 19 vertical. No wire-layer changes; no DLL rebuild required (UI-only).
+
+- **Auto-skip overloads modal on count==1**. Methods grid right-click "Call method… (pick overload)" probes `findMethodInstances` first; when the result has exactly one entry, jumps straight to `MethodCallWindow` seeded from that overload. Multi-overload methods (`Mathf.Abs`, `String.Concat`) still drop into the picker. "Find overloads…" keeps today's always-show-modal behaviour because the user explicitly wants the AOB / Copy panel. Implemented as a split handler pair in `MainWindow.axaml.cs`: `OnMethodCallMethodClicked` (new fast path) + `OnMethodFindOverloadsClicked` (unchanged) + shared `ResolveMethodRow` / `BuildOverloadsVm` helpers so the two paths can't drift.
+
+- **Inspector cross-tab "Call instance method…"**. Right-click any instance in the Inspector's Instances ListBox → "Call method on this instance… (switch to Methods)" snaps `SelectedInstance` to the right-clicked row and switches the right-pane TabControl to the Methods tab. From there, the Methods-grid right-click "Call method… (pick overload)" opens `MethodCallWindow` with the `Instance address` textbox pre-filled. The cross-tab handoff is **strictly scope-checked**: `GetDefaultMethodCallInstance` returns the inspector's selected instance ONLY when `Browser.SelectedAssembly.Name == Inspector.TargetAssembly` AND `Browser.SelectedClass.Namespace == Inspector.TargetNamespace` AND `Browser.SelectedClass.Name == Inspector.TargetName` (ordinal equality on all three). This prevents a stale inspector instance from bleeding into a method call on a different class, which would silently feed a wrong-type pointer to the trampoline.
+
+- **Threading**: `MethodOverloadsViewModel`'s constructor gains an optional `defaultInstanceAddress` param (forwarded to `MethodCallViewModel`). `MethodCallViewModel`'s `defaultInstanceAddress` ctor arg already existed in 19d for future use; 19d-2 finally populates it from a real source. AOT publish stays clean — 0/0 trim/AOT analyzer warnings; `DiscreteUI.exe` 38.3 MB.
+
+- **Files touched**: [MainWindow.axaml.cs](../ui/UnityDumpUI/Views/MainWindow.axaml.cs), [MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml), [MethodOverloadsViewModel.cs](../ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs), [MethodOverloadsWindow.axaml.cs](../ui/UnityDumpUI/Views/MethodOverloadsWindow.axaml.cs), [Resources/Strings/en.axaml](../ui/UnityDumpUI/Resources/Strings/en.axaml).
+
+---
+
+## What landed previously — Phase 19 (full vertical) + UI Windows-only cleanup
 
 ### Phase 19 — Lua-callable Unity methods (closed end-to-end)
 
@@ -81,12 +96,9 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 |---|---|---|
 | **Phase 12d — 32-bit Mono** | x86 support is unstarted. CMake currently enforces x64-only (`CMAKE_SIZEOF_VOID_P EQUAL 8` is a fatal); UI's `WindowsDllInjector` runs `CreateRemoteThread` from a 64-bit process and won't cross to 32-bit targets; we ship x64 proxy DLLs only. | Engineering only — no external blockers. Parallel x86 build config in cmake, x86 builds of `UnityDumper-Mono.dll` + both proxy variants with Mono 32-bit struct offsets verified, cross-bitness inject (or document "proxy install only" for x86), x86/x64 selection in the install flyout. |
 
-### Phase 19 polish (drafted but deferred — would land as 19d-2)
+### Phase 19 polish (drafted but deferred — would land as 19d-3)
 
-- **Inspector cross-tab "Call instance method…"** — right-click any walked instance → pre-fills the `this` address and opens `MethodCallWindow` scoped to the instance's class. Dialog already accepts an instance address typed manually, so the workflow exists without this — it's just one extra step.
 - **Smart-typed editors** — NumericUpDown for sized ints (range-checked at the editor level instead of post-Call), ComboBox for enum params via `getEnumValues`. Current TextBox + culture-invariant parsing + post-Call error message works correctly but is plain.
-- **Auto-skip overloads modal when `findMethodInstances` returns count==1** — for non-overloaded methods, jump straight to the Call dialog. Most user-defined methods (`AddItems`, `get_numberOfItems`, `Save`) would become one-click; multi-overload methods (`Mathf.Abs`, `String.Concat`) keep the picker.
-- **Mono-side smoke of `unity_invoke.lua`** — IL2CPP-side verified live (4/4 scenarios). Mono-side bridge byte-identical at the wire layer (verified via PowerShell 19b smoke), but the Lua wrapper hasn't been exercised on the Mono path live. Quick win — same 4 scenarios against BongoCat.
 
 ### Open follow-ups (not blocking, drip-feed)
 
@@ -104,10 +116,10 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 
 | Option | Effort | Why pick this |
 |---|---|---|
-| **Phase 19d-2 polish** (Inspector cross-tab + auto-skip overloads modal + Mono-side `unity_invoke.lua` smoke) | ½–1 day | Cleanest finishing touches on the freshly-shipped Phase 19 — no design work, just making the existing flows smoother. Inspector cross-tab is the most user-visible piece (right-click an instance → call a method on it without typing the address by hand). |
 | **Phase 16 docs** | Variable, parallelizable | No user-facing feature gain but important for adoption / contributor onboarding. Pick one of: `lessons-learned.md` (consolidates the memory entries we've accumulated — runtime_invoke marshaling, signatureMatch substring trap, PowerShell ConvertTo-Json unwrap, Avalonia 12 Win-only trio), `Readme.MD` (en+zh-TW), or `CONTRIBUTING.md`. |
 | **Inspector classifier unit tests** | <½ day | Cheapest test win. Offline regression coverage for the classifier kind-routing logic. |
 | **Highlight matching substring** | <½ day | Pure UI polish — small but visible improvement for users who filter heavily. |
+| **Phase 18 multi-overload AA-script user-click** | <½ hour | Last open verification — Farthest Frontier `ItemBundle.AddItems` (2 overloads). |
 | **Phase 12d (32-bit Mono)** | Multi-day | Required for any pre-Unity-2018 Mono game. No user has asked yet (no 32-bit Unity game in test matrix). |
 
 ### Live verifications (carried forward — still green)
@@ -121,11 +133,11 @@ These remain confirmed clicked-through on the dev box:
 - ✅ Phase 18 — single-overload AA-script generation against SaGa F2R `MainGame/PLY_WORK.AddGrowHpMax(int)`. AOBMaker `CreateAAScript` direct push.
 - ✅ **Phase 19a/b/c** — both backends, three games. SaGa F2R (IL2CPP) + BongoCat (Mono) + Farthest Frontier (both — instance dispatch via `ItemBundle.get_numberOfItems()`). PowerShell smoke (`Test-CallMethod.ps1`) covers Mathf.Abs(int/float) + Convert.ToByte(int) + Int32.Parse(string) + String.Concat(string,string) + Instance + Custom scenarios.
 - ✅ **Phase 19d** — UI MethodCallWindow user-tested via the Methods grid context menu.
-- ✅ **Phase 19e** — `unity_invoke.lua` dofile + 4 scenarios green from CE Lua console (IL2CPP / SaGa F2R).
+- ✅ **Phase 19e** — `unity_invoke.lua` dofile + 4 scenarios green from CE Lua console on **both backends**: IL2CPP / SaGa F2R + Mono / BongoCat (2026-05-07). Mono-side run of the BongoCat recipe: `Math.Abs(-7) → 7` (0 ms), `String.Concat("Hello, ", "World") → "Hello, World"` (0 ms), `Convert.ToByte(-1) → System.OverflowException` (host stayed alive, message decoded from `MonoException + 0x18`), `prettyPrint(r)` round-trip clean. Wire layer was already byte-identical via the 19b PowerShell smoke; this confirms the Lua wrapper side too.
+- ✅ **Phase 19d-2** — User click-through green on both UX paths: auto-skip on single-overload methods jumps straight to `MethodCallWindow` (no picker shown); Inspector cross-tab right-click → switches to Methods tab → subsequent Methods-grid right-click pre-fills the `Instance address` textbox from the inspector's selected instance. Build: 38.3 MB AOT, 0/0 trim/AOT warnings, 5/5 xUnit pass (build #234).
 
 ### Pending verification (small)
 
-- **Phase 19e Mono-side smoke** — same 4 scenarios from CE Lua console against BongoCat (Mono backend). Wire layer is verified byte-identical via the 19b PowerShell smoke; this just exercises the Lua wrapper.
 - **Phase 18 multi-overload AA-script generation user-click** — Farthest Frontier `ItemBundle.AddItems` (2 overloads) is the canonical target now that we have a real multi-overload class. Single-overload path verified earlier.
 
 ---

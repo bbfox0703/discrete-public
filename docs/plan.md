@@ -760,6 +760,54 @@ Out (v2 follow-ups, deliberately not started):
     in `ProtocolModels.cs` (`CallArgRequest` / `CallMethodResult` /
     `CallMethodMethodInfo`) + matching `ProtocolJsonContext` registrations.
 
+- [x] **19d-2** Polish — landed 2026-05-07, build #234. Two UX
+  improvements on top of 19d that don't change the wire layer:
+  * **Auto-skip overloads modal on count==1** — Methods grid right-click
+    "Call method… (pick overload)" now probes `findMethodInstances`
+    first; when the result has exactly one entry, jumps straight to
+    `MethodCallWindow` seeded from that overload, bypassing the picker.
+    Multi-overload methods (`Mathf.Abs`, `String.Concat`) still drop
+    into the picker. "Find overloads…" keeps today's always-show-modal
+    behaviour because the user explicitly wants the AOB / Copy panel.
+    Implemented as a split handler pair in `MainWindow.axaml.cs`
+    (`OnMethodCallMethodClicked` for the fast path,
+    `OnMethodFindOverloadsClicked` unchanged) plus shared row-resolution
+    and overloads-VM-construction helpers (`ResolveMethodRow`,
+    `BuildOverloadsVm`).
+  * **Inspector cross-tab "Call instance method…"** — right-click any
+    instance in the Inspector's Instances ListBox → "Call method on
+    this instance… (switch to Methods)" snaps `SelectedInstance` to the
+    right-clicked row and switches the right-pane TabControl to
+    Methods. From there, the existing Methods-grid right-click
+    (above) opens MethodCallWindow with the `Instance address` textbox
+    pre-filled. The cross-tab handoff is scope-checked
+    (`GetDefaultMethodCallInstance` returns the inspector's selected
+    instance ONLY when `Browser.SelectedClass` matches `Inspector`'s
+    `TargetAssembly + TargetNamespace + TargetName` — strict equality
+    on all three) so a stale inspector instance can't bleed into a
+    method call on a different class.
+  * Threading: `MethodOverloadsViewModel` constructor gains an optional
+    `defaultInstanceAddress` param that's forwarded to
+    `MethodCallViewModel` when a row's "Call method…" is invoked.
+    `MethodCallViewModel` already had a `defaultInstanceAddress`
+    constructor param (added in 19d for future use); 19d-2 finally
+    populates it from a real source.
+  * AOT publish stays clean — 0/0 trim/AOT analyzer warnings;
+    `DiscreteUI.exe` 38.3 MB.
+  * Files: [`MainWindow.axaml.cs`](../ui/UnityDumpUI/Views/MainWindow.axaml.cs)
+    (split handlers + helpers + Inspector instance handler),
+    [`MainWindow.axaml`](../ui/UnityDumpUI/Views/MainWindow.axaml)
+    (rewire menu Click + add Instances ListBox ContextMenu),
+    [`MethodOverloadsViewModel.cs`](../ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs)
+    (new `DefaultInstanceAddress` property + ctor param),
+    [`MethodOverloadsWindow.axaml.cs`](../ui/UnityDumpUI/Views/MethodOverloadsWindow.axaml.cs)
+    (forward `DefaultInstanceAddress` into `MethodCallViewModel`),
+    [`Strings/en.axaml`](../ui/UnityDumpUI/Resources/Strings/en.axaml)
+    (new `Inspector.CallMethodOnInstanceMenu` resource).
+  * Deferred to a hypothetical 19d-3 (no user ask yet): smart-typed
+    editors (NumericUpDown for sized ints, ComboBox for enums via
+    `getEnumValues`).
+
 - [x] **19e** Lua bridge — landed 2026-05-07, build #224. New
   `scripts/unity_invoke.lua` (18 KB; standalone — does NOT `require` the
   sibling scripts). Closes the original CLAUDE.md goal "invoke managed
