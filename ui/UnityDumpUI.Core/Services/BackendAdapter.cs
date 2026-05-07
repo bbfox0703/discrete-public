@@ -342,6 +342,56 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `findMethodInstances` — Phase 18a-2. Walks the supplied class's
+    /// declared methods and returns every overload of <paramref name="method"/>
+    /// with native address + decoded signature. Pass
+    /// <paramref name="signatureMatch"/> as a substring to narrow when a
+    /// caller already knows part of the signature (e.g. <c>"Vector3"</c>).
+    /// </summary>
+    public async Task<FindMethodInstancesResult> FindMethodInstancesAsync(
+        string assembly, string @namespace, string className, string method,
+        string? signatureMatch = null, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["assembly"]  = Str(assembly),
+            ["namespace"] = Str(@namespace),
+            ["name"]      = Str(className),
+            ["method"]    = Str(method),
+        };
+        if (!string.IsNullOrEmpty(signatureMatch))
+            args["signatureMatch"] = Str(signatureMatch);
+        var env = await _pipe.SendAsync(
+            "findMethodInstances", args,
+            ProtocolJsonContext.Default.RpcEnvelopeFindMethodInstancesResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("findMethodInstances returned no result");
+    }
+
+    /// <summary>
+    /// `getMethodAobPattern` — Phase 18a-3. Reads <paramref name="length"/>
+    /// bytes (default 32, capped 128) from <paramref name="address"/>,
+    /// disassembles them, returns a CE-style AOB pattern with rel8/rel32
+    /// immediates and RIP-relative ModRM disp32 fields wildcarded. Soft
+    /// errors (unreadable address) land in
+    /// <see cref="GetMethodAobPatternResult.Error"/> instead of throwing.
+    /// </summary>
+    public async Task<GetMethodAobPatternResult> GetMethodAobPatternAsync(
+        string address, int length = 32, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["address"] = Str(address),
+            ["length"]  = Int(length),
+        };
+        var env = await _pipe.SendAsync(
+            "getMethodAobPattern", args,
+            ProtocolJsonContext.Default.RpcEnvelopeGetMethodAobPatternResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("getMethodAobPattern returned no result");
+    }
+
+    /// <summary>
     /// `readMemory` — raw byte read. <paramref name="size"/> must be in
     /// [1, 1048576]; soft errors land in <see cref="ReadMemoryResult.Error"/>.
     /// </summary>

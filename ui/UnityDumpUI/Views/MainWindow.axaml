@@ -627,7 +627,8 @@
                        PlaceholderText="{StaticResource Browser.FilterMethodsWatermark}"
                        Text="{Binding Browser.MethodFilter, Mode=TwoWay}"
                        Margin="0,0,0,4" />
-              <DataGrid ItemsSource="{Binding Browser.FilteredMethods}"
+              <DataGrid x:Name="MethodsDataGrid"
+                        ItemsSource="{Binding Browser.FilteredMethods}"
                         IsReadOnly="True"
                         AutoGenerateColumns="False"
                         CanUserResizeColumns="True"
@@ -635,6 +636,15 @@
                         CanUserSortColumns="True"
                         GridLinesVisibility="Horizontal"
                         x:DataType="vm:MainWindowViewModel">
+                <DataGrid.ContextMenu>
+                  <!-- Phase 18c: right-click any row → enumerate every overload
+                       of this method on the selected class, generate AOB AA
+                       script for one (or many) selected overloads. -->
+                  <ContextMenu>
+                    <MenuItem Header="{StaticResource Browser.MethodFindOverloadsMenu}"
+                              Click="OnMethodFindOverloadsClicked" />
+                  </ContextMenu>
+                </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTextColumn Header="{StaticResource Browser.ColName}"    Width="*"
                                       Binding="{Binding Name, x:DataType=vm:MethodRow}" />

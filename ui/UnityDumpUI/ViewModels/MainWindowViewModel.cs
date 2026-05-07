@@ -191,6 +191,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public IProcessEnumerator ProcessEnumerator => _processes;
 
+    /// <summary>Phase 18c — exposed so the View can construct sub-VMs
+    /// (e.g. <c>MethodOverloadsViewModel</c>) without smuggling the adapter
+    /// through Browser. Both the adapter and the logger are stable for the
+    /// lifetime of the main window.</summary>
+    public BackendAdapter BackendAdapter => _backend;
+    public FileLogger     Logger         => _logger;
+
     /// <summary>
     /// Phase 8 panels — assembly tree / class browser / field+method grids.
     /// Populated automatically after a successful handshake.

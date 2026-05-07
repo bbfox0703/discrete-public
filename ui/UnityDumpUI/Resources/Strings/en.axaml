@@ -143,4 +143,22 @@
   <sys:String x:Key="Handshake.AssembliesCount">Assemblies</sys:String>
   <sys:String x:Key="Handshake.Build">Build</sys:String>
   <sys:String x:Key="Handshake.Protocol">Protocol</sys:String>
+
+  <!-- Phase 18c — Methods grid context menu + Method Overloads modal. -->
+  <sys:String x:Key="Browser.MethodFindOverloadsMenu">Find overloads…</sys:String>
+
+  <sys:String x:Key="MethodOverloads.Title">Method overloads</sys:String>
+  <sys:String x:Key="MethodOverloads.Refresh">Refresh</sys:String>
+  <sys:String x:Key="MethodOverloads.SigFilterLabel">Signature filter</sys:String>
+  <sys:String x:Key="MethodOverloads.SigFilterWatermark">substring narrows by signature, e.g. Vector3</sys:String>
+  <sys:String x:Key="MethodOverloads.AobLengthLabel">AOB bytes</sys:String>
+  <sys:String x:Key="MethodOverloads.ColSignature">Signature</sys:String>
+  <sys:String x:Key="MethodOverloads.ColReturn">Returns</sys:String>
+  <sys:String x:Key="MethodOverloads.ColAddress">Address</sys:String>
+  <sys:String x:Key="MethodOverloads.ColSuffix">Suffix</sys:String>
+  <sys:String x:Key="MethodOverloads.ColModifiers">Modifiers</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyAobScript">Copy AOB AA script</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyRegisterSymbol">Copy registerSymbol script</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyAddresses">Copy addresses</sys:String>
+  <sys:String x:Key="MethodOverloads.Close">Close</sys:String>
 </ResourceDictionary>

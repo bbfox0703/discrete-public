@@ -165,6 +165,47 @@ public partial class MainWindow : Window
         await vm.LookupInspectorAddressAsync(addr).ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// Phase 18c — right-click on a Methods row → enumerate every overload
+    /// of that method on the currently-selected class, in a modal window
+    /// that lets the user pick one or many and copy an AOB AA script. The
+    /// selected-class spec comes from <see cref="AssemblyBrowserViewModel"/>
+    /// (which already drove the Methods grid the user just clicked).
+    /// </summary>
+    private async void OnMethodFindOverloadsClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var browser = vm.Browser;
+        if (browser.SelectedAssembly is null || browser.SelectedClass is null) return;
+
+        // Resolve which row the right-click targeted. Fall back to the
+        // grid's current SelectedItem when the context menu was opened
+        // without a row beneath the pointer.
+        MethodRow? targetRow = null;
+        if (sender is Avalonia.Controls.MenuItem mi &&
+            mi.Parent is Avalonia.Controls.ContextMenu cm &&
+            cm.PlacementTarget is Avalonia.Controls.DataGrid placedGrid &&
+            placedGrid.SelectedItem is MethodRow sel)
+        {
+            targetRow = sel;
+        }
+        if (targetRow is null)
+        {
+            var methodsGrid = this.FindControl<Avalonia.Controls.DataGrid>("MethodsDataGrid");
+            targetRow = methodsGrid?.SelectedItem as MethodRow;
+        }
+        if (targetRow is null) return;
+
+        var overloadsVm = new MethodOverloadsViewModel(
+            vm.BackendAdapter, vm.Logger,
+            browser.SelectedAssembly.Name,
+            browser.SelectedClass.Namespace,
+            browser.SelectedClass.Name,
+            targetRow.Name);
+        var win = new MethodOverloadsWindow(overloadsVm);
+        await win.ShowDialog(this);
+    }
+
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions

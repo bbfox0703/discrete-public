@@ -366,3 +366,65 @@ public sealed class MetadataStatsResult
     [JsonPropertyName("verdict")]            public string?  Verdict           { get; set; }
     [JsonPropertyName("error")]              public string?  Error             { get; set; }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 18 — find method instances + AOB pattern generator.
+// findMethodInstances enumerates every overload of a named method on a class
+// and returns each one's native address (Mono: post-JIT; IL2CPP: AOT) +
+// decoded signature + a symbol-safe humanSuffix used for AA-script naming.
+// getMethodAobPattern reads N bytes at any address, walks them with a
+// minimal x64 length disassembler, returns a CE-style pattern with
+// rel8/rel32 immediates and RIP-relative ModRM disp32 wildcarded.
+// ---------------------------------------------------------------------------
+
+public sealed class FindMethodInstancesResult
+{
+    [JsonPropertyName("method")]  public string                 Method  { get; set; } = string.Empty;
+    [JsonPropertyName("count")]   public int                    Count   { get; set; }
+    [JsonPropertyName("matches")] public List<MethodOverloadEntry> Matches { get; set; } = new();
+    [JsonPropertyName("error")]   public string?                Error   { get; set; }
+}
+
+public sealed class MethodOverloadEntry
+{
+    [JsonPropertyName("name")]               public string       Name              { get; set; } = string.Empty;
+    [JsonPropertyName("token")]              public uint         Token             { get; set; }
+    [JsonPropertyName("flags")]              public uint         Flags             { get; set; }
+    [JsonPropertyName("iflags")]             public uint         IFlags            { get; set; }
+    [JsonPropertyName("isStatic")]           public bool         IsStatic          { get; set; }
+    [JsonPropertyName("isVirtual")]          public bool         IsVirtual         { get; set; }
+    [JsonPropertyName("isAbstract")]         public bool         IsAbstract        { get; set; }
+    [JsonPropertyName("compiled")]           public bool         Compiled          { get; set; }
+    [JsonPropertyName("address")]            public string?      Address           { get; set; }
+    [JsonPropertyName("paramTypes")]         public List<string> ParamTypes        { get; set; } = new();
+    [JsonPropertyName("paramNames")]         public List<string> ParamNames        { get; set; } = new();
+    [JsonPropertyName("returnType")]         public string?      ReturnType        { get; set; }
+    [JsonPropertyName("declaringClass")]     public string?      DeclaringClass    { get; set; }
+    [JsonPropertyName("declaringNamespace")] public string?      DeclaringNamespace { get; set; }
+    [JsonPropertyName("signature")]          public string?      Signature         { get; set; }
+    [JsonPropertyName("humanSuffix")]        public string?      HumanSuffix       { get; set; }
+}
+
+public sealed class GetMethodAobPatternResult
+{
+    [JsonPropertyName("address")]       public string?               Address       { get; set; }
+    [JsonPropertyName("length")]        public int                   Length        { get; set; }
+    [JsonPropertyName("pattern")]       public string?               Pattern       { get; set; }
+    [JsonPropertyName("bytes")]         public string?               Bytes         { get; set; }
+    [JsonPropertyName("moduleName")]    public string?               ModuleName    { get; set; }
+    [JsonPropertyName("moduleBase")]    public string?               ModuleBase    { get; set; }
+    [JsonPropertyName("moduleOffset")]  public string?               ModuleOffset  { get; set; }
+    [JsonPropertyName("moduleSize")]    public long                  ModuleSize    { get; set; }
+    [JsonPropertyName("stats")]         public AobPatternStats?      Stats         { get; set; }
+    [JsonPropertyName("decoderBailed")] public bool                  DecoderBailed { get; set; }
+    [JsonPropertyName("bailedAt")]      public int?                  BailedAt      { get; set; }
+    [JsonPropertyName("error")]         public string?               Error         { get; set; }
+}
+
+public sealed class AobPatternStats
+{
+    [JsonPropertyName("instructions")] public int Instructions { get; set; }
+    [JsonPropertyName("wildcards")]    public int Wildcards    { get; set; }
+    [JsonPropertyName("relBranches")]  public int RelBranches  { get; set; }
+    [JsonPropertyName("ripRel")]       public int RipRel       { get; set; }
+}
