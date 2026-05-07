@@ -39,7 +39,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     public MethodOverloadsViewModel(BackendAdapter backend, FileLogger logger,
                                     string assembly, string @namespace, string className,
                                     string methodName,
-                                    IAobMakerBridge? aobMaker = null)
+                                    IAobMakerBridge? aobMaker = null,
+                                    string? defaultInstanceAddress = null)
     {
         _backend     = backend;
         _logger      = logger;
@@ -48,6 +49,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         Namespace    = @namespace;
         ClassName    = className;
         MethodName   = methodName;
+        DefaultInstanceAddress = defaultInstanceAddress;
 
         TitleLabel = string.IsNullOrEmpty(@namespace)
             ? $"{className}.{methodName}"
@@ -66,6 +68,17 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     public string MethodName { get; }
     public string TitleLabel { get; }
     public bool   HasAobMakerBridge { get; }
+
+    /// <summary>
+    /// Phase 19d-2 — sticky `this` address piped through from the caller
+    /// (typically the Inspector's currently-selected instance, when its
+    /// target class matches the one this overloads window is for). Threaded
+    /// into <see cref="MethodCallViewModel"/> as the default
+    /// <c>InstanceAddress</c> so the user doesn't have to paste it by hand.
+    /// Null = no default (static methods don't need it; non-static methods
+    /// will show an empty Instance address textbox the user must fill in).
+    /// </summary>
+    public string? DefaultInstanceAddress { get; }
 
     /// <summary>
     /// View-supplied clipboard write — wired by the Window code-behind.

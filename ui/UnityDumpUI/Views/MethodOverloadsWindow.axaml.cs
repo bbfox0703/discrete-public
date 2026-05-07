@@ -63,6 +63,13 @@ public partial class MethodOverloadsWindow : Window
         // exists, prompting the user to refine.
         string sigMatch = string.IsNullOrEmpty(row.Signature) ? "()" : row.Signature;
 
+        // Phase 19d-2: pre-fill the Instance address textbox from
+        // DefaultInstanceAddress (typically the Inspector's currently-
+        // selected instance, threaded in by MainWindow.axaml.cs when the
+        // browser's selected class matches the inspector's target). Static
+        // methods ignore the field at the DLL layer, so harmlessly seeding
+        // it for static overloads is fine — the textbox is also dimmed
+        // unused via the existing IsStatic styling.
         var callVm = new MethodCallViewModel(
             _backend, _logger,
             parentVm.Assembly, parentVm.Namespace, parentVm.ClassName, parentVm.MethodName,
@@ -75,7 +82,8 @@ public partial class MethodOverloadsWindow : Window
                                 ? ln
                                 : new System.Collections.Generic.List<string>(row.ParamNames),
             returnType:       row.ReturnType ?? "System.Void",
-            isStatic:         row.IsStatic);
+            isStatic:         row.IsStatic,
+            defaultInstanceAddress: parentVm.DefaultInstanceAddress);
 
         var win = new MethodCallWindow(callVm);
         await win.ShowDialog(this);

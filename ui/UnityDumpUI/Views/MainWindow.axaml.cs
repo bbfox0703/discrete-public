@@ -178,9 +178,98 @@ public partial class MainWindow : Window
         var browser = vm.Browser;
         if (browser.SelectedAssembly is null || browser.SelectedClass is null) return;
 
-        // Resolve which row the right-click targeted. Fall back to the
-        // grid's current SelectedItem when the context menu was opened
-        // without a row beneath the pointer.
+        MethodRow? targetRow = ResolveMethodRow(sender);
+        if (targetRow is null) return;
+
+        var overloadsVm = BuildOverloadsVm(vm, browser, targetRow);
+        var win = new MethodOverloadsWindow(overloadsVm, vm.BackendAdapter, vm.Logger);
+        await win.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// Phase 19d-2 — right-click on a Methods row → "Call method… (pick
+    /// overload)". Fast-paths the common single-overload case: when
+    /// <c>findMethodInstances</c> returns count == 1, jump straight to the
+    /// MethodCallWindow seeded from that one entry — most user-defined
+    /// methods (<c>AddItems</c>, <c>get_numberOfItems</c>, <c>Save</c>) are
+    /// non-overloaded, so this saves an extra click. Multi-overload methods
+    /// (<c>Mathf.Abs</c>, <c>String.Concat</c>) still drop into the picker
+    /// modal so the user can choose. Errors (resolution failure, no entry
+    /// returned) fall through to the modal where the user sees the
+    /// diagnostic message in <c>vm.ErrorMessage</c>.
+    /// </summary>
+    private async void OnMethodCallMethodClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var browser = vm.Browser;
+        if (browser.SelectedAssembly is null || browser.SelectedClass is null) return;
+
+        MethodRow? targetRow = ResolveMethodRow(sender);
+        if (targetRow is null) return;
+
+        string asm = browser.SelectedAssembly.Name;
+        string ns  = browser.SelectedClass.Namespace;
+        string cls = browser.SelectedClass.Name;
+        string mth = targetRow.Name;
+        string? defaultInstance = GetDefaultMethodCallInstance(vm, asm, ns, cls);
+
+        // Probe overloads first. Single-overload → jump straight to the
+        // call dialog. Anything else (zero / multiple / RPC error) falls
+        // through to the picker modal — the user gets to see the actual
+        // diagnostic there and can refine via the signature filter.
+        UnityDumpUI.Core.Services.FindMethodInstancesResult? probe = null;
+        try
+        {
+            probe = await vm.BackendAdapter
+                .FindMethodInstancesAsync(asm, ns, cls, mth, signatureMatch: null,
+                                          ct: System.Threading.CancellationToken.None)
+                .ConfigureAwait(true);
+        }
+        catch
+        {
+            // Fall through to the picker modal — it will re-issue the same
+            // RPC and surface the same error in vm.ErrorMessage where the
+            // user can read it.
+        }
+
+        if (probe is not null && string.IsNullOrEmpty(probe.Error) &&
+            probe.Count == 1 && probe.Matches.Count == 1)
+        {
+            var only = probe.Matches[0];
+            string sig    = only.Signature ?? "()";
+            string sigLbl = only.Signature ?? "()";
+            var callVm = new MethodCallViewModel(
+                vm.BackendAdapter, vm.Logger,
+                asm, ns, cls, mth,
+                signatureMatch:   sig,
+                signatureDisplay: sigLbl,
+                paramTypes:       only.ParamTypes,
+                paramNames:       only.ParamNames,
+                returnType:       only.ReturnType ?? "System.Void",
+                isStatic:         only.IsStatic,
+                defaultInstanceAddress: defaultInstance);
+            var callWin = new MethodCallWindow(callVm);
+            await callWin.ShowDialog(this);
+            return;
+        }
+
+        // Zero / multiple overloads (or probe error): fall back to the
+        // picker. Caller's instance default still threads through, so the
+        // call dialog the user opens from a row-context-menu still
+        // pre-fills with the inspector's selected instance.
+        var overloadsVm = BuildOverloadsVm(vm, browser, targetRow);
+        var win = new MethodOverloadsWindow(overloadsVm, vm.BackendAdapter, vm.Logger);
+        await win.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// Resolve which Methods-grid row the context-menu click targeted —
+    /// trying the menu's PlacementTarget first (for menus opened on a
+    /// specific row), falling back to the grid's current SelectedItem when
+    /// the menu was opened without a row beneath the pointer.
+    /// </summary>
+    private MethodRow? ResolveMethodRow(object? sender)
+    {
         MethodRow? targetRow = null;
         if (sender is Avalonia.Controls.MenuItem mi &&
             mi.Parent is Avalonia.Controls.ContextMenu cm &&
@@ -194,22 +283,107 @@ public partial class MainWindow : Window
             var methodsGrid = this.FindControl<Avalonia.Controls.DataGrid>("MethodsDataGrid");
             targetRow = methodsGrid?.SelectedItem as MethodRow;
         }
-        if (targetRow is null) return;
+        return targetRow;
+    }
 
-        var overloadsVm = new MethodOverloadsViewModel(
+    /// <summary>
+    /// Build a <see cref="MethodOverloadsViewModel"/> for the right-clicked
+    /// Methods-grid row. Threads in the inspector's currently-selected
+    /// instance address (when its target class matches), so the
+    /// MethodCallWindow opened from a row context menu pre-fills the
+    /// Instance address textbox without the user pasting it.
+    /// </summary>
+    private static MethodOverloadsViewModel BuildOverloadsVm(MainWindowViewModel vm,
+                                                              AssemblyBrowserViewModel browser,
+                                                              MethodRow targetRow)
+    {
+        string asm = browser.SelectedAssembly!.Name;
+        string ns  = browser.SelectedClass!.Namespace;
+        string cls = browser.SelectedClass.Name;
+        return new MethodOverloadsViewModel(
             vm.BackendAdapter, vm.Logger,
-            browser.SelectedAssembly.Name,
-            browser.SelectedClass.Namespace,
-            browser.SelectedClass.Name,
-            targetRow.Name,
+            asm, ns, cls, targetRow.Name,
             // Re-use the inspector's existing AOBMaker bridge so a single
             // session shares one pipe-client lifetime + one log stream.
             // Bridge no-ops cleanly when AOBMaker / CE aren't running, so
             // the user just sees the "AOBMaker pipe unavailable" status
             // line — same behaviour as the Inspector's HEX button.
-            vm.Inspector.AobMaker);
-        var win = new MethodOverloadsWindow(overloadsVm, vm.BackendAdapter, vm.Logger);
-        await win.ShowDialog(this);
+            vm.Inspector.AobMaker,
+            // Phase 19d-2: thread the inspector's selected instance through
+            // when its target class matches the browser's selected class.
+            // Pre-fills the Instance address textbox in MethodCallWindow.
+            defaultInstanceAddress: GetDefaultMethodCallInstance(vm, asm, ns, cls));
+    }
+
+    /// <summary>
+    /// Phase 19d-2 — return the inspector's currently-selected instance
+    /// address ONLY when its target class matches the (assembly, namespace,
+    /// class) the user is about to call a method on. Cross-class wiring
+    /// would silently feed a wrong-type pointer to the trampoline, which
+    /// the runtime would either crash on or quietly misinterpret — neither
+    /// is acceptable, so we scope strictly. Null = no default; the
+    /// MethodCallWindow shows an empty Instance textbox the user fills in.
+    /// </summary>
+    private static string? GetDefaultMethodCallInstance(MainWindowViewModel vm,
+                                                        string assembly, string @namespace, string className)
+    {
+        var inspector = vm.Inspector;
+        if (inspector.SelectedInstance is null) return null;
+        if (string.IsNullOrEmpty(inspector.TargetAssembly) || string.IsNullOrEmpty(inspector.TargetName))
+            return null;
+        if (!string.Equals(inspector.TargetAssembly, assembly, System.StringComparison.Ordinal))
+            return null;
+        if (!string.Equals(inspector.TargetNamespace ?? string.Empty, @namespace ?? string.Empty,
+                           System.StringComparison.Ordinal))
+            return null;
+        if (!string.Equals(inspector.TargetName, className, System.StringComparison.Ordinal))
+            return null;
+        return inspector.SelectedInstance.Address;
+    }
+
+    /// <summary>
+    /// Phase 19d-2 — right-click an Inspector instance → "Call method on
+    /// this instance…". Switches the right-pane TabControl over to the
+    /// Methods grid and ensures the right-clicked instance is the
+    /// inspector's <see cref="LiveInspectionViewModel.SelectedInstance"/>
+    /// so the GetDefaultMethodCallInstance helper picks it up when the
+    /// user right-clicks a method. Discoverability shim — the existing
+    /// Methods-grid right-click flow ("Call method… (pick overload)") does
+    /// all the heavy lifting; we just navigate the user there with the
+    /// instance address remembered.
+    /// </summary>
+    private void OnCallMethodOnInstanceClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var inspector = vm.Inspector;
+
+        // Resolve the right-clicked instance. Same pattern as the Methods
+        // grid handler — try the menu's PlacementTarget first, fall back to
+        // the ListBox's current SelectedItem.
+        InstanceItem? targetInstance = null;
+        if (sender is Avalonia.Controls.MenuItem mi &&
+            mi.Parent is Avalonia.Controls.ContextMenu cm &&
+            cm.PlacementTarget is Avalonia.Controls.ListBox placedList &&
+            placedList.SelectedItem is InstanceItem sel)
+        {
+            targetInstance = sel;
+        }
+        if (targetInstance is null)
+        {
+            targetInstance = inspector.SelectedInstance;
+        }
+        if (targetInstance is null) return;
+
+        // Snap the inspector's SelectedInstance to the right-clicked row so
+        // the cross-class scope check in GetDefaultMethodCallInstance picks
+        // up THIS address (not whichever instance was previously walked).
+        // Setter cascades to OnSelectedInstanceChanged → WalkInstanceAsync,
+        // which is harmless and matches what a user click would do.
+        if (!ReferenceEquals(inspector.SelectedInstance, targetInstance))
+        {
+            inspector.SelectedInstance = targetInstance;
+        }
+        vm.SelectedDetailTabIndex = MainWindowViewModel.TabIndexMethods;
     }
 
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)

@@ -455,6 +455,21 @@
                   <ListBox ItemsSource="{Binding Inspector.Instances}"
                            SelectedItem="{Binding Inspector.SelectedInstance, Mode=TwoWay}"
                            x:DataType="vm:MainWindowViewModel">
+                    <!-- Phase 19d-2: right-click any instance → "Call method
+                         on this instance…". Switches to the Methods tab and
+                         remembers this instance so the subsequent
+                         "Call method… (pick overload)" right-click on any
+                         method pre-fills its `this` pointer (no manual
+                         paste). The handler lives in the code-behind and
+                         resolves the right-clicked row via the ListBox's
+                         SelectedItem (Avalonia auto-selects on right-click
+                         before showing the menu). -->
+                    <ListBox.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="{StaticResource Inspector.CallMethodOnInstanceMenu}"
+                                  Click="OnCallMethodOnInstanceClicked" />
+                      </ContextMenu>
+                    </ListBox.ContextMenu>
                     <ListBox.ItemTemplate>
                       <DataTemplate x:DataType="vm:InstanceItem">
                         <TextBlock Text="{Binding Label}"
@@ -637,21 +652,24 @@
                         GridLinesVisibility="Horizontal"
                         x:DataType="vm:MainWindowViewModel">
                 <DataGrid.ContextMenu>
-                  <!-- Phase 18c / 19d: right-click any row → enumerate every
-                       overload of this method on the selected class. From
-                       the modal that opens, the user can either generate AOB
-                       AA scripts for one (or many) overloads (Phase 18c) or
-                       right-click a single overload row to invoke it via
-                       `callMethod` (Phase 19d). The "Call method…" entry
-                       below is a shortcut that opens the same modal — users
-                       can't call directly from the Methods grid because we
-                       don't know which overload to target until the user
-                       picks one in the overloads window. -->
+                  <!-- Phase 18c / 19d / 19d-2: right-click any row →
+                       enumerate every overload of this method on the
+                       selected class. Two paths:
+                       • "Find overloads…" always opens the picker modal
+                         (where the user can copy AOB / registerSymbol AA
+                         scripts, or right-click a single overload to call
+                         it via `callMethod`).
+                       • "Call method… (pick overload)" probes
+                         findMethodInstances first; when count==1 it skips
+                         the picker and jumps straight to the
+                         MethodCallWindow seeded from that single overload.
+                         Multi-overload methods (Mathf.Abs, String.Concat)
+                         still drop into the picker for the user to choose. -->
                   <ContextMenu>
                     <MenuItem Header="{StaticResource Browser.MethodFindOverloadsMenu}"
                               Click="OnMethodFindOverloadsClicked" />
                     <MenuItem Header="{StaticResource Browser.MethodCallMethodMenu}"
-                              Click="OnMethodFindOverloadsClicked" />
+                              Click="OnMethodCallMethodClicked" />
                   </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
