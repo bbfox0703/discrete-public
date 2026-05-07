@@ -4,7 +4,7 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-07
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 (17a/b/c/d) + 18 (18a/b/c/d) all closed**. **Phase 18** (find method instances + AOB AA-script generator + AOBMaker direct push) closed on 2026-05-07 — `findMethodInstances` + `getMethodAobPattern` ship end-to-end across DLL → UI → CE; `unity_symbols.lua` gains `registerMethodOverloads`. **Phase 12d** (32-bit Mono) is the only formally-deferred phase. Open feature work: **Phase 19** (Lua-callable Unity methods — newly drafted, the long-standing "invoke managed methods from Lua with marshaled args" goal), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 (17a/b/c/d) + 18 (18a/b/c/d) + 19a + 19b closed and verified live**. 19a green on SaGa F2R (IL2CPP); 19b green on BongoCat (Mono) — both backends ship `callMethod` end-to-end with byte-identical wire shape. Per-backend error code suffix only. **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -93,7 +93,7 @@
 - Lessons learned (still applicable):
   - VS DevShell loading must use `Import-Module Microsoft.VisualStudio.DevShell.dll` + `Enter-VsDevShell` cmdlet (NOT `Launch-VsDevShell.ps1` — recurses on VS 18)
   - `Avalonia.ReactiveUI` has no v12 release; use `CommunityToolkit.Mvvm` 8.x for AOT-friendly MVVM
-  - `Tmds.DBus.Protocol` 0.9x triggers NU1903; pin to `0.92.0` in every csproj
+  - `Tmds.DBus.Protocol` was a transitive Linux-only dep pulled in by `Avalonia.Desktop` → `Avalonia.X11` → `Avalonia.FreeDesktop`. After 19a we dropped `Avalonia.Desktop` in favor of `Avalonia.Win32` directly (Windows-only build per project scope) — both the Tmds.DBus override pins AND the ILC "will always throw" dead-code diagnostics for X11/DBus entry points are gone.
   - `BuiltInComInteropSupport=false` is required for Avalonia 12 + Native AOT
 
 ---
@@ -597,29 +597,57 @@ Out (v2 follow-ups, deliberately not started):
 
 ### Sub-phases (mirror Phase 17/18 shape)
 
-- [ ] **19a** DLL handler — IL2CPP first (simpler: AOT `methodPointer`
-  ready, no JIT step). New pipe RPC `callMethod(assembly, ns, class,
-  method, [signatureMatch], [args])` for **static** methods only in 19a.
-  Server-side: locate the `MethodInfo*` via the same parent-chain walk
-  Phase 18a uses (depth cap 16 + `signatureMatch` substring filter).
-  Marshal each arg per the wire `type` tag against the resolved formal
-  parameter type; build the `void**` params array; call
-  `il2cpp_runtime_invoke(method, NULL, params, &exc)` inside a
-  `ThreadAttachGuard`. Capture exception + boxed return value. SEH-leaf
-  primitives reuse the MethodFinder pattern. New required IL2CPP resolver
-  bindings: `il2cpp_runtime_invoke`, `il2cpp_object_unbox`,
-  `il2cpp_string_new`, `il2cpp_string_chars`, `il2cpp_string_length`,
-  `il2cpp_exception_get_message_internal` (or read `Il2CppException`
-  layout directly). Smoke: `tools/Test-CallMethod.ps1` (mirrors
-  `Test-FindMethodInstances.ps1`).
+- [x] **19a** DLL handler — IL2CPP first (static methods only). Landed
+  2026-05-07. New module pair `dll/src/il2cpp/IL2CPPMethodInvoker.{h,cpp}`
+  + new pipe RPC `callMethod(assembly, ns, class, method, [signatureMatch],
+  [instance], [args])`. Resolver gains six optional bindings
+  (`il2cpp_runtime_invoke`, `il2cpp_object_unbox`,
+  `il2cpp_object_get_class`, `il2cpp_string_new`, `il2cpp_string_chars`,
+  `il2cpp_string_length`); the three string-related ones are pre-bound for
+  19c but unused in 19a. Single-pass overload resolution mirrors Phase
+  18a's iterator (depth-cap method walk + `signatureMatch` substring
+  filter) and returns the `MethodInfo*` directly. Marshaling uses one
+  8-byte slot per arg (low-N-byte writes, upper bits zero — matches
+  IL2CPP's `libil2cpp/vm/Runtime.cpp::Invoke` convention). Whole invoke
+  wrapped in a single SEH leaf so a hard crash in the JIT/AOT entry
+  becomes `error: native_crash_in_runtime_invoke` instead of tearing down
+  the host. Exception path: `il2cpp_object_get_class` →
+  `il2cpp_class_get_name` for the type, `Il2CppException + 0x18` for the
+  `_message` System.String pointer (decoded via the same UTF-16 → UTF-8
+  layout the Inspector's String field already uses). Return decode
+  switches on the resolved formal `returnType`: void/bool/int*/uint*/
+  float/double unboxed via `object_unbox`; reference types surface as the
+  raw managed pointer (`returnValue: "0x..."`); `System.String` returns
+  surface as Address in 19a (19c will decode to UTF-8). Spec doc:
+  [docs/lua-invoke.md](lua-invoke.md). Pipe-protocol entry:
+  [pipe-protocol.md#callmethod-il2cpp](pipe-protocol.md#callmethod-il2cpp).
+  Smoke: `tools/Test-CallMethod.ps1` (positive / exception / overload-disambig
+  scenarios). 19a explicitly rejects `instance != 0`
+  (`instance_methods_not_supported_in_19a`), non-static methods
+  (`instance_required_for_non_static`), and string args
+  (`string_args_not_supported_in_19a`) — all three lift in 19c.
 
-- [ ] **19b** Mono port — `mono_runtime_invoke(method, NULL, void**,
-  &exc)` with the same arg-marshaling semantics as 19a. New required
-  Mono resolver bindings: `mono_runtime_invoke`, `mono_object_unbox`,
-  `mono_string_new`, `mono_string_to_utf8`, `mono_string_chars`,
-  `mono_string_length`. Reuses the existing `monoCompileMethod` path
-  internally before invoke (both backends now reach feature parity
-  for static methods).
+- [x] **19b** Mono port — landed 2026-05-07, build #213. New module pair
+  `dll/src/mono/MonoMethodInvoker.{h,cpp}` mirrors the IL2CPP shape
+  exactly (single-pass overload resolver, 8-byte-slot marshaling, SEH
+  wrap, `MonoException + 0x18` for `_message` decode). Resolver gains six
+  new optional bindings (`mono_runtime_invoke`, `mono_object_unbox`,
+  `mono_object_get_class`, `mono_string_new`, `mono_string_chars`,
+  `mono_string_length`); the three string-related ones are pre-bound for
+  19c but unused in 19b. Address field of the response is populated via
+  the existing `mono_compile_method` path (Mono is JIT — no
+  AOT-`methodPointer` shortcut). Wire shape is byte-identical to IL2CPP;
+  per-backend error codes are `instance_methods_not_supported_in_19b` /
+  `string_args_not_supported_in_19b` / `mono_runtime_invoke unbound`.
+  Acceptance: same canonical positive (`Math.Abs(int):-7 → 7`) +
+  exception (`Convert.ToByte(int):-1 → OverflowException`) +
+  overload-disambig gates that 19a verified, against a Mono game
+  (BongoCat) instead of SaGa F2R. **All three gates verified live
+  2026-05-07** — `Math.Abs(int):-7 → 7`, `Math.Abs(double):-3.14159
+  → 3.14159` via `signatureMatch=(System.Double)`, `Convert.ToByte(int):-1
+  → System.OverflowException` (host process stayed alive, message
+  decoded cleanly from `MonoException + 0x18` confirming the shared
+  System.Exception layout assumption).
 
 - [ ] **19c** Instance methods + string marshaling. Adds:
   * `instance` arg parsed as hex address; passed as `this` to runtime

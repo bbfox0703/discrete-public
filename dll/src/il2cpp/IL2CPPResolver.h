@@ -54,6 +54,20 @@ using fn_free                   = void            (*)(void*);
 // Optional — falls back to the catch-all decode when unbound.
 using fn_class_from_il2cpp_type = Il2CppClass*    (*)(const Il2CppType*);
 
+// Phase 19 — managed-method invocation. `il2cpp_runtime_invoke` boxes the
+// return value (or returns NULL for void), captures any managed exception
+// in `*exc`. `il2cpp_object_unbox` returns a pointer to the unboxed bytes
+// for value-type returns. `il2cpp_object_get_class` is the bridge from a
+// boxed object to its class — used to resolve the exception's type name.
+// String-related entries are bound now even though 19a doesn't use them
+// (19c needs them for string args / string return UTF-16 → UTF-8 decode).
+using fn_runtime_invoke         = Il2CppObject*  (*)(const MethodInfo*, void* /*obj*/, void** /*params*/, Il2CppException** /*exc*/);
+using fn_object_unbox           = void*          (*)(Il2CppObject*);
+using fn_object_get_class       = Il2CppClass*   (*)(Il2CppObject*);
+using fn_string_new             = Il2CppString*  (*)(const char* /*utf8*/);
+using fn_string_chars           = std::uint16_t* (*)(Il2CppString*);
+using fn_string_length          = std::int32_t   (*)(Il2CppString*);
+
 struct Resolver {
     bool         resolved = false;
     std::wstring moduleName;        // L"GameAssembly.dll"
@@ -96,6 +110,13 @@ struct Resolver {
     fn_type_get_name          type_get_name          = nullptr;
     fn_free                   free                   = nullptr;
     fn_class_from_il2cpp_type class_from_il2cpp_type = nullptr;
+    // Phase 19 — managed-method invocation.
+    fn_runtime_invoke         runtime_invoke         = nullptr;
+    fn_object_unbox           object_unbox           = nullptr;
+    fn_object_get_class       object_get_class       = nullptr;
+    fn_string_new             string_new             = nullptr;
+    fn_string_chars           string_chars           = nullptr;
+    fn_string_length          string_length          = nullptr;
 };
 
 const Resolver& GetResolver();

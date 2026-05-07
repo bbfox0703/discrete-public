@@ -101,6 +101,16 @@ void DoResolve() {
     bindOpt("il2cpp_free",                      g_resolver.free);
     // Type → class bridge for inspector enum / value-type detection.
     bindOpt("il2cpp_class_from_il2cpp_type",    g_resolver.class_from_il2cpp_type);
+    // Phase 19 — managed-method invocation. Optional at resolve time so
+    // pre-19 features (handshake / class walking / findMethodInstances)
+    // keep working on minimal Unity builds where these are missing; the
+    // callMethod handler refuses cleanly when runtime_invoke is unbound.
+    bindOpt("il2cpp_runtime_invoke",            g_resolver.runtime_invoke);
+    bindOpt("il2cpp_object_unbox",              g_resolver.object_unbox);
+    bindOpt("il2cpp_object_get_class",          g_resolver.object_get_class);
+    bindOpt("il2cpp_string_new",                g_resolver.string_new);
+    bindOpt("il2cpp_string_chars",              g_resolver.string_chars);
+    bindOpt("il2cpp_string_length",             g_resolver.string_length);
 
     g_resolver.resolved = (okReq == totalReq);
 

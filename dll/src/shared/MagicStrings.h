@@ -68,4 +68,14 @@ inline constexpr const char* CmdGetClassRangeStats    = "getClassRangeStats";
 inline constexpr const char* CmdFindMethodInstances   = "findMethodInstances";
 inline constexpr const char* CmdGetMethodAobPattern   = "getMethodAobPattern";
 
+// Phase 19 — Lua-callable Unity methods (managed invocation).
+// callMethod resolves a method by class + name (+ optional signatureMatch
+// to disambiguate overloads), marshals primitive / null / address args
+// into a void** params array, calls the runtime invoke entry point, and
+// returns the unboxed primitive return value (or raw address for
+// reference-type returns) plus any captured managed exception.
+// 19a scope: IL2CPP, static methods only, primitive + null + address
+// args, primitive + address returns, no string args/returns.
+inline constexpr const char* CmdCallMethod            = "callMethod";
+
 }  // namespace UnityCEDumper::MagicStrings

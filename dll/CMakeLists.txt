@@ -56,6 +56,8 @@ set(DLL_MONO_SOURCES
     src/mono/MonoAddressFinder.h
     src/mono/MonoMethodFinder.cpp
     src/mono/MonoMethodFinder.h
+    src/mono/MonoMethodInvoker.cpp
+    src/mono/MonoMethodInvoker.h
 )
 
 # IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
@@ -80,6 +82,8 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPAddressFinder.h
     src/il2cpp/IL2CPPMethodFinder.cpp
     src/il2cpp/IL2CPPMethodFinder.h
+    src/il2cpp/IL2CPPMethodInvoker.cpp
+    src/il2cpp/IL2CPPMethodInvoker.h
 )
 
 # ---------------------------------------------------------------------------

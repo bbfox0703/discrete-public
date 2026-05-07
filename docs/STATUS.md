@@ -1,9 +1,49 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (one commit ahead of origin — push pending)
-**Last commit**: `06195cc` (`docs(plan): draft Phase 19 — Lua-callable Unity methods + close out 18`)
-**Build**: 208
-**Current state**: **Phases 0–15 + 9.5 + 11.5 + 14c + 17 (17a/b/c/d) + 18 (18a/b/c/d) all closed**. **Phase 19** (Lua-callable Unity methods) drafted, not started — five sub-phases ready in [plan.md](plan.md#phase-19--lua-callable-unity-methods-lua--managed-invocation). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase.
+**Branch**: `dev` (uncommitted Phase 19a/b + Windows-only UI cleanup in tree — push pending)
+**Last commit**: `526e4be` (`docs: refresh STATUS / Archiutecture / pipe-protocol / test-matrix for Phase 17+18 closure`)
+**Build**: 213
+**Current state**: **Phases 0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b all closed.** 19a verified live on SaGa F2R (IL2CPP); 19b verified live on BongoCat (Mono) — both backends green on all three acceptance gates (positive return, overload disambig, managed-exception capture). Wire shape byte-identical between the two backends; per-backend error code suffix only. UI also went **Windows-only** this session (`Avalonia.Desktop` → `Avalonia.Win32` + `Avalonia.Skia`; X11/FreeDesktop/Tmds.DBus dropped from the AOT graph; `DiscreteUI.exe` 39.0 → 38.0 MB). Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase.
+
+## What landed in this session — Phase 19b (Mono `callMethod`)
+
+- **New module pair** `dll/src/mono/MonoMethodInvoker.{h,cpp}` mirrors `IL2CPPMethodInvoker` exactly — same single-pass overload resolver, same 8-byte-slot marshaling, same SEH wrap, same `+0x18` exception `_message` decode. Dispatcher implementation is the only thing that changes (`mono_runtime_invoke` instead of `il2cpp_runtime_invoke`).
+- **Resolver bumps** — six new optional Mono bindings: `mono_runtime_invoke`, `mono_object_unbox`, `mono_object_get_class` (load-bearing in 19b), plus `mono_string_new` / `mono_string_chars` / `mono_string_length` (pre-bound for 19c, unused now). Note: `mono_string_new` takes a `MonoDomain*` first arg, unlike IL2CPP's signature — handled in the resolver typedef.
+- **Address-field path differs** — IL2CPP reads `MethodInfo->methodPointer` directly (AOT entry point ready). Mono is JIT, so the address comes from `mono_compile_method`, which is already bound for Phase 18's `findMethodInstances`. The invoker calls compile-method during overload resolution so the response carries the JIT'd entry point address; `mono_runtime_invoke` itself doesn't need a pre-compile (it JITs internally).
+- **Wire shape is byte-identical to 19a.** Per-backend error-code suffix only: `instance_methods_not_supported_in_19b` / `string_args_not_supported_in_19b` / `mono_runtime_invoke unbound`. Test scripts (`Test-CallMethod.ps1`) work unchanged against both backends — only the `-ClassAssembly` / `-Method` triple changes per game.
+- **Class-namespace difference** — `Mono::CallArg` / `Mono::CallReturn` / `Mono::CallMethodResult` are intentionally namespace-local duplicates of the IL2CPP types. The Mono and IL2CPP DLLs compile separately (`UnityDumper-Mono.dll` vs `UnityDumper-IL2CPP.dll`); sharing a single namespace would force one to depend on the other. The wire shapes ExportAPI.cpp emits on each side stay identical.
+- ✅ **Live verification (BongoCat / Mono, 2026-05-07, build #213)** — all three gates green, byte-identical wire shape to the IL2CPP path:
+  - **Positive (int)** `System.Math.Abs(int32:-7)` → `{ok:true, returnValue:7, returnType:"System.Int32"}`, ~4ms.
+  - **Overload disambig (double)** `System.Math.Abs(double:-3.14159)` via `signatureMatch=(System.Double)` → `3.14159` (System.Double).
+  - **Managed exception** `System.Convert.ToByte(int32:-1)` via `signatureMatch=(System.Int32)` → `ok:false`, `exception:"System.OverflowException: Value was either too large or too small for an unsigned byte."` — host stayed alive, message decoded cleanly from `MonoException + 0x18` (confirms Mono and IL2CPP do share the corlib System.Exception layout).
+- Both backends now at feature parity for static-method invocation. 19c is next — lifts the static-only restriction (instance dispatch + string in/out marshaling).
+
+---
+
+## What landed in this session — Windows-only UI cleanup
+
+- **Dropped `Avalonia.Desktop` metapackage** in favor of `Avalonia.Win32` directly. The metapackage was dragging in `Avalonia.X11` + `Avalonia.FreeDesktop` + `Tmds.DBus.Protocol` — all dead code on win-x64, but the trimmer left dangling references that ILC flagged as "Method '...' will always throw because: Failed to load type 'Tmds.DBus.Protocol.Connection'…" on every AOT publish. Linux is not in scope for this project (per user direction 2026-05-07); `Avalonia.Win32` is the bare Windows backend.
+- `Program.cs` switches from `.UsePlatformDetect()` (extension lives in `Avalonia.Desktop`) to `.UseWin32()` (lives in `Avalonia.Win32`).
+- Both `UnityDumpUI.csproj` and `UnityDumpUI.Tests.csproj` lose their explicit `Tmds.DBus.Protocol` 0.93.0 PackageReference — those were defensive overrides for a transitive Linux dep that no longer exists in the graph.
+- Trimmer-root list loses `Avalonia.Desktop` (the metapackage), keeps `Avalonia.Win32` + `Avalonia.Win32.Automation`.
+- Result: ILC dead-code diagnostics gone, AOT publish stays clean, `DiscreteUI.exe` should shrink slightly (X11/FreeDesktop assemblies no longer in the trimmed output).
+
+## What landed in this session — Phase 19a (IL2CPP `callMethod`)
+
+- **New module pair** `dll/src/il2cpp/IL2CPPMethodInvoker.{h,cpp}`. Single-pass overload resolver mirrors the Phase 18a iterator (depth-cap method walk + `signatureMatch` substring filter) and returns the matched `MethodInfo*` directly so the invoker doesn't need a second lookup.
+- **Resolver bumps** — six new optional bindings on `IL2CPPResolver`: `il2cpp_runtime_invoke`, `il2cpp_object_unbox`, `il2cpp_object_get_class` (load-bearing in 19a), plus `il2cpp_string_new` / `il2cpp_string_chars` / `il2cpp_string_length` (pre-bound for 19c, unused now). All optional so handshake / class walk / `findMethodInstances` keep working on minimal Unity builds where these are missing — `callMethod` itself returns `il2cpp_runtime_invoke unbound` cleanly.
+- **New wire RPC** `callMethod(assembly, ns, class, method, [signatureMatch], [instance], [args])`. 19a is **IL2CPP + static-only + primitive / null / address args**; instance dispatch + string args land in 19c with distinct error codes (`instance_methods_not_supported_in_19a`, `instance_required_for_non_static`, `string_args_not_supported_in_19a`). Full wire spec in [docs/lua-invoke.md](lua-invoke.md); pipe-protocol entry in [docs/pipe-protocol.md](pipe-protocol.md).
+- **Marshaling** uses one 8-byte slot per arg (low-N-byte writes, upper bits zero — matches IL2CPP's `libil2cpp/vm/Runtime.cpp::Invoke` convention). `void** params` then points at each slot. Null becomes a slot holding NULL; address args go straight in.
+- **SEH wrap** — the entire `runtime_invoke` call sits in a single SEH leaf, so a hard crash inside the JIT/AOT entry becomes `error: native_crash_in_runtime_invoke` instead of tearing down the host. Same convention every other DLL module follows (one set of `Seh*` leaves per `.cpp`, `#pragma warning(disable: 4509)`).
+- **Exception decode** — when `*exc != null`, we get the type name via `il2cpp_object_get_class` + `il2cpp_class_get_name` and read `_message` from `Il2CppException + 0x18` (Mono-derived `System.Exception` layout — stable across Unity 2018+). Decoded with the same UTF-16 → UTF-8 routine the Inspector's `System.String` field uses.
+- **Return decode** switches on the resolved formal `returnType`: `Void` → null, `Boolean`/int*/uint*/`Char` → unbox + memcpy into the right-width slot, `Single`/`Double` → unbox into double, `IntPtr`/`UIntPtr`/any reference type → raw managed pointer as `"0x..."` hex string. `System.String` returns surface as Address in 19a (19c will decode to UTF-8). Multi-field value-type returns (Vector3 etc.) come back as `Unsupported` with a `note` field saying decode is deferred to v2.
+- **Smoke test** `tools/Test-CallMethod.ps1` wraps three pre-canned scenarios: `-Scenario Abs` (positive — `Mathf.Abs(-7) → 7`), `-Scenario Throw` (managed exception — `Convert.ToInt32` on a null/garbage string), `-Scenario Float` (overload disambiguation via `signatureMatch=Single`). `-Scenario Custom` for arbitrary class/method/args.
+- ✅ **Live verification (SaGa F2R, 2026-05-07, build #212)** — all three 19a acceptance gates green:
+  - **Positive** `Mathf.Abs(int32:-7)` → `{ok:true, returnValue:7, returnType:"System.Int32"}`, ~2ms.
+  - **Overload disambig** `Mathf.Abs` with `signatureMatch=Single` + `float:-3.5` → `3.5` (System.Single) — confirms `signatureMatch` filter walks the same iterator order as Phase 18.
+  - **Managed exception** `Convert.ToByte(int32:-1)` with `signatureMatch=(System.Int32)` → `ok:false`, `returnValue:null`, `exception:"System.OverflowException: Value was either too large or too small for an unsigned byte."` — host process stayed alive, no log scrubbing required, exception type + `_message` decoded cleanly from the +0x18 layout.
+
+---
 
 This session closed **Phase 18 (Find Method Instances)** end-to-end. Headline outputs:
 
@@ -133,7 +173,7 @@ These remain confirmed clicked-through on the dev box:
 ### Pending verification (not yet exercised on a live game this session)
 
 - **Phase 18 multi-overload path** — needs a real overloaded method. Canonical case: `Vector3.Set(float, float, float)` exists but Unity inlines the Vector3-arg variant on Unity 2021.3 so SaGa F2R only shows one. Try `string.Equals` or any user-written overloaded method.
-- **AOBMaker `CreateAAScript` direct push** — code is in but not yet user-tested with CE + AOBMaker plugin running. Expected: clicking "Create AA in CE" creates a vtAutoAssembler entry titled `{Class}.{Method} {Suffix}` in CE's address list, optionally already enabled.
+- ✅ **AOBMaker `CreateAAScript` direct push** — verified live (2026-05-07) with CE + AOBMaker plugin running. Clicking "Create AA in CE" creates a vtAutoAssembler entry in CE's address list as expected.
 - **`unity_symbols.lua` `registerMethodOverloads`** — code is in but not yet exercised against a Lua console session.
 
 ---

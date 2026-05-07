@@ -739,6 +739,74 @@ the original address as a sanity-check trailing comment.
 
 ---
 
+## Phase 19a / 19b — Lua-callable Unity methods
+
+### `callMethod` *(IL2CPP + Mono)*
+
+Invokes a managed method via `il2cpp_runtime_invoke` (IL2CPP backend) or
+`mono_runtime_invoke` (Mono backend) with marshaled args and a typed
+return value. 19a/19b are **static-only + primitive / null / address
+args**. Instance dispatch + string args land in 19c. Wire shape is
+byte-identical between the two backends; the only difference visible to
+the caller is the `error` string when the load-bearing export is missing
+(`il2cpp_runtime_invoke unbound` vs `mono_runtime_invoke unbound`) and
+the per-backend variant of the static-only error codes
+(`*_in_19a` vs `*_in_19b`). Full spec, error-code table, marshaling
+rules, GC-root caveats: [lua-invoke.md](lua-invoke.md).
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assembly`, `namespace`, `name` | strings | identify the class — same shape as `getClassInfo` |
+| `method` | string | required — method name |
+| `signatureMatch` | string | optional — substring filter against the rendered signature, same semantics as `findMethodInstances` |
+| `instance` | hex string / int | reserved for 19c; non-null returns `instance_methods_not_supported_in_19a` |
+| `args` | array of `{type, value}` | one entry per formal parameter; `type` is one of `bool`/`byte`/`sbyte`/`int16`/`uint16`/`int32`/`uint32`/`int64`/`uint64`/`float`/`double`/`char`/`address`/`null` (string is reserved for 19c) |
+
+```jsonc
+// → success
+// {
+//   "ok":          true,
+//   "returnType":  "System.Int32",
+//   "returnValue": 7,
+//   "exception":   null,
+//   "elapsedMs":   2,
+//   "method": {
+//     "address":     "0x7FF6A7773740",
+//     "signature":   "(System.Int32)",
+//     "humanSuffix": "int"
+//   }
+// }
+//
+// → managed exception caught
+// {
+//   "ok":          false,
+//   "returnType":  "System.Int32",
+//   "returnValue": null,
+//   "exception":   "System.FormatException: Input string was not in a correct format.",
+//   "elapsedMs":   3,
+//   "method":      { "...": "..." }
+// }
+//
+// → resolution failure
+// { "error": "method_not_found" }     // or "ambiguous_method", "method_is_abstract", ...
+```
+
+`returnValue` encoding by `returnType`:
+
+| `returnType` | `returnValue` shape |
+| --- | --- |
+| `System.Void` | `null` |
+| `System.Boolean` / unsigned ints / `Char` | unsigned int |
+| signed ints | signed int |
+| `System.Single` / `Double` | float |
+| `System.IntPtr` / `UIntPtr` / any reference type | hex string `"0x..."` |
+| `System.String` | hex string `"0x..."` (raw managed pointer) — **19a/19b**. UTF-8 string — **19c**. |
+| Value type by value (Vector3 etc.) | `null` + `note` field saying decode is deferred to v2 |
+
+Switch on `returnType`, not on the JSON type of `returnValue`.
+
+---
+
 ### `il2cppGetMetadataTypeFields` *(IL2CPP)*
 
 Per-type field listing including const literals (which don't appear in the
@@ -786,6 +854,7 @@ present, with a best-effort string decode.
 | Identify the instance + class at an address (CE *what writes here*) | `whatIsAt` |
 | Enumerate every overload of a method with native addresses | `findMethodInstances` |
 | Generate a CE AOB pattern from a method's native address | `getMethodAobPattern` |
+| Invoke a managed method with marshaled args (IL2CPP + Mono, static-only in 19a/19b) | `callMethod` |
 
 ---
 

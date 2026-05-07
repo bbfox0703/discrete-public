@@ -16,6 +16,7 @@
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
 #  include "../mono/MonoMethodFinder.h"
+#  include "../mono/MonoMethodInvoker.h"
 #  include "../mono/MonoResolver.h"
 #  include "../mono/MonoThreadAttach.h"
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
@@ -23,6 +24,7 @@
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
 #  include "../il2cpp/IL2CPPMethodFinder.h"
+#  include "../il2cpp/IL2CPPMethodInvoker.h"
 #  include "../il2cpp/IL2CPPMetadataRegistration.h"
 #  include "../il2cpp/IL2CPPResolver.h"
 #  include "../il2cpp/IL2CPPThreadAttach.h"
@@ -1464,6 +1466,136 @@ void RegisterCoreHandlers() {
             {"matches", std::move(matches)},
         };
     });
+
+    // Phase 19b — callMethod (Mono, static-only). Mirror of the IL2CPP
+    // handler in the IL2CPP block below: same wire shape, same arg-marshal
+    // semantics, mono_runtime_invoke instead of il2cpp_runtime_invoke. 19c
+    // will lift the static-only / no-string restrictions; 19b stays tight
+    // so the wire shape matches IL2CPP exactly.
+    PipeServer::RegisterHandler(MagicStrings::CmdCallMethod,
+        [resolveClassFromArgs, parseAddr, formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        std::string methodName = args.value("method", std::string{});
+        if (methodName.empty()) return json{{"error", "missing 'method' arg"}};
+        std::string sigMatch   = args.value("signatureMatch", std::string{});
+
+        std::string err;
+        Mono::MonoClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        // 19b: instance must be absent / null. Parse for forward-compat; the
+        // invoker rejects non-zero with a distinct error code.
+        std::uintptr_t instance = 0;
+        if (args.contains("instance") && !args["instance"].is_null()) {
+            if (!parseAddr(args["instance"], instance)) {
+                return json{{"error", "invalid 'instance' (hex string or integer)"}};
+            }
+        }
+
+        // Decode each {type, value} into a typed CallArg. Identical wire
+        // contract to the IL2CPP handler — same `type` tags, same JSON
+        // encodings. Spec: docs/lua-invoke.md.
+        using Mono::CallArg;
+        using Mono::CallArgKind;
+        std::vector<CallArg> typedArgs;
+
+        const json& argsArr = args.contains("args") && args["args"].is_array()
+                                ? args["args"] : json::array();
+        typedArgs.reserve(argsArr.size());
+        for (std::size_t i = 0; i < argsArr.size(); ++i) {
+            const json& a = argsArr[i];
+            if (!a.is_object()) {
+                return json{{"error", std::string{"args["} + std::to_string(i) + "] not an object"}};
+            }
+            std::string ty = a.value("type", std::string{});
+            CallArg out;
+
+            if (ty == "null") {
+                out.kind = CallArgKind::Null;
+            } else if (ty == "bool" || ty == "boolean") {
+                out.kind = CallArgKind::Bool;
+                if (a.contains("value")) {
+                    if      (a["value"].is_boolean())          out.i64 = a["value"].get<bool>() ? 1 : 0;
+                    else if (a["value"].is_number_integer())    out.i64 = a["value"].get<std::int64_t>();
+                    else if (a["value"].is_number_unsigned())   out.u64 = a["value"].get<std::uint64_t>();
+                }
+            } else if (ty == "byte"   || ty == "uint8")  { out.kind = CallArgKind::Byte;   out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "sbyte"  || ty == "int8")   { out.kind = CallArgKind::SByte;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "int16"  || ty == "short")  { out.kind = CallArgKind::Int16;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "uint16" || ty == "ushort") { out.kind = CallArgKind::UInt16; out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "int32"  || ty == "int")    { out.kind = CallArgKind::Int32;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "uint32" || ty == "uint")   { out.kind = CallArgKind::UInt32; out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "int64"  || ty == "long")   { out.kind = CallArgKind::Int64;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "uint64" || ty == "ulong")  { out.kind = CallArgKind::UInt64; out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "float"  || ty == "single") { out.kind = CallArgKind::Float;
+                  if (a.contains("value") && a["value"].is_number()) out.f = a["value"].get<double>();
+              }
+              else if (ty == "double") { out.kind = CallArgKind::Double;
+                  if (a.contains("value") && a["value"].is_number()) out.f = a["value"].get<double>();
+              }
+              else if (ty == "char")   { out.kind = CallArgKind::Char;
+                  if (a.contains("value")) {
+                      if      (a["value"].is_string() && !a["value"].get<std::string>().empty())
+                                                          out.u64 = static_cast<std::uint8_t>(a["value"].get<std::string>()[0]);
+                      else if (a["value"].is_number())     out.u64 = a["value"].get<std::uint64_t>();
+                  }
+              }
+              else if (ty == "string") {
+                  out.kind = CallArgKind::String;          // rejected by invoker in 19b
+                  out.s = a.value("value", std::string{});
+              }
+              else if (ty == "address" || ty == "intptr" || ty == "uintptr" || ty == "ptr") {
+                  out.kind = CallArgKind::Address;
+                  if (a.contains("value")) {
+                      std::uintptr_t addr = 0;
+                      if (parseAddr(a["value"], addr)) {
+                          out.u64 = addr;
+                      } else {
+                          return json{{"error", std::string{"args["} + std::to_string(i) + "].value not a valid address"}};
+                      }
+                  }
+              }
+              else {
+                  return json{{"error", std::string{"args["} + std::to_string(i) + "] unknown type '" + ty + "'"}};
+              }
+            typedArgs.push_back(std::move(out));
+        }
+
+        auto cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+
+        json returnValue = nullptr;
+        switch (cr.ret.kind) {
+        case Mono::CallReturn::Kind::Void:        returnValue = nullptr; break;
+        case Mono::CallReturn::Kind::SignedInt:   returnValue = cr.ret.i64; break;
+        case Mono::CallReturn::Kind::UnsignedInt: returnValue = cr.ret.u64; break;
+        case Mono::CallReturn::Kind::Float:       returnValue = cr.ret.f; break;
+        case Mono::CallReturn::Kind::Address:     returnValue = formatHex(cr.ret.u64); break;
+        case Mono::CallReturn::Kind::String:      returnValue = cr.ret.s; break;
+        case Mono::CallReturn::Kind::Unsupported: returnValue = nullptr; break;
+        }
+
+        json result;
+        if (!cr.error.empty()) {
+            result["ok"]    = false;
+            result["error"] = cr.error;
+            return result;
+        }
+        result["ok"]          = cr.ok;
+        result["returnType"]  = cr.ret.typeName;
+        result["returnValue"] = std::move(returnValue);
+        result["exception"]   = cr.exception.empty() ? json(nullptr) : json(cr.exception);
+        result["elapsedMs"]   = cr.elapsedMs;
+        result["method"] = json{
+            {"address",     formatHex(reinterpret_cast<std::uintptr_t>(cr.addressCalled))},
+            {"signature",   cr.methodSignature},
+            {"humanSuffix", cr.humanSuffix},
+        };
+        if (cr.ret.kind == Mono::CallReturn::Kind::Unsupported) {
+            result["note"] = "value-type-by-value returns are not decoded in 19b; pass an out-buffer in v2 or read the address";
+        }
+        return result;
+    });
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
@@ -2361,6 +2493,144 @@ void RegisterCoreHandlers() {
             {"count",   matches.size()},
             {"matches", std::move(matches)},
         };
+    });
+
+    // Phase 19a — callMethod (IL2CPP, static-only). Parses typed args from
+    // the JSON request, marshals into IL2CPP's void** params, invokes
+    // il2cpp_runtime_invoke under SEH, captures managed exceptions, and
+    // unboxes the return value per the resolved method's formal returnType.
+    // 19c will lift the static-only / no-string restrictions; 19a stays
+    // tight so the wire shape is locked in before instance dispatch lands.
+    PipeServer::RegisterHandler(MagicStrings::CmdCallMethod,
+        [resolveClassFromArgs, parseAddr, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::string methodName = args.value("method", std::string{});
+        if (methodName.empty()) return json{{"error", "missing 'method' arg"}};
+        std::string sigMatch   = args.value("signatureMatch", std::string{});
+
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        // 19a: instance must be absent / null. Parse for forward-compat; the
+        // invoker rejects non-zero with a distinct error code.
+        std::uintptr_t instance = 0;
+        if (args.contains("instance") && !args["instance"].is_null()) {
+            if (!parseAddr(args["instance"], instance)) {
+                return json{{"error", "invalid 'instance' (hex string or integer)"}};
+            }
+        }
+
+        // Decode each {type, value} into a typed CallArg. Numeric values may
+        // arrive as JSON int / uint / float / hex-string ("0xCAFEBABE") for
+        // address args. Enforce the wire `type` tags listed in
+        // docs/lua-invoke.md — unknown tags get rejected so a typo doesn't
+        // silently coerce to null.
+        using IL2CPP::CallArg;
+        using IL2CPP::CallArgKind;
+        std::vector<CallArg> typedArgs;
+
+        const json& argsArr = args.contains("args") && args["args"].is_array()
+                                ? args["args"] : json::array();
+        typedArgs.reserve(argsArr.size());
+        for (std::size_t i = 0; i < argsArr.size(); ++i) {
+            const json& a = argsArr[i];
+            if (!a.is_object()) {
+                return json{{"error", std::string{"args["} + std::to_string(i) + "] not an object"}};
+            }
+            std::string ty = a.value("type", std::string{});
+            CallArg out;
+
+            if (ty == "null") {
+                out.kind = CallArgKind::Null;
+            } else if (ty == "bool" || ty == "boolean") {
+                out.kind = CallArgKind::Bool;
+                if (a.contains("value")) {
+                    if      (a["value"].is_boolean())          out.i64 = a["value"].get<bool>() ? 1 : 0;
+                    else if (a["value"].is_number_integer())    out.i64 = a["value"].get<std::int64_t>();
+                    else if (a["value"].is_number_unsigned())   out.u64 = a["value"].get<std::uint64_t>();
+                }
+            } else if (ty == "byte"   || ty == "uint8")  { out.kind = CallArgKind::Byte;   out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "sbyte"  || ty == "int8")   { out.kind = CallArgKind::SByte;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "int16"  || ty == "short")  { out.kind = CallArgKind::Int16;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "uint16" || ty == "ushort") { out.kind = CallArgKind::UInt16; out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "int32"  || ty == "int")    { out.kind = CallArgKind::Int32;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "uint32" || ty == "uint")   { out.kind = CallArgKind::UInt32; out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "int64"  || ty == "long")   { out.kind = CallArgKind::Int64;  out.i64 = a.value("value", std::int64_t{0}); }
+              else if (ty == "uint64" || ty == "ulong")  { out.kind = CallArgKind::UInt64; out.u64 = a.value("value", std::uint64_t{0}); }
+              else if (ty == "float"  || ty == "single") { out.kind = CallArgKind::Float;
+                  if (a.contains("value") && a["value"].is_number()) out.f = a["value"].get<double>();
+              }
+              else if (ty == "double") { out.kind = CallArgKind::Double;
+                  if (a.contains("value") && a["value"].is_number()) out.f = a["value"].get<double>();
+              }
+              else if (ty == "char")   { out.kind = CallArgKind::Char;
+                  if (a.contains("value")) {
+                      if      (a["value"].is_string() && !a["value"].get<std::string>().empty())
+                                                          out.u64 = static_cast<std::uint8_t>(a["value"].get<std::string>()[0]);
+                      else if (a["value"].is_number())     out.u64 = a["value"].get<std::uint64_t>();
+                  }
+              }
+              else if (ty == "string") {
+                  out.kind = CallArgKind::String;          // rejected by invoker in 19a
+                  out.s = a.value("value", std::string{});
+              }
+              else if (ty == "address" || ty == "intptr" || ty == "uintptr" || ty == "ptr") {
+                  out.kind = CallArgKind::Address;
+                  if (a.contains("value")) {
+                      std::uintptr_t addr = 0;
+                      if (parseAddr(a["value"], addr)) {
+                          out.u64 = addr;
+                      } else {
+                          return json{{"error", std::string{"args["} + std::to_string(i) + "].value not a valid address"}};
+                      }
+                  }
+              }
+              else {
+                  return json{{"error", std::string{"args["} + std::to_string(i) + "] unknown type '" + ty + "'"}};
+              }
+            typedArgs.push_back(std::move(out));
+        }
+
+        auto cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+
+        // Render the typed return into a JSON-friendly value. The discriminator
+        // chooses how returnValue is encoded — null for Void / Unsupported,
+        // numeric for ints/floats, hex string for addresses.
+        json returnValue = nullptr;
+        switch (cr.ret.kind) {
+        case IL2CPP::CallReturn::Kind::Void:        returnValue = nullptr; break;
+        case IL2CPP::CallReturn::Kind::SignedInt:   returnValue = cr.ret.i64; break;
+        case IL2CPP::CallReturn::Kind::UnsignedInt: returnValue = cr.ret.u64; break;
+        case IL2CPP::CallReturn::Kind::Float:       returnValue = cr.ret.f; break;
+        case IL2CPP::CallReturn::Kind::Address:     returnValue = formatHex(cr.ret.u64); break;
+        case IL2CPP::CallReturn::Kind::String:      returnValue = cr.ret.s; break;
+        case IL2CPP::CallReturn::Kind::Unsupported: returnValue = nullptr; break;
+        }
+
+        json result;
+        if (!cr.error.empty()) {
+            result["ok"]    = false;
+            result["error"] = cr.error;
+            return result;
+        }
+        result["ok"]          = cr.ok;
+        result["returnType"]  = cr.ret.typeName;
+        result["returnValue"] = std::move(returnValue);
+        result["exception"]   = cr.exception.empty() ? json(nullptr) : json(cr.exception);
+        result["elapsedMs"]   = cr.elapsedMs;
+        result["method"] = json{
+            {"address",     formatHex(reinterpret_cast<std::uintptr_t>(cr.addressCalled))},
+            {"signature",   cr.methodSignature},
+            {"humanSuffix", cr.humanSuffix},
+        };
+        if (cr.ret.kind == IL2CPP::CallReturn::Kind::Unsupported) {
+            // Tell the caller why returnValue is null even though the call
+            // succeeded. 19a doesn't decode multi-field value-type returns.
+            result["note"] = "value-type-by-value returns are not decoded in 19a; pass an out-buffer in v2 or read the address";
+        }
+        return result;
     });
 #endif
 }

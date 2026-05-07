@@ -126,6 +126,17 @@ void DoResolve() {
     optBind("mono_signature_get_return_type",   g_resolver.signature_get_return_type);
     optBind("mono_method_get_param_names",      g_resolver.method_get_param_names);
 
+    // Phase 19 — managed-method invocation. Optional at resolve time so
+    // pre-19 features (handshake / class walking / findMethodInstances)
+    // keep working on minimal Mono builds where these are missing; the
+    // callMethod handler refuses cleanly when runtime_invoke is unbound.
+    optBind("mono_runtime_invoke",              g_resolver.runtime_invoke);
+    optBind("mono_object_unbox",                g_resolver.object_unbox);
+    optBind("mono_object_get_class",            g_resolver.object_get_class);
+    optBind("mono_string_new",                  g_resolver.string_new);
+    optBind("mono_string_chars",                g_resolver.string_chars);
+    optBind("mono_string_length",               g_resolver.string_length);
+
     g_resolver.resolved = (ok == total);
 
     char line[256];

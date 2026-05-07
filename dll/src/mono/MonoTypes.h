@@ -16,5 +16,11 @@ struct MonoMethod;
 struct MonoMethodSignature;
 struct MonoType;
 struct MonoVTable;
+// Phase 19 — managed-method invocation. Boxed object + exception + string
+// types stay opaque; the invoker only ever passes pointers and reads
+// fixed-offset header bytes via SafeReadBytes for unbox / message extraction.
+struct MonoObject;
+struct MonoException;
+struct MonoString;
 
 }  // namespace UnityCEDumper::Mono

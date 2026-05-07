@@ -77,6 +77,21 @@ using fn_class_get_element_class = MonoClass*    (*)(MonoClass*);
 using fn_class_value_size       = int            (*)(MonoClass*, std::uint32_t* /*align*/);
 using fn_class_is_valuetype     = int            (*)(MonoClass*);
 
+// --- Phase 19 managed-method invocation -------------------------------------
+// `mono_runtime_invoke` boxes the return value (or returns NULL for void) and
+// captures any managed exception in `*exc`. `mono_object_unbox` returns a
+// pointer to the unboxed bytes for value-type returns. `mono_object_get_class`
+// is the bridge from a boxed object to its class — used to resolve the
+// exception's type name. String-related entries are bound now even though
+// 19b doesn't use them (19c needs them for string args / string return
+// UTF-16 → UTF-8 decode).
+using fn_runtime_invoke         = MonoObject*    (*)(MonoMethod*, void* /*obj*/, void** /*params*/, MonoObject** /*exc*/);
+using fn_object_unbox           = void*          (*)(MonoObject*);
+using fn_object_get_class       = MonoClass*     (*)(MonoObject*);
+using fn_string_new             = MonoString*    (*)(MonoDomain*, const char* /*utf8*/);
+using fn_string_chars           = std::uint16_t* (*)(MonoString*);
+using fn_string_length          = std::int32_t   (*)(MonoString*);
+
 // MONO_TABLE_TYPEDEF row index in a MonoImage; pass to image_get_table_info.
 inline constexpr int          MonoTableTypedef = 2;
 // CLI metadata token base for TypeDef rows.
@@ -139,6 +154,14 @@ struct Resolver {
     fn_class_get_element_class class_get_element_class = nullptr;
     fn_class_value_size       class_value_size       = nullptr;
     fn_class_is_valuetype     class_is_valuetype     = nullptr;
+
+    // Phase 19 — managed-method invocation.
+    fn_runtime_invoke         runtime_invoke         = nullptr;
+    fn_object_unbox           object_unbox           = nullptr;
+    fn_object_get_class       object_get_class       = nullptr;
+    fn_string_new             string_new             = nullptr;
+    fn_string_chars           string_chars           = nullptr;
+    fn_string_length          string_length          = nullptr;
 };
 
 // Singleton accessor. First call probes the loaded mono module and binds every

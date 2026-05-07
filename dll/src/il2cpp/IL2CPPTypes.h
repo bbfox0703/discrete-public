@@ -11,5 +11,11 @@ struct Il2CppClass;
 struct Il2CppType;
 struct FieldInfo;
 struct MethodInfo;
+// Phase 19 — managed-method invocation. Boxed object + exception + string
+// types stay opaque; we only ever pass pointers and read fixed-offset
+// header bytes via SafeReadBytes for unbox / message extraction.
+struct Il2CppObject;
+struct Il2CppException;
+struct Il2CppString;
 
 }  // namespace UnityCEDumper::IL2CPP
