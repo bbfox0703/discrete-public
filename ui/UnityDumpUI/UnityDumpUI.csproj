@@ -67,10 +67,10 @@
 
   <ItemGroup>
     <!-- Avalonia 12 -->
-    <PackageReference Include="Avalonia"               Version="$(AvaloniaVersion)" />
-    <PackageReference Include="Avalonia.Desktop"       Version="$(AvaloniaVersion)" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="$(AvaloniaVersion)" />
-    <PackageReference Include="Avalonia.Fonts.Inter"   Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia" Version="12.0.2" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.0.2" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.2" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.2" />
     <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.0.0" />
 
     <!-- AOT-friendly MVVM via source generators ([ObservableProperty], [RelayCommand]).
@@ -79,7 +79,7 @@
 
     <!-- Override transitive Tmds.DBus.Protocol to dodge NU1903 (CVE in 0.90.x).
          Linux-only dependency; we ship win-x64 but NuGet still audits it. -->
-    <PackageReference Include="Tmds.DBus.Protocol" Version="0.92.0" />
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.93.0" />
   </ItemGroup>
 
   <ItemGroup>
