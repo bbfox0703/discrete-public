@@ -15,6 +15,44 @@ The original goal in [CLAUDE.md](../CLAUDE.md) is "invoke managed methods
 from CE Lua with marshaled args / return values." This doc pins down what
 "marshaled" means in the wire protocol so each phase ships the same shape.
 
+## Why a custom RPC when CE has built-in support?
+
+**Optional alternative — not the recommended path.** Cheat Engine 7.5+ ships
+its own Mono client (`mono.dll` Lua module, exposed when "Enable Mono
+features" is ticked in Settings). It works on **both Mono and IL2CPP**
+backed Unity games. Public API includes:
+
+```lua
+LaunchMonoDataCollector()
+local img    = mono_findImage("Assembly-CSharp")
+local cls    = mono_image_findClass(img, "MyNamespace", "MyClass")
+local method = mono_class_findMethodWithSignature(cls,
+                  "MyMethod", "Int32,String")
+local result = mono_invoke_method(domain, method, thisPtr, {42, "hello"})
+```
+
+So in principle, **CE alone can call Unity managed methods on either
+backend** — no DLL injection needed.
+
+In practice, getting to a working `mono_invoke_method` call from CE Lua
+is painful:
+
+| Pain point | CE built-in path | Our `callMethod` |
+|---|---|---|
+| Class / method discovery | `mono_findImage` → `mono_image_findClass` → `mono_class_findMethod` (+ `_findMethodWithSignature` for overloads); each call needs a fresh `LaunchMonoDataCollector` if the previous session was torn down | One `callMethod` RPC with `(assembly, namespace, name, method, signatureMatch)`; resolution is server-side and stateless |
+| Overload disambiguation | Build the comma-separated CLR signature by hand (`"Int32,String"`) and hope your spelling matches what Mono reports | Substring filter against the formatted signature; matches the exact same shape `findMethodInstances` uses (Phase 18) |
+| Argument marshaling | Caller picks how to pass each arg — primitives directly, strings via `mono_string_new`, objects as `MonoObject*` etc. — and gets it wrong silently when the convention differs across CE versions | Wire `type` tags resolve the convention per arg; the DLL handles the IL2CPP/Mono non-uniform pointer indirection that bit our own first impl |
+| String return decode | Manual: `mono_string_toCSharpString(returnValue)` — assumes the return is in fact a managed string | Auto: `returnType == "System.String"` triggers UTF-16 → UTF-8 decode in `DecodeManagedString` |
+| Exception capture | Faults bubble up as Lua errors; type + message extraction is on the user | `Type: message` populated automatically from `Il2CppException + 0x18` / `MonoException + 0x18` |
+| Works while CE is detached | No (CE must be attached to use mono_*) | Yes — pipe is hosted by the injected DLL, any client can drive it (UI, PowerShell, Lua, custom tools) |
+| Phase 18 symbol naming integration | Manual | `humanSuffix` already in `findMethodInstances` response — same shape as registerSymbol AA scripts |
+
+**Recommendation:** for prototyping or one-off shots, CE's built-in
+`mono_invoke_method` is fine. For shipping a cheat table with consistent
+behavior across Mono + IL2CPP games — or any workflow that wants the same
+API surface from PowerShell / the UI / Lua at once — `callMethod` is the
+lower-friction path.
+
 ## Scope by sub-phase
 
 |        | static | instance | primitives | string args | string return | exception | runtime |

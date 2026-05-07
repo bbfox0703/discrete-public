@@ -566,6 +566,30 @@ registered symbol via `executeCodeEx`, but only with raw native ABI
 That's fine for methods taking a single int; painful for anything that
 takes `string`, returns a managed type, or might throw.
 
+### Why a custom RPC when CE already has Mono support?
+
+CE 7.5+ ships its own Mono client (`mono.dll` Lua module, enabled via
+*Settings → Mono → Enable Mono features*) that **does work for both Mono
+and IL2CPP** Unity games — `LaunchMonoDataCollector()` →
+`mono_image_findClass` → `mono_class_findMethodWithSignature` →
+`mono_invoke_method` is the canonical CE path for managed-method
+invocation.
+
+In practice it's awkward enough to be worth replacing for any non-trivial
+workflow: overload disambiguation requires hand-built CLR signature
+strings, string args / returns need manual `mono_string_new` /
+`mono_string_toCSharpString` plumbing, exceptions surface as Lua errors
+without typed message extraction, and CE must stay attached for the
+mono APIs to remain valid. Our `callMethod` RPC handles all of those
+server-side.
+
+**This makes the CE-only path an OPTIONAL alternative, not a competing
+solution** — useful for one-off prototyping when the user happens to
+have CE attached and doesn't need our pipe surface elsewhere. The
+recommended workflow stays our DLL + `callMethod`. Full
+side-by-side comparison: [docs/lua-invoke.md §"Why a custom RPC when CE
+has built-in support?"](lua-invoke.md#why-a-custom-rpc-when-ce-has-built-in-support).
+
 ### Scope (v1)
 
 In:
