@@ -193,26 +193,69 @@ to re-dump anything.
 
 ---
 
-## v35-v39 future work
+## v35-v39 work — production reality
+
+**Update 2026-05-07**: this section was originally written as "future
+work" with the framing "no game in our test matrix uses v32+ metadata
+(Unity 6.0 reverted to v29; Unity 6.1+ is unreleased)". That framing
+is now stale on both counts:
+
+- **Unity 6.1 is shipping.** Songs of Silence (`6000.3.8f1`,
+  metadata v39) is in the test matrix as of 2026-05-07 — see
+  [test-matrix.md](test-matrix.md) for the row. Confirms v32+ is
+  production reality, not a hypothetical future.
+- **The structural-shape `Il2CppMetadataRegistration` AOB scan
+  works fine on v39** (Phase 5 segment 2d). The blocker is purely
+  the `MetadataParser` flat-header assumption — the runtime
+  `GameAssembly.dll` discovery is version-portable through v39.
 
 A community fork of Il2CppDumper has shipped v35-v39 support — see
 [Perfare/Il2CppDumper#903](https://github.com/Perfare/Il2CppDumper/pull/903)
-and our cloned snapshot at `vendor/Il2CppDumperV35plus/`. As of this
-writing **no game in our test matrix uses v32+ metadata** (Unity 6.0 reverted
-to v29; Unity 6.1+ is unreleased). We deliberately defer implementation
-until a real test target appears.
+(open since 2026-02-26, not merged at time of writing, but actively
+used by the community per the PR comments — multiple "saved my day"
+/ "this change worked great" reports through 2026-05-04). Our
+cloned snapshot at `vendor/Il2CppDumperV35plus/` pins to
+`bbd9c0c2` (= roytu's master tip from 2026-02-26).
 
-This section captures what would change so the next implementer doesn't
-have to re-discover it.
+**Caveats on the upstream fork** (open issues per PR #903 comments):
+
+- `DummyAssemblyGenerator.CreateGenericParameter` IndexOutOfRange
+  on some v39 metadata (custom-attribute path).
+- `Stream length must be non-negative` failures on certain
+  protected metadata (likely encrypted / packed).
+- Author mentioned a `constraintIndices` typing fix in a 2026-02-28
+  comment ("changed to be `TypeIndex` instead of `int32_t`") but
+  no follow-up commit was actually pushed to master — the PR's 3
+  commits remain unchanged. Our vendored snapshot is missing this
+  fix because it doesn't exist in any published commit. Re-discover
+  + apply if porting.
+
+This section captures what would change in our parser so the next
+implementer doesn't have to re-derive it from the fork's diff.
+
+### v35: small struct-field removals (per PR #903 body)
+
+v35 keeps the **flat header layout** (parallel `xxxOffset` / `xxxSize`
+int32 pairs) — same prefix shape as our `HeaderV29` for the header
+itself. Two row-level struct changes:
+
+- **REMOVED** `Il2CppTypeDefinition.elementTypeIndex`. Our
+  `TypeDefinitionV29` reader doesn't dereference this field today,
+  but the per-row stride shrinks by 4 bytes — must shrink the v35
+  layout struct accordingly or `i * stride` arithmetic walks past
+  every type after the first.
+- **REMOVED** `Il2CppStringLiteral.length`. The string-literal
+  iterator must compute length from the `dataIndex` delta to the
+  next row instead of reading a stored length field.
 
 ### v36-v37: incremental within the v35 window
 
 The upstream fork's `[Version(Min = ..., Max = 35)]` attributes on
 [Il2CppGlobalMetadataHeader](../vendor/Il2CppDumperV35plus/Il2CppDumper/Il2Cpp/MetadataClass.cs)
-indicate the **flat header layout** (parallel `xxxOffset` / `xxxSize`
-int32 pairs) survived through v35. v36-v37 are within this same
-window — same prefix shape as our `HeaderV29`. Nothing to do for these
-two beyond bumping `LoadHeader`'s allowed range.
+indicate the **flat header layout** survived through v35. v36-v37
+are within this same window — same prefix shape as v35 (with the
+two struct-field removals). Nothing to do for these two beyond
+bumping `LoadHeader`'s allowed range and reusing the v35 layout.
 
 ### v38: section-based header rewrite
 
@@ -247,12 +290,12 @@ table, plus a per-version branch in `LoadHeader` / `LoadTables`.
 Pre-v38, `TypeIndex`, `TypeDefinitionIndex`, `GenericContainerIndex`,
 and `ParameterIndex` were always 4-byte int32 fields in
 `Il2CppFieldDefinition` / `Il2CppTypeDefinition` / etc. v38 compresses
-them to 1, 2, or 4 bytes per field based on each table's row count
+them to **1, 2, or 4 bytes per field** based on each table's row count
 (small tables get small indices). The widths are computed at load time
 from the section sizes:
 
 ```cs
-// from Il2CppDumperV35plus/Il2CpDumper/Il2Cpp/Metadata.cs:101-114
+// from Il2CppDumperV35plus/Il2CppDumper/Il2Cpp/Metadata.cs:101-114
 int sizeOfIl2CppParameterDefinition = (int)(header.parameters.size / header.parameters.count);
 typeIndexSize = sizeOfIl2CppParameterDefinition - 8;
 typeDefinitionIndexSize = GetIndexSize((int)header.typeDefinitions.count);
@@ -265,34 +308,72 @@ that today reads an int32 typed-index would need to consult it. Affects
 `FieldDefinition`, `TypeDefinition`, `FieldDefaultValue`, and a few
 others.
 
-### v39: incremental from v38
+### v38: other struct changes (per PR #903 body)
 
-The fork has only one v39-specific gate (`Version < 39` in
-[BinaryStream.cs:220](../vendor/Il2CppDumperV35plus/Il2CppDumper/IO/BinaryStream.cs)).
-Likely a single new field in some struct — diff against v38 once a v39
-target lands.
+- `Metadata.interfaceIndices` replaced with `interfaceOffsetPairs` —
+  changes the in-table row layout for the interfaces section.
+- `Metadata.constraintIndices` width changed: was `uint32_t`, now
+  `uint16_t` per the PR body. **Caveat**: per a 2026-02-28 PR comment
+  by the author, `constraintIndices` is actually a `TypeIndex`
+  (variable-sized 1/2/4 bytes), not a fixed `uint16_t`. The fix was
+  never pushed to the PR's commits, so the upstream code today reads
+  it as `uint16_t` and may produce wrong results on metadata where
+  type-table count exceeds 64K. When porting, prefer the `TypeIndex`
+  interpretation.
+
+### v39: just `ParamIndex` (per PR #903 body)
+
+PR #903's body is explicit: *"Introduced `ParamIndex`. No other
+changes."* Single-byte additive vs v38 — ParamIndex becomes another
+variable-width type alongside TypeIndex / TypeDefinitionIndex /
+GenericContainerIndex. Bump the `IndexSizes` struct to carry it,
+plumb through every `parameterIndex` consumer (mostly
+`Il2CppMethodDefinition` related, which we don't currently consume —
+no MethodDefinitions parser yet).
 
 ### Approximate effort
 
-When a real test game appears: ~1.5-2 days.
+Real test target now exists (Songs of Silence, v39). Updated estimate
+~**2-3 days** end-to-end:
 
-1. New `HeaderV38` struct + version-aware dispatch in `LoadHeader` /
-   `LoadTables` — half a day.
-2. Variable-width index plumbing through `EnumerateTypeFields` /
-   `FindFieldDefault` / `GetTypeDefinition` — half a day.
-3. Empirical verification against the test game (first 5 type defs match
-   canonical names + tokens; field defaults decode) — half a day.
-4. Phase 14c-style cross-check pass against
-   `vendor/libil2cpp/Unity_6.1+/<exact>/vm/GlobalMetadataFileInternals.h`
-   once that's available in `sync_vendor.ps1` — quarter day.
+1. New `HeaderV35` (struct-field removals only, flat header
+   preserved) + `LoadHeader` widens to v37 — quarter day.
+2. New `HeaderV38` (section-based, 12-byte triplets per table) +
+   per-version branch in `LoadHeader` / `LoadTables` — half a day.
+3. `IndexSizes` plumbing for v38+: `TypeIndex` / `TypeDefinitionIndex`
+   / `GenericContainerIndex` / `ParameterIndex` (v39) — every reader
+   in `EnumerateTypeFields` / `FindFieldDefault` / `GetTypeDefinition`
+   consults size at runtime — half to one day depending on how many
+   call sites haven't already abstracted the index reads.
+4. v38 `interfaceOffsetPairs` + `constraintIndices` (use TypeIndex
+   per PR comment, NOT the fork's still-broken uint16) — quarter
+   day.
+5. Empirical verification against Songs of Silence: registration
+   already proven (Phase 5 segment 2d sweep, 2026-05-07); add field
+   defaults decode + walkInstance round-trip — half a day.
+6. Phase 14c-style cross-check against upstream Unity source once
+   `vendor/libil2cpp/Unity_6.1.x/<exact>/` is available via
+   `sync_vendor.ps1` — quarter day. (Currently only Unity 6.0.x is
+   vendored; 6.1.x sources need to be added.)
 
 ### Defensive guard live today
 
 [MetadataParser::LoadHeader](../dll/src/il2cpp/MetadataParser.cpp)
-rejects `version < 16 || version > 31` outright with a clear log line.
-[metadata-cli](../tools/metadata-cli/main.cpp)'s "load failed" stderr
-message points users back here. Better to fail loud on a v38 file than
-silently produce nonsense offsets. When v32-v37 turn out to be
-backwards-compatible (which the upstream fork's `Max = 35` window
-suggests), the guard widens to `version > 35`; when v38 lands its real
-implementation, the guard goes away.
+rejects `version < 16 || version > 31` outright with a clear log line
+(Songs of Silence reproducibly trips this — see
+[STATUS.md §"v39 registration scan works"](STATUS.md)). Better to fail
+loud on a v38+ file than silently produce nonsense offsets via the
+flat-header reader.
+
+When v35–v37 are added (struct-field-only changes, flat header
+preserved), the guard widens to `version > 37`. When v38 lands the
+section-based reader + variable-width indices, the guard goes away.
+
+What still works on v38+ targets without any of the above:
+- The structural-shape `Il2CppMetadataRegistration` AOB scan — fully
+  version-portable through v39 (verified). `il2cppGetMetadataRegistration`
+  RPC works.
+- Live-runtime browsing via `IL2CPPClassWalker` — not yet exercised on
+  v38+ targets but uses runtime APIs (`il2cpp_image_get_class`,
+  `il2cpp_class_get_fields` etc.), not metadata.dat. Likely works
+  unless the runtime ABI also shifted (would need verification).
