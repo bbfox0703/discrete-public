@@ -27,8 +27,18 @@ internal static class Program
     public static AppBuilder BuildAvaloniaApp() =>
         AppBuilder.Configure<App>()
             // Windows-only build (see UnityDumpUI.csproj — Avalonia.Desktop
-            // metapackage is intentionally NOT referenced). UsePlatformDetect
-            // lives in Avalonia.Desktop, so call UseWin32 directly instead.
+            // metapackage is intentionally NOT referenced). The three pieces
+            // UsePlatformDetect used to wire up automatically:
+            //   * UseWin32     — windowing / input (Avalonia.Win32)
+            //   * UseSkia      — rendering backend (Avalonia.Skia)
+            //   * UseHarfBuzz  — text shaping (without this, AppBuilder.Setup
+            //                    throws "No text shaping system configured.
+            //                    Consider calling UseHarfBuzz()." and the
+            //                    process exits with 0xC0000409)
+            // Without HarfBuzz the window never appears — the exception
+            // happens during Setup, before any UI is shown or any log written.
             .UseWin32()
+            .UseSkia()
+            .UseHarfBuzz()
             .WithInterFont();
 }
