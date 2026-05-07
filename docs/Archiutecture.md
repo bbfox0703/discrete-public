@@ -12,14 +12,20 @@ building, and live structure inspection.
 Headline capabilities (single source of truth: [CLAUDE.md](../CLAUDE.md)):
 - Full hierarchy walk (live + offline `metadata-cli`).
 - Instance walker + exporter (CE XML / CSX / SDK header / live tables).
-- Find method instances by signature (Phase 16 candidate).
+- **Find method instances by signature** — closed as Phase 18
+  (`findMethodInstances` + `getMethodAobPattern` wire commands +
+  UI overload picker + AOB AA-script generator + AOBMaker
+  `CreateAAScript` direct push). See [plan.md §Phase 18](plan.md#phase-18--find-method-instances).
 - Jump-to-disassembly via the AOBMaker bridge.
-- CE Auto-Assembler scaffolding for overload-correct injection.
-- Lua-callable Unity methods (Mono JIT / IL2CPP AOT).
-- **Address finder (reverse lookup)** — given any CE-scanned address,
-  identify the containing managed instance + class + field. Inverse of
-  `findInstances`. See [address-finder.md](address-finder.md) for the
-  design spec.
+- CE Auto-Assembler scaffolding for overload-correct injection
+  (Phase 18 `aobscanmodule(name, MODULE, AOB)` script generator).
+- **Lua-callable Unity methods** (Mono JIT / IL2CPP AOT) — drafted as
+  Phase 19 with marshaled primitive + string args + boxed return
+  values + managed exception capture. Plan in [plan.md §Phase 19](plan.md#phase-19--lua-callable-unity-methods-lua--managed-invocation).
+- **Address finder (reverse lookup)** — closed as Phase 17. Given any
+  CE-scanned address, identifies the containing managed instance +
+  class + field. Inverse of `findInstances`. Design spec:
+  [address-finder.md](address-finder.md).
 
 The architecture mirrors **UE5CEDumper**: injected C++ DLL communicates via Named Pipe JSON-RPC with an external Avalonia UI. The UI is **engine-agnostic** — a single binary handles both Mono and IL2CPP backends, auto-detected at connection time.
 

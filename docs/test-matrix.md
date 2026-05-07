@@ -10,7 +10,7 @@ Phase 15. Compatibility ledger for the games + tooling versions UnityCEDumper ha
 
 | Game | Unity | Backend | Metadata ver | Bitness | DLL build verified | Workflow | Notes |
 |---|---|---|---|---|---|---|---|
-| **SaGa Frontier 2 Remastered** | `2021.3.39f1` | IL2CPP | v29 | x64 | 101 (Phase 11), 108 (Phase 14), 110+ (Phase 12), 150 (Phase 14c) | Pick & inject AND proxy install | **Primary verification target.** All phases 6–14 were validated against this game. `MainGame.PLY_WORK` decode round-trips against a manual CE Structure Dissect, including the `Vector3`/`reserv2[]` substruct expansion (Phase 11.5 follow-up). `metadata-cli info`: 10001 type defs, 11392 string literals. |
+| **SaGa Frontier 2 Remastered** | `2021.3.39f1` | IL2CPP | v29 | x64 | 101 (Phase 11), 108 (Phase 14), 110+ (Phase 12), 150 (Phase 14c), 188+ (Phase 17), 201+ (Phase 18) | Pick & inject AND proxy install | **Primary verification target.** All phases 6–14 + 17 + 18 validated here. `MainGame.PLY_WORK` decode round-trips against a manual CE Structure Dissect (Phase 11.5 incl. `Vector3`/`reserv2[]` substruct expansion). Phase 17 `whatIsAt` round-trips against `PLY_WORK.HP` field address. **Phase 18** AOB pattern generation verified against `MainGame/PLY_WORK.AddGrowHpMax(int)` — single-overload, 32-byte AOB with 0 wildcards (simple `MOVSS [rcx],xmm0` prologue), suffix `int`, "Copy AOB AA script" writes a complete CE Auto-Assembler script to clipboard. `metadata-cli info`: 10001 type defs, 11392 string literals. |
 | **SaGa Frontier Remastered** | `2019.4.16f1` | IL2CPP | **v24** | x64 | 150 (Phase 14c) | Static metadata only (`metadata-cli`) | Phase 14c verification target: 7,514 type defs parse cleanly, canonical leading types (`<Module>`, `<>f__AnonymousType0\`1`, `Locale`, `SR`, `Mono.Runtime`) with correct IL tokens. Live walkInstance not yet exercised against this older IL2CPP runtime. |
 | **FINAL FANTASY VI PR** | `2019.4.26f1` | IL2CPP | **v24** | x64 | 150 (Phase 14c) | Static metadata only | Second v24 fixture — confirms layout works across Unity 2019.4 sub-versions. 11,438 type defs, 11,537 string literals. |
 | **Townscaper** | `2020.3.4f1` | IL2CPP | **v27** ✨ | **x86** | 150 (Phase 14c) | Static metadata only | Phase 14c v27 target — only 32-bit IL2CPP build in the corpus. Its `global-metadata.dat` parses identically to v29 (88-byte stride, IL token at +84). 8,132 type defs match canonical leading types — confirming the metadata format is bitness-neutral even when the game runtime is x86. Live runtime support deferred to Phase 12d. |
@@ -54,8 +54,11 @@ These are the failure modes the test matrix doesn't cover *yet* — useful when 
 | `getMetadataStats` `partial_strip` verdict | Same as above (or a partial-strip game) | 14b |
 | Stripped metadata via mismatched magic | An encrypted / packed `global-metadata.dat` | error-banner verification only |
 | Unity 6 Mono `monoCompileMethod` symbol registration | Silksong (already in the matrix) — just need to run `unity_symbols.lua` against it | Mono coverage closure |
-| `findMethodInstances` overload disambiguation (Phase 16 candidate) | Any class with overloaded methods (most CE-side workflows hit this) | Phase 16 |
-| AOBMaker bridge integration | CE running with the AOBMaker plugin loaded | Manual smoke only — the per-row `HEX` button calls `\\.\pipe\AOBMakerCEBridge` |
+| **Phase 18 multi-overload AA-script generation** | Any class with genuinely overloaded methods. Canonical case `Vector3.Set(float, float, float)` exists but Unity 2021.3 inlines the Vector3-arg variant on SaGa F2R, leaving only one overload visible. Try `string.Equals` or any user-written overloaded method. | Phase 18 — verified single-overload only so far |
+| **Phase 18 `unity_symbols.lua` `registerMethodOverloads`** | Any overloaded method, exercise the Lua bridge from CE's console. Code in but not yet user-tested. | Phase 18 |
+| **AOBMaker `CreateAAScript` direct push** | CE running with the AOBMaker plugin loaded, click "Create AA in CE" on the overloads modal. Code in but not yet user-tested. | Phase 18 |
+| **Phase 19 — Lua-callable methods** | Any method with primitive args + return value. Plan drafted; nothing implemented yet. | Phase 19 (not started) |
+| AOBMaker bridge integration (HEX navigate) | CE running with the AOBMaker plugin loaded | Manual smoke only — Inspector per-row `HEX` button calls `\\.\pipe\AOBMakerCEBridge` |
 
 ---
 

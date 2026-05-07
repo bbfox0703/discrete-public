@@ -642,6 +642,103 @@ production caller never needs it (the cache builds on demand).
 
 ---
 
+## Phase 18 — Find method instances + AOB pattern
+
+Two paired commands. `findMethodInstances` enumerates every overload of a
+method on a class with native address + decoded signature + a symbol-safe
+human-readable suffix; `getMethodAobPattern` reads N bytes at any address
+and returns a CE-style AOB pattern with rel8/rel32 immediates and
+RIP-relative ModRM disp32 fields wildcarded.
+
+### `findMethodInstances`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assembly`, `namespace`, `name` | strings | identify the class — same shape as `getClassInfo` |
+| `method` | string | required — method name to enumerate overloads for |
+| `signatureMatch` | string | optional — substring filter against the rendered signature (e.g. `"Vector3"` picks only the Vector3-arg overload) |
+
+```jsonc
+// → {
+//   "method":  "Set",
+//   "count":   2,
+//   "matches": [
+//     {
+//       "name":               "Set",
+//       "token":              <uint>,
+//       "flags":              <uint>,           // MethodAttributes
+//       "iflags":             <uint>,           // MethodImplAttributes
+//       "isStatic":           false,
+//       "isVirtual":          false,
+//       "isAbstract":         false,
+//       "compiled":           true,             // false for abstract / generic-without-args
+//       "address":            "0x7FF6A7773740", // post-JIT (Mono) / AOT (IL2CPP)
+//       "paramTypes":         ["System.Single", "System.Single", "System.Single"],
+//       "paramNames":         ["newX", "newY", "newZ"],   // empty when get_param_names unbound
+//       "returnType":         "System.Void",
+//       "declaringClass":     "Vector3",
+//       "declaringNamespace": "UnityEngine",
+//       "signature":          "(System.Single, System.Single, System.Single)",
+//       "humanSuffix":        "3float"           // symbol-safe, used by AA-script generator
+//     },
+//     { "...second overload..." }
+//   ]
+// }
+```
+
+`humanSuffix` shape (single source of truth: `dll/src/shared/MethodSignatureFormat.h`):
+- 0 args → `"noargs"`
+- 1 arg → `"<Short>"` (e.g. `"Vector3"`)
+- N same → `"<N><Short>"` (e.g. `"3float"`)
+- N mixed → `"<S0>_<S1>_..."` (e.g. `"string_Card_Point"`)
+
+C# keywords for primitives: `bool` / `byte` / `sbyte` / `short` / `ushort` /
+`int` / `uint` / `long` / `ulong` / `float` / `double` / `char` / `string` /
+`object` / `void`. Other types use the last segment after `.` or `/`,
+generic backticks (`Foo`1[Bar]`) and `<…>` instantiations stripped, sanitised
+to `[A-Za-z0-9_]`.
+
+### `getMethodAobPattern`
+
+Backend-agnostic. Walks N bytes through a minimal x64 length disassembler
+with conservative wildcarding: rel8/rel32 immediates (CALL/JMP/Jcc/LOOPxx)
+and RIP-relative ModRM disp32 → `??`. Unknown opcode → fall through with
+literal bytes (the AOB stays valid, just less version-stable across game
+patches). False positives (over-wildcarding) cause symbol ambiguity and are
+the failure mode we avoid.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `address` | hex string / int | required — the method's native entry point |
+| `length` | uint | optional, default 32, capped at 128 |
+
+```jsonc
+// → {
+//   "address":      "0x7FF6A7773740",
+//   "length":       32,
+//   "pattern":      "F3 0F 11 09 F3 0F 11 51 04 ... 48 89 5C 24 ?? E8 ?? ?? ?? ??",
+//   "bytes":        "F30F1109F30F11510...",          // raw hex, no wildcards
+//   "moduleName":   "GameAssembly.dll",              // "" if address isn't in any loaded module
+//   "moduleBase":   "0x7FF6A7260000",
+//   "moduleOffset": "0x00000000005A3740",            // address - moduleBase
+//   "moduleSize":   47968256,
+//   "stats": {
+//     "instructions": 17,
+//     "wildcards":    8,
+//     "relBranches":  2,                             // CALL/JMP/Jcc immediates wildcarded
+//     "ripRel":       0                              // RIP-relative disp32 fields wildcarded
+//   },
+//   "decoderBailed": false,
+//   "bailedAt":      0                               // present only when decoderBailed == true
+// }
+```
+
+The wire response is everything the UI needs to emit a complete
+`aobscanmodule(name, MODULE, AOB)` line — module name + AOB pattern plus
+the original address as a sanity-check trailing comment.
+
+---
+
 ### `il2cppGetMetadataTypeFields` *(IL2CPP)*
 
 Per-type field listing including const literals (which don't appear in the
@@ -687,6 +784,8 @@ present, with a best-effort string decode.
 | List enum members | `getEnumValues` (IL2CPP today) |
 | Read `const` literals stripped by IL2CPP | `il2cppGetMetadataTypeFields` |
 | Identify the instance + class at an address (CE *what writes here*) | `whatIsAt` |
+| Enumerate every overload of a method with native addresses | `findMethodInstances` |
+| Generate a CE AOB pattern from a method's native address | `getMethodAobPattern` |
 
 ---
 
