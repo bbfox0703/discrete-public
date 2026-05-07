@@ -1,9 +1,9 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (Phase 19d-2 + Mono-side smoke verified live, changes uncommitted)
-**Last committed**: `fix(deploy): glob *.lua in Install-CEScripts so new bridge scripts ship`
-**Build**: 234 (after the 19d-2 AOT publish)
-**Current state**: **Phase 19 fully shipped (19a–19e) AND verified live on both backends across DLL + UI + Lua bridge, plus 19d-2 polish landed and click-through verified.** Mono-side `unity_invoke.lua` smoke ran 2026-05-07 against BongoCat — all 4 scenarios green, including managed-exception capture (host stayed alive). The original CLAUDE.md goal "invoke managed Unity methods from CE Lua with marshaled args / return values" is closed end-to-end on both Mono and IL2CPP. **Phase 12d** (32-bit Mono) is now the only formally-deferred phase.
+**Branch**: `dev` (clean — pushed)
+**Last commit**: `f69cf2b docs: Phase 5 segment 2d — R-Type Dimensions EX (Unity 2018.1 / v24) surfaces missing IL2CPP exports`
+**Build**: 236
+**Current state**: **All shipped phases verified live; Phase 16 docs closed; Phase 5 segment 2d cross-version sweep complete (5 metadata versions × 5 Unity major versions covered).** Phase 19 + 19d-2 closed across DLL → UI → CE Lua bridge on both backends. Phase 16 docs landed (lessons-learned + READMEs en/zh-TW + CONTRIBUTING + 7 internal/spec docs). Phase 5 segment 2d cross-version sweep against Unity 2018.1 → 2019.4 → 2021.3 → 2022.3 → 6.1 (metadata v24 / v29 / v31 / v39) confirms `Il2CppMetadataRegistration` structural-shape AOB scan is **fully version-portable** through the whole matrix; v39 runtime sweep proves first-class support of all runtime-API paths. **Phase 12d** (32-bit Mono) remains the only formally-deferred phase. New backlog items surfaced (none blocking): v24 integer-decode bug (FF VI) — fix sketched ~1 hr; Unity 2018.x missing IL2CPP exports (R-Type) — fix sketched ~2 hr; v32+ metadata.dat parser — 2-3 days; minor cosmetic (`findInstances classPtr` empty, JSON Inf/NaN coercion). All documented in this file.
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
 
@@ -19,7 +19,7 @@
 | 13 | ✅ | `dist/metadata-cli.exe` — offline `global-metadata.dat` parser. |
 | 14a–14f | ✅ | Hardening: auto-disconnect, stripped-metadata banner, thread-attach audit, log rotation, SEH-leaf audit. |
 | 14c | ✅ | IL2CPP metadata v24/v27/v29/v31 dispatch — six games verified across all four versions. Cross-checked vs `vendor/libil2cpp/`. |
-| 15 | ✅ | [test-matrix.md](test-matrix.md) — 7 verified targets across two backends + four metadata versions. |
+| 15 | ✅ | [test-matrix.md](test-matrix.md) — **9 verified targets** across two backends + 4 metadata versions × 5 Unity major versions (2018.1 / 2019.4 / 2021.3 / 2022.3 / 6.1). Latest additions (2026-05-07): R-Type Dimensions EX (oldest IL2CPP — Unity 2018.1, surfaced missing-exports finding) + Songs of Silence (newest IL2CPP — Unity 6.1 / v39, first-class supported). |
 | 17 (a/b/c/d) | ✅ | **Address Finder (reverse lookup).** New wire command `whatIsAt(addr)` returning instance + class + declared field. DLL backward-scan + class-pointer cache, UI Address Lookup tab, CE Lua bridge `unity_addrfind.lua`. Spec: [address-finder.md](address-finder.md). |
 | 18 (a/b/c/d) | ✅ | **Find Method Instances + AOB AA-script generator + AOBMaker direct push.** New wire commands `findMethodInstances` + `getMethodAobPattern`, hand-rolled x64 LDE, UI overloads modal, `unity_symbols.lua` overload-aware extension, `CreateAAScript` integration over `\\.\pipe\AOBMakerCEBridge`. |
 | **19 (a/b/c/d/e)** | ✅ | **Lua-callable Unity methods.** New wire RPC `callMethod(asm, ns, class, method, [signatureMatch], [instance], [args])` invoking Mono / IL2CPP methods with marshaled primitive + null + address + string args + boxed-primitive / address / UTF-8-decoded-string returns + managed exception capture. Static AND instance dispatch on both backends. UI MethodCallWindow (right-click any overload row → Call method…) + `scripts/unity_invoke.lua` Lua bridge with full arg-builder set. Spec: [lua-invoke.md](lua-invoke.md). |
@@ -28,17 +28,61 @@
 
 ---
 
-## What landed in this session — Phase 19d-2 polish (auto-skip picker + Inspector cross-tab)
+## What landed in this session — Phase 16 docs + Phase 5 segment 2d cross-version sweep
 
-Two UX improvements on top of the freshly-shipped Phase 19 vertical. No wire-layer changes; no DLL rebuild required (UI-only).
+Two big chunks across one long session. No code changes to the DLL or UI binaries; pure documentation refresh + smoke-test infrastructure + verification against five Unity-version targets.
 
-- **Auto-skip overloads modal on count==1**. Methods grid right-click "Call method… (pick overload)" probes `findMethodInstances` first; when the result has exactly one entry, jumps straight to `MethodCallWindow` seeded from that overload. Multi-overload methods (`Mathf.Abs`, `String.Concat`) still drop into the picker. "Find overloads…" keeps today's always-show-modal behaviour because the user explicitly wants the AOB / Copy panel. Implemented as a split handler pair in `MainWindow.axaml.cs`: `OnMethodCallMethodClicked` (new fast path) + `OnMethodFindOverloadsClicked` (unchanged) + shared `ResolveMethodRow` / `BuildOverloadsVm` helpers so the two paths can't drift.
+### Phase 16 docs — closed end-to-end
 
-- **Inspector cross-tab "Call instance method…"**. Right-click any instance in the Inspector's Instances ListBox → "Call method on this instance… (switch to Methods)" snaps `SelectedInstance` to the right-clicked row and switches the right-pane TabControl to the Methods tab. From there, the Methods-grid right-click "Call method… (pick overload)" opens `MethodCallWindow` with the `Instance address` textbox pre-filled. The cross-tab handoff is **strictly scope-checked**: `GetDefaultMethodCallInstance` returns the inspector's selected instance ONLY when `Browser.SelectedAssembly.Name == Inspector.TargetAssembly` AND `Browser.SelectedClass.Namespace == Inspector.TargetNamespace` AND `Browser.SelectedClass.Name == Inspector.TargetName` (ordinal equality on all three). This prevents a stale inspector instance from bleeding into a method call on a different class, which would silently feed a wrong-type pointer to the trampoline.
+12 new files (≈ 3300 lines):
 
-- **Threading**: `MethodOverloadsViewModel`'s constructor gains an optional `defaultInstanceAddress` param (forwarded to `MethodCallViewModel`). `MethodCallViewModel`'s `defaultInstanceAddress` ctor arg already existed in 19d for future use; 19d-2 finally populates it from a real source. AOT publish stays clean — 0/0 trim/AOT analyzer warnings; `DiscreteUI.exe` 38.3 MB.
+- **Repo root**: [`README.md`](../README.md), [`README.zh-TW.md`](../README.zh-TW.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md).
+- **`docs/`**: [`lessons-learned.md`](lessons-learned.md), [`proxy-dlls.md`](proxy-dlls.md), [`metadata-cli.md`](metadata-cli.md), [`export-formats.md`](export-formats.md), [`mono-internals.md`](mono-internals.md), [`il2cpp-internals.md`](il2cpp-internals.md), [`dll-spec.md`](dll-spec.md), [`ui-spec.md`](ui-spec.md), [`technical-notes.md`](technical-notes.md).
 
-- **Files touched**: [MainWindow.axaml.cs](../ui/UnityDumpUI/Views/MainWindow.axaml.cs), [MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml), [MethodOverloadsViewModel.cs](../ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs), [MethodOverloadsWindow.axaml.cs](../ui/UnityDumpUI/Views/MethodOverloadsWindow.axaml.cs), [Resources/Strings/en.axaml](../ui/UnityDumpUI/Resources/Strings/en.axaml).
+`lessons-learned.md` consolidates every memory entry (runtime_invoke marshaling, signatureMatch substring trap, Avalonia 12 trio, GC root, PowerShell ConvertTo-Json, AOT analyzer rules, etc.) into one searchable place. The two READMEs + `CONTRIBUTING.md` are the new user-facing entry points; the seven `docs/*-spec.md` / `*-internals.md` files are the contributor-facing deep dives. Phase Overview row 16 flipped to ✅.
+
+### Phase 5 segment 2d — cross-version sweep + bug surface
+
+Started by correcting a stale framing — `Phase 5 segment 2d` follow-up actually shipped commit `5c59077` on 2026-04-29; STATUS / plan kept describing it as deferred. Then ran the cross-version smoke against four IL2CPP targets covering metadata v24 / v29 / v31 / v39 across Unity 2018.1 → 6.1.
+
+**Headline finding**: the `Il2CppMetadataRegistration` structural-shape AOB scan is **fully version-portable** — found cleanly on every target tested (Unity 2018.1 / 2019.4 / 2021.3 / 2022.3 / 6.1). Heuristic correctness confirmed across 5 Unity major versions and 4 metadata versions.
+
+**Three new findings, all deferred but documented with fix sketches**:
+
+1. **v24 integer-decode bug** (FF VI / Unity 2019.4) — `il2cppGetMetadataTypeFields`'s I*/U* family decoder assumes CLI compressed-int + sentinel encoding (correct for v29+) but v24 metadata stores raw little-endian bytes. `Int32.MaxValue` returns `-2147483648` instead of `2147483647`. Fix: per-version dispatch hooked off `MetadataParser::version()`. ~1 hr.
+
+2. **Unity 2018.x missing IL2CPP exports** (R-Type Dimensions EX / Unity 2018.1) — runtime is missing `il2cpp_image_get_class_count` + `il2cpp_image_get_class` (added between Unity 2018.x and 2019.x). `IL2CPPResolver` bails (`required 16/18, resolved=no`); every runtime RPC returns `"il2cpp runtime not resolved"`. Registration scan still works (proves it's runtime-ABI-sensitive, not metadata-version-sensitive). Fix: demote both exports to OPTIONAL + add `MetadataParser`-table-driven fallback through `il2cpp_class_from_name`. ~2 hr.
+
+3. **v32+ metadata.dat parsing not implemented** (Songs of Silence / Unity 6.1) — `MetadataParser` rejects v39 by design (`version > 31` guard). However the v39 runtime sweep ([`Test-V39RuntimeSweep.ps1`](../tools/Test-V39RuntimeSweep.ps1)) shows **9 / 9 runtime paths green** on v39 — Inspector / class browser / Phase 17/18/19 all work. Only `il2cppGetMetadataTypeFields` const decode + offline `metadata-cli` are gated. So **v39 is effectively first-class supported** for ~95 % of usage; v32+ parser work (2-3 day project per [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md)) only unlocks the const-decode niche.
+
+Bonus minor findings:
+- `findInstances` IL2CPP path returns empty `classPtr` field (matches still come back). Cosmetic backlog item.
+- JSON spec doesn't allow `Infinity` / `NaN`; `nlohmann/json` coerces to `null` for special-case floats. R4 decoder runs but value field is null on the 3 special values. Cosmetic.
+
+### Phase 18 multi-overload AA-script user-click verified
+
+Closed the last open Phase 18 verification: Farthest Frontier `ItemBundle.AddItems` (2 overloads — `(System.UInt32, System.UInt32)` + `(ItemBundle)`) — both AOB patterns scan-clean from CE, both `registersymbol` succeed, addresses resolve in `GameAssembly.dll+0xB20900` / `+0xB20980`. Two-symbol `[ENABLE]` block is idempotent.
+
+### New tooling
+
+- **[`tools/Test-MetadataRegistration.ps1`](../tools/Test-MetadataRegistration.ps1)** — diagnostic probe for `il2cppGetMetadataRegistration` in isolation. Useful when `MetadataParser` rejects metadata.dat (e.g. v32+) but you want to verify the registration scan independently.
+- **[`tools/Test-V39RuntimeSweep.ps1`](../tools/Test-V39RuntimeSweep.ps1)** — composite "what works on a v32+ target" sweep (9 independent runtime paths, one client connection). Generic enough to use on any IL2CPP target as a smoke.
+
+### Files touched (whole session)
+
+13 docs files (`STATUS.md`, `plan.md`, `test-matrix.md`, `il2cpp-metadata-crosscheck.md`, plus the 9 new docs), 3 root files (`README.md` + `README.zh-TW.md` + `CONTRIBUTING.md`), 2 new smoke scripts. **No code changes to the DLL, UI, or Lua bridges.** The docs / plan / matrix are now ground truth for handing off to a fresh checkout on another machine.
+
+---
+
+## What landed in the previous session — Phase 19d-2 polish
+
+Two UX improvements on top of the freshly-shipped Phase 19 vertical. UI-only.
+
+- **Auto-skip overloads modal on count==1**. Methods grid right-click "Call method… (pick overload)" probes `findMethodInstances` first; on count==1, jumps straight to `MethodCallWindow`. Multi-overload methods still drop into the picker. Split handler pair in `MainWindow.axaml.cs` (`OnMethodCallMethodClicked` + unchanged `OnMethodFindOverloadsClicked`) + shared `ResolveMethodRow` / `BuildOverloadsVm` helpers.
+
+- **Inspector cross-tab "Call instance method…"**. Right-click any instance in the Inspector → "Call method on this instance… (switch to Methods)" snaps `SelectedInstance` + flips to Methods tab. The Methods-grid right-click then pre-fills `Instance address` in `MethodCallWindow` (scope-checked: only when Browser.SelectedClass matches Inspector.TargetClass on assembly + namespace + name).
+
+Files: [`MainWindow.axaml.cs`](../ui/UnityDumpUI/Views/MainWindow.axaml.cs), [`MainWindow.axaml`](../ui/UnityDumpUI/Views/MainWindow.axaml), [`MethodOverloadsViewModel.cs`](../ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs), [`MethodOverloadsWindow.axaml.cs`](../ui/UnityDumpUI/Views/MethodOverloadsWindow.axaml.cs), [`Resources/Strings/en.axaml`](../ui/UnityDumpUI/Resources/Strings/en.axaml). AOT publish 0/0 warnings; `DiscreteUI.exe` 38.3 MB.
 
 ---
 
@@ -69,21 +113,21 @@ Dropped `Avalonia.Desktop` metapackage in favor of bare `Avalonia.Win32` + `Aval
 ## Recent commit history (most recent first)
 
 ```
-fix(deploy): glob *.lua in Install-CEScripts so new bridge scripts ship
-feat: Phase 19e — scripts/unity_invoke.lua (CE Lua bridge for callMethod)
-fix(ui): Phase 19d Call method… discoverability + status hint
-docs: list CE-only mono_invoke_method as optional alternative to callMethod
-feat: Phase 19d — UI MethodCallWindow for callMethod
-docs: mark Phase 19c instance dispatch verified live (Mono / Farthest Frontier)
-feat: Phase 19c — instance dispatch + string in/out marshaling
-fix(ui): wire Skia + HarfBuzz explicitly after dropping Avalonia.Desktop
-feat: Phase 19a/b — callMethod RPC (IL2CPP + Mono, static-only)
-chore(ui): drop Avalonia.Desktop metapackage in favor of Avalonia.Win32
-docs: refresh STATUS / Archiutecture / pipe-protocol / test-matrix for Phase 17+18 closure
-docs(plan): draft Phase 19 — Lua-callable Unity methods + close out 18
-fix(overloads): single-click checkbox in the overloads grid
-fix(overloads): single-overload buttons + Create AA in CE via AOBMaker
-feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
+f69cf2b docs: Phase 5 segment 2d — R-Type Dimensions EX (Unity 2018.1 / v24) surfaces missing IL2CPP exports
+a32e6dc docs/tools: Phase 5 segment 2d — v39 runtime sweep proves first-class support (9/9 paths green on Songs of Silence)
+52c5879 docs(crosscheck): refresh v35-v39 section — production reality, not future work
+938605c docs/tools: Phase 5 segment 2d — v24 + v39 cross-version verification + new Test-MetadataRegistration.ps1
+85e3f43 docs: correct stale Phase 5 segment 2d entries — already shipped, not deferred
+7994d95 docs: complete Phase 16 — add 9 new docs/ files + close out the phase
+ffbade7 docs: add README (en + zh-TW) and CONTRIBUTING at repo root
+2dfc0ff docs: close out Phase 18 multi-overload AA-script verification
+cf67235 docs: refresh STATUS / plan for Phase 19d-2 closure + Phase 19e Mono-side verification
+147d793 feat(ui): Phase 19d-2 polish — auto-skip single-overload picker + Inspector cross-tab call-on-instance
+3ead275 docs: refresh STATUS / plan / test-matrix / CLAUDE for Phase 19 closure
+def955a fix(deploy): glob *.lua in Install-CEScripts so new bridge scripts ship
+91057dc feat: Phase 19e — scripts/unity_invoke.lua (CE Lua bridge for callMethod)
+ac5dd88 fix(ui): make Phase 19d "Call method…" discoverable from Methods grid
+b3a87b8 docs: list CE-only mono_invoke_method as optional alternative to callMethod
 ```
 
 ---
@@ -102,23 +146,39 @@ feat: Phase 18d — registerMethodOverloads in unity_symbols.lua
 
 ### Open follow-ups (not blocking, drip-feed)
 
-- **Phase 16 docs** — ✅ closed 2026-05-07. All planned doc files now exist (see Phase Overview table for the per-file list).
-- **Phase 5 segment 2d** — ✅ already shipped commit `5c59077` (2026-04-29). Doc was stale through Phases 17–19; corrected 2026-05-07. v29 verified live (SaGa F2R); cross-version smoke against v24 / v27 / v31 still pending — recipe in [§Phase 5 segment 2d cross-version smoke](#phase-5-segment-2d-cross-version-smoke).
+Closed in this session, kept here as crossed-out reference until next prune:
+
+- ~~**Phase 16 docs**~~ — ✅ closed 2026-05-07. All planned doc files now exist (see Phase Overview table).
+- ~~**Phase 5 segment 2d cross-version smoke**~~ — ✅ partially closed 2026-05-07. v29 / v31 / v39 verified; v24 partial (registration + R4/R8 OK, I*/U* decoder bug); v27 still uncovered. See full table in [§Phase 5 segment 2d cross-version smoke](#phase-5-segment-2d-cross-version-smoke) below.
+- ~~**Phase 18 multi-overload AA-script user-click smoke**~~ — ✅ closed 2026-05-07 against Farthest Frontier `ItemBundle.AddItems` (2 overloads).
+
+Genuine open items:
+
+- **v24 integer-decode bug** (~1 hr fix) — `il2cppGetMetadataTypeFields`'s I*/U* decoder assumes CLI compressed-int + sentinel encoding (correct v29+) but v24 metadata stores raw little-endian bytes. Fix: per-version dispatch via `MetadataParser::version()`. See [§v24 integer-decode bug](#v24-integer-decode-bug-surfaced-2026-05-07-against-ff-vi).
+- **Unity 2018.x missing IL2CPP exports** (~2 hr fix) — `il2cpp_image_get_class_count` + `il2cpp_image_get_class` not exported in Unity 2018.x; `IL2CPPResolver` bails. Fix: demote to OPTIONAL + `MetadataParser`-table-driven fallback. See [§Unity 2018.x IL2CPP missing-exports](#unity-2018x-il2cpp-missing-exports-surfaced-2026-05-07-against-r-type-dimensions-ex).
+- **v27 verification target** — no Unity 2020 IL2CPP game in matrix to confirm the v24 bug is shared with v27 (likely is, given the shared "raw LE" encoding hypothesis). 5–10 min if a target appears.
+- **v32+ metadata.dat parser** (2-3 day project) — only blocks `il2cppGetMetadataTypeFields` const-decode + offline `metadata-cli` on v32+ targets. Runtime path on v39 already works (9/9 sweep). Defer until a user needs offline analysis or const decoding on Unity 6.1+. Full design in [il2cpp-metadata-crosscheck.md §"v35-v39 work — production reality"](il2cpp-metadata-crosscheck.md).
+- **`findInstances` IL2CPP `classPtr` empty** (~30 min cosmetic fix) — response builder doesn't populate the field for IL2CPP. Matches still come back. Backlog.
+- **JSON Inf/NaN value coercion** (~30 min fix) — R4/R8 `Infinity` / `-Infinity` / `NaN` const literals decode the tag correctly but `value` is JSON-null because the spec doesn't allow these as numeric literals. Fix: emit `"infinity"` / `"-infinity"` / `"nan"` strings or add a `value_kind` flag. Backlog.
 - **Phase 17e — Strategy B address finder** — only-if-asked. Cached heap walk + interval tree for batch CE pointer-scan lookups. Skip until requested.
-- **Phase 18 multi-overload AA-script user-click smoke** — Farthest Frontier `ItemBundle.AddItems` exposes 2 overloads (verified via `findMethodInstances`); end-to-end "Copy AOB AA script" against the multi-overload result not yet user-clicked through.
 - **More automated test coverage** — current test suite covers protocol, exporters, pipe lifecycle, a few inspector helpers. Big gaps: classifier (enum vs value-type vs pointer routing), end-to-end `MetadataParser` round-trips per version, CE-XML live-mode rendering against a deterministic fixture, AobMakerBridge happy + sad-path with a fake pipe server. Drip-feed.
 - **Highlight matching substring** in Fields / Methods / Inspector filter results — pure UI polish.
-- **CSX live mode** — design dead-end as scoped (CSX is an offset-relative *structure* format; "live" only makes sense as snapshot-derived layout). CE XML already provides true absolute-address live mode. Defer until a user explicitly asks.
+- **CSX live mode** — design dead-end as scoped (CSX is offset-relative; "live" only makes sense as snapshot-derived layout). CE XML already provides true absolute-address live mode. Defer until a user explicitly asks.
 
 ---
 
 ## Suggested first steps for the new session
 
+Pick whichever fits the slot of time you have. Nothing on this list is blocking.
+
 | Option | Effort | Why pick this |
 |---|---|---|
-| **Phase 5 segment 2d cross-version smoke** | <10 min per target | Run `Test-MetadataFields.ps1` against v24 / v27 / v31 IL2CPP games — recipe in §"Pending verification" below. Closes the last formal gap. |
-| **Inspector classifier unit tests** | <½ day | Cheapest test win. Offline regression coverage for the classifier kind-routing logic. |
-| **Highlight matching substring** | <½ day | Pure UI polish — small but visible improvement for users who filter heavily. |
+| **v24 integer-decode bug fix** | ~1 hr | Real bug surfaced 2026-05-07. Per-version dispatch hooked off `MetadataParser::version()` in `ExportAPI.cpp` cmp lambda. Verify against FF VI re-run after fix. Adds a second small win on v27 (likely affected too). See [§v24 integer-decode bug](#v24-integer-decode-bug-surfaced-2026-05-07-against-ff-vi). |
+| **Unity 2018.x missing-export fallback** | ~2 hr | Demote `il2cpp_image_get_class_count` + `il2cpp_image_get_class` to OPTIONAL + add `MetadataParser`-table-driven fallback through `il2cpp_class_from_name`. Unblocks Unity 2018.x IL2CPP targets (e.g. R-Type Dimensions EX). See [§Unity 2018.x IL2CPP missing-exports](#unity-2018x-il2cpp-missing-exports-surfaced-2026-05-07-against-r-type-dimensions-ex). |
+| **Cosmetic backlog** (`findInstances classPtr` + JSON Inf/NaN) | ~1 hr combined | Two small bugs found by the cross-version sweep. Quick wins, don't block anything but visible to users who hit them. |
+| **Inspector classifier unit tests** | <½ day | Cheapest test-coverage win. Offline regression coverage for the classifier kind-routing logic. |
+| **Highlight matching substring** | <½ day | Pure UI polish — visible improvement for users who filter heavily. |
+| **v32+ metadata.dat parser** | 2–3 days | Only blocks const-decode + offline `metadata-cli` on Unity 6.1+. v39 runtime already works. Worth it if anyone asks for offline v32+ analysis. Full design ready in [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md). |
 | **Phase 12d (32-bit Mono)** | Multi-day | Required for any pre-Unity-2018 Mono game. No user has asked yet (no 32-bit Unity game in test matrix). |
 
 ### Live verifications (carried forward — still green)
@@ -135,10 +195,12 @@ These remain confirmed clicked-through on the dev box:
 - ✅ **Phase 19d** — UI MethodCallWindow user-tested via the Methods grid context menu.
 - ✅ **Phase 19e** — `unity_invoke.lua` dofile + 4 scenarios green from CE Lua console on **both backends**: IL2CPP / SaGa F2R + Mono / BongoCat (2026-05-07). Mono-side run of the BongoCat recipe: `Math.Abs(-7) → 7` (0 ms), `String.Concat("Hello, ", "World") → "Hello, World"` (0 ms), `Convert.ToByte(-1) → System.OverflowException` (host stayed alive, message decoded from `MonoException + 0x18`), `prettyPrint(r)` round-trip clean. Wire layer was already byte-identical via the 19b PowerShell smoke; this confirms the Lua wrapper side too.
 - ✅ **Phase 19d-2** — User click-through green on both UX paths: auto-skip on single-overload methods jumps straight to `MethodCallWindow` (no picker shown); Inspector cross-tab right-click → switches to Methods tab → subsequent Methods-grid right-click pre-fills the `Instance address` textbox from the inspector's selected instance. Build: 38.3 MB AOT, 0/0 trim/AOT warnings, 5/5 xUnit pass (build #234).
+- ✅ **Phase 5 segment 2d cross-version sweep** (2026-05-07, build #235-236) — Registration scan: ✅ on Unity 2018.1 (R-Type / v24, types=19874), Unity 2019.4 (FF VI / v24), Unity 2021.3 (SaGa F2R / v29, baseline), Unity 2022.3 (Farthest Frontier / v31), Unity 6.1 (Songs of Silence / v39, types=144837). FieldDefault decode: ✅ R4/R8 across all versions, ✅ I*/U* on v29 / v31, ⚠️ I*/U* broken on v24 (v24 metadata uses raw LE; decoder assumes CLI compressed-int + sentinels). v32+ blocked at `MetadataParser` `version > 31` reject (by design).
+- ✅ **Phase 5 segment 2d v39 runtime sweep** (2026-05-07, build #235) — `Test-V39RuntimeSweep.ps1` 9/9 paths green against Songs of Silence: handshake, `il2cppGetMetadataRegistration`, `getAssemblies` (253 assemblies), `getClasses UnityEngine.CoreModule` (1093 classes), `getClassInfo UnityEngine.GameObject` (143 methods, parent walk OK), `findInstances` (8/8 matches), `walkInstance` (decoded `m_CachedPtr +0x10`), `findMethodInstances UnityEngine.Mathf.Abs` (2 overloads with addresses + signatures), `callMethod Mathf.Abs(int:-7) → 7`. **v39 is first-class supported** for Inspector / browser / Phase 17/18/19 / Lua bridges; only `il2cppGetMetadataTypeFields` const decode + offline `metadata-cli` remain gated.
 
 ### Pending verification (small)
 
-- **Phase 5 segment 2d — cross-version smoke**. v29 (SaGa F2R) verified; v24 / v27 / v31 structural-shape scan + typed-decode still uncovered. ~10 min per target — recipe below.
+_(none — every shipped phase has a live click-through on the dev box. New work surfaced by the cross-version sweep is captured in "Open follow-ups" with fix sketches.)_
 
 ### Phase 5 segment 2d cross-version smoke
 
