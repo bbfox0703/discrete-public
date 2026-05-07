@@ -3,10 +3,12 @@
 #define UNITYCEDUMPER_BUILDING_DLL
 #include "ExportAPI.h"
 
+#include "AobPattern.h"
 #include "BackendDetector.h"
 #include "Logger.h"
 #include "MagicStrings.h"
 #include "Memory.h"
+#include "ModuleHelper.h"
 #include "PipeServer.h"
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
@@ -744,6 +746,89 @@ void RegisterCoreHandlers() {
         }
         return out;
     };
+
+    // ----------------------------------------------------------------------
+    // Phase 18a-3 — backend-agnostic AOB pattern generator. Reads N bytes
+    // (default 32, capped 128) from the supplied address, walks them with a
+    // minimal x64 length disassembler, returns a CE-style pattern string
+    // with rel8/rel32 immediates and RIP-relative ModRM disp32 fields
+    // wildcarded. Also resolves the containing module name + offset so the
+    // UI can emit `aobscanmodule(name, GameAssembly.dll, ...)` directly.
+    // ----------------------------------------------------------------------
+    PipeServer::RegisterHandler(MagicStrings::CmdGetMethodAobPattern,
+        [parseAddr, bytesToHex, formatHex](const json& args) -> json {
+        std::uintptr_t addr = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], addr)) {
+            return json{{"error", "missing/invalid 'address'"}};
+        }
+        std::size_t length = 32;
+        if (args.contains("length") && args["length"].is_number_unsigned()) {
+            length = args["length"].get<std::size_t>();
+        }
+        if (length == 0)   length = 32;
+        if (length > 128)  length = 128;
+
+        std::vector<std::uint8_t> buf(length);
+        if (!Memory::SafeReadBytes(reinterpret_cast<void*>(addr),
+                                   buf.data(), buf.size())) {
+            return json{
+                {"error",   "address unreadable"},
+                {"address", formatHex(addr)},
+                {"length",  length},
+            };
+        }
+
+        auto pr = Aob::BuildPattern(buf.data(), buf.size());
+
+        // Resolve containing module — needed for the AA script's
+        // aobscanmodule(name, MODULE, AOB) form.
+        std::string moduleName;
+        std::uintptr_t moduleBase = 0;
+        std::size_t    moduleSize = 0;
+        for (const auto& mi : ModuleHelper::EnumerateModules()) {
+            const auto base = reinterpret_cast<std::uintptr_t>(mi.baseAddress);
+            if (base == 0 || mi.sizeOfImage == 0) continue;
+            if (addr >= base && addr < base + mi.sizeOfImage) {
+                moduleBase = base;
+                moduleSize = mi.sizeOfImage;
+                int n = ::WideCharToMultiByte(CP_UTF8, 0, mi.name.data(),
+                                              static_cast<int>(mi.name.size()),
+                                              nullptr, 0, nullptr, nullptr);
+                if (n > 0) {
+                    moduleName.assign(static_cast<std::size_t>(n), '\0');
+                    ::WideCharToMultiByte(CP_UTF8, 0, mi.name.data(),
+                                          static_cast<int>(mi.name.size()),
+                                          moduleName.data(), n, nullptr, nullptr);
+                }
+                break;
+            }
+        }
+
+        std::size_t wildcards = 0;
+        for (bool b : pr.wildcardMask) if (b) ++wildcards;
+
+        json result = {
+            {"address",      formatHex(addr)},
+            {"length",       pr.length},
+            {"pattern",      pr.pattern},
+            {"bytes",        bytesToHex(pr.bytes.data(), pr.bytes.size())},
+            {"moduleName",   moduleName},
+            {"moduleBase",   formatHex(moduleBase)},
+            {"moduleOffset", formatHex(moduleBase ? (addr - moduleBase) : 0)},
+            {"moduleSize",   moduleSize},
+            {"stats", json{
+                {"instructions", pr.instructionCount},
+                {"wildcards",    wildcards},
+                {"relBranches",  pr.relBranchCount},
+                {"ripRel",       pr.ripRelCount},
+            }},
+            {"decoderBailed", pr.decoderBailed},
+        };
+        if (pr.decoderBailed) {
+            result["bailedAt"] = pr.bailedAt;
+        }
+        return result;
+    });
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
     // Phase 3 segment 1: list every Mono-loaded assembly.
