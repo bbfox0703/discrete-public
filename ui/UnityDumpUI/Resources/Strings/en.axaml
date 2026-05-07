@@ -160,5 +160,7 @@
   <sys:String x:Key="MethodOverloads.CopyAobScript">Copy AOB AA script</sys:String>
   <sys:String x:Key="MethodOverloads.CopyRegisterSymbol">Copy registerSymbol script</sys:String>
   <sys:String x:Key="MethodOverloads.CopyAddresses">Copy addresses</sys:String>
+  <sys:String x:Key="MethodOverloads.CreateAaInCe">Create AA in CE</sys:String>
+  <sys:String x:Key="MethodOverloads.AutoActivate">Auto-activate</sys:String>
   <sys:String x:Key="MethodOverloads.Close">Close</sys:String>
 </ResourceDictionary>

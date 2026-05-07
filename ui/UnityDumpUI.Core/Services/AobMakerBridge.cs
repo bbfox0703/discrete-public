@@ -47,6 +47,19 @@ public interface IAobMakerBridge
 
     /// <summary>Open / move CE's Disassembler pane to the given address.</summary>
     Task<bool> NavigateDisassemblerAsync(string hexAddress, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 18c — push a complete AA script (ENABLE/DISABLE pair) into
+    /// CE's address list as a new memory record of type vtAutoAssembler.
+    /// CE plugin runs <c>al.createMemoryRecord()</c> + sets
+    /// <c>mr.Script = [==[…]==]</c> on a synchronize callback.
+    /// </summary>
+    /// <param name="description">CE entry description (column 1 of the address list).</param>
+    /// <param name="script">Full AA script text — both <c>[ENABLE]</c> and <c>[DISABLE]</c> blocks.</param>
+    /// <param name="autoActivate">When true, CE flips the entry's checkbox on after creation.</param>
+    Task<bool> CreateAAScriptAsync(string description, string script,
+                                   bool autoActivate = false,
+                                   CancellationToken ct = default);
 }
 
 public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
@@ -58,6 +71,7 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
 
     private const string TypeNavigateHexView      = "NavigateHexView";
     private const string TypeNavigateDisassembler = "NavigateDisassembler";
+    private const string TypeCreateAAScript       = "CreateAAScript";
 
     private readonly FileLogger? _logger;
     private NamedPipeClientStream? _pipe;
@@ -70,6 +84,61 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
 
     public Task<bool> NavigateDisassemblerAsync(string hexAddress, CancellationToken ct = default)
         => SendAsync(TypeNavigateDisassembler, StripHexPrefix(hexAddress), ct);
+
+    public async Task<bool> CreateAAScriptAsync(string description, string script,
+                                                bool autoActivate = false,
+                                                CancellationToken ct = default)
+    {
+        const string type = TypeCreateAAScript;
+        if (string.IsNullOrEmpty(script))
+        {
+            Log($"AobMaker {type}: empty script, skipping");
+            return false;
+        }
+        if (!await ReconnectAsync(ct).ConfigureAwait(false))
+        {
+            Log($"AobMaker {type}: pipe unavailable (CE / AOBMaker not running?)");
+            return false;
+        }
+
+        try
+        {
+            var request = new AobMakerMessage
+            {
+                Type         = type,
+                Description  = description,
+                Script       = script,
+                AutoActivate = autoActivate,
+            };
+            await WriteMessageAsync(_pipe!, request, ct).ConfigureAwait(false);
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(ResponseTimeoutMs);
+            AobMakerMessage? response = await ReadMessageAsync(_pipe!, timeoutCts.Token)
+                .ConfigureAwait(false);
+            CleanupPipe();
+
+            if (response == null || !response.Success)
+            {
+                Log($"AobMaker {type} → '{description}': failure ({response?.Message ?? "no response"})");
+                return false;
+            }
+            Log($"AobMaker {type} → '{description}': ok (scriptLen={script.Length}, autoActivate={autoActivate})");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            Log($"AobMaker {type} → '{description}': timed out");
+            CleanupPipe();
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log($"AobMaker {type} → '{description}': {ex.GetType().Name}: {ex.Message}");
+            CleanupPipe();
+            return false;
+        }
+    }
 
     // ---------- Internals ------------------------------------------------
 
@@ -201,9 +270,11 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
 }
 
 /// <summary>
-/// Wire model — every field optional except <c>type</c>. Only the subset we
-/// actually exchange is declared here (no CreateAAScript / CreateSymbolScript
-/// support yet — we don't need them for inspector navigation).
+/// Wire model — every field optional except <c>type</c>. Subset we actually
+/// exchange: navigate (Address) + create AA script (Description + Script +
+/// AutoActivate) + the response envelope (Success / Message). The CE Plugin
+/// silently ignores extra fields, so the same message class serves every
+/// command direction.
 /// </summary>
 internal sealed class AobMakerMessage
 {
@@ -211,6 +282,15 @@ internal sealed class AobMakerMessage
     [JsonPropertyName("address")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Address { get; set; }
+    [JsonPropertyName("description")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Description { get; set; }
+    [JsonPropertyName("script")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Script { get; set; }
+    [JsonPropertyName("autoActivate")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool    AutoActivate { get; set; }
     [JsonPropertyName("success")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool    Success { get; set; }

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -30,16 +31,19 @@ namespace UnityDumpUI.ViewModels;
 
 public sealed partial class MethodOverloadsViewModel : ObservableObject
 {
-    private readonly BackendAdapter _backend;
-    private readonly FileLogger     _logger;
+    private readonly BackendAdapter    _backend;
+    private readonly FileLogger        _logger;
+    private readonly IAobMakerBridge?  _aobMaker;
     private CancellationTokenSource? _refreshCts;
 
     public MethodOverloadsViewModel(BackendAdapter backend, FileLogger logger,
                                     string assembly, string @namespace, string className,
-                                    string methodName)
+                                    string methodName,
+                                    IAobMakerBridge? aobMaker = null)
     {
         _backend     = backend;
         _logger      = logger;
+        _aobMaker    = aobMaker;
         Assembly     = assembly;
         Namespace    = @namespace;
         ClassName    = className;
@@ -48,6 +52,12 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         TitleLabel = string.IsNullOrEmpty(@namespace)
             ? $"{className}.{methodName}"
             : $"{@namespace}.{className}.{methodName}";
+
+        // Surface "Create AA in CE via AOBMaker" only when the bridge is
+        // wired. When AOBMaker / CE aren't running the call is fail-soft,
+        // but the button stays hidden so the user isn't tempted to click
+        // it expecting magic.
+        HasAobMakerBridge = aobMaker is not null;
     }
 
     public string Assembly   { get; }
@@ -55,6 +65,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     public string ClassName  { get; }
     public string MethodName { get; }
     public string TitleLabel { get; }
+    public bool   HasAobMakerBridge { get; }
 
     /// <summary>
     /// View-supplied clipboard write — wired by the Window code-behind.
@@ -68,6 +79,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(CopyAobScriptCommand))]
     [NotifyCanExecuteChangedFor(nameof(CopyRegisterSymbolScriptCommand))]
     [NotifyCanExecuteChangedFor(nameof(CopyAddressesCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CreateAaScriptInCeCommand))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -97,6 +109,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         IsBusy        = true;
         ErrorMessage  = null;
         StatusMessage = "Searching overloads…";
+        UnsubscribeRowEvents();
         Overloads.Clear();
         try
         {
@@ -112,11 +125,18 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
             }
             foreach (var m in result.Matches)
             {
-                Overloads.Add(new MethodOverloadRow(m));
+                var row = new MethodOverloadRow(m);
+                row.PropertyChanged += OnRowPropertyChanged;
+                Overloads.Add(row);
             }
             StatusMessage = result.Count == 0
                 ? "No overloads matched."
                 : $"{result.Count} overload(s) found.";
+            // CommandToolkit.Mvvm doesn't auto-re-evaluate CanExecute when a
+            // child observable item changes — refresh selection-dependent
+            // commands explicitly so a freshly-loaded grid starts in the
+            // right state (button disabled until a row gets ticked).
+            NotifySelectionDependentCommands();
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
@@ -131,6 +151,30 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         }
     }
 
+    private void UnsubscribeRowEvents()
+    {
+        foreach (var row in Overloads)
+        {
+            row.PropertyChanged -= OnRowPropertyChanged;
+        }
+    }
+
+    private void OnRowPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MethodOverloadRow.IsSelected))
+        {
+            NotifySelectionDependentCommands();
+        }
+    }
+
+    private void NotifySelectionDependentCommands()
+    {
+        CopyAobScriptCommand.NotifyCanExecuteChanged();
+        CopyRegisterSymbolScriptCommand.NotifyCanExecuteChanged();
+        CopyAddressesCommand.NotifyCanExecuteChanged();
+        CreateAaScriptInCeCommand.NotifyCanExecuteChanged();
+    }
+
     /// <summary>
     /// Selected rows that have a real native address (compiled successfully
     /// in the Mono path, AOT pointer in IL2CPP). Abstract / generic methods
@@ -142,7 +186,45 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
 
     private bool CanRunCommands() => !IsBusy;
 
-    [RelayCommand(CanExecute = nameof(CanCopyAobScript))]
+    /// <summary>
+    /// Build one <see cref="AaScriptOverload"/> per selected row, fetching
+    /// each one's AOB pattern via <c>getMethodAobPattern</c>. Returns null
+    /// on failure (status / error message already set on the VM).
+    /// </summary>
+    private async Task<List<AaScriptOverload>?> BuildScriptBagAsync(
+        IReadOnlyList<MethodOverloadRow> picks, int aobLength)
+    {
+        int len = Math.Clamp(aobLength, 8, 128);
+        var bag = new List<AaScriptOverload>(picks.Count);
+        foreach (var row in picks)
+        {
+            var patt = await _backend.GetMethodAobPatternAsync(row.Address!, len).ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(patt.Error))
+            {
+                StatusMessage = $"AOB scan failed for {row.SignatureLabel}: {patt.Error}";
+                return null;
+            }
+            bag.Add(new AaScriptOverload
+            {
+                MethodName       = MethodName,
+                ClassName        = ClassName,
+                Namespace        = Namespace,
+                HumanSuffix      = row.HumanSuffix ?? "T",
+                Signature        = row.SignatureLabel,
+                Pattern          = patt.Pattern ?? string.Empty,
+                ModuleName       = patt.ModuleName ?? "GameAssembly.dll",
+                Address          = patt.Address ?? row.Address!,
+                ModuleOffset     = patt.ModuleOffset ?? "0x0",
+                ReturnType       = row.ReturnType,
+                DecoderBailed    = patt.DecoderBailed,
+                InstructionCount = patt.Stats?.Instructions ?? 0,
+                WildcardCount    = patt.Stats?.Wildcards ?? 0,
+            });
+        }
+        return bag;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRunSelectionCmd))]
     public async Task CopyAobScriptAsync()
     {
         var picks = SelectedAddressable();
@@ -158,33 +240,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         StatusMessage = $"Generating AOB pattern for {picks.Count} overload(s)…";
         try
         {
-            int len = Math.Clamp(AobLength, 8, 128);
-            var bag = new List<AaScriptOverload>(picks.Count);
-            foreach (var row in picks)
-            {
-                var patt = await _backend.GetMethodAobPatternAsync(row.Address!, len).ConfigureAwait(true);
-                if (!string.IsNullOrEmpty(patt.Error))
-                {
-                    StatusMessage = $"AOB scan failed for {row.SignatureLabel}: {patt.Error}";
-                    return;
-                }
-                bag.Add(new AaScriptOverload
-                {
-                    MethodName       = MethodName,
-                    ClassName        = ClassName,
-                    Namespace        = Namespace,
-                    HumanSuffix      = row.HumanSuffix ?? "T",
-                    Signature        = row.SignatureLabel,
-                    Pattern          = patt.Pattern ?? string.Empty,
-                    ModuleName       = patt.ModuleName ?? "GameAssembly.dll",
-                    Address          = patt.Address ?? row.Address!,
-                    ModuleOffset     = patt.ModuleOffset ?? "0x0",
-                    ReturnType       = row.ReturnType,
-                    DecoderBailed    = patt.DecoderBailed,
-                    InstructionCount = patt.Stats?.Instructions ?? 0,
-                    WildcardCount    = patt.Stats?.Wildcards ?? 0,
-                });
-            }
+            var bag = await BuildScriptBagAsync(picks, AobLength).ConfigureAwait(true);
+            if (bag is null) return;
             string script = AobAaScriptGenerator.Build(bag);
             await CopyToClipboardAsync(script).ConfigureAwait(true);
             StatusMessage = $"Copied AOB AA script for {bag.Count} overload(s) to clipboard.";
@@ -201,8 +258,64 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         }
     }
 
-    private bool CanCopyAobScript() =>
+    /// <summary>
+    /// Push the generated AOB AA script straight into CE's address list as
+    /// a new memory record (vtAutoAssembler) via the AOBMaker bridge. Skip
+    /// the clipboard round-trip — UE5CEDumper-style. Optional
+    /// <c>autoActivate</c> flips the cheat entry's checkbox on after
+    /// creation so the AOB scan + symbol register fires immediately.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanRunCreateInCe))]
+    public async Task CreateAaScriptInCeAsync()
+    {
+        var picks = SelectedAddressable();
+        if (picks.Count == 0 || _aobMaker is null)
+        {
+            StatusMessage = "Select at least one overload with a native address.";
+            return;
+        }
+
+        IsBusy = true;
+        ErrorMessage = null;
+        StatusMessage = $"Pushing AOB script for {picks.Count} overload(s) to CE…";
+        try
+        {
+            var bag = await BuildScriptBagAsync(picks, AobLength).ConfigureAwait(true);
+            if (bag is null) return;
+            string script      = AobAaScriptGenerator.Build(bag);
+            string description = picks.Count == 1
+                ? $"{ClassName}.{MethodName} {bag[0].HumanSuffix}"
+                : $"{ClassName}.{MethodName}  ({picks.Count} overloads)";
+
+            bool ok = await _aobMaker.CreateAAScriptAsync(description, script,
+                                                          autoActivate: AutoActivateInCe)
+                                     .ConfigureAwait(true);
+            StatusMessage = ok
+                ? $"Created '{description}' in CE address list ({bag.Count} overload(s))."
+                : "AOBMaker pipe unavailable — start CE with the AOBMaker plugin loaded, then retry.";
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"MethodOverloadsViewModel: AOBMaker CreateAAScript failed: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>If true, the CE-side memory record's checkbox is flipped on
+    /// after creation so AOB scan + registersymbol run immediately.</summary>
+    [ObservableProperty]
+    private bool _autoActivateInCe = true;
+
+    private bool CanRunSelectionCmd() =>
         !IsBusy && CopyToClipboardAsync is not null && Overloads.Any(r => r.IsSelected);
+
+    private bool CanRunCreateInCe() =>
+        !IsBusy && _aobMaker is not null && Overloads.Any(r => r.IsSelected);
 
     /// <summary>
     /// Drop a runtime-injection style script that registers each selected
@@ -211,7 +324,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// address is baked in) but useful when the user wants to verify the
     /// finder output without dealing with AOB scan timing.
     /// </summary>
-    [RelayCommand(CanExecute = nameof(CanCopyAobScript))]
+    [RelayCommand(CanExecute = nameof(CanRunSelectionCmd))]
     public async Task CopyRegisterSymbolScriptAsync()
     {
         var picks = SelectedAddressable();
@@ -276,7 +389,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// selected overloads. Useful when the user just wants to paste them
     /// into a CE manual-add dialog.
     /// </summary>
-    [RelayCommand(CanExecute = nameof(CanCopyAobScript))]
+    [RelayCommand(CanExecute = nameof(CanRunSelectionCmd))]
     public async Task CopyAddressesAsync()
     {
         var picks = SelectedAddressable();

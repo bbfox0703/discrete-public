@@ -57,12 +57,19 @@
                  Foreground="#FF7B7B7B"
                  TextWrapping="NoWrap" />
       <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+        <CheckBox Content="{StaticResource MethodOverloads.AutoActivate}"
+                  IsChecked="{Binding AutoActivateInCe, Mode=TwoWay}"
+                  IsVisible="{Binding HasAobMakerBridge}"
+                  VerticalAlignment="Center" />
         <Button Content="{StaticResource MethodOverloads.CopyAddresses}"
                 Command="{Binding CopyAddressesCommand}" />
         <Button Content="{StaticResource MethodOverloads.CopyRegisterSymbol}"
                 Command="{Binding CopyRegisterSymbolScriptCommand}" />
         <Button Content="{StaticResource MethodOverloads.CopyAobScript}"
-                Command="{Binding CopyAobScriptCommand}"
+                Command="{Binding CopyAobScriptCommand}" />
+        <Button Content="{StaticResource MethodOverloads.CreateAaInCe}"
+                Command="{Binding CreateAaScriptInCeCommand}"
+                IsVisible="{Binding HasAobMakerBridge}"
                 Classes="accent" />
         <Button Content="{StaticResource MethodOverloads.Close}"
                 Click="OnCloseClicked" />

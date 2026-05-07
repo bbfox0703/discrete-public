@@ -201,7 +201,13 @@ public partial class MainWindow : Window
             browser.SelectedAssembly.Name,
             browser.SelectedClass.Namespace,
             browser.SelectedClass.Name,
-            targetRow.Name);
+            targetRow.Name,
+            // Re-use the inspector's existing AOBMaker bridge so a single
+            // session shares one pipe-client lifetime + one log stream.
+            // Bridge no-ops cleanly when AOBMaker / CE aren't running, so
+            // the user just sees the "AOBMaker pipe unavailable" status
+            // line — same behaviour as the Inspector's HEX button.
+            vm.Inspector.AobMaker);
         var win = new MethodOverloadsWindow(overloadsVm);
         await win.ShowDialog(this);
     }
