@@ -3,12 +3,13 @@
     Deploy UnityCEDumper Lua scripts + DLLs into Cheat Engine's discrete folder.
 
 .DESCRIPTION
-    Copies the bridge scripts (unity_dump / unity_dissect / unity_symbols / utils)
-    and the backend DLLs (UnityDumper-Mono, UnityDumper-IL2CPP) into
-    <CE-install>\discrete\ so CE Lua's `dofile` can pick them up.
+    Copies every *.lua bridge script + the backend DLLs
+    (UnityDumper-Mono, UnityDumper-IL2CPP) into <CE-install>\discrete\ so
+    CE Lua's `dofile` can pick them up. Lua list is glob-driven, so new
+    scripts ship automatically without editing this file.
 
     Two source modes:
-      * release  Copy everything from dist/ — use post-build.cmd. (Default.)
+      * release  Copy *.lua + DLLs from dist/ — use post-build.cmd. (Default.)
       * scripts  Copy *.lua from scripts/ + DLLs from dist/ — use during live
                  iteration on the Lua bridge without re-running build.cmd.
 
@@ -90,18 +91,37 @@ Write-Info ("Source mode: {0}" -f $Mode)
 
 # ---------------------------------------------------------------------------
 # Build file list per mode
+#
+# Lua scripts are picked up by glob (`*.lua`) — matches the same convention
+# `build.ps1`'s dist-copy step uses, so any new script the project adds gets
+# deployed automatically without touching this file. Earlier hardcoded list
+# was missing `unity_addrfind.lua` (Phase 17d) AND `unity_invoke.lua`
+# (Phase 19e), forcing manual copies. DLL names stay enumerated since we
+# only ship two specific backend DLLs (the dist tree contains other DLLs
+# we don't want to deploy into CE — Skia, HarfBuzz, Avalonia native libs).
 # ---------------------------------------------------------------------------
 $sourceFiles = New-Object System.Collections.Generic.List[string]
 
-$luaNames = @('unity_dump.lua', 'unity_dissect.lua', 'unity_symbols.lua', 'utils.lua')
 $dllNames = @('UnityDumper-Mono.dll', 'UnityDumper-IL2CPP.dll')
+
+function Add-LuaScriptsFromDir {
+    param([string]$Dir, [System.Collections.Generic.List[string]]$Sink)
+    if (-not (Test-Path $Dir)) { return 0 }
+    $found = Get-ChildItem -Path $Dir -Filter '*.lua' -File -ErrorAction SilentlyContinue
+    foreach ($f in $found) { [void]$Sink.Add($f.FullName) }
+    return $found.Count
+}
 
 switch ($Mode) {
     'release' {
         if (-not (Test-Path $distDir)) {
             throw "dist\ not found at $distDir. Run build.cmd first, or use -Mode scripts for live-iteration deploys."
         }
-        foreach ($n in $luaNames + $dllNames) {
+        $luaCount = Add-LuaScriptsFromDir -Dir $distDir -Sink $sourceFiles
+        if ($luaCount -eq 0) {
+            Write-Warning "No *.lua found in dist\ — did the build complete?"
+        }
+        foreach ($n in $dllNames) {
             $f = Join-Path $distDir $n
             if (Test-Path $f) { [void]$sourceFiles.Add($f) }
             else              { Write-Warning "Skipping missing $n in dist\" }
@@ -109,10 +129,9 @@ switch ($Mode) {
     }
     'scripts' {
         # Lua from scripts/ (live edits), DLLs still come from dist/
-        foreach ($n in $luaNames) {
-            $f = Join-Path $scriptsDir $n
-            if (Test-Path $f) { [void]$sourceFiles.Add($f) }
-            else              { Write-Warning "Skipping missing $n in scripts\" }
+        $luaCount = Add-LuaScriptsFromDir -Dir $scriptsDir -Sink $sourceFiles
+        if ($luaCount -eq 0) {
+            Write-Warning "No *.lua found in scripts\ — repo layout looks wrong."
         }
         foreach ($n in $dllNames) {
             $f = Join-Path $distDir $n
