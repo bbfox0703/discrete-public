@@ -166,10 +166,61 @@ The `Il2CppMetadataRegistration` discovery uses a structural-shape scan (not a l
 
 | Metadata version | Target | Status |
 |---|---|---|
-| v24 | (any Unity 2018 game in the test matrix) | ⏳ |
+| v24 | FINAL FANTASY VI (Unity 2019.4.26f1) | ⚠️ Partial 2026-05-07 — registration scan works, R4/R8 decode works, but I*/U* decoder is wrong (see "v24 integer-decode bug" below) |
 | v27 | (any Unity 2020 game in the test matrix) | ⏳ |
 | v29 | SaGa F2R | ✅ verified |
-| v31 | Farthest Frontier / Hollow Knight: Silksong | ⏳ |
+| v31 | Farthest Frontier (Unity 2022.3.62f3) | ✅ verified 2026-05-07 |
+| v39 | Songs of Silence (Unity 6000.3.8f1) | 🟡 Registration scan ✅ (`types_count=144837`); FieldDefault decode blocked at `MetadataParser` `version > 31` hard-reject — see [il2cpp-metadata-crosscheck.md §"v35-v39 future work"](il2cpp-metadata-crosscheck.md). Confirms structural-shape scan is **version-independent**. |
+
+**v31 verification details** (2026-05-07, build #235):
+
+- Banner: `Il2CppMetadataRegistration: YES` ✅
+- `System.Int32.MaxValue` → tag 0x08 (I4), value 2147483647, enc 1B (sentinel `0xFE` = type_max, decoder correctly bounded to int max)
+- `System.Int32.MinValue` → tag 0x08 (I4), value -2147483648, enc 1B (sentinel `0xFF` = type_min)
+- `System.Single.MinValue` / `Epsilon` / `MaxValue` / `NegativeZero` → tag 0x0C (R4), correct float values, enc 4B
+- `System.Single.PositiveInfinity` / `NegativeInfinity` / `NaN` → tag 0x0C identified, decoder ran, but wire `value` came back null (see "JSON Inf/NaN limitation" below).
+
+**Known non-blocking issue surfaced during v31 verification**: JSON spec doesn't allow `Infinity` / `-Infinity` / `NaN` as numeric literals. The R4 decoder code path runs and sets `enc_bytes=4`, but `nlohmann/json` serializes the float value as `null` for the three special cases. The smoke script reports "(no decode)" when value is null. Tag identification still works. Fix would be either (a) emit special-case strings (`"infinity"` / `"nan"`) for these values, or (b) add a flag like `"value_kind": "infinity"` alongside a null `value`. Defer until a user actually needs to read these specific constants.
+
+### v24 integer-decode bug (surfaced 2026-05-07 against FF VI)
+
+The v24 cross-version smoke uncovered a real bug in the integer FieldDefault decoder. Banner / structural-shape scan / R4 / R8 paths all work on v24 — but the I*/U* family (Bool / Char / I1-I8 / U1-U8) decode wrong values.
+
+**Root cause**: the I*/U* decoder in `il2cppGetMetadataTypeFields` (ExportAPI.cpp:1860-1875 area) assumes **CLI compressed-int with sentinel encoding** (`0xFE` = type_max, `0xFF` = type_min, else compressed-signed). That's correct for v29 / v31. v24 IL2CPP code-gen instead emits **raw little-endian bytes** for integer constants — same convention floats already use unconditionally.
+
+**Concrete reproduction**:
+
+| Field (v24, FF VI) | raw_hex first 4 bytes | LE-int32 reading | Should be | Decoder returns |
+|---|---|---|---|---|
+| `System.Int32.MaxValue` | `FFFFFF7F` | `0x7FFFFFFF` = 2147483647 ✅ | 2147483647 | **-2147483648** ❌ (saw `0xFF` first byte → type_min sentinel) |
+| `System.Int32.MinValue` | `00000080` | `0x80000000` = -2147483648 ✅ | -2147483648 | **0** ❌ (saw `0x00` → 1-byte CLI compressed-int = 0) |
+
+R4 / R8 are unaffected because their decoder is unconditional `memcpy(p, 4 or 8)`.
+
+**Fix options** (none implemented yet):
+
+1. **Per-version dispatch** — version-aware decoder, raw LE for v24 / v27, sentinel + compressed-int for v29+.
+2. **Auto-detect** — if the data slot is exactly N bytes for a fixed-N type (1 for I1, 4 for I4, 8 for I8) AND the value would otherwise be a sentinel result, prefer raw LE. Brittle when the actual value really IS the sentinel (`int.MaxValue` is the legitimate max).
+3. **Feature flag at the registration-find level** — `IL2CPPMetadataRegistration::IsLikelyV24Encoding()` heuristic, reported as `encoding_format` in the wire response, smoke / consumers branch on it.
+
+Option 1 is cleanest. Estimated ½-day work: hook the encoding choice off `MetadataParser::version()` (already known at the site), branch the I*/U* decoder, add v24/v27 unit tests. Defer until a user explicitly needs `getMetadataTypeFields` const-int values on v24 / v27.
+
+**Workaround in the meantime**: read `raw_hex_first16` and decode manually for v24 / v27. The Inspector and class browser don't depend on this path — only `il2cppGetMetadataTypeFields`'s typed-value field does.
+
+### v39 registration scan works (surfaced 2026-05-07 against Songs of Silence)
+
+Songs of Silence (Unity 6000.3.8f1) is the first **v32+ metadata target** to land in the test matrix. The structural-shape AOB scan found the registration cleanly via the new `il2cppGetMetadataRegistration` diagnostic command (probe via [Test-MetadataRegistration.ps1](../tools/Test-MetadataRegistration.ps1)):
+
+```json
+{ "found": true,
+  "address": "0x00007FFE9C13D830",
+  "types_array": "0x00007FFE9C22A1C0",
+  "types_count": 144837 }
+```
+
+`types_count=144837` is plausible for a 253-assembly Unity 6.1 game; the address pair is in the expected `GameAssembly.dll` range. **This confirms the structural-shape heuristic is version-independent through v39** — no per-version layout tweaks needed for the registration scan, even when metadata.dat parsing is gated behind unimplemented v38/v39 work.
+
+`il2cppGetMetadataTypeFields` itself still errors out with `global-metadata.dat not loaded` because `MetadataParser::LoadHeader` rejects `version > 31` — by design, see the defensive guard in [il2cpp-metadata-crosscheck.md §"Defensive guard live today"](il2cpp-metadata-crosscheck.md). Adding v32-v39 metadata-table parsing is a separate project (~1.5–2 days, see same doc); the registration scan is unblocked from that work.
 
 If `Il2CppMetadataRegistration: no` shows up on any version, the registration's PE-section layout or struct shape changed between versions — would need a per-version layout dispatch in `IL2CPPMetadataRegistration.cpp` (currently hardcoded `kRegBytes = 0x80` for v29). The init log will have `MetadataRegistration: near-miss @0x.. typesCount=N: <reason>` lines pointing at what failed the heuristic.
 
