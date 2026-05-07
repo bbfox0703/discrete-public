@@ -4,7 +4,7 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-07
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c fully closed and verified live across both backends; 19d (UI MethodCallWindow) implemented in tree and AOT-publish-clean (build #222), awaiting hands-on UI verification**. Build #220 — static + instance + string args/return + managed exception capture all green. Verified targets: SaGa F2R (IL2CPP), BongoCat (Mono), Farthest Frontier (both backends — instance dispatch via `ItemBundle.get_numberOfItems()`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c fully closed and verified live across both backends; 19d (UI MethodCallWindow) verified live via UI smoke; 19e (`scripts/unity_invoke.lua` Lua bridge) implemented in tree, build #224, awaiting CE-side verification.** Phase 19 fully shipped — closes the original CLAUDE.md goal "invoke managed methods from CE Lua with marshaled args / return values" end-to-end across DLL → UI → CE Lua bridge. Build #220 — static + instance + string args/return + managed exception capture all green. Verified targets: SaGa F2R (IL2CPP), BongoCat (Mono), Farthest Frontier (both backends — instance dispatch via `ItemBundle.get_numberOfItems()`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -760,10 +760,10 @@ Out (v2 follow-ups, deliberately not started):
     in `ProtocolModels.cs` (`CallArgRequest` / `CallMethodResult` /
     `CallMethodMethodInfo`) + matching `ProtocolJsonContext` registrations.
 
-- [ ] **19e** Lua bridge — new `scripts/unity_invoke.lua` (separate
-  file rather than extending `unity_symbols.lua` because the API surface
-  is meaningfully different — typed args + return values vs symbol
-  bookkeeping). Public API:
+- [x] **19e** Lua bridge — landed 2026-05-07, build #224. New
+  `scripts/unity_invoke.lua` (18 KB; standalone — does NOT `require` the
+  sibling scripts). Closes the original CLAUDE.md goal "invoke managed
+  methods from CE Lua with marshaled args / return values." Public API:
   ```lua
   -- Static call:
   local r = callUnityMethod("UnityEngine.CoreModule", "UnityEngine",
@@ -779,6 +779,32 @@ Out (v2 follow-ups, deliberately not started):
   ```
   Same `\\.\pipe\UnityDumpBfx` retry scaffolding + per-RPC
   `processMessages()` + `sleep(1)` yield as the sibling scripts.
+
+  Implementation details:
+  * Ships its own JSON serializer (~50 LOC, request-shape-specific) on
+    top of the response-shape-specific parser the sibling scripts also
+    carry. Needed because `callMethod`'s `args` is a nested JSON array
+    of `{type, value}` objects — flat-only `{"k":v}` builders the other
+    scripts use can't express it.
+  * Arg builder helpers — `argNull` / `argBool` / `argByte` / `argSByte`
+    / `argInt16` / `argUInt16` / `argInt32` / `argUInt32` / `argInt64`
+    / `argUInt64` / `argFloat` / `argDouble` / `argChar` / `argString`
+    / `argAddress` — one per wire type tag from `lua-invoke.md`. Keeps
+    callers from hand-typing `{type="int32", value=...}` for every arg.
+    `argChar("X")` accepts a 1-char string and converts to the code
+    unit; `argAddress` accepts hex string OR Lua number.
+  * Result helpers: `asAddress(v)` decodes a `"0x..."` returnValue back
+    to a Lua number; `prettyPrint(r)` logs a one-line human summary;
+    `pcallUnityMethod(...)` is the non-throwing variant.
+  * `findOverloads(asm, ns, class, method, sigMatch?)` wraps
+    `findMethodInstances` so users can list every overload of a method
+    and pick the right `signatureMatch` from CE Lua without leaving the
+    console (e.g. `Mathf.Abs` has 6).
+  * Header comment carries quick-start + full API reference + the same
+    overload-disambig + GC-root caveats from `lua-invoke.md` so the
+    file is self-documenting (the dofile target is itself the docs).
+  * `scripts/README.md` gains a Phase 19e workflow step (item 6) +
+    install-layout entry.
 
 ### Wire shape
 

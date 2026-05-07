@@ -1,8 +1,9 @@
 # UnityCEDumper — CE Lua Bridge
 
-Five Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
-of the project (Phase 17d added `unity_addrfind.lua`); CE-side equivalent
-of running `DiscreteUI.exe` + the in-app process picker.
+Six Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
+of the project (Phase 17d added `unity_addrfind.lua`; Phase 19e added
+`unity_invoke.lua`); CE-side equivalent of running `DiscreteUI.exe` + the
+in-app process picker.
 
 ## Install
 
@@ -44,6 +45,7 @@ Engine`. Override with `-CePath`:
     ├── unity_dissect.lua
     ├── unity_symbols.lua
     ├── unity_addrfind.lua
+    ├── unity_invoke.lua
     └── utils.lua
 ```
 
@@ -133,7 +135,59 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
    bindAddrLookupHotkey({ VK_CONTROL, VK_F2 })
    ```
 
-6. **Switching to the standalone UI** — the DLL pipe server is
+6. **(Optional) Call managed methods** — Phase 19e. Invoke any static
+   or instance method on either backend (Mono / IL2CPP) with marshaled
+   args + typed return value + managed exception capture. Closes the
+   long-standing CLAUDE.md goal of "Lua-callable Unity methods". Full
+   spec: [docs/lua-invoke.md](../docs/lua-invoke.md).
+   ```lua
+   dofile([[<CE>\discrete\unity_invoke.lua]])
+
+   -- Static call (Mathf.Abs):
+   local r = callUnityMethod(
+       "UnityEngine.CoreModule", "UnityEngine", "Mathf", "Abs",
+       { argInt32(-7) },
+       { signatureMatch = "(System.Int32)" })
+   print(r.ok, r.returnValue)   -- true, 7
+
+   -- Instance call (item count on a live ItemBundle):
+   local r = callUnityMethod(
+       "Assembly-CSharp", "", "ItemBundle", "get_numberOfItems",
+       {},
+       { instance = "0x16F8CEA0BE0", signatureMatch = "()" })
+   print(r.returnValue)         -- 1
+
+   -- Managed exception (Convert.ToByte(-1) overflows):
+   local r = callUnityMethod(
+       "mscorlib", "System", "Convert", "ToByte",
+       { argInt32(-1) },
+       { signatureMatch = "(System.Int32)" })
+   print(r.ok, r.exception)
+   --> false, "System.OverflowException: Value was either too large or…"
+   ```
+   Arg builders for every wire type tag (`argNull` / `argBool` /
+   `argByte` / `argSByte` / `argInt16` / `argUInt16` / `argInt32` /
+   `argUInt32` / `argInt64` / `argUInt64` / `argFloat` / `argDouble` /
+   `argChar` / `argString` / `argAddress`) — see the script header for
+   the full list. Convenience: `prettyPrint(r)` logs a one-line summary;
+   `pcallUnityMethod(...)` is the non-throwing variant; `findOverloads(asm,
+   ns, class, method)` lists every overload so you can prep a
+   `signatureMatch` (e.g. `Mathf.Abs` has 6).
+
+   **Overload disambiguation gotcha**: the wire `signatureMatch` is a
+   substring filter. Bare `"Int32"` matches `(Int32)` AND `(UInt32)`
+   AND `(Int32, IFormatProvider)` — `Int32` is a substring of `UInt32`
+   and any `(Int32, …)` overload contains it too. Default to the
+   parens-bounded form `"(System.Int32)"` for guaranteed uniqueness.
+
+   **GC-root caveat**: a managed pointer returned by `callUnityMethod`
+   is valid for the next call you make right now. A GC that ran between
+   the address read and the next invoke can have moved the object
+   (Mono moving GC). Best practice: chain `findInstances` →
+   `callUnityMethod` in a single Lua block when correctness matters,
+   instead of stashing the address.
+
+7. **Switching to the standalone UI** — the DLL pipe server is
    single-instance, so the desktop UI (`DiscreteUI.exe`) and CE Lua
    bridge are **mutually exclusive while connected**. To swap:
    - In Lua, just stop sending RPCs (no Disconnect needed).
@@ -148,11 +202,14 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
   as the standalone UI's `WindowsDllInjector` (CreateRemoteThread →
   LoadLibraryW). Logs land at
   `%LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\init\current.log`.
-* `unity_dissect.lua`, `unity_symbols.lua`, and `unity_addrfind.lua`
-  open the named pipe directly via
-  `io.open([[\\.\pipe\UnityDumpBfx]], "r+b")`. All three ship a tiny
-  purpose-built JSON parser (no external Lua deps); good enough for
-  the DLL's response shape, not a general JSON library.
+* `unity_dissect.lua`, `unity_symbols.lua`, `unity_addrfind.lua`, and
+  `unity_invoke.lua` open the named pipe directly via
+  `io.open([[\\.\pipe\UnityDumpBfx]], "r+b")`. All four ship a tiny
+  purpose-built JSON parser (no external Lua deps); good enough for the
+  DLL's response shape, not a general JSON library. `unity_invoke.lua`
+  also ships a small JSON serializer because `callMethod`'s `args` is a
+  nested array; the other scripts get away with hand-built request
+  strings because they only send flat key-value args.
 * **Pipe-open retry**: both scripts retry `io.open` up to 15× at 200 ms
   intervals before giving up (~3 s budget). The DLL's pipe-server
   worker thread may not have finished `CreateNamedPipeW` by the time
