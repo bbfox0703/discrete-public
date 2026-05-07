@@ -4,7 +4,7 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-07
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c closed and verified live across both backends**. Build #220 — string args/return + managed exception capture all green on SaGa F2R (IL2CPP) and BongoCat (Mono). Instance dispatch implemented but not yet exercised live — same code path as static methods minus the obj=instance line. **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c fully closed and verified live across both backends**. Build #220 — static + instance + string args/return + managed exception capture all green. Verified targets: SaGa F2R (IL2CPP), BongoCat (Mono), Farthest Frontier (both backends — instance dispatch via `ItemBundle.get_numberOfItems()`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -686,7 +686,9 @@ Out (v2 follow-ups, deliberately not started):
     both backends 2026-05-07** (build #220): IL2CPP/SaGa F2R + Mono/BongoCat
     both pass `Parse("42") → 42`, `Concat("Hello, ", "World") →
     "Hello, World"`, `Parse("not a number") → FormatException`. Instance
-    dispatch path is in but not yet exercised live.
+    dispatch verified live on Mono (Farthest Frontier) —
+    `ItemBundle.get_numberOfItems()` returned `1` against a live
+    instance address.
   * **Marshaling fix mid-19c** — initial implementation used the
     "uniform" convention from Mono docs (params[i] = &slot for both
     value and reference types). Parse("42") returned FormatException
