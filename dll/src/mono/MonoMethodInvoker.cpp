@@ -68,6 +68,9 @@ MonoClass* SehObjectGetClass(fn_object_get_class fn, MonoObject* o) {
 void* SehObjectUnbox(fn_object_unbox fn, MonoObject* o) {
     __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+MonoString* SehStringNew(fn_string_new fn, MonoDomain* d, const char* utf8) {
+    __try { return fn(d, utf8); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 // runtime_invoke is the throwing call — wrap the whole call in SEH so a
 // native crash inside the JIT trampoline becomes "exception captured"
 // rather than tearing down the host process.
@@ -397,11 +400,12 @@ void DecodeReturnValue(const std::string& returnType,
         return;
     }
 
-    // System.String surfaces as Address in 19b (raw MonoString*); 19c will
-    // decode it into UTF-8 here.
+    // 19c — decode managed string return into UTF-8. Boxed is the raw
+    // MonoString* itself (strings are reference types — no unbox).
     if (returnType == "System.String") {
-        out.kind = CallReturn::Kind::Address;
+        out.kind = CallReturn::Kind::String;
         out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
+        out.s    = DecodeManagedString(reinterpret_cast<std::uintptr_t>(boxed));
         return;
     }
 
@@ -410,12 +414,20 @@ void DecodeReturnValue(const std::string& returnType,
     out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
 }
 
-// Marshal one CallArg into its 8-byte slot. Returns false when the wire
-// `type` tag conflicts with the formal parameter type or carries a value
-// 19b refuses to forward (e.g. string args).
+// Marshal one CallArg into its 8-byte backing slot AND set the params-array
+// entry the runtime sees. Mono's runtime_invoke uses the non-uniform
+// convention (matches IL2CPP — see the matching MarshalArg in
+// IL2CPPMethodInvoker.cpp for the full explanation):
+//   * value types  → paramPtr = &slot, slot holds the value bytes
+//   * reference types (Null / String / Address) → paramPtr = the object
+//     pointer DIRECTLY (one less indirection than value types)
+// `domain` is only used when allocating a managed string (mono_string_new
+// takes a MonoDomain*); ignored otherwise.
 bool MarshalArg(const CallArg& arg,
                 const std::string& formalType,
+                MonoDomain* domain,
                 std::uint64_t* slot,
+                void*& paramPtr,
                 std::string& outErr) {
     auto write = [slot](const void* src, std::size_t n) {
         std::memcpy(slot, src, n);
@@ -423,75 +435,107 @@ bool MarshalArg(const CallArg& arg,
 
     switch (arg.kind) {
     case CallArgKind::Null:
+        // Reference-type null — pass NULL directly as the param pointer.
         *slot = 0;
+        paramPtr = nullptr;
         return true;
     case CallArgKind::Bool: {
         std::uint8_t v = (arg.i64 != 0 || arg.u64 != 0) ? 1u : 0u;
         write(&v, 1);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Byte: {
         std::uint8_t v = static_cast<std::uint8_t>(arg.u64);
         write(&v, 1);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::SByte: {
         std::int8_t v = static_cast<std::int8_t>(arg.i64);
         write(&v, 1);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Int16: {
         std::int16_t v = static_cast<std::int16_t>(arg.i64);
         write(&v, 2);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::UInt16: {
         std::uint16_t v = static_cast<std::uint16_t>(arg.u64);
         write(&v, 2);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Int32: {
         std::int32_t v = static_cast<std::int32_t>(arg.i64);
         write(&v, 4);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::UInt32: {
         std::uint32_t v = static_cast<std::uint32_t>(arg.u64);
         write(&v, 4);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Int64: {
         std::int64_t v = arg.i64;
         write(&v, 8);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::UInt64: {
         std::uint64_t v = arg.u64;
         write(&v, 8);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Float: {
         float v = static_cast<float>(arg.f);
         write(&v, 4);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Double: {
         double v = arg.f;
         write(&v, 8);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Char: {
         std::uint16_t v = static_cast<std::uint16_t>(arg.u64);
         write(&v, 2);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Address:
+        // Reference-shaped — pass the pre-resolved managed pointer / IntPtr
+        // directly as the param.
         *slot = arg.u64;
+        paramPtr = reinterpret_cast<void*>(arg.u64);
         return true;
-    case CallArgKind::String:
-        outErr = "string_args_not_supported_in_19b";
-        (void)formalType;
-        return false;
+    case CallArgKind::String: {
+        // 19c — alloc MonoString* via mono_string_new(domain, utf8) and
+        // pass the managed pointer DIRECTLY in params[i].
+        const auto& r = GetResolver();
+        if (r.string_new == nullptr) {
+            outErr = "mono_string_new unbound";
+            (void)formalType;
+            return false;
+        }
+        MonoString* s = SehStringNew(r.string_new, domain, arg.s.c_str());
+        if (s == nullptr) {
+            outErr = "mono_string_new returned null";
+            (void)formalType;
+            return false;
+        }
+        *slot   = reinterpret_cast<std::uintptr_t>(s);
+        paramPtr = s;
+        return true;
+    }
     }
     outErr = "unknown_arg_kind";
     return false;
@@ -517,12 +561,6 @@ CallMethodResult CallMethod(MonoClass* klass,
         return result;
     }
 
-    // 19b constraint — instance dispatch lifts in 19c.
-    if (instance != 0) {
-        result.error = "instance_methods_not_supported_in_19b";
-        return result;
-    }
-
     MonoDomain* domain = GetRootDomain();
     if (domain == nullptr) { result.error = "no mono root domain"; return result; }
 
@@ -544,10 +582,20 @@ CallMethodResult CallMethod(MonoClass* klass,
         result.error = "method_is_abstract";
         return result;
     }
-    if (!m.isStatic) {
-        // 19c lifts this; in 19b reject early with a distinct error code.
-        result.error = "instance_required_for_non_static";
-        return result;
+
+    // 19c — instance dispatch supported. Same validation as IL2CPP:
+    // static + instance != 0 → ignore instance silently (callers may pass
+    // it unconditionally); !static + instance == 0 → reject; !static +
+    // instance != 0 → forward as obj to runtime_invoke.
+    void* invokeObj = nullptr;
+    if (m.isStatic) {
+        // instance silently ignored on static methods.
+    } else {
+        if (instance == 0) {
+            result.error = "instance_required_for_non_static";
+            return result;
+        }
+        invokeObj = reinterpret_cast<void*>(instance);
     }
 
     if (args.size() != m.paramTypes.size()) {
@@ -555,33 +603,25 @@ CallMethodResult CallMethod(MonoClass* klass,
         return result;
     }
 
-    // 19b explicitly refuses string args.
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i].kind == CallArgKind::String) {
-            result.error = "string_args_not_supported_in_19b";
-            return result;
-        }
-    }
-
-    // Build the params array. Same convention as IL2CPP: one 8-byte slot
-    // per arg, primitives written at the low end. Mono's runtime_invoke
-    // marshaling matches this on x64 (see mono/metadata/object.c).
+    // Build the params array. Each arg gets one 8-byte backing slot;
+    // paramPtrs[i] is set per-arg by MarshalArg per the non-uniform
+    // convention (value types → &slot, ref types → object pointer
+    // directly). See the matching code path in IL2CPPMethodInvoker.cpp.
     std::vector<std::uint64_t> slots(args.size(), 0u);
     std::vector<void*>         paramPtrs(args.size(), nullptr);
     for (std::size_t i = 0; i < args.size(); ++i) {
         std::string err;
-        if (!MarshalArg(args[i], m.paramTypes[i], &slots[i], err)) {
+        if (!MarshalArg(args[i], m.paramTypes[i], domain, &slots[i], paramPtrs[i], err)) {
             result.error = err.empty() ? "arg_marshal_failed" : err;
             return result;
         }
-        paramPtrs[i] = &slots[i];
     }
 
     MonoObject* exc = nullptr;
     MonoObject* ret = nullptr;
     if (!SehRuntimeInvoke(r.runtime_invoke,
                           m.method,
-                          /*obj=*/nullptr,                     // 19b: static only
+                          invokeObj,                           // 19c: instance dispatch
                           paramPtrs.empty() ? nullptr : paramPtrs.data(),
                           &exc,
                           &ret)) {

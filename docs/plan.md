@@ -4,7 +4,7 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-07
-**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 (17a/b/c/d) + 18 (18a/b/c/d) + 19a + 19b closed and verified live**. 19a green on SaGa F2R (IL2CPP); 19b green on BongoCat (Mono) — both backends ship `callMethod` end-to-end with byte-identical wire shape. Per-backend error code suffix only. **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: Phases **0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c closed and verified live across both backends**. Build #220 — string args/return + managed exception capture all green on SaGa F2R (IL2CPP) and BongoCat (Mono). Instance dispatch implemented but not yet exercised live — same code path as static methods minus the obj=instance line. **Phase 12d** (32-bit Mono) stays the only formally-deferred phase. Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`), **Phase 16** (docs finalization, parallelizable). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -649,22 +649,52 @@ Out (v2 follow-ups, deliberately not started):
   decoded cleanly from `MonoException + 0x18` confirming the shared
   System.Exception layout assumption).
 
-- [ ] **19c** Instance methods + string marshaling. Adds:
-  * `instance` arg parsed as hex address; passed as `this` to runtime
-    invoke
-  * String args: alloc `MonoString*` / `Il2CppString*` via
-    `*_string_new_utf8`, pass the boxed pointer to the method
-  * String return values: read length + UTF-16 → UTF-8 (both runtimes
-    share the same `String` layout: vtable + sync at +0, length at
-    +0x10, UTF-16 chars at +0x14 — already used by the existing String
-    decoder in `walkInstance`, factor out into a shared helper)
-  * Reference return values surface as
-    `{type: "address", value: "0x..."}`
-  * GC-root caveat documented in `lua-invoke.md`: a returned address is
-    valid only until the next GC. Mono is moving-GC; IL2CPP is largely
-    non-moving but not guaranteed for all generations. Callers wanting
-    to outlive a GC should chain `findInstances` → `walkInstance` rather
-    than holding the raw pointer indefinitely.
+- [x] **19c** Instance methods + string marshaling — landed 2026-05-07,
+  build #215. Lifts the static-only / no-string restrictions on both
+  backends with byte-identical wire-shape changes:
+  * **Instance dispatch** — `instance` arg parsed as hex; routing rule:
+    static method → instance silently ignored (callers may always send
+    one); non-static method + `instance == 0` → reject with
+    `instance_required_for_non_static`; otherwise forward as `obj` to
+    `*_runtime_invoke`. The blanket `instance_methods_not_supported_in_19{a,b}`
+    rejects are gone.
+  * **String args** — wire `type: string` allocates a managed string via
+    `il2cpp_string_new(utf8)` / `mono_string_new(domain, utf8)` and slots
+    the resulting `Il2CppString*` / `MonoString*` pointer for runtime
+    invoke. The `string_*` resolver bindings that were pre-bound in 19a/b
+    become load-bearing here. Errors:
+    `il2cpp_string_new unbound` / `mono_string_new unbound` (export
+    missing), `il2cpp_string_new returned null` /
+    `mono_string_new returned null` (alloc faulted).
+  * **String returns** — `returnType == "System.String"` decodes the
+    managed `+0x10 length / +0x14 UTF-16 chars` layout into UTF-8 using
+    the existing `DecodeManagedString` helper each invoker carries (no
+    factor-out into shared header — the helper has no SEH and the
+    duplication keeps each backend self-contained, matching the per-.cpp
+    SEH-leaf pattern this codebase already follows).
+  * **GC-root caveat** documented in `lua-invoke.md` — managed pointers
+    returned by `callMethod` are valid for the next call you make right
+    now. Best practice: `findInstances` → `callMethod` in one Lua block.
+  * Reference return values continue to surface as
+    `returnValue: "0x..."` hex string; only `System.String` got promoted
+    from address-encoded to UTF-8-decoded.
+  * Smoke test `tools/Test-CallMethod.ps1` gains four new scenarios:
+    `StringConcat` (string args + string return), `StringParse` (string
+    arg + non-string return), `StringThrow` (string arg + managed
+    exception), `Instance` (caller supplies `-InstanceAddress 0x...` +
+    class triple + method). **Three string scenarios verified live on
+    both backends 2026-05-07** (build #220): IL2CPP/SaGa F2R + Mono/BongoCat
+    both pass `Parse("42") → 42`, `Concat("Hello, ", "World") →
+    "Hello, World"`, `Parse("not a number") → FormatException`. Instance
+    dispatch path is in but not yet exercised live.
+  * **Marshaling fix mid-19c** — initial implementation used the
+    "uniform" convention from Mono docs (params[i] = &slot for both
+    value and reference types). Parse("42") returned FormatException
+    because the trampoline read &slot as if it were a managed string.
+    Switched to the non-uniform convention used by BepInEx /
+    MelonLoader / Il2CppInterop: value types still pass &slot, but
+    reference types pass the object pointer **directly** in params[i].
+    Fixed in build #220.
 
 - [ ] **19d** UI surface — "Call method…" entry on the `MethodOverloadsWindow`
   context menu (right-click an overload row). Opens a `MethodCallDialog`

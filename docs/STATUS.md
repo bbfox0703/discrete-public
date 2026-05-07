@@ -1,9 +1,44 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (uncommitted Phase 19a/b + Windows-only UI cleanup in tree — push pending)
-**Last commit**: `526e4be` (`docs: refresh STATUS / Archiutecture / pipe-protocol / test-matrix for Phase 17+18 closure`)
-**Build**: 213
-**Current state**: **Phases 0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b all closed.** 19a verified live on SaGa F2R (IL2CPP); 19b verified live on BongoCat (Mono) — both backends green on all three acceptance gates (positive return, overload disambig, managed-exception capture). Wire shape byte-identical between the two backends; per-backend error code suffix only. UI also went **Windows-only** this session (`Avalonia.Desktop` → `Avalonia.Win32` + `Avalonia.Skia`; X11/FreeDesktop/Tmds.DBus dropped from the AOT graph; `DiscreteUI.exe` 39.0 → 38.0 MB). Open feature work: **19c** (instance dispatch + string marshaling — lifts the static-only restriction on both backends), **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase.
+**Branch**: `dev` (uncommitted Phase 19c + UI HarfBuzz fix in tree — push pending; 19a/b + Windows-only cleanup already pushed as `d8d5591` / `128e1cb`)
+**Last commit**: `d8d5591` (`feat: Phase 19a/b — callMethod RPC (IL2CPP + Mono, static-only)`)
+**Build**: 220
+**Current state**: **Phases 0–15 + 9.5 + 11.5 + 14c + 17 + 18 + 19a + 19b + 19c all closed and verified live across both backends.** 19a green on SaGa F2R (IL2CPP), 19b green on BongoCat (Mono), 19c green on both — `Int32.Parse("42") → 42`, `String.Concat("Hello, ", "World") → "Hello, World"`, `Int32.Parse("not a number") → System.FormatException`. Wire shape byte-identical between the two backends; the `runtime_invoke` marshaling convention is non-uniform (value types pass `&slot`, reference types pass the pointer directly — initial implementation used the uniform convention from Mono docs, which turns out to be wrong). UI is **Windows-only** with all three pieces wired (`Avalonia.Win32` + `Avalonia.Skia` + `Avalonia.HarfBuzz`; `.UseWin32().UseSkia().UseHarfBuzz()` in Program.cs). `DiscreteUI.exe` 38.1 MB. Open feature work: **19d** (UI MethodCallDialog), **19e** (`scripts/unity_invoke.lua`). **Phase 12d** (32-bit Mono) stays the only formally-deferred phase.
+
+## What landed in this session — Phase 19c (instance dispatch + string in/out marshaling)
+
+- **Static-only restriction lifted on both backends.** The `instance != 0` blanket reject is gone; replaced with a per-method-flavor route — static methods silently ignore any `instance` arg (callers may always send one), non-static methods reject with `instance_required_for_non_static` only when `instance == 0`. When an instance address is supplied, it gets cast to `void*` and forwarded as the `obj` parameter to `*_runtime_invoke`.
+- **String args wire through `*_string_new`.** Wire `type: string` arrives as UTF-8 in the JSON request; the invoker allocates a managed `Il2CppString*` (IL2CPP) / `MonoString*` (Mono) via the runtime's string-alloc entry, and slots the resulting pointer for `runtime_invoke` to pick up. The `string_*` resolver bindings that were pre-bound in 19a/b are now load-bearing for this path. Mono's `mono_string_new` takes a `MonoDomain*` first arg — handled by threading the domain into Mono's `MarshalArg` (IL2CPP needs no domain).
+- **String returns decode to UTF-8.** When the resolved formal `returnType == "System.String"`, the boxed `Il2CppString*` / `MonoString*` is decoded via the same `DecodeManagedString` helper each invoker already had (used previously for the `_message` field of caught exceptions). No factor-out into a shared header — the helper has no SEH and the duplication keeps each backend self-contained, matching the per-`.cpp` SEH-leaf pattern this codebase already follows.
+- **`Test-CallMethod.ps1` gains four new scenarios:**
+  - `-Scenario StringConcat` — `String.Concat("Hello, ", "World") → "Hello, World"`
+  - `-Scenario StringParse`  — `Int32.Parse("42") → 42`
+  - `-Scenario StringThrow`  — `Int32.Parse("not a number") → System.FormatException`
+  - `-Scenario Instance`     — caller supplies `-InstanceAddress 0x...` (typically from `findInstances`) + class triple + method
+  - All four scenarios use parens-bounded `signatureMatch` (`(System.String)`, `(System.String, System.String)`) per the saved-to-memory substring-trap rule.
+- **GC-root caveat** documented in `lua-invoke.md` — managed pointers returned by `callMethod` are valid for the next call you make right now. Best practice: chain `findInstances` → `callMethod` in a single Lua block when correctness matters.
+- ✅ **Live verification (2026-05-07, build #220) — both backends green on string args/return + managed exception:**
+  - **IL2CPP (SaGa F2R):** `StringParse` → `42`, `StringConcat` → `"Hello, World"`, `StringThrow` → `System.FormatException` (host alive, message decoded).
+  - **Mono (BongoCat):** same three scenarios, byte-identical wire shapes.
+  - The non-uniform marshaling fix (refactored mid-session — see "Marshaling convention fix" below) was load-bearing. Initial 19c attempt used the Mono-docs-described "uniform" convention (params[i] = &slot for both value and reference types) and Parse("42") returned FormatException because the runtime read the address-of-slot as if it were a managed string and saw garbage bytes. Switched to the non-uniform convention used by BepInEx / MelonLoader / Il2CppInterop: value types still pass `&slot`, but reference types now pass the object pointer **directly** in `params[i]`. Both runtimes accept this — the documented Mono convention turns out to be wrong (or at least mismatched with what the actual trampoline expects on x64).
+  - **Instance dispatch path is in but not yet exercised live** — needs a reference-type instance address from `findInstances`. Static methods use the same code path minus the obj=instance line (which is `nullptr` when `instance == 0`), so high confidence the code works; awaiting a live instance test for full sign-off.
+
+### Marshaling convention fix (mid-19c, build #217 → #220)
+
+Three lessons saved to memory:
+- [PowerShell `ConvertTo-Json` single-element-array unwrap](../../../../Users/%USERNAME%/.claude/projects/D--Github-discrete/memory/feedback_powershell_json_array.md) — splice raw JSON for nested arrays in `Test-*.ps1`.
+- [`signatureMatch` substring trap](../../../../Users/%USERNAME%/.claude/projects/D--Github-discrete/memory/feedback_signaturematch_substring.md) — `Int32` ⊂ `UInt32`; default to parens-bounded `(System.Int32)`.
+- [`runtime_invoke` non-uniform marshaling](../../../../Users/%USERNAME%/.claude/projects/D--Github-discrete/memory/feedback_runtime_invoke_convention.md) — value types pass `&value`, reference types pass the pointer **directly**, matching BepInEx / MelonLoader / Il2CppInterop. Mono docs are misleading.
+
+### UI regression fix (build #219 → #220)
+
+The Windows-only cleanup in `128e1cb` was incomplete. Dropping `Avalonia.Desktop` removed not just X11/DBus but also the implicit Skia + HarfBuzz wiring that `UsePlatformDetect()` was doing. Build #220 added the missing pieces:
+- `Avalonia.HarfBuzz` package reference
+- `.UseSkia().UseHarfBuzz()` calls in `Program.cs`
+
+Without `UseHarfBuzz`, `AppBuilder.Setup()` threw `InvalidOperationException: No text shaping system configured` BEFORE any logging started — the UI silently exited with `0xC0000409`. No log file, no window. Fix saved to memory: [Avalonia 12 Windows-only build needs Skia + HarfBuzz wired explicitly](../../../../Users/%USERNAME%/.claude/projects/D--Github-discrete/memory/feedback_avalonia12_winonly.md).
+
+---
 
 ## What landed in this session — Phase 19b (Mono `callMethod`)
 

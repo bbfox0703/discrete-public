@@ -1,10 +1,10 @@
-// MonoMethodInvoker.h — Phase 19b callMethod backend (Mono).
+// MonoMethodInvoker.h — Phase 19b/c callMethod backend (Mono).
 //
 // Mirror of IL2CPPMethodInvoker. Resolves a method by class + name (+ optional
 // signatureMatch substring), marshals typed CallArgs into Mono's `void**`
 // params array, invokes `mono_runtime_invoke`, captures managed exceptions,
-// and unboxes the return value into a typed CallReturn. 19b is static-only;
-// instance dispatch + string marshaling land in 19c.
+// and unboxes the return value into a typed CallReturn. 19b delivered
+// static-only; 19c added instance dispatch + string in/out marshaling.
 //
 // CallArg / CallReturn / CallMethodResult are intentionally namespace-local
 // (Mono::) duplicates of the IL2CPP::* types — both backends compile into
@@ -35,7 +35,7 @@ enum class CallArgKind {
     Float,
     Double,
     Char,
-    String,    // Reserved for 19c — rejected by 19b invoker.
+    String,    // 19c — alloc MonoString* via mono_string_new(domain, utf8).
     Address,
 };
 
@@ -77,8 +77,10 @@ struct CallMethodResult {
     std::int64_t  elapsedMs       = 0;
 };
 
-// 19b: pass `instance == 0` for static. Non-zero instance triggers
-// `instance_methods_not_supported_in_19b` (lifts in 19c).
+// 19c: pass `instance == 0` for static methods (silently ignored if the
+// resolved method is non-static); pass the managed object pointer
+// (typically from findInstances / whatIsAt) for instance dispatch. Method
+// resolution validates and routes accordingly.
 CallMethodResult CallMethod(MonoClass* klass,
                             const std::string& methodName,
                             const std::string& signatureMatch,

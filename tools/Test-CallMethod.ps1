@@ -9,11 +9,19 @@
     args and instance dispatch land in 19c and will fail here with a
     distinct error code.
 
-    Three pre-canned scenarios cover the acceptance gates:
+    Pre-canned scenarios cover the acceptance gates:
 
-      1. Positive  : Mathf.Abs(int32:-7) -> 7
-      2. Exception : Convert.ToByte(int32:-1) -> OverflowException
-      3. Disambig  : Mathf.Abs (overload picked via -SignatureMatch Single)
+      19a/b (static, primitive args):
+        1. Abs           : Mathf.Abs(int32:-7) -> 7
+        2. Throw         : Convert.ToByte(int32:-1) -> OverflowException
+        3. Float         : Mathf.Abs(float:-3.5) via signatureMatch=Single -> 3.5
+
+      19c (string args/return + instance dispatch):
+        4. StringConcat  : String.Concat("Hello, ", "World") -> "Hello, World"
+        5. StringParse   : Int32.Parse("42") -> 42
+        6. StringThrow   : Int32.Parse("not a number") -> FormatException
+        7. Instance      : pass an -InstanceAddress (hex) of a managed object
+                           and call -Method on it (e.g., Object.ToString)
 
     Anything beyond that, supply -ClassAssembly / -Namespace / -Name /
     -Method / -ArgsJson manually.
@@ -37,7 +45,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Abs','Throw','Float','Custom')]
+    [ValidateSet('Abs','Throw','Float','StringConcat','StringParse','StringThrow','Instance','Custom')]
     [string] $Scenario = 'Abs',
 
     [string] $ClassAssembly,
@@ -46,6 +54,7 @@ param(
     [string] $Method,
     [string] $ArgsJson,
     [string] $SignatureMatch = '',
+    [string] $InstanceAddress = '',           # Hex address (0x...) for instance dispatch
 
     [int] $TimeoutMs = 10000
 )
@@ -86,6 +95,51 @@ switch ($Scenario) {
         if (-not $ArgsJson)      { $ArgsJson      = '[{"type":"int32","value":-1}]' }
         if (-not $SignatureMatch){ $SignatureMatch = '(System.Int32)' }
     }
+    'StringConcat' {
+        # String.Concat(string, string) — covers string args + string return.
+        # Disambiguate via the parens-bounded signature so we don't catch the
+        # (object, object) / (string[]) / IEnumerable<string> overloads.
+        if (-not $ClassAssembly) { $ClassAssembly = 'mscorlib' }
+        if (-not $Namespace)     { $Namespace     = 'System' }
+        if (-not $Name)          { $Name          = 'String' }
+        if (-not $Method)        { $Method        = 'Concat' }
+        if (-not $ArgsJson)      { $ArgsJson      = '[{"type":"string","value":"Hello, "},{"type":"string","value":"World"}]' }
+        if (-not $SignatureMatch){ $SignatureMatch = '(System.String, System.String)' }
+    }
+    'StringParse' {
+        # Int32.Parse(string) — covers string arg + non-string return.
+        # signatureMatch bounded with parens; bare "String" would also match
+        # (string, NumberStyles), (string, IFormatProvider), etc.
+        if (-not $ClassAssembly) { $ClassAssembly = 'mscorlib' }
+        if (-not $Namespace)     { $Namespace     = 'System' }
+        if (-not $Name)          { $Name          = 'Int32' }
+        if (-not $Method)        { $Method        = 'Parse' }
+        if (-not $ArgsJson)      { $ArgsJson      = '[{"type":"string","value":"42"}]' }
+        if (-not $SignatureMatch){ $SignatureMatch = '(System.String)' }
+    }
+    'StringThrow' {
+        # Int32.Parse("not a number") -> FormatException. Covers string arg
+        # + managed exception capture in the same call.
+        if (-not $ClassAssembly) { $ClassAssembly = 'mscorlib' }
+        if (-not $Namespace)     { $Namespace     = 'System' }
+        if (-not $Name)          { $Name          = 'Int32' }
+        if (-not $Method)        { $Method        = 'Parse' }
+        if (-not $ArgsJson)      { $ArgsJson      = '[{"type":"string","value":"not a number"}]' }
+        if (-not $SignatureMatch){ $SignatureMatch = '(System.String)' }
+    }
+    'Instance' {
+        # Instance dispatch — caller supplies -InstanceAddress (hex) plus
+        # the class triple + method. Default: call object.ToString() on the
+        # instance, which exists on every managed type and returns a string.
+        if (-not $InstanceAddress) {
+            throw 'Instance scenario requires -InstanceAddress 0x... (use findInstances first)'
+        }
+        if (-not $ClassAssembly) { throw 'Instance scenario requires -ClassAssembly' }
+        if (-not $Name)          { throw 'Instance scenario requires -Name' }
+        if (-not $Method)        { $Method = 'ToString' }
+        if (-not $ArgsJson)      { $ArgsJson = '[]' }
+        if (-not $SignatureMatch){ $SignatureMatch = '()' }
+    }
     'Custom' {
         if (-not $ClassAssembly -or -not $Name -or -not $Method -or -not $ArgsJson) {
             throw 'Custom scenario requires -ClassAssembly, -Name, -Method, -ArgsJson'
@@ -102,7 +156,8 @@ $reader = New-Object System.IO.StreamReader($client)
 
 try {
     $hdr = "==[ callMethod  $Namespace.$Name.$Method"
-    if ($SignatureMatch) { $hdr += "  sigMatch='$SignatureMatch'" }
+    if ($SignatureMatch)  { $hdr += "  sigMatch='$SignatureMatch'" }
+    if ($InstanceAddress) { $hdr += "  instance=$InstanceAddress" }
     $hdr += "  asm=$ClassAssembly ]=="
     Write-Host ''
     Write-Host $hdr -ForegroundColor Green
@@ -121,7 +176,8 @@ try {
         name      = $Name
         method    = $Method
     }
-    if ($SignatureMatch) { $bodyHash.signatureMatch = $SignatureMatch }
+    if ($SignatureMatch)  { $bodyHash.signatureMatch = $SignatureMatch }
+    if ($InstanceAddress) { $bodyHash.instance       = $InstanceAddress }
     $bodyJson = ($bodyHash | ConvertTo-Json -Compress)
     # Drop the trailing `}`, append `,"args":<raw json array>}`.
     $bodyJson = $bodyJson.Substring(0, $bodyJson.Length - 1) + ',"args":' + $ArgsJson + '}'

@@ -65,6 +65,9 @@ Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
 void* SehObjectUnbox(fn_object_unbox fn, Il2CppObject* o) {
     __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+Il2CppString* SehStringNew(fn_string_new fn, const char* utf8) {
+    __try { return fn(utf8); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 // runtime_invoke is the throwing call — we wrap the whole call in SEH so a
 // native crash inside the JIT/AOT entry point becomes "exception captured"
 // rather than tearing down the host process.
@@ -400,11 +403,15 @@ void DecodeReturnValue(const std::string& returnType,
         return;
     }
 
-    // System.String surfaces as Address in 19a (raw Il2CppString*); 19c will
-    // decode it into UTF-8 here.
+    // 19c — decode managed string return into UTF-8. Boxed is the raw
+    // Il2CppString* itself (strings are reference types — no unbox). Null
+    // managed string returns surface as the empty string with the address
+    // stashed in u64=0 so callers can distinguish via a separate field if
+    // they care; the wire shape just renders returnValue:"".
     if (returnType == "System.String") {
-        out.kind = CallReturn::Kind::Address;
+        out.kind = CallReturn::Kind::String;
         out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
+        out.s    = DecodeManagedString(reinterpret_cast<std::uintptr_t>(boxed));
         return;
     }
 
@@ -413,13 +420,24 @@ void DecodeReturnValue(const std::string& returnType,
     out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
 }
 
-// Marshal one CallArg into its 8-byte slot. Returns false when the wire
-// `type` tag conflicts with the formal parameter type or carries a value
-// 19a refuses to forward (e.g. string args). `slot` is pre-zeroed by the
-// caller, so partial-width writes leave the upper bits at 0.
+// Marshal one CallArg into its 8-byte slot AND set the params-array entry
+// the runtime sees. IL2CPP's runtime_invoke uses a non-uniform convention:
+//   * value types  → params[i] = &slot, slot holds the value bytes
+//   * reference types (Null / String / Address) → params[i] = the object
+//     pointer DIRECTLY (one less level of indirection than value types)
+//
+// This split is what the popular IL2CPP mod loaders (BepInEx,
+// MelonLoader, Il2CppInterop) use. The "uniform" convention from
+// upstream Mono docs (params[i] always = &slot, even for refs) is a
+// historical mismatch — the trampoline IL2CPP generates dereferences
+// once for value types and zero times for reference types. Passing
+// &(MonoString*) where a MonoString* is expected was reading the address
+// of our slot as if it were a managed string, hence Parse("42") seeing
+// garbage bytes and throwing FormatException.
 bool MarshalArg(const CallArg& arg,
                 const std::string& formalType,
                 std::uint64_t* slot,
+                void*& paramPtr,
                 std::string& outErr) {
     auto write = [slot](const void* src, std::size_t n) {
         std::memcpy(slot, src, n);
@@ -427,79 +445,113 @@ bool MarshalArg(const CallArg& arg,
 
     switch (arg.kind) {
     case CallArgKind::Null:
-        // Reference-type slot holding null. Works for any reference parameter
-        // and for nullable IntPtr-style args.
+        // Reference-type null — pass NULL directly as the param pointer.
         *slot = 0;
+        paramPtr = nullptr;
         return true;
     case CallArgKind::Bool: {
         std::uint8_t v = (arg.i64 != 0 || arg.u64 != 0) ? 1u : 0u;
         write(&v, 1);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Byte: {
         std::uint8_t v = static_cast<std::uint8_t>(arg.u64);
         write(&v, 1);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::SByte: {
         std::int8_t v = static_cast<std::int8_t>(arg.i64);
         write(&v, 1);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Int16: {
         std::int16_t v = static_cast<std::int16_t>(arg.i64);
         write(&v, 2);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::UInt16: {
         std::uint16_t v = static_cast<std::uint16_t>(arg.u64);
         write(&v, 2);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Int32: {
         std::int32_t v = static_cast<std::int32_t>(arg.i64);
         write(&v, 4);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::UInt32: {
         std::uint32_t v = static_cast<std::uint32_t>(arg.u64);
         write(&v, 4);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Int64: {
         std::int64_t v = arg.i64;
         write(&v, 8);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::UInt64: {
         std::uint64_t v = arg.u64;
         write(&v, 8);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Float: {
         float v = static_cast<float>(arg.f);
         write(&v, 4);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Double: {
         double v = arg.f;
         write(&v, 8);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Char: {
         std::uint16_t v = static_cast<std::uint16_t>(arg.u64);
         write(&v, 2);
+        paramPtr = slot;
         return true;
     }
     case CallArgKind::Address:
-        // Pass a pre-resolved managed pointer (e.g. an Il2CppObject* the
-        // caller already located) or a raw IntPtr.
+        // Reference-shaped — pass the pre-resolved managed pointer / IntPtr
+        // directly as the param. Slot is unused for routing but kept set so
+        // the address shows up in any debug log of slots[].
         *slot = arg.u64;
+        paramPtr = reinterpret_cast<void*>(arg.u64);
         return true;
-    case CallArgKind::String:
-        outErr = "string_args_not_supported_in_19a";
-        (void)formalType;
-        return false;
+    case CallArgKind::String: {
+        // 19c — alloc Il2CppString* via il2cpp_string_new and pass the
+        // managed pointer DIRECTLY in params[i] (non-uniform convention —
+        // see big comment on MarshalArg). Slot stores the pointer too for
+        // diagnostic visibility.
+        const auto& r = GetResolver();
+        if (r.string_new == nullptr) {
+            outErr = "il2cpp_string_new unbound";
+            (void)formalType;
+            return false;
+        }
+        // Empty string is valid — il2cpp_string_new("") returns a non-null
+        // empty MonoString. Null wire value would arrive as Kind::Null, not
+        // here.
+        Il2CppString* s = SehStringNew(r.string_new, arg.s.c_str());
+        if (s == nullptr) {
+            outErr = "il2cpp_string_new returned null";
+            (void)formalType;
+            return false;
+        }
+        *slot   = reinterpret_cast<std::uintptr_t>(s);
+        paramPtr = s;
+        return true;
+    }
     }
     outErr = "unknown_arg_kind";
     return false;
@@ -525,12 +577,6 @@ CallMethodResult CallMethod(Il2CppClass* klass,
         return result;
     }
 
-    // 19a constraint — instance dispatch lifts in 19c.
-    if (instance != 0) {
-        result.error = "instance_methods_not_supported_in_19a";
-        return result;
-    }
-
     Il2CppDomain* domain = GetDomain();
     if (domain == nullptr) { result.error = "no il2cpp domain"; return result; }
 
@@ -552,12 +598,23 @@ CallMethodResult CallMethod(Il2CppClass* klass,
         result.error = "method_is_abstract";
         return result;
     }
-    if (!m.isStatic) {
-        // The plan defers instance dispatch to 19c; reject early with a
-        // distinct error code so the UI / Lua side can hint "v1 IL2CPP
-        // supports static only".
-        result.error = "instance_required_for_non_static";
-        return result;
+
+    // 19c — instance dispatch supported. Validate the instance arg vs the
+    // resolved method's static-ness:
+    //  * static  + instance != 0 → ignore instance (callers may always send
+    //    one for safety; we don't reject so the same Lua snippet works for
+    //    both static and instance overloads of a given method).
+    //  * !static + instance == 0 → reject (needs a `this` pointer).
+    //  * !static + instance != 0 → forward as obj to runtime_invoke.
+    void* invokeObj = nullptr;
+    if (m.isStatic) {
+        // instance silently ignored on static methods.
+    } else {
+        if (instance == 0) {
+            result.error = "instance_required_for_non_static";
+            return result;
+        }
+        invokeObj = reinterpret_cast<void*>(instance);
     }
 
     if (args.size() != m.paramTypes.size()) {
@@ -565,35 +622,27 @@ CallMethodResult CallMethod(Il2CppClass* klass,
         return result;
     }
 
-    // 19a explicitly refuses string args. Catch before the marshal loop so
-    // the error string is uniform for any string position.
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i].kind == CallArgKind::String) {
-            result.error = "string_args_not_supported_in_19a";
-            return result;
-        }
-    }
-
-    // Build the params array. Each slot is 8 bytes — primitive types occupy
-    // their natural width at the low end, which matches IL2CPP's marshaling
-    // convention (see libil2cpp/vm/Runtime.cpp::Invoke). Null refs become a
-    // slot holding NULL; address args go straight into the slot.
+    // Build the params array. Each arg gets one 8-byte backing slot; the
+    // slot holds the value bytes for value types and stores the object
+    // pointer (for diagnostic visibility) for ref types. paramPtrs[i] is
+    // set per-arg by MarshalArg per the non-uniform convention:
+    //   * value types → paramPtrs[i] = &slot
+    //   * ref types   → paramPtrs[i] = the object pointer directly
     std::vector<std::uint64_t> slots(args.size(), 0u);
     std::vector<void*>         paramPtrs(args.size(), nullptr);
     for (std::size_t i = 0; i < args.size(); ++i) {
         std::string err;
-        if (!MarshalArg(args[i], m.paramTypes[i], &slots[i], err)) {
+        if (!MarshalArg(args[i], m.paramTypes[i], &slots[i], paramPtrs[i], err)) {
             result.error = err.empty() ? "arg_marshal_failed" : err;
             return result;
         }
-        paramPtrs[i] = &slots[i];
     }
 
     Il2CppException* exc = nullptr;
     Il2CppObject*    ret = nullptr;
     if (!SehRuntimeInvoke(r.runtime_invoke,
                           m.method,
-                          /*obj=*/nullptr,                     // 19a: static only
+                          invokeObj,                           // 19c: instance dispatch
                           paramPtrs.empty() ? nullptr : paramPtrs.data(),
                           &exc,
                           &ret)) {

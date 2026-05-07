@@ -1,10 +1,10 @@
 # Lua-callable Unity methods
 
 > Phase 19 design spec. Companion to [plan.md](plan.md#phase-19--lua-callable-unity-methods-lua--managed-invocation).
-> Implementation status: **19a (IL2CPP, static-only)** + **19b (Mono port,
-> static-only)** both landed; 19c lifts the static-only / no-string
-> restrictions, 19d wires the UI dialog, 19e ships the `unity_invoke.lua`
-> bridge.
+> Implementation status: **19a (IL2CPP)** + **19b (Mono port)** + **19c
+> (instance dispatch + string in/out marshaling)** all landed end-to-end on
+> both backends. 19d adds the UI MethodCallDialog, 19e ships the
+> `unity_invoke.lua` bridge.
 
 The Phase 19 wire surface is a single new pipe RPC: `callMethod`. It takes a
 `(class, method, args)` triple, marshals the typed args into the Mono /
@@ -21,7 +21,7 @@ from CE Lua with marshaled args / return values." This doc pins down what
 |--------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | **19a**✅ | ✓  |    | ✓  |    | (as address) | ✓ | IL2CPP |
 | **19b**✅ | ✓  |    | ✓  |    | (as address) | ✓ | + Mono |
-| **19c**| ✓  | ✓  | ✓  | ✓  | ✓  | ✓ | both   |
+| **19c**✅ | ✓  | ✓  | ✓  | ✓  | ✓  | ✓ | both   |
 | 19d (UI)    | UI dialog only — no protocol change |
 | 19e (Lua)   | Lua bridge only — no protocol change |
 
@@ -143,7 +143,7 @@ method, etc.) — note no `ok` / `returnType` keys, only `error`:
 | `System.SByte` / `Int16` / `Int32` / `Int64` | signed int |
 | `System.Single` / `Double` | float |
 | `System.IntPtr` / `UIntPtr` | hex string `"0x..."` |
-| `System.String` | hex string `"0x..."` (managed pointer) — **19a/19b**. UTF-8 string — **19c**. |
+| `System.String` | UTF-8 string (decoded from the managed UTF-16 buffer at `+0x14`) |
 | Other reference type | hex string `"0x..."` — caller chains `whatIsAt` / `walkInstance` |
 | Value type by value (Vector3, Color, ...) | `null`, plus `note` field saying decode is deferred to v2 |
 
@@ -156,14 +156,14 @@ when consuming the response, not on the JSON type of `returnValue`.
 |---|---|---|
 | `il2cpp runtime not resolved` / `mono runtime not resolved` | DLL injected but resolver not bound | re-inject; check `handshake` |
 | `il2cpp_runtime_invoke unbound` / `mono_runtime_invoke unbound` | Unity build missing the export | none — pre-Unity-2018? |
+| `il2cpp_string_new unbound` / `mono_string_new unbound` | runtime missing the string-alloc export, but a wire `type: string` arg was sent | drop the string arg, or pass an `address` you allocated yourself |
+| `il2cpp_string_new returned null` / `mono_string_new returned null` | string allocation failed inside the runtime | usually OOM or a corrupt domain; rare |
 | `class not found: …` | bad assembly / namespace / name | fix the triple |
 | `method_not_found` | no overload matches name + signature | drop the `signatureMatch` filter or fix it |
-| `ambiguous_method` | >1 overload matches | tighten `signatureMatch` |
-| `method_is_abstract` | method has no body to invoke | call a concrete override on an instance instead (19c) |
-| `instance_methods_not_supported_in_19a` (IL2CPP) / `_in_19b` (Mono) | non-null `instance` arg | wait for 19c, or call a static method |
-| `instance_required_for_non_static` | matched method is non-static, `instance == null` | wait for 19c, or pick a static overload |
+| `ambiguous_method` | >1 overload matches | tighten `signatureMatch` (use parens-bounded `(System.Int32)` form to dodge `Int32` ⊂ `UInt32` substring matches) |
+| `method_is_abstract` | method has no body to invoke | pick a concrete override; instance dispatch routes through the overload's actual native entry |
+| `instance_required_for_non_static` | matched method is non-static, but `instance == null` | pass the managed object pointer as `instance` (typically from `findInstances` / `whatIsAt`) |
 | `arg_count_mismatch` | wire `args.length != formal param count` | match the parameter count |
-| `string_args_not_supported_in_19a` (IL2CPP) / `_in_19b` (Mono) | wire `type: string` arg | wait for 19c; for 19a/19b, allocate the string yourself and pass an `address` |
 | `native_crash_in_runtime_invoke` | SEH caught a hard crash inside the JIT/AOT entry point | check the log file and the method's actual signature |
 
 ## Caller responsibilities

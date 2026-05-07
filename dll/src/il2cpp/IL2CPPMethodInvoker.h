@@ -1,10 +1,10 @@
-// IL2CPPMethodInvoker.h — Phase 19a callMethod backend (IL2CPP).
+// IL2CPPMethodInvoker.h — Phase 19a/c callMethod backend (IL2CPP).
 //
 // Resolves a method by class + name (+ optional signatureMatch substring),
 // marshals typed CallArgs into the IL2CPP `void**` params array, invokes
 // `il2cpp_runtime_invoke`, captures managed exceptions, and unboxes the
-// return value into a typed CallReturn. 19a is static-only on IL2CPP;
-// instance dispatch + string marshaling land in 19c.
+// return value into a typed CallReturn. 19a delivered static-only; 19c
+// added instance dispatch + string in/out marshaling.
 #pragma once
 
 #include "IL2CPPTypes.h"
@@ -32,7 +32,7 @@ enum class CallArgKind {
     Float,
     Double,
     Char,
-    String,    // Reserved for 19c — rejected by 19a invoker.
+    String,    // 19c — alloc Il2CppString* via il2cpp_string_new(utf8).
     Address,
 };
 
@@ -77,8 +77,10 @@ struct CallMethodResult {
     std::int64_t  elapsedMs       = 0;
 };
 
-// 19a: pass `instance == 0` for static. Non-zero instance triggers
-// `instance_methods_not_supported_in_19a` (lifts in 19c).
+// 19c: pass `instance == 0` for static methods (silently ignored if the
+// resolved method is non-static); pass the managed object pointer
+// (typically from findInstances / whatIsAt) for instance dispatch. Method
+// resolution validates and routes accordingly.
 CallMethodResult CallMethod(Il2CppClass* klass,
                             const std::string& methodName,
                             const std::string& signatureMatch,

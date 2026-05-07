@@ -739,19 +739,19 @@ the original address as a sanity-check trailing comment.
 
 ---
 
-## Phase 19a / 19b — Lua-callable Unity methods
+## Phase 19a / 19b / 19c — Lua-callable Unity methods
 
 ### `callMethod` *(IL2CPP + Mono)*
 
 Invokes a managed method via `il2cpp_runtime_invoke` (IL2CPP backend) or
 `mono_runtime_invoke` (Mono backend) with marshaled args and a typed
-return value. 19a/19b are **static-only + primitive / null / address
-args**. Instance dispatch + string args land in 19c. Wire shape is
-byte-identical between the two backends; the only difference visible to
-the caller is the `error` string when the load-bearing export is missing
-(`il2cpp_runtime_invoke unbound` vs `mono_runtime_invoke unbound`) and
-the per-backend variant of the static-only error codes
-(`*_in_19a` vs `*_in_19b`). Full spec, error-code table, marshaling
+return value. **Static AND instance methods**, primitive / null / address
+/ string args, primitive / address / UTF-8-decoded-string returns, plus
+managed exception capture. Wire shape is byte-identical between the two
+backends; the only differences visible to the caller are the `error`
+strings when a backend-specific export is missing
+(`il2cpp_runtime_invoke unbound` vs `mono_runtime_invoke unbound`,
+similarly for `*_string_new`). Full spec, error-code table, marshaling
 rules, GC-root caveats: [lua-invoke.md](lua-invoke.md).
 
 | Arg | Type | Notes |
@@ -759,8 +759,8 @@ rules, GC-root caveats: [lua-invoke.md](lua-invoke.md).
 | `assembly`, `namespace`, `name` | strings | identify the class — same shape as `getClassInfo` |
 | `method` | string | required — method name |
 | `signatureMatch` | string | optional — substring filter against the rendered signature, same semantics as `findMethodInstances` |
-| `instance` | hex string / int | reserved for 19c; non-null returns `instance_methods_not_supported_in_19a` |
-| `args` | array of `{type, value}` | one entry per formal parameter; `type` is one of `bool`/`byte`/`sbyte`/`int16`/`uint16`/`int32`/`uint32`/`int64`/`uint64`/`float`/`double`/`char`/`address`/`null` (string is reserved for 19c) |
+| `instance` | hex string / int | managed object pointer for instance dispatch; null/omit for static methods (silently ignored if the resolved overload is static) |
+| `args` | array of `{type, value}` | one entry per formal parameter; `type` is one of `bool`/`byte`/`sbyte`/`int16`/`uint16`/`int32`/`uint32`/`int64`/`uint64`/`float`/`double`/`char`/`string`/`address`/`null` |
 
 ```jsonc
 // → success
@@ -800,7 +800,7 @@ rules, GC-root caveats: [lua-invoke.md](lua-invoke.md).
 | signed ints | signed int |
 | `System.Single` / `Double` | float |
 | `System.IntPtr` / `UIntPtr` / any reference type | hex string `"0x..."` |
-| `System.String` | hex string `"0x..."` (raw managed pointer) — **19a/19b**. UTF-8 string — **19c**. |
+| `System.String` | UTF-8 string (decoded from the managed UTF-16 buffer) |
 | Value type by value (Vector3 etc.) | `null` + `note` field saying decode is deferred to v2 |
 
 Switch on `returnType`, not on the JSON type of `returnValue`.
@@ -854,7 +854,7 @@ present, with a best-effort string decode.
 | Identify the instance + class at an address (CE *what writes here*) | `whatIsAt` |
 | Enumerate every overload of a method with native addresses | `findMethodInstances` |
 | Generate a CE AOB pattern from a method's native address | `getMethodAobPattern` |
-| Invoke a managed method with marshaled args (IL2CPP + Mono, static-only in 19a/19b) | `callMethod` |
+| Invoke a managed method with marshaled args (IL2CPP + Mono, static + instance) | `callMethod` |
 
 ---
 
