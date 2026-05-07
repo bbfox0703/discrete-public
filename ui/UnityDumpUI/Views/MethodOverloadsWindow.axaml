@@ -85,8 +85,19 @@
               GridLinesVisibility="Horizontal"
               x:DataType="vm:MethodOverloadsViewModel">
       <DataGrid.Columns>
-        <DataGridCheckBoxColumn Header="" Width="36"
-                                Binding="{Binding IsSelected, Mode=TwoWay, x:DataType=vm:MethodOverloadRow}" />
+        <!-- DataGridCheckBoxColumn requires entering edit mode before the
+             checkbox responds (double-click). Use a template column with a
+             real CheckBox + Focusable=False so a single click toggles. -->
+        <DataGridTemplateColumn Header="" Width="36" CanUserSort="False">
+          <DataGridTemplateColumn.CellTemplate>
+            <DataTemplate x:DataType="vm:MethodOverloadRow">
+              <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                        Focusable="False"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+            </DataTemplate>
+          </DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSignature}" Width="*"
                             Binding="{Binding SignatureLabel, x:DataType=vm:MethodOverloadRow}"
                             IsReadOnly="True"
