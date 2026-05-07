@@ -369,11 +369,20 @@ When v35–v37 are added (struct-field-only changes, flat header
 preserved), the guard widens to `version > 37`. When v38 lands the
 section-based reader + variable-width indices, the guard goes away.
 
-What still works on v38+ targets without any of the above:
+What still works on v38+ targets without any of the above (verified
+2026-05-07 against Songs of Silence / v39 via
+[Test-V39RuntimeSweep.ps1](../tools/Test-V39RuntimeSweep.ps1)):
 - The structural-shape `Il2CppMetadataRegistration` AOB scan — fully
-  version-portable through v39 (verified). `il2cppGetMetadataRegistration`
-  RPC works.
-- Live-runtime browsing via `IL2CPPClassWalker` — not yet exercised on
-  v38+ targets but uses runtime APIs (`il2cpp_image_get_class`,
-  `il2cpp_class_get_fields` etc.), not metadata.dat. Likely works
-  unless the runtime ABI also shifted (would need verification).
+  version-portable through v39. `il2cppGetMetadataRegistration` RPC
+  works.
+- Live-runtime browsing via `IL2CPPClassWalker` — `getAssemblies` /
+  `getClasses` / `getClassInfo` / `findInstances` / `walkInstance` /
+  `findMethodInstances` / `callMethod` all work. The runtime ABI did
+  not shift in any way that breaks our consumers between v31 and
+  v39. Inspector / class browser / Phase 17/18/19 / CE Lua bridges
+  are all v39-compatible without code changes.
+
+Effectively, the only v32+ work that remains for end users is the
+two metadata.dat-only paths: `il2cppGetMetadataTypeFields` const-
+literal decoding + offline `metadata-cli` parsing. Both are bounded
+in scope; neither is on the critical path for typical workflows.

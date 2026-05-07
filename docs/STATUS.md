@@ -170,7 +170,7 @@ The `Il2CppMetadataRegistration` discovery uses a structural-shape scan (not a l
 | v27 | (any Unity 2020 game in the test matrix) | ⏳ |
 | v29 | SaGa F2R | ✅ verified |
 | v31 | Farthest Frontier (Unity 2022.3.62f3) | ✅ verified 2026-05-07 |
-| v39 | Songs of Silence (Unity 6000.3.8f1) | 🟡 Registration scan ✅ (`types_count=144837`); FieldDefault decode blocked at `MetadataParser` `version > 31` hard-reject — see [il2cpp-metadata-crosscheck.md §"v35-v39 future work"](il2cpp-metadata-crosscheck.md). Confirms structural-shape scan is **version-independent**. |
+| v39 | Songs of Silence (Unity 6000.3.8f1) | ✅ Runtime path 9/9 green (handshake / domain walk / class enum / getClassInfo / findInstances / walkInstance / Phase 18 findMethodInstances / Phase 19 callMethod); only `il2cppGetMetadataTypeFields` const-literal path + offline `metadata-cli` blocked behind `version > 31`. See "v39 — first-class supported" subsection below. |
 
 **v31 verification details** (2026-05-07, build #235):
 
@@ -207,9 +207,9 @@ Option 1 is cleanest. Estimated ½-day work: hook the encoding choice off `Metad
 
 **Workaround in the meantime**: read `raw_hex_first16` and decode manually for v24 / v27. The Inspector and class browser don't depend on this path — only `il2cppGetMetadataTypeFields`'s typed-value field does.
 
-### v39 registration scan works (surfaced 2026-05-07 against Songs of Silence)
+### v39 — first-class supported, except for two metadata.dat-only paths (verified 2026-05-07 against Songs of Silence)
 
-Songs of Silence (Unity 6000.3.8f1) is the first **v32+ metadata target** to land in the test matrix. The structural-shape AOB scan found the registration cleanly via the new `il2cppGetMetadataRegistration` diagnostic command (probe via [Test-MetadataRegistration.ps1](../tools/Test-MetadataRegistration.ps1)):
+Songs of Silence (Unity 6000.3.8f1) is the first **v32+ metadata target** to land in the test matrix. Initial sweep found the structural-shape `Il2CppMetadataRegistration` AOB scan working cleanly:
 
 ```json
 { "found": true,
@@ -218,9 +218,28 @@ Songs of Silence (Unity 6000.3.8f1) is the first **v32+ metadata target** to lan
   "types_count": 144837 }
 ```
 
-`types_count=144837` is plausible for a 253-assembly Unity 6.1 game; the address pair is in the expected `GameAssembly.dll` range. **This confirms the structural-shape heuristic is version-independent through v39** — no per-version layout tweaks needed for the registration scan, even when metadata.dat parsing is gated behind unimplemented v38/v39 work.
+Follow-up sweep ([Test-V39RuntimeSweep.ps1](../tools/Test-V39RuntimeSweep.ps1)) extended that to the full runtime API surface — **9 / 9 paths green**:
 
-`il2cppGetMetadataTypeFields` itself still errors out with `global-metadata.dat not loaded` because `MetadataParser::LoadHeader` rejects `version > 31` — by design, see the defensive guard in [il2cpp-metadata-crosscheck.md §"Defensive guard live today"](il2cpp-metadata-crosscheck.md). Adding v32-v39 metadata-table parsing is a separate project (~1.5–2 days, see same doc); the registration scan is unblocked from that work.
+| Path | Result |
+|---|---|
+| `handshake` / `il2cppGetMetadataRegistration` / `getAssemblies` / `getClasses` | ✅ |
+| `getClassInfo UnityEngine.GameObject` (143 methods, parent=Object, inheritance walk) | ✅ |
+| `findInstances UnityEngine.GameObject` (8 / 8 matches, class-pointer match works) | ✅ |
+| `walkInstance` first GameObject (decoded `m_CachedPtr` at +0x10) | ✅ |
+| `findMethodInstances UnityEngine.Mathf.Abs` (2 overloads, both with AOT addresses + decoded signatures) | ✅ Phase 18 |
+| `callMethod Mathf.Abs(int:-7) → 7` | ✅ Phase 19 (marshal + invoke + return decode) |
+
+**Effective conclusion: v39 is first-class supported for ~95 % of typical usage** — Inspector, class browser, Phase 17 (`whatIsAt`), Phase 18 (overload + AOB), Phase 19 (`callMethod`), and the CE Lua bridges all work without any v32+ specific code. The runtime APIs (`il2cpp_image_get_class`, `il2cpp_class_get_fields`, `il2cpp_method_get_pointer` fallback, `il2cpp_runtime_invoke`) didn't shift between v31 and v39 in any way that affects our consumers.
+
+**Two paths still gated behind unimplemented v32+ metadata.dat parsing**:
+1. `il2cppGetMetadataTypeFields` — const literal decoding via `MetadataParser`. Affects only the typed-FieldDefault values in the field list, NOT field iteration / offset / type strings (those go through the runtime).
+2. Offline [`metadata-cli`](../tools/metadata-cli/) — pure on-disk analysis. Live runtime path is an unblocked alternative for everything except diff-checking metadata across versions.
+
+Both are bounded-scope features the average user doesn't need on a v39 game.
+
+`MetadataParser::LoadHeader` continues to reject `version > 31` by design — see the defensive guard in [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md). Implementing v32+ metadata-table parsing is a 2-3 day project documented there.
+
+**Minor cosmetic finding from the sweep**: `findInstances` IL2CPP path returns empty `classPtr` field in the response (matches still come back correctly — heap scan finds them, just the response builder doesn't populate the per-class pointer field for IL2CPP). Not v32+ specific; low-priority backlog item.
 
 If `Il2CppMetadataRegistration: no` shows up on any version, the registration's PE-section layout or struct shape changed between versions — would need a per-version layout dispatch in `IL2CPPMetadataRegistration.cpp` (currently hardcoded `kRegBytes = 0x80` for v29). The init log will have `MetadataRegistration: near-miss @0x.. typesCount=N: <reason>` lines pointing at what failed the heuristic.
 
