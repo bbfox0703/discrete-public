@@ -31,6 +31,7 @@ $deps = @{
     "BepInEx"                  = "https://github.com/BepInEx/BepInEx"
     "mono"                     = "https://github.com/mono/mono"
     "libil2cpp"                = "https://github.com/MlgmXyysd/libil2cpp"
+	"Il2CppInspectorRedux"     = "https://github.com/LukeFZ/Il2CppInspectorRedux"
 }
 
 if (!(Test-Path "dll"))        { New-Item -ItemType Directory -Path "dll" | Out-Null }
