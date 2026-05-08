@@ -564,7 +564,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         // Resolve the managed type to walk. For pointer fields the type
         // stored on the row is the field's declared managed type; ignore
         // collection wrappers (those go through Collection above).
-        if (res is null && TryParseClassName(node.Type, out string ns, out string name))
+        if (res is null && InstanceFieldClassifier.TryParseClassName(node.Type, out string ns, out string name))
         {
             // Generic instances need the IL-form name (with backtick suffix) for
             // FindClass to match — the wire-side `il2cpp_type_get_name` strips it
@@ -649,7 +649,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private async Task LoadArrayChildrenAsync(WalkedFieldNode node, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(node.EffectiveAddress)) return;
-        if (!TryParseCollectionType(node.Type ?? string.Empty,
+        if (!InstanceFieldClassifier.TryParseCollectionType(node.Type ?? string.Empty,
                                      out string elementType, out bool isList)) return;
 
         string arrayAddr = node.EffectiveAddress!;
@@ -772,7 +772,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         if (CopyToClipboardAsync is null || SelectedNode is null) return;
         if (string.IsNullOrEmpty(SelectedNode.EffectiveAddress)) return;
-        if (!TryParseClassName(SelectedNode.Type, out string ns, out string name))
+        if (!InstanceFieldClassifier.TryParseClassName(SelectedNode.Type, out string ns, out string name))
         {
             // Not a class-rooted node — fall back to a single leaf entry.
             string xml = WrapLeafXml(SelectedNode);
@@ -990,27 +990,12 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     }
 
     // ---------- Static helpers (type / hex parsing) ----------------------
-
-    /// <summary>Parses <c>T[]</c> and <c>List`1&lt;T&gt;</c> wrappers.</summary>
-    internal static bool TryParseCollectionType(string typeName, out string elementType, out bool isList)
-    {
-        isList = false;
-        elementType = string.Empty;
-        if (typeName.EndsWith("[]", StringComparison.Ordinal))
-        {
-            elementType = typeName.Substring(0, typeName.Length - 2);
-            return true;
-        }
-        const string listPrefix = "System.Collections.Generic.List`1<";
-        if (typeName.StartsWith(listPrefix, StringComparison.Ordinal)
-            && typeName.EndsWith(">", StringComparison.Ordinal))
-        {
-            elementType = typeName.Substring(listPrefix.Length, typeName.Length - listPrefix.Length - 1).Trim();
-            isList = true;
-            return true;
-        }
-        return false;
-    }
+    //
+    // Field-classification helpers (TryParseCollectionType / TryParseClassName /
+    // ClassifyInstanceField + the WalkedFieldKind enum) live in the Core
+    // project at UnityDumpUI.Core.Services.InstanceFieldClassifier so they
+    // can be unit-tested offline without spinning up a VM. SplitFullName
+    // stays here for now — it's only used by code that sits next to the VM.
 
     /// <summary>
     /// Split a managed full-name into (namespace, name). Returns null for
@@ -1023,33 +1008,6 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         int dot = full.LastIndexOf('.');
         if (dot < 0) return (string.Empty, full);
         return (full.Substring(0, dot), full.Substring(dot + 1));
-    }
-
-    internal static bool TryParseClassName(string? type, out string ns, out string name)
-    {
-        ns = string.Empty;
-        name = string.Empty;
-        if (string.IsNullOrWhiteSpace(type)) return false;
-        if (type.StartsWith("System.", StringComparison.Ordinal)) return false;
-        if (type.EndsWith("[]", StringComparison.Ordinal)) return false;
-
-        // Strip the generic instantiation suffix BEFORE splitting at the dot —
-        // for `MainGame.ClassAry<MainGame.CARRYITEM>` we want the last `.` in
-        // `MainGame.ClassAry`, not the one inside the generic argument. Without
-        // this, ns/name come out as `MainGame.ClassAry<MainGame` / `CARRYITEM>`
-        // and the DLL's FindClass(ns, name) lookup fails silently.
-        int lt = type.IndexOf('<');
-        string outer = lt > 0 ? type.Substring(0, lt) : type;
-
-        int dot = outer.LastIndexOf('.');
-        if (dot < 0)
-        {
-            name = outer;
-            return true;
-        }
-        ns = outer.Substring(0, dot);
-        name = outer.Substring(dot + 1);
-        return true;
     }
 
     internal static string HexAdd(string hexAddr, long delta)
@@ -1074,28 +1032,9 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 }
 
 // =================== Tree-node and row records =============================
-
-public enum WalkedFieldKind
-{
-    /// <summary>Primitive value or unrecognised pointer; no children.</summary>
-    Leaf,
-    /// <summary>Pointer to a managed class instance — expand via walkInstance on the dereferenced address.</summary>
-    PointerToClass,
-    /// <summary>
-    /// Inline value-type struct (e.g. <c>Vector3</c>, custom struct) — its fields
-    /// live at the parent address + offset (no header). Expand via
-    /// <c>walkInstance</c> at the field's storage address; the DLL's
-    /// walkInstance iterates fields by offset starting there, so it works
-    /// for both class instances (with header) and value types (without).
-    /// </summary>
-    ValueStruct,
-    /// <summary>T[] / List&lt;T&gt; — expand via walkArray.</summary>
-    Collection,
-    /// <summary>Pointer slot inside an expanded array — recursively expandable like PointerToClass.</summary>
-    ArraySlotPointer,
-    /// <summary>Value-type slot inside an expanded array — primitive leaf for now.</summary>
-    ArraySlotLeaf,
-}
+//
+// WalkedFieldKind moved to UnityDumpUI.Core.Services.InstanceFieldClassifier
+// (2026-05-08) to enable offline unit-tests for the kind-routing logic.
 
 /// <summary>
 /// Per-row UI callbacks for a <see cref="WalkedFieldNode"/>. Bundles the
@@ -1255,7 +1194,7 @@ public sealed partial class WalkedFieldNode : ObservableObject
         WalkedField f, int indent, WalkedFieldActions actions)
     {
         string display = FormatDisplay(f, out bool isPointerValue);
-        WalkedFieldKind kind = ClassifyInstanceField(f, isPointerValue);
+        WalkedFieldKind kind = InstanceFieldClassifier.Classify(f, isPointerValue);
         string? effective = ComputeEffectiveAddress(f, kind);
         // For inline value-type structs the wire `ptr` is meaningless garbage
         // (decodeField's catch-all reads 8 bytes opaque) — replace the
@@ -1289,7 +1228,7 @@ public sealed partial class WalkedFieldNode : ObservableObject
         {
             // The slot stores a pointer to the element object; expand that
             // pointer (recursive walkInstance) using elementType's class.
-            kind      = LiveInspectionViewModel.TryParseClassName(elementType, out _, out _)
+            kind      = InstanceFieldClassifier.TryParseClassName(elementType, out _, out _)
                           ? WalkedFieldKind.ArraySlotPointer
                           : WalkedFieldKind.ArraySlotLeaf;
             effective = e.Ptr;
@@ -1316,62 +1255,8 @@ public sealed partial class WalkedFieldNode : ObservableObject
             actions:     actions);
     }
 
-    private static WalkedFieldKind ClassifyInstanceField(WalkedField f, bool isPointerValue)
-    {
-        // Server-side enum classification trumps everything else — enums
-        // come back with the underlying integer already decoded into Value,
-        // so the row is a Leaf showing that int. Without this short-circuit,
-        // the catch-all 8-byte-ptr decode + the heuristic below would route
-        // them to ValueStruct ("expand") which fails because enums have no
-        // walkable inner fields.
-        if (f.IsEnum) return WalkedFieldKind.Leaf;
-
-        // Collection takes priority — its Type is `T[]` / `List<T>`,
-        // distinguishable without inspecting the wire payload.
-        if (!string.IsNullOrEmpty(f.Type) &&
-            LiveInspectionViewModel.TryParseCollectionType(f.Type, out _, out _))
-        {
-            // Empty pointer = empty array, no expansion possible.
-            if (string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
-                return WalkedFieldKind.Leaf;
-            return WalkedFieldKind.Collection;
-        }
-
-        // A primitive that the DLL already decoded inline (`value` or
-        // `string`) is a Leaf even when the runtime says IsValueType=true
-        // (every primitive is technically a value type). Without this
-        // short-circuit, server-side value-type flags would route Int32s
-        // / floats to ValueStruct.
-        bool primitiveDecoded = f.Value.HasValue || f.String is not null;
-
-        // Inline value-type substruct (Vector3, Quaternion, custom struct,
-        // …). The field's storage IS the struct — no pointer to deref —
-        // and walkInstance can iterate its fields by offset starting at
-        // the field's own address. The server-side `IsValueType` flag is
-        // the authoritative signal when populated; we fall back to the
-        // legacy UnityTypeMap heuristic for older runtimes that didn't
-        // bind the type→class bridge.
-        bool serverStruct = f.IsValueType && !primitiveDecoded;
-        bool legacyStruct = !primitiveDecoded
-            && !string.IsNullOrEmpty(f.Type)
-            && !UnityTypeMap.IsPointerType(f.Type)
-            && LiveInspectionViewModel.TryParseClassName(f.Type, out _, out _);
-        if ((serverStruct || legacyStruct) && !string.IsNullOrEmpty(f.Address))
-        {
-            return WalkedFieldKind.ValueStruct;
-        }
-
-        // Pointer-to-class: the wire layer reports a Ptr value AND the
-        // field type resolves to a non-primitive class.
-        if (isPointerValue
-            && !string.IsNullOrEmpty(f.Ptr)
-            && f.Ptr != "0x0000000000000000"
-            && LiveInspectionViewModel.TryParseClassName(f.Type, out _, out _))
-        {
-            return WalkedFieldKind.PointerToClass;
-        }
-        return WalkedFieldKind.Leaf;
-    }
+    // ClassifyInstanceField moved to UnityDumpUI.Core.Services.InstanceFieldClassifier.Classify
+    // (2026-05-08). Call sites in this file use InstanceFieldClassifier.Classify directly.
 
     private static string? ComputeEffectiveAddress(WalkedField f, WalkedFieldKind kind)
         => kind switch
