@@ -1860,7 +1860,7 @@ void RegisterCoreHandlers() {
         //
         // R4 / R8 (and Boolean / Char) are unaffected — they're always raw LE
         // regardless of metadata version.
-        const std::uint16_t metadataVersion = mp.version();
+        const std::int32_t metadataVersion = mp.version();
         auto decodeByTag = [&decodeCompressedSigned, metadataVersion]
             (std::uint8_t tag, const std::uint8_t* p, std::size_t avail,
              json& out) -> bool {
