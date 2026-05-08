@@ -849,13 +849,25 @@ present, with a best-effort string decode.
 //       "default": {                        // only if FieldDefault exists
 //         "type_index": <int>, "data_index": <int>,
 //         "raw_hex_first16": "...", "raw_size": <int>,
-//         "decoded_string": "..."           // only when shape matches a string
+//         "decoded_string": "...",          // only when shape matches a string
+//         "value_kind": "normal" | "infinity" | "-infinity" | "nan"
+//                                            // R4/R8 only — see note below
 //       }
 //     },
 //     ...
 //   ]
 // }
 ```
+
+**R4 / R8 special-value handling**: JSON disallows `Infinity` / `-Infinity`
+/ `NaN` as numeric literals; nlohmann/json silently coerces those floats
+to `null`. To preserve the semantic, R4 and R8 default values now also
+emit a `value_kind` field — `"normal"` for finite values, `"infinity"` /
+`"-infinity"` / `"nan"` for the IEEE-754 special cases (with `value`
+set to JSON `null` in those three cases). Older clients that ignore
+`value_kind` continue to see `value: null` for non-finite floats, same
+as before this fix. Added 2026-05-08 closing the cosmetic backlog item
+surfaced by the v31 cross-version sweep.
 
 ---
 

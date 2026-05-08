@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <map>
 #include <mutex>
 #include <string>
@@ -1932,14 +1933,38 @@ void RegisterCoreHandlers() {
                     if (avail < 4) return false;
                     {
                         float v = 0.f; std::memcpy(&v, p, 4);
-                        out["value"] = v; out["enc_bytes"] = 4;
+                        out["enc_bytes"] = 4;
+                        // JSON spec disallows Infinity / -Infinity / NaN as
+                        // numeric literals; nlohmann/json silently coerces
+                        // those to null. Emit a `value_kind` tag so consumers
+                        // can recover the original float-special-case meaning.
+                        if (std::isnan(v)) {
+                            out["value"] = nullptr;
+                            out["value_kind"] = "nan";
+                        } else if (std::isinf(v)) {
+                            out["value"] = nullptr;
+                            out["value_kind"] = (v > 0.f) ? "infinity" : "-infinity";
+                        } else {
+                            out["value"] = v;
+                            out["value_kind"] = "normal";
+                        }
                     }
                     return true;
                 case 0x0D:  // R8
                     if (avail < 8) return false;
                     {
                         double v = 0.0; std::memcpy(&v, p, 8);
-                        out["value"] = v; out["enc_bytes"] = 8;
+                        out["enc_bytes"] = 8;
+                        if (std::isnan(v)) {
+                            out["value"] = nullptr;
+                            out["value_kind"] = "nan";
+                        } else if (std::isinf(v)) {
+                            out["value"] = nullptr;
+                            out["value_kind"] = (v > 0.0) ? "infinity" : "-infinity";
+                        } else {
+                            out["value"] = v;
+                            out["value_kind"] = "normal";
+                        }
                     }
                     return true;
                 case 0x0E:  // String — handled separately via TryDecodeStringDefault
