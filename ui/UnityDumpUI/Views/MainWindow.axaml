@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:UnityDumpUI.ViewModels"
+        xmlns:controls="using:UnityDumpUI.Controls"
         x:Class="UnityDumpUI.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1280" Height="780"
@@ -103,7 +104,8 @@
         </Grid>
         <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,4"
               IsVisible="{Binding !IsAssembliesPaneCollapsed}">
-          <TextBox Grid.Column="0"
+          <TextBox x:Name="AssemblyFilterBox"
+                   Grid.Column="0"
                    PlaceholderText="{StaticResource Browser.FilterWatermark}"
                    Text="{Binding Browser.AssemblyFilter, Mode=TwoWay}" />
           <Button  Grid.Column="1"
@@ -121,9 +123,10 @@
                  x:DataType="vm:MainWindowViewModel">
           <ListBox.ItemTemplate>
             <DataTemplate x:DataType="vm:AssemblyItem">
-              <TextBlock Text="{Binding Name}"
-                         TextTrimming="CharacterEllipsis"
-                         ToolTip.Tip="{Binding Name}" />
+              <controls:HighlightedTextBlock SourceText="{Binding Name}"
+                                             Highlight="{Binding #AssemblyFilterBox.Text}"
+                                             TextTrimming="CharacterEllipsis"
+                                             ToolTip.Tip="{Binding Name}" />
             </DataTemplate>
           </ListBox.ItemTemplate>
         </ListBox>
@@ -157,7 +160,8 @@
                      ToolTip.Tip="{StaticResource Browser.ExpandPaneTooltip}"
                      IsVisible="{Binding IsClassesPaneCollapsed}" />
         </Grid>
-        <TextBox DockPanel.Dock="Top"
+        <TextBox x:Name="ClassFilterBox"
+                 DockPanel.Dock="Top"
                  PlaceholderText="{StaticResource Browser.FilterWatermark}"
                  Text="{Binding Browser.ClassFilter, Mode=TwoWay}"
                  IsVisible="{Binding !IsClassesPaneCollapsed}"
@@ -183,12 +187,14 @@
           <ListBox.ItemTemplate>
             <DataTemplate x:DataType="vm:ClassItem">
               <StackPanel ToolTip.Tip="{Binding DisplayName}">
-                <TextBlock Text="{Binding Name}"
-                           FontWeight="SemiBold"
-                           TextTrimming="CharacterEllipsis" />
-                <TextBlock Text="{Binding Namespace}"
-                           Opacity="0.55" FontSize="11"
-                           TextTrimming="CharacterEllipsis" />
+                <controls:HighlightedTextBlock SourceText="{Binding Name}"
+                                               Highlight="{Binding #ClassFilterBox.Text}"
+                                               FontWeight="SemiBold"
+                                               TextTrimming="CharacterEllipsis" />
+                <controls:HighlightedTextBlock SourceText="{Binding Namespace}"
+                                               Highlight="{Binding #ClassFilterBox.Text}"
+                                               Opacity="0.55" FontSize="11"
+                                               TextTrimming="CharacterEllipsis" />
               </StackPanel>
             </DataTemplate>
           </ListBox.ItemTemplate>
@@ -331,7 +337,8 @@
                    the unfiltered Fields collection. Matches name OR type
                    (case-insensitive substring) so a search like "vector"
                    surfaces every Vector3 field across the inheritance chain. -->
-              <TextBox DockPanel.Dock="Top"
+              <TextBox x:Name="FieldFilterBox"
+                       DockPanel.Dock="Top"
                        PlaceholderText="{StaticResource Browser.FilterFieldsWatermark}"
                        Text="{Binding Browser.FieldFilter, Mode=TwoWay}"
                        Margin="0,0,0,4" />
@@ -351,13 +358,33 @@
                   </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
-                  <DataGridTextColumn Header="{StaticResource Browser.ColName}"   Width="*"
-                                      Binding="{Binding Name, x:DataType=vm:FieldRow}" />
+                  <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
+                                          Width="*" SortMemberPath="Name">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate x:DataType="vm:FieldRow">
+                        <controls:HighlightedTextBlock SourceText="{Binding Name}"
+                                                       Highlight="{Binding #FieldFilterBox.Text}"
+                                                       VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Margin="4,0" />
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
                                       Binding="{Binding OffsetHex, x:DataType=vm:FieldRow}"
                                       SortMemberPath="Offset" />
-                  <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
-                                      Binding="{Binding Type, x:DataType=vm:FieldRow}" />
+                  <DataGridTemplateColumn Header="{StaticResource Browser.ColType}"
+                                          Width="*" SortMemberPath="Type">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate x:DataType="vm:FieldRow">
+                        <controls:HighlightedTextBlock SourceText="{Binding Type}"
+                                                       Highlight="{Binding #FieldFilterBox.Text}"
+                                                       VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Margin="4,0" />
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"  Width="80"
                                       Binding="{Binding FlagsHex, x:DataType=vm:FieldRow}" />
                   <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
@@ -638,7 +665,8 @@
           </TabItem>
           <TabItem Header="{StaticResource Browser.MethodsTab}">
             <DockPanel>
-              <TextBox DockPanel.Dock="Top"
+              <TextBox x:Name="MethodFilterBox"
+                       DockPanel.Dock="Top"
                        PlaceholderText="{StaticResource Browser.FilterMethodsWatermark}"
                        Text="{Binding Browser.MethodFilter, Mode=TwoWay}"
                        Margin="0,0,0,4" />
@@ -673,8 +701,18 @@
                   </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
-                  <DataGridTextColumn Header="{StaticResource Browser.ColName}"    Width="*"
-                                      Binding="{Binding Name, x:DataType=vm:MethodRow}" />
+                  <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
+                                          Width="*" SortMemberPath="Name">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate x:DataType="vm:MethodRow">
+                        <controls:HighlightedTextBlock SourceText="{Binding Name}"
+                                                       Highlight="{Binding #MethodFilterBox.Text}"
+                                                       VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Margin="4,0" />
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColAddress}" Width="160"
                                       Binding="{Binding Address, x:DataType=vm:MethodRow}" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColToken}"   Width="100"
