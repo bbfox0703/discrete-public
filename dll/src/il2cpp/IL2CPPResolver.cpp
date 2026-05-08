@@ -63,8 +63,14 @@ void DoResolve() {
     bindReq("il2cpp_domain_get_assemblies",     g_resolver.domain_get_assemblies);
     bindReq("il2cpp_assembly_get_image",        g_resolver.assembly_get_image);
     bindReq("il2cpp_image_get_name",            g_resolver.image_get_name);
-    bindReq("il2cpp_image_get_class_count",     g_resolver.image_get_class_count);
-    bindReq("il2cpp_image_get_class",           g_resolver.image_get_class);
+    // Unity 2018.x IL2CPP runtime didn't export these two yet — they were
+    // added between Unity 2018.x and 2019.x. Demoted from REQUIRED to OPTIONAL
+    // 2026-05-08 so the resolver's `resolved` flag flips green for Unity
+    // 2018.x targets (e.g. R-Type Dimensions EX). When unbound, the class
+    // walker falls back to the MetadataParser-table-driven path that uses
+    // `il2cpp_class_from_name` per type — slower but functional.
+    bindOpt("il2cpp_image_get_class_count",     g_resolver.image_get_class_count);
+    bindOpt("il2cpp_image_get_class",           g_resolver.image_get_class);
     bindReq("il2cpp_class_from_name",           g_resolver.class_from_name);
     bindReq("il2cpp_class_get_name",            g_resolver.class_get_name);
     bindReq("il2cpp_class_get_namespace",       g_resolver.class_get_namespace);

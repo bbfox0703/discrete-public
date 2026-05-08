@@ -8,6 +8,7 @@
 #include "IL2CPPResolver.h"
 #include "IL2CPPThreadAttach.h"
 #include "IL2CPPTypeParser.h"
+#include "MetadataParser.h"
 
 #include <windows.h>
 
@@ -151,21 +152,66 @@ std::vector<ClassEntry> EnumerateClasses(const Il2CppImage* image) {
     if (image == nullptr) return out;
 
     const auto& r = GetResolver();
-    if (!r.resolved || r.image_get_class_count == nullptr || r.image_get_class == nullptr) {
-        return out;
-    }
+    if (!r.resolved) return out;
 
     Il2CppDomain* domain = GetDomain();
     if (domain == nullptr) return out;
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return out;
 
-    std::size_t n = SehClassCount(r.image_get_class_count, image);
-    if (n == 0) return out;
+    // Fast path — Unity 2019+ exports il2cpp_image_get_class_count /
+    // il2cpp_image_get_class. Iterate them directly for the canonical class
+    // list (top-level + nested, in metadata-token order).
+    if (r.image_get_class_count != nullptr && r.image_get_class != nullptr) {
+        std::size_t n = SehClassCount(r.image_get_class_count, image);
+        if (n == 0) return out;
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            Il2CppClass* k = SehClassByIdx(r.image_get_class, image, i);
+            ClassEntry e;
+            if (DescribeClass(k, e)) out.push_back(std::move(e));
+        }
+        return out;
+    }
 
-    out.reserve(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        Il2CppClass* k = SehClassByIdx(r.image_get_class, image, i);
+    // Fallback path — Unity 2018.x IL2CPP runtime didn't export the two
+    // image-iter APIs above. Walk the global TypeDefinitions table from
+    // global-metadata.dat, attempt il2cpp_class_from_name for each
+    // (namespace, name) against the requested image. class_from_name
+    // returns null for types belonging to a different image, so we
+    // implicitly filter without needing class_get_image. Slower
+    // (O(N_global_typedefs) regardless of image size) but functional.
+    //
+    // Caveats:
+    //   * Nested types are stored in metadata with their unqualified name
+    //     and an empty namespace; class_from_name with that key won't find
+    //     them. They'll appear via their declaring outer class instead, so
+    //     the consumer still reaches them via class_get_nested_types.
+    //   * Generic type-defs whose runtime forms haven't been instantiated
+    //     yet may also miss; that's a fundamental limitation of
+    //     class_from_name and not specific to this fallback.
+    if (r.class_from_name == nullptr) return out;
+
+    const auto& mp = Metadata::Parser::Get();
+    if (!mp.loaded()) {
+        // No metadata.dat = no fallback enumeration available. Caller will
+        // see an empty list; class lookup via FindClass still works for
+        // explicitly-named types since it goes straight through
+        // il2cpp_class_from_name.
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit,
+            "IL2CPPClassWalker: image_get_class_count missing AND "
+            "global-metadata.dat unloaded — cannot enumerate classes");
+        return out;
+    }
+
+    const std::uint32_t typeCount = mp.TypeDefinitionCount();
+    out.reserve(typeCount / 16);  // most types belong to OTHER images
+    for (std::uint32_t i = 0; i < typeCount; ++i) {
+        auto td = mp.GetTypeDefinition(static_cast<std::int32_t>(i));
+        if (!td || td->name.empty()) continue;
+        Il2CppClass* k = SehClassFromName(
+            r.class_from_name, image, td->ns.c_str(), td->name.c_str());
+        if (k == nullptr) continue;  // belongs to a different image
         ClassEntry e;
         if (DescribeClass(k, e)) out.push_back(std::move(e));
     }
