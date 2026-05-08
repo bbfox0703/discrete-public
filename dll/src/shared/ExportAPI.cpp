@@ -1848,29 +1848,51 @@ void RegisterCoreHandlers() {
         // (from MetadataRegistration::GetTypeTag). Returns true on success
         // and fills `out` with `value` + `enc_bytes`.
         //
-        // Integer encoding observed empirically against System.Int32 in
-        // SaGa Frontier 2 Remastered:
-        //   * lead byte 0xFE = type-max sentinel (1 byte total)
-        //   * lead byte 0xFF = type-min sentinel (1 byte total)
-        //   * else §II.23.2 compressed signed int (zigzag-style, 1/2/4 bytes)
-        // The §II.23.2 form maxes at ±2^28; values like Int32.MaxValue
-        // (2147483647) fall outside that range, hence the sentinels.
-        auto decodeByTag = [&decodeCompressedSigned]
+        // **Per-version dispatch on integer encoding**:
+        //   * v24 / v27 (Unity 2018 / 2019 / 2020 IL2CPP): raw little-endian,
+        //     exactly sizeof(T) bytes — no sentinels, no compressed-int.
+        //     Surfaced 2026-05-07 against FF VI (Unity 2019.4): byte sequence
+        //     `FFFFFF7F` is `Int32.MaxValue` (2147483647) under raw LE, but
+        //     was mis-decoded as the type-min sentinel under the v29+ rules.
+        //   * v29+ (Unity 2021+ IL2CPP): sentinels + §II.23.2 compressed
+        //     signed int (zigzag-style, 1/2/4 bytes; ±2^28 range, hence the
+        //     sentinels for values outside).
+        //
+        // R4 / R8 (and Boolean / Char) are unaffected — they're always raw LE
+        // regardless of metadata version.
+        const std::uint16_t metadataVersion = mp.version();
+        auto decodeByTag = [&decodeCompressedSigned, metadataVersion]
             (std::uint8_t tag, const std::uint8_t* p, std::size_t avail,
              json& out) -> bool {
+            const bool useRawLE = (metadataVersion <= 27);
             auto cmp = [&](auto&& cast1, auto&& cast2,
-                           std::int64_t maxVal, std::int64_t minVal) -> bool {
+                           std::int64_t maxVal, std::int64_t minVal,
+                           std::size_t typeSize) -> bool {
+                if (useRawLE) {
+                    // v24 / v27 path: read exactly typeSize bytes as little-
+                    // endian. cast1/cast2 handle truncation + sign-extension.
+                    if (avail < typeSize) return false;
+                    std::int64_t raw = 0;
+                    std::memcpy(&raw, p, typeSize);
+                    out["value"] = cast2(cast1(raw));
+                    out["enc_bytes"] = typeSize;
+                    out["encoding"] = "raw_le";
+                    return true;
+                }
+                // v29+ path: sentinels + compressed-int.
                 if (avail >= 1) {
                     if (p[0] == 0xFE) {
                         out["value"] = cast2(cast1(maxVal));
                         out["enc_bytes"] = 1;
                         out["sentinel"] = "type_max";
+                        out["encoding"] = "sentinel_compressed";
                         return true;
                     }
                     if (p[0] == 0xFF) {
                         out["value"] = cast2(cast1(minVal));
                         out["enc_bytes"] = 1;
                         out["sentinel"] = "type_min";
+                        out["encoding"] = "sentinel_compressed";
                         return true;
                     }
                 }
@@ -1878,6 +1900,7 @@ void RegisterCoreHandlers() {
                 if (!decodeCompressedSigned(p, avail, raw, w)) return false;
                 out["value"] = cast2(cast1(raw));
                 out["enc_bytes"] = w;
+                out["encoding"] = "sentinel_compressed";
                 return true;
             };
             switch (tag) {
@@ -1894,27 +1917,27 @@ void RegisterCoreHandlers() {
                 case 0x04:  // I1
                     return cmp([](std::int64_t x){ return static_cast<std::int8_t>(x); },
                                [](std::int8_t x){ return static_cast<std::int64_t>(x); },
-                               0x7F, -0x80);
+                               0x7F, -0x80, 1);
                 case 0x05:  // U1
                     return cmp([](std::int64_t x){ return static_cast<std::uint8_t>(x); },
                                [](std::uint8_t x){ return static_cast<std::uint64_t>(x); },
-                               0xFF, 0);
+                               0xFF, 0, 1);
                 case 0x06:  // I2
                     return cmp([](std::int64_t x){ return static_cast<std::int16_t>(x); },
                                [](std::int16_t x){ return static_cast<std::int64_t>(x); },
-                               0x7FFF, -0x8000);
+                               0x7FFF, -0x8000, 2);
                 case 0x07:  // U2
                     return cmp([](std::int64_t x){ return static_cast<std::uint16_t>(x); },
                                [](std::uint16_t x){ return static_cast<std::uint64_t>(x); },
-                               0xFFFF, 0);
+                               0xFFFF, 0, 2);
                 case 0x08:  // I4
                     return cmp([](std::int64_t x){ return static_cast<std::int32_t>(x); },
                                [](std::int32_t x){ return static_cast<std::int64_t>(x); },
-                               0x7FFFFFFFLL, -0x80000000LL);
+                               0x7FFFFFFFLL, -0x80000000LL, 4);
                 case 0x09:  // U4
                     return cmp([](std::int64_t x){ return static_cast<std::uint32_t>(x); },
                                [](std::uint32_t x){ return static_cast<std::uint64_t>(x); },
-                               0xFFFFFFFFLL, 0);
+                               0xFFFFFFFFLL, 0, 4);
                 case 0x0A:  // I8
                     if (avail < 8) return false;
                     {
