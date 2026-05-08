@@ -1,9 +1,9 @@
 # UnityCEDumper — CE Lua Bridge
 
-Six Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
+Seven Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
 of the project (Phase 17d added `unity_addrfind.lua`; Phase 19e added
-`unity_invoke.lua`); CE-side equivalent of running `DiscreteUI.exe` + the
-in-app process picker.
+`unity_invoke.lua`; Phase 20a added `unity_scene.lua`); CE-side
+equivalent of running `DiscreteUI.exe` + the in-app process picker.
 
 ## Install
 
@@ -46,6 +46,7 @@ Engine`. Override with `-CePath`:
     ├── unity_symbols.lua
     ├── unity_addrfind.lua
     ├── unity_invoke.lua
+    ├── unity_scene.lua
     └── utils.lua
 ```
 
@@ -187,7 +188,50 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
    `callUnityMethod` in a single Lua block when correctness matters,
    instead of stashing the address.
 
-7. **Switching to the standalone UI** — the DLL pipe server is
+7. **(Optional) Scene / GameObject explorer** — Phase 20a. Walk the
+   live scene's GameObject list, drill into Transform child trees, and
+   list Components attached to any GameObject. Pure composition over
+   `findInstances` (heap scan) + `callMethod` (Phase 19) — no new wire
+   commands. Concept borrowed from `vendor/UnityExplorer/`'s in-process
+   Scene Explorer, reproduced for our out-of-process pipe architecture.
+   ```lua
+   dofile([[<CE>\discrete\unity_scene.lua]])
+
+   -- All GameObjects in heap (fast; no name decode unless asked):
+   local all = getAllGameObjects()
+   print(#all .. " GameObjects")
+
+   -- Substring search across the loaded scene:
+   for _, h in ipairs(findByName("Camera")) do
+       print(string.format("0x%X  %s", h.address, h.name))
+   end
+
+   -- Active scene roots (filters by transform.parent == null):
+   local roots = getActiveSceneRoots()
+
+   -- Children of a known GameObject:
+   local kids = getChildren(roots[1].address)
+
+   -- Components attached to a GameObject:
+   local comps = getComponents(roots[1].address)
+   for _, c in ipairs(comps) do
+       print(string.format("0x%X  %s.%s", c.address, c.namespace or "", c.className or "?"))
+   end
+   ```
+   Public API (all return Lua arrays, 1-indexed; throw on RPC error so
+   callers can `pcall`):
+   `getName(addr)` / `getAllGameObjects(opts)` / `findByName(pattern, opts)` /
+   `getActiveSceneRoots(opts)` / `getChildren(addr)` /
+   `getComponents(addr)`. Full `opts` shape lives in the script header.
+
+   **Cost notes**: `getAllGameObjects()` is one heap scan (cheap).
+   `getActiveSceneRoots()` does N+1 `callMethod`s (one per object) to
+   filter on `transform.parent == null`; that's tens of ms on a small
+   scene, several hundred ms on a busy one. `getComponents()` issues
+   one `whatIsAt` per component to recover the runtime class, so it's
+   the costliest op — defer until the user expands a node.
+
+8. **Switching to the standalone UI** — the DLL pipe server is
    single-instance, so the desktop UI (`DiscreteUI.exe`) and CE Lua
    bridge are **mutually exclusive while connected**. To swap:
    - In Lua, just stop sending RPCs (no Disconnect needed).

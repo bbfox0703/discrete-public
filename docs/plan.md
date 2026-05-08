@@ -126,6 +126,9 @@
 | 17 | Address Finder (reverse lookup) | New wire command `whatIsAt(address)` returning instance + class + field; inverse of `findInstances` | ✅ All four sub-phases shipped (17a DLL handler / 17b field resolution / 17c UI Address Lookup tab / 17d CE Lua bridge). Spec in [address-finder.md](address-finder.md). |
 | 18 | Find Method Instances | New wire commands `findMethodInstances` + `getMethodAobPattern` + UI overloads modal + AOB AA-script generator + AOBMaker `CreateAAScript` direct push | ✅ All four sub-phases shipped (18a DLL handler + signature decoding / 18a-3 hand-rolled x64 LDE for AOB wildcarding / 18c UI overloads picker + AobAaScriptGenerator + AOBMaker direct push / 18d `unity_symbols.lua` extension `registerMethodOverloads`). |
 | 19 | Lua-callable Unity methods | New wire command `callMethod(asm, ns, class, method, [args], [instance])` invoking Mono / IL2CPP methods with marshaled primitive + string args; closes the long-standing CLAUDE.md goal | ✅ All five sub-phases shipped (19a IL2CPP DLL / 19b Mono port / 19c instance dispatch + string in/out / 19d UI MethodCallWindow / 19e `scripts/unity_invoke.lua` Lua bridge). Verified live across SaGa F2R + BongoCat + Farthest Frontier. Spec: [lua-invoke.md](lua-invoke.md). |
+| 20 | Scene / GameObject explorer + Object.name search | `scripts/unity_scene.lua` Lua bridge + DiscreteUI Scene tab + filter-by-name + click-to-inspect handoff. Tree-walk primitives gated behind a NEW sub-phase **20-MT** (DLL-side main-thread marshaling) since iterating Unity icalls from the worker thread freezes the game. | 🚧 In progress — 20a landed + hardened 2026-05-08 (envelope unwrap fix + main-thread caveat after live test on SaGa F2R locked up the game). `getName` / `getAllGameObjects` / `findByName` are safe-and-working primitives; `getActiveSceneRoots` / `getChildren` / `getComponents` formally **EXPERIMENTAL until 20-MT ships**. 20b (UI tab) blocked behind 20-MT. Zero DLL changes so far; 20-MT will need DLL frame-hook work. |
+| 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector cells go editable with Apply button | ⏳ Planned — after Phase 20. ~½ day + tests. Closes the read/write asymmetry: today the Inspector only reads. GC-root caveat applies (same pattern as Phase 19c). |
+| 22 | `.CT` embedding + AA-script generator UI tab | New DiscreteUI tab that produces a self-contained `.CT` with all `unity_*.lua` files embedded (`findTableFile()` + `createStringStream()` loader pattern) AND auto-built AA scripts whose Lua sections invoke the embedded modules. Extends Phase 18's `AobAaScriptGenerator` from "single AA script for one method" to "full toolkit AA script with Lua-section dispatch" | ⏳ **Promoted to active next phase** (2026-05-08). User confirmed this is the most practical of the three new phases — end-users only enable/disable AA scripts in `.CT`s. Phase 22 makes Discrete production-shippable as a single `.CT`. Phase 20 (scene explorer) and 21 (write-back) defer until 22 ships, since they'd need to be embedded too. Reference embedding pattern: `D:\Github\Mydev-Cheat-Engine-Tables\Crimson Desert\CrimsonDesert.CT`. |
 
 ---
 
@@ -984,6 +987,296 @@ Wire `type` tags for v1: `bool`, `byte`, `sbyte`, `int16`, `uint16`,
 
 Estimated effort: ~3 days for v1 (19a + 19b in one day, 19c in one day,
 19d + 19e in one day).
+
+---
+
+## Phase 20 — Scene / GameObject explorer + Object.name search
+
+**Goal**: Reproduce the most useful concept from
+[`vendor/UnityExplorer/`](../vendor/UnityExplorer/) — its Scene Explorer
+tab — in our out-of-process architecture. UnityExplorer's full Scene
+Explorer needs in-process Unity engine API access (it's a BepInEx /
+MelonLoader plugin); we get an equivalent surface for free by composing
+already-shipped Phase 19 (`callMethod`) and Phase 9.5 (`walkInstance`)
+primitives — no DLL changes needed.
+
+### Why now
+
+Phase 19 just landed `callMethod`. The single largest user-visible gap vs
+UnityExplorer / RuntimeUnityEditor is **"how do I find which GameObject a
+managed value belongs to"** — today users have `findInstances` (by class)
+and `whatIsAt` (reverse lookup by address), but no way to walk the actual
+scene-graph tree the way Unity programmers think. Adding this is cheap
+because all the pieces exist.
+
+### Scope (v1)
+
+In:
+- `scripts/unity_scene.lua` — public entry points
+  - `getActiveSceneRoots()` → returns array of `{ address, name, childCount }`
+    by calling `SceneManager.GetActiveScene().GetRootGameObjects()` then
+    walking each `GameObject.transform` for `childCount`
+  - `getChildren(gameObjectAddr)` → traverse `Transform.GetChild(i)` for
+    `i = 0..childCount-1`, return `{ address, name, childCount }` for each
+  - `getComponents(gameObjectAddr)` → traverse `GameObject.GetComponents()`
+    array (return as `findMethodInstances`-style class+addr pairs so the
+    caller can pass into our existing inspector)
+  - `findByName(pattern)` — substring match across the active scene tree.
+    Recursive walk via `getActiveSceneRoots` + `getChildren`. Cap at
+    configurable max-depth (default 10).
+- DiscreteUI: new "Scene" tab in MainWindow
+  - TreeView control. Lazy-expand via `getChildren`. Each row shows
+    `name + (componentCount?)`. Cells colored by `activeInHierarchy`
+    (gray = inactive).
+  - Filter input box at top → calls `findByName` and flattens result to
+    a list view.
+  - Right-click any row → "View instance" (flips to existing Inspector
+    tab with `SelectedInstance` set) and "Show components" (drill into
+    `getComponents` result, each becomes a child).
+
+Out (v2 candidates):
+- `DontDestroyOnLoad` scene + `HideAndDontSave` scene enumeration —
+  needs different API path (`Object.FindObjectsOfTypeAll` filtered by
+  scene). Defer.
+- Mouse-pick (`Physics.Raycast` / `GraphicRaycaster`) — requires
+  in-process. Out of scope.
+- Live update / scene-change listener — would need a managed callback,
+  also out of scope. v1 is "press refresh".
+
+### Sub-phases
+
+- [x] **20a** `unity_scene.lua` Lua bridge (file landed 2026-05-08, hardened
+  same day across THREE iterations of live testing on SaGa F2R) —
+  implements `getName(addr)`, `getAllGameObjects(opts)`,
+  `findByName(pattern, opts)`, `getActiveSceneRoots(opts)`,
+  `getChildren(addr)`, `getComponents(addr)`. Standalone; pure
+  composition over `callMethod` + `walkArray` (no longer uses
+  `findInstances` for the GameObject enumeration entry point — see
+  issue 3 below). **Three issues surfaced + fixed**:
+    1. *Wire envelope unwrap missed* — `rpc()` returned `{id, result}` raw
+       envelope instead of unwrapping `result`; every public function
+       saw nil fields and returned 0/empty. Fixed.
+    2. *Main-thread marshaling not respected* — `getActiveSceneRoots`
+       on a 1024-GameObject scene issued ~2048 sustained icalls
+       (`Transform.get_parent` etc.) and locked up the game. This is
+       the v1 limitation called out in `lua-invoke.md` ("v1 invokes on
+       the pipe worker thread"). Fixed by lowering defaults and adding
+       a 1 ms `sleep()` per-RPC throttle. **`getActiveSceneRoots` /
+       `getChildren` / `getComponents` are now formally EXPERIMENTAL
+       until 20-MT lands.**
+    3. *`findInstances UnityEngine.GameObject` returns metadata
+       records, not instances* — heap-scan heuristic ("first qword ==
+       classPtr") matches IL2CPP RGCTX cache entries that legitimately
+       store the GameObject classPtr at +0x00 AND +0x18 with garbage at
+       +0x10. Even a two-layer Lua-side validator (klass match +
+       m_CachedPtr range check) couldn't distinguish them — 622/622
+       survivors returned `native_crash_in_runtime_invoke` on get_name
+       in SaGa F2R's equipment screen. Forensic confirmed identical
+       layout signature across all samples (+0x18 = classPtr again,
+       +0x10 = constant 0x41BC0600). `whatIsAt` shares the heuristic
+       so reverse lookup couldn't disambiguate either. **Pivot**:
+       `getAllGameObjects` now uses `Object.FindObjectsOfTypeAll(Type)`
+       — Unity's authoritative engine enumeration, zero false
+       positives. Cost shape: 2 callMethod + 1 walkArray, constant
+       regardless of N. Pattern matches what UnityExplorer / RUE use
+       in-process. The `findInstances`-based path is preserved as
+       deprecated `_isValidInstance` for users who explicitly want the
+       old strategy on user classes (where it's still fine). All
+       three issues logged in `lessons-learned.md`.
+    4. *IL2CPP code stripping removes most enumeration APIs* —
+       `Resources.FindObjectsOfTypeAll`, `SceneManager.get_sceneCount`,
+       `GameObject.FindWithTag`, the 1-arg `Object.FindObjectsOfType(Type)`
+       overload — ALL stripped on SaGa F2R's shipped IL2CPP build.
+       Survivors: `Object.FindObjectsOfType(Type, bool)` (2-arg),
+       `GameObject.Find(string)`, `Camera.get_main()`,
+       `SceneManager.GetActiveScene()` + `Scene.GetRootGameObjects()`
+       (last one needs Scene value-type marshaling — Phase 19 v2).
+       Code path updated to call the surviving 2-arg overload with
+       `includeInactive=true` and a precise `(System.Type, System.Boolean)`
+       signatureMatch (the previous `(System.Type)` didn't substring-match
+       the 2-arg signature because Type is followed by a comma, not a
+       close paren). **Untested in this session** — left for the next
+       run after stripping was confirmed mid-test. Logged in
+       `lessons-learned.md` (two new entries: IL2CPP stripping +
+       signatureMatch close-paren trap).
+- [ ] **20a-2** Verify the `Object.FindObjectsOfType(Type, bool)` recipe
+  end-to-end (untested at session end). Same six-step test plan but
+  smaller limits, against SaGa F2R first. If 20a-2 fails too (e.g. the
+  2-arg overload also gets stripped on a different game), fall back to
+  20-HEAP below.
+- [ ] **20-MT** *(new sub-phase)* DLL-side main-thread marshaling —
+  frame-hooked queue drain so `callMethod` on Unity icalls no longer
+  fights the game thread. Probably patches `PlayerLoop` or a similar
+  per-frame Unity hook to invoke pending requests on the main thread.
+  **Required to make `getActiveSceneRoots` / `getChildren` /
+  `getComponents` (and similar future Unity-engine API recipes) safe at
+  scale.** Multi-day; design TBD; sequenced before Phase 20b.
+- [ ] **20-HEAP** *(new sub-phase, fallback if Unity APIs aren't
+  reachable)* DLL-side managed-heap walker that doesn't depend on Unity
+  managed APIs at all — walks libgc heap sections via
+  `GC_get_heap_section_count` / `GC_get_heap_section_at`, scans for
+  IL2CPP object headers (klass match + valid m_CachedPtr), returns
+  authoritative instance lists. Bypasses both `findInstances`'s
+  false-positive problem AND IL2CPP code stripping. New wire RPC like
+  `walkManagedHeap(classFilter)`. Multi-day; only needed if 20a-2
+  doesn't work on the user's target games.
+- [ ] **20b** DiscreteUI Scene tab — new `SceneExplorerViewModel.cs` +
+  `SceneExplorerView.axaml`. Lazy TreeView. Right-click context menu
+  matching the existing patterns from Inspector + Methods tabs.
+- [ ] **20c** Cross-tab handoff — "View instance" flips to Inspector
+  tab with `SelectedInstance.Address = node.Address` populated. Reuse
+  the Phase 19d-2 cross-tab plumbing already added between Inspector and
+  Methods.
+- [ ] **20d** Live verification on at least 2 targets (one IL2CPP, one
+  Mono). Document any per-Unity-version quirks (older Unity may not have
+  `Scene` struct as a managed type — fall back to
+  `Object.FindObjectsOfType<GameObject>()`).
+
+Estimated effort: ~½–1 day total. No DLL changes. No new wire
+commands.
+
+---
+
+## Phase 21 — Inspector field write-back
+
+**Goal**: Close the read/write asymmetry in the Inspector. Today
+`walkInstance` reads field values; there is no path to write them back
+beyond manually opening Cheat Engine's memory viewer. UnityExplorer
+exposes per-field "Apply" buttons; we should too, since the underlying
+write is just "address + offset + type + value" — easier than the read
+path which had to handle pointer chains and value-type inlining.
+
+### Scope (v1)
+
+In:
+- New wire RPC `setInstanceField(instanceAddress, fieldOffset, type, value)`.
+  - `type` matches the existing wire-type taxonomy from Phase 19's
+    `callMethod` arg builders: `int8/16/32/64`, `uint8/16/32/64`, `float`,
+    `double`, `bool`, `address` (writes a raw pointer).
+  - `value` is JSON-typed (number / bool / `"0x..."` for address).
+  - Backend writes `sizeof(type)` bytes via SEH-protected `SafeWriteBytes`
+    on both Mono and IL2CPP. No runtime reflection needed — the field
+    offset is already known from the prior `walkInstance` response.
+- UI: existing read-only Inspector field cells become editable on
+  double-click. Apply button per row commits via the new RPC. Edit
+  state shown via row highlight; failed writes show inline error.
+- CE Lua bridge: extend `unity_invoke.lua` (or pair `unity_dump.lua`)
+  with `setField(addr, off, type, value)` wrapper.
+
+Out (v2):
+- Reference-type field write (writing a managed `string` or object
+  pointer) — needs `il2cpp_string_new` / `mono_string_new` and proper
+  GC root handling, identical to Phase 19c's marshaling. Defer one
+  sub-phase.
+- Value-type-by-value (Vector3, Color) — need full struct marshaler.
+  Defer to Phase 19's "boxed value-type args" v2 follow-up.
+- Atomic batch write (multi-field commit) — out of scope.
+
+### Sub-phases
+
+- [ ] **21a** DLL handler — `setInstanceField` in
+  `dll/src/shared/ExportAPI.cpp`, dispatches per-type to a small
+  `SafeWriteBytes` helper. Both backends share the writer (it's just
+  process memory write). PowerShell smoke `Test-SetInstanceField.ps1`.
+- [ ] **21b** UI editable cells — `LiveInspectionView.axaml` field grid
+  goes editable. New `FieldEditViewModel` row state. Apply button
+  bound to a command that calls the wire RPC.
+- [ ] **21c** CE Lua bridge wrapper — short addition to
+  `unity_invoke.lua` or a new sibling. Documented example in
+  [lua-invoke.md](lua-invoke.md).
+- [ ] **21d** Live verification — write `Player.HP` on SaGa F2R, watch
+  CE address-list value update in real time. Do same for one Mono
+  target.
+
+### GC-root caveat
+
+A managed pointer field that the user wants to overwrite may shift
+between the read (which gave us the address + offset to display) and
+the write (the user's Apply click). For value-type fields, the offset
+is stable — the embedded value is rewritten in place. For reference-type
+fields (deferred to v2), this is the same caveat as Phase 19c's return
+addresses — chain operations within one request when correctness matters.
+
+Estimated effort: ~½ day + tests.
+
+---
+
+## Phase 22 — `.CT` embedding + AA-script generator UI tab (DEFERRED)
+
+**Goal**: Make Discrete production-shippable as a single `.CT` file.
+Today the deliverable is "DLL + 6 lua scripts in `scripts/` + manual
+`dofile` recipes from CE Lua console" — that's a developer workflow,
+not an end-user one. The user's actual end-users don't run `dofile`;
+they enable/disable AA scripts in CE's address list. The output of this
+phase is a tool that takes a saved DiscreteUI session (selected symbols,
+instance addresses, methods to expose) and emits a self-contained `.CT`
+with all `unity_*.lua` files embedded as table files plus matching AA
+scripts whose `[ENABLE]` Lua sections invoke the embedded modules.
+
+### Why deferred
+
+The DiscreteUI features it consumes (Phase 17 address finder, Phase 18
+AOB AA-scripts, Phase 19 callMethod, Phase 20 scene tree, Phase 21 field
+write-back) all need to exist first to be worth packaging. Phase 22 is
+the **outer wrapper** that turns the toolkit into a deliverable.
+
+### Reference
+
+Pattern source: `D:\Github\Mydev-Cheat-Engine-Tables\Crimson Desert\CrimsonDesert.CT`
+
+The user's existing Crimson Desert table demonstrates the embedding
+pattern:
+- Lua files inserted into the `.CT` via CE's
+  `Table → Add file` (UI entry "Script: 4. Generate scripts").
+- Loaded at runtime via `findTableFile(name)` →
+  `createStringStream()` → `readLine()` loop → `loadstring()` /
+  `assert(load(buf))`. NOT `dofile` (which reads from disk).
+- AA scripts in the address list have `[ENABLE]` Lua sections that
+  call functions exported by the loaded modules. Enable/disable becomes
+  the entire user-visible interaction.
+
+### Scope sketch (to be fleshed out when started)
+
+In:
+- New "Generate CT" tab in DiscreteUI.
+- Inputs: which symbols to register (pulled from current session's
+  inspector + browser state), which methods to expose as one-click
+  AA-script invocations, which fields to expose as write-back AA scripts,
+  scene roots to bookmark.
+- Outputs:
+  - A `.CT` file produced via CE's table-file format. (Format is XML
+    with embedded base64 lua bodies + AA-script blocks. We can parse
+    a starter template `.CT` and substitute.)
+  - Inside it: `utils.lua` + `unity_dump.lua` + `unity_dissect.lua` +
+    `unity_symbols.lua` + `unity_addrfind.lua` + `unity_invoke.lua` +
+    `unity_scene.lua` (Phase 20) + any new bridge scripts as embedded
+    table files.
+  - One AA-script entry per chosen feature, with its `[ENABLE]` block
+    calling the appropriate embedded function.
+
+Out:
+- Encrypted `.CT` (CE supports it, but we don't need to gate on it).
+- Per-end-user customization UX inside the generated `.CT` (could be
+  added later via a CE form, but v1 just emits a fixed set).
+
+### Open design questions (record-keeping for future implementer)
+
+- **Bootstrap script**: a `.CT` needs ONE entry point that loads all
+  embedded lua files in the right order. Decide between (a) a
+  hand-maintained loader script also embedded in the `.CT`, (b) a
+  generated-each-time loader that knows the exact filename list from
+  the current build, or (c) attach loader to the `.CT`'s
+  `OnTableOpening` event.
+- **Module count ceiling**: 6 modules today, +2 likely (Phase 20
+  `unity_scene.lua`, Phase 21 write-back wrapper) = 8. Past that the
+  user (= cheat-table author) loses track. Consider consolidating
+  before starting Phase 22.
+- **Versioning**: as the bridge scripts evolve, end-users will be
+  using older `.CT`s with newer DLLs. Decide on a wire-protocol-version
+  contract that the embedded scripts assert on load.
+
+Estimated effort: 2–3 days when started. Will probably grow during
+implementation.
 
 ---
 
