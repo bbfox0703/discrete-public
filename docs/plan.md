@@ -117,7 +117,7 @@
 | 11 | CE Lua Bridge | unity_dump.lua, unity_dissect.lua, unity_symbols.lua | ✅ Both bridge scripts (dissect + symbols) verified live; deploy tooling shipped |
 | 11.5 | Inspector inline drilldown | Hierarchical pointer / array / value-struct expansion | ✅ |
 | 12 | Proxy DLLs | version.dll / winmm.dll / dxgi.dll variants + bulk deploy panel | ✅ x64 (12a-12c). 12d (32-bit Mono) deferred — see below |
-| 12d | 32-bit Mono support | x86 build of backend + proxy DLLs, cross-bitness inject, x86/x64 selection in installer | ⏳ Deferred — engineering only, no external blockers |
+| 12d | 32-bit Mono support | x86 build of backend + proxy DLLs, cross-bitness inject, x86/x64 selection in installer | ⏳ Deferred — engineering effort only (user confirmed 2026-05-08 they HAVE a 32-bit Mono test target available; not blocked on demand). Re-estimated: ~3-5 days focused work (parallel x86 build config in CMake, x86 backend DLL with Mono 32-bit struct offsets verified, x86 builds of `version.dll` / `winmm.dll` / `dxgi.dll` proxies, cross-bitness inject from x64 UI to x86 game (or document "proxy install only" for x86), x86/x64 selection flyout in installer, test matrix expansion with the 32-bit target) |
 | 13 | Offline Metadata CLI | Standalone tool to parse global-metadata.dat | ✅ Ships as `dist/metadata-cli.exe` |
 | 14 | Hardening | Error paths, AOT trim warnings, log rotation, edge cases | ✅ All sub-items closed (14a-14f) |
 | 14c | IL2CPP metadata version dispatch | v24 / v27 / v29 / v31 TypeDefinition layouts | ✅ Cross-checked vs upstream Unity (`docs/il2cpp-metadata-crosscheck.md`) |
