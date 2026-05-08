@@ -1063,10 +1063,17 @@ void RegisterCoreHandlers() {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
         }
         return json{
-            {"vtable",  formatHex(reinterpret_cast<std::uintptr_t>(vtable))},
-            {"count",   arr.size()},
-            {"limit",   limit},
-            {"matches", std::move(arr)},
+            // `class_ptr` mirrors the IL2CPP findInstances shape so cross-backend
+            // consumers (e.g. unity_scene.lua's first-qword validator) can read
+            // the same field name. On Mono the FIRST qword of a real instance
+            // is actually MonoVTable* (not MonoClass*), so for validators that
+            // compare against the instance's first qword, use `vtable`.
+            // `class_ptr` is provided for class-identity purposes.
+            {"class_ptr", formatHex(reinterpret_cast<std::uintptr_t>(k))},
+            {"vtable",   formatHex(reinterpret_cast<std::uintptr_t>(vtable))},
+            {"count",    arr.size()},
+            {"limit",    limit},
+            {"matches",  std::move(arr)},
         };
     });
 

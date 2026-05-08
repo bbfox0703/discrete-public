@@ -360,21 +360,43 @@ that's the `Il2CppClass*` (the first qword of every object); in Mono it's the
 ```jsonc
 // IL2CPP result:
 {
-  "class_ptr": "0x...",         // the searched-for pointer
+  "class_ptr": "0x...",         // Il2CppClass* — and also the searched-for first-qword pointer
   "count": 100, "limit": 256,
   "matches": ["0x...", "0x...", ...]
 }
 // Mono result:
 {
-  "vtable": "0x...",
+  "class_ptr": "0x...",         // MonoClass* — class identity (added 2026-05-08 for cross-backend uniformity)
+  "vtable": "0x...",            // MonoVTable* — the first-qword pointer the heap scan matched on
   "count": 100, "limit": 256,
   "matches": ["0x...", "0x...", ...]
 }
 ```
 
-False positives are possible (the same pointer can appear in metadata tables
-or in field values that happen to hold a class reference). Filter by
-`instance_size` alignment if you need precision.
+**Both backends now return `class_ptr`** so cross-backend consumers can
+read one canonical field. **Mono's heap scan target is `vtable`** (the
+MonoObject header's first qword is MonoVTable*, not MonoClass*) — if a
+client validates instances by comparing `*(addr) == header`, use
+`vtable` on Mono and `class_ptr` on IL2CPP.
+
+⚠️ **False positives are common, especially for hot Unity classes.**
+Heap scan is "first qword equals target" across all RW pages — it picks
+up:
+- **Thread stacks** (stale local variables of the matching pointer
+  type — addresses look like `0x67_xxxx`, `0xB5_xxxx`, `0xF5_xxxx`).
+- **IL2CPP metadata structures** (RGCTX entries, `Il2CppType` records,
+  vtable pieces — these legitimately store class pointers at
+  offset 0). Even Phase 17 `whatIsAt` can be fooled.
+
+For consumers that intend to invoke `runtime_invoke` on the matches:
+pre-filter with a class-pointer validation memory read AND a layout
+sanity check (e.g. for `UnityEngine.Object` derivatives, validate
+`m_CachedPtr` at +0x10 is a plausible native pointer). For
+`UnityEngine.*`-derived classes, **prefer Unity's own enumeration
+APIs** (e.g. `Object.FindObjectsOfType(Type, bool)` if not stripped) —
+zero false positives. See
+`docs/lessons-learned.md` "findInstances heap scan picks up
+thread-stack false positives — validate before invoking".
 
 ### `walkInstance` *(Both)*
 
