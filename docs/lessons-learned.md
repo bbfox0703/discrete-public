@@ -255,6 +255,37 @@ XAML must update too: `App.axaml`'s `ResourceInclude Source=` and any
 `Window.Icon` references. Forget any one of them and the build
 succeeds but resources fail to load at runtime with cryptic null refs.
 
+### Avalonia 12 `TextBlock.Text` and `Inlines` are mutually-exclusive sources
+
+**Symptom**: setting both `Text` and `Inlines` on the same `TextBlock`
+produces undefined rendering — sometimes the plain text appears,
+sometimes the inline runs appear, sometimes the text gets duplicated
+(plain string + concatenated inline runs). Not deterministic across
+property-set order or Avalonia minor versions.
+
+**Rule**: pick exactly one source per render. To toggle between plain
+text and inline runs (e.g. for the filter-substring highlight UX in
+`HighlightedTextBlock`), the pattern is **clear the other source first**:
+
+```csharp
+if (noHighlight) {
+    Inlines = null;           // clear before setting Text
+    Text = source;
+} else {
+    Text = null;              // clear before setting Inlines
+    Inlines = BuildRuns(source, filter);
+}
+```
+
+Also — don't bind `Text` from XAML when the control internally manages
+`Inlines`. Add a `SourceText` styled property that the consumer binds
+instead, and let the control decide which of `Text` / `Inlines` to set.
+
+Pattern in
+[ui/UnityDumpUI/Controls/HighlightedTextBlock.cs](../ui/UnityDumpUI/Controls/HighlightedTextBlock.cs)
++ pure splitting in
+[ui/UnityDumpUI.Core/Services/HighlightSegmenter.cs](../ui/UnityDumpUI.Core/Services/HighlightSegmenter.cs).
+
 ### `DataGridCheckBoxColumn` requires double-click to enter edit mode
 
 Single-click on a `DataGridCheckBoxColumn`'s checkbox does nothing
@@ -263,6 +294,36 @@ single-click toggles (e.g. multi-select grids), use a
 `DataGridTemplateColumn` with an inline
 `<CheckBox Focusable="False" />` instead. Pattern in
 [MethodOverloadsWindow.axaml:103-112](../ui/UnityDumpUI/Views/MethodOverloadsWindow.axaml).
+
+### `DataGridTextColumn` cannot host custom controls — use `DataGridTemplateColumn` + `CellTemplate`
+
+Need a custom-painted cell inside a `DataGrid` (e.g. the filter
+substring highlight rendered by `HighlightedTextBlock`)? `DataGridTextColumn`
+can't do it — it only renders plain text from its `Binding`. The
+replacement is a `DataGridTemplateColumn` with a `CellTemplate` that
+holds whatever control tree you want:
+
+```xml
+<DataGridTemplateColumn Header="Name" Width="*" SortMemberPath="Name">
+  <DataGridTemplateColumn.CellTemplate>
+    <DataTemplate x:DataType="vm:FieldRow">
+      <controls:HighlightedTextBlock SourceText="{Binding Name}"
+                                     Highlight="{Binding #FieldFilterBox.Text}"
+                                     VerticalAlignment="Center"
+                                     TextTrimming="CharacterEllipsis"
+                                     Margin="4,0" />
+    </DataTemplate>
+  </DataGridTemplateColumn.CellTemplate>
+</DataGridTemplateColumn>
+```
+
+Two gotchas worth remembering:
+1. **Preserve `SortMemberPath`** explicitly — without it, `DataGridTemplateColumn` sorts by the bound DataTemplate's first text node (often empty / wrong). `SortMemberPath="Name"` keeps the click-the-header sort working.
+2. **Element-name binding works inside the cell template** — `{Binding #FilterBox.Text}` reaches a named control elsewhere in the same XAML file, even though the cell's `DataContext` is the row item.
+
+Both points exercised by the Browser filter-highlight wiring in
+[MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml) (Fields
+Name + Type columns, Methods Name column).
 
 ### `CommunityToolkit.Mvvm` quirks
 
@@ -328,6 +389,39 @@ without re-confirming it survives a backend switch.
 target process after injection. Trying to rebuild while the game is
 running fails with `LNK1104: cannot open file ...`. Close the game,
 then rebuild.
+
+### `Inject-Dll.ps1` reads from `build/dll-both-release/bin/`, NOT `dist/`
+
+**Symptom**: a freshly-committed DLL fix appears to fail every live-
+verification run. The wire response shows the pre-fix behaviour even
+though the source code clearly contains the new branch.
+
+**Root cause**: `Inject-Dll.ps1` (called by `Test-Handshake.ps1` and
+DiscreteUI's "Pick & Inject" alike) reads the DLL from
+`build\dll-both-release\bin\UnityDumper-IL2CPP.dll` (or `…-Mono.dll`).
+`dist/` is the *shippable* tree but is **not** the inject source —
+`dist/` only gets repopulated when `build.ps1` runs to completion.
+Locally-edited code that you forgot to rebuild stays out of `build/`,
+out of `dist/`, and out of every injected process. **Worse**, partial
+or aborted builds can leave `dist/` slightly newer than
+`build/dll-both-release/bin/` (e.g. the IL2CPP variant got copied but
+Mono got stuck on `LNK1104`), so a "is dist/ recent?" eyeball check
+gives a false-positive.
+
+**Rule**: before any live-verification round after a commit,
+unconditionally rebuild — even if `dist/` *looks* recent:
+
+```powershell
+.\build.ps1 -Target DLL -Backend Both   # ~20 s warm
+Get-ChildItem build\dll-both-release\bin\UnityDumper-*.dll | Select Name,LastWriteTime
+```
+
+The build_number bump in `build_number.txt` is the cheapest signal —
+if the UI's status bar reads a build # lower than `cat build_number.txt`,
+**the running DLL is out of date no matter what `dist/` says**. Caught
+2026-05-08 burning ~15 minutes on a 4-target verification run where
+all four "failures" turned out to be stale DLLs from before the fix
+commits.
 
 ### AOB decoder bailout is by design
 

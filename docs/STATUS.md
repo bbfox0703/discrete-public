@@ -1,9 +1,10 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (clean — pushed up to commit `587e794`)
-**Last commit**: `587e794 fix(il2cpp): Unity 2018.x — demote two missing exports + MetadataParser fallback`
-**Build**: 253 (post-verification warning cleanup; live verification used #251)
-**Current state**: **All shipped phases verified live + 4 backlog cosmetics ✅ live-verified 2026-05-08 against build #251 across four targets (Silksong / SaGa F2R / FF VI / R-Type). ExportAPI.cpp:1863 C4244 narrowing warnings cleaned up in #253 (no functional change — `metadataVersion` typed as `int32_t` to match `MetadataParser::version()`'s return).** Phase 19 + 19d-2 closed across DLL → UI → CE Lua bridge on both backends. Phase 16 docs landed. Phase 5 segment 2d cross-version sweep against Unity 2018.1 → 6.1 (metadata v24 / v29 / v31 / v39) confirms `Il2CppMetadataRegistration` structural-shape AOB scan is fully version-portable; v39 runtime sweep 9/9 green. **Phase 20a (Scene/GameObject explorer Lua bridge)** is parked at "FindObjectsOfType(Type, bool) recipe untested" after surfacing four cliffs (envelope unwrap, main-thread marshaling, findInstances false positives, IL2CPP code stripping) — see open follow-ups. **Backlog sweep 2026-05-08**: ✅ v24 integer-decode (commit `cb3d100`, **live-verified FF VI**), ✅ Unity 2018.x missing IL2CPP exports (commit `587e794`, **live-verified R-Type Dimensions EX**), ✅ findInstances Mono `class_ptr` consistency (commit `3e519a8`, **live-verified Silksong**), ✅ JSON Inf/NaN R4/R8 `value_kind` (commit `fd428d2`, **live-verified SaGa F2R**). Phase 12d (32-bit Mono) re-estimated as 3-5 days (user has test target). **Phase 22** (.CT embedding + AA-script generator UI tab) **promoted to next active phase** per user direction. Session ending — fresh session will pick up from Phase 22 design + live verification of the 4 fixes.
+**Branch**: `dev` (clean — pushed up to commit `950c0d8`)
+**Last commit**: `950c0d8 feat(ui): highlight matching substring in Browser filter results`
+**Build**: 257 (Publish / AOT; DiscreteUI.exe 38.3 MB; 0/0 trim+AOT warnings)
+**Tests**: 57/57 pass (was 5 before this session; +52 from the InstanceFieldClassifier + HighlightSegmenter extracts)
+**Current state**: **All shipped phases verified live + 4 backlog cosmetics ✅ live-verified 2026-05-08 against build #251 across four targets (Silksong / SaGa F2R / FF VI / R-Type) + Inspector classifier & Browser filter-highlight polish landed in build #257.** Phase 19 + 19d-2 closed across DLL → UI → CE Lua bridge on both backends. Phase 16 docs landed. Phase 5 segment 2d cross-version sweep against Unity 2018.1 → 6.1 (metadata v24 / v29 / v31 / v39) confirms `Il2CppMetadataRegistration` structural-shape AOB scan is fully version-portable; v39 runtime sweep 9/9 green. **Phase 20a (Scene/GameObject explorer Lua bridge)** is parked at "FindObjectsOfType(Type, bool) recipe untested" after surfacing four cliffs (envelope unwrap, main-thread marshaling, findInstances false positives, IL2CPP code stripping) — see open follow-ups. **Backlog sweep 2026-05-08**: ✅ v24 integer-decode (commit `cb3d100`, **live-verified FF VI**), ✅ Unity 2018.x missing IL2CPP exports (commit `587e794`, **live-verified R-Type Dimensions EX**), ✅ findInstances Mono `class_ptr` consistency (commit `3e519a8`, **live-verified Silksong**), ✅ JSON Inf/NaN R4/R8 `value_kind` (commit `fd428d2`, **live-verified SaGa F2R**). **Polish sweep 2026-05-08 (build #257)**: ✅ Inspector classifier extracted to `UnityDumpUI.Core.Services.InstanceFieldClassifier` + 38 unit tests (commit `1e0d861`); ✅ `HighlightedTextBlock` control + `HighlightSegmenter` + 14 unit tests wired into 4 Browser lists (commit `950c0d8`). Phase 12d (32-bit Mono) re-estimated as 3-5 days (user has test target). **Phase 22** (.CT embedding + AA-script generator UI tab) **promoted to next active phase** per user direction. Session ending — fresh session on the other PC picks up from Phase 22 design (most likely) or one of the smaller drip-feed items (B / A / E ranked in §"Suggested first steps").
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
 
@@ -28,7 +29,70 @@
 
 ---
 
-## What landed in this session — Phase 16 docs + Phase 5 segment 2d cross-version sweep
+## What landed in this session — 4-fix live verification + Inspector classifier extract + Browser filter highlight
+
+Three deliverables across one session. Heavy on test coverage + UX polish, light on new capability.
+
+### Cross-PC sync trap surfaced + recovered
+
+Session opened with a four-target verification of the 2026-05-08 backlog fixes — and **all four failed at first run**. Root cause: `Inject-Dll.ps1` reads from `build/dll-both-release/bin/`, not `dist/`. The 18:56 build that landed in `build/` predated the 21:11–21:18 fix commits. `dist/UnityDumper-IL2CPP.dll` had been updated to 21:18:03 (21 sec before the last fix commit) so it was *also* still missing one fix. Forcing a `.\build.ps1 -Target DLL -Backend Both` (build #251) made every fix live-pass on the next try. Logged in [lessons-learned.md](lessons-learned.md) — DO NOT skip a rebuild before live verification when the most recent thing you did was a commit, even if `dist/` artifacts have a "recent" timestamp.
+
+### Backlog-sweep fixes — all 4 live-verified ✅
+
+Targets / observations (full breakdown in §"Open follow-ups" entries below):
+
+| Fix | Commit | Target | Observation |
+|---|---|---|---|
+| Mono `findInstances class_ptr` | `3e519a8` | Hollow Knight Silksong / Mono / Unity 6000.0 | `class_ptr : 0x000002201761E3D0` (no fallback to `vtable`), 100 Transform instances. |
+| R4/R8 `value_kind` for Inf/NaN | `fd428d2` | SaGa F2R / IL2CPP / v29 | `PositiveInfinity` → `value:null, value_kind:"infinity"`; `NegativeInfinity` → `"-infinity"`; `NaN` → `"nan"`; finite floats all `"normal"`. Raw JSON sanity-checked end-to-end. |
+| v24 integer-decode | `cb3d100` | FF VI / IL2CPP / v24 / Unity 2019.4 | `Int32.MaxValue` → 2147483647 (was -2147483648); `MinValue` → -2147483648 (was 0); `enc=4B` proves the raw-LE branch fired. |
+| Unity 2018.x missing IL2CPP exports | `587e794` | R-Type Dimensions EX / IL2CPP / v24 / Unity 2018.1 | `assemblies_count=36` (was 0); `findInstances UnityEngine.GameObject` returned 100 matches with `class_ptr` populated; scan only 529 ms — fallback enumeration is fast enough to be the production path, not a degraded slow lane. |
+
+Drive-by cleanup in commit `0315071`: `ExportAPI.cpp:1863` C4244 narrowing warnings cleaned up (`metadataVersion` retyped from `uint16_t` to `int32_t` to match `MetadataParser::version()`'s return). 0 warnings post-build #253.
+
+### Inspector classifier extracted + 38 unit tests (commit `1e0d861`)
+
+`WalkedFieldKind` enum + `ClassifyInstanceField` + `TryParseCollectionType` + `TryParseClassName` moved out of `LiveInspectionViewModel.cs` (net -150 lines from the VM) and into a new pure-logic class `UnityDumpUI.Core.Services.InstanceFieldClassifier`. The VM now delegates; behaviour unchanged.
+
+New `InstanceFieldClassifierTests.cs` covers all five precedence rules:
+- **Rule 1**: `IsEnum` trumps everything (including the gotcha case where `IsValueType=true` AND `IsEnum=true` — without the short-circuit, the field would route to `ValueStruct` and crash on expand).
+- **Rule 2**: Collection (`T[]` / `List<T>`) with empty-pointer degradation to `Leaf`.
+- **Rule 3**: `ValueStruct` via server-side `IsValueType` flag (modern resolver) vs the legacy `UnityTypeMap`-driven path (which only catches Unity-known structs like Vector3 / Quaternion / Color — documented limitation; custom user structs need the modern resolver's `IsValueType=true`).
+- **Rule 4**: `PointerToClass` including the dotted-namespace-in-generic-arg case (`MainGame.ClassAry<MainGame.CARRYITEM>` resolves to outer `MainGame.ClassAry`).
+- **Rule 5**: `Leaf` fallback for `System.*`, unknown types, null type, etc.
+
+### Browser filter-highlight UX (commit `950c0d8`)
+
+New `HighlightedTextBlock` Avalonia control + `UnityDumpUI.Core.Services.HighlightSegmenter` pure-logic helper. Wired into the four filtered Browser lists:
+
+| List | Filter binding | Highlighted columns |
+|---|---|---|
+| Assemblies (ListBox) | `Browser.AssemblyFilter` → `#AssemblyFilterBox.Text` | Name |
+| Classes (ListBox) | `Browser.ClassFilter` → `#ClassFilterBox.Text` | Name + Namespace |
+| Fields (DataGrid) | `Browser.FieldFilter` → `#FieldFilterBox.Text` | Name + Type |
+| Methods (DataGrid) | `Browser.MethodFilter` → `#MethodFilterBox.Text` | Name |
+
+Inspector Fields grid is deliberately untouched — it has no filter (drives off `walkInstance` results); nothing to highlight.
+
+Two implementation notes worth remembering (now logged in [lessons-learned.md](lessons-learned.md)):
+1. **Avalonia 12 `TextBlock.Text` and `Inlines` are mutually-exclusive sources.** Setting both leads to undefined rendering. The control uses a `SourceText` property and flips between plain-text and inline-runs internally, clearing the other source first.
+2. **DataGrid highlight requires `DataGridTemplateColumn` + `CellTemplate`** — `DataGridTextColumn` doesn't accept custom controls. Switching preserves sort behaviour via `SortMemberPath="Name"` etc.
+
+Element-name binding (`{Binding #FilterBox.Text}`) means the live filter value flows into every row template without the VM having to push it onto each row record.
+
+`HighlightSegmenter` has 14 [Fact]/[Theory] cases covering all the edge cases — empty filter, null source, filter-not-found, at start / end / middle, multiple occurrences, adjacent matches, case-insensitive preservation, filter-equals-source, overlapping patterns (resolved left-to-right, no greedy backtrack).
+
+Total test count went from **5 → 57** across the session.
+
+### Tooling state for the new PC
+
+- `dist/` is up to date as of build #257 (Publish / AOT — `DiscreteUI.exe` 38.3 MB, both DLLs at 576 / 545 KB).
+- `build/dll-both-release/bin/` matches dist (verified — `Inject-Dll.ps1` will pick up the fresh DLLs).
+- All 4 verification targets are documented in the §"Open follow-ups" block — Silksong / SaGa F2R / FF VI / R-Type. If you want a fresh smoke run on the new PC, the recipes are in §"Suggested first steps" → "Re-verify on the new PC" (added below).
+
+---
+
+## What landed previously — Phase 16 docs + Phase 5 segment 2d cross-version sweep
 
 Two big chunks across one long session. No code changes to the DLL or UI binaries; pure documentation refresh + smoke-test infrastructure + verification against five Unity-version targets.
 
@@ -74,7 +138,7 @@ Closed the last open Phase 18 verification: Farthest Frontier `ItemBundle.AddIte
 
 ---
 
-## What landed in the previous session — Phase 19d-2 polish
+## What landed two sessions ago — Phase 19d-2 polish
 
 Two UX improvements on top of the freshly-shipped Phase 19 vertical. UI-only.
 
@@ -86,7 +150,7 @@ Files: [`MainWindow.axaml.cs`](../ui/UnityDumpUI/Views/MainWindow.axaml.cs), [`M
 
 ---
 
-## What landed previously — Phase 19 (full vertical) + UI Windows-only cleanup
+## What landed three sessions ago — Phase 19 (full vertical) + UI Windows-only cleanup
 
 ### Phase 19 — Lua-callable Unity methods (closed end-to-end)
 
@@ -113,6 +177,10 @@ Dropped `Avalonia.Desktop` metapackage in favor of bare `Avalonia.Win32` + `Aval
 ## Recent commit history (most recent first)
 
 ```
+950c0d8 feat(ui): highlight matching substring in Browser filter results
+1e0d861 refactor(inspector): extract field classifier to Core + 38 unit tests
+0315071 docs+fix: live-verify 4 backlog fixes (build #251) + clean ExportAPI C4244
+2143a77 docs: refresh STATUS / plan after backlog sweep — 4 fixes shipped, Phase 22 active
 587e794 fix(il2cpp): Unity 2018.x — demote two missing exports + MetadataParser fallback
 cb3d100 fix(dll): v24 integer-decode — per-version dispatch on FieldDefault decoder
 fd428d2 fix(dll): emit value_kind for R4/R8 const literals (Infinity / NaN preserved)
@@ -177,12 +245,31 @@ Pick whichever fits the slot of time you have. Nothing on this list is blocking.
 | Option | Effort | Why pick this |
 |---|---|---|
 | **Phase 22 — `.CT` embedding + AA-script generator UI tab** | 2-3 days | **User-confirmed top priority** (2026-05-08). End-users only enable/disable AA scripts; this phase makes Discrete production-shippable. Packages already-working Phase 17 / 18 / 19 + Phase 20a partial. Full design in [plan.md §Phase 22](plan.md#phase-22--ct-embedding--aa-script-generator-ui-tab-deferred). |
+| **`findInstances` heap-scan false positives — restrict to managed heap range** | ~½ day | Highest CP-value of the open ½-day items. Heap scan today walks every RW page → matches stale stack-frame `GameObject*` locals AND IL2CPP RGCTX cache entries (legit class-pointer storage). Lua-side workaround (`_isValidInstance` two-layer filter in `unity_scene.lua`) is DEPRECATED. Proper fix: restrict scan to the IL2CPP managed heap via `il2cpp_gc_get_heap_section_count` / Mono `mono_gc_*` equivalents. Also unblocks Phase 20-HEAP. Affects Phase 20a / `whatIsAt` / every Inspector instance pick. |
 | **Phase 20a-2 — verify FindObjectsOfType recipe** | ~30 min | Quick verification of the 2-arg recipe pivot at session end 2026-05-08. If it works, Phase 20a closes; if not, opens Phase 20-HEAP (DLL-side libgc walker). |
 | **Phase 21 — field write-back** | ~½ day | Real capability gap: today the Inspector only reads. New wire RPC + SEH-protected write + editable UI cells. Full design in [plan.md §Phase 21](plan.md#phase-21--inspector-field-write-back). |
-| **Inspector classifier unit tests** | <½ day | Cheapest test-coverage win. Offline regression coverage for the classifier kind-routing logic. |
-| **Highlight matching substring** | <½ day | Pure UI polish — visible improvement for users who filter heavily. |
+| **Phase 19d-3 — smart-typed editors** | <½ day | `NumericUpDown` for sized ints (range-checked at edit time, not post-Call), `ComboBox` for enum params via `getEnumValues`. Most natural to ship together with Phase 22's AA-script generator. |
 | **Phase 12d (32-bit Mono)** | 3-5 days | User has 32-bit Mono test target (confirmed 2026-05-08) — engineering effort only. Parallel x86 build config in CMake, x86 backend DLL with Mono 32-bit struct offsets, x86 proxy DLLs, cross-bitness inject, x86/x64 selector in installer. |
 | **v32+ metadata.dat parser** | 2–3 days | Only blocks const-decode + offline `metadata-cli` on Unity 6.1+. v39 runtime already works. Worth it if anyone asks for offline v32+ analysis. Full design ready in [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md). |
+
+### Re-verify on the new PC (sanity check before continuing)
+
+Once the repo is checked out + the dev VS DevShell is wired, before starting any new feature work it's worth confirming the new PC's environment doesn't drift from the dev box's:
+
+```powershell
+# 1. Build everything (Publish + AOT + tests, ~2 min on a warm cache)
+.\build.ps1 -Mode Publish
+
+# 2. Quick handshake against any one target (BongoCat / Silksong easiest because no per-target metadata caveats):
+.\tools\List-UnityProcs.ps1
+.\tools\Test-Handshake.ps1 -ProcessId <PID>
+
+# 3. (Optional) Re-run the 4-fix verification recipes — see the entries in §"Open follow-ups"
+#    against the 4 verified targets (Silksong / SaGa F2R / FF VI / R-Type) if you have any
+#    of them installed on the new PC.
+```
+
+Acceptance: build #258+ rolls clean (0/0 trim+AOT warnings), `57/57 tests pass`, `Test-Handshake` shows `backend=…, build=258+, unity_version=…` against a live target.
 
 ### Live verifications (carried forward — still green)
 
