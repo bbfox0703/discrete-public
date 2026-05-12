@@ -28,4 +28,12 @@
     <Description>Unity Engine Dumper UI core (engine-agnostic models, services, platform interfaces)</Description>
     <AssemblyTitle>UnityCEDumper UI core</AssemblyTitle>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Phase 22a: AobMakerBridge has a test-only ctor that overrides the
+         pipe name, so the test rig can spin up a fake NamedPipeServerStream
+         on a per-test GUID-suffixed pipe (no collision with a real AOBMaker
+         install on the dev box). -->
+    <InternalsVisibleTo Include="UnityDumpUI.Tests" />
+  </ItemGroup>
 </Project>

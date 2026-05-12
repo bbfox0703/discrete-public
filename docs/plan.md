@@ -1324,12 +1324,12 @@ new `CreateAAScriptWithRecordsAsync`). 22f closes the phase.
 - ❌ Bidirectional CT import / edit-and-export.
 - ❌ DLL bundling inside the CT (Bootstrap script just pings the DLL pipe; user keeps DiscreteUI + CE both running).
 
-### Pre-work (5 min, ships with 22a)
+### Pre-work
 
-- Add `"protocol_version": 1` to DLL `handshake` response (`ExportAPI.cpp`)
-  so the Bootstrap AA script has something to assert against. Bump
-  pipe-protocol.md to call out the field as additive (older clients
-  silently ignore).
+✅ None needed — `handshake.protocol` (integer, currently 1) is already
+emitted by `ExportAPI.cpp` (line 104) and documented in
+`pipe-protocol.md` (line 146). 22c's Bootstrap AA script asserts on this
+existing field (note: actual key is `protocol`, not `protocol_version`).
 
 ---
 
