@@ -36,4 +36,35 @@
          install on the dev box). -->
     <InternalsVisibleTo Include="UnityDumpUI.Tests" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Phase 22b: embed the 7 CE Lua bridge scripts so DiscreteUI can
+         push them into a currently-open CE table via AOBMaker plugin's
+         InjectTableFile (Phase 22a). LogicalName uses a stable prefix so
+         BridgeLuaResources.cs can enumerate by suffix without depending on
+         the physical Include path (scripts/ lives outside the project tree).
+         Mirrors UE5CEDumper's HelperLuaResource pattern, scaled from 1 to 7
+         files. -->
+    <EmbeddedResource Include="..\..\scripts\utils.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.utils.lua</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\scripts\unity_dump.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_dump.lua</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\scripts\unity_dissect.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_dissect.lua</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\scripts\unity_symbols.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_symbols.lua</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\scripts\unity_addrfind.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_addrfind.lua</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\scripts\unity_invoke.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_invoke.lua</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\scripts\unity_scene.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_scene.lua</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
 </Project>
