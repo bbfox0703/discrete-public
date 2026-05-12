@@ -128,7 +128,7 @@
 | 19 | Lua-callable Unity methods | New wire command `callMethod(asm, ns, class, method, [args], [instance])` invoking Mono / IL2CPP methods with marshaled primitive + string args; closes the long-standing CLAUDE.md goal | ✅ All five sub-phases shipped (19a IL2CPP DLL / 19b Mono port / 19c instance dispatch + string in/out / 19d UI MethodCallWindow / 19e `scripts/unity_invoke.lua` Lua bridge). Verified live across SaGa F2R + BongoCat + Farthest Frontier. Spec: [lua-invoke.md](lua-invoke.md). |
 | 20 | Scene / GameObject explorer + Object.name search | `scripts/unity_scene.lua` Lua bridge + DiscreteUI Scene tab + filter-by-name + click-to-inspect handoff. Tree-walk primitives gated behind a NEW sub-phase **20-MT** (DLL-side main-thread marshaling) since iterating Unity icalls from the worker thread freezes the game. | 🚧 In progress — 20a landed + hardened 2026-05-08 (envelope unwrap fix + main-thread caveat after live test on SaGa F2R locked up the game). `getName` / `getAllGameObjects` / `findByName` are safe-and-working primitives; `getActiveSceneRoots` / `getChildren` / `getComponents` formally **EXPERIMENTAL until 20-MT ships**. 20b (UI tab) blocked behind 20-MT. Zero DLL changes so far; 20-MT will need DLL frame-hook work. |
 | 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector cells go editable with Apply button | ⏳ Planned — after Phase 20. ~½ day + tests. Closes the read/write asymmetry: today the Inspector only reads. GC-root caveat applies (same pattern as Phase 19c). |
-| 22 | `.CT` embedding + AA-script generator UI tab | New DiscreteUI tab that produces a self-contained `.CT` with all `unity_*.lua` files embedded (`findTableFile()` + `createStringStream()` loader pattern) AND auto-built AA scripts whose Lua sections invoke the embedded modules. Extends Phase 18's `AobAaScriptGenerator` from "single AA script for one method" to "full toolkit AA script with Lua-section dispatch" | ⏳ **Promoted to active next phase** (2026-05-08). User confirmed this is the most practical of the three new phases — end-users only enable/disable AA scripts in `.CT`s. Phase 22 makes Discrete production-shippable as a single `.CT`. Phase 20 (scene explorer) and 21 (write-back) defer until 22 ships, since they'd need to be embedded too. Reference embedding pattern: `D:\Github\Mydev-Cheat-Engine-Tables\Crimson Desert\CrimsonDesert.CT`. |
+| 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. Re-estimated 2 days (was 3-3.5). | ⏳ **Active next phase, scope revised 2026-05-12.** Original plan (independent `.CT` file builder with Ascii85 + XML serializer + cart UI) collapsed after auditing `D:\Github\AOBMaker\plugins\CEPlugin\src\protocol.h` + `D:\Github\UE5CEDumper\ui\UE5DumpUI\Services\AobMakerBridgeService.cs` — AOBMaker plugin already ships `InjectTableFile` (raw UTF-8, no Ascii85 needed) + 4 sibling commands that cover everything we need to mutate a live CE table. Pattern: copy UE5CEDumper's `<EmbeddedResource>` + `HelperLuaResource.cs` + `InjectCeHelperLuaAsync()` trio, scale to 7 lua modules + bootstrap AA script. |
 
 ---
 
@@ -1201,82 +1201,135 @@ Estimated effort: ~½ day + tests.
 
 ---
 
-## Phase 22 — `.CT` embedding + AA-script generator UI tab (DEFERRED)
+## Phase 22 — Live CT Population via AOBMaker
 
-**Goal**: Make Discrete production-shippable as a single `.CT` file.
-Today the deliverable is "DLL + 6 lua scripts in `scripts/` + manual
-`dofile` recipes from CE Lua console" — that's a developer workflow,
-not an end-user one. The user's actual end-users don't run `dofile`;
-they enable/disable AA scripts in CE's address list. The output of this
-phase is a tool that takes a saved DiscreteUI session (selected symbols,
-instance addresses, methods to expose) and emits a self-contained `.CT`
-with all `unity_*.lua` files embedded as table files plus matching AA
-scripts whose `[ENABLE]` Lua sections invoke the embedded modules.
+**Goal**: Let end-users consume Discrete via the only CE interaction
+they care about — enable/disable AA-script checkboxes. Pivoted away
+from "build a standalone `.CT` from scratch" (Ascii85 + XML serializer
+scrapped) after auditing `D:\Github\AOBMaker\plugins\CEPlugin\src\protocol.h`
++ `D:\Github\UE5CEDumper\ui\UE5DumpUI\Services\AobMakerBridgeService.cs`.
 
-### Why deferred
+**New model**: user opens CE 7.6+ with AOBMaker plugin loaded, opens
+(or starts) any CT, then DiscreteUI fires AOBMaker pipe commands that
+inject our 7 bridge lua modules into the table's `<Files>` and create
+matching AA-script memory records. User saves via CE File→Save. No
+offline CT builder, no Ascii85, no XML serializer. Estimated 2 days
+(was 3–3.5).
 
-The DiscreteUI features it consumes (Phase 17 address finder, Phase 18
-AOB AA-scripts, Phase 19 callMethod, Phase 20 scene tree, Phase 21 field
-write-back) all need to exist first to be worth packaging. Phase 22 is
-the **outer wrapper** that turns the toolkit into a deliverable.
+### Why the pivot
+
+Original Phase 22 design assumed we'd serialize a fresh `.CT` XML
+ourselves (Ascii85-encode every embedded file + match CE's
+whitespace + golden-file testing). That entire layer is dead weight
+because the AOBMaker CE plugin already exposes 5 pipe commands that
+mutate the currently-open CT in-process:
+
+| Command | Maps to |
+|---|---|
+| `InjectTableFile { fileName, content }` | Insert one `<File>` entry — content is raw UTF-8, plugin internally calls `findTableFile`+`createTableFile`+`Stream.copyFrom`. Idempotent (existing same-name entry is deleted first). |
+| `CreateAAScript { description, script, autoActivate }` | Append a `vtAutoAssembler` (type=11) memory record. Already used by Phase 18c. |
+| `CreateMemoryRecord { description, address, valueType, isSigned }` | Append a primitive memory record (byte/word/dword/qword/single/double/string/byteArray). Phase 21 write-back will use this. |
+| `CreateAAScriptWithRecords { description, script, autoActivate, hideChildren, records:[{ description, address, valueType, isSigned, offsets:[…], color }] }` | Parent AA script + N pointer-chain child records under it. Used for "register one symbol + expose its fields" pattern (Phase 17 Address Lookup hand-off). |
+| `CreateSymbolScript { name, aob, pos, aoblen, symbol, module }` | Plugin assembles the AA template internally. We already have our own `AobAaScriptGenerator`, so this is informational only. |
+
+UE5CEDumper has the canonical implementation of this pattern —
+[`Services/HelperLuaResource.cs`](../../UE5CEDumper/ui/UE5DumpUI/Services/HelperLuaResource.cs)
+embeds one lua module via `<EmbeddedResource>` in csproj,
+[`Services/AobMakerBridgeService.cs`](../../UE5CEDumper/ui/UE5DumpUI/Services/AobMakerBridgeService.cs)
+exposes `InjectTableFileAsync` + `CheckAvailabilityAsync` + `IsAvailable`,
+and `MainWindowViewModel.InjectCeHelperLuaAsync()` is a single Tools-menu
+RelayCommand. Phase 22 = scale that pattern from 1 module to 7 + add
+a bootstrap AA-script generator.
+
+### What AOBMaker plugin cannot do today (out of scope for v1)
+
+1. **Build a brand-new `.CT` without CE open** — plugin operates on
+   the currently-loaded table. User saves via CE File→Save.
+2. **True nested memory-record trees** — `CreateAAScriptWithRecords`
+   supports a single parent + offset-children. Multi-level grouping
+   like CrimsonDesert.CT's "Toggle Scripts > Battle > …" would need
+   a `parentId` parameter on AOBMaker side. Defer; ship flat with
+   description prefixes (`[Discrete] callMethod: Mathf.Abs`) for
+   visual grouping.
+3. **Duplicate detection** — re-clicking a "Send to CE Table" entry
+   creates a second copy. v1 documents this in the menu tooltip
+   ("Re-click creates duplicates; remove old entry in CE first").
+4. **List / query existing records** — no `ListRecords` /
+   `FindByDescription` command.
+
+These can come back as "Phase 22.1 — AOBMaker plugin extensions" if
+demand surfaces, but each is a small AOBMaker-side patch, not a
+Discrete-side architecture change.
 
 ### Reference
 
-Pattern source: `D:\Github\Mydev-Cheat-Engine-Tables\Crimson Desert\CrimsonDesert.CT`
+- Plugin protocol: `D:\Github\AOBMaker\plugins\CEPlugin\src\protocol.h`
+  + handler implementations in `pipe_server.cpp` (lines 582 onwards
+  cover `HandleCreateMemoryRecord` / `HandleCreateAAScript` /
+  `HandleCreateAAScriptWithRecords` / `HandleInjectTableFile`).
+- Discrete's existing AOBMaker client (Phase 18c): [`AobMakerBridge.cs`](../ui/UnityDumpUI.Core/Services/AobMakerBridge.cs)
+  — 3 commands wired (`NavigateHexView` / `NavigateDisassembler` /
+  `CreateAAScript`). Phase 22a extends to all 5 we need.
+- UE5CEDumper reference implementation:
+  - [`ui/UE5DumpUI/Services/HelperLuaResource.cs`](../../UE5CEDumper/ui/UE5DumpUI/Services/HelperLuaResource.cs)
+    (embedded-resource pattern).
+  - [`ui/UE5DumpUI/Services/AobMakerBridgeService.cs:275-331`](../../UE5CEDumper/ui/UE5DumpUI/Services/AobMakerBridgeService.cs)
+    (`InjectTableFileAsync` + `CheckAvailabilityAsync` + `IsAvailable` observable).
+  - [`ui/UE5DumpUI/ViewModels/MainWindowViewModel.cs:828-876`](../../UE5CEDumper/ui/UE5DumpUI/ViewModels/MainWindowViewModel.cs)
+    (`InjectCeHelperLuaAsync` Tools-menu RelayCommand).
+- Original deferred design (reason it was scrapped): see this section's
+  git history at commit `2143a77`.
 
-The user's existing Crimson Desert table demonstrates the embedding
-pattern:
-- Lua files inserted into the `.CT` via CE's
-  `Table → Add file` (UI entry "Script: 4. Generate scripts").
-- Loaded at runtime via `findTableFile(name)` →
-  `createStringStream()` → `readLine()` loop → `loadstring()` /
-  `assert(load(buf))`. NOT `dofile` (which reads from disk).
-- AA scripts in the address list have `[ENABLE]` Lua sections that
-  call functions exported by the loaded modules. Enable/disable becomes
-  the entire user-visible interaction.
+### Sub-phase breakdown
 
-### Scope sketch (to be fleshed out when started)
+| # | Task | Effort | Key content |
+|---|---|---|---|
+| **22a** | Extend `AobMakerBridge` | 3h | Add `InjectTableFileAsync(fileName, content)`, `CreateMemoryRecordAsync(description, address, valueType, isSigned)`, `CreateAAScriptWithRecordsAsync(description, script, records, autoActivate, hideChildren)`, `CheckAvailabilityAsync()` + `IsAvailable` observable. Wire model gains `FileName` / `Content` / `ValueType` / `IsSigned` / `Records[]` fields — all `[JsonIgnore(WhenWritingNull)]` so the same wire shape covers all 5 commands (AOT-safe via existing source-gen context). Direct port of UE5CEDumper `AobMakerBridgeService.cs`. |
+| **22b** | Embed 7 bridge lua files as `<EmbeddedResource>` | 1h | Add 7 `<EmbeddedResource Include="..\..\scripts\unity_*.lua">` entries to `UnityDumpUI.csproj` with stable `<LogicalName>` keys. New `UnityDumpUI/Services/BridgeLuaResources.cs` exposes `ReadAll() → IReadOnlyList<(string fileName, string content)>` plus `Read(name)`. Mirrors UE5CEDumper `HelperLuaResource.cs`. |
+| **22c** | "Load Discrete Bridge" AA-script template | 3h | C# `const string` template + minimal substitution (no dynamic AA generation). `[ENABLE]` block iterates the 7 files via `findTableFile` + `Stream.copyFrom` + `load()`, guarded by `_G.discrete_bridgeLoaded`; runs `unity_handshake()` to assert `protocol_version` (warns but does not abort on mismatch); pings the DLL pipe (`\\.\pipe\UnityDumper-{Backend}`) and prints "Inject DLL via DiscreteUI first" if absent. `[DISABLE]` clears the globals. |
+| **22d** | Tools menu "Inject Discrete Bridge into CE Table" | 2h | New `MainWindowViewModel.InjectDiscreteBridgeAsync()` RelayCommand: `CheckAvailability` → 7× `InjectTableFile` with progress status ("Injecting 1/8…") → 1× `CreateAAScript` for bootstrap. Stops on first failure with the AOBMaker error message. Final status: "Bridge ready in CE — enable Load Discrete Bridge to activate". Menu item bound to `IsAvailable`; tooltip when disabled: "Open CE with AOBMaker plugin loaded". |
+| **22e** | Per-feature "Send to CE Table" entries | 4h | • **Methods grid context menu** → "Send AA script to CE Table" — calls existing `AobAaScriptGenerator.Build()` on the selected overload(s), pushes result via `CreateAAScript`. • **MethodCallWindow** "Send to CE Table" button — wraps `callUnityMethod(asm, ns, cls, method, args, opts)` in a `{$lua}` AA block + `CreateAAScript`. • **AddressLookup** result row → uses `CreateAAScriptWithRecords` to push instance pointer + each field as offset-children. • **Inspector** field row (gated on Phase 21) — "Send write-back to CE Table" → `CreateAAScript` wrapping `setInstanceField(...)`. Every generated `[ENABLE]` prepends `if not _G.discrete_bridgeLoaded then print('Enable Load Discrete Bridge first'); return end`. |
+| **22f** | E2E smoke + integration doc | 2h | New [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) describing the user journey (open CE → load CT → DiscreteUI Inject Bridge → use feature buttons → CE File→Save). Smoke: clean CE 7.6 → empty CT → bridge injection → Phase 18 AOB push + Phase 19 callMethod push + Phase 17 AddressLookup push → File→Save → re-open in fresh CE process → verify all 3 features still enable cleanly. |
 
-In:
-- New "Generate CT" tab in DiscreteUI.
-- Inputs: which symbols to register (pulled from current session's
-  inspector + browser state), which methods to expose as one-click
-  AA-script invocations, which fields to expose as write-back AA scripts,
-  scene roots to bookmark.
-- Outputs:
-  - A `.CT` file produced via CE's table-file format. (Format is XML
-    with embedded base64 lua bodies + AA-script blocks. We can parse
-    a starter template `.CT` and substitute.)
-  - Inside it: `utils.lua` + `unity_dump.lua` + `unity_dissect.lua` +
-    `unity_symbols.lua` + `unity_addrfind.lua` + `unity_invoke.lua` +
-    `unity_scene.lua` (Phase 20) + any new bridge scripts as embedded
-    table files.
-  - One AA-script entry per chosen feature, with its `[ENABLE]` block
-    calling the appropriate embedded function.
+### Dependencies + parallelism
 
-Out:
-- Encrypted `.CT` (CE supports it, but we don't need to gate on it).
-- Per-end-user customization UX inside the generated `.CT` (could be
-  added later via a CE form, but v1 just emits a fixed set).
+```
+22a (bridge methods) ──┐
+22b (embed resources) ─┼──→ 22d (Tools menu) ──┐
+22c (bootstrap AA)   ──┘                       │
+                                                ├──→ 22f (E2E)
+22e (per-feature buttons) ─────────────────────┘
+```
 
-### Open design questions (record-keeping for future implementer)
+22a / 22b / 22c are independent and can be done in parallel once 22a's
+wire-model design is locked. 22d is the convergence point. 22e can
+start as soon as 22a lands (it only needs `CreateAAScriptAsync` + the
+new `CreateAAScriptWithRecordsAsync`). 22f closes the phase.
 
-- **Bootstrap script**: a `.CT` needs ONE entry point that loads all
-  embedded lua files in the right order. Decide between (a) a
-  hand-maintained loader script also embedded in the `.CT`, (b) a
-  generated-each-time loader that knows the exact filename list from
-  the current build, or (c) attach loader to the `.CT`'s
-  `OnTableOpening` event.
-- **Module count ceiling**: 6 modules today, +2 likely (Phase 20
-  `unity_scene.lua`, Phase 21 write-back wrapper) = 8. Past that the
-  user (= cheat-table author) loses track. Consider consolidating
-  before starting Phase 22.
-- **Versioning**: as the bridge scripts evolve, end-users will be
-  using older `.CT`s with newer DLLs. Decide on a wire-protocol-version
-  contract that the embedded scripts assert on load.
+### Acceptance
 
-Estimated effort: 2–3 days when started. Will probably grow during
-implementation.
+- Clean CE 7.6 + empty CT → DiscreteUI Tools → "Inject Discrete Bridge into CE Table" → status text shows "8/8 complete" → CE Table → Show table files lists 7 `unity_*.lua` files → memory record list shows "Load Discrete Bridge" entry.
+- Enable "Load Discrete Bridge" → CE Lua console prints `[discrete] bridge loaded — IL2CPP / build 257`.
+- In DiscreteUI Methods grid, right-click `Mathf.Abs` → "Send AA script to CE Table" → CE gains a new AA-script entry → enable it → AOB scan hits, `registersymbol` succeeds.
+- Same workflow from MethodCallWindow for `Mathf.Abs(-7)` → CE gains a callMethod wrapper entry → enable → CE Lua console prints `7`.
+- `File → Save` the CT → open the saved `.CT` in a fresh CE process → re-enable Bridge + any feature script → behaviour identical.
+- When `IsAvailable=false` (CE closed / plugin not loaded), Tools menu item is disabled with an informative tooltip; errors mid-flight surface the AOBMaker `Message` field (not a generic "failed").
+- AOT publish: 0/0 trim+AOT warnings; new tests (`AobMakerBridge` mock-driven inject flow + bootstrap AA template string assertions) ≥ 6/6 pass.
+
+### Out of scope (deferred, not blocking ship)
+
+- ❌ Offline `.CT` builder (Ascii85 + XML serializer + golden-file fixture). Re-evaluate as Phase 22.5 only if a user needs to generate a CT without CE open.
+- ❌ Multi-level nested memory-record trees (needs AOBMaker `parentId` extension).
+- ❌ Encrypted CT output.
+- ❌ Bidirectional CT import / edit-and-export.
+- ❌ DLL bundling inside the CT (Bootstrap script just pings the DLL pipe; user keeps DiscreteUI + CE both running).
+
+### Pre-work (5 min, ships with 22a)
+
+- Add `"protocol_version": 1` to DLL `handshake` response (`ExportAPI.cpp`)
+  so the Bootstrap AA script has something to assert against. Bump
+  pipe-protocol.md to call out the field as additive (older clients
+  silently ignore).
 
 ---
 
