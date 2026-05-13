@@ -1,0 +1,223 @@
+// BridgeInjectorTests.cs — Phase 22d verification.
+//
+// Drives BridgeInjector with a hand-rolled fake IAobMakerBridge that
+// records every method call + lets the test scenario script the
+// success/failure outcome of each step. Avoids spinning up
+// NamedPipeServerStream because what we're testing is the orchestration
+// (call order, abort-on-failure semantics, progress reporting), not
+// the wire format — that's already pinned in AobMakerBridgeTests.
+
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using UnityDumpUI.Core.Services;
+using UnityDumpUI.Core.Services.Export;
+using Xunit;
+using Xunit.v3;
+
+namespace UnityDumpUI.Tests;
+
+public class BridgeInjectorTests
+{
+    [Fact]
+    public async Task InjectAsync_HappyPath_FiresCheckThenAllFilesThenAaScript()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var bridge = new FakeBridge();
+
+        var progresses = new List<BridgeInjectProgress>();
+        var report     = new Progress<BridgeInjectProgress>(progresses.Add);
+
+        var result = await BridgeInjector.InjectAsync(bridge, report, ct);
+
+        Assert.True(result.Ok);
+        Assert.True(result.AaScriptCreated);
+        Assert.Equal(BridgeLuaResources.LoadOrder.Count, result.FilesInjected);
+        Assert.Null(result.FailedStepDescription);
+        Assert.Null(result.ErrorMessage);
+
+        // Call sequence: 1× CheckAvailability, 7× InjectTableFile (in
+        // LoadOrder), 1× CreateAAScript. Nothing else.
+        Assert.Equal(1, bridge.CheckAvailabilityCount);
+        Assert.Equal(BridgeLuaResources.LoadOrder.Count, bridge.InjectTableFileCalls.Count);
+        Assert.Single(bridge.CreateAAScriptCalls);
+
+        // File order matches LoadOrder.
+        for (int i = 0; i < BridgeLuaResources.LoadOrder.Count; ++i)
+        {
+            Assert.Equal(BridgeLuaResources.LoadOrder[i],
+                         bridge.InjectTableFileCalls[i].FileName);
+            // Content sanity: every embedded bridge file starts with a
+            // lua banner; passing it through verbatim should preserve that.
+            Assert.StartsWith("-- =", bridge.InjectTableFileCalls[i].Content);
+        }
+
+        // Bootstrap AA: description + first/last lines of the script.
+        var (aaDesc, aaScript, aaAuto) = bridge.CreateAAScriptCalls[0];
+        Assert.Equal(BootstrapAaScriptGenerator.EntryDescription, aaDesc);
+        Assert.Contains("[ENABLE]", aaScript);
+        Assert.Contains("[DISABLE]", aaScript);
+        // autoActivate=false so the user sees the new CE entry first
+        // and can verify game/DLL state before flipping the checkbox.
+        Assert.False(aaAuto);
+    }
+
+    [Fact]
+    public async Task InjectAsync_ProgressReporting_OneStepPerCall()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var bridge     = new FakeBridge();
+        var progresses = new List<BridgeInjectProgress>();
+        await BridgeInjector.InjectAsync(bridge,
+            new Progress<BridgeInjectProgress>(progresses.Add), ct);
+
+        // Total = 1 check + N files + 1 AA. Indices are 1-based.
+        int expected = 1 + BridgeLuaResources.LoadOrder.Count + 1;
+        Assert.Equal(expected, progresses.Count);
+        for (int i = 0; i < progresses.Count; ++i)
+        {
+            Assert.Equal(i + 1, progresses[i].Index);
+            Assert.Equal(expected, progresses[i].Total);
+        }
+
+        Assert.StartsWith("Checking", progresses[0].Description);
+        Assert.StartsWith("Injecting unity_scene.lua",
+            progresses[expected - 2].Description); // last file step
+        Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.EntryDescription,
+            progresses[expected - 1].Description);
+    }
+
+    [Fact]
+    public async Task InjectAsync_AbortsWhenAvailabilityCheckFails()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var bridge = new FakeBridge { CheckAvailabilityResult = false };
+        var result = await BridgeInjector.InjectAsync(bridge, progress: null, ct: ct);
+
+        Assert.False(result.Ok);
+        Assert.Equal(0, result.FilesInjected);
+        Assert.False(result.AaScriptCreated);
+        Assert.Equal(1, bridge.CheckAvailabilityCount);
+        Assert.Empty(bridge.InjectTableFileCalls);
+        Assert.Empty(bridge.CreateAAScriptCalls);
+        Assert.Contains("AOBMaker", result.ErrorMessage!);
+    }
+
+    [Fact]
+    public async Task InjectAsync_AbortsOnFirstFileInjectFailure()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var bridge = new FakeBridge();
+        // Fail on the third file (index 2 = unity_dissect.lua per LoadOrder).
+        // Surfaces a plugin-side message so we can also pin that we forward it.
+        bridge.InjectTableFileFailureFor[BridgeLuaResources.LoadOrder[2]] =
+            "Stream size mismatch: wrote 9456, stream has 0";
+
+        var result = await BridgeInjector.InjectAsync(bridge, progress: null, ct: ct);
+
+        Assert.False(result.Ok);
+        Assert.Equal(2, result.FilesInjected);    // first 2 succeeded
+        Assert.False(result.AaScriptCreated);
+        Assert.Equal("Stream size mismatch: wrote 9456, stream has 0",
+                     result.ErrorMessage);
+        Assert.Contains(BridgeLuaResources.LoadOrder[2],
+                        result.FailedStepDescription!);
+
+        // Confirm we stopped IMMEDIATELY at the failed file — no
+        // subsequent injects, no AA script attempt.
+        Assert.Equal(3, bridge.InjectTableFileCalls.Count);
+        Assert.Empty(bridge.CreateAAScriptCalls);
+    }
+
+    [Fact]
+    public async Task InjectAsync_AbortsWhenAaScriptCreationFails()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var bridge = new FakeBridge { CreateAAScriptResult = false };
+        var result = await BridgeInjector.InjectAsync(bridge, progress: null, ct: ct);
+
+        Assert.False(result.Ok);
+        Assert.Equal(BridgeLuaResources.LoadOrder.Count, result.FilesInjected);
+        Assert.False(result.AaScriptCreated);
+        Assert.Contains("CreateAAScript", result.ErrorMessage!);
+        Assert.Contains(BootstrapAaScriptGenerator.EntryDescription,
+                        result.FailedStepDescription!);
+    }
+
+    [Fact]
+    public async Task InjectAsync_PropagatesCancellationBetweenSteps()
+    {
+        var bridge = new FakeBridge();
+        var cts    = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => BridgeInjector.InjectAsync(bridge, progress: null, ct: cts.Token));
+
+        // Pre-cancellation contract: no inject / no AA, period. The
+        // availability check IS allowed to fire (it's reported via
+        // progress before the throw point) but the bridge methods that
+        // mutate CE state must not run.
+        Assert.Empty(bridge.InjectTableFileCalls);
+        Assert.Empty(bridge.CreateAAScriptCalls);
+    }
+
+    [Fact]
+    public async Task InjectAsync_ThrowsOnNullBridge()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => BridgeInjector.InjectAsync(null!, progress: null, ct: ct));
+    }
+
+    // ---------- Fake bridge ---------------------------------------------
+
+    private sealed class FakeBridge : IAobMakerBridge
+    {
+        public bool   IsAvailable { get; private set; }
+        public event EventHandler<bool>? AvailabilityChanged;
+
+        public bool   CheckAvailabilityResult { get; set; } = true;
+        public bool   CreateAAScriptResult    { get; set; } = true;
+        /// <summary>fileName → plugin-side error message. Files not in this
+        /// dict succeed.</summary>
+        public Dictionary<string, string> InjectTableFileFailureFor { get; }
+            = new(StringComparer.Ordinal);
+
+        public int CheckAvailabilityCount { get; private set; }
+        public List<(string FileName, string Content)> InjectTableFileCalls { get; } = new();
+        public List<(string Description, string Script, bool AutoActivate)> CreateAAScriptCalls { get; } = new();
+
+        public Task<bool> CheckAvailabilityAsync(CancellationToken ct = default)
+        {
+            ++CheckAvailabilityCount;
+            IsAvailable = CheckAvailabilityResult;
+            AvailabilityChanged?.Invoke(this, IsAvailable);
+            return Task.FromResult(CheckAvailabilityResult);
+        }
+
+        public Task<(bool Ok, string? ErrorMessage)> InjectTableFileAsync(
+            string fileName, string content, CancellationToken ct = default)
+        {
+            InjectTableFileCalls.Add((fileName, content));
+            if (InjectTableFileFailureFor.TryGetValue(fileName, out string? msg))
+                return Task.FromResult((false, (string?)msg));
+            return Task.FromResult((true, (string?)null));
+        }
+
+        public Task<bool> CreateAAScriptAsync(string description, string script,
+                                              bool autoActivate = false,
+                                              CancellationToken ct = default)
+        {
+            CreateAAScriptCalls.Add((description, script, autoActivate));
+            return Task.FromResult(CreateAAScriptResult);
+        }
+
+        // Unused by BridgeInjector but required by the interface.
+        public Task<bool> NavigateHexViewAsync(string a, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> NavigateDisassemblerAsync(string a, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> CreateMemoryRecordAsync(string d, string a, CeValueType v, bool s = false, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> CreateAAScriptWithRecordsAsync(string d, string s, IReadOnlyList<AaScriptChildRecord> r, bool aa = false, bool hc = true, CancellationToken ct = default) => Task.FromResult(true);
+    }
+}

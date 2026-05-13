@@ -11,6 +11,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core.Platform;
 using UnityDumpUI.Core.Services;
+using UnityDumpUI.Core.Services.Export;
 
 namespace UnityDumpUI.ViewModels;
 
@@ -32,6 +33,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IDllInjector       _injector;
     private readonly IProxyInstaller    _proxyInstaller;
     private readonly IUnityGameScanner  _gameScanner;
+    private readonly AobMakerBridge     _aobMaker;
     private CancellationTokenSource?    _connectCts;
 
     /// <summary>
@@ -67,10 +69,22 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         Browser         = new AssemblyBrowserViewModel(_backend, _logger);
         Inspector       = new LiveInspectionViewModel(_backend, _logger);
         AddressLookup   = new AddressLookupViewModel(_backend, _logger);
-        // Optional bridge to AOBMaker's Cheat Engine plugin — drives the
-        // per-row "HEX" button in the Inspector grid (CE Memory View
-        // navigation). Bridge no-ops when AOBMaker / CE aren't running.
-        Inspector.AobMaker = new AobMakerBridge(_logger);
+        // Phase 22a/d: hoisted from Inspector to a top-level VM property.
+        // AobMaker is session-wide — the Inspector's per-row HEX/Disasm
+        // buttons, MethodOverloads' "Send AA script to CE" entries, and
+        // the Phase 22d "Inject Discrete Bridge into CE Table" Tools-menu
+        // command all consume the SAME instance. Inspector still gets the
+        // reference for backward-compat with code paths that read through
+        // it; new code paths should use vm.AobMaker directly.
+        _aobMaker = new AobMakerBridge(_logger);
+        Inspector.AobMaker = _aobMaker;
+        _aobMaker.AvailabilityChanged += OnAobMakerAvailabilityChanged;
+        // Opportunistic startup probe so the connection-bar status text
+        // can show "AOBMaker plugin: connected" without waiting for the
+        // user to click anything. Fire-and-forget; failure is silent
+        // (IsAobMakerAvailable stays false, which is the correct initial
+        // state).
+        _ = _aobMaker.CheckAvailabilityAsync();
 
         // Phase 17c — handoff from the Address Lookup tab back to the
         // Inspector tab. The VM raises this when the user clicks
@@ -218,6 +232,14 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public AddressLookupViewModel AddressLookup { get; }
 
     /// <summary>
+    /// Phase 22d — session-wide AOBMaker CE-plugin bridge. Inspector's
+    /// HEX/Disasm row buttons, MethodOverloads' "Send AA script to CE",
+    /// and Tools→Inject Discrete Bridge all share this instance so a
+    /// single pipe-client lifetime + log stream cover the whole session.
+    /// </summary>
+    public IAobMakerBridge AobMaker => _aobMaker;
+
+    /// <summary>
     /// Selected index of the right-pane TabControl. The Address Lookup tab
     /// is index 3 (Fields=0 / Inspector=1 / Methods=2 / AddressLookup=3).
     /// Bound TwoWay so cross-tab handoff (e.g. the inspector's right-click
@@ -252,7 +274,30 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(InjectAndConnectCommand))]
+    [NotifyCanExecuteChangedFor(nameof(InjectDiscreteBridgeCommand))]
     private bool _isBusy;
+
+    /// <summary>
+    /// Phase 22d — mirrors <see cref="IAobMakerBridge.IsAvailable"/> for
+    /// data-binding. Updated on <see cref="IAobMakerBridge.AvailabilityChanged"/>
+    /// transitions (false→true on first successful pipe contact, true→false
+    /// when a request fails the connect / IO path). Surfaced in the
+    /// connection bar so the user knows whether Tools→Inject Discrete
+    /// Bridge will actually reach a CE instance.
+    /// </summary>
+    [ObservableProperty] private bool _isAobMakerAvailable;
+
+    /// <summary>
+    /// Phase 22d — status line for the bridge-inject pipeline. Updated
+    /// per step ("Injecting unity_dump.lua (3/9)…") and on completion
+    /// ("Bridge ready in CE — enable Load Discrete Bridge to activate")
+    /// or failure ("Step 3/9 'Injecting unity_dump.lua' failed: …").
+    /// Separate from <see cref="ConnectionStatus"/> because the bridge
+    /// inject is independent of the DLL pipe lifecycle (you can inject
+    /// the bridge without DiscreteUI being connected to the game DLL,
+    /// and vice versa). Null when no inject has run this session yet.
+    /// </summary>
+    [ObservableProperty] private string? _bridgeInjectStatus;
 
     [ObservableProperty] private string? _engine;
     [ObservableProperty] private string? _backend2;     // "Backend" collides with field above
@@ -639,6 +684,86 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _ = vm.RefreshCommand.ExecuteAsync(null);
         ShowProxyDeploy(vm);
     }
+
+    /// <summary>
+    /// Phase 22d — reacts to AobMaker pipe availability transitions.
+    /// Marshals to the UI thread because the bridge fires the event from
+    /// whichever pool thread happened to be doing the connect (matches
+    /// the OnPipeDisconnected pattern).
+    /// </summary>
+    private void OnAobMakerAvailabilityChanged(object? sender, bool isAvailable)
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            IsAobMakerAvailable = isAvailable;
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"AOBMaker plugin: {(isAvailable ? "available" : "unavailable")}");
+        });
+    }
+
+    /// <summary>
+    /// Phase 22d — Tools menu "Inject Discrete Bridge into CE Table".
+    /// Embeds the 7 bridge lua files into the currently-open CE table
+    /// (via AOBMaker plugin's InjectTableFile) + creates the "Load
+    /// Discrete Bridge" AA-script entry that loads them on enable.
+    ///
+    /// Deviation from plan.md (documented here so reviewers understand
+    /// the trade-off): the menu item does NOT pre-gate on
+    /// <see cref="IsAobMakerAvailable"/>. Gating creates a chicken-and-egg
+    /// problem when the user opens Cheat Engine AFTER DiscreteUI: the
+    /// menu would stay disabled until either a periodic poller or an
+    /// explicit "Recheck" button refreshes the flag, neither of which we
+    /// want to add for v1. Instead the command runs CheckAvailability as
+    /// step 1 of <see cref="BridgeInjector.InjectAsync"/> and surfaces
+    /// "open CE with the AOBMaker plugin loaded" via
+    /// <see cref="BridgeInjectStatus"/> on failure. Same pattern as
+    /// <see cref="InjectAndConnectAsync"/> (which doesn't pre-gate on
+    /// backend reachability either). The IsAobMakerAvailable property is
+    /// still used by the connection bar's status indicator.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanInjectDiscreteBridge))]
+    private async Task InjectDiscreteBridgeAsync()
+    {
+        IsBusy = true;
+        BridgeInjectStatus = "Starting…";
+        try
+        {
+            var progress = new Progress<BridgeInjectProgress>(p =>
+                BridgeInjectStatus = $"({p.Index}/{p.Total}) {p.Description}…");
+
+            BridgeInjectResult result = await BridgeInjector
+                .InjectAsync(_aobMaker, progress).ConfigureAwait(true);
+
+            if (result.Ok)
+            {
+                BridgeInjectStatus =
+                    $"Bridge ready ({result.FilesInjected} files + bootstrap AA) — " +
+                    $"enable \"{BootstrapAaScriptGenerator.EntryDescription}\" in CE to activate";
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                    $"InjectDiscreteBridge: ok — {result.FilesInjected} files, AA created");
+            }
+            else
+            {
+                BridgeInjectStatus = result.FailedStepDescription is { } step
+                    ? $"Failed at \"{step}\": {result.ErrorMessage}"
+                    : $"Failed: {result.ErrorMessage ?? "(no detail)"}";
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                    $"InjectDiscreteBridge: failed — step='{result.FailedStepDescription}' err='{result.ErrorMessage}'");
+            }
+        }
+        catch (Exception ex)
+        {
+            BridgeInjectStatus = $"Failed: {ex.GetType().Name}: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"InjectDiscreteBridge: exception {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanInjectDiscreteBridge() => !IsBusy;
 
     /// <summary>
     /// Hand the currently selected class off to the inspector and kick a

@@ -30,6 +30,25 @@
              it open while connecting / browsing in this window. -->
         <Button Content="{StaticResource Conn.ProxyDeploy}"
                 Command="{Binding OpenProxyDeployCommand}" />
+
+        <!-- Phase 22d: Tools menu. Currently houses one entry (Inject
+             Discrete Bridge); future entries (Phase 22e per-feature
+             "Send to CE Table" actions) will join here. The button
+             stays clickable even when AOBMaker isn't reachable; the
+             menu item itself surfaces the plugin-not-connected case
+             via BridgeInjectStatus rather than greying out the menu
+             (avoids a chicken-and-egg "open CE first to enable the
+             menu, but the menu is what asks you to open CE" loop). -->
+        <Button Content="{StaticResource Conn.ToolsMenu}">
+          <Button.Flyout>
+            <MenuFlyout>
+              <MenuItem Header="{StaticResource Tools.InjectDiscreteBridge}"
+                        Command="{Binding InjectDiscreteBridgeCommand}"
+                        ToolTip.Tip="{StaticResource Tools.InjectDiscreteBridgeTooltip}" />
+            </MenuFlyout>
+          </Button.Flyout>
+        </Button>
+
         <TextBlock Text="{StaticResource Conn.StatusLabel}"
                    VerticalAlignment="Center"
                    Opacity="0.7" />
@@ -40,7 +59,39 @@
                      IsVisible="{Binding IsBusy}"
                      Width="120" Height="6"
                      VerticalAlignment="Center" />
+
+        <!-- Phase 22d: AOBMaker pipe availability indicator. Subtle
+             dot + label so the user can tell "Tools menu actions will
+             reach CE" at a glance without clicking the menu first.
+             Updated on every successful/failed AOBMaker request +
+             the opportunistic startup probe. -->
+        <StackPanel Orientation="Horizontal" Spacing="4"
+                    VerticalAlignment="Center" Margin="16,0,0,0">
+          <TextBlock Text="{StaticResource Tools.AobMakerStatusLabel}"
+                     Opacity="0.7" />
+          <TextBlock Text="{StaticResource Tools.AobMakerConnected}"
+                     Foreground="#FF35A744"
+                     FontWeight="SemiBold"
+                     IsVisible="{Binding IsAobMakerAvailable}" />
+          <TextBlock Text="{StaticResource Tools.AobMakerNotConnected}"
+                     Opacity="0.55"
+                     IsVisible="{Binding !IsAobMakerAvailable}" />
+        </StackPanel>
       </StackPanel>
+    </Border>
+
+    <!-- Phase 22d: bridge inject status line. Appears only after the
+         user has clicked Tools→Inject Discrete Bridge once this
+         session. Stays put after success/failure so the user can read
+         the outcome without timing pressure. Distinct from the
+         connection bar's ConnectionStatus (DLL pipe lifecycle) — the
+         bridge inject is a separate concern. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding BridgeInjectStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+            Background="#1135A744" BorderBrush="#5535A744"
+            BorderThickness="0,0,0,1" Padding="12,4">
+      <TextBlock Text="{Binding BridgeInjectStatus}"
+                 Foreground="#FF35A744" TextWrapping="Wrap" FontFamily="Consolas,Menlo,monospace" />
     </Border>
 
     <!-- Phase 14b: stripped/obfuscated metadata warning. Yellow strip

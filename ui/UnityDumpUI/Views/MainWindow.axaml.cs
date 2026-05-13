@@ -303,12 +303,13 @@ public partial class MainWindow : Window
         return new MethodOverloadsViewModel(
             vm.BackendAdapter, vm.Logger,
             asm, ns, cls, targetRow.Name,
-            // Re-use the inspector's existing AOBMaker bridge so a single
-            // session shares one pipe-client lifetime + one log stream.
-            // Bridge no-ops cleanly when AOBMaker / CE aren't running, so
-            // the user just sees the "AOBMaker pipe unavailable" status
-            // line — same behaviour as the Inspector's HEX button.
-            vm.Inspector.AobMaker,
+            // Phase 22a/d: session-wide AOBMaker bridge. Hoisted from
+            // Inspector to a top-level VM property so the Phase 22d
+            // Tools-menu Inject command, Inspector HEX/Disasm buttons,
+            // and this Methods-grid context all share one pipe-client
+            // lifetime + one log stream. Bridge no-ops cleanly when
+            // AOBMaker / CE aren't running.
+            vm.AobMaker,
             // Phase 19d-2: thread the inspector's selected instance through
             // when its target class matches the browser's selected class.
             // Pre-fills the Instance address textbox in MethodCallWindow.
