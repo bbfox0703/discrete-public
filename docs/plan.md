@@ -128,7 +128,7 @@
 | 19 | Lua-callable Unity methods | New wire command `callMethod(asm, ns, class, method, [args], [instance])` invoking Mono / IL2CPP methods with marshaled primitive + string args; closes the long-standing CLAUDE.md goal | ✅ All five sub-phases shipped (19a IL2CPP DLL / 19b Mono port / 19c instance dispatch + string in/out / 19d UI MethodCallWindow / 19e `scripts/unity_invoke.lua` Lua bridge). Verified live across SaGa F2R + BongoCat + Farthest Frontier. Spec: [lua-invoke.md](lua-invoke.md). |
 | 20 | Scene / GameObject explorer + Object.name search | `scripts/unity_scene.lua` Lua bridge + DiscreteUI Scene tab + filter-by-name + click-to-inspect handoff. Tree-walk primitives gated behind a NEW sub-phase **20-MT** (DLL-side main-thread marshaling) since iterating Unity icalls from the worker thread freezes the game. | 🚧 In progress — 20a landed + hardened 2026-05-08 (envelope unwrap fix + main-thread caveat after live test on SaGa F2R locked up the game). `getName` / `getAllGameObjects` / `findByName` are safe-and-working primitives; `getActiveSceneRoots` / `getChildren` / `getComponents` formally **EXPERIMENTAL until 20-MT ships**. 20b (UI tab) blocked behind 20-MT. Zero DLL changes so far; 20-MT will need DLL frame-hook work. |
 | 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector cells go editable with Apply button | ⏳ Planned — after Phase 20. ~½ day + tests. Closes the read/write asymmetry: today the Inspector only reads. GC-root caveat applies (same pattern as Phase 19c). |
-| 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. Re-estimated 2 days (was 3-3.5). | ⏳ **Active next phase, scope revised 2026-05-12.** Original plan (independent `.CT` file builder with Ascii85 + XML serializer + cart UI) collapsed after auditing `D:\Github\AOBMaker\plugins\CEPlugin\src\protocol.h` + `D:\Github\UE5CEDumper\ui\UE5DumpUI\Services\AobMakerBridgeService.cs` — AOBMaker plugin already ships `InjectTableFile` (raw UTF-8, no Ascii85 needed) + 4 sibling commands that cover everything we need to mutate a live CE table. Pattern: copy UE5CEDumper's `<EmbeddedResource>` + `HelperLuaResource.cs` + `InjectCeHelperLuaAsync()` trio, scale to 7 lua modules + bootstrap AA script. |
+| 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. | ✅ **All sub-phases (22a–22f) shipped 2026-05-12.** 22a `AobMakerBridge` extended (4 new commands, `IsAvailable` event); 22b 7 bridge lua files embedded in Core; 22c `BootstrapAaScriptGenerator` template; 22d Tools menu RelayCommand + `BridgeInjector` orchestrator; 22e `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` per-feature buttons; 22f `docs/ce-bridge-integration.md` + `tools/Test-BridgeInject.ps1` smoke. 148/148 xUnit pass, AOT 0/0 warnings, DiscreteUI.exe 38.6 MB. **Live click-through smoke against CE 7.6 + AOBMaker plugin still pending** — captured in [`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md). |
 
 ---
 
@@ -1201,7 +1201,7 @@ Estimated effort: ~½ day + tests.
 
 ---
 
-## Phase 22 — Live CT Population via AOBMaker
+## Phase 22 — Live CT Population via AOBMaker ✅ SHIPPED 2026-05-12
 
 **Goal**: Let end-users consume Discrete via the only CE interaction
 they care about — enable/disable AA-script checkboxes. Pivoted away
@@ -1209,12 +1209,19 @@ from "build a standalone `.CT` from scratch" (Ascii85 + XML serializer
 scrapped) after auditing `D:\Github\AOBMaker\plugins\CEPlugin\src\protocol.h`
 + `D:\Github\UE5CEDumper\ui\UE5DumpUI\Services\AobMakerBridgeService.cs`.
 
-**New model**: user opens CE 7.6+ with AOBMaker plugin loaded, opens
+**Model shipped**: user opens CE 7.6+ with AOBMaker plugin loaded, opens
 (or starts) any CT, then DiscreteUI fires AOBMaker pipe commands that
 inject our 7 bridge lua modules into the table's `<Files>` and create
 matching AA-script memory records. User saves via CE File→Save. No
-offline CT builder, no Ascii85, no XML serializer. Estimated 2 days
-(was 3–3.5).
+offline CT builder, no Ascii85, no XML serializer. Final cost: ~1.5
+days (originally estimated 2; under because the AOBMaker plugin
+already had every command we needed).
+
+**Status**: all 6 sub-phases (22a–22f) landed across commits
+`296f76f` / `99b25f8` / `421c3c8` / `6cdfdc3` / `bcd378d` / *this
+commit*. Live click-through smoke against CE 7.6 + AOBMaker plugin
++ a real Unity game still pending — checklist in
+[`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md).
 
 ### Why the pivot
 
