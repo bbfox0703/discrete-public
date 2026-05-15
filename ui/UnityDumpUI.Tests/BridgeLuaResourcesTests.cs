@@ -93,15 +93,48 @@ public class BridgeLuaResourcesTests
         string physical = Path.Combine(ScriptsDir, "unity_scene.lua");
         if (!File.Exists(physical)) return;
 
-        string fromDisk     = File.ReadAllText(physical);
-        string fromManifest = BridgeLuaResources.Read("unity_scene.lua");
+        // Phase 22 live smoke (2026-05-12) caught CRLF in the working
+        // copy of one file (unity_scene.lua). AOBMaker plugin's CE-side
+        // InjectTableFile normalises CRLF→LF and verifies the post-write
+        // Stream.Size against the pre-normalisation byte count, which
+        // mismatches by exactly one byte per CRLF pair and aborts the
+        // production inject pipeline. Asserting EXACT byte equality (no
+        // slack) is the only way this test catches that regression.
+        // .gitattributes (added in the same fix) enforces eol=lf for
+        // *.lua, so the physical file should be LF-only too.
+        byte[] fromDisk     = File.ReadAllBytes(physical);
+        byte[] fromManifest = System.Text.Encoding.UTF8.GetBytes(
+            BridgeLuaResources.Read("unity_scene.lua"));
 
-        // EmbeddedResource normalises CRLF→LF on some toolchains; assert
-        // length within 5 % to accommodate both (real corruption would
-        // show as a much larger drift, e.g. 50 % on a stream truncation).
-        double ratio = (double)fromManifest.Length / fromDisk.Length;
-        Assert.InRange(ratio, 0.95, 1.05);
-        Assert.Contains("findByName", fromManifest);
+        Assert.Equal(fromDisk.Length, fromManifest.Length);
+        Assert.Equal(fromDisk, fromManifest);
+        Assert.Contains("findByName",
+            System.Text.Encoding.UTF8.GetString(fromManifest));
+    }
+
+    [Theory]
+    [InlineData("utils.lua")]
+    [InlineData("unity_dump.lua")]
+    [InlineData("unity_dissect.lua")]
+    [InlineData("unity_symbols.lua")]
+    [InlineData("unity_addrfind.lua")]
+    [InlineData("unity_invoke.lua")]
+    [InlineData("unity_scene.lua")]
+    public void Read_EmbeddedContent_IsLfOnly_NoCrlf(string fileName)
+    {
+        // Hard regression bar for Phase 22 live smoke — every embedded
+        // bridge lua MUST be LF-only. CRLF anywhere fails the AOBMaker
+        // InjectTableFile verification (one byte per CRLF pair lost in
+        // CE's StringStream normalisation; verification compares the
+        // pre-normalisation byte count). Catching it at unit-test time
+        // is much cheaper than catching it at the user's first inject
+        // attempt.
+        string content = BridgeLuaResources.Read(fileName);
+        Assert.DoesNotContain("\r\n", content);
+        // Also reject bare \r — would suggest a Mac-classic line ending
+        // sneaked in (we've only ever seen \r\n in practice, but
+        // defence-in-depth costs nothing here).
+        Assert.DoesNotContain("\r", content);
     }
 
     [Fact]

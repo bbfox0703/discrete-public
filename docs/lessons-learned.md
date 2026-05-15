@@ -702,3 +702,64 @@ Surfaced 2026-05-08 during Phase 20a's first live test against SaGa
 F2R: `getAllGameObjects()` returned 0 even though the same
 `findInstances` call from a hand-built `rpc()` showed 4+ matches. Fix
 in `unity_scene.lua`'s `rpc()`.
+
+---
+
+## AOBMaker CE plugin
+
+### `InjectTableFile` is CRLF-sensitive — Stream.Size verification fires "wrote N, stream has N-K"
+
+**Symptom**: AOBMaker plugin's `InjectTableFile` reply for one
+specific lua file is
+`failure — Stream size mismatch: wrote 37326, stream has 36466`,
+while every other file in the same batch succeeds. The byte gap is
+suspiciously close to the file's line count.
+
+**Root cause**: CE's `createStringStream(content)` +
+`Stream.copyFrom(ss, 0)` path in the plugin's
+`HandleInjectTableFile` (see `D:\Github\AOBMaker\plugins\CEPlugin\src\pipe_server.cpp`
+line ~1354) **silently normalises CRLF → LF** when writing into the
+TableFile's underlying store. The plugin computes `expectedSize` from
+the pre-normalisation byte count and verifies post-write
+`Stream.Size` against it; any CRLF in the input mismatches by exactly
+one byte per pair.
+
+In Phase 22 live smoke (2026-05-12) this surfaced on
+`scripts/unity_scene.lua` — 860 CRLF pairs in the working copy of
+that one file (the other 6 bridge files were LF only), 860-byte
+deficit, plugin verification fired and the entire bridge-inject
+pipeline aborted at step 7/8. **Production DiscreteUI's "Inject
+Discrete Bridge" would have hit the same failure on first user run** —
+a silent P1 that only the live smoke caught.
+
+**Rule**: every text file embedded as `<EmbeddedResource>` in a
+project that ships through AOBMaker `InjectTableFile` must be LF-only
+in the index AND the working tree. Enforce via:
+
+1. `.gitattributes` at repo root — `* text=auto eol=lf` plus explicit
+   `*.lua text eol=lf` belt-and-braces. Survives any contributor's
+   `core.autocrlf=true` machine config.
+2. A unit test that asserts `BridgeLuaResources.Read(name)` contains
+   neither `\r\n` nor bare `\r`. See
+   [BridgeLuaResourcesTests.cs `Read_EmbeddedContent_IsLfOnly_NoCrlf`](../ui/UnityDumpUI.Tests/BridgeLuaResourcesTests.cs).
+3. A byte-for-byte round-trip test (NOT a 5%-tolerance length check —
+   that was the original test that missed this). See same file's
+   `Read_RoundTripsPhysicalFile_ByteForByte`.
+
+The fix to a CRLF-contaminated file is one line of PowerShell:
+
+```powershell
+$src = 'path\to\file.lua'
+$bytes = [System.IO.File]::ReadAllBytes($src)
+$lf = ([System.Text.Encoding]::UTF8.GetString($bytes)) -replace "`r`n", "`n"
+[System.IO.File]::WriteAllBytes($src, [System.Text.Encoding]::UTF8.GetBytes($lf))
+```
+
+`git ls-files --eol scripts/*.lua` is the diagnostic of choice — it
+shows `i/<eol>` (index) and `w/<eol>` (working tree) per file. Both
+must be `lf` for `*.lua` patterns.
+
+A future `Phase 22.x` could push the fix upstream to the AOBMaker
+plugin (compute `expectedSize` *after* the same normalisation lua
+applies on the way in), but the source-side fix is sufficient and
+doesn't depend on the plugin shipping a patch.

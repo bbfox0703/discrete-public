@@ -1,0 +1,50 @@
+# Discrete repo — line-ending normalisation rules.
+#
+# Why: Phase 22 live smoke (2026-05-12) caught a real failure on
+# unity_scene.lua. AOBMaker plugin's CE-side InjectTableFile path
+# normalises CRLF→LF inside CE's StringStream / TableFile, but
+# verifies the post-write Stream.Size against the pre-normalisation
+# byte count. A CRLF-having file mismatches by exactly one byte per
+# line ending, fails verification, and the whole bridge-inject
+# pipeline aborts.
+#
+# Discrete itself is fine on either line ending — the only consumer
+# that cares is the AOBMaker pipe round-trip. But the safe default is
+# LF everywhere (that's what the embedded resources encode, what the
+# tests assume, and what every existing scripts/*.lua except the
+# accidentally-CRLF unity_scene.lua already shipped with).
+#
+# git config core.autocrlf is honoured per-machine; this file
+# OVERRIDES it for the patterns listed below so the in-tree state is
+# deterministic regardless of contributor environment.
+
+# Default: every text file LF on checkout AND in the index. Binary
+# detection via git heuristics (e.g. .png stays binary).
+* text=auto eol=lf
+
+# Belt + braces for the file types Discrete cares most about.
+*.lua  text eol=lf
+*.cs   text eol=lf
+*.cpp  text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.axaml text eol=lf
+*.xaml  text eol=lf
+
+# PowerShell + Windows scripts are also fine as LF (PowerShell 7+
+# parses both; build.cmd is the lone exception — Windows shell needs
+# CRLF or it breaks line-continuation).
+*.ps1  text eol=lf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# Build artifacts / generated content / vendored binaries stay binary.
+*.dll  binary
+*.exe  binary
+*.pdb  binary
+*.lib  binary
+*.png  binary
+*.ico  binary
+*.zip  binary
