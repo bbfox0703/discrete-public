@@ -26,8 +26,12 @@ public class BridgeInjectorTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         var bridge = new FakeBridge();
 
-        var progresses = new List<BridgeInjectProgress>();
-        var report     = new Progress<BridgeInjectProgress>(progresses.Add);
+        // SyncProgress runs Report synchronously on the calling thread,
+        // unlike Progress<T> which posts to the captured SyncContext —
+        // xUnit tests run without a SyncContext so the post lands on a
+        // pool thread asynchronously, occasionally losing the final
+        // report by the time the await returns.
+        var report = new SyncProgress<BridgeInjectProgress>();
 
         var result = await BridgeInjector.InjectAsync(bridge, report, ct);
 
@@ -67,25 +71,24 @@ public class BridgeInjectorTests
     public async Task InjectAsync_ProgressReporting_OneStepPerCall()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        var bridge     = new FakeBridge();
-        var progresses = new List<BridgeInjectProgress>();
-        await BridgeInjector.InjectAsync(bridge,
-            new Progress<BridgeInjectProgress>(progresses.Add), ct);
+        var bridge = new FakeBridge();
+        var report = new SyncProgress<BridgeInjectProgress>();
+        await BridgeInjector.InjectAsync(bridge, report, ct);
 
         // Total = 1 check + N files + 1 AA. Indices are 1-based.
         int expected = 1 + BridgeLuaResources.LoadOrder.Count + 1;
-        Assert.Equal(expected, progresses.Count);
-        for (int i = 0; i < progresses.Count; ++i)
+        Assert.Equal(expected, report.Reports.Count);
+        for (int i = 0; i < report.Reports.Count; ++i)
         {
-            Assert.Equal(i + 1, progresses[i].Index);
-            Assert.Equal(expected, progresses[i].Total);
+            Assert.Equal(i + 1, report.Reports[i].Index);
+            Assert.Equal(expected, report.Reports[i].Total);
         }
 
-        Assert.StartsWith("Checking", progresses[0].Description);
+        Assert.StartsWith("Checking", report.Reports[0].Description);
         Assert.StartsWith("Injecting unity_scene.lua",
-            progresses[expected - 2].Description); // last file step
+            report.Reports[expected - 2].Description); // last file step
         Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.EntryDescription,
-            progresses[expected - 1].Description);
+            report.Reports[expected - 1].Description);
     }
 
     [Fact]
@@ -169,6 +172,20 @@ public class BridgeInjectorTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => BridgeInjector.InjectAsync(null!, progress: null, ct: ct));
+    }
+
+    // ---------- Synchronous IProgress<T> --------------------------------
+    //
+    // Progress<T>.Report posts to the captured SynchronizationContext;
+    // xUnit tests run without one, so the post lands on the thread pool
+    // and the final report can race the await BridgeInjector returns
+    // on. This helper records synchronously instead — what test code
+    // actually wants.
+
+    private sealed class SyncProgress<T> : IProgress<T>
+    {
+        public List<T> Reports { get; } = new();
+        public void Report(T value) { lock (Reports) Reports.Add(value); }
     }
 
     // ---------- Fake bridge ---------------------------------------------

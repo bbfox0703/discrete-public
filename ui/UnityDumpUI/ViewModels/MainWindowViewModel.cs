@@ -77,7 +77,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // reference for backward-compat with code paths that read through
         // it; new code paths should use vm.AobMaker directly.
         _aobMaker = new AobMakerBridge(_logger);
-        Inspector.AobMaker = _aobMaker;
+        Inspector.AobMaker     = _aobMaker;
+        AddressLookup.AobMaker = _aobMaker;  // Phase 22e Send-to-CE button
         _aobMaker.AvailabilityChanged += OnAobMakerAvailabilityChanged;
         // Opportunistic startup probe so the connection-bar status text
         // can show "AOBMaker plugin: connected" without waiting for the

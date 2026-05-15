@@ -248,6 +248,8 @@ public partial class MainWindow : Window
                 returnType:       only.ReturnType ?? "System.Void",
                 isStatic:         only.IsStatic,
                 defaultInstanceAddress: defaultInstance);
+            // Phase 22e: Send-to-CE button needs the session bridge.
+            callVm.AobMaker = vm.AobMaker;
             var callWin = new MethodCallWindow(callVm);
             await callWin.ShowDialog(this);
             return;

@@ -13,10 +13,12 @@ using System;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core;
 using UnityDumpUI.Core.Services;
+using UnityDumpUI.Core.Services.Export;
 
 namespace UnityDumpUI.ViewModels;
 
@@ -50,6 +52,7 @@ public sealed partial class AddressLookupViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(LookupCommand))]
+    [NotifyCanExecuteChangedFor(nameof(SendToCeTableCommand))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -69,6 +72,7 @@ public sealed partial class AddressLookupViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(ScannedLabel))]
     [NotifyCanExecuteChangedFor(nameof(InspectInstanceCommand))]
     [NotifyCanExecuteChangedFor(nameof(CopyInstanceAddrCommand))]
+    [NotifyCanExecuteChangedFor(nameof(SendToCeTableCommand))]
     private WhatIsAtResult? _result;
 
     public bool HasResult        => Result is { Found: true };
@@ -246,6 +250,103 @@ public sealed partial class AddressLookupViewModel : ObservableObject
             : Task.CompletedTask;
 
     private bool CanCopyInstanceAddr() => !string.IsNullOrEmpty(Result?.Instance);
+
+    /// <summary>
+    /// Phase 22e — optional AOBMaker bridge. Wired post-construction by
+    /// MainWindowViewModel (matches the
+    /// <see cref="CopyToClipboardAsync"/> pattern). Bridge no-ops cleanly
+    /// when AOBMaker / CE aren't running.
+    /// </summary>
+    public IAobMakerBridge? AobMaker
+    {
+        get => _aobMaker;
+        set
+        {
+            if (ReferenceEquals(_aobMaker, value)) return;
+            _aobMaker = value;
+            OnPropertyChanged(nameof(HasAobMaker));
+            SendToCeTableCommand.NotifyCanExecuteChanged();
+        }
+    }
+    private IAobMakerBridge? _aobMaker;
+
+    public bool HasAobMaker => _aobMaker is not null;
+
+    /// <summary>
+    /// Phase 22e — push the current lookup result to CE's address list
+    /// as a parent AA-script (registers the instance pointer as a
+    /// CE symbol) plus child memory records (one per resolved field
+    /// at its offset). Generated via
+    /// <see cref="AddressLookupAaScriptGenerator"/>.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanSendToCeTable))]
+    private async Task SendToCeTableAsync()
+    {
+        if (_aobMaker is null) return;
+        var r = Result;
+        if (r is null || !r.Found || string.IsNullOrEmpty(r.Instance) || string.IsNullOrEmpty(r.Class))
+        {
+            ErrorMessage = "Send to CE: lookup result has no instance/class to register.";
+            return;
+        }
+
+        IsBusy = true;
+        ErrorMessage = null;
+        try
+        {
+            var req = new AddressLookupRequest
+            {
+                Instance  = r.Instance!,
+                ClassName = r.Class!,
+                Namespace = r.Namespace,
+                Assembly  = r.Assembly,
+                Field        = r.Field        is null ? null : ToGenField(r.Field),
+                NearestField = r.NearestField is null ? null : ToGenField(r.NearestField),
+            };
+
+            AddressLookupAaPayload payload = AddressLookupAaScriptGenerator.Build(req);
+            bool ok = await _aobMaker.CreateAAScriptWithRecordsAsync(
+                description:  payload.ParentDescription,
+                script:       payload.ParentScript,
+                records:      payload.ChildRecords,
+                autoActivate: false,
+                hideChildren: true).ConfigureAwait(true);
+
+            if (!ok)
+            {
+                ErrorMessage = "AOBMaker pipe unavailable — open CE with the AOBMaker plugin loaded, then retry.";
+            }
+            else
+            {
+                _logger.Write(Constants.LogCategoryView,
+                    $"AddressLookupViewModel: sent '{payload.ParentDescription}' to CE ({payload.ChildRecords.Count} child record(s))");
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Send to CE failed: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"AddressLookupViewModel: SendToCeTable failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanSendToCeTable() =>
+        !IsBusy && _aobMaker is not null
+        && Result is { Found: true, Class.Length: > 0, Instance.Length: > 0 };
+
+    private static AddressLookupField ToGenField(WhatIsAtField f) => new()
+    {
+        Name           = f.Name,
+        Type           = f.Type ?? "System.Object",
+        Offset         = f.Offset,
+        Size           = f.Size,
+        IsEnum         = f.IsEnum,
+        UnderlyingType = f.UnderlyingType,
+    };
 }
 
 /// <summary>

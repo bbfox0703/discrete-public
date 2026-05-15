@@ -70,6 +70,15 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     public bool   HasAobMakerBridge { get; }
 
     /// <summary>
+    /// Phase 22e — exposed so the spawning window (MethodOverloadsWindow)
+    /// can thread the bridge through to a child MethodCallWindow. Same
+    /// instance the local Create-AA command uses; null when the parent
+    /// chose not to provide one (then SendToCeTable on the child stays
+    /// hidden too).
+    /// </summary>
+    public IAobMakerBridge? AobMaker => _aobMaker;
+
+    /// <summary>
     /// Phase 19d-2 — sticky `this` address piped through from the caller
     /// (typically the Inspector's currently-selected instance, when its
     /// target class matches the one this overloads window is for). Threaded

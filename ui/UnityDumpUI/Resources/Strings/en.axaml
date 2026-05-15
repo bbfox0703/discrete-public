@@ -88,6 +88,9 @@
   <sys:String x:Key="AddrLookup.ScannedLabel">Scan:</sys:String>
   <sys:String x:Key="AddrLookup.InspectInstance">Inspect this instance</sys:String>
   <sys:String x:Key="AddrLookup.CopyInstance">Copy instance address</sys:String>
+  <!-- Phase 22e: push lookup result to CE's address list. -->
+  <sys:String x:Key="AddrLookup.SendToCe">Send to CE Table…</sys:String>
+  <sys:String x:Key="AddrLookup.SendToCeTooltip">Push the resolved instance pointer + field offsets to the open CE table as a parent AA-script entry plus child memory records. Requires "Load Discrete Bridge" enabled in CE.</sys:String>
   <sys:String x:Key="AddrLookup.NoResult">No managed instance found in the scanned window. Try raising the backward scan, or check the address is from a live heap-resident object.</sys:String>
   <sys:String x:Key="AddrLookup.NotFoundReason">Reason:</sys:String>
 
@@ -190,6 +193,10 @@
   <sys:String x:Key="MethodCall.NoParams">(no parameters)</sys:String>
   <sys:String x:Key="MethodCall.CallButton">Call</sys:String>
   <sys:String x:Key="MethodCall.CloseButton">Close</sys:String>
+  <!-- Phase 22e: Send-to-CE button. Only visible when an AOBMaker bridge
+       is wired (i.e. CE is open with the plugin loaded). -->
+  <sys:String x:Key="MethodCall.SendToCeButton">Send to CE Table…</sys:String>
+  <sys:String x:Key="MethodCall.SendToCeTooltip">Push the current method-call inputs to the open CE table as an AA-script entry. End-user toggles the entry's checkbox to repeat the call. Requires "Load Discrete Bridge" enabled in CE.</sys:String>
   <sys:String x:Key="MethodCall.ResultHeader">Result</sys:String>
   <sys:String x:Key="MethodCall.ResultOk">Returned</sys:String>
   <sys:String x:Key="MethodCall.ResultException">Managed exception</sys:String>

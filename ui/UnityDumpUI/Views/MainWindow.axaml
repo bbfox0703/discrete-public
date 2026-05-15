@@ -928,6 +928,14 @@
                                 Command="{Binding AddressLookup.InspectInstanceCommand}" />
                         <Button Content="{StaticResource AddrLookup.CopyInstance}"
                                 Command="{Binding AddressLookup.CopyInstanceAddrCommand}" />
+                        <!-- Phase 22e: push the lookup result (instance pointer
+                             + resolved field) to CE's address list as a
+                             parent AA + child memory record. Hidden when the
+                             session has no AOBMaker bridge. -->
+                        <Button Content="{StaticResource AddrLookup.SendToCe}"
+                                Command="{Binding AddressLookup.SendToCeTableCommand}"
+                                IsVisible="{Binding AddressLookup.HasAobMaker}"
+                                ToolTip.Tip="{StaticResource AddrLookup.SendToCeTooltip}" />
                       </StackPanel>
                     </StackPanel>
                   </Border>

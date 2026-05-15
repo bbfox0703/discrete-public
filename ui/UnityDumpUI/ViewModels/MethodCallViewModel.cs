@@ -22,6 +22,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core;
 using UnityDumpUI.Core.Services;
+using UnityDumpUI.Core.Services.Export;
 
 namespace UnityDumpUI.ViewModels;
 
@@ -82,8 +83,35 @@ public sealed partial class MethodCallViewModel : ObservableObject
     public bool HasParams   => Params.Count > 0;
     public bool HasNoParams => Params.Count == 0;
 
+    /// <summary>
+    /// Phase 22e — optional AOBMaker bridge. Wired post-construction
+    /// from the spawning site (MethodOverloadsWindow / MainWindow code-
+    /// behind) so the existing 2 ctor call sites don't need to change
+    /// signature. Bridge no-ops cleanly when AOBMaker / CE aren't running.
+    /// </summary>
+    public IAobMakerBridge? AobMaker
+    {
+        get => _aobMaker;
+        set
+        {
+            if (ReferenceEquals(_aobMaker, value)) return;
+            _aobMaker = value;
+            OnPropertyChanged(nameof(HasAobMaker));
+            SendToCeTableCommand.NotifyCanExecuteChanged();
+        }
+    }
+    private IAobMakerBridge? _aobMaker;
+
+    /// <summary>
+    /// True once <see cref="AobMaker"/> has been wired. The Send-to-CE
+    /// button binds Visibility to this so the column header doesn't
+    /// flicker on call sites that don't pass a bridge.
+    /// </summary>
+    public bool HasAobMaker => _aobMaker is not null;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(CallCommand))]
+    [NotifyCanExecuteChangedFor(nameof(SendToCeTableCommand))]
     private bool _isBusy;
 
     /// <summary>
@@ -201,6 +229,75 @@ public sealed partial class MethodCallViewModel : ObservableObject
     }
 
     private bool CanCall() => !IsBusy;
+
+    /// <summary>
+    /// Phase 22e — push the current MethodCallWindow inputs to CE's
+    /// address list as an AA-script entry. End-user toggles the entry's
+    /// checkbox to repeat the call. Generates the script via
+    /// <see cref="CallMethodAaScriptGenerator"/> (which prepends the
+    /// _G.discrete_bridgeLoaded guard so the entry abort cleanly when
+    /// the user hasn't loaded the Phase 22c bootstrap yet).
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanSendToCeTable))]
+    private async Task SendToCeTableAsync()
+    {
+        if (_aobMaker is null) return;
+
+        // Snapshot the current row inputs into the generator's request
+        // shape. We deliberately don't validate (e.g. via TryBuildArg)
+        // — letting CE see what the user typed surfaces parse errors
+        // in CE's lua console, which is the right place for them: the
+        // "Send" path is for repeat-this-call workflows where the
+        // user has typically already proven the inputs work via the
+        // Call button.
+        var args = new List<CallMethodArg>(Params.Count);
+        foreach (var p in Params)
+        {
+            args.Add(new CallMethodArg
+            {
+                TypeName  = p.TypeName,
+                ValueText = p.ValueText ?? string.Empty,
+                IsNull    = p.IsNull,
+            });
+        }
+
+        string? instance = IsStatic || string.IsNullOrWhiteSpace(InstanceAddress)
+            ? null
+            : InstanceAddress.Trim();
+        string? sigMatch = string.IsNullOrEmpty(SignatureMatch) ? null : SignatureMatch;
+
+        IsBusy = true;
+        StatusMessage = "Sending to CE…";
+        try
+        {
+            string script = CallMethodAaScriptGenerator.Build(
+                Assembly, Namespace, ClassName, MethodName,
+                signatureMatch:  sigMatch,
+                instanceAddress: instance,
+                args:            args);
+            string desc = CallMethodAaScriptGenerator.SuggestDescription(
+                ClassName, MethodName, sigMatch);
+
+            bool ok = await _aobMaker.CreateAAScriptAsync(desc, script,
+                                                          autoActivate: false)
+                                     .ConfigureAwait(true);
+            StatusMessage = ok
+                ? $"Created '{desc}' in CE — toggle the entry to repeat the call."
+                : "AOBMaker pipe unavailable — open CE with the AOBMaker plugin loaded, then retry.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Send to CE failed: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"MethodCallViewModel: SendToCeTable failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanSendToCeTable() => !IsBusy && _aobMaker is not null;
 
     /// <summary>
     /// Convert a single param row's user input into a typed

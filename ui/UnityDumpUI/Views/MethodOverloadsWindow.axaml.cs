@@ -84,6 +84,11 @@ public partial class MethodOverloadsWindow : Window
             returnType:       row.ReturnType ?? "System.Void",
             isStatic:         row.IsStatic,
             defaultInstanceAddress: parentVm.DefaultInstanceAddress);
+        // Phase 22e: thread the same AOBMaker bridge through so the
+        // MethodCallWindow's "Send to CE Table" button reaches the
+        // session-wide instance. Same-pipe-client lifetime as the
+        // overloads window's own Create-AA command.
+        callVm.AobMaker = parentVm.AobMaker;
 
         var win = new MethodCallWindow(callVm);
         await win.ShowDialog(this);

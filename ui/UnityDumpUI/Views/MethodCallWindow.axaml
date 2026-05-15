@@ -47,6 +47,14 @@
                  Foreground="#FF7B7B7B"
                  TextWrapping="NoWrap" />
       <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+        <!-- Phase 22e: push the current inputs to CE's address list as
+             an AA script (via AOBMaker bridge). Hidden when the parent
+             window didn't wire a bridge so the button doesn't tease a
+             feature that won't work. -->
+        <Button Content="{StaticResource MethodCall.SendToCeButton}"
+                Command="{Binding SendToCeTableCommand}"
+                IsVisible="{Binding HasAobMaker}"
+                ToolTip.Tip="{StaticResource MethodCall.SendToCeTooltip}" />
         <Button Content="{StaticResource MethodCall.CallButton}"
                 Command="{Binding CallCommand}"
                 Classes="accent" />
