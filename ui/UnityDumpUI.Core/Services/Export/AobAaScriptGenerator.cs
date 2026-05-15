@@ -91,21 +91,51 @@ public static class AobAaScriptGenerator
         for (int i = 0; i < overloads.Count; ++i)
         {
             var ov = overloads[i];
-            // Trailing comment carries the pre-scan address + module offset
-            // for cross-reference / quick sanity checking.
+            // Mono JIT methods don't live inside any DLL module — the JIT
+            // VirtualAllocs each method's code page on first compile, so
+            // ModuleName comes back empty from getMethodAobPattern. CE's
+            // `aobscanmodule(name, MODULE, pattern)` would be silently
+            // wrong with an empty MODULE arg (CE accepts the syntax but
+            // the scan never matches), so for empty-module overloads we
+            // fall back to `aobscan(name, pattern)` which scans the
+            // whole address space. The trade-off: aobscan is slower
+            // (~hundreds of ms vs ~ms) AND can pick up false positives
+            // outside the JIT region — the user can disambiguate by
+            // raising AobLength in the overloads window before pushing.
+            // See lessons-learned § "AOBMaker CE plugin" for the
+            // surfacing story.
+            bool isMonoJit = string.IsNullOrEmpty(ov.ModuleName);
+
+            // Trailing comment carries the pre-scan address + module
+            // offset for cross-reference. For Mono JIT we annotate
+            // "Mono JIT (no module)" instead of "(+0x000…)" so the
+            // generated script doesn't look like it's missing data.
             sb.Append("// ")
               .Append(ClassDisplay(ov)).Append('.').Append(ov.MethodName)
               .Append(ov.Signature).Append("  ")
-              .Append("→ ").Append(ov.Address)
-              .Append("  (").Append(ov.ModuleName).Append('+').Append(ov.ModuleOffset).AppendLine(")");
+              .Append("→ ").Append(ov.Address);
+            if (isMonoJit)
+                sb.AppendLine("  (Mono JIT — no module; using whole-process aobscan)");
+            else
+                sb.Append("  (").Append(ov.ModuleName).Append('+').Append(ov.ModuleOffset).AppendLine(")");
+
             if (ov.DecoderBailed)
             {
                 sb.AppendLine("//   ⚠ x64 decoder bailed mid-stream — pattern's tail is literal bytes (less version-stable).");
             }
-            sb.Append("aobscanmodule(")
-              .Append(symbols[i]).Append(", ")
-              .Append(ov.ModuleName).Append(", ")
-              .Append(ov.Pattern).AppendLine(")");
+            if (isMonoJit)
+            {
+                sb.Append("aobscan(")
+                  .Append(symbols[i]).Append(", ")
+                  .Append(ov.Pattern).AppendLine(")");
+            }
+            else
+            {
+                sb.Append("aobscanmodule(")
+                  .Append(symbols[i]).Append(", ")
+                  .Append(ov.ModuleName).Append(", ")
+                  .Append(ov.Pattern).AppendLine(")");
+            }
             sb.Append("registersymbol(").Append(symbols[i]).AppendLine(")");
             sb.AppendLine();
         }
