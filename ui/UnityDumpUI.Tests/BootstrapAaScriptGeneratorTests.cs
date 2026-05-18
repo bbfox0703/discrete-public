@@ -121,16 +121,32 @@ public class BootstrapAaScriptGeneratorTests
     }
 
     [Fact]
-    public void Build_SmokeChecksDllBuildNumber()
+    public void Build_SmokeChecksDllViaPipeHandshake()
     {
-        // The smoke at the end of [ENABLE] catches "DLL not injected"
-        // — the most common runtime failure on a fresh table. Must
-        // call UnityDumper_GetBuildNumber via U.callDLL (not directly,
-        // which would skip the executeCodeEx safety wrapper).
+        // The smoke at the end of [ENABLE] catches "DLL not injected /
+        // pipe not up" — the most common runtime failure on a fresh
+        // table. Originally used U.callDLL('UnityDumper_GetBuildNumber',
+        // 'uint32') (CE's executeCodeEx via remote thread in target).
+        // That path is finicky on Windows x64 — returns nil even when
+        // the DLL is fully loaded + every subsequent pipe-RPC works,
+        // so the smoke spammed a "DLL not yet reachable" false negative
+        // on every successful bridge load (Phase 22f live smoke
+        // surfaced 2026-05-12).
+        //
+        // Replaced with a pipe-based handshake — same path the bridge's
+        // registerMethodSymbol / callUnityMethod / whatIsAt use. If
+        // those work the smoke passes; if those don't work the smoke
+        // fails honestly. No more false negatives.
         string script = BootstrapAaScriptGenerator.Build();
-        Assert.Contains("UnityDumper_GetBuildNumber", script);
-        Assert.Contains("U.callDLL",                   script);
-        Assert.Contains("require('utils')",            script);
+        Assert.Contains("\\\\.\\pipe\\UnityDumpBfx",    script);
+        Assert.Contains("\"cmd\":\"handshake\"",        script);
+        Assert.Contains("\"build\"",                    script);
+        Assert.Contains("\"backend\"",                  script);
+        // Old failure-mode strings MUST be gone — they were the source
+        // of the false-negative noise.
+        Assert.DoesNotContain("UnityDumper_GetBuildNumber", script);
+        Assert.DoesNotContain("U.callDLL",                   script);
+        Assert.DoesNotContain("executeCodeEx",               script);
     }
 
     [Fact]

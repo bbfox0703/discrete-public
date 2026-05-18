@@ -167,22 +167,35 @@ for _, name in ipairs(BRIDGE_FILES) do
   end
 end
 
--- Smoke: confirm the DLL is injected + CE has scanned its symbols.
--- We go through the just-preloaded utils module so we don't have to
--- duplicate the executeCodeEx wrapper here. Soft-fail — the bridge
--- can still expose lua-only functions (e.g. JSON helpers) even if
--- the DLL isn't talking yet.
-local U = require('utils')
-local ok, build = pcall(function()
-  return U.callDLL('UnityDumper_GetBuildNumber', 'uint32')
-end)
-if ok and type(build) == 'number' then
-  print(string.format('[Discrete] __ENTRY_DESCRIPTION__: ready — DLL build %d', build))
+-- Smoke: confirm the DLL pipe is reachable. We go through the SAME
+-- pipe path the bridge's registerMethodSymbol / callUnityMethod /
+-- whatIsAt use — io.open(pipe) + 1 RPC + close. The earlier
+-- remote-thread-via-symbolhandler smoke (replaced 2026-05-12) was
+-- finicky on Windows x64 — empirically returned nil even when the
+-- DLL was fully loaded + the pipe + every subsequent pipe-based RPC
+-- worked. Pipe handshake gives us the same info (build number +
+-- backend) via the path we know is good.
+local pipe = io.open([[\\.\pipe\UnityDumpBfx]], 'r+b')
+if pipe then
+  -- One-shot handshake. Format mirrors unity_symbols.lua's rpc().
+  pipe:write('{""id"":0,""cmd"":""handshake"",""args"":{}}\n'); pipe:flush()
+  local resp = pipe:read('*l'); pipe:close()
+  -- Cheap field extraction — full JSON parser is overkill for two ints
+  -- and a string. The handshake response is small + well-formed; the
+  -- field shapes are stable per pipe-protocol.md.
+  local build   = resp and resp:match('""build""%s*:%s*(%d+)') or nil
+  local backend = resp and resp:match('""backend""%s*:%s*""([^""]+)""') or nil
+  if build and backend then
+    print(string.format('[Discrete] __ENTRY_DESCRIPTION__: ready — %s / DLL build %s',
+                        backend, build))
+  else
+    print('[Discrete] __ENTRY_DESCRIPTION__: bridge loaded, handshake response unparseable: '
+          .. tostring(resp))
+  end
 else
-  print('[Discrete] __ENTRY_DESCRIPTION__: lua loaded, but DLL not yet reachable.')
+  print('[Discrete] __ENTRY_DESCRIPTION__: lua loaded, but DLL pipe unreachable.')
   print('[Discrete]   If you ran this before DiscreteUI injected the DLL,')
-  print('[Discrete]   wait for CE\'s symbolhandler to finish scanning, then')
-  print('[Discrete]   disable + re-enable this entry.')
+  print('[Discrete]   wait a moment then disable + re-enable this entry.')
 end
 
 _G.discrete_bridgeLoaded = true
