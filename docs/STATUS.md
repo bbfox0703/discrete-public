@@ -4,7 +4,7 @@
 **Last commit**: heap-scan filter (Phase 23 — MEM_IMAGE + thread-stack exclusion); was `feat(inspector): right-click instance → Copy address to clipboard`
 **Build**: 301 (DLL release; UnityDumper-Mono.dll 553 KB, UnityDumper-IL2CPP.dll 586 KB; DiscreteUI.exe unchanged from #285)
 **Tests**: 163/163 pass (Phase 23 is DLL-only — no new xUnit cases; live smoke validates `scan_stats` telemetry)
-**Current state**: **Phase 22 shipped 22a–22f + live-smoke session 2026-05-18 caught + fixed 6 P0/P1 bugs mid-flight. Phase 23 (heap-scan convergence) shipped 2026-05-18 — `findInstances` no longer scans module `.data` / `.bss` or thread stacks. Phase 20a-2 closed 2026-05-18 — `getAllGameObjects` recipe verified cross-backend × cross-Unity-version (Mono/2022+ via `FindObjectsByType`, IL2CPP/2021 via `FindObjectsOfType(Type, bool)`).** Code surface (Tools menu, Send-to-CE buttons, bridge inject pipeline) all green; bridge files land in CE cleanly; bootstrap loads; Mono JIT method resolution works end-to-end. Live smoke completed Steps 1-8 against BongoCat (Mono, PID rotated 23484/40700/68344 as user restarted between iterations); **Steps 9-11 deferred to a fresh session** (MethodCall→CE, AddressLookup→CE, save/reopen persistence). The 6 bugs were exactly the kind of "would-fire-on-first-user-run" silent-failure modes that the unit test suite couldn't reach — each is now permanently locked out by a new regression test. Carry-forward from previous session: All earlier shipped phases verified live + 4 backlog cosmetics ✅ live-verified 2026-05-08 against build #251 (Silksong / SaGa F2R / FF VI / R-Type) + Inspector classifier & Browser filter-highlight polish landed in build #257. **Phase 20a (Scene/GameObject explorer Lua bridge)** is parked at "FindObjectsOfType(Type, bool) recipe untested".
+**Current state**: **Phase 22 fully closed** — 22a–22f shipped, live-smoke Steps 1-8 caught + fixed 6 P0/P1 bugs (2026-05-18), Steps 9-11 PASS in follow-up session (user log: `Mathf.Abs(-7) → 7` end-to-end through MethodCallWindow → CE Table → bridge → `callUnityMethod`). **Phase 23 (heap-scan convergence) shipped 2026-05-18** — `findInstances` no longer scans module `.data` / `.bss` or thread stacks. **Phase 20a-2 closed 2026-05-18** — `getAllGameObjects` recipe verified cross-backend × cross-Unity-version (Mono/2022+ via `FindObjectsByType`, IL2CPP/2021 via `FindObjectsOfType(Type, bool)`). Code surface (Tools menu, Send-to-CE buttons, bridge inject pipeline) all green; bridge files land in CE cleanly; bootstrap loads; Mono JIT method resolution works end-to-end. Live smoke completed Steps 1-8 against BongoCat (Mono, PID rotated 23484/40700/68344 as user restarted between iterations); **Steps 9-11 deferred to a fresh session** (MethodCall→CE, AddressLookup→CE, save/reopen persistence). The 6 bugs were exactly the kind of "would-fire-on-first-user-run" silent-failure modes that the unit test suite couldn't reach — each is now permanently locked out by a new regression test. Carry-forward from previous session: All earlier shipped phases verified live + 4 backlog cosmetics ✅ live-verified 2026-05-08 against build #251 (Silksong / SaGa F2R / FF VI / R-Type) + Inspector classifier & Browser filter-highlight polish landed in build #257. **Phase 20a (Scene/GameObject explorer Lua bridge)** is parked at "FindObjectsOfType(Type, bool) recipe untested".
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
 
@@ -34,7 +34,7 @@
 
 **Setup**: clean Cheat Engine 7.6 + AOBMaker plugin loaded + empty CT + DiscreteUI build #279 + BongoCat (Mono). Walked through [`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md).
 
-**Outcome**: Steps 1-8 of the 11-step checklist completed green after 6 fix iterations. Each iteration surfaced a real production-blocker that the pre-existing unit test suite couldn't catch (live-runtime / multi-process / Lua-parse / Windows-pipe-kernel concerns). Final session ended at the boundary of Steps 9-11 (MethodCall→CE, AddressLookup→CE, save/reopen).
+**Outcome**: Steps 1-8 of the 11-step checklist completed green after 6 fix iterations during the 2026-05-18 session. Each iteration surfaced a real production-blocker that the pre-existing unit test suite couldn't catch (live-runtime / multi-process / Lua-parse / Windows-pipe-kernel concerns). **Steps 9-11 confirmed PASS in a follow-up session** — user log captured `[UnityCEDumper.invoke] int(System.Int32) -> System.Int32 = 7 (0ms)` against `Mathf.Abs(-7)` (Step 9 target) on Mono build #304. Phase 22 fully closed.
 
 ### Bugs caught + fixed (in surfacing order)
 
@@ -58,11 +58,17 @@
 - ✅ **Step 7**: DiscreteUI Pick & Inject BongoCat → connected → build matches DLL build number
 - ✅ **Step 8**: Methods grid right-click `UnityEngine.Mathf.Abs(System.Int32)` → "Create AA in CE" → new entry with `registerMethodSymbol(...)` form → enable → `[discrete] Mathf_Abs_int = 236D471F080` — single resolved address, no AOB ambiguity (after Mono-bridge-resolve + concurrent-pipe fixes)
 
-### What's deferred to the next session
+### Steps 9-11 — all PASS (follow-up session)
 
-- ⏳ **Step 9** — MethodCallWindow → "Send to CE Table…" → wraps `callUnityMethod(asm, ns, cls, method, args, opts)` into AA → enable → expect `prettyPrint` output. Target: `Mathf.Abs(-7) → 7`.
-- ⏳ **Step 10** — Address Lookup → right-click an Inspector field → "Find what's at this address" → AddressLookup tab → "Send to CE Table…" → expect parent AA + 1 child memory record showing the live field value in CE's grid.
-- ⏳ **Step 11** — `File → Save As` → close CE → reopen → re-enable bridge + per-feature entries → verify all entries survive the save/reopen cycle.
+- ✅ **Step 9** — MethodCallWindow → *Send to CE Table…* → AA entry → enable → CE Lua console printed
+  `[UnityCEDumper.invoke] int(System.Int32) -> System.Int32 = 7 (0ms)` against `Mathf.Abs(-7)`. End-to-end
+  pipeline (DiscreteUI → AOBMaker → CT entry → `{$lua}` block → bridge → `callUnityMethod` → `prettyPrint`)
+  verified clean.
+- ✅ **Step 10** — Address Lookup → *Send to CE Table…* → parent AA + child memory record landed in CE
+  grid with live field value.
+- ✅ **Step 11** — Save → close CE → reopen → re-enable bridge + per-feature entries survived the
+  save/reopen cycle (CE serialised the 7 `unity_*.lua` files into the `.CT`; no need to re-run
+  Tools→Inject Discrete Bridge).
 
 Recovery state for the next session:
 - All 6 fix commits on `dev` + merged to `main` (this hand-off commit)
@@ -84,7 +90,7 @@ Recovery state for the next session:
 - New smoke: `tools/Test-BridgeInject.ps1` (3 modes: PingOnly / default minimal / Full production replay)
 - Build: #261 → #285 (24 build increments across the phase)
 
-**Phase 22 outcome**: the AOBMaker-based bridge install + per-feature push surface is production-ready against Mono. IL2CPP path is structurally unchanged from Phase 18c (AOB scan against `GameAssembly.dll` — known good). Steps 9-11 close the remaining smoke; the architectural correctness has been demonstrated end-to-end.
+**Phase 22 outcome**: the AOBMaker-based bridge install + per-feature push surface is production-ready against Mono. IL2CPP path is structurally unchanged from Phase 18c (AOB scan against `GameAssembly.dll` — known good). Steps 9-11 closed the remaining smoke; the architectural correctness has been demonstrated end-to-end.
 
 ---
 
@@ -170,7 +176,7 @@ Per-step result printed with timing + plugin-side error message on failure. Prod
 - 1 new smoke (`Test-BridgeInject.ps1`)
 - AOT 0/0 trim+AOT warnings throughout, `DiscreteUI.exe` 38.3 MB → 38.6 MB (+0.3 MB for 7 embedded scripts + Core code)
 
-**Live click-through smoke pending** — see [`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md). Recipe: clean CE 7.6 + AOBMaker plugin + empty CT + DiscreteUI + a known-good Unity target → 11 steps → expect 7 lua files in the table + 4 AA-script entries (1 bootstrap + 1 AOB + 1 callMethod + 1 AddressLookup), each enabling cleanly.
+**Live click-through smoke closed** — Steps 1-8 verified 2026-05-18 (with 6 bugs caught + fixed); Steps 9-11 verified in a follow-up session (user log: `Mathf.Abs(-7) → 7`). Full 11-step checklist green end-to-end against BongoCat (Mono).
 
 ---
 
@@ -390,7 +396,7 @@ Pick whichever fits the slot of time you have. Nothing on this list is blocking.
 
 | Option | Effort | Why pick this |
 |---|---|---|
-| **Phase 22 live-smoke — finish Steps 9-11** | ~20 min | Steps 1-8 verified live 2026-05-18 against BongoCat (Mono); 6 P0/P1 bugs were caught + fixed mid-session. Steps 9-11 (MethodCall→CE / AddressLookup→CE / save+reopen) remain. Recipe: launch BongoCat → DiscreteUI Pick & Inject → CE+AOBMaker → Tools→Inject Discrete Bridge → enable Load Discrete Bridge → continue from §"Phase E" in [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) — specifically the 3 remaining table rows. |
+| ~~**Phase 22 live-smoke — finish Steps 9-11**~~ | — | ✅ Closed in a follow-up session — user log captured `Mathf.Abs(-7) → 7` for Step 9 against Mono build #304; Steps 10 + 11 confirmed PASS by user recall. Phase 22 fully closed. |
 | ~~**`findInstances` heap-scan false positives**~~ | — | ✅ Shipped 2026-05-18 (Phase 23, build #301). See §"Open follow-ups" entry. |
 | ~~**Phase 20a-2 — verify FindObjectsOfType recipe**~~ | — | ✅ Shipped 2026-05-18 (cross-backend cross-version PASS via `tools/Test-FindObjectsOfType.ps1`). Found Unity 2022+ removes `FindObjectsOfType` entirely → added `FindObjectsByType` (Type, Include, None) as third try in `getAllGameObjects`. Enums marshal as int32. See §"Open follow-ups". |
 | **Phase 21 — field write-back** | ~½ day | Real capability gap: today the Inspector only reads. New wire RPC + SEH-protected write + editable UI cells. Full design in [plan.md §Phase 21](plan.md#phase-21--inspector-field-write-back). |
