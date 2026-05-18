@@ -435,42 +435,57 @@ function getAllGameObjects(opts)
         return {}  -- _getManagedType already warned
     end
 
-    -- Unity 2021 API layout (live forensic on SaGa F2R 2026-05-08, Unity
-    -- 2021.3.39f1, IL2CPP, code stripping enabled):
+    -- Cross-Unity-version API survey (verified live 2026-05-18 via
+    -- tools/Test-FindObjectsOfType.ps1 against two backends + two API tiers):
     --
+    -- Unity 2018-2021 (IL2CPP, code stripping enabled — SaGa F2R / Unity 2021.3):
     --   ❌ Resources.FindObjectsOfTypeAll(Type)            — STRIPPED
-    --   ❌ Object.FindObjectsOfTypeAll<T>() (generic)      — stripped + unsupported
-    --   ❌ Object.FindObjectsOfType(Type) (single arg)     — stripped (only the
-    --                                                        2-arg overload survives)
-    --   ✅ Object.FindObjectsOfType(Type, bool incl. inactive) — survived
-    --                                                            (this is what we use)
-    --   ✅ GameObject.Find(string)                         — survived (per-name)
-    --   ✅ Camera.get_main()                                — survived (singleton)
-    --   ✅ SceneManager.GetActiveScene() → Scene struct    — survived but needs
-    --                                                         value-type marshaling
+    --   ❌ Object.FindObjectsOfTypeAll<T>()                — stripped + generic
+    --   ❌ Object.FindObjectsOfType(Type) (1-arg)          — stripped on most builds
+    --   ✅ Object.FindObjectsOfType(Type, bool)            — survives stripping
+    --   ❌ Object.FindObjectsByType — doesn't exist pre-2022
+    --
+    -- Unity 2022+ (Mono / BongoCat / Unity 2022+):
+    --   ❌ Object.FindObjectsOfType — REMOVED outright (0 overloads).
+    --      `findMethodInstances` returns count=0; the API surface was
+    --      replaced wholesale, not just deprecated.
+    --   ✅ Object.FindObjectsByType(Type, FindObjectsInactive, FindObjectsSortMode)
+    --      — the 3-arg compiled overload. Generic FindObjectsByType<T>(...)
+    --      overloads exist but their address is 0x0 (not JIT-instantiated).
+    --      Pass enum args as int32 (ABI-identical to underlying type):
+    --        FindObjectsInactive: Exclude=0, Include=1
+    --        FindObjectsSortMode: None=0, InstanceID=1
     --
     -- Substring-match note: signatureMatch="(System.Type)" does NOT match
     -- "(System.Type, System.Boolean)" because the close paren in our needle
     -- isn't in the haystack — Type is followed by a comma. Use the exact
-    -- sig string for two-arg methods.
+    -- sig string for multi-arg methods.
     --
-    -- includeInactive=true gives us roughly what FindObjectsOfTypeAll would
-    -- have, modulo the HideAndDontSave-only objects (rare in user code).
+    -- All three tries pass `includeInactive`/`Include` so we surface the
+    -- same set as FindObjectsOfTypeAll would have (modulo HideAndDontSave-only
+    -- objects, rare in user code).
     local tries = {
         {
             class = "Object", method = "FindObjectsOfType",
             sig   = "(System.Type, System.Boolean)",
             args  = function() return { _argAddress(typeAddr), _argBool(true) } end,
-            note  = "all (incl. inactive); 2-arg overload",
+            note  = "Unity 2018-2021: 2-arg (Type, bool) — preferred",
         },
-        -- Fallback: the 1-arg overload IF it ever survives stripping in some
-        -- Unity build. signatureMatch ends with ')' so it won't accidentally
-        -- match the 2-arg form.
+        -- 1-arg fallback. signatureMatch ends with ')' so it won't accidentally
+        -- match the 2-arg form via substring.
         {
             class = "Object", method = "FindObjectsOfType",
             sig   = "(System.Type)",
             args  = function() return { _argAddress(typeAddr) } end,
-            note  = "active only; 1-arg overload",
+            note  = "Unity 2018-2021: 1-arg (Type) — active only; misses inactive",
+        },
+        -- Unity 2022+ replacement. The 3-arg overload is the compiled one
+        -- (others are generic / non-instantiated). Enums marshal as int32.
+        {
+            class = "Object", method = "FindObjectsByType",
+            sig   = "(System.Type, UnityEngine.FindObjectsInactive, UnityEngine.FindObjectsSortMode)",
+            args  = function() return { _argAddress(typeAddr), _argInt32(1), _argInt32(0) } end,
+            note  = "Unity 2022+: FindObjectsByType (Type, Include=1, None=0)",
         },
     }
     local arrR, arrAddr, usedAttempt, lastErr

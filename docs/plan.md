@@ -1099,11 +1099,27 @@ Out (v2 candidates):
        run after stripping was confirmed mid-test. Logged in
        `lessons-learned.md` (two new entries: IL2CPP stripping +
        signatureMatch close-paren trap).
-- [ ] **20a-2** Verify the `Object.FindObjectsOfType(Type, bool)` recipe
-  end-to-end (untested at session end). Same six-step test plan but
-  smaller limits, against SaGa F2R first. If 20a-2 fails too (e.g. the
-  2-arg overload also gets stripped on a different game), fall back to
-  20-HEAP below.
+- [x] **20a-2** Verify the enumeration recipe end-to-end. **Closed
+  2026-05-18** with cross-version + cross-backend PASS via the new
+  `tools/Test-FindObjectsOfType.ps1` smoke (4-step recipe replay,
+  no CE / Lua required):
+  - **SaGa F2R** (IL2CPP, Unity 2021): picked the 2-arg
+    `FindObjectsOfType(Type, bool)` overload — survived stripping as
+    expected. 14,942 GameObjects in scene; sampled names came back as
+    real "SoundObject_SeCh11..15" instances, 0 native_crashes.
+  - **BongoCat** (Mono, Unity 2022+): `FindObjectsOfType` has 0
+    overloads (entirely removed in Unity 2022+, not just deprecated).
+    Picked the 3-arg `FindObjectsByType(Type, FindObjectsInactive,
+    FindObjectsSortMode)` replacement. 40,752 GameObjects; sampled
+    names "Background" ×5, 0 native_crashes.
+  - **Enum marshaling fact-check** (bonus): the two enum params on the
+    Unity 2022+ API marshal as plain `int32` over the wire (ABI is
+    identical to underlying type — no DLL changes needed, no new
+    `enum` wire tag). `Include=1`, `None=0`.
+  - `scripts/unity_scene.lua` `getAllGameObjects` `tries[]` updated
+    to a three-entry priority list: 2-arg OfType → 1-arg OfType →
+    3-arg ByType. The first match wins, so production calls land on
+    the historically-preferred path on each Unity version.
 - [ ] **20-MT** *(new sub-phase)* DLL-side main-thread marshaling —
   frame-hooked queue drain so `callMethod` on Unity icalls no longer
   fights the game thread. Probably patches `PlayerLoop` or a similar

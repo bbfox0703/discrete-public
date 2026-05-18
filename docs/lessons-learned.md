@@ -113,6 +113,48 @@ doesn't depend on Unity's managed APIs at all — walks libgc's heap
 sections directly via `GC_get_heap_section_count` /
 `GC_get_heap_section_at`. Backlog'd as a follow-up to Phase 20-MT.
 
+**Update 2026-05-18 (Phase 20a-2 closure)** — Unity 2022+ adds another
+layer: `Object.FindObjectsOfType` is **removed outright**, not just
+deprecated. On a BongoCat-style Unity 2022+ build, `findMethodInstances`
+returns 0 overloads for `FindObjectsOfType`. The replacement is
+`Object.FindObjectsByType(Type, FindObjectsInactive, FindObjectsSortMode)` —
+the 3-arg compiled overload (generic `FindObjectsByType<T>(...)`
+overloads exist but have address `0x0` until JIT-instantiated). Updated
+`unity_scene.lua` `getAllGameObjects` tries[] now has three entries:
+2-arg OfType → 1-arg OfType → 3-arg ByType. First match wins,
+production calls land on the per-version preferred path automatically.
+
+### Enums marshal as their underlying integer type — no `enum` wire tag needed
+
+**Surfaced**: Phase 20a-2 verification on BongoCat (Unity 2022+) had to
+call `Object.FindObjectsByType(Type, FindObjectsInactive,
+FindObjectsSortMode)`. Both enum params have no `enum` tag in the
+callMethod wire protocol.
+
+**Resolution**: pass `int32` directly with the underlying integer value:
+`Include = 1`, `None = 0`. Worked on Mono first try, no DLL changes.
+
+**Why it works**: CLR enum-typed parameters are ABI-identical to their
+underlying integer type. The JIT/AOT prologue reads
+`*(int32_t*)params[i]` for an enum param the same way it does for an
+int32 param. Our Phase 19c non-uniform marshaling (value types pass
+`&value`) gives `runtime_invoke` exactly that — a 4-byte int32 slot
+pointer. No type-checking happens between the DLL and the JIT
+trampoline.
+
+**Caveat**: this only works for enums whose underlying type is `int32`
+(the C# default). For `enum X : long` or `enum X : byte` you'd need to
+pass the matching width (`int64` / `byte`). Almost all Unity public
+enums use the default — but check `findMethodInstances` output if in
+doubt; `paramTypes` shows the enum type name and the rendered signature
+matches the underlying width via the CLR's normal type-rendering rules.
+
+**Rule**: when calling a method with enum params, pass `int32` and look
+up the enum's integer values from Unity docs or the metadata-cli
+(`getEnumValues` RPC also exists for live enumeration). Don't wait for
+a DLL-side `enum` wire type — there's nothing it could do that
+`int32` doesn't already.
+
 ### `signatureMatch` substring substring is whitespace-and-comma-aware — close-paren matters
 
 **Symptom**: a `callMethod` call with a precise-looking
