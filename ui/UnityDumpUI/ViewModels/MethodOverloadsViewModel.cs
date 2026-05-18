@@ -257,10 +257,16 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                 MethodName       = MethodName,
                 ClassName        = ClassName,
                 Namespace        = Namespace,
+                Assembly         = Assembly,  // Phase 22f follow-up: Mono JIT path needs this for registerMethodSymbol
                 HumanSuffix      = row.HumanSuffix ?? "T",
                 Signature        = row.SignatureLabel,
                 Pattern          = patt.Pattern ?? string.Empty,
-                ModuleName       = patt.ModuleName ?? "GameAssembly.dll",
+                // ModuleName="" → Mono JIT path (no module); generator
+                // switches to bridge-call AA instead of aobscan. Don't
+                // default to GameAssembly.dll — that would silently
+                // misclassify Mono targets as IL2CPP and emit a broken
+                // aobscanmodule.
+                ModuleName       = patt.ModuleName ?? string.Empty,
                 Address          = patt.Address ?? row.Address!,
                 ModuleOffset     = patt.ModuleOffset ?? "0x0",
                 ReturnType       = row.ReturnType,

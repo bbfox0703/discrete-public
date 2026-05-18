@@ -44,6 +44,15 @@ public sealed class AaScriptOverload
     public bool            DecoderBailed  { get; init; }
     public int             InstructionCount { get; init; }
     public int             WildcardCount  { get; init; }
+
+    /// <summary>
+    /// CLR assembly name (e.g. "UnityEngine.CoreModule", "Assembly-CSharp").
+    /// Phase 22f follow-up: required for the Mono JIT bridge-call AA
+    /// script form (registerMethodSymbol(symName, ASM, ns, cls, …)).
+    /// Optional for IL2CPP path — only the AOB scan uses ModuleName +
+    /// pattern. Callers building Mono-targeted bags MUST set this.
+    /// </summary>
+    public string?         Assembly       { get; init; }
 }
 
 public static class AobAaScriptGenerator
@@ -87,60 +96,114 @@ public static class AobAaScriptGenerator
         sb.AppendLine("end");
         sb.AppendLine();
 
+        // Mono JIT methods don't live inside any DLL module — the JIT
+        // VirtualAllocs each method's code page on first compile, so
+        // ModuleName comes back empty from getMethodAobPattern. Two
+        // failure modes we already burnt through:
+        //   1. `aobscanmodule(name, MODULE, pattern)` with empty MODULE
+        //      — CE accepts the syntax but never matches. Silent fail.
+        //      (Phase 22f live smoke #1 — fixed by falling back to
+        //      `aobscan` in commit 90...)
+        //   2. `aobscan(name, pattern)` — works for unique patterns
+        //      but Mono JIT routinely produces MULTIPLE instances of
+        //      the same source method (different generic instantiations,
+        //      optimization tiers). Their prologues match, CE picks the
+        //      first hit which is rarely the right one. Silent wrong-
+        //      answer fail. (Phase 22f live smoke #2 against BongoCat
+        //      UnityEngine.Mathf.Abs returned 3 hits, only 1 real.)
+        //
+        // Real fix: for Mono JIT, don't AOB-scan at all. The DLL already
+        // resolves method addresses via mono_compile_method (server-side,
+        // server-authoritative, overload-precise). Phase 18d shipped
+        // `registerMethodSymbol` (in scripts/unity_symbols.lua, the
+        // single-overload variant added Phase 22f follow-up) which wraps
+        // findMethodInstances + signature filter + registerSymbol. The
+        // AA's [ENABLE] block calls into the bridge instead of aobscan.
+        //
+        // Trade-off: the AA now requires the bridge to be loaded first
+        // ("Load Discrete Bridge" enabled). The early-return guard
+        // surfaces a clear error if not. For IL2CPP overloads
+        // (ModuleName populated) we keep the AOB form — it's
+        // self-contained and doesn't pay the bridge round-trip.
+        bool anyMonoJit = false;
+        for (int i = 0; i < overloads.Count; ++i)
+            if (string.IsNullOrEmpty(overloads[i].ModuleName)) { anyMonoJit = true; break; }
+
         sb.AppendLine("{$asm}");
         for (int i = 0; i < overloads.Count; ++i)
         {
             var ov = overloads[i];
-            // Mono JIT methods don't live inside any DLL module — the JIT
-            // VirtualAllocs each method's code page on first compile, so
-            // ModuleName comes back empty from getMethodAobPattern. CE's
-            // `aobscanmodule(name, MODULE, pattern)` would be silently
-            // wrong with an empty MODULE arg (CE accepts the syntax but
-            // the scan never matches), so for empty-module overloads we
-            // fall back to `aobscan(name, pattern)` which scans the
-            // whole address space. The trade-off: aobscan is slower
-            // (~hundreds of ms vs ~ms) AND can pick up false positives
-            // outside the JIT region — the user can disambiguate by
-            // raising AobLength in the overloads window before pushing.
-            // See lessons-learned § "AOBMaker CE plugin" for the
-            // surfacing story.
             bool isMonoJit = string.IsNullOrEmpty(ov.ModuleName);
 
             // Trailing comment carries the pre-scan address + module
             // offset for cross-reference. For Mono JIT we annotate
-            // "Mono JIT (no module)" instead of "(+0x000…)" so the
-            // generated script doesn't look like it's missing data.
+            // "Mono JIT (bridge resolve)" so a developer reading the
+            // script knows the missing module info is intentional.
             sb.Append("// ")
               .Append(ClassDisplay(ov)).Append('.').Append(ov.MethodName)
               .Append(ov.Signature).Append("  ")
               .Append("→ ").Append(ov.Address);
             if (isMonoJit)
-                sb.AppendLine("  (Mono JIT — no module; using whole-process aobscan)");
+                sb.AppendLine("  (Mono JIT — resolved via bridge findMethodInstances on enable)");
             else
                 sb.Append("  (").Append(ov.ModuleName).Append('+').Append(ov.ModuleOffset).AppendLine(")");
+
+            if (isMonoJit)
+            {
+                // Bridge-call form lives in [$lua] below; nothing to
+                // emit here in the [$asm] block for Mono JIT entries.
+                // Leave a placeholder comment so the script flow is
+                // obvious to a reader.
+                sb.AppendLine("// (no aobscan — symbol registration happens in the {$lua} block below)");
+                sb.AppendLine();
+                continue;
+            }
 
             if (ov.DecoderBailed)
             {
                 sb.AppendLine("//   ⚠ x64 decoder bailed mid-stream — pattern's tail is literal bytes (less version-stable).");
             }
-            if (isMonoJit)
-            {
-                sb.Append("aobscan(")
-                  .Append(symbols[i]).Append(", ")
-                  .Append(ov.Pattern).AppendLine(")");
-            }
-            else
-            {
-                sb.Append("aobscanmodule(")
-                  .Append(symbols[i]).Append(", ")
-                  .Append(ov.ModuleName).Append(", ")
-                  .Append(ov.Pattern).AppendLine(")");
-            }
+            sb.Append("aobscanmodule(")
+              .Append(symbols[i]).Append(", ")
+              .Append(ov.ModuleName).Append(", ")
+              .Append(ov.Pattern).AppendLine(")");
             sb.Append("registersymbol(").Append(symbols[i]).AppendLine(")");
             sb.AppendLine();
         }
 
         sb.AppendLine("{$lua}");
+
+        // Mono JIT registrations go through the bridge. Guard with
+        // discrete_bridgeLoaded — without the bridge, registerMethodSymbol
+        // is undefined and the entry would silently no-op.
+        if (anyMonoJit)
+        {
+            sb.AppendLine("if not _G.discrete_bridgeLoaded then");
+            sb.AppendLine("  print('[Discrete] Enable \"Load Discrete Bridge\" first (Mono JIT methods resolve via the bridge)')");
+            sb.AppendLine("  return");
+            sb.AppendLine("end");
+            for (int i = 0; i < overloads.Count; ++i)
+            {
+                var ov = overloads[i];
+                if (string.IsNullOrEmpty(ov.ModuleName))
+                {
+                    // registerMethodSymbol(symbolName, assembly, ns, class, method, sigFilter?)
+                    // Quote arguments. ov.Signature is the formal-param-list rendering
+                    // (e.g. "(System.Int32)") — passed verbatim as the filter; sufficient
+                    // when there's a unique formal-param-list-named overload.
+                    sb.Append("registerMethodSymbol('").Append(LuaSqEscape(symbols[i])).Append("', ")
+                      .Append('\'').Append(LuaSqEscape(ov.Assembly ?? "")).Append("', ")
+                      .Append('\'').Append(LuaSqEscape(ov.Namespace ?? "")).Append("', ")
+                      .Append('\'').Append(LuaSqEscape(ov.ClassName)).Append("', ")
+                      .Append('\'').Append(LuaSqEscape(ov.MethodName)).Append("', ")
+                      .Append('\'').Append(LuaSqEscape(ov.Signature ?? "")).AppendLine("')");
+                }
+            }
+        }
+        // Final discrete_logScan calls report each symbol's resolved
+        // address (covers both AOB-resolved and bridge-resolved
+        // entries — registerSymbol made the name visible to
+        // getAddressSafe regardless of how it got there).
         for (int i = 0; i < overloads.Count; ++i)
         {
             sb.Append("_G.discrete_logScan(\"").Append(symbols[i]).AppendLine("\")");
@@ -148,13 +211,49 @@ public static class AobAaScriptGenerator
         sb.AppendLine();
 
         sb.AppendLine("[DISABLE]");
-        sb.AppendLine("{$asm}");
-        for (int i = 0; i < overloads.Count; ++i)
+        // unregisterSymbol is a Lua function in CE (not an AA directive)
+        // when the symbol was set via registerSymbol; the matching path
+        // for aobscanmodule-registered symbols is the {$asm}
+        // `unregistersymbol` directive. Cover both — use the {$asm}
+        // form for AOB-registered, {$lua} for bridge-registered.
+        if (anyMonoJit)
         {
-            sb.Append("unregistersymbol(").Append(symbols[i]).AppendLine(")");
+            sb.AppendLine("{$lua}");
+            sb.AppendLine("if syntaxcheck then return end");
+            for (int i = 0; i < overloads.Count; ++i)
+            {
+                if (string.IsNullOrEmpty(overloads[i].ModuleName))
+                    sb.Append("pcall(unregisterSymbol, '").Append(LuaSqEscape(symbols[i])).AppendLine("')");
+            }
+        }
+        bool anyAob = false;
+        for (int i = 0; i < overloads.Count; ++i)
+            if (!string.IsNullOrEmpty(overloads[i].ModuleName)) { anyAob = true; break; }
+        if (anyAob)
+        {
+            sb.AppendLine("{$asm}");
+            for (int i = 0; i < overloads.Count; ++i)
+            {
+                if (!string.IsNullOrEmpty(overloads[i].ModuleName))
+                    sb.Append("unregistersymbol(").Append(symbols[i]).AppendLine(")");
+            }
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Escape a string for a Lua single-quoted literal. Defence against
+    /// any apostrophe / backslash / newline a class name / namespace
+    /// might contain (unlikely in practice but cheap to harden).
+    /// </summary>
+    private static string LuaSqEscape(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        return s.Replace("\\", "\\\\")
+                .Replace("'",  "\\'")
+                .Replace("\n", "\\n")
+                .Replace("\r", "\\r");
     }
 
     /// <summary>

@@ -45,13 +45,18 @@ public class AobAaScriptGeneratorTests
         MethodName       = "Abs",
         ClassName        = "Mathf",
         Namespace        = "UnityEngine",
+        Assembly         = "UnityEngine.CoreModule",  // Phase 22f follow-up: needed for bridge-call AA
         HumanSuffix      = "int32",
         Signature        = "(System.Int32)",
         Pattern          = "55 48 8B EC 48 83 EC 30 48 89 75 F8 48 8B F1 85 F6",
-        // Mono JIT: ModuleName is empty (the JIT VirtualAllocs each
-        // method's code page; no .dll module owns the address). The
-        // pre-fix code path threaded this through into
-        // `aobscanmodule(name, , pattern)`, which never matches.
+        // Mono JIT: ModuleName empty (JIT VirtualAllocs code pages; no
+        // .dll module owns the address). Two fix iterations:
+        //  - First fix (commit 90...): emit aobscan() instead of
+        //    aobscanmodule(name, , ...). Worked for unique patterns
+        //    but failed for multi-instance JIT (BongoCat live smoke).
+        //  - Second fix (this commit): switch entire Mono path to
+        //    bridge-call AA via registerMethodSymbol — DLL-side
+        //    mono_compile_method is overload-precise.
         ModuleName       = "",
         Address          = "0x0000018C5C470E30",
         ModuleOffset     = "0x0000000000000000",
@@ -76,55 +81,71 @@ public class AobAaScriptGeneratorTests
     }
 
     [Fact]
-    public void Build_MonoJitOverload_UsesAobscan_NotAobscanmodule()
+    public void Build_MonoJitOverload_UsesBridgeCall_NotAobscan()
     {
-        // Phase 22f live-smoke regression. Surfaced 2026-05-12 against
-        // BongoCat (Mono / PID 40700) — the generated script used
-        // `aobscanmodule(name, , pattern)` (empty module) and CE
-        // silently failed every scan.
+        // Phase 22f live-smoke regression (second iteration). Surfaced
+        // 2026-05-12 against BongoCat. First fix replaced
+        // `aobscanmodule(name, , pattern)` with `aobscan(name, pattern)`
+        // — worked for unique patterns but failed for multi-instance
+        // JIT (Mono routinely compiles the same source method N times
+        // with identical prologues). Real fix: switch the entire Mono
+        // path to a bridge-call AA — DLL's mono_compile_method is
+        // overload-precise.
         string s = AobAaScriptGenerator.Build(new[] { MonoJitOverload() });
 
-        // Mono JIT → must NOT have an empty-module aobscanmodule.
-        Assert.DoesNotContain("aobscanmodule(Mathf_Abs_int32, , ", s);
-        Assert.DoesNotContain("aobscanmodule(Mathf_Abs_int32, ,", s);
+        // Mono JIT path must NOT emit ANY aobscan/aobscanmodule for the
+        // overload — those are inherently unstable for JIT'd code.
+        Assert.DoesNotContain("aobscan(Mathf_Abs_int32",       s);
+        Assert.DoesNotContain("aobscanmodule(Mathf_Abs_int32", s);
 
-        // Should use the whole-process aobscan form instead.
-        Assert.Contains("aobscan(Mathf_Abs_int32, 55 48 8B EC", s);
-        Assert.Contains("registersymbol(Mathf_Abs_int32)", s);
+        // Must call the bridge with the canonical arg order:
+        //   registerMethodSymbol(symName, asm, ns, cls, method, sigFilter)
+        Assert.Contains(
+            "registerMethodSymbol('Mathf_Abs_int32', 'UnityEngine.CoreModule', 'UnityEngine', 'Mathf', 'Abs', '(System.Int32)')",
+            s);
 
-        // Trailing comment annotates "Mono JIT" so a developer reading
-        // the script doesn't think module info is missing — it
-        // genuinely doesn't exist for JIT methods.
-        Assert.Contains("Mono JIT", s);
+        // Bridge-loaded guard required — without the bridge,
+        // registerMethodSymbol is undefined and the entry would
+        // silently no-op (worse: misleading "OK" status from CE).
+        Assert.Contains("if not _G.discrete_bridgeLoaded then", s);
+        Assert.Contains("Load Discrete Bridge", s);
+
+        // Trailing comment annotates "Mono JIT — resolved via bridge".
+        Assert.Contains("Mono JIT — resolved via bridge", s);
         // And NOT the misleading "(+0x000…)" form.
         Assert.DoesNotContain("(+0x", s);
     }
 
     [Fact]
-    public void Build_MonoJitOverload_DisableUnregistersSymbol()
+    public void Build_MonoJitOverload_DisableUnregistersSymbolViaLua()
     {
-        // [DISABLE] block must still unregister the symbol regardless
-        // of which scan form was used in [ENABLE].
+        // [DISABLE] for bridge-registered symbols uses Lua's
+        // unregisterSymbol (the symbol was set via registerSymbol from
+        // the bridge, not via {$asm} aobscanmodule). pcall guards
+        // against the case where the symbol was never registered (e.g.
+        // [ENABLE] aborted on the bridge-loaded guard).
         string s = AobAaScriptGenerator.Build(new[] { MonoJitOverload() });
 
         Assert.Contains("[DISABLE]", s);
         int disableIdx = s.IndexOf("[DISABLE]", StringComparison.Ordinal);
         string disableBlock = s.Substring(disableIdx);
-        Assert.Contains("unregistersymbol(Mathf_Abs_int32)", disableBlock);
+        Assert.Contains("pcall(unregisterSymbol, 'Mathf_Abs_int32')", disableBlock);
+        // The {$asm} unregistersymbol() directive is for AOB path only.
+        Assert.DoesNotContain("unregistersymbol(Mathf_Abs_int32)", disableBlock);
     }
 
     [Fact]
-    public void Build_MixedBatch_PerOverloadModuleDecision()
+    public void Build_MixedBatch_IL2cppKeepsAobMonoUsesBridge()
     {
         // Realistic batch: one IL2CPP + one Mono-style overload (this
         // doesn't happen in practice on a single-backend target, but
-        // pins that the per-overload branching is per-overload, not a
-        // generator-wide flag).
+        // pins that the per-overload branching is per-overload).
         var monoVariant = new AaScriptOverload
         {
             MethodName       = "Sign",
             ClassName        = "Mathf",
             Namespace        = "UnityEngine",
+            Assembly         = "UnityEngine.CoreModule",
             HumanSuffix      = "int32_2",
             Signature        = "(System.Int32)",
             Pattern          = "55 48 8B EC 48 83 EC 30 48 89 75 F8 48 8B F1 85 F6",
@@ -135,8 +156,15 @@ public class AobAaScriptGeneratorTests
         };
         string s = AobAaScriptGenerator.Build(new[] { Il2cppOverload(), monoVariant });
 
+        // IL2CPP overload keeps the AOB form.
         Assert.Contains("aobscanmodule(Mathf_Abs_int32, GameAssembly.dll,", s);
-        Assert.Contains("aobscan(Mathf_Sign_int32_2, 55 48 8B EC", s);
+        // Mono overload uses the bridge call.
+        Assert.Contains(
+            "registerMethodSymbol('Mathf_Sign_int32_2', 'UnityEngine.CoreModule', 'UnityEngine', 'Mathf', 'Sign', '(System.Int32)')",
+            s);
+        // No accidental aobscan on the Mono one.
+        Assert.DoesNotContain("aobscan(Mathf_Sign_int32_2",       s);
+        Assert.DoesNotContain("aobscanmodule(Mathf_Sign_int32_2", s);
     }
 
     [Fact]

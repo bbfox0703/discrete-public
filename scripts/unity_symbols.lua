@@ -328,5 +328,85 @@ function registerMethodOverloads(assembly, ns, name, method, opts)
     return registered
 end
 
+--- Phase 22 follow-up: register ONE specific overload under a caller-
+--- chosen short symbol name. Same DLL path as registerMethodOverloads
+--- (findMethodInstances → mono_compile_method server-side / AOT
+--- pointer for IL2CPP) but trims the result to the first match
+--- against `sigFilter` and uses the caller's name verbatim instead of
+--- the long Unity:Asm:Ns.Cls.m_Method__suffix shape.
+---
+--- Designed as the runtime target for AA scripts produced by
+--- Discrete's UI right-click "Create AA in CE" / "Send AA script to
+--- CE Table" when the backend is Mono (no module → AOB scan would be
+--- unstable across the JIT's multiple instantiations of the same
+--- source method; calling back through the DLL is server-authoritative
+--- and overload-precise).
+---
+--- @param symbolName string  CE symbol name to register under (e.g. "Mathf_Abs_int32").
+--- @param assembly   string  Assembly name (e.g. "UnityEngine.CoreModule").
+--- @param ns         string  Namespace ("" if global).
+--- @param className  string  Class name.
+--- @param methodName string  Method name.
+--- @param sigFilter  string|nil  Optional substring of the rendered signature to
+---                              disambiguate overloads (e.g. "(System.Int32)"
+---                              vs "(System.Single)"). Pass nil/empty when
+---                              there's only one overload — first compiled
+---                              match wins.
+--- @return boolean  true on success (symbol registered to a valid JIT address).
+function registerMethodSymbol(symbolName, assembly, ns, className, methodName, sigFilter)
+    if not symbolName or symbolName == "" then
+        err("registerMethodSymbol: symbolName required"); return false
+    end
+    local args = {
+        assembly  = assembly,
+        namespace = ns or "",
+        name      = className,
+        method    = methodName,
+    }
+    if sigFilter and sigFilter ~= "" then args.signatureMatch = sigFilter end
+
+    local resp = rpc("findMethodInstances", args)
+    if resp.error or (resp.result and resp.result.error) then
+        err("findMethodInstances failed for %s: %s",
+            symbolName, resp.error or resp.result.error)
+        return false
+    end
+    local r = resp.result
+    if r == nil or r.matches == nil or #r.matches == 0 then
+        err("%s: no overload matched (sigFilter=%s)", symbolName, tostring(sigFilter or "—"))
+        return false
+    end
+
+    -- Pick the first compiled overload. Multiple matches with a non-
+    -- empty sigFilter usually means the filter wasn't unique — log
+    -- both addresses so the user can tighten it. With nil filter,
+    -- the first match is by design.
+    if #r.matches > 1 and sigFilter and sigFilter ~= "" then
+        warn("%s: sigFilter '%s' matched %d overloads; using first.",
+            symbolName, sigFilter, #r.matches)
+        for i, m in ipairs(r.matches) do
+            warn("  [%d] %s%s  @ %s", i, methodName,
+                m.signature or "", tostring(m.address))
+        end
+    end
+
+    for _, m in ipairs(r.matches) do
+        local addr = m.address
+        if m.compiled and addr and addr ~= "0x0" and addr ~= "" then
+            local addrInt = tonumber(addr:gsub("^0x", ""), 16)
+            if addrInt and addrInt ~= 0 then
+                registerSymbol(symbolName, addrInt, true)
+                log("%s = %X  // %s%s", symbolName, addrInt,
+                    methodName, m.signature or "")
+                return true
+            end
+        end
+    end
+
+    err("%s: all matched overloads were uncompiled/abstract", symbolName)
+    return false
+end
+
 log("Loaded. registerClassSymbols(asm, ns, cls) — bulk class symbols.")
 log("        registerMethodOverloads(asm, ns, cls, method [, {sigFilter=...}]) — overload-disambiguated symbols.")
+log("        registerMethodSymbol(symName, asm, ns, cls, method [, sigFilter]) — single overload under chosen short name.")
