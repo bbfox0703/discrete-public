@@ -1058,10 +1058,22 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit);
+        Memory::ScanStats stats{};
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, &stats);
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
+        }
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "findInstances(Mono) class=%p vtable=%p matches=%zu "
+                "regions total=%zu scanned=%zu skipImage=%zu skipStack=%zu bytes=%zu stacks=%zu",
+                static_cast<const void*>(k), static_cast<const void*>(vtable),
+                matches.size(), stats.regionsTotal, stats.regionsScanned,
+                stats.regionsSkipImage, stats.regionsSkipStack,
+                stats.bytesScanned, stats.threadStacks);
+            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
         return json{
             // `class_ptr` mirrors the IL2CPP findInstances shape so cross-backend
@@ -1075,6 +1087,14 @@ void RegisterCoreHandlers() {
             {"count",    arr.size()},
             {"limit",    limit},
             {"matches",  std::move(arr)},
+            {"scan_stats", json{
+                {"regions_total",      stats.regionsTotal},
+                {"regions_scanned",    stats.regionsScanned},
+                {"regions_skip_image", stats.regionsSkipImage},
+                {"regions_skip_stack", stats.regionsSkipStack},
+                {"bytes_scanned",      stats.bytesScanned},
+                {"thread_stacks",      stats.threadStacks},
+            }},
         };
     });
 
@@ -2152,16 +2172,36 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit);
+        Memory::ScanStats stats{};
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit, &stats);
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
+        }
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "findInstances(IL2CPP) class=%p matches=%zu "
+                "regions total=%zu scanned=%zu skipImage=%zu skipStack=%zu bytes=%zu stacks=%zu",
+                static_cast<const void*>(k), matches.size(),
+                stats.regionsTotal, stats.regionsScanned,
+                stats.regionsSkipImage, stats.regionsSkipStack,
+                stats.bytesScanned, stats.threadStacks);
+            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
         return json{
             {"class_ptr", formatHex(reinterpret_cast<std::uintptr_t>(k))},
             {"count",     arr.size()},
             {"limit",     limit},
             {"matches",   std::move(arr)},
+            {"scan_stats", json{
+                {"regions_total",      stats.regionsTotal},
+                {"regions_scanned",    stats.regionsScanned},
+                {"regions_skip_image", stats.regionsSkipImage},
+                {"regions_skip_stack", stats.regionsSkipStack},
+                {"bytes_scanned",      stats.bytesScanned},
+                {"thread_stacks",      stats.threadStacks},
+            }},
         };
     });
 

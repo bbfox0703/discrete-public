@@ -64,6 +64,17 @@ try {
     Write-Host ("$headerLabel : {0}" -f $headerVal) -ForegroundColor Cyan
     Write-Host ("count       : {0}  (limit {1}, scan took {2:N0} ms)" -f `
         $r.count, $r.limit, $elapsed)
+
+    # Phase 23 — heap-convergence telemetry. Confirms MEM_IMAGE + thread-stack
+    # filtering kicked in. `regions_skip_image` should be non-zero (game DLLs
+    # always have writable .data sections); `regions_skip_stack` >= 1 per
+    # active managed thread.
+    if ($r.scan_stats) {
+        $s = $r.scan_stats
+        Write-Host ('scan_stats  : regions total={0} scanned={1} skipImage={2} skipStack={3} bytes={4:N0} stacks={5}' -f `
+            $s.regions_total, $s.regions_scanned, $s.regions_skip_image, `
+            $s.regions_skip_stack, $s.bytes_scanned, $s.thread_stacks) -ForegroundColor DarkGray
+    }
     Write-Host ''
 
     $shown = [Math]::Min($r.count, 20)

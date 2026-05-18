@@ -378,30 +378,12 @@ end
 -- Heap-scan via findInstances. Fastest entry point — no callMethod cost
 -- unless decodeNames is set. Returns up to opts.limit GameObjects.
 --
--- WARNING: findInstances can produce false positives (Phase 9 caveat —
--- the same Il2CppClass*/MonoVTable* can appear in metadata tables too).
--- For Scene-explorer use, opts.decodeNames=true filters most of those out
--- because non-GameObject false positives won't have a decodable name.
-
---- DEPRECATED — kept only for users who explicitly want the old
---- findInstances-based path. The two-layer validator below is
---- structurally insufficient for `UnityEngine.GameObject` because
---- IL2CPP metadata structures (RGCTX cache entries) legitimately
---- store class pointers at +0x00 AND +0x18, with garbage at +0x10
---- that happens to fall within "plausible user-space pointer" range.
---- See lessons-learned.md "findInstances heap scan picks up..." for
---- the full forensic. Use `getAllGameObjects` (which now goes through
---- `Object.FindObjectsOfTypeAll`) instead.
-local function _isValidInstance(addr, classPtr)
-    if classPtr == 0 then return true end
-    if readPointer == nil then return true end
-    local ok1, typePtr = pcall(readPointer, addr)
-    if not ok1 or typePtr ~= classPtr then return false end
-    local ok2, cachedPtr = pcall(readPointer, addr + 0x10)
-    if not ok2 or cachedPtr == nil then return false end
-    if cachedPtr < 0x10000 or cachedPtr > 0x7FFFFFFFFFFF then return false end
-    return true
-end
+-- The Phase 23 DLL-side scan now restricts the search to non-MEM_IMAGE
+-- regions + excludes thread-stack ranges, so IL2CPP RGCTX cache entries
+-- and stale stack-local `T*` no longer leak through as false positives.
+-- Metadata-side false positives are still possible (e.g. a `Type` reflection
+-- record whose first qword points at the same vtable); `opts.decodeNames=true`
+-- filters those because non-GameObject matches won't have a decodable name.
 
 --- Resolve a managed Type instance for a fully-qualified type name.
 --- Used as the entry point for `Object.FindObjectsOfTypeAll(Type)`

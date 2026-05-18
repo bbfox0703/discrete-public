@@ -48,16 +48,53 @@ struct CommittedRegion {
     const std::uint8_t* base;
     std::size_t         size;
     unsigned long       protect;   // PAGE_* protection mask
+    unsigned long       type;      // MEM_IMAGE / MEM_MAPPED / MEM_PRIVATE
 };
 
 // Enumerates committed, readable, non-guarded regions in the host process.
 std::vector<CommittedRegion> EnumerateCommittedRegions();
 
-// Scans every committed RW region for pointer-sized values equal to `target`,
-// at 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an
+// One thread's stack range. `low` = StackLimit (current end of committed stack);
+// `high` = StackBase (top of reserved stack). [low, high) covers everything that
+// could plausibly be touched by the thread.
+struct ThreadStackRange {
+    const std::uint8_t* low;
+    const std::uint8_t* high;
+};
+
+// Enumerates stack ranges for every live thread in the current process. Used to
+// exclude stack residue from heap scans (findInstances false positives — stale
+// `GameObject*` locals in old frames happen to pass the first-qword check).
+std::vector<ThreadStackRange> CollectThreadStackRanges();
+
+// Telemetry for one ScanForPointer invocation (helps debug "where did the false
+// positives go" without rebuilding with logging). Populated by ScanForPointer
+// when caller passes a non-null pointer.
+struct ScanStats {
+    std::size_t regionsTotal     = 0;  // all committed RW regions enumerated
+    std::size_t regionsScanned   = 0;  // regions actually scanned (after filters)
+    std::size_t regionsSkipImage = 0;  // skipped because mbi.Type == MEM_IMAGE
+    std::size_t regionsSkipStack = 0;  // skipped because overlaps a thread stack
+    std::size_t bytesScanned     = 0;
+    std::size_t threadStacks     = 0;  // count of stack ranges collected
+};
+
+// Scans heap-like RW memory for pointer-sized values equal to `target`, at
+// 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an
 // object is its Il2CppClass*; in Mono it's a MonoVTable*. Returns at most
 // `limit` matches (use SIZE_MAX for unbounded).
+//
+// **Filters applied (Phase 23 — managed-heap convergence):**
+//   • Skip `MEM_IMAGE` regions (DLL/EXE `.data` / `.bss` — these hold IL2CPP
+//     RGCTX cache entries and Mono's class/vtable tables, which legitimately
+//     store class-pointer values at +0x00 and would otherwise be false-positive
+//     instance matches).
+//   • Skip regions overlapping any live thread's stack (stale local-variable
+//     pointers from old frames survive until overwritten by deeper calls).
+//
+// Passing a non-null `stats` populates per-call telemetry.
 std::vector<const void*> ScanForPointer(std::uintptr_t target,
-                                        std::size_t   limit = 256);
+                                        std::size_t   limit = 256,
+                                        ScanStats*    stats = nullptr);
 
 }  // namespace UnityCEDumper::Memory

@@ -565,6 +565,25 @@ The DLL-side proper fix (restrict `findInstances` to the IL2CPP
 managed heap range only — queryable via libgc / `il2cpp_gc_get_heap_section_count`)
 is backlog'd.
 
+**Resolved 2026-05-18 (Phase 23 / build #301)** — `ScanForPointer` now
+filters out `MEM_IMAGE` regions (all DLL `.data` / `.bss` sections,
+including IL2CPP RGCTX cache and Mono class-table memory) and every
+live thread's stack range (collected via `NtQueryInformationThread` +
+TEB walk). The "managed heap range" framing turned out to be a misdiagnosis
+of the API surface: `il2cpp_gc_get_heap_section_count` doesn't exist
+in any Unity version we surveyed (2017.1 → 6000.0); the closest public
+API is `il2cpp_gc_foreach_heap` (2019.3+, IL2CPP only). The negative
+filter (exclude module + stack) is runtime-agnostic, works on Mono +
+all IL2CPP versions, and eliminates both documented false-positive
+sources (RGCTX entries are in `MEM_IMAGE`, stack residue is in stack
+ranges). Live smoke on BongoCat (Mono): 1194 regions → 571 scanned;
+`UnityEngine.Mathf` (static class, expected 0 instances) found 3
+matches (down from order-of-magnitude higher pre-fix counts; remaining
+3 are reflection records, not stack/module residue). Per-call telemetry
+exposed via `scan_stats` in the wire response + `scan` log category
+so future regressions surface immediately. Deprecated Lua-side
+`_isValidInstance` removed from `scripts/unity_scene.lua`.
+
 **Even the two-layer Lua-side filter is structurally insufficient for
 hot Unity classes.** Pass 3 of the SaGa F2R live test (PID 41748,
 equipment screen, 2026-05-08) confirmed: 622 of 1024 candidates
