@@ -1,10 +1,10 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (clean — pushed up to commit `bcd378d`)
-**Last commit**: `bcd378d feat(ui): Phase 22e — per-feature Send-to-CE-Table entries`
-**Build**: 272 (Publish / AOT; DiscreteUI.exe 38.6 MB; 0/0 trim+AOT warnings)
-**Tests**: 148/148 pass (was 57; +91 across Phase 22 — `AobMakerBridge` 11, `BridgeLuaResources` 14, `BootstrapAaScriptGenerator` 11, `BridgeInjector` 7, `CallMethodAaScriptGenerator` 22, `AddressLookupAaScriptGenerator` 26)
-**Current state**: **Phase 22 (Live CT Population via AOBMaker) shipped across 22a–22f, 6 commits 2026-05-12.** Tools → "Inject Discrete Bridge into CE Table" + per-feature Send-to-CE buttons on MethodCallWindow + AddressLookup live; Methods grid Send-to-CE was already shipping from Phase 18c. Three new Core generators (`BootstrapAaScriptGenerator`, `CallMethodAaScriptGenerator`, `AddressLookupAaScriptGenerator`) + one orchestrator (`BridgeInjector`) + extended `AobMakerBridge` with 4 new commands + 7 lua bridge files embedded as `<EmbeddedResource>` in Core. New docs: [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) (user journey + manual smoke checklist + troubleshooting). New tooling: [`tools/Test-BridgeInject.ps1`](../tools/Test-BridgeInject.ps1) (PowerShell wire-only smoke that drives the AOBMaker pipe directly — useful for plugin updates without launching a Unity game). **Live click-through smoke against CE 7.6 + AOBMaker plugin + a Unity game still pending** — captured in the integration doc's checklist. Carry-forward from previous session: All shipped phases verified live + 4 backlog cosmetics ✅ live-verified 2026-05-08 against build #251 across four targets (Silksong / SaGa F2R / FF VI / R-Type) + Inspector classifier & Browser filter-highlight polish landed in build #257. **Phase 20a (Scene/GameObject explorer Lua bridge)** is parked at "FindObjectsOfType(Type, bool) recipe untested" after surfacing four cliffs (envelope unwrap, main-thread marshaling, findInstances false positives, IL2CPP code stripping) — see open follow-ups.
+**Branch**: `dev` (clean — pushed up to commit `9919b56`; will be merged to `main` in this hand-off commit)
+**Last commit**: `9919b56 fix(bridge): Phase 22c — bootstrap smoke via pipe handshake, not executeCodeEx`
+**Build**: 285 (Publish / AOT; DiscreteUI.exe 38.6 MB; 0/0 trim+AOT warnings)
+**Tests**: 163/163 pass (was 57; +106 across Phase 22 — `AobMakerBridge` 11, `BridgeLuaResources` 14, `BootstrapAaScriptGenerator` 12, `BridgeInjector` 7, `CallMethodAaScriptGenerator` 22, `AddressLookupAaScriptGenerator` 26, `AobAaScriptGenerator` 5, plus +3 regression bars across the 3 AA generators)
+**Current state**: **Phase 22 shipped 22a–22f + live-smoke session 2026-05-18 caught + fixed 6 P0/P1 bugs mid-flight.** Code surface (Tools menu, Send-to-CE buttons, bridge inject pipeline) all green; bridge files land in CE cleanly; bootstrap loads; Mono JIT method resolution works end-to-end. Live smoke completed Steps 1-8 against BongoCat (Mono, PID rotated 23484/40700/68344 as user restarted between iterations); **Steps 9-11 deferred to a fresh session** (MethodCall→CE, AddressLookup→CE, save/reopen persistence). The 6 bugs were exactly the kind of "would-fire-on-first-user-run" silent-failure modes that the unit test suite couldn't reach — each is now permanently locked out by a new regression test. Carry-forward from previous session: All earlier shipped phases verified live + 4 backlog cosmetics ✅ live-verified 2026-05-08 against build #251 (Silksong / SaGa F2R / FF VI / R-Type) + Inspector classifier & Browser filter-highlight polish landed in build #257. **Phase 20a (Scene/GameObject explorer Lua bridge)** is parked at "FindObjectsOfType(Type, bool) recipe untested".
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
 
@@ -30,7 +30,65 @@
 
 ---
 
-## What landed in this session — Phase 22 (Live CT Population via AOBMaker), end-to-end
+## What landed in this session — Phase 22f live smoke (2026-05-18) caught + fixed 6 P0/P1 bugs
+
+**Setup**: clean Cheat Engine 7.6 + AOBMaker plugin loaded + empty CT + DiscreteUI build #279 + BongoCat (Mono). Walked through [`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md).
+
+**Outcome**: Steps 1-8 of the 11-step checklist completed green after 6 fix iterations. Each iteration surfaced a real production-blocker that the pre-existing unit test suite couldn't catch (live-runtime / multi-process / Lua-parse / Windows-pipe-kernel concerns). Final session ended at the boundary of Steps 9-11 (MethodCall→CE, AddressLookup→CE, save/reopen).
+
+### Bugs caught + fixed (in surfacing order)
+
+| # | Bug | Severity | Commit | Fix |
+|---|---|---|---|---|
+| 1 | `unity_scene.lua` shipped with CRLF in working tree → AOBMaker plugin's `Stream.Size` verify mismatched the pre-LF-normalisation byte count → bridge inject **aborts at file 7/8** | P1 silent-fail | [`571ddf0`](https://github.com/) | `.gitattributes` enforces `*.lua text eol=lf` repo-wide; working copy normalised; `Read_EmbeddedContent_IsLfOnly_NoCrlf` [Theory] × 7 + tightened byte-for-byte round-trip test (was 5% tolerance, now exact). |
+| 2 | `AobAaScriptGenerator` emitted `aobscanmodule(name, , pattern)` for Mono (empty module from `getMethodAobPattern`). CE accepts the syntax; scan **never matches**; symbol stays unresolved. | P1 silent-fail | [`bcc2ff6`](https://github.com/) | Per-overload: empty `ModuleName` → fall back to `aobscan(name, pattern)` whole-process scan + 5 regression tests in new `AobAaScriptGeneratorTests`. (This fix worked for unique patterns but unblocked bug #4 below.) |
+| 3 | Bootstrap AA had `print('… CE''s symbolhandler …')` (C#-style apostrophe doubling). Lua reads `''` as close-then-open-string → `')' expected near "s symbolhandler…"` → **entire chunk fails to parse** → bridge never loads. | P0 silent-fail (the worst — "OK" status from CE, no bridge state, one cryptic error) | [`a169c1f`](https://github.com/) | Lua `\'` escape + `\w''\w` regex regression bar in all 3 generators (catches the bug shape — `letter''letter` — without false-positiving on legitimate empty-string `''` between commas). |
+| 4 | Mono JIT routinely emits **multiple instantiations** of the same source method (different generic params, optimization tiers); their prologues are byte-identical. `aobscan(pattern)` returned 3 hits for `Mathf.Abs(int)` — CE picked the first which was wrong. | P1 wrong-answer | [`253402a`](https://github.com/) | Architectural fix: Mono JIT path no longer AOB-scans at all. New `registerMethodSymbol(symName, asm, ns, cls, method, sigFilter)` in `unity_symbols.lua` calls `findMethodInstances` RPC (DLL-side `mono_compile_method` — overload-precise). AA `[ENABLE]` emits `{$lua}` block with the bridge call instead of `{$asm} aobscan(...)`. IL2CPP path (AOT addresses in `GameAssembly.dll`) unchanged — keeps fast `aobscanmodule` form. |
+| 5 | DLL pipe was `nMaxInstances=1` (Phase 11 design). Phase 22's "DiscreteUI persistent + bridge bursts" workflow contends for the single slot → bridge `io.open(PIPE)` returns ERROR_PIPE_BUSY (`"Invalid argument"` via Lua CRT) → **AA scripts can never reach the DLL** while DiscreteUI is connected. | P0 silent-fail | [`8075675`](https://github.com/) | `nMaxInstances=4` + detached worker thread per accepted client. Main loop returns to `CreateNamedPipeW` immediately; concurrent DiscreteUI + bridge work cleanly. Handlers already read-mostly (Mono/IL2CPP runtime is re-entrant); per-handler mutex deferred until a real race surfaces under load. |
+| 6 | Bootstrap smoke called `U.callDLL('UnityDumper_GetBuildNumber','uint32')` via CE `executeCodeEx` (remote thread in target). Returns nil even when DLL + pipe + every other pipe-RPC works. Printed misleading "DLL not yet reachable" on every successful bridge load. | P2 false-negative | [`9919b56`](https://github.com/) | Replaced with inline pipe-`handshake` RPC (same path the bridge's `registerMethodSymbol` / `callUnityMethod` use). If those work, smoke passes. New `Build_SmokeChecksDllViaPipeHandshake` test pins the new shape + explicitly forbids the old `executeCodeEx` / `U.callDLL` / `UnityDumper_GetBuildNumber` substrings. |
+
+### What's verified live (Steps 1-8 of the manual smoke checklist)
+
+- ✅ **Step 1**: Clean Publish build (build #285, AOT 0/0 warnings, `DiscreteUI.exe` 38.6 MB)
+- ✅ **Step 2**: CE 7.6 + AOBMaker plugin + empty CT — `AOBMaker: connected` green chip in DiscreteUI immediately
+- ✅ **Step 3**: DiscreteUI launches, connectivity dot green
+- ✅ **Step 4**: Tools → "Inject Discrete Bridge into CE Table" — 8/8 wire calls (after CRLF fix), ~120 ms total
+- ✅ **Step 5**: CE `Table → Show table files` lists all 7 `unity_*.lua` files with expected byte sizes
+- ✅ **Step 6**: Enable "Load Discrete Bridge" → CE Lua console prints all 7 module banners (after apostrophe-escape fix) → ready message via pipe handshake (after smoke replacement)
+- ✅ **Step 7**: DiscreteUI Pick & Inject BongoCat → connected → build matches DLL build number
+- ✅ **Step 8**: Methods grid right-click `UnityEngine.Mathf.Abs(System.Int32)` → "Create AA in CE" → new entry with `registerMethodSymbol(...)` form → enable → `[discrete] Mathf_Abs_int = 236D471F080` — single resolved address, no AOB ambiguity (after Mono-bridge-resolve + concurrent-pipe fixes)
+
+### What's deferred to the next session
+
+- ⏳ **Step 9** — MethodCallWindow → "Send to CE Table…" → wraps `callUnityMethod(asm, ns, cls, method, args, opts)` into AA → enable → expect `prettyPrint` output. Target: `Mathf.Abs(-7) → 7`.
+- ⏳ **Step 10** — Address Lookup → right-click an Inspector field → "Find what's at this address" → AddressLookup tab → "Send to CE Table…" → expect parent AA + 1 child memory record showing the live field value in CE's grid.
+- ⏳ **Step 11** — `File → Save As` → close CE → reopen → re-enable bridge + per-feature entries → verify all entries survive the save/reopen cycle.
+
+Recovery state for the next session:
+- All 6 fix commits on `dev` + merged to `main` (this hand-off commit)
+- BongoCat may have been closed by user after the smoke; if so: relaunch → DiscreteUI Pick & Inject before any CE work
+- CE may have been closed; if so: relaunch → reopen the in-progress smoke CT (or start fresh and re-run Tools→Inject Discrete Bridge)
+- `dist/` is at build #285 — both DLLs + DiscreteUI.exe + 7 `*.lua` files all current
+
+### Cumulative across Phase 22 (a→f + live-smoke fixes)
+
+- **13 production commits** on `dev` (22a-22f + 6 live-smoke bug fixes)
+- **+106 xUnit cases** (57 → 163, all pass)
+- **6 production-blocker bugs** caught by the live smoke (would have hit on first user run on every machine — esp. bugs #1, #3, #4, #5)
+- New Core types: `BridgeInjector`, `BridgeLuaResources`, `BootstrapAaScriptGenerator`, `CallMethodAaScriptGenerator`, `AddressLookupAaScriptGenerator`, `AaScriptChildRecord`, `CeValueType`, plus `Assembly` field added to `AaScriptOverload`
+- Bridge methods added to `AobMakerBridge`: +4 (`InjectTableFile`, `CreateMemoryRecord`, `CreateAAScriptWithRecords`, `CheckAvailability`) + `AvailabilityChanged` event
+- Bridge Lua additions: new `registerMethodSymbol(symName, asm, ns, cls, method, sigFilter)` in `unity_symbols.lua` — single-overload bridge-resolve (Phase 22f follow-up to `registerMethodOverloads`)
+- DLL changes: `nMaxInstances=1 → 4` + thread-per-client in `PipeServer.cpp`
+- UI surface added: Tools menu + 2 Send-to-CE buttons + AOBMaker connectivity dot + bridge-inject status banner
+- New docs: `ce-bridge-integration.md`, lessons-learned additions for AOBMaker + executeCodeEx + concurrent-pipe + CRLF
+- New smoke: `tools/Test-BridgeInject.ps1` (3 modes: PingOnly / default minimal / Full production replay)
+- Build: #261 → #285 (24 build increments across the phase)
+
+**Phase 22 outcome**: the AOBMaker-based bridge install + per-feature push surface is production-ready against Mono. IL2CPP path is structurally unchanged from Phase 18c (AOB scan against `GameAssembly.dll` — known good). Steps 9-11 close the remaining smoke; the architectural correctness has been demonstrated end-to-end.
+
+---
+
+## What landed in the prior session — Phase 22 (Live CT Population via AOBMaker), end-to-end
 
 Six commits across one session. The original Phase 22 plan ("offline `.CT` builder with Ascii85 + XML serializer + cart UI") got scrapped on day 1 after auditing AOBMaker's CE plugin (which already exposes `InjectTableFile` + 4 sibling commands that mutate a live, currently-open CT) and UE5CEDumper's `<EmbeddedResource>` pattern. New approach: DiscreteUI fires AOBMaker pipe commands; user saves via CE File→Save. Saved ~1.5 days from the original 3.5-day estimate.
 
@@ -331,7 +389,7 @@ Pick whichever fits the slot of time you have. Nothing on this list is blocking.
 
 | Option | Effort | Why pick this |
 |---|---|---|
-| **Phase 22 live-smoke against CE 7.6 + AOBMaker + a Unity game** | ~30 min | Closes the only remaining open item on Phase 22. Recipe is in [`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md). Run end-to-end, capture any failure, file a follow-up. After it passes once, the entire Phase 22 surface is verified. |
+| **Phase 22 live-smoke — finish Steps 9-11** | ~20 min | Steps 1-8 verified live 2026-05-18 against BongoCat (Mono); 6 P0/P1 bugs were caught + fixed mid-session. Steps 9-11 (MethodCall→CE / AddressLookup→CE / save+reopen) remain. Recipe: launch BongoCat → DiscreteUI Pick & Inject → CE+AOBMaker → Tools→Inject Discrete Bridge → enable Load Discrete Bridge → continue from §"Phase E" in [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) — specifically the 3 remaining table rows. |
 | **`findInstances` heap-scan false positives — restrict to managed heap range** | ~½ day | Highest CP-value of the open ½-day items. Heap scan today walks every RW page → matches stale stack-frame `GameObject*` locals AND IL2CPP RGCTX cache entries (legit class-pointer storage). Lua-side workaround (`_isValidInstance` two-layer filter in `unity_scene.lua`) is DEPRECATED. Proper fix: restrict scan to the IL2CPP managed heap via `il2cpp_gc_get_heap_section_count` / Mono `mono_gc_*` equivalents. Also unblocks Phase 20-HEAP. Affects Phase 20a / `whatIsAt` / every Inspector instance pick. |
 | **Phase 20a-2 — verify FindObjectsOfType recipe** | ~30 min | Quick verification of the 2-arg recipe pivot at session end 2026-05-08. If it works, Phase 20a closes; if not, opens Phase 20-HEAP (DLL-side libgc walker). |
 | **Phase 21 — field write-back** | ~½ day | Real capability gap: today the Inspector only reads. New wire RPC + SEH-protected write + editable UI cells. Full design in [plan.md §Phase 21](plan.md#phase-21--inspector-field-write-back). |
