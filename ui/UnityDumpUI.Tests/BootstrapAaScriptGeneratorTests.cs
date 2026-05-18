@@ -174,4 +174,27 @@ public class BootstrapAaScriptGeneratorTests
         // and so users can recognise the entry across CT versions.
         Assert.Equal("Load Discrete Bridge", BootstrapAaScriptGenerator.EntryDescription);
     }
+
+    [Fact]
+    public void Build_HasNo_AdjacentSingleQuotes_LuaSyntaxTrap()
+    {
+        // Phase 22f live smoke regression (2026-05-12): the soft-fail
+        // print on the symbolhandler-lag path was written as
+        //   print('[Discrete]   wait for CE''s symbolhandler ...')
+        // — C#-style apostrophe doubling. Lua reads `''` as
+        //   "close string, immediately open new string"
+        // and bails with `')' expected near "s symbolhandler..."`,
+        // which fails the ENTIRE script parse, so the bridge never
+        // loads at all (Lua chunks are parse-then-execute — line-184
+        // syntax error means nothing executes).
+        //
+        // The bug shape is specifically `word''word` — `''` surrounded
+        // by alphanumerics, as in CE''s. A bare `''` substring can
+        // legitimately appear in generated scripts (empty namespace
+        // arg between commas, e.g. `, '', ` from CallMethod with no
+        // namespace) — those are valid empty Lua strings. The regex
+        // below threads that needle.
+        string script = BootstrapAaScriptGenerator.Build();
+        Assert.DoesNotMatch(@"\w''\w", script);
+    }
 }

@@ -181,7 +181,7 @@ if ok and type(build) == 'number' then
 else
   print('[Discrete] __ENTRY_DESCRIPTION__: lua loaded, but DLL not yet reachable.')
   print('[Discrete]   If you ran this before DiscreteUI injected the DLL,')
-  print('[Discrete]   wait for CE''s symbolhandler to finish scanning, then')
+  print('[Discrete]   wait for CE\'s symbolhandler to finish scanning, then')
   print('[Discrete]   disable + re-enable this entry.')
 end
 

@@ -203,4 +203,25 @@ public class AddressLookupAaScriptGeneratorTests
         Assert.Throws<ArgumentException>(() => AddressLookupAaScriptGenerator.Build(
             new AddressLookupRequest { Instance = "0x10", ClassName = "" }));
     }
+
+    [Fact]
+    public void Build_HasNo_AdjacentSingleQuotes_LuaSyntaxTrap()
+    {
+        // See BootstrapAaScriptGeneratorTests for the full story.
+        // Bug shape: `word''word` (apostrophe pair inside what was
+        // meant to be one string). Bare `''` is a legitimate empty
+        // Lua string in some contexts; the regex below threads the
+        // needle.
+        const string bugPattern = @"\w''\w";
+        var p = AddressLookupAaScriptGenerator.Build(BasicReq(field: new AddressLookupField
+        {
+            Name = "HP", Type = "System.Int32", Offset = 0x10, Size = 4,
+        }));
+        Assert.DoesNotMatch(bugPattern, p.ParentScript);
+        foreach (var child in p.ChildRecords)
+        {
+            Assert.DoesNotMatch(bugPattern, child.Description);
+            Assert.DoesNotMatch(bugPattern, child.Address);
+        }
+    }
 }

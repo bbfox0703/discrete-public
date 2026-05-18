@@ -196,4 +196,27 @@ public class CallMethodAaScriptGeneratorTests
         Assert.Throws<ArgumentException>(
             () => CallMethodAaScriptGenerator.Build("asm", "ns", "C", "", null, null, NoArgs()));
     }
+
+    [Fact]
+    public void Build_HasNo_AdjacentSingleQuotes_LuaSyntaxTrap()
+    {
+        // See BootstrapAaScriptGeneratorTests for full story. Bug
+        // shape: `word''word` (apostrophe pair inside what was meant
+        // to be one string). Bare `''` between commas / parens is a
+        // legitimate empty Lua string (e.g. empty namespace arg) and
+        // not a bug. Regex check threads the needle.
+        const string bugPattern = @"\w''\w";
+
+        string s1 = CallMethodAaScriptGenerator.Build(
+            "asm", "ns", "C", "M", null, null, NoArgs());
+        Assert.DoesNotMatch(bugPattern, s1);
+
+        string s2 = CallMethodAaScriptGenerator.Build(
+            "asm", "", "C", "M", null, null,
+            new[] { new CallMethodArg { TypeName = "System.String",
+                                        ValueText = "can't won't" } });
+        Assert.DoesNotMatch(bugPattern, s2);
+        // Sanity: the EscapeSq path did produce a `\'` form.
+        Assert.Contains(@"can\'t won\'t", s2);
+    }
 }
