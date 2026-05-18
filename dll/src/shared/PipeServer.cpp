@@ -10,6 +10,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <thread>  // Phase 22f: detached worker thread per client
 #include <thread>
 #include <vector>
 
@@ -168,33 +169,50 @@ void ServeClient(HANDLE pipe) {
     LogPipe("client disconnected");
 }
 
+// Phase 22f live-smoke follow-up (2026-05-12, build #284): bumped
+// from 1 to 4 concurrent clients. Phase 11 / 18d ran in
+// "either-bridge-or-DiscreteUI" mode where single-instance was safe
+// (and useful — prevented game-relaunch ghost-pipe confusion). Phase
+// 22's design is "DiscreteUI persistent + CE-Lua-bridge bursts",
+// which contend for the single slot — bridge io.open() returns
+// ERROR_PIPE_BUSY ("Invalid argument" via Lua's CRT translation) the
+// moment DiscreteUI is connected. The fix is twofold:
+//   1. nMaxInstances=kMaxPipeInstances so the kernel allows multiple
+//      live instances of the alive game's DLL.
+//   2. Each accepted client runs on a DETACHED worker thread so the
+//      main loop returns to CreateNamedPipeW immediately and the
+//      NEXT client's connect doesn't wait for the first client's
+//      session to end (could be hours for a held DiscreteUI).
+// Handlers are read-mostly (Mono / IL2CPP runtime walks, address
+// caches); concurrent invocations are tolerated — worst-case race is
+// a duplicate cache fill, not corruption. If a real data race shows
+// up under load we add a per-handler mutex; defensive design isn't
+// worth the complexity until a concrete scenario demands it.
+// Ghost-pipe trade-off (original concern): only relevant during
+// game-relaunch, and DiscreteUI's ConnectWithRetryAsync already
+// tolerates the transient "Pipe is broken" hits that path produces.
+constexpr DWORD kMaxPipeInstances = 4;
+
 void WorkerThread() {
     LogPipe("pipe server started");
     while (g_running.load()) {
-        // Single instance only. If we used PIPE_UNLIMITED_INSTANCES, each
-        // crashed/exited game would leave its own instance lingering in the
-        // kernel namespace until full process cleanup — accumulating across
-        // many test cycles. A new client connecting to the name then gets
-        // routed to whichever ghost instance the kernel finds first, the
-        // first IO fails with "Pipe is broken.", and the live game's instance
-        // is unreachable for tens of seconds. With nMaxInstances=1 the kernel
-        // refuses to create a second instance while any previous one still
-        // exists; CreateNamedPipeW returns ERROR_PIPE_BUSY and we retry below
-        // until the old one is fully released. The client always sees a
-        // single instance — the live one — so connect lands cleanly.
         HANDLE pipe = ::CreateNamedPipeW(
             MagicStrings::PipeName,
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1,                                                  // nMaxInstances
+            kMaxPipeInstances,                                  // nMaxInstances
             kPipeBufferSize, kPipeBufferSize, 0, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) {
             DWORD err = ::GetLastError();
-            // ERROR_PIPE_BUSY (231) and ERROR_ACCESS_DENIED (5) are the
-            // expected results when a previous game's instance hasn't been
-            // released yet — log once at info level, then keep retrying.
+            // ERROR_PIPE_BUSY (231) is the "all instance slots taken"
+            // case — should be rare with kMaxPipeInstances=4 but
+            // still possible if a ghost holds a slot during game
+            // relaunch. ERROR_ACCESS_DENIED (5) shows up under the
+            // same conditions on some Windows builds.
             LogPipe("CreateNamedPipeW failed: " + std::to_string(err)
-                    + (err == 231 ? " (ERROR_PIPE_BUSY — previous instance not yet released)" : ""));
+                    + (err == 231 ? " (ERROR_PIPE_BUSY — all "
+                                    + std::to_string(kMaxPipeInstances)
+                                    + " slots in use)" : ""));
             ::Sleep(500);
             continue;
         }
@@ -226,11 +244,28 @@ void WorkerThread() {
         }
 
         if (ready) {
-            ServeClient(pipe);
+            // Detach a worker thread per accepted client. ServeClient
+            // is the per-client request-response loop (lifetime =
+            // until client disconnects). Detaching means the main
+            // WorkerThread loop immediately returns to
+            // CreateNamedPipeW for the next client — concurrent
+            // DiscreteUI + bridge slot in cleanly.
+            //
+            // Lifetime / cleanup: on g_running=false the per-client
+            // ReadLine bails (it polls g_running each iteration), the
+            // worker exits, captures clean up. We do NOT join detached
+            // threads on shutdown — DLL unload only happens at game
+            // exit and any in-flight ServeClient pipe handle gets
+            // forcibly closed when the process tears down.
+            std::thread([pipe]() {
+                ServeClient(pipe);
+                ::DisconnectNamedPipe(pipe);
+                ::CloseHandle(pipe);
+            }).detach();
+        } else {
+            ::DisconnectNamedPipe(pipe);
+            ::CloseHandle(pipe);
         }
-
-        ::DisconnectNamedPipe(pipe);
-        ::CloseHandle(pipe);
     }
     LogPipe("pipe server stopped");
 }
