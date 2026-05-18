@@ -546,6 +546,8 @@
                       <ContextMenu>
                         <MenuItem Header="{StaticResource Inspector.CallMethodOnInstanceMenu}"
                                   Click="OnCallMethodOnInstanceClicked" />
+                        <MenuItem Header="{StaticResource Inspector.CopyInstanceAddressMenu}"
+                                  Click="OnCopyInstanceAddressClicked" />
                       </ContextMenu>
                     </ListBox.ContextMenu>
                     <ListBox.ItemTemplate>

@@ -389,6 +389,28 @@ public partial class MainWindow : Window
         vm.SelectedDetailTabIndex = MainWindowViewModel.TabIndexMethods;
     }
 
+    private async void OnCopyInstanceAddressClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var inspector = vm.Inspector;
+
+        InstanceItem? targetInstance = null;
+        if (sender is Avalonia.Controls.MenuItem mi &&
+            mi.Parent is Avalonia.Controls.ContextMenu cm &&
+            cm.PlacementTarget is Avalonia.Controls.ListBox placedList &&
+            placedList.SelectedItem is InstanceItem sel)
+        {
+            targetInstance = sel;
+        }
+        targetInstance ??= inspector.SelectedInstance;
+        if (targetInstance is null) return;
+
+        if (inspector.CopyToClipboardAsync is { } copy)
+        {
+            await copy(targetInstance.Address).ConfigureAwait(true);
+        }
+    }
+
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions

@@ -69,6 +69,7 @@
   <sys:String x:Key="Inspector.NavigateHexTooltip">Open Cheat Engine's Memory View at this address (requires AOBMaker plugin)</sys:String>
   <sys:String x:Key="Inspector.LookupAddressMenu">Find what's at this address…</sys:String>
   <sys:String x:Key="Inspector.CallMethodOnInstanceMenu">Call method on this instance… (switch to Methods)</sys:String>
+  <sys:String x:Key="Inspector.CopyInstanceAddressMenu">Copy address to clipboard</sys:String>
 
   <!-- Phase 17c — Address Lookup tab (reverse address lookup; whatIsAt RPC). -->
   <sys:String x:Key="AddrLookup.Tab">Address Lookup</sys:String>
