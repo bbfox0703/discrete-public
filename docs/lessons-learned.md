@@ -264,6 +264,40 @@ Any new JSON serialization path must go through the source-gen
 `JsonSerializer.SerializeToElement<T>(value)` trips IL2026 + IL3050
 under all four trim/AOT analyzers.
 
+### `x:DataType` on `DataGridTextColumn` Binding silently kills column sort under AOT
+
+With `AvaloniaUseCompiledBindingsByDefault=true`, adding an explicit
+`x:DataType=vm:RowType` annotation inside a column's Binding —
+
+```xml
+<!-- BROKEN: header click does nothing -->
+<DataGridTextColumn Binding="{Binding Foo, x:DataType=vm:RowType}" />
+```
+
+— switches the column cell binding to the compiled-binding code
+path. That path generates a typed delegate but doesn't expose the
+property-name path string the DataGrid's runtime sort comparer
+relies on. Result: header clicks become silent no-ops in published
+(AOT) builds, while the column still renders correctly.
+
+Fix is to drop the annotation entirely; Avalonia infers the row
+type from the DataGrid's `ItemsSource` (e.g. `ObservableCollection<RowType>`):
+
+```xml
+<!-- WORKS: header click sorts as expected -->
+<DataGridTextColumn Binding="{Binding Foo}" />
+```
+
+Cross-checked against sibling project `D:\Github\CrimsonAtomtic`
+(same Avalonia 12 + Native AOT setup). `SortMemberPath` /
+`CustomSortComparer` are not needed in either project — the default
+runtime-path sort works once `x:DataType` is gone.
+
+The trap is that the IDE / build pipeline never warns about this:
+build is green, AOT publish is green, the column renders, and only
+manual interactive testing of header click reveals it. If a new
+DataGrid is added, omit `x:DataType` on column Bindings.
+
 - **In-Core code** can reach `ProtocolJsonContext` directly. Pattern:
   `Str(string)` / `Int(int)` helpers in
   [BackendAdapter.cs](../ui/UnityDumpUI.Core/Services/BackendAdapter.cs).
