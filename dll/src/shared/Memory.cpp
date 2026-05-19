@@ -177,10 +177,22 @@ bool SehScanRegion(const std::uint8_t* base, std::size_t size,
 // Win32 release. We dynamically resolve it so the rest of the codebase doesn't
 // need to link against ntdll's import lib.
 //
-// Each thread's TEB layout (x64): StackBase at +0x08, StackLimit at +0x10.
+// Each thread's TEB starts with an NT_TIB:
+//   +0           ExceptionList
+//   +sizeof(ptr) StackBase     (high end of the committed stack)
+//   +2*sizeof(ptr) StackLimit  (low end)
+// On x64: StackBase at +0x08, StackLimit at +0x10.
+// On x86: StackBase at +0x04, StackLimit at +0x08.
 // [StackLimit, StackBase) is the currently committed stack — exactly what we
 // need to exclude. (The reserved-but-not-yet-committed pages below StackLimit
 // have PAGE_GUARD and are already skipped by EnumerateCommittedRegions.)
+//
+// Phase 12d Legacy-Mono smoke (Endless Legend / LEAVES, 2026-05-19) surfaced
+// that the offsets were hardcoded x64 — on x86 we read random TEB fields and
+// produced bogus "stack" ranges that filtered out heap regions where
+// instances lived. `findInstances` returned 0 matches for x86 legacy-Mono
+// targets despite the class_ptr resolving cleanly. Scaling with
+// sizeof(void*) makes the offsets arch-correct without per-arch branches.
 
 namespace {
 
@@ -238,13 +250,18 @@ std::vector<ThreadStackRange> CollectThreadStackRanges() {
                 if (th) {
                     ThreadBasicInformation tbi{};
                     if (query(th, kThreadBasicInformation, &tbi, sizeof(tbi), nullptr) == 0 && tbi.TebBaseAddress) {
-                        // TEB layout: +0x08 = StackBase (high), +0x10 = StackLimit (low).
-                        // Read via SafeReadBytes so a thread exiting mid-enum doesn't AV us.
+                        // NT_TIB layout: ExceptionList(+0), StackBase(+ptr),
+                        // StackLimit(+2*ptr). Offsets scale with pointer width
+                        // so x86 reads +0x04/+0x08 and x64 reads +0x08/+0x10
+                        // from the same source. Read via SafeReadBytes so a
+                        // thread exiting mid-enum doesn't AV us.
+                        constexpr std::size_t kStackBaseOffset  = sizeof(void*);
+                        constexpr std::size_t kStackLimitOffset = 2 * sizeof(void*);
                         void* stackBase = nullptr;
                         void* stackLimit = nullptr;
                         auto* teb = static_cast<const std::uint8_t*>(tbi.TebBaseAddress);
-                        if (SafeReadBytes(teb + 0x08, &stackBase, sizeof(stackBase)) &&
-                            SafeReadBytes(teb + 0x10, &stackLimit, sizeof(stackLimit)) &&
+                        if (SafeReadBytes(teb + kStackBaseOffset,  &stackBase,  sizeof(stackBase)) &&
+                            SafeReadBytes(teb + kStackLimitOffset, &stackLimit, sizeof(stackLimit)) &&
                             stackBase && stackLimit && stackLimit < stackBase) {
                             ThreadStackRange r{};
                             r.low  = static_cast<const std::uint8_t*>(stackLimit);
