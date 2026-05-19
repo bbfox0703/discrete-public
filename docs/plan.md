@@ -844,9 +844,76 @@ Out (v2 follow-ups, deliberately not started):
     (forward `DefaultInstanceAddress` into `MethodCallViewModel`),
     [`Strings/en.axaml`](../ui/UnityDumpUI/Resources/Strings/en.axaml)
     (new `Inspector.CallMethodOnInstanceMenu` resource).
-  * Deferred to a hypothetical 19d-3 (no user ask yet): smart-typed
-    editors (NumericUpDown for sized ints, ComboBox for enums via
-    `getEnumValues`).
+  * Deferred to 19d-3: smart-typed editors (NumericUpDown for sized ints,
+    ComboBox for enums via `getEnumValues`).
+
+- [x] **19d-3** Smart-typed editors — landed 2026-05-19. Replaces the
+  single TextBox in `MethodCallWindow`'s Value column with a per-row
+  editor chosen by a new `MethodCallEditorKind` enum:
+  * **NumericUpDown** for `System.{S?Byte, Int16, UInt16, Int32, UInt32,
+    Int64, UInt64}` — bounded to each type's `[MinValue, MaxValue]` so
+    out-of-range input is clamped at the editor instead of bouncing back
+    as a `"arg '...' (System.Int32): out of range [...]"` after Call.
+    `decimal`-backed (the entire sized-int range fits in `decimal`). The
+    setter forwards the value as invariant-culture text into
+    `ValueText` so the existing wire serializer
+    (`MethodCallViewModel.TryBuildArg`) keeps working unchanged.
+    `System.Single` / `System.Double` stay on TextBox — Avalonia's
+    `NumericUpDown` is `decimal`-backed, which would silently truncate
+    `double`s outside the decimal range (and most game inputs don't need
+    a stepper anyway).
+  * **ComboBox** for enum-typed params — populated from
+    `getEnumValues(assembly, namespace, name)`. Each row's
+    `MethodCallEnumChoice` carries the member name, display label
+    (`"Game = 1"`), and the invariant-culture numeric `WireValue` written
+    back to `ValueText` on selection. The probe also captures
+    `underlying_type` so the wire `type` tag becomes the underlying
+    integer type (`int32` / `uint32` / etc.) instead of the CLR enum
+    class name — fixes a latent issue where enum params were being
+    encoded as `type:"address"` via TryBuildArg's unknown-type
+    fallthrough.
+  * **Async enum probe** lives in `MethodCallViewModel.InitializeAsync`
+    and is kicked from `MethodCallWindow.Opened`. Per param: skip
+    primitives + nested types (`+`) + generics (`<`) + empty names; try
+    the method's own assembly first, then `UnityEngine.CoreModule` when
+    the namespace starts with `UnityEngine`. Soft failures (class not
+    found, not an enum, Mono missing `mono_field_get_data`) silently
+    leave the row on TextBox.
+  * Files: new DTOs in
+    [`ProtocolModels.cs`](../ui/UnityDumpUI.Core/Services/ProtocolModels.cs)
+    (`GetEnumValuesResult` / `EnumValueEntry`), registered in
+    [`ProtocolJson.cs`](../ui/UnityDumpUI.Core/Services/ProtocolJson.cs)
+    so AOT publish stays clean; new `GetEnumValuesAsync` in
+    [`BackendAdapter.cs`](../ui/UnityDumpUI.Core/Services/BackendAdapter.cs);
+    new `MethodCallEditorKind` enum + `MethodCallEnumChoice` plus
+    extended `MethodCallParamRow` (numeric range / NumericValue setter /
+    EnumChoices / SelectedEnumChoice / EnumUnderlyingType) and
+    `InitializeAsync` + `ProbeEnumAsync` in
+    [`MethodCallViewModel.cs`](../ui/UnityDumpUI/ViewModels/MethodCallViewModel.cs);
+    multi-editor `DataTemplate` in
+    [`MethodCallWindow.axaml`](../ui/UnityDumpUI/Views/MethodCallWindow.axaml);
+    `Opened` handler in
+    [`MethodCallWindow.axaml.cs`](../ui/UnityDumpUI/Views/MethodCallWindow.axaml.cs).
+  * Build clean (0 warnings); 163/163 tests pass; AOT publish 0/0 trim/AOT
+    analyzer warnings; `DiscreteUI.exe` 38.7 MB.
+  * **Live click-through smoke 2026-05-19 (user-confirmed, multi-target)**:
+    * IL2CPP — `MainGame.PARTY_WORK.SetValue(System.UInt32 ofs,
+      System.Byte value)`. NumericUpDown rendered for both rows with
+      spinners; manual `6` into `ofs` accepted. Null checkbox correctly
+      disabled on both value-type rows (existing `IsReference` gating).
+    * Mono (BongoCat / Unity 2022+) — `UnityEngine.Mathf.Abs(System.Int32
+      value)`. NumericUpDown rendered for the Int32 row; manual `99`
+      accepted. Confirms parity across backends.
+    * ComboBox / enum path **not yet exercised live** — pending a method
+      with an enum param.
+    * **19d-3 polish (same-day follow-up, 2026-05-19)** —
+      `System.Boolean` now renders `AutoCompleteBox` with `true`/`false`
+      suggestions (FilterMode=StartsWith, MinimumPrefixLength=0 so the
+      dropdown surfaces on focus); free text still accepted (the
+      existing `bool.TryParse` path consumes case-insensitive variants).
+      New 5th `MethodCallEditorKind.Bool`; new `IsEditorBool` derived
+      prop + `BoolSuggestions` static list on `MethodCallParamRow`.
+      Build clean, 163/163 tests pass, AOT publish 0/0 warnings.
 
 - [x] **19e** Lua bridge — landed 2026-05-07, build #224. New
   `scripts/unity_invoke.lua` (18 KB; standalone — does NOT `require` the

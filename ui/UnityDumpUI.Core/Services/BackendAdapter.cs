@@ -452,6 +452,31 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `getEnumValues` — Phase 6 segment D. Returns the named enum members of
+    /// a managed enum class plus the underlying integer type, used by Phase
+    /// 19d-3's MethodCallWindow to render a ComboBox for enum-typed
+    /// parameters. Soft outcomes (class not an enum, mono missing exports,
+    /// metadata not loaded) land in
+    /// <see cref="GetEnumValuesResult.Error"/>; pipe-level errors still throw.
+    /// </summary>
+    public async Task<GetEnumValuesResult> GetEnumValuesAsync(
+        string assembly, string @namespace, string className,
+        CancellationToken ct = default)
+    {
+        var d = new Dictionary<string, JsonElement>
+        {
+            ["assembly"]  = Str(assembly),
+            ["namespace"] = Str(@namespace ?? string.Empty),
+            ["name"]      = Str(className),
+        };
+        var env = await _pipe.SendAsync(
+            "getEnumValues", d,
+            ProtocolJsonContext.Default.RpcEnvelopeGetEnumValuesResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("getEnumValues returned no result");
+    }
+
+    /// <summary>
     /// AOT-safe wrapper that serializes a string into a <see cref="JsonElement"/>
     /// via the source-gen context. The reflection-based
     /// <c>SerializeToElement&lt;T&gt;</c> overload trips IL2026 / IL3050.

@@ -168,9 +168,10 @@ calling out here for visibility:
   CE XML already provides true absolute-address live mode.
 - **Highlight matching substring** in Fields / Methods / Inspector
   filter results — pure UI polish.
-- **Phase 19d-3 smart-typed editors** — NumericUpDown for sized
-  ints, ComboBox for enums via `getEnumValues`. Current TextBox +
-  culture-invariant parsing works correctly but is plain.
+- ~~**Phase 19d-3 smart-typed editors**~~ ✅ shipped 2026-05-19 —
+  `MethodCallWindow` picks NumericUpDown / ComboBox / TextBox per
+  row via `MethodCallEditorKind`; sized-int range clamps at the
+  editor; enum params probe `getEnumValues` on window-open.
 
 ---
 

@@ -164,18 +164,63 @@
                             Binding="{Binding Name, x:DataType=vm:MethodCallParamRow}"
                             IsReadOnly="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
-        <!-- Value editor: TextBox for everything in v1 (string, hex, number,
-             "true"/"false"). Smart-typed editors (NumericUpDown, ComboBox
-             for enums) deferred to 19d-2. -->
+        <!-- Phase 19d-3 — smart-typed value editor: TextBox / NumericUpDown /
+             ComboBox picked per row via MethodCallParamRow.EditorKind.
+             Sized integer params render NumericUpDown bounded to the type's
+             range (clamps invalid input at the editor instead of post-Call);
+             enum params render a ComboBox seeded by getEnumValues. Other
+             params (string, hex, float, bool) stay on TextBox. -->
         <DataGridTemplateColumn Header="{StaticResource MethodCall.ParamColValue}" Width="*"
                                 CanUserSort="False">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate x:DataType="vm:MethodCallParamRow">
-              <TextBox Text="{Binding ValueText, Mode=TwoWay}"
-                       IsEnabled="{Binding !IsNull}"
-                       FontFamily="Consolas,Cascadia Mono,monospace"
-                       VerticalAlignment="Center"
-                       Margin="0,2,0,2" />
+              <Panel>
+                <TextBox Text="{Binding ValueText, Mode=TwoWay}"
+                         IsEnabled="{Binding !IsNull}"
+                         IsVisible="{Binding IsEditorText}"
+                         FontFamily="Consolas,Cascadia Mono,monospace"
+                         VerticalAlignment="Center"
+                         Margin="0,2,0,2" />
+                <NumericUpDown Value="{Binding NumericValue, Mode=TwoWay}"
+                               Minimum="{Binding NumericMinimum}"
+                               Maximum="{Binding NumericMaximum}"
+                               Increment="1"
+                               FormatString="0"
+                               IsEnabled="{Binding !IsNull}"
+                               IsVisible="{Binding IsEditorNumeric}"
+                               FontFamily="Consolas,Cascadia Mono,monospace"
+                               VerticalAlignment="Center"
+                               Margin="0,2,0,2" />
+                <ComboBox ItemsSource="{Binding EnumChoices}"
+                          SelectedItem="{Binding SelectedEnumChoice, Mode=TwoWay}"
+                          IsEnabled="{Binding !IsNull}"
+                          IsVisible="{Binding IsEditorEnum}"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Center"
+                          Margin="0,2,0,2">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:MethodCallEnumChoice">
+                      <TextBlock Text="{Binding Display}"
+                                 FontFamily="Consolas,Cascadia Mono,monospace" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+                <!-- Phase 19d-3 polish: System.Boolean gets an
+                     AutoCompleteBox suggesting true/false while still
+                     accepting any text that bool.TryParse can consume
+                     (matches user feedback "可以選 true/false，但是不
+                     強制只能這二個值"). -->
+                <AutoCompleteBox Text="{Binding ValueText, Mode=TwoWay}"
+                                 ItemsSource="{Binding BoolSuggestions}"
+                                 FilterMode="StartsWith"
+                                 MinimumPrefixLength="0"
+                                 IsEnabled="{Binding !IsNull}"
+                                 IsVisible="{Binding IsEditorBool}"
+                                 FontFamily="Consolas,Cascadia Mono,monospace"
+                                 HorizontalAlignment="Stretch"
+                                 VerticalAlignment="Center"
+                                 Margin="0,2,0,2" />
+              </Panel>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>

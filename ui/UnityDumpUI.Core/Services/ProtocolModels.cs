@@ -486,3 +486,39 @@ public sealed class CallMethodMethodInfo
     [JsonPropertyName("signature")]   public string? Signature   { get; set; }
     [JsonPropertyName("humanSuffix")] public string? HumanSuffix { get; set; }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 segment D — getEnumValues. Used by Phase 19d-3 smart-typed editors
+// so the MethodCallWindow can render a ComboBox of named enum members instead
+// of a raw integer TextBox. IL2CPP combines runtime + metadata; Mono needs
+// mono_field_get_data + mono_class_enum_basetype optional exports (returns
+// `error` if missing — caller treats that as soft-fail and reverts to text).
+// ---------------------------------------------------------------------------
+
+public sealed class GetEnumValuesResult
+{
+    [JsonPropertyName("namespace")]       public string?              Namespace      { get; set; }
+    [JsonPropertyName("name")]            public string?              Name           { get; set; }
+    [JsonPropertyName("underlying_type")] public string?              UnderlyingType { get; set; }
+    [JsonPropertyName("count")]           public int                  Count          { get; set; }
+    [JsonPropertyName("values")]          public List<EnumValueEntry> Values         { get; set; } = new();
+    [JsonPropertyName("error")]           public string?              Error          { get; set; }
+    [JsonPropertyName("hint")]            public string?              Hint           { get; set; }
+    /// <summary>When the class isn't an enum the DLL returns the parent class name (e.g. "Object").</summary>
+    [JsonPropertyName("parent")]          public string?              Parent         { get; set; }
+}
+
+public sealed class EnumValueEntry
+{
+    [JsonPropertyName("name")]         public string       Name        { get; set; } = string.Empty;
+    [JsonPropertyName("field_index")]  public int?         FieldIndex  { get; set; }
+    /// <summary>
+    /// Decoded numeric value (number for integer / float / Boolean enums, raw
+    /// numeric for Char). Null when the DLL couldn't decode the blob and set
+    /// <see cref="DecodeError"/> instead.
+    /// </summary>
+    [JsonPropertyName("value")]        public JsonElement? Value       { get; set; }
+    [JsonPropertyName("enc_bytes")]    public int?         EncBytes    { get; set; }
+    [JsonPropertyName("raw_hex")]      public string?      RawHex      { get; set; }
+    [JsonPropertyName("decode_error")] public string?      DecodeError { get; set; }
+}
