@@ -278,4 +278,315 @@ if _G.mono_registerSymbolBySignatureMatch == nil then
   end
 end
 
+-- ================================================================
+-- discrete_* — always-overwrite private variants used by Discrete's
+-- generated AA scripts. The `mono_*` versions above use idempotency
+-- guards so a user's pre-existing autorun definitions take priority
+-- for hand-written CTs. That's great for muscle-memory copy-paste,
+-- but it bites the auto-generated path: if the user's autorun lacks
+-- an attach step (common), `mono_findClass` returns nil because the
+-- collector was never launched. The `discrete_*` variants below own
+-- their namespace outright — no guards, no override risk — and add
+-- two robustness shims the autorun pattern typically lacks:
+--   * explicit attach (mirrors mono_ensureAttached above)
+--   * image-iteration fallback for Unity 2022+ split modules
+--     (UnityEngine.CoreModule / .PhysicsModule / ...). CE's stock
+--     mono_findClass already iterates mono_enumImages(), but the
+--     cache isn't always warm on first call after LaunchMonoDataCollector
+--     — re-iterating with mono_image_findClass against a freshly
+--     enumerated list catches the late-bound case.
+-- ================================================================
+
+local function _discrete_ensure_attached()
+  local pid = getOpenedProcessID()
+  if pid == 0 then
+    print("[discrete] No process attached. File -> Open Process first.")
+    return false
+  end
+  if _G.lastMonoPID == nil then _G.lastMonoPID = -1 end
+  if monopipe == nil or _G.lastMonoPID ~= pid then
+    if monopipe ~= nil and _G.SafeMonoDestroy then
+      pcall(_G.SafeMonoDestroy)
+    end
+    local ok, err = pcall(LaunchMonoDataCollector)
+    if not ok then
+      print(string.format("[discrete] LaunchMonoDataCollector failed: %s",
+                          tostring(err)))
+      return false
+    end
+    _G.lastMonoPID = pid
+  end
+  return monopipe ~= nil
+end
+
+-- Symmetric type-name match. CE's `mono_method_get_parameters` reports
+-- `typename` with inconsistent namespace prefixes — `System.Int32`
+-- keeps `System.`, but `UnityEngine.FindObjectsInactive` may come back
+-- as just `FindObjectsInactive` (CE strips the assembly's "primary"
+-- namespace in some versions). Plain substring would either over- or
+-- under-match. Tail-match rule:
+--   * exact string equality, OR
+--   * one side ends with "." .. (the other) — i.e. the shorter form
+--     is the basename of the longer form.
+-- Crucially, "System.Int32" tail-matches neither "UInt32" nor
+-- "System.UInt32", so the long-standing Int32/UInt32 substring trap
+-- (memory: feedback_signaturematch_substring) is preserved.
+local function _discrete_typename_match(pname, needle)
+  if type(pname) ~= "string" or type(needle) ~= "string" then return false end
+  if pname == needle then return true end
+  -- pname ends with ".needle" → pname is namespaced, needle is bare
+  if #pname > #needle then
+    local tail = pname:sub(-#needle - 1)
+    if tail == "." .. needle then return true end
+  end
+  -- needle ends with ".pname" → needle is namespaced, pname is bare
+  if #needle > #pname then
+    local tail = needle:sub(-#pname - 1)
+    if tail == "." .. pname then return true end
+  end
+  return false
+end
+
+local function _discrete_find_class(namespace, classname)
+  -- Fast path: CE's built-in (iterates cached image list).
+  local r = mono_findClass(namespace, classname)
+  if r and r ~= 0 then return r end
+
+  -- Fallback: force enumeration + per-image search. Unity 2022+ splits
+  -- UnityEngine into many modular DLLs (CoreModule / PhysicsModule /...)
+  -- and CE's cached image list is sometimes stale on first lookup after
+  -- the data collector launches.
+  local imgs = mono_enumImages()
+  if imgs then
+    for _, entry in ipairs(imgs) do
+      local img = (type(entry) == "table" and entry.image) or entry
+      if mono_image_findClass and img and img ~= 0 then
+        r = mono_image_findClass(img, namespace, classname)
+        if r and r ~= 0 then return r end
+      end
+    end
+  end
+  return nil
+end
+
+-- discrete_mono_registerSymbol — first matching method name.
+_G.discrete_mono_registerSymbol = function(symbolname, namespace, classname, methodname)
+  if not _discrete_ensure_attached() then return false end
+
+  local m = mono_findMethod(namespace, classname, methodname)
+  if m == nil or m == 0 then
+    -- mono_findMethod uses its own class-lookup path; fall back through
+    -- discrete_find_class + enumMethods so the split-module shim helps
+    -- here too.
+    local cls = _discrete_find_class(namespace, classname)
+    if not cls then
+      print(string.format("[discrete] method not found - %s.%s.%s (class missing)",
+                          namespace, classname, methodname))
+      return false
+    end
+    local methods = mono_class_enumMethods(cls)
+    for _, mm in ipairs(methods or {}) do
+      if mm.name == methodname then m = mm.method; break end
+    end
+    if not m or m == 0 then
+      print(string.format("[discrete] method not found - %s.%s.%s",
+                          namespace, classname, methodname))
+      return false
+    end
+  end
+
+  local addr = mono_compile_method(m)
+  if addr == 0 then
+    print(string.format("[discrete] could not compile - %s.%s.%s",
+                        namespace, classname, methodname))
+    return false
+  end
+
+  registerSymbol(symbolname, addr)
+  print(string.format("[discrete] registered %s = %X", symbolname, addr))
+  return true
+end
+
+-- discrete_mono_registerSymbolEx — exact-count, ordered param-type match.
+_G.discrete_mono_registerSymbolEx = function(symbolname, namespace, classname, methodname, paramTypes)
+  if not _discrete_ensure_attached() then return false end
+
+  local cls = _discrete_find_class(namespace, classname)
+  if not cls then
+    print(string.format("[discrete] class not found - %s.%s",
+                        namespace, classname))
+    return false
+  end
+
+  local methods = mono_class_enumMethods(cls)
+  if not methods then
+    print(string.format("[discrete] no methods in %s.%s",
+                        namespace, classname))
+    return false
+  end
+
+  paramTypes = paramTypes or {}
+  local candidates = 0          -- name-matched overloads we considered
+  local diag = {}               -- shape strings for the post-mortem log
+  for _, m in ipairs(methods) do
+    if m.name == methodname then
+      candidates = candidates + 1
+      -- pcall — some uncompiled / generic methods throw inside
+      -- mono_method_get_parameters. Treat any failure as "skip this
+      -- overload, try the next" rather than letting the whole AA die.
+      local ok, p = pcall(mono_method_get_parameters, m.method)
+      if not ok or not p or type(p.parameters) ~= "table" then
+        diag[#diag+1] = "  (introspection unavailable — likely generic / uncompiled)"
+      elseif #p.parameters ~= #paramTypes then
+        -- Count mismatch — won't match regardless of which path. Log
+        -- and continue.
+        local parts = {}
+        for i, e in ipairs(p.parameters) do
+          parts[i] = string.format("%s %s", tostring(e.typename or "<nil>"),
+                                            tostring(e.name or "?"))
+        end
+        diag[#diag+1] = string.format("  (%d) %s",
+                                      #p.parameters, table.concat(parts, ", "))
+      else
+        -- Count matches. Try the typename path first; on failure,
+        -- fall back to signature-string substring matching. The
+        -- typename field on `parameters[i]` is unreliable across CE
+        -- versions / Mono targets — Unity 2022+ Mono returns it as
+        -- nil for every parameter on some builds, even though
+        -- `mono_method_getSignature` renders the full type info
+        -- cleanly. Signature fallback handles that case.
+        local matched = true
+        for i = 1, #paramTypes do
+          local entry = p.parameters[i]
+          local pname = entry and entry.typename
+          if not _discrete_typename_match(pname, paramTypes[i]) then
+            matched = false
+            break
+          end
+        end
+
+        local via = "typename"
+        if not matched then
+          local okS, sig = pcall(mono_method_getSignature, m.method)
+          if okS and type(sig) == "string" then
+            matched = true
+            for i = 1, #paramTypes do
+              if type(paramTypes[i]) ~= "string"
+                  or not string.find(sig, paramTypes[i], 1, true) then
+                matched = false
+                break
+              end
+            end
+            if matched then via = "signature" end
+          end
+        end
+
+        if matched then
+          local addr = mono_compile_method(m.method)
+          if addr == 0 then
+            print(string.format("[discrete] matched but failed to compile - %s.%s.%s",
+                                namespace, classname, methodname))
+            return false
+          end
+          registerSymbol(symbolname, addr)
+          print(string.format("[discrete] registered %s = %X  (matched via %s)",
+                              symbolname, addr, via))
+          return true
+        end
+
+        -- Both paths failed for this overload — log its shape so the
+        -- user can see why neither typename nor signature substring
+        -- match landed.
+        local parts = {}
+        for i, e in ipairs(p.parameters) do
+          parts[i] = string.format("%s %s", tostring(e.typename or "<nil>"),
+                                            tostring(e.name or "?"))
+        end
+        local okS, sig = pcall(mono_method_getSignature, m.method)
+        local sigStr = (okS and type(sig) == "string") and sig or "<unavailable>"
+        diag[#diag+1] = string.format("  (%d) %s  -- sig: %s",
+                                      #p.parameters, table.concat(parts, ", "),
+                                      sigStr)
+      end
+    end
+  end
+
+  -- Reaching here means: class found, methods enumerated, ≥0 named matches
+  -- but no full match. Dump what we saw so the user can diagnose typename
+  -- mismatches without rebuilding the helper.
+  print(string.format("[discrete] no matching overload - %s.%s.%s",
+                      namespace, classname, methodname))
+  print(string.format("[discrete]   looked at %d candidate(s); expected (%d): %s",
+                      candidates, #paramTypes, table.concat(paramTypes, ", ")))
+  for i, line in ipairs(diag) do print("[discrete] " .. line) end
+  return false
+end
+
+-- discrete_mono_registerSymbolBySignatureMatch — substring match against
+-- mono_method_getSignature's rendered string, with optional excludes.
+_G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace, classname,
+                                                           methodname, sigContains, sigExcludes)
+  if not _discrete_ensure_attached() then return false end
+
+  local cls = _discrete_find_class(namespace, classname)
+  if not cls then
+    print(string.format("[discrete] class not found - %s.%s",
+                        namespace, classname))
+    return false
+  end
+
+  local methods = mono_class_enumMethods(cls)
+  if not methods then
+    print(string.format("[discrete] no methods in %s.%s",
+                        namespace, classname))
+    return false
+  end
+
+  for _, m in ipairs(methods) do
+    if m.name == methodname then
+      -- pcall — same defensive shape as registerSymbolEx above.
+      -- mono_method_getSignature can throw or return nil for
+      -- generic / uncompiled methods; skip past those rather
+      -- than crashing the AA.
+      local ok, sig = pcall(mono_method_getSignature, m.method)
+      if ok and type(sig) == "string" then
+        local matched = true
+
+        for _, kw in ipairs(sigContains or {}) do
+          if type(kw) ~= "string" or not string.find(sig, kw, 1, true) then
+            matched = false
+            break
+          end
+        end
+
+        if matched and sigExcludes then
+          for _, ex in ipairs(sigExcludes) do
+            if type(ex) == "string" and string.find(sig, ex, 1, true) then
+              matched = false
+              break
+            end
+          end
+        end
+
+        if matched then
+          local addr = mono_compile_method(m.method)
+          if addr == 0 then
+            print(string.format("[discrete] matched but failed to compile - %s.%s.%s",
+                                namespace, classname, methodname))
+            return false
+          end
+          registerSymbol(symbolname, addr)
+          print(string.format("[discrete] registered %s = %X (sig=%s)",
+                              symbolname, addr, sig))
+          return true
+        end
+      end
+    end
+  end
+
+  print(string.format("[discrete] no matching signature - %s.%s.%s",
+                      namespace, classname, methodname))
+  return false
+end
+
 print("[discrete] mono_registersymbol_helpers.lua loaded — DLL-free Mono symbol register helpers ready.")

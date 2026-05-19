@@ -3,12 +3,13 @@
 // Drives the MethodOverloadsWindow modal. Wraps `findMethodInstances` +
 // `getMethodAobPattern` and produces:
 //   * a multi-select grid of overloads with native addresses + signatures
-//   * a "Copy AOB AA script" action that pre-fetches the pattern for each
+//   * a "Copy: aobscan" action that pre-fetches the pattern for each
 //     selected overload, hands the bag to AobAaScriptGenerator, then writes
 //     the resulting script string to the clipboard
-//   * a "Copy registerSymbol AA script" alternative for users who prefer
-//     the runtime-injection path (matches the user's existing
-//     mono_registerSymbol* convention)
+//   * a "Copy: registersymbol" alternative for users who prefer the
+//     runtime-injection path (fixed address baked into the AA)
+//   * a "Copy: mono_register" Mono-only DLL-free path (calls
+//     mono_registerSymbolEx via CE's built-in Mono API)
 //
 // AOT-safe: CommunityToolkit.Mvvm source-gen, no reflection.
 
@@ -57,7 +58,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
             ? $"{className}.{methodName}"
             : $"{@namespace}.{className}.{methodName}";
 
-        // Surface "Create AA in CE via AOBMaker" only when the bridge is
+        // Surface "Push aobscan to CE" only when the AOBMaker bridge is
         // wired. When AOBMaker / CE aren't running the call is fail-soft,
         // but the button stays hidden so the user isn't tempted to click
         // it expecting magic.
@@ -199,9 +200,19 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                 row.PropertyChanged += OnRowPropertyChanged;
                 Overloads.Add(row);
             }
+            // Single-overload fast-path: tick the only row so the bottom-bar
+            // commands enable without a manual click. Mirrors the Phase 19d-2
+            // auto-skip in the "Call method…" Methods-grid context menu, just
+            // here we open the picker anyway (this entry point is "Find
+            // overloads…", which surfaces the Copy/Push buttons). Multi-row
+            // results keep the legacy "user must tick" gating.
+            if (Overloads.Count == 1)
+                Overloads[0].IsSelected = true;
             StatusMessage = result.Count == 0
                 ? "No overloads matched."
-                : $"{result.Count} overload(s) found.  Right-click a row → Call method…";
+                : Overloads.Count == 1
+                    ? "1 overload found — pre-selected. Use the buttons below or right-click → Call method…"
+                    : $"{result.Count} overload(s) found.  Tick rows to enable the buttons below, or right-click → Call method…";
             // CommandToolkit.Mvvm doesn't auto-re-evaluate CanExecute when a
             // child observable item changes — refresh selection-dependent
             // commands explicitly so a freshly-loaded grid starts in the

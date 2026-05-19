@@ -221,17 +221,22 @@
   <sys:String x:Key="MethodOverloads.ColAddress">Address</sys:String>
   <sys:String x:Key="MethodOverloads.ColSuffix">Suffix</sys:String>
   <sys:String x:Key="MethodOverloads.ColModifiers">Modifiers</sys:String>
-  <sys:String x:Key="MethodOverloads.CopyAobScript">Copy AOB AA script</sys:String>
-  <sys:String x:Key="MethodOverloads.CopyRegisterSymbol">Copy registerSymbol script</sys:String>
-  <sys:String x:Key="MethodOverloads.CopyAddresses">Copy addresses</sys:String>
-  <sys:String x:Key="MethodOverloads.CreateAaInCe">Create AA in CE</sys:String>
+  <!-- Bottom-bar actions, grouped by mechanism. "Copy …" puts an AA script
+       (or raw addresses) on the clipboard; "Push … to CE" sends the same
+       script through AOBMaker into CE's address list. Mechanism keywords
+       (aobscan / registersymbol / mono_register) match the underlying CE
+       commands so the user sees what each path emits. -->
+  <sys:String x:Key="MethodOverloads.CopyAddresses">Copy: addresses</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyRegisterSymbol">Copy: registersymbol</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyAobScript">Copy: aobscan</sys:String>
+  <sys:String x:Key="MethodOverloads.CreateAaInCe">Push aobscan to CE</sys:String>
   <sys:String x:Key="MethodOverloads.AutoActivate">Auto-activate</sys:String>
   <sys:String x:Key="MethodOverloads.Close">Close</sys:String>
   <sys:String x:Key="MethodOverloads.CallMethodMenu">Call method…</sys:String>
   <!-- DLL-free Mono path (helper file lives in the CT — Tools → Inject Discrete Bridge ships it) -->
-  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScript">Copy mono_register AA</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScript">Copy: mono_register</sys:String>
   <sys:String x:Key="MethodOverloads.CopyMonoSymbolScriptTooltip">DLL-free: generates an AA that calls mono_registerSymbolEx via CE's built-in Mono API. Mono targets only. Run Tools → Inject Discrete Bridge first to ship mono_registersymbol_helpers.lua into the cheat table.</sys:String>
-  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCe">Create mono_register in CE</sys:String>
+  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCe">Push mono_register to CE</sys:String>
   <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCeTooltip">Push the mono_register AA into CE's address list via AOBMaker. Same DLL-free Mono path as the Copy button — no UnityCEDumper DLL needed.</sys:String>
 
   <!-- Phase 19d — Call Method dialog -->

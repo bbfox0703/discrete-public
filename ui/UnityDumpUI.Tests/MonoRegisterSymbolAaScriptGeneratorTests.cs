@@ -5,11 +5,13 @@
 //   1. Helper bootstrap shape — findTableFile + chunk load + idempotency
 //      guard. Drift here would silently no-op on second-AA-on-same-CT
 //      use, or fail loudly when the helper file isn't injected.
-//   2. mono_registerSymbolEx call shape — exact arg order + Lua single-
-//      quoted strings. The helper substring-matches paramTypes (with
-//      string.find plain=true), so we MUST emit full-name forms
+//   2. discrete_mono_registerSymbolEx call shape — exact arg order + Lua
+//      single-quoted strings. The helper substring-matches paramTypes
+//      (with string.find plain=true), so we MUST emit full-name forms
 //      ("System.Int32" not "Int32") to avoid the Int32-matches-UInt32
 //      substring trap. (Memory feedback_signaturematch_substring.)
+//      Namespaced under `discrete_*` to dodge user-autorun overrides of
+//      the public `mono_*` names.
 //   3. Mono-only guard — Build() throws when ModuleName is populated
 //      (IL2CPP overload accidentally routed here).
 
@@ -60,10 +62,13 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         Assert.Contains("[ENABLE]", s);
         Assert.Contains("if syntaxcheck then return end", s);
 
-        // Idempotency guard: only load helpers if not already in _G.
-        // Skipping this would re-define globals on every enable and
-        // leak file handles if a second AA on the same CT also runs.
-        Assert.Contains("if _G.mono_registerSymbolEx == nil then", s);
+        // Idempotency guard keyed off the discrete-namespaced symbol —
+        // a pre-existing user autorun definition of _G.mono_* (CE forums
+        // pattern, often missing mono_ensureAttached) must NOT be allowed
+        // to suppress our helper load. Asserting the discrete_* form
+        // catches accidental drift back to the public name.
+        Assert.Contains("if _G.discrete_mono_registerSymbolEx == nil then", s);
+        Assert.DoesNotContain("if _G.mono_registerSymbolEx == nil then", s);
 
         // findTableFile + chunk-load via createStringStream — same
         // mechanism BootstrapAaScriptGenerator uses.
@@ -88,7 +93,7 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
 
         // Exact call shape: (symbol, namespace, class, method, paramTypes-table)
         Assert.Contains(
-            "_G.mono_registerSymbolEx('Mathf_Abs_int32', 'UnityEngine', 'Mathf', 'Abs', { 'System.Int32' })",
+            "_G.discrete_mono_registerSymbolEx('Mathf_Abs_int32', 'UnityEngine', 'Mathf', 'Abs', { 'System.Int32' })",
             s);
 
         // Diagnostic comment line so the user can identify which row
@@ -110,10 +115,10 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         string s = MonoRegisterSymbolAaScriptGenerator.Build(new[] { byInt, byBundle });
 
         Assert.Contains(
-            "_G.mono_registerSymbolEx('ItemBundle_AddItems_uint_uint', '', 'ItemBundle', 'AddItems', { 'System.UInt32', 'System.UInt32' })",
+            "_G.discrete_mono_registerSymbolEx('ItemBundle_AddItems_uint_uint', '', 'ItemBundle', 'AddItems', { 'System.UInt32', 'System.UInt32' })",
             s);
         Assert.Contains(
-            "_G.mono_registerSymbolEx('ItemBundle_AddItems_ItemBundle', '', 'ItemBundle', 'AddItems', { 'ItemBundle' })",
+            "_G.discrete_mono_registerSymbolEx('ItemBundle_AddItems_ItemBundle', '', 'ItemBundle', 'AddItems', { 'ItemBundle' })",
             s);
 
         // Both unregisterSymbol calls in [DISABLE], pcall-wrapped so a
@@ -132,7 +137,7 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         // Empty table — mono_registerSymbolEx will match the zero-param
         // overload (the #p.parameters ~= 0 check fires for any other).
         Assert.Contains(
-            "_G.mono_registerSymbolEx('Mathf_Reset_noargs', 'UnityEngine', 'Mathf', 'Reset', {})",
+            "_G.discrete_mono_registerSymbolEx('Mathf_Reset_noargs', 'UnityEngine', 'Mathf', 'Reset', {})",
             s);
     }
 
@@ -161,7 +166,7 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
 
         string s = MonoRegisterSymbolAaScriptGenerator.Build(new[] { ov });
         Assert.Contains(
-            "_G.mono_registerSymbolEx('Mathf_Abs_noargs', 'UnityEngine', 'Mathf', 'Abs', {})",
+            "_G.discrete_mono_registerSymbolEx('Mathf_Abs_noargs', 'UnityEngine', 'Mathf', 'Abs', {})",
             s);
     }
 

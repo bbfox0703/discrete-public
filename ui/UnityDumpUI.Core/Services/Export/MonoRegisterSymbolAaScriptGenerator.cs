@@ -7,6 +7,13 @@
 // / mono_compile_method) via the helper layer shipped in
 // scripts/mono_registersymbol_helpers.lua.
 //
+// Calls the discrete-namespaced (`_G.discrete_mono_registerSymbolEx`)
+// variants, NOT the `mono_*` versions. The user-facing `mono_*` names
+// share a namespace with hand-written CE-forums autorun scripts that
+// often pre-register their own helpers without an attach step; checking
+// against discrete_* keeps our generator independent of whatever's in
+// the user's autorun.
+//
 // The helper file is bundled into the cheat table by Tools → Inject
 // Discrete Bridge (BridgeLuaResources.LoadOrder includes it). The
 // generated AA's [ENABLE] pulls it out of the CT via findTableFile
@@ -81,15 +88,18 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.AppendLine("if syntaxcheck then return end");
         sb.AppendLine();
 
-        // Lazy-load the helpers from the CT. Idempotency: the second AA
-        // on the same cheat table finds _G.mono_registerSymbolEx already
-        // defined and skips straight to the register calls. If the
-        // helper file is missing — user hasn't run "Inject Discrete
+        // Lazy-load the helpers from the CT. Idempotency keys off the
+        // discrete-namespaced symbol — the user-facing `mono_*` names
+        // share a namespace with hand-written autorun scripts (CE forums
+        // pattern), which would override my version's attach + robust
+        // class-lookup logic. Checking the discrete-namespaced symbol
+        // guarantees my helper code is what runs.
+        // If the helper file is missing — user hasn't run "Inject Discrete
         // Bridge" yet — print a clear instruction and bail. No silent
         // no-op (the worst failure mode from Phase 22 live smoke).
         sb.AppendLine("-- Lazy-load DLL-free Mono helpers from the cheat table.");
         sb.AppendLine("-- Idempotent across multiple register AAs on the same CT.");
-        sb.AppendLine("if _G.mono_registerSymbolEx == nil then");
+        sb.AppendLine("if _G.discrete_mono_registerSymbolEx == nil then");
         sb.Append("  local f = findTableFile('").Append(HelpersFileName).AppendLine("')");
         sb.AppendLine("  if not f then");
         sb.Append("    print('[discrete] ").Append(HelpersFileName).AppendLine(" missing from CT.')");
@@ -108,9 +118,11 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.AppendLine("end");
         sb.AppendLine();
 
-        // One mono_registerSymbolEx call per overload. The helper auto-
-        // calls mono_ensureAttached() at the top of each invocation, so
-        // we don't need to gate on it here.
+        // One discrete_mono_registerSymbolEx call per overload. The helper
+        // auto-calls _discrete_ensure_attached() at the top of each
+        // invocation and uses an image-iteration fallback for class
+        // lookup (Unity 2022+ split-module workaround), so we don't need
+        // to gate on either here.
         sb.AppendLine("-- Register one symbol per overload.");
         for (int i = 0; i < overloads.Count; ++i)
         {
@@ -124,7 +136,7 @@ public static class MonoRegisterSymbolAaScriptGenerator
               .Append(ov.Signature)
               .Append("   (last-seen address ").Append(ov.Address ?? "?").AppendLine(")");
 
-            sb.Append("_G.mono_registerSymbolEx('").Append(LuaSqEscape(symbols[i])).Append("', ")
+            sb.Append("_G.discrete_mono_registerSymbolEx('").Append(LuaSqEscape(symbols[i])).Append("', ")
               .Append('\'').Append(LuaSqEscape(ov.Namespace ?? "")).Append("', ")
               .Append('\'').Append(LuaSqEscape(ov.ClassName)).Append("', ")
               .Append('\'').Append(LuaSqEscape(ov.MethodName)).Append("', ")
