@@ -57,6 +57,11 @@
 --   findOverloads(asm, ns, class, method, sigMatch?) -> { matches[], count }
 --       wraps findMethodInstances; useful to prep a signatureMatch.
 --
+--   -- Phase 21b — Inspector field write-back (primitives + raw address).
+--   setField(fieldAddr, wireType, value)                     -> result
+--   setInstanceField(instanceAddr, fieldOffset, wireType, value) -> result
+--       result = { ok, address, fieldOffset, fieldAddress, type, written, error, ... }
+--
 -- Arg builders (pass these inside the `args` table):
 --   argNull()             argBool(b)         argInt8(v)   argByte(v)
 --   argInt16(v)           argUInt16(v)       argInt32(v)  argUInt32(v)
@@ -450,6 +455,163 @@ function prettyPrint(r)
         tostring(r.elapsedMs or 0))
     if r.note and r.note ~= "" then warn("note: %s", r.note) end
     return r
+end
+
+-- ---------- Phase 21b — Inspector field write-back ---------------------
+--
+-- setField / setInstanceField wrap the new setInstanceField pipe RPC
+-- (spec: docs/pipe-protocol.md §"setInstanceField"). Inverse of the
+-- per-field read in walkInstance — given a field's storage address +
+-- wire type + a typed value, writes sizeof(type) bytes through the DLL's
+-- SEH-protected SafeWriteBytes.
+--
+-- v1 scope: primitives (bool / int8..int64 / uint8..uint64 / float /
+-- double / char) plus raw address. Reference-type writes
+-- (System.String, object pointer) are deferred to v2 — they need
+-- mono_string_new / il2cpp_string_new plus proper GC-root marshaling.
+--
+-- The DLL accepts both shortform wire tags ("int32") and CLR-style names
+-- ("System.Int32") — pass whatever the walkInstance row gave you.
+--
+-- Quick start:
+--   -- Write 999 into a field at +0x28 of an instance:
+--   local r = setInstanceField("0x1F8CEA0BE0", 0x28, "int32", 999)
+--   if r.ok then log("wrote %d bytes", r.written)
+--   else      err("write failed: %s", r.error or "?") end
+--
+--   -- When you already have the field's storage address (e.g. from a
+--   -- walkInstance row's `address`), use setField(addr, type, value):
+--   local r = setField("0x1F8CEA0C08", "float", 3.14)
+--
+--   -- Boolean: 0/1, true/false, "true"/"false" all accepted:
+--   setField("0x1234", "bool", true)
+--
+--   -- Address (raw 8-byte pointer write):
+--   setField("0x1234", "address", "0x00007FFE12345678")
+--
+-- API
+-- ---
+--   setField(fieldAddr, type, value)                        -> result
+--   setInstanceField(instanceAddr, fieldOffset, type, value) -> result
+--
+-- result = { ok, address, fieldOffset, fieldAddress, type, written, error, size, hint }
+--   - ok        true on success, false otherwise
+--   - written   bytes actually written on success
+--   - error     soft-error message ("memory not writable" / "'value' out
+--               of range for ..." / "unsupported type '...'"). Pipe-level
+--               errors throw via the underlying rpc() call; managed
+--               exceptions don't apply (no managed code runs).
+
+--- Normalise an address argument to the "0x..." hex string the DLL
+--- expects. Accepts a hex string (with or without 0x prefix) or a Lua
+--- number.
+local function _normalizeAddr(v, label)
+    if type(v) == "number" then return string.format("0x%X", v) end
+    if type(v) == "string" then
+        v = v:gsub("%s", "")
+        if v:sub(1, 2):lower() == "0x" then return v end
+        return "0x" .. v
+    end
+    error(TAG .. " " .. label .. ": expected address (number or hex string), got " .. type(v))
+end
+
+--- Normalise the JSON value sent over the wire based on the wire type.
+--- Same per-type rules as the DLL handler's marshaling — keeping the
+--- conversion on the Lua side means error messages surface immediately
+--- instead of round-tripping through a "memory not writable" reply.
+local function _wireValueFor(wireType, v)
+    if type(wireType) ~= "string" then
+        error(TAG .. " setField: 'type' must be a string, got " .. type(wireType))
+    end
+    local t = wireType:lower()
+    if t == "bool" or t == "boolean" or t == "system.boolean" then
+        if type(v) == "boolean" then return v end
+        if type(v) == "number"  then return v ~= 0 end
+        if type(v) == "string"  then
+            local s = v:lower()
+            if s == "true"  or s == "1" then return true  end
+            if s == "false" or s == "0" then return false end
+        end
+        error(TAG .. " setField: bad bool value: " .. tostring(v))
+    end
+    -- Numeric primitives — pass the Lua number through; the DLL clamps
+    -- to the type's range and returns a soft error if out-of-range.
+    if t == "byte"   or t == "uint8"  or t == "system.byte"
+    or t == "sbyte"  or t == "int8"   or t == "system.sbyte"
+    or t == "int16"  or t == "short"  or t == "system.int16"
+    or t == "uint16" or t == "ushort" or t == "system.uint16"
+    or t == "int32"  or t == "int"    or t == "system.int32"
+    or t == "uint32" or t == "uint"   or t == "system.uint32"
+    or t == "int64"  or t == "long"   or t == "system.int64"
+    or t == "uint64" or t == "ulong"  or t == "system.uint64"
+    or t == "float"  or t == "single" or t == "system.single"
+    or t == "double" or t == "system.double" then
+        if type(v) ~= "number" then
+            -- Tolerate a numeric string ("999"). Reject anything else.
+            local n = tonumber(v)
+            if n == nil then
+                error(TAG .. " setField: value for " .. wireType .. " must be a number, got " .. type(v))
+            end
+            return n
+        end
+        return v
+    end
+    if t == "char" or t == "system.char" then
+        if type(v) == "string" and #v == 1 then return string.byte(v) end
+        if type(v) == "number" then return v end
+        error(TAG .. " setField: char value must be a single-char string or numeric code unit")
+    end
+    if t == "address" or t == "intptr" or t == "uintptr" or t == "ptr"
+    or t == "system.intptr" or t == "system.uintptr" then
+        return _normalizeAddr(v, "setField address value")
+    end
+    -- Unknown type — let the DLL reject it; caller still gets a soft
+    -- error rather than a Lua throw, matching the rest of this script.
+    return v
+end
+
+--- Write a primitive value to an instance field. Combines the
+--- `instanceAddress + fieldOffset = fieldAddress` indirection that
+--- mirrors the wire RPC shape — pass either form (set offset=0 if the
+--- address you already have IS the field storage).
+---
+--- @param instanceAddr  number|string  instance start address
+--- @param fieldOffset   integer        cumulative bytes from the instance base (0 if pre-computed)
+--- @param wireType      string         "int32" / "float" / "bool" / "address" / ...
+--- @param value         any            typed per the wireType (see _wireValueFor)
+--- @return              table          { ok, address, fieldOffset, fieldAddress, type, written, error, ... }
+function setInstanceField(instanceAddr, fieldOffset, wireType, value)
+    if instanceAddr == nil then
+        error(TAG .. " setInstanceField: instanceAddr is required")
+    end
+    if type(fieldOffset) ~= "number" then
+        error(TAG .. " setInstanceField: fieldOffset must be a number")
+    end
+    local body = {
+        address     = _normalizeAddr(instanceAddr, "setInstanceField address"),
+        fieldOffset = fieldOffset,
+        type        = wireType,
+        value       = _wireValueFor(wireType, value),
+    }
+    local resp = rpc("setInstanceField", body)
+    if resp.error then
+        error(TAG .. " pipe error " .. tostring(resp.error.code or "?") ..
+              ": " .. tostring(resp.error.message or "?"))
+    end
+    return resp.result or {}
+end
+
+--- Convenience wrapper for the "I already have the field's storage
+--- address" path — pass fieldOffset=0 implicitly. Most CE Lua callers
+--- will use this form because the inspector / address-finder hand them
+--- the exact field address.
+---
+--- @param fieldAddr  number|string  storage address of the field
+--- @param wireType   string         "int32" / "float" / "bool" / "address" / ...
+--- @param value      any            typed per the wireType
+--- @return           table          same as setInstanceField
+function setField(fieldAddr, wireType, value)
+    return setInstanceField(fieldAddr, 0, wireType, value)
 end
 
 log("Loaded. callUnityMethod(asm, ns, class, method, args, opts) — see header comment for examples.")

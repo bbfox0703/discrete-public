@@ -667,6 +667,53 @@ public partial class MainWindow : Window
         await win.ShowDialog(this);
     }
 
+    /// <summary>
+    /// Phase 21b — "Write value…" right-click handler. Opens the
+    /// <see cref="FieldWriteWindow"/> modal seeded with the selected
+    /// Inspector row's field metadata + current display. The VM gates
+    /// the Write button on <see cref="InspectorWriteTypeMap"/> support,
+    /// so unsupported types (reference / value-struct / collection)
+    /// open the modal but show the unsupported banner instead of writing.
+    /// On success the VM fires the Written event, which we hook here to
+    /// kick a walkInstance refresh so the row's displayed value updates.
+    /// </summary>
+    private async void OnWriteFieldClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var inspector = vm.Inspector;
+        WalkedFieldNode? node = inspector.SelectedNode;
+        if (node is null) return;
+        if (string.IsNullOrEmpty(node.Address))
+        {
+            inspector.ErrorMessage = "Write: row has no field address";
+            return;
+        }
+
+        var fieldVm = new FieldWriteViewModel(
+            vm.BackendAdapter, vm.Logger,
+            fieldName:   node.Name,
+            clrTypeName: node.Type ?? string.Empty,
+            declaredIn:  node.DeclaredIn ?? string.Empty,
+            fieldAddress: node.Address!,
+            currentDisplay: node.DisplayValue ?? string.Empty);
+
+        // Refresh the walked-fields grid on successful write so the
+        // displayed value reflects the new bytes. Reusing the existing
+        // RefreshWalkCommand keeps us on the same code path as the
+        // toolbar button and the auto-refresh loop.
+        fieldVm.Written += async (_, _) =>
+        {
+            try
+            {
+                await inspector.RefreshWalkCommand.ExecuteAsync(null);
+            }
+            catch { /* surfaced via inspector.ErrorMessage */ }
+        };
+
+        var win = new FieldWriteWindow(fieldVm);
+        await win.ShowDialog(this);
+    }
+
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions

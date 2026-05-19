@@ -83,6 +83,22 @@
        the selected row crosses a pointer-traversal or collection-element
        ancestor (see InspectorFieldOffsetResolver). -->
   <sys:String x:Key="Inspector.ListFieldAcrossInstancesMenu">List this field across instances…</sys:String>
+  <!-- Phase 21b — Inspector field write-back. Right-click any value-typed
+       primitive leaf to overwrite its storage in the host process via the
+       new setInstanceField RPC. Hidden / disabled for reference / value-
+       struct / collection rows (those need GC-root marshaling, deferred). -->
+  <sys:String x:Key="Inspector.WriteFieldMenu">Write value…</sys:String>
+
+  <!-- Phase 21b — Field write modal. -->
+  <sys:String x:Key="FieldWrite.Title">Write field value</sys:String>
+  <sys:String x:Key="FieldWrite.FieldLabel">Field</sys:String>
+  <sys:String x:Key="FieldWrite.TypeLabel">Type</sys:String>
+  <sys:String x:Key="FieldWrite.AddressLabel">Address</sys:String>
+  <sys:String x:Key="FieldWrite.CurrentLabel">Current</sys:String>
+  <sys:String x:Key="FieldWrite.NewValueLabel">New value</sys:String>
+  <sys:String x:Key="FieldWrite.WriteButton">Write</sys:String>
+  <sys:String x:Key="FieldWrite.CancelButton">Cancel</sys:String>
+  <sys:String x:Key="FieldWrite.UnsupportedNote">This field's type isn't writable in v1. Reference types (System.String, object pointers), arrays/lists, and value-struct types like Vector3 are deferred to v2 — they need GC-root marshaling.</sys:String>
 
   <!-- Phase 21a — Field-across-instances modal. -->
   <sys:String x:Key="FieldAcross.Title">Field across live instances</sys:String>

@@ -448,6 +448,62 @@ If the address is unreadable, the decoded entry carries `"error":
 The string layout (`length` at `+0x10`, UTF-16 chars at `+0x14`) is identical
 between Mono-bdwgc and IL2CPP, so the same decoder serves both backends.
 
+### `setInstanceField` *(Both)*
+
+Phase 21a — **inverse of `walkInstance`'s per-field read**. Given an instance
+address + cumulative field offset + a wire-type tag + a JSON-typed value,
+writes `sizeof(type)` bytes at `instance + fieldOffset` via SEH-protected
+`SafeWriteBytes`. Backend-agnostic (just process memory write — no Mono /
+IL2CPP API calls; the caller already knows the field offset from a prior
+`walkInstance` response).
+
+v1 scope: primitives (bool, signed + unsigned 8/16/32/64, float, double, char)
+plus raw address. Reference-type writes (`System.String`, object pointer)
+are out of scope — they need `il2cpp_string_new` / `mono_string_new` plus
+proper GC-root marshaling, deferred to v2.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `address` | address | required; instance start (first qword is the class header) |
+| `fieldOffset` | int | required; cumulative bytes from `address` to the field storage (0 if `address` already points at the field). Must be in `[0, 16_777_216]`. |
+| `type` | string | required; one of `bool` / `int8` / `uint8` / `int16` / `uint16` / `int32` / `uint32` / `int64` / `uint64` / `float` / `double` / `char` / `address`. CLR names (`System.Int32`, `System.Boolean`, …) also accepted. |
+| `value` | typed | required; JSON number for numeric types, `true`/`false` (or 0/1) for `bool`, `0x...` hex string for `address`, single-char string or numeric code point for `char`. |
+
+```jsonc
+// → {
+//   "ok":           true,                 // false when memory not writable / value out of range
+//   "address":      "0x...",              // echoed instance address
+//   "fieldOffset":  32,                   // echoed
+//   "fieldAddress": "0x...",              // computed instance + offset
+//   "type":         "int32",              // echoed
+//   "written":      4                     // bytes actually written
+// }
+```
+
+Soft errors (memory unwritable, value out of range for type, unsupported
+type tag) land in the result envelope as `error: "..."` with `ok: false`
+and (for unwritable memory) the echoed `address` / `fieldOffset` /
+`fieldAddress` / `type` / `size` fields so the caller can show the rejected
+write verbatim. For an unsupported type tag the result also carries a `hint`
+pointing at the deferred-to-v2 reference-type story.
+
+**Caveats**:
+- The same heap-scan false positives as `findInstances` / `walkInstance`
+  apply: writing to an address that *looks* like the right instance but is
+  actually thread-stack residue or a metadata structure will overwrite
+  unrelated memory. Validate the instance with a prior `walkInstance` /
+  `whatIsAt` round-trip before writing if correctness matters.
+- For value-type fields (`int`, `float`, `Vector3.x`), the offset is stable
+  between reads and writes. For reference-type fields (deferred), the
+  pointer at `instance + offset` may shift between the read and the
+  user's Apply click — chain reads + writes inside one request when
+  correctness matters.
+- Boolean writes emit exactly one byte (`0x00` or `0x01`). The CLR
+  semantically treats any non-zero byte as `true`, so a write of `1` and a
+  prior value of `2` will both read back as `true` after the write.
+- Float writes go through `double → float` narrowing; values outside
+  `[FloatMin, FloatMax]` clamp to ±Infinity rather than failing.
+
 ### `listFieldValuesAcrossInstances` *(Both)*
 
 Phase 21a — **row-wise inverse of `walkInstance`**. Where `walkInstance` is

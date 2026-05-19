@@ -1,0 +1,144 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.FieldWriteWindow"
+        x:DataType="vm:FieldWriteViewModel"
+        Width="560" Height="320"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Icon="avares://DiscreteUI/Assets/MainIcon.ico"
+        Title="{StaticResource FieldWrite.Title}">
+  <DockPanel LastChildFill="True" Margin="12">
+
+    <!-- Header: field metadata (read-only labels). -->
+    <Grid DockPanel.Dock="Top"
+          ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto"
+          Margin="0,0,0,8">
+      <TextBlock Grid.Row="0" Grid.Column="0"
+                 Text="{StaticResource FieldWrite.FieldLabel}"
+                 Foreground="#FF7B7B7B" VerticalAlignment="Center" />
+      <SelectableTextBlock Grid.Row="0" Grid.Column="1"
+                           Text="{Binding FieldName}"
+                           FontFamily="Consolas,Cascadia Mono,monospace"
+                           FontWeight="SemiBold"
+                           VerticalAlignment="Center" />
+
+      <TextBlock Grid.Row="1" Grid.Column="0"
+                 Text="{StaticResource FieldWrite.TypeLabel}"
+                 Foreground="#FF7B7B7B" VerticalAlignment="Center" />
+      <SelectableTextBlock Grid.Row="1" Grid.Column="1"
+                           Text="{Binding EditorLabel}"
+                           FontFamily="Consolas,Cascadia Mono,monospace"
+                           VerticalAlignment="Center" />
+
+      <TextBlock Grid.Row="2" Grid.Column="0"
+                 Text="{StaticResource FieldWrite.AddressLabel}"
+                 Foreground="#FF7B7B7B" VerticalAlignment="Center" />
+      <SelectableTextBlock Grid.Row="2" Grid.Column="1"
+                           Text="{Binding FieldAddress}"
+                           FontFamily="Consolas,Cascadia Mono,monospace"
+                           VerticalAlignment="Center" />
+
+      <TextBlock Grid.Row="3" Grid.Column="0"
+                 Text="{StaticResource FieldWrite.CurrentLabel}"
+                 Foreground="#FF7B7B7B" VerticalAlignment="Center" />
+      <SelectableTextBlock Grid.Row="3" Grid.Column="1"
+                           Text="{Binding CurrentDisplay}"
+                           FontFamily="Consolas,Cascadia Mono,monospace"
+                           Foreground="#FF7B7B7B"
+                           VerticalAlignment="Center" />
+    </Grid>
+
+    <!-- Unsupported banner — shown when InspectorWriteTypeMap.Resolve() said
+         the field isn't writable in v1 (System.String, T[], pointer-to-class,
+         user value-structs). The Write button stays disabled via CanWrite. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding IsUnsupported}"
+            Background="#33D32F2F" BorderBrush="#88D32F2F"
+            BorderThickness="1" CornerRadius="4" Padding="10,6"
+            Margin="0,0,0,8">
+      <TextBlock Text="{StaticResource FieldWrite.UnsupportedNote}"
+                 Foreground="#FFD32F2F" TextWrapping="Wrap" />
+    </Border>
+
+    <!-- Footer action bar. -->
+    <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+      <TextBlock DockPanel.Dock="Left"
+                 Text="{Binding StatusMessage}"
+                 VerticalAlignment="Center"
+                 Foreground="#FF7B7B7B"
+                 TextWrapping="NoWrap" />
+      <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+        <Button Content="{StaticResource FieldWrite.CancelButton}"
+                Command="{Binding CancelCommand}" />
+        <Button Content="{StaticResource FieldWrite.WriteButton}"
+                Command="{Binding WriteCommand}"
+                Classes="accent" />
+      </StackPanel>
+    </DockPanel>
+
+    <ProgressBar DockPanel.Dock="Bottom" IsIndeterminate="True"
+                 IsVisible="{Binding IsBusy}" Height="3" Margin="0,4,0,0" />
+
+    <Border DockPanel.Dock="Bottom"
+            IsVisible="{Binding ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+            Background="#33D32F2F" BorderBrush="#88D32F2F"
+            BorderThickness="1" CornerRadius="4" Padding="10,6"
+            Margin="0,8,0,0">
+      <TextBlock Text="{Binding ErrorMessage}"
+                 Foreground="#FFD32F2F" TextWrapping="Wrap" />
+    </Border>
+
+    <!-- Editor row — exactly one of the five inputs is visible per field
+         based on IsEditorXxx flags computed from InspectorWriteTypeMap. -->
+    <Grid ColumnDefinitions="120,*" VerticalAlignment="Top">
+      <TextBlock Grid.Column="0"
+                 Text="{StaticResource FieldWrite.NewValueLabel}"
+                 Foreground="#FF7B7B7B"
+                 VerticalAlignment="Center" />
+
+      <!-- Sized integer — NumericUpDown bounded to the type's [Min, Max]. -->
+      <NumericUpDown Grid.Column="1"
+                     Value="{Binding NumericValue, Mode=TwoWay}"
+                     Minimum="{Binding NumericMin}"
+                     Maximum="{Binding NumericMax}"
+                     Increment="1"
+                     FormatString="0"
+                     IsVisible="{Binding IsEditorInteger}" />
+
+      <!-- Float / Double — TextBox (decimal can't represent the full double
+           range, same reason Phase 19d-3 kept these on TextBox). -->
+      <TextBox Grid.Column="1"
+               Text="{Binding FloatText, Mode=TwoWay}"
+               IsVisible="{Binding IsEditorFloat}"
+               FontFamily="Consolas,Cascadia Mono,monospace" />
+
+      <!-- Boolean — AutoCompleteBox with true/false suggestions, same shape
+           as Phase 19d-3's bool param editor (case-insensitive,
+           whitespace-tolerant via bool.TryParse). ItemsSource (not the
+           inline <Items> shape) because AOT XAML can't introspect the
+           AutoCompleteBox.Items getter at compile time. -->
+      <AutoCompleteBox Grid.Column="1"
+                       Text="{Binding BoolText, Mode=TwoWay}"
+                       ItemsSource="{Binding BoolSuggestions}"
+                       FilterMode="StartsWith"
+                       MinimumPrefixLength="0"
+                       IsVisible="{Binding IsEditorBool}"
+                       FontFamily="Consolas,Cascadia Mono,monospace" />
+
+      <!-- IntPtr / UIntPtr — TextBox for hex address. -->
+      <TextBox Grid.Column="1"
+               Text="{Binding AddressText, Mode=TwoWay}"
+               IsVisible="{Binding IsEditorAddress}"
+               FontFamily="Consolas,Cascadia Mono,monospace" />
+
+      <!-- Char — TextBox, single char accepted. -->
+      <TextBox Grid.Column="1"
+               Text="{Binding CharText, Mode=TwoWay}"
+               MaxLength="1"
+               IsVisible="{Binding IsEditorChar}"
+               FontFamily="Consolas,Cascadia Mono,monospace" />
+    </Grid>
+
+  </DockPanel>
+</Window>

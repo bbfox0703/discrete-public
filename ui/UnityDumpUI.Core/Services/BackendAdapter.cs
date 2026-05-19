@@ -427,6 +427,35 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `setInstanceField` — Phase 21a Inspector field write-back. Writes
+    /// <paramref name="value"/> as <paramref name="type"/> at
+    /// <c>instance + fieldOffset</c> via SEH-protected SafeWriteBytes.
+    /// <paramref name="value"/> must be a <see cref="JsonElement"/> already
+    /// serialized via the source-gen context (use <see cref="CallArgFactory"/>
+    /// helpers or one of the convenience overloads below). Soft errors
+    /// (memory not writable, value out of range, unsupported type) land in
+    /// <see cref="SetInstanceFieldResult.Error"/>; the result carries
+    /// <c>Ok=false</c> in that case. Pipe-level errors still throw.
+    /// </summary>
+    public async Task<SetInstanceFieldResult> SetInstanceFieldAsync(
+        string instanceAddress, long fieldOffset, string type, JsonElement value,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["address"]     = Str(instanceAddress),
+            ["fieldOffset"] = JsonSerializer.SerializeToElement(fieldOffset, ProtocolJsonContext.Default.Int64),
+            ["type"]        = Str(type),
+            ["value"]       = value,
+        };
+        var env = await _pipe.SendAsync(
+            "setInstanceField", args,
+            ProtocolJsonContext.Default.RpcEnvelopeSetInstanceFieldResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("setInstanceField returned no result");
+    }
+
+    /// <summary>
     /// `readMemory` — raw byte read. <paramref name="size"/> must be in
     /// [1, 1048576]; soft errors land in <see cref="ReadMemoryResult.Error"/>.
     /// </summary>

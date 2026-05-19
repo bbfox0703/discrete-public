@@ -360,3 +360,66 @@ These would slot in without breaking the v1 shape:
   registered symbol as a managed delegate target.
 - `instantiate` arg for open-generic methods, listing concrete type
   arguments by name.
+
+## Phase 21b — field write-back (`setField` / `setInstanceField`)
+
+Companion to `callUnityMethod`. Where Phase 19 lets you call a managed
+method, Phase 21b lets you write a primitive instance field's bytes
+through the same `\\.\pipe\UnityDumpBfx` channel — no method invocation
+required, no managed code runs.
+
+Wire spec lives in [pipe-protocol.md §"setInstanceField"](pipe-protocol.md);
+this section just covers the Lua wrappers shipped in `unity_invoke.lua`.
+
+```lua
+-- Single-shot from a field's storage address (most common — the
+-- inspector / address-finder hand you this directly):
+local r = setField("0x1F8CEA0BE8", "int32", 999)
+if r.ok then log("wrote %d bytes at %s", r.written, r.fieldAddress)
+else      err("write failed: %s", r.error or "?") end
+
+-- Two-step from instance + offset (e.g. when the offset comes from
+-- walkInstance):
+local r = setInstanceField("0x1F8CEA0BE0", 0x28, "float", 3.14)
+
+-- Boolean: 0/1, true/false, "true"/"false" all accepted:
+setField("0x1234", "bool", true)
+
+-- Address (raw 8-byte pointer write):
+setField("0x1234", "address", "0x00007FFE12345678")
+```
+
+**API**
+
+| Function | Signature | Notes |
+| --- | --- | --- |
+| `setField` | `(fieldAddr, wireType, value) -> result` | Field-address shorthand. Equivalent to `setInstanceField(fieldAddr, 0, wireType, value)`. |
+| `setInstanceField` | `(instanceAddr, fieldOffset, wireType, value) -> result` | Full form mirroring the wire RPC shape. |
+
+**Wire type tags** (same taxonomy as Phase 19 arg builders): `bool`,
+`int8` / `sbyte`, `uint8` / `byte`, `int16`, `uint16`, `int32` / `int`,
+`uint32` / `uint`, `int64` / `long`, `uint64` / `ulong`, `float` /
+`single`, `double`, `char`, `address` / `intptr` / `uintptr`. CLR-style
+names (`System.Int32`, `System.Boolean`, …) are also accepted — the
+walkInstance row's `type` string plugs straight in.
+
+**Result table** (mirrors the wire response):
+
+| Field | Notes |
+| --- | --- |
+| `ok` | `true` on a successful write; `false` (with `error`) otherwise |
+| `address` | echoed instance address |
+| `fieldOffset` | echoed |
+| `fieldAddress` | computed `address + fieldOffset` |
+| `type` | echoed wire type |
+| `written` | bytes actually written on success |
+| `error` | soft-error message (`"memory not writable"`, `"'value' out of range for int8"`, `"unsupported type '...'"`) |
+| `hint` | populated on unsupported-type errors with the v2-deferred-to story |
+
+**Out of scope for v1** (mirrors the DLL — see
+[pipe-protocol.md §"setInstanceField"](pipe-protocol.md)): reference-type
+writes (`System.String`, object pointer), value-type-by-value
+(`Vector3`, `Color`), and atomic batch writes. Pipe-level errors still
+throw via the underlying `rpc()` call — wrap calls in `pcall` if you
+need a non-throwing variant (no `pcallSetField` shipped — the soft
+errors land in `result.error`, which is the more useful signal).

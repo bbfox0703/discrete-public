@@ -665,6 +665,16 @@
                              InspectorFieldOffsetResolver. -->
                         <MenuItem Header="{StaticResource Inspector.ListFieldAcrossInstancesMenu}"
                                   Click="OnListFieldAcrossInstancesClicked" />
+                        <!-- Phase 21b — write-back. Code-behind reads the
+                             selected WalkedFieldNode and opens the
+                             FieldWriteWindow modal seeded with field
+                             name / type / address / current display. Modal
+                             gates Write on InspectorWriteTypeMap.Supported,
+                             so reference / value-struct / collection rows
+                             open but show the unsupported banner instead
+                             of letting the user click Write. -->
+                        <MenuItem Header="{StaticResource Inspector.WriteFieldMenu}"
+                                  Click="OnWriteFieldClicked" />
                       </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>

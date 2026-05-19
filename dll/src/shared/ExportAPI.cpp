@@ -38,6 +38,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -831,6 +833,180 @@ void RegisterCoreHandlers() {
             result["bailedAt"] = pr.bailedAt;
         }
         return result;
+    });
+
+    // Phase 21a — setInstanceField. Inverse of walkInstance's per-field
+    // read: given instance + cumulative offset + type + value, write
+    // sizeof(type) bytes at instance+offset. Backend-agnostic — just
+    // SEH-protected SafeWriteBytes; the field offset is already known
+    // from the prior walkInstance response, so no runtime reflection.
+    //
+    // v1 scope: primitives (bool / signed + unsigned 8/16/32/64 / float /
+    // double / char) + raw address. Reference-type writes (System.String,
+    // object pointer) deferred to v2 — they need il2cpp_string_new /
+    // mono_string_new plus proper GC-root marshaling, mirroring Phase 19c.
+    //
+    // Type tags accept both the wire-short form ("int32") and the CLR
+    // type name ("System.Int32") — matches the taxonomy used by
+    // callMethod arg builders and walkInstance field decode so callers
+    // can plumb a single string through both sides.
+    PipeServer::RegisterHandler(MagicStrings::CmdSetInstanceField,
+        [parseAddr, formatHex](const json& args) -> json {
+        std::uintptr_t instance = 0;
+        if (!args.contains("address") || !parseAddr(args["address"], instance)) {
+            return json{{"error", "missing/invalid 'address' (hex string or integer)"}};
+        }
+        std::int64_t fieldOffset = 0;
+        if (args.contains("fieldOffset")) {
+            if (args["fieldOffset"].is_number_integer()) {
+                fieldOffset = args["fieldOffset"].get<std::int64_t>();
+            } else if (args["fieldOffset"].is_number_unsigned()) {
+                fieldOffset = static_cast<std::int64_t>(args["fieldOffset"].get<std::uint64_t>());
+            } else {
+                return json{{"error", "'fieldOffset' must be an integer"}};
+            }
+        }
+        // Cap offset to a sane upper bound (matches listFieldValuesAcrossInstances).
+        if (fieldOffset < 0 || fieldOffset > (1 << 24)) {
+            return json{{"error", "'fieldOffset' out of range"}};
+        }
+        if (!args.contains("type") || !args["type"].is_string()) {
+            return json{{"error", "missing 'type'"}};
+        }
+        const std::string ty = args["type"].get<std::string>();
+        if (!args.contains("value")) {
+            return json{{"error", "missing 'value'"}};
+        }
+        const json& jv = args["value"];
+
+        std::uintptr_t fieldAddr = instance + static_cast<std::uintptr_t>(fieldOffset);
+
+        // Marshal value into a stack buffer. The byte layout is identical
+        // to MonoObject + offset / Il2CppObject + offset since the field
+        // storage is just raw bytes at the supplied address.
+        std::uint8_t buf[8] = {0};
+        std::size_t size = 0;
+
+        auto asI64 = [&](std::int64_t& out) -> bool {
+            if (jv.is_number_integer())      { out = jv.get<std::int64_t>(); return true; }
+            if (jv.is_number_unsigned())     { out = static_cast<std::int64_t>(jv.get<std::uint64_t>()); return true; }
+            if (jv.is_number_float())        { out = static_cast<std::int64_t>(jv.get<double>()); return true; }
+            if (jv.is_boolean())             { out = jv.get<bool>() ? 1 : 0; return true; }
+            return false;
+        };
+        auto asU64 = [&](std::uint64_t& out) -> bool {
+            if (jv.is_number_unsigned())     { out = jv.get<std::uint64_t>(); return true; }
+            if (jv.is_number_integer())      { out = static_cast<std::uint64_t>(jv.get<std::int64_t>()); return true; }
+            if (jv.is_number_float())        { out = static_cast<std::uint64_t>(jv.get<double>()); return true; }
+            if (jv.is_boolean())             { out = jv.get<bool>() ? 1 : 0; return true; }
+            return false;
+        };
+
+        if (ty == "bool" || ty == "boolean" || ty == "System.Boolean") {
+            std::uint8_t v = 0;
+            if      (jv.is_boolean())          v = jv.get<bool>() ? 1 : 0;
+            else if (jv.is_number_integer())   v = jv.get<std::int64_t>() != 0 ? 1 : 0;
+            else if (jv.is_number_unsigned())  v = jv.get<std::uint64_t>() != 0 ? 1 : 0;
+            else return json{{"error", "'value' not a bool"}};
+            buf[0] = v; size = 1;
+        } else if (ty == "sbyte" || ty == "int8" || ty == "System.SByte") {
+            std::int64_t v = 0;
+            if (!asI64(v)) return json{{"error", "'value' not a number"}};
+            if (v < INT8_MIN || v > INT8_MAX) return json{{"error", "'value' out of range for int8"}};
+            std::int8_t w = static_cast<std::int8_t>(v);
+            std::memcpy(buf, &w, 1); size = 1;
+        } else if (ty == "byte" || ty == "uint8" || ty == "System.Byte") {
+            std::uint64_t v = 0;
+            if (!asU64(v)) return json{{"error", "'value' not a number"}};
+            if (v > UINT8_MAX) return json{{"error", "'value' out of range for uint8"}};
+            buf[0] = static_cast<std::uint8_t>(v); size = 1;
+        } else if (ty == "int16" || ty == "short" || ty == "System.Int16") {
+            std::int64_t v = 0;
+            if (!asI64(v)) return json{{"error", "'value' not a number"}};
+            if (v < INT16_MIN || v > INT16_MAX) return json{{"error", "'value' out of range for int16"}};
+            std::int16_t w = static_cast<std::int16_t>(v);
+            std::memcpy(buf, &w, 2); size = 2;
+        } else if (ty == "uint16" || ty == "ushort" || ty == "char" ||
+                   ty == "System.UInt16" || ty == "System.Char") {
+            std::uint64_t v = 0;
+            if (ty == "char" || ty == "System.Char") {
+                if (jv.is_string() && !jv.get<std::string>().empty()) {
+                    v = static_cast<std::uint8_t>(jv.get<std::string>()[0]);
+                } else if (!asU64(v)) {
+                    return json{{"error", "'value' not a char or number"}};
+                }
+            } else if (!asU64(v)) {
+                return json{{"error", "'value' not a number"}};
+            }
+            if (v > UINT16_MAX) return json{{"error", "'value' out of range for uint16"}};
+            std::uint16_t w = static_cast<std::uint16_t>(v);
+            std::memcpy(buf, &w, 2); size = 2;
+        } else if (ty == "int32" || ty == "int" || ty == "System.Int32") {
+            std::int64_t v = 0;
+            if (!asI64(v)) return json{{"error", "'value' not a number"}};
+            if (v < INT32_MIN || v > INT32_MAX) return json{{"error", "'value' out of range for int32"}};
+            std::int32_t w = static_cast<std::int32_t>(v);
+            std::memcpy(buf, &w, 4); size = 4;
+        } else if (ty == "uint32" || ty == "uint" || ty == "System.UInt32") {
+            std::uint64_t v = 0;
+            if (!asU64(v)) return json{{"error", "'value' not a number"}};
+            if (v > UINT32_MAX) return json{{"error", "'value' out of range for uint32"}};
+            std::uint32_t w = static_cast<std::uint32_t>(v);
+            std::memcpy(buf, &w, 4); size = 4;
+        } else if (ty == "int64" || ty == "long" || ty == "System.Int64") {
+            std::int64_t v = 0;
+            if (!asI64(v)) return json{{"error", "'value' not a number"}};
+            std::memcpy(buf, &v, 8); size = 8;
+        } else if (ty == "uint64" || ty == "ulong" || ty == "System.UInt64") {
+            std::uint64_t v = 0;
+            if (!asU64(v)) return json{{"error", "'value' not a number"}};
+            std::memcpy(buf, &v, 8); size = 8;
+        } else if (ty == "float" || ty == "single" || ty == "System.Single") {
+            double d = 0.0;
+            if      (jv.is_number())          d = jv.get<double>();
+            else if (jv.is_number_integer())  d = static_cast<double>(jv.get<std::int64_t>());
+            else if (jv.is_number_unsigned()) d = static_cast<double>(jv.get<std::uint64_t>());
+            else return json{{"error", "'value' not a number"}};
+            float w = static_cast<float>(d);
+            std::memcpy(buf, &w, 4); size = 4;
+        } else if (ty == "double" || ty == "System.Double") {
+            double w = 0.0;
+            if      (jv.is_number())          w = jv.get<double>();
+            else if (jv.is_number_integer())  w = static_cast<double>(jv.get<std::int64_t>());
+            else if (jv.is_number_unsigned()) w = static_cast<double>(jv.get<std::uint64_t>());
+            else return json{{"error", "'value' not a number"}};
+            std::memcpy(buf, &w, 8); size = 8;
+        } else if (ty == "address" || ty == "intptr" || ty == "uintptr" || ty == "ptr" ||
+                   ty == "System.IntPtr" || ty == "System.UIntPtr") {
+            std::uintptr_t v = 0;
+            if (!parseAddr(jv, v)) return json{{"error", "'value' not a valid address"}};
+            std::memcpy(buf, &v, sizeof(std::uintptr_t));
+            size = sizeof(std::uintptr_t);
+        } else {
+            return json{
+                {"error", std::string{"unsupported type '"} + ty + "'"},
+                {"hint",  "v1 supports primitives + address; reference-type writes (string, object) deferred to v2"},
+            };
+        }
+
+        if (!Memory::SafeWriteBytes(reinterpret_cast<void*>(fieldAddr), buf, size)) {
+            return json{
+                {"error",        "memory not writable"},
+                {"address",      formatHex(instance)},
+                {"fieldOffset",  fieldOffset},
+                {"fieldAddress", formatHex(fieldAddr)},
+                {"type",         ty},
+                {"size",         size},
+            };
+        }
+        return json{
+            {"ok",           true},
+            {"address",      formatHex(instance)},
+            {"fieldOffset",  fieldOffset},
+            {"fieldAddress", formatHex(fieldAddr)},
+            {"type",         ty},
+            {"written",      size},
+        };
     });
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)

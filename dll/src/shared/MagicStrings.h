@@ -89,4 +89,14 @@ inline constexpr const char* CmdGetMethodAobPattern   = "getMethodAobPattern";
 // args, primitive + address returns, no string args/returns.
 inline constexpr const char* CmdCallMethod            = "callMethod";
 
+// Phase 21a — Inspector field write-back. Given an instance address,
+// a field offset (cumulative from the instance base), a type tag (same
+// taxonomy as Phase 19 callMethod arg builders), and a JSON-typed value,
+// write sizeof(type) bytes to instance+offset via SEH-protected
+// SafeWriteBytes. Backend-agnostic (no Mono/IL2CPP API calls — just
+// process memory write). v1 scope: primitives + raw address. Reference-
+// type writes (System.String, object pointer) deferred to v2 for GC
+// root marshaling.
+inline constexpr const char* CmdSetInstanceField      = "setInstanceField";
+
 }  // namespace UnityCEDumper::MagicStrings

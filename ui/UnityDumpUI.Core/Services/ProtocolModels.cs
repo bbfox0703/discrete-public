@@ -226,6 +226,27 @@ public sealed class ReadMemoryResult
 }
 
 /// <summary>
+/// `setInstanceField` result — Phase 21a Inspector field write-back.
+/// <see cref="Ok"/> is true on a successful write of <see cref="Written"/>
+/// bytes at <see cref="FieldAddress"/>. Soft errors (memory not writable,
+/// value out of range, unsupported type) land in <see cref="Error"/>; the
+/// returned object still carries <see cref="FieldAddress"/> / <see cref="Type"/>
+/// so the UI can show the rejected address verbatim.
+/// </summary>
+public sealed class SetInstanceFieldResult
+{
+    [JsonPropertyName("ok")]           public bool    Ok           { get; set; }
+    [JsonPropertyName("address")]      public string? Address      { get; set; }
+    [JsonPropertyName("fieldOffset")]  public long    FieldOffset  { get; set; }
+    [JsonPropertyName("fieldAddress")] public string? FieldAddress { get; set; }
+    [JsonPropertyName("type")]         public string? Type         { get; set; }
+    [JsonPropertyName("written")]      public int     Written      { get; set; }
+    [JsonPropertyName("size")]         public int     Size         { get; set; }
+    [JsonPropertyName("error")]        public string? Error        { get; set; }
+    [JsonPropertyName("hint")]         public string? Hint         { get; set; }
+}
+
+/// <summary>
 /// `walkArray` result — one entry per slot in a managed <c>T[]</c>, capped
 /// by the request limit. Pointer-typed arrays come back with <c>ptr</c>
 /// set per slot (the dereferenced object pointer); primitive arrays come

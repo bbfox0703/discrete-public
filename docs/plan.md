@@ -127,7 +127,7 @@
 | 18 | Find Method Instances | New wire commands `findMethodInstances` + `getMethodAobPattern` + UI overloads modal + AOB AA-script generator + AOBMaker `CreateAAScript` direct push | ✅ All four sub-phases shipped (18a DLL handler + signature decoding / 18a-3 hand-rolled x64 LDE for AOB wildcarding / 18c UI overloads picker + AobAaScriptGenerator + AOBMaker direct push / 18d `unity_symbols.lua` extension `registerMethodOverloads`). |
 | 19 | Lua-callable Unity methods | New wire command `callMethod(asm, ns, class, method, [args], [instance])` invoking Mono / IL2CPP methods with marshaled primitive + string args; closes the long-standing CLAUDE.md goal | ✅ All five sub-phases shipped (19a IL2CPP DLL / 19b Mono port / 19c instance dispatch + string in/out / 19d UI MethodCallWindow / 19e `scripts/unity_invoke.lua` Lua bridge). Verified live across SaGa F2R + BongoCat + Farthest Frontier. Spec: [lua-invoke.md](lua-invoke.md). |
 | 20 | Scene / GameObject explorer + Object.name search | `scripts/unity_scene.lua` Lua bridge + DiscreteUI Scene tab + filter-by-name + click-to-inspect handoff. Tree-walk primitives gated behind a NEW sub-phase **20-MT** (DLL-side main-thread marshaling) since iterating Unity icalls from the worker thread freezes the game. | 🚧 In progress — 20a landed + hardened 2026-05-08 (envelope unwrap fix + main-thread caveat after live test on SaGa F2R locked up the game). `getName` / `getAllGameObjects` / `findByName` are safe-and-working primitives; `getActiveSceneRoots` / `getChildren` / `getComponents` formally **EXPERIMENTAL until 20-MT ships**. 20b (UI tab) blocked behind 20-MT. Zero DLL changes so far; 20-MT will need DLL frame-hook work. |
-| 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector cells go editable with Apply button | ⏳ Planned — after Phase 20. ~½ day + tests. Closes the read/write asymmetry: today the Inspector only reads. GC-root caveat applies (same pattern as Phase 19c). |
+| 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector field "Write value…" right-click + CE Lua `setField` wrapper | ✅ 21a (DLL handler + smoke), 21b (UI modal + 37 new tests + AOT clean), 21c (Lua bridge + docs) shipped 2026-05-19. 21d pending live click-through on a Mono + an IL2CPP target. v1 covers primitives + raw address; reference-type writes deferred to v2 (GC-root marshaling). |
 | 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. | ✅ **All sub-phases (22a–22f) shipped 2026-05-12 + live smoke fully closed 2026-05-18.** 22a `AobMakerBridge` extended (4 new commands, `IsAvailable` event); 22b 7 bridge lua files embedded in Core; 22c `BootstrapAaScriptGenerator` template; 22d Tools menu RelayCommand + `BridgeInjector` orchestrator; 22e `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` per-feature buttons; 22f `docs/ce-bridge-integration.md` + `tools/Test-BridgeInject.ps1` smoke. **Live click-through smoke**: Steps 1-8 captured + fixed 6 P0/P1 bugs mid-session; Steps 9-11 (MethodCall→CE / AddressLookup→CE / save+reopen) PASS in follow-up session — user log `Mathf.Abs(-7) → 7` confirms the AA-script → bridge → `callUnityMethod` chain. 163/163 xUnit pass, AOT 0/0 warnings. |
 
 ---
@@ -862,19 +862,66 @@ Out (v2):
 
 ### Sub-phases
 
-- [ ] **21a** DLL handler — `setInstanceField` in
-  `dll/src/shared/ExportAPI.cpp`, dispatches per-type to a small
-  `SafeWriteBytes` helper. Both backends share the writer (it's just
-  process memory write). PowerShell smoke `Test-SetInstanceField.ps1`.
-- [ ] **21b** UI editable cells — `LiveInspectionView.axaml` field grid
-  goes editable. New `FieldEditViewModel` row state. Apply button
-  bound to a command that calls the wire RPC.
-- [ ] **21c** CE Lua bridge wrapper — short addition to
-  `unity_invoke.lua` or a new sibling. Documented example in
-  [lua-invoke.md](lua-invoke.md).
-- [ ] **21d** Live verification — write `Player.HP` on SaGa F2R, watch
-  CE address-list value update in real time. Do same for one Mono
-  target.
+- [x] **21a** DLL handler — `setInstanceField` in
+  `dll/src/shared/ExportAPI.cpp` (build #326). One backend-agnostic
+  handler (~150 lines) sitting right before the Mono/IL2CPP `#if`
+  split — no Mono/IL2CPP API needed since the write is just process
+  memory. Accepts both wire-short types (`int32`) and CLR-style names
+  (`System.Int32`); marshals each type into an 8-byte stack buffer +
+  per-type width then calls `Memory::SafeWriteBytes`. Returns `ok`
+  + `written` + echoed `address` / `fieldOffset` / `fieldAddress` /
+  `type` on success; soft `error` + `hint` on unwritable / out-of-range /
+  unsupported-type. PowerShell smoke
+  [`tools/Test-SetInstanceField.ps1`](../tools/Test-SetInstanceField.ps1)
+  saves bytes via `readMemory`, calls `setInstanceField`, reads back
+  via `readMemory` to verify the new value, then restores the
+  original bytes unless `-NoRestore`. Spec recorded in
+  [pipe-protocol.md §"setInstanceField"](pipe-protocol.md).
+- [x] **21b** UI Inspector field write modal (build #331, AOT clean).
+  Right-click any Inspector row → "Write value…" context-menu item →
+  opens new `FieldWriteWindow` modal. Per-row editor flavor picked by
+  new `Core.Services.InspectorWriteTypeMap` helper (`Resolve(clrType)`
+  → `{ Supported, WireType, EditorKind, [Min,Max], ByteSize,
+  IsUnsigned }`): NumericUpDown for sized ints (clamped to type
+  range), TextBox for float/double (decimal can't represent full
+  double range — same call as Phase 19d-3), AutoCompleteBox with
+  `true`/`false` suggestions for bool, TextBox for char + address.
+  Reference / value-struct / collection rows open the modal but
+  surface an unsupported banner instead of letting Write fire (gated
+  by `TypeInfo.Supported`). On success the VM fires `Written` event
+  → handler runs `Inspector.RefreshWalkCommand` so the row updates.
+  New `SetFieldValueFactory` paralleling `CallArgFactory` keeps the
+  source-gen JSON context internal to Core. New `BackendAdapter
+  .SetInstanceFieldAsync` + `SetInstanceFieldResult` DTO + source-gen
+  registration in `ProtocolJson.cs`. Tests: +6 fake-pipe RPC smoke
+  (happy path + bool + float + address + soft-error + range-error) +
+  31 `InspectorWriteTypeMap` classifier (theory rows) +
+  unsupported-type guard. 238/238 pass.
+- [x] **21c** CE Lua bridge wrapper — extended
+  [`scripts/unity_invoke.lua`](../scripts/unity_invoke.lua) with
+  `setField(fieldAddr, wireType, value)` + `setInstanceField(
+  instanceAddr, fieldOffset, wireType, value)` (1 KB code growth).
+  Bridge-side type marshaling mirrors the DLL — accepts both
+  shortform tags and CLR names; bool tolerates `0/1/true/false/
+  "true"/"false"`; address tolerates Lua number or `"0x..."`/bare
+  hex. Pipe-level errors throw (matching the rest of the script);
+  soft errors land in `result.error` so consumers can branch on
+  `result.ok`. Documented in
+  [lua-invoke.md §"Phase 21b — field write-back"](lua-invoke.md)
+  with worked examples.
+- [ ] **21d** Live verification — pending user click-through on a
+  Mono + an IL2CPP target. Suggested recipe:
+  * **IL2CPP** — SaGa F2R → DiscreteUI Pick & Inject → Browser
+    selects `MainGame.PLY_WORK` → Inspect → right-click any Int32
+    field (e.g. `HP`) → "Write value…" → enter `9999` → Write.
+    Verify CE address-list value updates in real time and the
+    inspector row shows the new value after the auto-refresh.
+  * **Mono** — BongoCat or Farthest Frontier Mono → same flow,
+    but verify against a primitive field on a discoverable class.
+  * **CE Lua** — open CE Lua console, `dofile([[..\\unity_invoke.lua]])`,
+    call `setField("0x...", "int32", 999)`, watch the value
+    change. Compare the round-trip output against the
+    `readMemory` snapshot the Lua call returns.
 
 ### GC-root caveat
 
