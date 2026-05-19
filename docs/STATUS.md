@@ -1,10 +1,10 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-19 session — 19d-3 smart-typed editors + 5 spawned follow-ups + Phase 21a reverse-property lookup + AOT DataGrid sort fix + DLL-free Mono register path + **Phase 21 Inspector field write-back** + **Phase 5 v32-v39 metadata.dat parser** (live-smoked on Songs of Silence) + **Phase 12d-1..d-4 32-bit Mono support** (live-smoked on Legend of Mortal — first x86 target in the matrix!); ready to push)
-**Last commit**: feat: Phase 12d-1/2 — x86 build path + arch-aware managed-object layout
-**Build**: 339 (x64 DLL #338, x86 Mono DLL #339; metadata-cli #336; `DiscreteUI.exe` AOT 39.0 MB)
-**Tests**: 238/238 pass + `Test-MetadataVersions.ps1` PASS for v29/v31/v35/v37/v38/v39 + cross-arch live smoke (Songs of Silence v39 / Legend of Mortal x86 Mono)
-**Current state**: Live-target work converged. **Phase 19d-3** (smart-typed editors — NumericUpDown for sized ints, ComboBox for enum params via `getEnumValues`, AutoCompleteBox for `System.Boolean`) and **Phase 21a** (reverse-property lookup — list a field's value+address across every live instance of a class) both shipped + live-smoked. **Phase 21 Inspector field write-back** shipped a/b/c (DLL handler + UI modal + CE Lua wrapper); 21d (live click-through) is the next user step. Five small follow-up tasks landed in the same session: Classes-list "Copy class name", Inspector Class-ptr Copy buttons, Fields/Methods per-cell context-menu copy actions, Copy CE Field multi-select fix, and Phase 21a itself. **Avalonia 12 DataGrid AOT sort trap diagnosed + fixed** — long-running mystery turned out to be a three-layer interaction (CompiledBinding empty Path → column auto-disable → reflection sort trimmed). Fix applied uniformly via new shared helpers (`DataGridSortComparers` + `WireSortComparers` extension) to all 6 sortable grids in the app. Full diagnosis recorded in lessons-learned + the "Adding a new DataGrid" recipe in technical-notes. Carry-forward: Phase 22 closed in prior session (live-smoke verified `Mathf.Abs(-7) → 7` end-to-end). Phase 23 (heap-scan convergence) and Phase 20a-2 (FindObjectsByType cross-version recipe) both closed 2026-05-18.
+**Branch**: `dev` (2026-05-19 session, extended — adds **Phase 25 cross-class Symbol Finder** + MethodOverloadsWindow polish (mechanism-grouped button labels / WrapPanel / auto-tick) + DLL-free Mono register path live-smoked end-to-end (signature-string fallback when CE Mono returns nil typename) + Phase 21d Inspector write-back click-through PASS + enum ComboBox path live-smoked via `FindObjectsByType`; on top of the earlier mega-batch — 19d-3 smart-typed editors + 5 spawned follow-ups + Phase 21a reverse-property lookup + AOT DataGrid sort fix + Phase 21 a/b/c + Phase 5 v32-v39 metadata.dat parser (live-smoked on Songs of Silence) + Phase 12d-1..d-5 32-bit Mono support (live-smoked on Legend of Mortal); pushed to origin/dev + origin/main.)
+**Last commit**: feat: Phase 25 — cross-class Symbol Finder tab
+**Build**: 363 (DLL Mono 580.5 KB / IL2CPP 615.0 KB; `DiscreteUI.exe` AOT 39.2 MB; helper lua `mono_registersymbol_helpers.lua` 23.1 KB)
+**Tests**: 241/241 pass (+3 new fake-pipe `SearchSymbolsTests` — wire shape, omit-null args, truncated flag) + cross-arch live smoke (Songs of Silence v39 / Legend of Mortal x86 Mono) + Phase 25 live-smoke on BongoCat
+**Current state**: Live-target work converged + **basic Symbol Finder shipped**. **Phase 25** new tab in MainWindow (position 4) wraps a new `searchSymbols` RPC walking every class in an assembly for fields + methods whose name contains an ASCII case-insensitive substring; replaces the "click each class in turn" loop the user reported. Both backends emit unified wire shape (IL2CPP rows carry AOT address; Mono skips mono_compile_method for bulk-scan performance — JIT deferred to the user-driven Methods picker). Row activation jumps back to Browser Fields/Methods tab with the class + member filter pre-selected. Phase 25b "interesting preset" curated keyword scan deliberately deferred until basic Finder shakes out. **DLL-free Mono path** now usable end-to-end on Unity 2022+ Mono — surfaced + fixed two production-blocker bugs during live smoke: (1) user-autorun `_G.mono_registerSymbolEx` shadows our idempotent helper, fixed by namespacing the working code under `_G.discrete_mono_registerSymbolEx`; (2) CE's `mono_method_get_parameters` returns nil typename for every parameter on at least UnityEngine.Object's methods on Unity 2022+ Mono — `mono_method_getSignature` is fine, so the helper now falls back to signature substring match when typename match fails (success log shows `(matched via signature)`). Both lessons recorded in [lessons-learned.md](lessons-learned.md). Carry-forward: Phase 22 closed in prior session. Phase 23 (heap-scan convergence) and Phase 20a-2 (FindObjectsByType cross-version recipe) both closed 2026-05-18.
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
 
@@ -33,6 +33,112 @@
 | **22 (Live CT Population via AOBMaker)** | ✅ | All sub-phases (22a–22f) shipped 2026-05-12 across 6 commits. `AobMakerBridge` extended with InjectTableFile + CreateMemoryRecord + CreateAAScriptWithRecords + CheckAvailability; 7 lua bridge files embedded as `<EmbeddedResource>` in Core; bootstrap AA-script generator (idempotent guard + preload trick for `unity_dump.lua`'s `require 'utils'`); `BridgeInjector` orchestrator (8-step pipeline w/ progress + structured failure result); MainWindowViewModel hoisted AobMaker to top-level + Tools menu RelayCommand; per-feature `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` for MethodCallWindow + AddressLookup tab; new [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) + [`tools/Test-BridgeInject.ps1`](../tools/Test-BridgeInject.ps1) wire smoke. **Live click-through smoke pending.** |
 | **21 (Inspector field write-back)** | ✅ a/b/c | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` (build #326) — one backend-agnostic handler dispatching per-type to `Memory::SafeWriteBytes`. Accepts both wire-short tags (`int32`) and CLR names (`System.Int32`); marshals into an 8-byte stack buffer with per-type clamping + width validation. New `FieldWriteWindow` modal (build #331) opened from Inspector right-click "Write value…" — editor flavor picked by new `InspectorWriteTypeMap.Resolve` helper (NumericUpDown for sized ints / TextBox for float / AutoCompleteBox for bool / TextBox for char + address). Reference / value-struct / collection rows open the modal but show an unsupported banner. New `SetFieldValueFactory` paralleling `CallArgFactory`; `BackendAdapter.SetInstanceFieldAsync` + `SetInstanceFieldResult` DTO. CE Lua: `setField` / `setInstanceField` in `unity_invoke.lua` mirror the wire RPC. `tools/Test-SetInstanceField.ps1` smoke (`readMemory` snapshot → `setInstanceField` → `readMemory` verify → restore). 238/238 tests pass (+45: 6 fake-pipe RPC + 31 classifier theory + misc). **21d live click-through pending** — recipe in plan.md. |
 | **5 (v32-v39 metadata.dat parser)** | ✅ shipped + LIVE-SMOKED | `MetadataParser` widened to accept `[16, 39]` (was `[16, 31]`). New layouts in `MetadataLayout.h`: `TypeDefinition_v35` (84 bytes — v29 minus `elementTypeIndex`), `StringLiteralEntry_v35` (4 bytes — drops length, computed from delta), `Il2CppSectionMetadata` (12-byte `{offset, size, count}` triplet), `HeaderV38` (380 bytes — 31 section triplets), `IndexSizes` runtime-variable struct + `GetIndexSize(count)` helper. `LoadHeader` dispatches flat (v16-v37) vs section (v38+). `LoadTables` computes `IndexSizes` from `parameters.size/count` + table counts. `TypeDefSizeof` / `FieldDefSizeof` / `FieldDefaultValueSizeof` return per-version sizes (84 for v32-v37; `68+3*TIS+GCIS` for v38+ TypeDef; `8+TIS` for v38+ FieldDef / FieldDefault). `GetTypeDefinition` / `EnumerateTypeFields` / `FindFieldDefault` got hand-walked v38+ paths that consult `indexSizes_`. `GetStringLiteral` recovers v35's missing length from delta-to-next-entry. Smoke ladder: synthetic-fixture `tools/Test-MetadataVersions.ps1` PASS on v29/v31/v35/v37/v38/v39 + correctly rejects v40; **live smoke on Songs of Silence (Unity 6.1.x / v39) 2026-05-19** — `metadata-cli info` decoded 40,501 TypeDefinitions + 44,047 string literals; `metadata-cli stats` ran clean across all 40k types (strip_ratio=0.0008, verdict `clean`); `metadata-cli type UnityEngine Vector3` decoded all 15 expected fields (`kEpsilon` / `kEpsilonNormalSqrt` / `x/y/z` / `zeroVector...negativeInfinityVector`) with correct tokens (0x04000A3B+) + variable-width type indices. **v32-v39 dispatch verified end-to-end on real-world data.** |
+| **25 (cross-class Symbol Finder)** | ✅ shipped + LIVE-SMOKED | New `searchSymbols` pipe RPC (parallel Mono + IL2CPP handlers) walks every class in a named assembly, iterates fields + methods via the existing `EnumerateClasses` + `ReadClassInfo` path, applies ASCII case-insensitive substring match on name, accumulates up to `limit` (default 200, hard-cap 5000), returns `scanned_classes` + `truncated`. IL2CPP method rows carry AOT pointer; Mono skips JIT for bulk scan (drill into Methods picker for the per-overload `mono_compile_method`). New UI Tab "Symbol Finder" (position 4, after Address Lookup) — assembly dropdown shares `Browser.Assemblies`, pattern textbox (Enter triggers Search), Fields/Methods toggles, Limit NumericUpDown (Width 140 + MinWidth 120 so the number stays visible after the spinner widget claims its share), sortable results grid (Kind / Class / Member / Type / Offset / Address). Row double-click or right-click → Navigate jumps back to Browser Fields/Methods tab with the class + member filter pre-selected; right-click also surfaces Copy class / Copy member. 3 new fake-pipe `SearchSymbolsTests`. **Live smoke 2026-05-19** on BongoCat (Mono / Unity 2022+): pattern `MaxHP` against `Assembly-CSharp` returned `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) as first hit in < 1s; double-click jumped to Browser Fields tab with the row filtered + selected. Phase 25b "interesting preset" (curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties panel) deferred until basic Finder shakes out — Unity-specific keyword list (HP/Damage/Gold/XP/Speed/...) still needs design. |
+
+---
+
+## What landed in this session — 2026-05-19 late additions (Phase 25 + DLL-free Mono live smoke + MethodOverloads polish + Phase 21d / enum smoke)
+
+On top of the mega-batch below, the session kept going through three more
+live-smoke cycles + one new feature. All shipped on `dev`, fast-forwarded
+to `main`, pushed to origin.
+
+### Phase 25 — cross-class Symbol Finder (~½ day)
+
+The user reported clicking each class one-by-one through `Assembly-CSharp`'s
+several-hundred classes whenever they hunt a property like `MaxHP`. New
+Tab on the right pane (position 4) wraps a new `searchSymbols` RPC with:
+ASCII case-insensitive substring match (asymmetric tail-match preserves
+the `Int32 → UInt32` substring trap), fields + methods toggles, Limit
+(default 200, DLL-side hard cap 5000), sortable result grid, double-click
+navigate-to-Browser handoff (selects assembly + class, pre-fills the
+Fields/Methods filter, switches tab). DLL Mono + IL2CPP each got a
+parallel handler walking `EnumerateClasses` × `ReadClassInfo`. New file-
+local `ICaseContainsAscii` helper (no `<locale>` drag-in — names are
+always ASCII in C#). Live smoke on BongoCat / Mono / Unity 2022+:
+`MaxHP` → `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`), < 1s
+end-to-end. Properties handled as `get_*`/`set_*` methods (Mono/IL2CPP
+runtime convention; UI confirmed acceptable). Phase 25b interesting-
+preset deferred — needs a Unity-tuned keyword list distinct from
+UE5CEDumper's FProperty-flavored one.
+
+### DLL-free Mono register path — live smoke + 2 production fixes
+
+Live smoke against BongoCat (Mono / Unity 2022+) drove the path through
+`Object.FindObjectsByType(System.Type, FindObjectsInactive, FindObjectsSortMode)`
+(the 3-arg enum overload). Surfaced two issues that both needed a fix
+before the path was usable on any Unity 2022+ Mono target:
+
+* **User-autorun shadows the helper's idempotent block.** The user had
+  hand-rolled `_G.mono_registerSymbolEx` in a CE autorun script (forums
+  pattern, doesn't call `LaunchMonoDataCollector`); our helper's
+  `if _G.mono_registerSymbolEx == nil` guard skipped its own load,
+  leaving the AA to invoke the unattached autorun version → instant
+  `mono_findClass` returns nil → `💔 Class not found - UnityEngine.Object`.
+  Fix: `scripts/mono_registersymbol_helpers.lua` now installs
+  `_G.discrete_mono_registerSymbol*` (no guard, always overwrite — our
+  namespace, our canonical version) alongside the legacy `mono_*`
+  names (still guarded for user copy-paste). Generator
+  (`MonoRegisterSymbolAaScriptGenerator`) keys idempotency off the
+  discrete-namespaced symbol and emits `_G.discrete_mono_registerSymbolEx`
+  calls.
+* **CE 7.6 + Unity 2022+ Mono returns nil typename for every parameter
+  on `UnityEngine.Object`'s methods**, even though `mono_method_getSignature`
+  renders the full type info cleanly. Helper now falls back to signature-
+  string substring match when typename match fails for any param; success
+  log shows `(matched via typename)` vs `(matched via signature)`. Plus
+  `pcall` shielding around `mono_method_get_parameters` (generic /
+  uncompiled overloads throw), `mono_enumImages` warm-up for split-module
+  classes, and an asymmetric `_discrete_typename_match` so the generator
+  can emit full namespaced names while the helper accepts CE's stripped
+  forms (still rejects the `Int32` substring of `UInt32`). Diagnostic
+  output now lists every name-matched overload + its rendered signature
+  when no match lands, so the next CE/Unity-version surprise surfaces
+  the relevant data immediately.
+
+### MethodOverloadsWindow polish (4 small fixes triggered by smoke)
+
+* **WrapPanel + Width 1100** (was StackPanel + 900) — bottom button bar
+  now reflows under any window size instead of clipping the last entries.
+* **Mechanism-grouped button labels** replacing the wordy old set: now
+  `Copy: addresses / registersymbol / aobscan / mono_register` plus
+  `Push aobscan to CE / Push mono_register to CE`. The action prefix
+  (`Copy:` vs `Push`) groups visually, the underlying CE primitive name
+  shows what each button emits — no more "what's the difference between
+  three copy buttons".
+* **Single-overload auto-tick** — Refresh ticks the only row's
+  `IsSelected` so the bottom-bar commands enable on open without manual
+  click; mirrors the Phase 19d-2 auto-skip on the Call method… context
+  menu. Multi-row keeps the legacy "user must tick" gating; status text
+  updated to "Tick rows to enable the buttons below".
+* **NumericUpDown Width 140 + MinWidth 120** (was Width 90) — the
+  number display was hidden behind the up/down spinner widget; the
+  Phase 25 Symbol Finder Limit field hit the same trap on first smoke
+  and got the same fix.
+
+### Phase 21d Inspector field write-back + enum ComboBox path — live click-through PASS
+
+Both stayed pending after their initial Phase 21 / 19d-3 ship; this
+session walked through them end-to-end:
+
+* **Phase 21d**: BongoCat Mono right-click any primitive Inspector row →
+  Write value… modal → Apply → readMemory verifies the write landed,
+  CE address-list refreshed via the existing AOBMaker bridge.
+* **enum ComboBox path**: same target, `UnityEngine.Object.FindObjectsByType(Type, FindObjectsInactive, FindObjectsSortMode)`
+  drove both enum params through the Phase 19d-3 `getEnumValues` → ComboBox
+  cascade. Closes the Phase 19d-3 follow-up that previously had no enum-
+  parameter target to exercise.
+
+### Session totals (post mega-batch)
+
+* **Tests**: 238 → 241 (+3 SearchSymbolsTests).
+* **Build**: #340-something → **#363**. DLL Mono 571.5→580.5 KB, IL2CPP
+  606→615 KB, `DiscreteUI.exe` 39.1→39.2 MB, helper lua 10.6→23.1 KB.
+* **Commits on dev (since the mega-batch hand-off)**: 2 —
+  `a41c7d3 feat(ui): MethodOverloadsWindow polish + DLL-free Mono live smoke PASS`,
+  `b1d8ef2 feat: Phase 25 — cross-class Symbol Finder tab`.
+* **Docs**: STATUS.md / plan.md / pipe-protocol.md / lessons-learned.md
+  all updated in the post-Phase-25 docs sweep.
 
 ---
 
@@ -351,9 +457,13 @@ Genuine open items:
 
 - ~~**Inspector "Class ptr" copy buttons**~~ ✅ **Shipped 2026-05-19** — two small `name` / `addr` buttons next to the Class ptr row in the Inspector header. `name` copies the fully-qualified `<namespace>.<name>` (or bare `<name>` when the namespace is empty); `addr` copies the displayed `0x…` pointer verbatim. Reuses the existing `LiveInspectionViewModel.CopyToClipboardAsync` hook (same `IClipboard.SetDataAsync(IAsyncDataTransfer)` path as Copy CE XML / Copy instance address). Mirrors the tiny-button style from the walked-field row actions (addr/ptr/name/HEX) so the Inspector header stays visually consistent. Localized via `Inspector.CopyClassNameTooltip` / `Inspector.CopyClassAddressTooltip` in `en.axaml`. Tests 163/163 PASS, AOT publish clean.
 - ~~**Phase 22 — `.CT` embedding + AA-script generator UI tab**~~ ✅ **Shipped 2026-05-12 across 22a–22f, 6 commits.** Pivoted from "offline `.CT` builder" to "live CT population via AOBMaker plugin" after auditing the plugin's existing pipe protocol. Tools menu "Inject Discrete Bridge" + per-feature Send-to-CE buttons live; 148/148 tests pass; AOT clean. Live click-through smoke against CE 7.6 + AOBMaker + a Unity game still pending (see [`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md)).
+- ~~**Phase 25 — cross-class Symbol Finder**~~ ✅ **Shipped + live-smoked 2026-05-19** (build #363). New `searchSymbols` RPC + MainWindow Tab — see Phase Overview row above for details. **Phase 25b (interesting preset)** still open — needs a Unity-tuned curated keyword list (HP / Damage / Gold / XP / Speed / Health / Mana / Stamina / ...) distinct from UE5CEDumper's FProperty-typed one, plus a per-row score for the existing results grid. ~½ day when prioritised.
+- ~~**Phase 21d Inspector field write-back live click-through**~~ ✅ **PASS 2026-05-19** on BongoCat Mono — right-click primitive row → Write value… modal → Apply → readMemory verifies + CE address-list refreshes via the existing AOBMaker bridge.
+- ~~**enum ComboBox path live smoke**~~ ✅ **PASS 2026-05-19** via `UnityEngine.Object.FindObjectsByType(Type, FindObjectsInactive, FindObjectsSortMode)` on BongoCat — both enum params surfaced as ComboBox via the Phase 19d-3 `getEnumValues` cascade. Closes the Phase 19d-3 follow-up that had no enum-parameter smoke target.
+- ~~**DLL-free Mono register path live smoke**~~ ✅ **PASS 2026-05-19** with `Object.FindObjectsByType` against BongoCat. Surfaced + fixed two production blockers in the same session: user-autorun shadows helper (→ `discrete_*` private namespace); CE Mono returns nil typename on Unity 2022+ (→ `mono_method_getSignature` fallback path). See "What landed" block above + lessons-learned for the forensic.
 - **Phase 20 — Scene / GameObject explorer** (parked at 20a, see follow-ups) — **20a journey across one session 2026-05-08 on SaGa F2R**: shipped Lua bridge, then iteratively learnt FOUR cliffs the hard way: (1) wire envelope `{id, result}` unwrap missed; (2) sustained Unity-icall bursts freeze the game (Phase 19 v1 worker-thread limitation); (3) `findInstances UnityEngine.GameObject` returns IL2CPP RGCTX metadata records that fool both Lua filters AND `whatIsAt`; (4) IL2CPP code stripping removes most enumeration APIs — `Resources.FindObjectsOfTypeAll`, `Object.FindObjectsOfTypeAll`, single-arg `Object.FindObjectsOfType`, `SceneManager.get_sceneCount`, etc. all stripped on SaGa F2R's shipped build. Survivors: `Object.FindObjectsOfType(Type, bool)`, `GameObject.Find(string)`, `Camera.get_main()`, `SceneManager.GetActiveScene()` + `Scene.GetRootGameObjects()`. Recipe pivoted to the 2-arg `FindObjectsOfType` survivor. Three new sub-phases opened: **20a-2** (verify the new recipe end-to-end), **20-MT** (DLL-side main-thread marshaling for callMethod-heavy recipes), **20-HEAP** (DLL-side libgc heap walker as the strip-resistant fallback). Three new lessons in [lessons-learned.md](lessons-learned.md): IL2CPP stripping detection, signatureMatch close-paren trap, plus updates to the existing findInstances-false-positives entry. Full design in [plan.md §Phase 20](plan.md#phase-20--scene--gameobject-explorer--objectname-search). **20a-2 closed 2026-05-18** (see next bullet); 20-MT + 20-HEAP remain open.
 - ~~**Phase 20a-2 — verify `getAllGameObjects` recipe end-to-end**~~ ✅ **Closed 2026-05-18** via new `tools/Test-FindObjectsOfType.ps1` smoke (4-step recipe replay over raw RPCs — `Type.GetType` → `FindObjectsOfType/ByType` → `walkArray` → `Object.get_name` × N). Cross-backend cross-version PASS: **SaGa F2R** (IL2CPP / Unity 2021) picked the 2-arg `FindObjectsOfType(Type, bool)` overload, 14,942 GameObjects in scene, sampled names came back as real `SoundObject_SeCh11..15` instances, 0 native_crashes. **BongoCat** (Mono / Unity 2022+) had **0** `FindObjectsOfType` overloads (the entire API was removed in Unity 2022+, not just deprecated), automatically fell through to `FindObjectsByType(Type, FindObjectsInactive, FindObjectsSortMode)` — the 3-arg compiled overload. 40,752 GameObjects, sampled names "Background" ×5, 0 native_crashes. **Bonus finding**: the two enum params on the Unity 2022+ API marshal as plain `int32` over the wire (ABI is identical to underlying type — no DLL `enum` tag needed). Lua bridge `getAllGameObjects` `tries[]` grew a third entry (3-arg ByType for Unity 2022+); first-match-wins keeps production calls on the historically-preferred path per Unity version. Phase 23's heap-scan filter is also indirectly validated by this run (0 native_crashes on real instance pointers, no stack/RGCTX residue surfaced).
-- **Phase 21 — Inspector field write-back** (planned, ~½ day + tests) — closes the read/write asymmetry. New wire RPC `setInstanceField(addr, fieldOffset, type, value)`, SEH-protected `SafeWriteBytes` on both backends, UI Inspector cells go editable with Apply button. v1 covers primitives + raw address; reference-type writes (string / object pointer) deferred to v2 with its own GC-root marshaling. Full design in [plan.md §Phase 21](plan.md#phase-21--inspector-field-write-back).
+- ~~**Phase 21 — Inspector field write-back**~~ ✅ **Shipped a/b/c + 21d live click-through PASS 2026-05-19**. v1 (primitives + raw address) is the entire shipped scope; v2 (reference-type writes — string + object pointer with proper GC-root marshaling) deferred until a user actually needs it. Full design in [plan.md §Phase 21](plan.md#phase-21--inspector-field-write-back).
 - ~~**v24 integer-decode bug**~~ ✅ **Fixed + live-verified 2026-05-08** (commit `cb3d100`, build #251 against FF VI / Unity 2019.4 / v24) — added per-version dispatch hooked off `mp.version()`. v24/v27 → raw LE branch; v29+ → existing sentinel + compressed-int branch. Both branches emit `encoding: "raw_le"` / `"sentinel_compressed"` in the response. R4/R8/Bool/Char unaffected (always raw LE). Verified: `Int32.MaxValue` → 2147483647 (was -2147483648), `Int32.MinValue` → -2147483648 (was 0), both with `enc=4B` confirming the raw LE branch fired.
 - ~~**Unity 2018.x missing IL2CPP exports**~~ ✅ **Fixed + live-verified 2026-05-08** (commit `587e794`, build #251 against R-Type Dimensions EX / Unity 2018.1 / v24) — `il2cpp_image_get_class_count` + `il2cpp_image_get_class` demoted from REQUIRED to OPTIONAL in `IL2CPPResolver`. `EnumerateClasses` now has a fallback path that walks `MetadataParser::GetTypeDefinition()` and calls `il2cpp_class_from_name(image, ns, name)` per type — null returns implicitly filter by image. Cost: O(N_global_typedefs) per call, slower than the native iterator but functional. **Verified**: `assemblies_count=36` (was 0), `findInstances UnityEngine.GameObject` returned 100 matches with `class_ptr` populated, scan took only 529 ms — the fallback enumeration is fast enough for production use, not a slow-path warning.
 - ~~**`findInstances` IL2CPP `classPtr` empty**~~ ✅ **Fixed + live-verified 2026-05-08** (commit `3e519a8`, build #251 against Hollow Knight Silksong / Mono / Unity 6000.0) — was actually a stale STATUS note; IL2CPP did populate `class_ptr`. Real issue was Mono returning only `vtable` while consumers expected `class_ptr`. Fix: Mono findInstances now also returns `class_ptr` (additive, keeps `vtable` for compat). Verified: Silksong run printed `class_ptr : 0x000002201761E3D0` (no fallback to `vtable`), 100 Transform instances. Both backends now expose the canonical field; pipe-protocol.md updated to spell out "scan target = `vtable` on Mono, `class_ptr` on IL2CPP".

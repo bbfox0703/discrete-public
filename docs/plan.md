@@ -127,8 +127,9 @@
 | 18 | Find Method Instances | New wire commands `findMethodInstances` + `getMethodAobPattern` + UI overloads modal + AOB AA-script generator + AOBMaker `CreateAAScript` direct push | ✅ All four sub-phases shipped (18a DLL handler + signature decoding / 18a-3 hand-rolled x64 LDE for AOB wildcarding / 18c UI overloads picker + AobAaScriptGenerator + AOBMaker direct push / 18d `unity_symbols.lua` extension `registerMethodOverloads`). |
 | 19 | Lua-callable Unity methods | New wire command `callMethod(asm, ns, class, method, [args], [instance])` invoking Mono / IL2CPP methods with marshaled primitive + string args; closes the long-standing CLAUDE.md goal | ✅ All five sub-phases shipped (19a IL2CPP DLL / 19b Mono port / 19c instance dispatch + string in/out / 19d UI MethodCallWindow / 19e `scripts/unity_invoke.lua` Lua bridge). Verified live across SaGa F2R + BongoCat + Farthest Frontier. Spec: [lua-invoke.md](lua-invoke.md). |
 | 20 | Scene / GameObject explorer + Object.name search | `scripts/unity_scene.lua` Lua bridge + DiscreteUI Scene tab + filter-by-name + click-to-inspect handoff. Tree-walk primitives gated behind a NEW sub-phase **20-MT** (DLL-side main-thread marshaling) since iterating Unity icalls from the worker thread freezes the game. | 🚧 In progress — 20a landed + hardened 2026-05-08 (envelope unwrap fix + main-thread caveat after live test on SaGa F2R locked up the game). `getName` / `getAllGameObjects` / `findByName` are safe-and-working primitives; `getActiveSceneRoots` / `getChildren` / `getComponents` formally **EXPERIMENTAL until 20-MT ships**. 20b (UI tab) blocked behind 20-MT. Zero DLL changes so far; 20-MT will need DLL frame-hook work. |
-| 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector field "Write value…" right-click + CE Lua `setField` wrapper | ✅ 21a (DLL handler + smoke), 21b (UI modal + 37 new tests + AOT clean), 21c (Lua bridge + docs) shipped 2026-05-19. 21d pending live click-through on a Mono + an IL2CPP target. v1 covers primitives + raw address; reference-type writes deferred to v2 (GC-root marshaling). |
-| 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. | ✅ **All sub-phases (22a–22f) shipped 2026-05-12 + live smoke fully closed 2026-05-18.** 22a `AobMakerBridge` extended (4 new commands, `IsAvailable` event); 22b 7 bridge lua files embedded in Core; 22c `BootstrapAaScriptGenerator` template; 22d Tools menu RelayCommand + `BridgeInjector` orchestrator; 22e `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` per-feature buttons; 22f `docs/ce-bridge-integration.md` + `tools/Test-BridgeInject.ps1` smoke. **Live click-through smoke**: Steps 1-8 captured + fixed 6 P0/P1 bugs mid-session; Steps 9-11 (MethodCall→CE / AddressLookup→CE / save+reopen) PASS in follow-up session — user log `Mathf.Abs(-7) → 7` confirms the AA-script → bridge → `callUnityMethod` chain. 163/163 xUnit pass, AOT 0/0 warnings. |
+| 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector field "Write value…" right-click + CE Lua `setField` wrapper | ✅ 21a (DLL handler + smoke), 21b (UI modal + 37 new tests + AOT clean), 21c (Lua bridge + docs) shipped 2026-05-19. **21d live click-through PASS 2026-05-19** on BongoCat Mono (right-click primitive Inspector row → Write value… modal → Apply → readMemory verifies + CE address-list refreshed). v1 covers primitives + raw address; reference-type writes deferred to v2 (GC-root marshaling). |
+| 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. | ✅ **All sub-phases (22a–22f) shipped 2026-05-12 + live smoke fully closed 2026-05-18.** 22a `AobMakerBridge` extended (4 new commands, `IsAvailable` event); 22b 7 bridge lua files embedded in Core; 22c `BootstrapAaScriptGenerator` template; 22d Tools menu RelayCommand + `BridgeInjector` orchestrator; 22e `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` per-feature buttons; 22f `docs/ce-bridge-integration.md` + `tools/Test-BridgeInject.ps1` smoke. **Live click-through smoke**: Steps 1-8 captured + fixed 6 P0/P1 bugs mid-session; Steps 9-11 (MethodCall→CE / AddressLookup→CE / save+reopen) PASS in follow-up session — user log `Mathf.Abs(-7) → 7` confirms the AA-script → bridge → `callUnityMethod` chain. 163/163 xUnit pass, AOT 0/0 warnings. **DLL-free Mono register path live-smoked 2026-05-19** with the Phase 22e `MonoRegisterSymbolAaScriptGenerator` on BongoCat — surfaced + fixed two production blockers (user-autorun `_G.mono_*` shadowing → `discrete_*` private namespace; CE Mono nil typename on Unity 2022+ → `mono_method_getSignature` substring fallback). |
+| 25 | Cross-class Symbol Finder | New `searchSymbols` pipe RPC + Symbol Finder Tab in MainWindow. Walks every class in a named assembly for fields + methods whose name contains an ASCII case-insensitive substring. Row double-click navigates back to Browser Fields/Methods tab with the class + member filter pre-selected. Replaces the historical "click each class in turn" loop the user reported when hunting properties like `MaxHP` across a few-hundred-class assembly. | ✅ **Shipped + live-smoked 2026-05-19** (build #363) on BongoCat Mono — pattern `MaxHP` → `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) in < 1s. 3 new fake-pipe `SearchSymbolsTests`. Properties surfaced via `get_*`/`set_*` methods (Mono/IL2CPP runtime convention; no separate property row kind). 25b (Interesting preset — curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties) deferred until basic finder shakes out — needs a Unity-tuned keyword list distinct from UE5CEDumper's FProperty-flavored one. |
 
 ---
 
@@ -1110,6 +1111,119 @@ expect CE Lua console banner
 emitted by `ExportAPI.cpp` (line 104) and documented in
 `pipe-protocol.md` (line 146). 22c's Bootstrap AA script asserts on this
 existing field (note: actual key is `protocol`, not `protocol_version`).
+
+---
+
+## Phase 25 — Cross-class Symbol Finder ✅ SHIPPED 2026-05-19
+
+**Goal**: Replace the "click every class in turn through the Browser
+pane" loop the user reported when hunting a property like `MaxHP` that
+could live in any of the few-hundred classes in `Assembly-CSharp`. One
+keystroke ought to find it.
+
+**Design**:
+* **New pipe RPC `searchSymbols`** — parallel Mono + IL2CPP handlers
+  in `ExportAPI.cpp` walk the existing `EnumerateClasses(image)` × per-
+  class `ReadClassInfo` path, apply ASCII case-insensitive substring
+  match on field/method names, accumulate matches up to `limit`.
+  Defaults: limit 200, hard-cap 5000, both kinds (`field` + `method`)
+  enabled. Returns `{matches: [...], scanned_classes: N, truncated: bool}`.
+  Wire shape is unified across backends — IL2CPP method rows carry the
+  AOT `methodPointer`; Mono method rows omit address (calling
+  `mono_compile_method` per method during a bulk scan is too heavy;
+  defer JIT to the user's per-overload Methods picker click).
+* **New file-local `ICaseContainsAscii` helper** at the top of
+  `ExportAPI.cpp` — ASCII fold (`(c >= 'A' && c <= 'Z') ? c | 0x20 : c`),
+  no `<locale>` drag-in. C# field/method names are always ASCII.
+* **Properties handled as `get_*`/`set_*` methods** — the Mono/IL2CPP
+  runtimes already lower properties to that pair of accessor methods,
+  and the Browser Methods grid surfaces them, so the finder doesn't
+  need a separate `property` row kind. User search `MaxHP` automatically
+  matches the field `MaxHP`, the getter `get_MaxHP`, and the setter
+  `set_MaxHP` in one pass.
+* **Core layer**: new `BackendAdapter.SearchSymbolsAsync(asm, pattern,
+  kinds?, limit?)` with a JsonDocument-based inline `kinds` array (no
+  AOT-unfriendly serializer path for a string[]). New
+  `SearchSymbolsResult` + `SearchSymbolMatch` DTOs + `ProtocolJsonContext`
+  envelope.
+* **UI tab**: new TabItem at position 4 (after Address Lookup) in
+  MainWindow. Assembly dropdown shares `Browser.Assemblies` so the
+  list auto-populates after handshake. Pattern textbox triggers
+  Search on Enter (the bound `RelayCommand`'s `CanExecute` gates on
+  selected assembly + non-empty pattern + ≥1 kind toggle on).
+  Limit NumericUpDown (Width 140 + MinWidth 120 — the original 90px
+  column starved the number display behind the up/down spinner).
+  Sortable results grid (Kind / Class / Member / Type / Offset /
+  Address). Row double-click or right-click "Navigate" jumps back
+  to the Browser: selects assembly + class, pre-fills Fields/Methods
+  filter with the member name, switches to the matching tab.
+  Right-click also surfaces Copy class / Copy member.
+* **Tests**: 3 new fake-pipe `SearchSymbolsTests` — wire-shape pin
+  (cmd + args), omit-null-kinds/-limit guard, truncated flag round-
+  trip. SymbolFinderRow's display projection (ClassDisplay /
+  OffsetLabel / KindLabel) lives in the UI project (not Core) so
+  xUnit can't reach it without pulling Avalonia into test deps;
+  covered by manual click-through smoke instead. Lift to Core if the
+  projection grows enough to need its own tests.
+
+**Live smoke 2026-05-19**:
+* **BongoCat** (Mono / Unity 2022+ / Assembly-CSharp): pattern
+  `MaxHP` returned `MainGame/CALC_WORK.maxHp` (`System.Int32` @
+  `0x2C`) as the first hit in < 1s. Double-click jumped to Browser
+  Fields tab with the row filtered + selected.
+* Limit-column width regression caught + fixed in the same session
+  (Width 90 → 140 + MinWidth 120).
+
+**Files**:
+* `dll/src/shared/MagicStrings.h` — new `CmdSearchSymbols`
+* `dll/src/shared/ExportAPI.cpp` — `ICaseContainsAscii` helper +
+  both backends' handlers
+* `ui/UnityDumpUI.Core/Services/ProtocolModels.cs` —
+  `SearchSymbolsResult` + `SearchSymbolMatch`
+* `ui/UnityDumpUI.Core/Services/ProtocolJson.cs` — JSON contexts
+* `ui/UnityDumpUI.Core/Services/BackendAdapter.cs` —
+  `SearchSymbolsAsync` + `BuildKindsJson` helper
+* `ui/UnityDumpUI/ViewModels/SymbolFinderViewModel.cs` (new)
+* `ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs` —
+  `SymbolFinder` property + `OnSymbolFinderNavigateRequested`
+  handler + `TabIndexSymbolFinder = 4`
+* `ui/UnityDumpUI/Views/MainWindow.axaml` — new TabItem
+* `ui/UnityDumpUI/Views/MainWindow.axaml.cs` — 5 handlers
+* `ui/UnityDumpUI/Resources/Strings/en.axaml` — `SymbolFinder.*` keys
+* `ui/UnityDumpUI.Tests/SearchSymbolsTests.cs` (new)
+
+### Phase 25b — Interesting preset (deferred)
+
+UE5CEDumper has a sibling "Interesting Properties" panel that runs a
+batched multi-keyword search against a curated seed list (HP /
+Damage / Gold / XP / Speed / Health / Mana / Stamina / Crit / ...)
+and scores each match by category (Stats / Combat / Resources /
+Movement / Utility) with a "class-location" bonus for unusual
+containers (e.g. fields living on a HUD class get a +4 bump). It
+surfaces fields no user would type into the basic finder.
+
+Phase 25b would add the same surface for Unity but using a Unity-
+tuned keyword list (UE5CEDumper's list is FProperty-flavored —
+`HitResult`, `Pawn`, `Ability` — which doesn't translate). Open
+design questions before implementing:
+
+* Keyword list curation — start from a Unity-specific dump (BongoCat
+  + SaGa F2R + Songs of Silence pooled) and bias toward names that
+  appear across ≥ 3 games.
+* Single batched RPC vs. client-side iterates the existing
+  `searchSymbols` once per keyword. Latter is simpler (no new DLL
+  RPC) but slower; UE5 chose the batched path because their cap
+  was 1.5s vs. 42s on 4400-class games. Unity assemblies are
+  generally smaller per-assembly, so the simpler path may be
+  acceptable.
+* Score model — UE5 keyword-hit ladder (Stats=5, Combat=4, Resources=4,
+  Movement=4, Utility=3) is a reasonable starting point; we'd add
+  Unity-specific categories (UI / Audio / VFX / SaveData) and skip
+  UE-specific ones (Networking / Replication).
+
+Defer until either a user explicitly asks for it, or the basic Phase
+25 finder gets enough use to surface the "I don't know what to
+search for" gap.
 
 ---
 

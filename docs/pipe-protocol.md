@@ -560,6 +560,81 @@ matches.
   `instance + fieldOffset` happens to be readable will return a garbage
   value. See `findInstances` for the validation strategy.
 
+### `searchSymbols` *(Both)*
+
+Phase 25 — **cross-class field + method finder**. Walks every class in
+the named assembly, iterates each class's fields + methods via the same
+`EnumerateClasses` × `ReadClassInfo` path that drives `getClassInfo`,
+and returns rows whose name contains the supplied ASCII case-insensitive
+substring. Replaces the historical "click each class in turn" loop the
+user reported when hunting a property like `MaxHP` across an assembly
+with several-hundred classes.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assembly` | string | required; same name string `getClasses` accepts (e.g. `"Assembly-CSharp"`, `"UnityEngine.CoreModule"`). |
+| `pattern`  | string | required; non-empty ASCII case-insensitive substring (`'A'`-`'Z'` fold to `'a'`-`'z'`; non-ASCII bytes compare as-is). |
+| `kinds`    | string[] | optional; subset of `["field", "method"]`. Default = both. At least one must be present; passing `[]` errors. |
+| `limit`    | int    | optional; cap on returned rows. Default 200, hard cap 5000. |
+
+```jsonc
+// → {
+//   "matches": [
+//     {
+//       "namespace": "Game",
+//       "class":     "Player",
+//       "name":      "MaxHP",
+//       "kind":      "field",
+//       "type":      "System.Int32",   // declared type (field kind only)
+//       "offset":    64,               // bytes from instance base
+//       "static":    false
+//     },
+//     {
+//       "namespace": "",
+//       "class":     "PlayerStats",
+//       "name":      "get_MaxHP",
+//       "kind":      "method",
+//       "token":     100663552,        // metadata token (Mono + IL2CPP)
+//       "static":    false,
+//       "address":   "0x00007FF876123450"  // IL2CPP only — Mono omits this
+//     }
+//   ],
+//   "scanned_classes": 153,            // distinct classes walked
+//   "truncated":       false           // true when capped by `limit`
+// }
+```
+
+**Backend differences (small)**:
+
+- **IL2CPP method rows carry `address`** (the AOT `methodPointer`).
+- **Mono method rows omit `address`** — calling `mono_compile_method`
+  per method during a bulk scan would JIT every overload of every
+  matching class, which is far too heavy. The user drills into a
+  single overload via the Methods picker's "Find overloads" entry
+  point, which JITs only that one method.
+- **`kind` is always one of `"field"` / `"method"`** — properties
+  in C# are surfaced via their `get_*` / `set_*` accessor methods
+  (Mono / IL2CPP runtime convention); a `MaxHP` property hits as
+  three rows: field `MaxHP` (if there's a backing field), method
+  `get_MaxHP`, method `set_MaxHP`.
+
+**Caveats**:
+
+- The pattern is **substring**, not prefix or regex. Searching for
+  `"set"` will match every setter in the assembly; narrow with
+  prefix (`"set_MaxHP"`) or use the kind filter when the result set
+  bloats.
+- `truncated: true` means at least one matching row was *not* emitted
+  — the user should narrow the pattern or raise the `limit`. The
+  truncated set is order-of-iteration (whichever class the scan
+  reached first), not "best matches first".
+- `ReadClassInfo` walks declared members only — inherited fields /
+  methods from parent classes don't surface here. Use `getClassInfo`
+  with `include_inherited` for that path.
+- The `format` of `address` matches `findMethodInstances` —
+  `0x` prefix + uppercase hex, never zero-padded — so the UI can
+  hand it to `CreateAAScript` / `whatIsAt` verbatim.
+
 ### `walkArray` *(Both)*
 
 Reads a managed `T[]` header at `address` and returns up to `limit` per-element

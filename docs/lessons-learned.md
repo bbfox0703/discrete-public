@@ -898,6 +898,98 @@ F2R: `getAllGameObjects()` returned 0 even though the same
 `findInstances` call from a hand-built `rpc()` showed 4+ matches. Fix
 in `unity_scene.lua`'s `rpc()`.
 
+### CE's `mono_method_get_parameters(method).parameters[i].typename` is nil on Unity 2022+ Mono — fall back to `mono_method_getSignature`
+
+**Symptom**: an AA script that calls CE's built-in `mono_*` Lua API to
+locate an overload (e.g. our Phase 22e `discrete_mono_registerSymbolEx`
+helper) substring-matches `paramTypes[i]` against `p.parameters[i].typename`.
+On at least Unity 2022+ Mono (verified on BongoCat), CE returns
+`p.parameters[i].typename == nil` for *every* parameter on *every*
+method of at least `UnityEngine.Object` — including non-generic
+compiled methods. `string.find(nil, ...)` then crashes (`bad
+argument #1 to 'find'`), or with a nil guard the substring match
+fails for every overload and the user sees `no matching overload`
+even though the picker showed three.
+
+**Critically, `mono_method_getSignature(m.method)` is fine on the same
+target** — it returns the full rendered signature string with all
+type info intact. The right-pane overload picker in DiscreteUI was
+reading the same data via our DLL pipe (which doesn't go through
+CE's introspection) and showed correct typenames, so the disparity
+was specifically inside CE's MonoDataCollector Lua surface, not the
+runtime itself.
+
+**Fix** (in [`scripts/mono_registersymbol_helpers.lua`](../scripts/mono_registersymbol_helpers.lua)):
+
+1. **`pcall`-shield `mono_method_get_parameters`** — some generic /
+   uncompiled overloads throw inside the call; skip the row, don't
+   crash the AA.
+2. **Defensive nil-guard on `typename`** before any `string.find` —
+   treat nil typename as "this overload doesn't match", continue
+   to the next.
+3. **Fall back to `mono_method_getSignature` substring match** when
+   the typename path fails for any param of an otherwise-matching
+   overload (right name + right param count). Success log
+   distinguishes `(matched via typename)` vs `(matched via signature)`
+   so the next debug session sees which path landed.
+4. **Symmetric tail-match for typename comparisons** when both
+   forms ARE populated — `_discrete_typename_match("UnityEngine.FindObjectsInactive",
+   "FindObjectsInactive")` returns true (either side may be the
+   namespaced form, the other the basename). Crucially still
+   rejects `"System.Int32"` ↔ `"UInt32"`, so the long-standing
+   Int32-substring-of-UInt32 trap stays caught.
+5. **Diagnostic dump on no-match** prints every name-matched
+   overload's `(N) <typename name>, ...  -- sig: <full signature>`
+   so the next CE/Unity-version surprise surfaces the relevant data
+   on the first run.
+
+Surfaced 2026-05-19 during Phase 25 live-smoke. Same session also
+caught the autorun-shadowing trap below.
+
+### User-autorun `_G.mono_*` definitions shadow idempotent helpers — namespace under `_G.discrete_*`
+
+**Symptom**: a freshly-generated AA script that loads our DLL-free
+Mono register helper from the CT (Phase 22e `MonoRegisterSymbolAaScriptGenerator`
+pattern — `findTableFile` → `chunk()` → `_G.mono_registerSymbolEx(...)`)
+runs the *user's* hand-rolled autorun version of `mono_registerSymbolEx`
+instead of ours. Two giveaways: error message format doesn't match
+our helper's `[discrete] ...` convention (user's autorun prints
+`💔 Error: ...`), and the autorun version lacks the
+`mono_ensureAttached()` step our helper does, so `mono_findClass`
+returns nil on the first run because `LaunchMonoDataCollector` was
+never called.
+
+**Root cause**: our helper uses `if _G.mono_registerSymbolEx == nil
+then ... end` for idempotency (avoid re-defining functions across
+multiple AA enable/disable cycles). When the user has a CE autorun
+script that pre-registers the same name (CE forums pattern — very
+common for cheat-table authors who chain together community
+snippets), the guard skips our load, and the AA call invokes the
+autorun's version.
+
+**Fix**: don't share namespace with users. The helper now installs
+`_G.discrete_mono_registerSymbol{,Ex,BySignatureMatch}` as a private
+suite — **no idempotency guard, always overwrite** (our namespace,
+our canonical version, no risk of stomping unrelated user code).
+The user-facing `mono_*` names stay defined with their guards so
+hand-written CT copy-paste examples still work as before. The
+generator (`MonoRegisterSymbolAaScriptGenerator`) keys idempotency
+off `_G.discrete_mono_registerSymbolEx == nil` (test asserts the
+guard text doesn't drift back to the `mono_*` form). A `Assert.DoesNotContain`
+in `MonoRegisterSymbolAaScriptGeneratorTests` catches accidental
+regression.
+
+**General lesson** for any user-facing scripting surface: assume
+the user has *something* under your "obvious" function name. Either
+prefix everything with your project's tag (`discrete_*`) or use a
+table namespace (`Discrete = Discrete or {}; function Discrete.foo()`).
+The idempotency guard pattern is fine for end-user examples (where
+you want their override to win) but NOT for your own internal
+function calls.
+
+Surfaced 2026-05-19 during Phase 25 follow-on live-smoke on
+BongoCat.
+
 ---
 
 ## AOBMaker CE plugin
