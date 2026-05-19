@@ -70,8 +70,15 @@ void DoResolve() {
     tryBind("mono_thread_detach",          g_resolver.thread_detach);
     tryBind("mono_assembly_foreach",       g_resolver.assembly_foreach);
     tryBind("mono_assembly_get_image",     g_resolver.assembly_get_image);
-    tryBind("mono_assembly_get_name",      g_resolver.assembly_get_name);
-    tryBind("mono_assembly_name_get_name", g_resolver.assembly_name_get_name);
+    // assembly_get_name + assembly_name_get_name: optional in practice.
+    // MonoDomain::OnAssembly uses image_get_name as the primary source for
+    // the friendly assembly name and only falls back to this pair when the
+    // image-side path returns empty. Unity 5.3-era legacy mono.dll (pre-
+    // bdwgc Mono 2.x fork) ships without these two exports — see Endless
+    // Legend smoke 2026-05-19. Demoting to optBind unblocks legacy targets;
+    // call sites are already null-guarded.
+    optBind("mono_assembly_get_name",      g_resolver.assembly_get_name);
+    optBind("mono_assembly_name_get_name", g_resolver.assembly_name_get_name);
     tryBind("mono_image_get_name",         g_resolver.image_get_name);
     tryBind("mono_image_get_filename",     g_resolver.image_get_filename);
 
@@ -94,7 +101,12 @@ void DoResolve() {
     tryBind("mono_method_get_token",       g_resolver.method_get_token);
     tryBind("mono_method_get_flags",       g_resolver.method_get_flags);
     tryBind("mono_type_get_name",          g_resolver.type_get_name);
-    tryBind("mono_free",                   g_resolver.free);
+    // mono_free: ideally we call it to free the char* mono_type_get_name
+    // allocates, but Unity 5.3-era legacy mono.dll doesn't export it.
+    // Without mono_free, we leak a small string per type-name lookup —
+    // bounded, non-fatal. MonoTypeParser is already null-guarded at the
+    // call site. Demoting unblocks legacy Unity 5.x Mono targets.
+    optBind("mono_free",                   g_resolver.free);
 
     // Segment 3: static-field address + JIT compile.
     tryBind("mono_class_vtable",                g_resolver.class_vtable);

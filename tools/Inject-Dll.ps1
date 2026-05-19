@@ -44,14 +44,28 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Defin
 # ---------------------------------------------------------------------------
 # Resolve DLL path
 # ---------------------------------------------------------------------------
+# Search order:
+#   1. -DllPath (explicit override)
+#   2. -BuildDir (explicit override)
+#   3. dist\UnityDumper-{Backend}.dll                    (canonical, post-12d)
+#   4. build\dll-{both,backend}-release-x64\bin\...      (arch-suffixed, post-12d)
+#   5. build\dll-{both,backend}-release\bin\...          (pre-12d legacy)
+# Putting dist\ first means whichever DLL was most recently produced (by
+# `build.ps1 -Target DLL ...` of any arch/backend combo) wins — no stale
+# build/dll-both-release/bin/ from the pre-12d era can shadow it.
 if (-not $DllPath) {
     if (-not $BuildDir) {
-        $BuildDir = Join-Path $RepoRoot 'build\dll-both-release\bin'
-        if (-not (Test-Path $BuildDir)) {
-            $BuildDir = Join-Path $RepoRoot "build\dll-$($Backend.ToLower())-release\bin"
-        }
+        $candidates = @(
+            (Join-Path $RepoRoot                       "dist\UnityDumper-$Backend.dll"),
+            (Join-Path $RepoRoot                       "build\dll-both-release-x64\bin\UnityDumper-$Backend.dll"),
+            (Join-Path $RepoRoot "build\dll-$($Backend.ToLower())-release-x64\bin\UnityDumper-$Backend.dll"),
+            (Join-Path $RepoRoot                       "build\dll-both-release\bin\UnityDumper-$Backend.dll"),
+            (Join-Path $RepoRoot "build\dll-$($Backend.ToLower())-release\bin\UnityDumper-$Backend.dll")
+        )
+        $DllPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    } else {
+        $DllPath = Join-Path $BuildDir "UnityDumper-$Backend.dll"
     }
-    $DllPath = Join-Path $BuildDir "UnityDumper-$Backend.dll"
 }
 if (-not (Test-Path $DllPath)) {
     throw "DLL not found: $DllPath`n  Build first:  .\build.ps1 -Target DLL -Backend $Backend"
