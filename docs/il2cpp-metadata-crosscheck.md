@@ -389,14 +389,34 @@ with a clear log line.
   autonomous — no live Unity target required. Verified PASS at build
   #336.
 
+**Live-smoke results (2026-05-19, Songs of Silence / v39):**
+
+- `metadata-cli info` →
+  `{version:39, loaded:true, type_tables_parsed:true,
+    type_definition_count:40501, string_literal_count:44047}`
+  — section header parsed cleanly; `IndexSizes` derivation worked
+  on the real 40k-type-def table.
+- `metadata-cli stats` ran across all 40,501 types: `verdict:"clean"`,
+  `avg_name_length:21.39` — `GetHeapString` recovers names through
+  the variable-width TypeDefinition stride correctly.
+- `metadata-cli types` produced canonical Unity types with correct
+  tokens: `UnityEngine.Vector3` at index 15063 (15 fields, 58 methods),
+  `UnityEngine.Mathf` at 15065, `UnityEngine.GameObject` at 15151
+  (143 methods). Token sequence is monotonic +1 starting at
+  0x02000001 — `EnumerateTypeFields`'s v38+ hand-walked reader
+  produces the right `field_count` per type.
+- `metadata-cli type UnityEngine Vector3` → all 15 expected fields
+  (`kEpsilon` + `kEpsilonNormalSqrt` const-defaulted, `x/y/z`
+  instance, then 10 readonly statics `zeroVector...negativeInfinityVector`).
+  Tokens monotonic 0x04000A3B..0x04000A49; `typeIndex` values in
+  expected range (98345-104681 across ~150k types[]).
+- **`type_tables_parsed:true` is the key signal.** Pre-this-change
+  Songs of Silence reproducibly produced `loaded:false` with the
+  `version > 31` reject. Now the section-header reader + variable-
+  width indices walk the real-world data end-to-end.
+
 **What still needs work (carry-forward):**
 
-- **Live smoke against a real v39 file.** Songs of Silence's actual
-  `global-metadata.dat` exercises non-empty tables, real
-  `IndexSizes` derivation (likely 4-byte for typeDefinitionIndex
-  given the typedef count), and the v35 `StringLiteralEntry` delta
-  computation. Tracked as Phase 21d-equivalent in
-  [STATUS.md](STATUS.md).
 - **v33 / v34 / v36 verification.** No Unity build in the wild
   reportedly ships these — they're transitional Unity 2023.x or
   intermediate Unity 6.1 dev builds. We accept them with a soft

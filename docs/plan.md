@@ -107,7 +107,7 @@
 | 2 | Backend Detection + Handshake | Auto-detect Mono/IL2CPP, return engine info | ✅ |
 | 3 | Mono Backend | Resolver → Domain walk → Class walk → Field/Method | ✅ |
 | 4 | IL2CPP Backend (API) | Resolver → Domain walk → Class walk via exports | ✅ |
-| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31/35-39) | ✅ v24/v27/v29/v31 dispatch live (Phase 14c); **v32-v39 dispatch landed 2026-05-19 (build #336)** — flat→section header transition + variable-width metadata indices + v35 struct-field removals + synthetic-fixture smoke; live verification on Songs of Silence pending. IL2CPPMetadataRegistration AOB cross-link still optional ("2d follow-up", non-blocking) |
+| 5 | IL2CPP Backend (Metadata) | global-metadata.dat parser (v24/27/29/31/35-39) | ✅ v24/v27/v29/v31 dispatch live (Phase 14c); **v32-v39 dispatch shipped + live-smoked 2026-05-19 (build #336)** — flat→section header transition + variable-width metadata indices + v35 struct-field removals; synthetic-fixture PASS on v29/v31/v35/v37/v38/v39; live PASS on Songs of Silence (v39, 40,501 TypeDefs + 44,047 string literals + Vector3 full field walk). IL2CPPMetadataRegistration AOB cross-link still optional ("2d follow-up", non-blocking) |
 | 6 | Pipe Protocol Core Commands | getAssemblies / getClasses / getClassInfo / etc. | ✅ |
 | 7 | UI Skeleton (Avalonia + AOT) | Single-instance app, pipe client, handshake | ✅ |
 | 8 | UI Panels — Tree & Browse | AssemblyTree, ClassBrowser, FieldStruct, MethodList | ✅ |
