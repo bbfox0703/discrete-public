@@ -80,7 +80,8 @@
          delegate (the AOT-safe path doesn't expose the path string the
          sort comparer needs). Cross-checked against CrimsonAtomtic — same
          framework + AOT, sort works because columns omit x:DataType. -->
-    <DataGrid ItemsSource="{Binding FilteredRows}"
+    <DataGrid x:Name="RowsGrid"
+              ItemsSource="{Binding FilteredRows}"
               IsReadOnly="True"
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"

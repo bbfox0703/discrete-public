@@ -99,6 +99,15 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
     /// </summary>
     public Func<string, Task>? CopyToClipboardAsync { get; set; }
 
+    /// <summary>
+    /// Diagnostic passthrough — the View hooks DataGrid events and
+    /// routes one-line trace messages through here so they land in the
+    /// standard FileLogger output without the View needing to pull in
+    /// FileLogger directly.
+    /// </summary>
+    public void LogDiagnostic(string message) =>
+        _logger.Write(Constants.LogCategoryView, $"[FieldAcross sort diag] {message}");
+
     [RelayCommand(CanExecute = nameof(CanRefresh))]
     private async Task RefreshAsync()
     {
