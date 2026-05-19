@@ -7,6 +7,7 @@
 #include "BackendDetector.h"
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "ManagedLayout.h"
 #include "Memory.h"
 #include "ModuleHelper.h"
 #include "PipeServer.h"
@@ -247,19 +248,19 @@ void RegisterCoreHandlers() {
             if (rd(addr, &v, 8)) out["value"] = v; else out["error"] = "unreadable";
         } else if (typeName == "System.IntPtr" || typeName == "System.UIntPtr") {
             std::uintptr_t v = 0;
-            if (rd(addr, &v, 8)) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
+            if (rd(addr, &v, sizeof(std::uintptr_t))) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
         } else if (typeName == "System.String") {
             // Reference to MonoString / Il2CppString. Follow the pointer if non-null
             // and decode the inline UTF-16 buffer to UTF-8.
             std::uintptr_t sptr = 0;
-            if (!rd(addr, &sptr, 8)) { out["error"] = "unreadable"; return out; }
+            if (!rd(addr, &sptr, sizeof(std::uintptr_t))) { out["error"] = "unreadable"; return out; }
             out["ptr"] = formatHex(sptr);
             if (sptr == 0) { out["string"] = nullptr; return out; }
             std::int32_t len = 0;
-            if (!rd(sptr + 0x10, &len, 4)) { out["string_error"] = "header unreadable"; return out; }
+            if (!rd(sptr + ManagedLayout::kStringLengthOffset, &len, 4)) { out["string_error"] = "header unreadable"; return out; }
             if (len < 0 || len > 65536)    { out["string_error"] = "implausible length"; out["string_length"] = len; return out; }
             std::vector<std::uint16_t> chars(static_cast<std::size_t>(len));
-            if (len > 0 && !rd(sptr + 0x14, chars.data(),
+            if (len > 0 && !rd(sptr + ManagedLayout::kStringCharsOffset, chars.data(),
                                static_cast<std::size_t>(len) * 2u)) {
                 out["string_error"] = "chars unreadable";
                 return out;
@@ -301,10 +302,10 @@ void RegisterCoreHandlers() {
             out["string"] = std::move(utf8);
             out["string_length"] = len;
         } else {
-            // Reference / unknown value type: report the raw pointer-sized qword.
+            // Reference / unknown value type: report the raw pointer-sized word.
             // Caller can resolvePointer or walkInstance again on it.
             std::uintptr_t v = 0;
-            if (rd(addr, &v, 8)) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
+            if (rd(addr, &v, sizeof(std::uintptr_t))) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
         }
         (void)bytesToHex;  // reserved for future raw-bytes inclusion
         return out;
@@ -555,13 +556,17 @@ void RegisterCoreHandlers() {
             }
         }
 
-        // Read array header — bounds (validate SZARRAY) + max_length.
+        // Read array header — bounds (validate SZARRAY) + max_length. Both
+        // fields are pointer-sized: 8 bytes on x64, 4 on x86. Offsets come
+        // from ManagedLayout so the same source serves Mono x64 / Mono x86 /
+        // IL2CPP x64 without a per-arch branch.
         auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
             return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
         };
         std::uintptr_t bounds = 0;
         std::uintptr_t length = 0;
-        if (!rd(addr + 0x10, &bounds, 8) || !rd(addr + 0x18, &length, 8)) {
+        if (!rd(addr + ManagedLayout::kArrayBoundsOffset,    &bounds, sizeof(std::uintptr_t)) ||
+            !rd(addr + ManagedLayout::kArrayMaxLengthOffset, &length, sizeof(std::uintptr_t))) {
             return json{{"error", "header unreadable"}, {"address", formatHex(addr)}};
         }
         // Sanity: a real managed array has length below ~16M for our use
@@ -574,7 +579,7 @@ void RegisterCoreHandlers() {
             };
         }
 
-        std::uintptr_t dataAddr = addr + 0x20;
+        std::uintptr_t dataAddr = addr + ManagedLayout::kArrayDataOffset;
         std::size_t    n = (length < limit) ? static_cast<std::size_t>(length) : limit;
 
         json elements = json::array();
@@ -586,8 +591,8 @@ void RegisterCoreHandlers() {
             };
             if (isPointer) {
                 std::uintptr_t v = 0;
-                if (rd(slotAddr, &v, 8)) e["ptr"] = formatHex(v);
-                else                     e["error"] = "unreadable";
+                if (rd(slotAddr, &v, sizeof(std::uintptr_t))) e["ptr"] = formatHex(v);
+                else                                          e["error"] = "unreadable";
             } else if (!elementType.empty()) {
                 // Decode primitive inline using the existing field decoder.
                 json decoded = decodeField(elementType, slotAddr);
@@ -1841,7 +1846,7 @@ void RegisterCoreHandlers() {
         case Mono::CallReturn::Kind::SignedInt:   returnValue = cr.ret.i64; break;
         case Mono::CallReturn::Kind::UnsignedInt: returnValue = cr.ret.u64; break;
         case Mono::CallReturn::Kind::Float:       returnValue = cr.ret.f; break;
-        case Mono::CallReturn::Kind::Address:     returnValue = formatHex(cr.ret.u64); break;
+        case Mono::CallReturn::Kind::Address:     returnValue = formatHex(static_cast<std::uintptr_t>(cr.ret.u64)); break;
         case Mono::CallReturn::Kind::String:      returnValue = cr.ret.s; break;
         case Mono::CallReturn::Kind::Unsupported: returnValue = nullptr; break;
         }

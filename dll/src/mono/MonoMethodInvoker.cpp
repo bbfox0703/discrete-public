@@ -10,6 +10,7 @@
 
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
 #include "../shared/MethodSignatureFormat.h"
 #include "MonoDomain.h"
@@ -202,19 +203,22 @@ bool ResolveOverload(MonoClass* klass,
 }
 
 // Decode the System.String at `strPtr` (a managed MonoString*) into UTF-8.
-// Layout is shared between Mono bdwgc and IL2CPP at +0x10 length, +0x14 chars.
-// Returns "" for null pointers and best-effort on partial reads.
+// Layout is shared between Mono bdwgc and IL2CPP: header (vtable + sync)
+// followed by int32 length and UTF-16 chars. Offsets scale with
+// sizeof(void*) so the same source works for both x64 (length +0x10,
+// chars +0x14) and x86 (length +0x08, chars +0x0C). Returns "" for null
+// pointers and best-effort on partial reads.
 std::string DecodeManagedString(std::uintptr_t strPtr) {
     if (strPtr == 0) return {};
     auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
         return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
     };
     std::int32_t len = 0;
-    if (!rd(strPtr + 0x10, &len, 4)) return {};
+    if (!rd(strPtr + ManagedLayout::kStringLengthOffset, &len, 4)) return {};
     if (len <= 0 || len > 65536) return {};
 
     std::vector<std::uint16_t> chars(static_cast<std::size_t>(len));
-    if (!rd(strPtr + 0x14, chars.data(),
+    if (!rd(strPtr + ManagedLayout::kStringCharsOffset, chars.data(),
             static_cast<std::size_t>(len) * sizeof(std::uint16_t))) {
         return {};
     }
@@ -257,14 +261,15 @@ std::string DecodeManagedString(std::uintptr_t strPtr) {
 
 // Format `Type: message` for a captured managed exception.
 //
-// MonoException mirrors managed System.Exception. On x64 the relevant
-// offsets are identical to IL2CPP (Mono and IL2CPP share the corlib
-// layout):
-//   +0x00  MonoObject (vtable*, sync)              16 bytes
-//   +0x10  _className   (MonoString*)              legacy, often null
-//   +0x18  _message     (MonoString*)              ← the message
-//   +0x20  _data        (IDictionary*)
-//   +0x28  _innerException
+// MonoException mirrors managed System.Exception. Mono and IL2CPP share
+// the corlib layout and offsets are pointer-width-relative, so the same
+// source works on x64 (header 0x10 → _message at 0x18) and x86 (header
+// 0x08 → _message at 0x0C):
+//   +0           MonoObject (vtable*, sync)              kObjectHeader bytes
+//   +header      _className   (MonoString*)              legacy, often null
+//   +header+ptr  _message     (MonoString*)              ← the message
+//   +header+2ptr _data        (IDictionary*)
+//   +header+3ptr _innerException
 //   ...
 // If the message decode fails we still emit the exception type alone
 // (decoded via mono_object_get_class + mono_class_get_name) so the caller
@@ -289,7 +294,8 @@ std::string FormatException(MonoObject* exc) {
     auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
         return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
     };
-    if (rd(reinterpret_cast<std::uintptr_t>(exc) + 0x18, &msgPtr, sizeof(msgPtr)) &&
+    if (rd(reinterpret_cast<std::uintptr_t>(exc) + ManagedLayout::kExceptionMessageOffset,
+           &msgPtr, sizeof(msgPtr)) &&
         msgPtr != 0) {
         std::string msg = DecodeManagedString(msgPtr);
         if (!msg.empty()) return typeName + ": " + msg;

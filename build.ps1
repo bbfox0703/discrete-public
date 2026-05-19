@@ -55,6 +55,15 @@ param(
     [ValidateSet('Debug','Release','Publish')]
     [string]$Mode = 'Release',
 
+    # Phase 12d: target architecture for the DLL + proxy build. x64 stays
+    # the default (production targets are all 64-bit). x86 enables the
+    # 32-bit Mono path for older Unity games (Legend of Mortal, etc.).
+    # 'Both' builds both arches in sequence; x86 outputs land in dist/x86/.
+    # IL2CPP is never built x86 (no shipping IL2CPP target is 32-bit) —
+    # the dispatch below skips IL2CPP when -Arch x86 is selected.
+    [ValidateSet('x64','x86','Both')]
+    [string]$Arch = 'x64',
+
     [switch]$Clean,
 
     [string]$LogFile = ''
@@ -125,8 +134,8 @@ function Bump-BuildNumber {
     return $n
 }
 
-$script:DevShellLoaded = $false
-$script:VsInstallPath  = $null
+$script:DevShellLoadedFor = $null   # 'x64' or 'x86' — Enter-VsDevEnvironment caches
+$script:VsInstallPath     = $null
 
 function Resolve-VsInstallPath {
     if ($script:VsInstallPath) { return $script:VsInstallPath }
@@ -153,7 +162,17 @@ function Resolve-VsInstallPath {
 }
 
 function Enter-VsDevEnvironment {
-    if ($script:DevShellLoaded) { return }
+    param(
+        [ValidateSet('x64','x86')]
+        [string]$Arch = 'x64'
+    )
+    if ($script:DevShellLoadedFor -eq $Arch) { return }
+    if ($script:DevShellLoadedFor -and $script:DevShellLoadedFor -ne $Arch) {
+        # Switching arches within one process is unsupported by DevShell
+        # (PATH / INCLUDE / LIB stay pinned to the first arch loaded). Bail
+        # loud so the caller can rerun the build per-arch.
+        throw "DevShell already loaded for $($script:DevShellLoadedFor); cannot switch to $Arch in the same process. Re-run build.ps1 per arch, or use -Arch Both which spawns a child process per arch."
+    }
 
     $vsPath = Resolve-VsInstallPath
     $devShellDll = Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
@@ -161,18 +180,18 @@ function Enter-VsDevEnvironment {
         throw "Microsoft.VisualStudio.DevShell.dll not found at $devShellDll."
     }
 
-    Write-Info "Loading VS DevShell from $vsPath"
+    Write-Info "Loading VS DevShell from $vsPath ($Arch)"
     Import-Module $devShellDll
-    Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+    Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=$Arch -host_arch=x64" | Out-Null
 
-    $script:DevShellLoaded = $true
-    Write-Ok 'MSVC x64 environment loaded'
+    $script:DevShellLoadedFor = $Arch
+    Write-Ok "MSVC $Arch environment loaded"
 }
 
 # ---------------------------------------------------------------------------
 # Preamble
 # ---------------------------------------------------------------------------
-Write-Banner "UnityCEDumper Build  |  Mode: $Mode  |  Target: $Target  |  Backend: $Backend"
+Write-Banner "UnityCEDumper Build  |  Mode: $Mode  |  Target: $Target  |  Backend: $Backend  |  Arch: $Arch"
 Write-Info "Root:   $RepoRoot"
 Write-Info "Clean:  $Clean"
 
@@ -203,13 +222,22 @@ $exitCode = 0
 # ---------------------------------------------------------------------------
 # DLL build (CMake + Ninja, MSVC)
 # ---------------------------------------------------------------------------
-function Build-Dll {
-    Enter-VsDevEnvironment
+function Build-DllForArch {
+    param(
+        [ValidateSet('x64','x86')]
+        [string]$Arch,
+        [ValidateSet('Mono','IL2CPP','Both')]
+        [string]$BackendForArch
+    )
+    Enter-VsDevEnvironment -Arch $Arch
 
     $cfg = if ($Mode -eq 'Debug') { 'Debug' } else { 'Release' }
-    $dllBuildDir = Join-Path $BUILD_DIR "dll-$($Backend.ToLower())-$($cfg.ToLower())"
+    $dllBuildDir = Join-Path $BUILD_DIR "dll-$($BackendForArch.ToLower())-$($cfg.ToLower())-$Arch"
+    # x64 outputs ship to dist/ (production); x86 outputs go to dist/x86/
+    # to keep the same-name DLLs from clobbering each other.
+    $archDistDir = if ($Arch -eq 'x86') { Join-Path $DIST_DIR 'x86' } else { $DIST_DIR }
 
-    Write-Banner "C++ DLL  |  Backend=$Backend  Mode=$cfg"
+    Write-Banner "C++ DLL  |  Backend=$BackendForArch  Mode=$cfg  Arch=$Arch"
 
     # Always do a clean configure — same rule as UE5CEDumper. CMake's cache
     # is fragile across BACKEND swaps, so wipe before reconfigure.
@@ -218,26 +246,21 @@ function Build-Dll {
         Remove-Item $dllBuildDir -Recurse -Force
     }
 
-    Write-Step 'Configuring CMake (Ninja + MSVC)'
-    # NOTE: `| Out-Host` is intentional. Without it, native-command stdout
-    # inside a function is collected as part of the function's return-value
-    # array, so (a) the user never sees cmake / dotnet output and (b) when
-    # we later `return $false`, the return value is `@(...stdout..., $false)`
-    # which evaluates as truthy in `if (-not (Build-X))` — the caller then
-    # thinks the step succeeded. Out-Host writes to the host display stream
-    # (also captured by Start-Transcript) and returns nothing, which fixes
-    # both. Same trick applied to every other native call below.
+    if (-not (Test-Path $archDistDir)) {
+        New-Item -ItemType Directory -Path $archDistDir -Force | Out-Null
+    }
+
+    Write-Step "Configuring CMake (Ninja + MSVC $Arch)"
     & cmake -S $RepoRoot -B $dllBuildDir -G Ninja `
         "-DCMAKE_BUILD_TYPE=$cfg" `
-        "-DBACKEND=$Backend" | Out-Host
+        "-DBACKEND=$BackendForArch" | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
     Write-Ok 'CMake configured'
 
-    Write-Step "Building DLL ($cfg)"
+    Write-Step "Building DLL ($cfg / $Arch)"
     & cmake --build $dllBuildDir --parallel | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake build failed'; return $false }
 
-    # Copy every produced .dll + .pdb into dist\.
     $outDir = Join-Path $dllBuildDir 'bin'
     if (-not (Test-Path $outDir)) {
         Write-Fail "DLL output dir not found: $outDir"
@@ -246,10 +269,11 @@ function Build-Dll {
 
     $produced = 0
     Get-ChildItem $outDir -File | Where-Object { $_.Extension -in '.dll', '.pdb' } | ForEach-Object {
-        Copy-Item $_.FullName -Destination $DIST_DIR -Force
+        Copy-Item $_.FullName -Destination $archDistDir -Force
         if ($_.Extension -eq '.dll') {
-            $sz = Get-FileSize (Join-Path $DIST_DIR $_.Name)
-            Write-Ok "$($_.Name) ($sz) -> dist\"
+            $sz = Get-FileSize (Join-Path $archDistDir $_.Name)
+            $relDir = if ($Arch -eq 'x86') { 'dist\x86\' } else { 'dist\' }
+            Write-Ok "$($_.Name) ($sz) -> $relDir"
             $produced++
         }
     }
@@ -258,6 +282,36 @@ function Build-Dll {
         return $false
     }
     return $true
+}
+
+function Build-Dll {
+    # x86 IL2CPP isn't a real-world target (no shipping IL2CPP game is
+    # 32-bit), so when -Arch x86|Both we silently restrict the x86 leg
+    # to Mono. The user's selected Backend still drives the x64 leg.
+    if ($Arch -eq 'Both') {
+        # DevShell pins PATH / INCLUDE / LIB to the first arch it loads;
+        # there's no clean way to swap mid-process. Spawn a child PS for
+        # the second arch so it gets a fresh DevShell.
+        $x64Ok = Build-DllForArch -Arch x64 -BackendForArch $Backend
+        Write-Banner 'Re-launching child process for x86 build'
+        $childArgs = @('-NoProfile','-ExecutionPolicy','Bypass',
+                       '-File',$PSCommandPath,
+                       '-Target','DLL','-Mode',$Mode,'-Arch','x86')
+        & pwsh @childArgs
+        $x86Ok = ($LASTEXITCODE -eq 0)
+        return ($x64Ok -and $x86Ok)
+    }
+
+    $backendForArch = if ($Arch -eq 'x86') {
+        if ($Backend -eq 'IL2CPP') {
+            Write-Info 'Skipping x86 build: IL2CPP has no 32-bit targets in the wild.'
+            return $true
+        }
+        'Mono'
+    } else {
+        $Backend
+    }
+    return (Build-DllForArch -Arch $Arch -BackendForArch $backendForArch)
 }
 
 # ---------------------------------------------------------------------------
@@ -361,7 +415,9 @@ function Build-ProxyDll {
     return $true
 }
 function Build-MetadataCli {
-    Enter-VsDevEnvironment
+    # metadata-cli is x64-only (only consumer is the offline-analysis flow;
+    # parses IL2CPP metadata which has no 32-bit shipping target).
+    Enter-VsDevEnvironment -Arch x64
 
     $cfg = if ($Mode -eq 'Debug') { 'Debug' } else { 'Release' }
     $cliBuildDir = Join-Path $BUILD_DIR "cli-$($cfg.ToLower())"
@@ -465,6 +521,7 @@ Write-Host ''
 Write-Host "  Mode:    $Mode"     -ForegroundColor White
 Write-Host "  Target:  $Target"   -ForegroundColor White
 Write-Host "  Backend: $Backend"  -ForegroundColor White
+Write-Host "  Arch:    $Arch"     -ForegroundColor White
 Write-Host "  Build#:  $buildNum" -ForegroundColor White
 Write-Host "  Time:    $($sw.Elapsed.ToString('mm\:ss\.ff'))" -ForegroundColor White
 
@@ -478,6 +535,16 @@ if (Test-Path $DIST_DIR) {
     Get-ChildItem $DIST_DIR -File -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
         $sz = Get-FileSize $_.FullName
         Write-Host ("    {0,-32}  {1}" -f $_.Name, $sz) -ForegroundColor Gray
+    }
+    # x86 outputs (Phase 12d) get their own dist subdir so x64 and x86
+    # same-name DLLs don't clobber each other.
+    $x86Dir = Join-Path $DIST_DIR 'x86'
+    if (Test-Path $x86Dir) {
+        Write-Host "  Output: $x86Dir (x86)" -ForegroundColor White
+        Get-ChildItem $x86Dir -File -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+            $sz = Get-FileSize $_.FullName
+            Write-Host ("    {0,-32}  {1}" -f $_.Name, $sz) -ForegroundColor Gray
+        }
     }
 }
 

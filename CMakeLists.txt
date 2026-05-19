@@ -13,9 +13,22 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Architecture: x64-only per project decision (docs/plan.md)
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "UnityCEDumper is x64-only. Configure with a 64-bit toolchain.")
+# Architecture: x64 is the default; Phase 12d added x86 for 32-bit Mono
+# targets (Legend of Mortal, older Unity games). The build.ps1 -Arch flag
+# selects which toolchain DevShell loads — we just report what cmake sees
+# here, and stamp a compile-time define so backend code can branch on
+# pointer width when struct layouts shift (Mono MonoObject prefix is
+# 0x10 on x64 but 0x08 on x86, for example).
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(UNITYCEDUMPER_ARCH "x64")
+    add_compile_definitions(UNITYCEDUMPER_ARCH_X64=1)
+    message(STATUS "Architecture: x64 (pointer size 8)")
+elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(UNITYCEDUMPER_ARCH "x86")
+    add_compile_definitions(UNITYCEDUMPER_ARCH_X86=1)
+    message(STATUS "Architecture: x86 (pointer size 4)")
+else()
+    message(FATAL_ERROR "UnityCEDumper requires a 32-bit or 64-bit Windows toolchain.")
 endif()
 
 if(MSVC)
