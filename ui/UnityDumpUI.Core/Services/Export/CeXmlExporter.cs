@@ -533,7 +533,7 @@ public static class CeXmlExporter
     /// table. Useful for "right-click on field → Copy CE field" workflows
     /// where the user only wants one record pasted into CE.
     /// </summary>
-    public static async Task<string> RenderFieldAsync(
+    public static Task<string> RenderFieldAsync(
         string             baseAddress,
         FieldEntry         field,
         GetClassInfoResult declaringClass,
@@ -541,7 +541,29 @@ public static class CeXmlExporter
         ExportOptions      options,
         IClassInfoLookup?  lookup,
         CancellationToken  ct = default)
+        => RenderFieldsAsync(baseAddress, new[] { field }, declaringClass,
+                             assemblyName, options, lookup, ct);
+
+    /// <summary>
+    /// Multi-field variant of <see cref="RenderFieldAsync"/> — emits one
+    /// <c>&lt;CheatEntry&gt;</c> per supplied field, all wrapped in a single
+    /// declaring-class GroupHeader rooted at <paramref name="baseAddress"/>.
+    /// Drives the Fields-tab "Copy CE field" right-click when the user has
+    /// multi-selected rows (Ctrl/Shift-click); single-element input matches
+    /// the single-field shape byte-for-byte so the legacy path is unaffected.
+    /// </summary>
+    public static async Task<string> RenderFieldsAsync(
+        string                     baseAddress,
+        IReadOnlyList<FieldEntry>  fields,
+        GetClassInfoResult         declaringClass,
+        string?                    assemblyName,
+        ExportOptions              options,
+        IClassInfoLookup?          lookup,
+        CancellationToken          ct = default)
     {
+        if (fields is null || fields.Count == 0)
+            throw new ArgumentException("at least one field required", nameof(fields));
+
         var sb = new StringBuilder(1024);
         var idGen = new IdGen();
         var visited = new HashSet<string>();
@@ -550,15 +572,24 @@ public static class CeXmlExporter
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
-        string rootName = $"{StructLabel(declaringClass, assemblyName)}.{field.Name}";
-        // Wrap in a base-address group so the field's relative +0xNN address
+        // Single-row preserves the historical "Class.field" label so existing
+        // exports and the unit-test snapshot don't churn. Multi-row uses the
+        // bare class label because the entries underneath have different
+        // names — putting any one of them in the header would mislead.
+        string rootName = fields.Count == 1
+            ? $"{StructLabel(declaringClass, assemblyName)}.{fields[0].Name}"
+            : StructLabel(declaringClass, assemblyName);
+        // Wrap in a base-address group so each field's relative +0xNN address
         // resolves correctly without polluting the user's existing CE table.
         OpenGroup(sb, "    ", idGen, rootName, baseAddress,
                   offsets: null, collapsed: false, varType: "8 Bytes", showAsHex: true);
-        await EmitOneFieldAsync(sb, "      ", idGen, field,
-                                isInherited: false, assemblyName,
-                                options, lookup, visited,
-                                currentDepth: 0, ct).ConfigureAwait(false);
+        foreach (FieldEntry field in fields)
+        {
+            await EmitOneFieldAsync(sb, "      ", idGen, field,
+                                    isInherited: false, assemblyName,
+                                    options, lookup, visited,
+                                    currentDepth: 0, ct).ConfigureAwait(false);
+        }
         CloseGroup(sb, "    ");
 
         sb.Append("  </CheatEntries>\n");

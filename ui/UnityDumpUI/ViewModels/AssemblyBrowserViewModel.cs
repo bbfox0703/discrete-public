@@ -60,6 +60,15 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// </summary>
     public Func<string, Task>? CopyToClipboardAsync { get; set; }
 
+    /// <summary>
+    /// View-supplied accessor for the Fields DataGrid's current multi-row
+    /// selection. Returns an empty list when nothing's selected or only one
+    /// row is highlighted (in which case the singular <see cref="SelectedFieldRow"/>
+    /// path is sufficient). Wired by MainWindow code-behind — keeps the VM
+    /// free of Avalonia DataGrid types.
+    /// </summary>
+    public Func<IReadOnlyList<FieldRow>>? GetSelectedFieldRows { get; set; }
+
     // ---------- Export options (Phase 10b) ------------------------------
 
     [ObservableProperty] private int  _drilldownDepth       = 1;
@@ -406,46 +415,77 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Copy a single field's CE XML pointer-chain to the clipboard. Uses the
-    /// currently-selected row in the Fields DataGrid; when the field is a
-    /// pointer/array and drilldown is configured, the resolved nested struct
-    /// is included so pasting one entry into CE gives the full sub-tree.
+    /// Copy one or more fields' CE XML pointer-chain to the clipboard. Uses
+    /// every currently-selected row in the Fields DataGrid (Ctrl/Shift-click
+    /// for multi-select); falls back to <see cref="SelectedFieldRow"/> for
+    /// the common single-row case. When a field is a pointer/array and
+    /// drilldown is configured, the resolved nested struct is included so
+    /// pasting one entry into CE gives the full sub-tree.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanCopyField))]
     private async Task CopyCeFieldAsync()
     {
-        if (CopyToClipboardAsync is null || SelectedFieldRow is null || _currentChain.Count == 0) return;
+        if (CopyToClipboardAsync is null || _currentChain.Count == 0) return;
 
-        // Find the FieldEntry + the GetClassInfoResult that declared it (so
-        // RenderField can label the entry with the right declaring class).
-        FieldRow row = SelectedFieldRow;
-        FieldEntry? entry = null;
+        // Build the working set: prefer the multi-select snapshot from the
+        // View when more than one row is highlighted, fall back to the
+        // singular SelectedFieldRow otherwise. Preserves single-select
+        // behaviour byte-for-byte (RenderFieldsAsync with one entry produces
+        // the same output the old RenderFieldAsync did).
+        IReadOnlyList<FieldRow> rows = GetSelectedFieldRows?.Invoke() ?? Array.Empty<FieldRow>();
+        if (rows.Count == 0 && SelectedFieldRow is not null)
+            rows = new[] { SelectedFieldRow };
+        if (rows.Count == 0) return;
+
+        // Resolve FieldRow → FieldEntry once per row and remember the
+        // declaring GetClassInfoResult so the wrapping group label points at
+        // the right class. Multi-row exports root every entry under the same
+        // declaring class — that's the common case (the user just shift-
+        // selected a range in the Fields grid), and matches the bug-report
+        // acceptance criterion ("all 3 fields present in clipboard").
+        var entries  = new List<FieldEntry>(rows.Count);
         GetClassInfoResult declaring = _currentChain[^1];
-        foreach (GetClassInfoResult info in _currentChain)
+        bool declaringSet = false;
+        foreach (FieldRow row in rows)
         {
-            if (info.Fields is null) continue;
-            foreach (FieldEntry f in info.Fields)
+            foreach (GetClassInfoResult info in _currentChain)
             {
-                if (f.Name == row.Name && f.Offset == row.Offset && f.Static == row.IsStatic)
+                if (info.Fields is null) continue;
+                FieldEntry? match = null;
+                foreach (FieldEntry f in info.Fields)
                 {
-                    entry = f;
-                    declaring = info;
+                    if (f.Name == row.Name && f.Offset == row.Offset && f.Static == row.IsStatic)
+                    {
+                        match = f;
+                        break;
+                    }
+                }
+                if (match is not null)
+                {
+                    entries.Add(match);
+                    if (!declaringSet)
+                    {
+                        declaring = info;
+                        declaringSet = true;
+                    }
                     break;
                 }
             }
-            if (entry is not null) break;
         }
-        if (entry is null) return;
+        if (entries.Count == 0) return;
 
         string assembly = SelectedAssembly?.Name ?? "Assembly";
         try
         {
-            string xml = await CeXmlExporter.RenderFieldAsync(
-                CeXmlBaseAddress, entry, declaring, assembly,
+            string xml = await CeXmlExporter.RenderFieldsAsync(
+                CeXmlBaseAddress, entries, declaring, assembly,
                 CurrentExportOptions, _backend, default).ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            string nameSummary = entries.Count == 1
+                ? entries[0].Name
+                : $"{entries.Count} fields ({entries[0].Name}, …)";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
-                $"copy CE field {entry.Name} clipboard ({xml.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit})");
+                $"copy CE field {nameSummary} clipboard ({xml.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit})");
         }
         catch (Exception ex)
         {
