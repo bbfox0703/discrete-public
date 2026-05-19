@@ -51,7 +51,8 @@
     </StackPanel>
 
     <!-- Process grid -->
-    <DataGrid ItemsSource="{Binding FilteredProcesses}"
+    <DataGrid x:Name="ProcessesGrid"
+              ItemsSource="{Binding FilteredProcesses}"
               SelectedItem="{Binding Selected, Mode=TwoWay}"
               IsReadOnly="True"
               AutoGenerateColumns="False"
@@ -60,13 +61,17 @@
               GridLinesVisibility="Horizontal">
       <DataGrid.Columns>
         <DataGridTextColumn Header="{StaticResource Picker.ColPid}"     Width="80"
-                            Binding="{Binding Pid}" />
+                            Binding="{Binding Pid}"
+                            SortMemberPath="Pid" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Picker.ColName}"    Width="180"
-                            Binding="{Binding Name}" />
+                            Binding="{Binding Name}"
+                            SortMemberPath="Name" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Picker.ColBackend}" Width="90"
-                            Binding="{Binding BackendLabel}" />
+                            Binding="{Binding BackendLabel}"
+                            SortMemberPath="BackendLabel" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Picker.ColPath}"    Width="*"
-                            Binding="{Binding Path}" />
+                            Binding="{Binding Path}"
+                            SortMemberPath="Path" CanUserSort="True" />
       </DataGrid.Columns>
     </DataGrid>
   </DockPanel>

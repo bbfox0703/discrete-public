@@ -103,7 +103,8 @@
     </Border>
 
     <!-- Game list -->
-    <DataGrid ItemsSource="{Binding FilteredGames}"
+    <DataGrid x:Name="GamesGrid"
+              ItemsSource="{Binding FilteredGames}"
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
               CanUserSortColumns="True"
@@ -126,21 +127,29 @@
         </DataGridTemplateColumn>
 
         <DataGridTextColumn Header="{StaticResource Deploy.ColName}"     Width="240"
-                            Binding="{Binding DisplayName}" />
+                            Binding="{Binding DisplayName}"
+                            SortMemberPath="DisplayName" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColBackend}"  Width="80"
-                            Binding="{Binding BackendLabel}" />
+                            Binding="{Binding BackendLabel}"
+                            SortMemberPath="BackendLabel" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColBitness}"  Width="60"
-                            Binding="{Binding BitnessLabel}" />
+                            Binding="{Binding BitnessLabel}"
+                            SortMemberPath="BitnessLabel" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColProxy}"    Width="100"
-                            Binding="{Binding ProxyLabel}" />
+                            Binding="{Binding ProxyLabel}"
+                            SortMemberPath="ProxyLabel" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColStatus}"   Width="200"
-                            Binding="{Binding DeployStatusLabel}" />
+                            Binding="{Binding DeployStatusLabel}"
+                            SortMemberPath="DeployStatusLabel" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColVersion}"  Width="180"
-                            Binding="{Binding VersionLabel}" />
+                            Binding="{Binding VersionLabel}"
+                            SortMemberPath="VersionLabel" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColLastMessage}" Width="240"
-                            Binding="{Binding LastOperationMessage}" />
+                            Binding="{Binding LastOperationMessage}"
+                            SortMemberPath="LastOperationMessage" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColPath}"     Width="*"
-                            Binding="{Binding ExePath}" />
+                            Binding="{Binding ExePath}"
+                            SortMemberPath="ExePath" CanUserSort="True" />
       </DataGrid.Columns>
     </DataGrid>
   </DockPanel>

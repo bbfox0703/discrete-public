@@ -424,7 +424,7 @@
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
-                                          Width="*" SortMemberPath="Name">
+                                          Width="*" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
                         <controls:HighlightedTextBlock SourceText="{Binding Name}"
@@ -437,9 +437,9 @@
                   </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
                                       Binding="{Binding OffsetHex}"
-                                      SortMemberPath="Offset" />
+                                      SortMemberPath="Offset" CanUserSort="True" />
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColType}"
-                                          Width="*" SortMemberPath="Type">
+                                          Width="*" SortMemberPath="Type" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
                         <controls:HighlightedTextBlock SourceText="{Binding Type}"
@@ -451,11 +451,14 @@
                     </DataGridTemplateColumn.CellTemplate>
                   </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"  Width="80"
-                                      Binding="{Binding FlagsHex}" />
+                                      Binding="{Binding FlagsHex}"
+                                      SortMemberPath="Flags" CanUserSort="True" />
                   <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
-                                          Binding="{Binding IsStatic}" />
+                                          Binding="{Binding IsStatic}"
+                                          SortMemberPath="IsStatic" CanUserSort="True" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                      Binding="{Binding DeclaredIn}" />
+                                      Binding="{Binding DeclaredIn}"
+                                      SortMemberPath="DeclaredIn" CanUserSort="True" />
                 </DataGrid.Columns>
               </DataGrid>
             </DockPanel>
@@ -666,7 +669,7 @@
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
                       <DataGridTemplateColumn Header="{StaticResource Browser.ColName}" Width="*"
-                                              SortMemberPath="Name">
+                                              SortMemberPath="Name" CanUserSort="True">
                         <DataGridTemplateColumn.CellTemplate>
                           <DataTemplate x:DataType="vm:WalkedFieldNode">
                             <StackPanel Orientation="Horizontal" Spacing="2">
@@ -693,7 +696,7 @@
                       </DataGridTemplateColumn>
                       <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
                                           Binding="{Binding OffsetHex}"
-                                          SortMemberPath="Offset" />
+                                          SortMemberPath="Offset" CanUserSort="True" />
                       <!-- Field storage address. Live + per-instance, so a
                            glance at the column lets the user spot which
                            rows share an instance memory page (handy when
@@ -702,13 +705,17 @@
                            in the Value column so it's not duplicated here. -->
                       <DataGridTextColumn Header="{StaticResource Inspector.ColAddress}" Width="155"
                                           Binding="{Binding Address}"
+                                          SortMemberPath="Address" CanUserSort="True"
                                           FontFamily="Consolas,Cascadia Mono,monospace" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
-                                          Binding="{Binding Type}" />
+                                          Binding="{Binding Type}"
+                                          SortMemberPath="Type" CanUserSort="True" />
                       <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
-                                          Binding="{Binding DisplayValue}" />
+                                          Binding="{Binding DisplayValue}"
+                                          SortMemberPath="DisplayValue" CanUserSort="True" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                          Binding="{Binding DeclaredIn}" />
+                                          Binding="{Binding DeclaredIn}"
+                                          SortMemberPath="DeclaredIn" CanUserSort="True" />
                       <!-- Phase 11.6: per-row action buttons. addr / ptr /
                            name copy the corresponding string to clipboard;
                            HEX hands the row's effective address to AOBMaker's
@@ -799,7 +806,7 @@
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
-                                          Width="*" SortMemberPath="Name">
+                                          Width="*" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:MethodRow">
                         <controls:HighlightedTextBlock SourceText="{Binding Name}"
@@ -811,15 +818,20 @@
                     </DataGridTemplateColumn.CellTemplate>
                   </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColAddress}" Width="160"
-                                      Binding="{Binding Address}" />
+                                      Binding="{Binding Address}"
+                                      SortMemberPath="Address" CanUserSort="True" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColToken}"   Width="100"
-                                      Binding="{Binding TokenHex}" />
+                                      Binding="{Binding TokenHex}"
+                                      SortMemberPath="Token" CanUserSort="True" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"   Width="80"
-                                      Binding="{Binding FlagsHex}" />
+                                      Binding="{Binding FlagsHex}"
+                                      SortMemberPath="Flags" CanUserSort="True" />
                   <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
-                                          Binding="{Binding IsStatic}" />
+                                          Binding="{Binding IsStatic}"
+                                          SortMemberPath="IsStatic" CanUserSort="True" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                      Binding="{Binding DeclaredIn}" />
+                                      Binding="{Binding DeclaredIn}"
+                                      SortMemberPath="DeclaredIn" CanUserSort="True" />
                 </DataGrid.Columns>
               </DataGrid>
             </DockPanel>

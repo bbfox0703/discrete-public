@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
@@ -43,7 +44,59 @@ public partial class MainWindow : Window
         // column collapses to a thin rail (28 px) and remembers the user's
         // last expanded width via the GridSplitter for restoration.
         vm.PropertyChanged += OnMainViewModelPropertyChanged;
+
+        // AOT-safe DataGrid sort wiring — Avalonia's default sort uses
+        // reflection on each column's SortMemberPath which the AOT trimmer
+        // drops. Set CustomSortComparer per column at Loaded time (when the
+        // column collection is fully realized) so the grid's built-in
+        // direction-toggle + arrow glyph keep working but the comparison
+        // goes through our typed selectors. See DataGridSortComparers.cs
+        // for the multi-layer trap this defeats.
+        Loaded += (_, _) => WireSortComparersForAllGrids();
     }
+
+    private void WireSortComparersForAllGrids()
+    {
+        this.FindControl<DataGrid>("BrowserFieldsDataGrid")?
+            .WireSortComparers(BrowserFieldsSortComparers);
+        this.FindControl<DataGrid>("FieldsDataGrid")?
+            .WireSortComparers(InspectorFieldsSortComparers);
+        this.FindControl<DataGrid>("MethodsDataGrid")?
+            .WireSortComparers(MethodsSortComparers);
+    }
+
+    private static readonly IReadOnlyDictionary<string, IComparer> BrowserFieldsSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["Name"]       = DataGridSortComparers.Ordinal<FieldRow>(r => r.Name),
+            ["Offset"]     = DataGridSortComparers.Number <FieldRow>(r => r.Offset),
+            ["Type"]       = DataGridSortComparers.Ordinal<FieldRow>(r => r.Type),
+            ["Flags"]      = DataGridSortComparers.Number <FieldRow>(r => r.Flags),
+            ["IsStatic"]   = DataGridSortComparers.Bool   <FieldRow>(r => r.IsStatic),
+            ["DeclaredIn"] = DataGridSortComparers.Ordinal<FieldRow>(r => r.DeclaredIn),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> InspectorFieldsSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["Name"]         = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.Name),
+            ["Offset"]       = DataGridSortComparers.Number <WalkedFieldNode>(n => n.Offset),
+            ["Address"]      = DataGridSortComparers.Hex    <WalkedFieldNode>(n => n.Address),
+            ["Type"]         = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.Type),
+            ["DisplayValue"] = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.DisplayValue),
+            ["DeclaredIn"]   = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.DeclaredIn),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> MethodsSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["Name"]       = DataGridSortComparers.Ordinal<MethodRow>(r => r.Name),
+            ["Address"]    = DataGridSortComparers.Hex    <MethodRow>(r => r.Address),
+            ["Token"]      = DataGridSortComparers.Number <MethodRow>(r => r.Token),
+            ["Flags"]      = DataGridSortComparers.Number <MethodRow>(r => r.Flags),
+            ["IsStatic"]   = DataGridSortComparers.Bool   <MethodRow>(r => r.IsStatic),
+            ["DeclaredIn"] = DataGridSortComparers.Ordinal<MethodRow>(r => r.DeclaredIn),
+        };
 
     /// <summary>Last expanded widths for the Assemblies / Classes columns.
     /// Captured immediately before collapse so the pane restores to the

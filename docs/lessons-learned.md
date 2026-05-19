@@ -264,64 +264,111 @@ Any new JSON serialization path must go through the source-gen
 `JsonSerializer.SerializeToElement<T>(value)` trips IL2026 + IL3050
 under all four trim/AOT analyzers.
 
-### `x:DataType` on the `DataGrid` element silently kills column sort under AOT
+### Avalonia 12 DataGrid sort is a three-layer trap under AOT — fix needs all three
 
-With `AvaloniaUseCompiledBindingsByDefault=true`, setting an
-`x:DataType="vm:SomeViewModel"` annotation on the `DataGrid`
-**element itself** —
+Diagnosed live 2026-05-19 via logging the DataGrid's column state +
+Sorting event firing. The earlier "strip `x:DataType` and you're
+done" version of this entry was wrong; the real picture has three
+distinct gates that all have to be open:
 
-```xml
-<!-- BROKEN: header click does nothing -->
-<DataGrid ItemsSource="{Binding Rows}"
-          CanUserSortColumns="True"
-          x:DataType="vm:ListViewModel">
-  <DataGrid.Columns>
-    <DataGridTextColumn Binding="{Binding Foo}" />
-  </DataGrid.Columns>
-</DataGrid>
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Layer 1 — column binding compiles to CompiledBinding                │
+│           (Window-level x:DataType inherits scope down to the      │
+│            DataGrid, so column Bindings compile to a typed         │
+│            delegate; CompiledBinding has no readable Path string   │
+│            at runtime)                                              │
+│                                                                     │
+│ Layer 2 — empty Path → column.CanUserSort auto-disabled to False    │
+│           (CanUserSortColumns=True on the grid does NOT override    │
+│            per-column auto-disable; header click is a silent       │
+│            no-op — the Sorting event never even fires)              │
+│                                                                     │
+│ Layer 3 — even with CanUserSort restored, the default sort uses     │
+│           reflection on SortMemberPath to read row property values  │
+│           — AOT trim drops that reflection, comparer reads          │
+│           nothing, "sorted" data appears in the same order while    │
+│           the column header glyph (▲/▼) animates correctly          │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-— anchors the compile-time DataContext type at the DataGrid scope.
-Column cell bindings (`{Binding Foo}`) then get compiled against
-that scope, but `Foo` doesn't live on `ListViewModel` — it lives on
-each row item. Avalonia silently falls back to runtime resolution
-for the cell value (so the column still renders correctly), but the
-DataGrid's sort comparer reads the column binding's path through
-the *compiled* metadata and can't find a comparable accessor.
-Result: header clicks become silent no-ops in published (AOT)
-builds, while the data displays fine.
+**Symptoms by layer reached:**
 
-Fix is to drop the `x:DataType` attribute from the `DataGrid`
-element. The Window-level `x:DataType` already establishes the
-parent VM type for `ItemsSource="{Binding Rows}"`; the column
-bindings then resolve against each row item via runtime path lookup
-(which DataGrid's `TrimmerRootAssembly` preserves under AOT):
+| Sort state | Layer | Cause |
+|---|---|---|
+| Header click does nothing, no glyph change, Sorting event never fires | 1+2 | Default config — column auto-disabled |
+| Glyph flips ▲↔▼ but rows don't reorder | 1+3 | CanUserSort restored, but default reflection-sort silently fails |
+| Rows actually reorder | all three open | Working config |
+
+**Fix that lands all three for every grid in the project:**
 
 ```xml
-<!-- WORKS: header click sorts as expected -->
-<DataGrid ItemsSource="{Binding Rows}"
-          CanUserSortColumns="True">
-  <DataGrid.Columns>
-    <DataGridTextColumn Binding="{Binding Foo}" />
-  </DataGrid.Columns>
-</DataGrid>
+<!-- XAML — open layer 2 -->
+<DataGridTextColumn Binding="{Binding Foo}"
+                    SortMemberPath="Foo"        ← gives sort a real string path,
+                                                  defeats CompiledBinding-empty-Path
+                                                  auto-disable
+                    CanUserSort="True"          ← belt-and-braces override
+                    ... />
 ```
 
-Cross-checked against sibling project `D:\Github\CrimsonAtomtic`
-(same Avalonia 12 + Native AOT setup, all DataGrids sort correctly).
-The diff is exactly this: their DataGrid elements never carry
-`x:DataType`. `SortMemberPath` / `CustomSortComparer` are not
-needed in either project once this attribute is gone.
+```csharp
+// Code-behind — open layer 3
+Loaded += (_, _) =>
+    this.FindControl<DataGrid>("GridName")?.WireSortComparers(_sortComparers);
 
-The same trap also applies — to a lesser degree — to `x:DataType`
-*inside the column Binding itself* (`Binding="{Binding Foo,
-x:DataType=vm:RowType}"`); strip that too for safety.
+private static readonly IReadOnlyDictionary<string, IComparer> _sortComparers =
+    new Dictionary<string, IComparer>
+    {
+        ["Foo"] = DataGridSortComparers.Ordinal<MyRow>(r => r.Foo),
+        // Hex / Number / Bool also available — see DataGridSortComparers.cs
+    };
+```
 
-The trap is that the IDE / build pipeline never warns about this:
-build is green, AOT publish is green, the column renders, and only
-manual interactive testing of header click reveals it. If a new
-DataGrid is added, omit `x:DataType` on both the DataGrid element
-and column Bindings — let Avalonia infer from `ItemsSource`.
+`CustomSortComparer` is Avalonia's documented escape hatch — when
+set, the DataGrid uses our typed delegate-based comparer and skips
+the reflection path. The shared
+[`DataGridSortComparers`](../ui/UnityDumpUI.Core/Services/DataGridSortComparers.cs)
+provides factories for the common shapes (Hex address columns get
+numeric compare so `0x100000000` doesn't sort before
+`0x80000000`); the
+[`WireSortComparers`](../ui/UnityDumpUI/Views/DataGridSortExtensions.cs)
+extension keys lookup by `SortMemberPath` so the XAML and the
+code-behind stay in sync via a single column-name string per
+binding.
+
+**Why `D:\Github\CrimsonAtomtic` doesn't need this:** its column
+Bindings compile to plain `Binding` (not `CompiledBinding`) because
+its XAML scope shape doesn't put a Window-level `x:DataType` in
+inheritance reach of the DataGrid columns. Plain `Binding` exposes
+the path string, so layer 1 never triggers and layers 2/3 never
+matter. Our windows do put `x:DataType` on the root `<Window>`, so
+we hit all three layers — the explicit `SortMemberPath` +
+`CanUserSort=True` + per-column `CustomSortComparer` route is the
+strict-superset fix that works in both scope shapes.
+
+**Old false leads that didn't fix it (kept here so they aren't
+re-tried):**
+
+- Stripping `x:DataType=vm:RowType` from inside the column Binding
+  (`Binding="{Binding Foo, x:DataType=vm:RowType}"`). Doesn't change
+  the binding kind to plain `Binding` — Window-level x:DataType
+  still inherits the typed scope.
+- Stripping `x:DataType="vm:SomeVM"` from the DataGrid element
+  itself. Same reason — Window scope still applies.
+- Adding `CustomSortComparer` alone, without `SortMemberPath` +
+  `CanUserSort=True`. The comparer is wired, but the column is
+  still auto-disabled at layer 2 so click never reaches it.
+
+**Diagnostic recipe** if a new DataGrid's sort doesn't work: hook
+`DataGrid.Sorting` to a logger, print each column's
+`SortMemberPath`, `CanUserSort`, `Binding` runtime type. If
+`canUserSort=False` you're stuck at layer 2 — add
+`SortMemberPath="<PropertyName>" CanUserSort="True"` in XAML. If
+`Sorting event fired` lines appear but rows don't reorder, you're
+at layer 3 — wire `CustomSortComparer` per column. Build is always
+green in both cases; only interactive header click reveals which
+layer is closed.
 
 - **In-Core code** can reach `ProtocolJsonContext` directly. Pattern:
   `Str(string)` / `Int(int)` helpers in

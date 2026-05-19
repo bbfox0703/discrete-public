@@ -1,19 +1,17 @@
 // FieldAcrossInstancesWindow.axaml.cs — Phase 21a modal dialog code-behind.
 //
-// Hooks the VM's clipboard delegate to Avalonia's top-level Clipboard and
-// kicks off the initial listFieldValuesAcrossInstances pass on Opened so the
-// user sees rows without an extra click. Matches the MethodOverloadsWindow
-// pattern for consistency.
+// Wires the VM clipboard delegate to Avalonia's clipboard, kicks off the
+// initial RPC on Opened, and installs the per-column CustomSortComparer
+// needed for AOT-safe DataGrid sort (see DataGridSortComparers.cs for the
+// three-layer trap defeated by this pattern).
 
-using System;
 using System.Collections;
-using System.Globalization;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
-using UnityDumpUI.Core;
 using UnityDumpUI.Core.Services;
 using UnityDumpUI.ViewModels;
 
@@ -34,156 +32,35 @@ public partial class FieldAcrossInstancesWindow : Window
         DataContext = vm;
         vm.CopyToClipboardAsync = CopyToClipboardAsync;
 
-        // Diag prints fire from TWO event hooks so we can tell which lifecycle
-        // stage works. Opened fires after the window is shown; Loaded fires
-        // earlier on the root visual. Both are sync handlers — no async-lambda
-        // unobserved-exception trap.
-        Opened += OnOpenedDiag;
-        Loaded += OnLoadedDiag;
+        // Loaded fires after the DataGrid materializes its column collection,
+        // which is the safe time to assign CustomSortComparer per column.
+        Loaded += OnLoaded;
+        Opened += async (_, _) =>
+        {
+            try { await vm.RefreshCommand.ExecuteAsync(null); }
+            catch { /* surfaced via VM */ }
+        };
     }
 
-    private void OnLoadedDiag(object? sender, RoutedEventArgs e)
+    private void OnLoaded(object? sender, RoutedEventArgs e)
     {
-        TryLog("Loaded event fired");
-        SafeHookSortDiagnostics(stage: "Loaded");
-    }
-
-    private async void OnOpenedDiag(object? sender, EventArgs e)
-    {
-        TryLog("Opened event fired");
-        SafeHookSortDiagnostics(stage: "Opened");
-        if (_vm is not null)
-        {
-            try { await _vm.RefreshCommand.ExecuteAsync(null); }
-            catch (Exception ex) { TryLog($"RefreshCommand threw: {ex.GetType().Name}: {ex.Message}"); }
-        }
-    }
-
-    private void SafeHookSortDiagnostics(string stage)
-    {
-        try
-        {
-            HookSortDiagnostics(stage);
-        }
-        catch (Exception ex)
-        {
-            TryLog($"HookSortDiagnostics({stage}) threw: {ex.GetType().Name}: {ex.Message}");
-        }
+        var grid = this.FindControl<DataGrid>("RowsGrid");
+        grid?.WireSortComparers(SortComparers);
     }
 
     /// <summary>
-    /// Diagnostic — log effective per-column sort flags + hook the DataGrid's
-    /// Sorting event so we can tell apart "header click not recognized" from
-    /// "comparer broken" when published / AOT-recompiled. Logs land in the
-    /// standard FileLogger output (`ui\view\current.log`).
+    /// AOT-safe sort wiring — keyed by each column's SortMemberPath. Hex
+    /// columns use numeric compare (so 0x100000000 doesn't sort before
+    /// 0x80000000); Value is a heterogeneous int / float / "true" /
+    /// quoted-string column so we keep it as an ordinal string compare.
     /// </summary>
-    private void HookSortDiagnostics(string stage)
-    {
-        var grid = this.FindControl<DataGrid>("RowsGrid");
-        if (grid is null) { TryLog($"[{stage}] RowsGrid not found"); return; }
-
-        string itemsType = grid.ItemsSource?.GetType().Name ?? "<null>";
-        TryLog($"[{stage}] RowsGrid found. CanUserSortColumns={grid.CanUserSortColumns}, " +
-               $"ItemsSourceType={itemsType}, ColumnCount={grid.Columns.Count}");
-        for (int i = 0; i < grid.Columns.Count; i++)
+    private static readonly IReadOnlyDictionary<string, IComparer> SortComparers =
+        new Dictionary<string, IComparer>
         {
-            var c = grid.Columns[i];
-            string binding = "<n/a>";
-            if (c is DataGridBoundColumn b && b.Binding is { } ib)
-            {
-                binding = ib is Avalonia.Data.Binding av
-                    ? $"Binding(Path='{av.Path}')"
-                    : $"{ib.GetType().Name}";
-            }
-            TryLog($"[{stage}]   col[{i}] type={c.GetType().Name} header={c.Header} " +
-                   $"canUserSort={c.CanUserSort} sortMemberPath='{c.SortMemberPath}' " +
-                   $"binding={binding} customSortComparer={(c.CustomSortComparer is null ? "null" : "set")}");
-        }
-
-        // Hook Sorting only once — Loaded can fire before Opened so guard via a flag.
-        // Wire per-column CustomSortComparer in the same guard since the column
-        // collection is realized by the time Loaded fires. AOT-safe: Avalonia's
-        // default sort uses reflection on SortMemberPath which the trimmer drops;
-        // CustomSortComparer is the documented escape hatch — when set, the
-        // DataGrid uses our IComparer to reorder the items and skips the
-        // reflection path entirely.
-        if (!_sortingHooked)
-        {
-            grid.Sorting += (_, e) =>
-            {
-                TryLog($"Sorting event fired. header='{e.Column.Header}' " +
-                       $"SortMemberPath='{e.Column.SortMemberPath}'");
-            };
-            foreach (var col in grid.Columns)
-            {
-                col.CustomSortComparer = col.SortMemberPath switch
-                {
-                    "Instance"     => InstanceAddressComparer.Instance,
-                    "FieldAddress" => FieldAddressComparer.Instance,
-                    "Value"        => ValueOrdinalComparer.Instance,
-                    _              => col.CustomSortComparer,
-                };
-            }
-            _sortingHooked = true;
-            TryLog($"[{stage}] Sorting event handler + CustomSortComparer wired");
-        }
-    }
-
-    // AOT-safe per-column comparers — Avalonia hands two row objects in as
-    // `object?` and we cast to FieldAcrossInstanceRow for typed access.
-    // Hex address columns parse to ulong so "0x100000000" doesn't sort before
-    // "0x80000000" (alpha-sort gotcha).
-    private sealed class InstanceAddressComparer : IComparer
-    {
-        public static readonly IComparer Instance = new InstanceAddressComparer();
-        public int Compare(object? x, object? y) =>
-            CompareHex((x as FieldAcrossInstanceRow)?.Instance,
-                       (y as FieldAcrossInstanceRow)?.Instance);
-    }
-
-    private sealed class FieldAddressComparer : IComparer
-    {
-        public static readonly IComparer Instance = new FieldAddressComparer();
-        public int Compare(object? x, object? y) =>
-            CompareHex((x as FieldAcrossInstanceRow)?.FieldAddress,
-                       (y as FieldAcrossInstanceRow)?.FieldAddress);
-    }
-
-    private sealed class ValueOrdinalComparer : IComparer
-    {
-        public static readonly IComparer Instance = new ValueOrdinalComparer();
-        public int Compare(object? x, object? y)
-        {
-            string a = (x as FieldAcrossInstanceRow)?.Value ?? string.Empty;
-            string b = (y as FieldAcrossInstanceRow)?.Value ?? string.Empty;
-            return string.Compare(a, b, StringComparison.Ordinal);
-        }
-    }
-
-    private static int CompareHex(string? a, string? b)
-    {
-        if (TryParseHex(a, out ulong ua) && TryParseHex(b, out ulong ub))
-            return ua.CompareTo(ub);
-        return string.Compare(a ?? string.Empty, b ?? string.Empty, StringComparison.Ordinal);
-    }
-
-    private static bool TryParseHex(string? s, out ulong value)
-    {
-        value = 0;
-        if (string.IsNullOrEmpty(s)) return false;
-        ReadOnlySpan<char> span = s.AsSpan();
-        if (span.Length > 2 && span[0] == '0' && (span[1] == 'x' || span[1] == 'X'))
-            span = span.Slice(2);
-        return ulong.TryParse(span, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
-    }
-
-    private bool _sortingHooked;
-
-    private void TryLog(string msg)
-    {
-        try { _vm?.LogDiagnostic(msg); }
-        catch { /* logger should never throw, but belt-and-braces */ }
-    }
+            ["Instance"]     = DataGridSortComparers.Hex<FieldAcrossInstanceRow>(r => r.Instance),
+            ["FieldAddress"] = DataGridSortComparers.Hex<FieldAcrossInstanceRow>(r => r.FieldAddress),
+            ["Value"]        = DataGridSortComparers.Ordinal<FieldAcrossInstanceRow>(r => r.Value),
+        };
 
     private async Task CopyToClipboardAsync(string text)
     {
