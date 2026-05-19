@@ -272,6 +272,61 @@ public sealed class WalkedArrayElement
 }
 
 // ---------------------------------------------------------------------------
+// Phase 21a — reverse-property lookup.
+//
+// `listFieldValuesAcrossInstances` is the row-wise inverse of `walkInstance`:
+// it takes one class + one field offset + the field's managed type, finds
+// every live instance via the same heap scan as `findInstances`, then decodes
+// the field at instance + offset for each. The UI uses this to answer "what
+// value does field X have across every live instance of class Y right now?"
+// — useful when chasing per-entity state (player chrNo, item slot id, …).
+//
+// Scope is value-typed fields whose offset is statically fixed from the
+// instance base. Pointer-traversal fields and array-element fields are
+// rejected at the UI layer (they'd need per-row deref / per-row index
+// resolution, neither of which fits the bulk scan model). See
+// `docs/pipe-protocol.md` §"listFieldValuesAcrossInstances".
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// `listFieldValuesAcrossInstances` result. <see cref="ClassPtr"/> and
+/// (Mono-only) <see cref="VTable"/> echo the values <c>findInstances</c>
+/// returns so cross-backend consumers can use one canonical class identity
+/// field. <see cref="Rows"/> is empty (count = 0) when no live instances of
+/// the class were located; a non-empty rows list with every row carrying
+/// <c>error</c> is the "instances found but offset unreadable" case.
+/// </summary>
+public sealed class ListFieldValuesResult
+{
+    [JsonPropertyName("class_ptr")]   public string?                    ClassPtr    { get; set; }
+    [JsonPropertyName("vtable")]      public string?                    VTable      { get; set; }
+    [JsonPropertyName("count")]       public int                        Count       { get; set; }
+    [JsonPropertyName("limit")]       public int                        Limit       { get; set; }
+    [JsonPropertyName("fieldOffset")] public long                       FieldOffset { get; set; }
+    [JsonPropertyName("fieldType")]   public string?                    FieldType   { get; set; }
+    [JsonPropertyName("rows")]        public List<ListFieldValueRow>?   Rows        { get; set; }
+    [JsonPropertyName("error")]       public string?                    Error       { get; set; }
+}
+
+/// <summary>
+/// One decoded row from <see cref="ListFieldValuesResult.Rows"/>. Per-type
+/// payload mirrors <see cref="WalkedField"/> exactly — exactly one of
+/// <see cref="Value"/> / <see cref="Ptr"/> / <see cref="String"/> /
+/// <see cref="Error"/> is meaningful per row.
+/// </summary>
+public sealed class ListFieldValueRow
+{
+    [JsonPropertyName("instance")]      public string?      Instance     { get; set; }
+    [JsonPropertyName("fieldAddress")]  public string?      FieldAddress { get; set; }
+    [JsonPropertyName("value")]         public JsonElement? Value        { get; set; }
+    [JsonPropertyName("ptr")]           public string?      Ptr          { get; set; }
+    [JsonPropertyName("string")]        public string?      String       { get; set; }
+    [JsonPropertyName("string_length")] public int?         StringLength { get; set; }
+    [JsonPropertyName("string_error")]  public string?      StringError  { get; set; }
+    [JsonPropertyName("error")]         public string?      Error        { get; set; }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 17a + 17b — address finder (reverse lookup).
 //
 // `whatIsAt` is the inverse of `findInstances`: given any process address,

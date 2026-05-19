@@ -1098,6 +1098,73 @@ void RegisterCoreHandlers() {
         };
     });
 
+    // Phase 21a — listFieldValuesAcrossInstances (Mono).
+    // Inverse of walkInstance: given a class spec + a fixed cumulative byte
+    // offset from instance base + the field's managed type, find every live
+    // instance of the class and decode the field at instance+offset for each.
+    // Reuses the same heap scan as findInstances and the same per-type decoder
+    // as walkInstance, so primitives come back as `value`, strings as `ptr`
+    // + `string`, references as `ptr`, unreadable rows as `error: unreadable`.
+    PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
+        [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        std::string err;
+        Mono::MonoClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        if (!args.contains("fieldOffset") || !args["fieldOffset"].is_number()) {
+            return json{{"error", "missing/invalid 'fieldOffset' (int)"}};
+        }
+        std::int64_t fieldOffset = args["fieldOffset"].get<std::int64_t>();
+        if (fieldOffset < 0 || fieldOffset > (1 << 24)) {
+            return json{{"error", "'fieldOffset' out of range"}};
+        }
+        std::string fieldType = args.value("fieldType", std::string{"System.Object"});
+
+        const auto& r = Mono::GetResolver();
+        if (r.class_vtable == nullptr) return json{{"error", "mono_class_vtable not exported"}};
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        if (domain == nullptr) return json{{"error", "no mono root domain"}};
+
+        Mono::MonoVTable* vtable = nullptr;
+        {
+            Mono::ThreadAttachGuard guard(domain);
+            if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            vtable = r.class_vtable(domain, k);
+        }
+        if (vtable == nullptr) return json{{"error", "mono_class_vtable returned null"}};
+
+        std::size_t limit = 256;
+        if (args.contains("limit") && args["limit"].is_number_unsigned()) {
+            limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
+        }
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, nullptr);
+
+        json rows = json::array();
+        for (const void* p : matches) {
+            std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
+            std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(fieldOffset);
+            json row = {
+                {"instance",     formatHex(inst)},
+                {"fieldAddress", formatHex(fieldAddr)},
+            };
+            json decoded = decodeField(fieldType, fieldAddr);
+            for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
+                row[kv.key()] = kv.value();
+            }
+            rows.push_back(std::move(row));
+        }
+        return json{
+            {"class_ptr",   formatHex(reinterpret_cast<std::uintptr_t>(k))},
+            {"vtable",      formatHex(reinterpret_cast<std::uintptr_t>(vtable))},
+            {"count",       rows.size()},
+            {"limit",       limit},
+            {"fieldOffset", fieldOffset},
+            {"fieldType",   fieldType},
+            {"rows",        std::move(rows)},
+        };
+    });
+
     // Phase 6 segment B — walkInstance (Mono).
     // Given an instance address + class spec, walk the inheritance chain and
     // decode every instance field's value. Each MonoObject's first 16 bytes
@@ -2202,6 +2269,56 @@ void RegisterCoreHandlers() {
                 {"bytes_scanned",      stats.bytesScanned},
                 {"thread_stacks",      stats.threadStacks},
             }},
+        };
+    });
+
+    // Phase 21a — listFieldValuesAcrossInstances (IL2CPP). See the Mono
+    // handler above for the contract; per-backend differences are:
+    //   * heap scan target is the Il2CppClass* (not a VTable).
+    //   * `vtable` is not emitted (Mono-specific).
+    PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
+        [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        std::string err;
+        IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+        if (k == nullptr) return json{{"error", err}};
+
+        if (!args.contains("fieldOffset") || !args["fieldOffset"].is_number()) {
+            return json{{"error", "missing/invalid 'fieldOffset' (int)"}};
+        }
+        std::int64_t fieldOffset = args["fieldOffset"].get<std::int64_t>();
+        if (fieldOffset < 0 || fieldOffset > (1 << 24)) {
+            return json{{"error", "'fieldOffset' out of range"}};
+        }
+        std::string fieldType = args.value("fieldType", std::string{"System.Object"});
+
+        std::size_t limit = 256;
+        if (args.contains("limit") && args["limit"].is_number_unsigned()) {
+            limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
+        }
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit, nullptr);
+
+        json rows = json::array();
+        for (const void* p : matches) {
+            std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
+            std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(fieldOffset);
+            json row = {
+                {"instance",     formatHex(inst)},
+                {"fieldAddress", formatHex(fieldAddr)},
+            };
+            json decoded = decodeField(fieldType, fieldAddr);
+            for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
+                row[kv.key()] = kv.value();
+            }
+            rows.push_back(std::move(row));
+        }
+        return json{
+            {"class_ptr",   formatHex(reinterpret_cast<std::uintptr_t>(k))},
+            {"count",       rows.size()},
+            {"limit",       limit},
+            {"fieldOffset", fieldOffset},
+            {"fieldType",   fieldType},
+            {"rows",        std::move(rows)},
         };
     });
 

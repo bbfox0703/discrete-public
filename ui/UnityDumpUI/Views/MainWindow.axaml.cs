@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
+using UnityDumpUI.Core.Services;
 using UnityDumpUI.ViewModels;
 
 namespace UnityDumpUI.Views;
@@ -409,6 +410,54 @@ public partial class MainWindow : Window
         {
             await copy(targetInstance.Address).ConfigureAwait(true);
         }
+    }
+
+    /// <summary>
+    /// Phase 21a — "List this field across instances…" right-click handler.
+    /// Resolves the selected Inspector row's cumulative byte offset from its
+    /// parent chain via <see cref="InspectorFieldOffsetResolver"/>, then
+    /// opens the FieldAcrossInstancesWindow seeded with the inspector's
+    /// target class spec, the field name + type, and the cumulative offset.
+    ///
+    /// Bails (with the soft reason rendered as a tiny info window) when the
+    /// resolver reports the chain isn't supported — typically because the
+    /// selection crosses a pointer-traversal field or a collection element,
+    /// neither of which has a statically-fixed address offset.
+    /// </summary>
+    private async void OnListFieldAcrossInstancesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var inspector = vm.Inspector;
+        WalkedFieldNode? node = inspector.SelectedNode;
+        if (node is null) return;
+        if (!inspector.HasTarget) return;
+
+        CumulativeOffsetResult resolved = InspectorFieldOffsetResolver.Resolve(node);
+        if (!resolved.Supported)
+        {
+            // Soft surface — write to the inspector's error banner so the
+            // user sees the reason without a separate dialog. The banner
+            // is the same one Find/Walk errors use.
+            inspector.ErrorMessage = $"Reverse lookup: {resolved.Reason}";
+            return;
+        }
+
+        // Build the modal. The target class spec is the OUTER class the
+        // inspector is walking — not the value-struct type that may live
+        // inside it. Field type comes from the row itself (e.g.
+        // System.Int32 for a primitive, UnityEngine.Vector3 if the user
+        // picked the struct row itself — though the most useful case is a
+        // primitive leaf).
+        var fieldVm = new FieldAcrossInstancesViewModel(
+            vm.BackendAdapter, vm.Logger,
+            inspector.TargetAssembly!,
+            inspector.TargetNamespace,
+            inspector.TargetName!,
+            fieldName:   node.Name,
+            fieldType:   node.Type ?? "System.Object",
+            fieldOffset: resolved.Offset);
+        var win = new FieldAcrossInstancesWindow(fieldVm);
+        await win.ShowDialog(this);
     }
 
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)

@@ -59,6 +59,17 @@ inline constexpr const char* CmdIL2CPPGetGenericInstances = "il2cppGetGenericIns
 inline constexpr const char* CmdWhatIsAt              = "whatIsAt";
 inline constexpr const char* CmdGetClassRangeStats    = "getClassRangeStats";
 
+// Phase 21a — reverse-property lookup. Given a class spec + a fixed
+// byte offset from the instance base, scan the heap for live instances
+// (same scan findInstances uses) and decode the field at each
+// instance+offset. Inverse of walkInstance (one instance, all fields):
+// this returns one field across all instances. Offset must already be
+// the cumulative offset from instance base (UI computes it by walking
+// the Inspector node's parent chain summing offsets, bailing if any
+// ancestor crosses a pointer-traversal field).
+inline constexpr const char* CmdListFieldValuesAcrossInstances =
+    "listFieldValuesAcrossInstances";
+
 // Phase 18 — find method instances + AOB pattern generator.
 // findMethodInstances enumerates every overload of a named method on a class
 // and returns each one's native address + decoded signature + a symbol-safe

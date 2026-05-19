@@ -1065,8 +1065,16 @@ public sealed class WalkedFieldActions
 /// One row in the hierarchical field grid. Doubles as both top-level
 /// instance fields and child rows produced by lazy expansion.
 /// </summary>
-public sealed partial class WalkedFieldNode : ObservableObject
+public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldNode
 {
+    // Phase 21a — adapter for the offset resolver in Core. Cumulative-offset
+    // resolution needs a parent-chain walk; the resolver lives in Core (so it
+    // can be unit-tested offline), and Core can't see this UI type — hence
+    // the interface seam. ParentNode forwards to the existing Parent field
+    // typed as the resolver's contract; Offset and Kind are already public.
+    IInspectorFieldNode? IInspectorFieldNode.ParentNode => Parent;
+
+
     public WalkedFieldNode(string name, string type, int offset, string declaredIn,
                             string? address, string displayValue, string? ptr,
                             int indentLevel, WalkedFieldKind kind,

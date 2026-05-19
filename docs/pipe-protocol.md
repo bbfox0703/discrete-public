@@ -448,6 +448,62 @@ If the address is unreadable, the decoded entry carries `"error":
 The string layout (`length` at `+0x10`, UTF-16 chars at `+0x14`) is identical
 between Mono-bdwgc and IL2CPP, so the same decoder serves both backends.
 
+### `listFieldValuesAcrossInstances` *(Both)*
+
+Phase 21a — **row-wise inverse of `walkInstance`**. Where `walkInstance` is
+"one instance, all fields", this is "all instances, one field". Heap-scans
+for every live instance of the class (same scan as `findInstances`), then
+decodes the field at `instance + fieldOffset` for each match.
+
+Useful when chasing per-entity state across a class — e.g. "what `chrNo` does
+every live `PARTY_WORK` instance have right now?", "which `Inventory`
+instance has its `gold` set to 9999?".
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assembly`, `namespace`, `name` | class spec | required |
+| `fieldOffset` | int | required; **cumulative** byte offset from instance base (the UI walks the Inspector node's parent chain and sums offsets across value-struct ancestors) |
+| `fieldType` | string | optional managed CLR type, e.g. `"System.Int32"`; selects the decoder. Unknown / unsupplied → raw 8-byte qword `ptr`. |
+| `limit` | uint | optional, default 256, capped at 4096 |
+
+```jsonc
+// IL2CPP result:
+{
+  "class_ptr":   "0x0000000123456789",
+  "count":       2,
+  "limit":       256,
+  "fieldOffset": 32,
+  "fieldType":   "System.Int32",
+  "rows": [
+    { "instance": "0x...", "fieldAddress": "0x...", "value": 5 },
+    { "instance": "0x...", "fieldAddress": "0x...", "value": 42 }
+  ]
+}
+// Mono result is identical except an additional "vtable" field is emitted
+// at the top level (same Mono-only quirk as findInstances).
+```
+
+Per-row decoding uses the same per-type rules as `walkInstance` —
+primitives → `value`, `System.String` → `ptr` + `string` + `string_length`
+(or `string_error`), everything else → raw 8-byte qword `ptr`. Unreadable
+field memory for an instance lands on `row.error = "unreadable"` so the
+caller can render a placeholder for that row without losing the other
+matches.
+
+**Caveats**:
+- Caller is responsible for the *cumulative* offset. The DLL doesn't walk
+  metadata to recompute it — it trusts the supplied offset. The UI's
+  `InspectorFieldOffsetResolver` does the walk client-side; it bails out
+  when the chain crosses any non-value-struct ancestor (pointer field,
+  collection element) because those would need a per-row dereference /
+  per-row index resolution at lookup time.
+- The same heap-scan false positives as `findInstances` apply — thread
+  stacks and metadata structures can match the class pointer pattern. Rows
+  whose `fieldAddress` lands on unreadable memory at least flag themselves
+  via `error: "unreadable"`, but a false-positive instance whose
+  `instance + fieldOffset` happens to be readable will return a garbage
+  value. See `findInstances` for the validation strategy.
+
 ### `walkArray` *(Both)*
 
 Reads a managed `T[]` header at `address` and returns up to `limit` per-element
