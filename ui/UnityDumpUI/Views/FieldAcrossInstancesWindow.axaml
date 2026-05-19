@@ -1,0 +1,95 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.FieldAcrossInstancesWindow"
+        x:DataType="vm:FieldAcrossInstancesViewModel"
+        Width="780" Height="540"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Icon="avares://DiscreteUI/Assets/MainIcon.ico"
+        Title="{StaticResource FieldAcross.Title}">
+  <DockPanel LastChildFill="True" Margin="12">
+
+    <!-- Header: which field on which class, plus a Refresh button. -->
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+      <StackPanel Grid.Column="0" Spacing="2">
+        <TextBlock FontSize="14" FontWeight="SemiBold"
+                   Text="{Binding FieldName}" />
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="{StaticResource FieldAcross.ClassLabel}" Opacity="0.7" />
+          <TextBlock Text="{Binding ClassLabel}"
+                     FontFamily="Consolas,Cascadia Mono,monospace" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="{StaticResource FieldAcross.OffsetLabel}" Opacity="0.7" />
+          <TextBlock Text="{Binding OffsetLabel}"
+                     FontFamily="Consolas,Cascadia Mono,monospace" />
+          <TextBlock Text="{StaticResource FieldAcross.TypeLabel}" Opacity="0.7" Margin="14,0,0,0" />
+          <TextBlock Text="{Binding FieldType}"
+                     FontFamily="Consolas,Cascadia Mono,monospace" />
+          <TextBlock Text="{StaticResource FieldAcross.CountLabel}" Opacity="0.7" Margin="14,0,0,0" />
+          <TextBlock Text="{Binding CountLabel}" />
+        </StackPanel>
+      </StackPanel>
+      <Button Grid.Column="1"
+              VerticalAlignment="Center"
+              Content="{StaticResource FieldAcross.RefreshButton}"
+              Command="{Binding RefreshCommand}" />
+    </Grid>
+
+    <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
+                 IsVisible="{Binding IsBusy}" Height="3" Margin="0,0,0,4" />
+
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+            Background="#33D32F2F" BorderBrush="#88D32F2F"
+            BorderThickness="1" CornerRadius="4" Padding="10,6"
+            Margin="0,0,0,8">
+      <TextBlock Text="{Binding ErrorMessage}" Foreground="#FFD32F2F" TextWrapping="Wrap" />
+    </Border>
+
+    <!-- Footer: Close button. -->
+    <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+      <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+        <Button Content="{StaticResource FieldAcross.CloseButton}"
+                Click="OnCloseClicked" />
+      </StackPanel>
+    </DockPanel>
+
+    <!-- Rows grid. Three columns: instance address, field address, decoded
+         value. CommandParameter binds to the row VM so the per-row "Copy"
+         menu items reach the right tuple without code-behind. -->
+    <DataGrid ItemsSource="{Binding Rows}"
+              IsReadOnly="True"
+              AutoGenerateColumns="False"
+              CanUserResizeColumns="True"
+              CanUserSortColumns="True"
+              GridLinesVisibility="Horizontal"
+              x:DataType="vm:FieldAcrossInstancesViewModel">
+      <DataGrid.ContextMenu>
+        <ContextMenu>
+          <MenuItem Header="{StaticResource FieldAcross.CopyInstanceMenu}"
+                    Command="{Binding CopyInstanceCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <MenuItem Header="{StaticResource FieldAcross.CopyFieldAddressMenu}"
+                    Command="{Binding CopyFieldAddressCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <MenuItem Header="{StaticResource FieldAcross.CopyValueMenu}"
+                    Command="{Binding CopyValueCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+        </ContextMenu>
+      </DataGrid.ContextMenu>
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="{StaticResource FieldAcross.ColInstance}" Width="200"
+                            Binding="{Binding Instance, x:DataType=vm:FieldAcrossInstanceRow}"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+        <DataGridTextColumn Header="{StaticResource FieldAcross.ColFieldAddress}" Width="200"
+                            Binding="{Binding FieldAddress, x:DataType=vm:FieldAcrossInstanceRow}"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+        <DataGridTextColumn Header="{StaticResource FieldAcross.ColValue}" Width="*"
+                            Binding="{Binding Value, x:DataType=vm:FieldAcrossInstanceRow}"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+      </DataGrid.Columns>
+    </DataGrid>
+  </DockPanel>
+</Window>

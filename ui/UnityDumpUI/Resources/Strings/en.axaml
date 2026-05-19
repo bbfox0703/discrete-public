@@ -77,6 +77,29 @@
   <sys:String x:Key="Inspector.CopyNameTooltip">Copy field name</sys:String>
   <sys:String x:Key="Inspector.NavigateHexTooltip">Open Cheat Engine's Memory View at this address (requires AOBMaker plugin)</sys:String>
   <sys:String x:Key="Inspector.LookupAddressMenu">Find what's at this address…</sys:String>
+  <!-- Phase 21a — reverse-property lookup. Right-click any value-typed
+       Inspector row to list this field's address + value across every live
+       instance of the current target class. Bails with a soft error when
+       the selected row crosses a pointer-traversal or collection-element
+       ancestor (see InspectorFieldOffsetResolver). -->
+  <sys:String x:Key="Inspector.ListFieldAcrossInstancesMenu">List this field across instances…</sys:String>
+
+  <!-- Phase 21a — Field-across-instances modal. -->
+  <sys:String x:Key="FieldAcross.Title">Field across live instances</sys:String>
+  <sys:String x:Key="FieldAcross.HeaderLabel">Field</sys:String>
+  <sys:String x:Key="FieldAcross.ClassLabel">Class</sys:String>
+  <sys:String x:Key="FieldAcross.OffsetLabel">Offset</sys:String>
+  <sys:String x:Key="FieldAcross.TypeLabel">Type</sys:String>
+  <sys:String x:Key="FieldAcross.CountLabel">Matches</sys:String>
+  <sys:String x:Key="FieldAcross.RefreshButton">Refresh</sys:String>
+  <sys:String x:Key="FieldAcross.CloseButton">Close</sys:String>
+  <sys:String x:Key="FieldAcross.ColInstance">Instance</sys:String>
+  <sys:String x:Key="FieldAcross.ColFieldAddress">Field address</sys:String>
+  <sys:String x:Key="FieldAcross.ColValue">Value</sys:String>
+  <sys:String x:Key="FieldAcross.CopyInstanceMenu">Copy instance address</sys:String>
+  <sys:String x:Key="FieldAcross.CopyFieldAddressMenu">Copy field address</sys:String>
+  <sys:String x:Key="FieldAcross.CopyValueMenu">Copy value</sys:String>
+  <sys:String x:Key="FieldAcross.UnsupportedTitle">Reverse lookup not supported</sys:String>
   <sys:String x:Key="Inspector.CallMethodOnInstanceMenu">Call method on this instance… (switch to Methods)</sys:String>
   <sys:String x:Key="Inspector.CopyInstanceAddressMenu">Copy address to clipboard</sys:String>
 

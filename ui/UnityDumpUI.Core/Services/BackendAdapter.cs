@@ -392,6 +392,41 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `listFieldValuesAcrossInstances` — Phase 21a reverse-property lookup.
+    /// Heap-scans for every live instance of the class spec (same scan as
+    /// <see cref="FindInstancesAsync"/>), then decodes the field at
+    /// <c>instance + fieldOffset</c> for each. <paramref name="fieldOffset"/>
+    /// is the cumulative offset from the instance base — the caller is
+    /// responsible for summing it across value-struct ancestors (see
+    /// <c>InspectorFieldOffsetResolver</c>). <paramref name="fieldType"/> is
+    /// the managed CLR type name (e.g. <c>"System.Int32"</c>) and selects
+    /// the per-type decoder; unknown types come back as raw qword
+    /// <c>ptr</c>. Soft per-instance errors land on each
+    /// <see cref="ListFieldValueRow.Error"/> instead of failing the call.
+    /// </summary>
+    public async Task<ListFieldValuesResult> ListFieldValuesAcrossInstancesAsync(
+        string assembly, string? @namespace, string name,
+        long fieldOffset, string fieldType,
+        int? limit = null, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["assembly"]    = Str(assembly),
+            ["namespace"]   = Str(@namespace ?? string.Empty),
+            ["name"]        = Str(name),
+            ["fieldOffset"] = JsonSerializer.SerializeToElement(fieldOffset, ProtocolJsonContext.Default.Int64),
+            ["fieldType"]   = Str(fieldType),
+        };
+        if (limit is int l) args["limit"] = Int(l);
+
+        var env = await _pipe.SendAsync(
+            "listFieldValuesAcrossInstances", args,
+            ProtocolJsonContext.Default.RpcEnvelopeListFieldValuesResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("listFieldValuesAcrossInstances returned no result");
+    }
+
+    /// <summary>
     /// `readMemory` — raw byte read. <paramref name="size"/> must be in
     /// [1, 1048576]; soft errors land in <see cref="ReadMemoryResult.Error"/>.
     /// </summary>

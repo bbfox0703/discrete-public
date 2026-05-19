@@ -1,9 +1,9 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (clean — last pushed commit on this session: instance-address copy menu)
-**Last commit**: heap-scan filter (Phase 23 — MEM_IMAGE + thread-stack exclusion); was `feat(inspector): right-click instance → Copy address to clipboard`
-**Build**: 301 (DLL release; UnityDumper-Mono.dll 553 KB, UnityDumper-IL2CPP.dll 586 KB; DiscreteUI.exe unchanged from #285)
-**Tests**: 167/167 pass (Phase 23 is DLL-only — no new xUnit cases; live smoke validates `scan_stats` telemetry; +4 cases for the multi-row "Copy CE field" fix)
+**Branch**: `dev` (5 follow-up tasks merged 2026-05-19 — Classes Copy class name, Inspector Class ptr buttons, Fields/Methods per-cell copy, Copy CE Field multi-select fix, Phase 21a reverse-property lookup; on top of Phase 19d-3 smart-typed editors)
+**Last commit**: Merge Task 5 — Phase 21a reverse-property lookup (`listFieldValuesAcrossInstances` RPC + Inspector right-click + FieldAcrossInstances modal)
+**Build**: 307 (DLL #306 release; UnityDumper-Mono.dll ~560 KB, UnityDumper-IL2CPP.dll ~591 KB; DiscreteUI.exe AOT 38.7 MB pre-Phase 21a)
+**Tests**: 176/176 pass (was 163 pre-merge; +4 multi-row Copy CE field, +9 offset resolver, +3 fake-pipe RPC smoke, +1 namespace-thread regression — final number reconfirmed in the post-merge `dotnet test` run)
 **Current state**: **Phase 22 fully closed** — 22a–22f shipped, live-smoke Steps 1-8 caught + fixed 6 P0/P1 bugs (2026-05-18), Steps 9-11 PASS in follow-up session (user log: `Mathf.Abs(-7) → 7` end-to-end through MethodCallWindow → CE Table → bridge → `callUnityMethod`). **Phase 23 (heap-scan convergence) shipped 2026-05-18** — `findInstances` no longer scans module `.data` / `.bss` or thread stacks. **Phase 20a-2 closed 2026-05-18** — `getAllGameObjects` recipe verified cross-backend × cross-Unity-version (Mono/2022+ via `FindObjectsByType`, IL2CPP/2021 via `FindObjectsOfType(Type, bool)`). Code surface (Tools menu, Send-to-CE buttons, bridge inject pipeline) all green; bridge files land in CE cleanly; bootstrap loads; Mono JIT method resolution works end-to-end. Live smoke completed Steps 1-8 against BongoCat (Mono, PID rotated 23484/40700/68344 as user restarted between iterations); **Steps 9-11 deferred to a fresh session** (MethodCall→CE, AddressLookup→CE, save/reopen persistence). The 6 bugs were exactly the kind of "would-fire-on-first-user-run" silent-failure modes that the unit test suite couldn't reach — each is now permanently locked out by a new regression test. Carry-forward from previous session: All earlier shipped phases verified live + 4 backlog cosmetics ✅ live-verified 2026-05-08 against build #251 (Silksong / SaGa F2R / FF VI / R-Type) + Inspector classifier & Browser filter-highlight polish landed in build #257. **Phase 20a (Scene/GameObject explorer Lua bridge)** is parked at "FindObjectsOfType(Type, bool) recipe untested".
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
@@ -26,7 +26,62 @@
 | **19 (a/b/c/d/e)** | ✅ | **Lua-callable Unity methods.** New wire RPC `callMethod(asm, ns, class, method, [signatureMatch], [instance], [args])` invoking Mono / IL2CPP methods with marshaled primitive + null + address + string args + boxed-primitive / address / UTF-8-decoded-string returns + managed exception capture. Static AND instance dispatch on both backends. UI MethodCallWindow (right-click any overload row → Call method…) + `scripts/unity_invoke.lua` Lua bridge with full arg-builder set. Spec: [lua-invoke.md](lua-invoke.md). |
 | **19d-2** | ✅ | **UI polish.** Methods grid "Call method… (pick overload)" auto-skips the picker modal when `findMethodInstances` returns exactly one overload — single-overload user methods (`AddItems`, `get_numberOfItems`, `Save`) become one click. Inspector right-click on any instance → "Call method on this instance… (switch to Methods)" snaps `SelectedInstance` to that row + flips to the Methods tab; the subsequent Methods-grid right-click then pre-fills the `Instance address` textbox in `MethodCallWindow` (scope-checked: only when Browser.SelectedClass matches Inspector.TargetClass on assembly + namespace + name). |
 | 16 (docs) | ✅ | All planned files exist. New in this batch: `lessons-learned.md`, `README.md` + `README.zh-TW.md` (root), `CONTRIBUTING.md` (root), `proxy-dlls.md`, `metadata-cli.md`, `export-formats.md`, `mono-internals.md`, `il2cpp-internals.md`, `dll-spec.md`, `ui-spec.md`, `technical-notes.md`. |
+| **21a (Reverse-property lookup)** | ✅ | New wire RPC `listFieldValuesAcrossInstances(class, fieldOffset, fieldType[, limit])` — row-wise inverse of `walkInstance`. Right-click any value-typed Inspector row → "List this field across instances…" → modal grid showing `[instance_address, field_address, value]` for every live instance of the target class. Scope: value-typed fields whose offset is statically fixed from the instance base. New `InspectorFieldOffsetResolver` (Core) walks the parent chain summing offsets across value-struct ancestors and bails on pointer / collection / array-slot ancestors with a soft reason. 9 resolver unit tests + 3 fake-pipe RPC smoke tests. |
 | **22 (Live CT Population via AOBMaker)** | ✅ | All sub-phases (22a–22f) shipped 2026-05-12 across 6 commits. `AobMakerBridge` extended with InjectTableFile + CreateMemoryRecord + CreateAAScriptWithRecords + CheckAvailability; 7 lua bridge files embedded as `<EmbeddedResource>` in Core; bootstrap AA-script generator (idempotent guard + preload trick for `unity_dump.lua`'s `require 'utils'`); `BridgeInjector` orchestrator (8-step pipeline w/ progress + structured failure result); MainWindowViewModel hoisted AobMaker to top-level + Tools menu RelayCommand; per-feature `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` for MethodCallWindow + AddressLookup tab; new [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) + [`tools/Test-BridgeInject.ps1`](../tools/Test-BridgeInject.ps1) wire smoke. **Live click-through smoke pending.** |
+
+---
+
+## What landed in this session — Phase 21a Reverse-property lookup (2026-05-19)
+
+**Outcome**: New "List this field across instances" right-click flow in the
+Inspector. Inverse of the existing Inspector cascade (one instance → all
+fields); this is one field → all live instances. Useful when chasing
+per-entity state ("which `PARTY_WORK` has `chrNo == 5` right now", "what
+`gold` does every Inventory have").
+
+**Pipeline**:
+1. **DLL** — new `listFieldValuesAcrossInstances` handler registered in both
+   Mono and IL2CPP blocks. Same heap scan as `findInstances` (Mono vtable
+   match / IL2CPP class match), per-instance SEH-protected `decodeField` at
+   `instance + fieldOffset`. Soft errors per row.
+2. **DTOs + adapter** — `ListFieldValuesResult` + `ListFieldValueRow` in
+   `ProtocolModels.cs`, registered in `ProtocolJsonContext` for AOT.
+   `BackendAdapter.ListFieldValuesAcrossInstancesAsync` is the typed entry
+   point.
+3. **Offset resolver** — `InspectorFieldOffsetResolver` (Core, pure) walks
+   `IInspectorFieldNode.ParentNode` summing offsets. Bails with a soft reason
+   on any non-`ValueStruct` ancestor (pointer / collection / array slot).
+   `WalkedFieldNode` implements the interface via a one-line adapter.
+4. **UI** — `FieldAcrossInstancesViewModel` + `FieldAcrossInstancesWindow`
+   (modal, 3-column DataGrid with per-row Copy menu). New menu item under
+   the Inspector field grid context menu; click handler in
+   `MainWindow.axaml.cs` resolves the offset and opens the modal.
+5. **Localization** — 14 new keys under `FieldAcross.*` +
+   `Inspector.ListFieldAcrossInstancesMenu`.
+
+**Tests**: 13 new (`InspectorFieldOffsetResolverTests` × 9 +
+`ListFieldValuesAcrossInstancesTests` × 3 fake-pipe smokes + 1 namespace
+threading regression). Full suite 176/176 green.
+
+**Build**: DLL `UnityDumper-Mono.dll` 560 KB / `UnityDumper-IL2CPP.dll` 591
+KB (build #306). UI AOT publish clean (build #307, `DiscreteUI.exe`
+38.7 MB). 0 errors / 0 warnings.
+
+**Live verification**: NOT YET — feature ready for the next live-smoke
+session. Steps to verify:
+1. Inject BongoCat (or any Mono target) → Inspector → Find instances of a
+   class with primitive fields (e.g. PARTY_WORK).
+2. Right-click a primitive row → "List this field across instances…".
+3. Modal should open with one row per live instance, each showing the field
+   value. Per-row "Copy instance address" should round-trip.
+4. Right-click a row inside an expanded value-struct (e.g. `pos.x` if any
+   `Vector3` field is present) → menu should still open with cumulative
+   offset summed.
+5. Right-click a row inside an expanded pointer-to-class child (e.g.
+   drilled-into reference) → soft error on the Inspector banner saying
+   "Reverse lookup not supported across a pointer-traversal field".
+
+**Docs**: `docs/pipe-protocol.md` §`listFieldValuesAcrossInstances` added.
 
 ---
 

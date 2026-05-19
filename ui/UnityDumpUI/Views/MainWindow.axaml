@@ -655,6 +655,15 @@
                              through MainWindowViewModel. -->
                         <MenuItem Header="{StaticResource Inspector.LookupAddressMenu}"
                                   Click="OnLookupInspectorAddressClicked" />
+                        <!-- Phase 21a — Reverse-property lookup: given the
+                             selected field, list its address + value across
+                             every live instance of the inspector's target
+                             class. Bails (with a soft MessageBox-style note)
+                             when the selection crosses a pointer-traversal
+                             or collection-element ancestor — see
+                             InspectorFieldOffsetResolver. -->
+                        <MenuItem Header="{StaticResource Inspector.ListFieldAcrossInstancesMenu}"
+                                  Click="OnListFieldAcrossInstancesClicked" />
                       </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
