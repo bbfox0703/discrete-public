@@ -6,6 +6,8 @@
 // pattern for consistency.
 
 using System;
+using System.Collections;
+using System.Globalization;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -99,6 +101,12 @@ public partial class FieldAcrossInstancesWindow : Window
         }
 
         // Hook Sorting only once — Loaded can fire before Opened so guard via a flag.
+        // Wire per-column CustomSortComparer in the same guard since the column
+        // collection is realized by the time Loaded fires. AOT-safe: Avalonia's
+        // default sort uses reflection on SortMemberPath which the trimmer drops;
+        // CustomSortComparer is the documented escape hatch — when set, the
+        // DataGrid uses our IComparer to reorder the items and skips the
+        // reflection path entirely.
         if (!_sortingHooked)
         {
             grid.Sorting += (_, e) =>
@@ -106,9 +114,67 @@ public partial class FieldAcrossInstancesWindow : Window
                 TryLog($"Sorting event fired. header='{e.Column.Header}' " +
                        $"SortMemberPath='{e.Column.SortMemberPath}'");
             };
+            foreach (var col in grid.Columns)
+            {
+                col.CustomSortComparer = col.SortMemberPath switch
+                {
+                    "Instance"     => InstanceAddressComparer.Instance,
+                    "FieldAddress" => FieldAddressComparer.Instance,
+                    "Value"        => ValueOrdinalComparer.Instance,
+                    _              => col.CustomSortComparer,
+                };
+            }
             _sortingHooked = true;
-            TryLog($"[{stage}] Sorting event handler attached");
+            TryLog($"[{stage}] Sorting event handler + CustomSortComparer wired");
         }
+    }
+
+    // AOT-safe per-column comparers — Avalonia hands two row objects in as
+    // `object?` and we cast to FieldAcrossInstanceRow for typed access.
+    // Hex address columns parse to ulong so "0x100000000" doesn't sort before
+    // "0x80000000" (alpha-sort gotcha).
+    private sealed class InstanceAddressComparer : IComparer
+    {
+        public static readonly IComparer Instance = new InstanceAddressComparer();
+        public int Compare(object? x, object? y) =>
+            CompareHex((x as FieldAcrossInstanceRow)?.Instance,
+                       (y as FieldAcrossInstanceRow)?.Instance);
+    }
+
+    private sealed class FieldAddressComparer : IComparer
+    {
+        public static readonly IComparer Instance = new FieldAddressComparer();
+        public int Compare(object? x, object? y) =>
+            CompareHex((x as FieldAcrossInstanceRow)?.FieldAddress,
+                       (y as FieldAcrossInstanceRow)?.FieldAddress);
+    }
+
+    private sealed class ValueOrdinalComparer : IComparer
+    {
+        public static readonly IComparer Instance = new ValueOrdinalComparer();
+        public int Compare(object? x, object? y)
+        {
+            string a = (x as FieldAcrossInstanceRow)?.Value ?? string.Empty;
+            string b = (y as FieldAcrossInstanceRow)?.Value ?? string.Empty;
+            return string.Compare(a, b, StringComparison.Ordinal);
+        }
+    }
+
+    private static int CompareHex(string? a, string? b)
+    {
+        if (TryParseHex(a, out ulong ua) && TryParseHex(b, out ulong ub))
+            return ua.CompareTo(ub);
+        return string.Compare(a ?? string.Empty, b ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    private static bool TryParseHex(string? s, out ulong value)
+    {
+        value = 0;
+        if (string.IsNullOrEmpty(s)) return false;
+        ReadOnlySpan<char> span = s.AsSpan();
+        if (span.Length > 2 && span[0] == '0' && (span[1] == 'x' || span[1] == 'X'))
+            span = span.Slice(2);
+        return ulong.TryParse(span, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
     }
 
     private bool _sortingHooked;
