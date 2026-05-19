@@ -340,6 +340,31 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         ErrorMessage = null;
     }
 
+    // ---------- Copy Class name / Class ptr ------------------------------
+    //
+    // Bound to the two small buttons next to the "Class ptr" row in the
+    // Inspector header. The whole StackPanel is IsVisible-gated on
+    // ClassPointer being non-null, so by the time these fire HasTarget is
+    // already true. Null-guards stay in for defence-in-depth (CopyToClipboardAsync
+    // is wired late by the View and could in theory be null in tests).
+
+    [RelayCommand]
+    private async Task CopyClassNameAsync()
+    {
+        if (CopyToClipboardAsync is null || string.IsNullOrEmpty(TargetName)) return;
+        string text = string.IsNullOrEmpty(TargetNamespace)
+            ? TargetName!
+            : $"{TargetNamespace}.{TargetName}";
+        await CopyToClipboardAsync(text).ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task CopyClassAddressAsync()
+    {
+        if (CopyToClipboardAsync is null || string.IsNullOrEmpty(ClassPointer)) return;
+        await CopyToClipboardAsync(ClassPointer!).ConfigureAwait(true);
+    }
+
     /// <summary>
     /// Root walk for a fresh selected instance. Replaces the entire
     /// <see cref="Fields"/> list with top-level rows. When a previous walk
