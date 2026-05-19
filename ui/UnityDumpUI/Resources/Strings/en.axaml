@@ -99,6 +99,8 @@
   <sys:String x:Key="FieldAcross.CopyInstanceMenu">Copy instance address</sys:String>
   <sys:String x:Key="FieldAcross.CopyFieldAddressMenu">Copy field address</sys:String>
   <sys:String x:Key="FieldAcross.CopyValueMenu">Copy value</sys:String>
+  <sys:String x:Key="FieldAcross.ValueFilterLabel">Filter value</sys:String>
+  <sys:String x:Key="FieldAcross.ValueFilterWatermark">substring match — e.g. 99, "Background", true</sys:String>
   <sys:String x:Key="FieldAcross.UnsupportedTitle">Reverse lookup not supported</sys:String>
   <sys:String x:Key="Inspector.CallMethodOnInstanceMenu">Call method on this instance… (switch to Methods)</sys:String>
   <sys:String x:Key="Inspector.CopyInstanceAddressMenu">Copy address to clipboard</sys:String>

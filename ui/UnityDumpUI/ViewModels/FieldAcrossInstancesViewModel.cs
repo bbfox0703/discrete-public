@@ -59,7 +59,29 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
 
     public string OffsetLabel => $"+0x{FieldOffset:X} ({FieldOffset} bytes)";
 
+    /// <summary>
+    /// Raw rows the DLL returned. The DataGrid binds to <see cref="FilteredRows"/>
+    /// instead, which is the visible projection after the
+    /// <see cref="ValueFilter"/> substring match is applied.
+    /// </summary>
     public ObservableCollection<FieldAcrossInstanceRow> Rows { get; } = new();
+
+    /// <summary>
+    /// View-side filtered mirror of <see cref="Rows"/>, driven by
+    /// <see cref="ValueFilter"/>. Empty filter mirrors Rows exactly. UI-only
+    /// — Copy commands still pull the clicked row's tuple verbatim, no need
+    /// to project through the filter.
+    /// </summary>
+    public ObservableCollection<FieldAcrossInstanceRow> FilteredRows { get; } = new();
+
+    /// <summary>
+    /// Substring filter applied to <see cref="FilteredRows"/>. Matches the
+    /// row's <see cref="FieldAcrossInstanceRow.Value"/> column
+    /// (case-insensitive). Empty = show all. Phase 21a polish — lets the
+    /// user type e.g. <c>"99"</c> to find every instance whose chrNo is 99.
+    /// </summary>
+    [ObservableProperty] private string _valueFilter = string.Empty;
+    partial void OnValueFilterChanged(string value) => RefilterRows();
 
     [ObservableProperty] private int     _instanceLimit = 256;
     [ObservableProperty] private bool    _isBusy;
@@ -98,6 +120,7 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
             {
                 ErrorMessage = result.Error;
                 Rows.Clear();
+                FilteredRows.Clear();
                 MatchCount = 0;
                 return;
             }
@@ -113,6 +136,7 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
                 }
             }
             MatchCount = result.Count;
+            RefilterRows();
             _logger.Write(Constants.LogCategoryView,
                 $"listFieldValuesAcrossInstances {ClassLabel} +0x{FieldOffset:X} {FieldType}: {result.Count} matches");
         }
@@ -145,6 +169,31 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
     private Task CopyValueAsync(FieldAcrossInstanceRow? row) =>
         (CopyToClipboardAsync is { } f && row is not null && !string.IsNullOrEmpty(row.Value))
             ? f(row.Value) : Task.CompletedTask;
+
+    /// <summary>
+    /// Rebuild <see cref="FilteredRows"/> from <see cref="Rows"/> using the
+    /// current <see cref="ValueFilter"/> as a case-insensitive substring
+    /// match against each row's <see cref="FieldAcrossInstanceRow.Value"/>.
+    /// Called on filter-change AND at the end of <see cref="RefreshAsync"/>
+    /// so a brand-new result set immediately respects the typed filter.
+    /// </summary>
+    private void RefilterRows()
+    {
+        FilteredRows.Clear();
+        string needle = (ValueFilter ?? string.Empty).Trim();
+        if (needle.Length == 0)
+        {
+            foreach (var r in Rows) FilteredRows.Add(r);
+            return;
+        }
+        foreach (var r in Rows)
+        {
+            if (r.Value.Contains(needle, StringComparison.OrdinalIgnoreCase))
+            {
+                FilteredRows.Add(r);
+            }
+        }
+    }
 
     /// <summary>
     /// Render one decoded wire row as the human-readable string the DataGrid
