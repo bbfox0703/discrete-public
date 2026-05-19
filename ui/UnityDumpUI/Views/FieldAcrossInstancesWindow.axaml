@@ -101,14 +101,28 @@
         </ContextMenu>
       </DataGrid.ContextMenu>
       <DataGrid.Columns>
+        <!-- AOT sort note: with AvaloniaUseCompiledBindingsByDefault=true,
+             the column Binding compiles to a CompiledBinding whose Path
+             string is empty at runtime — Avalonia then auto-sets the
+             column's CanUserSort=False because it can't derive a sort
+             path. Diagnostic log confirmed this. The fix is explicit
+             SortMemberPath + CanUserSort=True on every column; the
+             string then drives reflection on the row at sort time
+             (preserved by Avalonia.Controls.DataGrid TrimmerRootAssembly). -->
         <DataGridTextColumn Header="{StaticResource FieldAcross.ColInstance}" Width="200"
                             Binding="{Binding Instance}"
+                            SortMemberPath="Instance"
+                            CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource FieldAcross.ColFieldAddress}" Width="200"
                             Binding="{Binding FieldAddress}"
+                            SortMemberPath="FieldAddress"
+                            CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource FieldAcross.ColValue}" Width="*"
                             Binding="{Binding Value}"
+                            SortMemberPath="Value"
+                            CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
       </DataGrid.Columns>
     </DataGrid>
