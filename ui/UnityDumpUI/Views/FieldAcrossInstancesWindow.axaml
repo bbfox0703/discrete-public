@@ -78,7 +78,8 @@
          DataGrid auto-sort can't resolve the property path in AOT builds
          (the compiled-binding `x:DataType` annotation on the column binding
          is invisible to the runtime sort comparer). -->
-    <DataGrid ItemsSource="{Binding FilteredRows}"
+    <DataGrid x:Name="RowsGrid"
+              ItemsSource="{Binding FilteredRows}"
               IsReadOnly="True"
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"

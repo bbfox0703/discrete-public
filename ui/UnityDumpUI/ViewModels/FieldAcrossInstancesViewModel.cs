@@ -176,6 +176,9 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
     /// match against each row's <see cref="FieldAcrossInstanceRow.Value"/>.
     /// Called on filter-change AND at the end of <see cref="RefreshAsync"/>
     /// so a brand-new result set immediately respects the typed filter.
+    /// Sorting is owned by the DataGrid via per-column
+    /// <c>CustomSortComparer</c> instances wired in the View's code-behind,
+    /// so this method doesn't need to reorder.
     /// </summary>
     private void RefilterRows()
     {
