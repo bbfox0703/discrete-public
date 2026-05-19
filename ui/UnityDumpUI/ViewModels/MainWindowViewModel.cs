@@ -4,6 +4,7 @@
 // observable properties + commands per the AOT mandate.
 
 using System;
+using System.Linq;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -69,6 +70,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         Browser         = new AssemblyBrowserViewModel(_backend, _logger);
         Inspector       = new LiveInspectionViewModel(_backend, _logger);
         AddressLookup   = new AddressLookupViewModel(_backend, _logger);
+        SymbolFinder    = new SymbolFinderViewModel(_backend, _logger, Browser.Assemblies);
+        SymbolFinder.NavigateRequested += OnSymbolFinderNavigateRequested;
         // Phase 22a/d: hoisted from Inspector to a top-level VM property.
         // AobMaker is session-wide — the Inspector's per-row HEX/Disasm
         // buttons, MethodOverloads' "Send AA script to CE" entries, and
@@ -233,6 +236,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public AddressLookupViewModel AddressLookup { get; }
 
     /// <summary>
+    /// Phase 25 — cross-class symbol finder. Wraps `searchSymbols` so the
+    /// user can hunt a field/method name across every class in an assembly
+    /// without iterating the Classes list by hand. Shares
+    /// <see cref="AssemblyBrowserViewModel.Assemblies"/> so the dropdown
+    /// populates as soon as the Browser finishes its post-handshake refresh.
+    /// </summary>
+    public SymbolFinderViewModel SymbolFinder { get; }
+
+    /// <summary>
     /// Phase 22d — session-wide AOBMaker CE-plugin bridge. Inspector's
     /// HEX/Disasm row buttons, MethodOverloads' "Send AA script to CE",
     /// and Tools→Inject Discrete Bridge all share this instance so a
@@ -259,6 +271,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexInspector     = 1;
     public const int TabIndexMethods       = 2;
     public const int TabIndexAddressLookup = 3;
+    public const int TabIndexSymbolFinder  = 4;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -829,6 +842,56 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         if (string.IsNullOrEmpty(address)) return;
         SelectedDetailTabIndex = TabIndexAddressLookup;
         await AddressLookup.PrefillAndLookupAsync(address).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Phase 25 — handoff from Symbol Finder row activation back to the
+    /// Browser. Picks the assembly + class the row points at, pre-fills
+    /// the Fields/Methods filter with the member name so the row stands
+    /// out, and switches the right-pane tab to Fields or Methods
+    /// depending on the row's kind.
+    /// </summary>
+    private void OnSymbolFinderNavigateRequested(SymbolFinderRow row)
+    {
+        try
+        {
+            // SelectedAssembly drives a class-list reload; SelectedClass
+            // drives a field+method detail reload. Setting both walks the
+            // existing browse cascade with no extra plumbing.
+            var asm = Browser.Assemblies.FirstOrDefault(
+                a => string.Equals(a.Name, SymbolFinder.SelectedAssembly?.Name,
+                                   System.StringComparison.Ordinal));
+            if (asm is null) return;
+            if (!ReferenceEquals(Browser.SelectedAssembly, asm))
+                Browser.SelectedAssembly = asm;
+
+            // Class lookup defers — Browser repopulates Classes async after
+            // SelectedAssembly fires. Walk the (possibly stale) collection
+            // first; if the class isn't there yet, the user can pick it
+            // manually after the load settles.
+            var cls = Browser.Classes.FirstOrDefault(
+                c => string.Equals(c.Namespace, row.Namespace, System.StringComparison.Ordinal)
+                  && string.Equals(c.Name,      row.Class,     System.StringComparison.Ordinal));
+            if (cls is not null && !ReferenceEquals(Browser.SelectedClass, cls))
+                Browser.SelectedClass = cls;
+
+            if (string.Equals(row.Kind, "method", System.StringComparison.Ordinal))
+            {
+                Browser.MethodFilter   = row.Member;
+                SelectedDetailTabIndex = TabIndexMethods;
+            }
+            else
+            {
+                Browser.FieldFilter    = row.Member;
+                SelectedDetailTabIndex = TabIndexFields;
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Navigate from finder failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnSymbolFinderNavigateRequested: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>

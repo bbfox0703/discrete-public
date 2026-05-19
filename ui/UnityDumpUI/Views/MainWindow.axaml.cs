@@ -727,4 +727,53 @@ public partial class MainWindow : Window
         });
         return file?.TryGetLocalPath();
     }
+
+    // ----------------------------------------------------------------------
+    // Phase 25 — Symbol Finder tab handlers.
+    // ----------------------------------------------------------------------
+
+    /// <summary>
+    /// Enter key in the pattern textbox kicks the Search command — saves
+    /// the user from having to mouse over to the button.
+    /// </summary>
+    private void OnSymbolFinderPatternKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+    {
+        if (e.Key != Avalonia.Input.Key.Enter) return;
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (vm.SymbolFinder.SearchCommand.CanExecute(null))
+        {
+            vm.SymbolFinder.SearchCommand.Execute(null);
+            e.Handled = true;
+        }
+    }
+
+    private void OnSymbolFinderResultDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("SymbolFinderResultsGrid");
+        if (grid?.SelectedItem is SymbolFinderRow row)
+            vm.SymbolFinder.Activate(row);
+    }
+
+    private void OnSymbolFinderNavigateMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<SymbolFinderRow>(sender, this.FindControl<DataGrid>("SymbolFinderResultsGrid"));
+        if (row is null) return;
+        vm.SymbolFinder.Activate(row);
+    }
+
+    private async void OnSymbolFinderCopyClassMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SymbolFinderRow>(sender, this.FindControl<DataGrid>("SymbolFinderResultsGrid"));
+        if (row is null) return;
+        await CopyBrowserTextAsync(row.ClassDisplay).ConfigureAwait(true);
+    }
+
+    private async void OnSymbolFinderCopyMemberMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SymbolFinderRow>(sender, this.FindControl<DataGrid>("SymbolFinderResultsGrid"));
+        if (row is null) return;
+        await CopyBrowserTextAsync(row.Member).ConfigureAwait(true);
+    }
 }

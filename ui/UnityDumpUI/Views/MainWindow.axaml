@@ -847,6 +847,135 @@
             </DockPanel>
           </TabItem>
 
+          <!-- Phase 25 — Symbol Finder tab. Wraps the `searchSymbols`
+               RPC so the user can hunt a field/method name across every
+               class in an assembly with one keystroke. Replaces the
+               historical "click each class in turn" loop. Row activation
+               (double-click) jumps back to the Browser's Fields/Methods
+               tab with the class pre-selected and the field/method
+               filter pre-filled. -->
+          <TabItem Header="{StaticResource SymbolFinder.Tab}">
+            <DockPanel Margin="0,4,0,0">
+              <!-- Top row: assembly + pattern + kind toggles + limit + search -->
+              <!-- Column widths:
+                     0: "Assembly" label (Auto)
+                     1: assembly ComboBox (220)
+                     2: pattern TextBox (*)
+                     3-4: Fields / Methods checkboxes (Auto)
+                     5: "Limit" label (Auto)
+                     6: NumericUpDown (140 — narrower starves the number
+                        display after the up/down spinner takes its half)
+                     7: Search button (Auto) -->
+              <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,220,*,Auto,Auto,Auto,140,Auto" Margin="0,0,0,8">
+                <TextBlock Grid.Column="0"
+                           Text="{StaticResource SymbolFinder.AssemblyLabel}"
+                           VerticalAlignment="Center" Margin="0,0,8,0" />
+                <ComboBox Grid.Column="1"
+                          ItemsSource="{Binding SymbolFinder.Assemblies}"
+                          SelectedItem="{Binding SymbolFinder.SelectedAssembly, Mode=TwoWay}"
+                          Margin="0,0,8,0">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:AssemblyItem">
+                      <TextBlock Text="{Binding Name}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+                <TextBox Grid.Column="2"
+                         PlaceholderText="{StaticResource SymbolFinder.PatternWatermark}"
+                         Text="{Binding SymbolFinder.Pattern, Mode=TwoWay}"
+                         KeyDown="OnSymbolFinderPatternKeyDown"
+                         Margin="0,0,8,0" />
+                <CheckBox Grid.Column="3"
+                          Content="{StaticResource SymbolFinder.IncludeFields}"
+                          IsChecked="{Binding SymbolFinder.IncludeFields, Mode=TwoWay}"
+                          VerticalAlignment="Center" Margin="0,0,8,0" />
+                <CheckBox Grid.Column="4"
+                          Content="{StaticResource SymbolFinder.IncludeMethods}"
+                          IsChecked="{Binding SymbolFinder.IncludeMethods, Mode=TwoWay}"
+                          VerticalAlignment="Center" Margin="0,0,12,0" />
+                <TextBlock Grid.Column="5"
+                           Text="{StaticResource SymbolFinder.LimitLabel}"
+                           VerticalAlignment="Center" Margin="0,0,6,0" />
+                <NumericUpDown Grid.Column="6"
+                               Value="{Binding SymbolFinder.Limit, Mode=TwoWay}"
+                               Minimum="1" Maximum="5000" Increment="100"
+                               FormatString="0"
+                               MinWidth="120"
+                               Margin="0,0,8,0" />
+                <Button Grid.Column="7"
+                        Content="{StaticResource SymbolFinder.SearchButton}"
+                        Command="{Binding SymbolFinder.SearchCommand}"
+                        Classes="accent" />
+              </Grid>
+
+              <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
+                           IsVisible="{Binding SymbolFinder.IsBusy}"
+                           Height="3" Margin="0,0,0,4" />
+
+              <Border DockPanel.Dock="Top"
+                      IsVisible="{Binding SymbolFinder.ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+                      Background="#33D32F2F" BorderBrush="#88D32F2F"
+                      BorderThickness="1" CornerRadius="4" Padding="10,6"
+                      Margin="0,0,0,8">
+                <TextBlock Text="{Binding SymbolFinder.ErrorMessage}"
+                           Foreground="#FFD32F2F" TextWrapping="Wrap" />
+              </Border>
+
+              <TextBlock DockPanel.Dock="Bottom"
+                         Text="{Binding SymbolFinder.StatusMessage}"
+                         Foreground="#FF7B7B7B"
+                         Margin="0,4,0,0" />
+
+              <!-- Results — double-click navigates back to the Browser. -->
+              <DataGrid x:Name="SymbolFinderResultsGrid"
+                        ItemsSource="{Binding SymbolFinder.Matches}"
+                        IsReadOnly="True"
+                        AutoGenerateColumns="False"
+                        CanUserResizeColumns="True"
+                        CanUserReorderColumns="True"
+                        CanUserSortColumns="True"
+                        GridLinesVisibility="Horizontal"
+                        DoubleTapped="OnSymbolFinderResultDoubleTapped">
+                <DataGrid.ContextMenu>
+                  <ContextMenu>
+                    <MenuItem Header="{StaticResource SymbolFinder.NavigateMenu}"
+                              Click="OnSymbolFinderNavigateMenu" />
+                    <Separator />
+                    <MenuItem Header="{StaticResource SymbolFinder.CopyClassMenu}"
+                              Click="OnSymbolFinderCopyClassMenu" />
+                    <MenuItem Header="{StaticResource SymbolFinder.CopyMemberMenu}"
+                              Click="OnSymbolFinderCopyMemberMenu" />
+                  </ContextMenu>
+                </DataGrid.ContextMenu>
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="{StaticResource SymbolFinder.ColKind}"
+                                      Binding="{Binding KindLabel}" Width="110"
+                                      SortMemberPath="KindLabel" CanUserSort="True" />
+                  <DataGridTextColumn Header="{StaticResource SymbolFinder.ColClass}"
+                                      Binding="{Binding ClassDisplay}" Width="*"
+                                      SortMemberPath="ClassDisplay" CanUserSort="True"
+                                      FontFamily="Consolas,Cascadia Mono,monospace" />
+                  <DataGridTextColumn Header="{StaticResource SymbolFinder.ColMember}"
+                                      Binding="{Binding Member}" Width="2*"
+                                      SortMemberPath="Member" CanUserSort="True"
+                                      FontFamily="Consolas,Cascadia Mono,monospace" />
+                  <DataGridTextColumn Header="{StaticResource SymbolFinder.ColType}"
+                                      Binding="{Binding Type}" Width="1.5*"
+                                      SortMemberPath="Type" CanUserSort="True"
+                                      FontFamily="Consolas,Cascadia Mono,monospace" />
+                  <DataGridTextColumn Header="{StaticResource SymbolFinder.ColOffset}"
+                                      Binding="{Binding OffsetLabel}" Width="90"
+                                      SortMemberPath="OffsetLabel" CanUserSort="True"
+                                      FontFamily="Consolas,Cascadia Mono,monospace" />
+                  <DataGridTextColumn Header="{StaticResource SymbolFinder.ColAddress}"
+                                      Binding="{Binding Address}" Width="170"
+                                      SortMemberPath="Address" CanUserSort="True"
+                                      FontFamily="Consolas,Cascadia Mono,monospace" />
+                </DataGrid.Columns>
+              </DataGrid>
+            </DockPanel>
+          </TabItem>
+
           <!-- Phase 17c — Address Lookup tab. Wraps the `whatIsAt` RPC:
                paste any process address (typically from CE's *Find what
                writes / accesses* or pointer scan) and the backend walks

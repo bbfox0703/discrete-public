@@ -461,6 +461,53 @@ public sealed class FindMethodInstancesResult
     [JsonPropertyName("error")]   public string?                Error   { get; set; }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 25 — cross-class symbol finder.
+//
+// Searches every class in a single assembly for fields + methods whose name
+// contains the (case-insensitive ASCII) substring `pattern`. One RPC call
+// replaces the historical "click each class in turn" loop.
+//
+// Wire shape is unified across backends: Mono and IL2CPP emit the same
+// `SearchSymbolMatch` records, with `Address` populated only on IL2CPP
+// (Mono needs mono_compile_method to JIT a method, which is too expensive
+// for bulk scanning — JIT is deferred to the user's follow-up "Call method"
+// click).
+// ---------------------------------------------------------------------------
+
+public sealed class SearchSymbolsResult
+{
+    /// <summary>Matching rows, capped at the requested `limit` (default 200).</summary>
+    [JsonPropertyName("matches")]         public List<SearchSymbolMatch> Matches        { get; set; } = new();
+    /// <summary>Classes the backend walked. May exceed Matches.Count if Hits filtered out.</summary>
+    [JsonPropertyName("scanned_classes")] public int                     ScannedClasses { get; set; }
+    /// <summary>True when the result was cut short by `limit` — the user
+    /// should narrow the pattern or raise the cap.</summary>
+    [JsonPropertyName("truncated")]       public bool                    Truncated      { get; set; }
+    [JsonPropertyName("error")]           public string?                 Error          { get; set; }
+}
+
+public sealed class SearchSymbolMatch
+{
+    [JsonPropertyName("namespace")] public string  Namespace { get; set; } = string.Empty;
+    [JsonPropertyName("class")]     public string  Class     { get; set; } = string.Empty;
+    [JsonPropertyName("name")]      public string  Name      { get; set; } = string.Empty;
+    /// <summary>"field" or "method".</summary>
+    [JsonPropertyName("kind")]      public string  Kind      { get; set; } = string.Empty;
+    /// <summary>Field type for "field" rows. Empty for "method" (return type
+    /// isn't carried by the lightweight scan — use findMethodInstances for
+    /// full method signatures).</summary>
+    [JsonPropertyName("type")]      public string? Type      { get; set; }
+    /// <summary>Field offset in bytes from instance base (for "field" rows).</summary>
+    [JsonPropertyName("offset")]    public int?    Offset    { get; set; }
+    /// <summary>AOT method address (IL2CPP "method" rows only). Mono methods
+    /// land here as null because Mono JIT is deferred to the user-driven
+    /// findMethodInstances / Call method flow.</summary>
+    [JsonPropertyName("address")]   public string? Address   { get; set; }
+    [JsonPropertyName("token")]     public uint?   Token     { get; set; }
+    [JsonPropertyName("static")]    public bool    IsStatic  { get; set; }
+}
+
 public sealed class MethodOverloadEntry
 {
     [JsonPropertyName("name")]               public string       Name              { get; set; } = string.Empty;

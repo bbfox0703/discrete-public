@@ -99,4 +99,16 @@ inline constexpr const char* CmdCallMethod            = "callMethod";
 // root marshaling.
 inline constexpr const char* CmdSetInstanceField      = "setInstanceField";
 
+// Phase 25 — cross-class symbol finder. Walks every class in the given
+// assembly, iterates its fields + methods, and returns rows whose name
+// contains the supplied substring (case-insensitive). The UI exposes
+// this as a Tab so the user no longer has to click each class in turn
+// when hunting a property like "MaxHP" that could live anywhere.
+// Both backends accept the same args:
+//   assembly: string (required)
+//   pattern : string (required, ASCII case-insensitive substring)
+//   kinds   : optional ["field"|"method"] — default both
+//   limit   : optional int — default 200, hard-cap 5000
+inline constexpr const char* CmdSearchSymbols         = "searchSymbols";
+
 }  // namespace UnityCEDumper::MagicStrings

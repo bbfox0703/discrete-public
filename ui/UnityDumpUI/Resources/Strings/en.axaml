@@ -123,6 +123,24 @@
 
   <!-- Phase 17c — Address Lookup tab (reverse address lookup; whatIsAt RPC). -->
   <sys:String x:Key="AddrLookup.Tab">Address Lookup</sys:String>
+
+  <!-- Phase 25 — cross-class symbol finder. -->
+  <sys:String x:Key="SymbolFinder.Tab">Symbol Finder</sys:String>
+  <sys:String x:Key="SymbolFinder.AssemblyLabel">Assembly</sys:String>
+  <sys:String x:Key="SymbolFinder.PatternWatermark">name substring (case-insensitive), e.g. MaxHP</sys:String>
+  <sys:String x:Key="SymbolFinder.IncludeFields">Fields</sys:String>
+  <sys:String x:Key="SymbolFinder.IncludeMethods">Methods</sys:String>
+  <sys:String x:Key="SymbolFinder.LimitLabel">Limit</sys:String>
+  <sys:String x:Key="SymbolFinder.SearchButton">Search</sys:String>
+  <sys:String x:Key="SymbolFinder.ColKind">Kind</sys:String>
+  <sys:String x:Key="SymbolFinder.ColClass">Class</sys:String>
+  <sys:String x:Key="SymbolFinder.ColMember">Member</sys:String>
+  <sys:String x:Key="SymbolFinder.ColType">Type</sys:String>
+  <sys:String x:Key="SymbolFinder.ColOffset">Offset</sys:String>
+  <sys:String x:Key="SymbolFinder.ColAddress">Address</sys:String>
+  <sys:String x:Key="SymbolFinder.NavigateMenu">Navigate to this in Browser</sys:String>
+  <sys:String x:Key="SymbolFinder.CopyClassMenu">Copy class name</sys:String>
+  <sys:String x:Key="SymbolFinder.CopyMemberMenu">Copy member name</sys:String>
   <sys:String x:Key="AddrLookup.AddressLabel">Address:</sys:String>
   <sys:String x:Key="AddrLookup.AddressWatermark">paste a hex address (e.g. 0x000001E55B2518F0)…</sys:String>
   <sys:String x:Key="AddrLookup.LookupButton">Lookup</sys:String>

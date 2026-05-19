@@ -160,6 +160,59 @@ public sealed class BackendAdapter : ILiveExportSource
         return env.Result ?? throw new PipeProtocolException("getClassInfo returned no result");
     }
 
+    /// <summary>
+    /// `searchSymbols` — Phase 25. Walks every class in the supplied
+    /// assembly, iterates fields + methods, returns rows whose name contains
+    /// the supplied substring (ASCII case-insensitive). Replaces the
+    /// "click each class in turn" loop the user had to do when hunting a
+    /// property like "MaxHP" that could live anywhere.
+    ///
+    /// `kinds` filters by row type (`"field"` / `"method"`); leave empty/null
+    /// for both. `limit` caps the result set (DLL caps at 5000, default 200);
+    /// when the cap fires <see cref="SearchSymbolsResult.Truncated"/> is true.
+    /// </summary>
+    public async Task<SearchSymbolsResult> SearchSymbolsAsync(
+        string assembly, string pattern,
+        IReadOnlyList<string>? kinds = null, int? limit = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["assembly"] = Str(assembly),
+            ["pattern"]  = Str(pattern),
+        };
+        if (kinds is { Count: > 0 })
+        {
+            // Build an inline JSON array — same Str/Int helper pattern used
+            // by the rest of this file; keeps everything reflection-free
+            // for AOT.
+            using var doc = JsonDocument.Parse(BuildKindsJson(kinds));
+            args["kinds"] = doc.RootElement.Clone();
+        }
+        if (limit.HasValue) args["limit"] = Int(limit.Value);
+
+        var env = await _pipe.SendAsync(
+            "searchSymbols", args,
+            ProtocolJsonContext.Default.RpcEnvelopeSearchSymbolsResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("searchSymbols returned no result");
+    }
+
+    private static string BuildKindsJson(IReadOnlyList<string> kinds)
+    {
+        // Tiny hand-rolled emitter so we don't need a JsonSerializable for
+        // a string[] (AOT analyzers complain on the generic path).
+        var sb = new System.Text.StringBuilder(32);
+        sb.Append('[');
+        for (int i = 0; i < kinds.Count; ++i)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append('"').Append(kinds[i].Replace("\\", "\\\\").Replace("\"", "\\\"")).Append('"');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
     // -----------------------------------------------------------------------
     // Phase 9 — live inspection.
     // -----------------------------------------------------------------------
