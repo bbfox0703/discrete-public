@@ -40,7 +40,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                                     string assembly, string @namespace, string className,
                                     string methodName,
                                     IAobMakerBridge? aobMaker = null,
-                                    string? defaultInstanceAddress = null)
+                                    string? defaultInstanceAddress = null,
+                                    bool   isMonoBackend = false)
     {
         _backend     = backend;
         _logger      = logger;
@@ -50,6 +51,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         ClassName    = className;
         MethodName   = methodName;
         DefaultInstanceAddress = defaultInstanceAddress;
+        IsMonoBackend = isMonoBackend;
 
         TitleLabel = string.IsNullOrEmpty(@namespace)
             ? $"{className}.{methodName}"
@@ -68,6 +70,24 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     public string MethodName { get; }
     public string TitleLabel { get; }
     public bool   HasAobMakerBridge { get; }
+
+    /// <summary>
+    /// True when the live target's backend is Mono. Gates the DLL-free
+    /// <c>mono_registerSymbolEx</c> AA-script action (and its
+    /// AOBMaker-push sibling) — IL2CPP overloads have AOT addresses
+    /// in <c>GameAssembly.dll</c>, so the <c>mono_*</c> CE Lua API path
+    /// doesn't apply. Wired from <c>MainWindowViewModel.Backend2</c>
+    /// at VM construction; stays false on disconnect / unknown backend.
+    /// </summary>
+    public bool   IsMonoBackend     { get; }
+
+    /// <summary>
+    /// True when both the AOBMaker bridge is wired AND the target is Mono.
+    /// Used by the DLL-free "Create in CE" button — needs both to make
+    /// sense (push the script to CE via AOBMaker, register Mono symbol on
+    /// enable).
+    /// </summary>
+    public bool   ShowMonoCreateInCe => IsMonoBackend && HasAobMakerBridge;
 
     /// <summary>
     /// Phase 22e — exposed so the spawning window (MethodOverloadsWindow)
@@ -128,6 +148,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(CopyRegisterSymbolScriptCommand))]
     [NotifyCanExecuteChangedFor(nameof(CopyAddressesCommand))]
     [NotifyCanExecuteChangedFor(nameof(CreateAaScriptInCeCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CopyMonoSymbolScriptCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CreateMonoSymbolInCeCommand))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -221,6 +243,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         CopyRegisterSymbolScriptCommand.NotifyCanExecuteChanged();
         CopyAddressesCommand.NotifyCanExecuteChanged();
         CreateAaScriptInCeCommand.NotifyCanExecuteChanged();
+        CopyMonoSymbolScriptCommand.NotifyCanExecuteChanged();
+        CreateMonoSymbolInCeCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>
@@ -273,6 +297,13 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                 DecoderBailed    = patt.DecoderBailed,
                 InstructionCount = patt.Stats?.Instructions ?? 0,
                 WildcardCount    = patt.Stats?.Wildcards ?? 0,
+                // Per-param type names — populated for the DLL-free
+                // mono_registerSymbolEx generator path. Snapshot to an
+                // array so the generator can't see in-place mutations
+                // if the row is later refreshed.
+                ParamTypes       = row.ParamTypes is { Count: > 0 }
+                    ? row.ParamTypes.ToArray()
+                    : Array.Empty<string>(),
             });
         }
         return bag;
@@ -437,6 +468,109 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
             ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
         }
     }
+
+    /// <summary>
+    /// DLL-free Mono path: copy an AA script that calls
+    /// <c>mono_registerSymbolEx</c> from <c>mono_registersymbol_helpers.lua</c>
+    /// (lazy-loaded out of the CT on enable). Works without ever
+    /// injecting the UnityCEDumper DLL — the user's existing
+    /// <c>mono_*</c> Lua helper pattern, generated for them.
+    /// Mono-only — gated on <see cref="IsMonoBackend"/>.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanRunMonoSelectionCmd))]
+    public async Task CopyMonoSymbolScriptAsync()
+    {
+        var picks = SelectedAddressable();
+        if (picks.Count == 0)
+        {
+            StatusMessage = "Select at least one overload with a native address.";
+            return;
+        }
+        if (CopyToClipboardAsync is null) return;
+
+        IsBusy       = true;
+        ErrorMessage = null;
+        StatusMessage = $"Generating mono_registerSymbolEx script for {picks.Count} overload(s)…";
+        try
+        {
+            // Re-use BuildScriptBagAsync (already populates ParamTypes
+            // for us) — pattern bytes are unused by this generator, but
+            // the shared bag keeps the address + ModuleName='' check
+            // honest. AOB length doesn't matter; minimum allowed is 8.
+            var bag = await BuildScriptBagAsync(picks, aobLength: 8).ConfigureAwait(true);
+            if (bag is null) return;
+            string script = MonoRegisterSymbolAaScriptGenerator.Build(bag);
+            await CopyToClipboardAsync(script).ConfigureAwait(true);
+            StatusMessage = $"Copied mono_registerSymbolEx AA script for {bag.Count} overload(s) to clipboard.";
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"MethodOverloadsViewModel: mono_register script generation failed: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Push the DLL-free Mono register AA straight into CE's address
+    /// list via the AOBMaker bridge — same UE5CEDumper-style flow as
+    /// <see cref="CreateAaScriptInCeAsync"/>, but using the
+    /// <c>mono_registerSymbolEx</c> generator instead of the AOB one.
+    /// Needs Mono target AND AOBMaker bridge — gated on
+    /// <see cref="ShowMonoCreateInCe"/>.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanRunMonoCreateInCe))]
+    public async Task CreateMonoSymbolInCeAsync()
+    {
+        var picks = SelectedAddressable();
+        if (picks.Count == 0 || _aobMaker is null)
+        {
+            StatusMessage = "Select at least one overload with a native address.";
+            return;
+        }
+
+        IsBusy       = true;
+        ErrorMessage = null;
+        StatusMessage = $"Pushing mono_registerSymbolEx script for {picks.Count} overload(s) to CE…";
+        try
+        {
+            var bag = await BuildScriptBagAsync(picks, aobLength: 8).ConfigureAwait(true);
+            if (bag is null) return;
+            string script      = MonoRegisterSymbolAaScriptGenerator.Build(bag);
+            string description = picks.Count == 1
+                ? $"{ClassName}.{MethodName} {bag[0].HumanSuffix} (DLL-free)"
+                : $"{ClassName}.{MethodName}  ({picks.Count} overloads, DLL-free)";
+
+            bool ok = await _aobMaker.CreateAAScriptAsync(description, script,
+                                                          autoActivate: AutoActivateInCe)
+                                     .ConfigureAwait(true);
+            StatusMessage = ok
+                ? $"Created '{description}' in CE address list ({bag.Count} overload(s))."
+                : "AOBMaker pipe unavailable — start CE with the AOBMaker plugin loaded, then retry.";
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"MethodOverloadsViewModel: mono_register AOBMaker push failed: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanRunMonoSelectionCmd() =>
+        !IsBusy && IsMonoBackend && CopyToClipboardAsync is not null
+        && Overloads.Any(r => r.IsSelected);
+
+    private bool CanRunMonoCreateInCe() =>
+        !IsBusy && IsMonoBackend && _aobMaker is not null
+        && Overloads.Any(r => r.IsSelected);
 
     /// <summary>
     /// Fallback: copy a newline-separated list of addresses for the

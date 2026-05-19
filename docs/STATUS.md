@@ -1,9 +1,9 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-19 session — 19d-3 smart-typed editors + 5 spawned follow-ups merged + Phase 21a reverse-property lookup + FieldAcross sort/filter polish + AOT DataGrid three-layer-trap fix applied across all 6 grids; ready to push)
+**Branch**: `dev` (2026-05-19 session — 19d-3 smart-typed editors + 5 spawned follow-ups merged + Phase 21a reverse-property lookup + FieldAcross sort/filter polish + AOT DataGrid three-layer-trap fix applied across all 6 grids + **DLL-free Mono symbol register path in Methods overload window** (new file `scripts/mono_registersymbol_helpers.lua` + new `MonoRegisterSymbolAaScriptGenerator` + 2 new buttons in the overload picker); ready to push)
 **Last commit**: feat(ui): AOT-safe DataGrid sort across all 6 grids via shared helpers
 **Build**: 325 (DLL #306 release unchanged; `DiscreteUI.exe` AOT 38.9 MB)
-**Tests**: 180/180 pass
+**Tests**: 193/193 pass (+13 from 180: +11 generator + 3 BridgeLuaResources InlineData − 1 refactored BridgeInjector test now reads `LoadOrder[last]` instead of hard-coded `unity_scene.lua`)
 **Current state**: Live-target work converged. **Phase 19d-3** (smart-typed editors — NumericUpDown for sized ints, ComboBox for enum params via `getEnumValues`, AutoCompleteBox for `System.Boolean`) and **Phase 21a** (reverse-property lookup — list a field's value+address across every live instance of a class) both shipped + live-smoked. Five small follow-up tasks landed in the same session: Classes-list "Copy class name", Inspector Class-ptr Copy buttons, Fields/Methods per-cell context-menu copy actions, Copy CE Field multi-select fix, and Phase 21a itself. **Avalonia 12 DataGrid AOT sort trap diagnosed + fixed** — long-running mystery turned out to be a three-layer interaction (CompiledBinding empty Path → column auto-disable → reflection sort trimmed). Fix applied uniformly via new shared helpers (`DataGridSortComparers` + `WireSortComparers` extension) to all 6 sortable grids in the app. Full diagnosis recorded in lessons-learned + the "Adding a new DataGrid" recipe in technical-notes. Carry-forward: Phase 22 closed in prior session (live-smoke verified `Mathf.Abs(-7) → 7` end-to-end). Phase 23 (heap-scan convergence) and Phase 20a-2 (FindObjectsByType cross-version recipe) both closed 2026-05-18.
 
 > Companion files: [plan.md](plan.md) (canonical phase ledger), [pipe-protocol.md](pipe-protocol.md) (DLL ↔ UI contract), [Archiutecture.md](Archiutecture.md) (rules / invariants), [test-matrix.md](test-matrix.md) (verified games + tooling versions), [lua-invoke.md](lua-invoke.md) (Phase 19 spec), [address-finder.md](address-finder.md) (Phase 17 spec).
@@ -158,6 +158,66 @@ trap"](lessons-learned.md). Recipe for adding new DataGrids in
 * **Commits**: 19 on `dev` since `06f7880` (was main).
 * **Docs**: STATUS.md + plan.md + technical-notes.md +
   lessons-learned.md + pipe-protocol.md all updated.
+
+### Late-day addition — DLL-free Mono symbol register path
+
+User-requested: for cheat-table authors who don't want to inject the
+UnityCEDumper DLL, generate AA scripts that call CE's built-in
+Mono Lua API (`mono_findClass` / `mono_class_enumMethods` /
+`mono_compile_method`) via the user's hand-rolled
+`mono_registerSymbol` / `mono_registerSymbolEx` /
+`mono_registerSymbolBySignatureMatch` helpers. Lives in the Methods
+overload picker (right-click any method → Method overloads).
+
+* **New** `scripts/mono_registersymbol_helpers.lua` — the three
+  register helpers + `mono_ensureAttached()` + `SafeMonoDestroy`,
+  all `if _G.xxx == nil` guarded. Side-effect-free at load time
+  (Mono attach happens lazily on first register call) so the
+  bridge bootstrap can ship it harmlessly even to users who never
+  hit the DLL-free path.
+* **Wired into** `BridgeLuaResources.LoadOrder` (now 8 entries) +
+  `UnityDumpUI.Core.csproj` `<EmbeddedResource>` so Tools → Inject
+  Discrete Bridge ships it into the CT alongside the existing 7
+  `unity_*.lua` files.
+* **New generator** `MonoRegisterSymbolAaScriptGenerator` —
+  emits an AA whose `[ENABLE]` lazy-loads
+  `mono_registersymbol_helpers.lua` out of the CT via
+  `findTableFile` + `createStringStream` + `load` (same trick
+  `BootstrapAaScriptGenerator` uses for `unity_dump.lua`), with
+  idempotency guard `if _G.mono_registerSymbolEx == nil`. One
+  `mono_registerSymbolEx(symName, ns, cls, method, { paramTypes })`
+  call per selected overload, using **full-name** paramTypes
+  (e.g. `'System.Int32'` not `'Int32'`) to avoid the substring
+  trap (`feedback_signaturematch_substring`). `[DISABLE]`
+  pcall-wraps `unregisterSymbol` per — partial enable still tears
+  down cleanly.
+* **UI surface** in `MethodOverloadsWindow`: two new buttons
+  ("Copy mono_register AA", "Create mono_register in CE") gated
+  on `IsMonoBackend` (new VM property threaded through from
+  `MainWindowViewModel.Backend2 == "Mono"`). The CreateInCe
+  button additionally requires `HasAobMakerBridge`.
+* **Mono-only by design** — IL2CPP overloads route to the
+  existing AOB-scan path. The new generator's `Build()` throws
+  `ArgumentException` if any overload has `ModuleName` populated
+  (IL2CPP signal), so a UI-gating bug would surface loudly
+  rather than emit a broken AA.
+* **Tests**: 180 → 193 pass (+11 new
+  `MonoRegisterSymbolAaScriptGeneratorTests` covering helper
+  lazy-load shape, single + multi overload, zero-param, null
+  paramTypes, Lua apostrophe escaping, IL2CPP-input guard, empty
+  + null input; +3 new `BridgeLuaResources` Inline cases for the
+  8th file; −1 refactored `BridgeInjector` last-file assertion
+  now reads `LoadOrder[last]` instead of hard-coded
+  `unity_scene.lua`).
+* **AOT publish**: 0 warnings, `DiscreteUI.exe` size delta
+  negligible (new generator + 2 commands + Lua file are all small).
+* **Live smoke**: pending — needs a Mono target + CE + AOBMaker.
+  Two-step manual recipe: (1) Tools → Inject Discrete Bridge
+  (ships the new helper file into the CT), (2) Methods tab →
+  right-click method → Method overloads → tick overload → "Copy
+  mono_register AA" → paste into CT entry → enable. Verify
+  console banner `mono_registerSymbolEx: registered <name> = <addr>`
+  appears.
 
 ---
 

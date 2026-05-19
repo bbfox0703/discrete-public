@@ -66,5 +66,13 @@
     <EmbeddedResource Include="..\..\scripts\unity_scene.lua">
       <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_scene.lua</LogicalName>
     </EmbeddedResource>
+    <!-- DLL-free Mono symbol register helpers. Used by the
+         Methods-tab overload picker's "Copy mono_register* AA script"
+         action: the generated AA pulls this file out of the CT via
+         findTableFile and chunk-loads it, so end users get
+         registerSymbol() without injecting the Unity dumper DLL. -->
+    <EmbeddedResource Include="..\..\scripts\mono_registersymbol_helpers.lua">
+      <LogicalName>UnityDumpUI.Core.Resources.Bridge.mono_registersymbol_helpers.lua</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

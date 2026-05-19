@@ -42,6 +42,15 @@ public static class BridgeLuaResources
     /// <c>require 'utils'</c>; the rest are independent (verified 2026-05-12
     /// via grep of all <c>require</c>/<c>dofile</c> sites). Order is also
     /// what <see cref="ReadAll"/> yields.
+    /// <para>
+    /// <c>mono_registersymbol_helpers.lua</c> is the DLL-free Mono symbol
+    /// register helpers — bundled into the CT here so the
+    /// MethodOverloads-tab "Copy mono_register* AA script" output can
+    /// findTableFile() + chunk-load it on enable. The file is
+    /// side-effect-free at load time (only function defs land in _G);
+    /// running it at bridge boot is harmless to users who never hit the
+    /// DLL-free path.
+    /// </para>
     /// </summary>
     public static IReadOnlyList<string> LoadOrder { get; } = new[]
     {
@@ -52,6 +61,7 @@ public static class BridgeLuaResources
         "unity_addrfind.lua",
         "unity_invoke.lua",
         "unity_scene.lua",
+        "mono_registersymbol_helpers.lua",
     };
 
     /// <summary>

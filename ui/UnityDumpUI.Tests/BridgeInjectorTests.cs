@@ -85,7 +85,12 @@ public class BridgeInjectorTests
         }
 
         Assert.StartsWith("Checking", report.Reports[0].Description);
-        Assert.StartsWith("Injecting unity_scene.lua",
+        // Last file in LoadOrder — derived from the source-of-truth list
+        // rather than hard-coded so adding a file to LoadOrder doesn't
+        // require touching this assertion. The progress label is
+        // "Injecting <fileName>" per BridgeInjector's step formatter.
+        string lastFile = BridgeLuaResources.LoadOrder[BridgeLuaResources.LoadOrder.Count - 1];
+        Assert.StartsWith("Injecting " + lastFile,
             report.Reports[expected - 2].Description); // last file step
         Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.EntryDescription,
             report.Reports[expected - 1].Description);

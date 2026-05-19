@@ -1,9 +1,10 @@
 # UnityCEDumper — CE Lua Bridge
 
-Seven Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
+Eight Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
 of the project (Phase 17d added `unity_addrfind.lua`; Phase 19e added
-`unity_invoke.lua`; Phase 20a added `unity_scene.lua`); CE-side
-equivalent of running `DiscreteUI.exe` + the in-app process picker.
+`unity_invoke.lua`; Phase 20a added `unity_scene.lua`; later added
+`mono_registersymbol_helpers.lua` for the DLL-free Mono register path);
+CE-side equivalent of running `DiscreteUI.exe` + the in-app process picker.
 
 ## Install
 
@@ -47,6 +48,7 @@ Engine`. Override with `-CePath`:
     ├── unity_addrfind.lua
     ├── unity_invoke.lua
     ├── unity_scene.lua
+    ├── mono_registersymbol_helpers.lua  <- DLL-free Mono register helpers
     └── utils.lua
 ```
 

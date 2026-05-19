@@ -1,6 +1,6 @@
 // BridgeLuaResourcesTests.cs — Phase 22b verification.
 //
-// Pin the contract that all 7 CE Lua bridge scripts ship in the Core
+// Pin the contract that all 8 CE Lua bridge scripts ship in the Core
 // assembly's manifest with the expected LogicalName, in the
 // dependency-correct LoadOrder, and that ReadAll round-trips the
 // physical files on disk byte-for-byte.
@@ -29,13 +29,16 @@ public class BridgeLuaResourcesTests
             "..", "..", "..", "..", "..", "scripts"));
 
     [Fact]
-    public void LoadOrder_HasExpectedSevenFiles_InDependencyOrder()
+    public void LoadOrder_HasExpectedFiles_InDependencyOrder()
     {
         // utils.lua must come first because unity_dump.lua does
-        // `require 'utils'`. Other 5 scripts are independent (no
+        // `require 'utils'`. The other scripts are independent (no
         // require/dofile cross-references) so their relative order is
         // convention, not required — but the test pins it so future
         // edits can't accidentally swap them without a code review.
+        // mono_registersymbol_helpers.lua is the DLL-free helper file
+        // (Methods overload picker "Copy mono_register* AA script");
+        // listed last because the bootstrap order doesn't depend on it.
         Assert.Equal(new[]
         {
             "utils.lua",
@@ -45,6 +48,7 @@ public class BridgeLuaResourcesTests
             "unity_addrfind.lua",
             "unity_invoke.lua",
             "unity_scene.lua",
+            "mono_registersymbol_helpers.lua",
         }, BridgeLuaResources.LoadOrder);
     }
 
@@ -71,6 +75,7 @@ public class BridgeLuaResourcesTests
     [InlineData("unity_addrfind.lua")]
     [InlineData("unity_invoke.lua")]
     [InlineData("unity_scene.lua")]
+    [InlineData("mono_registersymbol_helpers.lua")]
     public void Read_ReturnsNonEmptyContent_ForEveryBridgeFile(string fileName)
     {
         string content = BridgeLuaResources.Read(fileName);
@@ -120,6 +125,7 @@ public class BridgeLuaResourcesTests
     [InlineData("unity_addrfind.lua")]
     [InlineData("unity_invoke.lua")]
     [InlineData("unity_scene.lua")]
+    [InlineData("mono_registersymbol_helpers.lua")]
     public void Read_EmbeddedContent_IsLfOnly_NoCrlf(string fileName)
     {
         // Hard regression bar for Phase 22 live smoke — every embedded

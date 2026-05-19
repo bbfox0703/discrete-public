@@ -408,7 +408,12 @@ public partial class MainWindow : Window
             // Phase 19d-2: thread the inspector's selected instance through
             // when its target class matches the browser's selected class.
             // Pre-fills the Instance address textbox in MethodCallWindow.
-            defaultInstanceAddress: GetDefaultMethodCallInstance(vm, asm, ns, cls));
+            defaultInstanceAddress: GetDefaultMethodCallInstance(vm, asm, ns, cls),
+            // Backend gate for the DLL-free Mono register actions —
+            // mono_registerSymbolEx is meaningless on IL2CPP. Backend2
+            // is the live handshake's backend string; falls back to
+            // false on disconnect / unknown backend.
+            isMonoBackend: string.Equals(vm.Backend2, "Mono", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

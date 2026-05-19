@@ -212,6 +212,11 @@
   <sys:String x:Key="MethodOverloads.AutoActivate">Auto-activate</sys:String>
   <sys:String x:Key="MethodOverloads.Close">Close</sys:String>
   <sys:String x:Key="MethodOverloads.CallMethodMenu">Call method…</sys:String>
+  <!-- DLL-free Mono path (helper file lives in the CT — Tools → Inject Discrete Bridge ships it) -->
+  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScript">Copy mono_register AA</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScriptTooltip">DLL-free: generates an AA that calls mono_registerSymbolEx via CE's built-in Mono API. Mono targets only. Run Tools → Inject Discrete Bridge first to ship mono_registersymbol_helpers.lua into the cheat table.</sys:String>
+  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCe">Create mono_register in CE</sys:String>
+  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCeTooltip">Push the mono_register AA into CE's address list via AOBMaker. Same DLL-free Mono path as the Copy button — no UnityCEDumper DLL needed.</sys:String>
 
   <!-- Phase 19d — Call Method dialog -->
   <sys:String x:Key="MethodCall.Title">Call method</sys:String>

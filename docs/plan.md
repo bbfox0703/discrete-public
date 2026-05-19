@@ -4,7 +4,7 @@
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
 **Last updated**: 2026-05-19
-**Current phase**: **All shipped phases closed + verified live; 2026-05-19 mega-batch landed.** Latest sub-phases shipped this session: **19d-3** (smart-typed editors — NumericUpDown / ComboBox-via-getEnumValues / AutoCompleteBox-for-Boolean), **21a** (reverse-property lookup `listFieldValuesAcrossInstances`), plus 5 small follow-ups (Classes Copy class name, Inspector Class-ptr Copy buttons, Fields/Methods per-cell context-menu copy, Copy CE Field multi-select fix, FieldAcross sort+filter polish). **Avalonia 12 DataGrid AOT sort trap diagnosed + fixed** — three-layer mystery (CompiledBinding empty Path → column auto-disable → reflection sort trimmed) solved with shared `DataGridSortComparers` + per-grid wiring; pattern applied uniformly to all 6 sortable DataGrids; full mechanism + recipe in lessons-learned + technical-notes. Carry-forward: Phase 22 closed 2026-05-12 (CT live-population via AOBMaker, all 22a–22f shipped + live-smoked), Phase 23 closed 2026-05-18 (`findInstances` MEM_IMAGE + thread-stack exclusion), Phase 20a-2 closed 2026-05-18 (`getAllGameObjects` cross-version PASS, Unity 2022+ `FindObjectsByType` fallback). **Phase 12d** (32-bit Mono), **Phase 20-MT** (DLL main-thread marshaling), **Phase 21** (Inspector field write-back) remain open / planned. **No critical-path open work.** Verified targets across the matrix: SaGa F2R (IL2CPP v29), BongoCat (Mono Unity 6.0 + 2022+), Farthest Frontier (both backends, IL2CPP v31), Songs of Silence (IL2CPP v39 / Unity 6.1), R-Type Dimensions EX (IL2CPP v24 / Unity 2018.1), FF VI PR (IL2CPP v24 / Unity 2019.4), Hollow Knight Silksong (Mono / Unity 6.0), plus the original Phase 14c metadata-only fixtures. Build #325 (Publish/AOT clean, `DiscreteUI.exe` 38.9 MB; 180/180 tests pass). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
+**Current phase**: **All shipped phases closed + verified live; 2026-05-19 mega-batch landed.** Latest sub-phases shipped this session: **19d-3** (smart-typed editors — NumericUpDown / ComboBox-via-getEnumValues / AutoCompleteBox-for-Boolean), **21a** (reverse-property lookup `listFieldValuesAcrossInstances`), **22g** (DLL-free Mono symbol register path — new `scripts/mono_registersymbol_helpers.lua` shipped via bridge inject + new `MonoRegisterSymbolAaScriptGenerator` wired into Methods overload picker; lets cheat-table authors emit `mono_registerSymbolEx` AAs without ever injecting the UnityCEDumper DLL), plus 5 small follow-ups (Classes Copy class name, Inspector Class-ptr Copy buttons, Fields/Methods per-cell context-menu copy, Copy CE Field multi-select fix, FieldAcross sort+filter polish). **Avalonia 12 DataGrid AOT sort trap diagnosed + fixed** — three-layer mystery (CompiledBinding empty Path → column auto-disable → reflection sort trimmed) solved with shared `DataGridSortComparers` + per-grid wiring; pattern applied uniformly to all 6 sortable DataGrids; full mechanism + recipe in lessons-learned + technical-notes. Carry-forward: Phase 22 closed 2026-05-12 (CT live-population via AOBMaker, all 22a–22f shipped + live-smoked), Phase 23 closed 2026-05-18 (`findInstances` MEM_IMAGE + thread-stack exclusion), Phase 20a-2 closed 2026-05-18 (`getAllGameObjects` cross-version PASS, Unity 2022+ `FindObjectsByType` fallback). **Phase 12d** (32-bit Mono), **Phase 20-MT** (DLL main-thread marshaling), **Phase 21** (Inspector field write-back) remain open / planned. **No critical-path open work.** Verified targets across the matrix: SaGa F2R (IL2CPP v29), BongoCat (Mono Unity 6.0 + 2022+), Farthest Frontier (both backends, IL2CPP v31), Songs of Silence (IL2CPP v39 / Unity 6.1), R-Type Dimensions EX (IL2CPP v24 / Unity 2018.1), FF VI PR (IL2CPP v24 / Unity 2019.4), Hollow Knight Silksong (Mono / Unity 6.0), plus the original Phase 14c metadata-only fixtures. Build #325 (Publish/AOT clean, `DiscreteUI.exe` 38.9 MB; 180/180 tests pass). See `STATUS.md` for the detailed hand-off summary; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -1022,6 +1022,39 @@ new `CreateAAScriptWithRecordsAsync`). 22f closes the phase.
 - ❌ Multi-level nested memory-record trees (needs AOBMaker `parentId` extension).
 - ❌ Encrypted CT output.
 - ❌ Bidirectional CT import / edit-and-export.
+
+### 22g — DLL-free Mono symbol register (shipped 2026-05-19)
+
+User-requested addition for cheat-table authors who don't want to
+inject the UnityCEDumper DLL. Lets the Methods overload picker emit
+AAs that register Mono symbols entirely via CE's built-in Mono Lua
+API (`mono_findClass` / `mono_class_enumMethods` /
+`mono_compile_method`), through the user's hand-rolled
+`mono_registerSymbol*` helper pattern. Single CT preparation step
+(Tools → Inject Discrete Bridge) ships the helpers; generated AAs
+lazy-load them on enable.
+
+| Piece | Where | Note |
+|---|---|---|
+| `scripts/mono_registersymbol_helpers.lua` | new file | 3 register helpers + `mono_ensureAttached()` + `SafeMonoDestroy`. All `if _G.xxx == nil` guarded. No top-level side effects — Mono attach happens lazily on first register call. |
+| `BridgeLuaResources.LoadOrder` | +1 entry | 7 → 8 files. The bootstrap auto-loads the helpers harmlessly at bridge boot (only function defs land in _G). |
+| `UnityDumpUI.Core.csproj` | +1 EmbeddedResource | Same LogicalName convention as the other 7 bridge files. |
+| `MonoRegisterSymbolAaScriptGenerator` | new file | Emits `[ENABLE]` that lazy-loads helpers via `findTableFile` + chunk-load (idempotent), then `mono_registerSymbolEx(symName, ns, cls, method, { paramTypes })` per overload. Uses full-name paramTypes (e.g. `'System.Int32'`) to avoid the `feedback_signaturematch_substring` trap. `[DISABLE]` pcalls each `unregisterSymbol`. Mono-only — throws on populated `ModuleName` (IL2CPP signal). |
+| `AaScriptOverload.ParamTypes` | new init-only field | `IReadOnlyList<string>?` — populated by `MethodOverloadsViewModel.BuildScriptBagAsync` from `MethodOverloadRow.ParamTypes`. Optional / null = no per-param info (generator falls back to empty Lua table). |
+| `MethodOverloadsViewModel` | +2 commands + `IsMonoBackend` gate | `CopyMonoSymbolScriptCommand` (clipboard) + `CreateMonoSymbolInCeCommand` (AOBMaker push). Both gated on `IsMonoBackend` + at-least-one-selected; CreateInCe additionally requires `HasAobMakerBridge`. |
+| `MethodOverloadsWindow.axaml` | +2 buttons | `IsVisible="{Binding IsMonoBackend}"` / `"{Binding ShowMonoCreateInCe}"`. Tooltips explain the prereq (run Tools → Inject Discrete Bridge first). |
+| `MainWindow.axaml.cs` `BuildOverloadsVm` | +1 ctor arg | Threads `vm.Backend2 == "Mono"` into `MethodOverloadsViewModel.IsMonoBackend`. |
+| Tests | +11 generator / +3 BridgeLuaResources / −1 BridgeInjector refactor | 180 → 193 pass. `BridgeInjector` test now reads `LoadOrder[last]` so future LoadOrder additions don't need test edits. |
+
+**Live smoke**: pending. Manual recipe: clean CE 7.6 + AOBMaker
+plugin loaded + empty CT + Mono target (e.g. BongoCat or
+Farthest Frontier Mono build) → DiscreteUI Pick & Inject → Tools
+→ Inject Discrete Bridge (8 files + 1 AA, ~120 ms) → Methods tab
+→ right-click a method → Method overloads → tick an overload →
+"Copy mono_register AA" → paste into a new CT entry → enable →
+expect CE Lua console banner
+`mono_registerSymbolEx: registered <name> = <addr>`. Or use
+"Create mono_register in CE" to skip the clipboard round-trip.
 - ❌ DLL bundling inside the CT (Bootstrap script just pings the DLL pipe; user keeps DiscreteUI + CE both running).
 
 ### Pre-work

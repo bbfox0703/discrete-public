@@ -53,6 +53,22 @@ public sealed class AaScriptOverload
     /// pattern. Callers building Mono-targeted bags MUST set this.
     /// </summary>
     public string?         Assembly       { get; init; }
+
+    /// <summary>
+    /// Per-parameter CLR type names (full-name form preferred — e.g.
+    /// <c>System.Int32</c>, <c>UnityEngine.Vector3</c>). Consumed by the
+    /// DLL-free Mono register path (<c>MonoRegisterSymbolAaScriptGenerator</c>):
+    /// the generated AA emits <c>mono_registerSymbolEx(…, { p1, p2, ... })</c>
+    /// which does ordered substring-match per param. Full-name form is
+    /// important — <c>"Int32"</c> alone would also match <c>"UInt32"</c>
+    /// via the substring matcher (the signatureMatch substring trap).
+    /// Null/empty = no per-param info; the DLL-free generator emits an
+    /// empty-paramTypes <c>mono_registerSymbolEx</c> call (matches
+    /// zero-arg overloads only) or you can prefer
+    /// <c>mono_registerSymbolBySignatureMatch</c> instead. Not consumed
+    /// by the AOB-scan or bridge-resolve paths.
+    /// </summary>
+    public IReadOnlyList<string>? ParamTypes { get; init; }
 }
 
 public static class AobAaScriptGenerator
