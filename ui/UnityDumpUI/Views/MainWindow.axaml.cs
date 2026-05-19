@@ -389,6 +389,33 @@ public partial class MainWindow : Window
         vm.SelectedDetailTabIndex = MainWindowViewModel.TabIndexMethods;
     }
 
+    // Right-click on a row in the Classes list → "Copy class name". Pushes
+    // the fully-qualified "Namespace.Name" (or just "Name" when the namespace
+    // is empty — handled by ClassItem.DisplayName) onto the clipboard. v1 is
+    // single-select; the Classes ListBox is single-select today, so this
+    // handler doesn't enumerate SelectedItems.
+    private async void OnCopyClassNameClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var browser = vm.Browser;
+
+        ClassItem? target = null;
+        if (sender is Avalonia.Controls.MenuItem mi &&
+            mi.Parent is Avalonia.Controls.ContextMenu cm &&
+            cm.PlacementTarget is Avalonia.Controls.ListBox placedList &&
+            placedList.SelectedItem is ClassItem sel)
+        {
+            target = sel;
+        }
+        target ??= browser.SelectedClass;
+        if (target is null) return;
+
+        if (browser.CopyToClipboardAsync is { } copy)
+        {
+            await copy(target.DisplayName).ConfigureAwait(true);
+        }
+    }
+
     private async void OnCopyInstanceAddressClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
