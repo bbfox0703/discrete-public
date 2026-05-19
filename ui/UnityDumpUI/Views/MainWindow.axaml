@@ -499,9 +499,20 @@
                 <StackPanel Orientation="Horizontal" Spacing="8"
                             IsVisible="{Binding Inspector.ClassPointer, Converter={x:Static ObjectConverters.IsNotNull}}">
                   <TextBlock Text="{StaticResource Inspector.ClassPointerLabel}"
-                             Opacity="0.7" />
+                             Opacity="0.7"
+                             VerticalAlignment="Center" />
                   <TextBlock Text="{Binding Inspector.ClassPointer}"
-                             FontFamily="Consolas,Cascadia Mono,monospace" />
+                             FontFamily="Consolas,Cascadia Mono,monospace"
+                             VerticalAlignment="Center" />
+                  <!-- Small icon-style copy buttons. Same shape as the
+                       walked-field row actions (addr / ptr / name / HEX) so
+                       Inspector stays visually consistent. -->
+                  <Button Content="name" FontSize="10" Padding="4,0" MinHeight="20"
+                          Command="{Binding Inspector.CopyClassNameCommand}"
+                          ToolTip.Tip="{StaticResource Inspector.CopyClassNameTooltip}" />
+                  <Button Content="addr" FontSize="10" Padding="4,0" MinHeight="20"
+                          Command="{Binding Inspector.CopyClassAddressCommand}"
+                          ToolTip.Tip="{StaticResource Inspector.CopyClassAddressTooltip}" />
                 </StackPanel>
                 <TextBlock Text="{Binding Inspector.WalkSummary}"
                            Opacity="0.6" FontSize="11"

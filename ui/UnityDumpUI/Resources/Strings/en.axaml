@@ -57,6 +57,8 @@
   <sys:String x:Key="Inspector.InstancesTitle">Instances</sys:String>
   <sys:String x:Key="Inspector.FieldsTitle">Walked fields</sys:String>
   <sys:String x:Key="Inspector.ClassPointerLabel">Class ptr</sys:String>
+  <sys:String x:Key="Inspector.CopyClassNameTooltip">Copy fully-qualified class name (namespace.name)</sys:String>
+  <sys:String x:Key="Inspector.CopyClassAddressTooltip">Copy class pointer address (0x...)</sys:String>
   <sys:String x:Key="Inspector.ColIndex">#</sys:String>
   <sys:String x:Key="Inspector.ColAddress">Address</sys:String>
   <sys:String x:Key="Inspector.ColValue">Value</sys:String>
