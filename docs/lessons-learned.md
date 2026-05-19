@@ -1099,3 +1099,176 @@ visible smoke / startup path should go through the pipe. See
 for the canonical inline-handshake pattern (12 lines of Lua;
 open pipe, write `{"cmd":"handshake"}`, read response, regex-extract
 two fields).
+
+## x86 / WOW64 portability (Phase 12d)
+
+### Pointer-width-relative offsets, not hardcoded x64
+
+**Symptom**: post-Phase-12d, three different x86 Mono targets
+(Legend of Mortal / Kingdom / LEAVES) all handshake-passed and
+walked classes cleanly, but `findInstances` results varied
+wildly: 19 / 100+ / **0** matches respectively. The `class_ptr`
+(scan target) resolved correctly in all three cases — the bug
+was in the SCAN FILTER, not the scan target.
+
+**Root cause**:
+[`Memory.cpp::CollectThreadStackRanges`](../dll/src/shared/Memory.cpp)
+hardcoded the x64 TEB layout for reading per-thread stack
+base/limit:
+
+```cpp
+SafeReadBytes(teb + 0x08, &stackBase,  sizeof(stackBase));  // x64
+SafeReadBytes(teb + 0x10, &stackLimit, sizeof(stackLimit)); // x64
+```
+
+On x86, NT_TIB is `(ExceptionList, StackBase, StackLimit, ...)`
+with each field being `sizeof(void*)` = 4 bytes wide, so:
+
+- x64: StackBase at +0x08, StackLimit at +0x10
+- x86: StackBase at **+0x04**, StackLimit at **+0x08**
+
+Reading `+0x08` on x86 returned `StackLimit` into our `stackBase`
+slot, and `+0x10` returned `FiberData` (NULL on most threads).
+Most reads passed the `stackLimit < stackBase && both != 0` sanity
+check by accident — producing **bogus "stack" ranges** that
+overlapped legitimate heap regions. ScanForPointer then filtered
+those heap regions out as thread-stack-overlapping → no instance
+matches.
+
+Why the variance:
+- LEAVES (Unity 5.4 / legacy mono): bogus stack ranges happened
+  to overlap *every* heap region → 0 matches.
+- Kingdom (Unity 5.3 / legacy mono): partial overlap → some
+  matches but pre-fix would have been 0 too (Kingdom wasn't tested
+  before the fix).
+- Legend of Mortal (Unity 2020 / bdwgc): bogus ranges happened
+  to not overlap bdwgc's specific heap regions → 19 matches
+  reported, but likely under-count (post-fix re-test pending).
+- Endless Legend (Unity 5.3 / legacy mono / **x64**): not
+  affected — x64 reads were already correct.
+
+**Live confirmation (LEAVES, before vs after build #349)**:
+
+| | Before | After |
+|---|---|---|
+| `skipStack` | 572 (1-2 bogus per thread) | **217** (= actual thread count, 1 per thread) |
+| `regions scanned` | 23 | **380** (16×) |
+| `bytes scanned` | 54 MB | **305 MB** |
+| `count` (Transform) | **0** | **7** |
+
+**Fix**: scale TEB offsets with `sizeof(void*)`:
+
+```cpp
+constexpr std::size_t kStackBaseOffset  = sizeof(void*);
+constexpr std::size_t kStackLimitOffset = 2 * sizeof(void*);
+SafeReadBytes(teb + kStackBaseOffset,  &stackBase,  sizeof(stackBase));
+SafeReadBytes(teb + kStackLimitOffset, &stackLimit, sizeof(stackLimit));
+```
+
+Same pattern as
+[`ManagedLayout.h`](../dll/src/shared/ManagedLayout.h)'s
+`kObjectHeader = 2 * sizeof(void*)`, `kStringLengthOffset`, etc.
+
+**Rule**: any byte-offset constant that addresses a struct from
+the OS or a runtime that ships in both x86 and x64 variants MUST
+scale with `sizeof(void*)` (or wrap in an `#if`-guarded
+arch-specific value). This includes:
+
+- NT_TIB / TEB offsets (Windows kernel structs)
+- MonoObject / Il2CppObject prefix + field offsets
+- System.Exception / MonoString / MonoArray layouts (corlib structs)
+- Any C++ struct from `winternl.h` or `ntddk.h`
+
+Cheap diagnostic when an x86 build behaves oddly: dump
+`scan_stats` and look for `skipStack >> threadStacks`. The ratio
+should be ~1:1 (one stack range per thread). Anything > 1.5:1
+hints at bogus ranges from mis-sized reads.
+
+### Bitness-mismatch inject can't `CreateRemoteThread` reliably
+
+**Symptom**: pre-Phase-12d, DiscreteUI x64 explicitly refused to
+inject into 32-bit targets with `"UnityCEDumper is x64-only."` —
+not because it physically couldn't run `OpenProcess` + `VirtualAllocEx`
++ `CreateRemoteThread`, but because the WOW64 boundary makes the
+remote `LoadLibraryW` thunk fragile:
+- `LoadLibraryW` lives in WOW64's `kernel32.dll`, not the x64 one
+  loaded into the x64 caller's address space. The `FARPROC` you
+  resolve in your own process via `GetProcAddress` isn't valid
+  in the WOW64 target.
+- `GetExitCodeThread` returns a `DWORD` (32-bit), which can't
+  faithfully carry a 64-bit HMODULE return from a 64-bit
+  `LoadLibrary` (irrelevant on x86 target but the underlying
+  thread API has the truncation issue baked in).
+- Even when it appears to work, the loaded DLL would be x64,
+  not x86 — same-bitness inject is the constraint.
+
+**Rule**: cross-bitness inject = shell out to a same-bitness
+helper. We ship
+[`dist/x86/inject-x86.exe`](../tools/inject-x86/main.cpp)
+(15.5 KB standalone) that does classic
+`OpenProcess` → `VirtualAllocEx` → `WriteProcessMemory` →
+`CreateRemoteThread(LoadLibraryW)` from a same-bitness world.
+The C# `WindowsDllInjector` checks `IsWow64Process` and shells
+out to the helper for WOW64 targets;
+[`tools/Inject-Dll.ps1`](../tools/Inject-Dll.ps1) does the same.
+
+The standard pattern used by BepInEx, MelonLoader, and similar
+tooling for the same reason — there's no clean in-process
+cross-bitness inject on Windows.
+
+### MonoResolver gate is over-strict for legacy mono.dll
+
+**Symptom**: handshake passed, BackendDetector reported
+`backend=Mono` with the right Unity version, but `assemblies_count=0`
+and every RPC after handshake returned `"mono runtime not resolved"`.
+Init log showed `MonoResolver: mono.dll — bound 29/32 exports` with
+specific exports missing.
+
+**Root cause**: pre-bdwgc legacy `mono.dll` (Unity 5.x and earlier)
+doesn't export the modern Mono API surface in full. Three exports
+the resolver was treating as `tryBind` (counted toward
+`resolved = (ok == total)`) are actually safe to be missing:
+
+- `mono_assembly_get_name` + `mono_assembly_name_get_name` —
+  `MonoDomain::OnAssembly` uses `image_get_name` as the primary
+  path and only falls back to this pair when image-side returns
+  empty. Both call sites are null-guarded.
+- `mono_free` — used to free the `char*` returned by
+  `mono_type_get_name`. Without it we leak a small string per
+  type-name lookup; bounded, non-fatal.
+  [`MonoTypeParser.cpp:35`](../dll/src/mono/MonoTypeParser.cpp)
+  is already null-guarded.
+
+**Rule**: `tryBind` (counts toward `resolved`) is only for exports
+that the resolver genuinely *can't* operate without. Null-guarded
+fallback paths → `optBind` (binds but doesn't gate). The cost of
+demotion when wrong: a legacy target that should fail explicitly
+fails silently instead. Mitigate with the `bound N/M exports` log
+line at the bottom of `DoResolve` — any production target on a
+modern Mono should hit `M/M`; anything less is a hint that an
+optBind-demoted fallback path is being taken.
+
+### MonoObject layout has no padding hole on x86
+
+**Symptom**: walking a Transform on x64 + Mono shows
+`m_InstanceID` at +0x10 and `m_CachedPtr` at +0x18 (4 bytes of
+visible padding). On x86 the same fields appear at +0x08 and
+**+0x0C** (no padding).
+
+**Root cause**: `m_InstanceID` is a managed `int32` (always 4
+bytes); `m_CachedPtr` is `System.IntPtr` (4 bytes on x86, 8 bytes
+on x64). The CLR's natural-alignment rules require pointer-sized
+fields to be aligned on their own size:
+- x64: int32 at +0x10, then 4 bytes padding, then IntPtr at +0x18
+  (8-byte aligned). Net offset += 12.
+- x86: int32 at +0x08, IntPtr at +0x0C (4-byte aligned,
+  immediately follows). Net offset += 8.
+
+**Rule**: when documenting field offsets, ALWAYS state them
+relative to `kObjectHeader` and call out the alignment story.
+Don't write "+0x18 m_CachedPtr"; write "+kObjectHeader +
+sizeof(int32) + align-up-to-sizeof(IntPtr) padding". The
+on-the-wire `walkInstance` already gets this right because it
+relies on `mono_field_get_offset` which the runtime computes per-
+arch; the doc concern is purely about explaining offsets to
+human readers without leading them to assume x64.
