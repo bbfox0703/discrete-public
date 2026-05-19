@@ -356,20 +356,66 @@ Real test target now exists (Songs of Silence, v39). Updated estimate
    `sync_vendor.ps1` — quarter day. (Currently only Unity 6.0.x is
    vendored; 6.1.x sources need to be added.)
 
-### Defensive guard live today
+### v35-v39 status — SHIPPED 2026-05-19 (build #336)
 
-[MetadataParser::LoadHeader](../dll/src/il2cpp/MetadataParser.cpp)
-rejects `version < 16 || version > 31` outright with a clear log line
-(Songs of Silence reproducibly trips this — see
-[STATUS.md §"v39 registration scan works"](STATUS.md)). Better to fail
-loud on a v38+ file than silently produce nonsense offsets via the
-flat-header reader.
+The full v32-v39 dispatch landed in one session per the design above.
+[MetadataParser::LoadHeader](../dll/src/il2cpp/MetadataParser.cpp) now
+accepts `[16, 39]` inclusive; outside that range loads still fail loud
+with a clear log line.
 
-When v35–v37 are added (struct-field-only changes, flat header
-preserved), the guard widens to `version > 37`. When v38 lands the
-section-based reader + variable-width indices, the guard goes away.
+**What landed:**
 
-What still works on v38+ targets without any of the above (verified
+- New layout structs in [MetadataLayout.h](../dll/src/il2cpp/MetadataLayout.h):
+  `TypeDefinition_v35` (84 bytes — v29 minus `elementTypeIndex`),
+  `StringLiteralEntry_v35` (4 bytes — drops the `length` prefix),
+  `Il2CppSectionMetadata` (12 bytes — the `(offset, size, count)` triplet
+  v38+ uses per table), `HeaderV38` (380 bytes — sanity + version + 31
+  section triplets), plus `IndexSizes` + a `GetIndexSize(count)` helper
+  for the runtime-variable-width metadata indices v38 introduced.
+- `MetadataParser.cpp` grew per-version branches in `LoadHeader` (flat
+  vs section), `LoadTables` (computes `IndexSizes` from
+  `parameters.size/count` and table counts on v38+), `TypeDefSizeof`
+  (84 for v32-v37, runtime-computed `68 + 3*TIS + GCIS` for v38+, 92
+  for v24, 88 for v27/v29/v31/v32-v34), `FieldDefSizeof` /
+  `FieldDefaultValueSizeof` (`8 + TIS` for v38+, 12 fixed for the rest),
+  plus hand-walked TypeDef / FieldDef / FieldDefaultValue readers for
+  v38+ that consult `indexSizes_` per field. `GetStringLiteral`
+  recovers v35's missing length from the delta to the next entry's
+  `dataIndex`.
+- `tools/Test-MetadataVersions.ps1` synthetic-fixture smoke — builds
+  empty-but-valid metadata.dat blobs in-memory for v29 / v31 / v35 /
+  v37 / v38 / v39, runs `metadata-cli info` against each, asserts the
+  parsed version matches. Also verifies v40 is rejected. Fully
+  autonomous — no live Unity target required. Verified PASS at build
+  #336.
+
+**What still needs work (carry-forward):**
+
+- **Live smoke against a real v39 file.** Songs of Silence's actual
+  `global-metadata.dat` exercises non-empty tables, real
+  `IndexSizes` derivation (likely 4-byte for typeDefinitionIndex
+  given the typedef count), and the v35 `StringLiteralEntry` delta
+  computation. Tracked as Phase 21d-equivalent in
+  [STATUS.md](STATUS.md).
+- **v33 / v34 / v36 verification.** No Unity build in the wild
+  reportedly ships these — they're transitional Unity 2023.x or
+  intermediate Unity 6.1 dev builds. We accept them with a soft
+  warning (assuming v34 = v31 layout, v36 = v35 layout) until a
+  target appears.
+- **MethodDefinition / ParameterDefinition / GenericContainer
+  readers** — `Il2CppMethodDefinition` shrinks under v38+'s variable
+  ParamIndex (v39), but we don't currently consume these tables. If
+  Phase 5d adds method-default decode or similar, the new readers
+  will need `parameterIndexSize` plumbing the same way fields got
+  `typeIndexSize`.
+- **`elementTypeIndex` fallback for enums.** Per upstream
+  `GetEnumElementTypeIndex(version)`: v35+ uses `parentIndex` since
+  the dedicated field is gone. Our parser doesn't currently surface
+  enum-element-type info to call sites, so this is wired only at the
+  layout level — add the fallback when `il2cppGetMetadataTypeFields`
+  starts decoding enum constants on v35+.
+
+What still works on v38+ targets even without offline parsing (verified
 2026-05-07 against Songs of Silence / v39 via
 [Test-V39RuntimeSweep.ps1](../tools/Test-V39RuntimeSweep.ps1)):
 - The structural-shape `Il2CppMetadataRegistration` AOB scan — fully
@@ -381,8 +427,3 @@ What still works on v38+ targets without any of the above (verified
   not shift in any way that breaks our consumers between v31 and
   v39. Inspector / class browser / Phase 17/18/19 / CE Lua bridges
   are all v39-compatible without code changes.
-
-Effectively, the only v32+ work that remains for end users is the
-two metadata.dat-only paths: `il2cppGetMetadataTypeFields` const-
-literal decoding + offline `metadata-cli` parsing. Both are bounded
-in scope; neither is on the critical path for typical workflows.

@@ -3,6 +3,8 @@
 // lands in a follow-up commit.
 #pragma once
 
+#include "MetadataLayout.h"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -107,14 +109,24 @@ private:
     bool LoadTables();
 
     // Returns sizeof(TypeDefinition) for the loaded metadata version.
-    // 0 for unsupported versions (v27 today).
+    // For v38+ this is computed from the runtime-variable index sizes
+    // (typeIndexSize, genericContainerIndexSize); for v24-v37 it's a fixed
+    // compile-time constant. 0 for unsupported versions.
     std::size_t TypeDefSizeof() const noexcept;
+
+    // v38+ row strides depend on runtime-variable typeIndexSize.
+    // For v24-v37 these are fixed at 12 bytes (matches the legacy structs).
+    std::size_t FieldDefSizeof() const noexcept;
+    std::size_t FieldDefaultValueSizeof() const noexcept;
 
     bool                      loaded_  = false;
     std::int32_t              version_ = 0;
     std::vector<std::uint8_t> data_;  // owns the whole file
 
-    // Cached prefix offsets (v29 layout, also valid for v24 / v27 / v31).
+    // Cached prefix offsets (v29 layout, also valid for v24 / v27 / v31 /
+    // v32-v37; for v38+ these are populated from the corresponding
+    // Il2CppSectionMetadata entries by LoadHeader so the rest of the
+    // parser can stay version-agnostic).
     std::int32_t stringLiteralOffset_     = 0;
     std::int32_t stringLiteralSize_       = 0;
     std::int32_t stringLiteralDataOffset_ = 0;
@@ -122,9 +134,9 @@ private:
     std::int32_t stringOffset_            = 0;
     std::int32_t stringSize_              = 0;
 
-    // Segment 2 — populated for v24 / v29 / v31. (v27 still skipped — no
-    // test target locally.) tablesLoaded_ goes true when the offsets are
-    // bound and the version-specific TypeDefinition layout is known.
+    // Segment 2 — populated for v24 / v29 / v31 / v32-v39.
+    // tablesLoaded_ goes true when the offsets are bound and the
+    // version-specific TypeDefinition layout is known.
     bool         tablesLoaded_           = false;
     std::int32_t typeDefinitionsOffset_  = 0;
     std::int32_t typeDefinitionsSize_    = 0;
@@ -134,6 +146,23 @@ private:
     std::int32_t fieldDefaultsSize_      = 0;
     std::int32_t fieldDefaultDataOffset_ = 0;
     std::int32_t fieldDefaultDataSize_   = 0;
+
+    // For v38+ derive the variable-width metadata-index sizes at load time
+    // from each table's row count (and the parameter row's TIS-inferred
+    // size). v24-v37 leave the defaults of 4 bytes each. See
+    // MetadataLayout.h §IndexSizes for the derivation.
+    Metadata::IndexSizes indexSizes_;
+
+    // Total parameters.count emitted by the v38 section header — the
+    // parameter row stride is `8 + typeIndexSize`, so the row reader
+    // (used by metadata-cli only today) needs this to walk the table.
+    std::int64_t parametersCount_       = 0;
+
+    // String-literal table entry size: 8 bytes for v24-v34 (length +
+    // dataIndex pair), 4 bytes for v35+ (just dataIndex; length comes
+    // from the delta to the next entry). Cached so StringLiteralCount
+    // doesn't repeat the version check.
+    std::int32_t stringLiteralEntryStride_ = 8;
 };
 
 }  // namespace UnityCEDumper::IL2CPP::Metadata

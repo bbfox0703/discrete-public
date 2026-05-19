@@ -15,9 +15,24 @@
 // v24/v27/v29/v31 — we read just that span via HeaderV29 and dispatch the
 // trailing TypeDefinition layout per version.
 //
-// All four layouts cross-checked against Unity's official IL2CPP source in
-// vendor/libil2cpp/ — see docs/il2cpp-metadata-crosscheck.md for the
-// field-by-field comparison and source-line citations.
+// v32+ (Unity 2023+ / Unity 6.1+) coverage added below. v32-v37 keep the
+// flat header layout but v35 drops two struct fields:
+//   • Il2CppTypeDefinition.elementTypeIndex (was at offset 20 in v29) —
+//     stride goes 88 → 84 bytes.
+//   • Il2CppStringLiteral.length — entry size 8 → 4 bytes; length is now
+//     recovered from the delta to the next entry's dataIndex.
+// v38 rewrites the header into Il2CppSectionMetadata{offset,size,count}
+// triplets per table (12 bytes each, ~30 sections) AND introduces
+// variable-width "metadata indices" — TypeIndex / TypeDefinitionIndex /
+// GenericContainerIndex / ParameterIndex (v39) shrink to 1, 2, or 4 bytes
+// per field based on each table's row count. v39 is incremental: only
+// ParamIndex joins the variable-width family (per Perfare/Il2CppDumper#903).
+//
+// All layouts cross-checked against Unity's official IL2CPP source in
+// vendor/libil2cpp/ + the Il2CppDumperV35plus community fork (pinned at
+// bbd9c0c2 in vendor/Il2CppDumperV35plus/) — see
+// docs/il2cpp-metadata-crosscheck.md for the field-by-field comparison and
+// source-line citations.
 #pragma once
 
 #include <cstdint>
@@ -194,15 +209,163 @@ using FieldDefinition_v24      = FieldDefinition_v29;
 using FieldDefinition_v31      = FieldDefinition_v29;
 using FieldDefaultValue_v24    = FieldDefaultValue_v29;
 using FieldDefaultValue_v31    = FieldDefaultValue_v29;
+
+// v32-v34: identical to v31 (no struct-level changes per upstream
+// Il2CppDumperV35plus). Aliasing for clarity at call sites.
+using TypeDefinition_v32       = TypeDefinition_v29;
+using TypeDefinition_v34       = TypeDefinition_v29;
+using FieldDefinition_v32      = FieldDefinition_v29;
+using FieldDefaultValue_v32    = FieldDefaultValue_v29;
+
+// v35 drops Il2CppTypeDefinition.elementTypeIndex — 84-byte stride instead
+// of v29's 88. The field was only consulted for enum decoding (resolved
+// from parentIndex in v35+ per upstream `GetEnumElementTypeIndex`). All
+// other fields keep their absolute layout: nameIndex/namespaceIndex stay at
+// offset 0/4; byvalTypeIndex/declaringTypeIndex/parentIndex/
+// genericContainerIndex are still 4-byte int32 indices in v35-v37
+// (variable-width starts at v38), the 8 int "Start" fields and 8 ushort
+// counts follow, then bitfield + token at the tail. Verified against
+// vendor/Il2CppDumperV35plus/Il2CppDumper/Il2Cpp/MetadataClass.cs:290-378.
+struct TypeDefinition_v35 {
+    std::int32_t  nameIndex;
+    std::int32_t  namespaceIndex;
+    std::int32_t  byvalTypeIndex;
+    std::int32_t  declaringTypeIndex;
+    std::int32_t  parentIndex;
+    // elementTypeIndex REMOVED in v35
+    std::int32_t  genericContainerIndex;
+    std::uint32_t flags;
+    std::int32_t  fieldStart;
+    std::int32_t  methodStart;
+    std::int32_t  eventStart;
+    std::int32_t  propertyStart;
+    std::int32_t  nestedTypesStart;
+    std::int32_t  interfacesStart;
+    std::int32_t  vtableStart;
+    std::int32_t  interfaceOffsetsStart;
+    std::uint16_t method_count;
+    std::uint16_t property_count;
+    std::uint16_t field_count;
+    std::uint16_t event_count;
+    std::uint16_t nested_type_count;
+    std::uint16_t vtable_count;
+    std::uint16_t interfaces_count;
+    std::uint16_t interface_offsets_count;
+    std::uint32_t bitfield;
+    std::uint32_t token;
+};
+
+// v35 also shrinks Il2CppStringLiteral: drops the `length` prefix; entries
+// now hold just the `dataIndex` int32. Length is recovered from the delta
+// to the next entry's dataIndex (and to stringLiteralDataSize for the
+// last entry). Verified against MetadataClass.cs:474-479.
+struct StringLiteralEntry_v35 {
+    std::int32_t dataIndex;
+};
+
+// v36 / v37 reuse v35's layout per upstream `[Version(Min=…, Max=35)]`
+// attributes (the version bumps don't change the row shape — incremental
+// runtime-side changes only).
+using TypeDefinition_v36       = TypeDefinition_v35;
+using TypeDefinition_v37       = TypeDefinition_v35;
+using FieldDefinition_v35      = FieldDefinition_v29;
+using FieldDefinition_v36      = FieldDefinition_v29;
+using FieldDefinition_v37      = FieldDefinition_v29;
+using FieldDefaultValue_v35    = FieldDefaultValue_v29;
+using FieldDefaultValue_v36    = FieldDefaultValue_v29;
+using FieldDefaultValue_v37    = FieldDefaultValue_v29;
+
+// v38 introduces the section-based header. Every (offset, size) pair from
+// the flat v29-v37 header becomes a 12-byte `Il2CppSectionMetadata` triplet
+// carrying offset / size / count. Critical: reading a v38 header through
+// HeaderV29's flat (offset, size, offset, size, ...) shape yields silently-
+// wrong offsets — the third int32 of a v38 header is a `count`, not the
+// expected `stringLiteralDataOffset`. Field order matches MetadataClass.cs
+// lines 169-230.
+struct Il2CppSectionMetadata {
+    std::uint32_t offset;
+    std::uint32_t size;
+    std::uint32_t count;
+};
+
+struct HeaderV38 {
+    std::uint32_t sanity;
+    std::int32_t  version;
+    // 30 section triplets, in the order upstream declares them.
+    Il2CppSectionMetadata stringLiterals;
+    Il2CppSectionMetadata stringLiteralData;
+    Il2CppSectionMetadata strings;
+    Il2CppSectionMetadata events;
+    Il2CppSectionMetadata properties;
+    Il2CppSectionMetadata methods;
+    Il2CppSectionMetadata parameterDefaultValues;
+    Il2CppSectionMetadata fieldDefaultValues;
+    Il2CppSectionMetadata fieldAndParameterDefaultValueData;
+    Il2CppSectionMetadata fieldMarshaledSizes;
+    Il2CppSectionMetadata parameters;
+    Il2CppSectionMetadata fields;
+    Il2CppSectionMetadata genericParameters;
+    Il2CppSectionMetadata genericParameterConstraints;
+    Il2CppSectionMetadata genericContainers;
+    Il2CppSectionMetadata nestedTypes;
+    Il2CppSectionMetadata interfaces;
+    Il2CppSectionMetadata vtableMethods;
+    Il2CppSectionMetadata interfaceOffsets;
+    Il2CppSectionMetadata typeDefinitions;
+    Il2CppSectionMetadata images;
+    Il2CppSectionMetadata assemblies;
+    Il2CppSectionMetadata fieldRefs;
+    Il2CppSectionMetadata referencedAssemblies;
+    Il2CppSectionMetadata attributeData;
+    Il2CppSectionMetadata attributeDataRanges;
+    Il2CppSectionMetadata unresolvedIndirectCallParameterTypes;
+    Il2CppSectionMetadata unresolvedIndirectCallParameterRanges;
+    Il2CppSectionMetadata windowsRuntimeTypeNames;
+    Il2CppSectionMetadata windowsRuntimeStrings;
+    Il2CppSectionMetadata exportedTypeDefinitions;
+};
 #pragma pack(pop)
+
+// Variable-width metadata-index sizes inferred at load time. Pre-v38 these
+// are all 4 (int32 always); v38+ shrinks them to 1/2/4 bytes per field based
+// on each table's row count (small tables get small indices).
+//
+// Width derivation (from vendor/Il2CppDumperV35plus/Il2Cpp/Metadata.cs:101-114):
+//   typeDefinitionIndexSize  = GetIndexSize(typeDefinitions.count)
+//   genericContainerIndexSize = GetIndexSize(genericContainers.count)
+//   parameterIndexSize       = GetIndexSize(parameters.count)
+//   typeIndexSize            = sizeof(ParameterDefinition_row) - 8
+//                              (Il2CppParameterDefinition has uint nameIndex +
+//                               uint token + TypeIndex typeIndex = 8 + TIS)
+// where GetIndexSize(n) = n ≤ 0xFF ? 1 : n ≤ 0xFFFF ? 2 : 4.
+//
+// v39 just adds ParamIndex to this family — no other structural changes
+// per Perfare/Il2CppDumper#903.
+struct IndexSizes {
+    int typeIndexSize             = 4;
+    int typeDefinitionIndexSize   = 4;
+    int genericContainerIndexSize = 4;
+    int parameterIndexSize        = 4;
+};
+
+inline int GetIndexSize(std::int64_t count) noexcept {
+    if (count <= 0xFF)   return 1;
+    if (count <= 0xFFFF) return 2;
+    return 4;
+}
 
 static_assert(sizeof(HeaderPrefix)            == 32,  "HeaderPrefix must be 32 bytes");
 static_assert(sizeof(StringLiteralEntry)      == 8,   "StringLiteralEntry must be 8 bytes");
+static_assert(sizeof(StringLiteralEntry_v35)  == 4,   "StringLiteralEntry_v35 must be 4 bytes");
 static_assert(sizeof(HeaderV29)               == 168, "HeaderV29 must be 168 bytes");
 static_assert(sizeof(TypeDefinition_v29)      == 88,  "TypeDefinition_v29 must be 88 bytes");
 static_assert(sizeof(TypeDefinition_v24)      == 92,  "TypeDefinition_v24 must be 92 bytes");
 static_assert(sizeof(TypeDefinition_v31)      == 88,  "TypeDefinition_v31 must be 88 bytes (== v29)");
+static_assert(sizeof(TypeDefinition_v35)      == 84,  "TypeDefinition_v35 must be 84 bytes (v29 minus elementTypeIndex)");
 static_assert(sizeof(FieldDefinition_v29)     == 12,  "FieldDefinition_v29 must be 12 bytes");
 static_assert(sizeof(FieldDefaultValue_v29)   == 12,  "FieldDefaultValue_v29 must be 12 bytes");
+static_assert(sizeof(Il2CppSectionMetadata)   == 12,  "Il2CppSectionMetadata must be 12 bytes");
+static_assert(sizeof(HeaderV38)               == 8 + 31 * 12,
+              "HeaderV38 must be 8 (sanity+version) + 31 * 12 (sections) = 380 bytes");
 
 }  // namespace UnityCEDumper::IL2CPP::Metadata
