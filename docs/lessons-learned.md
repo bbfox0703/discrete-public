@@ -6,6 +6,34 @@
 > the root cause, then the rule. Cross-references to source live as
 > [file.ext:line](../path/file.ext) links.
 
+## Contents
+
+- [Mono / IL2CPP runtime invocation](#mono--il2cpp-runtime-invocation)
+  — `runtime_invoke` non-uniform marshaling, exception address at
+  `+0x18`, missing `method_get_pointer` export on Unity 2021.3+.
+- [Overload disambiguation](#overload-disambiguation) — IL2CPP code
+  stripping, enum-marshal-as-int32, `signatureMatch` substring traps,
+  AA-script idempotency.
+- [GC-root lifetime for `callMethod` returns](#gc-root-lifetime-for-callmethod-returns)
+  — managed return values can be collected before the caller reads them.
+- [Avalonia 12 Windows-only build](#avalonia-12-windows-only-build) —
+  Skia + HarfBuzz + Win32 wiring, AOT analyzer strictness, the
+  **DataGrid AOT sort three-layer trap**.
+- [PowerShell smoke testing](#powershell-smoke-testing) — pipe
+  enveloping, single-element JSON array unwrap, Boolean parameter
+  passing.
+- [Build / DLL development](#build--dll-development) — SEH-leaf
+  helpers, mutex-based single-instance, linker LNK1104 with cached
+  DLL handles, AOT trim warnings.
+- [Pipe client / connection](#pipe-client--connection) — overlapped
+  I/O on `\\.\pipe\*`, concurrent-clients pattern.
+- [Antivirus](#antivirus) — Bitdefender / Defender flagging injected DLLs.
+- [Cheat Engine Lua API](#cheat-engine-lua-api) — `executeCodeEx`
+  string-arg handling, missing `GotoAddressEx`, AA-script `[ENABLE]`
+  idempotency, autorun script wire encoding.
+- [AOBMaker CE plugin](#aobmaker-ce-plugin) — pipe protocol,
+  concurrent-client constraint pre-Phase 22f, AOB extraction surface.
+
 ---
 
 ## Mono / IL2CPP runtime invocation

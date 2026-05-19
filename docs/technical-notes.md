@@ -27,6 +27,87 @@ bump — keeps `git blame` honest about which commits actually shipped.
 
 ---
 
+## Adding a new sortable DataGrid (Avalonia 12 + Native AOT)
+
+There's a documented three-layer trap that disables Avalonia 12
+DataGrid sort under AOT trimming — see
+[lessons-learned.md §"Avalonia 12 DataGrid sort is a three-layer
+trap"](lessons-learned.md#avalonia-12-datagrid-sort-is-a-three-layer-trap-under-aot--fix-needs-all-three)
+for the full mechanism. Short version: column Bindings compile to
+`CompiledBinding` (no Path string), DataGrid auto-disables
+`CanUserSort`, and default reflection-based sort is trimmed away.
+
+**Three-step recipe for any new DataGrid that should sort:**
+
+1. **In XAML — every sortable column needs both attributes:**
+
+   ```xml
+   <DataGridTextColumn Binding="{Binding Foo}"
+                       SortMemberPath="Foo"
+                       CanUserSort="True" />
+   ```
+
+   `SortMemberPath` gives the runtime a real string path to key the
+   sort dictionary on; `CanUserSort="True"` is belt-and-braces
+   against the CompiledBinding-empty-Path auto-disable.
+
+   Skip these on columns that should NOT sort (e.g. action-button
+   columns, the per-row checkbox in ProxyDeploy) — leaving the
+   attributes off keeps `CanUserSort` at the default disabled
+   state, which is correct for those columns.
+
+2. **Name the DataGrid** so the code-behind can find it:
+
+   ```xml
+   <DataGrid x:Name="MyGrid" ... CanUserSortColumns="True">
+   ```
+
+3. **In code-behind — wire the comparers at `Loaded`:**
+
+   ```csharp
+   using System.Collections;
+   using System.Collections.Generic;
+   using Avalonia.Controls;
+   using UnityDumpUI.Core.Services;
+
+   public MyWindow()
+   {
+       AvaloniaXamlLoader.Load(this);
+       Loaded += (_, _) =>
+           this.FindControl<DataGrid>("MyGrid")?.WireSortComparers(SortComparers);
+   }
+
+   private static readonly IReadOnlyDictionary<string, IComparer> SortComparers =
+       new Dictionary<string, IComparer>
+       {
+           ["Foo"]  = DataGridSortComparers.Ordinal<MyRow>(r => r.Foo),
+           ["Bar"]  = DataGridSortComparers.Hex<MyRow>(r => r.Bar),       // hex addresses
+           ["Baz"]  = DataGridSortComparers.Number<MyRow>(r => r.Baz),    // ints
+           ["Quux"] = DataGridSortComparers.Bool<MyRow>(r => r.Quux),     // booleans
+       };
+   ```
+
+   Dictionary key = the XAML's `SortMemberPath`. Factories are in
+   [`UnityDumpUI.Core/Services/DataGridSortComparers.cs`](../ui/UnityDumpUI.Core/Services/DataGridSortComparers.cs);
+   extension method `WireSortComparers` is in
+   [`UnityDumpUI/Views/DataGridSortExtensions.cs`](../ui/UnityDumpUI/Views/DataGridSortExtensions.cs).
+
+**Diagnostic recipe when sort silently doesn't work:** hook
+`DataGrid.Sorting` to log, walk `grid.Columns` and dump each
+column's `SortMemberPath`, `CanUserSort`, `Binding` runtime type.
+The trap-layer-to-symptom mapping in lessons-learned tells you
+which gate is closed. Build is always green in the broken cases —
+only interactive header click reveals it.
+
+**Working reference:** every DataGrid in the project already
+follows this pattern as of 2026-05-19 (build 325). See
+[`FieldAcrossInstancesWindow`](../ui/UnityDumpUI/Views/FieldAcrossInstancesWindow.axaml)
++ [its code-behind](../ui/UnityDumpUI/Views/FieldAcrossInstancesWindow.axaml.cs)
+for a 3-column minimal example; [`MainWindow`](../ui/UnityDumpUI/Views/MainWindow.axaml.cs)
+shows the multi-grid case (3 grids in one window).
+
+---
+
 ## Logger channels
 
 DLL writes to `%LOCALAPPDATA%\UnityCEDumper\Logs\<host-pid>\<channel>\`
@@ -166,12 +247,16 @@ calling out here for visibility:
 - **CSX live mode** — design dead-end as scoped (CSX is offset-
   relative; "live" only makes sense as snapshot-derived layout).
   CE XML already provides true absolute-address live mode.
-- **Highlight matching substring** in Fields / Methods / Inspector
-  filter results — pure UI polish.
+- ~~**Highlight matching substring**~~ ✅ shipped 2026-05-08 in
+  Fields / Methods / Inspector filter results via
+  `HighlightedTextBlock` + `HighlightSegmenter`.
 - ~~**Phase 19d-3 smart-typed editors**~~ ✅ shipped 2026-05-19 —
   `MethodCallWindow` picks NumericUpDown / ComboBox / TextBox per
   row via `MethodCallEditorKind`; sized-int range clamps at the
   editor; enum params probe `getEnumValues` on window-open.
+  `System.Boolean` rows get an `AutoCompleteBox` suggesting
+  true/false but accepting any text the existing `bool.TryParse`
+  consumes.
 
 ---
 
