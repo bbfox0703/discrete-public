@@ -20,7 +20,16 @@ public partial class MainWindow : Window
         vm.PickProcessAsync          = ShowPickerDialogAsync;
         vm.Browser.SaveFileAsync     = SaveFileAsync;
         vm.Browser.CopyToClipboardAsync       = CopyToClipboardAsync;
+        // Hand the VMs an accessor that snapshots the DataGrid's current
+        // multi-row selection — Avalonia's DataGrid.SelectedItems isn't a
+        // bindable property, so the View has to push it through a callback.
+        // Lets "Copy CE field" on a multi-row Ctrl/Shift selection emit
+        // every highlighted row, not just the last one focused. (Bug fix:
+        // single-row paste still works because the VM falls back to its
+        // SelectedItem binding when the accessor returns an empty list.)
+        vm.Browser.GetSelectedFieldRows       = GetBrowserSelectedFieldRows;
         vm.Inspector.CopyToClipboardAsync     = CopyToClipboardAsync;
+        vm.Inspector.GetSelectedNodes         = GetInspectorSelectedNodes;
         vm.Inspector.ScrollFieldIntoView      = ScrollInspectorFieldIntoView;
         // Phase 17c — clipboard hook for the "Copy instance address" button
         // on the Address Lookup tab.
@@ -98,6 +107,36 @@ public partial class MainWindow : Window
             var grid = this.FindControl<DataGrid>("FieldsDataGrid");
             grid?.ScrollIntoView(node, null);
         }, Avalonia.Threading.DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// Snapshot the Fields-tab DataGrid's current selection as a typed list
+    /// the VM can consume without referencing Avalonia. Returns an empty
+    /// list when only one row (or none) is highlighted — the VM treats
+    /// that as the "use SelectedItem" path so single-row right-click stays
+    /// unchanged.
+    /// </summary>
+    private IReadOnlyList<FieldRow> GetBrowserSelectedFieldRows()
+        => SnapshotSelectedItems<FieldRow>("BrowserFieldsDataGrid");
+
+    /// <summary>
+    /// Same shape as <see cref="GetBrowserSelectedFieldRows"/>, for the
+    /// Inspector tab's hierarchical Walked-fields grid.
+    /// </summary>
+    private IReadOnlyList<WalkedFieldNode> GetInspectorSelectedNodes()
+        => SnapshotSelectedItems<WalkedFieldNode>("FieldsDataGrid");
+
+    private IReadOnlyList<T> SnapshotSelectedItems<T>(string gridName) where T : class
+    {
+        var grid = this.FindControl<DataGrid>(gridName);
+        if (grid?.SelectedItems is not System.Collections.IList selected || selected.Count <= 1)
+            return System.Array.Empty<T>();
+        var list = new List<T>(selected.Count);
+        foreach (var item in selected)
+        {
+            if (item is T typed) list.Add(typed);
+        }
+        return list;
     }
 
     /// <summary>

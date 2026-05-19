@@ -95,6 +95,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     public Func<string, Task>? CopyToClipboardAsync { get; set; }
 
     /// <summary>
+    /// View-supplied accessor for the inspector DataGrid's current multi-row
+    /// selection. Returns an empty list when nothing's selected or only one
+    /// row is highlighted (in which case the singular <see cref="SelectedNode"/>
+    /// path is sufficient). Wired by MainWindow code-behind — keeps the VM
+    /// free of Avalonia DataGrid types.
+    /// </summary>
+    public Func<IReadOnlyList<WalkedFieldNode>>? GetSelectedNodes { get; set; }
+
+    /// <summary>
     /// View-supplied DataGrid scroll-into-view bridge. Invoked by the VM
     /// after a fresh walk repopulates <see cref="Fields"/> so the
     /// previously-selected field stays visible across instance switches
@@ -800,7 +809,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         if (!InstanceFieldClassifier.TryParseClassName(SelectedNode.Type, out string ns, out string name))
         {
             // Not a class-rooted node — fall back to a single leaf entry.
-            string xml = WrapLeafXml(SelectedNode);
+            string xml = WrapLeavesXml(new[] { SelectedNode });
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
             return;
         }
@@ -849,13 +858,27 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     [RelayCommand(CanExecute = nameof(CanCopyNode))]
     private async Task CopyCeFieldNodeAsync()
     {
-        if (CopyToClipboardAsync is null || SelectedNode is null) return;
-        string xml = WrapLeafXml(SelectedNode);
+        if (CopyToClipboardAsync is null) return;
+
+        // Multi-select preferred — falls back to the singular SelectedNode
+        // when the View hasn't wired the accessor (tests) or only one row
+        // is highlighted. Each node contributes one leaf <CheatEntry> at
+        // its absolute address — works uniformly across heterogeneous
+        // selections (mixing top-level fields with expanded sub-tree rows).
+        IReadOnlyList<WalkedFieldNode> nodes = GetSelectedNodes?.Invoke() ?? Array.Empty<WalkedFieldNode>();
+        if (nodes.Count == 0 && SelectedNode is not null)
+            nodes = new[] { SelectedNode };
+        if (nodes.Count == 0) return;
+
+        string xml = WrapLeavesXml(nodes);
         try
         {
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            string summary = nodes.Count == 1
+                ? $"{nodes[0].Name} @ {nodes[0].EffectiveAddress ?? "?"}"
+                : $"{nodes.Count} nodes";
             _logger.Write(Constants.LogCategoryView,
-                $"copy CE field node {SelectedNode.Name} @ {SelectedNode.EffectiveAddress ?? "?"} ({xml.Length} bytes)");
+                $"copy CE field node {summary} ({xml.Length} bytes)");
         }
         catch (Exception ex)
         {
@@ -867,34 +890,41 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         => SelectedNode is not null && !string.IsNullOrEmpty(SelectedNode.EffectiveAddress);
 
     /// <summary>
-    /// Tiny single-entry CE table for nodes that don't have a resolvable
-    /// class type (primitives, pointer-to-anonymous, array slots that
-    /// shouldn't recurse further). Uses an absolute address so paste-into-CE
-    /// just works without an existing scope.
+    /// Multi-entry CE table covering every supplied node. Each node contributes
+    /// one leaf <c>&lt;CheatEntry&gt;</c> at its absolute address — keeps the
+    /// output uniform across heterogeneous selections (primitives mixed with
+    /// pointer leaves, top-level fields mixed with expanded children). Used
+    /// for both single-select and multi-select Inspector "Copy CE field"
+    /// flows — a one-element list produces the same single-entry shape the
+    /// original WrapLeafXml emitted.
     /// </summary>
-    private string WrapLeafXml(WalkedFieldNode node)
+    private static string WrapLeavesXml(IReadOnlyList<WalkedFieldNode> nodes)
     {
-        string addr = node.EffectiveAddress ?? "0x0";
-        string desc = $"{node.Name} : {node.Type ?? "?"}";
-        // Pick the right CE VariableType + display flags from the managed
-        // type — without this every leaf got "4 Bytes" + hex, which is wrong
-        // for signed integers (Int32 → CE shows the signed value with
-        // ShowAsSigned=1, no hex) and floats (Float type).
-        ManagedTypeShape shape = UnityTypeMap.Resolve(node.Type);
-        (bool hex, bool signed) = UnityTypeMap.CeDisplay(node.Type);
-        string vartype = shape.CeTypeKeyword;
-        var sb = new System.Text.StringBuilder(512);
+        var sb = new System.Text.StringBuilder(512 * Math.Max(1, nodes.Count));
         sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
         sb.Append("<CheatTable>\n  <CheatEntries>\n");
-        sb.Append("    <CheatEntry>\n");
-        sb.Append("      <ID>0</ID>\n");
-        sb.Append("      <Description>\"").Append(System.Net.WebUtility.HtmlEncode(desc)).Append("\"</Description>\n");
-        if (hex)
-            sb.Append("      <ShowAsHex>1</ShowAsHex>\n");
-        sb.Append("      <ShowAsSigned>").Append(signed ? '1' : '0').Append("</ShowAsSigned>\n");
-        sb.Append("      <VariableType>").Append(vartype).Append("</VariableType>\n");
-        sb.Append("      <Address>").Append(addr).Append("</Address>\n");
-        sb.Append("    </CheatEntry>\n");
+        int id = 0;
+        foreach (WalkedFieldNode node in nodes)
+        {
+            string addr = node.EffectiveAddress ?? "0x0";
+            string desc = $"{node.Name} : {node.Type ?? "?"}";
+            // Pick the right CE VariableType + display flags from the managed
+            // type — without this every leaf got "4 Bytes" + hex, which is wrong
+            // for signed integers (Int32 → CE shows the signed value with
+            // ShowAsSigned=1, no hex) and floats (Float type).
+            ManagedTypeShape shape = UnityTypeMap.Resolve(node.Type);
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(node.Type);
+            string vartype = shape.CeTypeKeyword;
+            sb.Append("    <CheatEntry>\n");
+            sb.Append("      <ID>").Append(id++).Append("</ID>\n");
+            sb.Append("      <Description>\"").Append(System.Net.WebUtility.HtmlEncode(desc)).Append("\"</Description>\n");
+            if (hex)
+                sb.Append("      <ShowAsHex>1</ShowAsHex>\n");
+            sb.Append("      <ShowAsSigned>").Append(signed ? '1' : '0').Append("</ShowAsSigned>\n");
+            sb.Append("      <VariableType>").Append(vartype).Append("</VariableType>\n");
+            sb.Append("      <Address>").Append(addr).Append("</Address>\n");
+            sb.Append("    </CheatEntry>\n");
+        }
         sb.Append("  </CheatEntries>\n</CheatTable>\n");
         return sb.ToString();
     }
