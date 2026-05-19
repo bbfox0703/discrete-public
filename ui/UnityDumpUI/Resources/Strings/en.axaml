@@ -35,6 +35,12 @@
   <sys:String x:Key="Browser.ExportCeXml">Export .CT…</sys:String>
   <sys:String x:Key="Browser.CopyCeXml">Copy CE XML</sys:String>
   <sys:String x:Key="Browser.CopyCeField">Copy CE field</sys:String>
+  <sys:String x:Key="Browser.CopyFieldNameMenu">Copy field name</sys:String>
+  <sys:String x:Key="Browser.CopyFieldTypeMenu">Copy type</sys:String>
+  <sys:String x:Key="Browser.CopyFieldDeclaredInMenu">Copy "Declared in"</sys:String>
+  <sys:String x:Key="Browser.CopyMethodNameMenu">Copy method name</sys:String>
+  <sys:String x:Key="Browser.CopyMethodAddressMenu">Copy address</sys:String>
+  <sys:String x:Key="Browser.CopyMethodDeclaredInMenu">Copy "Declared in"</sys:String>
   <sys:String x:Key="Browser.ExportOptions">Export options ▾</sys:String>
   <sys:String x:Key="Browser.OptDrilldownDepth">Drilldown depth</sys:String>
   <sys:String x:Key="Browser.OptArrayLimit">Array element limit</sys:String>

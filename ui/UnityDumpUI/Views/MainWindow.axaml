@@ -393,7 +393,8 @@
                        PlaceholderText="{StaticResource Browser.FilterFieldsWatermark}"
                        Text="{Binding Browser.FieldFilter, Mode=TwoWay}"
                        Margin="0,0,0,4" />
-              <DataGrid ItemsSource="{Binding Browser.FilteredFields}"
+              <DataGrid x:Name="BrowserFieldsDataGrid"
+                        ItemsSource="{Binding Browser.FilteredFields}"
                         SelectedItem="{Binding Browser.SelectedFieldRow, Mode=TwoWay}"
                         IsReadOnly="True"
                         AutoGenerateColumns="False"
@@ -406,6 +407,17 @@
                   <ContextMenu>
                     <MenuItem Header="{StaticResource Browser.CopyCeField}"
                               Command="{Binding Browser.CopyCeFieldCommand}" />
+                    <Separator />
+                    <!-- Per-cell clipboard helpers. Single-select only;
+                         multi-select copy is a follow-up (would need to
+                         join row values with newline + handle mixed
+                         columns). Handlers live in MainWindow.axaml.cs. -->
+                    <MenuItem Header="{StaticResource Browser.CopyFieldNameMenu}"
+                              Click="OnCopyFieldNameClicked" />
+                    <MenuItem Header="{StaticResource Browser.CopyFieldTypeMenu}"
+                              Click="OnCopyFieldTypeClicked" />
+                    <MenuItem Header="{StaticResource Browser.CopyFieldDeclaredInMenu}"
+                              Click="OnCopyFieldDeclaredInClicked" />
                   </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
@@ -751,6 +763,17 @@
                               Click="OnMethodFindOverloadsClicked" />
                     <MenuItem Header="{StaticResource Browser.MethodCallMethodMenu}"
                               Click="OnMethodCallMethodClicked" />
+                    <Separator />
+                    <!-- Per-cell clipboard helpers. MethodRow has no return
+                         type (only the overload-picker RPC carries that), so
+                         the 3rd item copies the row's Address column instead.
+                         Single-select only; multi-select is a follow-up. -->
+                    <MenuItem Header="{StaticResource Browser.CopyMethodNameMenu}"
+                              Click="OnCopyMethodNameClicked" />
+                    <MenuItem Header="{StaticResource Browser.CopyMethodAddressMenu}"
+                              Click="OnCopyMethodAddressClicked" />
+                    <MenuItem Header="{StaticResource Browser.CopyMethodDeclaredInMenu}"
+                              Click="OnCopyMethodDeclaredInClicked" />
                   </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
