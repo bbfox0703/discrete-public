@@ -71,15 +71,16 @@
 
     <!-- Rows grid. Three columns: instance address, field address, decoded
          value. CommandParameter binds to the row VM so the per-row "Copy"
-         menu items reach the right tuple without code-behind.
-         Bound to FilteredRows (post-filter projection); the underlying Rows
+         menu items reach the right tuple without code-behind. Bound to
+         FilteredRows (post-filter projection); the underlying Rows
          collection stays intact for Copy commands.
-         SortMemberPath set explicitly on every column — without it Avalonia's
-         DataGrid auto-sort can't resolve the property path in AOT builds
-         (the compiled-binding `x:DataType` annotation on the column binding
-         is invisible to the runtime sort comparer). -->
-    <DataGrid x:Name="RowsGrid"
-              ItemsSource="{Binding FilteredRows}"
+         Sort note: column Binding uses NO `x:DataType=` annotation —
+         Avalonia 12's DataGrid auto-sort works on runtime-path bindings
+         but silently no-ops when the column binding compiles to a typed
+         delegate (the AOT-safe path doesn't expose the path string the
+         sort comparer needs). Cross-checked against CrimsonAtomtic — same
+         framework + AOT, sort works because columns omit x:DataType. -->
+    <DataGrid ItemsSource="{Binding FilteredRows}"
               IsReadOnly="True"
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
@@ -101,16 +102,13 @@
       </DataGrid.ContextMenu>
       <DataGrid.Columns>
         <DataGridTextColumn Header="{StaticResource FieldAcross.ColInstance}" Width="200"
-                            Binding="{Binding Instance, x:DataType=vm:FieldAcrossInstanceRow}"
-                            SortMemberPath="Instance"
+                            Binding="{Binding Instance}"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource FieldAcross.ColFieldAddress}" Width="200"
-                            Binding="{Binding FieldAddress, x:DataType=vm:FieldAcrossInstanceRow}"
-                            SortMemberPath="FieldAddress"
+                            Binding="{Binding FieldAddress}"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource FieldAcross.ColValue}" Width="*"
-                            Binding="{Binding Value, x:DataType=vm:FieldAcrossInstanceRow}"
-                            SortMemberPath="Value"
+                            Binding="{Binding Value}"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
       </DataGrid.Columns>
     </DataGrid>

@@ -127,21 +127,21 @@
         </DataGridTemplateColumn>
 
         <DataGridTextColumn Header="{StaticResource Deploy.ColName}"     Width="240"
-                            Binding="{Binding DisplayName, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding DisplayName}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColBackend}"  Width="80"
-                            Binding="{Binding BackendLabel, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding BackendLabel}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColBitness}"  Width="60"
-                            Binding="{Binding BitnessLabel, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding BitnessLabel}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColProxy}"    Width="100"
-                            Binding="{Binding ProxyLabel, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding ProxyLabel}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColStatus}"   Width="200"
-                            Binding="{Binding DeployStatusLabel, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding DeployStatusLabel}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColVersion}"  Width="180"
-                            Binding="{Binding VersionLabel, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding VersionLabel}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColLastMessage}" Width="240"
-                            Binding="{Binding LastOperationMessage, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding LastOperationMessage}" />
         <DataGridTextColumn Header="{StaticResource Deploy.ColPath}"     Width="*"
-                            Binding="{Binding ExePath, x:DataType=m:ProxyGameRow}" />
+                            Binding="{Binding ExePath}" />
       </DataGrid.Columns>
     </DataGrid>
   </DockPanel>

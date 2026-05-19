@@ -157,11 +157,11 @@
               GridLinesVisibility="Horizontal">
       <DataGrid.Columns>
         <DataGridTextColumn Header="{StaticResource MethodCall.ParamColType}" Width="160"
-                            Binding="{Binding TypeName, x:DataType=vm:MethodCallParamRow}"
+                            Binding="{Binding TypeName}"
                             IsReadOnly="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource MethodCall.ParamColName}" Width="140"
-                            Binding="{Binding Name, x:DataType=vm:MethodCallParamRow}"
+                            Binding="{Binding Name}"
                             IsReadOnly="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <!-- Phase 19d-3 — smart-typed value editor: TextBox / NumericUpDown /

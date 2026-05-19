@@ -111,22 +111,22 @@
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSignature}" Width="*"
-                            Binding="{Binding SignatureLabel, x:DataType=vm:MethodOverloadRow}"
+                            Binding="{Binding SignatureLabel}"
                             IsReadOnly="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColReturn}" Width="120"
-                            Binding="{Binding ReturnType, x:DataType=vm:MethodOverloadRow}"
+                            Binding="{Binding ReturnType}"
                             IsReadOnly="True" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColAddress}" Width="160"
-                            Binding="{Binding Address, x:DataType=vm:MethodOverloadRow}"
+                            Binding="{Binding Address}"
                             IsReadOnly="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSuffix}" Width="120"
-                            Binding="{Binding HumanSuffix, x:DataType=vm:MethodOverloadRow}"
+                            Binding="{Binding HumanSuffix}"
                             IsReadOnly="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColModifiers}" Width="110"
-                            Binding="{Binding ModifiersLabel, x:DataType=vm:MethodOverloadRow}"
+                            Binding="{Binding ModifiersLabel}"
                             IsReadOnly="True" />
       </DataGrid.Columns>
     </DataGrid>

@@ -61,13 +61,13 @@
               x:DataType="vm:ProcessPickerViewModel">
       <DataGrid.Columns>
         <DataGridTextColumn Header="{StaticResource Picker.ColPid}"     Width="80"
-                            Binding="{Binding Pid, x:DataType=vm:ProcessRow}" />
+                            Binding="{Binding Pid}" />
         <DataGridTextColumn Header="{StaticResource Picker.ColName}"    Width="180"
-                            Binding="{Binding Name, x:DataType=vm:ProcessRow}" />
+                            Binding="{Binding Name}" />
         <DataGridTextColumn Header="{StaticResource Picker.ColBackend}" Width="90"
-                            Binding="{Binding BackendLabel, x:DataType=vm:ProcessRow}" />
+                            Binding="{Binding BackendLabel}" />
         <DataGridTextColumn Header="{StaticResource Picker.ColPath}"    Width="*"
-                            Binding="{Binding Path, x:DataType=vm:ProcessRow}" />
+                            Binding="{Binding Path}" />
       </DataGrid.Columns>
     </DataGrid>
   </DockPanel>

@@ -437,7 +437,7 @@
                     </DataGridTemplateColumn.CellTemplate>
                   </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
-                                      Binding="{Binding OffsetHex, x:DataType=vm:FieldRow}"
+                                      Binding="{Binding OffsetHex}"
                                       SortMemberPath="Offset" />
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColType}"
                                           Width="*" SortMemberPath="Type">
@@ -452,11 +452,11 @@
                     </DataGridTemplateColumn.CellTemplate>
                   </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"  Width="80"
-                                      Binding="{Binding FlagsHex, x:DataType=vm:FieldRow}" />
+                                      Binding="{Binding FlagsHex}" />
                   <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
-                                          Binding="{Binding IsStatic, x:DataType=vm:FieldRow}" />
+                                          Binding="{Binding IsStatic}" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                      Binding="{Binding DeclaredIn, x:DataType=vm:FieldRow}" />
+                                      Binding="{Binding DeclaredIn}" />
                 </DataGrid.Columns>
               </DataGrid>
             </DockPanel>
@@ -694,7 +694,7 @@
                         </DataGridTemplateColumn.CellTemplate>
                       </DataGridTemplateColumn>
                       <DataGridTextColumn Header="{StaticResource Browser.ColOffset}" Width="80"
-                                          Binding="{Binding OffsetHex, x:DataType=vm:WalkedFieldNode}"
+                                          Binding="{Binding OffsetHex}"
                                           SortMemberPath="Offset" />
                       <!-- Field storage address. Live + per-instance, so a
                            glance at the column lets the user spot which
@@ -703,14 +703,14 @@
                            pointer dereference value, when relevant, lives
                            in the Value column so it's not duplicated here. -->
                       <DataGridTextColumn Header="{StaticResource Inspector.ColAddress}" Width="155"
-                                          Binding="{Binding Address, x:DataType=vm:WalkedFieldNode}"
+                                          Binding="{Binding Address}"
                                           FontFamily="Consolas,Cascadia Mono,monospace" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
-                                          Binding="{Binding Type, x:DataType=vm:WalkedFieldNode}" />
+                                          Binding="{Binding Type}" />
                       <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
-                                          Binding="{Binding DisplayValue, x:DataType=vm:WalkedFieldNode}" />
+                                          Binding="{Binding DisplayValue}" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                          Binding="{Binding DeclaredIn, x:DataType=vm:WalkedFieldNode}" />
+                                          Binding="{Binding DeclaredIn}" />
                       <!-- Phase 11.6: per-row action buttons. addr / ptr /
                            name copy the corresponding string to clipboard;
                            HEX hands the row's effective address to AOBMaker's
@@ -814,15 +814,15 @@
                     </DataGridTemplateColumn.CellTemplate>
                   </DataGridTemplateColumn>
                   <DataGridTextColumn Header="{StaticResource Browser.ColAddress}" Width="160"
-                                      Binding="{Binding Address, x:DataType=vm:MethodRow}" />
+                                      Binding="{Binding Address}" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColToken}"   Width="100"
-                                      Binding="{Binding TokenHex, x:DataType=vm:MethodRow}" />
+                                      Binding="{Binding TokenHex}" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColFlags}"   Width="80"
-                                      Binding="{Binding FlagsHex, x:DataType=vm:MethodRow}" />
+                                      Binding="{Binding FlagsHex}" />
                   <DataGridCheckBoxColumn Header="{StaticResource Browser.ColStatic}" Width="60"
-                                          Binding="{Binding IsStatic, x:DataType=vm:MethodRow}" />
+                                          Binding="{Binding IsStatic}" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                      Binding="{Binding DeclaredIn, x:DataType=vm:MethodRow}" />
+                                      Binding="{Binding DeclaredIn}" />
                 </DataGrid.Columns>
               </DataGrid>
             </DockPanel>
