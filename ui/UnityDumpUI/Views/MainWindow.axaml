@@ -233,6 +233,8 @@
             <ContextMenu>
               <MenuItem Header="{StaticResource Browser.InspectMenuItem}"
                         Command="{Binding InspectSelectedClassCommand}" />
+              <MenuItem Header="{StaticResource Browser.CopyClassNameMenu}"
+                        Click="OnCopyClassNameClicked" />
             </ContextMenu>
           </ListBox.ContextMenu>
           <ListBox.ItemTemplate>

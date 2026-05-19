@@ -369,6 +369,7 @@ Closed in this session, kept here as crossed-out reference until next prune:
 - ~~**Phase 16 docs**~~ — ✅ closed 2026-05-07. All planned doc files now exist (see Phase Overview table).
 - ~~**Phase 5 segment 2d cross-version smoke**~~ — ✅ partially closed 2026-05-07. v29 / v31 / v39 verified; v24 partial (registration + R4/R8 OK, I*/U* decoder bug); v27 still uncovered. See full table in [§Phase 5 segment 2d cross-version smoke](#phase-5-segment-2d-cross-version-smoke) below.
 - ~~**Phase 18 multi-overload AA-script user-click smoke**~~ — ✅ closed 2026-05-07 against Farthest Frontier `ItemBundle.AddItems` (2 overloads).
+- ~~**Classes list — "Copy class name" right-click menu**~~ — ✅ shipped 2026-05-19 (build #307). Sibling to "Find instances" / "Inspect (find instances)…" on the Classes ListBox. Pushes `ClassItem.DisplayName` (`"Namespace.Name"`, or just `Name` when namespace is empty) to the clipboard via the existing `Browser.CopyToClipboardAsync` `DataTransfer` pattern. Single-select (matches the ListBox's selection mode); multi-select deferred. Release + Tests + AOT Publish all clean (163/163 tests pass).
 
 Genuine open items:
 
