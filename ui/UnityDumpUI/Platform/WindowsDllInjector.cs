@@ -7,8 +7,16 @@
 // AOT-safe: LibraryImport source generators (no DllImport runtime marshalling).
 // Synchronous internally; the async wrapper just shoves the work onto a
 // thread-pool thread so the UI doesn't block on WaitForSingleObject.
+//
+// Phase 12d-5: x64 → x86 cross-bitness inject. The in-process injector can't
+// usefully target a 32-bit process from x64 (LoadLibraryW lives in WOW64's
+// kernel32, not the x64 one, and the HMODULE return can't round-trip through
+// the x64 thread API). When the target is WOW64, we shell out to a tiny x86
+// helper `dist/x86/inject-x86.exe` that does the inject from same-bitness
+// world. The helper's exit code maps cleanly to InjectResult.
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -46,9 +54,16 @@ public sealed partial class WindowsDllInjector : IDllInjector
 
         try
         {
-            // x64 guard — refuse 32-bit targets so we don't load an x64 DLL into WOW64.
+            // Phase 12d-5: cross-bitness inject. WOW64 = target is 32-bit; shell out
+            // to dist/x86/inject-x86.exe so the LoadLibraryW call runs from a
+            // same-bitness world. The caller is expected to have supplied an x86
+            // DLL path (MainWindowViewModel routes through dist/x86/ on row.IsWow64).
             if (IsWow64Process(hProc, out bool wow64) && wow64)
-                return InjectResult.Failure("Target is a 32-bit process. UnityCEDumper is x64-only.");
+            {
+                CloseHandle(hProc);
+                hProc = IntPtr.Zero;
+                return InjectViaX86Helper(pid, dllPath);
+            }
 
             byte[] pathBytes = Encoding.Unicode.GetBytes(dllPath + "\0");
             UIntPtr size = (UIntPtr)pathBytes.Length;
@@ -108,6 +123,110 @@ public sealed partial class WindowsDllInjector : IDllInjector
             CloseHandle(hProc);
         }
     }
+
+    /// <summary>
+    /// Cross-bitness inject: shell out to the bundled x86 helper.
+    /// Resolves dist/x86/inject-x86.exe next to DiscreteUI.exe.
+    /// Maps the helper's exit codes (0/1/2/3) back to InjectResult so the
+    /// caller's error-handling stays uniform between in-process and
+    /// out-of-process paths.
+    /// </summary>
+    private static InjectResult InjectViaX86Helper(int pid, string dllPath)
+    {
+        // Resolve next to the actual .exe on disk, NOT AppContext.BaseDirectory —
+        // same caveat as MainWindowViewModel's DLL-path resolution (single-file
+        // self-extract puts BaseDirectory in a temp dir).
+        string? baseDir = Environment.ProcessPath is { Length: > 0 } pp
+                          ? Path.GetDirectoryName(pp) : null;
+        if (string.IsNullOrEmpty(baseDir)) baseDir = AppContext.BaseDirectory;
+        string helperPath = Path.Combine(baseDir, "x86", "inject-x86.exe");
+        if (!File.Exists(helperPath))
+        {
+            return InjectResult.Failure(
+                $"x86 inject helper not found at {helperPath}. Build with " +
+                "`build.ps1 -Target DLL -Arch x86` or copy dist\\x86\\inject-x86.exe " +
+                "next to DiscreteUI.exe.");
+        }
+
+        var psi = new ProcessStartInfo(helperPath)
+        {
+            UseShellExecute        = false,
+            CreateNoWindow         = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+        };
+        psi.ArgumentList.Add(pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        psi.ArgumentList.Add(dllPath);
+
+        Process? proc;
+        try
+        {
+            proc = Process.Start(psi);
+            if (proc is null)
+                return InjectResult.Failure("Process.Start(inject-x86.exe) returned null.");
+        }
+        catch (Exception ex)
+        {
+            return InjectResult.Failure($"Failed to launch {helperPath}: {ex.Message}");
+        }
+
+        string stdout = proc.StandardOutput.ReadToEnd();
+        string stderr = proc.StandardError.ReadToEnd();
+        // 30s budget is conservative; the helper itself caps at 10s for the
+        // remote thread + ~ms for the rest. Anything beyond 30s is hung.
+        if (!proc.WaitForExit(30_000))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+            return InjectResult.Failure(
+                "inject-x86.exe did not exit within 30 s; killed.");
+        }
+
+        int code = proc.ExitCode;
+        if (code == 0)
+        {
+            // Parse `inject-x86: LoadLibraryW=0x<hex> (thread exit code)` out of
+            // stdout so the caller's logger gets a useful HMODULE value too.
+            uint hmod = 0;
+            int idx = stdout.IndexOf("LoadLibraryW=0x", StringComparison.Ordinal);
+            if (idx >= 0)
+            {
+                int hexStart = idx + "LoadLibraryW=0x".Length;
+                int hexEnd = hexStart;
+                while (hexEnd < stdout.Length && IsHex(stdout[hexEnd])) hexEnd++;
+                if (hexEnd > hexStart)
+                {
+                    _ = uint.TryParse(
+                        stdout.AsSpan(hexStart, hexEnd - hexStart),
+                        System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out hmod);
+                }
+            }
+            return InjectResult.Success(hmod);
+        }
+
+        // Map the helper's non-zero exit codes back through InjectResult.
+        // stderr already carries the human-readable reason; concat both
+        // streams in case the helper logged context to stdout pre-failure.
+        string reason = string.IsNullOrWhiteSpace(stderr)
+            ? $"inject-x86.exe exited with code {code}."
+            : stderr.Trim();
+        if (code == 2)
+        {
+            reason = "inject-x86 refused to inject into an x64 target. " +
+                     "Use the in-process injector for x64 processes. " +
+                     "(Did ProcessPicker mis-detect bitness?)";
+        }
+        else if (code == 3)
+        {
+            reason = "x86 LoadLibraryW returned NULL — DLL failed to load. " +
+                     "Check %LOCALAPPDATA%\\UnityCEDumper\\Logs.";
+        }
+        return InjectResult.Failure(reason);
+    }
+
+    private static bool IsHex(char c) =>
+        (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 
     // ---------- P/Invoke (LibraryImport — AOT-friendly source-gen) ----------
 

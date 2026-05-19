@@ -119,3 +119,12 @@ option(BUILD_CLI "Build the offline metadata-cli (Phase 13)" OFF)
 if(BUILD_CLI)
     add_subdirectory(tools/metadata-cli)
 endif()
+
+# Phase 12d-5 — x86 inject helper. Only meaningful when building x86;
+# DiscreteUI x64 shells out to it for Pick & Inject on a 32-bit target.
+# Auto-included in the x86 build so users always have it alongside the
+# x86 backend DLL + proxies. Silently skipped under x64 (the in-process
+# .NET injector handles x64 targets directly).
+if(UNITYCEDUMPER_ARCH STREQUAL "x86")
+    add_subdirectory(tools/inject-x86)
+endif()

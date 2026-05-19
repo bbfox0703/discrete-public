@@ -268,9 +268,12 @@ function Build-DllForArch {
     }
 
     $produced = 0
-    Get-ChildItem $outDir -File | Where-Object { $_.Extension -in '.dll', '.pdb' } | ForEach-Object {
+    # .exe added Phase 12d-5 — inject-x86.exe is bundled into the x86
+    # build so DiscreteUI can shell out to it for Pick & Inject on
+    # 32-bit targets. Always-empty list under x64.
+    Get-ChildItem $outDir -File | Where-Object { $_.Extension -in '.dll', '.pdb', '.exe' } | ForEach-Object {
         Copy-Item $_.FullName -Destination $archDistDir -Force
-        if ($_.Extension -eq '.dll') {
+        if ($_.Extension -eq '.dll' -or $_.Extension -eq '.exe') {
             $sz = Get-FileSize (Join-Path $archDistDir $_.Name)
             $relDir = if ($Arch -eq 'x86') { 'dist\x86\' } else { 'dist\' }
             Write-Ok "$($_.Name) ($sz) -> $relDir"

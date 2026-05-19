@@ -617,6 +617,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Phase 12d-5: cross-bitness routing. 32-bit Unity targets (WOW64)
+        // need the x86 Mono DLL from dist/x86/; the WindowsDllInjector
+        // then shells out to dist/x86/inject-x86.exe to do the actual
+        // LoadLibraryW (the in-process x64 injector can't cleanly target
+        // WOW64). x86 IL2CPP isn't a shipping configuration — anyone
+        // running a 32-bit Unity game today is on Mono.
+        if (row.IsWow64 && row.Backend == UnityBackend.IL2CPP)
+        {
+            ErrorMessage = $"PID {row.Pid} ({row.Name}) — 32-bit IL2CPP isn't supported. " +
+                           "No shipping IL2CPP target is 32-bit. Pick another process.";
+            return;
+        }
         string dllName = row.Backend == UnityBackend.IL2CPP
             ? "UnityDumper-IL2CPP.dll"
             : "UnityDumper-Mono.dll";
@@ -629,7 +641,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         string? baseDir = Environment.ProcessPath is { Length: > 0 } pp
                           ? Path.GetDirectoryName(pp) : null;
         if (string.IsNullOrEmpty(baseDir)) baseDir = AppContext.BaseDirectory;
-        string dllPath = Path.Combine(baseDir, dllName);
+        string dllPath = row.IsWow64
+            ? Path.Combine(baseDir, "x86", dllName)
+            : Path.Combine(baseDir, dllName);
 
         ErrorMessage = null;
         IsBusy = true;
