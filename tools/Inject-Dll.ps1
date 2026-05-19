@@ -93,7 +93,12 @@ if ($Target -match '^\d+$') {
 Write-Host "Proc: $($proc.ProcessName) (PID $($proc.Id))" -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
-# x64 guard
+# Bitness detection — route through inject-x86.exe for WOW64 targets.
+# Phase 12d-5: the old x64-only guard refused to inject into 32-bit
+# processes. Now we shell out to the bundled x86 inject helper instead,
+# matching DiscreteUI's WindowsDllInjector behaviour. If the caller
+# passed -DllPath explicitly we honour it; otherwise auto-route to
+# dist\x86\UnityDumper-Mono.dll alongside the helper.
 # ---------------------------------------------------------------------------
 Add-Type -Namespace UCED -Name BitnessProbe -MemberDefinition @'
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
@@ -101,7 +106,41 @@ Add-Type -Namespace UCED -Name BitnessProbe -MemberDefinition @'
 '@
 $wow = $false
 [void][UCED.BitnessProbe]::IsWow64Process($proc.Handle, [ref]$wow)
-if ($wow) { throw "Target is a 32-bit process. UnityCEDumper is x64-only." }
+if ($wow) {
+    if ($Backend -eq 'IL2CPP') {
+        throw "Target is 32-bit but -Backend IL2CPP requested. No shipping IL2CPP target is 32-bit; re-check the picker."
+    }
+    $injectX86 = Join-Path $RepoRoot 'dist\x86\inject-x86.exe'
+    if (-not (Test-Path $injectX86)) {
+        throw "Target is 32-bit but $injectX86 is missing. Build with .\build.ps1 -Target DLL -Arch x86"
+    }
+    # Auto-route the DLL to dist\x86\ unless the caller passed -DllPath.
+    # The current $DllPath came from the x64 search above, which would be wrong.
+    if (-not $PSBoundParameters.ContainsKey('DllPath') -and
+        $DllPath -notlike '*dist\x86\*') {
+        $x86Dll = Join-Path $RepoRoot 'dist\x86\UnityDumper-Mono.dll'
+        if (-not (Test-Path $x86Dll)) {
+            throw "x86 Mono DLL not found at $x86Dll. Build with .\build.ps1 -Target DLL -Arch x86 -Backend Mono"
+        }
+        Write-Host "DLL : $x86Dll (auto-routed for 32-bit target)" -ForegroundColor Cyan
+        $DllPath = $x86Dll
+    }
+    Write-Host "Routing through $injectX86 (32-bit target)" -ForegroundColor Cyan
+    & $injectX86 $proc.Id $DllPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "inject-x86.exe failed with exit code $LASTEXITCODE."
+    }
+
+    # Verify the per-PID log appeared (same shape as the x64 path's tail).
+    $logFile = Join-Path $env:LOCALAPPDATA "UnityCEDumper\Logs\$($proc.Id)\init\current.log"
+    if (Test-Path $logFile) {
+        Write-Host ''
+        Write-Host "Log: $logFile" -ForegroundColor Green
+        Write-Host '--- last 20 lines ---' -ForegroundColor DarkGray
+        Get-Content $logFile -Tail 20
+    }
+    return
+}
 
 # ---------------------------------------------------------------------------
 # P/Invoke surface
