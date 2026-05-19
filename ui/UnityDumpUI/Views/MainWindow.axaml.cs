@@ -416,6 +416,89 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Resolve the right-clicked row of a DataGrid hosting <typeparamref name="T"/>
+    /// rows. Prefers the menu's PlacementTarget (the row beneath the pointer when
+    /// the menu opened) and falls back to the grid's current SelectedItem when
+    /// the menu was opened away from a row. Mirrors the pattern in
+    /// <see cref="ResolveMethodRow"/>.
+    /// </summary>
+    private static T? ResolveDataGridRow<T>(object? sender, DataGrid? fallbackGrid)
+        where T : class
+    {
+        if (sender is Avalonia.Controls.MenuItem mi &&
+            mi.Parent is Avalonia.Controls.ContextMenu cm &&
+            cm.PlacementTarget is Avalonia.Controls.DataGrid placedGrid &&
+            placedGrid.SelectedItem is T sel)
+        {
+            return sel;
+        }
+        return fallbackGrid?.SelectedItem as T;
+    }
+
+    private async Task CopyBrowserTextAsync(string? text)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (text is null) return;
+        if (vm.Browser.CopyToClipboardAsync is { } copy)
+        {
+            await copy(text).ConfigureAwait(true);
+        }
+    }
+
+    // Browser Fields tab per-cell copy. Single-select only; multi-select
+    // handling is a v2 follow-up (would need to join values per column
+    // with newlines). See en.axaml Browser.CopyField*Menu strings.
+    private async void OnCopyFieldNameClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<FieldRow>(sender, this.FindControl<DataGrid>("BrowserFieldsDataGrid"));
+        if (row is null) return;
+        await CopyBrowserTextAsync(row.Name).ConfigureAwait(true);
+    }
+
+    private async void OnCopyFieldTypeClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<FieldRow>(sender, this.FindControl<DataGrid>("BrowserFieldsDataGrid"));
+        if (row is null) return;
+        await CopyBrowserTextAsync(row.Type).ConfigureAwait(true);
+    }
+
+    private async void OnCopyFieldDeclaredInClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<FieldRow>(sender, this.FindControl<DataGrid>("BrowserFieldsDataGrid"));
+        if (row is null) return;
+        await CopyBrowserTextAsync(row.DeclaredIn).ConfigureAwait(true);
+    }
+
+    // Browser Methods tab per-cell copy. The "Copy address" entry
+    // substitutes for "Copy return type" — MethodRow doesn't carry a return
+    // type (only the FindMethodInstances RPC does), and Address is a visible
+    // column on this grid. Single-select only; multi-select is a follow-up.
+    private async void OnCopyMethodNameClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<MethodRow>(sender, this.FindControl<DataGrid>("MethodsDataGrid"));
+        if (row is null) return;
+        await CopyBrowserTextAsync(row.Name).ConfigureAwait(true);
+    }
+
+    private async void OnCopyMethodAddressClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<MethodRow>(sender, this.FindControl<DataGrid>("MethodsDataGrid"));
+        if (row is null) return;
+        // MethodRow.Address is null for some rows (no JIT'd entry yet on
+        // Mono, or AOT entries that couldn't be resolved). Copying an empty
+        // string would be useless; bail out instead so the user notices.
+        if (string.IsNullOrEmpty(row.Address)) return;
+        await CopyBrowserTextAsync(row.Address).ConfigureAwait(true);
+    }
+
+    private async void OnCopyMethodDeclaredInClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<MethodRow>(sender, this.FindControl<DataGrid>("MethodsDataGrid"));
+        if (row is null) return;
+        await CopyBrowserTextAsync(row.DeclaredIn).ConfigureAwait(true);
+    }
+
     private async void OnCopyInstanceAddressClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
