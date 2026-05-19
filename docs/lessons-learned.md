@@ -264,39 +264,64 @@ Any new JSON serialization path must go through the source-gen
 `JsonSerializer.SerializeToElement<T>(value)` trips IL2026 + IL3050
 under all four trim/AOT analyzers.
 
-### `x:DataType` on `DataGridTextColumn` Binding silently kills column sort under AOT
+### `x:DataType` on the `DataGrid` element silently kills column sort under AOT
 
-With `AvaloniaUseCompiledBindingsByDefault=true`, adding an explicit
-`x:DataType=vm:RowType` annotation inside a column's Binding —
+With `AvaloniaUseCompiledBindingsByDefault=true`, setting an
+`x:DataType="vm:SomeViewModel"` annotation on the `DataGrid`
+**element itself** —
 
 ```xml
 <!-- BROKEN: header click does nothing -->
-<DataGridTextColumn Binding="{Binding Foo, x:DataType=vm:RowType}" />
+<DataGrid ItemsSource="{Binding Rows}"
+          CanUserSortColumns="True"
+          x:DataType="vm:ListViewModel">
+  <DataGrid.Columns>
+    <DataGridTextColumn Binding="{Binding Foo}" />
+  </DataGrid.Columns>
+</DataGrid>
 ```
 
-— switches the column cell binding to the compiled-binding code
-path. That path generates a typed delegate but doesn't expose the
-property-name path string the DataGrid's runtime sort comparer
-relies on. Result: header clicks become silent no-ops in published
-(AOT) builds, while the column still renders correctly.
+— anchors the compile-time DataContext type at the DataGrid scope.
+Column cell bindings (`{Binding Foo}`) then get compiled against
+that scope, but `Foo` doesn't live on `ListViewModel` — it lives on
+each row item. Avalonia silently falls back to runtime resolution
+for the cell value (so the column still renders correctly), but the
+DataGrid's sort comparer reads the column binding's path through
+the *compiled* metadata and can't find a comparable accessor.
+Result: header clicks become silent no-ops in published (AOT)
+builds, while the data displays fine.
 
-Fix is to drop the annotation entirely; Avalonia infers the row
-type from the DataGrid's `ItemsSource` (e.g. `ObservableCollection<RowType>`):
+Fix is to drop the `x:DataType` attribute from the `DataGrid`
+element. The Window-level `x:DataType` already establishes the
+parent VM type for `ItemsSource="{Binding Rows}"`; the column
+bindings then resolve against each row item via runtime path lookup
+(which DataGrid's `TrimmerRootAssembly` preserves under AOT):
 
 ```xml
 <!-- WORKS: header click sorts as expected -->
-<DataGridTextColumn Binding="{Binding Foo}" />
+<DataGrid ItemsSource="{Binding Rows}"
+          CanUserSortColumns="True">
+  <DataGrid.Columns>
+    <DataGridTextColumn Binding="{Binding Foo}" />
+  </DataGrid.Columns>
+</DataGrid>
 ```
 
 Cross-checked against sibling project `D:\Github\CrimsonAtomtic`
-(same Avalonia 12 + Native AOT setup). `SortMemberPath` /
-`CustomSortComparer` are not needed in either project — the default
-runtime-path sort works once `x:DataType` is gone.
+(same Avalonia 12 + Native AOT setup, all DataGrids sort correctly).
+The diff is exactly this: their DataGrid elements never carry
+`x:DataType`. `SortMemberPath` / `CustomSortComparer` are not
+needed in either project once this attribute is gone.
+
+The same trap also applies — to a lesser degree — to `x:DataType`
+*inside the column Binding itself* (`Binding="{Binding Foo,
+x:DataType=vm:RowType}"`); strip that too for safety.
 
 The trap is that the IDE / build pipeline never warns about this:
 build is green, AOT publish is green, the column renders, and only
 manual interactive testing of header click reveals it. If a new
-DataGrid is added, omit `x:DataType` on column Bindings.
+DataGrid is added, omit `x:DataType` on both the DataGrid element
+and column Bindings — let Avalonia infer from `ItemsSource`.
 
 - **In-Core code** can reach `ProtocolJsonContext` directly. Pattern:
   `Str(string)` / `Int(int)` helpers in

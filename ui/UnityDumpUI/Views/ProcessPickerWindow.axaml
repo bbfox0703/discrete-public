@@ -57,8 +57,7 @@
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
               CanUserSortColumns="True"
-              GridLinesVisibility="Horizontal"
-              x:DataType="vm:ProcessPickerViewModel">
+              GridLinesVisibility="Horizontal">
       <DataGrid.Columns>
         <DataGridTextColumn Header="{StaticResource Picker.ColPid}"     Width="80"
                             Binding="{Binding Pid}" />

@@ -82,8 +82,7 @@
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
               CanUserSortColumns="False"
-              GridLinesVisibility="Horizontal"
-              x:DataType="vm:MethodOverloadsViewModel">
+              GridLinesVisibility="Horizontal">
       <!-- Phase 19d: right-click any row → "Call method…" opens the
            MethodCallWindow seeded from that overload's signature. The
            CommandParameter is the row VM via $parent[DataGrid].SelectedItem

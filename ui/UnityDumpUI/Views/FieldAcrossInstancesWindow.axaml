@@ -85,8 +85,7 @@
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
               CanUserSortColumns="True"
-              GridLinesVisibility="Horizontal"
-              x:DataType="vm:FieldAcrossInstancesViewModel">
+              GridLinesVisibility="Horizontal">
       <DataGrid.ContextMenu>
         <ContextMenu>
           <MenuItem Header="{StaticResource FieldAcross.CopyInstanceMenu}"

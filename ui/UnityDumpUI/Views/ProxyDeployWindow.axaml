@@ -109,8 +109,7 @@
               CanUserSortColumns="True"
               CanUserReorderColumns="True"
               IsReadOnly="True"
-              GridLinesVisibility="Horizontal"
-              x:DataType="vm:ProxyDeployViewModel">
+              GridLinesVisibility="Horizontal">
       <DataGrid.Columns>
         <!-- Per-row checkbox. Template column so the box stays interactive
              even with IsReadOnly=True on the DataGrid. -->

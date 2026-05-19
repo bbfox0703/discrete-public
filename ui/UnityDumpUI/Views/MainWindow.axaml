@@ -404,8 +404,7 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
-                        GridLinesVisibility="Horizontal"
-                        x:DataType="vm:MainWindowViewModel">
+                        GridLinesVisibility="Horizontal">
                 <DataGrid.ContextMenu>
                   <ContextMenu>
                     <MenuItem Header="{StaticResource Browser.CopyCeField}"
@@ -636,8 +635,7 @@
                             CanUserResizeColumns="True"
                             CanUserReorderColumns="True"
                             CanUserSortColumns="True"
-                            GridLinesVisibility="Horizontal"
-                            x:DataType="vm:MainWindowViewModel">
+                            GridLinesVisibility="Horizontal">
                     <DataGrid.ContextMenu>
                       <ContextMenu>
                         <MenuItem Header="{StaticResource Inspector.CopyCeXmlNode}"
@@ -766,8 +764,7 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
-                        GridLinesVisibility="Horizontal"
-                        x:DataType="vm:MainWindowViewModel">
+                        GridLinesVisibility="Horizontal">
                 <DataGrid.ContextMenu>
                   <!-- Phase 18c / 19d / 19d-2: right-click any row →
                        enumerate every overload of this method on the
