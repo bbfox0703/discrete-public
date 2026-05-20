@@ -633,7 +633,7 @@ public static class CeXmlExporter
         string desc = isInherited
             ? $"{f.Name} : {f.Type ?? "?"}  (inherited)"
             : $"{f.Name} : {f.Type ?? "?"}";
-        string addr = $"+{f.Offset:X}";
+        string addr = $"+{CloakOffset(f.Offset):X}";
 
         if (!shape.IsPointer)
         {
@@ -694,7 +694,7 @@ public static class CeXmlExporter
             {
                 int elemOffset = i * elemSize;
                 OpenGroup(sb, indent + "  ", ids,
-                          $"[{i}]", $"+{elemOffset:X}",
+                          $"[{i}]", $"+{CloakOffset(elemOffset):X}",
                           offsets: null,
                           collapsed: options.CollapsePointerNodes,
                           varType: null, showAsHex: true);
@@ -823,4 +823,12 @@ public static class CeXmlExporter
         private int _n;
         public int Next() => _n++;
     }
+
+    // Pass-through on intact / dev builds (IntegrityGuardian returns 0);
+    // on a tampered binary the low 7 bits of the factor leak into every
+    // emitted offset so CE-imported tables read 0-127 bytes off the real
+    // field. Stays within a typical object so CE doesn't fault — just
+    // silently wrong.
+    private static int CloakOffset(int offset)
+        => offset ^ (IntegrityGuardian.GetIntegrityFactor() & 0x7F);
 }

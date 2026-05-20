@@ -271,6 +271,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public IAobMakerBridge AobMaker => _aobMaker;
 
     /// <summary>
+    /// Footer credit line, decoded from the XOR-shielded blob in
+    /// <see cref="StringShield"/>. Built once at VM construction so the
+    /// plaintext never appears as a literal in the assembly.
+    /// </summary>
+    public string CopyrightText { get; } = $"© {StringShield.GetCopyright()}";
+
+    /// <summary>
     /// Selected index of the right-pane TabControl. The Address Lookup tab
     /// is index 3 (Fields=0 / Inspector=1 / Methods=2 / AddressLookup=3).
     /// Bound TwoWay so cross-tab handoff (e.g. the inspector's right-click

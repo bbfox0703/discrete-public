@@ -388,6 +388,23 @@ function Build-Ui {
 
     Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
 
+    # AOT publish only: stamp the SHA256 of the published binary into the
+    # IntegrityGuardian slot so the runtime self-check passes. Debug /
+    # Release builds keep the 0xCC dev-mode placeholder, which the guardian
+    # treats as "skip all checks" — same shape as AOBMaker.
+    if ($Mode -eq 'Publish') {
+        $injectScript = Join-Path $RepoRoot 'tools\inject-hash.ps1'
+        $finalExe     = Join-Path $DIST_DIR 'DiscreteUI.exe'
+        if (Test-Path $injectScript) {
+            Write-Step 'Injecting integrity hash into DiscreteUI.exe'
+            & $injectScript -ExePath $finalExe
+            if ($LASTEXITCODE -ne 0) { Write-Fail 'Integrity hash injection failed'; return $false }
+        }
+        else {
+            Write-Info "tools\inject-hash.ps1 not found, skipping integrity stamp"
+        }
+    }
+
     $exeSize = Get-FileSize (Join-Path $DIST_DIR 'DiscreteUI.exe')
     Write-Ok "DiscreteUI.exe ($exeSize) -> dist\"
     return $true
