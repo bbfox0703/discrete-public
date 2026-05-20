@@ -2,6 +2,8 @@ using System;
 using System.Threading;
 using Avalonia;
 using UnityDumpUI.Core;
+using UnityDumpUI.Core.Services;
+using UnityDumpUI.Platform;
 
 namespace UnityDumpUI;
 
@@ -20,6 +22,12 @@ internal static class Program
             // Another instance already running. Exit silently — production version may bring it to front.
             return 0;
         }
+
+        // Wire the UI-side runtime metadata token into Core's aggregator so
+        // Core consumers (CT export, etc.) can OR all three slot factors
+        // together. Without this, Core would only see slots A + B and slot C
+        // would only guard UI-side consumers.
+        TokenAggregator.RegisterExternal(WindowsRuntimeMetadata.Read);
 
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }

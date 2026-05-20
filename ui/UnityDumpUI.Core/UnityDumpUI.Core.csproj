@@ -35,6 +35,10 @@
          on a per-test GUID-suffixed pipe (no collision with a real AOBMaker
          install on the dev box). -->
     <InternalsVisibleTo Include="UnityDumpUI.Tests" />
+    <!-- UI-side platform helpers reach into Core's SchemaConstants pool for
+         their own self-check tokens. Keeping SchemaConstants internal limits
+         the public surface; this is the only cross-assembly consumer. -->
+    <InternalsVisibleTo Include="DiscreteUI" />
   </ItemGroup>
 
   <ItemGroup>

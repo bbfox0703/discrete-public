@@ -272,10 +272,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     /// <summary>
     /// Footer credit line, decoded from the XOR-shielded blob in
-    /// <see cref="StringShield"/>. Built once at VM construction so the
+    /// <see cref="LocalizedText"/>. Built once at VM construction so the
     /// plaintext never appears as a literal in the assembly.
     /// </summary>
-    public string CopyrightText { get; } = $"© {StringShield.GetCopyright()}";
+    public string CopyrightText { get; } = $"© {LocalizedText.GetCopyright()}";
 
     /// <summary>
     /// Selected index of the right-pane TabControl. The Address Lookup tab

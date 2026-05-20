@@ -824,11 +824,12 @@ public static class CeXmlExporter
         public int Next() => _n++;
     }
 
-    // Pass-through on intact / dev builds (IntegrityGuardian returns 0);
-    // on a tampered binary the low 7 bits of the factor leak into every
-    // emitted offset so CE-imported tables read 0-127 bytes off the real
-    // field. Stays within a typical object so CE doesn't fault — just
-    // silently wrong.
+    // Pass-through on intact / dev builds; on a tampered binary the low 7
+    // bits of the combined token leak into every emitted offset so CE-imported
+    // tables read 0-127 bytes off the real field. Stays within a typical
+    // object so CE doesn't fault — just silently wrong. TokenAggregator
+    // collects all three slot factors so tampering ANY hash slot triggers
+    // the poison.
     private static int CloakOffset(int offset)
-        => offset ^ (IntegrityGuardian.GetIntegrityFactor() & 0x7F);
+        => offset ^ (TokenAggregator.Combined() & 0x7F);
 }

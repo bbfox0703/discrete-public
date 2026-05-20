@@ -348,7 +348,7 @@ public static class CsxExporter
     }
 
     private static int CloakOffset(int offset)
-        => offset ^ (IntegrityGuardian.GetIntegrityFactor() & 0x7F);
+        => offset ^ (TokenAggregator.Combined() & 0x7F);
 
     // ---------- Helpers ---------------------------------------------------
 

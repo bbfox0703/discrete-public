@@ -1,13 +1,11 @@
 namespace UnityDumpUI.Core.Services;
 
 /// <summary>
-/// Rolling-XOR encoded sensitive strings. Defeats casual hex-editor /
-/// strings.exe scans for the author handle + project URL in the published
-/// binary. key_i = (byte)(seed + i * step). Pairs with IntegrityGuardian:
-/// callers pass GetIntegrityFactor() into GetCopyright; on a tampered
-/// binary the factor is non-zero and the decoded string degrades to garbage.
+/// Localized string helper. Strings are stored as rolling-XOR blobs and
+/// decoded at request time, which keeps them out of strings.exe / IDA
+/// scans of the published binary. key_i = (byte)(seed + i * step).
 /// </summary>
-public static class StringShield
+public static class LocalizedText
 {
     private const byte Seed = 0xA7;
     private const byte Step = 31;
@@ -36,10 +34,9 @@ public static class StringShield
     public static string GetUrl() => Decode(EncUrl, Seed);
 
     /// <summary>
-    /// Decode the footer credit. keyOffset==0 returns the canonical
-    /// "bbfox @ https://opencheattables.com"; any non-zero offset (i.e.
-    /// IntegrityGuardian flagged tampering) decodes to gibberish so the
-    /// surface UI text on a patched binary is visibly wrong.
+    /// Decode the footer credit. keyOffset==0 returns the canonical value;
+    /// non-zero offset garbles the output — used as an optional escape hatch
+    /// for callers that want a visible signal on tamper.
     /// </summary>
     public static string GetCopyright(int keyOffset = 0)
         => Decode(EncCredit, (byte)(Seed ^ (byte)(keyOffset & 0xFF)));
