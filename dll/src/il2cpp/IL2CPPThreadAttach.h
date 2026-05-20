@@ -19,27 +19,52 @@ class ThreadAttachGuard {
 public:
     explicit ThreadAttachGuard(Il2CppDomain* domain) {
         if (UnityCEDumper::MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()) {
-            skipped_ = true;
+            mainThreadSkip_ = true;
+            return;
+        }
+        // Phase 27 follow-up — reentrancy counter (mirror of the Mono
+        // guard's fix). 4000+ per-candidate WhatIsAt attaches were
+        // leaking finalizable Il2CppThread refs that BDWGC ran on
+        // process shutdown, accumulating a 30-40s hang. Outer scan-
+        // handler guard does ONE real attach; inner guards become
+        // counter-only no-ops.
+        if (s_attach_depth > 0) {
+            ++s_attach_depth;
+            reentrant_ = true;
             return;
         }
         const auto& r = GetResolver();
         if (r.resolved && domain != nullptr && r.thread_attach != nullptr) {
             thread_ = r.thread_attach(domain);
+            if (thread_ != nullptr) ++s_attach_depth;
         }
     }
     ~ThreadAttachGuard() {
-        if (thread_ == nullptr) return;
-        const auto& r = GetResolver();
-        if (r.thread_detach != nullptr) r.thread_detach(thread_);
+        if (reentrant_) {
+            --s_attach_depth;
+            return;
+        }
+        if (thread_ != nullptr) {
+            --s_attach_depth;
+            const auto& r = GetResolver();
+            if (r.thread_detach != nullptr) r.thread_detach(thread_);
+            return;
+        }
+        // mainThreadSkip_ or failed-attach: nothing to do.
     }
     ThreadAttachGuard(const ThreadAttachGuard&)            = delete;
     ThreadAttachGuard& operator=(const ThreadAttachGuard&) = delete;
     /// True if the guard either successfully attached OR deliberately
-    /// skipped because we're already on the main thread.
-    bool Attached() const noexcept { return thread_ != nullptr || skipped_; }
+    /// skipped because we're already on the main thread / outer-guard
+    /// reentrant scope.
+    bool Attached() const noexcept {
+        return thread_ != nullptr || mainThreadSkip_ || reentrant_;
+    }
 private:
-    Il2CppThread* thread_  = nullptr;
-    bool          skipped_ = false;
+    Il2CppThread* thread_         = nullptr;
+    bool          mainThreadSkip_ = false;
+    bool          reentrant_      = false;
+    inline static thread_local int s_attach_depth = 0;
 };
 
 }  // namespace UnityCEDumper::IL2CPP

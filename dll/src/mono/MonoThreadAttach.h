@@ -39,21 +39,43 @@ public:
         // BongoCat 2026-05-20) a process-killer because the matching
         // detach unbinds Unity's own thread handle.
         if (UnityCEDumper::MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()) {
-            skipped_ = true;
+            mainThreadSkip_ = true;
+            return;
+        }
+        // Phase 27 follow-up — reentrancy counter. Each WhatIsAt opens
+        // its own guard. In a value-scan batch with 4000+ candidates
+        // those would mean 4000+ attach/detach cycles, each of which
+        // leaves a finalizable MonoThread ref that BDWGC processes on
+        // process shutdown (observed: 44s game-close hang after a
+        // single scan on 活俠傳). With the counter, an outer scan-
+        // handler-level guard does the ONE real attach; inner guards
+        // see depth > 0 and skip the runtime call.
+        if (s_attach_depth > 0) {
+            ++s_attach_depth;
+            reentrant_ = true;
             return;
         }
         const auto& r = GetResolver();
         if (r.resolved && domain != nullptr && r.thread_attach != nullptr) {
             thread_ = r.thread_attach(domain);
+            if (thread_ != nullptr) ++s_attach_depth;
         }
     }
 
     ~ThreadAttachGuard() {
-        if (thread_ == nullptr) return;
-        const auto& r = GetResolver();
-        if (r.thread_detach != nullptr) {
-            r.thread_detach(thread_);
+        if (reentrant_) {
+            // Inner guard — just balance the counter, no detach.
+            --s_attach_depth;
+            return;
         }
+        if (thread_ != nullptr) {
+            // Outer guard that did the real attach — detach + balance.
+            --s_attach_depth;
+            const auto& r = GetResolver();
+            if (r.thread_detach != nullptr) r.thread_detach(thread_);
+            return;
+        }
+        // mainThreadSkip_ or failed-attach case: nothing to do.
     }
 
     ThreadAttachGuard(const ThreadAttachGuard&)            = delete;
@@ -62,11 +84,17 @@ public:
     /// True if the guard either successfully attached the thread OR
     /// deliberately skipped attach because we're already on the main
     /// thread (in which case runtime calls are still safe to make).
-    bool Attached() const noexcept { return thread_ != nullptr || skipped_; }
+    bool Attached() const noexcept {
+        return thread_ != nullptr || mainThreadSkip_ || reentrant_;
+    }
 
 private:
-    MonoThread* thread_  = nullptr;
-    bool        skipped_ = false;  // true = main-thread, no attach needed
+    MonoThread* thread_         = nullptr;
+    bool        mainThreadSkip_ = false;
+    bool        reentrant_      = false;
+    // Per-thread attach depth. C++17 inline variable so this header-only
+    // class doesn't need a .cpp definition.
+    inline static thread_local int s_attach_depth = 0;
 };
 
 }  // namespace UnityCEDumper::Mono

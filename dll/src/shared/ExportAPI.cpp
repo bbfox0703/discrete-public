@@ -2411,6 +2411,13 @@ void RegisterCoreHandlers() {
         Memory::ValueScanStats stats{};
         auto candidates = Memory::ScanForValue(scanReq, &stats);
 
+        // Phase 27 follow-up — open ONE outer ThreadAttachGuard for the
+        // entire WhatIsAt batch. Inner guards inside WhatIsAt become
+        // reentrant no-ops (depth > 0), so we go from N attach/detach
+        // cycles to 1. Closes the 44s-game-shutdown bug where 4K+
+        // attach cycles left finalizable refs that BDWGC ran on exit.
+        Mono::ThreadAttachGuard scanGuard(Mono::GetRootDomain());
+
         json rows = json::array();
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
         std::unordered_map<std::uintptr_t, int> perInstanceCount;
@@ -2534,6 +2541,10 @@ void RegisterCoreHandlers() {
 
         Memory::ValueScanStats stats{};
         auto rawCandidates = Memory::ScanForValue(scanReq, &stats);
+
+        // Phase 27 follow-up — outer ThreadAttachGuard for the WhatIsAt
+        // batch. See scanFieldValue handler above for the rationale.
+        Mono::ThreadAttachGuard scanGuard(Mono::GetRootDomain());
 
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
@@ -4191,6 +4202,11 @@ void RegisterCoreHandlers() {
         Memory::ValueScanStats stats{};
         auto candidates = Memory::ScanForValue(scanReq, &stats);
 
+        // Phase 27 follow-up — outer ThreadAttachGuard so the
+        // per-WhatIsAt inner guards become reentrant no-ops. Fixes the
+        // 30s+ shutdown hang from accumulated Il2CppThread refs.
+        IL2CPP::ThreadAttachGuard scanGuard(IL2CPP::GetDomain());
+
         json rows = json::array();
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
         std::unordered_map<std::uintptr_t, int> perInstanceCount;
@@ -4316,6 +4332,10 @@ void RegisterCoreHandlers() {
 
         Memory::ValueScanStats stats{};
         auto rawCandidates = Memory::ScanForValue(scanReq, &stats);
+
+        // Phase 27 follow-up — outer ThreadAttachGuard for the WhatIsAt
+        // batch. See the IL2CPP scanFieldValue handler above.
+        IL2CPP::ThreadAttachGuard scanGuard(IL2CPP::GetDomain());
 
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
