@@ -19,6 +19,10 @@
 - [Avalonia 12 Windows-only build](#avalonia-12-windows-only-build) —
   Skia + HarfBuzz + Win32 wiring, AOT analyzer strictness, the
   **DataGrid AOT sort three-layer trap**.
+- [Native AOT + integrity-stamping (Phase 26)](#native-aot--integrity-stamping-phase-26) —
+  `InternalsVisibleTo` matches AssemblyName, AOT preserves byte
+  literals but single-file deflate-compresses them, anti-trim idiom
+  for padding arrays.
 - [PowerShell smoke testing](#powershell-smoke-testing) — pipe
   enveloping, single-element JSON array unwrap, Boolean parameter
   passing.
@@ -725,6 +729,106 @@ Name + Type columns, Methods Name column).
   row's `PropertyChanged` and call `Notify*Changed()` manually.
   Pattern: `MethodOverloadsViewModel.OnRowPropertyChanged` in
   [MethodOverloadsViewModel.cs:188](../ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs).
+
+---
+
+## Native AOT + integrity-stamping (Phase 26)
+
+### `InternalsVisibleTo` matches AssemblyName, not project name
+
+Phase 26 puts a third token guardian (`WindowsRuntimeMetadata`) in the
+UI assembly so its sentinel + 32-byte hash slot lands in a different
+`.rdata` region than the two slots in Core.dll. The UI class reads
+`SchemaConstants` from Core, which is marked `internal`. So Core needs
+`<InternalsVisibleTo Include="..." />` naming the UI assembly.
+
+The UI's csproj has:
+
+```xml
+<RootNamespace>UnityDumpUI</RootNamespace>
+<AssemblyName>DiscreteUI</AssemblyName>
+```
+
+— the assembly **name** is `DiscreteUI` (since the repo is called
+"discrete"); the **project** + namespace is `UnityDumpUI` (kept for
+backward compatibility with the existing source tree).
+
+`InternalsVisibleTo` is matched against the consuming **assembly
+identity**, not the project name. Wrong:
+
+```xml
+<InternalsVisibleTo Include="UnityDumpUI" />  <!-- silently no-op -->
+```
+
+Right:
+
+```xml
+<InternalsVisibleTo Include="DiscreteUI" />
+```
+
+The "wrong" version compiles silently and triggers
+`CS0122 'SchemaConstants' is inaccessible due to its protection
+level` at the call site. Easy to misdiagnose as a build-cache issue
+the first time you hit it (we wasted a `rm -rf obj bin` cycle on
+this).
+
+### AOT preserves static byte-array literals in `.rdata`; single-file deflate-compresses them
+
+Phase 26's hash slot is a `private static readonly byte[]` literal
+with a 16-byte sentinel + 32 0xCC placeholder bytes. The publish
+step (`tools/inject-hash.ps1`) scans the binary for sentinel +
+0xCC tail and rewrites the trailing 32 bytes with the real SHA256.
+
+This works for AOT publish (`-p:PublishAot=true`):
+
+* ILC compiles each `byte[] = [...]` literal into a contiguous
+  block in the `.rdata` section of the native binary.
+* The byte sequence is searchable verbatim — sentinel + 0xCC tail
+  shows up as a 48-byte run.
+* AOT-verified empirically: 3 sentinels found at distinct offsets
+  in the published exe (each followed by 32×0xCC), inject-hash
+  patches successfully, runtime guardian re-hashes and compares
+  cleanly.
+
+It does **NOT** work for `-p:PublishSingleFile=true` (Debug/Release):
+
+* The bundled `UnityDumpUI.Core.dll` lives inside `DiscreteUI.exe`
+  as a deflate-compressed blob.
+* The 32-byte 0xCC run is extremely compressible — DEFLATE
+  collapses it to a few bytes in the bundle.
+* `inject-hash.ps1` scanning the .exe finds the sentinel bytes
+  but the tail isn't 32×0xCC anymore (we verified this on the
+  shipped Release `dist/DiscreteUI.exe`).
+
+**Rule**: integrity-stamping must run only on AOT publishes.
+`build.ps1`'s `Build-Ui` already gates the `inject-hash.ps1` call
+on `$Mode -eq 'Publish'`; Debug/Release builds keep the 0xCC
+placeholder, which `IsDevMode` short-circuits to factor=0 so all
+poison is disabled.
+
+### `_pad` arrays need an observable read so the trimmer doesn't drop them
+
+Every guardian carries a `byte[] _pad` (96–192 bytes of random-
+looking filler) to take up space in `.rdata` around the sentinel
+slot — visual obfuscation against "diff binary against a clean
+copy and look for the 48-byte block that changed".
+
+If `_pad` is never read, AOT trim drops it. The "anti-trim" idiom
+is a single bogus read inside the dev-mode early return:
+
+```csharp
+if (SchemaConstants.IsDevMode(HashSlot)) {
+    _ = _pad[0];  // anti-trim
+    return 0;
+}
+```
+
+`SchemaConstants._gap` uses the same trick inside `IsDevMode`. The
+read has no semantic effect but it makes the array observably
+live, so the linker preserves the literal bytes.
+
+Mirror of AOBMaker's pattern (their `IntegrityGuardian.cs` line 70
+does the identical `_ = _pad[0]`).
 
 ---
 

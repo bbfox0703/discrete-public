@@ -3,8 +3,8 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-19
-**Current phase**: **All shipped phases closed + verified live; 2026-05-19 mega-batch (extended).** Same-day landings: **19d-3** smart-typed editors + **21a** reverse-property lookup + **22g** DLL-free Mono symbol register path + 5 follow-ups + Avalonia 12 DataGrid AOT sort trap fix + **Phase 21 a/b/c** Inspector field write-back + **Phase 5 v32-v39 metadata.dat parser** (live-smoked on Songs of Silence, 40k TypeDefs decoded) + **Phase 12d 32-bit Mono support FULLY CLOSED** (live-smoked on Legend of Mortal — first x86 target in the matrix; all 5 sub-phases shipped including the new `inject-x86.exe` cross-bitness helper). Carry-forward: Phase 22 closed 2026-05-12, Phase 23 closed 2026-05-18, Phase 20a-2 closed 2026-05-18. **Phase 20-MT** (DLL main-thread marshaling) remains the only open major item. **No critical-path open work.** Verified targets across the matrix: SaGa F2R (IL2CPP v29 / x64), BongoCat (Mono Unity 6.0+ / x64), Farthest Frontier (both backends, IL2CPP v31 / x64), Songs of Silence (IL2CPP v39 / Unity 6.1 / x64), R-Type Dimensions EX (IL2CPP v24 / Unity 2018.1 / x64), FF VI PR (IL2CPP v24 / Unity 2019.4 / x64), Hollow Knight Silksong (Mono / Unity 6.0 / x64), **Legend of Mortal (Mono / Unity 2020.3 / x86 ✨)**. Build #344 (x64 DLL #338 + DiscreteUI.exe #344, x86 Mono DLL + inject-x86.exe #342, metadata-cli #336; 238/238 tests pass + `Test-MetadataVersions.ps1` smoke PASS + cross-bitness inject live PASS). See `STATUS.md` for the detailed hand-off; this file is the canonical phase ledger.
+**Last updated**: 2026-05-20
+**Current phase**: **All shipped phases closed + verified live.** Latest landings (2026-05-20 late): **Phase 26 anti-tamper protection** — 3-slot SHA256 self-check spread across Core + UI assemblies (`BuildArtifactToken` / `ExportFormatToken` / `WindowsRuntimeMetadata`) + 2 poison surfaces (CT export offsets + Inspector grid values, 1/11 deterministic) + XOR-shielded footer credit + `inject-hash.ps1` 3-slot AOBMaker-style stamping + new `USAGE.md` end-user guide. Mid-session (same day): **Phase 20-MT main-thread marshaling** (MinHook detour on `runtime_invoke` + dispatcher queue) live-PASS on 5 targets; **Phase 20b/c/d Scene Explorer tab** + cross-tab handoff. Carry-forward from 2026-05-19: Phase 25 cross-class Symbol Finder, Phase 5 v32-v39 metadata parser (live-smoked on Songs of Silence v39 / 40k TypeDefs), Phase 12d 32-bit Mono (Legend of Mortal x86), Phase 21d Inspector write-back live PASS, 19d-3 smart-typed editors, 21a reverse-property lookup, DataGrid AOT sort trap fix, 22g DLL-free Mono register. **No critical-path open work.** Verified targets: SaGa F2R (IL2CPP v29 / x64), BongoCat (Mono Unity 6.0+ / x64), Farthest Frontier (both backends / x64), Songs of Silence (IL2CPP v39 / Unity 6.1 / x64), R-Type Dimensions EX (IL2CPP v24 / Unity 2018.1 / x64), FF VI PR (IL2CPP v24 / Unity 2019.4 / x64), Hollow Knight Silksong (Mono / Unity 6.0 / x64), **LEAVES (Mono / Unity 5.4 / x86 ✨)**, **Legend of Mortal (Mono / Unity 2020.3 / x86 ✨)**. Build #408 (DiscreteUI.exe AOT 39.4 MB after 3-slot guardian, DLL sizes unchanged from #376; 283/283 tests pass + AOT round-trip verified end-to-end). See `STATUS.md` for the detailed hand-off; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -130,6 +130,7 @@
 | 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector field "Write value…" right-click + CE Lua `setField` wrapper | ✅ 21a (DLL handler + smoke), 21b (UI modal + 37 new tests + AOT clean), 21c (Lua bridge + docs) shipped 2026-05-19. **21d live click-through PASS 2026-05-19** on BongoCat Mono (right-click primitive Inspector row → Write value… modal → Apply → readMemory verifies + CE address-list refreshed). v1 covers primitives + raw address; reference-type writes deferred to v2 (GC-root marshaling). |
 | 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. | ✅ **All sub-phases (22a–22f) shipped 2026-05-12 + live smoke fully closed 2026-05-18.** 22a `AobMakerBridge` extended (4 new commands, `IsAvailable` event); 22b 7 bridge lua files embedded in Core; 22c `BootstrapAaScriptGenerator` template; 22d Tools menu RelayCommand + `BridgeInjector` orchestrator; 22e `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` per-feature buttons; 22f `docs/ce-bridge-integration.md` + `tools/Test-BridgeInject.ps1` smoke. **Live click-through smoke**: Steps 1-8 captured + fixed 6 P0/P1 bugs mid-session; Steps 9-11 (MethodCall→CE / AddressLookup→CE / save+reopen) PASS in follow-up session — user log `Mathf.Abs(-7) → 7` confirms the AA-script → bridge → `callUnityMethod` chain. 163/163 xUnit pass, AOT 0/0 warnings. **DLL-free Mono register path live-smoked 2026-05-19** with the Phase 22e `MonoRegisterSymbolAaScriptGenerator` on BongoCat — surfaced + fixed two production blockers (user-autorun `_G.mono_*` shadowing → `discrete_*` private namespace; CE Mono nil typename on Unity 2022+ → `mono_method_getSignature` substring fallback). |
 | 25 | Cross-class Symbol Finder | New `searchSymbols` pipe RPC + Symbol Finder Tab in MainWindow. Walks every class in a named assembly for fields + methods whose name contains an ASCII case-insensitive substring. Row double-click navigates back to Browser Fields/Methods tab with the class + member filter pre-selected. Replaces the historical "click each class in turn" loop the user reported when hunting properties like `MaxHP` across a few-hundred-class assembly. | ✅ **Shipped + live-smoked 2026-05-19** (build #363) on BongoCat Mono — pattern `MaxHP` → `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) in < 1s. 3 new fake-pipe `SearchSymbolsTests`. Properties surfaced via `get_*`/`set_*` methods (Mono/IL2CPP runtime convention; no separate property row kind). 25b (Interesting preset — curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties) deferred until basic finder shakes out — needs a Unity-tuned keyword list distinct from UE5CEDumper's FProperty-flavored one. |
+| 26 | Anti-tamper protection | 3-slot SHA256 self-check spread across two assemblies + 2 poison surfaces (CT export offsets + Inspector grid values) + XOR-shielded credit string + AOT-stamped hash via `tools/inject-hash.ps1`. Inspired by AOBMaker's pattern but redesigned for cross-assembly slot distribution (Slot A in Core/Services / Slot B in Core/Services/Export / **Slot C cross-assembly in ui/UnityDumpUI/Platform**). Dev-mode bypass (0xCC placeholders) keeps all factors at 0 in Debug/Release single-file builds — exports + Inspector + tests stay byte-identical to pre-Phase-26. Class names renamed to non-suggestive forms so binary metadata no longer leaks "Integrity" / "Guardian" / "Shield". | ✅ **Shipped + AOT-verified 2026-05-20** (build #408). Two iterations: `ccaae6e` single-slot baseline + `348cbb6` 3-slot cross-assembly upgrade. `TokenAggregator.Combined() = A \| B \| C` ORs all three factors (UI registers `WindowsRuntimeMetadata.Read` into Core via `Program.Main`). Poison 1: `CloakOffset(off) => off ^ (factor & 0x7F)` in `CeXmlExporter` + `CsxExporter` shifts every emitted offset 0-127 bytes (CT loads cleanly in CE; reads wrong fields). Poison 2: `LiveInspectionViewModel.MaybePerturbDisplay` corrupts 1/11 numeric `DisplayValue` rows via per-row deterministic seed (string `GetHashCode` XOR offset XOR salt) — same row corrupts same way within session, different rows across sessions. Anti-trace: `Read()` returns 0 for first N calls (A:3 / B:2 / C:4) even when tampered. Anti-debug: `Debugger.IsAttached` on published binary returns poison code. AOT round-trip verified end-to-end: 3 sentinels at `0x02438F98` / `0x02438E80` / `0x0243ABF8` (C ~11 KB away from A/B). `inject-hash.ps1` 3-slot AOBMaker-style: zero all 3 slots → SHA256 once → write same hash into all 3. Footer credit `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. New [`USAGE.md`](../USAGE.md) end-user guide for CT makers. |
 
 ---
 
@@ -1272,6 +1273,87 @@ design questions before implementing:
 Defer until either a user explicitly asks for it, or the basic Phase
 25 finder gets enough use to surface the "I don't know what to
 search for" gap.
+
+---
+
+## Phase 26 — Anti-tamper protection ✅ SHIPPED 2026-05-20
+
+**Goal**: Make a hex-edited `DiscreteUI.exe` silently produce wrong
+output, not crash, not show a "tamper detected" banner. Cost cap:
+"simple protection" — defensive enough to deter casual modification,
+not enterprise-grade obfuscation. Inspired by `D:\Github\AOBMaker`'s
+pattern (StringShield + IntegrityGuardian{,B,C} + Logic Poisoning)
+but redesigned for cross-assembly slot distribution so the three
+sentinel + 32-byte-hash blocks don't sit adjacent in `.rdata`.
+
+### Sub-phases
+
+- [x] **26a** Single-slot baseline (`ccaae6e`):
+  XOR-shielded credit string + one `BuildArtifactToken` (then named
+  `IntegrityGuardian`) self-check + `inject-hash.ps1` + CT export
+  `CloakOffset(off) ^= factor & 0x7F` in `CeXmlExporter` + `CsxExporter`.
+  Footer credit added to MainWindow.axaml (centered, opacity 0.55).
+  AOT round-trip verified on first attempt.
+- [x] **26b** 3-slot cross-assembly upgrade (`348cbb6`):
+  Renamed all 3 originals to non-suggestive forms
+  (`IntegrityGuardian` → `BuildArtifactToken` / `IntegrityCore` →
+  `SchemaConstants` / `StringShield` → `LocalizedText` /
+  `GetIntegrityFactor` → `Read`); added `ExportFormatToken` in
+  Core/Services/Export and `WindowsRuntimeMetadata` in
+  ui/UnityDumpUI/Platform (cross-assembly). Each guardian self-checks
+  the running binary independently — zeros all 3 slots before SHA256
+  so any-of-three tampering trips all-of-three checks.
+  `TokenAggregator.Combined() = A | B | C` bridges Core ↔ UI via
+  delegate registered in `Program.Main`.
+- [x] **26c** Inspector grid poison (`348cbb6`):
+  `LiveInspectionViewModel.WalkedFieldNode.MaybePerturbDisplay`
+  perturbs 1/11 numeric `DisplayValue` rows on tampered builds.
+  Per-row deterministic seed (string `GetHashCode` XOR offset XOR
+  salt) so same row corrupts same way within a session; across
+  sessions GetHashCode randomization shifts WHICH rows look buggy.
+  Skips non-numeric strings ("(struct — expand)", quoted strings,
+  bool literals, errors, pointers).
+- [x] **26d** 3-slot `inject-hash.ps1` (`348cbb6`):
+  Locates all 3 dev slots (sentinel + 32×0xCC) → zeros all 3 hash
+  regions → computes SHA256 once → writes same hash into all 3.
+  `build.ps1 -Mode Publish` invokes it as a post-publish step;
+  non-AOT builds skip injection (slot stays 0xCC → `IsDevMode` → no-op).
+
+### Design tradeoffs (documented for future-me)
+
+- **Single-file Release vs AOT**: deflate-compressed bundle in
+  `dist/DiscreteUI.exe` (Debug/Release single-file) collapses the
+  32×0xCC tail to a few bytes → `inject-hash.ps1` can't find slots
+  there. Only `-Mode Publish` (AOT) produces a binary where the
+  static byte literals stay searchable in `.rdata`. Build script
+  gates injection accordingly.
+- **DelayThreshold side-effect**: each guardian returns 0 for the
+  first N calls (A:3 / B:2 / C:4) even when tampered. Defeats
+  trivial breakpoint trace at the cost of the first ~2 exported
+  offsets being unpoisoned. Acceptable — exports usually have 50+
+  fields, attacker who comparatively reads CT vs ground truth
+  would notice "everything's slightly off" not "first two are
+  right then everything else is wrong".
+- **Asymmetric poison coverage**: CT export goes through Core's
+  `TokenAggregator.Combined()` which only sees slot C via the
+  Program.Main-registered delegate. If an attacker patches A + B
+  but not C, CT export still sees factor=C (non-zero) → still
+  poisoned. **All three slots must be patched correctly to escape
+  either surface.**
+- **`InternalsVisibleTo` quirk**: Core's `InternalsVisibleTo` must
+  reference the UI's **assembly name** (`DiscreteUI`), not the
+  project name (`UnityDumpUI`). Hit this during build; documented
+  in lessons-learned.md.
+
+### Out of scope (v2 candidates if user wants more breadth)
+
+- Methods grid Address column poison (only Inspector + CT export
+  covered today)
+- Symbol Finder address column poison (same reason)
+- Multi-poison-target obfuscation (each guardian poisons its own
+  unique consumer rather than the OR-combined "any tampering
+  trips everything" model)
+- Anti-VM / anti-sandbox detection (out of scope for "simple")
 
 ---
 
