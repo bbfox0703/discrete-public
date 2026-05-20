@@ -318,8 +318,20 @@ local MSCORLIB    = "mscorlib"
 -- Single-purpose convenience — keeps the call sites readable and routes
 -- all RPC responses through one error-handling path.
 
+-- Phase 20-MT — opt-in main-thread marshaling. Every Unity engine icall
+-- routed through this helper sets `main_thread = true` so the DLL's
+-- runtime_invoke detour runs the call on Unity's main thread instead of
+-- the pipe worker thread. Pre-20-MT this script worked but blocked the
+-- game on sustained bursts (Phase 20a's ~2048-icall freeze on SaGa F2R);
+-- the toggle is the long-term fix.
+--
+-- Callers can override via `opts.main_thread = false` when invoking a
+-- pure-managed helper (Math.Abs / String.Concat / Convert.ToByte) that
+-- doesn't touch Unity engine state — those run faster on the worker
+-- thread (no event ping-pong with the main thread).
 local function _call(opts)
-    -- opts = { asm, ns, class, method, args = {}, sig = nil, instance = nil }
+    -- opts = { asm, ns, class, method, args = {}, sig = nil, instance = nil,
+    --          main_thread = nil (defaults true for scene icalls) }
     local req = {
         assembly = opts.asm,
         ["namespace"] = opts.ns,
@@ -329,6 +341,16 @@ local function _call(opts)
     if opts.args     then req.args     = opts.args     end
     if opts.sig      then req.signatureMatch = opts.sig end
     if opts.instance then req.instance = opts.instance end
+    -- Default to main-thread for the Unity-engine icalls this module
+    -- exists to wrap. Caller can pass main_thread = false to opt out.
+    if opts.main_thread == nil then
+        req.main_thread = true
+    else
+        req.main_thread = opts.main_thread
+    end
+    if opts.main_thread_timeout_ms then
+        req.main_thread_timeout_ms = opts.main_thread_timeout_ms
+    end
     local r = rpc("callMethod", req)
     if not r.ok and r.exception then
         error(TAG .. " " .. opts.class .. "." .. opts.method ..

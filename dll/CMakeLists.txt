@@ -1,6 +1,16 @@
 # UnityDumper DLL — builds Mono and/or IL2CPP variants + ProxyDLLs
 
 # ---------------------------------------------------------------------------
+# Phase 20-MT — MinHook for inline detouring mono_runtime_invoke /
+# il2cpp_runtime_invoke so we can piggyback on Unity's per-frame engine
+# tick to drain the main-thread work queue. Vendored at
+# dll/vendor/minihook/ with its own CMakeLists.txt — we just add_subdirectory
+# (with EXCLUDE_FROM_ALL so its install rules don't pollute our `dist/`).
+# Build cost: ~50 KB statically linked into each UnityDumper-{Backend}.dll.
+# ---------------------------------------------------------------------------
+add_subdirectory(vendor/minihook EXCLUDE_FROM_ALL)
+
+# ---------------------------------------------------------------------------
 # Helper: configure_file the shared version.rc.in template per target with
 # the right InternalName / OriginalFilename / FileDescription, then add the
 # generated .rc to the target's sources. Each DLL gets its own VERSIONINFO
@@ -29,6 +39,8 @@ set(DLL_SHARED_SOURCES
     src/shared/Logger.cpp
     src/shared/Logger.h
     src/shared/MagicStrings.h
+    src/shared/MainThreadDispatcher.cpp
+    src/shared/MainThreadDispatcher.h
     src/shared/Memory.cpp
     src/shared/Memory.h
     src/shared/ModuleHelper.cpp
@@ -58,6 +70,8 @@ set(DLL_MONO_SOURCES
     src/mono/MonoMethodFinder.h
     src/mono/MonoMethodInvoker.cpp
     src/mono/MonoMethodInvoker.h
+    src/mono/MonoMainThreadHook.cpp
+    src/mono/MonoMainThreadHook.h
 )
 
 # IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
@@ -84,6 +98,8 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPMethodFinder.h
     src/il2cpp/IL2CPPMethodInvoker.cpp
     src/il2cpp/IL2CPPMethodInvoker.h
+    src/il2cpp/IL2CPPMainThreadHook.cpp
+    src/il2cpp/IL2CPPMainThreadHook.h
 )
 
 # ---------------------------------------------------------------------------
@@ -99,6 +115,10 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
     add_library(${TARGET_NAME} SHARED ${SOURCES})
     target_include_directories(${TARGET_NAME} PRIVATE src)
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
+    # Phase 20-MT: link MinHook (vendored as `minhook` target — see
+    # add_subdirectory above). Static C-only library, ~50 KB per backend.
+    target_link_libraries(${TARGET_NAME} PRIVATE minhook)
+    target_include_directories(${TARGET_NAME} PRIVATE vendor/minihook/include)
     set_target_properties(${TARGET_NAME} PROPERTIES
         OUTPUT_NAME "${TARGET_NAME}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

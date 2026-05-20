@@ -39,6 +39,17 @@
                  FontFamily="Consolas,Cascadia Mono,monospace" />
     </Grid>
 
+    <!-- Phase 20-MT: opt-in main-thread marshaling. Off by default for
+         pure-managed methods (Math.Abs / String.Concat); flip on for
+         Unity engine APIs that touch the scene graph (Transform.parent,
+         GameObject.name, anything in UnityEngine.* that crashes when
+         called off-thread). -->
+    <CheckBox DockPanel.Dock="Top"
+              Content="{StaticResource MethodCall.RunOnMainThread}"
+              ToolTip.Tip="{StaticResource MethodCall.RunOnMainThreadTooltip}"
+              IsChecked="{Binding RunOnMainThread, Mode=TwoWay}"
+              Margin="0,8,0,0" />
+
     <!-- Bottom action bar -->
     <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
       <TextBlock DockPanel.Dock="Left"

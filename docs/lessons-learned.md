@@ -82,6 +82,80 @@ missing entirely from a recent IL2CPP game.
 struct read at offset 0. The export-only path is a dead end on modern
 Unity.
 
+### Phase 20-MT main-thread marshaling — never `mono_thread_attach` from the Unity main thread
+
+**Symptom**: first-ever `callMethod main_thread=true` against BongoCat
+(Mono / Unity 6000.2) instantly crashed the game. The dispatcher's hook
+on `mono_runtime_invoke` fired (`tick_count` rose from 16943 → 24041),
+the work item reached `Drain`, but the worker thread saw a 5-second
+`main-thread queue drain timeout` followed by an empty pipe response =
+process dead. **Identical failure mode to the historical build #54
+"nested attach destroyed BongoCat" forensic.**
+
+**Root cause**: `Mono::CallMethod` opens a `ThreadAttachGuard` internally
+(see `MonoMethodInvoker.cpp:573`). When `Drain` runs that closure from
+inside our `mono_runtime_invoke` detour, we're **already on the Unity
+main thread**, which is itself attached to the Mono runtime — it's the
+thread that initialized Mono in the first place. The guard's
+constructor calls `mono_thread_attach(domain)`, which on the main
+thread returns the existing handle (apparently a no-op). But the
+destructor's `mono_thread_detach(thread_)` unbinds **Unity's own**
+attached-thread record. Next time Unity itself calls into the runtime
+(within microseconds, since Update() is mid-flight), it segfaults
+because its attached-thread structure has been torn out.
+
+**Rule**: any RAII attach/detach guard MUST check
+`MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()` and become a
+no-op when true. The flag is a `thread_local bool` set in `Drain` just
+before invoking each work item's closure (see
+`MainThreadDispatcher.cpp` — search `t_inside_work_item`). Same fix
+applied to `IL2CPP::ThreadAttachGuard`; the failure mode reproduces
+identically on `il2cpp_thread_attach` / `il2cpp_thread_detach`.
+
+**Why the recursion guard alone wasn't enough**: `t_drain_in_progress`
+protects against re-entering `Drain` from inside a draining work
+item's runtime_invoke call. But that doesn't help with attach/detach
+— the issue isn't recursion, it's that **the main thread is already
+attached and we shouldn't be touching its attachment state at all**.
+
+**Verified live 2026-05-20**: BongoCat (Mono Unity 6000.2), SaGa F2R
+(IL2CPP v29 / Unity 2021.3), Songs of Silence (IL2CPP v39 / Unity
+6000.3) — 1000-iteration `Mathf.Abs(-42)` burst on main-thread path,
+zero crashes, zero timeouts, drain_count == submit_count == 1000 on
+all three.
+
+### Phase 20-MT — Unity 2018 pauses the main loop when window loses focus
+
+**Symptom**: handshake against R-Type Dimensions EX (Unity 2018.1.9f2)
+returns `main_thread.is_healthy: false, tick_count: 0,
+last_tick_age_ms: -1`. The hook is installed (`hook_installed: true`,
+main thread id captured), but it has never fired. Burst smoke aborts
+with "Dispatcher NOT healthy".
+
+**Root cause**: Unity 2018 ships with `Application.runInBackground =
+false` by default. When the game window doesn't have foreground focus,
+Unity pauses the entire main loop — no Update() callbacks, no
+`runtime_invoke`, no rendering. Our hook only fires from inside
+`runtime_invoke`, so it correctly reports no recent ticks.
+
+Unity 2019+ flipped the default to `true`, so this is exclusively a
+Unity 2018-era problem. The runtime detection itself is correct —
+we're not misidentifying the main thread; the main thread is simply
+sleeping.
+
+**Rule for users**: keep the Unity 2018 game window in foreground
+focus when running main-thread-routing RPCs. Alt-tab to PowerShell is
+fine for typing the command, but once `Test-MainThreadBurst.ps1` is
+running you need the game window foreground OR the game's own
+"Allow background play" setting flipped on (if it exposes one in its
+Settings menu).
+
+**Rule for the codebase**: `MainThreadDispatcher::IsHealthy()` correctly
+returns false in this state and `SubmitAndWait` would all time out.
+Callers should check `IsHealthy` (exposed via `getDispatcherStats` /
+the `main_thread.is_healthy` handshake field) before routing through
+the queue, and fall back to the worker-thread path when stale.
+
 ---
 
 ## Overload disambiguation

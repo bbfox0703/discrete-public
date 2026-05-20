@@ -267,6 +267,8 @@
   <sys:String x:Key="MethodCall.SignatureLabel">Signature</sys:String>
   <sys:String x:Key="MethodCall.InstanceLabel">Instance address</sys:String>
   <sys:String x:Key="MethodCall.InstanceWatermark">0x... — leave empty for static methods</sys:String>
+  <sys:String x:Key="MethodCall.RunOnMainThread">Run on Unity main thread (recommended for engine APIs)</sys:String>
+  <sys:String x:Key="MethodCall.RunOnMainThreadTooltip">When checked, the call is queued onto the Unity main thread via the runtime_invoke hook (Phase 20-MT). Required for any UnityEngine.* method that touches the scene graph (Transform.parent, GameObject.name, etc.) — calling those from the pipe worker thread freezes the game. Pure-managed methods (Math.Abs / String.Concat / Convert.ToByte) run faster with this OFF.</sys:String>
   <sys:String x:Key="MethodCall.ParamsHeader">Parameters</sys:String>
   <sys:String x:Key="MethodCall.ParamColType">Type</sys:String>
   <sys:String x:Key="MethodCall.ParamColName">Name</sys:String>

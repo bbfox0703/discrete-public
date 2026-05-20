@@ -7,6 +7,7 @@
 #include "BackendDetector.h"
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "MainThreadDispatcher.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
 #include "ModuleHelper.h"
@@ -16,6 +17,7 @@
 #  include "../mono/MonoAddressFinder.h"
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
+#  include "../mono/MonoMainThreadHook.h"
 #  include "../mono/MonoMethodFinder.h"
 #  include "../mono/MonoMethodInvoker.h"
 #  include "../mono/MonoResolver.h"
@@ -24,6 +26,7 @@
 #  include "../il2cpp/IL2CPPAddressFinder.h"
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
+#  include "../il2cpp/IL2CPPMainThreadHook.h"
 #  include "../il2cpp/IL2CPPMethodFinder.h"
 #  include "../il2cpp/IL2CPPMethodInvoker.h"
 #  include "../il2cpp/IL2CPPMetadataRegistration.h"
@@ -131,13 +134,66 @@ json BuildHandshakeJson() {
     return j;
 }
 
+// Phase 20-MT — idempotent lazy install of the main-thread dispatcher +
+// runtime_invoke hook. Called from handshake/scan; safe to call repeatedly
+// because both Init() and Install() are guarded by atomic compare-exchange.
+//
+// Lazy install lets us inject the DLL even before Unity has finished
+// starting up — resolver might not be bound yet on first attach, but by
+// the time the UI's handshake / scan RPC arrives the Mono / IL2CPP
+// runtime is live and runtime_invoke is bindable. After install, the
+// detour piggybacks on Unity's per-frame runtime_invoke dispatch to drain
+// our queue + record main-thread tick freshness for `IsHealthy()`.
+//
+// j is filled in by the caller (handshake/scan response); we add a
+// "main_thread" sub-object showing dispatcher state so the UI can surface
+// it (e.g. "queued: 0, last tick 8 ms ago, hook installed").
+void TryInstallMainThreadHookAndReport(json& j) {
+    using namespace UnityCEDumper;
+    using namespace UnityCEDumper::MainThreadDispatcher;
+
+    if (!IsInitialized()) {
+        (void)Init();
+    }
+#if defined(UNITYCEDUMPER_BACKEND_MONO)
+    if (IsInitialized() && Mono::IsResolved() && !Mono::MainThreadHook::IsInstalled()) {
+        (void)Mono::MainThreadHook::Install();
+    }
+    const bool hookInstalled = Mono::MainThreadHook::IsInstalled();
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+    if (IsInitialized() && IL2CPP::IsResolved() && !IL2CPP::MainThreadHook::IsInstalled()) {
+        (void)IL2CPP::MainThreadHook::Install();
+    }
+    const bool hookInstalled = IL2CPP::MainThreadHook::IsInstalled();
+#else
+    const bool hookInstalled = false;
+#endif
+
+    Stats s = GetStats();
+    json mt = {
+        {"initialized",     s.initialized},
+        {"hook_installed",  hookInstalled},
+        {"main_thread_id",  s.main_thread_id},
+        {"tick_count",      s.tick_count},
+        {"last_tick_age_ms", s.last_tick_age_ms},
+        {"queue_depth",     s.queue_depth},
+        {"is_healthy",      IsHealthy()},
+    };
+    j["main_thread"] = std::move(mt);
+}
+
 void RegisterCoreHandlers() {
     using namespace UnityCEDumper;
     PipeServer::RegisterHandler("ping", [](const json&) -> json {
         return json{{"pong", true}};
     });
     PipeServer::RegisterHandler(MagicStrings::CmdHandshake, [](const json&) -> json {
-        return BuildHandshakeJson();
+        json j = BuildHandshakeJson();
+        // Phase 20-MT: piggyback hook install on handshake so the dispatcher
+        // is live by the time the user's first callMethod arrives. Adds a
+        // `main_thread` sub-object to the response for UI visibility.
+        TryInstallMainThreadHookAndReport(j);
+        return j;
     });
     // Phase 2: `scan` re-runs backend detection and returns the same shape as handshake.
     // Phase 17a follow-up: also drops the address-finder class-pointer cache so
@@ -148,7 +204,37 @@ void RegisterCoreHandlers() {
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
         IL2CPP::InvalidateClassRangeCache();
 #endif
-        return BuildHandshakeJson();
+        json j = BuildHandshakeJson();
+        TryInstallMainThreadHookAndReport(j);
+        return j;
+    });
+
+    // Phase 20-MT diagnostics — read-only snapshot of the dispatcher's
+    // internal counters. Useful for the stress smoke (`Test-MainThreadBurst.ps1`)
+    // and for the UI to show whether the hook is wired + healthy.
+    PipeServer::RegisterHandler(MagicStrings::CmdGetDispatcherStats, [](const json&) -> json {
+        using namespace UnityCEDumper::MainThreadDispatcher;
+        Stats s = GetStats();
+#if defined(UNITYCEDUMPER_BACKEND_MONO)
+        const bool hookInstalled = Mono::MainThreadHook::IsInstalled();
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+        const bool hookInstalled = IL2CPP::MainThreadHook::IsInstalled();
+#else
+        const bool hookInstalled = false;
+#endif
+        return json{
+            {"initialized",      s.initialized},
+            {"hook_installed",   hookInstalled},
+            {"main_thread_id",   s.main_thread_id},
+            {"tick_count",       s.tick_count},
+            {"submit_count",     s.submit_count},
+            {"drain_count",      s.drain_count},
+            {"timeout_count",    s.timeout_count},
+            {"reject_count",     s.reject_count},
+            {"last_tick_age_ms", s.last_tick_age_ms},
+            {"queue_depth",      s.queue_depth},
+            {"is_healthy",       IsHealthy()},
+        };
     });
 
     // ----------------------------------------------------------------------
@@ -1992,7 +2078,44 @@ void RegisterCoreHandlers() {
             typedArgs.push_back(std::move(out));
         }
 
-        auto cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+        // Phase 20-MT: optional main-thread marshaling. When `main_thread`
+        // is true (defaults false to keep Phase 19 callers fast), the
+        // CallMethod invocation runs inside MainThreadDispatcher::SubmitAndWait
+        // so the runtime_invoke fires on the Unity main thread instead of
+        // the worker thread. Required for any method that touches Unity
+        // scene-graph / lifecycle (Transform.parent, GameObject.name, etc.).
+        const bool mainThread = args.value("main_thread", false);
+        const std::int32_t mtTimeoutMs = args.value("main_thread_timeout_ms",
+                                                    std::int32_t{5000});
+
+        Mono::CallMethodResult cr;
+        std::string dispatchPath = "worker_direct";
+        if (mainThread) {
+            using namespace UnityCEDumper::MainThreadDispatcher;
+            if (!IsInitialized()) {
+                // Lazy install: handshake usually arms this, but if a Lua
+                // bridge or test hits callMethod first we kick it here.
+                (void)Init();
+                if (Mono::IsResolved() && !Mono::MainThreadHook::IsInstalled()) {
+                    (void)Mono::MainThreadHook::Install();
+                }
+            }
+            DispatchResult disp = SubmitAndWait(
+                [&]() { cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs); },
+                mtTimeoutMs);
+            dispatchPath = disp.diagnostic_path;
+            if (!disp.ok) {
+                json result;
+                result["ok"]    = false;
+                result["error"] = disp.error;
+                result["dispatch"] = json{{"main_thread", true}, {"path", disp.diagnostic_path},
+                                          {"timed_out",   disp.timed_out},
+                                          {"rejected",    disp.rejected}};
+                return result;
+            }
+        } else {
+            cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+        }
 
         json returnValue = nullptr;
         switch (cr.ret.kind) {
@@ -2021,6 +2144,7 @@ void RegisterCoreHandlers() {
             {"signature",   cr.methodSignature},
             {"humanSuffix", cr.humanSuffix},
         };
+        result["dispatch"] = json{{"main_thread", mainThread}, {"path", std::move(dispatchPath)}};
         if (cr.ret.kind == Mono::CallReturn::Kind::Unsupported) {
             result["note"] = "value-type-by-value returns are not decoded in 19b; pass an out-buffer in v2 or read the address";
         }
@@ -3262,7 +3386,38 @@ void RegisterCoreHandlers() {
             typedArgs.push_back(std::move(out));
         }
 
-        auto cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+        // Phase 20-MT: optional main-thread marshaling — mirror of the Mono
+        // handler above. See that branch for the full comment.
+        const bool mainThread = args.value("main_thread", false);
+        const std::int32_t mtTimeoutMs = args.value("main_thread_timeout_ms",
+                                                    std::int32_t{5000});
+
+        IL2CPP::CallMethodResult cr;
+        std::string dispatchPath = "worker_direct";
+        if (mainThread) {
+            using namespace UnityCEDumper::MainThreadDispatcher;
+            if (!IsInitialized()) {
+                (void)Init();
+                if (IL2CPP::IsResolved() && !IL2CPP::MainThreadHook::IsInstalled()) {
+                    (void)IL2CPP::MainThreadHook::Install();
+                }
+            }
+            DispatchResult disp = SubmitAndWait(
+                [&]() { cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs); },
+                mtTimeoutMs);
+            dispatchPath = disp.diagnostic_path;
+            if (!disp.ok) {
+                json result;
+                result["ok"]    = false;
+                result["error"] = disp.error;
+                result["dispatch"] = json{{"main_thread", true}, {"path", disp.diagnostic_path},
+                                          {"timed_out",   disp.timed_out},
+                                          {"rejected",    disp.rejected}};
+                return result;
+            }
+        } else {
+            cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+        }
 
         // Render the typed return into a JSON-friendly value. The discriminator
         // chooses how returnValue is encoded — null for Void / Unsupported,
@@ -3294,6 +3449,7 @@ void RegisterCoreHandlers() {
             {"signature",   cr.methodSignature},
             {"humanSuffix", cr.humanSuffix},
         };
+        result["dispatch"] = json{{"main_thread", mainThread}, {"path", std::move(dispatchPath)}};
         if (cr.ret.kind == IL2CPP::CallReturn::Kind::Unsupported) {
             // Tell the caller why returnValue is null even though the call
             // succeeded. 19a doesn't decode multi-field value-type returns.
@@ -3320,6 +3476,15 @@ int UnityDumper_Init() {
 void UnityDumper_Shutdown() {
     if (!g_initialized.exchange(false)) return;
     UnityCEDumper::PipeServer::Stop();
+    // Phase 20-MT: tear down the main-thread hook + dispatcher so we don't
+    // leave the runtime_invoke detour pointing at our soon-to-be-unloaded
+    // code. Safe to call when never installed (atomic-guarded no-op).
+#if defined(UNITYCEDUMPER_BACKEND_MONO)
+    UnityCEDumper::Mono::MainThreadHook::Uninstall();
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+    UnityCEDumper::IL2CPP::MainThreadHook::Uninstall();
+#endif
+    UnityCEDumper::MainThreadDispatcher::Shutdown();
     UnityCEDumper::Log::Init("ExportAPI: UnityDumper_Shutdown");
     UnityCEDumper::Log::Shutdown();
 }

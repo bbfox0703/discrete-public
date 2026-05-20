@@ -160,6 +160,17 @@ public sealed partial class MethodCallViewModel : ObservableObject
     [ObservableProperty]
     private string _instanceAddress = string.Empty;
 
+    /// <summary>
+    /// Phase 20-MT toggle. When true, the call is queued onto the Unity
+    /// main thread (via the runtime_invoke hook in MainThreadDispatcher);
+    /// when false, it runs synchronously on the pipe worker thread (the
+    /// Phase 19 legacy path). Default false to preserve fast Phase 19
+    /// behaviour on pure-managed methods (Math.Abs / String.Concat).
+    /// User flips on for Unity engine APIs that touch the scene graph.
+    /// </summary>
+    [ObservableProperty]
+    private bool _runOnMainThread;
+
     [ObservableProperty]
     private string? _statusMessage;
 
@@ -223,7 +234,8 @@ public sealed partial class MethodCallViewModel : ObservableObject
                 argsList,
                 signatureMatch: string.IsNullOrEmpty(SignatureMatch) ? null : SignatureMatch,
                 instanceAddress: instance,
-                ct).ConfigureAwait(true);
+                mainThread: RunOnMainThread,
+                ct: ct).ConfigureAwait(true);
 
             HasResult         = true;
             ResultReturnType  = result.ReturnType;

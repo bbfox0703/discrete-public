@@ -577,6 +577,7 @@ public sealed class BackendAdapter : ILiveExportSource
         string assembly, string @namespace, string className, string method,
         IReadOnlyList<CallArgRequest> args,
         string? signatureMatch = null, string? instanceAddress = null,
+        bool mainThread = false, int? mainThreadTimeoutMs = null,
         CancellationToken ct = default)
     {
         // Source-gen serialize the args list — keeps AOT clean (the
@@ -596,6 +597,18 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (!string.IsNullOrEmpty(signatureMatch)) d["signatureMatch"] = Str(signatureMatch);
         if (!string.IsNullOrEmpty(instanceAddress)) d["instance"]      = Str(instanceAddress);
+        // Phase 20-MT: opt-in main-thread marshaling. Off by default to
+        // preserve Phase 19 caller behaviour (pure-managed math methods
+        // run faster on the worker thread). MethodCallWindow's "Run on
+        // main thread" checkbox flips it on for Unity engine API calls.
+        if (mainThread)
+        {
+            d["main_thread"] = Bool(true);
+            if (mainThreadTimeoutMs.HasValue)
+            {
+                d["main_thread_timeout_ms"] = Int(mainThreadTimeoutMs.Value);
+            }
+        }
         var env = await _pipe.SendAsync(
             "callMethod", d,
             ProtocolJsonContext.Default.RpcEnvelopeCallMethodResult, ct).ConfigureAwait(false);
@@ -639,6 +652,10 @@ public sealed class BackendAdapter : ILiveExportSource
     /// <summary>AOT-safe int → <see cref="JsonElement"/>.</summary>
     private static JsonElement Int(int value) =>
         JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.Int32);
+
+    /// <summary>AOT-safe bool → <see cref="JsonElement"/>.</summary>
+    private static JsonElement Bool(bool value) =>
+        JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.Boolean);
 
     private static void ThrowIfError(RpcError? error)
     {

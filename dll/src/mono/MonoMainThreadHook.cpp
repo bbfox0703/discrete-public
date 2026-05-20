@@ -1,0 +1,163 @@
+// MonoMainThreadHook.cpp — Phase 20-MT (Mono backend).
+//
+// Installs a MinHook trampoline on `mono_runtime_invoke`. Mechanism:
+//   1. MinHook's `MH_CreateHook(target, detour, &orig)` redirects target →
+//      detour; trampoline `orig` carries the original instruction prologue
+//      so we can still call through to Unity's implementation.
+//   2. Our detour, when called from the Unity main thread, notifies the
+//      MainThreadDispatcher (which records the tick + drains the queue),
+//      then forwards to the trampoline.
+//   3. Recursion is impossible to avoid here — drained work items will
+//      themselves invoke `mono_runtime_invoke` to actually do the user's
+//      Unity icall. The dispatcher's thread_local guard short-circuits
+//      the inner Drain so we don't re-drain inside ourselves.
+//
+// The thread-id check is intentional: worker threads can ALSO go through
+// `mono_runtime_invoke` if a `callMethod` arrives in the un-marshaled
+// path (i.e. `main_thread=false`). Calling NotifyMainThreadTick from a
+// worker thread would falsely advance the freshness window AND let Drain
+// run on the wrong thread. The dispatcher's `IsMainThread` guard inside
+// `Drain` would catch that anyway, but cheaper to skip here.
+
+#include "MonoMainThreadHook.h"
+
+#include "MonoResolver.h"
+#include "../shared/Logger.h"
+#include "../shared/MagicStrings.h"
+#include "../shared/MainThreadDispatcher.h"
+
+#include <MinHook.h>
+#include <windows.h>
+
+#include <atomic>
+#include <cstdio>
+#include <string>
+
+namespace UnityCEDumper::Mono::MainThreadHook {
+
+namespace {
+
+template <typename... Args>
+void LogF(const char* fmt, Args... args) {
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), fmt, args...);
+    UnityCEDumper::Log::Write(UnityCEDumper::MagicStrings::LogCategoryInit, buf);
+}
+
+std::atomic<bool>  g_installed{false};
+
+// MinHook installs `mh_initialize` once per process; track our own init
+// so multiple Install() calls don't double-init.
+std::atomic<bool>  g_minhook_initialized{false};
+
+// Original trampoline. Filled by MH_CreateHook. NULL until Install succeeds.
+// Calling convention matches `fn_runtime_invoke` from MonoResolver.h.
+using fn_runtime_invoke_t = UnityCEDumper::Mono::MonoObject* (*)(
+    UnityCEDumper::Mono::MonoMethod*,
+    void*,
+    void**,
+    UnityCEDumper::Mono::MonoObject**);
+fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
+
+// Our detour. C-style function (no captures) so MinHook can route control
+// flow into it via a near-jump.
+UnityCEDumper::Mono::MonoObject* WINAPI HookedRuntimeInvoke(
+    UnityCEDumper::Mono::MonoMethod* method,
+    void* obj,
+    void** params,
+    UnityCEDumper::Mono::MonoObject** exc)
+{
+    using namespace UnityCEDumper::MainThreadDispatcher;
+    // Cheap thread-id check first — main thread id is a fixed std::atomic<uint32_t>.
+    const DWORD tid = ::GetCurrentThreadId();
+    if (tid == GetMainThreadId()) {
+        NotifyMainThreadTick();  // also calls Drain() under the recursion guard
+    }
+    if (g_orig_runtime_invoke == nullptr) {
+        // Defensive: if somehow the trampoline got cleared (Uninstall race),
+        // we have nothing to delegate to. Returning NULL would corrupt
+        // managed callers — better to bail with no exception sentinel.
+        if (exc) *exc = nullptr;
+        return nullptr;
+    }
+    return g_orig_runtime_invoke(method, obj, params, exc);
+}
+
+}  // namespace
+
+bool Install() {
+    bool expected = false;
+    if (!g_installed.compare_exchange_strong(expected, true)) {
+        return true;  // already installed
+    }
+
+    if (!UnityCEDumper::MainThreadDispatcher::IsInitialized()) {
+        LogF("[MonoMainThreadHook] Install: MainThreadDispatcher not initialized");
+        g_installed.store(false);
+        return false;
+    }
+
+    const auto& resolver = UnityCEDumper::Mono::GetResolver();
+    if (resolver.runtime_invoke == nullptr) {
+        LogF("[MonoMainThreadHook] Install: mono_runtime_invoke not bound");
+        g_installed.store(false);
+        return false;
+    }
+
+    // One-time MinHook init. MH_OK is the success status; MH_ERROR_ALREADY_INITIALIZED
+    // is fine — it means some other code in the DLL already called it.
+    bool needsInit = false;
+    if (!g_minhook_initialized.exchange(true)) {
+        needsInit = true;
+    }
+    if (needsInit) {
+        MH_STATUS s = ::MH_Initialize();
+        if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
+            LogF("[MonoMainThreadHook] MH_Initialize failed: status=%d", static_cast<int>(s));
+            g_installed.store(false);
+            g_minhook_initialized.store(false);
+            return false;
+        }
+    }
+
+    void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
+    MH_STATUS hs = ::MH_CreateHook(
+        target,
+        reinterpret_cast<void*>(&HookedRuntimeInvoke),
+        reinterpret_cast<void**>(&g_orig_runtime_invoke));
+    if (hs != MH_OK) {
+        LogF("[MonoMainThreadHook] MH_CreateHook(mono_runtime_invoke) failed: status=%d", static_cast<int>(hs));
+        g_installed.store(false);
+        return false;
+    }
+    hs = ::MH_EnableHook(target);
+    if (hs != MH_OK) {
+        LogF("[MonoMainThreadHook] MH_EnableHook failed: status=%d", static_cast<int>(hs));
+        ::MH_RemoveHook(target);
+        g_orig_runtime_invoke = nullptr;
+        g_installed.store(false);
+        return false;
+    }
+    LogF("[MonoMainThreadHook] Install: hook armed on mono_runtime_invoke @ %p (main_tid=%lu)",
+         target, UnityCEDumper::MainThreadDispatcher::GetMainThreadId());
+    return true;
+}
+
+void Uninstall() {
+    if (!g_installed.load()) return;
+    const auto& resolver = UnityCEDumper::Mono::GetResolver();
+    if (resolver.runtime_invoke != nullptr) {
+        void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
+        ::MH_DisableHook(target);
+        ::MH_RemoveHook(target);
+    }
+    g_orig_runtime_invoke = nullptr;
+    g_installed.store(false);
+    LogF("[MonoMainThreadHook] Uninstall: hook removed");
+}
+
+bool IsInstalled() {
+    return g_installed.load();
+}
+
+}  // namespace UnityCEDumper::Mono::MainThreadHook

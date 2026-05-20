@@ -111,4 +111,11 @@ inline constexpr const char* CmdSetInstanceField      = "setInstanceField";
 //   limit   : optional int — default 200, hard-cap 5000
 inline constexpr const char* CmdSearchSymbols         = "searchSymbols";
 
+// Phase 20-MT — diagnostic snapshot of the main-thread dispatcher state.
+// Args: (none).
+// Returns: { initialized, hook_installed, main_thread_id, tick_count,
+//            submit_count, drain_count, timeout_count, reject_count,
+//            last_tick_age_ms, queue_depth, is_healthy }
+inline constexpr const char* CmdGetDispatcherStats    = "getDispatcherStats";
+
 }  // namespace UnityCEDumper::MagicStrings

@@ -793,13 +793,32 @@ Out (v2 candidates):
     to a three-entry priority list: 2-arg OfType → 1-arg OfType →
     3-arg ByType. The first match wins, so production calls land on
     the historically-preferred path on each Unity version.
-- [ ] **20-MT** *(new sub-phase)* DLL-side main-thread marshaling —
-  frame-hooked queue drain so `callMethod` on Unity icalls no longer
-  fights the game thread. Probably patches `PlayerLoop` or a similar
-  per-frame Unity hook to invoke pending requests on the main thread.
-  **Required to make `getActiveSceneRoots` / `getChildren` /
-  `getComponents` (and similar future Unity-engine API recipes) safe at
-  scale.** Multi-day; design TBD; sequenced before Phase 20b.
+- [x] **20-MT** ✅ **Shipped + live-smoked 2026-05-20.** DLL-side
+  main-thread marshaling. MinHook detour on `mono_runtime_invoke` /
+  `il2cpp_runtime_invoke` piggybacks on Unity's per-frame engine tick
+  to drain a work queue in main-thread context. `callMethod` now
+  accepts `main_thread: true` (default false for Phase 19 back-compat)
+  + optional `main_thread_timeout_ms` (default 5000); `unity_scene.lua`
+  bridges flip it on automatically. New `getDispatcherStats` RPC +
+  `main_thread` sub-object on handshake/scan surface `hook_installed`
+  / `is_healthy` / `tick_count` / `drain_count` etc. for diagnostics.
+  Live-PASS matrix: BongoCat (Mono / Unity 6000.2), SaGa F2R (IL2CPP
+  v29 / Unity 2021.3), Songs of Silence (IL2CPP v39 / Unity 6000.3) —
+  1000-iteration `Mathf.Abs` burst, 0 errors, 0 timeouts, drain_count
+  == submit_count == 1000, no game crashes. x86 build compiles
+  cleanly (live-smoke deferred to user; expected to work on
+  Legend of Mortal / 活俠傳 / LEAVES). **Mid-implementation discovery**:
+  nested `mono_thread_attach` on Unity main thread destroys Unity's
+  own thread handle (reproducing the build #54 BongoCat crash);
+  `ThreadAttachGuard` now consults
+  `MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()` and
+  becomes a no-op on main thread. Two lessons recorded in
+  [lessons-learned.md](lessons-learned.md): nested-attach trap +
+  Unity 2018 focus-pause. Files: `dll/src/shared/MainThreadDispatcher.{h,cpp}`,
+  `dll/src/mono/MonoMainThreadHook.{h,cpp}`,
+  `dll/src/il2cpp/IL2CPPMainThreadHook.{h,cpp}`, `dll/vendor/minihook/`
+  (existing vendor, now wired into CMakeLists). 279/279 xUnit pass
+  (+3 new wire-shape tests).
 - [ ] **20-HEAP** *(new sub-phase, fallback if Unity APIs aren't
   reachable)* DLL-side managed-heap walker that doesn't depend on Unity
   managed APIs at all — walks libgc heap sections via
