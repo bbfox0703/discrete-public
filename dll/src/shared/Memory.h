@@ -4,8 +4,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace UnityCEDumper::Memory {
@@ -78,6 +80,91 @@ struct ScanStats {
     std::size_t bytesScanned     = 0;
     std::size_t threadStacks     = 0;  // count of stack ranges collected
 };
+
+// Phase 27a — Unity-aware value scan support.
+// Typed comparisons used by `ScanForValue` and the scanFieldValue RPC.
+// Wire-side enums in [docs/pipe-protocol.md](../../docs/pipe-protocol.md);
+// these mirror the C# `ScanDataType` / `ValueScanType` shape.
+enum class ValueDataType : int {
+    Int8 = 0, Int16, Int32, Int64,
+    UInt8, UInt16, UInt32, UInt64,
+    Float, Double,
+};
+
+inline constexpr std::size_t ValueDataTypeSize(ValueDataType t) noexcept {
+    switch (t) {
+        case ValueDataType::Int8:   case ValueDataType::UInt8:                                return 1;
+        case ValueDataType::Int16:  case ValueDataType::UInt16:                               return 2;
+        case ValueDataType::Int32:  case ValueDataType::UInt32:  case ValueDataType::Float:   return 4;
+        case ValueDataType::Int64:  case ValueDataType::UInt64:  case ValueDataType::Double:  return 8;
+    }
+    return 0;
+}
+
+enum class ValueScanType : int {
+    Exact = 0,
+    Range,   // [lo, hi] inclusive; lo == hi == exact, but caller should pick Exact when possible
+};
+
+// One scan request. `lo` and `hi` are raw 8-byte payloads — the scanner
+// reinterprets them as the actual dataType (so an Int32 request stores
+// the value in the lower 4 bytes; Float in the lower 4 as IEEE-754; etc.).
+// Caller fills via memcpy from the typed value.
+struct ValueScanRequest {
+    ValueDataType  dataType   = ValueDataType::Int32;
+    ValueScanType  scanType   = ValueScanType::Exact;
+    std::uint8_t   lo[8]      = {};
+    std::uint8_t   hi[8]      = {};
+    double         tolerance  = 0.0001;   // float/double epsilon (CE default)
+    std::size_t    alignment  = 0;        // 0 = default (sizeof(dataType))
+    std::size_t    limit      = 50000;    // cap on pre-filter hits (post-filter cap is caller's job)
+};
+
+struct ValueScanCandidate {
+    const void*  addr;
+    std::uint8_t value[8];   // raw current value (low N bytes valid, N = ValueDataTypeSize)
+};
+
+struct ValueScanStats {
+    std::size_t regionsTotal     = 0;
+    std::size_t regionsScanned   = 0;
+    std::size_t regionsSkipImage = 0;
+    std::size_t regionsSkipStack = 0;
+    std::size_t bytesScanned     = 0;
+    std::size_t readFailureBytes = 0;   // bytes inside regions where SEH read AV'd (AC-stripped)
+    std::size_t threadStacks     = 0;
+};
+
+// Scans committed RW (non-image, non-stack) regions for primitive values
+// matching `req`. Reuses the same MEM_IMAGE + thread-stack filtering as
+// `ScanForPointer` so module .data / stack residue don't pollute results.
+// Returns at most `req.limit` matches.
+//
+// The scan is in-process and single-threaded. SEH-protected SafeReadBytes
+// covers each region so AC-stripped pages don't crash the host. Failed
+// regions count toward `stats->readFailureBytes` but don't abort the scan.
+//
+// For float / double, comparison uses `std::fabs(value - target) <= tolerance`.
+// For integers, exact bitwise comparison.
+// For range, comparison is typed (lo and hi reinterpreted as the dataType).
+std::vector<ValueScanCandidate> ScanForValue(const ValueScanRequest& req,
+                                              ValueScanStats*         stats = nullptr) noexcept;
+
+// Convenience helpers — pack a typed value into the request's `lo` or `hi`
+// bytes without the caller having to memcpy by hand.
+template <typename T>
+void SetScanValueLo(ValueScanRequest& req, T value) noexcept {
+    static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+    static_assert(sizeof(T) <= 8, "T too large for ValueScanRequest payload");
+    ::memcpy(req.lo, &value, sizeof(T));
+}
+
+template <typename T>
+void SetScanValueHi(ValueScanRequest& req, T value) noexcept {
+    static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+    static_assert(sizeof(T) <= 8, "T too large for ValueScanRequest payload");
+    ::memcpy(req.hi, &value, sizeof(T));
+}
 
 // Scans heap-like RW memory for pointer-sized values equal to `target`, at
 // 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an

@@ -95,6 +95,175 @@ bool ICaseContainsAscii(std::string_view haystack, std::string_view needle) {
     return false;
 }
 
+// Phase 27a — shared helpers for the scanFieldValue handler (both backends).
+// `Memory::` below resolves to UnityCEDumper::Memory:: via this using; the
+// alternative is to fully qualify each occurrence, which makes the helper
+// signatures unreadable.
+namespace Memory = ::UnityCEDumper::Memory;
+
+// Wire dataType string → ValueDataType enum. Returns false on unknown string.
+bool ParseValueDataType(std::string_view s, Memory::ValueDataType& out) {
+    if (s == "int8"   || s == "sbyte"  || s == "System.SByte")   { out = Memory::ValueDataType::Int8;   return true; }
+    if (s == "uint8"  || s == "byte"   || s == "System.Byte")    { out = Memory::ValueDataType::UInt8;  return true; }
+    if (s == "int16"  || s == "short"  || s == "System.Int16")   { out = Memory::ValueDataType::Int16;  return true; }
+    if (s == "uint16" || s == "ushort" || s == "System.UInt16")  { out = Memory::ValueDataType::UInt16; return true; }
+    if (s == "int32"  || s == "int"    || s == "System.Int32")   { out = Memory::ValueDataType::Int32;  return true; }
+    if (s == "uint32" || s == "uint"   || s == "System.UInt32")  { out = Memory::ValueDataType::UInt32; return true; }
+    if (s == "int64"  || s == "long"   || s == "System.Int64")   { out = Memory::ValueDataType::Int64;  return true; }
+    if (s == "uint64" || s == "ulong"  || s == "System.UInt64")  { out = Memory::ValueDataType::UInt64; return true; }
+    if (s == "float"  || s == "single" || s == "System.Single")  { out = Memory::ValueDataType::Float;  return true; }
+    if (s == "double" || s == "System.Double")                   { out = Memory::ValueDataType::Double; return true; }
+    return false;
+}
+
+// Map ValueDataType → canonical CLR type-name string used by decodeField /
+// walkInstance. Used to filter whatIsAt-resolved field types when the
+// caller requests strict type matching.
+const char* ValueDataTypeClrName(Memory::ValueDataType dt) {
+    switch (dt) {
+        case Memory::ValueDataType::Int8:   return "System.SByte";
+        case Memory::ValueDataType::UInt8:  return "System.Byte";
+        case Memory::ValueDataType::Int16:  return "System.Int16";
+        case Memory::ValueDataType::UInt16: return "System.UInt16";
+        case Memory::ValueDataType::Int32:  return "System.Int32";
+        case Memory::ValueDataType::UInt32: return "System.UInt32";
+        case Memory::ValueDataType::Int64:  return "System.Int64";
+        case Memory::ValueDataType::UInt64: return "System.UInt64";
+        case Memory::ValueDataType::Float:  return "System.Single";
+        case Memory::ValueDataType::Double: return "System.Double";
+    }
+    return "System.Object";
+}
+
+// JSON value → packed 8-byte buffer per the requested dataType. The wire
+// allows: number (int / float), hex string ("0x...") for unsigned-64 path,
+// or a string-encoded number for clients that don't trust JSON precision
+// on 64-bit ints. Returns false if the value is out of range or wrong kind.
+bool PackJsonValueToBytes(const json& v, Memory::ValueDataType dt, std::uint8_t out[8]) {
+    std::memset(out, 0, 8);
+    // For signed ints, allow negative JSON numbers; for unsigned-64 we may
+    // need to accept hex strings to cover the > 2^53 range that JSON
+    // doubles can't represent exactly.
+    auto asI64 = [&](std::int64_t& iv) -> bool {
+        if (v.is_number_integer())        { iv = v.get<std::int64_t>(); return true; }
+        if (v.is_number_unsigned())       { iv = static_cast<std::int64_t>(v.get<std::uint64_t>()); return true; }
+        if (v.is_number_float())          { iv = static_cast<std::int64_t>(v.get<double>()); return true; }
+        if (v.is_string()) {
+            const std::string& s = v.get_ref<const std::string&>();
+            try {
+                if (s.size() > 2 && (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))) {
+                    iv = static_cast<std::int64_t>(std::stoll(s.substr(2), nullptr, 16));
+                } else {
+                    iv = std::stoll(s, nullptr, 10);
+                }
+                return true;
+            } catch (...) { return false; }
+        }
+        return false;
+    };
+    auto asU64 = [&](std::uint64_t& uv) -> bool {
+        if (v.is_number_unsigned())       { uv = v.get<std::uint64_t>(); return true; }
+        if (v.is_number_integer())        { auto s = v.get<std::int64_t>(); if (s < 0) return false; uv = static_cast<std::uint64_t>(s); return true; }
+        if (v.is_number_float())          { auto d = v.get<double>(); if (d < 0.0) return false; uv = static_cast<std::uint64_t>(d); return true; }
+        if (v.is_string()) {
+            const std::string& s = v.get_ref<const std::string&>();
+            try {
+                if (s.size() > 2 && (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))) {
+                    uv = std::stoull(s.substr(2), nullptr, 16);
+                } else {
+                    uv = std::stoull(s, nullptr, 10);
+                }
+                return true;
+            } catch (...) { return false; }
+        }
+        return false;
+    };
+    auto asF64 = [&](double& dv) -> bool {
+        if (v.is_number())                { dv = v.get<double>(); return true; }
+        if (v.is_string()) {
+            const std::string& s = v.get_ref<const std::string&>();
+            try { dv = std::stod(s); return true; } catch (...) { return false; }
+        }
+        return false;
+    };
+
+    switch (dt) {
+        case Memory::ValueDataType::Int8: {
+            std::int64_t iv; if (!asI64(iv)) return false;
+            if (iv < INT8_MIN || iv > INT8_MAX) return false;
+            std::int8_t t = static_cast<std::int8_t>(iv); std::memcpy(out, &t, 1); return true;
+        }
+        case Memory::ValueDataType::UInt8: {
+            std::uint64_t uv; if (!asU64(uv)) return false;
+            if (uv > UINT8_MAX) return false;
+            std::uint8_t t = static_cast<std::uint8_t>(uv); std::memcpy(out, &t, 1); return true;
+        }
+        case Memory::ValueDataType::Int16: {
+            std::int64_t iv; if (!asI64(iv)) return false;
+            if (iv < INT16_MIN || iv > INT16_MAX) return false;
+            std::int16_t t = static_cast<std::int16_t>(iv); std::memcpy(out, &t, 2); return true;
+        }
+        case Memory::ValueDataType::UInt16: {
+            std::uint64_t uv; if (!asU64(uv)) return false;
+            if (uv > UINT16_MAX) return false;
+            std::uint16_t t = static_cast<std::uint16_t>(uv); std::memcpy(out, &t, 2); return true;
+        }
+        case Memory::ValueDataType::Int32: {
+            std::int64_t iv; if (!asI64(iv)) return false;
+            if (iv < INT32_MIN || iv > INT32_MAX) return false;
+            std::int32_t t = static_cast<std::int32_t>(iv); std::memcpy(out, &t, 4); return true;
+        }
+        case Memory::ValueDataType::UInt32: {
+            std::uint64_t uv; if (!asU64(uv)) return false;
+            if (uv > UINT32_MAX) return false;
+            std::uint32_t t = static_cast<std::uint32_t>(uv); std::memcpy(out, &t, 4); return true;
+        }
+        case Memory::ValueDataType::Int64: {
+            std::int64_t iv; if (!asI64(iv)) return false;
+            std::memcpy(out, &iv, 8); return true;
+        }
+        case Memory::ValueDataType::UInt64: {
+            std::uint64_t uv; if (!asU64(uv)) return false;
+            std::memcpy(out, &uv, 8); return true;
+        }
+        case Memory::ValueDataType::Float: {
+            double dv; if (!asF64(dv)) return false;
+            float t = static_cast<float>(dv); std::memcpy(out, &t, 4); return true;
+        }
+        case Memory::ValueDataType::Double: {
+            double dv; if (!asF64(dv)) return false;
+            std::memcpy(out, &dv, 8); return true;
+        }
+    }
+    return false;
+}
+
+// Decode the raw value bytes back to a JSON-friendly representation for
+// the scanFieldValue response's `currentValue` field. Uses the same wire
+// shape as decodeField's primitive paths.
+json DecodeValueBytesToJson(const std::uint8_t bytes[8], Memory::ValueDataType dt) {
+    switch (dt) {
+        case Memory::ValueDataType::Int8:   { std::int8_t   v; std::memcpy(&v, bytes, 1); return static_cast<int>(v); }
+        case Memory::ValueDataType::UInt8:  { std::uint8_t  v; std::memcpy(&v, bytes, 1); return static_cast<unsigned>(v); }
+        case Memory::ValueDataType::Int16:  { std::int16_t  v; std::memcpy(&v, bytes, 2); return v; }
+        case Memory::ValueDataType::UInt16: { std::uint16_t v; std::memcpy(&v, bytes, 2); return v; }
+        case Memory::ValueDataType::Int32:  { std::int32_t  v; std::memcpy(&v, bytes, 4); return v; }
+        case Memory::ValueDataType::UInt32: { std::uint32_t v; std::memcpy(&v, bytes, 4); return v; }
+        case Memory::ValueDataType::Int64:  { std::int64_t  v; std::memcpy(&v, bytes, 8); return v; }
+        case Memory::ValueDataType::UInt64: { std::uint64_t v; std::memcpy(&v, bytes, 8); return v; }
+        case Memory::ValueDataType::Float:  { float         v; std::memcpy(&v, bytes, 4); return v; }
+        case Memory::ValueDataType::Double: { double        v; std::memcpy(&v, bytes, 8); return v; }
+    }
+    return nullptr;
+}
+
+// Wire scanType string → ValueScanType enum.
+bool ParseValueScanType(std::string_view s, Memory::ValueScanType& out) {
+    if (s == "exact" || s.empty()) { out = Memory::ValueScanType::Exact; return true; }
+    if (s == "range")              { out = Memory::ValueScanType::Range; return true; }
+    return false;
+}
+
 std::string Utf8FromWide(const std::wstring& w) {
     if (w.empty()) return {};
     int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
@@ -1586,6 +1755,278 @@ void RegisterCoreHandlers() {
         };
     });
 
+    // Phase 27a — scanFieldValue (Mono).
+    // CE-style value search filtered to Unity managed instances. Two modes:
+    //   * Global (default): walks every committed RW region with the same
+    //     MEM_IMAGE + thread-stack filter `findInstances` uses, then feeds
+    //     each value-match through `Mono::WhatIsAt` to drop non-managed
+    //     hits. Result rows are populated with the resolved instance +
+    //     class + field — exactly the kind of context CE alone cannot
+    //     provide.
+    //   * Class-scoped (request `classScope: true`): skips the region walk
+    //     entirely. Uses findInstances' Memory::ScanForPointer to enumerate
+    //     live instances of one class, then per-instance walks declared
+    //     fields whose typeName matches the wire dataType, SafeReads each
+    //     field, and emits matches inline. Orders of magnitude faster
+    //     because we never touch non-managed memory.
+    PipeServer::RegisterHandler(MagicStrings::CmdScanFieldValue,
+        [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        // --- Parse wire shape ---
+        std::string dtStr = args.value("dataType", std::string{"int32"});
+        Memory::ValueDataType dt{};
+        if (!ParseValueDataType(dtStr, dt)) {
+            return json{{"error", "unknown 'dataType' (try int32/uint32/float/double/...)"}};
+        }
+        std::string stStr = args.value("scanType", std::string{"exact"});
+        Memory::ValueScanType st{};
+        if (!ParseValueScanType(stStr, st)) {
+            return json{{"error", "unknown 'scanType' (expected exact|range)"}};
+        }
+        if (!args.contains("value")) return json{{"error", "missing 'value'"}};
+
+        Memory::ValueScanRequest req{};
+        req.dataType  = dt;
+        req.scanType  = st;
+        req.tolerance = args.value("tolerance", 0.0001);
+        req.alignment = static_cast<std::size_t>(args.value("alignment", 0));
+        req.limit     = static_cast<std::size_t>(args.value("limit", 50000));
+        if (req.limit == 0)        req.limit = 50000;
+        if (req.limit > 50000)     req.limit = 50000;
+
+        if (!PackJsonValueToBytes(args["value"], dt, req.lo)) {
+            return json{{"error", "'value' out of range or not numeric for dataType"}};
+        }
+        if (st == Memory::ValueScanType::Range) {
+            if (!args.contains("valueTo")) {
+                return json{{"error", "scanType=range requires 'valueTo'"}};
+            }
+            if (!PackJsonValueToBytes(args["valueTo"], dt, req.hi)) {
+                return json{{"error", "'valueTo' out of range or not numeric for dataType"}};
+            }
+        }
+
+        std::size_t maxBackwardScan = static_cast<std::size_t>(
+            args.value("maxBackwardScan", 16384));
+        if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+        if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+        const bool classScope = args.value("classScope", false);
+
+        // --- Build response shell ---
+        const char* expectedClrName = ValueDataTypeClrName(dt);
+
+        // -------- Class-scoped mode --------
+        if (classScope) {
+            std::string err;
+            Mono::MonoClass* k = resolveClassFromArgs(args, err);
+            if (k == nullptr) return json{{"error", err}};
+
+            const auto& r = Mono::GetResolver();
+            if (r.class_vtable == nullptr) return json{{"error", "mono_class_vtable not exported"}};
+            Mono::MonoDomain* domain = Mono::GetRootDomain();
+            if (domain == nullptr) return json{{"error", "no mono root domain"}};
+
+            Mono::MonoVTable* vtable = nullptr;
+            {
+                Mono::ThreadAttachGuard guard(domain);
+                if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+                vtable = r.class_vtable(domain, k);
+            }
+            if (vtable == nullptr) return json{{"error", "mono_class_vtable returned null"}};
+
+            // Enumerate live instances (cap at limit * 4 — most fields won't
+            // match, but we don't want to scan more than necessary).
+            const std::size_t instanceLimit = std::min<std::size_t>(req.limit * 4, 4096);
+            auto matches = Memory::ScanForPointer(
+                reinterpret_cast<std::uintptr_t>(vtable), instanceLimit, nullptr);
+
+            // For each instance, walk declared fields of matching type and
+            // SafeRead+compare each field value. ReadClassInfo gives us the
+            // declared field list with offsets + type names — same path
+            // walkInstance uses.
+            //
+            // IMPORTANT: ReadClassInfo creates its own ThreadAttachGuard
+            // internally. Wrapping THIS call in an outer guard would nest
+            // attach/detach on the pipe worker thread — the same hazard
+            // the Phase 20-MT investigation flagged for Mono (build #54
+            // BongoCat-killer). Don't add an outer guard here.
+            Mono::ClassInfoResult infoResult = Mono::ReadClassInfo(k);
+            if (!infoResult.ok) return json{{"error", "ReadClassInfo failed"}};
+            const Mono::ClassInfo& info = infoResult.info;
+            // Echo assembly back from request (resolver matched it; we don't
+            // re-derive it from the runtime).
+            std::string asmName = args.value("assembly", std::string{});
+            // ECMA-335 FieldAttributes.STATIC = 0x10.
+            constexpr std::uint32_t kFieldAttrStatic = 0x10;
+
+            json rows = json::array();
+            std::size_t fieldsConsidered = 0;
+            const std::size_t valueSize   = Memory::ValueDataTypeSize(dt);
+            const bool        isFloat     = (dt == Memory::ValueDataType::Float || dt == Memory::ValueDataType::Double);
+            const bool        isRange     = (st == Memory::ValueScanType::Range);
+
+            // Reuse Memory::ScanForValue's per-type predicate by routing one
+            // value through it: load the candidate as 8 bytes, call a one-
+            // off comparator. To keep the handler tight we use a small
+            // typed lambda — exact comparators for each dt.
+            auto matchesValue = [&](const std::uint8_t* candidate) -> bool {
+                std::uint8_t v[8] = {};
+                std::memcpy(v, candidate, valueSize);
+                // Use ScanForValue's comparison logic by stashing through a
+                // 1-byte fake region — overkill. Inline the typed compare:
+                #define CMP_INT(T) do { \
+                    T cur; std::memcpy(&cur, v, sizeof(T)); \
+                    T lo;  std::memcpy(&lo, req.lo, sizeof(T)); \
+                    if (isRange) { T hi; std::memcpy(&hi, req.hi, sizeof(T)); return cur >= lo && cur <= hi; } \
+                    return cur == lo; \
+                } while (0)
+                #define CMP_FLT(T) do { \
+                    T cur; std::memcpy(&cur, v, sizeof(T)); \
+                    T lo;  std::memcpy(&lo, req.lo, sizeof(T)); \
+                    if (!std::isfinite(static_cast<double>(cur))) return false; \
+                    if (isRange) { T hi; std::memcpy(&hi, req.hi, sizeof(T)); return cur >= lo && cur <= hi; } \
+                    return std::fabs(static_cast<double>(cur) - static_cast<double>(lo)) <= req.tolerance; \
+                } while (0)
+                switch (dt) {
+                    case Memory::ValueDataType::Int8:   CMP_INT(std::int8_t);
+                    case Memory::ValueDataType::UInt8:  CMP_INT(std::uint8_t);
+                    case Memory::ValueDataType::Int16:  CMP_INT(std::int16_t);
+                    case Memory::ValueDataType::UInt16: CMP_INT(std::uint16_t);
+                    case Memory::ValueDataType::Int32:  CMP_INT(std::int32_t);
+                    case Memory::ValueDataType::UInt32: CMP_INT(std::uint32_t);
+                    case Memory::ValueDataType::Int64:  CMP_INT(std::int64_t);
+                    case Memory::ValueDataType::UInt64: CMP_INT(std::uint64_t);
+                    case Memory::ValueDataType::Float:  CMP_FLT(float);
+                    case Memory::ValueDataType::Double: CMP_FLT(double);
+                }
+                #undef CMP_INT
+                #undef CMP_FLT
+                (void)isFloat;
+                return false;
+            };
+
+            for (const void* p : matches) {
+                if (rows.size() >= req.limit) break;
+                std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
+                for (const auto& f : info.fields) {
+                    if ((f.flags & kFieldAttrStatic) != 0) continue;
+                    if (f.typeName != expectedClrName) continue;
+                    fieldsConsidered++;
+                    std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(f.offset);
+                    std::uint8_t   buf[8] = {};
+                    if (!Memory::SafeReadBytes(reinterpret_cast<void*>(fieldAddr), buf, valueSize)) {
+                        continue;
+                    }
+                    if (!matchesValue(buf)) continue;
+
+                    json row = {
+                        {"addr",          formatHex(fieldAddr)},
+                        {"instAddr",      formatHex(inst)},
+                        {"asm",           asmName},
+                        {"ns",            info.self.ns},
+                        {"class",         info.self.name},
+                        {"field",         f.name},
+                        {"fieldOffset",   f.offset},
+                        {"fieldType",     f.typeName},
+                        {"fieldKind",     "leaf"},
+                        {"currentValue",  DecodeValueBytesToJson(buf, dt)},
+                    };
+                    rows.push_back(std::move(row));
+                    if (rows.size() >= req.limit) break;
+                }
+            }
+
+            return json{
+                {"ok",                true},
+                {"mode",              "class-scoped"},
+                {"dataType",          dtStr},
+                {"scanType",          stStr},
+                {"count",             rows.size()},
+                {"truncated",         rows.size() >= req.limit},
+                {"instancesScanned",  matches.size()},
+                {"fieldsConsidered",  fieldsConsidered},
+                {"droppedNonManaged", 0},
+                {"scannedBytes",      static_cast<std::uint64_t>(matches.size()) * valueSize},
+                {"candidates",        std::move(rows)},
+            };
+        }
+
+        // -------- Global mode --------
+        // Make sure the address-finder's class-range cache is built; first call
+        // is a one-shot ~tens-of-ms pass and subsequent whatIsAt calls are sub-ms.
+        if (!Mono::BuildClassRangeCache()) {
+            return json{{"error", "address-finder class cache build failed"}};
+        }
+
+        Memory::ValueScanStats stats{};
+        auto candidates = Memory::ScanForValue(req, &stats);
+
+        json rows = json::array();
+        std::size_t droppedNonManaged = 0;
+        const std::size_t valueSize = Memory::ValueDataTypeSize(dt);
+        for (const auto& c : candidates) {
+            std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
+            Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
+            if (!lookup.found) { droppedNonManaged++; continue; }
+
+            json row = {
+                {"addr",            formatHex(addr)},
+                {"instAddr",        formatHex(lookup.instance)},
+                {"asm",             lookup.assembly},
+                {"ns",              lookup.ns},
+                {"class",           lookup.className},
+                {"fieldOffset",     static_cast<std::int64_t>(lookup.fieldOffset)},
+                {"currentValue",    DecodeValueBytesToJson(c.value, dt)},
+            };
+            if (lookup.field.present) {
+                row["field"]     = lookup.field.name;
+                row["fieldType"] = lookup.field.typeName;
+                row["fieldKind"] = lookup.field.kind;
+            } else if (lookup.nearestField.present) {
+                row["nearestField"] = json{
+                    {"name",      lookup.nearestField.name},
+                    {"typeName",  lookup.nearestField.typeName},
+                    {"delta",     static_cast<std::int64_t>(lookup.nearestFieldDelta)},
+                };
+                row["fieldKind"] = "near";
+            } else {
+                row["fieldKind"] = "interior";
+            }
+            rows.push_back(std::move(row));
+        }
+
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "scanFieldValue(Mono) dt=%s candidates=%zu rows=%zu dropped=%zu bytes=%zu",
+                dtStr.c_str(), candidates.size(), rows.size(), droppedNonManaged,
+                stats.bytesScanned);
+            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+
+        return json{
+            {"ok",                true},
+            {"mode",              "global"},
+            {"dataType",          dtStr},
+            {"scanType",          stStr},
+            {"count",             rows.size()},
+            {"droppedNonManaged", droppedNonManaged},
+            {"truncated",         candidates.size() >= req.limit},
+            {"scannedBytes",      stats.bytesScanned},
+            {"readFailureBytes",  stats.readFailureBytes},
+            {"candidates",        std::move(rows)},
+            {"scan_stats", json{
+                {"regions_total",      stats.regionsTotal},
+                {"regions_scanned",    stats.regionsScanned},
+                {"regions_skip_image", stats.regionsSkipImage},
+                {"regions_skip_stack", stats.regionsSkipStack},
+                {"thread_stacks",      stats.threadStacks},
+            }},
+        };
+    });
+
     // Phase 6 segment B — walkInstance (Mono).
     // Given an instance address + class spec, walk the inheritance chain and
     // decode every instance field's value. Each MonoObject's first 16 bytes
@@ -2900,6 +3341,240 @@ void RegisterCoreHandlers() {
             {"fieldOffset", fieldOffset},
             {"fieldType",   fieldType},
             {"rows",        std::move(rows)},
+        };
+    });
+
+    // Phase 27a — scanFieldValue (IL2CPP). Mirror of the Mono handler above;
+    // see that block for full design notes. IL2CPP-specific differences:
+    //   * Heap scan target for class-scoped mode is the Il2CppClass* itself
+    //     (the first qword of an object header). Mono uses MonoVTable*.
+    //   * `vtable` is not emitted (IL2CPP doesn't separate it).
+    //   * AOT means JIT-compile is not needed; all field offsets are static.
+    PipeServer::RegisterHandler(MagicStrings::CmdScanFieldValue,
+        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::string dtStr = args.value("dataType", std::string{"int32"});
+        Memory::ValueDataType dt{};
+        if (!ParseValueDataType(dtStr, dt)) {
+            return json{{"error", "unknown 'dataType' (try int32/uint32/float/double/...)"}};
+        }
+        std::string stStr = args.value("scanType", std::string{"exact"});
+        Memory::ValueScanType st{};
+        if (!ParseValueScanType(stStr, st)) {
+            return json{{"error", "unknown 'scanType' (expected exact|range)"}};
+        }
+        if (!args.contains("value")) return json{{"error", "missing 'value'"}};
+
+        Memory::ValueScanRequest req{};
+        req.dataType  = dt;
+        req.scanType  = st;
+        req.tolerance = args.value("tolerance", 0.0001);
+        req.alignment = static_cast<std::size_t>(args.value("alignment", 0));
+        req.limit     = static_cast<std::size_t>(args.value("limit", 50000));
+        if (req.limit == 0)        req.limit = 50000;
+        if (req.limit > 50000)     req.limit = 50000;
+
+        if (!PackJsonValueToBytes(args["value"], dt, req.lo)) {
+            return json{{"error", "'value' out of range or not numeric for dataType"}};
+        }
+        if (st == Memory::ValueScanType::Range) {
+            if (!args.contains("valueTo")) {
+                return json{{"error", "scanType=range requires 'valueTo'"}};
+            }
+            if (!PackJsonValueToBytes(args["valueTo"], dt, req.hi)) {
+                return json{{"error", "'valueTo' out of range or not numeric for dataType"}};
+            }
+        }
+
+        std::size_t maxBackwardScan = static_cast<std::size_t>(
+            args.value("maxBackwardScan", 16384));
+        if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+        if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+        const bool classScope = args.value("classScope", false);
+        const char* expectedClrName = ValueDataTypeClrName(dt);
+
+        // Typed comparator — same body as the Mono path (re-inlined here
+        // rather than hoisted because the helper depends on req which we
+        // want to keep on the stack).
+        auto matchesValue = [&](const std::uint8_t* candidate) -> bool {
+            std::uint8_t v[8] = {};
+            const std::size_t valueSize = Memory::ValueDataTypeSize(dt);
+            std::memcpy(v, candidate, valueSize);
+            const bool isRange = (st == Memory::ValueScanType::Range);
+            #define CMP_INT(T) do { \
+                T cur; std::memcpy(&cur, v, sizeof(T)); \
+                T lo;  std::memcpy(&lo, req.lo, sizeof(T)); \
+                if (isRange) { T hi; std::memcpy(&hi, req.hi, sizeof(T)); return cur >= lo && cur <= hi; } \
+                return cur == lo; \
+            } while (0)
+            #define CMP_FLT(T) do { \
+                T cur; std::memcpy(&cur, v, sizeof(T)); \
+                T lo;  std::memcpy(&lo, req.lo, sizeof(T)); \
+                if (!std::isfinite(static_cast<double>(cur))) return false; \
+                if (isRange) { T hi; std::memcpy(&hi, req.hi, sizeof(T)); return cur >= lo && cur <= hi; } \
+                return std::fabs(static_cast<double>(cur) - static_cast<double>(lo)) <= req.tolerance; \
+            } while (0)
+            switch (dt) {
+                case Memory::ValueDataType::Int8:   CMP_INT(std::int8_t);
+                case Memory::ValueDataType::UInt8:  CMP_INT(std::uint8_t);
+                case Memory::ValueDataType::Int16:  CMP_INT(std::int16_t);
+                case Memory::ValueDataType::UInt16: CMP_INT(std::uint16_t);
+                case Memory::ValueDataType::Int32:  CMP_INT(std::int32_t);
+                case Memory::ValueDataType::UInt32: CMP_INT(std::uint32_t);
+                case Memory::ValueDataType::Int64:  CMP_INT(std::int64_t);
+                case Memory::ValueDataType::UInt64: CMP_INT(std::uint64_t);
+                case Memory::ValueDataType::Float:  CMP_FLT(float);
+                case Memory::ValueDataType::Double: CMP_FLT(double);
+            }
+            #undef CMP_INT
+            #undef CMP_FLT
+            return false;
+        };
+
+        // -------- Class-scoped mode --------
+        if (classScope) {
+            std::string err;
+            IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
+            if (k == nullptr) return json{{"error", err}};
+
+            IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
+            if (domain == nullptr) return json{{"error", "no il2cpp domain"}};
+
+            const std::size_t instanceLimit = std::min<std::size_t>(req.limit * 4, 4096);
+            auto matches = Memory::ScanForPointer(
+                reinterpret_cast<std::uintptr_t>(k), instanceLimit, nullptr);
+
+            // ReadClassInfo creates its own ThreadAttachGuard. Nesting an
+            // outer guard here triggers the IL2CPP analog of the Phase
+            // 20-MT build-#54 BongoCat killer (nested attach corrupts
+            // pipe-worker thread state). Don't add one.
+            IL2CPP::ClassInfoResult infoResult = IL2CPP::ReadClassInfo(k);
+            if (!infoResult.ok) return json{{"error", "ReadClassInfo failed"}};
+            const IL2CPP::ClassInfo& info = infoResult.info;
+            std::string asmName = args.value("assembly", std::string{});
+
+            // FIELD_ATTRIBUTE_STATIC (ECMA-335) = 0x10.
+            constexpr std::uint32_t kFieldAttrStatic = 0x10;
+            const std::size_t valueSize = Memory::ValueDataTypeSize(dt);
+
+            json rows = json::array();
+            std::size_t fieldsConsidered = 0;
+            for (const void* p : matches) {
+                if (rows.size() >= req.limit) break;
+                std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
+                for (const auto& f : info.fields) {
+                    if ((f.flags & kFieldAttrStatic) != 0) continue;
+                    if (f.typeName != expectedClrName) continue;
+                    fieldsConsidered++;
+                    std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(f.offset);
+                    std::uint8_t   buf[8] = {};
+                    if (!Memory::SafeReadBytes(reinterpret_cast<void*>(fieldAddr), buf, valueSize)) {
+                        continue;
+                    }
+                    if (!matchesValue(buf)) continue;
+
+                    json row = {
+                        {"addr",          formatHex(fieldAddr)},
+                        {"instAddr",      formatHex(inst)},
+                        {"asm",           asmName},
+                        {"ns",            info.self.ns},
+                        {"class",         info.self.name},
+                        {"field",         f.name},
+                        {"fieldOffset",   static_cast<std::int64_t>(f.offset)},
+                        {"fieldType",     f.typeName},
+                        {"fieldKind",     "leaf"},
+                        {"currentValue",  DecodeValueBytesToJson(buf, dt)},
+                    };
+                    rows.push_back(std::move(row));
+                    if (rows.size() >= req.limit) break;
+                }
+            }
+
+            return json{
+                {"ok",                true},
+                {"mode",              "class-scoped"},
+                {"dataType",          dtStr},
+                {"scanType",          stStr},
+                {"count",             rows.size()},
+                {"truncated",         rows.size() >= req.limit},
+                {"instancesScanned",  matches.size()},
+                {"fieldsConsidered",  fieldsConsidered},
+                {"droppedNonManaged", 0},
+                {"scannedBytes",      static_cast<std::uint64_t>(matches.size()) * valueSize},
+                {"candidates",        std::move(rows)},
+            };
+        }
+
+        // -------- Global mode --------
+        if (!IL2CPP::BuildClassRangeCache()) {
+            return json{{"error", "address-finder class cache build failed"}};
+        }
+
+        Memory::ValueScanStats stats{};
+        auto candidates = Memory::ScanForValue(req, &stats);
+
+        json rows = json::array();
+        std::size_t droppedNonManaged = 0;
+        for (const auto& c : candidates) {
+            std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
+            IL2CPP::AddressLookup lookup = IL2CPP::WhatIsAt(addr, maxBackwardScan);
+            if (!lookup.found) { droppedNonManaged++; continue; }
+
+            json row = {
+                {"addr",            formatHex(addr)},
+                {"instAddr",        formatHex(lookup.instance)},
+                {"asm",             lookup.assembly},
+                {"ns",              lookup.ns},
+                {"class",           lookup.className},
+                {"fieldOffset",     static_cast<std::int64_t>(lookup.fieldOffset)},
+                {"currentValue",    DecodeValueBytesToJson(c.value, dt)},
+            };
+            if (lookup.field.present) {
+                row["field"]     = lookup.field.name;
+                row["fieldType"] = lookup.field.typeName;
+                row["fieldKind"] = lookup.field.kind;
+            } else if (lookup.nearestField.present) {
+                row["nearestField"] = json{
+                    {"name",      lookup.nearestField.name},
+                    {"typeName",  lookup.nearestField.typeName},
+                    {"delta",     static_cast<std::int64_t>(lookup.nearestFieldDelta)},
+                };
+                row["fieldKind"] = "near";
+            } else {
+                row["fieldKind"] = "interior";
+            }
+            rows.push_back(std::move(row));
+        }
+
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "scanFieldValue(IL2CPP) dt=%s candidates=%zu rows=%zu dropped=%zu bytes=%zu",
+                dtStr.c_str(), candidates.size(), rows.size(), droppedNonManaged,
+                stats.bytesScanned);
+            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+
+        return json{
+            {"ok",                true},
+            {"mode",              "global"},
+            {"dataType",          dtStr},
+            {"scanType",          stStr},
+            {"count",             rows.size()},
+            {"droppedNonManaged", droppedNonManaged},
+            {"truncated",         candidates.size() >= req.limit},
+            {"scannedBytes",      stats.bytesScanned},
+            {"readFailureBytes",  stats.readFailureBytes},
+            {"candidates",        std::move(rows)},
+            {"scan_stats", json{
+                {"regions_total",      stats.regionsTotal},
+                {"regions_scanned",    stats.regionsScanned},
+                {"regions_skip_image", stats.regionsSkipImage},
+                {"regions_skip_stack", stats.regionsSkipStack},
+                {"thread_stacks",      stats.threadStacks},
+            }},
         };
     });
 

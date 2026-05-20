@@ -114,6 +114,42 @@ inline constexpr const char* CmdSetInstanceField      = "setInstanceField";
 //   limit   : optional int — default 200, hard-cap 5000
 inline constexpr const char* CmdSearchSymbols         = "searchSymbols";
 
+// Phase 27a — Unity-aware value scan (First Scan).
+// Searches process memory (or a single class's live instances in
+// class-scoped mode) for primitive values matching the request and
+// filters non-Unity-managed hits via the Phase 17 whatIsAt class-range
+// cache. Wire request fields:
+//   dataType  : "int8"|"int16"|"int32"|"int64"
+//               |"uint8"|"uint16"|"uint32"|"uint64"
+//               |"float"|"double"  (string scan lives in Phase 27b)
+//   scanType  : "exact"|"range"  (changed/unchanged/etc. live in 27b)
+//   value     : number (exact match) or range lower bound
+//   valueTo   : number (range upper bound, inclusive — required when
+//               scanType == "range")
+//   tolerance : number (float/double epsilon match; default 0.0001
+//               matches CE's default float epsilon)
+//   classScope: bool (true = class-scoped mode — requires assembly +
+//               ns + class)
+//   assembly  : string (class-scoped mode only)
+//   ns        : string (class-scoped mode only — empty allowed)
+//   class     : string (class-scoped mode only)
+//   alignment : int (1/2/4/8 — defaults to sizeof(dataType); set to
+//               1 for "fast scan" misaligned search)
+//   limit     : int (default 50_000, hard-cap 50_000 — applies AFTER
+//               whatIsAt filter so callers always see at most this many
+//               managed candidates)
+//   maxBackwardScan : int (default 16384, cap 16384 — passed through to
+//               whatIsAt; bumped from the Phase 17 default 4096 because
+//               value-scan candidates can land deep inside very large
+//               MonoBehaviour subclasses)
+// Response shape:
+//   { ok: true, candidates: [ { addr, instAddr, asm, ns, class, field,
+//                               fieldOffset, fieldKind, currentValue,
+//                               nearestField? } ],
+//     scannedBytes, droppedNonManaged, truncated, count, mode }
+//   mode = "global"|"class-scoped".
+inline constexpr const char* CmdScanFieldValue        = "scanFieldValue";
+
 // Phase 20-MT — diagnostic snapshot of the main-thread dispatcher state.
 // Args: (none).
 // Returns: { initialized, hook_installed, main_thread_id, tick_count,

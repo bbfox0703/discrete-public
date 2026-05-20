@@ -1,7 +1,7 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-20 late session — adds **Phase 26 anti-tamper protection**: 3-slot SHA256 self-check spread across Core + UI assemblies (`BuildArtifactToken` / `ExportFormatToken` / `WindowsRuntimeMetadata`), XOR-shielded footer credit, CT-export offset poisoning, and 1/11 Inspector grid value poisoning — all gated by 0xCC dev-mode bypass; on top of mid-session Phase 20-MT main-thread marshaling and Phase 25 multi-assembly Symbol Finder.)
-**Last commit**: feat(security): 3-slot token guardian + Inspector grid poison
+**Branch**: `dev` (2026-05-20 **night** session — **Phase 27a shipped + live-smoked + production bug fixed**: `scanFieldValue` RPC works end-to-end on IL2CPP x64 (SaGa F2R), Mono x64 (BongoCat), and Mono x86 (活俠傳 / Legend of Mortal, Unity 2020.3.49f1). Mid-smoke caught one P0 hang on legacy 32-bit Mono — eager `mono_class_vtable` batch for 17K classes wedged BDWGC when game's main thread was concurrently focus-paused (alt-tab to console). Rewrote `Mono::BuildClassRangeCache` + `WhatIsAt` to lazy vtable→klass resolution: cache build does pure pointer enumeration (~500ms, zero runtime calls), backward scan derefs each candidate qword via SafeReadBytes to get klass, memoizes for subsequent hits. Build #423 verified hang-free across 2 runs at different in-game UIs on 活俠傳. Lesson recorded in [lessons-learned.md](lessons-learned.md). Also fixed build.ps1 default `-Arch x64` → `Both` (no-args `build.cmd` now rebuilds x86 + x64 together — was leaving `dist/x86/` stale) + `WindowsProcessEnumerator` no longer force-sets Backend=None for WOW64 processes (32-bit Unity targets now appear in Pick & Inject picker). Earlier today (2026-05-20 even later): **Phase 27 planning landed**: Unity-aware Value Search drafted as sub-phases 27a-27f in [plan.md](plan.md). Inspired by `D:\Github\AOBMaker`'s `WindowsValueScanner.cs` but reuses Discrete's existing `Memory::EnumerateCommittedRegions` + `whatIsAt` (Phase 17) filter + `findInstances` (Phase 6c) — no new scan engine needed. Two scan modes: **global** (CE flow) + **class-scoped** (Discrete flow, ~100x faster). Full CE filter mode set. Includes Phase 17b carry-forward — Array / List<T> element resolution in `whatIsAt`. v1 estimated ~6.5 days; v2 sub-phase 27f doubles as Phase 20-HEAP closure via libgc heap-section binding. **Phase 28** (Field → Methods cross-reference) added as TODO stub — Mono IL walk + IL2CPP RIP scan for static fields + heuristic for IL2CPP instance fields; picks up after Phase 27. **No code yet for either.** Earlier today (2026-05-20 mid/late): **Phase 26 anti-tamper protection** — 3-slot SHA256 self-check spread across Core + UI assemblies (`BuildArtifactToken` / `ExportFormatToken` / `WindowsRuntimeMetadata`), XOR-shielded footer credit, CT-export offset poisoning, and 1/11 Inspector grid value poisoning — all gated by 0xCC dev-mode bypass; on top of mid-session Phase 20-MT main-thread marshaling and Phase 25 multi-assembly Symbol Finder.)
+**Last commit**: feat(security): 3-slot token guardian + Inspector grid poison _(planning-only update — no commit yet for Phase 27/28)_
 **Build**: 408 (DLL sizes unchanged from build #376; `DiscreteUI.exe` AOT 39.4 MB after 3-slot guardian + TokenAggregator + InspectorPoison helper; Release single-file unchanged)
 **Tests**: 283/283 pass (no new tests this session — protection layer is dev-mode-bypassed so existing snapshot tests stay byte-identical) + AOT round-trip verified end-to-end: 3 distinct sentinels in `.rdata`, inject-hash.ps1 patches all 3 with SHA256 `2A9C9F…E13B`, slot C ~11 KB away from A/B (cross-assembly blob distance).
 **Current state**: **Phase 26 shipped + AOT-verified.** Three independent token guardians (slots A in Core/Services, B in Core/Services/Export, C in ui/UnityDumpUI/Platform) each self-check the running binary by zeroing ALL three slots and re-computing SHA256. `TokenAggregator.Combined()` ORs all three factors so tampering ANY slot trips both poison surfaces. Surface 1 — CT export offsets: `CloakOffset(off) => off ^ (factor & 0x7F)` in CeXml/CsxExporter. Surface 2 — Inspector `DisplayValue`: `MaybePerturbDisplay` XORs low byte of 1/11 numeric rows (per-row deterministic seed) with `factor & 0xFF`. Dev mode (Debug/Release single-file with 0xCC slots) short-circuits to factor=0 — exports + Inspector identical to pre-Phase-26. `tools/inject-hash.ps1` upgraded to 3-slot AOBMaker-style patching; build.ps1 calls it on `-Mode Publish` only. Class names renamed to non-suggestive forms (`IntegrityGuardian` → `BuildArtifactToken` / `IntegrityCore` → `SchemaConstants` / `StringShield` → `LocalizedText`) so binary metadata no longer leaks the words "Integrity" / "Guardian" / "Shield". UI footer (centered, opacity 0.55) shows `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. New end-user doc at `USAGE.md` (root) covers Mode A/B deployment for CT makers. Pre-Phase-26 work still in scope: **Phase 20-MT live-PASS across 5 targets** (BongoCat / SaGa F2R / Songs of Silence / LEAVES x86 / Legend of Mortal x86) MinHook detour on `mono_runtime_invoke` / `il2cpp_runtime_invoke` piggybacks on Unity's per-frame engine tick to drain a work queue on the Unity main thread. `callMethod` got two new optional args (`main_thread: bool` default false, `main_thread_timeout_ms: int` default 5000); `unity_scene.lua` defaults the engine-icall wrappers to `main_thread = true`; UI `MethodCallWindow` got a "Run on Unity main thread" checkbox. New `getDispatcherStats` RPC + `main_thread` sub-object on handshake/scan expose `hook_installed`/`is_healthy`/`tick_count`/`drain_count`/`queue_depth` for diagnostics. Discovered mid-implementation: nested `mono_thread_attach` on Unity main thread reproduces the build #54 BongoCat-killer; `ThreadAttachGuard` now consults a thread-local `IsCurrentlyDrainingOnMainThread()` flag and becomes a no-op on main thread. Stress 1000-iteration `Mathf.Abs` burst on main-thread path: BongoCat 15.66 ms/call, SaGa F2R 7.13 ms/call, Songs of Silence 3.95 ms/call — zero errors, zero timeouts, drain_count == 1000 on all. Two new lessons in [lessons-learned.md](lessons-learned.md): nested-attach trap + Unity 2018 focus-pause (`Application.runInBackground = false` default — R-Type Dimensions EX reports `is_healthy: false` when window loses focus, expected behavior). Phase 20b / 20c / 20d (Scene tab UI + cross-tab handoff + 2-target verify) still open; Phase 20-HEAP (libgc heap-walker fallback) also still open. Live-target work converged + **basic Symbol Finder shipped**. **Phase 25** new tab in MainWindow (position 4) wraps a new `searchSymbols` RPC walking every class in an assembly for fields + methods whose name contains an ASCII case-insensitive substring; replaces the "click each class in turn" loop the user reported. Both backends emit unified wire shape (IL2CPP rows carry AOT address; Mono skips mono_compile_method for bulk-scan performance — JIT deferred to the user-driven Methods picker). Row activation jumps back to Browser Fields/Methods tab with the class + member filter pre-selected. Phase 25b "interesting preset" curated keyword scan deliberately deferred until basic Finder shakes out. **DLL-free Mono path** now usable end-to-end on Unity 2022+ Mono — surfaced + fixed two production-blocker bugs during live smoke: (1) user-autorun `_G.mono_registerSymbolEx` shadows our idempotent helper, fixed by namespacing the working code under `_G.discrete_mono_registerSymbolEx`; (2) CE's `mono_method_get_parameters` returns nil typename for every parameter on at least UnityEngine.Object's methods on Unity 2022+ Mono — `mono_method_getSignature` is fine, so the helper now falls back to signature substring match when typename match fails (success log shows `(matched via signature)`). Both lessons recorded in [lessons-learned.md](lessons-learned.md). Carry-forward: Phase 22 closed in prior session. Phase 23 (heap-scan convergence) and Phase 20a-2 (FindObjectsByType cross-version recipe) both closed 2026-05-18.
@@ -35,6 +35,83 @@
 | **5 (v32-v39 metadata.dat parser)** | ✅ shipped + LIVE-SMOKED | `MetadataParser` widened to accept `[16, 39]` (was `[16, 31]`). New layouts in `MetadataLayout.h`: `TypeDefinition_v35` (84 bytes — v29 minus `elementTypeIndex`), `StringLiteralEntry_v35` (4 bytes — drops length, computed from delta), `Il2CppSectionMetadata` (12-byte `{offset, size, count}` triplet), `HeaderV38` (380 bytes — 31 section triplets), `IndexSizes` runtime-variable struct + `GetIndexSize(count)` helper. `LoadHeader` dispatches flat (v16-v37) vs section (v38+). `LoadTables` computes `IndexSizes` from `parameters.size/count` + table counts. `TypeDefSizeof` / `FieldDefSizeof` / `FieldDefaultValueSizeof` return per-version sizes (84 for v32-v37; `68+3*TIS+GCIS` for v38+ TypeDef; `8+TIS` for v38+ FieldDef / FieldDefault). `GetTypeDefinition` / `EnumerateTypeFields` / `FindFieldDefault` got hand-walked v38+ paths that consult `indexSizes_`. `GetStringLiteral` recovers v35's missing length from delta-to-next-entry. Smoke ladder: synthetic-fixture `tools/Test-MetadataVersions.ps1` PASS on v29/v31/v35/v37/v38/v39 + correctly rejects v40; **live smoke on Songs of Silence (Unity 6.1.x / v39) 2026-05-19** — `metadata-cli info` decoded 40,501 TypeDefinitions + 44,047 string literals; `metadata-cli stats` ran clean across all 40k types (strip_ratio=0.0008, verdict `clean`); `metadata-cli type UnityEngine Vector3` decoded all 15 expected fields (`kEpsilon` / `kEpsilonNormalSqrt` / `x/y/z` / `zeroVector...negativeInfinityVector`) with correct tokens (0x04000A3B+) + variable-width type indices. **v32-v39 dispatch verified end-to-end on real-world data.** |
 | **25 (cross-class Symbol Finder)** | ✅ shipped + LIVE-SMOKED | New `searchSymbols` pipe RPC (parallel Mono + IL2CPP handlers) walks every class in a named assembly, iterates fields + methods via the existing `EnumerateClasses` + `ReadClassInfo` path, applies ASCII case-insensitive substring match on name, accumulates up to `limit` (default 200, hard-cap 5000), returns `scanned_classes` + `truncated`. IL2CPP method rows carry AOT pointer; Mono skips JIT for bulk scan (drill into Methods picker for the per-overload `mono_compile_method`). New UI Tab "Symbol Finder" (position 4, after Address Lookup) — assembly dropdown shares `Browser.Assemblies`, pattern textbox (Enter triggers Search), Fields/Methods toggles, Limit NumericUpDown (Width 140 + MinWidth 120 so the number stays visible after the spinner widget claims its share), sortable results grid (Kind / Class / Member / Type / Offset / Address). Row double-click or right-click → Navigate jumps back to Browser Fields/Methods tab with the class + member filter pre-selected; right-click also surfaces Copy class / Copy member. 3 new fake-pipe `SearchSymbolsTests`. **Live smoke 2026-05-19** on BongoCat (Mono / Unity 2022+): pattern `MaxHP` against `Assembly-CSharp` returned `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) as first hit in < 1s; double-click jumped to Browser Fields tab with the row filtered + selected. Phase 25b "interesting preset" (curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties panel) deferred until basic Finder shakes out — Unity-specific keyword list (HP/Damage/Gold/XP/Speed/...) still needs design. |
 | **26 (Anti-tamper protection)** | ✅ shipped + AOT-verified | 3-slot SHA256 self-check spread across two assemblies + 2 poison surfaces + XOR-shielded credit string. Slots: A `BuildArtifactToken` (Core/Services) / B `ExportFormatToken` (Core/Services/Export) / C `WindowsRuntimeMetadata` (ui/UnityDumpUI/Platform — **cross-assembly**). `TokenAggregator.Combined() = A \| B \| C` bridges Core consumers to slot C via UI-registered delegate from `Program.Main`. Poison surface 1: `CeXmlExporter` / `CsxExporter` `CloakOffset(off) => off ^ (factor & 0x7F)` shifts every exported field by 0-127 bytes (CT loads cleanly in CE, reads wrong fields). Poison surface 2: `LiveInspectionViewModel.WalkedFieldNode.MaybePerturbDisplay` perturbs 1/11 numeric `DisplayValue` rows (per-row deterministic seed) via low-byte XOR — same row corrupts same way within a session, different rows across sessions (string `GetHashCode` randomization). Anti-trace: each guardian's `Read()` returns 0 for first N calls (A:3 / B:2 / C:4) even when tampered. Anti-debug: `Debugger.IsAttached` on a published binary returns its own poison code. Dev-mode no-op: 0xCC placeholder `IsDevMode` short-circuits all factors to 0 (Debug/Release single-file paths). `tools/inject-hash.ps1` upgraded to 3-slot AOBMaker-style patching (zero all 3 slots → one SHA256 → write same hash to all 3); `build.ps1 -Mode Publish` invokes it. AOT round-trip verified: sentinels at `0x02438F98` / `0x02438E80` / `0x0243ABF8` (C ~11 KB away from A/B = different .rdata blob). Footer credit `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. Class names renamed (`IntegrityGuardian` → `BuildArtifactToken` / `IntegrityCore` → `SchemaConstants` / `StringShield` → `LocalizedText` / `GetIntegrityFactor` → `Read`) so binary metadata no longer leaks "Integrity" / "Guardian" / "Shield" strings. New end-user guide [`USAGE.md`](../USAGE.md) at repo root for CT makers. 283/283 tests pass (no new tests — protection layer dev-mode-bypassed). Commits `ccaae6e` (single-slot) + `348cbb6` (3-slot upgrade). |
+
+---
+
+## What landed in this session — 2026-05-20 even later (Phase 27 planning + Phase 28 stub)
+
+**Planning only — no code changes.** User asked to evaluate two new feature
+ideas; after discussion, agreed to fully plan feature 1 and add feature 2
+as a TODO stub.
+
+### Phase 27 — Unity-aware Value Search
+
+Full sub-phase plan (27a–27f) drafted in [plan.md](plan.md). Key design
+decisions captured in the AskUserQuestion exchange:
+
+* **v1 includes string scan** — managed UTF-16 path walking `MonoString*`
+  / `Il2CppString*` layouts; encoding option + Exact / Contains match
+  mode in UI.
+* **v1 includes full CE filter-mode set** — exact / range / changed /
+  unchanged / increased / decreased / new value (parity with CE Next
+  Scan).
+* **Two scan modes shipped together** — global (CE flow) for the
+  "I have HP=100, find it" case; class-scoped (Discrete flow) for
+  "I know it's somewhere on PLY_WORK" — ~100x faster, essentially
+  `listFieldValuesAcrossInstances` + value predicate.
+
+### Architecture choice
+
+Reuses existing primitives instead of rebuilding AOBMaker-style:
+
+| Existing | What it gives us |
+|---|---|
+| `Memory::EnumerateCommittedRegions` (Phase 23 hardened) | MEM_IMAGE + thread-stack filtering for free |
+| `Memory::ScanForPointer` template | Parallel chunked scan pattern |
+| `whatIsAt` (Phase 17) | Per-candidate Unity-managed filter |
+| `findInstances` (Phase 6c) | Class-scoped mode core |
+| `listFieldValuesAcrossInstances` (Phase 21a) | Pattern for class-scoped value walk |
+| AOBMaker `WindowsValueScanner.cs` shapes | UI-side `DataType` / `ScanType` enum reference (not the engine itself — we run from inside the target process) |
+
+Anti-cheat is largely a non-issue because the scan runs from inside the
+target process via the existing injected DLL — user-mode AC hooking
+`OpenProcess`/`ReadProcessMemory` doesn't see our scan. `SafeReadBytes`
+SEH-protection covers the rare in-process VirtualQuery hook case.
+
+### Phase 17b carry-forward bundled into Phase 27
+
+Array / List<T> element resolution was deferred in Phase 17b ("nearest
+field" returns when query lands in an array buffer). Phase 27c finally
+closes this — detect Array klass via class-name `[]` suffix or
+non-null element_class, compute index from offset, return
+`{kind: "array-element", arrayIndex, arrayLength}`.
+
+### Sub-phase v1 estimate: ~6.5 days
+
+| Sub-phase | Effort |
+|---|---|
+| 27a (DLL First Scan + class-scoped + whatIsAt filter) | ~2 days |
+| 27b (Next Scan session + filter modes + string path) | ~1.5 days |
+| 27c (Array element resolution in whatIsAt) | ~0.5 day |
+| 27d (UI Value Search tab + Cancel + cross-tab handoffs) | ~2 days |
+| 27e (CE Lua bridge `scripts/unity_valuescan.lua`) | ~0.5 day |
+| 27f (libgc heap-section, deferred — closes 20-HEAP simultaneously) | ~1-2 days |
+
+### Phase 28 — Field → Methods cross-reference (TODO stub)
+
+Brief approach captured in plan.md. Mono path uses IL bytecode walk
+(`ldfld`/`stfld`/`ldsfld`/`stsfld` token match) — high confidence, clean.
+IL2CPP static fields reuse [AOBMaker's `RipReferenceScanner.cs`](D:\github\AOBMaker\src\AOBMaker.Core\Services\RipReferenceScanner.cs)
+against the field's static-storage address. IL2CPP instance fields stay
+heuristic (AOB scan for `[reg+offset]` patterns within declaring class's
+methods) and may be skipped in v1. No sub-phases / no commitment to
+scope yet.
+
+### Next session pickup
+
+* Start coding Phase 27a — new `Memory::ScanForValue<T>` helper +
+  `scanFieldValue` RPC handler in both backends. Same SEH-leaf pattern
+  as the existing scan primitives.
 
 ---
 

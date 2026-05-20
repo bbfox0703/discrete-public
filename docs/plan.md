@@ -3,8 +3,10 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-20
-**Current phase**: **All shipped phases closed + verified live.** Latest landings (2026-05-20 late): **Phase 26 anti-tamper protection** — 3-slot SHA256 self-check spread across Core + UI assemblies (`BuildArtifactToken` / `ExportFormatToken` / `WindowsRuntimeMetadata`) + 2 poison surfaces (CT export offsets + Inspector grid values, 1/11 deterministic) + XOR-shielded footer credit + `inject-hash.ps1` 3-slot AOBMaker-style stamping + new `USAGE.md` end-user guide. Mid-session (same day): **Phase 20-MT main-thread marshaling** (MinHook detour on `runtime_invoke` + dispatcher queue) live-PASS on 5 targets; **Phase 20b/c/d Scene Explorer tab** + cross-tab handoff. Carry-forward from 2026-05-19: Phase 25 cross-class Symbol Finder, Phase 5 v32-v39 metadata parser (live-smoked on Songs of Silence v39 / 40k TypeDefs), Phase 12d 32-bit Mono (Legend of Mortal x86), Phase 21d Inspector write-back live PASS, 19d-3 smart-typed editors, 21a reverse-property lookup, DataGrid AOT sort trap fix, 22g DLL-free Mono register. **No critical-path open work.** Verified targets: SaGa F2R (IL2CPP v29 / x64), BongoCat (Mono Unity 6.0+ / x64), Farthest Frontier (both backends / x64), Songs of Silence (IL2CPP v39 / Unity 6.1 / x64), R-Type Dimensions EX (IL2CPP v24 / Unity 2018.1 / x64), FF VI PR (IL2CPP v24 / Unity 2019.4 / x64), Hollow Knight Silksong (Mono / Unity 6.0 / x64), **LEAVES (Mono / Unity 5.4 / x86 ✨)**, **Legend of Mortal (Mono / Unity 2020.3 / x86 ✨)**. Build #408 (DiscreteUI.exe AOT 39.4 MB after 3-slot guardian, DLL sizes unchanged from #376; 283/283 tests pass + AOT round-trip verified end-to-end). See `STATUS.md` for the detailed hand-off; this file is the canonical phase ledger.
+**Last updated**: 2026-05-20 (even later — Phase 27a shipped + live-smoked)
+**Current phase**: **🚧 Phase 27 — Unity-aware Value Search (27a shipped, 27b next)**. **27a live-smoked on three targets**: SaGa F2R (IL2CPP x64, global scan for Int32=100000 found `MainGame.PLY_WORK.purse` at +0x18 ✨), BongoCat (Mono x64, class-scoped scan), and 活俠傳 (Legend of Mortal, Mono x86, Unity 2020.3.49f1 — global scan reliably identified `Mortal.Core.GameStat._value` across UI state changes). One production bug discovered + fixed mid-smoke: `Mono::BuildClassRangeCache` was hammering `mono_class_vtable` for all ~17K classes in a single ThreadAttachGuard scope, wedging legacy 32-bit Mono when the game's main thread was focus-paused; rewrote as lazy vtable→klass resolution in `WhatIsAt` (cache build now ~500ms with zero runtime calls; per-candidate +1 SafeReadBytes deref, memoized after first hit). Lesson recorded in [lessons-learned.md](lessons-learned.md). Build #423.
+
+**Original planning**: **🚧 Phase 27 — Unity-aware Value Search (planning)**. Sub-phases 27a-27f drafted (~6.5 day v1 estimate). No code yet. **Phase 28** (Field → Methods cross-reference) added as TODO stub — picks up after Phase 27 ships. Inspired by `D:\Github\AOBMaker`'s `WindowsValueScanner.cs` pattern but reuses existing Discrete primitives (`Memory::EnumerateCommittedRegions` + `whatIsAt` filter + `findInstances`) so no new scan engine needed. Two scan modes: **global** (CE flow — scan + whatIsAt filter) + **class-scoped** (Discrete flow — `listFieldValuesAcrossInstances` + value predicate, ~100x faster). Full CE filter mode set (exact / range / changed / unchanged / increased / decreased / new value). Includes Phase 17b carry-forward (Array / List<T> element resolution in `whatIsAt`). v2 sub-phase 27f closes Phase 20-HEAP simultaneously via libgc heap-section binding. Previous landings (2026-05-20 early/mid): **Phase 26 anti-tamper protection** — 3-slot SHA256 self-check spread across Core + UI assemblies (`BuildArtifactToken` / `ExportFormatToken` / `WindowsRuntimeMetadata`) + 2 poison surfaces (CT export offsets + Inspector grid values, 1/11 deterministic) + XOR-shielded footer credit + `inject-hash.ps1` 3-slot AOBMaker-style stamping + new `USAGE.md` end-user guide. Mid-session (same day): **Phase 20-MT main-thread marshaling** (MinHook detour on `runtime_invoke` + dispatcher queue) live-PASS on 5 targets; **Phase 20b/c/d Scene Explorer tab** + cross-tab handoff. Carry-forward from 2026-05-19: Phase 25 cross-class Symbol Finder, Phase 5 v32-v39 metadata parser (live-smoked on Songs of Silence v39 / 40k TypeDefs), Phase 12d 32-bit Mono (Legend of Mortal x86), Phase 21d Inspector write-back live PASS, 19d-3 smart-typed editors, 21a reverse-property lookup, DataGrid AOT sort trap fix, 22g DLL-free Mono register. **No critical-path open work.** Verified targets: SaGa F2R (IL2CPP v29 / x64), BongoCat (Mono Unity 6.0+ / x64), Farthest Frontier (both backends / x64), Songs of Silence (IL2CPP v39 / Unity 6.1 / x64), R-Type Dimensions EX (IL2CPP v24 / Unity 2018.1 / x64), FF VI PR (IL2CPP v24 / Unity 2019.4 / x64), Hollow Knight Silksong (Mono / Unity 6.0 / x64), **LEAVES (Mono / Unity 5.4 / x86 ✨)**, **Legend of Mortal (Mono / Unity 2020.3 / x86 ✨)**. Build #408 (DiscreteUI.exe AOT 39.4 MB after 3-slot guardian, DLL sizes unchanged from #376; 283/283 tests pass + AOT round-trip verified end-to-end). See `STATUS.md` for the detailed hand-off; this file is the canonical phase ledger.
 
 **2026-05-07 renumbering**: the address-finder track was originally tagged Phase 18 with sub-phases 17a-17d, a holdover from when "find method instances" sat at Phase 17. After the address-finder shipped, the two phases were swapped so the sub-phase letters match the parent number — the track that just closed is now Phase 17 (matching its 17a-17d nodes), and find-method-instances moves to Phase 18. No runtime / wire-protocol changes; everything that previously said "Phase 18 sub-phase 17X" now reads "Phase 17 sub-phase 17X" (or simply "Phase 17X").
 
@@ -130,6 +132,8 @@
 | 21 | Inspector field write-back | New wire RPC `setInstanceField(addr, fieldOffset, type, value)` + SEH-protected `SafeWriteBytes` on both backends + UI Inspector field "Write value…" right-click + CE Lua `setField` wrapper | ✅ 21a (DLL handler + smoke), 21b (UI modal + 37 new tests + AOT clean), 21c (Lua bridge + docs) shipped 2026-05-19. **21d live click-through PASS 2026-05-19** on BongoCat Mono (right-click primitive Inspector row → Write value… modal → Apply → readMemory verifies + CE address-list refreshed). v1 covers primitives + raw address; reference-type writes deferred to v2 (GC-root marshaling). |
 | 22 | Live CT Population via AOBMaker | One-click "Inject Discrete Bridge into CE Table" (Tools menu) + per-feature "Send to CE Table" buttons. Pivoted away from offline `.CT` build (Ascii85 + XML serializer scrapped) — uses AOBMaker CE plugin's pipe protocol (`InjectTableFile` + `CreateAAScript` + `CreateMemoryRecord` + `CreateAAScriptWithRecords`) to mutate the currently-open CT. User saves via CE File→Save. | ✅ **All sub-phases (22a–22f) shipped 2026-05-12 + live smoke fully closed 2026-05-18.** 22a `AobMakerBridge` extended (4 new commands, `IsAvailable` event); 22b 7 bridge lua files embedded in Core; 22c `BootstrapAaScriptGenerator` template; 22d Tools menu RelayCommand + `BridgeInjector` orchestrator; 22e `CallMethodAaScriptGenerator` + `AddressLookupAaScriptGenerator` per-feature buttons; 22f `docs/ce-bridge-integration.md` + `tools/Test-BridgeInject.ps1` smoke. **Live click-through smoke**: Steps 1-8 captured + fixed 6 P0/P1 bugs mid-session; Steps 9-11 (MethodCall→CE / AddressLookup→CE / save+reopen) PASS in follow-up session — user log `Mathf.Abs(-7) → 7` confirms the AA-script → bridge → `callUnityMethod` chain. 163/163 xUnit pass, AOT 0/0 warnings. **DLL-free Mono register path live-smoked 2026-05-19** with the Phase 22e `MonoRegisterSymbolAaScriptGenerator` on BongoCat — surfaced + fixed two production blockers (user-autorun `_G.mono_*` shadowing → `discrete_*` private namespace; CE Mono nil typename on Unity 2022+ → `mono_method_getSignature` substring fallback). |
 | 25 | Cross-class Symbol Finder | New `searchSymbols` pipe RPC + Symbol Finder Tab in MainWindow. Walks every class in a named assembly for fields + methods whose name contains an ASCII case-insensitive substring. Row double-click navigates back to Browser Fields/Methods tab with the class + member filter pre-selected. Replaces the historical "click each class in turn" loop the user reported when hunting properties like `MaxHP` across a few-hundred-class assembly. | ✅ **Shipped + live-smoked 2026-05-19** (build #363) on BongoCat Mono — pattern `MaxHP` → `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) in < 1s. 3 new fake-pipe `SearchSymbolsTests`. Properties surfaced via `get_*`/`set_*` methods (Mono/IL2CPP runtime convention; no separate property row kind). 25b (Interesting preset — curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties) deferred until basic finder shakes out — needs a Unity-tuned keyword list distinct from UE5CEDumper's FProperty-flavored one. |
+| 27 | Unity-aware Value Search | CE-style First Scan / Next Scan but filtered to Unity managed instances only. New `scanFieldValue` + `refineValueScan` pipe RPCs; reuses `Memory::EnumerateCommittedRegions` + `whatIsAt` (Phase 17) to drop non-managed candidates. Two scan modes: **global** (CE flow — type + value → walks all committed RW pages, filters via `whatIsAt`) + **class-scoped** (Discrete flow — pick class first, equivalent to `listFieldValuesAcrossInstances` plus value filter; orders-of-magnitude faster). Supports int8-64 / uint8-64 / float / double / string (managed UTF-16). Full CE filter set: exact / range / changed / unchanged / increased / decreased. New Value Search tab (MainWindow position 5) + CE Lua bridge `unity_valuescan.lua`. Includes **Phase 17b carry-forward** — Array / List<T> element resolution in `whatIsAt`. | 🚧 **27a shipped + live-smoked 2026-05-20** on SaGa F2R (IL2CPP, found `PLY_WORK.purse = 100000` at +0x18) + 活俠傳 (Mono x86, Unity 2020.3.49f1, found `Mortal.Core.GameStat._value` reliably across UI states). 27b-27f open. |
+| 28 | Field → Methods cross-reference (TODO stub) | Inverse of Symbol Finder's "find by name": given a field, list methods that read/write it. **Mono path**: walk method IL bytecode (`mono_method_header_get_code`) for `ldfld`/`stfld`/`ldsfld`/`stsfld` referencing the target field token — high-confidence, clean. **IL2CPP static fields**: reuse AOBMaker's `RipReferenceScanner` against the field's runtime address — scan executable pages for RIP-relative references, attribute hits to enclosing methods via Phase 18a range-check. **IL2CPP instance fields**: heuristic — AOB-scan declaring-class methods for `[reg+offset]` patterns matching field offset; mark "low confidence" in UI. | 📝 **TODO / not started** — picks up after Phase 27 ships. Approach drafted below. |
 | 26 | Anti-tamper protection | 3-slot SHA256 self-check spread across two assemblies + 2 poison surfaces (CT export offsets + Inspector grid values) + XOR-shielded credit string + AOT-stamped hash via `tools/inject-hash.ps1`. Inspired by AOBMaker's pattern but redesigned for cross-assembly slot distribution (Slot A in Core/Services / Slot B in Core/Services/Export / **Slot C cross-assembly in ui/UnityDumpUI/Platform**). Dev-mode bypass (0xCC placeholders) keeps all factors at 0 in Debug/Release single-file builds — exports + Inspector + tests stay byte-identical to pre-Phase-26. Class names renamed to non-suggestive forms so binary metadata no longer leaks "Integrity" / "Guardian" / "Shield". | ✅ **Shipped + AOT-verified 2026-05-20** (build #408). Two iterations: `ccaae6e` single-slot baseline + `348cbb6` 3-slot cross-assembly upgrade. `TokenAggregator.Combined() = A \| B \| C` ORs all three factors (UI registers `WindowsRuntimeMetadata.Read` into Core via `Program.Main`). Poison 1: `CloakOffset(off) => off ^ (factor & 0x7F)` in `CeXmlExporter` + `CsxExporter` shifts every emitted offset 0-127 bytes (CT loads cleanly in CE; reads wrong fields). Poison 2: `LiveInspectionViewModel.MaybePerturbDisplay` corrupts 1/11 numeric `DisplayValue` rows via per-row deterministic seed (string `GetHashCode` XOR offset XOR salt) — same row corrupts same way within session, different rows across sessions. Anti-trace: `Read()` returns 0 for first N calls (A:3 / B:2 / C:4) even when tampered. Anti-debug: `Debugger.IsAttached` on published binary returns poison code. AOT round-trip verified end-to-end: 3 sentinels at `0x02438F98` / `0x02438E80` / `0x0243ABF8` (C ~11 KB away from A/B). `inject-hash.ps1` 3-slot AOBMaker-style: zero all 3 slots → SHA256 once → write same hash into all 3. Footer credit `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. New [`USAGE.md`](../USAGE.md) end-user guide for CT makers. |
 
 ---
@@ -1354,6 +1358,328 @@ sentinel + 32-byte-hash blocks don't sit adjacent in `.rdata`.
   unique consumer rather than the OR-combined "any tampering
   trips everything" model)
 - Anti-VM / anti-sandbox detection (out of scope for "simple")
+
+---
+
+## Phase 27 — Unity-aware Value Search 🚧 PLANNING 2026-05-20
+
+**Goal**: Close the read-by-value gap. Today every Discrete query starts from
+a class name (Browser) or address (Address Lookup). CE users approach the
+problem from the opposite end — "I have HP=100, where does the game store
+it?". This phase brings that workflow into Discrete while keeping the
+Unity-class-aware filtering that CE itself cannot do.
+
+**Inspiration**: `D:\Github\AOBMaker\src\AOBMaker.Platform.Windows\Services\WindowsValueScanner.cs`
+(parallel chunked VirtualQueryEx walker with memory budget + cancellation).
+We do NOT reimplement that engine in C# — we reuse the existing DLL-side
+`Memory::EnumerateCommittedRegions` + `Memory::ScanForPointer` plumbing
+([dll/src/shared/Memory.h](../dll/src/shared/Memory.h)) which already has
+Phase 23's MEM_IMAGE / stack-residue filtering hardened.
+
+### Why two scan modes
+
+| Mode | When to use | Speed |
+|---|---|---|
+| **Global** | CE flow — "I see HP=100, find it" | Slower First Scan (walks all committed RW), but Next Scan only re-reads the filtered Unity-managed candidates (typically < 1000 addrs after `whatIsAt`) |
+| **Class-scoped** | Discrete flow — "I know it's somewhere on `PLY_WORK`" | Order-of-magnitude faster — only walks live instances of the named class via existing `findInstances` path |
+
+Same wire-shape result for both — UI surfaces them as a mode toggle on
+the search tab. Class-scoped is essentially `listFieldValuesAcrossInstances`
+(Phase 21a) with an added value-filter predicate, so the implementation
+cost there is tiny.
+
+### Reusable existing infrastructure
+
+| Existing | Reused for | Lives in |
+|---|---|---|
+| `Memory::EnumerateCommittedRegions()` | Region enumeration with VirtualQueryEx + protect filter | [dll/src/shared/Memory.h:55](../dll/src/shared/Memory.h) |
+| `Memory::SafeReadBytes` + SEH-leaf primitives | Reading anti-cheat-stripped pages without crashing the scan | same |
+| `Memory::ScanForPointer` (Phase 23 hardened) | Template / pattern for the new `ScanForValue<T>` parallel scanner | same |
+| `whatIsAt(addr)` (Phase 17) — class-range cache + backward scan | Per-candidate Unity-managed filter | [MonoAddressFinder.cpp](../dll/src/mono/MonoAddressFinder.cpp) / [IL2CPPAddressFinder.cpp](../dll/src/il2cpp/IL2CPPAddressFinder.cpp) |
+| `listFieldValuesAcrossInstances` (Phase 21a) | Class-scoped mode core — already iterates instances + reads field values | ExportAPI handlers |
+| `findInstances` (Phase 6c) | Class-scoped mode instance enumeration | same |
+| AOBMaker `WindowsValueScanner.cs` `ValueScanRequest` / `ValueScanState` / `ValueScanType` shapes | UI-side reference for DataType / ScanType enums + Parallel.ForEach result-merge pattern | `D:\Github\AOBMaker\src\AOBMaker.Core\Models\` |
+
+**Crucially**: anti-cheat is already a non-issue because the scan runs from
+inside the target process via the existing injected DLL. User-mode AC that
+hooks `OpenProcess` / `ReadProcessMemory` is invisible to our path. AC
+that hooks `VirtualQueryEx` from inside the process is the only remaining
+concern and is rare; same `SafeReadBytes` SEH-protection keeps the scan
+from crashing if a hooked region throws.
+
+### Sub-phases
+
+- [ ] **27a** DLL `scanFieldValue` RPC (First Scan).
+  * New `Memory::ScanForValue<T>` helper paralleling `Memory::ScanForPointer`:
+    chunked parallel walk over `EnumerateCommittedRegions()` output, skip
+    MEM_IMAGE + thread-stack regions (already filtered today), exact /
+    range comparison, alignment defaulting to `sizeof(T)` with a "fast
+    scan" toggle for misaligned hits.
+  * **Type taxonomy** (8 numeric + 1 string + 1 byte-array) — matches
+    AOBMaker's `ScanDataType.cs`: Int8 / Int16 / Int32 / Int64 / UInt8 /
+    UInt16 / UInt32 / UInt64 / Float / Double + **string** (managed
+    UTF-16, walks `MonoString*` / `Il2CppString*` layouts — length-prefix
+    aware, see Phase 27b-2 below).
+  * **Per-candidate `whatIsAt` resolution** — every value-match address
+    is fed to the existing class-range cache + backward-scan logic. Only
+    candidates that resolve to a managed instance + field are kept.
+    Non-managed hits (game C++ heap, engine static buffers, etc.) are
+    silently dropped — counted in `droppedNonManaged` so the user can
+    see how aggressively the filter is firing.
+  * **Result envelope**: `{ candidates: [{addr, instAddr, asm, ns, class,
+    field, fieldOffset, fieldKind, currentValue}], scannedBytes,
+    droppedNonManaged, truncated, sessionId }`. `sessionId` is what Next
+    Scan (27b) uses to refine.
+  * **Result limit** — mirror AOBMaker's adaptive budget (`int.Clamp(
+    available * 0.25 / per-result-bytes, 100k, 50M)`), but enforce a
+    hard cap of 50k POST-`whatIsAt`-filter on the wire (a 50k JSON
+    payload is already ~6 MB).
+  * Smoke test: `tools/Test-ScanFieldValue.ps1` — known-value scan against
+    SaGa F2R (`HP = 100` int32) + BongoCat (`Mathf.PI` float).
+  * Class-scoped mode: when `request.targetClass` is set, skip the full
+    region walk — call existing `findInstances` to get instance addrs,
+    then for each instance + each declared field of matching wire-type,
+    SafeRead the field value, compare against the search value, emit the
+    candidate with full `whatIsAt`-shape envelope baked in (no actual
+    whatIsAt call needed since we already know instance + field).
+
+- [ ] **27b** DLL session state + Next Scan filter modes.
+  * **Session lifecycle**: `beginValueScan(request) → sessionId`,
+    `refineValueScan(sessionId, scanType, [value], [valueTo]) →
+    updated candidates`, `endValueScan(sessionId)`. Server holds
+    `unordered_map<uint64_t, ScanSession>` with one session per UI tab
+    (single session per pipe connection is enough today; multi-session
+    is just changing the cap from 1 to N).
+  * **Full CE filter mode set**: `exact` / `range [from, to]` /
+    `changed` / `unchanged` / `increased` / `decreased` / `new value`.
+    Comparison semantics match CE exactly (Compare-to-previous-scan for
+    changed/increased/decreased; Compare-to-given-value for exact/range/
+    new value).
+  * **Session memory cost**: per-session = `candidates.size() *
+    sizeof(Candidate)` where `Candidate = {addr, lastValue}` for numeric
+    + `{addr, lastValueStr}` for string. 50k × 32 bytes = 1.6 MB
+    worst-case — acceptable.
+  * **27b-2 — String scan path**:
+    * Mono: `MonoString` layout is `[ObjectHeader (8/16 bytes) | length:int32 | chars[length+1]:UTF-16]`. Walking strings means iterating GC heap for objects whose first qword == `mono_get_string_class()` vtable, then reading the length+UTF-16 buffer.
+    * IL2CPP: same shape but `Il2CppString*` class pointer comes from `il2cpp_defaults.string_class`. Some IL2CPP builds inline UTF-16 strings into static data sections — those are reachable via the same `whatIsAt` filter (string klass match in backward scan).
+    * UI-side: search box accepts plain UTF-8 / UTF-16-auto-detected, encoding option dropdown (UTF-16 / UTF-8 / ASCII) like CE.
+    * Substring matching: optional toggle (exact equal vs. contains).
+      Substring search is O(N × M) on candidates — capped at 5000 string
+      candidates pre-substring-filter to keep it sane.
+
+- [ ] **27c** Array / List<T> element resolution in `whatIsAt`
+  (Phase 17b carry-forward). Detect Array klass two ways: (a) class name
+  ends in `[]` from `*_class_get_name`, (b) `*_class_get_element_class`
+  returns non-null. Compute element index from
+  `(queriedAddr - elementsBase) / elementSize` where:
+  * `elementsBase` = instance base + array-header size (Mono: 32 bytes
+    on x64, 16 on x86; IL2CPP: 32 bytes — see [ManagedLayout.h](../dll/src/shared/ManagedLayout.h)
+    `kArrayDataOffset`).
+  * `elementSize` from `*_class_value_size(element_class)` for value-typed
+    arrays; pointer-size for reference arrays.
+  * Returned field shape: `{kind: "array-element", arrayIndex, arrayLength, elementClass, elementOffset}`.
+  * `List<T>` falls into the same path naturally — its backing `_items`
+    field IS a `T[]`, so user drilling into a `List<T>._items` row already
+    gets `whatIsAt`-resolved as an array element.
+
+- [ ] **27d** UI Value Search Tab (MainWindow position 5, after Symbol Finder).
+  * **Top bar**: Mode toggle (Global / Class-scoped) + Assembly +
+    optional Class dropdown (enabled when class-scoped) + DataType
+    dropdown + Value textbox + Value-To textbox (for range) + ScanType
+    dropdown (exact / range / changed / unchanged / increased /
+    decreased / new value) + Alignment toggle (Default / Misaligned) +
+    First Scan / Next Scan buttons.
+  * **Encoding sub-bar** (visible when DataType == String): UTF-16 /
+    UTF-8 / ASCII radio + Match-mode dropdown (Exact / Contains).
+  * **Result grid** (sortable, same `DataGridSortComparers` pattern as
+    the rest of the app — Phase 21a's lesson):
+    * Class | Field | Type | Offset | Current Value | Previous Value
+      (after Next Scan) | Instance Address | Field Address
+    * Right-click context menu: Inspect this instance (Phase 17c
+      handoff — cross-tab to Inspector), Write value… (Phase 21d handoff —
+      opens FieldWriteWindow), Find what writes (existing AOBMaker
+      bridge `NavigateHexView`), Copy field addr / instance addr / class.
+  * **Status bar**: `XX,XXX candidates of YY,YYY scanned (ZZ,ZZZ dropped
+    non-managed) in NNNN ms`.
+  * **Cancellation**: Long First Scan blocks the worker thread for
+    seconds — must surface a Cancel button + propagate a token through
+    the wire (new `cancelValueScan(sessionId)` RPC, server checks
+    cancellation flag between regions inside the parallel scan).
+
+- [ ] **27e** CE Lua bridge `scripts/unity_valuescan.lua`.
+  * Same retry / yield pattern as `unity_addrfind.lua` (Phase 17d):
+    inline JSON parser, ~3s pipe-open retry budget, per-RPC
+    `processMessages()` + `sleep(1)` yield.
+  * Public API:
+    * `firstValueScan(value, dataType, [scanType], [classScope])` —
+      returns table with `candidates` + `sessionId`.
+    * `nextValueScan(sessionId, scanType, [value], [valueTo])` —
+      refines.
+    * `clearValueScan(sessionId)` — end session.
+    * `findValue(value, dataType)` — convenience one-shot wrapper
+      around firstValueScan with class auto-filter to top match.
+    * Optional hotkey binding `bindValueScanHotkey({VK_CONTROL, VK_F3})`.
+
+- [ ] **27f** *(deferred, v2 acceleration)* libgc heap-section binding.
+  Bind `GC_get_heap_section_count` + `GC_get_heap_section_at` (BDWGC
+  exports) per backend, restrict global-mode scan to only those regions
+  for ~10x speedup. **Doubles as Phase 20-HEAP** — same code path that
+  walks the managed heap for value scan also satisfies the 20-HEAP
+  "walk libgc heap sections for IL2CPP instances" goal that's been open
+  since the Phase 20 series. Caveat: not all Unity builds link
+  bdwgc — some IL2CPP / non-bdwgc Mono builds don't export these. Fall
+  back to global EnumerateCommittedRegions transparently.
+
+### Acceptance criteria
+
+* **Global mode, IL2CPP**: SaGa F2R First Scan for `Int32 = 100` returns
+  the live `PLY_WORK.HP` candidate among results; non-managed memory hits
+  (e.g. C++ engine ints that happen to == 100) are dropped via
+  `whatIsAt`. Completes < 5s on a typical dev box.
+* **Next Scan**: After in-game damage, "decreased" scan narrows to <= 5
+  candidates (player HP + maybe enemy HP if visible).
+* **Class-scoped mode, Mono**: BongoCat First Scan with class=
+  `MainGame/CALC_WORK` + `Int32 = 100` skips full-process walk, returns
+  results in < 100ms (just `findInstances` + per-field SafeRead).
+* **Array resolution**: Scanning for an item count value finds matches
+  inside an inventory array and reports `{kind: "array-element",
+  arrayIndex: N}` instead of `{kind: "interior"}`.
+* **String scan**: Searching for `"GameOver"` (UTF-16) finds managed
+  strings; substring mode finds prefix-match candidates.
+* **AC-stripped pages**: scan never crashes the game even when a region
+  is hook-blocked; failure count surfaced in status.
+* **Cancellation**: Long First Scan can be cancelled mid-flight from UI;
+  worker exits cleanly within ~200ms.
+* **No regression** in existing tests (283/283 pass) + AOT publish clean
+  (0 IL2026/IL3050 warnings).
+
+### Risks / open questions
+
+* **Phase 17 backward-scan distance** — current default 4 KB. Some Unity
+  MonoBehaviour subclasses with hundreds of fields exceed that. The
+  `maxBackwardScan` arg on `whatIsAt` is configurable (cap 16 KB); the
+  scan RPC will use the 16 KB cap for filter calls to avoid missed
+  instances. Trade-off: each backward scan costs ~2k load+compare cycles
+  vs cache; bumping to 16 KB is fine.
+* **whatIsAt throughput** — 50k filter calls × 16 KB backward = 800 MB of
+  probes. Each probe is one binary-search class-cache lookup + one SEH
+  name-probe. Profiled scale: ~20 ns / probe → 16 ms total. Comfortably
+  inside the scan budget.
+* **Float / Double precision** — CE matches floats by epsilon (0.0001
+  default). We mirror that with a tunable `tolerance` field; matches
+  AOBMaker's `WindowsValueScanner.cs` `Math.Abs(value - target) <= tolerance`
+  pattern.
+* **Concurrent scan + walkInstance** — if user is also walking instances
+  on another tab while a scan runs, both touch `ThreadAttachGuard`. The
+  Phase 20-MT lesson about nested-attach already taught us to make the
+  guard reentrant via thread-local counter — re-verify under the scan
+  worker thread context before shipping.
+* **Session lifecycle on disconnect** — server must drop sessions when
+  the pipe closes (no orphan candidate buffers). Reuse Phase 14a's
+  auto-disconnect cleanup hook.
+
+### Estimated effort
+
+| Sub-phase | Effort |
+|---|---|
+| 27a (DLL First Scan + class-scoped) | ~2 days |
+| 27b (Next Scan + filter modes + string path) | ~1.5 days |
+| 27c (array resolution in whatIsAt) | ~0.5 day |
+| 27d (UI tab + Cancel + cross-tab handoffs) | ~2 days |
+| 27e (CE Lua bridge) | ~0.5 day |
+| **v1 total** | **~6.5 days** |
+| 27f (libgc, deferred — also closes 20-HEAP) | ~1-2 days |
+
+---
+
+## Phase 28 — Field → Methods cross-reference 📝 TODO STUB
+
+**Goal**: Inverse of Symbol Finder (Phase 25). Given a Unity field, list
+every method that reads or writes it. Closes the "I know what's interesting
+but I want to find the code that touches it" workflow that has no
+equivalent in CE for managed code.
+
+**Status**: not started. Picks up after Phase 27 ships. This stub captures
+the approach decided in the 2026-05-20 late planning conversation; no
+code, no commitment to scope yet.
+
+### Approach by backend
+
+| Backend / field-kind | Approach | Confidence |
+|---|---|---|
+| Mono instance + static fields | Walk method IL bytecode via `mono_method_get_header` + `mono_method_header_get_code`. Iterate IL ops looking for `ldfld` (0x7B) / `stfld` (0x7D) / `ldsfld` (0x7E) / `stsfld` (0x80). Each carries a 4-byte field-token immediate — compare against the target field's token. | **High** — IL is exact; no false positives. |
+| IL2CPP static fields | Reuse [AOBMaker's `RipReferenceScanner.cs`](D:\github\AOBMaker\src\AOBMaker.Core\Services\RipReferenceScanner.cs) against the field's runtime static-storage address. Scan executable pages for `mov reg, [rip + disp32]` or `lea reg, [rip + disp32]` where `disp32` resolves to the field address. Attribute each hit to its enclosing method via Phase 18a's method-address enumeration (binary-search the address against `findMethodInstances`'s sorted method-pointer list). | **High** — RIP-relative is unambiguous. |
+| IL2CPP instance fields | Heuristic. IL is discarded post-AOT; the field offset shows up as a literal in `mov rax, [rcx + 0xN]` style instructions. AOB-scan limited to: (a) methods in the declaring class + descendants, (b) methods that take `this` of compatible type. Filter for opcodes that actually access an instance pointer at the right offset. Surface results marked "low confidence". | **Low** — collisions with other struct offsets at the same byte distance are frequent. v1 may just decline to support this and surface a "declaring class's methods may reference this — enumerate them via Symbol Finder" hint. |
+
+### Reusable infrastructure
+
+* **AOBMaker `RipReferenceScanner.cs`** — already does the static-field scan
+  pattern for general native code; just needs Unity-managed-method
+  range attribution wired up.
+* **Phase 18a `findMethodInstances`** — gives us the `{methodAddr, methodName}`
+  table per class. Building a sorted lookup over all methods of all
+  classes in an assembly is one new RPC + one cache.
+* **Phase 25 `searchSymbols`** — surfaces the result table format we'd
+  reuse (Class / Member / Type / Offset / Address).
+
+### Tentative wire shape
+
+```jsonc
+// Request
+{
+  "command": "findFieldReferences",
+  "assembly": "Assembly-CSharp",
+  "ns": "MainGame",
+  "class": "PLY_WORK",
+  "fieldName": "HP",
+  "kind": "any",  // "read" / "write" / "any"
+  "limit": 200
+}
+// Response
+{
+  "ok": true,
+  "field": { "name": "HP", "offset": 0x1F4, "type": "System.Int32", "isStatic": false },
+  "references": [
+    {
+      "asm": "Assembly-CSharp", "ns": "MainGame", "class": "PLY_WORK",
+      "method": "TakeDamage", "signature": "(System.Int32)",
+      "address": "0x7FF712345678", "ilOffset": 0x0023,  // Mono only
+      "kind": "write", "confidence": "exact" /* or "heuristic" */
+    }
+  ],
+  "scanned_methods": 4523,
+  "truncated": false
+}
+```
+
+### Tentative UI integration
+
+* Inspector grid right-click → "Find methods that touch this field…" → opens
+  new modal `FieldReferencesWindow` (or a new Tab if usage justifies it).
+* Symbol Finder result row right-click → same entry point for fields.
+* Each reference row's "Navigate to disassembly" pushes the method addr
+  to AOBMaker's `NavigateDisassembler` (existing Phase 18c bridge).
+
+### Acceptance (sketch — refine when phase opens)
+
+* Mono — Given `PLY_WORK.HP` (offset 0x1F4), `findFieldReferences` returns
+  every method in `Assembly-CSharp` that contains an `stfld`/`ldfld` on
+  that field token. Cross-check against IL view in dnSpy.
+* IL2CPP static — Given `Math.PI` (or similar), the RIP scan returns the
+  methods that load that double constant.
+* IL2CPP instance — best-effort; user-visible "low confidence" badge in
+  UI; v1 may decline this branch.
+
+### Estimated effort (rough)
+
+| Sub-phase | Effort |
+|---|---|
+| 28a — Mono IL walker + token match | ~1 day |
+| 28b — IL2CPP static via RipReferenceScanner adapter | ~1 day |
+| 28c — IL2CPP instance heuristic (or v1 skip) | ~1-2 days OR 0 if skipped |
+| 28d — UI modal + Symbol Finder / Inspector entry points | ~1 day |
+| 28e — CE Lua bridge | ~0.5 day |
+| **v1 total** | **~3.5-5.5 days depending on 28c scope** |
 
 ---
 

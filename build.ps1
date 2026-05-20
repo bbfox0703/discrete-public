@@ -55,14 +55,18 @@ param(
     [ValidateSet('Debug','Release','Publish')]
     [string]$Mode = 'Release',
 
-    # Phase 12d: target architecture for the DLL + proxy build. x64 stays
-    # the default (production targets are all 64-bit). x86 enables the
-    # 32-bit Mono path for older Unity games (Legend of Mortal, etc.).
-    # 'Both' builds both arches in sequence; x86 outputs land in dist/x86/.
+    # Phase 12d: target architecture for the DLL + proxy build. Default
+    # is 'Both' so a no-arg `build.cmd` rebuilds x64 + x86 together —
+    # otherwise the x86 DLL silently goes stale and 32-bit Mono targets
+    # (Legend of Mortal / LEAVES / 活俠傳) load whatever was in
+    # `dist/x86/` from the last time someone passed `-Arch x86`
+    # explicitly. The 'Both' path spawns a child process for the x86 leg
+    # (DevShell pins PATH to its first arch); the extra ~10 s on top of
+    # the x64 build is worth not shipping stale 32-bit binaries.
     # IL2CPP is never built x86 (no shipping IL2CPP target is 32-bit) —
     # the dispatch below skips IL2CPP when -Arch x86 is selected.
     [ValidateSet('x64','x86','Both')]
-    [string]$Arch = 'x64',
+    [string]$Arch = 'Both',
 
     [switch]$Clean,
 

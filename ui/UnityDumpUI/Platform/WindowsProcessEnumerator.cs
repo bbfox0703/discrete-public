@@ -58,7 +58,15 @@ public sealed class WindowsProcessEnumerator : IProcessEnumerator
         string  name    = p.ProcessName;
         string? path    = TryGetPath(p);
         bool    isWow64 = TryIsWow64(p);
-        UnityBackend backend = isWow64 ? UnityBackend.None : DetectBackend(p);
+        // Phase 12d shipped cross-bitness inject via `inject-x86.exe`, so
+        // 32-bit Unity processes are first-class targets. Probe the module
+        // list regardless of bitness — Process.Modules walks WOW64 module
+        // tables correctly under .NET 8+ (uses EnumProcessModulesEx with
+        // LIST_MODULES_ALL). Pre-Phase-12d code force-set Backend=None for
+        // wow64 because we couldn't inject; that's no longer the case and
+        // it was hiding 活俠傳 / LEAVES / similar 32-bit Mono targets from
+        // the picker.
+        UnityBackend backend = DetectBackend(p);
         return new ProcessInfo(p.Id, name, path, backend, isWow64);
     }
 

@@ -266,6 +266,56 @@ them again — the runtime is shutting down.
 
 See `dll/src/main.cpp:DllMain` for the branch + the long comment.
 
+### Phase 27a — mass-batch Mono runtime API calls wedge legacy 32-bit Mono when main thread is focus-paused
+
+**Symptom**: 活俠傳 (Legend of Mortal, Unity 2020.3.49f1, x86 Mono) hangs
+indefinitely after a global `scanFieldValue` RPC completes. Audio
+keeps playing (separate thread), but the main thread never recovers.
+The pipe-worker thread is idle by the time the hang shows — the script
+already finished, disconnected, and exited.
+
+**Root cause**: the pre-Phase-27 `Mono::BuildClassRangeCache` eagerly
+called `mono_class_vtable(domain, klass)` for **every** class in the
+domain (17,341 calls on this target) inside a single `ThreadAttachGuard`
+scope on the pipe worker thread. Each call:
+* Touches BDWGC's internal GC lock.
+* Allocates a vtable slot if the class has never had one before.
+* Records the vtable in Mono's domain bookkeeping.
+
+When the game's main thread is concurrently focus-paused (alt-tab to a
+debug console; `Application.runInBackground = false` is still the
+default for many 2018-2021-era Unity games), the runtime never gets
+a chance to acknowledge the bookkeeping changes. Once focus returns
+and the main thread tries to resume, it finds the runtime in an
+inconsistent state and hangs on the first managed allocation.
+
+Yielding with `Sleep(0)` every 256 classes did NOT help — the issue
+isn't CPU starvation, it's that the runtime expects the main thread
+to participate in its bookkeeping handshake but the main thread can't.
+
+**Fix**: defer the heavy runtime touch to runtime. New design:
+* `BuildClassRangeCache` caches **only `MonoClass*`** (cheap pointer
+  enumeration via `EnumerateAssemblies` → `EnumerateClasses`, ~500 ms,
+  zero `mono_class_vtable` calls, no outer `ThreadAttachGuard`).
+* `WhatIsAt`'s backward-scan reads each candidate qword (assumed to be
+  a `MonoVTable*`) and does one SEH-protected `SafeReadBytes` to
+  fetch `vtable[0] = MonoClass*`. That's a pure process-memory read —
+  no runtime call, no GC lock.
+* Repeat hits skip the deref via a lazily-populated `g_vtableToKlass`
+  memo that grows as scans encounter new vtables.
+
+**Verified**: build #423 ran twice on 活俠傳 with the test script — no
+hang, ~1.5 s elapsed (vs ~3 s before AND no longer fragile), correctly
+identified `Mortal.Core.GameStat._value = 10160` both times.
+
+**Generalization**: any pipe-handler code path that calls a Mono /
+IL2CPP runtime API in a tight loop over thousands of items is a hang
+risk on focus-pausing targets. Prefer lazy / on-demand resolution over
+eager batches. Legacy Mono is the most fragile; IL2CPP and modern
+Mono (Unity 6+) tolerate the pattern but still pay the cost.
+
+---
+
 ### Phase 20-MT — Unity 2018 pauses the main loop when window loses focus
 
 **Symptom**: handshake against R-Type Dimensions EX (Unity 2018.1.9f2)

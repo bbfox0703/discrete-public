@@ -307,18 +307,6 @@ bool BuildClassRangeCache() {
                    "AddrFinder: BuildClassRangeCache: mono not resolved");
         return false;
     }
-    const auto& r = GetResolver();
-    if (r.class_vtable == nullptr) {
-        Log::Write(MagicStrings::LogCategoryWalk,
-                   "AddrFinder: BuildClassRangeCache: class_vtable not exported");
-        return false;
-    }
-    MonoDomain* domain = GetRootDomain();
-    if (domain == nullptr) {
-        Log::Write(MagicStrings::LogCategoryWalk,
-                   "AddrFinder: BuildClassRangeCache: no root domain");
-        return false;
-    }
 
     g_classSet.clear();
     g_vtableSet.clear();
@@ -328,68 +316,55 @@ bool BuildClassRangeCache() {
     g_minVtable = static_cast<std::uintptr_t>(-1);
     g_maxVtable = 0;
 
-    // EnumerateAssemblies / EnumerateClasses do their own attach — keep the
-    // outer scope free of a guard to avoid the nested attach pattern that
-    // bit BongoCat in build #54. We only attach for the runtime calls we
-    // make ourselves (mono_class_vtable batch).
+    // Phase 27a follow-up (2026-05-20): the old design pre-computed every
+    // class's MonoVTable* via `mono_class_vtable` in a 17K-call batch
+    // under a single ThreadAttachGuard. On legacy 32-bit Mono (活俠傳 /
+    // Unity 2020.3.49) with the game's main thread focus-paused, that
+    // mass forced-vtable-init wedged the BDWGC heap badly enough that
+    // the game stayed hung after focus returned — even though our worker
+    // thread had long since disconnected. The 17K runtime calls touch
+    // a global GC lock and trigger per-class vtable allocation; whatever
+    // bookkeeping the runtime expects from the main thread to acknowledge
+    // those allocations never gets to happen while focus is lost.
+    //
+    // The fix is to drop the eager vtable batch entirely. `WhatIsAt` now
+    // resolves vtable→klass lazily: when it finds a candidate qword in
+    // process memory (the supposed object header), it does a single SEH-
+    // protected SafeReadBytes(*qword) to get vtable[0] = MonoClass*, and
+    // checks THAT against `g_classSet`. The vtable→klass map below is
+    // populated lazily as WhatIsAt validates each new vtable it sees, so
+    // repeat hits are still O(log N) without any runtime calls.
+    //
+    // Cost shifts: BuildClassRangeCache goes from ~5s + 17K runtime calls
+    // to ~500ms + 0 runtime calls (just enumeration). WhatIsAt pays one
+    // extra SafeReadBytes per backward step, which is cheap (no SEH on
+    // committed RW pages, fast on PAGE_NOACCESS gaps). Net win for
+    // single-shot lookups; cumulative cost of N scans pays off after the
+    // first ~few scans because the lazy memo skips the deref for known
+    // vtables.
     auto assemblies = EnumerateAssemblies();
-
-    // Two-pass: first collect every class pointer (non-runtime), then attach
-    // and resolve vtables. This minimises the time spent inside the attach
-    // window and keeps each runtime call leaf-shaped.
-    std::vector<MonoClass*> classes;
     for (const auto& a : assemblies) {
         if (a.image == nullptr) continue;
         auto cs = EnumerateClasses(a.image);
         for (const auto& c : cs) {
-            if (c.klass != nullptr) classes.push_back(c.klass);
-        }
-    }
-
-    {
-        ThreadAttachGuard guard(domain);
-        if (!guard.Attached()) {
-            Log::Write(MagicStrings::LogCategoryWalk,
-                       "AddrFinder: BuildClassRangeCache: thread_attach failed");
-            return false;
-        }
-        g_classSet.reserve(classes.size());
-        g_vtableSet.reserve(classes.size());
-        g_vtableToKlass.reserve(classes.size());
-        for (MonoClass* k : classes) {
-            auto kp = reinterpret_cast<std::uintptr_t>(k);
+            if (c.klass == nullptr) continue;
+            auto kp = reinterpret_cast<std::uintptr_t>(c.klass);
             g_classSet.push_back(kp);
             if (kp < g_minKlass) g_minKlass = kp;
             if (kp > g_maxKlass) g_maxKlass = kp;
-
-            // Some classes (e.g. open generics, abstract types) refuse to
-            // produce a VTable. Skip them silently — they can't have live
-            // instances anyway, so the lookup wouldn't hit them.
-            MonoVTable* vt = SehGetVtable(r.class_vtable, domain, k);
-            if (vt == nullptr) continue;
-            auto vp = reinterpret_cast<std::uintptr_t>(vt);
-            g_vtableSet.push_back(vp);
-            g_vtableToKlass[vp] = kp;
-            if (vp < g_minVtable) g_minVtable = vp;
-            if (vp > g_maxVtable) g_maxVtable = vp;
         }
     }
 
     std::sort(g_classSet.begin(), g_classSet.end());
     g_classSet.erase(std::unique(g_classSet.begin(), g_classSet.end()),
                      g_classSet.end());
-    std::sort(g_vtableSet.begin(), g_vtableSet.end());
-    g_vtableSet.erase(std::unique(g_vtableSet.begin(), g_vtableSet.end()),
-                      g_vtableSet.end());
 
-    if (g_classSet.empty())  { g_minKlass = 0;  g_maxKlass = 0;  }
-    if (g_vtableSet.empty()) { g_minVtable = 0; g_maxVtable = 0; }
+    if (g_classSet.empty()) { g_minKlass = 0; g_maxKlass = 0; }
     g_built = true;
 
     Log::Write(MagicStrings::LogCategoryWalk,
                "AddrFinder: cached " + std::to_string(g_classSet.size()) +
-               " MonoClass*, " + std::to_string(g_vtableSet.size()) +
-               " MonoVTable* (root domain)");
+               " MonoClass* (root domain, lazy vtable)");
     return !g_classSet.empty();
 }
 
@@ -450,25 +425,34 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         return out;
     }
 
-    // Take a stable snapshot of the cache to avoid holding the mutex while
-    // doing SEH-protected runtime calls (which can be slow for thousands of
-    // probes against a degenerate input).
-    std::vector<std::uintptr_t> vtableSnapshot;
-    std::unordered_map<std::uintptr_t, std::uintptr_t> mapSnapshot;
-    std::uintptr_t minVt = 0, maxVt = 0;
+    // Phase 27a follow-up: lazy vtable resolution. Snapshot the class set
+    // and the (incrementally-populated) vtable→klass memo so the scan loop
+    // doesn't hold g_cacheMutex while doing SEH-protected probes. Any new
+    // (vtable, klass) pair we discover gets written back at the end of
+    // the call under the mutex so future scans skip the deref+lookup.
+    std::vector<std::uintptr_t>                        classSetSnap;
+    std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemoSnap;
+    std::uintptr_t minK = 0, maxK = 0;
     {
         std::lock_guard<std::mutex> lk(g_cacheMutex);
-        vtableSnapshot = g_vtableSet;
-        mapSnapshot    = g_vtableToKlass;
-        minVt = g_minVtable;
-        maxVt = g_maxVtable;
+        classSetSnap = g_classSet;
+        vtMemoSnap   = g_vtableToKlass;
+        minK = g_minKlass;
+        maxK = g_maxKlass;
+    }
+    if (classSetSnap.empty()) {
+        out.reason = "class_set_empty";
+        return out;
     }
 
-    auto inRange = [&](std::uintptr_t p) {
-        if (vtableSnapshot.empty()) return false;
-        if (p < minVt || p > maxVt) return false;
-        return std::binary_search(vtableSnapshot.begin(), vtableSnapshot.end(), p);
+    auto klassInSet = [&](std::uintptr_t kp) {
+        if (kp < minK || kp > maxK) return false;
+        return std::binary_search(classSetSnap.begin(), classSetSnap.end(), kp);
     };
+
+    // Track newly-discovered (vtable, klass) pairs to merge into the
+    // global memo at the end of this WhatIsAt call.
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> newlyMemoized;
 
     for (std::size_t i = 0; i < maxSteps; ++i) {
         std::uintptr_t p = start - i * kStride;
@@ -481,14 +465,32 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         }
         if (vtCandidate == 0) continue;
         if ((vtCandidate & 7u) != 0) continue;
-        if (!inRange(vtCandidate)) continue;
 
-        // Map vtable → class via the snapshot. Final filter: name probe.
-        auto it = mapSnapshot.find(vtCandidate);
-        if (it == mapSnapshot.end()) continue;
-        std::uintptr_t klassCandidate = it->second;
+        // Fast path: already-seen vtable.
+        std::uintptr_t klassCandidate = 0;
+        auto memoIt = vtMemoSnap.find(vtCandidate);
+        if (memoIt != vtMemoSnap.end()) {
+            klassCandidate = memoIt->second;
+        } else {
+            // Slow path: deref the candidate vtable's first qword to read
+            // MonoVTable::klass (which is at offset 0 on every Mono build).
+            // This is one extra SafeReadBytes per backward step on first
+            // sight of a vtable — cheap, no runtime call, no GC lock.
+            std::uintptr_t klassMaybe = 0;
+            if (!Memory::SafeReadBytes(reinterpret_cast<void*>(vtCandidate),
+                                       &klassMaybe, sizeof(klassMaybe))) {
+                continue;
+            }
+            if (klassMaybe == 0 || (klassMaybe & 7u) != 0) continue;
+            if (!klassInSet(klassMaybe)) continue;
+            klassCandidate = klassMaybe;
+            // Memoize so future iterations of this loop (and future
+            // WhatIsAt calls) skip the deref.
+            vtMemoSnap[vtCandidate] = klassCandidate;
+            newlyMemoized.emplace_back(vtCandidate, klassCandidate);
+        }
+
         MonoClass* k = reinterpret_cast<MonoClass*>(klassCandidate);
-
         const char* name = (r.class_get_name != nullptr)
             ? SehClassNameProbe(r.class_get_name, k) : nullptr;
         if (name == nullptr || *name == '\0') continue;
@@ -515,7 +517,40 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         // offset. Reuses the same outer ThreadAttachGuard scope.
         ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
                        out.nearestFieldDelta);
+
+        // Merge newly-discovered (vtable, klass) pairs into the global
+        // memo so subsequent calls hit the fast path.
+        if (!newlyMemoized.empty()) {
+            std::lock_guard<std::mutex> lk(g_cacheMutex);
+            for (const auto& kv : newlyMemoized) {
+                g_vtableToKlass[kv.first] = kv.second;
+                g_vtableSet.push_back(kv.first);
+                if (g_minVtable == 0 || kv.first < g_minVtable) g_minVtable = kv.first;
+                if (kv.first > g_maxVtable) g_maxVtable = kv.first;
+            }
+            // Keep the set sorted+deduped for the (mostly unused by the
+            // new code) range-rejection path in legacy callers.
+            std::sort(g_vtableSet.begin(), g_vtableSet.end());
+            g_vtableSet.erase(std::unique(g_vtableSet.begin(), g_vtableSet.end()),
+                              g_vtableSet.end());
+        }
         return out;
+    }
+
+    // No managed instance found in scan window. Still merge any vtables we
+    // ruled in mid-scan (for partial matches that failed the name probe)
+    // so we don't repeat the deref next time.
+    if (!newlyMemoized.empty()) {
+        std::lock_guard<std::mutex> lk(g_cacheMutex);
+        for (const auto& kv : newlyMemoized) {
+            g_vtableToKlass[kv.first] = kv.second;
+            g_vtableSet.push_back(kv.first);
+            if (g_minVtable == 0 || kv.first < g_minVtable) g_minVtable = kv.first;
+            if (kv.first > g_maxVtable) g_maxVtable = kv.first;
+        }
+        std::sort(g_vtableSet.begin(), g_vtableSet.end());
+        g_vtableSet.erase(std::unique(g_vtableSet.begin(), g_vtableSet.end()),
+                          g_vtableSet.end());
     }
 
     out.reason = "no_klass_in_range";
