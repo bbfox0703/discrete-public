@@ -856,57 +856,64 @@
                filter pre-filled. -->
           <TabItem Header="{StaticResource SymbolFinder.Tab}">
             <DockPanel Margin="0,4,0,0">
-              <!-- Top row: assembly + pattern + kind toggles + limit + search -->
-              <!-- Column widths:
-                     0: "Assembly" label (Auto)
-                     1: assembly ComboBox (220)
-                     2: pattern TextBox (*)
-                     3-4: Fields / Methods checkboxes (Auto)
-                     5: "Limit" label (Auto)
-                     6: NumericUpDown (140 — narrower starves the number
-                        display after the up/down spinner takes its half)
-                     7: Search button (Auto) -->
-              <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,220,*,Auto,Auto,Auto,140,Auto" Margin="0,0,0,8">
-                <TextBlock Grid.Column="0"
-                           Text="{StaticResource SymbolFinder.AssemblyLabel}"
-                           VerticalAlignment="Center" Margin="0,0,8,0" />
-                <ComboBox Grid.Column="1"
-                          ItemsSource="{Binding SymbolFinder.Assemblies}"
-                          SelectedItem="{Binding SymbolFinder.SelectedAssembly, Mode=TwoWay}"
-                          Margin="0,0,8,0">
-                  <ComboBox.ItemTemplate>
-                    <DataTemplate x:DataType="vm:AssemblyItem">
-                      <TextBlock Text="{Binding Name}" />
-                    </DataTemplate>
-                  </ComboBox.ItemTemplate>
-                </ComboBox>
-                <TextBox Grid.Column="2"
-                         PlaceholderText="{StaticResource SymbolFinder.PatternWatermark}"
-                         Text="{Binding SymbolFinder.Pattern, Mode=TwoWay}"
-                         KeyDown="OnSymbolFinderPatternKeyDown"
-                         Margin="0,0,8,0" />
-                <CheckBox Grid.Column="3"
-                          Content="{StaticResource SymbolFinder.IncludeFields}"
-                          IsChecked="{Binding SymbolFinder.IncludeFields, Mode=TwoWay}"
-                          VerticalAlignment="Center" Margin="0,0,8,0" />
-                <CheckBox Grid.Column="4"
-                          Content="{StaticResource SymbolFinder.IncludeMethods}"
-                          IsChecked="{Binding SymbolFinder.IncludeMethods, Mode=TwoWay}"
-                          VerticalAlignment="Center" Margin="0,0,12,0" />
-                <TextBlock Grid.Column="5"
-                           Text="{StaticResource SymbolFinder.LimitLabel}"
-                           VerticalAlignment="Center" Margin="0,0,6,0" />
-                <NumericUpDown Grid.Column="6"
-                               Value="{Binding SymbolFinder.Limit, Mode=TwoWay}"
-                               Minimum="1" Maximum="5000" Increment="100"
-                               FormatString="0"
-                               MinWidth="120"
-                               Margin="0,0,8,0" />
-                <Button Grid.Column="7"
-                        Content="{StaticResource SymbolFinder.SearchButton}"
-                        Command="{Binding SymbolFinder.SearchCommand}"
-                        Classes="accent" />
-              </Grid>
+              <!-- Top two rows: row 0 = assembly picker + "all user" toggle,
+                   row 1 = pattern + kind/limit + Search.
+                   The "Search all user assemblies" CheckBox lives on row 0
+                   next to the assembly ComboBox so the user immediately sees
+                   that the ComboBox greys out when the toggle is on. -->
+              <StackPanel DockPanel.Dock="Top" Spacing="6" Margin="0,0,0,8">
+                <!-- Row 0: assembly picker + multi-assembly toggle. -->
+                <Grid ColumnDefinitions="Auto,220,Auto,*">
+                  <TextBlock Grid.Column="0"
+                             Text="{StaticResource SymbolFinder.AssemblyLabel}"
+                             VerticalAlignment="Center" Margin="0,0,8,0" />
+                  <ComboBox Grid.Column="1"
+                            ItemsSource="{Binding SymbolFinder.Assemblies}"
+                            SelectedItem="{Binding SymbolFinder.SelectedAssembly, Mode=TwoWay}"
+                            IsEnabled="{Binding SymbolFinder.IsAssemblyPickerEnabled}"
+                            Margin="0,0,12,0">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:AssemblyItem">
+                        <TextBlock Text="{Binding Name}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                  <CheckBox Grid.Column="2"
+                            Content="{StaticResource SymbolFinder.SearchAllUserAssemblies}"
+                            ToolTip.Tip="{StaticResource SymbolFinder.SearchAllUserAssembliesTooltip}"
+                            IsChecked="{Binding SymbolFinder.SearchAllUserAssemblies, Mode=TwoWay}"
+                            VerticalAlignment="Center" />
+                </Grid>
+                <!-- Row 1: pattern + kinds + limit + Search. -->
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto,140,Auto">
+                  <TextBox Grid.Column="0"
+                           PlaceholderText="{StaticResource SymbolFinder.PatternWatermark}"
+                           Text="{Binding SymbolFinder.Pattern, Mode=TwoWay}"
+                           KeyDown="OnSymbolFinderPatternKeyDown"
+                           Margin="0,0,8,0" />
+                  <CheckBox Grid.Column="1"
+                            Content="{StaticResource SymbolFinder.IncludeFields}"
+                            IsChecked="{Binding SymbolFinder.IncludeFields, Mode=TwoWay}"
+                            VerticalAlignment="Center" Margin="0,0,8,0" />
+                  <CheckBox Grid.Column="2"
+                            Content="{StaticResource SymbolFinder.IncludeMethods}"
+                            IsChecked="{Binding SymbolFinder.IncludeMethods, Mode=TwoWay}"
+                            VerticalAlignment="Center" Margin="0,0,12,0" />
+                  <TextBlock Grid.Column="3"
+                             Text="{StaticResource SymbolFinder.LimitLabel}"
+                             VerticalAlignment="Center" Margin="0,0,6,0" />
+                  <NumericUpDown Grid.Column="4"
+                                 Value="{Binding SymbolFinder.Limit, Mode=TwoWay}"
+                                 Minimum="1" Maximum="5000" Increment="100"
+                                 FormatString="0"
+                                 MinWidth="120"
+                                 Margin="0,0,8,0" />
+                  <Button Grid.Column="5"
+                          Content="{StaticResource SymbolFinder.SearchButton}"
+                          Command="{Binding SymbolFinder.SearchCommand}"
+                          Classes="accent" />
+                </Grid>
+              </StackPanel>
 
               <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
                            IsVisible="{Binding SymbolFinder.IsBusy}"
@@ -951,6 +958,13 @@
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColKind}"
                                       Binding="{Binding KindLabel}" Width="110"
                                       SortMemberPath="KindLabel" CanUserSort="True" />
+                  <!-- Assembly column lights up in multi-assembly mode; in
+                       single-assembly mode every row repeats the same value
+                       but the column is still useful for sorting / filtering. -->
+                  <DataGridTextColumn Header="{StaticResource SymbolFinder.ColAssembly}"
+                                      Binding="{Binding Assembly}" Width="160"
+                                      SortMemberPath="Assembly" CanUserSort="True"
+                                      FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColClass}"
                                       Binding="{Binding ClassDisplay}" Width="*"
                                       SortMemberPath="ClassDisplay" CanUserSort="True"

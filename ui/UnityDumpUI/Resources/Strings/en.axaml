@@ -127,12 +127,15 @@
   <!-- Phase 25 — cross-class symbol finder. -->
   <sys:String x:Key="SymbolFinder.Tab">Symbol Finder</sys:String>
   <sys:String x:Key="SymbolFinder.AssemblyLabel">Assembly</sys:String>
+  <sys:String x:Key="SymbolFinder.SearchAllUserAssemblies">Search all user assemblies</sys:String>
+  <sys:String x:Key="SymbolFinder.SearchAllUserAssembliesTooltip">When checked, the picker is ignored and the search runs across every loaded assembly except Unity engine modules (UnityEngine.*, Unity.*) and the .NET / Mono base class libraries (System.*, mscorlib, netstandard, Microsoft.*, Mono.*).</sys:String>
   <sys:String x:Key="SymbolFinder.PatternWatermark">name substring (case-insensitive), e.g. MaxHP</sys:String>
   <sys:String x:Key="SymbolFinder.IncludeFields">Fields</sys:String>
   <sys:String x:Key="SymbolFinder.IncludeMethods">Methods</sys:String>
   <sys:String x:Key="SymbolFinder.LimitLabel">Limit</sys:String>
   <sys:String x:Key="SymbolFinder.SearchButton">Search</sys:String>
   <sys:String x:Key="SymbolFinder.ColKind">Kind</sys:String>
+  <sys:String x:Key="SymbolFinder.ColAssembly">Assembly</sys:String>
   <sys:String x:Key="SymbolFinder.ColClass">Class</sys:String>
   <sys:String x:Key="SymbolFinder.ColMember">Member</sys:String>
   <sys:String x:Key="SymbolFinder.ColType">Type</sys:String>

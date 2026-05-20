@@ -175,18 +175,52 @@ public sealed class BackendAdapter : ILiveExportSource
         string assembly, string pattern,
         IReadOnlyList<string>? kinds = null, int? limit = null,
         CancellationToken ct = default)
+        => await SearchSymbolsCoreAsync(
+            assembly, assemblies: null, pattern, kinds, limit, ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// Multi-assembly variant of <see cref="SearchSymbolsAsync(string,string,IReadOnlyList{string}?,int?,CancellationToken)"/>.
+    /// Walks every assembly in <paramref name="assemblies"/> under a single
+    /// global <paramref name="limit"/>. Used by the Symbol Finder's
+    /// "Search all user assemblies" toggle so the user can hunt a property
+    /// across the whole user-code surface in one click.
+    /// </summary>
+    public async Task<SearchSymbolsResult> SearchSymbolsAsync(
+        IReadOnlyList<string> assemblies, string pattern,
+        IReadOnlyList<string>? kinds = null, int? limit = null,
+        CancellationToken ct = default)
+        => await SearchSymbolsCoreAsync(
+            assembly: null, assemblies, pattern, kinds, limit, ct).ConfigureAwait(false);
+
+    private async Task<SearchSymbolsResult> SearchSymbolsCoreAsync(
+        string? assembly, IReadOnlyList<string>? assemblies,
+        string pattern, IReadOnlyList<string>? kinds, int? limit,
+        CancellationToken ct)
     {
         var args = new Dictionary<string, JsonElement>
         {
-            ["assembly"] = Str(assembly),
-            ["pattern"]  = Str(pattern),
+            ["pattern"] = Str(pattern),
         };
+        if (assemblies is { Count: > 0 })
+        {
+            using var doc = JsonDocument.Parse(BuildStringArrayJson(assemblies));
+            args["assemblies"] = doc.RootElement.Clone();
+        }
+        else if (!string.IsNullOrEmpty(assembly))
+        {
+            args["assembly"] = Str(assembly);
+        }
+        else
+        {
+            throw new ArgumentException(
+                "searchSymbols requires either a non-empty `assembly` or `assemblies`.");
+        }
         if (kinds is { Count: > 0 })
         {
             // Build an inline JSON array — same Str/Int helper pattern used
             // by the rest of this file; keeps everything reflection-free
             // for AOT.
-            using var doc = JsonDocument.Parse(BuildKindsJson(kinds));
+            using var doc = JsonDocument.Parse(BuildStringArrayJson(kinds));
             args["kinds"] = doc.RootElement.Clone();
         }
         if (limit.HasValue) args["limit"] = Int(limit.Value);
@@ -198,16 +232,17 @@ public sealed class BackendAdapter : ILiveExportSource
         return env.Result ?? throw new PipeProtocolException("searchSymbols returned no result");
     }
 
-    private static string BuildKindsJson(IReadOnlyList<string> kinds)
+    private static string BuildStringArrayJson(IReadOnlyList<string> items)
     {
         // Tiny hand-rolled emitter so we don't need a JsonSerializable for
-        // a string[] (AOT analyzers complain on the generic path).
+        // a string[] (AOT analyzers complain on the generic path). Shared
+        // by `kinds` and `assemblies` arg builders.
         var sb = new System.Text.StringBuilder(32);
         sb.Append('[');
-        for (int i = 0; i < kinds.Count; ++i)
+        for (int i = 0; i < items.Count; ++i)
         {
             if (i > 0) sb.Append(',');
-            sb.Append('"').Append(kinds[i].Replace("\\", "\\\\").Replace("\"", "\\\"")).Append('"');
+            sb.Append('"').Append(items[i].Replace("\\", "\\\\").Replace("\"", "\\\"")).Append('"');
         }
         sb.Append(']');
         return sb.ToString();

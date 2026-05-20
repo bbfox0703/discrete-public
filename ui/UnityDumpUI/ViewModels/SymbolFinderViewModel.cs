@@ -75,6 +75,30 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
     [ObservableProperty]
     private int _limit = 200;
 
+    /// <summary>
+    /// When true, the search bypasses <see cref="SelectedAssembly"/> and
+    /// ships every user assembly (anything <see cref="SystemAssemblyFilter.IsSystemAssembly"/>
+    /// returns false for) to the DLL under one global limit. Lets the user
+    /// hunt a property like "MaxHP" across the whole gameplay surface in
+    /// one click instead of cycling through every Assembly-CSharp-firstpass
+    /// / third-party DLL by hand.
+    /// </summary>
+    /// <remarks>
+    /// Affects <see cref="SearchCommand"/>'s CanExecute: with the toggle
+    /// on, SelectedAssembly is no longer required (the ComboBox can stay
+    /// empty / disabled). Wire path branches in <see cref="SearchAsync"/>.
+    /// </remarks>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
+    [NotifyPropertyChangedFor(nameof(IsAssemblyPickerEnabled))]
+    private bool _searchAllUserAssemblies;
+
+    /// <summary>
+    /// XAML-bound enable flag for the assembly ComboBox. Greys out when
+    /// the "Search all user assemblies" checkbox is on.
+    /// </summary>
+    public bool IsAssemblyPickerEnabled => !SearchAllUserAssemblies;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
     private bool _isBusy;
@@ -105,16 +129,41 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
         StatusMessage = "Searching…";
         Matches.Clear();
 
-        var asm = SelectedAssembly!.Name;
         var pat = (Pattern ?? string.Empty).Trim();
         var kinds = new List<string>();
         if (IncludeFields)  kinds.Add("field");
         if (IncludeMethods) kinds.Add("method");
 
+        // Branch on the "all user assemblies" toggle. Multi-assembly path
+        // computes the user-assembly set from the same Assemblies list
+        // the ComboBox draws from; system / Unity engine / BCL get
+        // filtered out via SystemAssemblyFilter.
+        List<string>? userAssemblies = null;
+        string scopeLabel;
+        if (SearchAllUserAssemblies)
+        {
+            userAssemblies = SystemAssemblyFilter.SelectUserAssemblies(
+                Assemblies.Select(a => a.Name));
+            if (userAssemblies.Count == 0)
+            {
+                IsBusy        = false;
+                ErrorMessage  = "No user assemblies — every loaded assembly looks like a Unity / system module. Untick the checkbox and pick one explicitly.";
+                StatusMessage = "Search aborted.";
+                return;
+            }
+            scopeLabel = $"{userAssemblies.Count} user assembl{(userAssemblies.Count == 1 ? "y" : "ies")}";
+        }
+        else
+        {
+            scopeLabel = SelectedAssembly!.Name;
+        }
+
         var sw = Stopwatch.StartNew();
         try
         {
-            var result = await _backend.SearchSymbolsAsync(asm, pat, kinds, Limit, ct).ConfigureAwait(true);
+            SearchSymbolsResult result = userAssemblies is not null
+                ? await _backend.SearchSymbolsAsync(userAssemblies, pat, kinds, Limit, ct).ConfigureAwait(true)
+                : await _backend.SearchSymbolsAsync(SelectedAssembly!.Name, pat, kinds, Limit, ct).ConfigureAwait(true);
 
             if (!string.IsNullOrEmpty(result.Error))
             {
@@ -127,9 +176,12 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
                 Matches.Add(new SymbolFinderRow(m));
 
             sw.Stop();
+            string missingNote = result.MissingAssemblies is { Count: > 0 }
+                ? $" {result.MissingAssemblies.Count} assembl{(result.MissingAssemblies.Count == 1 ? "y" : "ies")} not found in the backend (probably stripped or renamed)."
+                : string.Empty;
             StatusMessage = result.Truncated
-                ? $"{Matches.Count} hit(s) (truncated at limit={Limit}); scanned {result.ScannedClasses} class(es) in {sw.ElapsedMilliseconds} ms. Narrow the pattern or raise the limit."
-                : $"{Matches.Count} hit(s) in {result.ScannedClasses} class(es) ({sw.ElapsedMilliseconds} ms).";
+                ? $"{Matches.Count} hit(s) (truncated at limit={Limit}); scanned {result.ScannedClasses} class(es) across {scopeLabel} in {sw.ElapsedMilliseconds} ms. Narrow the pattern or raise the limit.{missingNote}"
+                : $"{Matches.Count} hit(s) in {result.ScannedClasses} class(es) across {scopeLabel} ({sw.ElapsedMilliseconds} ms).{missingNote}";
         }
         catch (OperationCanceledException) { /* superseded by a fresher search */ }
         catch (Exception ex)
@@ -137,7 +189,7 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
             ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
             StatusMessage = "Search failed.";
             _logger.Write(Constants.LogCategoryView,
-                $"SymbolFinder: search '{pat}' on {asm} failed: {ex.Message}");
+                $"SymbolFinder: search '{pat}' on {scopeLabel} failed: {ex.Message}");
         }
         finally
         {
@@ -147,9 +199,11 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
 
     private bool CanSearch() =>
         !IsBusy
-        && SelectedAssembly is not null
         && !string.IsNullOrWhiteSpace(Pattern)
-        && (IncludeFields || IncludeMethods);
+        && (IncludeFields || IncludeMethods)
+        && (SearchAllUserAssemblies
+                ? Assemblies.Count > 0
+                : SelectedAssembly is not null);
 
     /// <summary>Wired from the view's DataGrid double-click / Enter handlers.</summary>
     public void Activate(SymbolFinderRow row) => NavigateRequested?.Invoke(row);
@@ -178,6 +232,7 @@ public sealed class SymbolFinderRow
     {
         Namespace = m.Namespace ?? string.Empty;
         Class     = m.Class     ?? string.Empty;
+        Assembly  = m.Assembly  ?? string.Empty;
         Member    = m.Name      ?? string.Empty;
         Kind      = m.Kind      ?? string.Empty;
         Type      = m.Type      ?? string.Empty;
@@ -192,6 +247,11 @@ public sealed class SymbolFinderRow
 
     public string Namespace    { get; }
     public string Class        { get; }
+    /// <summary>Source assembly. In multi-assembly scans this varies row-to-row;
+    /// in single-assembly scans every row repeats the same value. Used by
+    /// the Navigate handler to flip the Browser to the right assembly tab
+    /// before drilling into the class.</summary>
+    public string Assembly     { get; }
     public string Member       { get; }
     public string Kind         { get; }
     public string Type         { get; }

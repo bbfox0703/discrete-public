@@ -1143,17 +1143,41 @@ void RegisterCoreHandlers() {
     });
 
     // Phase 25 — cross-class symbol finder (Mono). Walks every class in the
-    // given assembly, iterates fields + methods, returns rows whose names
-    // match a case-insensitive substring pattern. Same surface as the
-    // IL2CPP handler below; both emit the same wire shape so the UI VM
-    // is backend-agnostic.
+    // given assembly (or array of assemblies), iterates fields + methods,
+    // returns rows whose names match a case-insensitive substring pattern.
+    // Same surface as the IL2CPP handler below; both emit the same wire
+    // shape so the UI VM is backend-agnostic.
+    //
+    // Args: { assembly?: string, assemblies?: string[], pattern: string,
+    //         kinds?: string[], limit?: int }
+    //   - Exactly one of `assembly` (legacy single) or `assemblies` (multi)
+    //     must be present. Multi path applies a single global `limit` across
+    //     the union of all walked assemblies.
     PipeServer::RegisterHandler(MagicStrings::CmdSearchSymbols,
         [](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
-        std::string assemblyName = args.value("assembly", std::string{});
-        std::string pattern      = args.value("pattern",  std::string{});
-        if (assemblyName.empty()) return json{{"error", "missing 'assembly' arg"}};
-        if (pattern.empty())      return json{{"error", "missing 'pattern' arg"}};
+        std::string pattern = args.value("pattern", std::string{});
+        if (pattern.empty()) return json{{"error", "missing 'pattern' arg"}};
+
+        // Resolve target assembly list — accept legacy single `assembly` OR
+        // new `assemblies` array. Order in `assemblies` is preserved.
+        std::vector<std::string> assemblyNames;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) assemblyNames.push_back(s);
+            }
+            if (assemblyNames.empty()) {
+                return json{{"error", "'assemblies' array is empty"}};
+            }
+        } else {
+            std::string single = args.value("assembly", std::string{});
+            if (single.empty()) {
+                return json{{"error", "missing 'assembly' or 'assemblies' arg"}};
+            }
+            assemblyNames.push_back(std::move(single));
+        }
 
         bool wantFields  = true;
         bool wantMethods = true;
@@ -1174,60 +1198,79 @@ void RegisterCoreHandlers() {
         if (limit <= 0)      limit = 200;
         if (limit > 5000)    limit = 5000;
 
-        Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
-        if (img == nullptr) return json{{"error", "assembly not found: " + assemblyName}};
-
-        auto classes = Mono::EnumerateClasses(img);
         json matches  = json::array();
         bool truncated = false;
         std::size_t scanned = 0;
-        for (const auto& ce : classes) {
-            if (ce.klass == nullptr) continue;
-            ++scanned;
-            auto res = Mono::ReadClassInfo(ce.klass);
-            if (!res.ok) continue;
+        std::vector<std::string> missingAssemblies;
 
-            if (wantFields) {
-                for (const auto& f : res.info.fields) {
-                    if (!ICaseContainsAscii(f.name, pattern)) continue;
-                    matches.push_back({
-                        {"namespace", ce.ns},
-                        {"class",     ce.name},
-                        {"name",      f.name},
-                        {"kind",      "field"},
-                        {"type",      f.typeName},
-                        {"offset",    f.offset},
-                        {"static",    (f.flags & 0x10u) != 0},
-                    });
-                    if (matches.size() >= static_cast<std::size_t>(limit)) {
-                        truncated = true; break;
-                    }
+        for (const auto& assemblyName : assemblyNames) {
+            if (truncated) break;
+            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            if (img == nullptr) {
+                // Single-arg legacy: hard error preserves byte-identical
+                // behaviour. Multi-arg: skip missing + report via response.
+                if (assemblyNames.size() == 1) {
+                    return json{{"error", "assembly not found: " + assemblyName}};
                 }
-                if (truncated) break;
+                missingAssemblies.push_back(assemblyName);
+                continue;
             }
-            if (wantMethods) {
-                for (const auto& m : res.info.methods) {
-                    if (!ICaseContainsAscii(m.name, pattern)) continue;
-                    matches.push_back({
-                        {"namespace", ce.ns},
-                        {"class",     ce.name},
-                        {"name",      m.name},
-                        {"kind",      "method"},
-                        {"token",     m.token},
-                        {"static",    (m.flags & 0x10u) != 0},
-                    });
-                    if (matches.size() >= static_cast<std::size_t>(limit)) {
-                        truncated = true; break;
+
+            auto classes = Mono::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ++scanned;
+                auto res = Mono::ReadClassInfo(ce.klass);
+                if (!res.ok) continue;
+
+                if (wantFields) {
+                    for (const auto& f : res.info.fields) {
+                        if (!ICaseContainsAscii(f.name, pattern)) continue;
+                        matches.push_back({
+                            {"namespace", ce.ns},
+                            {"class",     ce.name},
+                            {"assembly",  assemblyName},
+                            {"name",      f.name},
+                            {"kind",      "field"},
+                            {"type",      f.typeName},
+                            {"offset",    f.offset},
+                            {"static",    (f.flags & 0x10u) != 0},
+                        });
+                        if (matches.size() >= static_cast<std::size_t>(limit)) {
+                            truncated = true; break;
+                        }
                     }
+                    if (truncated) break;
                 }
-                if (truncated) break;
+                if (wantMethods) {
+                    for (const auto& m : res.info.methods) {
+                        if (!ICaseContainsAscii(m.name, pattern)) continue;
+                        matches.push_back({
+                            {"namespace", ce.ns},
+                            {"class",     ce.name},
+                            {"assembly",  assemblyName},
+                            {"name",      m.name},
+                            {"kind",      "method"},
+                            {"token",     m.token},
+                            {"static",    (m.flags & 0x10u) != 0},
+                        });
+                        if (matches.size() >= static_cast<std::size_t>(limit)) {
+                            truncated = true; break;
+                        }
+                    }
+                    if (truncated) break;
+                }
             }
         }
-        return json{
+        json response = {
             {"matches",         std::move(matches)},
             {"scanned_classes", scanned},
             {"truncated",       truncated},
         };
+        if (!missingAssemblies.empty()) {
+            response["missing_assemblies"] = std::move(missingAssemblies);
+        }
+        return response;
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,
@@ -2119,16 +2162,33 @@ void RegisterCoreHandlers() {
     });
 
     // Phase 25 — cross-class symbol finder (IL2CPP). Mirror of the Mono
-    // handler above; same wire shape. IL2CPP method entries additionally
-    // carry the AOT pointer (Mono needs mono_compile_method to JIT — too
-    // expensive for a bulk scan, so we omit address there).
+    // handler above; same wire shape + same single-or-multi assembly arg
+    // semantics. IL2CPP method entries additionally carry the AOT pointer
+    // (Mono needs mono_compile_method to JIT — too expensive for a bulk
+    // scan, so we omit address there).
     PipeServer::RegisterHandler(MagicStrings::CmdSearchSymbols,
         [formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
-        std::string assemblyName = args.value("assembly", std::string{});
-        std::string pattern      = args.value("pattern",  std::string{});
-        if (assemblyName.empty()) return json{{"error", "missing 'assembly' arg"}};
-        if (pattern.empty())      return json{{"error", "missing 'pattern' arg"}};
+        std::string pattern = args.value("pattern", std::string{});
+        if (pattern.empty()) return json{{"error", "missing 'pattern' arg"}};
+
+        std::vector<std::string> assemblyNames;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) assemblyNames.push_back(s);
+            }
+            if (assemblyNames.empty()) {
+                return json{{"error", "'assemblies' array is empty"}};
+            }
+        } else {
+            std::string single = args.value("assembly", std::string{});
+            if (single.empty()) {
+                return json{{"error", "missing 'assembly' or 'assemblies' arg"}};
+            }
+            assemblyNames.push_back(std::move(single));
+        }
 
         bool wantFields  = true;
         bool wantMethods = true;
@@ -2149,61 +2209,78 @@ void RegisterCoreHandlers() {
         if (limit <= 0)   limit = 200;
         if (limit > 5000) limit = 5000;
 
-        const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
-        if (img == nullptr) return json{{"error", "assembly not found: " + assemblyName}};
-
-        auto classes = IL2CPP::EnumerateClasses(img);
         json matches   = json::array();
         bool truncated = false;
         std::size_t scanned = 0;
-        for (const auto& ce : classes) {
-            if (ce.klass == nullptr) continue;
-            ++scanned;
-            auto res = IL2CPP::ReadClassInfo(ce.klass);
-            if (!res.ok) continue;
+        std::vector<std::string> missingAssemblies;
 
-            if (wantFields) {
-                for (const auto& f : res.info.fields) {
-                    if (!ICaseContainsAscii(f.name, pattern)) continue;
-                    matches.push_back({
-                        {"namespace", ce.ns},
-                        {"class",     ce.name},
-                        {"name",      f.name},
-                        {"kind",      "field"},
-                        {"type",      f.typeName},
-                        {"offset",    f.offset},
-                        {"static",    (f.flags & 0x10u) != 0},
-                    });
-                    if (matches.size() >= static_cast<std::size_t>(limit)) {
-                        truncated = true; break;
-                    }
+        for (const auto& assemblyName : assemblyNames) {
+            if (truncated) break;
+            const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
+            if (img == nullptr) {
+                if (assemblyNames.size() == 1) {
+                    return json{{"error", "assembly not found: " + assemblyName}};
                 }
-                if (truncated) break;
+                missingAssemblies.push_back(assemblyName);
+                continue;
             }
-            if (wantMethods) {
-                for (const auto& m : res.info.methods) {
-                    if (!ICaseContainsAscii(m.name, pattern)) continue;
-                    matches.push_back({
-                        {"namespace", ce.ns},
-                        {"class",     ce.name},
-                        {"name",      m.name},
-                        {"kind",      "method"},
-                        {"token",     m.token},
-                        {"static",    (m.flags & 0x10u) != 0},
-                        {"address",   formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
-                    });
-                    if (matches.size() >= static_cast<std::size_t>(limit)) {
-                        truncated = true; break;
+
+            auto classes = IL2CPP::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ++scanned;
+                auto res = IL2CPP::ReadClassInfo(ce.klass);
+                if (!res.ok) continue;
+
+                if (wantFields) {
+                    for (const auto& f : res.info.fields) {
+                        if (!ICaseContainsAscii(f.name, pattern)) continue;
+                        matches.push_back({
+                            {"namespace", ce.ns},
+                            {"class",     ce.name},
+                            {"assembly",  assemblyName},
+                            {"name",      f.name},
+                            {"kind",      "field"},
+                            {"type",      f.typeName},
+                            {"offset",    f.offset},
+                            {"static",    (f.flags & 0x10u) != 0},
+                        });
+                        if (matches.size() >= static_cast<std::size_t>(limit)) {
+                            truncated = true; break;
+                        }
                     }
+                    if (truncated) break;
                 }
-                if (truncated) break;
+                if (wantMethods) {
+                    for (const auto& m : res.info.methods) {
+                        if (!ICaseContainsAscii(m.name, pattern)) continue;
+                        matches.push_back({
+                            {"namespace", ce.ns},
+                            {"class",     ce.name},
+                            {"assembly",  assemblyName},
+                            {"name",      m.name},
+                            {"kind",      "method"},
+                            {"token",     m.token},
+                            {"static",    (m.flags & 0x10u) != 0},
+                            {"address",   formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
+                        });
+                        if (matches.size() >= static_cast<std::size_t>(limit)) {
+                            truncated = true; break;
+                        }
+                    }
+                    if (truncated) break;
+                }
             }
         }
-        return json{
+        json response = {
             {"matches",         std::move(matches)},
             {"scanned_classes", scanned},
             {"truncated",       truncated},
         };
+        if (!missingAssemblies.empty()) {
+            response["missing_assemblies"] = std::move(missingAssemblies);
+        }
+        return response;
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,

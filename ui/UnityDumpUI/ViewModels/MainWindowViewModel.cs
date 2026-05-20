@@ -858,9 +858,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // SelectedAssembly drives a class-list reload; SelectedClass
             // drives a field+method detail reload. Setting both walks the
             // existing browse cascade with no extra plumbing.
+            //
+            // Prefer the row's own Assembly (multi-assembly scan populates
+            // this per-row), fall back to the finder's SelectedAssembly
+            // for back-compat with rows that pre-date the multi-assembly
+            // wire field.
+            string? rowAssembly = !string.IsNullOrEmpty(row.Assembly)
+                ? row.Assembly
+                : SymbolFinder.SelectedAssembly?.Name;
             var asm = Browser.Assemblies.FirstOrDefault(
-                a => string.Equals(a.Name, SymbolFinder.SelectedAssembly?.Name,
-                                   System.StringComparison.Ordinal));
+                a => string.Equals(a.Name, rowAssembly, System.StringComparison.Ordinal));
             if (asm is null) return;
             if (!ReferenceEquals(Browser.SelectedAssembly, asm))
                 Browser.SelectedAssembly = asm;

@@ -161,6 +161,68 @@ public class SearchSymbolsTests
     }
 
     [Fact]
+    public async Task SearchSymbols_MultiAssembly_EmitsAssembliesArrayInsteadOfSingleAssembly()
+    {
+        // Phase 25 multi-assembly extension: the IReadOnlyList<string>
+        // overload must send `assemblies` as a JSON array AND must NOT
+        // include the legacy `assembly` string. Wire shape pin.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string response = """
+        {
+          "matches": [
+            { "namespace": "Game", "class": "Player", "assembly": "Assembly-CSharp",
+              "name": "MaxHP", "kind": "field", "type": "System.Int32",
+              "offset": 64, "static": false },
+            { "namespace": "Mods", "class": "Boost", "assembly": "ThirdPartyMods",
+              "name": "get_MaxHP", "kind": "method", "token": 100663552, "static": false }
+          ],
+          "scanned_classes": 412,
+          "truncated": false,
+          "missing_assemblies": ["DeadAsm"]
+        }
+        """;
+        var (adapter, serverTask, server, client) = await StartPairAsync(response, ct);
+        try
+        {
+            SearchSymbolsResult result = await adapter.SearchSymbolsAsync(
+                new[] { "Assembly-CSharp", "ThirdPartyMods", "DeadAsm" },
+                "MaxHP",
+                kinds: new[] { "field", "method" }, limit: 500, ct)
+                .ConfigureAwait(true);
+
+            string requestLine = await serverTask.ConfigureAwait(true);
+            using var doc = JsonDocument.Parse(requestLine);
+            Assert.Equal("searchSymbols", doc.RootElement.GetProperty("cmd").GetString());
+            JsonElement args = doc.RootElement.GetProperty("args");
+
+            // assemblies present, single assembly absent.
+            Assert.False(args.TryGetProperty("assembly", out _),
+                "legacy single-arg `assembly` must be omitted when caller passes the array");
+            Assert.True(args.TryGetProperty("assemblies", out var assemblies));
+            Assert.Equal(JsonValueKind.Array, assemblies.ValueKind);
+            Assert.Equal(3, assemblies.GetArrayLength());
+            Assert.Equal("Assembly-CSharp", assemblies[0].GetString());
+            Assert.Equal("ThirdPartyMods", assemblies[1].GetString());
+            Assert.Equal("DeadAsm",        assemblies[2].GetString());
+
+            // Result row carries per-row assembly field.
+            Assert.Equal(2, result.Matches.Count);
+            Assert.Equal("Assembly-CSharp", result.Matches[0].Assembly);
+            Assert.Equal("ThirdPartyMods", result.Matches[1].Assembly);
+
+            // missing_assemblies surfaces unresolved names.
+            Assert.NotNull(result.MissingAssemblies);
+            Assert.Single(result.MissingAssemblies!);
+            Assert.Equal("DeadAsm", result.MissingAssemblies![0]);
+        }
+        finally
+        {
+            await client.DisposeAsync().ConfigureAwait(true);
+            await server.DisposeAsync().ConfigureAwait(true);
+        }
+    }
+
+    [Fact]
     public async Task SearchSymbols_Truncated_FlagsTruncatedTrue()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

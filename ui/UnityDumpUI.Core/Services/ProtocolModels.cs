@@ -484,6 +484,10 @@ public sealed class SearchSymbolsResult
     /// <summary>True when the result was cut short by `limit` — the user
     /// should narrow the pattern or raise the cap.</summary>
     [JsonPropertyName("truncated")]       public bool                    Truncated      { get; set; }
+    /// <summary>Assemblies the caller asked for that the backend couldn't
+    /// resolve (multi-assembly mode only). Empty / omitted on the wire
+    /// in single-assembly mode where a missing assembly is a hard error.</summary>
+    [JsonPropertyName("missing_assemblies")] public List<string>?        MissingAssemblies { get; set; }
     [JsonPropertyName("error")]           public string?                 Error          { get; set; }
 }
 
@@ -491,6 +495,10 @@ public sealed class SearchSymbolMatch
 {
     [JsonPropertyName("namespace")] public string  Namespace { get; set; } = string.Empty;
     [JsonPropertyName("class")]     public string  Class     { get; set; } = string.Empty;
+    /// <summary>Assembly the row was found in. Multi-assembly scans need this
+    /// to navigate back to the right Browser tab; single-assembly scans
+    /// repeat the caller's input here for shape consistency.</summary>
+    [JsonPropertyName("assembly")]  public string? Assembly  { get; set; }
     [JsonPropertyName("name")]      public string  Name      { get; set; } = string.Empty;
     /// <summary>"field" or "method".</summary>
     [JsonPropertyName("kind")]      public string  Kind      { get; set; } = string.Empty;
