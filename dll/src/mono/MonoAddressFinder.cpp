@@ -108,6 +108,11 @@ MonoClass* SehElementClassProbe(fn_class_get_element_class fn, MonoClass* k) {
     __try { return fn(k); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+// Phase 27d follow-up — walk nesting chain for nested-class name resolution.
+MonoClass* SehNestingProbe(fn_class_get_nesting_type fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 #pragma warning(pop)
 
 bool ContainsKlass(std::uintptr_t p) {
@@ -507,9 +512,28 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         out.vtablePtr   = vtCandidate;
         out.klassPtr    = klassCandidate;
         out.fieldOffset = static_cast<std::ptrdiff_t>(addr - p);
-        out.className   = name;
+        // Phase 27d follow-up — walk nesting chain so nested classes
+        // round-trip via walkInstance / FindClass. Mono uses
+        // `mono_class_get_nesting_type` (counterpart of IL2CPP's
+        // class_get_declaring). Same fix shape as IL2CPPAddressFinder.
+        std::string leaf = name;
+        MonoClass* outer = k;
+        if (r.class_get_nesting_type != nullptr) {
+            MonoClass* cur = k;
+            for (int i = 0; i < 16; ++i) {
+                MonoClass* d = SehNestingProbe(r.class_get_nesting_type, cur);
+                if (d == nullptr) break;
+                const char* dn = SehClassNameProbe(r.class_get_name, d);
+                if (dn != nullptr && *dn != '\0') {
+                    leaf = std::string(dn) + "/" + leaf;
+                }
+                outer = d;
+                cur = d;
+            }
+        }
+        out.className = std::move(leaf);
         if (r.class_get_namespace != nullptr) {
-            const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, k);
+            const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, outer);
             if (nsStr != nullptr) out.ns = nsStr;
         }
         if (r.class_get_image != nullptr && r.image_get_name != nullptr) {

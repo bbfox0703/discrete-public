@@ -45,6 +45,13 @@ const char* SehClassNamespaceProbe(fn_class_get_namespace fn, Il2CppClass* k) {
     __try { return fn(k); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+// Phase 27d follow-up — walk declaring-type chain to support nested
+// classes (Outer/Inner). Returns the outer class via `out`. Used to
+// build the slash-form name that FindClass + walkInstance expect.
+Il2CppClass* SehClassDeclaringProbe(fn_class_get_declaring fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 const Il2CppImage* SehClassImageProbe(fn_class_get_image fn, Il2CppClass* k) {
     __try { return fn(k); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
@@ -486,10 +493,33 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         out.instance    = p;
         out.klassPtr    = klassCandidate;
         out.fieldOffset = static_cast<std::ptrdiff_t>(addr - p);
-        out.className   = name;
+        // Phase 27d follow-up — walk declaring-type chain so nested
+        // classes round-trip cleanly back through walkInstance / FindClass.
+        // Without this, `PLY_WORK` (nested inside `MainGame`) was emitted
+        // as `className = "PLY_WORK"` + `ns = ""`, and the Inspect-this-
+        // instance handoff failed with `class not found: .PLY_WORK`.
+        // Same logic as IL2CPPClassWalker::DescribeClass.
+        std::string leaf = name;
+        Il2CppClass* outer = k;
+        if (r.class_get_declaring != nullptr) {
+            Il2CppClass* cur = k;
+            for (int i = 0; i < 16; ++i) {
+                Il2CppClass* d = SehClassDeclaringProbe(r.class_get_declaring, cur);
+                if (d == nullptr) break;
+                const char* dn = SehClassNameProbe(r.class_get_name, d);
+                if (dn != nullptr && *dn != '\0') {
+                    leaf = std::string(dn) + "/" + leaf;
+                }
+                outer = d;
+                cur = d;
+            }
+        }
+        out.className = std::move(leaf);
 
+        // Namespace comes from the OUTER class (IL2CPP / Mono only attach
+        // namespaces to top-level types; nested types have empty ns).
         if (r.class_get_namespace != nullptr) {
-            const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, k);
+            const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, outer);
             if (nsStr != nullptr) out.ns = nsStr;
         }
         if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
