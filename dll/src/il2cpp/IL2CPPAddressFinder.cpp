@@ -23,10 +23,17 @@ namespace UnityCEDumper::IL2CPP {
 
 namespace {
 
-// Cache of every Il2CppClass* observed during enumeration. Sorted ascending
-// for O(log N) binary-search membership.
-std::mutex                   g_cacheMutex;
-std::vector<std::uintptr_t>  g_classSet;
+// Phase 27 follow-up — heap-leaked Cache so process-exit doesn't iterate
+// 10K class-pointer destructors. Mirror of the same pattern in
+// MonoAddressFinder.cpp. Scalars stay direct (trivial destruction).
+struct Cache {
+    std::mutex                   mu;
+    std::vector<std::uintptr_t>  classSet;
+};
+Cache& cache() {
+    static Cache* p = new Cache();   // intentional leak; Windows reclaims at exit
+    return *p;
+}
 std::uintptr_t               g_minKlass = 0;
 std::uintptr_t               g_maxKlass = 0;
 bool                         g_built    = false;
@@ -108,9 +115,9 @@ Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k)
 #pragma warning(pop)
 
 bool ContainsClass(std::uintptr_t p) {
-    if (g_classSet.empty()) return false;
+    if (cache().classSet.empty()) return false;
     if (p < g_minKlass || p > g_maxKlass) return false;
-    return std::binary_search(g_classSet.begin(), g_classSet.end(), p);
+    return std::binary_search(cache().classSet.begin(), cache().classSet.end(), p);
 }
 
 // Strip ".dll" suffix from image name so it round-trips against the
@@ -354,8 +361,8 @@ void ResolveFieldAt(Il2CppClass* klass, std::ptrdiff_t fieldOffset,
 }  // namespace
 
 bool BuildClassRangeCache() {
-    std::lock_guard<std::mutex> lk(g_cacheMutex);
-    if (g_built) return !g_classSet.empty();
+    std::lock_guard<std::mutex> lk(cache().mu);
+    if (g_built) return !cache().classSet.empty();
 
     if (!IsResolved()) {
         Log::Write(MagicStrings::LogCategoryWalk,
@@ -363,7 +370,7 @@ bool BuildClassRangeCache() {
         return false;
     }
 
-    g_classSet.clear();
+    cache().classSet.clear();
     g_minKlass = static_cast<std::uintptr_t>(-1);
     g_maxKlass = 0;
 
@@ -374,40 +381,40 @@ bool BuildClassRangeCache() {
         for (const auto& c : classes) {
             if (c.klass == nullptr) continue;
             auto p = reinterpret_cast<std::uintptr_t>(c.klass);
-            g_classSet.push_back(p);
+            cache().classSet.push_back(p);
             if (p < g_minKlass) g_minKlass = p;
             if (p > g_maxKlass) g_maxKlass = p;
         }
     }
-    std::sort(g_classSet.begin(), g_classSet.end());
-    g_classSet.erase(std::unique(g_classSet.begin(), g_classSet.end()),
-                     g_classSet.end());
-    if (g_classSet.empty()) {
+    std::sort(cache().classSet.begin(), cache().classSet.end());
+    cache().classSet.erase(std::unique(cache().classSet.begin(), cache().classSet.end()),
+                     cache().classSet.end());
+    if (cache().classSet.empty()) {
         g_minKlass = 0;
         g_maxKlass = 0;
     }
     g_built = true;
 
     Log::Write(MagicStrings::LogCategoryWalk,
-               "AddrFinder: cached " + std::to_string(g_classSet.size()) +
+               "AddrFinder: cached " + std::to_string(cache().classSet.size()) +
                " Il2CppClass* pointers, range [" +
                std::to_string(g_minKlass) + ", " + std::to_string(g_maxKlass) + "]");
-    return !g_classSet.empty();
+    return !cache().classSet.empty();
 }
 
 void InvalidateClassRangeCache() {
-    std::lock_guard<std::mutex> lk(g_cacheMutex);
-    g_classSet.clear();
+    std::lock_guard<std::mutex> lk(cache().mu);
+    cache().classSet.clear();
     g_minKlass = 0;
     g_maxKlass = 0;
     g_built    = false;
 }
 
 ClassRangeStats GetClassRangeStats() {
-    std::lock_guard<std::mutex> lk(g_cacheMutex);
+    std::lock_guard<std::mutex> lk(cache().mu);
     ClassRangeStats s;
     s.built      = g_built;
-    s.classCount = g_classSet.size();
+    s.classCount = cache().classSet.size();
     s.minKlass   = g_minKlass;
     s.maxKlass   = g_maxKlass;
     return s;

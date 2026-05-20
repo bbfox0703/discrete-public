@@ -24,11 +24,28 @@ namespace UnityCEDumper::Mono {
 
 namespace {
 
-std::mutex                                       g_cacheMutex;
-std::vector<std::uintptr_t>                      g_vtableSet;       // sorted
-std::unordered_map<std::uintptr_t,
-                   std::uintptr_t>                g_vtableToKlass;   // MonoVTable* → MonoClass*
-std::vector<std::uintptr_t>                      g_classSet;        // sorted
+// Phase 27 follow-up — the cache containers (vector + unordered_map)
+// previously sat as direct file-statics. At process termination their
+// destructors iterated 10-17K entries to free each one — observed live
+// to contribute to a >30s game-shutdown stall on 活俠傳 after a value
+// scan (each whatIsAt call grows the vtable memo by hundreds of entries;
+// the class set is 10-17K entries baseline). Wrapping them in a
+// heap-allocated leaked Cache lets Windows reclaim the whole heap in
+// one OS sweep at process exit instead of iterating destructors.
+//
+// POD scalars stay direct — their "destructor" is a no-op.
+struct Cache {
+    std::mutex                                          mu;
+    std::vector<std::uintptr_t>                         vtableSet;     // sorted
+    std::unordered_map<std::uintptr_t, std::uintptr_t>  vtableToKlass; // vtable → klass
+    std::vector<std::uintptr_t>                         classSet;      // sorted
+};
+Cache& cache() {
+    static Cache* p = new Cache();  // intentional leak
+    return *p;
+}
+// Bound-scalar mirrors of the cache state stay in static storage —
+// trivially-destructible POD, no shutdown cost.
 std::uintptr_t                                   g_minKlass  = 0;
 std::uintptr_t                                   g_maxKlass  = 0;
 std::uintptr_t                                   g_minVtable = 0;
@@ -116,15 +133,15 @@ MonoClass* SehNestingProbe(fn_class_get_nesting_type fn, MonoClass* k) {
 #pragma warning(pop)
 
 bool ContainsKlass(std::uintptr_t p) {
-    if (g_classSet.empty()) return false;
+    if (cache().classSet.empty()) return false;
     if (p < g_minKlass || p > g_maxKlass) return false;
-    return std::binary_search(g_classSet.begin(), g_classSet.end(), p);
+    return std::binary_search(cache().classSet.begin(), cache().classSet.end(), p);
 }
 
 bool ContainsVtable(std::uintptr_t p) {
-    if (g_vtableSet.empty()) return false;
+    if (cache().vtableSet.empty()) return false;
     if (p < g_minVtable || p > g_maxVtable) return false;
-    return std::binary_search(g_vtableSet.begin(), g_vtableSet.end(), p);
+    return std::binary_search(cache().vtableSet.begin(), cache().vtableSet.end(), p);
 }
 
 std::string StripDllSuffix(const std::string& s) {
@@ -311,8 +328,8 @@ void ResolveFieldAt(MonoClass* klass, std::ptrdiff_t fieldOffset,
 }  // namespace
 
 bool BuildClassRangeCache() {
-    std::lock_guard<std::mutex> lk(g_cacheMutex);
-    if (g_built) return !g_classSet.empty();
+    std::lock_guard<std::mutex> lk(cache().mu);
+    if (g_built) return !cache().classSet.empty();
 
     if (!IsResolved()) {
         Log::Write(MagicStrings::LogCategoryWalk,
@@ -320,9 +337,9 @@ bool BuildClassRangeCache() {
         return false;
     }
 
-    g_classSet.clear();
-    g_vtableSet.clear();
-    g_vtableToKlass.clear();
+    cache().classSet.clear();
+    cache().vtableSet.clear();
+    cache().vtableToKlass.clear();
     g_minKlass  = static_cast<std::uintptr_t>(-1);
     g_maxKlass  = 0;
     g_minVtable = static_cast<std::uintptr_t>(-1);
@@ -343,7 +360,7 @@ bool BuildClassRangeCache() {
     // resolves vtable→klass lazily: when it finds a candidate qword in
     // process memory (the supposed object header), it does a single SEH-
     // protected SafeReadBytes(*qword) to get vtable[0] = MonoClass*, and
-    // checks THAT against `g_classSet`. The vtable→klass map below is
+    // checks THAT against `cache().classSet`. The vtable→klass map below is
     // populated lazily as WhatIsAt validates each new vtable it sees, so
     // repeat hits are still O(log N) without any runtime calls.
     //
@@ -361,41 +378,41 @@ bool BuildClassRangeCache() {
         for (const auto& c : cs) {
             if (c.klass == nullptr) continue;
             auto kp = reinterpret_cast<std::uintptr_t>(c.klass);
-            g_classSet.push_back(kp);
+            cache().classSet.push_back(kp);
             if (kp < g_minKlass) g_minKlass = kp;
             if (kp > g_maxKlass) g_maxKlass = kp;
         }
     }
 
-    std::sort(g_classSet.begin(), g_classSet.end());
-    g_classSet.erase(std::unique(g_classSet.begin(), g_classSet.end()),
-                     g_classSet.end());
+    std::sort(cache().classSet.begin(), cache().classSet.end());
+    cache().classSet.erase(std::unique(cache().classSet.begin(), cache().classSet.end()),
+                     cache().classSet.end());
 
-    if (g_classSet.empty()) { g_minKlass = 0; g_maxKlass = 0; }
+    if (cache().classSet.empty()) { g_minKlass = 0; g_maxKlass = 0; }
     g_built = true;
 
     Log::Write(MagicStrings::LogCategoryWalk,
-               "AddrFinder: cached " + std::to_string(g_classSet.size()) +
+               "AddrFinder: cached " + std::to_string(cache().classSet.size()) +
                " MonoClass* (root domain, lazy vtable)");
-    return !g_classSet.empty();
+    return !cache().classSet.empty();
 }
 
 void InvalidateClassRangeCache() {
-    std::lock_guard<std::mutex> lk(g_cacheMutex);
-    g_classSet.clear();
-    g_vtableSet.clear();
-    g_vtableToKlass.clear();
+    std::lock_guard<std::mutex> lk(cache().mu);
+    cache().classSet.clear();
+    cache().vtableSet.clear();
+    cache().vtableToKlass.clear();
     g_minKlass  = 0; g_maxKlass  = 0;
     g_minVtable = 0; g_maxVtable = 0;
     g_built     = false;
 }
 
 ClassRangeStats GetClassRangeStats() {
-    std::lock_guard<std::mutex> lk(g_cacheMutex);
+    std::lock_guard<std::mutex> lk(cache().mu);
     ClassRangeStats s;
     s.built       = g_built;
-    s.classCount  = g_classSet.size();
-    s.vtableCount = g_vtableSet.size();
+    s.classCount  = cache().classSet.size();
+    s.vtableCount = cache().vtableSet.size();
     s.minKlass    = g_minKlass;
     s.maxKlass    = g_maxKlass;
     s.minVtable   = g_minVtable;
@@ -439,16 +456,16 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
 
     // Phase 27a follow-up: lazy vtable resolution. Snapshot the class set
     // and the (incrementally-populated) vtable→klass memo so the scan loop
-    // doesn't hold g_cacheMutex while doing SEH-protected probes. Any new
+    // doesn't hold cache().mu while doing SEH-protected probes. Any new
     // (vtable, klass) pair we discover gets written back at the end of
     // the call under the mutex so future scans skip the deref+lookup.
     std::vector<std::uintptr_t>                        classSetSnap;
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemoSnap;
     std::uintptr_t minK = 0, maxK = 0;
     {
-        std::lock_guard<std::mutex> lk(g_cacheMutex);
-        classSetSnap = g_classSet;
-        vtMemoSnap   = g_vtableToKlass;
+        std::lock_guard<std::mutex> lk(cache().mu);
+        classSetSnap = cache().classSet;
+        vtMemoSnap   = cache().vtableToKlass;
         minK = g_minKlass;
         maxK = g_maxKlass;
     }
@@ -633,18 +650,18 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         // Merge newly-discovered (vtable, klass) pairs into the global
         // memo so subsequent calls hit the fast path.
         if (!newlyMemoized.empty()) {
-            std::lock_guard<std::mutex> lk(g_cacheMutex);
+            std::lock_guard<std::mutex> lk(cache().mu);
             for (const auto& kv : newlyMemoized) {
-                g_vtableToKlass[kv.first] = kv.second;
-                g_vtableSet.push_back(kv.first);
+                cache().vtableToKlass[kv.first] = kv.second;
+                cache().vtableSet.push_back(kv.first);
                 if (g_minVtable == 0 || kv.first < g_minVtable) g_minVtable = kv.first;
                 if (kv.first > g_maxVtable) g_maxVtable = kv.first;
             }
             // Keep the set sorted+deduped for the (mostly unused by the
             // new code) range-rejection path in legacy callers.
-            std::sort(g_vtableSet.begin(), g_vtableSet.end());
-            g_vtableSet.erase(std::unique(g_vtableSet.begin(), g_vtableSet.end()),
-                              g_vtableSet.end());
+            std::sort(cache().vtableSet.begin(), cache().vtableSet.end());
+            cache().vtableSet.erase(std::unique(cache().vtableSet.begin(), cache().vtableSet.end()),
+                              cache().vtableSet.end());
         }
         return out;
     }
@@ -653,16 +670,16 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     // ruled in mid-scan (for partial matches that failed the name probe)
     // so we don't repeat the deref next time.
     if (!newlyMemoized.empty()) {
-        std::lock_guard<std::mutex> lk(g_cacheMutex);
+        std::lock_guard<std::mutex> lk(cache().mu);
         for (const auto& kv : newlyMemoized) {
-            g_vtableToKlass[kv.first] = kv.second;
-            g_vtableSet.push_back(kv.first);
+            cache().vtableToKlass[kv.first] = kv.second;
+            cache().vtableSet.push_back(kv.first);
             if (g_minVtable == 0 || kv.first < g_minVtable) g_minVtable = kv.first;
             if (kv.first > g_maxVtable) g_maxVtable = kv.first;
         }
-        std::sort(g_vtableSet.begin(), g_vtableSet.end());
-        g_vtableSet.erase(std::unique(g_vtableSet.begin(), g_vtableSet.end()),
-                          g_vtableSet.end());
+        std::sort(cache().vtableSet.begin(), cache().vtableSet.end());
+        cache().vtableSet.erase(std::unique(cache().vtableSet.begin(), cache().vtableSet.end()),
+                          cache().vtableSet.end());
     }
 
     out.reason = "no_klass_in_range";
