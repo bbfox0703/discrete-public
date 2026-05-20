@@ -4,7 +4,7 @@
 
 * DLL: `scanFieldValue` (global + class-scoped + string scan), `beginValueScan` / `refineValueScan` / `endValueScan` (session lifecycle). `whatIsAt` now resolves array element indices for `T[]` / `List<T>._items`. `Mono::BuildClassRangeCache` rewritten to lazy vtable resolution (closes 32-bit Mono hang).
 * UI: new "Value Search" tab (MainWindow position 6) — DataType + ScanType + Value/ValueTo + Tolerance + Encoding/MatchMode (string mode) + First Scan / Next Scan / End Session buttons + DataGrid with class/field/type/offset/current value/instance/address columns + right-click → Inspect this instance (cross-tab to Inspector via FocusOnInstance). AOT-clean.
-* CE Lua bridge: `scripts/unity_valuescan.lua` (`firstValueScan` / `nextValueScan` / `endValueScan` / `findString` / optional hotkey).
+* ~~CE Lua bridge `scripts/unity_valuescan.lua`~~ — **dropped 2026-05-20**. Originally implemented; user observation: CE already has a native value scanner, so a CE-side bridge that calls our scan back into CE has no realistic workflow. The DLL-side Begin/Refine/End RPCs remain for UI consumption; the Lua wrapper was deleted as unused surface.
 * Tooling: `tools/Test-ScanFieldValue.ps1` + `tools/Test-ValueScanSession.ps1` PowerShell smoke harnesses.
 
 **Live-smoked**: SaGa F2R (IL2CPP) one-shot + session (purse=100000 → spent 1 coin → `newValue=99999` narrowed to PLY_WORK.purse correctly, while PLY_WORK_SAVEDATA.purse stayed 100000 and got correctly dropped); 活俠傳 (Mono x86, Unity 2020.3.49f1) found `Mortal.Core.GameStat._value` reliably across UI state changes. **UI tab live click-through still pending user verification.**
