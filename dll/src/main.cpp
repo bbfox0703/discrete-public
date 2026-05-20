@@ -129,12 +129,39 @@ void OnDetach() {
 
 }  // namespace
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
+// DllMain — entry point. lpReserved tells us WHY DLL_PROCESS_DETACH fired:
+//   lpReserved == NULL   → FreeLibrary called → we should clean up gracefully
+//                          (process keeps running; leaving hooks pointing at
+//                          unmapped memory would crash the host)
+//   lpReserved != NULL   → process is terminating → SKIP all cleanup, the
+//                          OS reclaims everything. Cleanup at this point is
+//                          actively harmful because:
+//                            (a) `std::thread::join()` in PipeServer::Stop
+//                                deadlocks under the loader lock (DllMain
+//                                holds it; the joinee thread can't make
+//                                progress on Windows operations needing the
+//                                same lock).
+//                            (b) MinHook's MH_RemoveHook SuspendThreads on
+//                                every other thread in the dying process
+//                                to verify nobody's in the trampoline —
+//                                slow (Unity has dozens of threads) and
+//                                potentially deadlocks against
+//                                TerminateProcess.
+//                          Observed live 2026-05-20 against SaGa F2R: ~10s
+//                          delay between window-close and process-exit
+//                          when the DLL is injected. Fixed by short-
+//                          circuiting here.
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
             OnAttach(hModule);
             break;
         case DLL_PROCESS_DETACH:
+            if (lpReserved != nullptr) {
+                // Process termination — let the OS sweep. Returning TRUE
+                // immediately is the documented best practice.
+                break;
+            }
             OnDetach();
             break;
         default:

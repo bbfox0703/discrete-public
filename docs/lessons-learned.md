@@ -206,6 +206,62 @@ the priority list ordered newest-first.
 `UnityEngine.CoreModule`. Both run identical Mathf.Abs(int) burst
 through the same code path.
 
+### Phase 20-MT — never clean up MinHook / pipe-worker `join()` from DllMain on process exit
+
+**Symptom**: closing SaGa Frontier 2 Remastered (with our IL2CPP DLL
+injected) hung for ~10 seconds between the user clicking the window's
+close button and the process actually vanishing from Task Manager.
+The per-PID init log (`Discrete_UEDumper\Logs\<pid>\init\current.log`)
+stopped at the post-init "hook armed on il2cpp_runtime_invoke" line
+with no shutdown banner — meaning `UnityDumper_Shutdown` either never
+ran or was blocked before reaching its log line.
+
+**Root cause**: classic Windows DllMain anti-pattern hit by two
+independent cleanup paths simultaneously when the process is dying:
+
+  1. `PipeServer::Stop()` calls `std::thread::join()` on the pipe
+     worker thread. Under DllMain's loader lock (held by every DLL
+     entry-point call), `join()` blocks waiting for the thread to
+     finish — but the thread might need the very same loader lock to
+     unwind through any Windows API call it's currently in. Classic
+     deadlock; only resolved when the thread eventually exits via
+     `TerminateProcess` after the OS gives up.
+
+  2. `MH_RemoveHook` (in `MonoMainThreadHook::Uninstall` /
+     `IL2CPPMainThreadHook::Uninstall`) calls `SuspendThread` on
+     every other thread in the process to verify nobody's currently
+     executing the trampoline. Unity has dozens of threads; on a
+     process that's mid-termination, some of those threads may already
+     be in weird states (TerminateThread, kernel-side cleanup) that
+     SuspendThread either blocks on or races against. Adds seconds of
+     latency at best, deadlocks at worst.
+
+**Rule**: read `lpReserved` in DllMain. When `DLL_PROCESS_DETACH` fires:
+
+  * `lpReserved == NULL` → `FreeLibrary` was called. Process keeps
+    running; we MUST clean up properly because hook trampolines into
+    soon-to-be-unmapped code would crash the host.
+  * `lpReserved != NULL` → process is terminating. **Skip all
+    cleanup.** The OS reclaims handles, threads, virtual memory,
+    everything. Cleanup at this point is at best wasted work, at
+    worst the deadlock-trap above.
+
+This is the documented Microsoft best practice, not a hack. The MSDN
+page on `DllMain` says verbatim:
+
+> When the system calls the DllMain function with the
+> DLL_PROCESS_DETACH value, lpReserved is NULL if FreeLibrary has been
+> called or the DLL load failed and non-NULL if the process is
+> terminating.
+
+**Verified live 2026-05-20**: post-fix, SaGa F2R closes instantly
+(< 1 s) regardless of how long the DLL has been injected or how many
+ticks the dispatcher has counted. `MainThreadDispatcher` + MinHook
+hooks remain in process memory until OS reaps, but nothing references
+them again — the runtime is shutting down.
+
+See `dll/src/main.cpp:DllMain` for the branch + the long comment.
+
 ### Phase 20-MT — Unity 2018 pauses the main loop when window loses focus
 
 **Symptom**: handshake against R-Type Dimensions EX (Unity 2018.1.9f2)
