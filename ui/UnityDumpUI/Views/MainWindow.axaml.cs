@@ -776,4 +776,51 @@ public partial class MainWindow : Window
         if (row is null) return;
         await CopyBrowserTextAsync(row.Member).ConfigureAwait(true);
     }
+
+    // -------- Phase 20b — Scene Explorer tab handlers --------------------
+    //
+    // The Scene TreeView's selected node lives on the VM
+    // (Scene.SelectedNode); these handlers read it + dispatch the
+    // requested action. The Inspect menu raises the VM's
+    // NavigateToInspectorRequested event, which MainWindowViewModel
+    // routes into the cross-tab handoff (Phase 20c).
+
+    private void OnScenePatternKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+    {
+        if (e.Key != Avalonia.Input.Key.Enter) return;
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (vm.Scene.SearchCommand.CanExecute(null))
+        {
+            vm.Scene.SearchCommand.Execute(null);
+            e.Handled = true;
+        }
+    }
+
+    private SceneNode? ResolveSelectedSceneNode()
+    {
+        var tv = this.FindControl<TreeView>("SceneTreeView");
+        return tv?.SelectedItem as SceneNode;
+    }
+
+    private void OnSceneInspectMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        SceneNode? node = ResolveSelectedSceneNode();
+        if (node is null) return;
+        vm.Scene.NavigateToInspector(node);
+    }
+
+    private async void OnSceneCopyAddressMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        SceneNode? node = ResolveSelectedSceneNode();
+        if (node is null) return;
+        await CopyBrowserTextAsync(node.Address).ConfigureAwait(true);
+    }
+
+    private async void OnSceneCopyNameMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        SceneNode? node = ResolveSelectedSceneNode();
+        if (node is null) return;
+        await CopyBrowserTextAsync(node.Name).ConfigureAwait(true);
+    }
 }

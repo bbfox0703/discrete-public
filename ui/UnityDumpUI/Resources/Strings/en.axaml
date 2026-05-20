@@ -144,6 +144,15 @@
   <sys:String x:Key="SymbolFinder.NavigateMenu">Navigate to this in Browser</sys:String>
   <sys:String x:Key="SymbolFinder.CopyClassMenu">Copy class name</sys:String>
   <sys:String x:Key="SymbolFinder.CopyMemberMenu">Copy member name</sys:String>
+
+  <!-- Phase 20b — Scene Explorer tab. -->
+  <sys:String x:Key="Scene.Tab">Scene</sys:String>
+  <sys:String x:Key="Scene.PatternWatermark">name substring (leave empty for first N), e.g. Player</sys:String>
+  <sys:String x:Key="Scene.LimitLabel">Limit</sys:String>
+  <sys:String x:Key="Scene.SearchButton">Search</sys:String>
+  <sys:String x:Key="Scene.InspectMenu">Inspect this GameObject (switch to Inspector)</sys:String>
+  <sys:String x:Key="Scene.CopyAddressMenu">Copy address</sys:String>
+  <sys:String x:Key="Scene.CopyNameMenu">Copy name</sys:String>
   <sys:String x:Key="AddrLookup.AddressLabel">Address:</sys:String>
   <sys:String x:Key="AddrLookup.AddressWatermark">paste a hex address (e.g. 0x000001E55B2518F0)…</sys:String>
   <sys:String x:Key="AddrLookup.LookupButton">Lookup</sys:String>

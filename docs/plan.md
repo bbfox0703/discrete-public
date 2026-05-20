@@ -830,17 +830,44 @@ Out (v2 candidates):
   false-positive problem AND IL2CPP code stripping. New wire RPC like
   `walkManagedHeap(classFilter)`. Multi-day; only needed if 20a-2
   doesn't work on the user's target games.
-- [ ] **20b** DiscreteUI Scene tab — new `SceneExplorerViewModel.cs` +
-  `SceneExplorerView.axaml`. Lazy TreeView. Right-click context menu
-  matching the existing patterns from Inspector + Methods tabs.
-- [ ] **20c** Cross-tab handoff — "View instance" flips to Inspector
-  tab with `SelectedInstance.Address = node.Address` populated. Reuse
-  the Phase 19d-2 cross-tab plumbing already added between Inspector and
-  Methods.
-- [ ] **20d** Live verification on at least 2 targets (one IL2CPP, one
-  Mono). Document any per-Unity-version quirks (older Unity may not have
-  `Scene` struct as a managed type — fall back to
-  `Object.FindObjectsOfType<GameObject>()`).
+- [x] **20b** ✅ **Shipped 2026-05-20.** DiscreteUI Scene tab — new
+  `SceneExplorerViewModel.cs` (+ inline `SceneNode` model) +
+  `SceneEnumerator.cs` in Core. Filter-driven TreeView (no separate
+  axaml file — Scene TabItem added inline to MainWindow.axaml). Top bar
+  has pattern TextBox + Limit NumericUpDown (1–500, default 200) +
+  Search button. Initial state empty; Search calls
+  `FindObjectsOfType*(Type)` with the same priority-list as
+  `unity_scene.lua` (Unity 2022+ 3-arg `FindObjectsByType` → 2-arg
+  `FindObjectsOfType(Type, bool)` → 1-arg `FindObjectsOfType(Type)`),
+  then `walkArray` for the address list, then per-element `Object.get_name`
+  for the display label. Each TreeView item lazy-expands via
+  `GameObject.transform` → `Transform.childCount` → loop
+  `Transform.GetChild(i)` → child `gameObject` → `get_name`. Every
+  Unity engine icall is routed through Phase 20-MT
+  (`mainThread: true`) so even big scenes don't freeze. Right-click
+  context menu: Inspect (Phase 20c) / Copy address / Copy name.
+- [x] **20c** ✅ **Shipped 2026-05-20.** Cross-tab handoff — Scene
+  right-click "Inspect this GameObject" raises
+  `SceneExplorerViewModel.NavigateToInspectorRequested(address)`;
+  `MainWindowViewModel.OnSceneNavigateToInspector` calls
+  `Inspector.SetTarget(UnityEngine.CoreModule, UnityEngine, GameObject)`
+  + `Inspector.FocusOnInstance(addr)` + `SelectedDetailTabIndex = TabIndexInspector`.
+  Same plumbing pattern as the Phase 19d-2 Methods → Inspector hop.
+- [x] **20d** ✅ **Verified live 2026-05-20** on two targets:
+  * **BongoCat** (Mono / Unity 6000.2 / x64): Scene tree expanded,
+    lazy children loaded, empty-expansion handled correctly (leaf
+    GameObjects show empty Children — Avalonia auto-hides chevron
+    on empty collection). Status bar surfaced "X match(es) for Player
+    of Y scanned (Z in scene, …ms; via Unity 2022+ 3-arg ByType)".
+  * **SaGa Frontier 2 Remastered** (IL2CPP v29 / Unity 2021.3 / x64):
+    Scene enumeration + Inspect this GameObject cross-tab handoff PASS;
+    Inspector populates correctly + the existing walkInstance cascade
+    fires automatically.
+  Older-Unity quirk noted (and Symbol Finder's earlier `UnityEngine.CoreModule`
+  vs `UnityEngine` monolithic-fallback applies symmetrically — but
+  SceneEnumerator uses 3-arg ByType which is Unity 2022+ only, so
+  Unity 5.x / 2017.1 GameObject enumeration via SceneEnumerator
+  falls back to the 1-arg `FindObjectsOfType(Type)` survival path).
 
 Estimated effort: ~½–1 day total. No DLL changes. No new wire
 commands.

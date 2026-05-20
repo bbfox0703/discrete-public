@@ -1154,6 +1154,95 @@
               </ScrollViewer>
             </DockPanel>
           </TabItem>
+
+          <!-- Phase 20b — Scene Explorer tab. Filter-driven TreeView
+               walking Unity's authoritative scene graph via
+               Object.FindObjects* (Type) + Transform.GetChild (lazy
+               per-node expand). All icalls main-thread-routed (Phase
+               20-MT) — see SceneEnumerator. Right-click a row →
+               "Inspect this GameObject" flips to Inspector with the
+               GameObject's address pre-populated. -->
+          <TabItem Header="{StaticResource Scene.Tab}">
+            <DockPanel Margin="0,4,0,0">
+              <!-- Top control row: pattern + limit + Search -->
+              <Grid DockPanel.Dock="Top"
+                    ColumnDefinitions="*,Auto,Auto,140,Auto"
+                    Margin="0,0,0,8">
+                <TextBox Grid.Column="0"
+                         PlaceholderText="{StaticResource Scene.PatternWatermark}"
+                         Text="{Binding Scene.Pattern, Mode=TwoWay}"
+                         KeyDown="OnScenePatternKeyDown"
+                         Margin="0,0,8,0" />
+                <TextBlock Grid.Column="2"
+                           Text="{StaticResource Scene.LimitLabel}"
+                           VerticalAlignment="Center" Margin="0,0,6,0" />
+                <NumericUpDown Grid.Column="3"
+                               Value="{Binding Scene.Limit, Mode=TwoWay}"
+                               Minimum="1" Maximum="500" Increment="50"
+                               FormatString="0"
+                               MinWidth="120"
+                               Margin="0,0,8,0" />
+                <Button Grid.Column="4"
+                        Content="{StaticResource Scene.SearchButton}"
+                        Command="{Binding Scene.SearchCommand}"
+                        Classes="accent" />
+              </Grid>
+
+              <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
+                           IsVisible="{Binding Scene.IsBusy}"
+                           Height="3" Margin="0,0,0,4" />
+
+              <Border DockPanel.Dock="Top"
+                      IsVisible="{Binding Scene.ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+                      Background="#33D32F2F" BorderBrush="#88D32F2F"
+                      BorderThickness="1" CornerRadius="4" Padding="10,6"
+                      Margin="0,0,0,8">
+                <TextBlock Text="{Binding Scene.ErrorMessage}"
+                           Foreground="#FFD32F2F" TextWrapping="Wrap" />
+              </Border>
+
+              <TextBlock DockPanel.Dock="Bottom"
+                         Text="{Binding Scene.StatusMessage}"
+                         Foreground="#FF7B7B7B"
+                         Margin="0,4,0,0" />
+
+              <!-- TreeView with HierarchicalDataTemplate for lazy
+                   children. ItemsSource binds to Scene.Roots; each
+                   SceneNode exposes a Children collection that's
+                   replaced wholesale on first IsExpanded=true. -->
+              <TreeView x:Name="SceneTreeView"
+                        ItemsSource="{Binding Scene.Roots}"
+                        SelectedItem="{Binding Scene.SelectedNode, Mode=TwoWay}">
+                <TreeView.ContextMenu>
+                  <ContextMenu>
+                    <MenuItem Header="{StaticResource Scene.InspectMenu}"
+                              Click="OnSceneInspectMenu" />
+                    <Separator />
+                    <MenuItem Header="{StaticResource Scene.CopyAddressMenu}"
+                              Click="OnSceneCopyAddressMenu" />
+                    <MenuItem Header="{StaticResource Scene.CopyNameMenu}"
+                              Click="OnSceneCopyNameMenu" />
+                  </ContextMenu>
+                </TreeView.ContextMenu>
+                <TreeView.ItemTemplate>
+                  <TreeDataTemplate DataType="vm:SceneNode" ItemsSource="{Binding Children}">
+                    <TextBlock Text="{Binding DisplayLabel}"
+                               FontFamily="Consolas,Cascadia Mono,monospace" />
+                  </TreeDataTemplate>
+                </TreeView.ItemTemplate>
+                <!-- Wire IsExpanded TwoWay so the SceneNode's
+                     OnIsExpandedChanged hook kicks off lazy load. The
+                     DataType pin lets compiled bindings resolve against
+                     the per-item SceneNode (not the Window's
+                     MainWindowViewModel DataContext). -->
+                <TreeView.Styles>
+                  <Style Selector="TreeViewItem" x:DataType="vm:SceneNode">
+                    <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                  </Style>
+                </TreeView.Styles>
+              </TreeView>
+            </DockPanel>
+          </TabItem>
         </TabControl>
       </DockPanel>
     </Grid>

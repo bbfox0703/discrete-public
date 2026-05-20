@@ -585,8 +585,16 @@ public sealed class BackendAdapter : ILiveExportSource
         // ProtocolJsonContext). Each arg's `Value` is already a JsonElement
         // built by the caller via JsonSerializer.SerializeToElement against
         // the appropriate primitive context entry.
+        //
+        // Source-gen's `ListCallArgRequest` JsonTypeInfo refuses to box
+        // an array — callers pass IReadOnlyList<CallArgRequest> for API
+        // ergonomics but the source-gen wants the concrete List<>. Coerce
+        // in one place so callers can pass arrays, lists, or hand-rolled
+        // collections interchangeably without surprises.
+        List<CallArgRequest> argsList = args as List<CallArgRequest>
+            ?? new List<CallArgRequest>(args);
         var argsArr = JsonSerializer.SerializeToElement(
-            args, ProtocolJsonContext.Default.ListCallArgRequest);
+            argsList, ProtocolJsonContext.Default.ListCallArgRequest);
         var d = new Dictionary<string, JsonElement>
         {
             ["assembly"]  = Str(assembly),

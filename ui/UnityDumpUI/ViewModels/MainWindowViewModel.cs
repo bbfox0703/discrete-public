@@ -72,6 +72,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         AddressLookup   = new AddressLookupViewModel(_backend, _logger);
         SymbolFinder    = new SymbolFinderViewModel(_backend, _logger, Browser.Assemblies);
         SymbolFinder.NavigateRequested += OnSymbolFinderNavigateRequested;
+        // Phase 20b: Scene Explorer tab. SceneEnumerator wraps the
+        // UnityEngine.Object.FindObjects* + Transform-walk recipe from
+        // unity_scene.lua; Phase 20-MT keeps main-thread routing on
+        // every icall so the game stays responsive under sustained
+        // burst.
+        Scene = new SceneExplorerViewModel(new SceneEnumerator(_backend, _logger), _logger);
+        Scene.NavigateToInspectorRequested += OnSceneNavigateToInspector;
         // Phase 22a/d: hoisted from Inspector to a top-level VM property.
         // AobMaker is session-wide — the Inspector's per-row HEX/Disasm
         // buttons, MethodOverloads' "Send AA script to CE" entries, and
@@ -247,6 +254,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public SymbolFinderViewModel SymbolFinder { get; }
 
     /// <summary>
+    /// Phase 20b — Scene Explorer tab. Filter-driven TreeView walking
+    /// Unity's authoritative scene graph via Object.FindObjects* +
+    /// Transform.GetChild. All icalls main-thread-routed (Phase 20-MT)
+    /// so even big scenes (40k+ GameObjects on BongoCat) don't freeze
+    /// the host.
+    /// </summary>
+    public SceneExplorerViewModel Scene { get; }
+
+    /// <summary>
     /// Phase 22d — session-wide AOBMaker CE-plugin bridge. Inspector's
     /// HEX/Disasm row buttons, MethodOverloads' "Send AA script to CE",
     /// and Tools→Inject Discrete Bridge all share this instance so a
@@ -274,6 +290,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexMethods       = 2;
     public const int TabIndexAddressLookup = 3;
     public const int TabIndexSymbolFinder  = 4;
+    public const int TabIndexScene         = 5;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -900,6 +917,37 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             ErrorMessage = $"Navigate from finder failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"OnSymbolFinderNavigateRequested: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Phase 20c — Scene → Inspector cross-tab handoff. SceneExplorer
+    /// fires this when the user right-clicks a tree row → "Inspect this
+    /// GameObject". We set the inspector's target to UnityEngine.GameObject,
+    /// drop the address in as `SelectedInstance`, and flip the tab.
+    ///
+    /// Same plumbing pattern as the Phase 19d-2 Methods → Inspector hop
+    /// (`OnInspectInstanceRequested`); we route through
+    /// <see cref="LiveInspectionViewModel.SetTarget"/> + `FocusOnInstance`
+    /// so the existing `walkInstance` cascade kicks off automatically.
+    /// </summary>
+    private void OnSceneNavigateToInspector(string gameObjectAddress)
+    {
+        if (string.IsNullOrEmpty(gameObjectAddress)) return;
+        try
+        {
+            Inspector.SetTarget(
+                assembly:  "UnityEngine.CoreModule",
+                @namespace: "UnityEngine",
+                name: "GameObject");
+            Inspector.FocusOnInstance(gameObjectAddress);
+            SelectedDetailTabIndex = TabIndexInspector;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Inspect from Scene failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnSceneNavigateToInspector({gameObjectAddress}): {ex.GetType().Name}: {ex.Message}");
         }
     }
 
