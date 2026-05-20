@@ -266,6 +266,63 @@ them again — the runtime is shutting down.
 
 See `dll/src/main.cpp:DllMain` for the branch + the long comment.
 
+### Phase 27 follow-up — 4000+ `thread_attach`/`detach` cycles in a batch leave BDWGC finalizers that stall shutdown for 30-60s
+
+**Symptom**: 活俠傳 (Legend of Mortal, Mono x86, Unity 2020.3.49) hung
+for ~44 seconds during shutdown after a single value scan. Test
+matrix:
+* Open UI → inject → close UI (no scan) → close game = **1 second**
+* Open UI → inject → run value scan → close UI → close game = **44 seconds**
+
+Confirmed scan-only — the longer the scan (more whatIsAt calls), the
+worse the shutdown.
+
+**Root cause**: each `Mono::WhatIsAt` / `IL2CPP::WhatIsAt` call opens its
+own `ThreadAttachGuard` for the duration of the backward scan. A global
+value scan that hits 4000+ candidates triggers 4000+
+`mono_thread_attach`/`mono_thread_detach` (or il2cpp equivalent) cycles
+on the pipe-worker thread within a couple of seconds.
+
+Each attach/detach pair appears to leave a finalizable thread-handle
+ref in BDWGC's finalizer queue (the runtime doesn't free thread state
+synchronously — it defers to the GC). When the game shuts down
+(`Application.Quit` → Mono teardown), BDWGC runs all pending finalizers
+before unwinding the domain. 4000+ thread refs × non-trivial cleanup
+each = the missing 40+ seconds.
+
+This **isn't** the same issue as the BDWGC class-vtable hang from the
+earlier Phase 27a fix. Different mechanism — same family (mass batch
+of cheap runtime calls leaving cleanup work for shutdown).
+
+**Fix**: per-thread reentrancy counter in both `ThreadAttachGuard`
+variants. Outer guard does the ONE real attach + bumps `depth=1`.
+Inner guards see `depth>0` and skip the runtime call entirely (just
+balance the counter on destruction). Scan handlers (Mono + IL2CPP ×
+scanFieldValue + beginValueScan) now open ONE outer guard before the
+WhatIsAt batch. All 4000 inner guards become counter-only no-ops.
+
+Net cost: **1 attach/detach per scan instead of 4000**. Shutdown back
+to baseline (~1 s).
+
+**Generalization**: any batch loop that calls Mono / IL2CPP runtime
+APIs in a tight loop should open ONE outer `ThreadAttachGuard` at the
+batch level. The reentrancy counter makes this safe (inner guards
+inside helper functions become no-ops). This also makes the existing
+"pipe handlers must hold their own guard around direct resolver calls"
+policy (MonoThreadAttach.h header) safer to follow — nested guards
+are no longer a footgun for the OUR-OWN-CODE case (Unity main-thread
+nested attach is still a footgun and still has its own skip via
+`IsCurrentlyDrainingOnMainThread`).
+
+**How to spot this in the future**: if shutting down the host process
+takes noticeably longer when a feature has been used, suspect either
+(a) accumulated runtime-handle refs queued for BDWGC finalization,
+or (b) C++ static-storage container destructors freeing many small
+allocations. The fix for (a) is reentrant attach (this lesson); the
+fix for (b) is heap-leaked singletons (the prior lesson above).
+
+---
+
 ### Phase 27a — mass-batch Mono runtime API calls wedge legacy 32-bit Mono when main thread is focus-paused
 
 **Symptom**: 活俠傳 (Legend of Mortal, Unity 2020.3.49f1, x86 Mono) hangs
