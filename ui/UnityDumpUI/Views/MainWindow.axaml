@@ -408,8 +408,22 @@
         <!-- Tabs: Fields / Inspector / Methods / Address Lookup. SelectedIndex
              is bound to the VM so cross-tab handoffs (Inspector right-click
              → Address Lookup, Address Lookup → Inspector) can switch tabs
-             from the VM layer. -->
-        <TabControl SelectedIndex="{Binding SelectedDetailTabIndex, Mode=TwoWay}">
+             from the VM layer.
+             Logo watermark sits behind the TabControl and is mutually
+             exclusive with it on IsConnected — at startup (no inject)
+             the right pane shows just the branding image; after the
+             user injects + connects the DataGrid tabs take over. -->
+        <Grid>
+          <Image Source="avares://DiscreteUI/Assets/Logo.webp"
+                 Stretch="Uniform"
+                 Opacity="0.5"
+                 MaxWidth="640"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center"
+                 IsHitTestVisible="False"
+                 IsVisible="{Binding !IsConnected}" />
+          <TabControl SelectedIndex="{Binding SelectedDetailTabIndex, Mode=TwoWay}"
+                      IsVisible="{Binding IsConnected}">
           <TabItem Header="{StaticResource Browser.FieldsTab}">
             <DockPanel>
               <!-- Filter is UI-only — exports + Copy CE field operate on
@@ -1432,6 +1446,7 @@
             </DockPanel>
           </TabItem>
         </TabControl>
+        </Grid>
       </DockPanel>
     </Grid>
   </DockPanel>
