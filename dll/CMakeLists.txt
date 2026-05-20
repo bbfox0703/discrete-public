@@ -80,6 +80,8 @@ set(DLL_SHARED_SOURCES
     src/shared/ExportAPI.cpp
     src/shared/ExportAPI.h
     src/shared/MethodSignatureFormat.h
+    src/shared/ValueScanSession.cpp
+    src/shared/ValueScanSession.h
 )
 
 # Mono-specific sources: only compiled into UnityDumper-Mono.dll.

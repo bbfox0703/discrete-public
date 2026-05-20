@@ -150,6 +150,43 @@ inline constexpr const char* CmdSearchSymbols         = "searchSymbols";
 //   mode = "global"|"class-scoped".
 inline constexpr const char* CmdScanFieldValue        = "scanFieldValue";
 
+// Phase 27b — Session-state RPCs for CE-style First Scan / Next Scan
+// workflow. `beginValueScan` takes the same args as `scanFieldValue`
+// but additionally stores the candidate list server-side under a
+// generated `sessionId`. Subsequent `refineValueScan` calls re-read
+// each candidate's current value, compare against the session's
+// previous-value snapshot per the supplied scanType, and prune the
+// session in place. `endValueScan` releases the session buffer.
+//
+// `beginValueScan` request additions (over scanFieldValue):
+//   (none — sessionId is server-allocated and returned)
+// `beginValueScan` response additions:
+//   sessionId (uint64 as decimal string for JSON-safe wire shape)
+//
+// `refineValueScan` request:
+//   sessionId : string (decimal uint64) — required
+//   scanType  : "exact"|"range"|"changed"|"unchanged"
+//               |"increased"|"decreased"|"newValue"
+//   value     : number (required for exact/range/newValue)
+//   valueTo   : number (required for range; upper bound)
+//   limit     : int (optional cap on returned candidate rows;
+//               default 5000)
+// `refineValueScan` response:
+//   { ok, sessionId, scanType, count, totalCandidates, removed,
+//     dataType, candidates: [...] }
+//   `count` = candidates emitted this call (capped by limit).
+//   `totalCandidates` = remaining session size after pruning.
+//   `removed` = number pruned this round.
+//
+// `endValueScan` request: { sessionId }. Response: { ok, sessionId, dropped }.
+//
+// Sessions auto-expire 5 minutes after last use (cap on memory leaks
+// from clients that crash without calling End). Auto-cleanup on pipe
+// disconnect via the existing Phase 14a teardown hook.
+inline constexpr const char* CmdBeginValueScan        = "beginValueScan";
+inline constexpr const char* CmdRefineValueScan       = "refineValueScan";
+inline constexpr const char* CmdEndValueScan          = "endValueScan";
+
 // Phase 20-MT — diagnostic snapshot of the main-thread dispatcher state.
 // Args: (none).
 // Returns: { initialized, hook_installed, main_thread_id, tick_count,

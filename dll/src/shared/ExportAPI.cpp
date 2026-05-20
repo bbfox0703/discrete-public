@@ -12,6 +12,7 @@
 #include "Memory.h"
 #include "ModuleHelper.h"
 #include "PipeServer.h"
+#include "ValueScanSession.h"
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
 #  include "../mono/MonoAddressFinder.h"
@@ -44,6 +45,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -98,8 +100,10 @@ bool ICaseContainsAscii(std::string_view haystack, std::string_view needle) {
 // Phase 27a — shared helpers for the scanFieldValue handler (both backends).
 // `Memory::` below resolves to UnityCEDumper::Memory:: via this using; the
 // alternative is to fully qualify each occurrence, which makes the helper
-// signatures unreadable.
-namespace Memory = ::UnityCEDumper::Memory;
+// signatures unreadable. Phase 27b adds the `ValueScan` alias for the
+// session container — same rationale.
+namespace Memory    = ::UnityCEDumper::Memory;
+namespace ValueScan = ::UnityCEDumper::ValueScan;
 
 // Wire dataType string → ValueDataType enum. Returns false on unknown string.
 bool ParseValueDataType(std::string_view s, Memory::ValueDataType& out) {
@@ -257,11 +261,125 @@ json DecodeValueBytesToJson(const std::uint8_t bytes[8], Memory::ValueDataType d
     return nullptr;
 }
 
-// Wire scanType string → ValueScanType enum.
+// Wire scanType string → ValueScanType enum (Memory-level: Exact / Range
+// are the only modes the raw memory scan supports). The session-level
+// modes (changed / unchanged / increased / decreased / newValue) are
+// handled in `CompareCandidateForRefine` below.
 bool ParseValueScanType(std::string_view s, Memory::ValueScanType& out) {
     if (s == "exact" || s.empty()) { out = Memory::ValueScanType::Exact; return true; }
     if (s == "range")              { out = Memory::ValueScanType::Range; return true; }
     return false;
+}
+
+// Phase 27b — session-level refine comparator. Returns true (keep) or
+// false (drop) for one candidate. When kept, `prev` is updated to `cur`
+// so the next refine round compares against THIS round's value.
+//
+// scanType values:
+//   exact      : cur == arg.value (range collapsed to single point)
+//   range      : arg.value <= cur <= arg.valueTo (typed)
+//   newValue   : cur == arg.value (alias for exact — semantic distinction
+//                only matters in the UI: "I now want a different value")
+//   changed    : cur != prev
+//   unchanged  : cur == prev
+//   increased  : cur > prev (typed)
+//   decreased  : cur < prev (typed)
+// `argLo` / `argHi` are 8-byte payloads packed by PackJsonValueToBytes
+// (only meaningful for exact / range / newValue).
+//
+// `cur` is read from process memory before this is called; if the read
+// failed, the caller should drop the candidate without invoking this.
+bool CompareCandidateForRefine(Memory::ValueDataType dt,
+                                std::string_view      scanType,
+                                const std::uint8_t    cur[8],
+                                std::uint8_t          prev[8],
+                                const std::uint8_t    argLo[8],
+                                const std::uint8_t    argHi[8],
+                                double                tolerance) {
+    auto updatePrev = [&](bool keep) {
+        if (keep) std::memcpy(prev, cur, Memory::ValueDataTypeSize(dt));
+        return keep;
+    };
+
+    #define LOAD(T, name, src) T name; std::memcpy(&name, src, sizeof(T))
+    #define BODY_INT(T) {                                                         \
+        LOAD(T, vCur, cur);  LOAD(T, vPrev, prev);                                \
+        if (scanType == "exact" || scanType == "newValue") {                      \
+            LOAD(T, vArg, argLo); return updatePrev(vCur == vArg);                \
+        }                                                                          \
+        if (scanType == "range") {                                                \
+            LOAD(T, vLo, argLo); LOAD(T, vHi, argHi);                             \
+            return updatePrev(vCur >= vLo && vCur <= vHi);                        \
+        }                                                                          \
+        if (scanType == "changed")    return updatePrev(vCur != vPrev);           \
+        if (scanType == "unchanged")  return updatePrev(vCur == vPrev);           \
+        if (scanType == "increased")  return updatePrev(vCur >  vPrev);           \
+        if (scanType == "decreased")  return updatePrev(vCur <  vPrev);           \
+        return false;                                                              \
+    }
+    #define BODY_FLT(T) {                                                         \
+        LOAD(T, vCur, cur);  LOAD(T, vPrev, prev);                                \
+        if (!std::isfinite(static_cast<double>(vCur))) return false;              \
+        if (scanType == "exact" || scanType == "newValue") {                      \
+            LOAD(T, vArg, argLo);                                                  \
+            bool ok = std::fabs(static_cast<double>(vCur)                          \
+                              - static_cast<double>(vArg)) <= tolerance;           \
+            return updatePrev(ok);                                                 \
+        }                                                                          \
+        if (scanType == "range") {                                                \
+            LOAD(T, vLo, argLo); LOAD(T, vHi, argHi);                             \
+            return updatePrev(vCur >= vLo && vCur <= vHi);                        \
+        }                                                                          \
+        if (scanType == "changed")    return updatePrev(vCur != vPrev);           \
+        if (scanType == "unchanged")  return updatePrev(vCur == vPrev);           \
+        if (scanType == "increased")  return updatePrev(vCur >  vPrev);           \
+        if (scanType == "decreased")  return updatePrev(vCur <  vPrev);           \
+        return false;                                                              \
+    }
+
+    switch (dt) {
+        case Memory::ValueDataType::Int8:   BODY_INT(std::int8_t);
+        case Memory::ValueDataType::UInt8:  BODY_INT(std::uint8_t);
+        case Memory::ValueDataType::Int16:  BODY_INT(std::int16_t);
+        case Memory::ValueDataType::UInt16: BODY_INT(std::uint16_t);
+        case Memory::ValueDataType::Int32:  BODY_INT(std::int32_t);
+        case Memory::ValueDataType::UInt32: BODY_INT(std::uint32_t);
+        case Memory::ValueDataType::Int64:  BODY_INT(std::int64_t);
+        case Memory::ValueDataType::UInt64: BODY_INT(std::uint64_t);
+        case Memory::ValueDataType::Float:  BODY_FLT(float);
+        case Memory::ValueDataType::Double: BODY_FLT(double);
+    }
+    #undef BODY_INT
+    #undef BODY_FLT
+    #undef LOAD
+    return false;
+}
+
+// Common: emit a Refine candidate as JSON row. Same shape as the global
+// scanFieldValue response so UI / Lua bridge code can render either with
+// the same template.
+json EmitCandidateRow(const ValueScan::Candidate& c,
+                      Memory::ValueDataType dt,
+                      const std::function<std::string(std::uintptr_t)>& fmtHex) {
+    json row = {
+        {"addr",         fmtHex(c.addr)},
+        {"instAddr",     fmtHex(c.instAddr)},
+        {"asm",          c.asmName},
+        {"ns",           c.ns},
+        {"class",        c.className},
+        {"fieldOffset",  c.fieldOffset},
+        {"fieldKind",    c.fieldKind},
+        {"currentValue", DecodeValueBytesToJson(c.prevValue, dt)},
+    };
+    if (!c.field.empty())     row["field"]     = c.field;
+    if (!c.fieldType.empty()) row["fieldType"] = c.fieldType;
+    if (!c.nearestFieldName.empty()) {
+        row["nearestField"] = json{
+            {"name",  c.nearestFieldName},
+            {"delta", c.nearestFieldDelta},
+        };
+    }
+    return row;
 }
 
 std::string Utf8FromWide(const std::wstring& w) {
@@ -403,6 +521,129 @@ void RegisterCoreHandlers() {
             {"last_tick_age_ms", s.last_tick_age_ms},
             {"queue_depth",      s.queue_depth},
             {"is_healthy",       IsHealthy()},
+        };
+    });
+
+    // Phase 27b — refineValueScan + endValueScan. Backend-agnostic: refine
+    // walks the session's candidate vector and re-reads each candidate's
+    // value via SafeReadBytes (no Mono/IL2CPP runtime APIs), end drops the
+    // session. Both handlers registered in RegisterCoreHandlers so they
+    // exist in both DLL flavors without duplication. `beginValueScan` IS
+    // backend-specific (uses Mono::WhatIsAt or IL2CPP::WhatIsAt) so it
+    // stays inside the #if blocks.
+    auto formatHexCore = [](std::uintptr_t v) -> std::string {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "0x%016llX", static_cast<unsigned long long>(v));
+        return std::string(buf);
+    };
+    PipeServer::RegisterHandler(MagicStrings::CmdRefineValueScan,
+        [formatHexCore](const json& args) -> json {
+        if (!args.contains("sessionId")) return json{{"error", "missing 'sessionId'"}};
+        std::uint64_t sessionId = 0;
+        try {
+            sessionId = std::stoull(args["sessionId"].get<std::string>());
+        } catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
+
+        std::string stStr = args.value("scanType", std::string{"unchanged"});
+        static const std::array<std::string_view, 7> kValidScanTypes = {
+            "exact", "range", "newValue", "changed", "unchanged", "increased", "decreased"
+        };
+        bool stOk = false;
+        for (const auto& v : kValidScanTypes) if (stStr == v) { stOk = true; break; }
+        if (!stOk) return json{{"error", "unknown 'scanType'"}};
+
+        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 5000));
+        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 5000;
+        double tolerance = args.value("tolerance", 0.0001);
+
+        json rows = json::array();
+        std::size_t totalCands = 0, removed = 0;
+        std::string errorOut;
+        std::string dtStrOut;
+
+        auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHexCore);
+        bool ok = ValueScan::SessionManager::Instance().RefineWith(sessionId,
+            [&](Memory::ValueDataType dt, std::vector<ValueScan::Candidate>& cands) {
+            const std::size_t vSize = Memory::ValueDataTypeSize(dt);
+            std::uint8_t argLo[8] = {};
+            std::uint8_t argHi[8] = {};
+            const bool needsArg = (stStr == "exact" || stStr == "range" || stStr == "newValue");
+            if (needsArg) {
+                if (!args.contains("value")) { errorOut = "missing 'value' for scanType=" + stStr; return; }
+                if (!PackJsonValueToBytes(args["value"], dt, argLo)) {
+                    errorOut = "'value' out of range for session dataType"; return;
+                }
+                if (stStr == "range") {
+                    if (!args.contains("valueTo")) { errorOut = "scanType=range requires 'valueTo'"; return; }
+                    if (!PackJsonValueToBytes(args["valueTo"], dt, argHi)) {
+                        errorOut = "'valueTo' out of range"; return;
+                    }
+                }
+            }
+
+            // Erase-remove with a writer index — O(N) prune in place.
+            std::size_t writer = 0;
+            for (std::size_t reader = 0; reader < cands.size(); ++reader) {
+                auto& c = cands[reader];
+                std::uint8_t curBytes[8] = {};
+                if (!Memory::SafeReadBytes(reinterpret_cast<void*>(c.addr), curBytes, vSize)) {
+                    continue;
+                }
+                if (!CompareCandidateForRefine(dt, stStr, curBytes, c.prevValue, argLo, argHi, tolerance)) {
+                    continue;
+                }
+                if (reader != writer) cands[writer] = std::move(c);
+                ++writer;
+            }
+            removed = cands.size() - writer;
+            cands.resize(writer);
+            totalCands = cands.size();
+
+            std::size_t toShow = std::min(totalCands, emitLimit);
+            rows = json::array();
+            for (std::size_t i = 0; i < toShow; ++i) {
+                rows.push_back(EmitCandidateRow(cands[i], dt, fmtHex));
+            }
+            dtStrOut = std::string(ValueDataTypeClrName(dt));
+        });
+
+        if (!ok)               return json{{"error", "session_not_found"}};
+        if (!errorOut.empty()) return json{{"error", errorOut}};
+
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "refineValueScan sess=%llu type=%s total=%zu removed=%zu",
+                static_cast<unsigned long long>(sessionId), stStr.c_str(),
+                totalCands, removed);
+            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+
+        return json{
+            {"ok",              true},
+            {"sessionId",       std::to_string(sessionId)},
+            {"scanType",        stStr},
+            {"dataType",        dtStrOut},
+            {"count",           rows.size()},
+            {"totalCandidates", totalCands},
+            {"removed",         removed},
+            {"truncated",       totalCands > rows.size()},
+            {"candidates",      std::move(rows)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdEndValueScan,
+        [](const json& args) -> json {
+        if (!args.contains("sessionId")) return json{{"error", "missing 'sessionId'"}};
+        std::uint64_t sessionId = 0;
+        try {
+            sessionId = std::stoull(args["sessionId"].get<std::string>());
+        } catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
+        bool dropped = ValueScan::SessionManager::Instance().End(sessionId);
+        return json{
+            {"ok",        true},
+            {"sessionId", std::to_string(sessionId)},
+            {"dropped",   dropped},
         };
     });
 
@@ -2027,6 +2268,124 @@ void RegisterCoreHandlers() {
         };
     });
 
+    // Phase 27b — beginValueScan (Mono). Identical inputs to scanFieldValue's
+    // global mode (no class-scoped support in v1 — class-scoped is already
+    // fast enough as a one-shot; session value is in the refine workflow).
+    // Difference: stores the candidate set in ValueScan::SessionManager so
+    // the client can later `refineValueScan(sessionId, scanType)`.
+    PipeServer::RegisterHandler(MagicStrings::CmdBeginValueScan,
+        [formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        std::string dtStr = args.value("dataType", std::string{"int32"});
+        Memory::ValueDataType dt{};
+        if (!ParseValueDataType(dtStr, dt)) {
+            return json{{"error", "unknown 'dataType'"}};
+        }
+        std::string stStr = args.value("scanType", std::string{"exact"});
+        Memory::ValueScanType st{};
+        if (!ParseValueScanType(stStr, st)) {
+            return json{{"error", "scanType must be exact|range for beginValueScan (refine modes go through refineValueScan)"}};
+        }
+        if (!args.contains("value")) return json{{"error", "missing 'value'"}};
+
+        Memory::ValueScanRequest req{};
+        req.dataType  = dt;
+        req.scanType  = st;
+        req.tolerance = args.value("tolerance", 0.0001);
+        req.alignment = static_cast<std::size_t>(args.value("alignment", 0));
+        req.limit     = static_cast<std::size_t>(args.value("limit", 50000));
+        if (req.limit == 0 || req.limit > 50000) req.limit = 50000;
+        if (!PackJsonValueToBytes(args["value"], dt, req.lo)) {
+            return json{{"error", "'value' out of range / not numeric for dataType"}};
+        }
+        if (st == Memory::ValueScanType::Range) {
+            if (!args.contains("valueTo")) return json{{"error", "scanType=range requires 'valueTo'"}};
+            if (!PackJsonValueToBytes(args["valueTo"], dt, req.hi)) {
+                return json{{"error", "'valueTo' out of range / not numeric for dataType"}};
+            }
+        }
+        std::size_t maxBackwardScan = static_cast<std::size_t>(args.value("maxBackwardScan", 16384));
+        if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+        if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+        if (!Mono::BuildClassRangeCache()) {
+            return json{{"error", "address-finder class cache build failed"}};
+        }
+
+        Memory::ValueScanStats stats{};
+        auto rawCandidates = Memory::ScanForValue(req, &stats);
+
+        std::vector<ValueScan::Candidate> sessionCands;
+        sessionCands.reserve(std::min<std::size_t>(rawCandidates.size(), 4096));
+        std::size_t droppedNonManaged = 0;
+        const std::size_t vSize = Memory::ValueDataTypeSize(dt);
+        for (const auto& c : rawCandidates) {
+            std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
+            Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
+            if (!lookup.found) { droppedNonManaged++; continue; }
+
+            ValueScan::Candidate sc{};
+            sc.addr        = addr;
+            sc.instAddr    = lookup.instance;
+            sc.fieldOffset = static_cast<std::int64_t>(lookup.fieldOffset);
+            sc.asmName     = lookup.assembly;
+            sc.ns          = lookup.ns;
+            sc.className   = lookup.className;
+            if (lookup.field.present) {
+                sc.field     = lookup.field.name;
+                sc.fieldType = lookup.field.typeName;
+                sc.fieldKind = lookup.field.kind;
+            } else if (lookup.nearestField.present) {
+                sc.fieldKind         = "near";
+                sc.nearestFieldName  = lookup.nearestField.name;
+                sc.nearestFieldDelta = static_cast<std::int64_t>(lookup.nearestFieldDelta);
+            } else {
+                sc.fieldKind = "interior";
+            }
+            std::memcpy(sc.prevValue, c.value, vSize);
+            sessionCands.push_back(std::move(sc));
+        }
+
+        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
+
+        // Re-render the same rows for immediate display — caller doesn't have
+        // to make a second RPC to see the initial set. ViewWith locks the
+        // session briefly (a few ms for 50K rows).
+        json rows = json::array();
+        std::size_t kept = 0;
+        auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHex);
+        ValueScan::SessionManager::Instance().ViewWith(sessionId,
+            [&](Memory::ValueDataType d, const std::vector<ValueScan::Candidate>& cands) {
+            kept = cands.size();
+            for (const auto& sc : cands) rows.push_back(EmitCandidateRow(sc, d, fmtHex));
+        });
+
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "beginValueScan(Mono) sess=%llu dt=%s candidates=%zu kept=%zu dropped=%zu bytes=%zu",
+                static_cast<unsigned long long>(sessionId), dtStr.c_str(),
+                rawCandidates.size(), kept, droppedNonManaged, stats.bytesScanned);
+            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+
+        return json{
+            {"ok",                true},
+            {"sessionId",         std::to_string(sessionId)},
+            {"mode",              "global"},
+            {"dataType",          dtStr},
+            {"scanType",          stStr},
+            {"count",             kept},
+            {"totalCandidates",   kept},
+            {"droppedNonManaged", droppedNonManaged},
+            {"truncated",         rawCandidates.size() >= req.limit},
+            {"scannedBytes",      stats.bytesScanned},
+            {"readFailureBytes",  stats.readFailureBytes},
+            {"candidates",        std::move(rows)},
+        };
+    });
+
     // Phase 6 segment B — walkInstance (Mono).
     // Given an instance address + class spec, walk the inheritance chain and
     // decode every instance field's value. Each MonoObject's first 16 bytes
@@ -3575,6 +3934,123 @@ void RegisterCoreHandlers() {
                 {"regions_skip_stack", stats.regionsSkipStack},
                 {"thread_stacks",      stats.threadStacks},
             }},
+        };
+    });
+
+    // Phase 27b — beginValueScan (IL2CPP). Mirror of the Mono backend
+    // beginValueScan; same global-mode-only design, stores candidate
+    // metadata resolved by IL2CPP::WhatIsAt into ValueScan::SessionManager
+    // so subsequent refineValueScan calls don't have to re-scan memory.
+    // refineValueScan + endValueScan are registered in RegisterCoreHandlers
+    // (backend-agnostic — they touch only process memory + the session
+    // container).
+    PipeServer::RegisterHandler(MagicStrings::CmdBeginValueScan,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::string dtStr = args.value("dataType", std::string{"int32"});
+        Memory::ValueDataType dt{};
+        if (!ParseValueDataType(dtStr, dt)) {
+            return json{{"error", "unknown 'dataType'"}};
+        }
+        std::string stStr = args.value("scanType", std::string{"exact"});
+        Memory::ValueScanType st{};
+        if (!ParseValueScanType(stStr, st)) {
+            return json{{"error", "scanType must be exact|range for beginValueScan (refine modes go through refineValueScan)"}};
+        }
+        if (!args.contains("value")) return json{{"error", "missing 'value'"}};
+
+        Memory::ValueScanRequest req{};
+        req.dataType  = dt;
+        req.scanType  = st;
+        req.tolerance = args.value("tolerance", 0.0001);
+        req.alignment = static_cast<std::size_t>(args.value("alignment", 0));
+        req.limit     = static_cast<std::size_t>(args.value("limit", 50000));
+        if (req.limit == 0 || req.limit > 50000) req.limit = 50000;
+        if (!PackJsonValueToBytes(args["value"], dt, req.lo)) {
+            return json{{"error", "'value' out of range / not numeric for dataType"}};
+        }
+        if (st == Memory::ValueScanType::Range) {
+            if (!args.contains("valueTo")) return json{{"error", "scanType=range requires 'valueTo'"}};
+            if (!PackJsonValueToBytes(args["valueTo"], dt, req.hi)) {
+                return json{{"error", "'valueTo' out of range / not numeric for dataType"}};
+            }
+        }
+        std::size_t maxBackwardScan = static_cast<std::size_t>(args.value("maxBackwardScan", 16384));
+        if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+        if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+        if (!IL2CPP::BuildClassRangeCache()) {
+            return json{{"error", "address-finder class cache build failed"}};
+        }
+
+        Memory::ValueScanStats stats{};
+        auto rawCandidates = Memory::ScanForValue(req, &stats);
+
+        std::vector<ValueScan::Candidate> sessionCands;
+        sessionCands.reserve(std::min<std::size_t>(rawCandidates.size(), 4096));
+        std::size_t droppedNonManaged = 0;
+        const std::size_t vSize = Memory::ValueDataTypeSize(dt);
+        for (const auto& c : rawCandidates) {
+            std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
+            IL2CPP::AddressLookup lookup = IL2CPP::WhatIsAt(addr, maxBackwardScan);
+            if (!lookup.found) { droppedNonManaged++; continue; }
+
+            ValueScan::Candidate sc{};
+            sc.addr        = addr;
+            sc.instAddr    = lookup.instance;
+            sc.fieldOffset = static_cast<std::int64_t>(lookup.fieldOffset);
+            sc.asmName     = lookup.assembly;
+            sc.ns          = lookup.ns;
+            sc.className   = lookup.className;
+            if (lookup.field.present) {
+                sc.field     = lookup.field.name;
+                sc.fieldType = lookup.field.typeName;
+                sc.fieldKind = lookup.field.kind;
+            } else if (lookup.nearestField.present) {
+                sc.fieldKind         = "near";
+                sc.nearestFieldName  = lookup.nearestField.name;
+                sc.nearestFieldDelta = static_cast<std::int64_t>(lookup.nearestFieldDelta);
+            } else {
+                sc.fieldKind = "interior";
+            }
+            std::memcpy(sc.prevValue, c.value, vSize);
+            sessionCands.push_back(std::move(sc));
+        }
+
+        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
+
+        json rows = json::array();
+        std::size_t kept = 0;
+        auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHex);
+        ValueScan::SessionManager::Instance().ViewWith(sessionId,
+            [&](Memory::ValueDataType d, const std::vector<ValueScan::Candidate>& cands) {
+            kept = cands.size();
+            for (const auto& sc : cands) rows.push_back(EmitCandidateRow(sc, d, fmtHex));
+        });
+
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "beginValueScan(IL2CPP) sess=%llu dt=%s candidates=%zu kept=%zu dropped=%zu bytes=%zu",
+                static_cast<unsigned long long>(sessionId), dtStr.c_str(),
+                rawCandidates.size(), kept, droppedNonManaged, stats.bytesScanned);
+            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+
+        return json{
+            {"ok",                true},
+            {"sessionId",         std::to_string(sessionId)},
+            {"mode",              "global"},
+            {"dataType",          dtStr},
+            {"scanType",          stStr},
+            {"count",             kept},
+            {"totalCandidates",   kept},
+            {"droppedNonManaged", droppedNonManaged},
+            {"truncated",         rawCandidates.size() >= req.limit},
+            {"scannedBytes",      stats.bytesScanned},
+            {"readFailureBytes",  stats.readFailureBytes},
+            {"candidates",        std::move(rows)},
         };
     });
 
