@@ -7,6 +7,11 @@
   -->
   <sys:String x:Key="App.Title">Unity CE Dumper</sys:String>
   <sys:String x:Key="App.BootstrapBanner">Phase 0 — Bootstrap. Ready.</sys:String>
+  <!-- Dev-tool reminder on the connection bar. End-user CE tables
+       should NOT ship DiscreteUI.exe — they should embed the backend
+       DLL inside the .CT file instead (see scripts/ce_table_bootstrap.lua). -->
+  <sys:String x:Key="App.DevToolWarning">Dev tool · not for distribution</sys:String>
+  <sys:String x:Key="App.DevToolWarningTooltip">DiscreteUI is a developer / power-user tool. For CE-table distribution to end users, embed the backend DLL inside the .CT file using the Mode-B bootstrap pattern — see scripts/ce_table_bootstrap.lua + scripts/README.md "Deployment for CE-table publishers".</sys:String>
 
   <!-- Phase 8 browser panels. -->
   <sys:String x:Key="Browser.AssembliesTitle">Assemblies</sys:String>

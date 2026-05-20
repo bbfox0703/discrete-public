@@ -242,6 +242,66 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
    - To go back to CE Lua, click *Disconnect* in the UI first; then
      re-run any of the dofile lines.
 
+## Deployment for CE-table publishers
+
+Two patterns for shipping a .CT that uses our framework. **DiscreteUI.exe
+is a developer tool — do NOT distribute it to end users.** End users get
+either:
+
+### Mode A — Install once into CE folder
+
+User extracts `discrete-runtime-{version}.zip` (or copies manually) into
+`<CE-install>/discrete/`. Final layout:
+
+```
+<CE-install>/
+  discrete/
+    UnityDumper-Mono.dll        ← required (or UnityDumper-IL2CPP.dll)
+    UnityDumper-IL2CPP.dll      ← required if game is IL2CPP
+    utils.lua
+    unity_dump.lua
+    unity_dissect.lua           ← optional (only if CT uses it)
+    unity_symbols.lua           ← optional
+    unity_invoke.lua            ← optional
+    unity_scene.lua             ← optional
+    unity_addrfind.lua          ← optional
+    mono_registersymbol_helpers.lua  ← optional
+    x86/
+      UnityDumper-Mono.dll      ← if targeting 32-bit Mono games
+```
+
+Pro: one shared install across N CT files.
+Con: end user has to copy files once.
+
+CE table activate-script does the usual `dofile(getCheatEngineDir() ..
+'discrete\\unity_dump.lua') ; inject(getOpenedProcessID())`.
+
+### Mode B — Everything embedded in the .CT (zero-touch)
+
+User just opens the .CT. The .CT contains the backend DLL + lua scripts
+as embedded files (Table menu → Add file…). Activate script extracts to
+`%TEMP%\Discrete_UEDumper\<table-id>\` and injects from there.
+
+Reference impl: [`scripts/ce_table_bootstrap.lua`](ce_table_bootstrap.lua).
+Copy its `bootstrap()` function into your CT's autorun Lua, customise
+`FILES_TO_EXTRACT` for the files you embedded, call `bootstrap()` from
+the [ENABLE] script.
+
+Pro: end user does literally nothing — just open the .CT. No
+"download these N files first" instructions.
+Con: each CT is ~1 MB larger (backend DLL); updating the runtime
+requires re-publishing every CT that embeds it.
+
+### Files NOT to deploy
+
+| File | Don't ship to end users | Why |
+|---|---|---|
+| `DiscreteUI.exe` | ✋ | Developer UI; surface area + complexity end users don't need |
+| `version.dll` / `winmm.dll` (proxy) | ✋ | Proxy is for dev "always load before Unity" use case; CE Lua `injectDLL()` at table-activate handles end-user injection |
+| `metadata-cli.exe` | ✋ | Offline metadata dump tool (dev/forensics) |
+| `inject-x86.exe` | ✋ usually | DiscreteUI's cross-bitness helper; CE 7.5+ `injectDLL()` handles 32-bit targets directly |
+| `*.pdb` | ✋ | Debug symbols |
+
 ## Notes
 
 * `unity_dump.lua` uses CE's `loadLibrary()` to inject — same mechanism

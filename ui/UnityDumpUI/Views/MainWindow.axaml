@@ -77,6 +77,20 @@
                      Opacity="0.55"
                      IsVisible="{Binding !IsAobMakerAvailable}" />
         </StackPanel>
+
+        <!-- Dev-tool reminder. DiscreteUI is for developers + power
+             users; CE-table publishers should embed the backend DLL +
+             scripts inside their .CT (see scripts/ce_table_bootstrap.lua)
+             instead of distributing DiscreteUI.exe to end users.
+             Subtle text, never dismissable — always visible so a fresh
+             dev knows the right deployment shape. -->
+        <TextBlock Text="{StaticResource App.DevToolWarning}"
+                   ToolTip.Tip="{StaticResource App.DevToolWarningTooltip}"
+                   VerticalAlignment="Center"
+                   HorizontalAlignment="Right"
+                   Opacity="0.55"
+                   Foreground="#FFE0A02C"
+                   Margin="24,0,0,0" />
       </StackPanel>
     </Border>
 
