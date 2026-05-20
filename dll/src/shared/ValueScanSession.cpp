@@ -5,11 +5,19 @@
 namespace UnityCEDumper::ValueScan {
 
 SessionManager& SessionManager::Instance() {
-    // Magic-static singleton. Thread-safe initialization per the C++11
-    // standard. Lives for the DLL's lifetime — no destruction concern
-    // because process exit unmaps everything.
-    static SessionManager inst;
-    return inst;
+    // Heap-allocated, intentionally leaked singleton. The DLL holds up to
+    // 50K candidates per session × multiple sessions × ~200 bytes of
+    // string metadata each — easily 10+ MB of small allocations. Running
+    // the C++ destructor chain over those at process exit can take long
+    // enough to make the game APPEAR to hang during shutdown (observed
+    // live 2026-05-20 on 活俠傳 after a value scan).
+    //
+    // The leak is harmless: Windows reclaims the entire process heap on
+    // termination, so we don't need to free anything. The destructor chain
+    // only matters for FreeLibrary unload, which we never do in practice
+    // (the DLL stays loaded until the game exits).
+    static SessionManager* inst = new SessionManager();
+    return *inst;
 }
 
 std::uint64_t SessionManager::Begin(Memory::ValueDataType dt,

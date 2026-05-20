@@ -90,7 +90,12 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     private string _valueText = string.Empty;
 
     [ObservableProperty] private string _valueToText  = string.Empty;
-    [ObservableProperty] private string _toleranceText = "0.0001";
+    // Default 0.5 matches CE's "Rounded (default)" float-exact semantics:
+    // searching for float 32 catches anything in [31.5, 32.5). Game HUDs
+    // round float HP/MP/coins to int display, so this is the value almost
+    // every CT author actually wants. Set to 0 for exact-binary match
+    // (rarely useful — IEEE-754 floats accumulate FP drift).
+    [ObservableProperty] private string _toleranceText = "0.5";
     [ObservableProperty] private int    _limit          = 500;
 
     [ObservableProperty]
