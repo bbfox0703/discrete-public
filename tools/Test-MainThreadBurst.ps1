@@ -32,15 +32,31 @@
     handler sees the array as an array.
 
 .PARAMETER Iterations
-    How many calls per backend path. Default 500.
+    How many calls per backend path. Default 1000 — heavy enough to
+    surface a freeze if one would happen, light enough to finish in
+    well under a minute on any of the verified targets.
+
+.PARAMETER FocusDelaySeconds
+    Seconds to wait between the dispatcher-health check and the actual
+    burst. Lets you alt-tab back to the game window — required on
+    Unity 2018-era games where losing focus pauses the main loop
+    (Application.runInBackground = false). Default 3.
+
+.PARAMETER TimeoutMs
+    Per-call timeout the DLL applies to each `main_thread=true` call.
+    Default 5000 ms.
 
 .EXAMPLE
-    .\tools\Test-MainThreadBurst.ps1 -Iterations 1000
+    .\tools\Test-MainThreadBurst.ps1
+    .\tools\Test-MainThreadBurst.ps1 -Iterations 2000
+    .\tools\Test-MainThreadBurst.ps1 -FocusDelaySeconds 0   # skip countdown
+    Get-Help .\tools\Test-MainThreadBurst.ps1 -Detailed     # full help
 #>
 [CmdletBinding()]
 param(
-    [int] $Iterations = 500,
-    [int] $TimeoutMs = 5000
+    [int] $Iterations        = 1000,
+    [int] $FocusDelaySeconds = 3,
+    [int] $TimeoutMs         = 5000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,7 +108,25 @@ Write-Host "==[ Phase 20-MT stress smoke (Iterations=$Iterations) ]==" -Foregrou
 
 $pipe = Open-Pipe
 try {
-    # 1. Confirm dispatcher health.
+    # 0. Focus countdown FIRST — before any dispatcher health probe. Many
+    # Unity games (anything pre-2019 default, plus plenty of newer games
+    # that didn't flip `Application.runInBackground`) pause the entire
+    # main loop while the window doesn't have foreground focus. If we
+    # probe is_healthy while the user is still in PowerShell, we get
+    # a false-abort. Counting down first means the user can alt-tab to
+    # the game, the engine resumes ticking, and the probe then sees a
+    # fresh tick. Skip via -FocusDelaySeconds 0 in CI / scripted runs.
+    if ($FocusDelaySeconds -gt 0) {
+        Write-Host ''
+        Write-Host "Switch focus to the game window now. Probe + burst start in:" -ForegroundColor Yellow
+        for ($s = $FocusDelaySeconds; $s -ge 1; $s--) {
+            Write-Host ("  {0}…" -f $s) -ForegroundColor Yellow
+            Start-Sleep -Seconds 1
+        }
+        Write-Host '  GO' -ForegroundColor Green
+    }
+
+    # 1. Confirm dispatcher health (now that the game window is focused).
     $stats0 = Send-Cmd $pipe 'getDispatcherStats' @{}
     Write-Host ''
     Write-Host 'Pre-burst dispatcher state:' -ForegroundColor Cyan
@@ -107,14 +141,42 @@ try {
         $stats0 | Format-Table initialized, hook_installed, main_thread_id, tick_count, drain_count, last_tick_age_ms, is_healthy -AutoSize | Out-Host
     }
     if (-not $stats0.is_healthy) {
-        Write-Host '  ! Dispatcher NOT healthy (no recent main-thread tick). Is the game past the loading screen?' -ForegroundColor Red
+        Write-Host '  ! Dispatcher NOT healthy (no recent main-thread tick). Possible causes:' -ForegroundColor Red
+        Write-Host '      (a) game window not in foreground — Unity pauses on focus loss' -ForegroundColor DarkGray
+        Write-Host '      (b) game still on loading / splash screen' -ForegroundColor DarkGray
+        Write-Host '      (c) hook target binding is wrong (rare)' -ForegroundColor DarkGray
         Write-Host '    main_thread=true calls will queue and time out. Aborting.' -ForegroundColor Red
         return
     }
 
+    # 1.5. Probe which UnityEngine assembly the target actually has.
+    # Unity 2017.2+ split monolithic UnityEngine.dll into per-module
+    # DLLs (`UnityEngine.CoreModule` + `UnityEngine.UIModule` + …).
+    # Old Unity (5.x / 2017.1) still ships the monolithic `UnityEngine`
+    # — verified live on LEAVES (Unity 5.4.3f1). Probe both names and
+    # use the first that resolves. Mathf lives in whichever survives.
+    $asmList = Send-Cmd $pipe 'getAssemblies' @{}
+    $candidateAssemblies = @('UnityEngine.CoreModule', 'UnityEngine')
+    $unityAsm = $null
+    foreach ($name in $candidateAssemblies) {
+        if ($asmList.assemblies | Where-Object { $_.name -eq $name }) {
+            $unityAsm = $name
+            break
+        }
+    }
+    if (-not $unityAsm) {
+        Write-Host ''
+        Write-Host '  ! Neither UnityEngine.CoreModule nor UnityEngine in this target. Aborting.' -ForegroundColor Red
+        Write-Host '    Found assemblies:' -ForegroundColor DarkGray
+        ($asmList.assemblies | Select-Object -First 12 | ForEach-Object { '      ' + $_.name }) -join "`n" | Write-Host
+        return
+    }
+    Write-Host ''
+    Write-Host ("Using UnityEngine assembly: {0}" -f $unityAsm) -ForegroundColor Cyan
+
     # 2. Build the call's scalar fields + raw args-array JSON ONCE.
     $scalarFields = @{
-        assembly       = 'UnityEngine.CoreModule'
+        assembly       = $unityAsm
         namespace      = 'UnityEngine'
         name           = 'Mathf'
         method         = 'Abs'

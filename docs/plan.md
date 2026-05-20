@@ -802,12 +802,14 @@ Out (v2 candidates):
   bridges flip it on automatically. New `getDispatcherStats` RPC +
   `main_thread` sub-object on handshake/scan surface `hook_installed`
   / `is_healthy` / `tick_count` / `drain_count` etc. for diagnostics.
-  Live-PASS matrix: BongoCat (Mono / Unity 6000.2), SaGa F2R (IL2CPP
-  v29 / Unity 2021.3), Songs of Silence (IL2CPP v39 / Unity 6000.3) —
-  1000-iteration `Mathf.Abs` burst, 0 errors, 0 timeouts, drain_count
-  == submit_count == 1000, no game crashes. x86 build compiles
-  cleanly (live-smoke deferred to user; expected to work on
-  Legend of Mortal / 活俠傳 / LEAVES). **Mid-implementation discovery**:
+  Live-PASS matrix (5 targets across Mono + IL2CPP × x64 + x86 ×
+  Unity 5.4 → 6000.3): BongoCat (Mono x64 / Unity 6000.2), SaGa F2R
+  (IL2CPP v29 x64 / Unity 2021.3), Songs of Silence (IL2CPP v39 x64
+  / Unity 6000.3), **LEAVES (Mono x86 / Unity 5.4.3 — surfaced the
+  x86 cdecl calling-convention bug)**, **Legend of Mortal / 活俠傳
+  (Mono x86 / Unity 2020.3)** — 1000-iteration `Mathf.Abs` burst on
+  each, 0 errors, 0 timeouts, drain_count == submit_count == 1000,
+  no game crashes. **Mid-implementation discovery**:
   nested `mono_thread_attach` on Unity main thread destroys Unity's
   own thread handle (reproducing the build #54 BongoCat crash);
   `ThreadAttachGuard` now consults

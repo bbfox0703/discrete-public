@@ -51,7 +51,15 @@ std::atomic<bool>  g_installed{false};
 std::atomic<bool>  g_minhook_initialized{false};
 
 // Original trampoline. Filled by MH_CreateHook. NULL until Install succeeds.
-// Calling convention matches `fn_runtime_invoke` from MonoResolver.h.
+// Calling convention MUST match `fn_runtime_invoke` from MonoResolver.h.
+// Mono is C, and Mono's exports use __cdecl on x86 (Microsoft's default
+// for unmarked C functions). On x64 Windows there's only one calling
+// convention so the keyword is irrelevant — but on x86, a stdcall
+// (WINAPI) detour against a cdecl target causes a stack double-pop and
+// the game crashes the next time Unity touches the runtime. Drop the
+// WINAPI keyword on the hook function below so it stays cdecl across
+// both bitnesses. (Verified live 2026-05-20: LEAVES / Unity 5.4 x86
+// crashed after exactly one hook fire under the stdcall variant.)
 using fn_runtime_invoke_t = UnityCEDumper::Mono::MonoObject* (*)(
     UnityCEDumper::Mono::MonoMethod*,
     void*,
@@ -60,8 +68,8 @@ using fn_runtime_invoke_t = UnityCEDumper::Mono::MonoObject* (*)(
 fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
 
 // Our detour. C-style function (no captures) so MinHook can route control
-// flow into it via a near-jump.
-UnityCEDumper::Mono::MonoObject* WINAPI HookedRuntimeInvoke(
+// flow into it via a near-jump. NO `WINAPI` — see comment above.
+UnityCEDumper::Mono::MonoObject* HookedRuntimeInvoke(
     UnityCEDumper::Mono::MonoMethod* method,
     void* obj,
     void** params,

@@ -124,6 +124,88 @@ attached and we shouldn't be touching its attachment state at all**.
 zero crashes, zero timeouts, drain_count == submit_count == 1000 on
 all three.
 
+### Phase 20-MT — x86 inline detour must match the target's calling convention (cdecl, not stdcall)
+
+**Symptom**: first-ever `Test-Handshake.ps1` against LEAVES (32-bit
+Mono / Unity 5.4.3f1) succeeded — handshake returned valid data,
+`main_thread.hook_installed: True`, `is_healthy: True`. But
+`main_thread.tick_count` only ever read **1** across multiple
+handshake / scan cycles. The next non-hook Mono call from the game
+itself crashed the process. Repeats identically on Legend of Mortal
+(Unity 2020.3) until fixed.
+
+**Root cause — calling convention mismatch on x86**. My initial detour
+declaration was:
+
+    MonoObject* WINAPI HookedRuntimeInvoke(MonoMethod*, void*, void**, MonoObject**)
+
+On x86 Windows, `WINAPI` expands to `__stdcall`. But Mono is a C
+library — its `mono_runtime_invoke` export uses `__cdecl` (Microsoft
+compiler's default for C functions not marked otherwise). When MinHook
+redirects a cdecl-caller's call into a stdcall-callee, the caller
+pushes args cdecl-style and expects to pop them itself; the callee's
+`ret <N>` already popped them on exit. The double-pop corrupts the
+stack pointer, so the immediate detour run *appears* to work (we
+return cleanly into Mono, the very first hook entry didn't fault), but
+the very next call into Mono on the corrupted stack faults.
+
+**Why it didn't surface on x64**: Windows x64 has exactly one calling
+convention (Microsoft x64 ABI). `WINAPI` / `__stdcall` / `__cdecl` /
+default all generate identical code, so the keyword is invisible.
+Phase 20-MT's first three live-PASS targets (BongoCat / SaGa F2R /
+Songs of Silence) were all x64 — the bug was completely silent.
+
+**Rule**: any MinHook detour function MUST be declared with the same
+calling convention as the target export. For Mono / IL2CPP runtime
+functions (and most third-party C libraries), that means **drop the
+`WINAPI` keyword** — let it default to cdecl. Even on x64 where the
+keyword is a no-op, omitting it removes the x86 footgun and makes
+the cross-bitness behaviour obvious from the signature. See
+`HookedRuntimeInvoke` in
+[`MonoMainThreadHook.cpp`](../dll/src/mono/MonoMainThreadHook.cpp)
+and [`IL2CPPMainThreadHook.cpp`](../dll/src/il2cpp/IL2CPPMainThreadHook.cpp)
+for the canonical shape.
+
+**Diagnostic tell**: `tick_count` stays at 1 right after install + an
+immediate game crash means the calling convention is wrong. A tick of
+1 (and no growth) means the hook fired once, returned, and the
+process died before the second Unity frame. Compare to a working hook
+where `tick_count` grows fast (BongoCat: 42 → 56 between handshake
+and scan; LEAVES with the fix: 59403 → 96097 across a burst).
+
+**Verified live 2026-05-20**: after the fix, LEAVES (x86 Mono Unity
+5.4) and Legend of Mortal (x86 Mono Unity 2020.3) both pass the 1000-
+iteration burst smoke cleanly. Full x86 hook drain count = 1000 on
+both.
+
+### Phase 20-MT — assembly enumeration name varies across Unity versions (monolithic vs split)
+
+**Symptom**: `Test-MainThreadBurst.ps1` (or any tool that hardcodes
+`assembly = "UnityEngine.CoreModule"`) returns
+`assembly not found: UnityEngine.CoreModule` against LEAVES (Unity
+5.4) even though the handshake reports `assemblies_count: 11`.
+
+**Root cause**: Unity 2017.2 was the first version to split the
+monolithic `UnityEngine.dll` into per-module DLLs
+(`UnityEngine.CoreModule.dll` + `UnityEngine.UIModule.dll` +
+`UnityEngine.PhysicsModule.dll` + ~30 others). Anything older — Unity
+5.x, Unity 2017.1 — still ships **one** `UnityEngine.dll` with `Mathf`
+/ `Transform` / `Object` / `GameObject` all inside. The split was a
+size-on-disk optimisation; the namespace `UnityEngine.*` is
+unchanged.
+
+**Rule for tools**: probe `getAssemblies` first and pick the first
+match in the priority list
+`["UnityEngine.CoreModule", "UnityEngine"]`. The new-name comes first
+because every Unity 2017.2+ build has it; old Unity falls through to
+the monolithic name. Same pattern any future split would need — keep
+the priority list ordered newest-first.
+
+**Verified live 2026-05-20**: LEAVES (Unity 5.4) auto-picks
+`UnityEngine`; Legend of Mortal (Unity 2020.3) auto-picks
+`UnityEngine.CoreModule`. Both run identical Mathf.Abs(int) burst
+through the same code path.
+
 ### Phase 20-MT — Unity 2018 pauses the main loop when window loses focus
 
 **Symptom**: handshake against R-Type Dimensions EX (Unity 2018.1.9f2)

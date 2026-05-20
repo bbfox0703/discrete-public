@@ -3,9 +3,15 @@
     List running processes that look like Unity games (Mono or IL2CPP).
 
 .DESCRIPTION
-    Scans every accessible 64-bit process in the user's session and reports
-    those that have GameAssembly.dll (IL2CPP) or mono-2.0-bdwgc.dll / mono.dll
+    Scans every accessible process in the user's session and reports those
+    that have GameAssembly.dll (IL2CPP) or mono-2.0-bdwgc.dll / mono.dll
     (Mono) loaded. Output is a table; pipe to Format-List for full detail.
+
+    The Arch column distinguishes 32-bit (x86, WOW64) from 64-bit (x64)
+    targets — Test-Handshake.ps1 / Inject-Dll.ps1 auto-route 32-bit
+    targets through dist\x86\inject-x86.exe + dist\x86\UnityDumper-Mono.dll
+    (Phase 12d-5), but you should still notice the column so you know
+    which DLL is going to load.
 
     Use the reported PID as input to .\tools\Test-Handshake.ps1.
 
@@ -17,6 +23,29 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+
+# Bitness probe — IsWow64Process returns true iff the target is a 32-bit
+# process on 64-bit Windows. We're always on x64 Windows (DLL is built
+# x64), so the negation is "true x64 native". Matches the detection
+# Inject-Dll.ps1 uses to decide whether to shell out to inject-x86.exe.
+if (-not ('UCED.BitnessProbe' -as [type])) {
+    Add-Type -Namespace UCED -Name BitnessProbe -MemberDefinition @'
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool IsWow64Process(System.IntPtr hProcess, out bool wow64Process);
+'@
+}
+
+function Get-ProcessArch([System.Diagnostics.Process] $proc) {
+    try {
+        $wow = $false
+        if ([UCED.BitnessProbe]::IsWow64Process($proc.Handle, [ref]$wow)) {
+            if ($wow) { return 'x86' } else { return 'x64' }
+        }
+    } catch {
+        # Handle invalid (process exited?) or access denied — fall through.
+    }
+    return '?'
+}
 
 $results = @()
 foreach ($p in Get-Process) {
@@ -40,9 +69,11 @@ foreach ($p in Get-Process) {
     if ($backend) {
         $exePath = '<denied>'
         try { $exePath = $p.MainModule.FileName } catch { }
+        $arch = Get-ProcessArch $p
         $results += [pscustomobject]@{
             PID         = $p.Id
             Backend     = $backend
+            Arch        = $arch
             ProcessName = $p.ProcessName
             Title       = $p.MainWindowTitle
             ExePath     = $exePath
@@ -59,4 +90,4 @@ if (-not $results) {
     return
 }
 
-$results | Sort-Object Backend, ProcessName | Format-Table PID, Backend, ProcessName, Title -AutoSize
+$results | Sort-Object Backend, Arch, ProcessName | Format-Table PID, Backend, Arch, ProcessName, Title -AutoSize

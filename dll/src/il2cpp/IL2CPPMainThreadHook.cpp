@@ -33,6 +33,12 @@ void LogF(const char* fmt, Args... args) {
 std::atomic<bool> g_installed{false};
 std::atomic<bool> g_minhook_initialized{false};
 
+// Calling convention MUST stay cdecl-compatible — IL2CPP's runtime
+// invoke export is C, defaults to __cdecl on x86. There's no shipping
+// IL2CPP x86 target right now (Unity 2019+ dropped x86 IL2CPP), but
+// keep the symmetry with MonoMainThreadHook so a future 32-bit revival
+// (or any niche x86 IL2CPP target that appears) doesn't trip the same
+// stack double-pop trap. See MonoMainThreadHook.cpp for the forensic.
 using fn_runtime_invoke_t = UnityCEDumper::IL2CPP::Il2CppObject* (*)(
     const UnityCEDumper::IL2CPP::MethodInfo*,
     void*,
@@ -40,7 +46,7 @@ using fn_runtime_invoke_t = UnityCEDumper::IL2CPP::Il2CppObject* (*)(
     UnityCEDumper::IL2CPP::Il2CppException**);
 fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
 
-UnityCEDumper::IL2CPP::Il2CppObject* WINAPI HookedRuntimeInvoke(
+UnityCEDumper::IL2CPP::Il2CppObject* HookedRuntimeInvoke(
     const UnityCEDumper::IL2CPP::MethodInfo* method,
     void* obj,
     void** params,
