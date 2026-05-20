@@ -1,369 +1,318 @@
-# UnityCEDumper — CE Lua Bridge
+# Discrete — Unity Cheat Engine Dumper
 
-Eight Lua scripts that drive the dumper from inside Cheat Engine. Phase 11
-of the project (Phase 17d added `unity_addrfind.lua`; Phase 19e added
-`unity_invoke.lua`; Phase 20a added `unity_scene.lua`; later added
-`mono_registersymbol_helpers.lua` for the DLL-free Mono register path);
-CE-side equivalent of running `DiscreteUI.exe` + the in-app process picker.
+> Inspect, scan, and modify Unity managed game state from Cheat Engine
+> or the standalone `DiscreteUI.exe` GUI.
 
-## Install
+---
 
-The dumper expects the Lua scripts and backend DLLs to live in
-`<CE-install>/discrete/`. Two ways to put them there:
+## Disclaimer
 
-### Recommended: `build.cmd deploy`
+- **Educational / personal use only.** Use against online / multiplayer
+  games likely violates their Terms of Service. Single-player offline
+  titles only.
+- **No warranty.** Use at your own risk. Memory modification can corrupt
+  save data or crash the host process.
+- **Kernel-mode anti-cheat unsupported.** EAC, BattlEye, Vanguard,
+  Denuvo, etc. will detect or block this tool. Don't try.
+- **Anti-virus may flag the proxy DLLs** (`version.dll` / `winmm.dll`).
+  This is a generic Windows technique that's also commonly used by
+  malware — false positives are normal. Whitelist the install folder
+  if your AV objects.
+- **Anti-tamper**: `DiscreteUI.exe` is checksummed; hex-editing it
+  silently produces *wrong* scan offsets without a banner warning,
+  so don't ship a modified copy.
 
-From the project root, in any (non-admin) terminal:
+---
 
-```powershell
-# Live iteration on the Lua bridge — copies scripts/*.lua + dist/*.dll
-.\build.cmd deploy-scripts
+## Who this is for
 
-# Post-build full deploy — copies everything from dist/
-.\build.cmd publish     # build first
-.\build.cmd deploy
-```
+You'll get value out of this if you already know:
 
-Both commands invoke `tools/Install-CEScripts.ps1`, which self-elevates
-via `Start-Process -Verb RunAs` when CE is in `Program Files` (a UAC
-prompt appears). It auto-detects the CE install via `$env:CE_PATH`,
-then `C:\Program Files\Cheat Engine`, then `C:\Program Files (x86)\Cheat
-Engine`. Override with `-CePath`:
+- **Unity managed code** — what an Assembly is, the Class / Field /
+  Method hierarchy, the difference between value-types and
+  reference-types in C#.
+- **Cheat Engine table authoring** — you've written CT activate
+  scripts, used Auto Assembler, created memory records.
+- **Basic reverse engineering** — comfortable with hex addresses,
+  pointer offsets, type marshaling.
 
-```powershell
-.\tools\Install-CEScripts.ps1 -CePath 'D:\Tools\CE'
-```
+You don't need C++ or .NET expertise — the tools handle that.
 
-### Manual layout (no deploy script)
+---
+
+## System requirements
+
+| Requirement | Notes |
+|---|---|
+| **Windows 10 or 11**, x64 | DiscreteUI.exe is 64-bit only (32-bit games are still supported via cross-bitness injection). |
+| **Cheat Engine 7.5+** (7.6+ recommended) | Needed for `loadLibrary` / table-side scripts. |
+| **Visual C++ Redistributable 2015-2022 (x64)** | Required by both `DiscreteUI.exe` and the 64-bit backend DLLs. [Microsoft download](https://aka.ms/vs/17/release/vc_redist.x64.exe). |
+| **Visual C++ Redistributable 2015-2022 (x86)** | Only required if you target 32-bit Unity Mono games. [x86 download](https://aka.ms/vs/17/release/vc_redist.x86.exe). |
+| **.NET runtime** | **Not needed separately.** `DiscreteUI.exe` is published as Native AOT and is fully self-contained. |
+| **AOBMaker CE plugin** *(optional)* | Required only if you want one-click "Inject Discrete Bridge into CE Table" from the UI's Tools menu. |
+
+Supported game runtimes:
+
+| Backend | Architectures | Unity versions tested |
+|---|---|---|
+| Mono (bdwgc) | x64, x86 | 5.4 → 6.0+ |
+| IL2CPP | x64 only (Unity 2019+ dropped x86 IL2CPP) | 2018.1 → 2022.3 → 6.1 |
+
+---
+
+## Features at a glance
+
+| File | Provides |
+|---|---|
+| **`DiscreteUI.exe`** | GUI for everything. Seven tabs: Fields, Inspector, Methods, Symbol Finder, Address Lookup, Scene, Value Search. |
+| **`UnityDumper-Mono.dll` / `UnityDumper-IL2CPP.dll`** | Injected backend. Speaks named-pipe JSON-RPC on `\\.\pipe\UnityDumpBfx`. |
+| **`version.dll` / `winmm.dll`** *(proxy DLLs)* | Drop next to the game's `.exe` for pre-Unity-init injection. Auto-selects Mono vs IL2CPP backend. |
+| **`unity_dump.lua`** | One-shot injector from CE Lua. |
+| **`unity_dissect.lua`** | Populate CE's *Structure Dissect* directly from a managed class layout. |
+| **`unity_symbols.lua`** | Register static fields + method addresses as CE symbols so CT memory records can reference them by name. |
+| **`unity_addrfind.lua`** | Reverse lookup: any address → managed instance + class + field. |
+| **`unity_invoke.lua`** | Call any Mono / IL2CPP method from CE Lua with typed args + return value + managed exception capture. |
+| **`unity_scene.lua`** | Walk Unity's scene graph (GameObject hierarchy, components, transforms). |
+| **`mono_registersymbol_helpers.lua`** | DLL-free Mono symbol register helpers (for CT authors who prefer pure-Lua). |
+| **`metadata-cli.exe`** | Offline `global-metadata.dat` parser (works on a game folder without launching the game). |
+
+### What the UI's tabs do
+
+- **Fields** — Browse Assemblies → Classes → declared fields with offsets, types, and static-field addresses.
+- **Inspector** — Live walk of instance fields. Pointer drilldown into nested structures, value-write back, list-the-same-field-across-all-instances.
+- **Methods** — Find every overload of a method by signature, invoke any of them with typed args (NumericUpDown / ComboBox-for-enums / AutoCompleteBox-for-bool editors), capture exceptions.
+- **Symbol Finder** — Substring search across every class in one (or all) assemblies. Type `MaxHP`, get every field/method whose name contains it.
+- **Address Lookup** — Reverse: paste an address, get instance + class + field.
+- **Scene** — GameObject hierarchy tree with substring filter + cross-tab "inspect this GameObject".
+- **Value Search** — CE-style First Scan + Next Scan, filtered to Unity managed instances. Every result row carries class + field context that CE alone cannot provide. Supports numeric (Int8–UInt64 / Float / Double) and string (UTF-16 / UTF-8 / ASCII, exact + contains).
+
+---
+
+## Deployment patterns
+
+You have three choices for getting Discrete into the target game.
+Pick one based on how your CT users will install your table.
+
+### Mode A — Manual install (CE folder)
+
+End user extracts the release zip into `<CE-install>/discrete/`.
 
 ```
 <CE-install>/
 ├── cheatengine-x86_64.exe
 └── discrete/
-    ├── UnityDumper-IL2CPP.dll      <- from dist/ after build
-    ├── UnityDumper-Mono.dll        <- from dist/ after build
-    ├── unity_dump.lua
-    ├── unity_dissect.lua
-    ├── unity_symbols.lua
-    ├── unity_addrfind.lua
-    ├── unity_invoke.lua
-    ├── unity_scene.lua
-    ├── mono_registersymbol_helpers.lua  <- DLL-free Mono register helpers
-    └── utils.lua
+    ├── UnityDumper-Mono.dll       ← required for Mono targets
+    ├── UnityDumper-IL2CPP.dll     ← required for IL2CPP targets
+    ├── unity_dump.lua             ← required (injector)
+    ├── utils.lua                  ← required
+    ├── unity_dissect.lua          ← optional
+    ├── unity_symbols.lua          ← optional
+    ├── unity_invoke.lua           ← optional
+    ├── unity_scene.lua            ← optional
+    ├── unity_addrfind.lua         ← optional
+    ├── mono_registersymbol_helpers.lua  ← optional
+    └── x86/
+        ├── UnityDumper-Mono.dll   ← required for 32-bit Mono games
+        └── version.dll / winmm.dll ← required if shipping Mode C for 32-bit games
 ```
 
-DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
-
-## Workflow
-
-1. **Open the game** — File → Open Process → pick the Unity target.
-2. **Inject the dumper**:
-   ```lua
-   dofile([[<CE>\discrete\unity_dump.lua]])
-   ```
-   Output:
-   ```
-   [UnityCEDumper] Backend: IL2CPP — DLL injected (build N)
-   [UnityCEDumper] Pipe ready: \\.\pipe\UnityDumpBfx
-   ```
-3. **(Optional) Dissect a class** — populate CE's Structure Dissect
-   directly from the live class layout:
-   ```lua
-   dofile([[<CE>\discrete\unity_dissect.lua]])
-   dissectClass("Assembly-CSharp", "MainGame", "PLY_WORK")
-   ```
-   For nested types use `Outer/Inner` as the class name with an empty
-   namespace, e.g. `dissectClass("Assembly-CSharp", "", "MainGame/PLY_WORK")`.
-   The structure registers into CE's global structures list and shows
-   up under *Memory View → Ctrl+D → Structures*.
-
-4. **(Optional) Register CE symbols** for static fields + method
-   addresses, so cheat tables can reference them by name:
-   ```lua
-   dofile([[<CE>\discrete\unity_symbols.lua]])
-   registerClassSymbols("Assembly-CSharp", "MainGame", "PLY_WORK")
-   -- Mono targets: pass {compileMethods=false} to skip JIT-on-register
-   --   for unused methods (statics-only, faster).
-   registerClassSymbols("Assembly-CSharp", "", "Player", {compileMethods=false})
-   -- Verbose: log each method name before its monoCompileMethod call
-   --   (useful when diagnosing a specific class).
-   registerClassSymbols("Assembly-CSharp", "", "GameManager", {verbose=true})
-   ```
-   Resulting symbol names follow `Archiutecture.md §"Symbol Registration
-   Pattern"`:
-   ```
-   Unity:Assembly-CSharp:MainGame.PLY_WORK.s_<staticFieldName>     (static fields)
-   Unity:Assembly-CSharp:MainGame.PLY_WORK.m_<methodName>          (method native addresses)
-   ```
-   Verify with CE's `getAddress`:
-   ```lua
-   print(string.format("%X", getAddress("Unity:Assembly-CSharp:MainGame.PLY_WORK.m_SomeMethod")))
-   ```
-   *(Older releases used `::<methodName>` for methods; that form
-   collides with CE's symbol resolver and is no longer emitted —
-   migrate any hardcoded references in cheat tables to `.m_`.)*
-
-   **Phase 18 — overload-aware registration**: when a class has
-   overloaded methods, `registerClassSymbols` only catches the first
-   match (CE rejects duplicates). Use `registerMethodOverloads` to
-   register every overload with a parameter-type suffix:
-   ```lua
-   registerMethodOverloads("UnityEngine.CoreModule", "UnityEngine", "Vector3", "Set")
-   -- Optional sigFilter narrows on the rendered signature substring:
-   registerMethodOverloads("Assembly-CSharp", "", "Foo", "Bar", {sigFilter="Vector3"})
-   ```
-   Symbol shape: `Unity:{Asm}:{Ns}.{Cls}.m_{Method}__{ParamSuffix}`
-   where `ParamSuffix` matches DiscreteUI's overload picker:
-   `__3float` / `__Vector3` / `__noargs` / `__string_Card_Point` etc.
-
-5. **(Optional) Reverse address lookup** — given any process address
-   (e.g. from CE's *Find what writes / accesses* hit, a pointer-scan
-   result, or anything you've highlighted in the memory view),
-   identify which managed instance + class + declared field it sits
-   inside:
-   ```lua
-   dofile([[<CE>\discrete\unity_addrfind.lua]])
-   lookupAddress(0x000001E55B2518F0)        -- pretty-prints to console
-   local hit = whatIsAt(0x000001E55B2518F0) -- programmatic; returns table
-   ```
-   Output (Phase 17b shape):
-   ```
-   [UnityCEDumper.addrfind] address 0x000001E55B2518F0 -> instance=0x000001E55B2518F0  class=MainGame.PLY_WORK  fieldOffset=16
-     field: chrNo  type=System.Byte  @+0x10  size=1  kind=leaf  declaredIn=PLY_WORK
-   ```
-   Optional: bind a global hotkey that picks up whatever address is
-   currently selected in CE's memory view (or pops `inputQuery` for a
-   manual paste when no memory view is open):
-   ```lua
-   bindAddrLookupHotkey({ VK_CONTROL, VK_F2 })
-   ```
-
-6. **(Optional) Call managed methods** — Phase 19e. Invoke any static
-   or instance method on either backend (Mono / IL2CPP) with marshaled
-   args + typed return value + managed exception capture. Closes the
-   long-standing CLAUDE.md goal of "Lua-callable Unity methods". Full
-   spec: [docs/lua-invoke.md](../docs/lua-invoke.md).
-   ```lua
-   dofile([[<CE>\discrete\unity_invoke.lua]])
-
-   -- Static call (Mathf.Abs):
-   local r = callUnityMethod(
-       "UnityEngine.CoreModule", "UnityEngine", "Mathf", "Abs",
-       { argInt32(-7) },
-       { signatureMatch = "(System.Int32)" })
-   print(r.ok, r.returnValue)   -- true, 7
-
-   -- Instance call (item count on a live ItemBundle):
-   local r = callUnityMethod(
-       "Assembly-CSharp", "", "ItemBundle", "get_numberOfItems",
-       {},
-       { instance = "0x16F8CEA0BE0", signatureMatch = "()" })
-   print(r.returnValue)         -- 1
-
-   -- Managed exception (Convert.ToByte(-1) overflows):
-   local r = callUnityMethod(
-       "mscorlib", "System", "Convert", "ToByte",
-       { argInt32(-1) },
-       { signatureMatch = "(System.Int32)" })
-   print(r.ok, r.exception)
-   --> false, "System.OverflowException: Value was either too large or…"
-   ```
-   Arg builders for every wire type tag (`argNull` / `argBool` /
-   `argByte` / `argSByte` / `argInt16` / `argUInt16` / `argInt32` /
-   `argUInt32` / `argInt64` / `argUInt64` / `argFloat` / `argDouble` /
-   `argChar` / `argString` / `argAddress`) — see the script header for
-   the full list. Convenience: `prettyPrint(r)` logs a one-line summary;
-   `pcallUnityMethod(...)` is the non-throwing variant; `findOverloads(asm,
-   ns, class, method)` lists every overload so you can prep a
-   `signatureMatch` (e.g. `Mathf.Abs` has 6).
-
-   **Overload disambiguation gotcha**: the wire `signatureMatch` is a
-   substring filter. Bare `"Int32"` matches `(Int32)` AND `(UInt32)`
-   AND `(Int32, IFormatProvider)` — `Int32` is a substring of `UInt32`
-   and any `(Int32, …)` overload contains it too. Default to the
-   parens-bounded form `"(System.Int32)"` for guaranteed uniqueness.
-
-   **GC-root caveat**: a managed pointer returned by `callUnityMethod`
-   is valid for the next call you make right now. A GC that ran between
-   the address read and the next invoke can have moved the object
-   (Mono moving GC). Best practice: chain `findInstances` →
-   `callUnityMethod` in a single Lua block when correctness matters,
-   instead of stashing the address.
-
-7. **(Optional) Scene / GameObject explorer** — Phase 20a. Walk the
-   live scene's GameObject list, drill into Transform child trees, and
-   list Components attached to any GameObject. Pure composition over
-   `findInstances` (heap scan) + `callMethod` (Phase 19) — no new wire
-   commands. Concept borrowed from `vendor/UnityExplorer/`'s in-process
-   Scene Explorer, reproduced for our out-of-process pipe architecture.
-   ```lua
-   dofile([[<CE>\discrete\unity_scene.lua]])
-
-   -- All GameObjects in heap (fast; no name decode unless asked):
-   local all = getAllGameObjects()
-   print(#all .. " GameObjects")
-
-   -- Substring search across the loaded scene:
-   for _, h in ipairs(findByName("Camera")) do
-       print(string.format("0x%X  %s", h.address, h.name))
-   end
-
-   -- Active scene roots (filters by transform.parent == null):
-   local roots = getActiveSceneRoots()
-
-   -- Children of a known GameObject:
-   local kids = getChildren(roots[1].address)
-
-   -- Components attached to a GameObject:
-   local comps = getComponents(roots[1].address)
-   for _, c in ipairs(comps) do
-       print(string.format("0x%X  %s.%s", c.address, c.namespace or "", c.className or "?"))
-   end
-   ```
-   Public API (all return Lua arrays, 1-indexed; throw on RPC error so
-   callers can `pcall`):
-   `getName(addr)` / `getAllGameObjects(opts)` / `findByName(pattern, opts)` /
-   `getActiveSceneRoots(opts)` / `getChildren(addr)` /
-   `getComponents(addr)`. Full `opts` shape lives in the script header.
-
-   **Cost notes**: `getAllGameObjects()` is one heap scan (cheap).
-   `getActiveSceneRoots()` does N+1 `callMethod`s (one per object) to
-   filter on `transform.parent == null`; that's tens of ms on a small
-   scene, several hundred ms on a busy one. `getComponents()` issues
-   one `whatIsAt` per component to recover the runtime class, so it's
-   the costliest op — defer until the user expands a node.
-
-8. **Switching to the standalone UI** — the DLL pipe server is
-   single-instance, so the desktop UI (`DiscreteUI.exe`) and CE Lua
-   bridge are **mutually exclusive while connected**. To swap:
-   - In Lua, just stop sending RPCs (no Disconnect needed).
-   - Launch `DiscreteUI.exe`, click *Connect* — DLL stays loaded, pipe
-     re-binds.
-   - To go back to CE Lua, click *Disconnect* in the UI first; then
-     re-run any of the dofile lines.
-
-## Deployment for CE-table publishers
-
-Two patterns for shipping a .CT that uses our framework. **DiscreteUI.exe
-is a developer tool — do NOT distribute it to end users.** End users get
-either:
-
-### Mode A — Install once into CE folder
-
-User extracts `discrete-runtime-{version}.zip` (or copies manually) into
-`<CE-install>/discrete/`. Final layout:
-
-```
-<CE-install>/
-  discrete/
-    UnityDumper-Mono.dll        ← required (or UnityDumper-IL2CPP.dll)
-    UnityDumper-IL2CPP.dll      ← required if game is IL2CPP
-    utils.lua
-    unity_dump.lua
-    unity_dissect.lua           ← optional (only if CT uses it)
-    unity_symbols.lua           ← optional
-    unity_invoke.lua            ← optional
-    unity_scene.lua             ← optional
-    unity_addrfind.lua          ← optional
-    mono_registersymbol_helpers.lua  ← optional
-    x86/
-      UnityDumper-Mono.dll      ← if targeting 32-bit Mono games
+The CT's `[ENABLE]` script does:
+```lua
+dofile(getCheatEngineDir() .. 'discrete\\unity_dump.lua')
+inject(getOpenedProcessID())
 ```
 
-Pro: one shared install across N CT files.
-Con: end user has to copy files once.
+**Pro**: one install serves every Discrete-using CT.
+**Con**: end user has to copy files once.
 
-CE table activate-script does the usual `dofile(getCheatEngineDir() ..
-'discrete\\unity_dump.lua') ; inject(getOpenedProcessID())`.
+### Mode B — Embed everything in the `.CT` (zero install)
 
-### Mode B — Everything embedded in the .CT (zero-touch)
+End user opens the `.CT` and it Just Works. The table contains all the
+required files as embedded *Table Files* (Table menu → Add file…). The
+`[ENABLE]` script extracts them to a temp directory and injects from
+there.
 
-User just opens the .CT. The .CT contains the backend DLL + lua scripts
-as embedded files (Table menu → Add file…). Activate script extracts to
-`%TEMP%\Discrete_UEDumper\<table-id>\` and injects from there.
+Reference implementation: **`ce_table_bootstrap.lua`** in this folder.
+Copy its `bootstrap()` function into your CT's autorun script, edit
+`FILES_TO_EXTRACT` to list whichever files you embedded, then call
+`bootstrap()` from your `[ENABLE]` block.
 
-Reference impl: [`scripts/ce_table_bootstrap.lua`](ce_table_bootstrap.lua).
-Copy its `bootstrap()` function into your CT's autorun Lua, customise
-`FILES_TO_EXTRACT` for the files you embedded, call `bootstrap()` from
-the [ENABLE] script.
+Tip: embed only the files you actually use. A minimum-functional CT
+only needs `UnityDumper-{Mono,IL2CPP}.dll` + `utils.lua` +
+`unity_dump.lua`. Adding the optional scripts is a few extra KB each.
 
-Pro: end user does literally nothing — just open the .CT. No
-"download these N files first" instructions.
-Con: each CT is ~1 MB larger (backend DLL); updating the runtime
-requires re-publishing every CT that embeds it.
+**Pro**: end user does nothing — opens `.CT`, plays. No "download
+these N files first" instructions.
+**Con**: each `.CT` is ~1 MB larger (the backend DLL). Updating the
+runtime requires re-publishing every CT that embeds it.
 
-### Proxy DLL deployment (alternative to runtime inject)
+### Mode C — Proxy DLL (pre-Unity-init injection)
 
-CE Lua `loadLibrary()` is the **simplest** end-user injection path —
-`unity_dump.lua` calls it at table-activate. Some CT publishers prefer
-proxy-DLL deployment instead (user drops `version.dll` / `winmm.dll`
-next to the game .exe → Windows auto-loads it before Unity starts).
-Trade-offs:
+Drop `version.dll` or `winmm.dll` next to the game's `.exe`. Windows
+loads it before Unity, and the proxy auto-loads the matching backend.
 
-| Injection style | Pros | Cons |
-|---|---|---|
-| **CE Lua `loadLibrary` at activate** (default) | Zero install. User opens .CT → it Just Works. Works on protected processes that allow LoadLibrary but block proxy load. | Inject happens *after* Unity initializes; backend detection fires post-handshake. |
-| **Proxy DLL (`version.dll` / `winmm.dll`)** | DLL loads before Unity → catches very-early init events. Survives game restart without re-running CT activate. Some games block `LoadLibrary` from CE specifically (rare). | User has to drop the proxy file into the game folder manually. Anti-virus often complains about generic `version.dll` proxies. |
-
-**If you ship a proxy DLL** — pick the right arch:
-
-| Target | Proxy from |
+| Game target | Proxy from |
 |---|---|
-| 64-bit Unity (most modern games) | `dist/version.dll` or `dist/winmm.dll` (x64) |
-| 32-bit Unity (legacy Mono, e.g. older Unity 2018-2020 games) | `dist/x86/version.dll` or `dist/x86/winmm.dll` |
+| 64-bit Unity (most modern games) | `version.dll` / `winmm.dll` in the package root |
+| 32-bit Unity (older Mono games) | `x86/version.dll` / `x86/winmm.dll` |
 
-The proxy auto-loads the appropriate `UnityDumper-Mono.dll` /
-`UnityDumper-IL2CPP.dll` from the same directory at game startup.
+The matching backend (`UnityDumper-Mono.dll` or `UnityDumper-IL2CPP.dll`
+in the correct arch) must sit next to the proxy.
 
-The matching backend DLL (`UnityDumper-{Mono,IL2CPP}.dll` for the right
-arch) must be deployed alongside the proxy. **Don't mix arch**: a 64-bit
-proxy with a 32-bit backend DLL silently fails.
+**Don't mix arches**: a 64-bit proxy with a 32-bit backend DLL silently
+fails to load.
+
+**Pro**: works on games that block runtime `LoadLibrary`. Loads early
+enough to catch Unity's very-first-frame init events. Survives game
+restart without re-running CT activate.
+**Con**: anti-virus often flags generic proxy DLLs. End user must drop
+the file into the game folder manually (some games are in `Program
+Files` and require admin to write there).
 
 ### Files NOT to deploy
 
-| File | Don't ship to end users | Why |
-|---|---|---|
-| `DiscreteUI.exe` | ✋ | Developer UI; surface area + complexity end users don't need |
-| `metadata-cli.exe` | ✋ | Offline metadata dump tool (dev/forensics) |
-| `inject-x86.exe` | ✋ usually | DiscreteUI's cross-bitness helper; CE 7.5+ `loadLibrary()` handles 32-bit targets directly |
-| `*.pdb` | ✋ | Debug symbols |
+These ship in the package for developers but shouldn't be installed
+on end-user machines:
 
-## Notes
+| File | Why not |
+|---|---|
+| `DiscreteUI.exe` | Author / developer tool. Don't bundle with shipped CTs — CT users only need the DLL + scripts. |
+| `metadata-cli.exe` | Offline IL2CPP metadata dump tool. Dev-only. |
+| `inject-x86.exe` | Cross-bitness inject helper for DiscreteUI. Not needed if you use Mode A/B/C for distribution. |
+| `*.pdb` | Debug symbols. |
 
-* `unity_dump.lua` uses CE's `loadLibrary()` to inject — same mechanism
-  as the standalone UI's `WindowsDllInjector` (CreateRemoteThread →
-  LoadLibraryW). Logs land at
-  `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\init\current.log`.
-* `unity_dissect.lua`, `unity_symbols.lua`, `unity_addrfind.lua`, and
-  `unity_invoke.lua` open the named pipe directly via
-  `io.open([[\\.\pipe\UnityDumpBfx]], "r+b")`. All four ship a tiny
-  purpose-built JSON parser (no external Lua deps); good enough for the
-  DLL's response shape, not a general JSON library. `unity_invoke.lua`
-  also ships a small JSON serializer because `callMethod`'s `args` is a
-  nested array; the other scripts get away with hand-built request
-  strings because they only send flat key-value args.
-* **Pipe-open retry**: both scripts retry `io.open` up to 15× at 200 ms
-  intervals before giving up (~3 s budget). The DLL's pipe-server
-  worker thread may not have finished `CreateNamedPipeW` by the time
-  the inject script returns *Pipe ready*, so the first RPC sometimes
-  fails with `Invalid argument`. The retry handles it transparently.
-* **Main-thread yield**: each RPC inserts `processMessages()` +
-  `sleep(1)` so CE's Windows message pump can service paint/input
-  between calls. Without this, `registerClassSymbols` against a
-  300+ method class (Mono JIT path issues one RPC per method) makes
-  CE *appear* hung for 30–60 s even though Lua is making progress.
-  Cost ~1 ms per RPC, ~330 ms across a full Silksong `GameManager`
-  registration.
-* **`createStructure` is unregistered by default**: CE 7.5.x's
-  `createStructure` returns a `TDissectedStruct` that is **not** added
-  to the global structures list. `unity_dissect.lua` calls
-  `s.addToGlobalStructureList()` after populating elements, and dedups
-  same-label structures so re-runs replace instead of accumulating.
-* **Method-symbol naming** (`Cls.m_<method>`) was changed from
-  `Cls::<method>` because CE's symbol resolver treats `::` as ambiguous
-  and falls through to a slow Mono-runtime enumeration that hangs the
-  UI for minutes against a large game's symbol table.
-* All scripts are safe to re-run: the DLL's `Init` / `StartPipe` are
-  idempotent, re-registering an existing CE symbol just overwrites the
-  previous binding, and `unity_dissect.lua` removes any prior
-  same-label structure before re-creating it.
+---
+
+## Quick start
+
+After deploying (any mode above) and opening a Unity game in CE:
+
+```lua
+-- Open CE's Lua console (View → Lua Engine, or Ctrl+Alt+L), then:
+dofile([[<CE>\discrete\unity_dump.lua]])
+-- Output:
+--   [UnityCEDumper] Backend: IL2CPP — DLL injected (build N)
+--   [UnityCEDumper] Pipe ready: \\.\pipe\UnityDumpBfx
+
+-- Reverse address lookup — paste any CE-discovered address:
+dofile([[<CE>\discrete\unity_addrfind.lua]])
+lookupAddress(0x000001E55B2518F0)
+--   → instance=0x...  class=MainGame.PLY_WORK  field=chrNo
+--     (System.Byte @ +0x10)
+
+-- Or launch DiscreteUI.exe for the GUI.
+```
+
+For end users of a published `.CT`, the activate-script handles all of
+this automatically (Mode A/B/C above).
+
+---
+
+## Debugging & bug reports
+
+### Where logs live
+
+All logs go under `%LOCALAPPDATA%\Discrete_UEDumper\Logs\`.
+
+| Path | What's logged |
+|---|---|
+| `<pid>\init\current.log` | DLL load + module enumeration + version banner |
+| `<pid>\pipe\current.log` | Pipe-server connection lifecycle |
+| `<pid>\scan\current.log` | Memory scans (value scans, instance heap scans) |
+| `<pid>\walk\current.log` | Class enumeration + address-finder cache builds |
+| `<pid>\metadata\current.log` | IL2CPP metadata parser |
+| `ui\*\current.log` | DiscreteUI app log (separate from per-game logs) |
+
+Open the folder quickly:
+```powershell
+explorer "$env:LOCALAPPDATA\Discrete_UEDumper\Logs"
+```
+
+Each log auto-rotates at 8 MB; older entries land under
+`current.log.1` / `current.log.2` etc.
+
+### Running diagnostics from CE Lua
+
+Once the DLL is injected, every `unity_*.lua` script can be re-run
+from CE's Lua console to probe state. The scripts print to CE's
+console — usually visible at the bottom of the Lua Engine window.
+
+```lua
+-- Verify pipe + backend detection:
+dofile([[<CE>\discrete\unity_dump.lua]])
+-- (the inject() call also prints the handshake)
+
+-- Walk every class in an assembly (large output — pipe it):
+dofile([[<CE>\discrete\unity_symbols.lua]])
+registerClassSymbols("Assembly-CSharp", "MainGame", "PLY_WORK",
+                     {verbose=true})
+```
+
+If a script hangs, CE's main thread may be busy on a backend RPC.
+Wait — the script inserts `processMessages() + sleep(1)` between
+RPCs so CE stays responsive even on a 300-method class.
+
+### Running diagnostics from PowerShell
+
+The release package ships PowerShell smoke harnesses under `tools/`.
+They open `\\.\pipe\UnityDumpBfx` directly and send JSON-RPC frames.
+Useful for reproducing bugs without launching DiscreteUI or CE.
+
+```powershell
+# Run from the dist/ folder (or anywhere — they use absolute paths).
+.\tools\Test-Handshake.ps1                       # verify pipe + backend
+.\tools\Test-WhatIsAt.ps1                        # reverse address lookup
+.\tools\Test-ScanFieldValue.ps1 -Value 100       # value scan
+.\tools\Test-ValueScanSession.ps1 -Value 100     # First / Next Scan workflow
+.\tools\Test-CallMethod.ps1                      # invoke a managed method
+```
+
+Each script logs to stdout; pipe to a file if you want to attach the
+output to a bug report:
+```powershell
+.\tools\Test-ScanFieldValue.ps1 -Value 100 > scan-bug.log
+```
+
+### What to include in a bug report
+
+1. **Game** — name, Steam ID if applicable, version.
+2. **Unity version** + **backend** (Mono / IL2CPP). The DLL prints
+   both in `init\current.log` at the top:
+   ```
+   UnityDumper DLL attached build=NNN backend=Mono pid=...
+   Detect: backend=Mono unity=2020.3.49f1 ...
+   ```
+3. **DLL build number** (`NNN` above).
+4. **Reproduce steps** — exact Lua commands or DiscreteUI clicks.
+5. **Relevant log entries** — at minimum the last ~50 lines from
+   `init\current.log` plus the category log for the failing feature
+   (e.g. `scan/current.log` for a Value Search issue, `walk/current.log`
+   for an Address Lookup issue).
+6. **Screenshot** of the UI if a visual / DataGrid problem.
+
+> **Privacy note**: log files contain class / field names from your
+> game. Trim to the relevant entries before sharing publicly if the
+> game's class layout is sensitive.
+
+---
+
+## Known limitations
+
+- **Anti-cheat**: kernel-mode AC (EAC, BattlEye, Vanguard, etc.) is
+  unsupported and won't be. User-mode AC that hooks
+  `OpenProcess`/`ReadProcessMemory` is bypassed (our DLL runs from
+  inside the game process), but AC that scans for our DLL itself
+  will still flag us.
+- **Method invocation GC caveat**: a managed pointer returned by
+  `callUnityMethod` (and friends) is valid only until the next GC
+  cycle. Don't stash and reuse across long delays — chain follow-up
+  RPCs immediately when correctness matters.
+- **String search**: UTF-16 only for Unity-managed strings (System.String
+  is always UTF-16). UTF-8 / ASCII modes are available for unmanaged
+  engine strings or natively-stored text.
+- **IL2CPP code stripping**: Unity's IL2CPP build strips "unused"
+  managed code aggressively. Methods you can see in dnSpy may not
+  exist in the runtime. Use Symbol Finder / `findMethodInstances` to
+  verify before referencing a method by name.
+- **32-bit IL2CPP**: not a thing in Unity 2019+ (Unity dropped x86
+  IL2CPP targets). Only 32-bit Mono is supported on the x86 side.
