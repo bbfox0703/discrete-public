@@ -100,10 +100,15 @@ Write-Host "Proc: $($proc.ProcessName) (PID $($proc.Id))" -ForegroundColor Cyan
 # passed -DllPath explicitly we honour it; otherwise auto-route to
 # dist\x86\UnityDumper-Mono.dll alongside the helper.
 # ---------------------------------------------------------------------------
-Add-Type -Namespace UCED -Name BitnessProbe -MemberDefinition @'
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool IsWow64Process(System.IntPtr hProcess, out bool wow64Process);
+# Type guard — List-UnityProcs.ps1 defines the same probe type, and the
+# user may have already imported that script in this session. Add-Type
+# blows up on duplicate registration so skip when the type is live.
+if (-not ('UCED.BitnessProbe' -as [type])) {
+    Add-Type -Namespace UCED -Name BitnessProbe -MemberDefinition @'
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool IsWow64Process(System.IntPtr hProcess, out bool wow64Process);
 '@
+}
 $wow = $false
 [void][UCED.BitnessProbe]::IsWow64Process($proc.Handle, [ref]$wow)
 if ($wow) {
