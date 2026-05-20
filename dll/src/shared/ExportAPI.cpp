@@ -49,6 +49,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 using nlohmann::json;
 
@@ -432,6 +433,37 @@ bool CompareCandidateForRefine(Memory::ValueDataType dt,
     #undef BODY_INT
     #undef BODY_FLT
     #undef LOAD
+    return false;
+}
+
+// Phase 27 hardening (2026-05-20 night) — real-game scans get dominated
+// by large static arrays (UIElements.IPointerEvent / compiler-generated
+// `<PrivateImplementationDetails>/__StaticArrayInitTypeSize=N`) when the
+// search value happens to appear in literal init data. One array can
+// flood thousands of array-element hits and starve the candidate budget
+// before the actual gameplay field is reached.
+//
+// Two filters mitigate this:
+//   1. Per-instance cap — at most kPerInstanceCap hits from the same
+//      managed instance. Stops one big array from monopolising results.
+//   2. Compiler-generated container filter — drop any class whose name
+//      starts with '<' (PrivateImplementationDetails, <>c__DisplayClass,
+//      generic anonymous types). These are never user-modifiable state.
+//
+// Both filters apply post-whatIsAt, so non-managed memory still gets
+// `droppedNonManaged`. Diversity drops counted separately.
+constexpr int kPerInstanceCap = 3;
+
+bool IsCompilerGeneratedClassName(std::string_view name) noexcept {
+    if (name.empty()) return false;
+    if (name.front() == '<') return true;
+    // C# compiler sometimes prefixes with the namespace, e.g.
+    // "MyNamespace.<PrivateImplementationDetails>". Check for '<' after
+    // the last namespace separator.
+    auto pos = name.rfind('.');
+    if (pos != std::string_view::npos && pos + 1 < name.size() && name[pos + 1] == '<') {
+        return true;
+    }
     return false;
 }
 
@@ -2366,16 +2398,29 @@ void RegisterCoreHandlers() {
             return json{{"error", "address-finder class cache build failed"}};
         }
 
+        // Phase 27 hardening: decouple raw memory-scan budget from the UI
+        // emit budget. Always scan up to kRawScanCap raw value matches so
+        // that one big static array can't starve the result set when the
+        // user's value happens to appear in literal init data. The UI's
+        // `limit` only caps the final post-filter rows.
+        const std::size_t emitLimit = req.limit;
+        constexpr std::size_t kRawScanCap = 50000;
+        Memory::ValueScanRequest scanReq = req;
+        scanReq.limit = kRawScanCap;
+
         Memory::ValueScanStats stats{};
-        auto candidates = Memory::ScanForValue(req, &stats);
+        auto candidates = Memory::ScanForValue(scanReq, &stats);
 
         json rows = json::array();
-        std::size_t droppedNonManaged = 0;
-        const std::size_t valueSize = Memory::ValueDataTypeSize(dt);
+        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
+        std::unordered_map<std::uintptr_t, int> perInstanceCount;
         for (const auto& c : candidates) {
+            if (rows.size() >= emitLimit) break;
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
             Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
             if (!lookup.found) { droppedNonManaged++; continue; }
+            if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
+            if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
 
             json row = {
                 {"addr",            formatHex(addr)},
@@ -2406,9 +2451,9 @@ void RegisterCoreHandlers() {
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "scanFieldValue(Mono) dt=%s candidates=%zu rows=%zu dropped=%zu bytes=%zu",
-                dtStr.c_str(), candidates.size(), rows.size(), droppedNonManaged,
-                stats.bytesScanned);
+                "scanFieldValue(Mono) dt=%s raw=%zu rows=%zu dropped non=%zu noise=%zu div=%zu bytes=%zu",
+                dtStr.c_str(), candidates.size(), rows.size(),
+                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
             UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
@@ -2419,7 +2464,9 @@ void RegisterCoreHandlers() {
             {"scanType",          stStr},
             {"count",             rows.size()},
             {"droppedNonManaged", droppedNonManaged},
-            {"truncated",         candidates.size() >= req.limit},
+            {"droppedNoise",      droppedNoise},
+            {"droppedDiversity",  droppedDiversity},
+            {"truncated",         candidates.size() >= kRawScanCap || rows.size() >= emitLimit},
             {"scannedBytes",      stats.bytesScanned},
             {"readFailureBytes",  stats.readFailureBytes},
             {"candidates",        std::move(rows)},
@@ -2478,17 +2525,28 @@ void RegisterCoreHandlers() {
             return json{{"error", "address-finder class cache build failed"}};
         }
 
+        // Phase 27 hardening — same decoupled-budget + diversity-cap +
+        // noise-filter pattern as scanFieldValue.
+        const std::size_t emitLimit = req.limit;
+        constexpr std::size_t kRawScanCap = 50000;
+        Memory::ValueScanRequest scanReq = req;
+        scanReq.limit = kRawScanCap;
+
         Memory::ValueScanStats stats{};
-        auto rawCandidates = Memory::ScanForValue(req, &stats);
+        auto rawCandidates = Memory::ScanForValue(scanReq, &stats);
 
         std::vector<ValueScan::Candidate> sessionCands;
-        sessionCands.reserve(std::min<std::size_t>(rawCandidates.size(), 4096));
-        std::size_t droppedNonManaged = 0;
+        sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
+        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
+        std::unordered_map<std::uintptr_t, int> perInstanceCount;
         const std::size_t vSize = Memory::ValueDataTypeSize(dt);
         for (const auto& c : rawCandidates) {
+            if (sessionCands.size() >= emitLimit) break;
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
             Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
             if (!lookup.found) { droppedNonManaged++; continue; }
+            if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
+            if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
 
             ValueScan::Candidate sc{};
             sc.addr        = addr;
@@ -2529,9 +2587,10 @@ void RegisterCoreHandlers() {
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "beginValueScan(Mono) sess=%llu dt=%s candidates=%zu kept=%zu dropped=%zu bytes=%zu",
+                "beginValueScan(Mono) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu bytes=%zu",
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
-                rawCandidates.size(), kept, droppedNonManaged, stats.bytesScanned);
+                rawCandidates.size(), kept,
+                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
             UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
@@ -2544,7 +2603,9 @@ void RegisterCoreHandlers() {
             {"count",             kept},
             {"totalCandidates",   kept},
             {"droppedNonManaged", droppedNonManaged},
-            {"truncated",         rawCandidates.size() >= req.limit},
+            {"droppedNoise",      droppedNoise},
+            {"droppedDiversity",  droppedDiversity},
+            {"truncated",         rawCandidates.size() >= kRawScanCap || kept >= emitLimit},
             {"scannedBytes",      stats.bytesScanned},
             {"readFailureBytes",  stats.readFailureBytes},
             {"candidates",        std::move(rows)},
@@ -4119,15 +4180,27 @@ void RegisterCoreHandlers() {
             return json{{"error", "address-finder class cache build failed"}};
         }
 
+        // Phase 27 hardening — decoupled raw budget + per-instance cap +
+        // compiler-class noise filter. See the Mono scanFieldValue handler
+        // above for the full rationale.
+        const std::size_t emitLimit = req.limit;
+        constexpr std::size_t kRawScanCap = 50000;
+        Memory::ValueScanRequest scanReq = req;
+        scanReq.limit = kRawScanCap;
+
         Memory::ValueScanStats stats{};
-        auto candidates = Memory::ScanForValue(req, &stats);
+        auto candidates = Memory::ScanForValue(scanReq, &stats);
 
         json rows = json::array();
-        std::size_t droppedNonManaged = 0;
+        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
+        std::unordered_map<std::uintptr_t, int> perInstanceCount;
         for (const auto& c : candidates) {
+            if (rows.size() >= emitLimit) break;
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
             IL2CPP::AddressLookup lookup = IL2CPP::WhatIsAt(addr, maxBackwardScan);
             if (!lookup.found) { droppedNonManaged++; continue; }
+            if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
+            if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
 
             json row = {
                 {"addr",            formatHex(addr)},
@@ -4158,9 +4231,9 @@ void RegisterCoreHandlers() {
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "scanFieldValue(IL2CPP) dt=%s candidates=%zu rows=%zu dropped=%zu bytes=%zu",
-                dtStr.c_str(), candidates.size(), rows.size(), droppedNonManaged,
-                stats.bytesScanned);
+                "scanFieldValue(IL2CPP) dt=%s raw=%zu rows=%zu non=%zu noise=%zu div=%zu bytes=%zu",
+                dtStr.c_str(), candidates.size(), rows.size(),
+                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
             UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
@@ -4171,7 +4244,9 @@ void RegisterCoreHandlers() {
             {"scanType",          stStr},
             {"count",             rows.size()},
             {"droppedNonManaged", droppedNonManaged},
-            {"truncated",         candidates.size() >= req.limit},
+            {"droppedNoise",      droppedNoise},
+            {"droppedDiversity",  droppedDiversity},
+            {"truncated",         candidates.size() >= kRawScanCap || rows.size() >= emitLimit},
             {"scannedBytes",      stats.bytesScanned},
             {"readFailureBytes",  stats.readFailureBytes},
             {"candidates",        std::move(rows)},
@@ -4232,17 +4307,28 @@ void RegisterCoreHandlers() {
             return json{{"error", "address-finder class cache build failed"}};
         }
 
+        // Phase 27 hardening — same decoupled-budget + diversity-cap +
+        // noise-filter as scanFieldValue.
+        const std::size_t emitLimit = req.limit;
+        constexpr std::size_t kRawScanCap = 50000;
+        Memory::ValueScanRequest scanReq = req;
+        scanReq.limit = kRawScanCap;
+
         Memory::ValueScanStats stats{};
-        auto rawCandidates = Memory::ScanForValue(req, &stats);
+        auto rawCandidates = Memory::ScanForValue(scanReq, &stats);
 
         std::vector<ValueScan::Candidate> sessionCands;
-        sessionCands.reserve(std::min<std::size_t>(rawCandidates.size(), 4096));
-        std::size_t droppedNonManaged = 0;
+        sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
+        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
+        std::unordered_map<std::uintptr_t, int> perInstanceCount;
         const std::size_t vSize = Memory::ValueDataTypeSize(dt);
         for (const auto& c : rawCandidates) {
+            if (sessionCands.size() >= emitLimit) break;
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
             IL2CPP::AddressLookup lookup = IL2CPP::WhatIsAt(addr, maxBackwardScan);
             if (!lookup.found) { droppedNonManaged++; continue; }
+            if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
+            if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
 
             ValueScan::Candidate sc{};
             sc.addr        = addr;
@@ -4280,9 +4366,10 @@ void RegisterCoreHandlers() {
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "beginValueScan(IL2CPP) sess=%llu dt=%s candidates=%zu kept=%zu dropped=%zu bytes=%zu",
+                "beginValueScan(IL2CPP) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu bytes=%zu",
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
-                rawCandidates.size(), kept, droppedNonManaged, stats.bytesScanned);
+                rawCandidates.size(), kept,
+                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
             UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
@@ -4295,7 +4382,9 @@ void RegisterCoreHandlers() {
             {"count",             kept},
             {"totalCandidates",   kept},
             {"droppedNonManaged", droppedNonManaged},
-            {"truncated",         rawCandidates.size() >= req.limit},
+            {"droppedNoise",      droppedNoise},
+            {"droppedDiversity",  droppedDiversity},
+            {"truncated",         rawCandidates.size() >= kRawScanCap || kept >= emitLimit},
             {"scannedBytes",      stats.bytesScanned},
             {"readFailureBytes",  stats.readFailureBytes},
             {"candidates",        std::move(rows)},
