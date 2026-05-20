@@ -7,8 +7,38 @@
 # dll/vendor/minihook/ with its own CMakeLists.txt — we just add_subdirectory
 # (with EXCLUDE_FROM_ALL so its install rules don't pollute our `dist/`).
 # Build cost: ~50 KB statically linked into each UnityDumper-{Backend}.dll.
-# ---------------------------------------------------------------------------
+#
+# CMake 3.27+ deprecates `cmake_minimum_required(VERSION < 3.10)`. MinHook
+# 1.3.3 still ships with `VERSION 3.0...3.5`. Two-part shut-up:
+#   (a) CMAKE_POLICY_VERSION_MINIMUM (CMake 3.24+) raises the floor so policy
+#       semantics behave like 3.10.
+#   (b) CMAKE_WARN_DEPRECATED toggle scopes the deprecation suppression to
+#       the vendor add_subdirectory call — our own DLL build still surfaces
+#       any deprecation warnings.
+# Without this you get one CMake Deprecation Warning per `cmake -B` run on
+# CMake 3.27 and later.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
+set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
 add_subdirectory(vendor/minihook EXCLUDE_FROM_ALL)
+unset(CMAKE_WARN_DEPRECATED CACHE)
+set(CMAKE_WARN_DEPRECATED ON CACHE BOOL "Suppress deprecated CMake feature warnings" FORCE)
+
+# Silence the warnings MinHook 1.3.3 emits under MSVC. None of these point
+# at real bugs — they're stylistic ABI / bit-packing decisions in vendored
+# third-party C code:
+#   C4100 — unreferenced formal parameter (x86-only path in buffer.c that
+#           takes pOrigin but doesn't use it; x64 build doesn't trip it)
+#   C4201 — nameless struct/union (used by MinHook's IO buffer)
+#   C4244 — BOOL → UINT8 narrowing in deliberate bit-pack assignments
+#   C4310 — cast truncates constant value (intentional opcode constants)
+#   C4701 — possibly-uninitialised local in the HDE disassembler's
+#           switch fall-through (the variable IS init in every path the
+#           runtime takes; MSVC's flow analysis is too conservative)
+# Apply via the `minhook` target so the suppressions don't bleed into
+# our own source — UnityDumper-* targets keep their warnings as-is.
+if(MSVC)
+    target_compile_options(minhook PRIVATE /wd4100 /wd4201 /wd4244 /wd4310 /wd4701)
+endif()
 
 # ---------------------------------------------------------------------------
 # Helper: configure_file the shared version.rc.in template per target with
