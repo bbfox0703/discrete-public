@@ -1,4 +1,4 @@
-# Discrete — Unity Cheat Engine Dumper
+# Discrete — Unity Dumper
 
 > Inspect, scan, and modify Unity managed game state from Cheat Engine
 > or the standalone `DiscreteUI.exe` GUI.
@@ -18,9 +18,6 @@
   This is a generic Windows technique that's also commonly used by
   malware — false positives are normal. Whitelist the install folder
   if your AV objects.
-- **Anti-tamper**: `DiscreteUI.exe` is checksummed; hex-editing it
-  silently produces *wrong* scan offsets without a banner warning,
-  so don't ship a modified copy.
 
 ---
 
@@ -46,8 +43,8 @@ You don't need C++ or .NET expertise — the tools handle that.
 |---|---|
 | **Windows 10 or 11**, x64 | DiscreteUI.exe is 64-bit only (32-bit games are still supported via cross-bitness injection). |
 | **Cheat Engine 7.5+** (7.6+ recommended) | Needed for `loadLibrary` / table-side scripts. |
-| **Visual C++ Redistributable 2015-2022 (x64)** | Required by both `DiscreteUI.exe` and the 64-bit backend DLLs. [Microsoft download](https://aka.ms/vs/17/release/vc_redist.x64.exe). |
-| **Visual C++ Redistributable 2015-2022 (x86)** | Only required if you target 32-bit Unity Mono games. [x86 download](https://aka.ms/vs/17/release/vc_redist.x86.exe). |
+| **Latest Visual C++ Redistributable (x64)** | Required by both `DiscreteUI.exe` and the 64-bit backend DLLs. The "Visual C++ Redistributable for Visual Studio 2015-2022" covers everything we ship — Microsoft maintains forward-compat in this family across MSVC 14.x. [x64 download](https://aka.ms/vs/17/release/vc_redist.x64.exe). |
+| **Latest Visual C++ Redistributable (x86)** | Only required if you target 32-bit Unity Mono games. Same "2015-2022" redist covers x86 builds. [x86 download](https://aka.ms/vs/17/release/vc_redist.x86.exe). |
 | **.NET runtime** | **Not needed separately.** `DiscreteUI.exe` is published as Native AOT and is fully self-contained. |
 | **AOBMaker CE plugin** *(optional)* | Required only if you want one-click "Inject Discrete Bridge into CE Table" from the UI's Tools menu. |
 
@@ -74,6 +71,7 @@ Supported game runtimes:
 | **`unity_invoke.lua`** | Call any Mono / IL2CPP method from CE Lua with typed args + return value + managed exception capture. |
 | **`unity_scene.lua`** | Walk Unity's scene graph (GameObject hierarchy, components, transforms). |
 | **`mono_registersymbol_helpers.lua`** | DLL-free Mono symbol register helpers (for CT authors who prefer pure-Lua). |
+| **`inject-x86.exe`** + **`x86/`** subfolder | Cross-bitness inject helper. `DiscreteUI.exe` is x64-only, so when the target is a 32-bit Unity Mono game the UI shells out to `inject-x86.exe` (a tiny standalone 32-bit injector) to push the matching `x86/UnityDumper-Mono.dll` into the target. Ships next to `DiscreteUI.exe`; not run by the end user directly. |
 | **`metadata-cli.exe`** | Offline `global-metadata.dat` parser (works on a game folder without launching the game). |
 
 ### What the UI's tabs do
