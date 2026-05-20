@@ -113,7 +113,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 * **Single Instance**: UI app uses Mutex to ensure only one instance runs
 * **Async everywhere**: All I/O, pipe operations, and alert actions must be async
 * **Platform Abstraction**: Any system/OS-dependent call (P/Invoke, Registry, OS commands) MUST go through an interface in `Core` project. `Core` must NEVER contain direct platform-specific code
-* **Log output**: All logs go to `%LOCALAPPDATA%\UnityCEDumper\Logs`, split by category into per-process subfolders. DLL: 5 files (init, scan, metadata, pipe, walk). UI: 3 files (init, pipe, view). 4-file rotation, 8MB max per file. Root `Logs/` has no loose files — only subfolders
+* **Log output**: All logs go to `%LOCALAPPDATA%\Discrete_UEDumper\Logs`, split by category into per-process subfolders. DLL: 5 files (init, scan, metadata, pipe, walk) under `<pid>\<category>\`. UI: 3 files (init, pipe, view) under `ui\<category>\`. UI rotates 5 files on every UI startup; DLL rotates 4 files on 8 MB size threshold per category. Per-PID DLL directories older than 15 days are pruned at UI startup. Root `Logs/` has no loose files — only subfolders
 * **Magic words management**: All magic strings kept in one file per project with proper comments
 * **UI Strings**: English only. All UI strings in `Resources/Strings/en.axaml`, referenced via `StaticResource` bindings
 * **Unity offsets**: All internal struct offsets (MonoClass, Il2CppClass, etc.) must be dynamically verified via OffsetFinder or API probing, never hardcoded for a single Unity version

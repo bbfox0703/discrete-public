@@ -110,7 +110,7 @@ shows the multi-grid case (3 grids in one window).
 
 ## Logger channels
 
-DLL writes to `%LOCALAPPDATA%\UnityCEDumper\Logs\<host-pid>\<channel>\`
+DLL writes to `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<host-pid>\<channel>\`
 across five channels:
 
 | Channel | Used by | Volume (typical) |

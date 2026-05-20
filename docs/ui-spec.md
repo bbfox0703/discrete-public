@@ -313,7 +313,7 @@ instance across all VMs.
 ### `FileLogger`
 
 Mirrors the DLL's per-PID rotated log layout, but for the UI:
-`%LOCALAPPDATA%\UnityCEDumper\Logs\<UI-pid>\view\`. Channels: `view`
+`%LOCALAPPDATA%\Discrete_UEDumper\Logs\<UI-pid>\view\`. Channels: `view`
 (VM-side events). The DLL writes to `init` / `scan` / `metadata` /
 `pipe` / `walk` from inside the host process.
 

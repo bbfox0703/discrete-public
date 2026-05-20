@@ -22,7 +22,7 @@
 //        job).
 //   3  — LoadLibraryW returned NULL — DLL exists but failed its DllMain
 //        (e.g. missing dep). Caller should check the per-PID log dir
-//        under %LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\init\current.log.
+//        under %LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\init\current.log.
 //
 // On a successful run, stdout looks like:
 //   inject-x86: pid=12345 wow64=true dll=C:\...\UnityDumper-Mono.dll
@@ -59,7 +59,7 @@ void Usage() {
         "  1 = argument / OS / write failure (reason on stderr)\n"
         "  2 = target is x64 (use the x64 injector instead)\n"
         "  3 = LoadLibraryW returned NULL — DllMain failed (check the\n"
-        "      per-PID log dir under %LOCALAPPDATA%\\UnityCEDumper\\Logs)\n",
+        "      per-PID log dir under %LOCALAPPDATA%\\Discrete_UEDumper\\Logs)\n",
         stderr);
 }
 
@@ -243,7 +243,7 @@ int CmdInject(int pid, const std::wstring& dllPath) {
     if (exitCode == 0) {
         std::fprintf(stderr,
             "inject-x86: LoadLibraryW returned NULL — DLL failed to load. "
-            "Check %%LOCALAPPDATA%%\\UnityCEDumper\\Logs\\%d\\init\\current.log\n",
+            "Check %%LOCALAPPDATA%%\\Discrete_UEDumper\\Logs\\%d\\init\\current.log\n",
             pid);
         return 3;
     }

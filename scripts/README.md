@@ -247,7 +247,7 @@ DLLs always come from `dist/`; run `.\build.cmd` once to produce them.
 * `unity_dump.lua` uses CE's `loadLibrary()` to inject — same mechanism
   as the standalone UI's `WindowsDllInjector` (CreateRemoteThread →
   LoadLibraryW). Logs land at
-  `%LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\init\current.log`.
+  `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\init\current.log`.
 * `unity_dissect.lua`, `unity_symbols.lua`, `unity_addrfind.lua`, and
   `unity_invoke.lua` open the named pipe directly via
   `io.open([[\\.\pipe\UnityDumpBfx]], "r+b")`. All four ship a tiny

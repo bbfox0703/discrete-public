@@ -10,7 +10,10 @@ inline constexpr const wchar_t* PipeName = L"\\\\.\\pipe\\UnityDumpBfx";
 
 // Logging ------------------------------------------------------------------
 inline constexpr const wchar_t* LogRootEnvVar = L"LOCALAPPDATA";
-inline constexpr const wchar_t* LogRootSubpath = L"UnityCEDumper\\Logs";
+// Renamed 2026-05-20: %LOCALAPPDATA%\UnityCEDumper\Logs\ → %LOCALAPPDATA%\Discrete_UEDumper\Logs\
+// to match the repo name (`discrete`) instead of the original working-title
+// `UnityCEDumper`. Mirror const in `ui/UnityDumpUI.Core/Constants.cs`.
+inline constexpr const wchar_t* LogRootSubpath = L"Discrete_UEDumper\\Logs";
 
 // DLL log categories (one subfolder each, per Architecture.md)
 inline constexpr const wchar_t* LogCategoryInit     = L"init";

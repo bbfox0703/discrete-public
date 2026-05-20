@@ -155,7 +155,7 @@ shape.
 [Logger.cpp](../dll/src/shared/Logger.cpp):
 
 - Five channels: `init`, `scan`, `metadata`, `pipe`, `walk`.
-- Per-PID subfolder under `%LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\<channel>\`.
+- Per-PID subfolder under `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\<channel>\`.
 - 8 MB rotation, 4-file ring per channel.
 - Lock-free writer (per-thread buffer + atomic enqueue).
 
@@ -219,7 +219,7 @@ DLL injected (via DiscreteUI Pick & Inject, proxy DLL, or Test-Handshake.ps1)
    │
    ▼
 DllMain (DLL_PROCESS_ATTACH):
-   1. Logger::EnsureRoot() — create %LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\
+   1. Logger::EnsureRoot() — create %LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\
    2. UnityDumper_Init() — initialize backend resolver singletons (lazy bind)
    3. UnityDumper_StartPipe() — spawn pipe server thread
    4. Return TRUE

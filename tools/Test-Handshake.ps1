@@ -103,7 +103,7 @@ $client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'UnityDumpBfx', 
 try {
     $client.Connect($PipeTimeoutMs)
 } catch {
-    throw "Pipe connect timed out after $PipeTimeoutMs ms. Is the DLL loaded? Check %LOCALAPPDATA%\UnityCEDumper\Logs\$ProcessId\init\current.log"
+    throw "Pipe connect timed out after $PipeTimeoutMs ms. Is the DLL loaded? Check %LOCALAPPDATA%\Discrete_UEDumper\Logs\$ProcessId\init\current.log"
 }
 
 $writer = New-Object System.IO.StreamWriter($client)

@@ -104,7 +104,7 @@ public sealed partial class WindowsDllInjector : IDllInjector
                     {
                         return InjectResult.Failure(
                             "LoadLibraryW returned NULL — DLL failed to load. " +
-                            "Check %LOCALAPPDATA%\\UnityCEDumper\\Logs.");
+                            "Check %LOCALAPPDATA%\\Discrete_UEDumper\\Logs.");
                     }
                     return InjectResult.Success(exitCode);
                 }
@@ -220,7 +220,7 @@ public sealed partial class WindowsDllInjector : IDllInjector
         else if (code == 3)
         {
             reason = "x86 LoadLibraryW returned NULL — DLL failed to load. " +
-                     "Check %LOCALAPPDATA%\\UnityCEDumper\\Logs.";
+                     "Check %LOCALAPPDATA%\\Discrete_UEDumper\\Logs.";
         }
         return InjectResult.Failure(reason);
     }

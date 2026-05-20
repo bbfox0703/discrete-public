@@ -123,15 +123,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
 
         // One-shot housekeeping: each game injection creates a new
-        // %LOCALAPPDATA%\UnityCEDumper\Logs\<pid>\ tree. They accumulate
-        // forever otherwise. Keep the 10 most-recent + the `ui` folder.
+        // %LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\ tree. They
+        // accumulate forever otherwise. Drop directories whose last-write
+        // time is older than Constants.LogPruneDaysToKeep (15 by default).
+        // The `ui` directory is always preserved.
         try
         {
-            int pruned = FileLogger.PruneOldDllPidDirectories(keepCount: 10);
+            int pruned = FileLogger.PruneOldDllPidDirectories();
             if (pruned > 0)
             {
                 _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
-                    $"pruned {pruned} stale DLL log directories (kept newest 10)");
+                    $"pruned {pruned} stale DLL log directories (older than {UnityDumpUI.Core.Constants.LogPruneDaysToKeep} days)");
             }
         }
         catch (Exception ex)

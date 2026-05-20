@@ -7,7 +7,7 @@
 #   - per-category total <= ~32 MB
 #
 # Usage:
-#   .\tools\Get-LogStats.ps1                      # all PIDs under %LOCALAPPDATA%\UnityCEDumper\Logs
+#   .\tools\Get-LogStats.ps1                      # all PIDs under %LOCALAPPDATA%\Discrete_UEDumper\Logs
 #   .\tools\Get-LogStats.ps1 -Pid 57040           # one PID
 
 [CmdletBinding()]
@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$root = Join-Path $env:LOCALAPPDATA 'UnityCEDumper\Logs'
+$root = Join-Path $env:LOCALAPPDATA 'Discrete_UEDumper\Logs'
 if (-not (Test-Path $root)) {
     Write-Host "No log root: $root" -ForegroundColor Yellow
     exit 0

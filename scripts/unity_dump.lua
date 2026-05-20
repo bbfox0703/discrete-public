@@ -111,7 +111,7 @@ local function main()
         local ok = injectDLL(dll)
         if ok == nil then
             U.err("injectDLL returned nil — DLL not found or injection failed.")
-            U.err("Check %%LOCALAPPDATA%%\\UnityCEDumper\\Logs\\<pid>\\init\\current.log")
+            U.err("Check %%LOCALAPPDATA%%\\Discrete_UEDumper\\Logs\\<pid>\\init\\current.log")
             return
         end
         injected = true
@@ -119,7 +119,7 @@ local function main()
         local handle = loadLibrary(dll)
         if handle == nil or handle == 0 then
             U.err("loadLibrary returned NULL — DLL not found or LoadLibraryW failed.")
-            U.err("Check %%LOCALAPPDATA%%\\UnityCEDumper\\Logs\\<pid>\\init\\current.log")
+            U.err("Check %%LOCALAPPDATA%%\\Discrete_UEDumper\\Logs\\<pid>\\init\\current.log")
             return
         end
         injected = true
