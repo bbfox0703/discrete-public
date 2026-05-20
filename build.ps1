@@ -89,7 +89,7 @@ if ($LogFile) {
         Start-Transcript -Path $LogFile -Force | Out-Null
         $script:transcriptActive = $true
     } catch {
-        Write-Warning "Could not start transcript to $LogFile : $_"
+        Write-Infoing "Could not start transcript to $LogFile : $_"
     }
 }
 
@@ -485,15 +485,42 @@ function Copy-CompanionArtifacts {
     $bn = Join-Path $RepoRoot 'build_number.txt'
     if (Test-Path $bn) { Copy-Item $bn -Destination $DIST_DIR -Force }
 
-    # CE Lua bridge (Phase 11) — ship every .lua + .CT + the README so
-    # users only need the dist/ folder, not a checked-out repo.
+    # CE Lua bridge (Phase 11) — ship every .lua + .CT so users only
+    # need the dist/ folder, not a checked-out repo. README ships as HTML
+    # (see below) so end users can double-click without a Markdown reader.
     $scriptsDir = Join-Path $RepoRoot 'scripts'
     if (Test-Path $scriptsDir) {
-        foreach ($pattern in @('*.lua', '*.CT', 'README.md')) {
+        foreach ($pattern in @('*.lua', '*.CT')) {
             Get-ChildItem $scriptsDir -File -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
-                # README.md keeps its name; the user reads it next to the scripts.
                 Copy-Item $_.FullName -Destination $DIST_DIR -Force
             }
+        }
+    }
+
+    # Render scripts/README.md → dist/README.html with embedded CSS so the
+    # end-user package looks polished without needing a Markdown reader.
+    # The source of truth stays scripts/README.md (GitHub renders it for
+    # repo readers). Conversion runs under pwsh (PS 7) for the built-in
+    # ConvertFrom-Markdown (Markdig-backed) — falls back to copying the
+    # raw .md if pwsh isn't on PATH.
+    $readmeMd     = Join-Path $scriptsDir 'README.md'
+    $readmeHtml   = Join-Path $DIST_DIR   'README.html'
+    $converter    = Join-Path $RepoRoot   'tools\Convert-ReadmeToHtml.ps1'
+    if ((Test-Path $readmeMd) -and (Test-Path $converter)) {
+        $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+        if ($pwsh) {
+            try {
+                & $pwsh.Source -NoProfile -ExecutionPolicy Bypass `
+                    -File $converter `
+                    -InputPath $readmeMd `
+                    -OutputPath $readmeHtml
+            } catch {
+                Write-Info "README → HTML conversion failed: $_"
+                Copy-Item $readmeMd -Destination (Join-Path $DIST_DIR 'README.md') -Force
+            }
+        } else {
+            Write-Info 'pwsh (PowerShell 7) not on PATH — shipping raw README.md instead of HTML'
+            Copy-Item $readmeMd -Destination (Join-Path $DIST_DIR 'README.md') -Force
         }
     }
 }
