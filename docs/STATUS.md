@@ -1,5 +1,43 @@
 # UnityCEDumper — Session Hand-off
 
+**Branch**: `dev` (2026-05-21 **session close** — build #465).
+
+## TL;DR — what's left to pick up
+
+Phase 27 (Unity-aware Value Search) shipped + live-verified end-to-end.
+Five production-bug + UX follow-up commits landed on top. README rewrite
+for end-user (CT maker) audience landed. Lessons documented. Repo
+ready for handoff.
+
+**Known minor open issue** (deferred — not blocking):
+* Dual-monitor maximize → restore: the `OnWindowPropertyChanged` hook
+  in MainWindow.axaml.cs captures pre-maximize bounds correctly, but on
+  restore the window stays at maximize-bounds rather than snapping back
+  to the saved pre-maximize Position+Size. Likely Avalonia 12's own
+  restore-bounds path is running AFTER our hook and overriding our
+  Position/Width/Height assignments. Next session: probably need
+  Dispatcher.UIThread.Post(...) to defer our restore until after
+  Avalonia's pass, or override OnPropertyChangedCore instead of
+  subscribing to the event. Code at MainWindow.axaml.cs `OnWindowPropertyChanged`.
+
+**Other carry-forward** (from earlier session notes — still open):
+* **27c live click-through smoke** — array element resolution in
+  `whatIsAt` shipped + DLL-level unit-tested; no live game smoke yet
+  on a `T[]` / `List<T>` instance.
+* **27b-4 live smoke** — UTF-16 / UTF-8 / ASCII string scan shipped;
+  no live game smoke.
+* **27d live UI click-through** — Value Search tab shipped + live-
+  smoked on 活俠傳 (Mono x86) and SaGa F2R (IL2CPP); SaGa F2R confirmed
+  the session refine workflow narrows correctly.
+* **Phase 27f** *(deferred, v2 acceleration)* — libgc heap-section
+  binding. Doubles as Phase 20-HEAP closure. Not blocking.
+* **Phase 28** (Field → Methods cross-reference) — TODO stub, picks
+  up after Phase 27 stabilises.
+
+---
+
+(Previous session-handoff narrative starts below.)
+
 **Branch**: `dev` (2026-05-20 **late night** session — **Phase 27 fully shipped + live-verified + 3 production-bug follow-ups**. Build #452. Beyond the headline value-search stack, the live testing on 活俠傳 surfaced three perf/shutdown bugs that all landed same-night: SessionManager heap-leak + AddressFinder cache heap-leaks + reentrant ThreadAttachGuard. The reentrant-guard fix is the standout: 4000+ per-WhatIsAt thread_attach/detach cycles were leaving BDWGC finalizers queued, which ran on game shutdown and hung 活俠傳 for 44 s post-scan. Outer guard at scan-handler level + new per-thread reentrancy counter cuts 4000 cycles → 1. Verified: post-scan game-close time 44 s → ~1 s. New lesson recorded in [lessons-learned.md](lessons-learned.md): "any batch loop calling Mono / IL2CPP runtime APIs should hold ONE outer ThreadAttachGuard". Earlier same session — **Phase 27 fully shipped (27a + 27b + 27c + 27b-4 + 27d + 27e)**: complete Unity-aware value search stack. Build #433. **283/283 xUnit pass**. New artifacts:
 
 * DLL: `scanFieldValue` (global + class-scoped + string scan), `beginValueScan` / `refineValueScan` / `endValueScan` (session lifecycle). `whatIsAt` now resolves array element indices for `T[]` / `List<T>._items`. `Mono::BuildClassRangeCache` rewritten to lazy vtable resolution (closes 32-bit Mono hang).
