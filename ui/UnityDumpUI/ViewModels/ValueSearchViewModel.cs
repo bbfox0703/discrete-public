@@ -18,6 +18,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core;
@@ -30,6 +31,8 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     private readonly BackendAdapter _backend;
     private readonly FileLogger     _logger;
     private CancellationTokenSource? _cts;
+    private DispatcherTimer? _elapsedTimer;
+    private Stopwatch?       _elapsedStopwatch;
 
     public ValueSearchViewModel(BackendAdapter backend, FileLogger logger)
     {
@@ -39,7 +42,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         // Default dataType / scanType picks
         SelectedDataType  = "int32";
         SelectedScanType  = "exact";
-        SelectedRefineType = "unchanged";
+        SelectedRefineType = "exact";   // most common Next-Scan usage
         SelectedEncoding  = "utf16";
         SelectedMatchMode = "contains";
     }
@@ -76,7 +79,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(NeedsValueTo))]
     private string _selectedScanType = "exact";
 
-    [ObservableProperty] private string _selectedRefineType = "unchanged";
+    [ObservableProperty] private string _selectedRefineType = "exact";
     [ObservableProperty] private string _selectedEncoding   = "utf16";
     [ObservableProperty] private string _selectedMatchMode  = "contains";
 
@@ -122,8 +125,9 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
 
-        IsBusy = true; ErrorMessage = null; StatusMessage = "Scanning…";
+        IsBusy = true; ErrorMessage = null;
         Results.Clear();
+        StartElapsedTimer("Scanning");
 
         // If a previous session is alive, free it before opening a new one.
         if (HasSession)
@@ -196,6 +200,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         }
         finally
         {
+            StopElapsedTimer();
             IsBusy = false;
         }
     }
@@ -208,7 +213,8 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
 
-        IsBusy = true; ErrorMessage = null; StatusMessage = "Refining…";
+        IsBusy = true; ErrorMessage = null;
+        StartElapsedTimer("Refining");
         var sw = Stopwatch.StartNew();
         try
         {
@@ -260,7 +266,42 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         }
         finally
         {
+            StopElapsedTimer();
             IsBusy = false;
+        }
+    }
+
+    // Live elapsed-time display while a scan is in flight. Real per-step
+    // progress would need pipe-protocol changes (the request-response
+    // pipe can't stream interim updates); for v1 just surface the wall
+    // clock so the user knows the UI isn't frozen.
+    private void StartElapsedTimer(string verb)
+    {
+        _elapsedStopwatch = Stopwatch.StartNew();
+        StatusMessage = $"{verb}… 0.0 s";
+        _elapsedTimer ??= new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(200),
+        };
+        _elapsedTimer.Tick -= OnElapsedTick;
+        _elapsedTimer.Tag = verb;
+        _elapsedTimer.Tick += OnElapsedTick;
+        _elapsedTimer.Start();
+    }
+
+    private void StopElapsedTimer()
+    {
+        _elapsedTimer?.Stop();
+        if (_elapsedTimer is not null) _elapsedTimer.Tick -= OnElapsedTick;
+        _elapsedStopwatch = null;
+    }
+
+    private void OnElapsedTick(object? sender, EventArgs e)
+    {
+        if (_elapsedStopwatch is null) return;
+        if (sender is DispatcherTimer t && t.Tag is string verb)
+        {
+            StatusMessage = $"{verb}… {_elapsedStopwatch.Elapsed.TotalSeconds:F1} s";
         }
     }
 

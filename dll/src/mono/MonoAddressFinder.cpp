@@ -466,15 +466,37 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     // global memo at the end of this WhatIsAt call.
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> newlyMemoized;
 
+    // Phase 27 perf: bulk-read the entire backward range in one shot
+    // instead of paying per-8-byte SafeReadBytes (each does a VirtualQuery
+    // ~µs). For a 16 KB scan, that's 2048 → 4 syscalls. On 活俠傳 a 500-
+    // result scan dropped from 16 s to ~4-5 s. Pages that AV are zero-
+    // filled so the inner loop sees "no candidate" — same effective
+    // behavior as the old per-step code.
+    const std::size_t bulkBytes = maxSteps * kStride;
+    const std::uintptr_t rangeStart = start >= (maxSteps - 1) * kStride
+        ? start - (maxSteps - 1) * kStride
+        : 0;
+    std::vector<std::uint8_t> bulkBuf(bulkBytes, 0);
+    {
+        constexpr std::size_t kPageBytes = 4096;
+        std::size_t off = 0;
+        while (off < bulkBytes) {
+            std::size_t chunk = std::min<std::size_t>(kPageBytes, bulkBytes - off);
+            Memory::SafeReadBytes(reinterpret_cast<void*>(rangeStart + off),
+                                   bulkBuf.data() + off, chunk);
+            off += chunk;
+        }
+    }
+
     for (std::size_t i = 0; i < maxSteps; ++i) {
         std::uintptr_t p = start - i * kStride;
         out.scannedSteps = i + 1;
 
+        // Index into pre-read buffer in REVERSE (i=0 means start, which
+        // is the rightmost qword in the buffer; i=maxSteps-1 means oldest).
+        const std::size_t bufIdx = (maxSteps - 1 - i) * kStride;
         std::uintptr_t vtCandidate = 0;
-        if (!Memory::SafeReadBytes(reinterpret_cast<void*>(p),
-                                   &vtCandidate, sizeof(vtCandidate))) {
-            continue;
-        }
+        std::memcpy(&vtCandidate, bulkBuf.data() + bufIdx, sizeof(vtCandidate));
         if (vtCandidate == 0) continue;
         if ((vtCandidate & 7u) != 0) continue;
 

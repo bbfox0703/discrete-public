@@ -58,7 +58,8 @@
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
               CanUserSortColumns="True"
-              GridLinesVisibility="Horizontal">
+              GridLinesVisibility="Horizontal"
+              DoubleTapped="OnProcessRowDoubleTapped">
       <DataGrid.Columns>
         <DataGridTextColumn Header="{StaticResource Picker.ColPid}"     Width="80"
                             Binding="{Binding Pid}"

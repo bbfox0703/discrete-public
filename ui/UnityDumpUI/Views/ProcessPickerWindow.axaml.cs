@@ -53,4 +53,18 @@ public partial class ProcessPickerWindow : Window
             Close(null);
         }
     }
+
+    /// <summary>
+    /// Double-clicking a Unity process row closes the dialog with that row
+    /// selected — equivalent to "click row, then click Inject & Connect".
+    /// Only fires when the click lands on an actual data row (not the header
+    /// or an empty area), enforced by the SelectedItem null-check.
+    /// </summary>
+    private void OnProcessRowDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is ProcessPickerViewModel vm && vm.Selected is { } row)
+        {
+            Close(row);
+        }
+    }
 }

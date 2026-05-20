@@ -292,14 +292,40 @@ Pro: end user does literally nothing — just open the .CT. No
 Con: each CT is ~1 MB larger (backend DLL); updating the runtime
 requires re-publishing every CT that embeds it.
 
+### Proxy DLL deployment (alternative to runtime inject)
+
+CE Lua `loadLibrary()` is the **simplest** end-user injection path —
+`unity_dump.lua` calls it at table-activate. Some CT publishers prefer
+proxy-DLL deployment instead (user drops `version.dll` / `winmm.dll`
+next to the game .exe → Windows auto-loads it before Unity starts).
+Trade-offs:
+
+| Injection style | Pros | Cons |
+|---|---|---|
+| **CE Lua `loadLibrary` at activate** (default) | Zero install. User opens .CT → it Just Works. Works on protected processes that allow LoadLibrary but block proxy load. | Inject happens *after* Unity initializes; backend detection fires post-handshake. |
+| **Proxy DLL (`version.dll` / `winmm.dll`)** | DLL loads before Unity → catches very-early init events. Survives game restart without re-running CT activate. Some games block `LoadLibrary` from CE specifically (rare). | User has to drop the proxy file into the game folder manually. Anti-virus often complains about generic `version.dll` proxies. |
+
+**If you ship a proxy DLL** — pick the right arch:
+
+| Target | Proxy from |
+|---|---|
+| 64-bit Unity (most modern games) | `dist/version.dll` or `dist/winmm.dll` (x64) |
+| 32-bit Unity (legacy Mono, e.g. older Unity 2018-2020 games) | `dist/x86/version.dll` or `dist/x86/winmm.dll` |
+
+The proxy auto-loads the appropriate `UnityDumper-Mono.dll` /
+`UnityDumper-IL2CPP.dll` from the same directory at game startup.
+
+The matching backend DLL (`UnityDumper-{Mono,IL2CPP}.dll` for the right
+arch) must be deployed alongside the proxy. **Don't mix arch**: a 64-bit
+proxy with a 32-bit backend DLL silently fails.
+
 ### Files NOT to deploy
 
 | File | Don't ship to end users | Why |
 |---|---|---|
 | `DiscreteUI.exe` | ✋ | Developer UI; surface area + complexity end users don't need |
-| `version.dll` / `winmm.dll` (proxy) | ✋ | Proxy is for dev "always load before Unity" use case; CE Lua `injectDLL()` at table-activate handles end-user injection |
 | `metadata-cli.exe` | ✋ | Offline metadata dump tool (dev/forensics) |
-| `inject-x86.exe` | ✋ usually | DiscreteUI's cross-bitness helper; CE 7.5+ `injectDLL()` handles 32-bit targets directly |
+| `inject-x86.exe` | ✋ usually | DiscreteUI's cross-bitness helper; CE 7.5+ `loadLibrary()` handles 32-bit targets directly |
 | `*.pdb` | ✋ | Debug symbols |
 
 ## Notes
