@@ -4,6 +4,7 @@
 
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
 #include "MonoClassWalker.h"
 #include "MonoDomain.h"
@@ -100,6 +101,12 @@ MonoType* SehEnumBasetypeProbe(fn_class_enum_basetype fn, MonoClass* k) {
 int SehValueSizeProbe(fn_class_value_size fn, MonoClass* k) {
     __try { std::uint32_t a = 0; return fn(k, &a); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+// Phase 27c — array element class lookup. Non-null result means klass is
+// an array type (System.Object[], int[], etc).
+MonoClass* SehElementClassProbe(fn_class_get_element_class fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 #pragma warning(pop)
 
@@ -513,10 +520,69 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
             }
         }
 
+        // Phase 27c — array element resolution. If klass is an array type
+        // (T[] / List<T>'s _items), compute element index from the offset
+        // instead of falling through to per-field resolution (arrays don't
+        // have declared fields in the usual sense — the "fields" are the
+        // bounds pointer + max_length + the slot vector).
+        bool resolvedAsArray = false;
+        if (r.class_get_element_class != nullptr) {
+            MonoClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
+            if (elemClass != nullptr) {
+                std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
+                if (out.fieldOffset >= dataOff) {
+                    // Read max_length so we can report total length.
+                    std::uintptr_t arrayLength = 0;
+                    Memory::SafeReadBytes(
+                        reinterpret_cast<void*>(p + ManagedLayout::kArrayMaxLengthOffset),
+                        &arrayLength, sizeof(arrayLength));
+
+                    // Determine element stride: value-type elements use
+                    // class_value_size; reference-type elements take one
+                    // pointer slot per array entry.
+                    std::size_t elemSize = ManagedLayout::kPointerSize;
+                    bool elemIsValueType = false;
+                    if (r.class_is_valuetype != nullptr) {
+                        elemIsValueType = SehIsValueTypeProbe(r.class_is_valuetype, elemClass) != 0;
+                    }
+                    if (elemIsValueType && r.class_value_size != nullptr) {
+                        int sz = SehValueSizeProbe(r.class_value_size, elemClass);
+                        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                    }
+
+                    std::ptrdiff_t into       = out.fieldOffset - dataOff;
+                    std::size_t    elemIdx    = static_cast<std::size_t>(into) / elemSize;
+                    std::size_t    interior   = static_cast<std::size_t>(into) % elemSize;
+
+                    out.field.present    = true;
+                    out.field.name       = "[" + std::to_string(elemIdx) + "]";
+                    out.field.offset     = dataOff + elemIdx * elemSize;
+                    out.field.size       = elemSize;
+                    out.field.kind       = (interior == 0) ? "array-element" : "array-interior";
+                    out.field.isValueType = elemIsValueType;
+                    out.field.interiorOffset = static_cast<std::ptrdiff_t>(interior);
+                    if (r.class_get_name != nullptr) {
+                        const char* enm = SehClassNameProbe(r.class_get_name, elemClass);
+                        if (enm != nullptr) out.field.typeName = enm;
+                    }
+                    // Surface array length + index in declaredIn slot so the
+                    // wire layer can extract them. Format: "len=N idx=M".
+                    char meta[64];
+                    std::snprintf(meta, sizeof(meta), "len=%zu idx=%zu",
+                                  static_cast<std::size_t>(arrayLength), elemIdx);
+                    out.field.declaredIn = meta;
+                    resolvedAsArray = true;
+                }
+            }
+        }
+
         // Phase 17b — resolve which declared field contains the queried
-        // offset. Reuses the same outer ThreadAttachGuard scope.
-        ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
-                       out.nearestFieldDelta);
+        // offset. Reuses the same outer ThreadAttachGuard scope. Skipped
+        // when array resolver already populated the field.
+        if (!resolvedAsArray) {
+            ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
+                           out.nearestFieldDelta);
+        }
 
         // Merge newly-discovered (vtable, klass) pairs into the global
         // memo so subsequent calls hit the fast path.

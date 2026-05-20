@@ -4,6 +4,7 @@
 
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
@@ -90,6 +91,12 @@ int SehIsValueTypeProbe(fn_class_is_valuetype fn, Il2CppClass* k) {
 int SehValueSizeProbe(fn_class_value_size fn, Il2CppClass* k) {
     __try { std::uint32_t a = 0; return fn(k, &a); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+// Phase 27c — array element class lookup. Non-null result means klass is
+// an array type.
+Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 #pragma warning(pop)
 
@@ -493,11 +500,62 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
             }
         }
 
+        // Phase 27c — array element resolution. If klass is an array
+        // type, compute the element index from the queried offset and
+        // report it as an array-element instead of falling through to
+        // declared-field resolution (arrays have no user-declared fields).
+        bool resolvedAsArray = false;
+        if (r.class_get_element_class != nullptr) {
+            Il2CppClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
+            if (elemClass != nullptr) {
+                std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
+                if (out.fieldOffset >= dataOff) {
+                    std::uintptr_t arrayLength = 0;
+                    Memory::SafeReadBytes(
+                        reinterpret_cast<void*>(p + ManagedLayout::kArrayMaxLengthOffset),
+                        &arrayLength, sizeof(arrayLength));
+
+                    std::size_t elemSize = ManagedLayout::kPointerSize;
+                    bool elemIsValueType = false;
+                    if (r.class_is_valuetype != nullptr) {
+                        elemIsValueType = SehIsValueTypeProbe(r.class_is_valuetype, elemClass) != 0;
+                    }
+                    if (elemIsValueType && r.class_value_size != nullptr) {
+                        int sz = SehValueSizeProbe(r.class_value_size, elemClass);
+                        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                    }
+
+                    std::ptrdiff_t into     = out.fieldOffset - dataOff;
+                    std::size_t    elemIdx  = static_cast<std::size_t>(into) / elemSize;
+                    std::size_t    interior = static_cast<std::size_t>(into) % elemSize;
+
+                    out.field.present    = true;
+                    out.field.name       = "[" + std::to_string(elemIdx) + "]";
+                    out.field.offset     = dataOff + elemIdx * elemSize;
+                    out.field.size       = elemSize;
+                    out.field.kind       = (interior == 0) ? "array-element" : "array-interior";
+                    out.field.isValueType = elemIsValueType;
+                    out.field.interiorOffset = static_cast<std::ptrdiff_t>(interior);
+                    if (r.class_get_name != nullptr) {
+                        const char* enm = SehClassNameProbe(r.class_get_name, elemClass);
+                        if (enm != nullptr) out.field.typeName = enm;
+                    }
+                    char meta[64];
+                    std::snprintf(meta, sizeof(meta), "len=%zu idx=%zu",
+                                  static_cast<std::size_t>(arrayLength), elemIdx);
+                    out.field.declaredIn = meta;
+                    resolvedAsArray = true;
+                }
+            }
+        }
+
         // Phase 17b — resolve which declared field contains the queried
         // offset. Reuses the same ThreadAttachGuard scope so the runtime
         // calls inside EnumerateInstanceFields don't have to re-attach.
-        ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
-                       out.nearestFieldDelta);
+        if (!resolvedAsArray) {
+            ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
+                           out.nearestFieldDelta);
+        }
         return out;
     }
 

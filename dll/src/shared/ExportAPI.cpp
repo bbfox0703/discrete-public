@@ -261,6 +261,86 @@ json DecodeValueBytesToJson(const std::uint8_t bytes[8], Memory::ValueDataType d
     return nullptr;
 }
 
+// Phase 27b-4 — wire encoding string → StringEncoding enum.
+bool ParseStringEncoding(std::string_view s, Memory::StringEncoding& out) {
+    if (s == "utf16" || s == "utf-16" || s == "utf16le" || s.empty()) {
+        out = Memory::StringEncoding::Utf16Le; return true;
+    }
+    if (s == "utf8" || s == "utf-8") {
+        out = Memory::StringEncoding::Utf8;    return true;
+    }
+    if (s == "ascii") {
+        out = Memory::StringEncoding::Ascii;   return true;
+    }
+    return false;
+}
+
+bool ParseStringMatchMode(std::string_view s, Memory::StringMatchMode& out) {
+    if (s == "contains" || s.empty()) { out = Memory::StringMatchMode::Contains; return true; }
+    if (s == "exact")                 { out = Memory::StringMatchMode::Exact;    return true; }
+    return false;
+}
+
+// Encode a UTF-8 wire string into the requested target encoding (bytes).
+// Returns empty on failure (caller maps to wire error).
+std::vector<std::uint8_t> EncodeNeedleForString(std::string_view utf8In,
+                                                  Memory::StringEncoding enc) {
+    std::vector<std::uint8_t> out;
+    if (utf8In.empty()) return out;
+    switch (enc) {
+        case Memory::StringEncoding::Ascii: {
+            out.reserve(utf8In.size());
+            for (unsigned char ch : utf8In) {
+                if (ch >= 0x80) return {};   // non-ASCII in ASCII mode
+                out.push_back(ch);
+            }
+            return out;
+        }
+        case Memory::StringEncoding::Utf8: {
+            out.assign(utf8In.begin(), utf8In.end());
+            return out;
+        }
+        case Memory::StringEncoding::Utf16Le: {
+            // UTF-8 → UTF-16LE via Windows API. CP_UTF8 = 65001.
+            int wc = ::MultiByteToWideChar(65001, 0, utf8In.data(),
+                                            static_cast<int>(utf8In.size()),
+                                            nullptr, 0);
+            if (wc <= 0) return {};
+            std::vector<wchar_t> wbuf(static_cast<std::size_t>(wc));
+            ::MultiByteToWideChar(65001, 0, utf8In.data(),
+                                  static_cast<int>(utf8In.size()),
+                                  wbuf.data(), wc);
+            out.assign(reinterpret_cast<const std::uint8_t*>(wbuf.data()),
+                       reinterpret_cast<const std::uint8_t*>(wbuf.data() + wc));
+            return out;
+        }
+    }
+    return out;
+}
+
+// Decode an arbitrary byte sequence into a UTF-8 display string for the
+// scanFieldValue response's `currentValue` field on string hits. The
+// sequence is the matched needle bytes — what we displayed at scan time.
+std::string DecodeMatchedNeedleToUtf8(const std::vector<std::uint8_t>& bytes,
+                                       Memory::StringEncoding enc) {
+    if (bytes.empty()) return {};
+    switch (enc) {
+        case Memory::StringEncoding::Ascii:
+        case Memory::StringEncoding::Utf8:
+            return std::string(bytes.begin(), bytes.end());
+        case Memory::StringEncoding::Utf16Le: {
+            const wchar_t* w = reinterpret_cast<const wchar_t*>(bytes.data());
+            int wcLen = static_cast<int>(bytes.size() / sizeof(wchar_t));
+            int u8 = ::WideCharToMultiByte(65001, 0, w, wcLen, nullptr, 0, nullptr, nullptr);
+            if (u8 <= 0) return {};
+            std::string out(static_cast<std::size_t>(u8), '\0');
+            ::WideCharToMultiByte(65001, 0, w, wcLen, out.data(), u8, nullptr, nullptr);
+            return out;
+        }
+    }
+    return {};
+}
+
 // Wire scanType string → ValueScanType enum (Memory-level: Exact / Range
 // are the only modes the raw memory scan supports). The session-level
 // modes (changed / unchanged / increased / decreased / newValue) are
@@ -2016,6 +2096,91 @@ void RegisterCoreHandlers() {
 
         // --- Parse wire shape ---
         std::string dtStr = args.value("dataType", std::string{"int32"});
+
+        // Phase 27b-4 — string scan path. Different request shape:
+        //   value     : string (the search string in UTF-8 wire encoding)
+        //   encoding  : "utf16"|"utf8"|"ascii" (default utf16, matches managed)
+        //   matchMode : "exact"|"contains" (default contains)
+        //   limit / maxBackwardScan : same as numeric path
+        if (dtStr == "string") {
+            std::string encStr   = args.value("encoding",  std::string{"utf16"});
+            std::string mmStr    = args.value("matchMode", std::string{"contains"});
+            Memory::StringEncoding enc{};
+            Memory::StringMatchMode mm{};
+            if (!ParseStringEncoding(encStr, enc))     return json{{"error", "unknown 'encoding'"}};
+            if (!ParseStringMatchMode(mmStr, mm))      return json{{"error", "unknown 'matchMode'"}};
+            if (!args.contains("value") || !args["value"].is_string()) {
+                return json{{"error", "string scan requires 'value' (string)"}};
+            }
+            std::string needleUtf8 = args["value"].get<std::string>();
+            auto needleBytes = EncodeNeedleForString(needleUtf8, enc);
+            if (needleBytes.empty()) return json{{"error", "needle encoding failed (e.g. non-ASCII chars in ASCII mode)"}};
+
+            Memory::StringScanRequest sreq{};
+            sreq.encoding  = enc;
+            sreq.matchMode = mm;
+            sreq.needle    = std::move(needleBytes);
+            sreq.limit     = static_cast<std::size_t>(args.value("limit", 5000));
+            if (sreq.limit == 0 || sreq.limit > 50000) sreq.limit = 5000;
+
+            std::size_t maxBackwardScan = static_cast<std::size_t>(args.value("maxBackwardScan", 16384));
+            if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+            if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+            if (!Mono::BuildClassRangeCache()) {
+                return json{{"error", "address-finder class cache build failed"}};
+            }
+
+            Memory::ValueScanStats sstats{};
+            auto candidates = Memory::ScanForString(sreq, &sstats);
+
+            json rows = json::array();
+            std::size_t droppedNonManaged = 0;
+            std::string matchedDisplay = DecodeMatchedNeedleToUtf8(sreq.needle, enc);
+            for (const auto& c : candidates) {
+                std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
+                Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
+                if (!lookup.found) { droppedNonManaged++; continue; }
+                json row = {
+                    {"addr",            formatHex(addr)},
+                    {"instAddr",        formatHex(lookup.instance)},
+                    {"asm",             lookup.assembly},
+                    {"ns",              lookup.ns},
+                    {"class",           lookup.className},
+                    {"fieldOffset",     static_cast<std::int64_t>(lookup.fieldOffset)},
+                    {"currentValue",    matchedDisplay},
+                    {"matchedLength",   c.length},
+                };
+                if (lookup.field.present) {
+                    row["field"]     = lookup.field.name;
+                    row["fieldType"] = lookup.field.typeName;
+                    row["fieldKind"] = lookup.field.kind;
+                } else if (lookup.nearestField.present) {
+                    row["nearestField"] = json{
+                        {"name",  lookup.nearestField.name},
+                        {"delta", static_cast<std::int64_t>(lookup.nearestFieldDelta)},
+                    };
+                    row["fieldKind"] = "near";
+                } else {
+                    row["fieldKind"] = "interior";
+                }
+                rows.push_back(std::move(row));
+            }
+            return json{
+                {"ok",                true},
+                {"mode",              "global"},
+                {"dataType",          "string"},
+                {"encoding",          encStr},
+                {"matchMode",         mmStr},
+                {"count",             rows.size()},
+                {"droppedNonManaged", droppedNonManaged},
+                {"truncated",         candidates.size() >= sreq.limit},
+                {"scannedBytes",      sstats.bytesScanned},
+                {"readFailureBytes",  sstats.readFailureBytes},
+                {"candidates",        std::move(rows)},
+            };
+        }
+
         Memory::ValueDataType dt{};
         if (!ParseValueDataType(dtStr, dt)) {
             return json{{"error", "unknown 'dataType' (try int32/uint32/float/double/...)"}};
@@ -3714,6 +3879,89 @@ void RegisterCoreHandlers() {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
         std::string dtStr = args.value("dataType", std::string{"int32"});
+
+        // Phase 27b-4 — string scan path (IL2CPP). Mirror of the Mono
+        // handler's string branch; backend difference is just which
+        // WhatIsAt + BuildClassRangeCache we call.
+        if (dtStr == "string") {
+            std::string encStr   = args.value("encoding",  std::string{"utf16"});
+            std::string mmStr    = args.value("matchMode", std::string{"contains"});
+            Memory::StringEncoding enc{};
+            Memory::StringMatchMode mm{};
+            if (!ParseStringEncoding(encStr, enc))     return json{{"error", "unknown 'encoding'"}};
+            if (!ParseStringMatchMode(mmStr, mm))      return json{{"error", "unknown 'matchMode'"}};
+            if (!args.contains("value") || !args["value"].is_string()) {
+                return json{{"error", "string scan requires 'value' (string)"}};
+            }
+            std::string needleUtf8 = args["value"].get<std::string>();
+            auto needleBytes = EncodeNeedleForString(needleUtf8, enc);
+            if (needleBytes.empty()) return json{{"error", "needle encoding failed"}};
+
+            Memory::StringScanRequest sreq{};
+            sreq.encoding  = enc;
+            sreq.matchMode = mm;
+            sreq.needle    = std::move(needleBytes);
+            sreq.limit     = static_cast<std::size_t>(args.value("limit", 5000));
+            if (sreq.limit == 0 || sreq.limit > 50000) sreq.limit = 5000;
+
+            std::size_t maxBackwardScan = static_cast<std::size_t>(args.value("maxBackwardScan", 16384));
+            if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+            if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+            if (!IL2CPP::BuildClassRangeCache()) {
+                return json{{"error", "address-finder class cache build failed"}};
+            }
+
+            Memory::ValueScanStats sstats{};
+            auto candidates = Memory::ScanForString(sreq, &sstats);
+
+            json rows = json::array();
+            std::size_t droppedNonManaged = 0;
+            std::string matchedDisplay = DecodeMatchedNeedleToUtf8(sreq.needle, enc);
+            for (const auto& c : candidates) {
+                std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
+                IL2CPP::AddressLookup lookup = IL2CPP::WhatIsAt(addr, maxBackwardScan);
+                if (!lookup.found) { droppedNonManaged++; continue; }
+                json row = {
+                    {"addr",            formatHex(addr)},
+                    {"instAddr",        formatHex(lookup.instance)},
+                    {"asm",             lookup.assembly},
+                    {"ns",              lookup.ns},
+                    {"class",           lookup.className},
+                    {"fieldOffset",     static_cast<std::int64_t>(lookup.fieldOffset)},
+                    {"currentValue",    matchedDisplay},
+                    {"matchedLength",   c.length},
+                };
+                if (lookup.field.present) {
+                    row["field"]     = lookup.field.name;
+                    row["fieldType"] = lookup.field.typeName;
+                    row["fieldKind"] = lookup.field.kind;
+                } else if (lookup.nearestField.present) {
+                    row["nearestField"] = json{
+                        {"name",  lookup.nearestField.name},
+                        {"delta", static_cast<std::int64_t>(lookup.nearestFieldDelta)},
+                    };
+                    row["fieldKind"] = "near";
+                } else {
+                    row["fieldKind"] = "interior";
+                }
+                rows.push_back(std::move(row));
+            }
+            return json{
+                {"ok",                true},
+                {"mode",              "global"},
+                {"dataType",          "string"},
+                {"encoding",          encStr},
+                {"matchMode",         mmStr},
+                {"count",             rows.size()},
+                {"droppedNonManaged", droppedNonManaged},
+                {"truncated",         candidates.size() >= sreq.limit},
+                {"scannedBytes",      sstats.bytesScanned},
+                {"readFailureBytes",  sstats.readFailureBytes},
+                {"candidates",        std::move(rows)},
+            };
+        }
+
         Memory::ValueDataType dt{};
         if (!ParseValueDataType(dtStr, dt)) {
             return json{{"error", "unknown 'dataType' (try int32/uint32/float/double/...)"}};

@@ -597,4 +597,114 @@ std::vector<ValueScanCandidate> ScanForValue(const ValueScanRequest& req,
     return matches;
 }
 
+// ---------- Phase 27b-4 — String (byte-sequence) scan -----------------------
+//
+// CE-style UTF-16 / UTF-8 / ASCII search. The caller pre-encodes the
+// needle into bytes (e.g. wstring → UTF-16LE bytes); this scanner just
+// looks for that byte sequence in committed RW memory.
+
+namespace {
+
+bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
+                    const std::uint8_t* needle, std::size_t needleSize,
+                    std::size_t stride,
+                    std::vector<StringScanCandidate>& matches,
+                    std::size_t limit) {
+    if (size < needleSize) return true;
+    const std::size_t end = size - needleSize;
+    for (std::size_t i = 0; i <= end; i += stride) {
+        if (std::memcmp(base + i, needle, needleSize) == 0) {
+            StringScanCandidate c{};
+            c.addr   = base + i;
+            c.length = needleSize;
+            matches.push_back(c);
+            if (matches.size() >= limit) return true;
+        }
+    }
+    return true;
+}
+
+#pragma warning(push)
+#pragma warning(disable: 4509)
+bool SehScanStringChunk(const std::uint8_t* base, std::size_t size,
+                        const std::uint8_t* needle, std::size_t needleSize,
+                        std::size_t stride,
+                        std::vector<StringScanCandidate>& matches,
+                        std::size_t limit) {
+    __try {
+        return SehMemcmpProbe(base, size, needle, needleSize, stride, matches, limit);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+#pragma warning(pop)
+
+}  // namespace
+
+std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
+                                                ValueScanStats* stats) noexcept {
+    std::vector<StringScanCandidate> matches;
+    if (req.needle.empty() || req.limit == 0) return matches;
+    matches.reserve(std::min<std::size_t>(req.limit, 1024));
+
+    std::size_t stride = req.alignment;
+    if (stride == 0) {
+        stride = (req.encoding == StringEncoding::Utf16Le) ? 2u : 1u;
+    }
+
+    constexpr DWORD kRW =
+        PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    auto regions = EnumerateCommittedRegions();
+    auto stacks  = CollectThreadStackRanges();
+    if (stats) stats->threadStacks = stacks.size();
+
+    for (const auto& r : regions) {
+        if (matches.size() >= req.limit) break;
+        if ((r.protect & kRW) == 0) continue;
+        if (stats) stats->regionsTotal++;
+        if (r.type == MEM_IMAGE) { if (stats) stats->regionsSkipImage++; continue; }
+
+        const std::uint8_t* regionEnd = r.base + r.size;
+        bool onStack = false;
+        for (const auto& s : stacks) {
+            if (s.low >= regionEnd) break;
+            if (RangesOverlap(r.base, regionEnd, s.low, s.high)) { onStack = true; break; }
+        }
+        if (onStack) { if (stats) stats->regionsSkipStack++; continue; }
+
+        if (stats) {
+            stats->regionsScanned++;
+            stats->bytesScanned += r.size;
+        }
+
+        // 64 KB chunks like ScanForValue. Cross-chunk-boundary matches
+        // are missed (a needle that straddles two chunks won't match);
+        // for v1, accept this — strings are short (< 256 bytes), so
+        // bumping the chunk overlap by `needleSize-1` would prevent it.
+        // Add that overlap to be safe.
+        constexpr std::size_t kStringScanChunkBytes = 64 * 1024;
+        const std::size_t overlap = req.needle.size() - 1;
+        std::size_t offset = 0;
+        while (offset < r.size) {
+            std::size_t chunkSize = std::min<std::size_t>(kStringScanChunkBytes, r.size - offset);
+            const std::uint8_t* chunkBase = r.base + offset;
+            if (!IsReadable(chunkBase, chunkSize)) {
+                if (stats) stats->readFailureBytes += chunkSize;
+            } else {
+                if (!SehScanStringChunk(chunkBase, chunkSize,
+                                        req.needle.data(), req.needle.size(),
+                                        stride, matches, req.limit)) {
+                    if (stats) stats->readFailureBytes += chunkSize;
+                }
+            }
+            if (matches.size() >= req.limit) break;
+            if (chunkSize <= overlap) break;
+            offset += chunkSize - overlap;   // overlap to catch boundary-straddling matches
+        }
+    }
+    return matches;
+}
+
 }  // namespace UnityCEDumper::Memory

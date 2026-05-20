@@ -516,6 +516,66 @@ public sealed class SearchSymbolMatch
     [JsonPropertyName("static")]    public bool    IsStatic  { get; set; }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 27 — Unity-aware value search (scanFieldValue + Begin/Refine/End).
+// ---------------------------------------------------------------------------
+
+public sealed class ValueScanCandidate
+{
+    [JsonPropertyName("addr")]         public string  Address      { get; set; } = string.Empty;
+    [JsonPropertyName("instAddr")]     public string? InstanceAddr { get; set; }
+    [JsonPropertyName("asm")]          public string? Assembly     { get; set; }
+    [JsonPropertyName("ns")]           public string? Namespace    { get; set; }
+    [JsonPropertyName("class")]        public string? Class        { get; set; }
+    [JsonPropertyName("field")]        public string? Field        { get; set; }
+    [JsonPropertyName("fieldType")]    public string? FieldType    { get; set; }
+    [JsonPropertyName("fieldKind")]    public string? FieldKind    { get; set; }
+    [JsonPropertyName("fieldOffset")]  public long?   FieldOffset  { get; set; }
+    /// <summary>Stringified current value — number for numeric scans, string
+    /// for string scans. Wire shape is JSON value; we accept it as string
+    /// after the round-trip to keep AOT serializers happy.</summary>
+    [JsonPropertyName("currentValue")] public JsonElement? CurrentValue { get; set; }
+    [JsonPropertyName("matchedLength")] public int?   MatchedLength { get; set; }
+}
+
+public sealed class BeginValueScanResult
+{
+    [JsonPropertyName("ok")]                public bool   Ok                { get; set; }
+    [JsonPropertyName("sessionId")]         public string SessionId         { get; set; } = string.Empty;
+    [JsonPropertyName("mode")]              public string Mode              { get; set; } = string.Empty;
+    [JsonPropertyName("dataType")]          public string DataType          { get; set; } = string.Empty;
+    [JsonPropertyName("scanType")]          public string ScanType          { get; set; } = string.Empty;
+    [JsonPropertyName("count")]             public int    Count             { get; set; }
+    [JsonPropertyName("totalCandidates")]   public int    TotalCandidates   { get; set; }
+    [JsonPropertyName("droppedNonManaged")] public int    DroppedNonManaged { get; set; }
+    [JsonPropertyName("truncated")]         public bool   Truncated         { get; set; }
+    [JsonPropertyName("scannedBytes")]      public long   ScannedBytes      { get; set; }
+    [JsonPropertyName("candidates")]        public List<ValueScanCandidate> Candidates { get; set; } = new();
+    [JsonPropertyName("error")]             public string? Error            { get; set; }
+}
+
+public sealed class RefineValueScanResult
+{
+    [JsonPropertyName("ok")]              public bool   Ok              { get; set; }
+    [JsonPropertyName("sessionId")]       public string SessionId       { get; set; } = string.Empty;
+    [JsonPropertyName("scanType")]        public string ScanType        { get; set; } = string.Empty;
+    [JsonPropertyName("dataType")]        public string DataType        { get; set; } = string.Empty;
+    [JsonPropertyName("count")]           public int    Count           { get; set; }
+    [JsonPropertyName("totalCandidates")] public int    TotalCandidates { get; set; }
+    [JsonPropertyName("removed")]         public int    Removed         { get; set; }
+    [JsonPropertyName("truncated")]       public bool   Truncated       { get; set; }
+    [JsonPropertyName("candidates")]      public List<ValueScanCandidate> Candidates { get; set; } = new();
+    [JsonPropertyName("error")]           public string? Error          { get; set; }
+}
+
+public sealed class EndValueScanResult
+{
+    [JsonPropertyName("ok")]        public bool   Ok        { get; set; }
+    [JsonPropertyName("sessionId")] public string SessionId { get; set; } = string.Empty;
+    [JsonPropertyName("dropped")]   public bool   Dropped   { get; set; }
+    [JsonPropertyName("error")]     public string? Error    { get; set; }
+}
+
 public sealed class MethodOverloadEntry
 {
     [JsonPropertyName("name")]               public string       Name              { get; set; } = string.Empty;

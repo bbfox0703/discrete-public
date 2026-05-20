@@ -1269,6 +1269,168 @@
               </TreeView>
             </DockPanel>
           </TabItem>
+
+          <!-- Phase 27d — Value Search tab. CE-style First Scan / Next Scan
+               via the beginValueScan / refineValueScan / endValueScan
+               pipe RPCs. Inline (no separate axaml file) per the Symbol
+               Finder / Scene Explorer convention. -->
+          <TabItem Header="Value Search">
+            <DockPanel Margin="6">
+              <!-- Top bar: dataType + scanType + Value + ValueTo + Limit + buttons -->
+              <Grid DockPanel.Dock="Top" Margin="0,0,0,6"
+                    ColumnDefinitions="Auto,*,Auto,*,Auto,*,Auto"
+                    RowDefinitions="Auto,Auto,Auto">
+
+                <!-- Row 0: dataType + scanType -->
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Type:"
+                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Grid.Row="0" Grid.Column="1"
+                          ItemsSource="{Binding ValueSearch.DataTypes}"
+                          SelectedItem="{Binding ValueSearch.SelectedDataType, Mode=TwoWay}"
+                          HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="Scan:"
+                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Grid.Row="0" Grid.Column="3"
+                          ItemsSource="{Binding ValueSearch.ScanTypes}"
+                          SelectedItem="{Binding ValueSearch.SelectedScanType, Mode=TwoWay}"
+                          IsVisible="{Binding ValueSearch.IsNumericMode}"
+                          HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+
+                <TextBlock Grid.Row="0" Grid.Column="4" Text="Limit:"
+                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <NumericUpDown Grid.Row="0" Grid.Column="5"
+                               Value="{Binding ValueSearch.Limit, Mode=TwoWay}"
+                               Minimum="10" Maximum="50000" Increment="50"
+                               HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+
+                <StackPanel Grid.Row="0" Grid.Column="6" Orientation="Horizontal" Spacing="6">
+                  <Button Content="First Scan"
+                          Command="{Binding ValueSearch.FirstScanCommand}"
+                          MinWidth="100"/>
+                  <Button Content="End Session"
+                          Command="{Binding ValueSearch.EndSessionCommand}"
+                          MinWidth="100"/>
+                </StackPanel>
+
+                <!-- Row 1: Value + ValueTo -->
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Value:"
+                           VerticalAlignment="Center" Margin="0,6,6,0"/>
+                <TextBox Grid.Row="1" Grid.Column="1"
+                         Text="{Binding ValueSearch.ValueText, Mode=TwoWay}"
+                         Margin="0,6,12,0"
+                         Watermark="100  or  GameOver  for strings"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="2" Text="To:"
+                           VerticalAlignment="Center" Margin="0,6,6,0"
+                           IsVisible="{Binding ValueSearch.NeedsValueTo}"/>
+                <TextBox Grid.Row="1" Grid.Column="3"
+                         Text="{Binding ValueSearch.ValueToText, Mode=TwoWay}"
+                         IsVisible="{Binding ValueSearch.NeedsValueTo}"
+                         Margin="0,6,12,0"
+                         Watermark="upper bound"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="4" Text="Tol:"
+                           VerticalAlignment="Center" Margin="0,6,6,0"/>
+                <TextBox Grid.Row="1" Grid.Column="5"
+                         Text="{Binding ValueSearch.ToleranceText, Mode=TwoWay}"
+                         Margin="0,6,12,0"
+                         Watermark="0.0001"
+                         ToolTip.Tip="Float / double epsilon — only used for float/double scanning."/>
+
+                <!-- Row 2: encoding/matchMode (string mode) OR refine controls -->
+                <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="7"
+                            Orientation="Horizontal" Spacing="6" Margin="0,6,0,0"
+                            IsVisible="{Binding ValueSearch.IsStringMode}">
+                  <TextBlock Text="Encoding:" VerticalAlignment="Center"/>
+                  <ComboBox ItemsSource="{Binding ValueSearch.Encodings}"
+                            SelectedItem="{Binding ValueSearch.SelectedEncoding, Mode=TwoWay}"
+                            MinWidth="100"/>
+                  <TextBlock Text="Match:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                  <ComboBox ItemsSource="{Binding ValueSearch.MatchModes}"
+                            SelectedItem="{Binding ValueSearch.SelectedMatchMode, Mode=TwoWay}"
+                            MinWidth="100"/>
+                  <TextBlock Text="(string scans are one-shot — no session / next-scan support)"
+                             VerticalAlignment="Center" FontStyle="Italic" Opacity="0.6"
+                             Margin="12,0,0,0"/>
+                </StackPanel>
+
+                <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="7"
+                            Orientation="Horizontal" Spacing="6" Margin="0,6,0,0"
+                            IsVisible="{Binding ValueSearch.IsNumericMode}">
+                  <TextBlock Text="Next Scan:" VerticalAlignment="Center"/>
+                  <ComboBox ItemsSource="{Binding ValueSearch.RefineTypes}"
+                            SelectedItem="{Binding ValueSearch.SelectedRefineType, Mode=TwoWay}"
+                            MinWidth="120"/>
+                  <Button Content="Next Scan"
+                          Command="{Binding ValueSearch.NextScanCommand}"
+                          MinWidth="100"/>
+                  <TextBlock Text="(session active)"
+                             VerticalAlignment="Center" Foreground="LimeGreen"
+                             Margin="12,0,0,0"
+                             IsVisible="{Binding ValueSearch.HasSession}"/>
+                </StackPanel>
+              </Grid>
+
+              <!-- Status / error band -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F808080" CornerRadius="3">
+                <TextBlock Text="{Binding ValueSearch.StatusMessage}"
+                           TextWrapping="Wrap"
+                           FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1FFF6060" CornerRadius="3"
+                      IsVisible="{Binding ValueSearch.ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding ValueSearch.ErrorMessage}"
+                           Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+
+              <!-- Results grid -->
+              <DataGrid ItemsSource="{Binding ValueSearch.Results}"
+                        SelectedItem="{Binding ValueSearch.SelectedRow, Mode=TwoWay}"
+                        AutoGenerateColumns="False" CanUserReorderColumns="True"
+                        CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
+                        IsReadOnly="True"
+                        CanUserSortColumns="True"
+                        DoubleTapped="OnValueSearchRowActivated"
+                        Name="ValueSearchGrid">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Class" Binding="{Binding ClassDisplay}"
+                                       Width="220" SortMemberPath="ClassDisplay" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Field" Binding="{Binding Field}"
+                                       Width="180" SortMemberPath="Field" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
+                                       Width="120" SortMemberPath="FieldType" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Offset" Binding="{Binding OffsetLabel}"
+                                       Width="80" SortMemberPath="FieldOffset" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Current Value" Binding="{Binding CurrentValue}"
+                                       Width="120" SortMemberPath="CurrentValue" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Instance" Binding="{Binding InstanceAddr}"
+                                       Width="180" FontFamily="Consolas,Menlo,monospace"
+                                       SortMemberPath="InstanceAddr" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Address" Binding="{Binding Address}"
+                                       Width="180" FontFamily="Consolas,Menlo,monospace"
+                                       SortMemberPath="Address" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Kind" Binding="{Binding FieldKind}"
+                                       Width="100" SortMemberPath="FieldKind" CanUserSort="True"/>
+                </DataGrid.Columns>
+                <DataGrid.ContextMenu>
+                  <ContextMenu>
+                    <MenuItem Header="Inspect this instance"
+                              Click="OnValueSearchInspectInstance"/>
+                    <Separator/>
+                    <MenuItem Header="Copy instance address"
+                              Click="OnValueSearchCopyInstanceAddr"/>
+                    <MenuItem Header="Copy field address"
+                              Click="OnValueSearchCopyFieldAddr"/>
+                    <MenuItem Header="Copy class name"
+                              Click="OnValueSearchCopyClass"/>
+                  </ContextMenu>
+                </DataGrid.ContextMenu>
+              </DataGrid>
+            </DockPanel>
+          </TabItem>
         </TabControl>
       </DockPanel>
     </Grid>

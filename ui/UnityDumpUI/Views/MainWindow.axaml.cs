@@ -755,6 +755,46 @@ public partial class MainWindow : Window
             vm.SymbolFinder.Activate(row);
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 27d — Value Search row activation + context menu.
+    // -----------------------------------------------------------------------
+
+    private void OnValueSearchRowActivated(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("ValueSearchGrid");
+        if (grid?.SelectedItem is ValueSearchRow row)
+            vm.ValueSearch.Activate(row);
+    }
+
+    private void OnValueSearchInspectInstance(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<ValueSearchRow>(sender, this.FindControl<DataGrid>("ValueSearchGrid"));
+        if (row is not null) vm.ValueSearch.Activate(row);
+    }
+
+    private async void OnValueSearchCopyInstanceAddr(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<ValueSearchRow>(sender, this.FindControl<DataGrid>("ValueSearchGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.InstanceAddr);
+    }
+
+    private async void OnValueSearchCopyFieldAddr(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<ValueSearchRow>(sender, this.FindControl<DataGrid>("ValueSearchGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.Address);
+    }
+
+    private async void OnValueSearchCopyClass(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<ValueSearchRow>(sender, this.FindControl<DataGrid>("ValueSearchGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.ClassDisplay);
+    }
+
     private void OnSymbolFinderNavigateMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;

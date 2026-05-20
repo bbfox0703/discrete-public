@@ -72,6 +72,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         AddressLookup   = new AddressLookupViewModel(_backend, _logger);
         SymbolFinder    = new SymbolFinderViewModel(_backend, _logger, Browser.Assemblies);
         SymbolFinder.NavigateRequested += OnSymbolFinderNavigateRequested;
+        ValueSearch     = new ValueSearchViewModel(_backend, _logger);
+        ValueSearch.NavigateToInspectorRequested += OnValueSearchNavigateToInspector;
         // Phase 20b: Scene Explorer tab. SceneEnumerator wraps the
         // UnityEngine.Object.FindObjects* + Transform-walk recipe from
         // unity_scene.lua; Phase 20-MT keeps main-thread routing on
@@ -254,6 +256,14 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public SymbolFinderViewModel SymbolFinder { get; }
 
     /// <summary>
+    /// Phase 27d — CE-style First Scan / Next Scan tab. Wraps the
+    /// beginValueScan / refineValueScan / endValueScan pipe RPCs so
+    /// the user can iteratively narrow candidates by typed value with
+    /// no class hint required.
+    /// </summary>
+    public ValueSearchViewModel ValueSearch { get; }
+
+    /// <summary>
     /// Phase 20b — Scene Explorer tab. Filter-driven TreeView walking
     /// Unity's authoritative scene graph via Object.FindObjects* +
     /// Transform.GetChild. All icalls main-thread-routed (Phase 20-MT)
@@ -298,6 +308,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexAddressLookup = 3;
     public const int TabIndexSymbolFinder  = 4;
     public const int TabIndexScene         = 5;
+    public const int TabIndexValueSearch   = 6;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -924,6 +935,29 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             ErrorMessage = $"Navigate from finder failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"OnSymbolFinderNavigateRequested: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Phase 27d — Value Search → Inspector cross-tab handoff. Same plumbing
+    /// pattern as Phase 17c (Address Lookup → Inspector) and Phase 20c
+    /// (Scene → Inspector): set the inspector's target to the row's class,
+    /// focus on the instance address, switch tab.
+    /// </summary>
+    private void OnValueSearchNavigateToInspector(ValueSearchRow row)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(row.Class) || string.IsNullOrEmpty(row.InstanceAddr)) return;
+            Inspector.SetTarget(row.Assembly, row.Namespace, row.Class);
+            Inspector.FocusOnInstance(row.InstanceAddr);
+            SelectedDetailTabIndex = TabIndexInspector;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Navigate to inspector failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnValueSearchNavigateToInspector: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

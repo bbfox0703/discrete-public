@@ -665,6 +665,109 @@ public sealed class BackendAdapter : ILiveExportSource
     private static JsonElement Bool(bool value) =>
         JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.Boolean);
 
+    /// <summary>AOT-safe double → <see cref="JsonElement"/>. Used by the
+    /// value-scan path which carries float / range bounds.</summary>
+    private static JsonElement Dbl(double value) =>
+        JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.Double);
+
+    // -----------------------------------------------------------------------
+    // Phase 27 — Unity-aware value search.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// `beginValueScan` — initial scan, opens a session for `refineValueScan`.
+    /// Numeric path: dataType is one of int8..uint64 / float / double; value
+    /// is a double (typed into the right bitness server-side via PackJsonValueToBytes).
+    /// String path: dataType = "string", value = the search string.
+    /// </summary>
+    public async Task<BeginValueScanResult> BeginValueScanAsync(
+        string dataType, string scanType, double value,
+        double? valueTo = null, int? limit = null, double? tolerance = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["dataType"] = Str(dataType),
+            ["scanType"] = Str(scanType),
+            ["value"]    = Dbl(value),
+        };
+        if (valueTo.HasValue)   args["valueTo"]   = Dbl(valueTo.Value);
+        if (limit.HasValue)     args["limit"]     = Int(limit.Value);
+        if (tolerance.HasValue) args["tolerance"] = Dbl(tolerance.Value);
+
+        var env = await _pipe.SendAsync(
+            "beginValueScan", args,
+            ProtocolJsonContext.Default.RpcEnvelopeBeginValueScanResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("beginValueScan returned no result");
+    }
+
+    /// <summary>String-scan variant of beginValueScan. Server uses scanFieldValue
+    /// internally (no session for strings in v1 — string refine isn't useful
+    /// because the matched bytes are deterministic; a refine "unchanged" would
+    /// always pass).</summary>
+    public async Task<BeginValueScanResult> ScanStringAsync(
+        string needle, string encoding = "utf16", string matchMode = "contains",
+        int? limit = null, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["dataType"]  = Str("string"),
+            ["value"]     = Str(needle),
+            ["encoding"]  = Str(encoding),
+            ["matchMode"] = Str(matchMode),
+        };
+        if (limit.HasValue) args["limit"] = Int(limit.Value);
+
+        // scanFieldValue returns the same wire envelope shape as
+        // beginValueScan (minus sessionId), so it deserializes cleanly
+        // into BeginValueScanResult — the SessionId field stays empty
+        // for string scans.
+        var env = await _pipe.SendAsync(
+            "scanFieldValue", args,
+            ProtocolJsonContext.Default.RpcEnvelopeBeginValueScanResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("scanFieldValue (string) returned no result");
+    }
+
+    /// <summary>
+    /// `refineValueScan` — narrow an existing session by scanType.
+    /// scanType ∈ exact / range / changed / unchanged / increased / decreased / newValue.
+    /// `value` / `valueTo` only required for exact / range / newValue.
+    /// </summary>
+    public async Task<RefineValueScanResult> RefineValueScanAsync(
+        string sessionId, string scanType,
+        double? value = null, double? valueTo = null, int? limit = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["sessionId"] = Str(sessionId),
+            ["scanType"]  = Str(scanType),
+        };
+        if (value.HasValue)   args["value"]   = Dbl(value.Value);
+        if (valueTo.HasValue) args["valueTo"] = Dbl(valueTo.Value);
+        if (limit.HasValue)   args["limit"]   = Int(limit.Value);
+
+        var env = await _pipe.SendAsync(
+            "refineValueScan", args,
+            ProtocolJsonContext.Default.RpcEnvelopeRefineValueScanResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("refineValueScan returned no result");
+    }
+
+    /// <summary>`endValueScan` — release the session's candidate buffer.</summary>
+    public async Task<EndValueScanResult> EndValueScanAsync(
+        string sessionId, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement> { ["sessionId"] = Str(sessionId) };
+        var env = await _pipe.SendAsync(
+            "endValueScan", args,
+            ProtocolJsonContext.Default.RpcEnvelopeEndValueScanResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("endValueScan returned no result");
+    }
+
     private static void ThrowIfError(RpcError? error)
     {
         if (error is not null)

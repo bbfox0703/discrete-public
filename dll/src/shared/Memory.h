@@ -166,6 +166,45 @@ void SetScanValueHi(ValueScanRequest& req, T value) noexcept {
     ::memcpy(req.hi, &value, sizeof(T));
 }
 
+// Phase 27b-4 — string scan support.
+// CE's UTF-16 / UTF-8 / ASCII search. Unity managed strings are UTF-16
+// length-prefixed (chars[] inline after the 16-byte object header), so
+// the natural scan target is "find this UTF-16 byte sequence anywhere in
+// committed RW memory" — that catches both managed `System.String`
+// bodies AND unmanaged engine strings.
+enum class StringEncoding : int {
+    Utf16Le = 0,   // managed System.String / WCHAR_T payloads
+    Utf8,
+    Ascii,
+};
+
+enum class StringMatchMode : int {
+    Exact = 0,     // full sequence equal (caller pre-encodes the bytes)
+    Contains,      // substring search via the same byte sequence
+};
+
+struct StringScanRequest {
+    StringEncoding   encoding   = StringEncoding::Utf16Le;
+    StringMatchMode  matchMode  = StringMatchMode::Contains;
+    std::vector<std::uint8_t> needle;        // pre-encoded payload bytes
+    std::size_t      limit      = 5000;
+    std::size_t      alignment  = 0;         // 0 = encoding's natural (UTF-16 → 2, others → 1)
+};
+
+struct StringScanCandidate {
+    const void*  addr   = nullptr;
+    std::size_t  length = 0;   // matched byte length (== needle.size())
+};
+
+// Scans committed RW pages (with the same MEM_IMAGE + thread-stack
+// filtering as ScanForValue) for the needle byte sequence at the
+// requested alignment. Boyer–Moore-Horspool would be faster for Contains
+// on long needles, but Unity targets typically search short strings
+// (< 64 chars) — the naive O(N*M) loop is fast enough at < 100 MB/s
+// and avoids the cache footprint of a skip table.
+std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
+                                                ValueScanStats* stats = nullptr) noexcept;
+
 // Scans heap-like RW memory for pointer-sized values equal to `target`, at
 // 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an
 // object is its Il2CppClass*; in Mono it's a MonoVTable*. Returns at most
