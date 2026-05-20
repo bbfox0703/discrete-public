@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Markup.Xaml;
@@ -53,6 +54,46 @@ public partial class MainWindow : Window
         // goes through our typed selectors. See DataGridSortComparers.cs
         // for the multi-layer trap this defeats.
         Loaded += (_, _) => WireSortComparersForAllGrids();
+
+        // Avalonia 12 dual-monitor restore quirk: when the window goes
+        // Normal → Maximized, Avalonia auto-saves the pre-maximize
+        // bounds; but on dual-monitor setups with mismatched DPI scales
+        // the restore math sometimes lands the window straddling the
+        // monitor boundary instead of returning to its original
+        // position. Track the bounds ourselves on Normal → Maximized
+        // and force-restore them on Maximized → Normal.
+        PropertyChanged += OnWindowPropertyChanged;
+    }
+
+    private PixelPoint? _preMaximizePosition;
+    private double      _preMaximizeWidth;
+    private double      _preMaximizeHeight;
+
+    private void OnWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != WindowStateProperty) return;
+        var oldState = (WindowState)e.OldValue!;
+        var newState = (WindowState)e.NewValue!;
+
+        if (oldState == WindowState.Normal && newState == WindowState.Maximized)
+        {
+            // Save where we WERE before maximizing.
+            _preMaximizePosition = Position;
+            _preMaximizeWidth    = Width;
+            _preMaximizeHeight   = Height;
+        }
+        else if (oldState == WindowState.Maximized && newState == WindowState.Normal
+                 && _preMaximizePosition is { } savedPos)
+        {
+            // Avalonia has already restored the window to *some* bounds
+            // by the time this fires; override with the bounds we
+            // captured pre-maximize. PixelPoint is screen-coordinates
+            // so this snaps the window back onto the exact monitor it
+            // started on.
+            Position = savedPos;
+            if (_preMaximizeWidth  > 0) Width  = _preMaximizeWidth;
+            if (_preMaximizeHeight > 0) Height = _preMaximizeHeight;
+        }
     }
 
     private void WireSortComparersForAllGrids()

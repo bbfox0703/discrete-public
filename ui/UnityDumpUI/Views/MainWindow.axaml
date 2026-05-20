@@ -414,14 +414,21 @@
              the right pane shows just the branding image; after the
              user injects + connects the DataGrid tabs take over. -->
         <Grid>
-          <Image Source="avares://DiscreteUI/Assets/Logo.webp"
-                 Stretch="Uniform"
-                 Opacity="0.5"
-                 MaxWidth="640"
-                 HorizontalAlignment="Center"
-                 VerticalAlignment="Center"
-                 IsHitTestVisible="False"
-                 IsVisible="{Binding !IsConnected}" />
+          <!-- Watermark holder — pure-XAML 75%-of-parent sizing: a
+               3-column / 3-row star grid (1*,6*,1*) makes the image
+               cell exactly 6/8 = 75% of width AND height. Stretch=
+               Uniform preserves aspect ratio inside that bounding box. -->
+          <Grid ColumnDefinitions="1*,6*,1*"
+                RowDefinitions="1*,6*,1*"
+                IsHitTestVisible="False"
+                IsVisible="{Binding !IsConnected}">
+            <Image Grid.Column="1" Grid.Row="1"
+                   Source="avares://DiscreteUI/Assets/Logo.webp"
+                   Stretch="Uniform"
+                   Opacity="0.5"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center" />
+          </Grid>
           <TabControl SelectedIndex="{Binding SelectedDetailTabIndex, Mode=TwoWay}"
                       IsVisible="{Binding IsConnected}">
           <TabItem Header="{StaticResource Browser.FieldsTab}">
