@@ -18,6 +18,7 @@
   This is a generic Windows technique that's also commonly used by
   malware — false positives are normal. Whitelist the install folder
   if your AV objects.
+- **Not all functions are working as excepted.** One man army cannot test all cases -- any bug is normal.
 
 ---
 
