@@ -616,9 +616,11 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
             bool nameExact = string.Equals(c.Name, filter, StringComparison.OrdinalIgnoreCase)
                           || string.Equals(c.DisplayName, filter, StringComparison.OrdinalIgnoreCase);
             if (nameExact) { bucket0.Add(c); continue; }
-            bool simplePrefix = c.Name.StartsWith(filter, StringComparison.OrdinalIgnoreCase);
+            bool simplePrefix = c.Name.StartsWith(filter, StringComparison.OrdinalIgnoreCase)
+                             || c.FriendlyName.StartsWith(filter, StringComparison.OrdinalIgnoreCase);
             if (simplePrefix) { bucket1.Add(c); continue; }
-            if (c.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            if (c.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase)
+                || c.FriendlyName.Contains(filter, StringComparison.OrdinalIgnoreCase))
             {
                 bucket2.Add(c);
             }
@@ -643,7 +645,9 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         {
             if (unfiltered ||
                 f.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
-                (f.Type?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false))
+                f.FriendlyName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                (f.Type?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                f.FriendlyType.Contains(filter, StringComparison.OrdinalIgnoreCase))
             {
                 FilteredFields.Add(f);
             }
@@ -661,7 +665,9 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         foreach (MethodRow m in Methods)
         {
             if (unfiltered ||
-                m.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+                m.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                m.FriendlyName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                m.FriendlyDeclaredIn.Contains(filter, StringComparison.OrdinalIgnoreCase))
             {
                 FilteredMethods.Add(m);
             }
@@ -692,11 +698,26 @@ public sealed class ClassItem
         Name      = name;
         Token     = token;
         DisplayName = string.IsNullOrEmpty(@namespace) ? name : $"{@namespace}.{name}";
+        FriendlyName = CompilerNameDemangler.DemangleClassPath(name);
+        // OriginHint is derived from the deepest nested segment — that's
+        // the one most likely to be a state machine / closure / lambda
+        // host. Top-level outer classes are user code 99% of the time.
+        string deepest = name;
+        int sep = -1;
+        for (int i = name.Length - 1; i >= 0; i--)
+            if (name[i] == '/' || name[i] == '+') { sep = i; break; }
+        if (sep >= 0) deepest = name.Substring(sep + 1);
+        OriginHint = CompilerNameDemangler.DescribeOrigin(deepest);
     }
-    public string Namespace   { get; }
-    public string Name        { get; }
-    public uint?  Token       { get; }
-    public string DisplayName { get; }
+    public string  Namespace    { get; }
+    public string  Name         { get; }
+    public uint?   Token        { get; }
+    public string  DisplayName  { get; }
+    public string  FriendlyName { get; }
+    public string? OriginHint   { get; }
+    /// <summary>Tooltip text — raw name plus origin if compiler-generated.</summary>
+    public string  Tooltip      =>
+        OriginHint is null ? DisplayName : $"{DisplayName}\n({OriginHint})";
 }
 
 public sealed class FieldRow
@@ -709,15 +730,25 @@ public sealed class FieldRow
         Flags = flags;
         IsStatic = isStatic;
         DeclaredIn = declaredIn;
+        FriendlyName       = CompilerNameDemangler.Demangle(name);
+        FriendlyType       = CompilerNameDemangler.DemangleClassPath(type);
+        FriendlyDeclaredIn = CompilerNameDemangler.DemangleClassPath(declaredIn);
+        OriginHint         = CompilerNameDemangler.DescribeOrigin(name);
     }
-    public string Name       { get; }
-    public string Type       { get; }
-    public int    Offset     { get; }
-    public string OffsetHex  => $"0x{Offset:X}";
-    public uint   Flags      { get; }
-    public string FlagsHex   => $"0x{Flags:X4}";
-    public bool   IsStatic   { get; }
-    public string DeclaredIn { get; }
+    public string  Name               { get; }
+    public string  Type               { get; }
+    public int     Offset             { get; }
+    public string  OffsetHex          => $"0x{Offset:X}";
+    public uint    Flags              { get; }
+    public string  FlagsHex           => $"0x{Flags:X4}";
+    public bool    IsStatic           { get; }
+    public string  DeclaredIn         { get; }
+    public string  FriendlyName       { get; }
+    public string  FriendlyType       { get; }
+    public string  FriendlyDeclaredIn { get; }
+    public string? OriginHint         { get; }
+    public string  Tooltip      =>
+        OriginHint is null ? Name : $"{Name}\n({OriginHint})";
 }
 
 public sealed class MethodRow
@@ -730,13 +761,25 @@ public sealed class MethodRow
         IsStatic = isStatic;
         Address = address;
         DeclaredIn = declaredIn;
+        // Methods on a state-machine class are almost always literally
+        // "MoveNext" / "SetStateMachine" — boring on their own. The
+        // useful hint lives on the *DeclaredIn* path. Demangle both so
+        // the user can read e.g. "CreateUnitResult [async 41] :: MoveNext".
+        FriendlyName       = CompilerNameDemangler.Demangle(name);
+        FriendlyDeclaredIn = CompilerNameDemangler.DemangleClassPath(declaredIn);
+        OriginHint         = CompilerNameDemangler.DescribeOrigin(name);
     }
-    public string  Name       { get; }
-    public uint    Token      { get; }
-    public string  TokenHex   => $"0x{Token:X8}";
-    public uint    Flags      { get; }
-    public string  FlagsHex   => $"0x{Flags:X4}";
-    public bool    IsStatic   { get; }
-    public string? Address    { get; }
-    public string  DeclaredIn { get; }
+    public string  Name               { get; }
+    public uint    Token              { get; }
+    public string  TokenHex           => $"0x{Token:X8}";
+    public uint    Flags              { get; }
+    public string  FlagsHex           => $"0x{Flags:X4}";
+    public bool    IsStatic           { get; }
+    public string? Address            { get; }
+    public string  DeclaredIn         { get; }
+    public string  FriendlyName       { get; }
+    public string  FriendlyDeclaredIn { get; }
+    public string? OriginHint         { get; }
+    public string  Tooltip            =>
+        OriginHint is null ? Name : $"{Name}\n({OriginHint})";
 }

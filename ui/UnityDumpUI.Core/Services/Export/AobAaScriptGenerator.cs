@@ -22,6 +22,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using UnityDumpUI.Core.Services;
 
 namespace UnityDumpUI.Core.Services.Export;
 
@@ -156,7 +157,8 @@ public static class AobAaScriptGenerator
             // "Mono JIT (bridge resolve)" so a developer reading the
             // script knows the missing module info is intentional.
             sb.Append("// ")
-              .Append(ClassDisplay(ov)).Append('.').Append(ov.MethodName)
+              .Append(ClassDisplay(ov)).Append('.')
+              .Append(CompilerNameDemangler.Demangle(ov.MethodName))
               .Append(ov.Signature).Append("  ")
               .Append("→ ").Append(ov.Address);
             if (isMonoJit)
@@ -297,8 +299,15 @@ public static class AobAaScriptGenerator
         return baseName + "_" + Guid.NewGuid().ToString("N")[..6];
     }
 
-    private static string ClassDisplay(AaScriptOverload ov) =>
-        string.IsNullOrEmpty(ov.Namespace) ? ov.ClassName : $"{ov.Namespace}.{ov.ClassName}";
+    private static string ClassDisplay(AaScriptOverload ov)
+    {
+        // Friendly form for the script comment ONLY. Symbol-name
+        // generation (MakeIdentifier / MakeSymbolName) still consumes
+        // the raw ov.ClassName so CE-level identifiers match the
+        // runtime metadata 1:1.
+        string friendly = CompilerNameDemangler.DemangleClassPath(ov.ClassName);
+        return string.IsNullOrEmpty(ov.Namespace) ? friendly : $"{ov.Namespace}.{friendly}";
+    }
 
     /// <summary>Replace any non-[A-Za-z0-9_] with '_'. Empty input → "T".</summary>
     public static string MakeIdentifier(string s)

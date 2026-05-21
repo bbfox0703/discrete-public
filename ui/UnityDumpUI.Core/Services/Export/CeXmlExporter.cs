@@ -42,6 +42,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using UnityDumpUI.Core.Services;
 
 namespace UnityDumpUI.Core.Services.Export;
 
@@ -76,12 +77,12 @@ public static class CeXmlExporter
         var sb = new StringBuilder(4096);
         var idGen = new IdGen();
         var visited = new HashSet<string>();
+        var nameMap = new ExportNameMap();
 
-        sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
-        string rootName  = StructLabel(self, assemblyName);
+        string rootName  = StructLabel(self, assemblyName, nameMap);
         OpenGroup(sb, "    ", idGen, rootName, baseAddress,
                   offsets: null, collapsed: options.CollapsePointerNodes,
                   varType: "8 Bytes", showAsHex: true);
@@ -102,7 +103,23 @@ public static class CeXmlExporter
 
         sb.Append("  </CheatEntries>\n");
         sb.Append("</CheatTable>\n");
-        return sb.ToString();
+        return BuildOutput(sb, nameMap);
+    }
+
+    // Prepend the XML prolog and (if non-empty) the demangle name-map
+    // comment. CE skips XML comments on load, so the map is editor-only.
+    private static string BuildOutput(StringBuilder body, ExportNameMap nameMap)
+    {
+        string comment = nameMap.ToXmlComment();
+        if (comment.Length == 0)
+        {
+            return "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" + body.ToString();
+        }
+        var prelude = new StringBuilder(comment.Length + 64);
+        prelude.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+        prelude.Append(comment);
+        prelude.Append(body);
+        return prelude.ToString();
     }
 
     // ---------- Live-data mode -------------------------------------------
@@ -128,12 +145,12 @@ public static class CeXmlExporter
         var sb = new StringBuilder(8192);
         var idGen = new IdGen();
         var visited = new HashSet<string>();
+        var nameMap = new ExportNameMap();
 
-        sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
-        string rootName  = $"{StructLabel(self, assemblyName)} @ 0x{baseAbs:X16}";
+        string rootName  = $"{StructLabel(self, assemblyName, nameMap)} @ 0x{baseAbs:X16}";
         OpenGroup(sb, "    ", idGen, rootName, $"0x{baseAbs:X16}",
                   offsets: null, collapsed: options.CollapsePointerNodes,
                   varType: "8 Bytes", showAsHex: true);
@@ -154,7 +171,7 @@ public static class CeXmlExporter
         CloseGroup(sb, "    ");
         sb.Append("  </CheatEntries>\n");
         sb.Append("</CheatTable>\n");
-        return sb.ToString();
+        return BuildOutput(sb, nameMap);
     }
 
     private static async Task EmitFieldsLiveAsync(
@@ -567,8 +584,8 @@ public static class CeXmlExporter
         var sb = new StringBuilder(1024);
         var idGen = new IdGen();
         var visited = new HashSet<string>();
+        var nameMap = new ExportNameMap();
 
-        sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
@@ -577,8 +594,8 @@ public static class CeXmlExporter
         // bare class label because the entries underneath have different
         // names — putting any one of them in the header would mislead.
         string rootName = fields.Count == 1
-            ? $"{StructLabel(declaringClass, assemblyName)}.{fields[0].Name}"
-            : StructLabel(declaringClass, assemblyName);
+            ? $"{StructLabel(declaringClass, assemblyName, nameMap)}.{fields[0].Name}"
+            : StructLabel(declaringClass, assemblyName, nameMap);
         // Wrap in a base-address group so each field's relative +0xNN address
         // resolves correctly without polluting the user's existing CE table.
         OpenGroup(sb, "    ", idGen, rootName, baseAddress,
@@ -594,7 +611,7 @@ public static class CeXmlExporter
 
         sb.Append("  </CheatEntries>\n");
         sb.Append("</CheatTable>\n");
-        return sb.ToString();
+        return BuildOutput(sb, nameMap);
     }
 
     // ---------- Field emission -------------------------------------------
@@ -792,11 +809,20 @@ public static class CeXmlExporter
         return max;
     }
 
-    private static string StructLabel(GetClassInfoResult info, string? assemblyName)
+    private static string StructLabel(GetClassInfoResult info, string? assemblyName,
+                                      ExportNameMap? nameMap = null)
     {
         string ns = info.Namespace ?? string.Empty;
         string nm = info.Name      ?? "Unknown";
-        string full = string.IsNullOrEmpty(ns) ? nm : $"{ns}.{nm}";
+        // Demangle compiler-generated nested-class paths so the CE address
+        // list shows "Outer / Async [async 41]" instead of the raw
+        // "Outer/<Async>d__41". When a NameMap is provided, register the
+        // pair so the export prepends a comment block letting the reader
+        // recover the canonical runtime name.
+        string friendly = nameMap is null
+            ? CompilerNameDemangler.DemangleClassPath(nm)
+            : nameMap.Register(nm);
+        string full = string.IsNullOrEmpty(ns) ? friendly : $"{ns}.{friendly}";
         return string.IsNullOrEmpty(assemblyName) ? full : $"{assemblyName}!{full}";
     }
 

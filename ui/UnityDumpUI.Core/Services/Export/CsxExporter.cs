@@ -34,6 +34,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using UnityDumpUI.Core.Services;
 
 namespace UnityDumpUI.Core.Services.Export;
 
@@ -373,7 +374,15 @@ public static class CsxExporter
     {
         string ns = info.Namespace ?? string.Empty;
         string nm = info.Name      ?? "Unknown";
-        string full = string.IsNullOrEmpty(ns) ? nm : $"{ns}.{nm}";
+        // Same demangle rationale as CeXmlExporter.StructLabel — the
+        // Dissect Data view shows this as a human-readable structure
+        // title, so the friendly form is much more useful than the raw
+        // "<Foo>d__N" runtime name. CSX intentionally omits XML comments
+        // (see file header — matches CE's own export shape), so no
+        // name-map block is prepended; the raw form survives in the
+        // wire metadata but not in the .csx file itself.
+        string friendly = CompilerNameDemangler.DemangleClassPath(nm);
+        string full = string.IsNullOrEmpty(ns) ? friendly : $"{ns}.{friendly}";
         return string.IsNullOrEmpty(assemblyName) ? full : $"{assemblyName}!{full}";
     }
 

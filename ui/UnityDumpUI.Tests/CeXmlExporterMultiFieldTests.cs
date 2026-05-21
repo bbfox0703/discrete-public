@@ -132,6 +132,63 @@ public class CeXmlExporterMultiFieldTests
                 ct: TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task RenderFieldsAsync_NoMangledNames_OmitsNameMapComment()
+    {
+        // A plain class with no compiler-generated nested form: the name
+        // map should stay empty, so the output is unchanged from before
+        // the demangle/name-map feature — guards against bloating every
+        // CT export with an empty comment block.
+        var info   = DeclaringClass();
+        var fields = new[] { info.Fields![0] };
+
+        string xml = await CeXmlExporter.RenderFieldsAsync(
+            "0x1000", fields, info, "Assembly-CSharp", Options(),
+            lookup: null, ct: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain("<!-- discrete: compiler-generated name map", xml);
+    }
+
+    [Fact]
+    public async Task RenderFieldsAsync_MangledClassName_EmitsFriendlyLabelAndNameMap()
+    {
+        // Brigandine-style nested async state machine: the declaring class
+        // name is the compiler-generated "<CreateUnitResult>d__41". The
+        // export should (1) show the friendly form in the entry label
+        // and (2) prepend a name-map comment block recovering the raw form.
+        var info = new GetClassInfoResult
+        {
+            Namespace = "",
+            Name      = "Menu_WorldQuestResult/<CreateUnitResult>d__41",
+            Fields    = new List<FieldEntry>
+            {
+                Field("state", "System.Int32", 0x10),
+            },
+        };
+        var fields = new[] { info.Fields![0] };
+
+        string xml = await CeXmlExporter.RenderFieldsAsync(
+            "0x1000", fields, info, "Assembly-CSharp", Options(),
+            lookup: null, ct: TestContext.Current.CancellationToken);
+
+        // Friendly form in the CE-visible entry label.
+        Assert.Contains(
+            "Menu_WorldQuestResult / CreateUnitResult [async 41]",
+            xml);
+        // Raw form preserved in the prepended comment block.
+        Assert.Contains("<!-- discrete: compiler-generated name map", xml);
+        Assert.Contains(
+            "Menu_WorldQuestResult/<CreateUnitResult>d__41",
+            xml);
+        // XML prolog still comes first so CE's loader doesn't choke.
+        Assert.StartsWith("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n", xml);
+        // Comment is positioned before the root element.
+        int commentIdx    = xml.IndexOf("<!-- discrete:", System.StringComparison.Ordinal);
+        int cheatTableIdx = xml.IndexOf("<CheatTable>",   System.StringComparison.Ordinal);
+        Assert.True(commentIdx > 0 && cheatTableIdx > commentIdx,
+                    "name-map comment must come before <CheatTable>");
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         int count = 0;

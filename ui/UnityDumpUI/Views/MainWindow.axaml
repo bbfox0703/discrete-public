@@ -265,8 +265,8 @@
           </ListBox.ContextMenu>
           <ListBox.ItemTemplate>
             <DataTemplate x:DataType="vm:ClassItem">
-              <StackPanel ToolTip.Tip="{Binding DisplayName}">
-                <controls:HighlightedTextBlock SourceText="{Binding Name}"
+              <StackPanel ToolTip.Tip="{Binding Tooltip}">
+                <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"
                                                Highlight="{Binding #ClassFilterBox.Text}"
                                                FontWeight="SemiBold"
                                                TextTrimming="CharacterEllipsis" />
@@ -474,10 +474,11 @@
                                           Width="*" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
-                        <controls:HighlightedTextBlock SourceText="{Binding Name}"
+                        <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"
                                                        Highlight="{Binding #FieldFilterBox.Text}"
                                                        VerticalAlignment="Center"
                                                        TextTrimming="CharacterEllipsis"
+                                                       ToolTip.Tip="{Binding Tooltip}"
                                                        Margin="4,0" />
                       </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
@@ -489,10 +490,11 @@
                                           Width="*" SortMemberPath="Type" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
-                        <controls:HighlightedTextBlock SourceText="{Binding Type}"
+                        <controls:HighlightedTextBlock SourceText="{Binding FriendlyType}"
                                                        Highlight="{Binding #FieldFilterBox.Text}"
                                                        VerticalAlignment="Center"
                                                        TextTrimming="CharacterEllipsis"
+                                                       ToolTip.Tip="{Binding Type}"
                                                        Margin="4,0" />
                       </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
@@ -504,7 +506,7 @@
                                           Binding="{Binding IsStatic}"
                                           SortMemberPath="IsStatic" CanUserSort="True" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                      Binding="{Binding DeclaredIn}"
+                                      Binding="{Binding FriendlyDeclaredIn}"
                                       SortMemberPath="DeclaredIn" CanUserSort="True" />
                 </DataGrid.Columns>
               </DataGrid>
@@ -866,10 +868,11 @@
                                           Width="*" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:MethodRow">
-                        <controls:HighlightedTextBlock SourceText="{Binding Name}"
+                        <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"
                                                        Highlight="{Binding #MethodFilterBox.Text}"
                                                        VerticalAlignment="Center"
                                                        TextTrimming="CharacterEllipsis"
+                                                       ToolTip.Tip="{Binding Tooltip}"
                                                        Margin="4,0" />
                       </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
@@ -887,7 +890,7 @@
                                           Binding="{Binding IsStatic}"
                                           SortMemberPath="IsStatic" CanUserSort="True" />
                   <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
-                                      Binding="{Binding DeclaredIn}"
+                                      Binding="{Binding FriendlyDeclaredIn}"
                                       SortMemberPath="DeclaredIn" CanUserSort="True" />
                 </DataGrid.Columns>
               </DataGrid>
