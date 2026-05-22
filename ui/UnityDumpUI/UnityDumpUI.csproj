@@ -96,6 +96,25 @@
     <ProjectReference Include="..\UnityDumpUI.Core\UnityDumpUI.Core.csproj" />
   </ItemGroup>
 
+  <!-- Native AOT static CRT — `build.cmd publish` should produce an exe
+       that runs on a bare Windows install without VC++ Redistributable.
+       The redist provides vcruntime140.dll + msvcp140.dll; swap msvcrt
+       and vcruntime for their static counterparts (libcmt, libvcruntime)
+       so those symbols inline into the .exe. UCRT (ucrtbase.dll) stays
+       dynamic — it's a Windows 10/11 OS component, not a redist payload,
+       and the .NET AOT targets pin /DEFAULTLIB:ucrt.lib at the end of
+       link.rsp anyway (overriding any /NODEFAULTLIB:ucrt.lib we'd add).
+       Only fires when PublishAot=true so Debug / Release single-file
+       publishes keep the dynamic CRT. -->
+  <ItemGroup Condition="'$(PublishAot)' == 'true'">
+    <LinkerArg Include="/NODEFAULTLIB:msvcrt.lib" />
+    <LinkerArg Include="/NODEFAULTLIB:msvcrtd.lib" />
+    <LinkerArg Include="/NODEFAULTLIB:vcruntime.lib" />
+    <LinkerArg Include="/NODEFAULTLIB:vcruntimed.lib" />
+    <LinkerArg Include="/DEFAULTLIB:libvcruntime.lib" />
+    <LinkerArg Include="/DEFAULTLIB:libcmt.lib" />
+  </ItemGroup>
+
   <ItemGroup>
     <AvaloniaResource Include="Resources\**" />
     <AvaloniaResource Include="Assets\**" />

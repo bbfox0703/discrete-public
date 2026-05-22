@@ -254,10 +254,16 @@ function Build-DllForArch {
         New-Item -ItemType Directory -Path $archDistDir -Force | Out-Null
     }
 
-    Write-Step "Configuring CMake (Ninja + MSVC $Arch)"
+    # Publish mode statically links the MSVC CRT so the shipped DLLs don't
+    # require VC++ Redistributable on the target machine. Debug / Release
+    # keep the default dynamic CRT (cheap iteration, smaller .obj cache).
+    $staticCrt = if ($Mode -eq 'Publish') { 'ON' } else { 'OFF' }
+
+    Write-Step "Configuring CMake (Ninja + MSVC $Arch, static-CRT=$staticCrt)"
     & cmake -S $RepoRoot -B $dllBuildDir -G Ninja `
         "-DCMAKE_BUILD_TYPE=$cfg" `
-        "-DBACKEND=$BackendForArch" | Out-Host
+        "-DBACKEND=$BackendForArch" `
+        "-DSTATIC_CRT=$staticCrt" | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
     Write-Ok 'CMake configured'
 
@@ -456,11 +462,13 @@ function Build-MetadataCli {
         Remove-Item $cliBuildDir -Recurse -Force
     }
 
-    Write-Step 'Configuring CMake (Ninja + MSVC, BUILD_CLI=ON)'
+    $staticCrt = if ($Mode -eq 'Publish') { 'ON' } else { 'OFF' }
+    Write-Step "Configuring CMake (Ninja + MSVC, BUILD_CLI=ON, static-CRT=$staticCrt)"
     & cmake -S $RepoRoot -B $cliBuildDir -G Ninja `
         "-DCMAKE_BUILD_TYPE=$cfg" `
         "-DBUILD_CLI=ON" `
-        "-DBACKEND=IL2CPP" | Out-Host
+        "-DBACKEND=IL2CPP" `
+        "-DSTATIC_CRT=$staticCrt" | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
 
     Write-Step "Building metadata-cli ($cfg)"
