@@ -194,6 +194,11 @@
   <sys:String x:Key="Tools.AobMakerStatusLabel">AOBMaker:</sys:String>
   <sys:String x:Key="Tools.AobMakerConnected">connected</sys:String>
   <sys:String x:Key="Tools.AobMakerNotConnected">not connected</sys:String>
+  <!-- Debugger symbol export — IL2CPP only, gated on backend == IL2CPP. -->
+  <sys:String x:Key="Tools.ExportSymbolsX64dbg">Export Symbols → x64dbg (.dd64)…</sys:String>
+  <sys:String x:Key="Tools.ExportSymbolsGhidra">Export Symbols → Ghidra (.txt)…</sys:String>
+  <sys:String x:Key="Tools.ExportSymbolsIda">Export Symbols → IDA (.idc)…</sys:String>
+  <sys:String x:Key="Tools.ExportSymbolsTooltip">IL2CPP only. Walks every user assembly (system / UnityEngine assemblies are filtered out) and emits one label per Il2CppClass* + one per AOT method entry point. Imports into x64dbg, Ghidra, or IDA against GameAssembly.dll.</sys:String>
 
   <!-- Proxy Deploy window (Phase 12c, redesigned to UE5CEDumper-style
        multi-select bulk panel). -->

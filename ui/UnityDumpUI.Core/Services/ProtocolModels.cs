@@ -516,6 +516,54 @@ public sealed class SearchSymbolMatch
     [JsonPropertyName("static")]    public bool    IsStatic  { get; set; }
 }
 
+/// <summary>
+/// `dumpIl2cppSymbols` result — IL2CPP-only bulk dump of class metadata
+/// pointers (`Il2CppClass*` in GameAssembly.dll's .data) + AOT method
+/// entry points (in .text). Drives the debugger-symbol exporters (x64dbg
+/// .dd64 / Ghidra labels / IDA .idc).
+/// </summary>
+public sealed class DumpIl2cppSymbolsResult
+{
+    /// <summary>The module that owns every address in <see cref="Rows"/>.
+    /// Always "GameAssembly.dll" for IL2CPP, or empty when the module
+    /// can't be located (the backend then leaves <see cref="ModuleBase"/>
+    /// at 0 too).</summary>
+    [JsonPropertyName("moduleName")]      public string  ModuleName      { get; set; } = string.Empty;
+    /// <summary>Module image base, formatted as uppercase "0x..." hex.
+    /// "0x0000000000000000" when the module isn't located.</summary>
+    [JsonPropertyName("moduleBase")]      public string  ModuleBase      { get; set; } = string.Empty;
+    [JsonPropertyName("moduleSize")]      public ulong   ModuleSize      { get; set; }
+    [JsonPropertyName("rows")]            public List<SymbolDumpRow> Rows { get; set; } = new();
+    [JsonPropertyName("count")]           public int     Count           { get; set; }
+    [JsonPropertyName("scanned_classes")] public int     ScannedClasses  { get; set; }
+    [JsonPropertyName("truncated")]       public bool    Truncated       { get; set; }
+    [JsonPropertyName("missing_assemblies")] public List<string>? MissingAssemblies { get; set; }
+    [JsonPropertyName("error")]           public string? Error           { get; set; }
+}
+
+public sealed class SymbolDumpRow
+{
+    /// <summary>"class" or "method".</summary>
+    [JsonPropertyName("kind")]        public string  Kind        { get; set; } = string.Empty;
+    [JsonPropertyName("assembly")]    public string  Assembly    { get; set; } = string.Empty;
+    [JsonPropertyName("namespace")]   public string  Namespace   { get; set; } = string.Empty;
+    [JsonPropertyName("class")]       public string  Class       { get; set; } = string.Empty;
+    /// <summary>Method simple name (method rows only).</summary>
+    [JsonPropertyName("name")]        public string? Name        { get; set; }
+    /// <summary>Method metadata token (method rows only).</summary>
+    [JsonPropertyName("token")]       public uint?   Token       { get; set; }
+    /// <summary>Method static flag (method rows only).</summary>
+    [JsonPropertyName("static")]      public bool?   IsStatic    { get; set; }
+    /// <summary>Absolute address, uppercase "0x..." hex. For class rows it's
+    /// the `Il2CppClass*`; for method rows it's the AOT methodPointer.</summary>
+    [JsonPropertyName("address")]     public string  Address     { get; set; } = string.Empty;
+    /// <summary>Overload-disambiguating suffix (method rows only) — same
+    /// shape as <c>findMethodInstances</c>: "noargs" / "int" / "3float" /
+    /// "string_Card_Point". Used to keep label collisions out of the
+    /// generated debugger symbols.</summary>
+    [JsonPropertyName("humanSuffix")] public string? HumanSuffix { get; set; }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 27 — Unity-aware value search (scanFieldValue + Begin/Refine/End).
 // ---------------------------------------------------------------------------

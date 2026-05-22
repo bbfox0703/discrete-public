@@ -3444,6 +3444,152 @@ void RegisterCoreHandlers() {
         return response;
     });
 
+    // Debugger symbol dump (IL2CPP only). Walks every requested assembly,
+    // emits one row per class (Il2CppClass* in .data) and/or per compiled
+    // method (AOT methodPointer in .text of GameAssembly.dll). The UI's
+    // SymbolExporter renders these into x64dbg .dd64 / Ghidra label /
+    // IDA .idc payloads.
+    PipeServer::RegisterHandler(MagicStrings::CmdDumpIl2cppSymbols,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::vector<std::string> assemblyNames;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) assemblyNames.push_back(s);
+            }
+        }
+        if (assemblyNames.empty()) {
+            return json{{"error", "missing or empty 'assemblies' arg"}};
+        }
+
+        bool wantClasses = true;
+        bool wantMethods = true;
+        if (args.contains("kinds") && args["kinds"].is_array()) {
+            wantClasses = false; wantMethods = false;
+            for (const auto& k : args["kinds"]) {
+                if (!k.is_string()) continue;
+                const auto& s = k.get_ref<const std::string&>();
+                if (s == "class")  wantClasses = true;
+                if (s == "method") wantMethods = true;
+            }
+            if (!wantClasses && !wantMethods) {
+                return json{{"error", "kinds must include 'class' or 'method'"}};
+            }
+        }
+
+        const bool wantHumanSuffix = args.value("computeHumanSuffix", true);
+
+        // limit=0 (default) = unlimited up to the safety cap. Negative values
+        // also degrade to unlimited rather than an error — same forgiving
+        // shape as other handlers.
+        std::int64_t limit = args.value("limit", static_cast<std::int64_t>(0));
+        if (limit < 0) limit = 0;
+        constexpr std::size_t kHardCap = 1'000'000u;
+        const std::size_t effectiveCap = (limit == 0)
+            ? kHardCap
+            : std::min<std::size_t>(static_cast<std::size_t>(limit), kHardCap);
+
+        // GameAssembly.dll is the only candidate for IL2CPP — every AOT
+        // method pointer + every Il2CppClass* lives there.
+        std::string    moduleName;
+        std::uintptr_t moduleBase = 0;
+        std::size_t    moduleSize = 0;
+        if (void* base = ModuleHelper::GetModuleBase(MagicStrings::ModuleIL2CPP)) {
+            moduleBase = reinterpret_cast<std::uintptr_t>(base);
+            moduleSize = ModuleHelper::GetModuleSize(MagicStrings::ModuleIL2CPP);
+            moduleName = "GameAssembly.dll";
+        }
+
+        json rows = json::array();
+        std::size_t scanned = 0;
+        bool truncated = false;
+        std::vector<std::string> missingAssemblies;
+
+        for (const auto& assemblyName : assemblyNames) {
+            if (truncated) break;
+            const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
+            if (img == nullptr) {
+                missingAssemblies.push_back(assemblyName);
+                continue;
+            }
+            auto classes = IL2CPP::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ++scanned;
+
+                if (wantClasses) {
+                    rows.push_back({
+                        {"kind",      "class"},
+                        {"assembly",  assemblyName},
+                        {"namespace", ce.ns},
+                        {"class",     ce.name},
+                        {"address",   formatHex(reinterpret_cast<std::uintptr_t>(ce.klass))},
+                    });
+                    if (rows.size() >= effectiveCap) { truncated = true; break; }
+                }
+
+                if (wantMethods) {
+                    if (wantHumanSuffix) {
+                        auto methods = IL2CPP::EnumerateMethodSignatures(ce.klass);
+                        for (const auto& m : methods) {
+                            if (m.pointer == nullptr) continue;
+                            rows.push_back({
+                                {"kind",        "method"},
+                                {"assembly",    assemblyName},
+                                {"namespace",   ce.ns},
+                                {"class",       ce.name},
+                                {"name",        m.name},
+                                {"token",       m.token},
+                                {"static",      (m.flags & 0x10u) != 0},
+                                {"address",     formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
+                                {"humanSuffix", m.humanSuffix},
+                            });
+                            if (rows.size() >= effectiveCap) { truncated = true; break; }
+                        }
+                    } else {
+                        // Light path — skip the per-param walk.
+                        auto info = IL2CPP::ReadClassInfo(ce.klass);
+                        if (info.ok) {
+                            for (const auto& m : info.info.methods) {
+                                if (m.pointer == nullptr) continue;
+                                rows.push_back({
+                                    {"kind",      "method"},
+                                    {"assembly",  assemblyName},
+                                    {"namespace", ce.ns},
+                                    {"class",     ce.name},
+                                    {"name",      m.name},
+                                    {"token",     m.token},
+                                    {"static",    (m.flags & 0x10u) != 0},
+                                    {"address",   formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
+                                });
+                                if (rows.size() >= effectiveCap) { truncated = true; break; }
+                            }
+                        }
+                    }
+                    if (truncated) break;
+                }
+            }
+        }
+
+        const std::size_t rowCount = rows.size();
+        json response = {
+            {"moduleName",      moduleName},
+            {"moduleBase",      formatHex(moduleBase)},
+            {"moduleSize",      moduleSize},
+            {"rows",            std::move(rows)},
+            {"count",           rowCount},
+            {"scanned_classes", scanned},
+            {"truncated",       truncated},
+        };
+        if (!missingAssemblies.empty()) {
+            response["missing_assemblies"] = std::move(missingAssemblies);
+        }
+        return response;
+    });
+
     PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,
         [resolveClassFromArgs](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};

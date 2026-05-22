@@ -45,6 +45,16 @@
               <MenuItem Header="{StaticResource Tools.InjectDiscreteBridge}"
                         Command="{Binding InjectDiscreteBridgeCommand}"
                         ToolTip.Tip="{StaticResource Tools.InjectDiscreteBridgeTooltip}" />
+              <Separator/>
+              <MenuItem Header="{StaticResource Tools.ExportSymbolsX64dbg}"
+                        Command="{Binding ExportSymbolsX64dbgCommand}"
+                        ToolTip.Tip="{StaticResource Tools.ExportSymbolsTooltip}" />
+              <MenuItem Header="{StaticResource Tools.ExportSymbolsGhidra}"
+                        Command="{Binding ExportSymbolsGhidraCommand}"
+                        ToolTip.Tip="{StaticResource Tools.ExportSymbolsTooltip}" />
+              <MenuItem Header="{StaticResource Tools.ExportSymbolsIda}"
+                        Command="{Binding ExportSymbolsIdaCommand}"
+                        ToolTip.Tip="{StaticResource Tools.ExportSymbolsTooltip}" />
             </MenuFlyout>
           </Button.Flyout>
         </Button>

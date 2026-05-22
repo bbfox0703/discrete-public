@@ -1,9 +1,12 @@
-# Export Formats — CE XML / CSX / SDK Header
+# Export Formats — CE XML / CSX / SDK Header / Debugger symbols
 
-> The UI exports the currently-selected class as one of three formats.
-> All three live in [`ui/UnityDumpUI.Core/Services/Export/`](../ui/UnityDumpUI.Core/Services/Export)
-> and run client-side off the cached `getClassInfo` response — no DLL
-> round-trip per export.
+> The UI exports the currently-selected class as one of three single-class
+> formats, plus a whole-process debugger-symbol dump driven from the
+> Tools menu. All exporters live in
+> [`ui/UnityDumpUI.Core/Services/Export/`](../ui/UnityDumpUI.Core/Services/Export);
+> the single-class ones run client-side off the cached `getClassInfo`
+> response (no per-export DLL round-trip), the debugger-symbol path
+> takes one `dumpIl2cppSymbols` round-trip for the whole process.
 
 ---
 
@@ -14,10 +17,15 @@
 | **CE XML (.CT)** | Drop-in cheat-table address list. Open directly in Cheat Engine. Live mode embeds real instance addresses → cheats work immediately without scanning. | `.CT` |
 | **CSX (Structure Dissect)** | CE's "Structure Dissect" feature. Snapshot the class layout for offset-relative reuse across many instances of the same type. | `.csx` |
 | **SDK header (.h)** | Plain C/C++ struct definition with `+0xNN` offset comments. For external consumers (mods, native tools, RE notes). | `.h` |
+| **x64dbg `.dd64`** | Debugger label database — class metadata pointers + method entry points, module-relative to `GameAssembly.dll`. IL2CPP only. | `.dd64` |
+| **Ghidra symbol text** | Same payload as `.dd64` but in `ImportSymbolsScript.py` format (absolute address). IL2CPP only. | `.txt` |
+| **IDA `.idc`** | Same payload as `.dd64` but as a `MakeName` / `MakeComm` IDC script. IL2CPP only. | `.idc` |
 
-UI entry points (Browser tab → class context menu): **Export .h…**,
-**Export .csx…**, **Export .CT…**, plus **Copy CE XML** /
-**Copy CE field** for clipboard variants.
+UI entry points: single-class exports live on the Browser tab's class
+context menu (**Export .h…**, **Export .csx…**, **Export .CT…**, plus
+**Copy CE XML** / **Copy CE field**). Whole-process debugger exports
+live on the connection bar's **Tools** flyout (**Export Symbols →
+x64dbg / Ghidra / IDA**).
 
 ---
 
@@ -223,6 +231,132 @@ same class.
 
 ---
 
+## 4. Debugger symbols — x64dbg `.dd64` / Ghidra / IDA `.idc`
+
+[SymbolExporter.cs](../ui/UnityDumpUI.Core/Services/Export/SymbolExporter.cs)
+
+Whole-process symbol dump targeted at static-RE workflows: load the
+output into a disassembler so every Unity class metadata pointer
+(`Il2CppClass*` in `.data`) and every AOT method entry (`.text`) gets a
+human-readable label. Triggered from the Tools menu while connected
+to an IL2CPP game.
+
+### How it differs from the single-class exporters
+
+- **Source**: one `dumpIl2cppSymbols` round-trip across every user
+  assembly, not a per-class `getClassInfo`. The DLL emits flat
+  `SymbolDumpRow`s (`kind: "class"|"method"` + address + label inputs);
+  the UI renders them.
+- **Default assembly filter**: passes the assembly list through
+  `SystemAssemblyFilter.SelectUserAssemblies` so system /
+  `UnityEngine.*` / `Unity.*` / BCL DLLs don't bloat the output.
+- **IL2CPP only**: the Mono backend leaves the menu greyed out. Mono
+  managed methods JIT into dynamic pages with no module-relative
+  offset, so a snapshot can't survive a game restart in a debugger.
+
+### Label naming
+
+Single source of truth: `SymbolExporter.BuildLabel`. Every label is
+sanitised to `[A-Za-z0-9_]` (spaces / `.` / `/` / `<` / `>` / `` ` ``
+collapse to `_`).
+
+| Row kind | Label shape | Example |
+|---|---|---|
+| class  | `Class_<Namespace>_<Class>` | `Class_Game_Player` |
+| method | `<Namespace>_<Class>__<Method>[_<HumanSuffix>]` | `Game_Player__TakeDamage_int` |
+
+The `HumanSuffix` comes from the backend's
+[`MethodSignatureFormat.h::MakeHumanSuffix`](../dll/src/shared/MethodSignatureFormat.h)
+and matches `findMethodInstances` byte-for-byte:
+
+- 0 args → `noargs`
+- 1 arg → C# keyword (`int`, `float`, `string`) or last-segment of the
+  type name
+- N same-typed → `<N><Short>` (e.g. `3float`)
+- N mixed → `<S0>_<S1>_...` (e.g. `string_Card_Point`)
+
+Without the suffix, every `Update`/`Start`/`OnEnable` (Unity message
+methods) would collide across hundreds of classes. The suffix is what
+keeps x64dbg from silently dropping all-but-one of every overload set.
+
+### Per-format details
+
+#### x64dbg `.dd64`
+
+```json
+{
+  "labels": [
+    { "module": "GameAssembly.dll",
+      "address": "5A3740",
+      "manual": true,
+      "text": "Game_Player__Update_noargs" }
+  ],
+  "comments": [
+    { "module": "GameAssembly.dll",
+      "address": "5A3740",
+      "manual": true,
+      "text": "Assembly-CSharp:Game.Player" }
+  ]
+}
+```
+
+- `address` is **module-relative HEX without** `0x` prefix —
+  x64dbg's loader treats the field as raw hex against the named module
+  and resolves at load time.
+- Method rows always get a paired comment (`{Assembly}:{Namespace}.{Class}`)
+  so the disassembly user can see the declaring class without expanding
+  the label.
+- When the backend can't locate `GameAssembly.dll` (`moduleBase` = 0)
+  the renderer falls back to absolute hex so the labels still load,
+  just without rebase support.
+
+Import via: Tools → Database management → Import.
+
+#### Ghidra symbols (`.txt`)
+
+```
+// Generated by UnityCEDumper — Ghidra Symbol Import
+// Import via: ImportSymbolsScript.py
+Class_Game_Player 0x00007FF6CAFEBABE l
+Game_Player__Move_Vector3 0x00007FF6DEADBEEF f
+```
+
+- Absolute hex with `0x` prefix (Ghidra wants it that way).
+- Type letter: `f` for method rows (Ghidra marks them as function
+  symbols), `l` for class rows (plain label on a data pointer).
+- Import via the bundled `ImportSymbolsScript.py` once the
+  `GameAssembly.dll` image is loaded into the project.
+
+#### IDA `.idc`
+
+```c
+#include <idc.idc>
+
+// Generated by UnityCEDumper — IDA Symbol Import
+static main() {
+    MakeName(0x00007FF600009999, "Game_Player__TakeDamage_int");
+    MakeComm(0x00007FF600009999, "Assembly-CSharp:Game.Player");
+    ...
+}
+```
+
+- Absolute hex (IDA's IDC accepts that shape natively).
+- Method rows pair `MakeName` + `MakeComm` (declaring class
+  qualifier). Quotes inside the qualifier are escaped — though
+  sanitised labels can never produce them, the comment payload
+  isn't sanitised.
+- Run from File → Script file… after loading `GameAssembly.dll`.
+
+### Cost guidance
+
+A typical Unity 2022 IL2CPP game with `Assembly-CSharp` + 4-5 user
+assemblies produces 30k-100k rows in 1-3 seconds. The 1,000,000-row
+safety cap (`limit: 0` request → unlimited up to cap) hasn't been
+reached in any test game so far; when it does, the response carries
+`truncated: true` and the UI surfaces a banner.
+
+---
+
 ## Common helpers
 
 ### `UnityTypeMap.cs`
@@ -272,6 +406,7 @@ options + (for CE XML live mode) the optional walked-instance tree.
 | [CeXmlExporter.cs](../ui/UnityDumpUI.Core/Services/Export/CeXmlExporter.cs) | `.CT` cheat-table emitter — structure & live modes |
 | [CsxExporter.cs](../ui/UnityDumpUI.Core/Services/Export/CsxExporter.cs) | `.csx` Structure Dissect emitter |
 | [SdkHeaderExporter.cs](../ui/UnityDumpUI.Core/Services/Export/SdkHeaderExporter.cs) | `.h` C/C++ struct emitter |
+| [SymbolExporter.cs](../ui/UnityDumpUI.Core/Services/Export/SymbolExporter.cs) | x64dbg `.dd64` / Ghidra label / IDA `.idc` emitter (IL2CPP only) |
 | [ExportOptions.cs](../ui/UnityDumpUI.Core/Services/Export/ExportOptions.cs) | Shared option DTO (depth, array limit, collapse, live, base address) |
 | [UnityTypeMap.cs](../ui/UnityDumpUI.Core/Services/Export/UnityTypeMap.cs) | Type-name → CE / C / size mapping |
 | [IClassInfoLookup.cs](../ui/UnityDumpUI.Core/Services/Export/IClassInfoLookup.cs) | Drilldown peer lookup interface |

@@ -14,12 +14,30 @@ git clone https://github.com/<you>/discrete.git
 cd discrete
 .\tools\sync_vendor.ps1
 
+# Point git at the in-tree hooks dir (one-shot per clone — see
+# "Git hooks" below for what it enforces).
+git config core.hooksPath .githooks
+
 # Full Release publish (DLL + UI AOT + tests + metadata-cli)
 .\build.cmd publish clean
 ```
 
 If `.\build.cmd publish clean` succeeds with no `IL*` warnings, your
 toolchain is set up correctly.
+
+### Git hooks
+
+The repo ships one pre-commit hook at [`.githooks/pre-commit`](.githooks/pre-commit)
+that rejects any staged `*.lua` whose working-tree state contains
+CRLF. The check exists because the UnityDumpUI.Core build embeds the
+working-tree lua bytes as `<EmbeddedResource>`s, and the Phase 22a
+AOBMaker CE-side `InjectTableFile` verification trips on CRLF (one
+byte per CRLF pair lost in CE's `StringStream` normalisation). The
+hook fires only on commits that stage a `*.lua`; everything else is
+unaffected.
+
+To skip the hook for an emergency one-off, `git commit --no-verify`
+— but anything pushed needs to land on `main` clean.
 
 ---
 

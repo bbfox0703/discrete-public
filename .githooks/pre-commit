@@ -1,0 +1,52 @@
+#!/bin/sh
+# pre-commit — reject staged *.lua whose working-tree state contains CRLF.
+#
+# Why this exists: .gitattributes (`*.lua text eol=lf`) keeps the *index*
+# LF-only, but the UnityDumpUI.Core build embeds bytes from the working-
+# tree files (not from the index) as <EmbeddedResource>s. The Phase 22a
+# AOBMaker CE-side InjectTableFile pipeline verifies the post-write
+# StringStream.Size against the pre-normalisation working-tree byte
+# count; CRLF anywhere in those bytes drops one byte per CRLF pair in
+# CE's normalisation and aborts the bridge inject. So a Windows editor
+# that silently rewrites a lua file with CRLF on save can ship a
+# broken bridge even though git's index looks fine.
+#
+# Install once per clone:
+#   git config core.hooksPath .githooks
+
+set -eu
+
+# Limit to *.lua. --diff-filter excludes deletions so a `git rm`
+# doesn't trip the check.
+files=$(git diff --cached --name-only --diff-filter=ACMR -- '*.lua')
+[ -z "$files" ] && exit 0
+
+CR=$(printf '\r')
+bad=""
+for f in $files; do
+    [ -f "$f" ] || continue
+    # -U keeps grep in binary mode; without it, MSYS/git-bash grep
+    # silently strips CR before matching (the very thing we're
+    # trying to catch).
+    if LC_ALL=C grep -qU "$CR" "$f"; then
+        bad="$bad $f"
+    fi
+done
+
+if [ -n "$bad" ]; then
+    printf 'pre-commit: working-tree CRLF detected in staged *.lua:\n'
+    for f in $bad; do printf '  %s\n' "$f"; done
+    printf '\n'
+    printf 'Why this blocks: the UnityDumpUI.Core build embeds working-tree\n'
+    printf "bytes into the assembly manifest, and the AOBMaker CE-side\n"
+    printf 'InjectTableFile verification trips on CRLF. See .githooks/pre-commit.\n'
+    printf '\n'
+    printf 'Fix (the .gitattributes eol=lf rule rewrites as LF on checkout):\n'
+    for f in $bad; do
+        printf '  rm %s && git checkout -- %s\n' "$f" "$f"
+    done
+    printf '\n'
+    exit 1
+fi
+
+exit 0

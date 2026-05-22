@@ -21,6 +21,7 @@ public partial class MainWindow : Window
         // Hand the VM the View-scoped callbacks. Keeps the VM free of
         // Avalonia Window / StorageProvider types.
         vm.PickProcessAsync          = ShowPickerDialogAsync;
+        vm.SaveFileAsync             = SaveFileAsync;
         vm.Browser.SaveFileAsync     = SaveFileAsync;
         vm.Browser.CopyToClipboardAsync       = CopyToClipboardAsync;
         // Hand the VMs an accessor that snapshots the DataGrid's current

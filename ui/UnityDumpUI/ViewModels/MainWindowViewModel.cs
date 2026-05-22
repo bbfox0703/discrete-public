@@ -4,6 +4,7 @@
 // observable properties + commands per the AOT mandate.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 using System.Threading;
@@ -320,12 +321,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(DisconnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(InjectAndConnectCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsX64dbgCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsGhidraCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsIdaCommand))]
     private bool _isConnected;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(InjectAndConnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(InjectDiscreteBridgeCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsX64dbgCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsGhidraCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsIdaCommand))]
     private bool _isBusy;
 
     /// <summary>
@@ -351,7 +358,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string? _bridgeInjectStatus;
 
     [ObservableProperty] private string? _engine;
-    [ObservableProperty] private string? _backend2;     // "Backend" collides with field above
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsX64dbgCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsGhidraCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportSymbolsIdaCommand))]
+    private string? _backend2;     // "Backend" collides with field above
     [ObservableProperty] private string? _dllVariant;
     [ObservableProperty] private string? _gameModule;
     [ObservableProperty] private string? _unityVersion;
@@ -829,6 +840,139 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     private bool CanInjectDiscreteBridge() => !IsBusy;
+
+    // -----------------------------------------------------------------------
+    // Debugger symbol export — Tools menu → "Export Symbols → x64dbg / Ghidra
+    // / IDA". IL2CPP-only (Mono method addresses are dynamic JIT pages, not
+    // module-relative; see docs/export-formats.md). Each command:
+    //   1. Lists assemblies, drops the system / UnityEngine subset.
+    //   2. Calls dumpIl2cppSymbols for the user-assembly union.
+    //   3. Renders via SymbolExporter (one format per command).
+    //   4. Writes via the View-supplied SaveFileAsync picker.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// View-supplied save-file picker, identical signature to
+    /// <see cref="AssemblyBrowserViewModel.SaveFileAsync"/>. Wired by the
+    /// View's code-behind; null until then.
+    /// </summary>
+    public Func<string /*suggestedName*/, string /*description*/, string /*ext*/, Task<string?>>? SaveFileAsync { get; set; }
+
+    [RelayCommand(CanExecute = nameof(CanExportSymbols))]
+    private Task ExportSymbolsX64dbgAsync() =>
+        ExportSymbolsAsync(
+            "x64dbg Database",
+            ".dd64",
+            "symbols_x64dbg.dd64",
+            (rows, modName, modBase) =>
+                SymbolExporter.RenderX64dbgDatabase(rows, modName, modBase));
+
+    [RelayCommand(CanExecute = nameof(CanExportSymbols))]
+    private Task ExportSymbolsGhidraAsync() =>
+        ExportSymbolsAsync(
+            "Ghidra Symbols",
+            ".txt",
+            "symbols_ghidra.txt",
+            (rows, _, _) => SymbolExporter.RenderGhidraSymbols(rows));
+
+    [RelayCommand(CanExecute = nameof(CanExportSymbols))]
+    private Task ExportSymbolsIdaAsync() =>
+        ExportSymbolsAsync(
+            "IDA Script",
+            ".idc",
+            "symbols_ida.idc",
+            (rows, _, _) => SymbolExporter.RenderIdaScript(rows));
+
+    /// <summary>
+    /// True only on IL2CPP connections with the View's save-file picker
+    /// wired up. Mono backends don't expose stable module-relative
+    /// addresses for managed methods (JIT pages, not GameAssembly.dll),
+    /// so the export menu greys out.
+    /// </summary>
+    private bool CanExportSymbols() =>
+        !IsBusy && IsConnected && SaveFileAsync is not null &&
+        string.Equals(Backend2, "IL2CPP", StringComparison.OrdinalIgnoreCase);
+
+    private async Task ExportSymbolsAsync(
+        string filterDescription,
+        string ext,
+        string suggestedName,
+        Func<IReadOnlyList<SymbolDumpRow>, string, ulong, string> renderer)
+    {
+        if (SaveFileAsync is null) return;
+
+        string? path;
+        try
+        {
+            path = await SaveFileAsync(suggestedName, filterDescription, ext).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"save dialog failed: {ex.Message}";
+            return;
+        }
+        if (path is null) return;
+
+        IsBusy = true;
+        try
+        {
+            // Source the assembly list straight from the DLL — Browser's
+            // collection might still be loading on a fresh connect, and
+            // we don't want a partial dump as a result of UI lag.
+            GetAssembliesResult asmResult = await _backend
+                .GetAssembliesAsync().ConfigureAwait(true);
+            var userAssemblies = SystemAssemblyFilter.SelectUserAssemblies(
+                asmResult.Assemblies.Select(a => a.Name));
+            if (userAssemblies.Count == 0)
+            {
+                ErrorMessage =
+                    "No user assemblies to export (every assembly was flagged as " +
+                    "system/Unity engine). Adjust SystemAssemblyFilter if your game " +
+                    "uses an unusual naming scheme.";
+                return;
+            }
+
+            DumpIl2cppSymbolsResult dump = await _backend
+                .DumpIl2cppSymbolsAsync(
+                    userAssemblies,
+                    includeClasses: true,
+                    includeMethods: true)
+                .ConfigureAwait(true);
+
+            ulong modBase = 0;
+            if (!string.IsNullOrEmpty(dump.ModuleBase))
+            {
+                string clean = dump.ModuleBase;
+                if (clean.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                    clean = clean[2..];
+                _ = ulong.TryParse(clean,
+                    System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture, out modBase);
+            }
+
+            string text = renderer(dump.Rows, dump.ModuleName, modBase);
+            await File.WriteAllTextAsync(path, text).ConfigureAwait(true);
+
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"export symbols {ext} -> {path} ({dump.Rows.Count} rows, " +
+                $"scanned={dump.ScannedClasses}, truncated={dump.Truncated})");
+            if (dump.Truncated)
+            {
+                ErrorMessage = "Symbol dump hit the 1,000,000-row safety cap — " +
+                               "output is incomplete.";
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"symbol export failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"export symbols {ext} failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
 
     /// <summary>
     /// Hand the currently selected class off to the inspector and kick a

@@ -79,4 +79,20 @@ struct MethodPointer {
 };
 MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& methodName);
 
+// Bulk enumeration used by dumpIl2cppSymbols. Like ReadClassInfo's method
+// pass but additionally reads each method's parameter types so the caller
+// can compute a symbol-safe overload-disambiguating suffix via
+// shared/MethodSignatureFormat.h::MakeHumanSuffix. Heavier than
+// ReadClassInfo (one runtime param-type call per parameter) so we only
+// pay it in bulk-dump paths the user explicitly invokes.
+struct MethodSignatureEntry {
+    std::string              name;
+    std::uint32_t            token       = 0;
+    std::uint32_t            flags       = 0;
+    void*                    pointer     = nullptr;  // AOT native code (nullptr for abstract / uncompiled generics)
+    std::vector<std::string> paramTypes;
+    std::string              humanSuffix;
+};
+std::vector<MethodSignatureEntry> EnumerateMethodSignatures(Il2CppClass* klass);
+
 }  // namespace UnityCEDumper::IL2CPP

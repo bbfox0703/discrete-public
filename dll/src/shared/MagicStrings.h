@@ -194,4 +194,19 @@ inline constexpr const char* CmdEndValueScan          = "endValueScan";
 //            last_tick_age_ms, queue_depth, is_healthy }
 inline constexpr const char* CmdGetDispatcherStats    = "getDispatcherStats";
 
+// Debugger symbol dump (IL2CPP only). Walks every class in the supplied
+// assembly list and emits one row per class (Il2CppClass*) and/or per
+// compiled method (AOT methodPointer in GameAssembly.dll). Drives the
+// UI's "Export Symbols → x64dbg / Ghidra / IDA" actions.
+//   assemblies         : string[] (required)
+//   kinds              : optional ["class"|"method"] — default both
+//   computeHumanSuffix : optional bool — default true; appended to
+//                        method rows so overloads disambiguate.
+//   limit              : optional int — 0 / unset = unlimited; hard
+//                        safety cap 1_000_000 rows.
+// Returns:
+//   { moduleName, moduleBase, moduleSize, rows:[...], count,
+//     scanned_classes, truncated, missing_assemblies? }
+inline constexpr const char* CmdDumpIl2cppSymbols     = "dumpIl2cppSymbols";
+
 }  // namespace UnityCEDumper::MagicStrings
