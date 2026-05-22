@@ -41,6 +41,21 @@ if(MSVC)
     )
 endif()
 
+# Static CRT (Publish mode) — drops the runtime dependency on the VC++
+# Redistributable (vcruntime140.dll / msvcp140.dll / ucrtbase.dll). build.ps1
+# passes -DSTATIC_CRT=ON for `build.cmd publish` so the shipped DLLs and
+# tools.exe drop into a bare Windows install without needing VCRedist.
+# Requires CMP0091=NEW (default for our cmake_minimum_required 3.25).
+option(STATIC_CRT "Statically link the MSVC runtime (/MT, /MTd)" OFF)
+if(MSVC AND STATIC_CRT)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    message(STATUS "MSVC runtime: static (/MT)")
+else()
+    if(MSVC)
+        message(STATUS "MSVC runtime: dynamic (/MD) — set -DSTATIC_CRT=ON for static")
+    endif()
+endif()
+
 # Backend selection (set by build.ps1 via -DBACKEND=Mono|IL2CPP|Both)
 set(BACKEND "Both" CACHE STRING "DLL backend: Mono | IL2CPP | Both")
 set_property(CACHE BACKEND PROPERTY STRINGS Mono IL2CPP Both)
