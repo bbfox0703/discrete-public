@@ -248,6 +248,59 @@ public sealed class BackendAdapter : ILiveExportSource
         return sb.ToString();
     }
 
+    /// <summary>
+    /// `dumpIl2cppSymbols` — bulk-dump every IL2CPP class and/or method
+    /// across the supplied assemblies into the rows the debugger-symbol
+    /// exporters consume. IL2CPP-only (Mono methods don't have stable
+    /// module-relative addresses — see [docs/export-formats.md] for why
+    /// Mono isn't supported here).
+    /// </summary>
+    public async Task<DumpIl2cppSymbolsResult> DumpIl2cppSymbolsAsync(
+        IReadOnlyList<string> assemblies,
+        bool includeClasses = true,
+        bool includeMethods = true,
+        bool computeHumanSuffix = true,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        if (assemblies is null || assemblies.Count == 0)
+        {
+            throw new ArgumentException(
+                "dumpIl2cppSymbols requires at least one assembly.",
+                nameof(assemblies));
+        }
+        if (!includeClasses && !includeMethods)
+        {
+            throw new ArgumentException(
+                "dumpIl2cppSymbols requires includeClasses or includeMethods.");
+        }
+
+        var args = new Dictionary<string, JsonElement>();
+        using (var asmDoc = JsonDocument.Parse(BuildStringArrayJson(assemblies)))
+        {
+            args["assemblies"] = asmDoc.RootElement.Clone();
+        }
+
+        var kinds = new List<string>(2);
+        if (includeClasses) kinds.Add("class");
+        if (includeMethods) kinds.Add("method");
+        using (var kindsDoc = JsonDocument.Parse(BuildStringArrayJson(kinds)))
+        {
+            args["kinds"] = kindsDoc.RootElement.Clone();
+        }
+
+        args["computeHumanSuffix"] = Bool(computeHumanSuffix);
+        if (limit.HasValue) args["limit"] = Int(limit.Value);
+
+        var env = await _pipe.SendAsync(
+            "dumpIl2cppSymbols", args,
+            ProtocolJsonContext.Default.RpcEnvelopeDumpIl2cppSymbolsResult, ct)
+            .ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result
+            ?? throw new PipeProtocolException("dumpIl2cppSymbols returned no result");
+    }
+
     // -----------------------------------------------------------------------
     // Phase 9 — live inspection.
     // -----------------------------------------------------------------------

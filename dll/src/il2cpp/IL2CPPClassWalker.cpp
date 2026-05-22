@@ -4,6 +4,7 @@
 
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/MethodSignatureFormat.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPThreadAttach.h"
@@ -117,6 +118,21 @@ Il2CppClass* SehClassFromIl2CppType(fn_class_from_il2cpp_type fn, const Il2CppTy
 }
 int SehClassIsValueType(fn_class_is_valuetype fn, Il2CppClass* k) {
     __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+std::uint32_t SehParamCount(fn_method_get_param_count fn, const MethodInfo* m) {
+    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+}
+const Il2CppType* SehParamType(fn_method_get_param fn, const MethodInfo* m, std::uint32_t i) {
+    __try { return fn(m, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+const char* SehMethodName(fn_method_get_name fn, const MethodInfo* m) {
+    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+std::uint32_t SehMethodToken(fn_method_get_token fn, const MethodInfo* m) {
+    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+}
+std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::uint32_t* iflags) {
+    __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
 }
 #pragma warning(pop)
 
@@ -425,6 +441,59 @@ MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& meth
     out.token = (r.method_get_token != nullptr) ? r.method_get_token(match) : 0u;
     out.address = ReadMethodPointer(match);
     out.ok = (out.address != nullptr);
+    return out;
+}
+
+std::vector<MethodSignatureEntry> EnumerateMethodSignatures(Il2CppClass* klass) {
+    std::vector<MethodSignatureEntry> out;
+    if (klass == nullptr) return out;
+
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_methods == nullptr) return out;
+
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return out;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return out;
+
+    void* iter = nullptr;
+    for (;;) {
+        const MethodInfo* m = SehNextMethod(r.class_get_methods, klass, &iter);
+        if (m == nullptr) break;
+
+        MethodSignatureEntry me;
+        if (r.method_get_name != nullptr) {
+            const char* n = SehMethodName(r.method_get_name, m);
+            if (n != nullptr) me.name = n;
+        }
+        if (r.method_get_token != nullptr) {
+            me.token = SehMethodToken(r.method_get_token, m);
+        }
+        if (r.method_get_flags != nullptr) {
+            std::uint32_t iflags = 0;
+            me.flags = SehMethodFlags(r.method_get_flags, m, &iflags);
+        }
+        me.pointer = ReadMethodPointer(m);
+
+        // Pull paramTypes when the resolver has the param accessors bound.
+        // Missing on Unity 2018 builds where the export wasn't present —
+        // callers degrade to humanSuffix = "noargs" (correct only for
+        // 0-arg methods; ambiguous for overloads).
+        std::uint32_t paramCount = 0;
+        if (r.method_get_param_count != nullptr) {
+            paramCount = SehParamCount(r.method_get_param_count, m);
+        }
+        if (paramCount > 0 && r.method_get_param != nullptr) {
+            me.paramTypes.reserve(paramCount);
+            for (std::uint32_t i = 0; i < paramCount; ++i) {
+                const Il2CppType* pt = SehParamType(r.method_get_param, m, i);
+                me.paramTypes.push_back(pt ? TypeName(pt) : std::string{});
+            }
+        }
+        me.humanSuffix = Shared::MakeHumanSuffix(me.paramTypes);
+
+        out.push_back(std::move(me));
+    }
     return out;
 }
 

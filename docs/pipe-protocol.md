@@ -1058,6 +1058,71 @@ surfaced by the v31 cross-version sweep.
 
 ---
 
+### `dumpIl2cppSymbols` *(IL2CPP)*
+
+Bulk dump of every IL2CPP class and/or AOT method native entry across the
+supplied assemblies. Drives the UI's "Export Symbols → x64dbg / Ghidra /
+IDA" actions — see [export-formats.md](export-formats.md) for the
+debugger-side format details.
+
+Mono is unsupported here on purpose: Mono managed methods live in dynamic
+JIT pages with no stable module-relative offset, so a session snapshot
+can't be reloaded into a debugger after a game restart.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assemblies`         | string[] | required; same name shape as `getClasses` (e.g. `"Assembly-CSharp"`). Missing assemblies are reported in `missing_assemblies` rather than failing the whole call. |
+| `kinds`              | string[] | optional; subset of `["class", "method"]`. Default = both. |
+| `computeHumanSuffix` | bool    | optional, default `true`. When `true`, every method row carries a `humanSuffix` field built from its formal-parameter types — same shape as `findMethodInstances`. Skip only if you don't care about overload collisions and want to shave the per-method param-walk cost on very large dumps. |
+| `limit`              | int     | optional; `0` (default) = unlimited up to a 1,000,000-row safety cap. When the cap fires `truncated` is `true`. |
+
+```jsonc
+// → {
+//   "moduleName":      "GameAssembly.dll",
+//   "moduleBase":      "0x00007FF6A7260000",      // absolute, "0x..." hex
+//   "moduleSize":      47968256,
+//   "rows": [
+//     { "kind": "class",  "assembly": "Assembly-CSharp",
+//       "namespace": "Game", "class": "Player",
+//       "address": "0x00007FF6A7990400" },
+//     { "kind": "method", "assembly": "Assembly-CSharp",
+//       "namespace": "Game", "class": "Player",
+//       "name":     "TakeDamage",
+//       "token":    100663552,
+//       "static":   false,
+//       "address":  "0x00007FF6A7773740",
+//       "humanSuffix": "int" },
+//     ...
+//   ],
+//   "count":              42_817,
+//   "scanned_classes":    1_503,
+//   "truncated":          false,
+//   "missing_assemblies": ["Foo.Bar"]              // optional, omitted when empty
+// }
+```
+
+**Address spaces**:
+
+- Class rows' `address` is the `Il2CppClass*` — a `.data` pointer inside
+  `GameAssembly.dll`. Useful as a label when reverse-engineering vtable /
+  RGCTX lookups.
+- Method rows' `address` is the AOT `methodPointer` — a `.text` entry
+  point. Same value `findMethodInstances` returns.
+- Both are subtractable from `moduleBase` to produce a stable
+  module-relative offset, which is what x64dbg's `.dd64` labels use.
+
+**Suffix collisions**: when `computeHumanSuffix` is enabled, two overloads
+of the same method get distinct rows (`HumanSuffix="int"` vs
+`HumanSuffix="float"`) — the UI's `SymbolExporter.BuildLabel` appends the
+suffix so the resulting debugger labels stay unique.
+
+**Cost guidance**: full dump of a typical Unity 2022 IL2CPP game's
+`Assembly-CSharp` + 4-5 user assemblies runs ~1-3 seconds and produces
+30-100k rows. With `computeHumanSuffix=false` it's roughly 2x faster but
+overloads will collide in the rendered output.
+
+---
+
 ## Quick tour by use case
 
 | Goal | Path |
@@ -1076,6 +1141,7 @@ surfaced by the v31 cross-version sweep.
 | Enumerate every overload of a method with native addresses | `findMethodInstances` |
 | Generate a CE AOB pattern from a method's native address | `getMethodAobPattern` |
 | Invoke a managed method with marshaled args (IL2CPP + Mono, static + instance) | `callMethod` |
+| Dump every class + method as debugger labels (IL2CPP) | `dumpIl2cppSymbols` |
 
 ---
 
