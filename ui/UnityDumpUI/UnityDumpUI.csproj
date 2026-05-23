@@ -73,18 +73,18 @@
          which makes ILC emit "will always throw" diagnostics for the
          Linux entry points whose DBus types were trimmed away. Avalonia.Win32
          is the bare Windows backend. -->
-    <PackageReference Include="Avalonia" Version="12.0.2" />
-    <PackageReference Include="Avalonia.Win32" Version="12.0.2" />
+    <PackageReference Include="Avalonia" Version="12.0.3" />
+    <PackageReference Include="Avalonia.Win32" Version="12.0.3" />
     <!-- Avalonia.Desktop used to bring Skia + HarfBuzz in transitively. With
          Desktop dropped, we have to reference both explicitly — Skia is the
          rendering backend; HarfBuzz is the text shaper. AppBuilder.Setup
          throws "No text shaping system configured" if HarfBuzz isn't
          registered (Avalonia 12 breaking change — UsePlatformDetect used to
          wire it in for free; UseSkia by itself does not). -->
-    <PackageReference Include="Avalonia.Skia" Version="12.0.2" />
-    <PackageReference Include="Avalonia.HarfBuzz" Version="12.0.2" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.2" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.2" />
+    <PackageReference Include="Avalonia.Skia" Version="12.0.3" />
+    <PackageReference Include="Avalonia.HarfBuzz" Version="12.0.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.3" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.3" />
     <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.0.0" />
 
     <!-- AOT-friendly MVVM via source generators ([ObservableProperty], [RelayCommand]).
