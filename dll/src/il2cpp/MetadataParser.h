@@ -64,6 +64,24 @@ public:
         std::uint32_t token       = 0;
     };
 
+    struct MethodDefView {
+        std::int32_t  index;             // global Method index
+        std::string   name;
+        std::int32_t  declaringTypeIndex = 0;  // TypeDefinition index (use GetTypeDefinition to resolve)
+        std::int32_t  returnTypeIndex    = 0;  // Il2CppType index — opaque without binary parse (Phase D)
+        std::int32_t  parameterStart     = 0;
+        std::uint16_t parameterCount     = 0;
+        std::uint32_t flags              = 0;
+        std::uint32_t token              = 0;
+    };
+
+    struct ParameterDefView {
+        std::int32_t  index;             // global Parameter index
+        std::string   name;
+        std::int32_t  typeIndex          = 0;  // Il2CppType index — opaque without binary parse
+        std::uint32_t token              = 0;
+    };
+
     struct FieldDefaultBlob {
         std::int32_t              fieldIndex = 0;
         std::int32_t              typeIndex  = 0;
@@ -73,6 +91,20 @@ public:
 
     std::uint32_t TypeDefinitionCount() const noexcept;
     std::optional<TypeDefView> GetTypeDefinition(std::int32_t idx) const;
+
+    // Phase B (Il2CppDumper feature parity): Method + Parameter enumeration.
+    // Same version dispatch as TypeDefinition — v24.0 / v24.1 / v24.2-v24.5
+    // / v29-v34 / v35-v37 share fixed strides; v38+ hand-walks based on
+    // IndexSizes. Parameter type resolution stays opaque (the Il2CppType
+    // table lives in the runtime binary, not metadata.dat — Phase D will
+    // cross-link).
+    std::uint32_t MethodDefinitionCount() const noexcept;
+    std::optional<MethodDefView> GetMethodDefinition(std::int32_t idx) const;
+    std::vector<MethodDefView>   EnumerateTypeMethods(const TypeDefView& type) const;
+
+    std::uint32_t ParameterCount() const noexcept;
+    std::optional<ParameterDefView> GetParameter(std::int32_t idx) const;
+    std::vector<ParameterDefView>   EnumerateMethodParameters(const MethodDefView& method) const;
 
     // Linear search by namespace + name. Returns the first match or nullopt.
     std::optional<TypeDefView> FindTypeByName(const std::string& ns, const std::string& name) const;
@@ -153,6 +185,14 @@ private:
     std::size_t FieldDefSizeof() const noexcept;
     std::size_t FieldDefaultValueSizeof() const noexcept;
 
+    // Phase B — Method / Parameter row strides. Same dispatch story as
+    // TypeDefSizeof / FieldDefSizeof: v24 sub-variants pick from
+    // MethodDefinition_v24_0/_v24_1/_v29; v31-v37 use MethodDefinition_v31;
+    // v38+ computes from IndexSizes (typeIndexSize / typeDefinitionIndexSize
+    // / parameterIndexSize / genericContainerIndexSize). 0 for unsupported.
+    std::size_t MethodDefSizeof() const noexcept;
+    std::size_t ParameterDefSizeof() const noexcept;
+
     bool                      loaded_  = false;
     std::int32_t              version_ = 0;
     std::vector<std::uint8_t> data_;  // owns the whole file
@@ -180,6 +220,12 @@ private:
     std::int32_t fieldDefaultsSize_      = 0;
     std::int32_t fieldDefaultDataOffset_ = 0;
     std::int32_t fieldDefaultDataSize_   = 0;
+    // Phase B: methods / parameters table offsets (both v29 flat header
+    // and v38+ section header populate these in LoadTables).
+    std::int32_t methodsOffset_          = 0;
+    std::int32_t methodsSize_            = 0;
+    std::int32_t parametersOffset_       = 0;
+    std::int32_t parametersSize_         = 0;
 
     // For v38+ derive the variable-width metadata-index sizes at load time
     // from each table's row count (and the parameter row's TIS-inferred

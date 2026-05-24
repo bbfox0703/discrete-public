@@ -165,6 +165,65 @@ metadata-cli type "C:\...\global-metadata.dat" "MainGame" "PLY_WORK"
 For enums, fields with `FieldDefaultValue` entries also include the
 typed default value.
 
+#### `methods` — JSON line per method
+
+One JSON object per line for every `MethodDefinition` in the file.
+Includes the declaring type's FQN so consumers don't need a second
+lookup. Useful for `jq` / text-tool slicing on large method tables
+(Heroes of Olden Era is ~200K methods; Songs of Silence ~250K).
+
+```powershell
+metadata-cli methods "C:\...\global-metadata.dat" > methods.jsonl
+```
+
+Each line:
+
+```json
+{"index":4,"declaring_namespace":"System","declaring_type":"Object","name":"GetHashCode","return_type_index":7,"parameter_count":0,"token":100663301,"flags":454}
+```
+
+`return_type_index` references the runtime `Il2CppType` table which
+lives in `GameAssembly.dll`, not in `global-metadata.dat`. The CLI
+emits it as a raw index — full resolution lands in the planned
+[il2cppdumper-comparison.md](il2cppdumper-comparison.md) **Phase D**
+(offline PE parser). Same caveat applies to `parameters[].type_index`.
+
+#### `method` — full decode of one method (with parameters)
+
+```powershell
+metadata-cli method "C:\...\global-metadata.dat" "System" "String" "Concat"
+```
+
+Returns all overloads as a JSON array — IL2CPP supports overloading,
+so a name lookup may match multiple methods:
+
+```json
+{
+  "namespace": "System",
+  "type": "String",
+  "method_name": "Concat",
+  "overloads": [
+    {
+      "index": 73390,
+      "token": 100663971,
+      "return_type_index": 48643,
+      "flags": 150,
+      "parameters": [
+        {"name": "str0", "index": 55305, "type_index": 48643, "token": 134218896},
+        {"name": "str1", "index": 55306, "type_index": 48643, "token": 134218897}
+      ]
+    },
+    ...
+  ]
+}
+```
+
+Verified across the test corpus (v24.0 / v24.5 / v29 / v31 / v39):
+the same call returns 6–7 overloads for `String.Concat` with
+parameter types consistent across overloads (e.g. all string-only
+overloads share the same `type_index`). Phase B docs at
+[il2cppdumper-comparison.md](il2cppdumper-comparison.md).
+
 ## Comparing CLI output to live RPC
 
 Quick sanity check: the CLI's `info` output should match the DLL's

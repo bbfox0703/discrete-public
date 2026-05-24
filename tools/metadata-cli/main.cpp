@@ -208,6 +208,101 @@ int CmdTypes(const std::wstring& path) {
     return 0;
 }
 
+int CmdMethods(const std::wstring& path) {
+    Parser p;
+    if (!p.LoadFromPath(path)) {
+        std::fputs("metadata-cli: load failed — see `info` subcommand for diagnostics, "
+                   "or check version is in [16, 39]\n", stderr);
+        return 1;
+    }
+    // One JSON line per MethodDefinition. Includes the declaring type's
+    // FQN for usability (declaringTypeIndex is otherwise opaque without
+    // a follow-up GetTypeDefinition call). Parameter types stay as
+    // raw indices — they reference the runtime Il2CppType table which
+    // lives in the binary, not metadata.dat (deferred to Phase D).
+    std::uint32_t count = p.MethodDefinitionCount();
+    for (std::uint32_t i = 0; i < count; ++i) {
+        auto md = p.GetMethodDefinition(static_cast<std::int32_t>(i));
+        if (!md) continue;
+        std::string declNs, declName;
+        if (auto td = p.GetTypeDefinition(md->declaringTypeIndex)) {
+            declNs   = td->ns;
+            declName = td->name;
+        }
+        std::fputs("{\"index\":", stdout);
+        std::printf("%d,\"declaring_namespace\":", md->index);
+        PutJsonString(declNs);
+        std::fputs(",\"declaring_type\":", stdout);
+        PutJsonString(declName);
+        std::fputs(",\"name\":", stdout);
+        PutJsonString(md->name);
+        std::printf(",\"return_type_index\":%d,\"parameter_count\":%u,"
+                    "\"token\":%u,\"flags\":%u}\n",
+                    md->returnTypeIndex, md->parameterCount,
+                    md->token, md->flags);
+    }
+    return 0;
+}
+
+int CmdMethod(const std::wstring& path,
+              const std::string& ns,
+              const std::string& typeName,
+              const std::string& methodName) {
+    Parser p;
+    if (!p.LoadFromPath(path)) {
+        std::fputs("metadata-cli: load failed — see `info` subcommand for diagnostics\n", stderr);
+        return 1;
+    }
+    auto td = p.FindTypeByName(ns, typeName);
+    if (!td) {
+        std::fprintf(stderr, "metadata-cli: type not found: %s.%s\n", ns.c_str(), typeName.c_str());
+        return 1;
+    }
+    auto methods = p.EnumerateTypeMethods(*td);
+    // Filter by name. IL2CPP supports overloading — multiple methods can
+    // share a name with different parameter signatures, so we emit an
+    // array of overloads (each with its parameter list).
+    std::fputs("{\"namespace\":", stdout);
+    PutJsonString(td->ns);
+    std::fputs(",\"type\":", stdout);
+    PutJsonString(td->name);
+    std::fputs(",\"method_name\":", stdout);
+    PutJsonString(methodName);
+    std::fputs(",\"overloads\":[", stdout);
+    bool firstM = true;
+    std::uint32_t matched = 0;
+    for (const auto& m : methods) {
+        if (m.name != methodName) continue;
+        if (!firstM) std::fputc(',', stdout);
+        firstM = false;
+        ++matched;
+        std::printf("{\"index\":%d,\"token\":%u,"
+                    "\"return_type_index\":%d,"
+                    "\"flags\":%u,\"parameters\":[",
+                    m.index, m.token, m.returnTypeIndex, m.flags);
+        auto params = p.EnumerateMethodParameters(m);
+        bool firstP = true;
+        for (const auto& pp : params) {
+            if (!firstP) std::fputc(',', stdout);
+            firstP = false;
+            std::fputs("{\"name\":", stdout);
+            PutJsonString(pp.name);
+            std::printf(",\"index\":%d,\"type_index\":%d,\"token\":%u}",
+                        pp.index, pp.typeIndex, pp.token);
+        }
+        std::fputs("]}", stdout);
+    }
+    std::fputs("]}\n", stdout);
+    if (matched == 0) {
+        std::fprintf(stderr,
+            "metadata-cli: no method named '%s' on %s.%s (type has %u methods total)\n",
+            methodName.c_str(), ns.c_str(), typeName.c_str(),
+            static_cast<unsigned>(methods.size()));
+        return 1;
+    }
+    return 0;
+}
+
 int CmdType(const std::wstring& path, const std::string& ns, const std::string& name) {
     Parser p;
     if (!p.LoadFromPath(path)) {
@@ -254,12 +349,14 @@ int CmdType(const std::wstring& path, const std::string& ns, const std::string& 
 
 void Usage() {
     std::fputs(
-        "metadata-cli — offline IL2CPP global-metadata.dat parser (Phase 13)\n\n"
+        "metadata-cli — offline IL2CPP global-metadata.dat parser\n\n"
         "USAGE:\n"
-        "  metadata-cli info  <path-to-global-metadata.dat>\n"
-        "  metadata-cli stats <path-to-global-metadata.dat>\n"
-        "  metadata-cli types <path-to-global-metadata.dat>\n"
-        "  metadata-cli type  <path-to-global-metadata.dat> <namespace> <name>\n\n"
+        "  metadata-cli info    <path-to-global-metadata.dat>\n"
+        "  metadata-cli stats   <path-to-global-metadata.dat>\n"
+        "  metadata-cli types   <path-to-global-metadata.dat>\n"
+        "  metadata-cli type    <path-to-global-metadata.dat> <namespace> <name>\n"
+        "  metadata-cli methods <path-to-global-metadata.dat>\n"
+        "  metadata-cli method  <path-to-global-metadata.dat> <namespace> <type> <method>\n\n"
         "Output is line-oriented JSON to stdout. Errors → stderr (exit 1).\n",
         stderr);
 }
@@ -274,12 +371,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "metadata-cli: invalid path argument\n");
         return 2;
     }
-    if      (sub == "info")  return CmdInfo(path);
-    else if (sub == "stats") return CmdStats(path);
-    else if (sub == "types") return CmdTypes(path);
+    if      (sub == "info")    return CmdInfo(path);
+    else if (sub == "stats")   return CmdStats(path);
+    else if (sub == "types")   return CmdTypes(path);
     else if (sub == "type") {
         if (argc < 5) { Usage(); return 2; }
         return CmdType(path, argv[3], argv[4]);
+    }
+    else if (sub == "methods") return CmdMethods(path);
+    else if (sub == "method") {
+        if (argc < 6) { Usage(); return 2; }
+        return CmdMethod(path, argv[3], argv[4], argv[5]);
     }
     Usage();
     return 2;

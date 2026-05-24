@@ -292,6 +292,108 @@ struct FieldDefinition_v24_0 {
     std::uint32_t token;
 };
 
+// MethodDefinition — phase B (Il2CppDumper feature parity). Layout per
+// vendor/Il2CppDumperV35plus/Il2CppDumper/Il2Cpp/MetadataClass.cs:381-407.
+// Same v24 sub-version field-drop story as TypeDefinition:
+//   v24.0: 56 bytes (customAttributeIndex + 5 v24.1 fields)
+//   v24.1: 52 bytes (drops customAttributeIndex)
+//   v24.2-v24.5, v27, v29: 32 bytes (drops all 5 v24.1 fields)
+//   v31, v32-v37: 36 bytes (adds returnParameterToken at offset 12)
+//   v38+: hand-walked (typed indices go variable-width per IndexSizes)
+
+// v29 / v27 / v24.2-v24.5: the canonical "modern" 32-byte layout.
+// 6 int32/uint32 + 4 uint16 = 32 bytes.
+struct MethodDefinition_v29 {
+    std::uint32_t nameIndex;
+    std::int32_t  declaringType;
+    std::int32_t  returnType;
+    std::int32_t  parameterStart;
+    std::int32_t  genericContainerIndex;
+    std::uint32_t token;
+    std::uint16_t flags;
+    std::uint16_t iflags;
+    std::uint16_t slot;
+    std::uint16_t parameterCount;
+};
+
+// v31-v37: adds `returnParameterToken` after `returnType`. 7 int32/uint32 +
+// 4 uint16 = 36 bytes. v32-v34 reuse v31; v35-v37 same as v31 (typed-index
+// changes for v35+ don't affect MethodDefinition pre-v38).
+struct MethodDefinition_v31 {
+    std::uint32_t nameIndex;
+    std::int32_t  declaringType;
+    std::int32_t  returnType;
+    std::int32_t  returnParameterToken;   // added at v31
+    std::int32_t  parameterStart;
+    std::int32_t  genericContainerIndex;
+    std::uint32_t token;
+    std::uint16_t flags;
+    std::uint16_t iflags;
+    std::uint16_t slot;
+    std::uint16_t parameterCount;
+};
+
+// v24.1 (Unity ~2018.2): the v29 layout plus the five deprecated indices
+// (methodIndex, invokerIndex, delegateWrapperIndex, rgctxStartIndex,
+// rgctxCount) inserted between `genericContainerIndex` and `token`.
+// 11 int32/uint32 + 4 uint16 = 52 bytes.
+struct MethodDefinition_v24_1 {
+    std::uint32_t nameIndex;
+    std::int32_t  declaringType;
+    std::int32_t  returnType;
+    std::int32_t  parameterStart;
+    std::int32_t  genericContainerIndex;
+    std::int32_t  methodIndex;            // ≤v24.1
+    std::int32_t  invokerIndex;           // ≤v24.1
+    std::int32_t  delegateWrapperIndex;   // ≤v24.1
+    std::int32_t  rgctxStartIndex;        // ≤v24.1
+    std::int32_t  rgctxCount;             // ≤v24.1
+    std::uint32_t token;
+    std::uint16_t flags;
+    std::uint16_t iflags;
+    std::uint16_t slot;
+    std::uint16_t parameterCount;
+};
+
+// v24.0 (Unity ~2017-2018.1, e.g. R-Type Dimensions): the v24.1 layout
+// plus `customAttributeIndex` inserted after `parameterStart`.
+// 12 int32/uint32 + 4 uint16 = 56 bytes.
+struct MethodDefinition_v24_0 {
+    std::uint32_t nameIndex;
+    std::int32_t  declaringType;
+    std::int32_t  returnType;
+    std::int32_t  parameterStart;
+    std::int32_t  customAttributeIndex;   // ≤v24.0
+    std::int32_t  genericContainerIndex;
+    std::int32_t  methodIndex;            // ≤v24.1
+    std::int32_t  invokerIndex;           // ≤v24.1
+    std::int32_t  delegateWrapperIndex;   // ≤v24.1
+    std::int32_t  rgctxStartIndex;        // ≤v24.1
+    std::int32_t  rgctxCount;             // ≤v24.1
+    std::uint32_t token;
+    std::uint16_t flags;
+    std::uint16_t iflags;
+    std::uint16_t slot;
+    std::uint16_t parameterCount;
+};
+
+// ParameterDefinition — same v24.0-only customAttributeIndex story.
+//   v24.0: 16 bytes (with customAttributeIndex)
+//   v24.1 through v37: 12 bytes (uint nameIndex + uint token + int typeIndex)
+//   v38+: 8 + typeIndexSize (typeIndex becomes variable-width)
+struct ParameterDefinition_v29 {
+    std::uint32_t nameIndex;
+    std::uint32_t token;
+    std::int32_t  typeIndex;
+};
+
+struct ParameterDefinition_v24_0 {
+    std::uint32_t nameIndex;
+    std::uint32_t token;
+    std::int32_t  customAttributeIndex;   // ≤v24.0
+    std::int32_t  typeIndex;
+};
+
 // v31 (Unity 2022.2+) TypeDefinition layout — empirically identical to v29
 // (88-byte stride, IL token at offset 84). Verified by hex-dumping
 // Farthest Frontier + Emberward typeDefinitions tables and locating the
@@ -462,6 +564,12 @@ static_assert(sizeof(TypeDefinition_v24)      == 92,  "TypeDefinition_v24 (v24.2
 static_assert(sizeof(TypeDefinition_v24_1)    == 100, "TypeDefinition_v24_1 must be 100 bytes (v24 + rgctx pair)");
 static_assert(sizeof(TypeDefinition_v24_0)    == 104, "TypeDefinition_v24_0 must be 104 bytes (v24.1 + customAttributeIndex)");
 static_assert(sizeof(FieldDefinition_v24_0)   == 16,  "FieldDefinition_v24_0 must be 16 bytes (v29 + customAttributeIndex)");
+static_assert(sizeof(MethodDefinition_v29)    == 32,  "MethodDefinition_v29 must be 32 bytes");
+static_assert(sizeof(MethodDefinition_v31)    == 36,  "MethodDefinition_v31 must be 36 bytes (v29 + returnParameterToken)");
+static_assert(sizeof(MethodDefinition_v24_1)  == 52,  "MethodDefinition_v24_1 must be 52 bytes (v29 + 5 deprecated indices)");
+static_assert(sizeof(MethodDefinition_v24_0)  == 56,  "MethodDefinition_v24_0 must be 56 bytes (v24.1 + customAttributeIndex)");
+static_assert(sizeof(ParameterDefinition_v29) == 12,  "ParameterDefinition_v29 must be 12 bytes");
+static_assert(sizeof(ParameterDefinition_v24_0) == 16, "ParameterDefinition_v24_0 must be 16 bytes (v29 + customAttributeIndex)");
 static_assert(sizeof(TypeDefinition_v31)      == 88,  "TypeDefinition_v31 must be 88 bytes (== v29)");
 static_assert(sizeof(TypeDefinition_v35)      == 84,  "TypeDefinition_v35 must be 84 bytes (v29 minus elementTypeIndex)");
 static_assert(sizeof(FieldDefinition_v29)     == 12,  "FieldDefinition_v29 must be 12 bytes");
