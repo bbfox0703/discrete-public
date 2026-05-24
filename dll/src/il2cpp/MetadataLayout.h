@@ -156,13 +156,31 @@ struct FieldDefaultValue_v29 {
     std::int32_t dataIndex;    // -> fieldAndParameterDefaultValueData blob; -1 = no data
 };
 
-// v24 (Unity 2018.4 - 2019.x) TypeDefinition layout: identical to v29 plus
-// an extra `byrefTypeIndex` int32 inserted between `byvalTypeIndex` and
-// `declaringTypeIndex`. Verified empirically against SaGa Frontier
-// Remastered + FINAL FANTASY VI PR (both Unity 2019.4) — first five
-// TypeDefs come back as `<Module>`, `<>f__AnonymousType0\`1`, `Locale`,
-// `SR`, `Mono.Runtime` with correct `field_count` / `method_count` /
-// IL token (0x02000001+). Total: 17 int32 + 8 uint16 + 2 uint32 = 92 bytes.
+// v24 has FOUR sub-version layouts per upstream Il2CppDumper
+// (vendor/Il2CppDumper/Il2CppDumper/Il2Cpp/MetadataClass.cs:166) —
+// Unity dropped fields from `Il2CppTypeDefinition` over the 2018.x
+// release cycle without bumping the metadata version number:
+//
+//   v24.0 (Unity ~2017-2018.1, e.g. R-Type Dimensions 2018.1.9f2):
+//     has `customAttributeIndex` + `byrefTypeIndex` +
+//     `rgctxStartIndex` + `rgctxCount`. 104-byte stride.
+//   v24.1 (Unity ~2018.2):
+//     drops `customAttributeIndex`. 100-byte stride.
+//   v24.2 / v24.3 / v24.4 (Unity ~2018.3-2018.4):
+//     drops `rgctxStartIndex` + `rgctxCount`. 92-byte stride.
+//   v24.5 (Unity 2019.x — SaGa Frontier Remastered / FFVI PR):
+//     same fields as v24.2-24.4. 92-byte stride. Final v24 layout
+//     before v27 drops `byrefTypeIndex` too.
+//
+// `TypeDefinition_v24` below is v24.2-v24.5 (92-byte stride) — the
+// most common shape in the wild and the one our test corpus validated
+// against. The variants for older Unity 2018 builds follow below as
+// `TypeDefinition_v24_0` (104 bytes) and `TypeDefinition_v24_1`
+// (100 bytes); `Parser::DetectV24Variant()` probes which one matches
+// by checking which stride lands TypeDef[0].token at 0x02000001.
+
+// v24.2-v24.5 (Unity ~2018.3-2019.x): only `byrefTypeIndex` from the
+// v24 deprecated-fields set survives. 17 int32 + 8 uint16 + 2 uint32 = 92 bytes.
 struct TypeDefinition_v24 {
     std::int32_t  nameIndex;
     std::int32_t  namespaceIndex;
@@ -190,6 +208,87 @@ struct TypeDefinition_v24 {
     std::uint16_t interfaces_count;
     std::uint16_t interface_offsets_count;
     std::uint32_t bitfield;
+    std::uint32_t token;
+};
+
+// v24.1 (Unity ~2018.2): adds `rgctxStartIndex` + `rgctxCount` to the v24.5
+// layout, placed between `elementTypeIndex` and `genericContainerIndex`.
+// 19 int32 + 8 uint16 + 2 uint32 = 100 bytes.
+struct TypeDefinition_v24_1 {
+    std::int32_t  nameIndex;
+    std::int32_t  namespaceIndex;
+    std::int32_t  byvalTypeIndex;
+    std::int32_t  byrefTypeIndex;
+    std::int32_t  declaringTypeIndex;
+    std::int32_t  parentIndex;
+    std::int32_t  elementTypeIndex;
+    std::int32_t  rgctxStartIndex;       // present only ≤v24.1
+    std::int32_t  rgctxCount;            // present only ≤v24.1
+    std::int32_t  genericContainerIndex;
+    std::uint32_t flags;
+    std::int32_t  fieldStart;
+    std::int32_t  methodStart;
+    std::int32_t  eventStart;
+    std::int32_t  propertyStart;
+    std::int32_t  nestedTypesStart;
+    std::int32_t  interfacesStart;
+    std::int32_t  vtableStart;
+    std::int32_t  interfaceOffsetsStart;
+    std::uint16_t method_count;
+    std::uint16_t property_count;
+    std::uint16_t field_count;
+    std::uint16_t event_count;
+    std::uint16_t nested_type_count;
+    std::uint16_t vtable_count;
+    std::uint16_t interfaces_count;
+    std::uint16_t interface_offsets_count;
+    std::uint32_t bitfield;
+    std::uint32_t token;
+};
+
+// v24.0 (Unity ~2017-2018.1, e.g. R-Type Dimensions 2018.1.9f2): adds
+// `customAttributeIndex` after `namespaceIndex` to the v24.1 layout.
+// 20 int32 + 8 uint16 + 2 uint32 = 104 bytes.
+struct TypeDefinition_v24_0 {
+    std::int32_t  nameIndex;
+    std::int32_t  namespaceIndex;
+    std::int32_t  customAttributeIndex;  // present only ≤v24.0
+    std::int32_t  byvalTypeIndex;
+    std::int32_t  byrefTypeIndex;
+    std::int32_t  declaringTypeIndex;
+    std::int32_t  parentIndex;
+    std::int32_t  elementTypeIndex;
+    std::int32_t  rgctxStartIndex;
+    std::int32_t  rgctxCount;
+    std::int32_t  genericContainerIndex;
+    std::uint32_t flags;
+    std::int32_t  fieldStart;
+    std::int32_t  methodStart;
+    std::int32_t  eventStart;
+    std::int32_t  propertyStart;
+    std::int32_t  nestedTypesStart;
+    std::int32_t  interfacesStart;
+    std::int32_t  vtableStart;
+    std::int32_t  interfaceOffsetsStart;
+    std::uint16_t method_count;
+    std::uint16_t property_count;
+    std::uint16_t field_count;
+    std::uint16_t event_count;
+    std::uint16_t nested_type_count;
+    std::uint16_t vtable_count;
+    std::uint16_t interfaces_count;
+    std::uint16_t interface_offsets_count;
+    std::uint32_t bitfield;
+    std::uint32_t token;
+};
+
+// FieldDefinition also gained/lost a `customAttributeIndex` over the v24
+// cycle. `[Version(Max = 24)]` per upstream — present at v24.0 only,
+// gone by v24.1. v24.1+ matches the v29 12-byte layout.
+struct FieldDefinition_v24_0 {
+    std::int32_t  nameIndex;
+    std::int32_t  typeIndex;
+    std::int32_t  customAttributeIndex;  // present only ≤v24.0
     std::uint32_t token;
 };
 
@@ -359,7 +458,10 @@ static_assert(sizeof(StringLiteralEntry)      == 8,   "StringLiteralEntry must b
 static_assert(sizeof(StringLiteralEntry_v35)  == 4,   "StringLiteralEntry_v35 must be 4 bytes");
 static_assert(sizeof(HeaderV29)               == 168, "HeaderV29 must be 168 bytes");
 static_assert(sizeof(TypeDefinition_v29)      == 88,  "TypeDefinition_v29 must be 88 bytes");
-static_assert(sizeof(TypeDefinition_v24)      == 92,  "TypeDefinition_v24 must be 92 bytes");
+static_assert(sizeof(TypeDefinition_v24)      == 92,  "TypeDefinition_v24 (v24.2-v24.5) must be 92 bytes");
+static_assert(sizeof(TypeDefinition_v24_1)    == 100, "TypeDefinition_v24_1 must be 100 bytes (v24 + rgctx pair)");
+static_assert(sizeof(TypeDefinition_v24_0)    == 104, "TypeDefinition_v24_0 must be 104 bytes (v24.1 + customAttributeIndex)");
+static_assert(sizeof(FieldDefinition_v24_0)   == 16,  "FieldDefinition_v24_0 must be 16 bytes (v29 + customAttributeIndex)");
 static_assert(sizeof(TypeDefinition_v31)      == 88,  "TypeDefinition_v31 must be 88 bytes (== v29)");
 static_assert(sizeof(TypeDefinition_v35)      == 84,  "TypeDefinition_v35 must be 84 bytes (v29 minus elementTypeIndex)");
 static_assert(sizeof(FieldDefinition_v29)     == 12,  "FieldDefinition_v29 must be 12 bytes");

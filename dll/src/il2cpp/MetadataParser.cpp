@@ -109,7 +109,16 @@ bool Parser::LoadFromPath(const std::wstring& path) {
 
 std::size_t Parser::TypeDefSizeof() const noexcept {
     switch (version_) {
-        case 24: return sizeof(TypeDefinition_v24);   // 92 bytes (+byrefTypeIndex)
+        case 24:
+            // v24 has 3 sub-version strides per upstream Il2CppDumper.
+            // DetectV24Variant() (called from LoadTables) probes the
+            // matching stride and latches v24Variant_; default is the
+            // 92-byte v24.2-v24.5 layout shared by Unity ~2018.3 onwards.
+            switch (v24Variant_) {
+                case V24Variant::V24_0: return sizeof(TypeDefinition_v24_0); // 104
+                case V24Variant::V24_1: return sizeof(TypeDefinition_v24_1); // 100
+                default:                return sizeof(TypeDefinition_v24);   // 92
+            }
         case 27:                                       // 88 bytes — same as v29
         case 29:
         case 31:
@@ -134,10 +143,14 @@ std::size_t Parser::TypeDefSizeof() const noexcept {
 }
 
 std::size_t Parser::FieldDefSizeof() const noexcept {
-    // Pre-v38: 12 bytes (uint nameIndex + int typeIndex + uint token).
-    // v38+: 8 + typeIndexSize.
+    // v38+: 8 + typeIndexSize (variable-width metadata indices).
     if (version_ >= 38) {
         return 8u + static_cast<std::size_t>(indexSizes_.typeIndexSize);
+    }
+    // v24.0 only: has an extra `customAttributeIndex` int32 — 16 bytes.
+    // v24.1 onwards (incl. all v27/v29/v31/v35+): standard 12 bytes.
+    if (version_ == 24 && v24Variant_ == V24Variant::V24_0) {
+        return sizeof(FieldDefinition_v24_0);
     }
     return sizeof(FieldDefinition_v29);
 }
@@ -242,7 +255,58 @@ bool Parser::LoadTables() {
             "MetadataParser: tables out of bounds");
         return false;
     }
+    if (version_ == 24) {
+        DetectV24Variant();
+    }
     return true;
+}
+
+void Parser::DetectV24Variant() {
+    // Probe candidate strides {92, 100, 104} — see MetadataLayout.h
+    // §TypeDefinition_v24*. The CLR canonical TypeDef[0].token is
+    // 0x02000001 (Module, rid=1). Whichever stride lands that value
+    // at offset (stride - 4) of row 0 is the right one. If none
+    // match, leave the default (v24.2-v24.5 / 92-byte stride) and
+    // let ValidateTypeTable() demote to strings-only.
+    constexpr std::uint32_t kModuleToken = 0x02000001u;
+    auto probeToken = [&](std::size_t stride) -> std::uint32_t {
+        if (typeDefinitionsOffset_ < 0 ||
+            static_cast<std::size_t>(typeDefinitionsOffset_) + stride > data_.size()) {
+            return 0;
+        }
+        std::uint32_t token = 0;
+        std::memcpy(&token,
+            data_.data() + typeDefinitionsOffset_ + stride - 4, sizeof(token));
+        return token;
+    };
+
+    const char* picked = "v24 (default 92-byte v24.2-v24.5)";
+    if (probeToken(92) == kModuleToken) {
+        v24Variant_ = V24Variant::V24_2_THROUGH_5;
+        picked = "v24.2-v24.5 (92-byte stride)";
+    } else if (probeToken(100) == kModuleToken) {
+        v24Variant_ = V24Variant::V24_1;
+        picked = "v24.1 (100-byte stride, +rgctxStart/+rgctxCount)";
+    } else if (probeToken(104) == kModuleToken) {
+        v24Variant_ = V24Variant::V24_0;
+        picked = "v24.0 (104-byte stride, +customAttributeIndex+rgctx)";
+    } else {
+        picked = "v24 (no candidate stride matched — ValidateTypeTable will reject)";
+    }
+
+    char line[200];
+    ::_snprintf_s(line, sizeof(line), _TRUNCATE,
+        "MetadataParser: DetectV24Variant — picked %s", picked);
+    UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+}
+
+std::string Parser::v24SubVersionLabel() const {
+    if (version_ != 24) return {};
+    switch (v24Variant_) {
+        case V24Variant::V24_0: return "v24.0";
+        case V24Variant::V24_1: return "v24.1";
+        default:                return "v24";  // v24.2-v24.5 (no distinction needed)
+    }
 }
 
 bool Parser::ValidateTypeTable() {
@@ -479,19 +543,35 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
     TypeDefView v;
     v.index = idx;
     if (version_ == 24) {
-        // v24 (Unity 2018.4-2019.x): byrefTypeIndex inserted between
-        // byvalTypeIndex and declaringTypeIndex; 92-byte stride, token at
-        // offset 88. Everything else aligned to v29's projected fields.
-        TypeDefinition_v24 td{};
-        std::memcpy(&td, row, sizeof(td));
-        v.ns          = GetHeapString(td.namespaceIndex);
-        v.name        = GetHeapString(td.nameIndex);
-        v.fieldStart  = td.fieldStart;
-        v.fieldCount  = td.field_count;
-        v.methodStart = td.methodStart;
-        v.methodCount = td.method_count;
-        v.flags       = td.flags;
-        v.token       = td.token;
+        // v24 (Unity 2018-2019.x): three sub-version strides per upstream
+        // Il2CppDumper — DetectV24Variant() latched the right one at
+        // load time. Same field projection works across all 3 layouts
+        // (TypeDefView only cares about name/namespace/fieldStart/
+        // methodStart/counts/flags/token, and those names match across
+        // the structs).
+        auto project = [&](auto&& td) {
+            v.ns          = GetHeapString(td.namespaceIndex);
+            v.name        = GetHeapString(td.nameIndex);
+            v.fieldStart  = td.fieldStart;
+            v.fieldCount  = td.field_count;
+            v.methodStart = td.methodStart;
+            v.methodCount = td.method_count;
+            v.flags       = td.flags;
+            v.token       = td.token;
+        };
+        if (v24Variant_ == V24Variant::V24_0) {
+            TypeDefinition_v24_0 td{};
+            std::memcpy(&td, row, sizeof(td));
+            project(td);
+        } else if (v24Variant_ == V24Variant::V24_1) {
+            TypeDefinition_v24_1 td{};
+            std::memcpy(&td, row, sizeof(td));
+            project(td);
+        } else {
+            TypeDefinition_v24 td{};   // v24.2-v24.5 (92-byte stride)
+            std::memcpy(&td, row, sizeof(td));
+            project(td);
+        }
     } else if (version_ >= 35 && version_ <= 37) {
         // v35-v37: identical to v29 but with elementTypeIndex removed.
         // 84-byte stride; field offsets after parentIndex shift -4 bytes.
@@ -636,6 +716,14 @@ Parser::EnumerateTypeFields(const TypeDefView& type) const {
             v.name      = GetHeapString(nameIndex);
             v.typeIndex = typeIndex;
             v.token     = token;
+        } else if (version_ == 24 && v24Variant_ == V24Variant::V24_0) {
+            // v24.0 FieldDefinition: 16 bytes — extra `customAttributeIndex`
+            // between typeIndex and token. Token slips from offset +8 to +12.
+            FieldDefinition_v24_0 f{};
+            std::memcpy(&f, row, sizeof(f));
+            v.name      = GetHeapString(f.nameIndex);
+            v.typeIndex = f.typeIndex;
+            v.token     = f.token;
         } else {
             FieldDefinition_v29 f{};
             std::memcpy(&f, row, sizeof(f));
