@@ -233,6 +233,33 @@ ResolvedField ResolveTargetField(MonoImage* image,
         out.error = "mono_class_get_field_token returned 0 for target field";
         return out;
     }
+    // FieldAttributes::Literal (0x40) — `const` fields and enum members.
+    // The C# compiler inlines literals at every use site (`ldc.i4 <value>`
+    // / `ldc.r4` / `ldstr`), so the field's metadata token NEVER appears
+    // in any method's IL body. A walk would honestly return 0 matches —
+    // semantically correct but misleading to the user, who'd assume the
+    // field is unreferenced. Surface the limit explicitly so they know
+    // it's a constraint of inlined constants, not a backend miss.
+    // Mono reads field flags via `field_get_flags`; we picked them up
+    // when iterating above. (The Static bit is 0x10, Literal is 0x40 —
+    // checking the Literal bit alone catches both `const` static fields
+    // and enum members, which always have Static|Literal set.)
+    if (out.field != nullptr) {
+        std::uint32_t fflags = 0;
+        if (GetResolver().field_get_flags != nullptr) {
+            fflags = GetResolver().field_get_flags(out.field);
+        }
+        if ((fflags & 0x40u) != 0) {
+            out.error =
+                "literal const field (or enum member) — the C# compiler "
+                "inlines the value at every use site (`ldc.i4 <value>` "
+                "etc.), so the field's metadata token never appears in IL "
+                "and there's nothing for Phase 28 to match against. "
+                "This is a semantic limitation of inlined constants, not "
+                "a backend bug.";
+            return out;
+        }
+    }
     return out;
 }
 
