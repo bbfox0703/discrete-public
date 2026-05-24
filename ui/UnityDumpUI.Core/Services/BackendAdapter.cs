@@ -233,6 +233,25 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// Phase 20-MT diagnostics — read-only snapshot of the DLL's main-thread
+    /// dispatcher counters. Useful for: (1) the connection-bar banner that
+    /// proactively offers Enable runInBackground when the engine is paused
+    /// (Phase 20-MT v2), (2) pre-flight health checks before mainThread RPCs
+    /// (avoid 5-second timeouts when we can already tell the dispatcher is
+    /// stuck), (3) the stress smoke <c>Test-MainThreadBurst.ps1</c>.
+    /// </summary>
+    public async Task<DispatcherStatsResult> GetDispatcherStatsAsync(CancellationToken ct = default)
+    {
+        var env = await _pipe.SendAsync(
+            "getDispatcherStats", new Dictionary<string, JsonElement>(),
+            ProtocolJsonContext.Default.RpcEnvelopeDispatcherStatsResult, ct)
+            .ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result
+            ?? throw new PipeProtocolException("getDispatcherStats returned no result");
+    }
+
+    /// <summary>
     /// Phase 28 — Field → Methods cross-reference. Inverse of
     /// <see cref="SearchSymbolsAsync(string,string,IReadOnlyList{string}?,int?,CancellationToken)"/>:
     /// given the FQN of a Unity field, list every method that reads

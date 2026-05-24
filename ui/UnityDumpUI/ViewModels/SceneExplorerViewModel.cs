@@ -44,6 +44,13 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
         _logger     = logger;
     }
 
+    /// <summary>The underlying enumerator. Exposed so
+    /// <see cref="MainWindowViewModel"/> can reuse it for cross-tab affordances
+    /// like the connection-bar "Enable runInBackground" banner (Phase 20-MT v2)
+    /// without spinning up a second SceneEnumerator that would maintain its
+    /// own (out-of-sync) <c>_resolvedUnityEngineAssembly</c> cache.</summary>
+    public SceneEnumerator Enumerator => _enumerator;
+
     public ObservableCollection<SceneNode> Roots { get; } = new();
 
     [ObservableProperty]
@@ -128,6 +135,26 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
             // the user can alt-tab back to the game window. See
             // FocusDelaySeconds docs for why.
             int delay = Math.Clamp(FocusDelaySeconds, 0, 10);
+
+            // Phase 20-MT v2: pre-flight dispatcher check. Skipped when the
+            // user has already set up a workaround — Focus delay > 0 means
+            // they're going to alt-tab during the countdown; the per-session
+            // RunInBackgroundEnabled flag means we already toggled the
+            // engine flag. Both are explicit "I know what I'm doing"
+            // signals. Otherwise, eager-fail with a clear message saves
+            // the user a 5-second timeout wait on the first icall.
+            if (delay == 0 && !RunInBackgroundEnabled)
+            {
+                string? preflightErr =
+                    await _enumerator.PreflightDispatcherCheckAsync(ct).ConfigureAwait(true);
+                if (preflightErr is not null)
+                {
+                    ErrorMessage  = preflightErr;
+                    StatusMessage = "Search blocked — dispatcher pre-flight failed.";
+                    return;
+                }
+            }
+
             for (int s = delay; s > 0; --s)
             {
                 ct.ThrowIfCancellationRequested();

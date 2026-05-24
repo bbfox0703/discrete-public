@@ -134,6 +134,34 @@
                  FontWeight="SemiBold" />
     </Border>
 
+    <!-- Phase 20-MT v2: auto-prompt runInBackground banner. Surfaces after
+         the connect-time dispatcher health probe (CheckDispatcherHealthAsync)
+         sees hook_installed=true but is_healthy=false — i.e. the engine is
+         alive but Update() isn't ticking, almost always because
+         Application.runInBackground=false + the game has lost focus.
+         One-shot fix below; dismissable. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding DispatcherBannerVisible}"
+            Background="#33D4A017" BorderBrush="#88D4A017"
+            BorderThickness="0,0,0,1" Padding="12,8">
+      <Grid ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto">
+        <TextBlock Grid.Column="0"
+                   Text="{Binding DispatcherBannerMessage}"
+                   Foreground="#FFD4A017" TextWrapping="Wrap"
+                   FontWeight="SemiBold"
+                   VerticalAlignment="Center" Margin="0,0,12,0" />
+        <Button Grid.Column="1"
+                Content="{StaticResource Dispatcher.EnableButton}"
+                Command="{Binding EnableRunInBackgroundFromBannerCommand}"
+                ToolTip.Tip="{StaticResource Dispatcher.EnableTooltip}"
+                Classes="accent"
+                Margin="0,0,8,0" />
+        <Button Grid.Column="2"
+                Content="{StaticResource Dispatcher.DismissButton}"
+                Command="{Binding DismissDispatcherBannerCommand}" />
+      </Grid>
+    </Border>
+
     <!-- Footer credit — XOR-shielded at rest (see StringShield.cs); decoded
          lazily by the VM. Subtle so it doesn't compete with the connection
          bar; click target only via "Copy text" if the user wants the URL. -->

@@ -671,6 +671,42 @@ public sealed class FieldReferenceRow
 }
 
 // ---------------------------------------------------------------------------
+// Phase 20-MT — main-thread dispatcher diagnostics.
+//
+// Read-only snapshot of the DLL's main-thread queue counters. Drives the
+// connection-bar "Enable runInBackground" banner (Phase 20-MT v2): if
+// <see cref="DispatcherStatsResult.IsHealthy"/> is false but
+// <see cref="DispatcherStatsResult.HookInstalled"/> is true, the engine
+// is alive but stopped ticking — almost always means
+// `Application.runInBackground = false` and the game lost focus. The
+// banner surfaces a one-click fix instead of letting the user discover
+// it via a 5-second RPC timeout.
+// ---------------------------------------------------------------------------
+
+public sealed class DispatcherStatsResult
+{
+    [JsonPropertyName("initialized")]      public bool   Initialized     { get; set; }
+    [JsonPropertyName("hook_installed")]   public bool   HookInstalled   { get; set; }
+    [JsonPropertyName("main_thread_id")]   public uint   MainThreadId    { get; set; }
+    [JsonPropertyName("tick_count")]       public ulong  TickCount       { get; set; }
+    [JsonPropertyName("submit_count")]     public ulong  SubmitCount     { get; set; }
+    [JsonPropertyName("drain_count")]      public ulong  DrainCount      { get; set; }
+    [JsonPropertyName("timeout_count")]    public ulong  TimeoutCount    { get; set; }
+    [JsonPropertyName("reject_count")]     public ulong  RejectCount     { get; set; }
+    /// <summary>Milliseconds since the dispatcher's drain hook last fired.
+    /// Big values (&gt;1000ms) on a connected target almost always mean
+    /// the engine has paused — typically focus-loss with
+    /// <c>runInBackground=false</c>.</summary>
+    [JsonPropertyName("last_tick_age_ms")] public long   LastTickAgeMs   { get; set; }
+    [JsonPropertyName("queue_depth")]      public uint   QueueDepth      { get; set; }
+    /// <summary>True when the hook is installed AND the drain has fired
+    /// recently. False = either no hook (engine doesn't have one of the
+    /// expected entry points) OR the engine is paused.</summary>
+    [JsonPropertyName("is_healthy")]       public bool   IsHealthy       { get; set; }
+    [JsonPropertyName("error")]            public string? Error          { get; set; }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 27 — Unity-aware value search (scanFieldValue + Begin/Refine/End).
 // ---------------------------------------------------------------------------
 

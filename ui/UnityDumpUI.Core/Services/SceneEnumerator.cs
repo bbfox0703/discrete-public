@@ -223,6 +223,46 @@ public sealed class SceneEnumerator
     }
 
     /// <summary>
+    /// Phase 20-MT v2 pre-flight — read dispatcher stats and return a
+    /// human-readable error string if the hook is installed but the
+    /// engine isn't ticking (`hook_installed=true && is_healthy=false`,
+    /// the classic focus-pause case). Returns null when the dispatcher
+    /// looks fine OR the diagnostic RPC itself fails (soft-fail — let
+    /// the real call surface any deeper issue).
+    ///
+    /// <para>Callers should only invoke this when they have no other
+    /// workaround in play — i.e. user hasn't dialled Focus delay or
+    /// pressed Enable runInBackground yet. Both are signals that the
+    /// user is intentionally handling the focus-pause, so blocking
+    /// them via a pre-flight check would be obnoxious.</para>
+    /// </summary>
+    public async Task<string?> PreflightDispatcherCheckAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            DispatcherStatsResult s =
+                await _backend.GetDispatcherStatsAsync(ct).ConfigureAwait(false);
+            if (s.HookInstalled && !s.IsHealthy)
+            {
+                return "Game's Update() loop isn't ticking — the dispatcher hook is armed "
+                    + "but no engine tick has fired recently. This usually means "
+                    + "Application.runInBackground = false and the game window has lost "
+                    + "focus. Either click \"Enable runInBackground\" on the connection bar "
+                    + "(one-shot fix for the session), or set Focus delay (s) above to ≥3 "
+                    + "so you can alt-tab back to the game during the countdown.";
+            }
+            return null;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.Write(Constants.LogCategoryView,
+                $"SceneEnumerator: dispatcher pre-flight RPC failed (soft): {ex.GetType().Name}: {ex.Message}");
+            return null;  // Soft-fail — fall through to the real call.
+        }
+    }
+
+    /// <summary>
     /// One-shot helper to toggle <c>UnityEngine.Application.runInBackground</c>
     /// on the target. The property defaults to <c>false</c> — when the user
     /// switches focus from the game window to DiscreteUI, Unity pauses
