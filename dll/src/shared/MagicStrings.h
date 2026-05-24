@@ -114,6 +114,47 @@ inline constexpr const char* CmdSetInstanceField      = "setInstanceField";
 //   limit   : optional int — default 200, hard-cap 5000
 inline constexpr const char* CmdSearchSymbols         = "searchSymbols";
 
+// Phase 28 — Field → Methods cross-reference. Inverse of Phase 25
+// `searchSymbols`: given a Unity field, list every method that reads
+// and/or writes it.
+//
+// Mono path (28a): walks the IL bytecode of every method declared in
+// the target assembly via `mono_method_get_header` + per-op decode,
+// matches the IL operand against the target field's metadata token
+// (0x04xxxxxx). Exact, no false positives. Generic methods scanned
+// once at the open-generic level — instantiated versions share the
+// same IL so a token match counts for every instantiation
+// (mirrors dnSpy).
+//
+// IL2CPP path (28b): static fields ONLY in v1. Scans GameAssembly.dll
+// `.text` for `mov reg, [rip+disp32]` / `lea reg, [rip+disp32]`
+// instructions whose target equals the field's static-storage address
+// (`il2cpp_class_get_static_data(klass) + field.offset`). Each hit is
+// attributed to its enclosing method via binary search against a
+// sorted method-pointer index built from the same `class_get_methods`
+// walk the rest of the IL2CPP backend uses. Instance fields return
+// `error: "field references for instance fields not supported on
+// IL2CPP backend in v1"` so the UI can surface the limitation
+// gracefully.
+//
+// Wire request:
+//   { assembly: string, ns: string, class: string, fieldName: string,
+//     kind?: "any"|"read"|"write" (default "any"), limit?: int (default 200,
+//     cap 5000) }
+//
+// Wire response:
+//   { ok: bool,
+//     field: { name, offset, type, isStatic, token (Mono only),
+//              staticAddress (IL2CPP static only) },
+//     references: [
+//       { assembly, namespace, class, method, signature?, methodToken,
+//         address (hex; null when Mono JIT skipped), isStatic,
+//         kind: "read"|"write", confidence: "exact",
+//         ilOffset (Mono only) } ],
+//     scanned_methods: int, truncated: bool,
+//     error?: string }
+inline constexpr const char* CmdFindFieldReferences   = "findFieldReferences";
+
 // Phase 27a — Unity-aware value scan (First Scan).
 // Searches process memory (or a single class's live instances in
 // class-scoped mode) for primitive values matching the request and

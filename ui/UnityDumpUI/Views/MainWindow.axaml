@@ -481,6 +481,10 @@
                               Click="OnCopyFieldTypeClicked" />
                     <MenuItem Header="{StaticResource Browser.CopyFieldDeclaredInMenu}"
                               Click="OnCopyFieldDeclaredInClicked" />
+                    <Separator />
+                    <!-- Phase 28 — same modal as Inspector + Symbol Finder. -->
+                    <MenuItem Header="{StaticResource FieldRefs.FindMethodsMenu}"
+                              Click="OnFindFieldReferencesFromFieldsTabClicked" />
                   </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
@@ -728,6 +732,17 @@
                              InspectorFieldOffsetResolver. -->
                         <MenuItem Header="{StaticResource Inspector.ListFieldAcrossInstancesMenu}"
                                   Click="OnListFieldAcrossInstancesClicked" />
+                        <!-- Phase 28 — Field → Methods cross-reference. Same
+                             code-behind handler shared with Symbol Finder
+                             + Fields tab; opens FieldReferencesWindow modal
+                             seeded with the row's class + field name +
+                             type + isStatic flag. Inspector path needs the
+                             selected node's name / declared-in chain to
+                             pin down the declaring class (which may differ
+                             from the inspector's TargetClass when the row
+                             is inherited from a parent). -->
+                        <MenuItem Header="{StaticResource FieldRefs.FindMethodsMenu}"
+                                  Click="OnFindFieldReferencesFromInspectorClicked" />
                         <!-- Phase 21b — write-back. Code-behind reads the
                              selected WalkedFieldNode and opens the
                              FieldWriteWindow modal seeded with field
@@ -1011,6 +1026,13 @@
                   <ContextMenu>
                     <MenuItem Header="{StaticResource SymbolFinder.NavigateMenu}"
                               Click="OnSymbolFinderNavigateMenu" />
+                    <!-- Phase 28 — Field → Methods cross-reference. Same modal
+                         as the Inspector + Browser Fields tab path. Menu item
+                         shows for any row but the handler short-circuits with
+                         a soft banner when the right-clicked row's Kind isn't
+                         a field. -->
+                    <MenuItem Header="{StaticResource FieldRefs.FindMethodsMenu}"
+                              Click="OnFindFieldReferencesFromSymbolFinderClicked" />
                     <Separator />
                     <MenuItem Header="{StaticResource SymbolFinder.CopyClassMenu}"
                               Click="OnSymbolFinderCopyClassMenu" />

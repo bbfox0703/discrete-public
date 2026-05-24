@@ -92,6 +92,20 @@ using fn_string_new             = MonoString*    (*)(MonoDomain*, const char* /*
 using fn_string_chars           = std::uint16_t* (*)(MonoString*);
 using fn_string_length          = std::int32_t   (*)(MonoString*);
 
+// --- Phase 28 — IL body access for findFieldReferences --------------------
+// `mono_method_get_header` returns the per-method IL header (callable on
+// methods with a managed body — abstract / pinvoke / icall methods return
+// null). `mono_method_header_get_code` extracts the IL byte pointer plus
+// the bytecode length via the out-param. `mono_metadata_free_mh` releases
+// headers created from inflated/instantiated methods — optional, the
+// per-method leak is small. `mono_class_get_field_token` returns the
+// metadata token (0x04xxxxxx) of a MonoClassField — used to identify the
+// target field when scanning IL operand immediates.
+using fn_method_get_header      = MonoMethodHeader* (*)(MonoMethod*);
+using fn_method_header_get_code = const unsigned char* (*)(MonoMethodHeader*, std::uint32_t* /*code_size*/, std::uint32_t* /*max_stack*/);
+using fn_metadata_free_mh       = void           (*)(MonoMethodHeader*);
+using fn_class_get_field_token  = std::uint32_t  (*)(MonoClassField*);
+
 // MONO_TABLE_TYPEDEF row index in a MonoImage; pass to image_get_table_info.
 inline constexpr int          MonoTableTypedef = 2;
 // CLI metadata token base for TypeDef rows.
@@ -162,6 +176,12 @@ struct Resolver {
     fn_string_new             string_new             = nullptr;
     fn_string_chars           string_chars           = nullptr;
     fn_string_length          string_length          = nullptr;
+
+    // Phase 28 — IL body access for findFieldReferences.
+    fn_method_get_header      method_get_header      = nullptr;
+    fn_method_header_get_code method_header_get_code = nullptr;
+    fn_metadata_free_mh       metadata_free_mh       = nullptr;
+    fn_class_get_field_token  class_get_field_token  = nullptr;
 };
 
 // Singleton accessor. First call probes the loaded mono module and binds every

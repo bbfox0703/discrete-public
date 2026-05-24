@@ -149,6 +149,15 @@ void DoResolve() {
     optBind("mono_string_chars",                g_resolver.string_chars);
     optBind("mono_string_length",               g_resolver.string_length);
 
+    // Phase 28 — IL body access. Optional: missing exports just disable
+    // findFieldReferences on this backend; the rest of the runtime stays up.
+    // Every modern Mono build (Unity 5+) ships these; the optBind keeps the
+    // resolver tolerant of legacy/stripped builds where they might not be.
+    optBind("mono_method_get_header",           g_resolver.method_get_header);
+    optBind("mono_method_header_get_code",      g_resolver.method_header_get_code);
+    optBind("mono_metadata_free_mh",            g_resolver.metadata_free_mh);
+    optBind("mono_class_get_field_token",       g_resolver.class_get_field_token);
+
     g_resolver.resolved = (ok == total);
 
     char line[256];

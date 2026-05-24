@@ -22,5 +22,9 @@ struct MonoVTable;
 struct MonoObject;
 struct MonoException;
 struct MonoString;
+// Phase 28 — IL body access for findFieldReferences. `mono_method_get_header`
+// returns this opaque handle; `mono_method_header_get_code` extracts the IL
+// byte pointer + size. Stays opaque — we only ever pass it back to Mono.
+struct MonoMethodHeader;
 
 }  // namespace UnityCEDumper::Mono

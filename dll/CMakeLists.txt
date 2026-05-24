@@ -104,6 +104,8 @@ set(DLL_MONO_SOURCES
     src/mono/MonoMethodInvoker.h
     src/mono/MonoMainThreadHook.cpp
     src/mono/MonoMainThreadHook.h
+    src/mono/MonoFieldXref.cpp
+    src/mono/MonoFieldXref.h
 )
 
 # IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
@@ -132,6 +134,8 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPMethodInvoker.h
     src/il2cpp/IL2CPPMainThreadHook.cpp
     src/il2cpp/IL2CPPMainThreadHook.h
+    src/il2cpp/IL2CPPFieldXref.cpp
+    src/il2cpp/IL2CPPFieldXref.h
 )
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@
 #  include "../mono/MonoAddressFinder.h"
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
+#  include "../mono/MonoFieldXref.h"
 #  include "../mono/MonoMainThreadHook.h"
 #  include "../mono/MonoMethodFinder.h"
 #  include "../mono/MonoMethodInvoker.h"
@@ -27,6 +28,7 @@
 #  include "../il2cpp/IL2CPPAddressFinder.h"
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
+#  include "../il2cpp/IL2CPPFieldXref.h"
 #  include "../il2cpp/IL2CPPMainThreadHook.h"
 #  include "../il2cpp/IL2CPPMethodFinder.h"
 #  include "../il2cpp/IL2CPPMethodInvoker.h"
@@ -1996,6 +1998,95 @@ void RegisterCoreHandlers() {
         return response;
     });
 
+    // Phase 28a — findFieldReferences (Mono). Walks every method in the
+    // target assembly's IL bytecode and returns every method that touches
+    // the named field via ldfld / stfld / ldsfld / stsfld / ldflda /
+    // ldsflda. Exact match — IL operand tokens uniquely identify the
+    // field. Scope: same-assembly references only (cross-assembly
+    // MemberRef tokens deferred to v2).
+    PipeServer::RegisterHandler(MagicStrings::CmdFindFieldReferences,
+        [formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        std::string assembly = args.value("assembly", std::string{});
+        if (assembly.empty()) return json{{"error", "missing 'assembly' arg"}};
+        std::string ns       = args.value("ns",       std::string{});
+        std::string klassNm  = args.value("class",    std::string{});
+        std::string fieldNm  = args.value("fieldName", std::string{});
+        if (klassNm.empty()) return json{{"error", "missing 'class' arg"}};
+        if (fieldNm.empty()) return json{{"error", "missing 'fieldName' arg"}};
+
+        std::string kindStr = args.value("kind", std::string{"any"});
+        Mono::FieldRefKind kind = Mono::FieldRefKind::Any;
+        if      (kindStr == "read")  kind = Mono::FieldRefKind::Read;
+        else if (kindStr == "write") kind = Mono::FieldRefKind::Write;
+        else if (kindStr != "any")
+            return json{{"error", "invalid 'kind' (expected 'any' / 'read' / 'write')"}};
+
+        int limit = args.value("limit", 200);
+        if (limit <= 0)   limit = 200;
+        if (limit > 5000) limit = 5000;
+
+        Mono::MonoImage* img = Mono::FindImageByName(assembly);
+        if (img == nullptr) return json{{"error", "assembly not found: " + assembly}};
+
+        auto fr = Mono::FindFieldReferences(img, ns, klassNm, fieldNm, kind,
+                                            static_cast<std::size_t>(limit));
+        if (!fr.ok && !fr.error.empty()) {
+            return json{{"error", fr.error}};
+        }
+
+        // Resolve declaring-field metadata for the response header. Re-walk
+        // the class once to grab offset / type / static-flag; cheap relative
+        // to the IL scan we just finished.
+        json fieldInfo = json::object();
+        fieldInfo["name"]    = fieldNm;
+        fieldInfo["token"]   = fr.fieldToken;
+        // Walk the resolved class once more for the headline metadata —
+        // ReadClassInfo is O(num_fields_on_class), trivially fast.
+        if (Mono::MonoClass* targetK = Mono::FindClass(img, ns, klassNm)) {
+            auto info = Mono::ReadClassInfo(targetK);
+            if (info.ok) {
+                for (const auto& f : info.info.fields) {
+                    if (f.name == fieldNm) {
+                        fieldInfo["offset"]   = f.offset;
+                        fieldInfo["type"]     = f.typeName;
+                        fieldInfo["isStatic"] = (f.flags & 0x10u) != 0;
+                        break;
+                    }
+                }
+            }
+        }
+
+        json refs = json::array();
+        for (const auto& m : fr.matches) {
+            refs.push_back({
+                {"assembly",       assembly},
+                {"namespace",      m.ns},
+                {"class",          m.className},
+                {"method",         m.methodName},
+                {"methodToken",    m.methodToken},
+                {"methodFlags",    m.methodFlags},
+                {"isMethodStatic", m.isMethodStatic},
+                {"isStatic",       m.isStatic},
+                {"kind",           m.refKind},
+                {"confidence",     m.confidence},
+                {"ilOffset",       m.ilOffset},
+                // address null on Mono — JIT deferred to user-driven
+                // findMethodInstances / callMethod flow.
+                {"address",        nullptr},
+            });
+        }
+
+        return json{
+            {"ok",              true},
+            {"field",           std::move(fieldInfo)},
+            {"references",     std::move(refs)},
+            {"scanned_methods", fr.scannedMethods},
+            {"truncated",       fr.truncated},
+        };
+    });
+
     PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,
         [resolveClassFromArgs](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
@@ -3557,6 +3648,91 @@ void RegisterCoreHandlers() {
             response["missing_assemblies"] = std::move(missingAssemblies);
         }
         return response;
+    });
+
+    // Phase 28b — findFieldReferences (IL2CPP). Static fields only in v1.
+    // Resolves the field's static-storage address via
+    // il2cpp_class_get_static_data + offset, then scans GameAssembly.dll's
+    // .text for `mov reg, [rip+disp32]` / `lea reg, [rip+disp32]` /
+    // `mov [rip+disp32], reg` whose absolute target hits the field. Each
+    // hit is attributed to its enclosing method via binary search against
+    // a sorted method-pointer index built from the target image. Instance
+    // fields return a clean error so the UI can surface the v1 limitation.
+    PipeServer::RegisterHandler(MagicStrings::CmdFindFieldReferences,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::string assembly = args.value("assembly", std::string{});
+        if (assembly.empty()) return json{{"error", "missing 'assembly' arg"}};
+        std::string ns       = args.value("ns",       std::string{});
+        std::string klassNm  = args.value("class",    std::string{});
+        std::string fieldNm  = args.value("fieldName", std::string{});
+        if (klassNm.empty()) return json{{"error", "missing 'class' arg"}};
+        if (fieldNm.empty()) return json{{"error", "missing 'fieldName' arg"}};
+
+        std::string kindStr = args.value("kind", std::string{"any"});
+        IL2CPP::FieldRefKind kind = IL2CPP::FieldRefKind::Any;
+        if      (kindStr == "read")  kind = IL2CPP::FieldRefKind::Read;
+        else if (kindStr == "write") kind = IL2CPP::FieldRefKind::Write;
+        else if (kindStr != "any")
+            return json{{"error", "invalid 'kind' (expected 'any' / 'read' / 'write')"}};
+
+        int limit = args.value("limit", 200);
+        if (limit <= 0)   limit = 200;
+        if (limit > 5000) limit = 5000;
+
+        const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assembly);
+        if (img == nullptr) return json{{"error", "assembly not found: " + assembly}};
+
+        auto fr = IL2CPP::FindStaticFieldReferences(img, ns, klassNm, fieldNm, kind,
+                                                    static_cast<std::size_t>(limit));
+        if (!fr.ok && !fr.error.empty()) {
+            return json{{"error", fr.error}};
+        }
+
+        // Resolve field metadata for the response header.
+        json fieldInfo = json::object();
+        fieldInfo["name"]          = fieldNm;
+        fieldInfo["staticAddress"] = formatHex(reinterpret_cast<std::uintptr_t>(fr.staticAddress));
+        if (IL2CPP::Il2CppClass* targetK = IL2CPP::FindClass(img, ns, klassNm)) {
+            auto info = IL2CPP::ReadClassInfo(targetK);
+            if (info.ok) {
+                for (const auto& f : info.info.fields) {
+                    if (f.name == fieldNm) {
+                        fieldInfo["offset"]   = f.offset;
+                        fieldInfo["type"]     = f.typeName;
+                        fieldInfo["isStatic"] = (f.flags & 0x10u) != 0;
+                        break;
+                    }
+                }
+            }
+        }
+
+        json refs = json::array();
+        for (const auto& m : fr.matches) {
+            refs.push_back({
+                {"assembly",       assembly},
+                {"namespace",      m.ns},
+                {"class",          m.className},
+                {"method",         m.methodName},
+                {"methodToken",    m.methodToken},
+                {"methodFlags",    m.methodFlags},
+                {"isMethodStatic", m.isMethodStatic},
+                {"isStatic",       m.isStatic},
+                {"kind",           m.refKind},
+                {"confidence",     m.confidence},
+                {"address",        formatHex(reinterpret_cast<std::uintptr_t>(m.methodAddress))},
+                {"hitAddress",     formatHex(reinterpret_cast<std::uintptr_t>(m.hitAddress))},
+            });
+        }
+
+        return json{
+            {"ok",              true},
+            {"field",           std::move(fieldInfo)},
+            {"references",     std::move(refs)},
+            {"scanned_methods", fr.scannedMethods},
+            {"truncated",       fr.truncated},
+        };
     });
 
     // Debugger symbol dump (IL2CPP only). Walks every requested assembly,

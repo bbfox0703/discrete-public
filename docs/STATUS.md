@@ -1,8 +1,33 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-21 **session close** — build #465).
+**Branch**: `dev` (2026-05-24 **session close** — build #518).
 
 ## TL;DR — what's left to pick up
+
+**Phase 28 v1 shipped** (build #515 UI / #518 with tests). 28a Mono IL
+walker + 28b IL2CPP static-field RIP scanner + 28d UI modal with 3
+right-click entry points (Inspector / Symbol Finder / Browser Fields
+tab) all landed clean. 28c (IL2CPP instance fields, AOB heuristic) and
+28e (CE Lua bridge) deferred per the
+[[project-phase-28-scope]] memory. **Tests 353 → 357 pass** (+4
+fake-pipe RPC tests for Mono shape / IL2CPP shape / kind-filter wire /
+instance-field error surface). DLL builds clean on both backends
+(Mono 580.5 → 730.5 KB; IL2CPP 615 → 793 KB). UI AOT publish 100.6 MB.
+
+**Phase 28 live verify TODO** — pick a known Assembly-CSharp field
+(e.g. SaGa F2R `PLY_WORK.HP`) → Inspector right-click "Find methods
+that touch this field…" → cross-check matches against dnSpy IL view.
+For IL2CPP path, pick a static field and verify the modal returns
+methods that read/write it; spot-check addresses against `dump.cs` if
+available.
+
+**Phase 20 (Scene/GameObject explorer)** is the agreed follow-up per
+[[project-phase-20-22-roadmap]] — picks up after Phase 28 live-smoke
+clears. Phase 20-MT main-thread marshaling already shipped earlier
+(build #408); 20b (UI tab) was the remaining piece.
+
+(Earlier session content below — Phase 27 + READMEs + minor open
+issues kept for context.)
 
 Phase 27 (Unity-aware Value Search) shipped + live-verified end-to-end.
 Five production-bug + UX follow-up commits landed on top. README rewrite
