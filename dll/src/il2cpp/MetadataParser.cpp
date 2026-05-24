@@ -219,6 +219,23 @@ std::size_t Parser::ParameterDefSizeof() const noexcept {
     return sizeof(ParameterDefinition_v29);          // 12
 }
 
+std::size_t Parser::ImageDefSizeof() const noexcept {
+    // v24.0/v24.1: deferred (rgctx-gap means images table isn't located).
+    // v24.2-v37: fixed 40 bytes (ImageDefinition_v29).
+    // v38+: variable-width typeStart + exportedTypeStart (TDIS each).
+    //   layout = uint(4) + int(4) + TDIS + uint(4) + TDIS + uint(4) +
+    //            int(4) + uint(4) + int(4) + uint(4)
+    //          = 32 + 2 * TDIS
+    if (version_ == 24 && v24Variant_ != V24Variant::V24_2_THROUGH_5) {
+        return 0;
+    }
+    if (version_ >= 38) {
+        std::size_t tdis = static_cast<std::size_t>(indexSizes_.typeDefinitionIndexSize);
+        return 32 + 2 * tdis;
+    }
+    return sizeof(ImageDefinition_v29);  // 40
+}
+
 bool Parser::LoadTables() {
     auto inBounds = [&](std::int32_t off, std::int32_t sz) {
         if (off < 0 || sz < 0) return false;
@@ -251,6 +268,8 @@ bool Parser::LoadTables() {
         methodsSize_            = static_cast<std::int32_t>(h.methods.size);
         parametersOffset_       = static_cast<std::int32_t>(h.parameters.offset);
         parametersSize_         = static_cast<std::int32_t>(h.parameters.size);
+        imagesOffset_           = static_cast<std::int32_t>(h.images.offset);
+        imagesSize_             = static_cast<std::int32_t>(h.images.size);
 
         parametersCount_ = static_cast<std::int64_t>(h.parameters.count);
 
@@ -308,6 +327,8 @@ bool Parser::LoadTables() {
         methodsSize_            = h.methodsSize;
         parametersOffset_       = h.parametersOffset;
         parametersSize_         = h.parametersSize;
+        // imagesOffset_ / imagesSize_ are deferred — see "Phase D-5.1
+        // images deferred read" block after DetectV24Variant() below.
     }
 
     if (!inBounds(typeDefinitionsOffset_,  typeDefinitionsSize_)  ||
@@ -322,6 +343,34 @@ bool Parser::LoadTables() {
     }
     if (version_ == 24) {
         DetectV24Variant();
+    }
+
+    // Phase D-5.1 — images table read (deferred until after v24 sub-
+    // version detection). For v24.0/v24.1 the metadata header has
+    // `rgctxEntriesOffset/Count` (8 bytes) sitting between typeDefinitions
+    // and images, so the values at HeaderV29's images-field offset are
+    // actually the rgctx fields, not images. We deliberately leave
+    // imagesOffset_/Size_ = 0 there — EnumerateImages will return empty
+    // for v24.0/v24.1 (the v24.0 / v24.1 cross-link path is deferred
+    // anyway since pre-v24.2 IL2CPP has no codeGenModules).
+    //
+    // For v24.2+ flat headers (v24.2-v24.5 / v27 / v29 / v31 / v35-v37)
+    // the images field sits right after typeDefinitions — safe to read.
+    // For v38+ the section header already populated imagesOffset_ above
+    // (h.images section, set in the v38+ branch).
+    if (version_ < 38) {
+        // Already 0 by default; only set when version is safe.
+        if (version_ >= 27 ||
+            (version_ == 24 && v24Variant_ == V24Variant::V24_2_THROUGH_5)) {
+            HeaderV29 h2{};
+            if (data_.size() >= sizeof(h2)) {
+                std::memcpy(&h2, data_.data(), sizeof(h2));
+                if (inBounds(h2.imagesOffset, h2.imagesSize)) {
+                    imagesOffset_ = h2.imagesOffset;
+                    imagesSize_   = h2.imagesSize;
+                }
+            }
+        }
     }
     return true;
 }
@@ -983,6 +1032,117 @@ Parser::EnumerateMethodParameters(const MethodDefView& method) const {
         }
     }
     return out;
+}
+
+// --- Phase D-5.1: Image table -----------------------------------------------
+
+std::uint32_t Parser::ImageCount() const noexcept {
+    if (!tablesLoaded_) return 0;
+    std::size_t sz = ImageDefSizeof();
+    if (sz == 0 || imagesSize_ <= 0) return 0;
+    return static_cast<std::uint32_t>(imagesSize_) / static_cast<std::uint32_t>(sz);
+}
+
+std::optional<Parser::ImageDefView> Parser::GetImage(std::int32_t idx) const {
+    if (!tablesLoaded_) return std::nullopt;
+    std::uint32_t count = ImageCount();
+    if (idx < 0 || static_cast<std::uint32_t>(idx) >= count) return std::nullopt;
+    std::size_t sz = ImageDefSizeof();
+    const std::uint8_t* row = data_.data() + imagesOffset_ +
+                              static_cast<std::size_t>(idx) * sz;
+
+    ImageDefView v;
+    v.index = idx;
+
+    // Read into local vars regardless of layout — then project.
+    std::uint32_t nameIndex = 0;
+    std::int32_t  typeStart = 0;
+    std::uint32_t typeCount = 0;
+    std::uint32_t token     = 0;
+
+    if (version_ >= 38) {
+        // Hand-walk: uint nameIndex + int assemblyIndex + TDIS typeStart +
+        // uint typeCount + TDIS exportedTypeStart + uint exportedTypeCount +
+        // int entryPointIndex + uint token + int caStart + uint caCount.
+        const std::size_t TDIS = static_cast<std::size_t>(indexSizes_.typeDefinitionIndexSize);
+        std::memcpy(&nameIndex, row + 0,        4);
+        std::uint32_t tsRaw = 0;
+        std::memcpy(&tsRaw,     row + 8,        TDIS);
+        typeStart = static_cast<std::int32_t>(tsRaw);
+        std::memcpy(&typeCount, row + 8 + TDIS, 4);
+        // skip exportedTypeStart (TDIS) + exportedTypeCount (4) +
+        // entryPointIndex (4) — jump to token offset.
+        std::size_t tokenOff = 8 + TDIS + 4 + TDIS + 4 + 4;
+        std::memcpy(&token,     row + tokenOff, 4);
+    } else {
+        ImageDefinition_v29 d{};
+        std::memcpy(&d, row, sizeof(d));
+        nameIndex = d.nameIndex;
+        typeStart = d.typeStart;
+        typeCount = d.typeCount;
+        token     = d.token;
+    }
+
+    v.name      = GetHeapString(static_cast<std::int32_t>(nameIndex));
+    v.typeStart = typeStart;
+    v.typeCount = typeCount;
+    v.token     = token;
+
+    // Compute methodStart / methodEnd by walking the image's types and
+    // taking min(type.methodStart) / max(type.methodStart + methodCount).
+    // For v24.2+, type.methodStart is monotonically increasing within an
+    // image (Unity emits them in order), so first-type's methodStart is
+    // a safe lower bound and last-type's bound is the upper. Defensive
+    // implementation in case ordering doesn't hold.
+    if (typeCount > 0) {
+        std::int32_t lo = INT32_MAX;
+        std::int32_t hi = 0;
+        std::uint32_t total = TypeDefinitionCount();
+        std::int32_t end = std::min<std::int32_t>(
+            typeStart + static_cast<std::int32_t>(typeCount),
+            static_cast<std::int32_t>(total));
+        for (std::int32_t i = typeStart; i < end; ++i) {
+            if (auto t = GetTypeDefinition(i)) {
+                if (t->methodCount == 0) continue;
+                std::int32_t ms = t->methodStart;
+                std::int32_t me = ms + static_cast<std::int32_t>(t->methodCount);
+                if (ms < lo) lo = ms;
+                if (me > hi) hi = me;
+            }
+        }
+        if (lo != INT32_MAX && hi > lo) {
+            v.methodStart = lo;
+            v.methodEnd   = hi;
+        }
+    }
+    return v;
+}
+
+std::vector<Parser::ImageDefView> Parser::EnumerateImages() const {
+    std::vector<ImageDefView> out;
+    std::uint32_t count = ImageCount();
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (auto v = GetImage(static_cast<std::int32_t>(i))) {
+            out.push_back(std::move(*v));
+        }
+    }
+    return out;
+}
+
+std::optional<Parser::ImageDefView>
+Parser::FindImageContainingMethod(std::int32_t globalMethodIdx) const {
+    std::uint32_t count = ImageCount();
+    for (std::uint32_t i = 0; i < count; ++i) {
+        auto v = GetImage(static_cast<std::int32_t>(i));
+        if (!v) continue;
+        if (v->methodEnd > v->methodStart &&
+            globalMethodIdx >= v->methodStart &&
+            globalMethodIdx <  v->methodEnd) {
+            return v;
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<std::string> Parser::TryDecodeStringDefault(std::int32_t dataIndex) const {

@@ -82,6 +82,22 @@ public:
         std::uint32_t token              = 0;
     };
 
+    // Phase D-5.1 — Image (assembly DLL) descriptor. Used offline to map
+    // a global method index to its owning image so the symbol resolver
+    // can look up codeGenModules[image_name].methodPointers[localIdx].
+    struct ImageDefView {
+        std::int32_t  index;             // image index in metadata Images table
+        std::string   name;              // assembly name (without ".dll" suffix)
+        std::int32_t  typeStart   = 0;   // first TypeDefinition belonging to this image
+        std::uint32_t typeCount   = 0;
+        std::uint32_t token       = 0;
+        // First / last+1 global method indices belonging to this image —
+        // computed by walking type.methodStart across the image's types.
+        // 0 / 0 if the image has no methods.
+        std::int32_t  methodStart = 0;
+        std::int32_t  methodEnd   = 0;   // exclusive upper bound
+    };
+
     struct FieldDefaultBlob {
         std::int32_t              fieldIndex = 0;
         std::int32_t              typeIndex  = 0;
@@ -105,6 +121,22 @@ public:
     std::uint32_t ParameterCount() const noexcept;
     std::optional<ParameterDefView> GetParameter(std::int32_t idx) const;
     std::vector<ParameterDefView>   EnumerateMethodParameters(const MethodDefView& method) const;
+
+    // Phase D-5.1: Image table enumeration. Populated for v24.2+ (the
+    // versions where the codeGenModules cross-link is viable); v24.0 /
+    // v24.1 read at a wrong offset because rgctxEntriesOffset/Count
+    // sits between typeDefinitions and images in those older headers
+    // — those builds return ImageCount() == 0 by default (deferred).
+    std::uint32_t ImageCount() const noexcept;
+    std::optional<ImageDefView> GetImage(std::int32_t idx) const;
+    std::vector<ImageDefView>   EnumerateImages() const;
+
+    // Find the image whose [methodStart, methodEnd) range covers
+    // `globalMethodIdx`. O(N) linear scan — fine for the typical
+    // 20-100 images and one-time symbol-dump pipelines. Returns
+    // std::nullopt on miss (method belongs to no image, or images
+    // table not loaded).
+    std::optional<ImageDefView> FindImageContainingMethod(std::int32_t globalMethodIdx) const;
 
     // Linear search by namespace + name. Returns the first match or nullopt.
     std::optional<TypeDefView> FindTypeByName(const std::string& ns, const std::string& name) const;
@@ -193,6 +225,11 @@ private:
     std::size_t MethodDefSizeof() const noexcept;
     std::size_t ParameterDefSizeof() const noexcept;
 
+    // Phase D-5.1 — Image table row stride. Fixed 40 bytes for v24.2-v37
+    // (Min=24.1 customAttribute pair shipped by the time we care). v38+
+    // has variable-width typeStart/exportedTypeStart (TDIS bytes each).
+    std::size_t ImageDefSizeof() const noexcept;
+
     bool                      loaded_  = false;
     std::int32_t              version_ = 0;
     std::vector<std::uint8_t> data_;  // owns the whole file
@@ -226,6 +263,13 @@ private:
     std::int32_t methodsSize_            = 0;
     std::int32_t parametersOffset_       = 0;
     std::int32_t parametersSize_         = 0;
+
+    // Phase D-5.1: images table offsets. 0/0 for v24.0/v24.1 (deferred —
+    // see ImageCount comment) and for any version where bounds checking
+    // rejected the field. Populated for v24.2-v37 (flat header) and
+    // v38+ (section header).
+    std::int32_t imagesOffset_           = 0;
+    std::int32_t imagesSize_             = 0;
 
     // For v38+ derive the variable-width metadata-index sizes at load time
     // from each table's row count (and the parameter row's TIS-inferred

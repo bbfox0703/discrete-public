@@ -24,6 +24,9 @@
 #include "PEParser.h"
 #include "RegistrationFinder.h"
 #include "CodeGenModulesFinder.h"
+#include "SymbolPipeline.h"
+
+#include <fstream>
 
 #include <windows.h>
 
@@ -208,6 +211,37 @@ int CmdTypes(const std::wstring& path) {
         std::printf(",\"field_count\":%u,\"method_count\":%u,\"token\":%u}\n",
                     td->fieldCount, td->methodCount, td->token);
     }
+    return 0;
+}
+
+// Phase D-5.1 smoke — list every Image (assembly DLL) in the metadata.
+// Used to validate the new MetadataParser image-table read across the
+// v29 / v31 / v39 corpus before D-5.2's cross-linker leans on it.
+int CmdImages(const std::wstring& path) {
+    Parser p;
+    if (!p.LoadFromPath(path)) {
+        std::fputs("metadata-cli: load failed — see `info` subcommand\n", stderr);
+        return 1;
+    }
+    std::uint32_t count = p.ImageCount();
+    std::printf("{\"version\":%d,\"image_count\":%u,\"images\":[",
+                p.version(), count);
+    bool first = true;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        auto img = p.GetImage(static_cast<std::int32_t>(i));
+        if (!img) continue;
+        if (!first) std::fputc(',', stdout);
+        first = false;
+        std::fputs("{\"index\":", stdout);
+        std::printf("%d,\"name\":", img->index);
+        PutJsonString(img->name);
+        std::printf(",\"type_start\":%d,\"type_count\":%u,"
+                    "\"method_start\":%d,\"method_end\":%d,"
+                    "\"token\":%u}",
+                    img->typeStart, img->typeCount,
+                    img->methodStart, img->methodEnd, img->token);
+    }
+    std::fputs("]}\n", stdout);
     return 0;
 }
 
@@ -576,6 +610,97 @@ int CmdCodeModules(const std::wstring& path) {
     return 0;
 }
 
+// Phase D-5 final — `symbols` subcommand. End-to-end pipeline:
+//   GameAssembly.dll (PE) + global-metadata.dat → method→RVA cross-link
+//   → write .dd64 + Ghidra symbols.txt + IDA .idc to `<prefix>` paths.
+//
+// Usage:
+//   metadata-cli symbols <GameAssembly.dll> <global-metadata.dat> <output-prefix>
+//
+// Produces three files: <prefix>.dd64, <prefix>.ghidra.txt, <prefix>.idc.
+// Stdout is a JSON stats summary so the caller can see resolution rate
+// (resolved / total methods) without having to count file rows.
+int CmdSymbols(int argc, char** argv) {
+    if (argc < 5) {
+        std::fputs(
+            "USAGE: metadata-cli symbols <GameAssembly.dll> <global-metadata.dat> <output-prefix>\n",
+            stderr);
+        return 2;
+    }
+    std::wstring gaPath       = Utf8ToWide(argv[2]);
+    std::wstring metadataPath = Utf8ToWide(argv[3]);
+    std::string  outPrefix    = argv[4];
+
+    if (gaPath.empty() || metadataPath.empty() || outPrefix.empty()) {
+        std::fprintf(stderr, "metadata-cli: symbols requires non-empty paths\n");
+        return 2;
+    }
+
+    std::string err;
+    auto r = UnityCEDumper::Phase_D::Symbols::ResolveSymbols(metadataPath, gaPath, &err);
+    if (!r) {
+        std::fprintf(stderr, "metadata-cli: symbols pipeline failed: %s\n",
+                     err.empty() ? "unknown error" : err.c_str());
+        return 1;
+    }
+
+    // We need imageBase from the PE for absolute-address formats (Ghidra
+    // + IDA emit absolute, .dd64 stays module-relative). Re-parse the PE
+    // header — cheap, just reads the DOS/NT bytes again.
+    std::vector<std::uint8_t> peBytes;
+    auto peImg = UnityCEDumper::Phase_D::PE::ParseFile(gaPath, &peBytes, &err);
+    if (!peImg) {
+        std::fprintf(stderr, "metadata-cli: re-parse for imageBase failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::uint64_t imageBase = peImg->imageBase;
+
+    // Write the three formats. `\n` translation lives at the OS layer
+    // for ofstream in text mode; we want LF for cross-tool compat
+    // (matches the C# SymbolExporter which writes UTF-8 without BOM).
+    auto writeFile = [&](const std::string& suffix, const std::string& body) -> bool {
+        std::string path = outPrefix + suffix;
+        std::ofstream f(path, std::ios::binary);
+        if (!f) {
+            std::fprintf(stderr, "metadata-cli: cannot open %s for write\n", path.c_str());
+            return false;
+        }
+        f.write(body.data(), static_cast<std::streamsize>(body.size()));
+        return f.good();
+    };
+
+    std::string dd64   = UnityCEDumper::Phase_D::Symbols::RenderDd64(*r, "GameAssembly.dll", imageBase);
+    std::string ghidra = UnityCEDumper::Phase_D::Symbols::RenderGhidra(*r, imageBase);
+    std::string ida    = UnityCEDumper::Phase_D::Symbols::RenderIda(*r, imageBase);
+
+    bool ok = writeFile(".dd64", dd64)
+           && writeFile(".ghidra.txt", ghidra)
+           && writeFile(".idc", ida);
+    if (!ok) return 1;
+
+    // Stats line for the CLI consumer.
+    std::printf("{\"ok\":true,"
+                "\"image_base\":\"0x%016llX\","
+                "\"images_total\":%zu,"
+                "\"images_matched\":%zu,"
+                "\"classes_total\":%zu,"
+                "\"methods_total\":%zu,"
+                "\"methods_resolved\":%zu,"
+                "\"methods_null_ptr\":%zu,"
+                "\"resolve_ratio\":%.4f,"
+                "\"output_prefix\":",
+                static_cast<unsigned long long>(imageBase),
+                r->imagesTotal, r->imagesMatched,
+                r->classesTotal,
+                r->methodsTotal, r->methodsResolved, r->methodsNullPtr,
+                r->methodsTotal > 0
+                    ? static_cast<double>(r->methodsResolved) / static_cast<double>(r->methodsTotal)
+                    : 0.0);
+    PutJsonString(outPrefix);
+    std::fputs("}\n", stdout);
+    return 0;
+}
+
 void Usage() {
     std::fputs(
         "metadata-cli — offline IL2CPP global-metadata.dat parser + PE inspector\n\n"
@@ -586,9 +711,12 @@ void Usage() {
         "  metadata-cli type    <path-to-global-metadata.dat> <namespace> <name>\n"
         "  metadata-cli methods <path-to-global-metadata.dat>\n"
         "  metadata-cli method  <path-to-global-metadata.dat> <namespace> <type> <method>\n"
+        "  metadata-cli images        <path-to-global-metadata.dat>\n"
         "  metadata-cli pe-info       <path-to-GameAssembly.dll>\n"
         "  metadata-cli registration  <path-to-GameAssembly.dll>\n"
-        "  metadata-cli code-modules  <path-to-GameAssembly.dll>\n\n"
+        "  metadata-cli code-modules  <path-to-GameAssembly.dll>\n"
+        "  metadata-cli symbols       <GameAssembly.dll> <global-metadata.dat> <output-prefix>\n"
+        "      (emits <prefix>.dd64 + <prefix>.ghidra.txt + <prefix>.idc)\n\n"
         "Output is line-oriented JSON to stdout. Errors → stderr (exit 1).\n",
         stderr);
 }
@@ -596,8 +724,15 @@ void Usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3) { Usage(); return 2; }
+    if (argc < 2) { Usage(); return 2; }
     std::string_view sub = argv[1];
+
+    // The `symbols` subcommand takes 3 positional args (ga.dll +
+    // metadata.dat + output-prefix), so its arg parsing is delegated
+    // to CmdSymbols. Every other subcommand takes one path as argv[2].
+    if (sub == "symbols") return CmdSymbols(argc, argv);
+
+    if (argc < 3) { Usage(); return 2; }
     std::wstring path = Utf8ToWide(argv[2]);
     if (path.empty()) {
         std::fprintf(stderr, "metadata-cli: invalid path argument\n");
@@ -611,6 +746,7 @@ int main(int argc, char** argv) {
         return CmdType(path, argv[3], argv[4]);
     }
     else if (sub == "methods") return CmdMethods(path);
+    else if (sub == "images")  return CmdImages(path);
     else if (sub == "method") {
         if (argc < 6) { Usage(); return 2; }
         return CmdMethod(path, argv[3], argv[4], argv[5]);
