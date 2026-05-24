@@ -318,6 +318,61 @@ structural shape" — no false positives on generic Win32 DLLs.
 Foundation for the planned Phase D-4 (method-pointer resolution)
 and D-5 (`symbols` subcommand → `.dd64` / Ghidra / IDA outputs).
 
+#### `code-modules` — offline `Il2CppCodeRegistration::codeGenModules` walker
+
+Phase D step 4. Locates the codeGenModules array directly (instead
+of trying to validate the larger `Il2CppCodeRegistration` struct
+that varies considerably across versions), and emits the per-module
+breakdown the upcoming `symbols` subcommand will use to cross-link
+metadata MethodDefinitions to native AOT addresses.
+
+```powershell
+metadata-cli code-modules "C:\Path\To\game_Data\..\GameAssembly.dll"
+```
+
+```json
+{
+  "found": true,
+  "image_base": "0x0000000180000000",
+  "code_gen_modules_array_rva": "0x05241EF0",
+  "code_gen_modules_array_va":  "0x00000001852419F0",
+  "module_count": 57,
+  "section": ".data",
+  "modules": [
+    {
+      "name": "Assembly-CSharp.dll",
+      "module_rva": "0x05241EF0",
+      "method_count": 51,
+      "method_pointers_rva": "0x05242090",
+      "sample_methods": ["0x0055BCA0", "0x0055BC00", "0x0055BC70"]
+    },
+    ...
+  ]
+}
+```
+
+Cross-corpus verification (build #501):
+
+| Game | Metadata | Modules | Example | Notes |
+|---|---|---|---|---|
+| R-Type Dimensions | **v24.0** | n/a | — | Correctly rejected: pre-v24.2 IL2CPP has no `codeGenModules` — uses the flat `methodPointers` on `Il2CppCodeRegistration` directly. Old-format support TBD when there's a consumer. |
+| SaGa F2R | v29 | 20 | Assembly-CSharp.dll = 20,161 methods | Sample shape: assemblies with mostly abstract / generic-only / inlined methods report `0x00000000` for the first slots (this is IL2CPP doing what it always does — `methodPointers[]` slots are null for methods that don't have a standalone AOT body) |
+| Heroes Olden Era | v31 | 57 | Cysharp.Net.Http.YetAnotherHttpHandler.dll, Discord.dll, Epic.dll, Facepunch.Steamworks.Win64.dll | All sample methods are real non-zero addresses (e.g. `0x0055ECF0`) |
+| Songs of Silence | v39 | 87 | Many Chimera.* internal modules | Confirms the same scan works on v38+ section-header metadata games |
+
+The strong-signal heuristic: scan for runs of 8-byte-aligned
+pointers where every entry dereferences to a struct whose **first
+field is a pointer to a string ending in `.dll`**. That's the
+unique signature of the codeGenModules array — Unity's IL2CPP
+toolchain always names modules after their source assembly file,
+and the moduleName slot has been the first struct field
+unchanged from v24.2 through v39.
+
+Foundation for Phase D-5 (`symbols` subcommand) — once we know
+each module's `methodPointers[]` base + count, the remaining
+work is to walk metadata.dat's Image table to compute each
+method's (image, image-local index) pair and look up the address.
+
 ## Comparing CLI output to live RPC
 
 Quick sanity check: the CLI's `info` output should match the DLL's

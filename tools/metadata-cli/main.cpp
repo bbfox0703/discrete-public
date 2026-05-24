@@ -23,6 +23,7 @@
 #include "../../dll/src/il2cpp/MetadataParser.h"
 #include "PEParser.h"
 #include "RegistrationFinder.h"
+#include "CodeGenModulesFinder.h"
 
 #include <windows.h>
 
@@ -487,6 +488,94 @@ int CmdRegistration(const std::wstring& path) {
     return 0;
 }
 
+// Phase D step 4 — offline codeGenModules finder. Locates the IL2CPP
+// `Il2CppCodeRegistration::codeGenModules` array (v24.2+) by scanning
+// for runs of pointers to structs whose first field resolves to a
+// ".dll" string. For each module, emits the name + native methodPointers
+// RVA + count + a sample of the first 3 method RVAs. Foundation for the
+// final cross-link to metadata MethodDefinitions (Phase D-5).
+int CmdCodeModules(const std::wstring& path) {
+    using namespace UnityCEDumper::Phase_D;
+
+    std::vector<std::uint8_t> bytes;
+    std::string err;
+    auto imgOpt = PE::ParseFile(path, &bytes, &err);
+    if (!imgOpt) {
+        std::fprintf(stderr, "metadata-cli: code-modules pe-parse failed: %s\n",
+                     err.empty() ? "unknown error" : err.c_str());
+        return 1;
+    }
+    const PE::Image& img = *imgOpt;
+
+    err.clear();
+    auto found = CodeGenModules::FindOffline(bytes.data(), bytes.size(), img,
+                                              /*minModules=*/2, /*maxModules=*/1024,
+                                              &err);
+    if (!found) {
+        std::fprintf(stderr, "metadata-cli: code-modules finder failed: %s\n",
+                     err.empty() ? "unknown error" : err.c_str());
+        std::printf("{\"found\":false,\"image_base\":\"0x%016llX\"}\n",
+                    static_cast<unsigned long long>(img.imageBase));
+        return 1;
+    }
+    const CodeGenModules::Found& f = *found;
+
+    std::printf("{\"found\":true,"
+                "\"image_base\":\"0x%016llX\","
+                "\"code_gen_modules_array_rva\":\"0x%08llX\","
+                "\"code_gen_modules_array_va\":\"0x%016llX\","
+                "\"module_count\":%zu,"
+                "\"section\":",
+                static_cast<unsigned long long>(img.imageBase),
+                static_cast<unsigned long long>(f.arrayRva),
+                static_cast<unsigned long long>(f.arrayVa),
+                f.moduleCount);
+    PutJsonString(f.sectionName);
+    std::fputs(",\"modules\":[", stdout);
+    bool firstMod = true;
+    for (const auto& m : f.modules) {
+        if (!firstMod) std::fputc(',', stdout);
+        firstMod = false;
+        std::fputs("{\"name\":", stdout);
+        PutJsonString(m.name);
+        std::printf(",\"module_rva\":\"0x%08llX\","
+                    "\"method_count\":%llu,"
+                    "\"method_pointers_rva\":\"0x%08llX\","
+                    "\"sample_methods\":[",
+                    static_cast<unsigned long long>(m.modulePtrRva),
+                    static_cast<unsigned long long>(m.methodCount),
+                    static_cast<unsigned long long>(m.methodPointersRva));
+
+        // Print first 3 method RVAs from the methodPointers[] table.
+        // The pointers are absolute VAs in the file (post-relocation),
+        // so we convert each to an RVA before emitting. Zero-valued
+        // entries (some methods are abstract / external-only and have
+        // no AOT body) are emitted as "0x00000000" so the JSON shape
+        // stays uniform.
+        auto methodPtrsFileOff = (img.imageBase <= m.methodPointersVa)
+            ? img.RvaToFileOffset(m.methodPointersVa - img.imageBase)
+            : std::nullopt;
+        bool firstM = true;
+        std::size_t sampleN = std::min<std::size_t>(3, m.methodCount);
+        for (std::size_t i = 0; i < sampleN; ++i) {
+            if (!firstM) std::fputc(',', stdout);
+            firstM = false;
+            std::uint64_t methodVa = 0;
+            if (methodPtrsFileOff &&
+                *methodPtrsFileOff + (i + 1) * 8 <= bytes.size()) {
+                std::memcpy(&methodVa, bytes.data() + *methodPtrsFileOff + i * 8, 8);
+            }
+            std::uint64_t methodRva =
+                (methodVa >= img.imageBase) ? (methodVa - img.imageBase) : 0;
+            std::printf("\"0x%08llX\"",
+                        static_cast<unsigned long long>(methodRva));
+        }
+        std::fputs("]}", stdout);
+    }
+    std::fputs("]}\n", stdout);
+    return 0;
+}
+
 void Usage() {
     std::fputs(
         "metadata-cli — offline IL2CPP global-metadata.dat parser + PE inspector\n\n"
@@ -497,8 +586,9 @@ void Usage() {
         "  metadata-cli type    <path-to-global-metadata.dat> <namespace> <name>\n"
         "  metadata-cli methods <path-to-global-metadata.dat>\n"
         "  metadata-cli method  <path-to-global-metadata.dat> <namespace> <type> <method>\n"
-        "  metadata-cli pe-info      <path-to-GameAssembly.dll>\n"
-        "  metadata-cli registration <path-to-GameAssembly.dll>\n\n"
+        "  metadata-cli pe-info       <path-to-GameAssembly.dll>\n"
+        "  metadata-cli registration  <path-to-GameAssembly.dll>\n"
+        "  metadata-cli code-modules  <path-to-GameAssembly.dll>\n\n"
         "Output is line-oriented JSON to stdout. Errors → stderr (exit 1).\n",
         stderr);
 }
@@ -527,6 +617,7 @@ int main(int argc, char** argv) {
     }
     else if (sub == "pe-info")      return CmdPeInfo(path);
     else if (sub == "registration") return CmdRegistration(path);
+    else if (sub == "code-modules") return CmdCodeModules(path);
     Usage();
     return 2;
 }
