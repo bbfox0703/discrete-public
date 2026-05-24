@@ -301,6 +301,46 @@ public sealed class BackendAdapter : ILiveExportSource
             ?? throw new PipeProtocolException("dumpIl2cppSymbols returned no result");
     }
 
+    /// <summary>
+    /// `dumpClassInfo` — bulk equivalent of getClassInfo. Walks every
+    /// class in every requested assembly server-side under ONE thread
+    /// context and returns the full payload in ONE pipe round-trip.
+    /// Replaces the N×getClassInfo client-side loop that
+    /// <see cref="Export.Il2cppHeaderBatchExporter"/> originally used —
+    /// fixes the slow-quit issue documented in lessons-learned.md
+    /// "Phase C follow-up — IL2CPP equivalent". Supported on BOTH
+    /// backends; Mono method rows carry null Address (JIT addresses
+    /// don't survive restart, on-demand monoCompileMethod is the right
+    /// answer when an address is needed).
+    /// </summary>
+    public async Task<DumpClassInfoResult> DumpClassInfoAsync(
+        IReadOnlyList<string> assemblies,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        if (assemblies is null || assemblies.Count == 0)
+        {
+            throw new ArgumentException(
+                "dumpClassInfo requires at least one assembly.",
+                nameof(assemblies));
+        }
+
+        var args = new Dictionary<string, JsonElement>();
+        using (var asmDoc = JsonDocument.Parse(BuildStringArrayJson(assemblies)))
+        {
+            args["assemblies"] = asmDoc.RootElement.Clone();
+        }
+        if (limit.HasValue) args["limit"] = Int(limit.Value);
+
+        var env = await _pipe.SendAsync(
+            "dumpClassInfo", args,
+            ProtocolJsonContext.Default.RpcEnvelopeDumpClassInfoResult, ct)
+            .ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result
+            ?? throw new PipeProtocolException("dumpClassInfo returned no result");
+    }
+
     // -----------------------------------------------------------------------
     // Phase 9 — live inspection.
     // -----------------------------------------------------------------------

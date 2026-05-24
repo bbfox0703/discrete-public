@@ -541,6 +541,40 @@ public sealed class DumpIl2cppSymbolsResult
     [JsonPropertyName("error")]           public string? Error           { get; set; }
 }
 
+/// <summary>
+/// `dumpClassInfo` result — bulk equivalent of `getClassInfo`. One row
+/// per class across every requested assembly, in ONE pipe round-trip.
+/// Replaces the N×getClassInfo client-side loop that
+/// <see cref="Export.Il2cppHeaderBatchExporter"/> originally used (and
+/// that caused the SaGa F2R >60s slow-quit documented in
+/// lessons-learned.md "Phase C follow-up — IL2CPP equivalent"). Same
+/// wire shape on both backends; Mono method rows carry null `Address`.
+/// </summary>
+public sealed class DumpClassInfoResult
+{
+    [JsonPropertyName("rows")]               public List<DumpedClassRow>  Rows               { get; set; } = new();
+    [JsonPropertyName("count")]              public int                   Count              { get; set; }
+    [JsonPropertyName("scanned")]            public int                   Scanned            { get; set; }
+    [JsonPropertyName("truncated")]          public bool                  Truncated          { get; set; }
+    [JsonPropertyName("missing_assemblies")] public List<string>?         MissingAssemblies  { get; set; }
+    [JsonPropertyName("error")]              public string?               Error              { get; set; }
+}
+
+public sealed class DumpedClassRow
+{
+    [JsonPropertyName("assembly")]  public string                  Assembly  { get; set; } = string.Empty;
+    [JsonPropertyName("namespace")] public string?                 Namespace { get; set; }
+    [JsonPropertyName("name")]      public string                  Name      { get; set; } = string.Empty;
+    [JsonPropertyName("parent")]    public ClassRef?               Parent    { get; set; }
+    [JsonPropertyName("fields")]    public List<FieldEntry>?       Fields    { get; set; }
+    [JsonPropertyName("methods")]   public List<MethodEntry>?      Methods   { get; set; }
+    /// <summary>When set, this row failed server-side (e.g. ReadClassInfo
+    /// returned !ok). Fields / Methods are then empty. UI consumers treat
+    /// this the same as a null getClassInfo result — emit a `// SKIPPED`
+    /// marker in the il2cpp.h instead of a struct body.</summary>
+    [JsonPropertyName("error")]     public string?                 Error     { get; set; }
+}
+
 public sealed class SymbolDumpRow
 {
     /// <summary>"class" or "method".</summary>

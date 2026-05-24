@@ -1750,6 +1750,121 @@ void RegisterCoreHandlers() {
         };
     });
 
+    // Phase C follow-up (Mono mirror of the IL2CPP handler ~line 3593) —
+    // bulk class-info dump in one RPC, prevents the per-class
+    // ThreadAttachGuard accumulation pattern documented in
+    // lessons-learned.md "Phase C follow-up — IL2CPP equivalent". Symmetric
+    // with the IL2CPP handler so the UI consumer can stay backend-
+    // agnostic; the only payload difference is Mono methods carry no
+    // `address` field (JIT addresses don't survive restart; on-demand
+    // monoCompileMethod is the right answer when an address is needed).
+    PipeServer::RegisterHandler(MagicStrings::CmdDumpClassInfo,
+        [](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        std::vector<std::string> assemblyNames;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) assemblyNames.push_back(s);
+            }
+        }
+        if (assemblyNames.empty()) {
+            return json{{"error", "missing or empty 'assemblies' arg"}};
+        }
+
+        std::int64_t limit = args.value("limit", static_cast<std::int64_t>(0));
+        if (limit < 0) limit = 0;
+        constexpr std::size_t kHardCap = 1'000'000u;
+        const std::size_t effectiveCap = (limit == 0)
+            ? kHardCap
+            : std::min<std::size_t>(static_cast<std::size_t>(limit), kHardCap);
+
+        json rows = json::array();
+        std::size_t scanned = 0;
+        bool truncated = false;
+        std::vector<std::string> missingAssemblies;
+
+        for (const auto& assemblyName : assemblyNames) {
+            if (truncated) break;
+            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            if (img == nullptr) {
+                missingAssemblies.push_back(assemblyName);
+                continue;
+            }
+            auto classes = Mono::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                ++scanned;
+
+                json row = {
+                    {"assembly",  assemblyName},
+                    {"namespace", ce.ns},
+                    {"name",      ce.name},
+                };
+
+                Mono::MonoClass* k = Mono::FindClass(img, ce.ns, ce.name);
+                if (k == nullptr) {
+                    row["error"] = "FindClass failed";
+                    rows.push_back(std::move(row));
+                    if (rows.size() >= effectiveCap) { truncated = true; break; }
+                    continue;
+                }
+
+                auto res = Mono::ReadClassInfo(k);
+                if (!res.ok) {
+                    row["error"] = "ReadClassInfo failed";
+                    rows.push_back(std::move(row));
+                    if (rows.size() >= effectiveCap) { truncated = true; break; }
+                    continue;
+                }
+
+                json fields = json::array();
+                for (const auto& f : res.info.fields) {
+                    fields.push_back({
+                        {"name", f.name}, {"type", f.typeName},
+                        {"offset", f.offset}, {"flags", f.flags},
+                        {"static", (f.flags & 0x10u) != 0},
+                    });
+                }
+                json methods = json::array();
+                for (const auto& m : res.info.methods) {
+                    // Mono path: NO `address` field — JIT addresses
+                    // require monoCompileMethod on demand and don't
+                    // survive a game restart. UI handles null.
+                    methods.push_back({
+                        {"name", m.name}, {"token", m.token}, {"flags", m.flags},
+                        {"static", (m.flags & 0x10u) != 0},
+                    });
+                }
+                json parent = nullptr;
+                if (!res.info.parent.name.empty()) {
+                    parent = json{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+                row["parent"]  = parent;
+                row["fields"]  = std::move(fields);
+                row["methods"] = std::move(methods);
+                rows.push_back(std::move(row));
+                if (rows.size() >= effectiveCap) { truncated = true; break; }
+            }
+        }
+
+        const std::size_t rowCount = rows.size();
+        json response = {
+            {"rows",      std::move(rows)},
+            {"count",     rowCount},
+            {"scanned",   scanned},
+            {"truncated", truncated},
+        };
+        if (!missingAssemblies.empty()) {
+            response["missing_assemblies"] = std::move(missingAssemblies);
+        }
+        return response;
+    });
+
     // Phase 25 — cross-class symbol finder (Mono). Walks every class in the
     // given assembly (or array of assemblies), iterates fields + methods,
     // returns rows whose names match a case-insensitive substring pattern.
@@ -3583,6 +3698,117 @@ void RegisterCoreHandlers() {
             {"count",           rowCount},
             {"scanned_classes", scanned},
             {"truncated",       truncated},
+        };
+        if (!missingAssemblies.empty()) {
+            response["missing_assemblies"] = std::move(missingAssemblies);
+        }
+        return response;
+    });
+
+    // Phase C follow-up — bulk class-info dump. Walks every class in
+    // every requested assembly server-side under ONE thread context,
+    // returns the same payload the per-class `getClassInfo` would emit
+    // but aggregated. Replaces the UI's per-class loop and fixes the
+    // SaGa F2R post-export slow-quit (see lessons-learned.md "Phase C
+    // follow-up — IL2CPP equivalent"). Wire shape mirrors the per-
+    // class handler at line ~3288 so the UI can reuse the same
+    // projection code on the receiving side.
+    PipeServer::RegisterHandler(MagicStrings::CmdDumpClassInfo,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::vector<std::string> assemblyNames;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) assemblyNames.push_back(s);
+            }
+        }
+        if (assemblyNames.empty()) {
+            return json{{"error", "missing or empty 'assemblies' arg"}};
+        }
+
+        // Same hard cap shape as dumpIl2cppSymbols — defends against a
+        // brand new game with an absurd type count flipping the heap.
+        std::int64_t limit = args.value("limit", static_cast<std::int64_t>(0));
+        if (limit < 0) limit = 0;
+        constexpr std::size_t kHardCap = 1'000'000u;
+        const std::size_t effectiveCap = (limit == 0)
+            ? kHardCap
+            : std::min<std::size_t>(static_cast<std::size_t>(limit), kHardCap);
+
+        json rows = json::array();
+        std::size_t scanned = 0;
+        bool truncated = false;
+        std::vector<std::string> missingAssemblies;
+
+        for (const auto& assemblyName : assemblyNames) {
+            if (truncated) break;
+            const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
+            if (img == nullptr) {
+                missingAssemblies.push_back(assemblyName);
+                continue;
+            }
+            auto classes = IL2CPP::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ++scanned;
+
+                json row = {
+                    {"assembly",  assemblyName},
+                    {"namespace", ce.ns},
+                    {"name",      ce.name},
+                };
+
+                auto res = IL2CPP::ReadClassInfo(ce.klass);
+                if (!res.ok) {
+                    // Surface per-class failures inline rather than dropping
+                    // them silently — matches the // SKIPPED behaviour the
+                    // existing UI flow uses to flag fail-loud cases.
+                    row["error"] = "ReadClassInfo failed";
+                    rows.push_back(std::move(row));
+                    if (rows.size() >= effectiveCap) { truncated = true; break; }
+                    continue;
+                }
+
+                json fields = json::array();
+                for (const auto& f : res.info.fields) {
+                    fields.push_back({
+                        {"name", f.name}, {"type", f.typeName},
+                        {"offset", f.offset}, {"flags", f.flags},
+                        {"static", (f.flags & 0x10u) != 0},
+                    });
+                }
+                json methods = json::array();
+                for (const auto& m : res.info.methods) {
+                    methods.push_back({
+                        {"name", m.name}, {"token", m.token}, {"flags", m.flags},
+                        {"static", (m.flags & 0x10u) != 0},
+                        {"address", formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
+                    });
+                }
+                json parent = nullptr;
+                if (!res.info.parent.name.empty()) {
+                    parent = json{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+                row["parent"]  = parent;
+                row["fields"]  = std::move(fields);
+                row["methods"] = std::move(methods);
+                rows.push_back(std::move(row));
+                if (rows.size() >= effectiveCap) { truncated = true; break; }
+            }
+        }
+
+        const std::size_t rowCount = rows.size();
+        json response = {
+            {"rows",      std::move(rows)},
+            {"count",     rowCount},
+            {"scanned",   scanned},
+            {"truncated", truncated},
         };
         if (!missingAssemblies.empty()) {
             response["missing_assemblies"] = std::move(missingAssemblies);
