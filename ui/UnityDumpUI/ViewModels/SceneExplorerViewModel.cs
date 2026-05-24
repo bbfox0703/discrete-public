@@ -75,8 +75,20 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
     [ObservableProperty]
     private int _focusDelaySeconds;
 
+    /// <summary>
+    /// True once <c>Application.runInBackground = true</c> has been
+    /// successfully applied via <see cref="EnableRunInBackgroundCommand"/>.
+    /// Drives the button's IsEnabled in XAML so the user can't double-
+    /// click it. The flag is per-session (resets when the user reconnects
+    /// — the underlying Unity state also resets when the game restarts).
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
+    private bool _runInBackgroundEnabled;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
+    [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -185,6 +197,71 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
             IsBusy = false;
         }
     }
+
+    /// <summary>
+    /// One-shot button: call <c>Application.set_runInBackground(true)</c>
+    /// on the target via the Phase 20-MT main-thread dispatcher. Removes
+    /// the engine-pause-on-focus-loss behaviour for the rest of the
+    /// session so subsequent mainThread RPCs (Scene tab, MethodCallWindow,
+    /// FieldWriteWindow, etc.) work without needing the game focused.
+    ///
+    /// Reuses the same Focus delay countdown as Search so the first call
+    /// itself doesn't time out — without the delay the user would be
+    /// stuck in a chicken-and-egg loop where they can't enable
+    /// runInBackground because runInBackground is off.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanEnableRunInBackground))]
+    public async Task EnableRunInBackgroundAsync()
+    {
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        var ct = _searchCts.Token;
+
+        IsBusy       = true;
+        ErrorMessage = null;
+        try
+        {
+            int delay = Math.Clamp(FocusDelaySeconds, 0, 10);
+            for (int s = delay; s > 0; --s)
+            {
+                ct.ThrowIfCancellationRequested();
+                StatusMessage = $"Focus the game window — enabling runInBackground in {s}s…";
+                await Task.Delay(1000, ct).ConfigureAwait(true);
+            }
+            StatusMessage = "Calling Application.set_runInBackground(true)…";
+
+            SetRunInBackgroundResult r =
+                await _enumerator.SetApplicationRunInBackgroundAsync(true, ct).ConfigureAwait(true);
+            if (r.Ok)
+            {
+                RunInBackgroundEnabled = true;
+                StatusMessage =
+                    $"Application.runInBackground = true (via {r.ResolvedAssembly}). "
+                    + "Subsequent main-thread RPCs no longer need the game window focused.";
+                _logger.Write(Constants.LogCategoryView,
+                    $"SceneExplorer: runInBackground enabled via {r.ResolvedAssembly}");
+            }
+            else
+            {
+                ErrorMessage = $"Failed to enable runInBackground: {r.Error}";
+                StatusMessage = "runInBackground toggle failed.";
+            }
+        }
+        catch (OperationCanceledException) { /* superseded */ }
+        catch (Exception ex)
+        {
+            ErrorMessage  = $"{ex.GetType().Name}: {ex.Message}";
+            StatusMessage = "runInBackground toggle failed.";
+            _logger.Write(Constants.LogCategoryView,
+                $"SceneExplorer: runInBackground failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanEnableRunInBackground() => !IsBusy && !RunInBackgroundEnabled;
 
     private bool CanSearch() => !IsBusy;
 

@@ -1250,13 +1250,16 @@
                GameObject's address pre-populated. -->
           <TabItem Header="{StaticResource Scene.Tab}">
             <DockPanel Margin="0,4,0,0">
-              <!-- Top control row: pattern + Limit + Focus delay + Search.
-                   Focus delay is the Phase 20-MT runInBackground workaround
-                   (see SceneExplorerViewModel.FocusDelaySeconds). Sits
-                   right before Search so it's clear the delay applies to
-                   the next Search click only. -->
+              <!-- Top control row: pattern + Limit + Focus delay + Enable
+                   runInBackground + Search. Focus delay is the Phase 20-MT
+                   runInBackground workaround (per-call countdown). The
+                   "Enable runInBackground" button is the one-shot fix:
+                   call it once (with Focus delay if needed for the very
+                   first call), and the engine stops pausing Update() on
+                   focus loss for the rest of the session. Button greys
+                   out once successfully applied. -->
               <Grid DockPanel.Dock="Top"
-                    ColumnDefinitions="*,Auto,140,Auto,90,Auto"
+                    ColumnDefinitions="*,Auto,140,Auto,90,Auto,Auto"
                     Margin="0,0,0,8">
                 <TextBox Grid.Column="0"
                          PlaceholderText="{StaticResource Scene.PatternWatermark}"
@@ -1284,6 +1287,11 @@
                                MinWidth="70"
                                Margin="0,0,8,0" />
                 <Button Grid.Column="5"
+                        Content="{StaticResource Scene.EnableRunInBackgroundButton}"
+                        Command="{Binding Scene.EnableRunInBackgroundCommand}"
+                        ToolTip.Tip="{StaticResource Scene.EnableRunInBackgroundTooltip}"
+                        Margin="0,0,8,0" />
+                <Button Grid.Column="6"
                         Content="{StaticResource Scene.SearchButton}"
                         Command="{Binding Scene.SearchCommand}"
                         Classes="accent" />

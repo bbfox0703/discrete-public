@@ -223,6 +223,82 @@ public sealed class SceneEnumerator
     }
 
     /// <summary>
+    /// One-shot helper to toggle <c>UnityEngine.Application.runInBackground</c>
+    /// on the target. The property defaults to <c>false</c> — when the user
+    /// switches focus from the game window to DiscreteUI, Unity pauses
+    /// <c>Update()</c>, which stops <c>mono_runtime_invoke</c> from firing,
+    /// which prevents the Phase 20-MT dispatcher hook from draining its
+    /// queue, which makes every <c>mainThread:true</c> RPC time out.
+    /// Setting it to <c>true</c> once flips that off for the rest of the
+    /// process lifetime.
+    ///
+    /// <para>NOTE: the call itself routes through <c>mainThread:true</c>
+    /// because <c>set_runInBackground</c> is an engine icall — so the
+    /// caller still needs the game window to have focus at submit time
+    /// (i.e. SceneExplorerViewModel's <c>FocusDelaySeconds</c> countdown
+    /// applies here too). After this returns ok, all subsequent
+    /// <c>mainThread:true</c> calls work regardless of which window has
+    /// focus.</para>
+    ///
+    /// <para>Tries the resolved Unity assembly first if we've already
+    /// resolved one (via <see cref="EnumerateGameObjectAddressesAsync"/>);
+    /// otherwise probes <c>UnityEngine.CoreModule</c> then monolithic
+    /// <c>UnityEngine</c>, same fallback chain Phase 20e uses.</para>
+    /// </summary>
+    public async Task<SetRunInBackgroundResult> SetApplicationRunInBackgroundAsync(
+        bool value, CancellationToken ct = default)
+    {
+        // Probe assembly order: resolved-survivor first (no point retrying
+        // the one that already failed), then the remaining one. If no
+        // resolution has happened yet, try CoreModule → monolithic.
+        var attempts = new List<string>(2);
+        if (_resolvedUnityEngineAssembly is not null)
+        {
+            attempts.Add(_resolvedUnityEngineAssembly);
+            if (!string.Equals(_resolvedUnityEngineAssembly,
+                                UnityCoreModuleAssembly, StringComparison.Ordinal))
+            {
+                attempts.Add(UnityCoreModuleAssembly);
+            }
+            else
+            {
+                attempts.Add(UnityMonolithicAssembly);
+            }
+        }
+        else
+        {
+            attempts.Add(UnityCoreModuleAssembly);
+            attempts.Add(UnityMonolithicAssembly);
+        }
+
+        string? lastErr = null;
+        foreach (string asm in attempts)
+        {
+            var r = await _backend.CallMethodAsync(
+                asm, UnityEngineNamespace, "Application", "set_runInBackground",
+                new[] { CallArgFactory.Bool(value) },
+                signatureMatch: "(System.Boolean)",
+                mainThread: true,
+                ct: ct).ConfigureAwait(false);
+            if (r.Ok)
+            {
+                _logger.Write(Constants.LogCategoryView,
+                    $"SceneEnumerator: Application.runInBackground = {value} via {asm}");
+                // Lock in the survivor so EnumerateGameObjects + GetName etc.
+                // use the same assembly afterwards.
+                _resolvedUnityEngineAssembly ??= asm;
+                return SetRunInBackgroundResult.Success(asm);
+            }
+            lastErr = r.Exception ?? r.Error ?? "unknown failure";
+        }
+
+        _logger.Write(Constants.LogCategoryView,
+            $"SceneEnumerator: set_runInBackground failed across "
+            + $"[{string.Join(", ", attempts)}]. last error: {lastErr ?? "<none>"}.");
+        return SetRunInBackgroundResult.Failure(lastErr ?? "no UnityEngine assembly responded");
+    }
+
+    /// <summary>
     /// Returns the <c>name</c> property of a GameObject (or any Unity
     /// Object subclass — same engine getter). Null on call failure or
     /// for a destroyed-but-still-referenced wrapper. Caller should
@@ -435,4 +511,25 @@ public sealed class EnumerateResult
 
     internal static EnumerateResult Failure(string error)
         => new(Array.Empty<string>(), 0, string.Empty, error);
+}
+
+/// <summary>Result envelope from
+/// <see cref="SceneEnumerator.SetApplicationRunInBackgroundAsync"/>.
+/// Either <see cref="ResolvedAssembly"/> is populated (success) or
+/// <see cref="Error"/> is.</summary>
+public sealed class SetRunInBackgroundResult
+{
+    public string? ResolvedAssembly { get; }
+    public string? Error            { get; }
+
+    private SetRunInBackgroundResult(string? asm, string? error)
+    {
+        ResolvedAssembly = asm;
+        Error            = error;
+    }
+
+    public bool Ok => Error is null;
+
+    internal static SetRunInBackgroundResult Success(string asm) => new(asm, null);
+    internal static SetRunInBackgroundResult Failure(string err) => new(null, err);
 }

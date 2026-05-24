@@ -182,6 +182,8 @@
   <sys:String x:Key="Scene.SearchButton">Search</sys:String>
   <sys:String x:Key="Scene.FocusDelayLabel">Focus delay (s)</sys:String>
   <sys:String x:Key="Scene.FocusDelayTooltip">Seconds to wait before issuing the first Unity icall. Use 3-5s on targets where Application.runInBackground = false (the engine default): click Search, alt-tab back to the game window, and the call fires once Unity's Update() loop is ticking again.</sys:String>
+  <sys:String x:Key="Scene.EnableRunInBackgroundButton">Enable runInBackground</sys:String>
+  <sys:String x:Key="Scene.EnableRunInBackgroundTooltip">One-shot fix for Phase 20-MT focus-pause. Calls UnityEngine.Application.set_runInBackground(true) on the target via the main-thread dispatcher, after which the engine no longer pauses Update() when DiscreteUI takes focus — so subsequent Scene / Method-call / Field-write RPCs work regardless of which window is active. The call itself still needs the game window focused at submit time; use Focus delay (3-5s) for the very first click, then never need it again this session.</sys:String>
   <sys:String x:Key="Scene.InspectMenu">Inspect this GameObject (switch to Inspector)</sys:String>
   <sys:String x:Key="Scene.CopyAddressMenu">Copy address</sys:String>
   <sys:String x:Key="Scene.CopyNameMenu">Copy name</sys:String>
