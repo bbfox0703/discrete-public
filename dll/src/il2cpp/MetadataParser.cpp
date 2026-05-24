@@ -164,6 +164,61 @@ std::size_t Parser::FieldDefaultValueSizeof() const noexcept {
     return sizeof(FieldDefaultValue_v29);
 }
 
+std::size_t Parser::MethodDefSizeof() const noexcept {
+    switch (version_) {
+        case 24:
+            switch (v24Variant_) {
+                case V24Variant::V24_0: return sizeof(MethodDefinition_v24_0); // 56
+                case V24Variant::V24_1: return sizeof(MethodDefinition_v24_1); // 52
+                default:                return sizeof(MethodDefinition_v29);   // 32
+            }
+        case 27:
+        case 29:
+        case 30:
+            return sizeof(MethodDefinition_v29);  // 32 bytes
+        case 31:
+        case 32:
+        case 33:
+        case 34:
+        case 35:
+        case 36:
+        case 37:
+            return sizeof(MethodDefinition_v31);  // 36 bytes
+        case 38: {
+            // v38: typed indices go variable-width except ParameterIndex
+            // (still 4 bytes pre-v39). Layout = uint nameIndex (4) +
+            // TDIS declaringType + TIS returnType + int returnParameterToken (4) +
+            // int parameterStart (4) + GCIS genericContainerIndex +
+            // uint token (4) + 4 ushort counts (8) = 24 + TDIS + TIS + GCIS.
+            const std::size_t TDIS = static_cast<std::size_t>(indexSizes_.typeDefinitionIndexSize);
+            const std::size_t TIS  = static_cast<std::size_t>(indexSizes_.typeIndexSize);
+            const std::size_t GCIS = static_cast<std::size_t>(indexSizes_.genericContainerIndexSize);
+            return 24 + TDIS + TIS + GCIS;
+        }
+        case 39: {
+            // v39: ParameterIndex also goes variable-width.
+            // 20 + TDIS + TIS + PIS + GCIS.
+            const std::size_t TDIS = static_cast<std::size_t>(indexSizes_.typeDefinitionIndexSize);
+            const std::size_t TIS  = static_cast<std::size_t>(indexSizes_.typeIndexSize);
+            const std::size_t PIS  = static_cast<std::size_t>(indexSizes_.parameterIndexSize);
+            const std::size_t GCIS = static_cast<std::size_t>(indexSizes_.genericContainerIndexSize);
+            return 20 + TDIS + TIS + PIS + GCIS;
+        }
+        default: return 0;
+    }
+}
+
+std::size_t Parser::ParameterDefSizeof() const noexcept {
+    if (version_ >= 38) {
+        // v38+: uint nameIndex (4) + uint token (4) + TIS typeIndex.
+        return 8u + static_cast<std::size_t>(indexSizes_.typeIndexSize);
+    }
+    if (version_ == 24 && v24Variant_ == V24Variant::V24_0) {
+        return sizeof(ParameterDefinition_v24_0);   // 16
+    }
+    return sizeof(ParameterDefinition_v29);          // 12
+}
+
 bool Parser::LoadTables() {
     auto inBounds = [&](std::int32_t off, std::int32_t sz) {
         if (off < 0 || sz < 0) return false;
@@ -192,6 +247,10 @@ bool Parser::LoadTables() {
         fieldDefaultsSize_      = static_cast<std::int32_t>(h.fieldDefaultValues.size);
         fieldDefaultDataOffset_ = static_cast<std::int32_t>(h.fieldAndParameterDefaultValueData.offset);
         fieldDefaultDataSize_   = static_cast<std::int32_t>(h.fieldAndParameterDefaultValueData.size);
+        methodsOffset_          = static_cast<std::int32_t>(h.methods.offset);
+        methodsSize_            = static_cast<std::int32_t>(h.methods.size);
+        parametersOffset_       = static_cast<std::int32_t>(h.parameters.offset);
+        parametersSize_         = static_cast<std::int32_t>(h.parameters.size);
 
         parametersCount_ = static_cast<std::int64_t>(h.parameters.count);
 
@@ -245,12 +304,18 @@ bool Parser::LoadTables() {
         fieldDefaultsSize_      = h.fieldDefaultValuesSize;
         fieldDefaultDataOffset_ = h.fieldAndParameterDefaultValueDataOffset;
         fieldDefaultDataSize_   = h.fieldAndParameterDefaultValueDataSize;
+        methodsOffset_          = h.methodsOffset;
+        methodsSize_            = h.methodsSize;
+        parametersOffset_       = h.parametersOffset;
+        parametersSize_         = h.parametersSize;
     }
 
     if (!inBounds(typeDefinitionsOffset_,  typeDefinitionsSize_)  ||
         !inBounds(fieldsOffset_,           fieldsSize_)           ||
         !inBounds(fieldDefaultsOffset_,    fieldDefaultsSize_)    ||
-        !inBounds(fieldDefaultDataOffset_, fieldDefaultDataSize_)) {
+        !inBounds(fieldDefaultDataOffset_, fieldDefaultDataSize_) ||
+        !inBounds(methodsOffset_,          methodsSize_)          ||
+        !inBounds(parametersOffset_,       parametersSize_)) {
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: tables out of bounds");
         return false;
@@ -732,6 +797,190 @@ Parser::EnumerateTypeFields(const TypeDefView& type) const {
             v.token     = f.token;
         }
         out.push_back(std::move(v));
+    }
+    return out;
+}
+
+// --- Phase B: Methods / Parameters -------------------------------------------
+
+std::uint32_t Parser::MethodDefinitionCount() const noexcept {
+    if (!tablesLoaded_) return 0;
+    std::size_t sz = MethodDefSizeof();
+    if (sz == 0) return 0;
+    return static_cast<std::uint32_t>(methodsSize_) / static_cast<std::uint32_t>(sz);
+}
+
+std::optional<Parser::MethodDefView> Parser::GetMethodDefinition(std::int32_t idx) const {
+    if (!tablesLoaded_) return std::nullopt;
+    std::uint32_t count = MethodDefinitionCount();
+    if (idx < 0 || static_cast<std::uint32_t>(idx) >= count) return std::nullopt;
+
+    std::size_t sz = MethodDefSizeof();
+    const std::uint8_t* row = data_.data() + methodsOffset_ +
+                              static_cast<std::size_t>(idx) * sz;
+
+    MethodDefView v;
+    v.index = idx;
+
+    // Pre-v38 path: project from a versioned struct. The TypeDefView code
+    // uses a lambda + struct dispatch — same pattern here.
+    auto project = [&](auto&& md) {
+        v.name               = GetHeapString(static_cast<std::int32_t>(md.nameIndex));
+        v.declaringTypeIndex = md.declaringType;
+        v.returnTypeIndex    = md.returnType;
+        v.parameterStart     = md.parameterStart;
+        v.parameterCount     = md.parameterCount;
+        v.flags              = md.flags;
+        v.token              = md.token;
+    };
+
+    if (version_ == 24) {
+        if (v24Variant_ == V24Variant::V24_0) {
+            MethodDefinition_v24_0 md{};
+            std::memcpy(&md, row, sizeof(md));
+            project(md);
+        } else if (v24Variant_ == V24Variant::V24_1) {
+            MethodDefinition_v24_1 md{};
+            std::memcpy(&md, row, sizeof(md));
+            project(md);
+        } else {
+            MethodDefinition_v29 md{};
+            std::memcpy(&md, row, sizeof(md));
+            project(md);
+        }
+    } else if (version_ >= 27 && version_ <= 30) {
+        MethodDefinition_v29 md{};
+        std::memcpy(&md, row, sizeof(md));
+        project(md);
+    } else if (version_ >= 31 && version_ <= 37) {
+        MethodDefinition_v31 md{};
+        std::memcpy(&md, row, sizeof(md));
+        project(md);
+    } else if (version_ >= 38) {
+        // v38+: hand-walk. Layout per vendor/Il2CppDumperV35plus/Il2Cpp/
+        // MetadataClass.cs:381-407 (typed-index version):
+        //   uint  nameIndex                4
+        //   TDI   declaringType            TDIS
+        //   TI    returnType               TIS
+        //   int   returnParameterToken     4   (≥v31; always present at v38+)
+        //   PI    parameterStart           PIS  (= 4 at v38, variable at v39+)
+        //   GCI   genericContainerIndex    GCIS
+        //   uint  token                    4
+        //   ushort flags                   2
+        //   ushort iflags                  2
+        //   ushort slot                    2
+        //   ushort parameterCount          2
+        const std::size_t TDIS = static_cast<std::size_t>(indexSizes_.typeDefinitionIndexSize);
+        const std::size_t TIS  = static_cast<std::size_t>(indexSizes_.typeIndexSize);
+        const std::size_t PIS  = (version_ >= 39)
+            ? static_cast<std::size_t>(indexSizes_.parameterIndexSize) : 4u;
+        const std::size_t GCIS = static_cast<std::size_t>(indexSizes_.genericContainerIndexSize);
+        std::size_t off = 0;
+        std::uint32_t nameIndex = 0;
+        std::memcpy(&nameIndex, row + off, 4); off += 4;
+        std::uint32_t declaringRaw = 0;
+        std::memcpy(&declaringRaw, row + off, TDIS); off += TDIS;
+        std::uint32_t returnRaw = 0;
+        std::memcpy(&returnRaw, row + off, TIS); off += TIS;
+        off += 4;  // returnParameterToken — not needed for current view
+        std::uint32_t parmStartRaw = 0;
+        std::memcpy(&parmStartRaw, row + off, PIS); off += PIS;
+        off += GCIS;  // genericContainerIndex — not needed
+        std::uint32_t token = 0;
+        std::memcpy(&token, row + off, 4); off += 4;
+        std::uint16_t flags = 0, iflags = 0, slot = 0, parameterCount = 0;
+        std::memcpy(&flags,           row + off + 0, 2);
+        std::memcpy(&iflags,          row + off + 2, 2);
+        std::memcpy(&slot,            row + off + 4, 2);
+        std::memcpy(&parameterCount,  row + off + 6, 2);
+
+        v.name               = GetHeapString(static_cast<std::int32_t>(nameIndex));
+        v.declaringTypeIndex = static_cast<std::int32_t>(declaringRaw);
+        v.returnTypeIndex    = static_cast<std::int32_t>(returnRaw);
+        v.parameterStart     = static_cast<std::int32_t>(parmStartRaw);
+        v.parameterCount     = parameterCount;
+        v.flags              = flags;
+        v.token              = token;
+    } else {
+        return std::nullopt;  // unsupported version
+    }
+
+    return v;
+}
+
+std::vector<Parser::MethodDefView>
+Parser::EnumerateTypeMethods(const TypeDefView& type) const {
+    std::vector<MethodDefView> out;
+    if (!tablesLoaded_) return out;
+    if (type.methodCount == 0) return out;
+    std::uint32_t total = MethodDefinitionCount();
+    out.reserve(type.methodCount);
+    for (std::uint16_t k = 0; k < type.methodCount; ++k) {
+        std::int32_t globalIdx = type.methodStart + k;
+        if (globalIdx < 0 || static_cast<std::uint32_t>(globalIdx) >= total) break;
+        if (auto md = GetMethodDefinition(globalIdx)) {
+            out.push_back(std::move(*md));
+        }
+    }
+    return out;
+}
+
+std::uint32_t Parser::ParameterCount() const noexcept {
+    if (!tablesLoaded_) return 0;
+    std::size_t sz = ParameterDefSizeof();
+    if (sz == 0) return 0;
+    return static_cast<std::uint32_t>(parametersSize_) / static_cast<std::uint32_t>(sz);
+}
+
+std::optional<Parser::ParameterDefView> Parser::GetParameter(std::int32_t idx) const {
+    if (!tablesLoaded_) return std::nullopt;
+    std::uint32_t count = ParameterCount();
+    if (idx < 0 || static_cast<std::uint32_t>(idx) >= count) return std::nullopt;
+
+    std::size_t sz = ParameterDefSizeof();
+    const std::uint8_t* row = data_.data() + parametersOffset_ +
+                              static_cast<std::size_t>(idx) * sz;
+
+    ParameterDefView v;
+    v.index = idx;
+    if (version_ >= 38) {
+        std::uint32_t nameIndex = 0, token = 0;
+        std::memcpy(&nameIndex, row + 0, 4);
+        std::memcpy(&token,     row + 4, 4);
+        std::uint32_t typeRaw = 0;
+        std::memcpy(&typeRaw,   row + 8, static_cast<std::size_t>(indexSizes_.typeIndexSize));
+        v.name      = GetHeapString(static_cast<std::int32_t>(nameIndex));
+        v.token     = token;
+        v.typeIndex = static_cast<std::int32_t>(typeRaw);
+    } else if (version_ == 24 && v24Variant_ == V24Variant::V24_0) {
+        ParameterDefinition_v24_0 p{};
+        std::memcpy(&p, row, sizeof(p));
+        v.name      = GetHeapString(static_cast<std::int32_t>(p.nameIndex));
+        v.token     = p.token;
+        v.typeIndex = p.typeIndex;
+    } else {
+        ParameterDefinition_v29 p{};
+        std::memcpy(&p, row, sizeof(p));
+        v.name      = GetHeapString(static_cast<std::int32_t>(p.nameIndex));
+        v.token     = p.token;
+        v.typeIndex = p.typeIndex;
+    }
+    return v;
+}
+
+std::vector<Parser::ParameterDefView>
+Parser::EnumerateMethodParameters(const MethodDefView& method) const {
+    std::vector<ParameterDefView> out;
+    if (!tablesLoaded_) return out;
+    if (method.parameterCount == 0) return out;
+    std::uint32_t total = ParameterCount();
+    out.reserve(method.parameterCount);
+    for (std::uint16_t k = 0; k < method.parameterCount; ++k) {
+        std::int32_t globalIdx = method.parameterStart + k;
+        if (globalIdx < 0 || static_cast<std::uint32_t>(globalIdx) >= total) break;
+        if (auto p = GetParameter(globalIdx)) {
+            out.push_back(std::move(*p));
+        }
     }
     return out;
 }
