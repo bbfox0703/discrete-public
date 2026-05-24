@@ -323,6 +323,73 @@ fix for (b) is heap-leaked singletons (the prior lesson above).
 
 ---
 
+### Phase C follow-up — IL2CPP equivalent: per-RPC ThreadAttachGuard batching across N pipe calls stalls shutdown
+
+**Symptom**: SaGa Frontier 2 Remastered (IL2CPP v29, Unity 2021.3.39f1)
+takes **>60 seconds to quit** after running the new Tools menu
+**Export il2cpp.h (whole game)…** action (build #486). User has to
+kill via Task Manager. Game window closes immediately on quit
+request; process lingers.
+
+The Phase C exporter walks 3,765 classes by calling `getClassInfo`
+as 3,765 **separate pipe RPCs** from the UI side. Each RPC enters
+the DLL handler, opens a `ThreadAttachGuard`, calls IL2CPP runtime
+APIs (`il2cpp_class_from_name`, `_get_field_count`, `_get_methods`),
+and closes the guard.
+
+**Root cause family**: identical to the Mono Phase 27 follow-up
+entry above — mass-batch runtime API calls leave per-call cleanup
+work that the runtime defers to shutdown. The difference is:
+
+* The Mono fix amortises attach/detach **within one RPC** (the
+  `ThreadAttachGuard` reentrancy counter lets a scan handler open
+  one outer guard before the WhatIsAt batch loop).
+* The Phase C case crosses **N separate RPCs**, so the per-thread
+  reentrancy counter doesn't fire — each pipe handler is its own
+  entry point.
+
+The IL2CPP runtime's per-class lookups may add metadata refs that
+accumulate over the batch; quit-time IL2CPP teardown then has 3,765×
+deferred cleanup to walk. The Mono BDWGC finalizer-queue mechanism
+is the canonical example, but IL2CPP shows analogous behaviour on
+large batches.
+
+**Proper fix** (tracked as a follow-up task, deferred from Phase C
+ship): add a server-side bulk `dumpIl2cppClassInfo` RPC that walks
+every user-assembly class **inside one `ThreadAttachGuard`** and
+returns the full payload as one pipe round-trip. The UI's
+`Il2cppHeaderBatchExporter` switches to this single call instead of
+the per-class loop. Expected side benefits:
+
+* Cuts whole-game export time from ~20-40s to ~2-5s (one pipe
+  round-trip vs thousands).
+* Restores quit to baseline (~1s).
+* Pairs naturally with offline Phase D — same `Il2cppHeaderBatchExporter`
+  rendering code can consume either the bulk RPC (live) or the
+  offline PE-parser output, just by swapping the data source.
+
+**Where the design went wrong**: when picking Phase C path B (UI
+live-driven over path A offline), the assumption was that
+"reuse existing `getClasses` / `getClassInfo` RPCs, no DLL changes"
+was the small-scope path. That **was** true for the rendering
+work, but it ignored the well-documented Mono lesson above — any
+batch loop over runtime APIs needs amortised attach. The lesson
+generalises across the pipe boundary too: any batch of pipe RPCs
+that hit the runtime needs a server-side bulk variant, not just a
+client-side loop.
+
+**How to spot this**: if a new feature does N>100 pipe RPCs that
+each call into the IL2CPP/Mono runtime, expect either
+shutdown-latency growth or runtime resource exhaustion. Either
+batch server-side, or amortise the runtime work via a cache the
+RPCs can hit without re-attaching.
+
+See [docs/il2cppdumper-comparison.md](il2cppdumper-comparison.md)
+Phase C log entry for the production-ship history; the bulk-RPC
+follow-up is tracked there.
+
+---
+
 ### Phase 27a — mass-batch Mono runtime API calls wedge legacy 32-bit Mono when main thread is focus-paused
 
 **Symptom**: 活俠傳 (Legend of Mortal, Unity 2020.3.49f1, x86 Mono) hangs

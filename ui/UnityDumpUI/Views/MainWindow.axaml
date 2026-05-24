@@ -1357,7 +1357,7 @@
                 <TextBox Grid.Row="1" Grid.Column="1"
                          Text="{Binding ValueSearch.ValueText, Mode=TwoWay}"
                          Margin="0,6,12,0"
-                         Watermark="100  or  GameOver  for strings"/>
+                         PlaceholderText="100  or  GameOver  for strings"/>
 
                 <TextBlock Grid.Row="1" Grid.Column="2" Text="To:"
                            VerticalAlignment="Center" Margin="0,6,6,0"
@@ -1366,14 +1366,14 @@
                          Text="{Binding ValueSearch.ValueToText, Mode=TwoWay}"
                          IsVisible="{Binding ValueSearch.NeedsValueTo}"
                          Margin="0,6,12,0"
-                         Watermark="upper bound"/>
+                         PlaceholderText="upper bound"/>
 
                 <TextBlock Grid.Row="1" Grid.Column="4" Text="Tol:"
                            VerticalAlignment="Center" Margin="0,6,6,0"/>
                 <TextBox Grid.Row="1" Grid.Column="5"
                          Text="{Binding ValueSearch.ToleranceText, Mode=TwoWay}"
                          Margin="0,6,12,0"
-                         Watermark="0.5"
+                         PlaceholderText="0.5"
                          ToolTip.Tip="Float / double epsilon — only used for float/double scanning. Default 0.5 matches CE's 'Rounded (default)' float semantics: searching for 32 catches anything that displays as 32 (i.e. 31.5 to 32.5). Set to 0 for bit-exact match."/>
 
                 <!-- Row 2: encoding/matchMode (string mode) OR refine controls -->

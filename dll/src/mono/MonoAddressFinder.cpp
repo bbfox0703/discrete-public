@@ -559,7 +559,8 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         MonoClass* outer = k;
         if (r.class_get_nesting_type != nullptr) {
             MonoClass* cur = k;
-            for (int i = 0; i < 16; ++i) {
+            // depth (not `i`) — outer scan-step loop already uses `i`.
+            for (int depth = 0; depth < 16; ++depth) {
                 MonoClass* d = SehNestingProbe(r.class_get_nesting_type, cur);
                 if (d == nullptr) break;
                 const char* dn = SehClassNameProbe(r.class_get_name, d);

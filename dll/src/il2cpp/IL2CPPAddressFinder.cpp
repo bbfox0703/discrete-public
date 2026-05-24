@@ -525,7 +525,8 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         Il2CppClass* outer = k;
         if (r.class_get_declaring != nullptr) {
             Il2CppClass* cur = k;
-            for (int i = 0; i < 16; ++i) {
+            // depth (not `i`) — outer scan-step loop already uses `i`.
+            for (int depth = 0; depth < 16; ++depth) {
                 Il2CppClass* d = SehClassDeclaringProbe(r.class_get_declaring, cur);
                 if (d == nullptr) break;
                 const char* dn = SehClassNameProbe(r.class_get_name, d);
