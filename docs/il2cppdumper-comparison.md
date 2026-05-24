@@ -16,7 +16,12 @@ this up across PCs.
 
 ---
 
-## Feature matrix (state at build #480, 2026-05-24)
+## Feature matrix (state at build #511, 2026-05-24)
+
+> All four planned phases (A roadmap, B Method/Param, C il2cpp.h batch
+> + bulk-RPC follow-up, D offline PE pipeline including v0.2 coverage
+> + nested-prefix improvements) shipped in a single 2026-05-24 sweep.
+> See the progress log at the bottom for the per-build delta history.
 
 | Il2CppDumper feature | Status | Notes |
 |---|---|---|
@@ -57,7 +62,7 @@ Three phases, prioritized by ROI for our niche. Each phase is
 self-contained — ship one and the project is strictly better even
 if the next one slips.
 
-### Phase B — Method + Parameter parsing in metadata-cli  ✏️ **in flight**
+### Phase B — Method + Parameter parsing in metadata-cli  ✅ **shipped build #482**
 
 **Why first**: foundational. Without method enumeration, neither the
 batch `il2cpp.h` (Phase C) nor the offline PE symbol resolution
@@ -93,26 +98,21 @@ actually asks). Generic method-instantiation table is also deferred.
 
 **Estimated effort**: ~half a day.
 
-### Phase C — Whole-game `il2cpp.h` batch export  📋 **pending**
+### Phase C — Whole-game `il2cpp.h` batch export  ✅ **shipped build #486** (path B — UI live-driven)
 
-**Why second**: ~4 hours of glue, leverages Phase B's method
-enumeration. Bridges the gap between our single-class
-`.h` exporter (already shipped in
-[`ui/UnityDumpUI.Core/Services/Export/SdkHeaderExporter.cs`](../ui/UnityDumpUI.Core/Services/Export/SdkHeaderExporter.cs))
-and Il2CppDumper's `il2cpp.h`.
+Tools menu → **Export il2cpp.h (whole game)…** walks every user
+assembly via `getClasses` + `getClassInfo` RPCs and concatenates a
+single `.h` with FQN-based struct names, offset comments, and
+trailing method AOT addresses inline (Il2CppDumper's `il2cpp.h`
+has no method addresses — those go in `dump.cs`). Path A
+(metadata-cli offline) wasn't built; Path B turned out to be
+sufficient on its own + naturally leveraged the live-DLL pipeline
+already in place.
 
-**Open design question** (decide when starting):
-
-- **Path A** — Add `metadata-cli sdk-headers <path> <out-dir>`.
-  Offline, no game running. Reuses Phase B method enumeration. Only
-  emits field layouts (no method bodies, because no PE parse yet).
-- **Path B** — Add a UI Tools menu entry "Export il2cpp.h…". Live
-  DLL drives, so we can include resolved method native addresses
-  inline as `// 0x7FF6...` comments — better than Il2CppDumper's
-  RVA-only output. Depends on having the game running.
-
-Path A ships sooner; Path B is more valuable. Likely build both —
-share the formatting code, vary the input source.
+Phase C follow-up (build #496) — server-side bulk `dumpClassInfo`
+RPC fixed the per-class round-trip slow-quit problem documented
+in [lessons-learned.md](lessons-learned.md). Symmetric across
+both backends to prevent future foot-guns.
 
 ### Phase D — Offline PE parser  ✅ **shipped** (D-1..D-5, build #506)
 
