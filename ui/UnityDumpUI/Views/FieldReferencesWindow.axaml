@@ -1,0 +1,149 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.FieldReferencesWindow"
+        x:DataType="vm:FieldReferencesViewModel"
+        Width="980" Height="600" MinWidth="720"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Icon="avares://DiscreteUI/Assets/MainIcon.ico"
+        Title="{StaticResource FieldRefs.Title}">
+  <DockPanel LastChildFill="True" Margin="12">
+
+    <!-- Header — which field on which class, plus the static/instance badge,
+         the resolved offset (Mono) or static-storage address (IL2CPP). -->
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+      <StackPanel Grid.Column="0" Spacing="2">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <TextBlock Text="{Binding FieldLabel}" FontSize="14" FontWeight="SemiBold"
+                     FontFamily="Consolas,Cascadia Mono,monospace" />
+          <TextBlock Text="{Binding StaticBadgeLabel}" FontSize="11" Opacity="0.65"
+                     VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="{StaticResource FieldRefs.ClassLabel}" Opacity="0.7" />
+          <TextBlock Text="{Binding ClassLabel}"
+                     FontFamily="Consolas,Cascadia Mono,monospace" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="{StaticResource FieldRefs.OffsetLabel}" Opacity="0.7"
+                     IsVisible="{Binding ResolvedFieldOffsetLabel, Converter={x:Static ObjectConverters.IsNotNull}}" />
+          <TextBlock Text="{Binding ResolvedFieldOffsetLabel}"
+                     FontFamily="Consolas,Cascadia Mono,monospace" />
+          <TextBlock Text="{StaticResource FieldRefs.StaticAddressLabel}" Opacity="0.7"
+                     Margin="14,0,0,0"
+                     IsVisible="{Binding ResolvedStaticAddressLabel, Converter={x:Static ObjectConverters.IsNotNull}}" />
+          <TextBlock Text="{Binding ResolvedStaticAddressLabel}"
+                     FontFamily="Consolas,Cascadia Mono,monospace" />
+        </StackPanel>
+      </StackPanel>
+      <Button Grid.Column="1"
+              VerticalAlignment="Center"
+              Content="{StaticResource FieldRefs.RefreshButton}"
+              Command="{Binding RefreshCommand}" />
+    </Grid>
+
+    <!-- Controls — kind filter + limit. -->
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto,Auto" Margin="0,0,0,8">
+      <TextBlock Grid.Column="0"
+                 Text="{StaticResource FieldRefs.KindLabel}"
+                 VerticalAlignment="Center" Margin="0,0,8,0" />
+      <ComboBox  Grid.Column="1" Width="100"
+                 SelectedItem="{Binding KindFilter, Mode=TwoWay}">
+        <ComboBox.Items>
+          <x:String>any</x:String>
+          <x:String>read</x:String>
+          <x:String>write</x:String>
+        </ComboBox.Items>
+      </ComboBox>
+      <TextBlock Grid.Column="2"
+                 Text="{StaticResource FieldRefs.LimitLabel}"
+                 VerticalAlignment="Center" Margin="14,0,8,0" />
+      <NumericUpDown Grid.Column="3"
+                     Value="{Binding MatchLimit, Mode=TwoWay}"
+                     Minimum="10" Maximum="5000" Increment="50"
+                     ShowButtonSpinner="True"
+                     Width="140" MinWidth="120" />
+      <TextBlock Grid.Column="5" Text="{Binding CountLabel}"
+                 VerticalAlignment="Center" Margin="0,0,12,0"
+                 Foreground="#FF6090FF" />
+      <TextBlock Grid.Column="6"
+                 VerticalAlignment="Center"
+                 Foreground="#FF7B7B7B" FontSize="11">
+        <Run Text="{StaticResource FieldRefs.ScannedLabel}" />
+        <Run Text=" " />
+        <Run Text="{Binding ScannedMethods}" />
+      </TextBlock>
+    </Grid>
+
+    <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
+                 IsVisible="{Binding IsBusy}" Height="3" Margin="0,0,0,4" />
+
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+            Background="#33D32F2F" BorderBrush="#88D32F2F"
+            BorderThickness="1" CornerRadius="4" Padding="10,6"
+            Margin="0,0,0,8">
+      <TextBlock Text="{Binding ErrorMessage}" Foreground="#FFD32F2F" TextWrapping="Wrap" />
+    </Border>
+
+    <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+      <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+        <Button Content="{StaticResource FieldRefs.CloseButton}"
+                Click="OnCloseClicked" />
+      </StackPanel>
+    </DockPanel>
+
+    <!-- Results grid. Per-column SortMemberPath + CanUserSort="True" required
+         under AOT — see DataGridSortComparers.cs for the three-layer trap.
+         Per-column CustomSortComparer is wired in code-behind. -->
+    <DataGrid x:Name="RowsGrid"
+              ItemsSource="{Binding Rows}"
+              IsReadOnly="True"
+              AutoGenerateColumns="False"
+              CanUserResizeColumns="True"
+              CanUserSortColumns="True"
+              GridLinesVisibility="Horizontal">
+      <DataGrid.ContextMenu>
+        <ContextMenu>
+          <MenuItem Header="{StaticResource FieldRefs.CopyClassMenu}"
+                    Command="{Binding CopyClassCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <MenuItem Header="{StaticResource FieldRefs.CopyMethodMenu}"
+                    Command="{Binding CopyMethodCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <MenuItem Header="{StaticResource FieldRefs.CopyAddressMenu}"
+                    Command="{Binding CopyAddressCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <MenuItem Header="{StaticResource FieldRefs.CopyHitAddressMenu}"
+                    Command="{Binding CopyHitAddressCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+        </ContextMenu>
+      </DataGrid.ContextMenu>
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColKind}" Width="90"
+                            Binding="{Binding Kind}"
+                            SortMemberPath="Kind" CanUserSort="True" />
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColClass}" Width="240"
+                            Binding="{Binding ClassQualified}"
+                            SortMemberPath="ClassQualified" CanUserSort="True"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColMethod}" Width="*"
+                            Binding="{Binding Method}"
+                            SortMemberPath="Method" CanUserSort="True"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColAddress}" Width="160"
+                            Binding="{Binding Address}"
+                            SortMemberPath="Address" CanUserSort="True"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColIlOffset}" Width="100"
+                            Binding="{Binding IlOffset}"
+                            SortMemberPath="IlOffset" CanUserSort="True"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColConfidence}" Width="90"
+                            Binding="{Binding Confidence}"
+                            SortMemberPath="Confidence" CanUserSort="True" />
+      </DataGrid.Columns>
+    </DataGrid>
+  </DockPanel>
+</Window>

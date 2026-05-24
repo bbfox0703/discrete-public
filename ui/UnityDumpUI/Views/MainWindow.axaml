@@ -134,6 +134,34 @@
                  FontWeight="SemiBold" />
     </Border>
 
+    <!-- Phase 20-MT v2: auto-prompt runInBackground banner. Surfaces after
+         the connect-time dispatcher health probe (CheckDispatcherHealthAsync)
+         sees hook_installed=true but is_healthy=false — i.e. the engine is
+         alive but Update() isn't ticking, almost always because
+         Application.runInBackground=false + the game has lost focus.
+         One-shot fix below; dismissable. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding DispatcherBannerVisible}"
+            Background="#33D4A017" BorderBrush="#88D4A017"
+            BorderThickness="0,0,0,1" Padding="12,8">
+      <Grid ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto">
+        <TextBlock Grid.Column="0"
+                   Text="{Binding DispatcherBannerMessage}"
+                   Foreground="#FFD4A017" TextWrapping="Wrap"
+                   FontWeight="SemiBold"
+                   VerticalAlignment="Center" Margin="0,0,12,0" />
+        <Button Grid.Column="1"
+                Content="{StaticResource Dispatcher.EnableButton}"
+                Command="{Binding EnableRunInBackgroundFromBannerCommand}"
+                ToolTip.Tip="{StaticResource Dispatcher.EnableTooltip}"
+                Classes="accent"
+                Margin="0,0,8,0" />
+        <Button Grid.Column="2"
+                Content="{StaticResource Dispatcher.DismissButton}"
+                Command="{Binding DismissDispatcherBannerCommand}" />
+      </Grid>
+    </Border>
+
     <!-- Footer credit — XOR-shielded at rest (see StringShield.cs); decoded
          lazily by the VM. Subtle so it doesn't compete with the connection
          bar; click target only via "Copy text" if the user wants the URL. -->
@@ -481,6 +509,10 @@
                               Click="OnCopyFieldTypeClicked" />
                     <MenuItem Header="{StaticResource Browser.CopyFieldDeclaredInMenu}"
                               Click="OnCopyFieldDeclaredInClicked" />
+                    <Separator />
+                    <!-- Phase 28 — same modal as Inspector + Symbol Finder. -->
+                    <MenuItem Header="{StaticResource FieldRefs.FindMethodsMenu}"
+                              Click="OnFindFieldReferencesFromFieldsTabClicked" />
                   </ContextMenu>
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
@@ -728,6 +760,17 @@
                              InspectorFieldOffsetResolver. -->
                         <MenuItem Header="{StaticResource Inspector.ListFieldAcrossInstancesMenu}"
                                   Click="OnListFieldAcrossInstancesClicked" />
+                        <!-- Phase 28 — Field → Methods cross-reference. Same
+                             code-behind handler shared with Symbol Finder
+                             + Fields tab; opens FieldReferencesWindow modal
+                             seeded with the row's class + field name +
+                             type + isStatic flag. Inspector path needs the
+                             selected node's name / declared-in chain to
+                             pin down the declaring class (which may differ
+                             from the inspector's TargetClass when the row
+                             is inherited from a parent). -->
+                        <MenuItem Header="{StaticResource FieldRefs.FindMethodsMenu}"
+                                  Click="OnFindFieldReferencesFromInspectorClicked" />
                         <!-- Phase 21b — write-back. Code-behind reads the
                              selected WalkedFieldNode and opens the
                              FieldWriteWindow modal seeded with field
@@ -1011,6 +1054,13 @@
                   <ContextMenu>
                     <MenuItem Header="{StaticResource SymbolFinder.NavigateMenu}"
                               Click="OnSymbolFinderNavigateMenu" />
+                    <!-- Phase 28 — Field → Methods cross-reference. Same modal
+                         as the Inspector + Browser Fields tab path. Menu item
+                         shows for any row but the handler short-circuits with
+                         a soft banner when the right-clicked row's Kind isn't
+                         a field. -->
+                    <MenuItem Header="{StaticResource FieldRefs.FindMethodsMenu}"
+                              Click="OnFindFieldReferencesFromSymbolFinderClicked" />
                     <Separator />
                     <MenuItem Header="{StaticResource SymbolFinder.CopyClassMenu}"
                               Click="OnSymbolFinderCopyClassMenu" />
@@ -1228,25 +1278,52 @@
                GameObject's address pre-populated. -->
           <TabItem Header="{StaticResource Scene.Tab}">
             <DockPanel Margin="0,4,0,0">
-              <!-- Top control row: pattern + limit + Search -->
+              <!-- Top control row: pattern + Limit + Focus delay + Enable
+                   runInBackground + Search. Focus delay is the Phase 20-MT
+                   runInBackground workaround (per-call countdown). The
+                   "Enable runInBackground" button is the one-shot fix:
+                   call it once (with Focus delay if needed for the very
+                   first call), and the engine stops pausing Update() on
+                   focus loss for the rest of the session. Button greys
+                   out once successfully applied. -->
               <Grid DockPanel.Dock="Top"
-                    ColumnDefinitions="*,Auto,Auto,140,Auto"
+                    ColumnDefinitions="*,Auto,140,Auto,140,Auto,Auto"
                     Margin="0,0,0,8">
                 <TextBox Grid.Column="0"
                          PlaceholderText="{StaticResource Scene.PatternWatermark}"
                          Text="{Binding Scene.Pattern, Mode=TwoWay}"
                          KeyDown="OnScenePatternKeyDown"
                          Margin="0,0,8,0" />
-                <TextBlock Grid.Column="2"
+                <TextBlock Grid.Column="1"
                            Text="{StaticResource Scene.LimitLabel}"
                            VerticalAlignment="Center" Margin="0,0,6,0" />
-                <NumericUpDown Grid.Column="3"
+                <NumericUpDown Grid.Column="2"
                                Value="{Binding Scene.Limit, Mode=TwoWay}"
                                Minimum="1" Maximum="500" Increment="50"
                                FormatString="0"
                                MinWidth="120"
                                Margin="0,0,8,0" />
-                <Button Grid.Column="4"
+                <TextBlock Grid.Column="3"
+                           Text="{StaticResource Scene.FocusDelayLabel}"
+                           ToolTip.Tip="{StaticResource Scene.FocusDelayTooltip}"
+                           VerticalAlignment="Center" Margin="0,0,6,0" />
+                <!-- Width matches Limit's 140 / MinWidth 120 — narrower
+                     NumericUpDowns hide the numeric value behind the
+                     up/down spinner widget (Phase 25 Symbol Finder Limit
+                     hit this trap; recorded in lessons-learned.md). -->
+                <NumericUpDown Grid.Column="4"
+                               Value="{Binding Scene.FocusDelaySeconds, Mode=TwoWay}"
+                               Minimum="0" Maximum="10" Increment="1"
+                               FormatString="0"
+                               ToolTip.Tip="{StaticResource Scene.FocusDelayTooltip}"
+                               MinWidth="120"
+                               Margin="0,0,8,0" />
+                <Button Grid.Column="5"
+                        Content="{StaticResource Scene.EnableRunInBackgroundButton}"
+                        Command="{Binding Scene.EnableRunInBackgroundCommand}"
+                        ToolTip.Tip="{StaticResource Scene.EnableRunInBackgroundTooltip}"
+                        Margin="0,0,8,0" />
+                <Button Grid.Column="6"
                         Content="{StaticResource Scene.SearchButton}"
                         Command="{Binding Scene.SearchCommand}"
                         Classes="accent" />

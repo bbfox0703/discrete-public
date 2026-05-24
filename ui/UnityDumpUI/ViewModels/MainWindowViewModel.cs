@@ -190,6 +190,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         Build           = 0;
         Protocol        = 0;
         MetadataWarning = null;
+        DispatcherBannerVisible = false;
+        DispatcherBannerMessage = string.Empty;
         // ConnectionStatus already carries the disconnect reason; suppress
         // the redundant red banner so the user only sees one row of state.
         ErrorMessage = null;
@@ -401,6 +403,140 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty] private string? _errorMessage;
 
+    // -----------------------------------------------------------------------
+    // Phase 20-MT v2 — auto-prompt "Enable runInBackground" banner.
+    //
+    // After a successful Connect, we read getDispatcherStats once. When the
+    // hook is installed but is_healthy=false (typical Mono target with
+    // Application.runInBackground=false where the game window doesn't have
+    // focus right now), surface a banner offering the one-shot fix instead
+    // of letting the user discover it via a 5-second timeout on the first
+    // Scene/Method/Field RPC.
+    //
+    // The banner stays until either the user clicks Enable (success →
+    // auto-dismiss), Dismiss (manual hide), or Disconnect (cleared).
+    // -----------------------------------------------------------------------
+
+    /// <summary>Banner visibility. Bound to a yellow strip below the strip-
+    /// warning banner.</summary>
+    [ObservableProperty]
+    private bool _dispatcherBannerVisible;
+
+    /// <summary>Inline status text on the banner — flips between the
+    /// initial offer, the countdown ("Calling in 2s…"), the in-flight
+    /// state, and any error.</summary>
+    [ObservableProperty]
+    private string _dispatcherBannerMessage = string.Empty;
+
+    /// <summary>When the banner button is mid-call. Disables both banner
+    /// commands so a double-click doesn't re-fire.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundFromBannerCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DismissDispatcherBannerCommand))]
+    private bool _dispatcherBannerBusy;
+
+    /// <summary>One-shot probe kicked from the Connect happy-path. Reads
+    /// dispatcher stats with a brief delay (gives Unity a few frames to
+    /// tick after the engine pause that frequently follows window
+    /// activation), then sets <see cref="DispatcherBannerVisible"/> if
+    /// the hook is installed but the dispatcher hasn't been ticking.
+    /// All paths are fire-and-forget — failures stay silent so we
+    /// don't gate Connect on a diagnostic RPC.</summary>
+    private async Task CheckDispatcherHealthAsync()
+    {
+        try
+        {
+            // Give Unity a moment to tick at least once after Connect. The
+            // pipe handshake happens on a worker thread; the engine may
+            // still be focused on DiscreteUI's connect dialog at the exact
+            // moment we run this check. ~1.5s is enough for the dispatcher
+            // hook to fire at least one drain on a healthy target.
+            await Task.Delay(1500, _connectCts?.Token ?? default).ConfigureAwait(true);
+
+            DispatcherStatsResult s =
+                await _backend.GetDispatcherStatsAsync(
+                    _connectCts?.Token ?? default).ConfigureAwait(true);
+
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"dispatcher stats: hook={s.HookInstalled} healthy={s.IsHealthy} "
+                + $"ticks={s.TickCount} drain={s.DrainCount} age_ms={s.LastTickAgeMs}");
+
+            if (s.HookInstalled && !s.IsHealthy)
+            {
+                DispatcherBannerMessage =
+                    "Game pauses when DiscreteUI takes focus — Scene / Method-call / "
+                    + "Field-write RPCs will time out. Click below to fix it for this "
+                    + "session (countdown lets you alt-tab back to the game first).";
+                DispatcherBannerVisible = true;
+            }
+        }
+        catch (OperationCanceledException) { /* disconnect cancellation, ignore */ }
+        catch (Exception ex)
+        {
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"dispatcher health probe failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanEnableRunInBackgroundFromBanner))]
+    private async Task EnableRunInBackgroundFromBannerAsync()
+    {
+        DispatcherBannerBusy = true;
+        try
+        {
+            // Hardcoded 3-second countdown — matches the suggested Focus
+            // delay default. User clicks button, sees countdown, alt-tabs
+            // back to the game, the call fires once Unity is ticking
+            // again.
+            for (int s = 3; s > 0; --s)
+            {
+                if (_connectCts?.Token.IsCancellationRequested == true) return;
+                DispatcherBannerMessage = $"Focus the game window — calling in {s}s…";
+                await Task.Delay(1000, _connectCts?.Token ?? default).ConfigureAwait(true);
+            }
+            DispatcherBannerMessage = "Calling Application.set_runInBackground(true)…";
+
+            SetRunInBackgroundResult r =
+                await Scene.Enumerator.SetApplicationRunInBackgroundAsync(
+                    true, _connectCts?.Token ?? default).ConfigureAwait(true);
+
+            if (r.Ok)
+            {
+                // Lock in the success on the Scene VM so its button greys
+                // out symmetrically — Scene and banner share the state.
+                Scene.RunInBackgroundEnabled = true;
+                DispatcherBannerVisible     = false;
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                    $"runInBackground enabled via banner ({r.ResolvedAssembly})");
+            }
+            else
+            {
+                DispatcherBannerMessage =
+                    $"Failed: {r.Error}. Re-focus the game window and try again.";
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                    $"runInBackground via banner failed: {r.Error}");
+            }
+        }
+        catch (OperationCanceledException) { /* superseded */ }
+        catch (Exception ex)
+        {
+            DispatcherBannerMessage = $"Failed: {ex.GetType().Name}: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                $"runInBackground via banner crashed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            DispatcherBannerBusy = false;
+        }
+    }
+
+    private bool CanEnableRunInBackgroundFromBanner() => !DispatcherBannerBusy;
+
+    [RelayCommand(CanExecute = nameof(CanDismissDispatcherBanner))]
+    private void DismissDispatcherBanner() => DispatcherBannerVisible = false;
+
+    private bool CanDismissDispatcherBanner() => !DispatcherBannerBusy;
+
     [RelayCommand(CanExecute = nameof(CanConnect))]
     private async Task ConnectAsync()
     {
@@ -440,6 +576,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // sees a "stripped/obfuscated" banner up front rather than
             // discovering it through garbled class names. Soft-fail.
             _ = LoadMetadataStatsAsync();
+
+            // Phase 20-MT v2: opportunistic dispatcher-health probe so the
+            // user sees the "Enable runInBackground" banner before their
+            // first Scene/Method/Field RPC eats a 5-second timeout.
+            // Soft-fail.
+            _ = CheckDispatcherHealthAsync();
         }
         catch (OperationCanceledException)
         {
@@ -626,6 +768,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             Build           = 0;
             Protocol        = 0;
             MetadataWarning = null;
+            DispatcherBannerVisible = false;
+            DispatcherBannerMessage = string.Empty;
 
             // Phase 8: stale data is misleading — wipe the browser too.
             Browser.Assemblies.Clear();

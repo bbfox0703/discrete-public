@@ -635,6 +635,139 @@ with several-hundred classes.
   `0x` prefix + uppercase hex, never zero-padded — so the UI can
   hand it to `CreateAAScript` / `whatIsAt` verbatim.
 
+### `findFieldReferences` *(Both — backend-symmetric wire shape)*
+
+Phase 28 — **inverse of [`searchSymbols`](#searchsymbols-both)**. Given a
+single Unity field, returns every method that reads or writes it.
+
+* **Mono** walks the IL bytecode of every method declared in the target
+  assembly via `mono_method_get_header` + `mono_method_header_get_code`,
+  matching `ldfld`(0x7B) / `ldflda`(0x7C) / `stfld`(0x7D) / `ldsfld`(0x7E)
+  / `ldsflda`(0x7F) / `stsfld`(0x80) operand tokens against the target
+  field's `mono_class_get_field_token`. Exact, no false positives.
+* **IL2CPP** static fields ONLY in v1. Resolves the field's static-storage
+  absolute address via `il2cpp_class_get_static_data(klass) + field.offset`,
+  scans `GameAssembly.dll`'s `.text` for `mov reg, [rip+disp32]` /
+  `lea reg, [rip+disp32]` / `mov [rip+disp32], reg` instructions whose
+  absolute target matches, then attributes each hit to its enclosing
+  method via binary search against a sorted method-pointer index built
+  from the target image's classes. Instance fields return
+  `error: "field references for instance fields not supported on IL2CPP
+  backend in v1"` — surface this in the UI cleanly.
+
+**Scope (v1)**: same-assembly references only — cross-assembly access
+uses MemberRef tokens (Mono) / methods in other images (IL2CPP), both
+deferred to v2 if a consumer asks.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assembly`  | string | required; declaring assembly name (e.g. `"Assembly-CSharp"`). |
+| `ns`        | string | optional, `""` allowed for top-level types. |
+| `class`     | string | required; class simple name. Use `"Outer/Inner"` for nested types. |
+| `fieldName` | string | required; field simple name. |
+| `kind`      | string | optional; `"any"` (default) / `"read"` / `"write"`. |
+| `limit`     | int    | optional; cap on returned rows. Default 200, hard cap 5000. |
+
+```jsonc
+// Mono response shape (instance field PLY_WORK.HP)
+// → {
+//   "ok": true,
+//   "field": {
+//     "name":     "HP",
+//     "type":     "System.Int32",
+//     "offset":   16,
+//     "isStatic": false,
+//     "token":    67108865         // 0x04000001 — Mono-only
+//   },
+//   "references": [
+//     {
+//       "assembly":      "Assembly-CSharp",
+//       "namespace":     "MainGame",
+//       "class":         "PLY_WORK",
+//       "method":        "TakeDamage",
+//       "methodToken":   100663553,
+//       "methodFlags":   134,
+//       "isMethodStatic": false,
+//       "isStatic":      false,       // mirrors field.isStatic for per-row convenience
+//       "kind":          "read",      // "read" / "write"
+//       "confidence":    "exact",     // Mono is always "exact"
+//       "ilOffset":      35,          // byte offset of the matching IL op (Mono-only)
+//       "address":       null         // Mono — JIT addresses don't survive restart
+//     }
+//   ],
+//   "scanned_methods": 1284,
+//   "truncated":       false
+// }
+```
+
+```jsonc
+// IL2CPP response shape (static field Game.Player.InstanceCount)
+// → {
+//   "ok": true,
+//   "field": {
+//     "name":          "InstanceCount",
+//     "type":          "System.Int32",
+//     "offset":        0,
+//     "isStatic":      true,
+//     "staticAddress": "0x00007FF876200000"  // IL2CPP-only — the resolved
+//                                            // target the RIP scan walked for
+//   },
+//   "references": [
+//     {
+//       "assembly":      "Assembly-CSharp",
+//       "namespace":     "Game",
+//       "class":         "Player",
+//       "method":        "RegisterPlayer",
+//       "methodToken":   100663600,
+//       "methodFlags":   22,
+//       "isMethodStatic": true,
+//       "isStatic":      true,
+//       "kind":          "read",       // "read" for MOV r,[rip+] / LEA r,[rip+];
+//                                      // "write" for MOV [rip+],r
+//       "confidence":    "exact",      // RIP-relative encoding is unambiguous
+//       "address":       "0x00007FF876123450", // enclosing method's AOT entry
+//       "hitAddress":    "0x00007FF876123460"  // exact IP of the matching insn
+//     }
+//   ],
+//   "scanned_methods": 4523,
+//   "truncated":       false
+// }
+```
+
+**Backend shape diffs (small)**:
+
+| Field on row | Mono | IL2CPP |
+|---|---|---|
+| `address`    | always `null` | enclosing method's AOT entry |
+| `hitAddress` | absent | exact IP of the matching insn |
+| `ilOffset`   | byte offset of the IL op | absent (RIP scan is native, no IL boundary) |
+
+| Field on header | Mono | IL2CPP |
+|---|---|---|
+| `token`         | target field's metadata token | absent |
+| `staticAddress` | absent | resolved static-storage absolute address |
+
+**Caveats**:
+
+- IL2CPP **instance fields** return an error, not an empty result — by
+  design, so the UI can show "not supported in v1" instead of misleading
+  the user into thinking the field genuinely has zero references.
+- IL2CPP **opcode coverage** is `0x8B` (MOV load) / `0x8D` (LEA) / `0x89`
+  (MOV store) at both 6-byte (no REX) and 7-byte (REX prefix) forms.
+  `MOV r/m, imm32` (0xC7) and SIMD `movss` / `movsd` (0xF3/0xF2 0x0F 0x10)
+  are NOT matched in v1 — most static-field reads in AOT Unity IL2CPP
+  are scalar MOV / LEA so this catches the vast majority. Float static
+  reads via `movss` would miss; rare enough that adding coverage is
+  v2.
+- Mono **generic methods** are scanned once at the open-generic level.
+  Instantiated versions share the same IL body, so a token match in
+  the open generic counts for every instantiation — same semantics as
+  dnSpy navigation.
+- Cross-assembly attribution (IL2CPP) — hits whose enclosing method
+  falls outside the target image are silently dropped. Scanning every
+  user assembly's method index would be O(NM); v1 scopes to one image
+  per call.
+
 ### `walkArray` *(Both)*
 
 Reads a managed `T[]` header at `address` and returns up to `limit` per-element

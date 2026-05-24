@@ -44,6 +44,13 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
         _logger     = logger;
     }
 
+    /// <summary>The underlying enumerator. Exposed so
+    /// <see cref="MainWindowViewModel"/> can reuse it for cross-tab affordances
+    /// like the connection-bar "Enable runInBackground" banner (Phase 20-MT v2)
+    /// without spinning up a second SceneEnumerator that would maintain its
+    /// own (out-of-sync) <c>_resolvedUnityEngineAssembly</c> cache.</summary>
+    public SceneEnumerator Enumerator => _enumerator;
+
     public ObservableCollection<SceneNode> Roots { get; } = new();
 
     [ObservableProperty]
@@ -53,8 +60,42 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
     [ObservableProperty]
     private int _limit = 200;
 
+    /// <summary>
+    /// Phase 20-MT workaround — seconds to wait before issuing the
+    /// first Unity icall when the user clicks Search. Lets the user
+    /// alt-tab back to the game window so it regains focus and
+    /// `Update()` resumes ticking before the
+    /// `Type.GetType` / `Object.FindObjectsByType` calls fire through
+    /// the main-thread dispatcher.
+    ///
+    /// Without this, on Unity targets where
+    /// <c>Application.runInBackground = false</c> (the engine default)
+    /// the dispatcher hook never gets a chance to drain the queue
+    /// because the engine pauses Update() the moment DiscreteUI takes
+    /// focus → every <c>mainThread:true</c> RPC times out.
+    ///
+    /// 0 = no delay (default — fine when the game is already
+    /// configured with <c>runInBackground=true</c> or when the user
+    /// can keep the game window focused). Capped at 10 seconds in the
+    /// XAML NumericUpDown.
+    /// </summary>
+    [ObservableProperty]
+    private int _focusDelaySeconds;
+
+    /// <summary>
+    /// True once <c>Application.runInBackground = true</c> has been
+    /// successfully applied via <see cref="EnableRunInBackgroundCommand"/>.
+    /// Drives the button's IsEnabled in XAML so the user can't double-
+    /// click it. The flag is per-session (resets when the user reconnects
+    /// — the underlying Unity state also resets when the game restarts).
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
+    private bool _runInBackgroundEnabled;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
+    [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -89,6 +130,37 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
         {
             int limit = Math.Clamp(Limit, 1, 500);
             string pattern = (Pattern ?? string.Empty).Trim();
+
+            // Phase 20-MT workaround: countdown before issuing icalls so
+            // the user can alt-tab back to the game window. See
+            // FocusDelaySeconds docs for why.
+            int delay = Math.Clamp(FocusDelaySeconds, 0, 10);
+
+            // Phase 20-MT v2: pre-flight dispatcher check. Skipped when the
+            // user has already set up a workaround — Focus delay > 0 means
+            // they're going to alt-tab during the countdown; the per-session
+            // RunInBackgroundEnabled flag means we already toggled the
+            // engine flag. Both are explicit "I know what I'm doing"
+            // signals. Otherwise, eager-fail with a clear message saves
+            // the user a 5-second timeout wait on the first icall.
+            if (delay == 0 && !RunInBackgroundEnabled)
+            {
+                string? preflightErr =
+                    await _enumerator.PreflightDispatcherCheckAsync(ct).ConfigureAwait(true);
+                if (preflightErr is not null)
+                {
+                    ErrorMessage  = preflightErr;
+                    StatusMessage = "Search blocked — dispatcher pre-flight failed.";
+                    return;
+                }
+            }
+
+            for (int s = delay; s > 0; --s)
+            {
+                ct.ThrowIfCancellationRequested();
+                StatusMessage = $"Focus the game window — resuming in {s}s…";
+                await Task.Delay(1000, ct).ConfigureAwait(true);
+            }
 
             StatusMessage = string.IsNullOrEmpty(pattern)
                 ? $"Enumerating up to {limit} GameObjects…"
@@ -152,6 +224,71 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
             IsBusy = false;
         }
     }
+
+    /// <summary>
+    /// One-shot button: call <c>Application.set_runInBackground(true)</c>
+    /// on the target via the Phase 20-MT main-thread dispatcher. Removes
+    /// the engine-pause-on-focus-loss behaviour for the rest of the
+    /// session so subsequent mainThread RPCs (Scene tab, MethodCallWindow,
+    /// FieldWriteWindow, etc.) work without needing the game focused.
+    ///
+    /// Reuses the same Focus delay countdown as Search so the first call
+    /// itself doesn't time out — without the delay the user would be
+    /// stuck in a chicken-and-egg loop where they can't enable
+    /// runInBackground because runInBackground is off.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanEnableRunInBackground))]
+    public async Task EnableRunInBackgroundAsync()
+    {
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        var ct = _searchCts.Token;
+
+        IsBusy       = true;
+        ErrorMessage = null;
+        try
+        {
+            int delay = Math.Clamp(FocusDelaySeconds, 0, 10);
+            for (int s = delay; s > 0; --s)
+            {
+                ct.ThrowIfCancellationRequested();
+                StatusMessage = $"Focus the game window — enabling runInBackground in {s}s…";
+                await Task.Delay(1000, ct).ConfigureAwait(true);
+            }
+            StatusMessage = "Calling Application.set_runInBackground(true)…";
+
+            SetRunInBackgroundResult r =
+                await _enumerator.SetApplicationRunInBackgroundAsync(true, ct).ConfigureAwait(true);
+            if (r.Ok)
+            {
+                RunInBackgroundEnabled = true;
+                StatusMessage =
+                    $"Application.runInBackground = true (via {r.ResolvedAssembly}). "
+                    + "Subsequent main-thread RPCs no longer need the game window focused.";
+                _logger.Write(Constants.LogCategoryView,
+                    $"SceneExplorer: runInBackground enabled via {r.ResolvedAssembly}");
+            }
+            else
+            {
+                ErrorMessage = $"Failed to enable runInBackground: {r.Error}";
+                StatusMessage = "runInBackground toggle failed.";
+            }
+        }
+        catch (OperationCanceledException) { /* superseded */ }
+        catch (Exception ex)
+        {
+            ErrorMessage  = $"{ex.GetType().Name}: {ex.Message}";
+            StatusMessage = "runInBackground toggle failed.";
+            _logger.Write(Constants.LogCategoryView,
+                $"SceneExplorer: runInBackground failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanEnableRunInBackground() => !IsBusy && !RunInBackgroundEnabled;
 
     private bool CanSearch() => !IsBusy;
 

@@ -756,6 +756,162 @@ public partial class MainWindow : Window
         await win.ShowDialog(this);
     }
 
+    // ----------------------------------------------------------------------
+    // Phase 28 — Field → Methods cross-reference (findFieldReferences).
+    //
+    // Three entry points all route through OpenFieldReferencesAsync — Inspector
+    // grid right-click, Symbol Finder result-row right-click (fields only),
+    // and Browser Fields tab right-click. Each resolves the field's
+    // (assembly, ns, class, name, type, isStatic) tuple from its own source
+    // VM and feeds them into one shared modal.
+    // ----------------------------------------------------------------------
+
+    /// <summary>Parse a fully-qualified class name into (namespace, simple class).
+    /// Handles nested-type "Outer/Inner" by anchoring the last '.' before the
+    /// first '/' boundary. Empty namespace returns ("", className).</summary>
+    private static (string ns, string simpleClass) ParseClassFqn(string fqn)
+    {
+        if (string.IsNullOrEmpty(fqn)) return (string.Empty, string.Empty);
+        int firstSlash = fqn.IndexOf('/');
+        int lastDot = firstSlash < 0
+            ? fqn.LastIndexOf('.')
+            : fqn.LastIndexOf('.', firstSlash);
+        if (lastDot < 0) return (string.Empty, fqn);
+        return (fqn.Substring(0, lastDot), fqn.Substring(lastDot + 1));
+    }
+
+    private async Task OpenFieldReferencesAsync(
+        string assembly, string? ns, string className,
+        string fieldName, string? fieldType, bool isStatic)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (string.IsNullOrEmpty(assembly) ||
+            string.IsNullOrEmpty(className) ||
+            string.IsNullOrEmpty(fieldName))
+        {
+            return;
+        }
+        var refsVm = new FieldReferencesViewModel(
+            vm.BackendAdapter, vm.Logger,
+            assembly, ns, className, fieldName, fieldType, isStatic);
+        var win = new FieldReferencesWindow(refsVm);
+        await win.ShowDialog(this);
+    }
+
+    /// <summary>Phase 28 — Inspector right-click. Uses the row's DeclaredIn
+    /// to identify the declaring class (which may differ from the inspector's
+    /// TargetClass when the field is inherited from a parent), and the
+    /// inspector's TargetAssembly. Inherited fields whose declaring class
+    /// lives in a *different* assembly (e.g. UnityEngine.MonoBehaviour from
+    /// UnityEngine.CoreModule) will surface a "class not found" error from
+    /// the DLL — out of scope for v1.</summary>
+    private async void OnFindFieldReferencesFromInspectorClicked(
+        object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var inspector = vm.Inspector;
+        WalkedFieldNode? node = inspector.SelectedNode;
+        if (node is null || !inspector.HasTarget) return;
+        if (string.IsNullOrEmpty(node.Name)) return;
+
+        // Prefer the field's DeclaredIn class — inherited fields belong on
+        // the parent class, not the target. Fall back to the inspector's
+        // TargetClass when DeclaredIn is empty (synthetic / array-slot rows).
+        //
+        // Caveat: walkInstance's `from` field returns `res.info.self.name`
+        // (the SIMPLE class name, without namespace) — so a field declared
+        // on `Mortal.Core.GameStat` shows DeclaredIn=`"GameStat"`, not the
+        // FQN. When ParseClassFqn finds no namespace dot we fall back to
+        // the inspector's TargetNamespace; this is correct for the common
+        // case (field declared on target class or on a parent in the same
+        // namespace) and surfaces a clean "class not found" error for the
+        // cross-namespace inheritance edge case (e.g. UnityEngine.MonoBehaviour
+        // parent in Assembly-CSharp inspector) which is v1-out-of-scope.
+        string declaredIn = node.DeclaredIn ?? string.Empty;
+        string ns; string clsName;
+        if (!string.IsNullOrEmpty(declaredIn))
+        {
+            (ns, clsName) = ParseClassFqn(declaredIn);
+            if (string.IsNullOrEmpty(ns))
+            {
+                ns = inspector.TargetNamespace ?? string.Empty;
+            }
+        }
+        else
+        {
+            ns = inspector.TargetNamespace ?? string.Empty;
+            clsName = inspector.TargetName ?? string.Empty;
+        }
+
+        // Flags isn't on the row — we can't tell static vs instance from the
+        // walked-node directly. Pass `false` and let the DLL surface the
+        // real status in the response header (the modal renders it from
+        // result.Field.IsStatic).
+        await OpenFieldReferencesAsync(
+            assembly:   inspector.TargetAssembly ?? string.Empty,
+            ns:         ns,
+            className:  clsName,
+            fieldName:  node.Name,
+            fieldType:  node.Type,
+            isStatic:   false);
+    }
+
+    /// <summary>Phase 28 — Symbol Finder right-click. Only proceeds when the
+    /// right-clicked row is a field; method rows quietly no-op.</summary>
+    private async void OnFindFieldReferencesFromSymbolFinderClicked(
+        object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SymbolFinderRow>(
+            sender, this.FindControl<DataGrid>("SymbolFinderResultsGrid"));
+        if (row is null) return;
+        if (!string.Equals(row.Kind, "field", System.StringComparison.OrdinalIgnoreCase))
+        {
+            // Method rows can't drive findFieldReferences; surface nothing
+            // (the menu item is shared across kinds for menu-layout reasons).
+            return;
+        }
+        await OpenFieldReferencesAsync(
+            assembly:   row.Assembly,
+            ns:         row.Namespace,
+            className:  row.Class,
+            fieldName:  row.Member,
+            fieldType:  row.Type,
+            isStatic:   row.IsStatic);
+    }
+
+    /// <summary>Phase 28 — Browser Fields tab right-click. Uses the row's
+    /// DeclaredIn for the declaring class FQN and the Browser's current
+    /// assembly selection.</summary>
+    private async void OnFindFieldReferencesFromFieldsTabClicked(
+        object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var browser = vm.Browser;
+        var row = ResolveDataGridRow<FieldRow>(
+            sender, this.FindControl<DataGrid>("BrowserFieldsDataGrid"));
+        if (row is null) return;
+
+        string declaredIn = row.DeclaredIn ?? string.Empty;
+        string ns; string clsName;
+        if (!string.IsNullOrEmpty(declaredIn))
+        {
+            (ns, clsName) = ParseClassFqn(declaredIn);
+        }
+        else
+        {
+            ns      = browser.SelectedClass?.Namespace ?? string.Empty;
+            clsName = browser.SelectedClass?.Name      ?? string.Empty;
+        }
+
+        await OpenFieldReferencesAsync(
+            assembly:   browser.SelectedAssembly?.Name ?? string.Empty,
+            ns:         ns,
+            className:  clsName,
+            fieldName:  row.Name,
+            fieldType:  row.Type,
+            isStatic:   row.IsStatic);
+    }
+
     private async Task<string?> SaveFileAsync(string suggestedName, string description, string ext)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions

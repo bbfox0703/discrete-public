@@ -53,6 +53,7 @@ while chasing parity**.
 | Mono backend (bdwgc + legacy `mono.dll`) | [`dll/src/mono/`](../dll/src/mono/) |
 | AOBMaker bridge + UI inspector | [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) |
 | `MetadataParser::ValidateTypeTable()` "fail loud" guard | build #479 — Il2CppDumper happily emits garbage on stride-mismatched metadata |
+| **Phase 28 `findFieldReferences` — Field → Methods x-ref** (build #515) | Mono IL walk (exact, ldfld/stfld/etc. token match) + IL2CPP static-field RIP scan on `.text`. Inverse of Symbol Finder. Il2CppDumper produces flat `dump.cs` — finding "which methods touch this field" means grepping the generated source. We do it live from the running process with exact (Mono) / RIP-precise (IL2CPP static) matches. See [docs/plan.md §Phase 28](plan.md). |
 
 ---
 

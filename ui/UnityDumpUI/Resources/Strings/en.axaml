@@ -123,6 +123,31 @@
   <sys:String x:Key="FieldAcross.ValueFilterLabel">Filter value</sys:String>
   <sys:String x:Key="FieldAcross.ValueFilterWatermark">substring match — e.g. 99, "Background", true</sys:String>
   <sys:String x:Key="FieldAcross.UnsupportedTitle">Reverse lookup not supported</sys:String>
+
+  <!-- Phase 28 — Field → Methods cross-reference (findFieldReferences modal). -->
+  <sys:String x:Key="FieldRefs.Title">Methods that touch this field</sys:String>
+  <sys:String x:Key="FieldRefs.ClassLabel">Class</sys:String>
+  <sys:String x:Key="FieldRefs.OffsetLabel">Offset</sys:String>
+  <sys:String x:Key="FieldRefs.StaticAddressLabel">Static @</sys:String>
+  <sys:String x:Key="FieldRefs.RefreshButton">Refresh</sys:String>
+  <sys:String x:Key="FieldRefs.CloseButton">Close</sys:String>
+  <sys:String x:Key="FieldRefs.KindLabel">Kind</sys:String>
+  <sys:String x:Key="FieldRefs.LimitLabel">Limit</sys:String>
+  <sys:String x:Key="FieldRefs.ScannedLabel">Methods scanned:</sys:String>
+  <sys:String x:Key="FieldRefs.ColKind">Kind</sys:String>
+  <sys:String x:Key="FieldRefs.ColClass">Class</sys:String>
+  <sys:String x:Key="FieldRefs.ColMethod">Method</sys:String>
+  <sys:String x:Key="FieldRefs.ColAddress">Address</sys:String>
+  <sys:String x:Key="FieldRefs.ColIlOffset">IL offset</sys:String>
+  <sys:String x:Key="FieldRefs.ColConfidence">Confidence</sys:String>
+  <sys:String x:Key="FieldRefs.CopyClassMenu">Copy class name</sys:String>
+  <sys:String x:Key="FieldRefs.CopyMethodMenu">Copy method name</sys:String>
+  <sys:String x:Key="FieldRefs.CopyAddressMenu">Copy method address</sys:String>
+  <sys:String x:Key="FieldRefs.CopyHitAddressMenu">Copy hit address</sys:String>
+  <!-- Right-click entry shared by Inspector grid, Symbol Finder result row,
+       and Browser Fields tab. -->
+  <sys:String x:Key="FieldRefs.FindMethodsMenu">Find methods that touch this field…</sys:String>
+
   <sys:String x:Key="Inspector.CallMethodOnInstanceMenu">Call method on this instance… (switch to Methods)</sys:String>
   <sys:String x:Key="Inspector.CopyInstanceAddressMenu">Copy address to clipboard</sys:String>
 
@@ -155,6 +180,15 @@
   <sys:String x:Key="Scene.PatternWatermark">name substring (leave empty for first N), e.g. Player</sys:String>
   <sys:String x:Key="Scene.LimitLabel">Limit</sys:String>
   <sys:String x:Key="Scene.SearchButton">Search</sys:String>
+  <sys:String x:Key="Scene.FocusDelayLabel">Focus delay (s)</sys:String>
+  <sys:String x:Key="Scene.FocusDelayTooltip">Seconds to wait before issuing the first Unity icall. Use 3-5s on targets where Application.runInBackground = false (the engine default): click Search, alt-tab back to the game window, and the call fires once Unity's Update() loop is ticking again.</sys:String>
+  <sys:String x:Key="Scene.EnableRunInBackgroundButton">Enable runInBackground</sys:String>
+  <sys:String x:Key="Scene.EnableRunInBackgroundTooltip">One-shot fix for Phase 20-MT focus-pause. Calls UnityEngine.Application.set_runInBackground(true) on the target via the main-thread dispatcher, after which the engine no longer pauses Update() when DiscreteUI takes focus — so subsequent Scene / Method-call / Field-write RPCs work regardless of which window is active. The call itself still needs the game window focused at submit time; use Focus delay (3-5s) for the very first click, then never need it again this session.</sys:String>
+
+  <!-- Phase 20-MT v2: auto-prompt banner strings. -->
+  <sys:String x:Key="Dispatcher.EnableButton">Enable runInBackground</sys:String>
+  <sys:String x:Key="Dispatcher.EnableTooltip">Counts down 3 seconds (alt-tab back to the game during the countdown), then calls Application.set_runInBackground(true) via the main-thread dispatcher. Persists for the rest of the game process — Scene / Method-call / Field-write RPCs will work without focus.</sys:String>
+  <sys:String x:Key="Dispatcher.DismissButton">Dismiss</sys:String>
   <sys:String x:Key="Scene.InspectMenu">Inspect this GameObject (switch to Inspector)</sys:String>
   <sys:String x:Key="Scene.CopyAddressMenu">Copy address</sys:String>
   <sys:String x:Key="Scene.CopyNameMenu">Copy name</sys:String>

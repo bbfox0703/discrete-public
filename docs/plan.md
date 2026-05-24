@@ -881,6 +881,45 @@ Out (v2 candidates):
 Estimated effort: ~½–1 day total. No DLL changes. No new wire
 commands.
 
+### Open issues / follow-ups
+
+- [x] **20e** — ✅ **Shipped 2026-05-24 (build #527).** *Scene tab
+  fails on legacy-Unity Mono 32-bit.* Originally reported on 活俠傳
+  (Legend of Mortal, Unity 2020.3.49f1 / Mono / x86): Scene tab
+  surfaced `Type.GetType("UnityEngine.GameObject, UnityEngine.CoreModule")
+  returned null. Probably mscorlib not loaded yet or Unity hasn't
+  initialised its assemblies.`
+  
+  **Root cause**: [`SceneEnumerator.cs`](../ui/UnityDumpUI.Core/Services/SceneEnumerator.cs)
+  hardcoded the post-Unity-5.4 module-split FQN
+  `"UnityEngine.GameObject, UnityEngine.CoreModule"` AND every
+  downstream `CallMethodAsync` (Object.FindObjects, Object.get_name,
+  GameObject.get_transform, Transform.get_childCount, Transform.GetChild,
+  Component.get_gameObject) used the same `UnityEngine.CoreModule`
+  assembly arg. Legacy Mono builds with a monolithic `UnityEngine.dll`
+  resolve neither the FQN nor the downstream image lookups under
+  CoreModule.
+  
+  **Fix**: probe `(CoreModule, monolithic)` pairs in
+  `ResolveGameObjectTypeAsync`; remember which assembly survived in
+  `_resolvedUnityEngineAssembly`; route every downstream
+  `CallMethodAsync` through a `UnityEngineAssembly` property that
+  returns the resolved name (falling back to CoreModule before
+  resolution, preserving existing behaviour for first-time callers and
+  the existing fake-pipe tests).
+  
+  **Tests**: +1 fake-pipe RPC test
+  (`EnumerateGameObjects_CoreModuleNullThenMonolithic_FallsBackAndUsesMonolithicAssemblyDownstream`)
+  drives a 4-RPC sequence (CoreModule probe → null, monolithic probe →
+  ok, FindObjectsByType → array, walkArray → element) and pins both
+  the probe ordering and the downstream assembly-arg flip. Suite
+  357 → **358 pass**.
+  
+  **Live-verify TODO**: re-test on 活俠傳 — Scene tab should now
+  enumerate GameObjects instead of erroring. Log line "resolved
+  GameObject Type via "UnityEngine.GameObject, UnityEngine"
+  (downstream assembly = UnityEngine)" confirms the fallback fired.
+
 ---
 
 ## Phase 21 — Inspector field write-back
@@ -1594,16 +1633,17 @@ from crashing if a hooked region throws.
 
 ---
 
-## Phase 28 — Field → Methods cross-reference 📝 TODO STUB
+## Phase 28 — Field → Methods cross-reference ✅ **v1 SHIPPED (28a + 28b + 28d, build #515)**
 
 **Goal**: Inverse of Symbol Finder (Phase 25). Given a Unity field, list
 every method that reads or writes it. Closes the "I know what's interesting
 but I want to find the code that touches it" workflow that has no
 equivalent in CE for managed code.
 
-**Status**: not started. Picks up after Phase 27 ships. This stub captures
-the approach decided in the 2026-05-20 late planning conversation; no
-code, no commitment to scope yet.
+**Status**: v1 shipped 2026-05-24. 28a + 28b + 28d landed; 28c (IL2CPP
+instance-field heuristic) and 28e (CE Lua bridge) deferred per the
+[[project-phase-28-scope]] memory. Live click-through smoke still
+pending — see "Live verify TODO" below.
 
 ### Approach by backend
 
@@ -1674,14 +1714,92 @@ code, no commitment to scope yet.
 
 ### Estimated effort (rough)
 
-| Sub-phase | Effort |
-|---|---|
-| 28a — Mono IL walker + token match | ~1 day |
-| 28b — IL2CPP static via RipReferenceScanner adapter | ~1 day |
-| 28c — IL2CPP instance heuristic (or v1 skip) | ~1-2 days OR 0 if skipped |
-| 28d — UI modal + Symbol Finder / Inspector entry points | ~1 day |
-| 28e — CE Lua bridge | ~0.5 day |
-| **v1 total** | **~3.5-5.5 days depending on 28c scope** |
+| Sub-phase | Effort | Actual |
+|---|---|---|
+| 28a — Mono IL walker + token match | ~1 day | ✅ shipped |
+| 28b — IL2CPP static via RIP scan + method-pointer index | ~1 day | ✅ shipped |
+| 28c — IL2CPP instance heuristic | ~1-2 days OR skip | ⏭ **skipped v1** (false-positive cost too high; revisit if a user asks) |
+| 28d — UI modal + 3 right-click entry points | ~1 day | ✅ shipped |
+| 28e — CE Lua bridge | ~0.5 day | ⏭ **skipped v1** (CT-embedding model per [[feedback-ce-table-distribution-model]] — xrefs is a power-user tool, not a CT consumer feature) |
+
+### What shipped (28a + 28b + 28d)
+
+**DLL Mono path** ([MonoFieldXref.cpp](../dll/src/mono/MonoFieldXref.cpp)):
+* New runtime exports bound (optional): `mono_method_get_header`,
+  `mono_method_header_get_code`, `mono_metadata_free_mh`,
+  `mono_class_get_field_token`.
+* IL opcode length table (one-byte + 0xFE prefix two-byte) per
+  ECMA-335 §III.1.2. Switch op handled with the 4-byte count + 4*count
+  targets walk.
+* Walks every class in the target image, iterates `class_get_methods`,
+  fetches IL via `method_get_header`+`method_header_get_code` (SEH-leaf
+  wrapped — abstract / pinvoke / icall return null and get skipped),
+  decodes ldfld(0x7B)/ldflda(0x7C)/stfld(0x7D)/ldsfld(0x7E)/ldsflda(0x7F)/stsfld(0x80)
+  ops, matches the 4-byte token immediate against the target field's
+  `mono_class_get_field_token`. Generic methods scanned once at the
+  open-generic level — instantiated versions share IL, mirrors dnSpy.
+* One outer `ThreadAttachGuard` around the whole batch (reentrancy
+  counter handles inner helpers — Phase 27 reentrant guard pattern).
+
+**DLL IL2CPP path** ([IL2CPPFieldXref.cpp](../dll/src/il2cpp/IL2CPPFieldXref.cpp)):
+* Resolves static address via `il2cpp_class_get_static_data(klass) + field.offset`.
+* PE walker reads `IMAGE_DOS_HEADER` + `IMAGE_NT_HEADERS64` from the
+  loaded GameAssembly.dll image base via `SafeRead`, enumerates
+  executable sections by `IMAGE_SCN_MEM_EXECUTE` characteristic.
+* Builds a sorted `(methodPointer, MethodInfo)` index from the target
+  image's classes (uses existing `class_get_methods` iterator + the
+  Phase 18 method-pointer read fallback chain).
+* Scans `.text` in 1 MB chunks with 16-byte tail overlap to catch
+  instructions straddling chunk boundaries; only emits hits whose
+  start IP falls within the chunk's "owned" region (avoids overlap
+  re-emission).
+* Pattern matcher: `[opt REX 0x40..0x4F] [opcode 0x8B/0x8D/0x89]
+  [ModRM with mod=00 r/m=101] [disp32]`. 7-byte form tried first; the
+  6-byte form skips when the preceding byte is a REX prefix (dedup —
+  the same instruction would otherwise match at both p and p+1).
+* Each hit attribute via `std::upper_bound` on the sorted method index;
+  hits whose enclosing method falls outside the target image are
+  dropped (cross-assembly attribution is v2).
+* Instance fields: hard-fail with `error: "field references for
+  instance fields not supported on IL2CPP backend in v1"` so the UI
+  surfaces the limitation cleanly.
+
+**UI** ([FieldReferencesWindow.axaml](../ui/UnityDumpUI/Views/FieldReferencesWindow.axaml) +
+[FieldReferencesViewModel.cs](../ui/UnityDumpUI/ViewModels/FieldReferencesViewModel.cs)):
+* New modal — DataGrid: Kind / Class / Method / Address / IL offset /
+  Confidence; sortable per AOT trap rules (SortMemberPath + CanUserSort
+  + per-column CustomSortComparer wired in code-behind).
+* Header strip carries field name + type + static/instance badge +
+  resolved offset (Mono) or static-storage address (IL2CPP).
+* Kind filter ComboBox (any / read / write) + match limit
+  NumericUpDown.
+* Three entry points — Inspector grid right-click (uses node.DeclaredIn
+  for declaring-class FQN), Symbol Finder result row right-click (only
+  fires for field rows), Browser Fields tab right-click (uses
+  row.DeclaredIn or falls back to Browser.SelectedClass). All three
+  funnel through `MainWindow.OpenFieldReferencesAsync`.
+
+**Tests**: 4 new fake-pipe tests in
+[FindFieldReferencesTests.cs](../ui/UnityDumpUI.Tests/FindFieldReferencesTests.cs) —
+Mono shape (IL offset + null address), IL2CPP shape (staticAddress +
+hitAddress), kind-filter wire-arg pass-through, IL2CPP instance-field
+error surface. Total suite: 353 → **357 pass** (no regressions).
+
+### Live verify TODO
+
+* Mono — pick a known field on Assembly-CSharp (e.g. SaGa F2R
+  `PLY_WORK.HP`), right-click in Inspector → "Find methods that touch
+  this field…". Cross-check matches against dnSpy IL view.
+* IL2CPP — pick a static field (e.g. game's `*.Singleton.s_instance`
+  or similar), verify the modal returns the methods that read/write
+  it. Spot-check the addresses against the game's compiled `dump.cs`
+  if Il2CppDumper output is available.
+* Confirm the Symbol Finder + Browser Fields tab right-click paths
+  open the modal correctly.
+
+Cross-assembly attribution (e.g. searching `UnityEngine.Time.timeScale`
+references across all user code) is a v2 enhancement — v1 only resolves
+references whose declaring class lives in the target assembly.
 
 ---
 

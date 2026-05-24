@@ -1,0 +1,77 @@
+// IL2CPPFieldXref.h — Phase 28b findFieldReferences backend (IL2CPP).
+//
+// v1: STATIC FIELDS ONLY. Resolves the field's static-storage address via
+// `il2cpp_class_get_static_data(klass) + field.offset`, then scans the
+// executable sections of `GameAssembly.dll` for `mov reg, [rip+disp32]`
+// and `lea reg, [rip+disp32]` instructions whose absolute target equals
+// that storage address. Each hit is attributed to its enclosing method
+// via binary search against a sorted method-pointer index built from
+// every class in the searched assemblies' image.
+//
+// Instance fields are NOT supported in v1 — they'd need heuristic
+// `mov reg, [rcx+offset]` AOB scans whose false-positive rate is too
+// high to ship with confidence. The pipe handler returns a clean
+// "not supported in v1" error so the UI can surface the limitation
+// gracefully.
+//
+// Confidence: "exact" — RIP-relative encoding is unambiguous, the
+// disp32 + IP arithmetic recovers a single absolute target.
+#pragma once
+
+#include "IL2CPPTypes.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace UnityCEDumper::IL2CPP {
+
+enum class FieldRefKind : int {
+    Any   = 0,   // any reference (mov + lea both count for v1)
+    Read  = 1,   // mov reg, [rip+disp32]  (load)
+    Write = 2,   // mov [rip+disp32], reg  — NOTE: v1 does NOT separately
+                 // detect this opcode; both reads and writes via mov get
+                 // classified as "read" in the output. A separate write
+                 // detector (opcode 0x89 / 0xC7) is a Phase 28c follow-up.
+};
+
+struct FieldRefMatch {
+    std::string   ns;
+    std::string   className;
+    std::string   methodName;
+    std::uint32_t methodToken = 0;
+    std::uint32_t methodFlags = 0;
+    bool          isStatic    = false;
+    bool          isMethodStatic = false;
+    void*         methodAddress = nullptr;  // AOT entry of enclosing method
+    void*         hitAddress    = nullptr;  // exact IP of the matching insn
+    std::string   refKind;      // "read" | "write"
+    std::string   confidence;   // "exact"
+};
+
+struct FindFieldRefsResult {
+    bool          ok = false;
+    std::string   error;
+    void*         staticAddress = nullptr;  // resolved target absolute address
+    std::vector<FieldRefMatch> matches;
+    std::size_t   scannedMethods = 0;
+    bool          truncated = false;
+};
+
+// Resolves `(image, ns, className, fieldName)`, walks the .text section of
+// GameAssembly.dll for RIP-relative references to the field's static
+// storage, and attributes each hit to the enclosing method via the
+// method-pointer index built from the image's classes.
+//
+// Returns ok=false + an `error` message when:
+//   - field not found / not static  (instance-field v2)
+//   - GameAssembly.dll not loaded
+//   - il2cpp_class_get_static_data unbound
+FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
+                                              const std::string& ns,
+                                              const std::string& className,
+                                              const std::string& fieldName,
+                                              FieldRefKind       kindFilter,
+                                              std::size_t        limit);
+
+}  // namespace UnityCEDumper::IL2CPP

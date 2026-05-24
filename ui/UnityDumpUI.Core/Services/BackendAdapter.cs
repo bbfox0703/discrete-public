@@ -232,6 +232,74 @@ public sealed class BackendAdapter : ILiveExportSource
         return env.Result ?? throw new PipeProtocolException("searchSymbols returned no result");
     }
 
+    /// <summary>
+    /// Phase 20-MT diagnostics — read-only snapshot of the DLL's main-thread
+    /// dispatcher counters. Useful for: (1) the connection-bar banner that
+    /// proactively offers Enable runInBackground when the engine is paused
+    /// (Phase 20-MT v2), (2) pre-flight health checks before mainThread RPCs
+    /// (avoid 5-second timeouts when we can already tell the dispatcher is
+    /// stuck), (3) the stress smoke <c>Test-MainThreadBurst.ps1</c>.
+    /// </summary>
+    public async Task<DispatcherStatsResult> GetDispatcherStatsAsync(CancellationToken ct = default)
+    {
+        var env = await _pipe.SendAsync(
+            "getDispatcherStats", new Dictionary<string, JsonElement>(),
+            ProtocolJsonContext.Default.RpcEnvelopeDispatcherStatsResult, ct)
+            .ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result
+            ?? throw new PipeProtocolException("getDispatcherStats returned no result");
+    }
+
+    /// <summary>
+    /// Phase 28 — Field → Methods cross-reference. Inverse of
+    /// <see cref="SearchSymbolsAsync(string,string,IReadOnlyList{string}?,int?,CancellationToken)"/>:
+    /// given the FQN of a Unity field, list every method that reads
+    /// and/or writes it. Mono walks IL bytecode (exact, no false
+    /// positives). IL2CPP scans GameAssembly.dll's .text for
+    /// RIP-relative references to the static-storage address
+    /// (static fields only in v1; instance fields surface a clean
+    /// "not supported in v1" error). Same wire shape across backends.
+    /// </summary>
+    /// <param name="assembly">Declaring assembly (e.g. "Assembly-CSharp").</param>
+    /// <param name="ns">Namespace ("" allowed).</param>
+    /// <param name="className">Class simple name; "Outer/Inner" for nested.</param>
+    /// <param name="fieldName">Field simple name.</param>
+    /// <param name="kind">"any" / "read" / "write" — default "any".</param>
+    /// <param name="limit">Match cap (DLL hard-caps at 5000, default 200).</param>
+    public async Task<FindFieldReferencesResult> FindFieldReferencesAsync(
+        string assembly, string? ns, string className, string fieldName,
+        string kind = "any", int? limit = null,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(assembly))
+            throw new ArgumentException("assembly required", nameof(assembly));
+        if (string.IsNullOrEmpty(className))
+            throw new ArgumentException("className required", nameof(className));
+        if (string.IsNullOrEmpty(fieldName))
+            throw new ArgumentException("fieldName required", nameof(fieldName));
+        if (kind != "any" && kind != "read" && kind != "write")
+            throw new ArgumentException("kind must be 'any' / 'read' / 'write'", nameof(kind));
+
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["assembly"]  = Str(assembly),
+            ["ns"]        = Str(ns ?? string.Empty),
+            ["class"]     = Str(className),
+            ["fieldName"] = Str(fieldName),
+            ["kind"]      = Str(kind),
+        };
+        if (limit.HasValue) args["limit"] = Int(limit.Value);
+
+        var env = await _pipe.SendAsync(
+            "findFieldReferences", args,
+            ProtocolJsonContext.Default.RpcEnvelopeFindFieldReferencesResult, ct)
+            .ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result
+            ?? throw new PipeProtocolException("findFieldReferences returned no result");
+    }
+
     private static string BuildStringArrayJson(IReadOnlyList<string> items)
     {
         // Tiny hand-rolled emitter so we don't need a JsonSerializable for
