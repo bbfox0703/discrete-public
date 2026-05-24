@@ -260,9 +260,41 @@ ResolvedStaticField ResolveStaticField(const Il2CppImage* image,
         out.error = "field references for instance fields not supported on IL2CPP backend in v1";
         return out;
     }
+    // FieldAttributes::Literal (0x40) — `const` fields and enum members.
+    // The C# compiler inlines literals as `ldc.i4`/`ldc.r4`/etc. with the
+    // value baked into the call site, so no `ldsfld <token>` IL op is ever
+    // emitted (Mono path) and no `mov reg, [rip+static_addr]` is ever
+    // emitted (IL2CPP path) — the field's metadata token never appears in
+    // executable code. IL2CPP additionally returns NULL from
+    // class_get_static_data for enum-only classes because there's no real
+    // static storage block to allocate. Either way, Phase 28 v1 cannot
+    // find references to literal fields; surface the limit clearly so the
+    // user knows it's a semantic constraint, not a backend bug.
+    if ((out.flags & 0x40u) != 0) {
+        out.error =
+            "literal const field (or enum member) — the C# compiler inlines "
+            "the value at every use site (`ldc.i4 <value>` etc.), so the "
+            "field's metadata token never appears in IL or native code and "
+            "there's nothing for Phase 28 to match against. "
+            "This is a semantic limitation of inlined constants, not a "
+            "backend bug.";
+        return out;
+    }
     void* staticBase = SehStaticData(r.class_get_static_data, out.klass);
     if (staticBase == nullptr) {
-        out.error = "il2cpp_class_get_static_data returned null for declaring class";
+        // Non-literal static field whose declaring class hasn't allocated
+        // a static-storage block. Two common causes: (1) the class hasn't
+        // been initialized yet (IL2CPP allocates lazily on first access —
+        // try touching a static method or reading another static field
+        // first), (2) the class is a generic open type whose per-
+        // instantiation storage hasn't been requested.
+        out.error =
+            "il2cpp_class_get_static_data returned null — the declaring "
+            "class has no allocated static storage block. Either the "
+            "class hasn't been initialised at runtime yet (try invoking "
+            "any of its static methods from CE / the Methods tab first), "
+            "or it's a generic open type without active instantiations. "
+            "Phase 28 v1 doesn't force class init.";
         return out;
     }
     out.address = static_cast<std::uint8_t*>(staticBase) + out.offset;
