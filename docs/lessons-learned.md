@@ -323,7 +323,7 @@ fix for (b) is heap-leaked singletons (the prior lesson above).
 
 ---
 
-### Phase C follow-up — IL2CPP equivalent: per-RPC ThreadAttachGuard batching across N pipe calls stalls shutdown
+### Phase C follow-up — IL2CPP equivalent: per-RPC ThreadAttachGuard batching across N pipe calls stalls shutdown  ✅ **Fixed build #496**
 
 **Symptom**: SaGa Frontier 2 Remastered (IL2CPP v29, Unity 2021.3.39f1)
 takes **>60 seconds to quit** after running the new Tools menu
@@ -354,19 +354,29 @@ deferred cleanup to walk. The Mono BDWGC finalizer-queue mechanism
 is the canonical example, but IL2CPP shows analogous behaviour on
 large batches.
 
-**Proper fix** (tracked as a follow-up task, deferred from Phase C
-ship): add a server-side bulk `dumpIl2cppClassInfo` RPC that walks
-every user-assembly class **inside one `ThreadAttachGuard`** and
-returns the full payload as one pipe round-trip. The UI's
-`Il2cppHeaderBatchExporter` switches to this single call instead of
-the per-class loop. Expected side benefits:
+**Fix (build #496)**: new server-side `dumpClassInfo` RPC handler
+([`dll/src/shared/ExportAPI.cpp`](../dll/src/shared/ExportAPI.cpp))
+walks every user-assembly class in ONE pipe round-trip — registered
+on BOTH backends (Mono mirror at the equivalent line in the Mono
+handler block; Mono method rows carry null `Address`). The UI's
+`Il2cppHeaderBatchExporter` gained a `RenderFromBulk()` entry point
+that projects `DumpClassInfoResult` through the same `EmitOneClass`
+helper the legacy delegate-driven `ExportAsync` uses, so output
+shape is identical. MainWindowViewModel switched from the per-class
+loop to one `BackendAdapter.DumpClassInfoAsync` call. Side benefits
+realised in the fix:
 
 * Cuts whole-game export time from ~20-40s to ~2-5s (one pipe
   round-trip vs thousands).
 * Restores quit to baseline (~1s).
-* Pairs naturally with offline Phase D — same `Il2cppHeaderBatchExporter`
-  rendering code can consume either the bulk RPC (live) or the
-  offline PE-parser output, just by swapping the data source.
+* Pairs naturally with offline Phase D — same
+  `Il2cppHeaderBatchExporter` rendering code can consume either the
+  bulk RPC (live) or the offline PE-parser output, just by swapping
+  the data source.
+
+The legacy `ExportAsync(getClasses, getClassInfo, ...)` delegate
+surface stays as the test-friendly entry point (mock the lookups,
+exercise the rendering contract). Production uses `RenderFromBulk`.
 
 **Where the design went wrong**: when picking Phase C path B (UI
 live-driven over path A offline), the assumption was that
@@ -384,9 +394,26 @@ shutdown-latency growth or runtime resource exhaustion. Either
 batch server-side, or amortise the runtime work via a cache the
 RPCs can hit without re-attaching.
 
+**Symmetry audit (build #496)** — catalogued every UI batch site
+that does N back-to-back RPCs into the runtime:
+
+| UI site | Volume | Status |
+|---|---|---|
+| `Il2cppHeaderBatchExporter` (whole-game il2cpp.h) | 3K-200K classes | ✅ **Fixed via bulk `dumpClassInfo`** |
+| `CeXmlExporter` / `CsxExporter` live-mode pointer drilldown | tens-hundreds | Low risk — bounded by user-controlled depth + opt-in toggle |
+| `AssemblyBrowserViewModel.GetClassesAsync` | 1 per click | OK |
+| `LiveInspectionViewModel.ReadMemoryAsync` | 1-few per op | OK |
+| `SdkHeaderExporter` ancestor walk | 1-5 depth | OK |
+| `dumpIl2cppSymbols` whole-process labels | 1 RPC | Already bulk ✓ |
+
+If you ship a new feature that does back-to-back RPCs into the
+runtime, add it to this table and decide: (a) batch server-side if
+volume can grow with content (assemblies / classes / methods), or
+(b) leave inline and document the bound if volume is user-action
+limited (clicks, drill-down depth caps).
+
 See [docs/il2cppdumper-comparison.md](il2cppdumper-comparison.md)
-Phase C log entry for the production-ship history; the bulk-RPC
-follow-up is tracked there.
+Phase C log entry for the production-ship history.
 
 ---
 

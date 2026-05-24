@@ -1015,41 +1015,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            int lastLoggedAt = 0;
-            (string text, Il2cppHeaderBatchExporter.BatchStats stats) =
-                await Il2cppHeaderBatchExporter.ExportAsync(
-                    userAssemblies,
-                    getClasses: (asm, ct) => _backend.GetClassesAsync(asm, ct),
-                    getClassInfo: async (asm, ns, name, ct) =>
-                    {
-                        // Soft-fail per class so one bad lookup doesn't tear
-                        // the whole dump down — matches the IClassInfoLookup
-                        // contract the per-class Browser export uses.
-                        try
-                        {
-                            GetClassInfoResult r = await _backend
-                                .GetClassInfoAsync(asm, ns, name, ct)
-                                .ConfigureAwait(false);
-                            return string.IsNullOrEmpty(r.Error) ? r : null;
-                        }
-                        catch
-                        {
-                            return null;
-                        }
-                    },
-                    progress: (asm, _, _, total) =>
-                    {
-                        // Cheap status update — every 200 classes so we
-                        // don't spam the log on big games.
-                        if (total - lastLoggedAt >= 200)
-                        {
-                            lastLoggedAt = total;
-                            _logger.Write(
-                                UnityDumpUI.Core.Constants.LogCategoryView,
-                                $"export il2cpp.h: {asm} — {total} classes emitted so far");
-                        }
-                    })
+            // Phase C follow-up — ONE bulk RPC instead of N×getClassInfo.
+            // Fixes the post-export slow-quit documented in
+            // docs/lessons-learned.md "Phase C follow-up — IL2CPP equivalent"
+            // AND drops export time from ~20-40s to ~2-5s on large games.
+            // The DLL handler walks every requested assembly server-side
+            // under one thread context; no per-class pipe overhead.
+            DumpClassInfoResult bulk = await _backend
+                .DumpClassInfoAsync(userAssemblies)
                 .ConfigureAwait(true);
+
+            (string text, Il2cppHeaderBatchExporter.BatchStats stats) =
+                Il2cppHeaderBatchExporter.RenderFromBulk(userAssemblies, bulk);
 
             await File.WriteAllTextAsync(path, text).ConfigureAwait(true);
 
@@ -1060,14 +1037,26 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 $"classes={stats.ClassesEmitted} " +
                 $"failed={stats.ClassesFailed} " +
                 $"fields={stats.FieldsEmitted} " +
-                $"methods={stats.MethodsEmitted}");
+                $"methods={stats.MethodsEmitted} " +
+                $"(server scanned={bulk.Scanned}, truncated={bulk.Truncated})");
 
+            var problems = new List<string>();
             if (stats.ClassesFailed > 0)
             {
-                ErrorMessage =
-                    $"il2cpp.h written, but {stats.ClassesFailed} class(es) " +
-                    "failed getClassInfo and were skipped — see // SKIPPED " +
-                    "markers in the file.";
+                problems.Add(
+                    $"{stats.ClassesFailed} class(es) failed ReadClassInfo — see // SKIPPED markers");
+            }
+            if (bulk.MissingAssemblies is { Count: > 0 } missing)
+            {
+                problems.Add($"{missing.Count} assemblies missing on the runtime side ({string.Join(", ", missing)})");
+            }
+            if (bulk.Truncated)
+            {
+                problems.Add("output truncated at the 1,000,000-row hard cap");
+            }
+            if (problems.Count > 0)
+            {
+                ErrorMessage = "il2cpp.h written; " + string.Join("; ", problems) + ".";
             }
         }
         catch (Exception ex)

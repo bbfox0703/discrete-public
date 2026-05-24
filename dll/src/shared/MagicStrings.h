@@ -209,4 +209,18 @@ inline constexpr const char* CmdGetDispatcherStats    = "getDispatcherStats";
 //     scanned_classes, truncated, missing_assemblies? }
 inline constexpr const char* CmdDumpIl2cppSymbols     = "dumpIl2cppSymbols";
 
+// Phase C follow-up — bulk getClassInfo across every user-assembly class
+// in ONE pipe RPC. Replaces the N×getClassInfo client-side loop that
+// `Il2cppHeaderBatchExporter` used to do (and that caused the SaGa F2R
+// >60s slow-quit documented in lessons-learned.md "Phase C follow-up").
+// Backend-symmetric: both Mono and IL2CPP register the same name; Mono
+// methods carry null `address` because the JIT addr doesn't survive
+// restart. Request:
+//   { assemblies: ["Assembly-CSharp", ...], limit?: int }
+// Response:
+//   { rows:[ {assembly, namespace, name, parent?, fields:[...],
+//             methods:[...], error?} ],
+//     count, scanned, truncated, missing_assemblies? }
+inline constexpr const char* CmdDumpClassInfo         = "dumpClassInfo";
+
 }  // namespace UnityCEDumper::MagicStrings
