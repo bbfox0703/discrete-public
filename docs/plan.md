@@ -883,34 +883,42 @@ commands.
 
 ### Open issues / follow-ups
 
-- [ ] **20e** — *Scene tab fails on legacy-Unity Mono 32-bit.* Reported
-  2026-05-24 on 活俠傳 (Legend of Mortal, Unity 2020.3.49f1 / Mono /
-  x86). Scene tab shows: `Type.GetType("UnityEngine.GameObject,
-  UnityEngine.CoreModule") returned null. Probably mscorlib not loaded
-  yet or Unity hasn't initialised its assemblies.`
+- [x] **20e** — ✅ **Shipped 2026-05-24 (build #527).** *Scene tab
+  fails on legacy-Unity Mono 32-bit.* Originally reported on 活俠傳
+  (Legend of Mortal, Unity 2020.3.49f1 / Mono / x86): Scene tab
+  surfaced `Type.GetType("UnityEngine.GameObject, UnityEngine.CoreModule")
+  returned null. Probably mscorlib not loaded yet or Unity hasn't
+  initialised its assemblies.`
   
-  **Root cause** (probable): [`SceneEnumerator.cs:42`](../ui/UnityDumpUI.Core/Services/SceneEnumerator.cs)
-  hardcodes the post-Unity-5.4 module-split FQN
-  `"UnityEngine.GameObject, UnityEngine.CoreModule"`. Some legacy
-  Mono builds (older Unity or 32-bit-specific builds) ship a
-  monolithic `UnityEngine.dll` instead, where `Type.GetType` only
-  resolves under the bare `"UnityEngine.GameObject, UnityEngine"`
-  form. Symbol Finder already handles this monolithic-fallback path —
-  Scene tab needs the symmetric fix.
+  **Root cause**: [`SceneEnumerator.cs`](../ui/UnityDumpUI.Core/Services/SceneEnumerator.cs)
+  hardcoded the post-Unity-5.4 module-split FQN
+  `"UnityEngine.GameObject, UnityEngine.CoreModule"` AND every
+  downstream `CallMethodAsync` (Object.FindObjects, Object.get_name,
+  GameObject.get_transform, Transform.get_childCount, Transform.GetChild,
+  Component.get_gameObject) used the same `UnityEngine.CoreModule`
+  assembly arg. Legacy Mono builds with a monolithic `UnityEngine.dll`
+  resolve neither the FQN nor the downstream image lookups under
+  CoreModule.
   
-  **Proposed fix**: in `ResolveGameObjectTypeAsync`, try a list of
-  candidate FQNs in order:
-  1. `"UnityEngine.GameObject, UnityEngine.CoreModule"` (Unity 5.4+
-     module split — current behaviour)
-  2. `"UnityEngine.GameObject, UnityEngine"` (Unity 5.3- / legacy
-     monolithic)
-  Return the first non-null + non-`0x0` address. Cache the survivor
-  per pipe lifetime so subsequent calls don't re-probe.
+  **Fix**: probe `(CoreModule, monolithic)` pairs in
+  `ResolveGameObjectTypeAsync`; remember which assembly survived in
+  `_resolvedUnityEngineAssembly`; route every downstream
+  `CallMethodAsync` through a `UnityEngineAssembly` property that
+  returns the resolved name (falling back to CoreModule before
+  resolution, preserving existing behaviour for first-time callers and
+  the existing fake-pipe tests).
   
-  Same pattern applies to any other type the Scene enumerator
-  resolves through `Type.GetType` if added later.
+  **Tests**: +1 fake-pipe RPC test
+  (`EnumerateGameObjects_CoreModuleNullThenMonolithic_FallsBackAndUsesMonolithicAssemblyDownstream`)
+  drives a 4-RPC sequence (CoreModule probe → null, monolithic probe →
+  ok, FindObjectsByType → array, walkArray → element) and pins both
+  the probe ordering and the downstream assembly-arg flip. Suite
+  357 → **358 pass**.
   
-  **Effort**: <½ day. Strictly UI-side change, no DLL touch.
+  **Live-verify TODO**: re-test on 活俠傳 — Scene tab should now
+  enumerate GameObjects instead of erroring. Log line "resolved
+  GameObject Type via "UnityEngine.GameObject, UnityEngine"
+  (downstream assembly = UnityEngine)" confirms the fallback fired.
 
 ---
 

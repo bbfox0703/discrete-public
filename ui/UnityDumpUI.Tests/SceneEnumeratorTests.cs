@@ -150,4 +150,128 @@ public class SceneEnumeratorTests
         name = await enumerator.GetNameAsync(null!, CancellationToken.None).ConfigureAwait(true);
         Assert.Null(name);
     }
+
+    [Fact]
+    public async Task EnumerateGameObjects_CoreModuleNullThenMonolithic_FallsBackAndUsesMonolithicAssemblyDownstream()
+    {
+        // Phase 20e — when Type.GetType("UnityEngine.GameObject,
+        // UnityEngine.CoreModule") returns null (the legacy-Unity
+        // monolithic case observed on 活俠傳 / Unity 2020.3.49f1 / Mono
+        // x86), SceneEnumerator must fall back to
+        // "UnityEngine.GameObject, UnityEngine" AND route every downstream
+        // Object.FindObjects* call through assembly="UnityEngine" (not
+        // CoreModule). The DLL's findImage step uses the assembly NAME so
+        // a CoreModule arg against a monolithic target would surface as
+        // "image not found" — the fix is end-to-end, not just the Type
+        // probe.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string pipeName = $"DiscreteUITest_SE_Mono_{Guid.NewGuid():N}";
+        var server = new NamedPipeServerStream(
+            pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var client = new PipeClient(pipeName);
+
+        Task waitConn = server.WaitForConnectionAsync(ct);
+        await client.ConnectAsync(timeoutMs: 2000, ct).ConfigureAwait(true);
+        await waitConn.ConfigureAwait(true);
+
+        // Sequence the server reads + replies for the 4 expected RPCs:
+        //   1. callMethod Type.GetType("...UnityEngine.CoreModule") → null
+        //   2. callMethod Type.GetType("...UnityEngine") (monolithic)  → valid address
+        //   3. callMethod Object.FindObjectsByType (3-arg)              → array address
+        //   4. walkArray                                                → 2 elements
+        // We capture each request line so the test can assert the
+        // downstream `assembly` arg flipped from CoreModule → UnityEngine.
+        var captured = new List<string>(4);
+        Task serverTask = Task.Run(async () =>
+        {
+            using var reader = new StreamReader(server, Encoding.UTF8, false, 4096, leaveOpen: true);
+            using var writer = new StreamWriter(server, new UTF8Encoding(false), 4096, leaveOpen: true)
+            { NewLine = "\n", AutoFlush = true };
+
+            string MakeOkCallMethod(int id, string? returnValue) =>
+                returnValue is null
+                    ? $"{{\"id\":{id},\"result\":{{\"ok\":true,\"returnType\":null,\"returnValue\":null,\"elapsedMs\":1,\"method\":{{\"address\":\"0x0\",\"signature\":\"(System.String)\",\"humanSuffix\":\"\"}}}}}}"
+                    : $"{{\"id\":{id},\"result\":{{\"ok\":true,\"returnType\":\"System.Object\",\"returnValue\":\"{returnValue}\",\"elapsedMs\":1,\"method\":{{\"address\":\"0x0\",\"signature\":\"\",\"humanSuffix\":\"\"}}}}}}";
+
+            // 1. CoreModule probe — DLL returns null returnValue → adapter
+            // surfaces .ReturnValue.ValueKind == JsonValueKind.Null, which
+            // SceneEnumerator treats as "this probe failed, try the next".
+            string line1 = (await reader.ReadLineAsync(ct).ConfigureAwait(false))!;
+            captured.Add(line1);
+            int id1 = JsonDocument.Parse(line1).RootElement.GetProperty("id").GetInt32();
+            await writer.WriteLineAsync(MakeOkCallMethod(id1, returnValue: null)).ConfigureAwait(false);
+
+            // 2. Monolithic probe — returns a valid Type address.
+            string line2 = (await reader.ReadLineAsync(ct).ConfigureAwait(false))!;
+            captured.Add(line2);
+            int id2 = JsonDocument.Parse(line2).RootElement.GetProperty("id").GetInt32();
+            await writer.WriteLineAsync(MakeOkCallMethod(id2, returnValue: "0x00000000DEADBEEF")).ConfigureAwait(false);
+
+            // 3. FindObjectsByType — returns array address. The Type-pointer
+            // probes downstream return as string-typed so adapter wraps as
+            // JsonValueKind.String. We make the array-result the same.
+            string line3 = (await reader.ReadLineAsync(ct).ConfigureAwait(false))!;
+            captured.Add(line3);
+            int id3 = JsonDocument.Parse(line3).RootElement.GetProperty("id").GetInt32();
+            await writer.WriteLineAsync(MakeOkCallMethod(id3, returnValue: "0x00000000CAFEBABE")).ConfigureAwait(false);
+
+            // 4. walkArray — single element so the test stays small.
+            string line4 = (await reader.ReadLineAsync(ct).ConfigureAwait(false))!;
+            captured.Add(line4);
+            int id4 = JsonDocument.Parse(line4).RootElement.GetProperty("id").GetInt32();
+            string walkArrayResult =
+                $"{{\"id\":{id4},\"result\":{{\"address\":\"0x00000000CAFEBABE\",\"length\":1," +
+                $"\"count\":1,\"elementType\":\"UnityEngine.Object\",\"elementSize\":8,\"dataAddress\":\"0x00000000CAFEBAC0\"," +
+                $"\"elements\":[{{\"index\":0,\"address\":\"0x00000000CAFEBAC0\",\"ptr\":\"0x00000000ABCDEF00\"}}]}}}}";
+            await writer.WriteLineAsync(walkArrayResult).ConfigureAwait(false);
+        }, ct);
+
+        try
+        {
+            var adapter = new BackendAdapter(client);
+            var enumerator = new SceneEnumerator(adapter,
+                new FileLogger(Path.Combine(Path.GetTempPath(), $"DiscreteUITestLogs_{Guid.NewGuid():N}")));
+            EnumerateResult result = await enumerator.EnumerateGameObjectAddressesAsync(
+                limit: 50, ct).ConfigureAwait(true);
+
+            await serverTask.ConfigureAwait(true);
+
+            Assert.True(result.Ok, $"enumerator should succeed via monolithic fallback; got error: {result.Error}");
+            Assert.Single(result.Addresses);
+            Assert.Equal("0x00000000ABCDEF00", result.Addresses[0]);
+
+            // Wire-shape pin #1: first probe carries the CoreModule FQN.
+            using var doc1 = JsonDocument.Parse(captured[0]);
+            JsonElement args1 = doc1.RootElement.GetProperty("args");
+            Assert.Equal("Type", args1.GetProperty("name").GetString());
+            JsonElement probeArgs1 = args1.GetProperty("args");
+            string fqn1 = probeArgs1[0].GetProperty("value").GetString()!;
+            Assert.Equal("UnityEngine.GameObject, UnityEngine.CoreModule", fqn1);
+
+            // Wire-shape pin #2: after the CoreModule probe returns null,
+            // SceneEnumerator MUST retry with the monolithic FQN — this is
+            // the heart of the fix.
+            using var doc2 = JsonDocument.Parse(captured[1]);
+            JsonElement args2 = doc2.RootElement.GetProperty("args");
+            JsonElement probeArgs2 = args2.GetProperty("args");
+            string fqn2 = probeArgs2[0].GetProperty("value").GetString()!;
+            Assert.Equal("UnityEngine.GameObject, UnityEngine", fqn2);
+
+            // Wire-shape pin #3: the downstream FindObjects* call MUST use
+            // assembly="UnityEngine" (the monolithic survivor), NOT
+            // "UnityEngine.CoreModule". Without this, the call would
+            // surface as "image not found" on a target that genuinely has
+            // only the monolithic UnityEngine.dll loaded.
+            using var doc3 = JsonDocument.Parse(captured[2]);
+            JsonElement args3 = doc3.RootElement.GetProperty("args");
+            Assert.Equal("UnityEngine",   args3.GetProperty("assembly").GetString());
+            Assert.Equal("UnityEngine",   args3.GetProperty("namespace").GetString());
+            Assert.Equal("Object",        args3.GetProperty("name").GetString());
+        }
+        finally
+        {
+            await client.DisposeAsync().ConfigureAwait(true);
+            await server.DisposeAsync().ConfigureAwait(true);
+        }
+    }
 }

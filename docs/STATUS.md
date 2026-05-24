@@ -1,37 +1,27 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-24 **session close** — build #518).
+**Branch**: `dev` (2026-05-24 **session close** — build #527).
 
 ## TL;DR — what's left to pick up
+
+**Phase 20e shipped** (build #527, 2026-05-24). `SceneEnumerator` now
+probes both `(CoreModule, monolithic)` FQNs in `ResolveGameObjectTypeAsync`
+and routes every downstream `CallMethodAsync` through the resolved
+assembly name (Object.FindObjects, get_name, GameObject.get_transform,
+Transform.get_childCount, Transform.GetChild, Component.get_gameObject).
+Existing fake-pipe tests still pass under the CoreModule-first probe
+order; +1 new test pins the monolithic-fallback path end-to-end. Suite
+357 → **358 pass**. **Live-verify TODO**: re-test on 活俠傳 — Scene
+tab should now enumerate GameObjects instead of erroring with the old
+`Type.GetType … returned null` message. Log line "resolved GameObject
+Type via … (downstream assembly = …)" confirms which probe survived.
 
 **Phase 28 v1 shipped** (build #515 UI / #518 with tests). 28a Mono IL
 walker + 28b IL2CPP static-field RIP scanner + 28d UI modal with 3
 right-click entry points (Inspector / Symbol Finder / Browser Fields
 tab) all landed clean. 28c (IL2CPP instance fields, AOB heuristic) and
 28e (CE Lua bridge) deferred per the
-[[project-phase-28-scope]] memory. **Tests 353 → 357 pass** (+4
-fake-pipe RPC tests for Mono shape / IL2CPP shape / kind-filter wire /
-instance-field error surface). DLL builds clean on both backends
-(Mono 580.5 → 730.5 KB; IL2CPP 615 → 793 KB). UI AOT publish 100.6 MB.
-
-**Phase 28 live verify TODO** — pick a known Assembly-CSharp field
-(e.g. SaGa F2R `PLY_WORK.HP`) → Inspector right-click "Find methods
-that touch this field…" → cross-check matches against dnSpy IL view.
-For IL2CPP path, pick a static field and verify the modal returns
-methods that read/write it; spot-check addresses against `dump.cs` if
-available.
-
-**Phase 20 (Scene/GameObject explorer)** is the agreed follow-up per
-[[project-phase-20-22-roadmap]] — picks up after Phase 28 live-smoke
-clears. Phase 20-MT main-thread marshaling already shipped earlier
-(build #408); 20a/b/c/d are also ✅ shipped. **One open issue
-recorded** as Phase 20e in [plan.md](plan.md): Scene tab fails on
-legacy-Unity Mono with `Type.GetType("UnityEngine.GameObject,
-UnityEngine.CoreModule")` returning null — needs the monolithic
-`UnityEngine.dll` fallback that Symbol Finder already has. Reported
-2026-05-24 on 活俠傳 (Unity 2020.3.49f1 / Mono / x86); fix is
-strictly UI-side (`SceneEnumerator.ResolveGameObjectTypeAsync` should
-probe `[CoreModule, monolithic]` in order). <½ day.
+[[project-phase-28-scope]] memory.
 
 **Phase 28 live-smoke COMPLETE** (build #523, 2026-05-24):
 * 活俠傳 (Mono x86 / Unity 2020.3) — `Mortal.Core.GameStat._value`
@@ -41,7 +31,12 @@ probe `[CoreModule, monolithic]` in order). <½ day.
   — matches dnSpy IL view shape.
 * SaGa F2R (IL2CPP v29 / Unity 2021.3) — instance fields cleanly
   surface "not supported in v1" error (28c deferred per scope
-  decision). Static-field path TODO to live-verify.
+  decision). Static-field path live-tried via `SteamManager` static
+  → **0 matches** returned. Could be (a) cross-assembly attribution
+  drop (v1 same-assembly limit), (b) thunk / SIMD load opcode pattern
+  not yet covered by the v1 matcher, or (c) the field was simply
+  unreferenced in the running build. Recorded as a Phase 28 v2
+  follow-up to investigate when more static-field targets show up.
 
 (Earlier session content below — Phase 27 + READMEs + minor open
 issues kept for context.)

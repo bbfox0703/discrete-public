@@ -35,11 +35,30 @@ public sealed class SceneEnumerator
     // whole VM on next Connect so the cache dies naturally).
     private string? _gameObjectTypeAddress;
 
-    private const string MscorlibAssembly         = "mscorlib";
-    private const string SystemNamespace          = "System";
-    private const string UnityCoreModuleAssembly  = "UnityEngine.CoreModule";
-    private const string UnityEngineNamespace     = "UnityEngine";
-    private const string GameObjectTypeFqn        = "UnityEngine.GameObject, UnityEngine.CoreModule";
+    // Phase 20e — the assembly name that actually held UnityEngine.GameObject
+    // on this target. Unity 5.4+ split the monolithic UnityEngine.dll into
+    // per-module DLLs (`UnityEngine.CoreModule`, `UnityEngine.PhysicsModule`,
+    // …); legacy Unity 5.3- + a few 32-bit Mono builds still ship the
+    // monolithic `UnityEngine.dll`. We try CoreModule first (modern
+    // default) and fall back to monolithic if Type.GetType returns null.
+    // The survivor is reused for every downstream Object / GameObject /
+    // Transform / Component call so the assembly arg matches the runtime's
+    // loaded image list. Null = not yet resolved.
+    private string? _resolvedUnityEngineAssembly;
+
+    private const string MscorlibAssembly             = "mscorlib";
+    private const string SystemNamespace              = "System";
+    private const string UnityEngineNamespace         = "UnityEngine";
+    private const string UnityCoreModuleAssembly      = "UnityEngine.CoreModule";
+    private const string UnityMonolithicAssembly     = "UnityEngine";
+    private const string GameObjectTypeFqnCoreModule = "UnityEngine.GameObject, UnityEngine.CoreModule";
+    private const string GameObjectTypeFqnMonolithic = "UnityEngine.GameObject, UnityEngine";
+
+    /// <summary>Currently-resolved engine assembly name for downstream calls.
+    /// Falls back to CoreModule before <see cref="ResolveGameObjectTypeAsync"/>
+    /// has run — keeps tests + first-time callers on the historical default.</summary>
+    private string UnityEngineAssembly =>
+        _resolvedUnityEngineAssembly ?? UnityCoreModuleAssembly;
 
     public SceneEnumerator(BackendAdapter backend, FileLogger logger)
     {
@@ -65,8 +84,11 @@ public sealed class SceneEnumerator
         if (typeAddr is null)
         {
             return EnumerateResult.Failure(
-                "Type.GetType(\"UnityEngine.GameObject, UnityEngine.CoreModule\") returned null. "
-                + "Probably mscorlib not loaded yet or Unity hasn't initialised its assemblies.");
+                "Type.GetType failed for both \"UnityEngine.GameObject, UnityEngine.CoreModule\" "
+                + "(Unity 5.4+ module-split) and \"UnityEngine.GameObject, UnityEngine\" "
+                + "(legacy monolithic). Probably mscorlib isn't loaded yet, Unity hasn't "
+                + "initialised its managed assemblies, or this target ships with a non-standard "
+                + "engine assembly name.");
         }
 
         // Probe order — most-recent-first. Each overload's signatureMatch
@@ -119,7 +141,7 @@ public sealed class SceneEnumerator
         foreach (var attempt in attempts)
         {
             var r = await _backend.CallMethodAsync(
-                UnityCoreModuleAssembly, UnityEngineNamespace, "Object", attempt.Method,
+                UnityEngineAssembly, UnityEngineNamespace, "Object", attempt.Method,
                 attempt.Args,
                 signatureMatch: attempt.Signature,
                 mainThread: true,
@@ -181,7 +203,7 @@ public sealed class SceneEnumerator
         if (string.IsNullOrEmpty(gameObjectAddress)) return null;
 
         var r = await _backend.CallMethodAsync(
-            UnityCoreModuleAssembly, UnityEngineNamespace, "Object", "get_name",
+            UnityEngineAssembly, UnityEngineNamespace, "Object", "get_name",
             new List<CallArgRequest>(),
             signatureMatch: "()",
             instanceAddress: gameObjectAddress,
@@ -210,7 +232,7 @@ public sealed class SceneEnumerator
 
         // 1. GameObject.transform (property accessor).
         var transformR = await _backend.CallMethodAsync(
-            UnityCoreModuleAssembly, UnityEngineNamespace, "GameObject", "get_transform",
+            UnityEngineAssembly, UnityEngineNamespace, "GameObject", "get_transform",
             new List<CallArgRequest>(),
             signatureMatch: "()",
             instanceAddress: gameObjectAddress,
@@ -224,7 +246,7 @@ public sealed class SceneEnumerator
 
         // 2. Transform.childCount.
         var countR = await _backend.CallMethodAsync(
-            UnityCoreModuleAssembly, UnityEngineNamespace, "Transform", "get_childCount",
+            UnityEngineAssembly, UnityEngineNamespace, "Transform", "get_childCount",
             new List<CallArgRequest>(),
             signatureMatch: "()",
             instanceAddress: transformAddr,
@@ -242,7 +264,7 @@ public sealed class SceneEnumerator
             ct.ThrowIfCancellationRequested();
 
             var childTrR = await _backend.CallMethodAsync(
-                UnityCoreModuleAssembly, UnityEngineNamespace, "Transform", "GetChild",
+                UnityEngineAssembly, UnityEngineNamespace, "Transform", "GetChild",
                 new[] { CallArgFactory.Int("int32", i) },
                 signatureMatch: "(System.Int32)",
                 instanceAddress: transformAddr,
@@ -254,7 +276,7 @@ public sealed class SceneEnumerator
 
             // Component.gameObject (the inverse of GameObject.transform).
             var childGoR = await _backend.CallMethodAsync(
-                UnityCoreModuleAssembly, UnityEngineNamespace, "Component", "get_gameObject",
+                UnityEngineAssembly, UnityEngineNamespace, "Component", "get_gameObject",
                 new List<CallArgRequest>(),
                 signatureMatch: "()",
                 instanceAddress: childTrAddr,
@@ -276,22 +298,67 @@ public sealed class SceneEnumerator
     /// <c>System.Type.GetType(string)</c>; subsequent calls return the
     /// cached address (Type instances are GC-rooted for the process
     /// lifetime once created).
+    ///
+    /// <para>Phase 20e: probes the module-split FQN
+    /// <c>"UnityEngine.GameObject, UnityEngine.CoreModule"</c> (Unity 5.4+)
+    /// first, then falls back to the monolithic
+    /// <c>"UnityEngine.GameObject, UnityEngine"</c> (Unity 5.3- + a few
+    /// 32-bit Mono ports). Remembers which assembly form worked in
+    /// <see cref="_resolvedUnityEngineAssembly"/> so every downstream
+    /// Object / GameObject / Transform / Component call passes the
+    /// matching assembly arg to the DLL's <c>mono_class_from_name</c>
+    /// lookup.</para>
     /// </summary>
     private async Task<string?> ResolveGameObjectTypeAsync(CancellationToken ct)
     {
         if (_gameObjectTypeAddress is not null) return _gameObjectTypeAddress;
 
-        var r = await _backend.CallMethodAsync(
-            MscorlibAssembly, SystemNamespace, "Type", "GetType",
-            new[] { CallArgFactory.String(GameObjectTypeFqn) },
-            signatureMatch: "(System.String)",
-            mainThread: true,
-            ct: ct).ConfigureAwait(false);
-        if (!r.Ok || r.ReturnValue.ValueKind != JsonValueKind.String) return null;
-        string? addr = r.ReturnValue.GetString();
-        if (string.IsNullOrEmpty(addr) || addr == "0x0000000000000000") return null;
-        _gameObjectTypeAddress = addr;
-        return addr;
+        // Probe order — modern module-split first (matches every Unity 5.4+
+        // build we've seen), then legacy monolithic for older targets and
+        // certain 32-bit Mono ports where CoreModule isn't a separate
+        // managed assembly. Each tuple pairs the FQN string passed to
+        // Type.GetType with the assembly NAME we'll thread through every
+        // downstream CallMethodAsync. The DLL's findImage step uses the
+        // assembly name (not the Type.GetType FQN string), so the pair has
+        // to be consistent — using "UnityEngine.CoreModule" downstream
+        // when the runtime only loaded "UnityEngine.dll" would surface as
+        // "image not found" at the next call.
+        var probes = new (string Fqn, string Assembly)[]
+        {
+            (GameObjectTypeFqnCoreModule, UnityCoreModuleAssembly),
+            (GameObjectTypeFqnMonolithic, UnityMonolithicAssembly),
+        };
+
+        string? lastErr = null;
+        foreach (var probe in probes)
+        {
+            var r = await _backend.CallMethodAsync(
+                MscorlibAssembly, SystemNamespace, "Type", "GetType",
+                new[] { CallArgFactory.String(probe.Fqn) },
+                signatureMatch: "(System.String)",
+                mainThread: true,
+                ct: ct).ConfigureAwait(false);
+            if (!r.Ok)
+            {
+                lastErr = r.Exception ?? r.Error ?? "unknown failure";
+                continue;
+            }
+            if (r.ReturnValue.ValueKind != JsonValueKind.String) continue;
+            string? addr = r.ReturnValue.GetString();
+            if (string.IsNullOrEmpty(addr) || addr == "0x0000000000000000") continue;
+
+            _gameObjectTypeAddress       = addr;
+            _resolvedUnityEngineAssembly = probe.Assembly;
+            _logger.Write(Constants.LogCategoryView,
+                $"SceneEnumerator: resolved GameObject Type via \"{probe.Fqn}\" "
+                + $"(downstream assembly = {probe.Assembly})");
+            return addr;
+        }
+
+        _logger.Write(Constants.LogCategoryView,
+            $"SceneEnumerator: GameObject Type resolution failed across "
+            + $"[CoreModule, monolithic]. last error: {lastErr ?? "<none>"}.");
+        return null;
     }
 }
 
