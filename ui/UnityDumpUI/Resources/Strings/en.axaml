@@ -180,6 +180,8 @@
   <sys:String x:Key="Scene.PatternWatermark">name substring (leave empty for first N), e.g. Player</sys:String>
   <sys:String x:Key="Scene.LimitLabel">Limit</sys:String>
   <sys:String x:Key="Scene.SearchButton">Search</sys:String>
+  <sys:String x:Key="Scene.FocusDelayLabel">Focus delay (s)</sys:String>
+  <sys:String x:Key="Scene.FocusDelayTooltip">Seconds to wait before issuing the first Unity icall. Use 3-5s on targets where Application.runInBackground = false (the engine default): click Search, alt-tab back to the game window, and the call fires once Unity's Update() loop is ticking again.</sys:String>
   <sys:String x:Key="Scene.InspectMenu">Inspect this GameObject (switch to Inspector)</sys:String>
   <sys:String x:Key="Scene.CopyAddressMenu">Copy address</sys:String>
   <sys:String x:Key="Scene.CopyNameMenu">Copy name</sys:String>

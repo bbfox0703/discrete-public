@@ -1250,25 +1250,40 @@
                GameObject's address pre-populated. -->
           <TabItem Header="{StaticResource Scene.Tab}">
             <DockPanel Margin="0,4,0,0">
-              <!-- Top control row: pattern + limit + Search -->
+              <!-- Top control row: pattern + Limit + Focus delay + Search.
+                   Focus delay is the Phase 20-MT runInBackground workaround
+                   (see SceneExplorerViewModel.FocusDelaySeconds). Sits
+                   right before Search so it's clear the delay applies to
+                   the next Search click only. -->
               <Grid DockPanel.Dock="Top"
-                    ColumnDefinitions="*,Auto,Auto,140,Auto"
+                    ColumnDefinitions="*,Auto,140,Auto,90,Auto"
                     Margin="0,0,0,8">
                 <TextBox Grid.Column="0"
                          PlaceholderText="{StaticResource Scene.PatternWatermark}"
                          Text="{Binding Scene.Pattern, Mode=TwoWay}"
                          KeyDown="OnScenePatternKeyDown"
                          Margin="0,0,8,0" />
-                <TextBlock Grid.Column="2"
+                <TextBlock Grid.Column="1"
                            Text="{StaticResource Scene.LimitLabel}"
                            VerticalAlignment="Center" Margin="0,0,6,0" />
-                <NumericUpDown Grid.Column="3"
+                <NumericUpDown Grid.Column="2"
                                Value="{Binding Scene.Limit, Mode=TwoWay}"
                                Minimum="1" Maximum="500" Increment="50"
                                FormatString="0"
                                MinWidth="120"
                                Margin="0,0,8,0" />
-                <Button Grid.Column="4"
+                <TextBlock Grid.Column="3"
+                           Text="{StaticResource Scene.FocusDelayLabel}"
+                           ToolTip.Tip="{StaticResource Scene.FocusDelayTooltip}"
+                           VerticalAlignment="Center" Margin="0,0,6,0" />
+                <NumericUpDown Grid.Column="4"
+                               Value="{Binding Scene.FocusDelaySeconds, Mode=TwoWay}"
+                               Minimum="0" Maximum="10" Increment="1"
+                               FormatString="0"
+                               ToolTip.Tip="{StaticResource Scene.FocusDelayTooltip}"
+                               MinWidth="70"
+                               Margin="0,0,8,0" />
+                <Button Grid.Column="5"
                         Content="{StaticResource Scene.SearchButton}"
                         Command="{Binding Scene.SearchCommand}"
                         Classes="accent" />

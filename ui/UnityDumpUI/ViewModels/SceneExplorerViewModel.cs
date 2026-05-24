@@ -53,6 +53,28 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
     [ObservableProperty]
     private int _limit = 200;
 
+    /// <summary>
+    /// Phase 20-MT workaround — seconds to wait before issuing the
+    /// first Unity icall when the user clicks Search. Lets the user
+    /// alt-tab back to the game window so it regains focus and
+    /// `Update()` resumes ticking before the
+    /// `Type.GetType` / `Object.FindObjectsByType` calls fire through
+    /// the main-thread dispatcher.
+    ///
+    /// Without this, on Unity targets where
+    /// <c>Application.runInBackground = false</c> (the engine default)
+    /// the dispatcher hook never gets a chance to drain the queue
+    /// because the engine pauses Update() the moment DiscreteUI takes
+    /// focus → every <c>mainThread:true</c> RPC times out.
+    ///
+    /// 0 = no delay (default — fine when the game is already
+    /// configured with <c>runInBackground=true</c> or when the user
+    /// can keep the game window focused). Capped at 10 seconds in the
+    /// XAML NumericUpDown.
+    /// </summary>
+    [ObservableProperty]
+    private int _focusDelaySeconds;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
     private bool _isBusy;
@@ -89,6 +111,17 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
         {
             int limit = Math.Clamp(Limit, 1, 500);
             string pattern = (Pattern ?? string.Empty).Trim();
+
+            // Phase 20-MT workaround: countdown before issuing icalls so
+            // the user can alt-tab back to the game window. See
+            // FocusDelaySeconds docs for why.
+            int delay = Math.Clamp(FocusDelaySeconds, 0, 10);
+            for (int s = delay; s > 0; --s)
+            {
+                ct.ThrowIfCancellationRequested();
+                StatusMessage = $"Focus the game window — resuming in {s}s…";
+                await Task.Delay(1000, ct).ConfigureAwait(true);
+            }
 
             StatusMessage = string.IsNullOrEmpty(pattern)
                 ? $"Enumerating up to {limit} GameObjects…"
