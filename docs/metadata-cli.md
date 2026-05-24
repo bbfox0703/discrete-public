@@ -224,6 +224,55 @@ parameter types consistent across overloads (e.g. all string-only
 overloads share the same `type_index`). Phase B docs at
 [il2cppdumper-comparison.md](il2cppdumper-comparison.md).
 
+#### `pe-info` — inspect GameAssembly.dll headers
+
+Phase D step 1+2 — minimal PE parser shipped as part of the CLI.
+Reads `GameAssembly.dll`'s DOS / NT / section headers and dumps a
+JSON description. Useful on its own for verifying a binary looks
+like an IL2CPP runtime before chaining into the planned `symbols`
+subcommand (Phase D step 5 — see
+[il2cppdumper-comparison.md](il2cppdumper-comparison.md)).
+
+```powershell
+metadata-cli pe-info "C:\Path\To\game_Data\..\GameAssembly.dll"
+```
+
+```json
+{
+  "machine": "x64",
+  "is64Bit": true,
+  "imageBase": "0x0000000180000000",
+  "entryPointRva": "0x00520214",
+  "sizeOfImage": 98496512,
+  "sectionCount": 7,
+  "hasIl2CppMarker": true,
+  "sections": [
+    {"name": ".text",  "rva": "0x00001000", "virtualSize": 5603812, "fileOffset": "0x00000400", "rawSize": 5603840,  "characteristics": "0x60000020"},
+    {"name": "il2cpp", "rva": "0x0055A000", "virtualSize": 65290316,"fileOffset": "0x00558600", "rawSize": 65290752, "characteristics": "0x60000020"},
+    {"name": ".rdata", "rva": "0x0439F000", "virtualSize": 14808108,"fileOffset": "0x0439C800", "rawSize": 14808576, "characteristics": "0x40000040"},
+    ...
+  ]
+}
+```
+
+Cross-corpus verified (build #499) — all 4 test-matrix IL2CPP
+targets parse cleanly: R-Type Dimensions (Unity 2018.1, 12 MB,
+5 sections), SaGa F2R (Unity 2021.3, 45 MB, 7 sections incl.
+separate `il2cpp` exec section), Heroes (Unity 6.0 LTS, 95 MB,
+7 sections), Songs of Silence (Unity 6.1, 170 MB, 7 sections).
+`hasIl2CppMarker` correctly distinguishes IL2CPP from generic
+Windows DLLs (`kernel32.dll` parses but reports `false`).
+
+Negative cases fail loud with one-line diagnostics:
+
+```powershell
+metadata-cli pe-info docs\metadata-cli.md
+# → "metadata-cli: pe-info failed: bad DOS magic (not a PE)", exit 1
+
+metadata-cli pe-info D:\nonexistent\file.dll
+# → "metadata-cli: pe-info failed: CreateFileW failed", exit 1
+```
+
 ## Comparing CLI output to live RPC
 
 Quick sanity check: the CLI's `info` output should match the DLL's

@@ -21,6 +21,7 @@
 // per-PID log dirs aren't created for a CLI invocation.
 
 #include "../../dll/src/il2cpp/MetadataParser.h"
+#include "PEParser.h"
 
 #include <windows.h>
 
@@ -347,16 +348,103 @@ int CmdType(const std::wstring& path, const std::string& ns, const std::string& 
     return 0;
 }
 
+// Phase D step 1+2 — minimal PE parser surface. Reads GameAssembly.dll's
+// DOS/NT/section headers and dumps a JSON description. Set up for the
+// follow-up `registration` + `symbols` subcommands (Phase D steps 3-5),
+// but useful on its own for sanity-checking that a file looks like an
+// IL2CPP binary before launching the full pipeline.
+int CmdPeInfo(const std::wstring& path) {
+    using namespace UnityCEDumper::Phase_D::PE;
+
+    std::vector<std::uint8_t> bytes;
+    std::string err;
+    auto imgOpt = ParseFile(path, &bytes, &err);
+    if (!imgOpt) {
+        std::fprintf(stderr, "metadata-cli: pe-info failed: %s\n",
+                     err.empty() ? "unknown error" : err.c_str());
+        return 1;
+    }
+    const Image& img = *imgOpt;
+
+    // Spot-detect "looks like an IL2CPP GameAssembly.dll": scan the .rdata
+    // section for the `il2cpp_init` export-name string. Real GameAssembly
+    // .dlls export 100s of il2cpp_* symbols; PE puts export-name strings
+    // in .rdata. Bounded by section size, so this scales to 170 MB games
+    // (Songs of Silence) without blowing up the wall-clock — a 35 MB
+    // .rdata linear scan completes in well under a second.
+    bool hasIl2CppMarker = false;
+    {
+        const char* needle = "il2cpp_init";
+        const std::size_t needleLen = std::strlen(needle);
+        // Scan every initialized-data section: typical games have one
+        // .rdata, but some have multiple (.rodata variants) so iterate.
+        for (const auto& s : img.sections) {
+            if (s.rawSize < needleLen) continue;
+            // Skip exec sections — needle definitely won't be in code.
+            constexpr std::uint32_t kExec = 0x20000000u; // IMAGE_SCN_MEM_EXECUTE
+            if (s.characteristics & kExec) continue;
+            std::size_t end = std::min<std::size_t>(
+                static_cast<std::size_t>(s.fileOffset) + s.rawSize,
+                bytes.size());
+            std::size_t start = static_cast<std::size_t>(s.fileOffset);
+            if (start >= end) continue;
+            for (std::size_t i = start; i + needleLen <= end; ++i) {
+                if (std::memcmp(bytes.data() + i, needle, needleLen) == 0) {
+                    hasIl2CppMarker = true; break;
+                }
+            }
+            if (hasIl2CppMarker) break;
+        }
+    }
+
+    const char* machineStr =
+        img.machine == Machine::Amd64 ? "x64" :
+        img.machine == Machine::I386  ? "x86" : "unknown";
+
+    std::printf("{\"machine\":\"%s\",\"is64Bit\":%s,"
+                "\"imageBase\":\"0x%016llX\","
+                "\"entryPointRva\":\"0x%08X\","
+                "\"sizeOfImage\":%u,"
+                "\"sectionCount\":%zu,"
+                "\"hasIl2CppMarker\":%s,"
+                "\"sections\":[",
+                machineStr,
+                img.is64Bit ? "true" : "false",
+                static_cast<unsigned long long>(img.imageBase),
+                img.entryPointRva,
+                img.sizeOfImage,
+                img.sections.size(),
+                hasIl2CppMarker ? "true" : "false");
+
+    bool first = true;
+    for (const auto& s : img.sections) {
+        if (!first) std::fputc(',', stdout);
+        first = false;
+        std::fputs("{\"name\":", stdout);
+        PutJsonString(s.name);
+        std::printf(",\"rva\":\"0x%08X\","
+                    "\"virtualSize\":%u,"
+                    "\"fileOffset\":\"0x%08X\","
+                    "\"rawSize\":%u,"
+                    "\"characteristics\":\"0x%08X\"}",
+                    s.virtualAddress, s.virtualSize,
+                    s.fileOffset, s.rawSize, s.characteristics);
+    }
+    std::fputs("]}\n", stdout);
+    return 0;
+}
+
 void Usage() {
     std::fputs(
-        "metadata-cli — offline IL2CPP global-metadata.dat parser\n\n"
+        "metadata-cli — offline IL2CPP global-metadata.dat parser + PE inspector\n\n"
         "USAGE:\n"
         "  metadata-cli info    <path-to-global-metadata.dat>\n"
         "  metadata-cli stats   <path-to-global-metadata.dat>\n"
         "  metadata-cli types   <path-to-global-metadata.dat>\n"
         "  metadata-cli type    <path-to-global-metadata.dat> <namespace> <name>\n"
         "  metadata-cli methods <path-to-global-metadata.dat>\n"
-        "  metadata-cli method  <path-to-global-metadata.dat> <namespace> <type> <method>\n\n"
+        "  metadata-cli method  <path-to-global-metadata.dat> <namespace> <type> <method>\n"
+        "  metadata-cli pe-info <path-to-GameAssembly.dll>\n\n"
         "Output is line-oriented JSON to stdout. Errors → stderr (exit 1).\n",
         stderr);
 }
@@ -383,6 +471,7 @@ int main(int argc, char** argv) {
         if (argc < 6) { Usage(); return 2; }
         return CmdMethod(path, argv[3], argv[4], argv[5]);
     }
+    else if (sub == "pe-info") return CmdPeInfo(path);
     Usage();
     return 2;
 }

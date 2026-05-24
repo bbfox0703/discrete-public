@@ -114,7 +114,7 @@ and Il2CppDumper's `il2cpp.h`.
 Path A ships sooner; Path B is more valuable. Likely build both —
 share the formatting code, vary the input source.
 
-### Phase D — Offline PE parser  🏗️ **deferred (2-3 days)**
+### Phase D — Offline PE parser  🚧 **in progress** (D-1 + D-2 shipped build #499)
 
 **Why last**: biggest investment, biggest payoff. Lets the CLI
 produce native method addresses without launching the game —
@@ -166,7 +166,8 @@ dev usable (no need to run the game).
 | #486 | 2026-05-24 | **C (il2cpp.h batch)** | ✅ **Done (path B — UI live-driven).** Tools menu entry "Export il2cpp.h (whole game)…" ships. Walks every user assembly via existing `getClasses` + `getClassInfo` RPCs (no DLL changes). FQN-based struct names (`Namespace_Class`) avoid collisions; method AOT addresses inline per class as `// Methods (AOT entry points…)` trailing comments — beats Il2CppDumper's RVA-only `dump.cs`. Mono backend greys out (JIT addresses don't survive restart). 4 unit tests in `Il2cppHeaderBatchExporterTests` pin the rendering contract; manual live-verification steps in [export-formats.md](export-formats.md). |
 | #487 | 2026-05-24 | C live-verify (SaGa F2R, v29) | ✅ **3,763 / 3,765 classes (99.95%)** — `MainGame/PLY_WORK` fields + method AOT addresses match the matrix-recorded layout. 2 `// SKIPPED` markers (both MessagePack edge cases — `MessagePackSerializer` generic-only static class and `LZ4Codec/HashTablePool` nested type) — design-as-intended fail-loud behaviour. ⚠️ Surfaced a slow-quit (game took >60s to terminate after the export) caused by 3,765 per-RPC `ThreadAttachGuard` cycles — the **IL2CPP analog** of the documented Mono Phase 27 follow-up issue. Recorded in [lessons-learned.md](lessons-learned.md) §"Phase C follow-up — IL2CPP equivalent". Proper fix is a **server-side bulk `dumpClassInfo` RPC** — landed at build #496. |
 | #496 | 2026-05-24 | **C follow-up (bulk RPC)** | ✅ **Shipped.** New `dumpClassInfo` RPC registered on **both backends** (Mono mirror is forward-symmetry — no current Mono UI consumer, but prevents future foot-gun if the il2cpp.h flow is ever extended). `Il2cppHeaderBatchExporter.RenderFromBulk()` consumes the bulk payload via the same `EmitOneClass` projection the per-class path uses — output shape unchanged, tests still green (353/353). MainWindowViewModel switched from N×getClassInfo loop to one `DumpClassInfoAsync` call. Also did a **symmetry audit** of every UI batch site (table in lessons-learned.md): the il2cpp.h export was the only hotspot; CE XML / CSX live-mode drilldown is bounded by user-action depth and stays inline. |
-| TBD | TBD | D (PE parser) | Deferred. |
+| #499 | 2026-05-24 | **D-1 + D-2 (PE parser + pe-info CLI)** | ✅ **Shipped.** [`tools/metadata-cli/PEParser.{h,cpp}`](../tools/metadata-cli/PEParser.h) — minimal DOS/NT/section walker with RVA↔file-offset mapping. `metadata-cli pe-info <GameAssembly.dll>` emits machine type, image base, sections, IL2CPP marker presence. Cross-corpus verified across all 4 test-matrix IL2CPP targets (R-Type 12 MB / SaGa F2R 45 MB / Heroes 95 MB / Songs of Silence 170 MB). Negative cases (non-PE, missing file, kernel32.dll) all behave correctly. Foundation for D-3 (offline registration finder) + D-4 (method address resolution) + D-5 (`symbols` subcommand → .dd64 / Ghidra / IDA). |
+| TBD | TBD | D-3..D-5 (registration + symbols) | Next session — use the PE parser to find `Il2CppMetadataRegistration` offline, cross-link to MethodDefinitions, wire to existing `SymbolExporter` formatters. |
 
 Update this table when each phase ships.
 
