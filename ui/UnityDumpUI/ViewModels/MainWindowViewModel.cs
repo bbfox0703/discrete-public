@@ -324,6 +324,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsX64dbgCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsGhidraCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsIdaCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportIl2cppHeaderCommand))]
     private bool _isConnected;
 
     [ObservableProperty]
@@ -333,6 +334,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsX64dbgCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsGhidraCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsIdaCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportIl2cppHeaderCommand))]
     private bool _isBusy;
 
     /// <summary>
@@ -362,6 +364,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsX64dbgCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsGhidraCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsIdaCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportIl2cppHeaderCommand))]
     private string? _backend2;     // "Backend" collides with field above
     [ObservableProperty] private string? _dllVariant;
     [ObservableProperty] private string? _gameModule;
@@ -967,6 +970,111 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             ErrorMessage = $"symbol export failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"export symbols {ext} failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    // Phase C (Il2CppDumper feature parity, path B): whole-game il2cpp.h.
+    // Walks every user assembly's classes via the existing getClasses /
+    // getClassInfo RPCs (no DLL changes needed), then renders the batch
+    // header via Il2cppHeaderBatchExporter. Same connection gating as
+    // the symbol exports — IL2CPP only, save-file dialog wired, not busy.
+    [RelayCommand(CanExecute = nameof(CanExportSymbols))]
+    private async Task ExportIl2cppHeaderAsync()
+    {
+        if (SaveFileAsync is null) return;
+
+        string? path;
+        try
+        {
+            path = await SaveFileAsync("il2cpp.h", "C/C++ Header", ".h").ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"save dialog failed: {ex.Message}";
+            return;
+        }
+        if (path is null) return;
+
+        IsBusy = true;
+        try
+        {
+            GetAssembliesResult asmResult = await _backend
+                .GetAssembliesAsync().ConfigureAwait(true);
+            var userAssemblies = SystemAssemblyFilter.SelectUserAssemblies(
+                asmResult.Assemblies.Select(a => a.Name));
+            if (userAssemblies.Count == 0)
+            {
+                ErrorMessage =
+                    "No user assemblies to export (every assembly was flagged " +
+                    "as system/Unity engine). Adjust SystemAssemblyFilter if " +
+                    "your game uses an unusual naming scheme.";
+                return;
+            }
+
+            int lastLoggedAt = 0;
+            (string text, Il2cppHeaderBatchExporter.BatchStats stats) =
+                await Il2cppHeaderBatchExporter.ExportAsync(
+                    userAssemblies,
+                    getClasses: (asm, ct) => _backend.GetClassesAsync(asm, ct),
+                    getClassInfo: async (asm, ns, name, ct) =>
+                    {
+                        // Soft-fail per class so one bad lookup doesn't tear
+                        // the whole dump down — matches the IClassInfoLookup
+                        // contract the per-class Browser export uses.
+                        try
+                        {
+                            GetClassInfoResult r = await _backend
+                                .GetClassInfoAsync(asm, ns, name, ct)
+                                .ConfigureAwait(false);
+                            return string.IsNullOrEmpty(r.Error) ? r : null;
+                        }
+                        catch
+                        {
+                            return null;
+                        }
+                    },
+                    progress: (asm, _, _, total) =>
+                    {
+                        // Cheap status update — every 200 classes so we
+                        // don't spam the log on big games.
+                        if (total - lastLoggedAt >= 200)
+                        {
+                            lastLoggedAt = total;
+                            _logger.Write(
+                                UnityDumpUI.Core.Constants.LogCategoryView,
+                                $"export il2cpp.h: {asm} — {total} classes emitted so far");
+                        }
+                    })
+                .ConfigureAwait(true);
+
+            await File.WriteAllTextAsync(path, text).ConfigureAwait(true);
+
+            _logger.Write(
+                UnityDumpUI.Core.Constants.LogCategoryView,
+                $"export il2cpp.h -> {path}: " +
+                $"assemblies={stats.AssembliesScanned} " +
+                $"classes={stats.ClassesEmitted} " +
+                $"failed={stats.ClassesFailed} " +
+                $"fields={stats.FieldsEmitted} " +
+                $"methods={stats.MethodsEmitted}");
+
+            if (stats.ClassesFailed > 0)
+            {
+                ErrorMessage =
+                    $"il2cpp.h written, but {stats.ClassesFailed} class(es) " +
+                    "failed getClassInfo and were skipped — see // SKIPPED " +
+                    "markers in the file.";
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"il2cpp.h export failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"export il2cpp.h failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {

@@ -30,7 +30,7 @@ this up across PCs.
 | CustomAttribute decode | ❌ Not done | Not in roadmap — same reason. |
 | `dump.cs` (whole-game C# pseudo-source) | ❌ Not planned | Use upstream Il2CppDumper. |
 | `DummyDll/` (.NET stubs for ILSpy/dnSpy) | ❌ Not planned | Use upstream Il2CppDumper. |
-| `il2cpp.h` (whole-game C struct header) | ⚠️ Single-class done in UI; **whole-game not done** | Gap target for **Phase C**. |
+| `il2cpp.h` (whole-game C struct header) | ✅ **Done build #486** | Tools menu → "Export il2cpp.h (whole game)…" walks every user assembly via existing `getClasses` + `getClassInfo` RPCs (no DLL changes); concatenates one big `.h` with FQN-based struct names, offset comments, and trailing **method AOT addresses inline** (Il2CppDumper only emits RVAs in `dump.cs`). [Il2cppHeaderBatchExporter.cs](../ui/UnityDumpUI.Core/Services/Export/Il2cppHeaderBatchExporter.cs) — see [export-formats.md](export-formats.md). |
 | `script.json` / Ghidra / IDA symbol scripts | ✅ Done (build #477) | `.dd64` (x64dbg) + `ImportSymbolsScript.py` (Ghidra) + `.idc` (IDA) — live-DLL driven. Offline equivalent depends on Phase D. |
 | Detect "dumped" metadata (process-dump replay) | ❌ Not done | Not in roadmap. |
 
@@ -163,7 +163,7 @@ dev usable (no need to run the game).
 |---|---|---|---|
 | #480 | 2026-05-24 | A (doc) | This file landed. |
 | #482 | 2026-05-24 | **B (Method/Param)** | ✅ **Done.** `metadata-cli methods` + `method` subcommands ship; corpus-verified on R-Type Dimensions (v24.0, 23.9K methods), SaGa Frontier Remastered (v24.5, 56.2K), SaGa F2R (v29, 69.6K), Heroes (v31, 203K), Songs of Silence (v39, 248.8K). Overload semantics validated against `System.String.Concat` (6 overloads on Heroes / 7 on R-Type) and `System.Math.Max` (11 primitive overloads on Songs of Silence). |
-| TBD | TBD | C (il2cpp.h batch) | Pending — needs path-A/path-B decision (CLI offline vs UI live-driven). |
+| #486 | 2026-05-24 | **C (il2cpp.h batch)** | ✅ **Done (path B — UI live-driven).** Tools menu entry "Export il2cpp.h (whole game)…" ships. Walks every user assembly via existing `getClasses` + `getClassInfo` RPCs (no DLL changes). FQN-based struct names (`Namespace_Class`) avoid collisions; method AOT addresses inline per class as `// Methods (AOT entry points…)` trailing comments — beats Il2CppDumper's RVA-only `dump.cs`. Mono backend greys out (JIT addresses don't survive restart). 4 unit tests in `Il2cppHeaderBatchExporterTests` pin the rendering contract; manual live-verification steps in [export-formats.md](export-formats.md). |
 | TBD | TBD | D (PE parser) | Deferred. |
 
 Update this table when each phase ships.
