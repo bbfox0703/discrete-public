@@ -46,6 +46,13 @@ public sealed class SceneEnumerator
     // loaded image list. Null = not yet resolved.
     private string? _resolvedUnityEngineAssembly;
 
+    // Last underlying error from ResolveGameObjectTypeAsync's probe loop.
+    // Surfaced in the EnumerateResult.Failure message so the user sees
+    // the actual cause (e.g. "main-thread queue drain timeout") rather
+    // than a generic "Type.GetType returned null". Phase 20e live-smoke
+    // on 活俠傳 hit this and got a misleading error before the upgrade.
+    private string? _lastResolveError;
+
     private const string MscorlibAssembly             = "mscorlib";
     private const string SystemNamespace              = "System";
     private const string UnityEngineNamespace         = "UnityEngine";
@@ -83,12 +90,35 @@ public sealed class SceneEnumerator
         string? typeAddr = await ResolveGameObjectTypeAsync(ct).ConfigureAwait(false);
         if (typeAddr is null)
         {
-            return EnumerateResult.Failure(
-                "Type.GetType failed for both \"UnityEngine.GameObject, UnityEngine.CoreModule\" "
-                + "(Unity 5.4+ module-split) and \"UnityEngine.GameObject, UnityEngine\" "
-                + "(legacy monolithic). Probably mscorlib isn't loaded yet, Unity hasn't "
-                + "initialised its managed assemblies, or this target ships with a non-standard "
-                + "engine assembly name.");
+            // Hint specialization — the most common real cause is the
+            // Phase 20-MT main-thread dispatcher timing out because the
+            // game window isn't focused. Unity's `Application.runInBackground`
+            // defaults to `false`, so when DiscreteUI is foreground the
+            // engine stops ticking → `mono_runtime_invoke` stops being
+            // called → the dispatcher hook never gets a chance to drain
+            // the queue → `mainThread:true` RPCs time out. Surface the
+            // workaround inline so the user doesn't have to grep docs.
+            string baseMsg = "Type.GetType failed for both "
+                + "\"UnityEngine.GameObject, UnityEngine.CoreModule\" (Unity 5.4+ module-split) "
+                + "and \"UnityEngine.GameObject, UnityEngine\" (legacy monolithic). "
+                + $"Last error: {_lastResolveError ?? "<none>"}.";
+            string hint;
+            if ((_lastResolveError ?? string.Empty).Contains("main-thread queue drain timeout",
+                    StringComparison.Ordinal))
+            {
+                hint = " The main-thread dispatcher timed out — usually this means the game "
+                    + "window isn't focused. Unity's `Application.runInBackground = false` "
+                    + "default pauses Update() when the window loses focus, which prevents "
+                    + "the Phase 20-MT hook from draining the queue. Try focusing the game "
+                    + "window briefly, then re-clicking Search.";
+            }
+            else
+            {
+                hint = " Probably mscorlib isn't loaded yet, Unity hasn't initialised its "
+                    + "managed assemblies, or this target ships with a non-standard engine "
+                    + "assembly name.";
+            }
+            return EnumerateResult.Failure(baseMsg + hint);
         }
 
         // Probe order — most-recent-first. Each overload's signatureMatch
@@ -355,6 +385,7 @@ public sealed class SceneEnumerator
             return addr;
         }
 
+        _lastResolveError = lastErr;
         _logger.Write(Constants.LogCategoryView,
             $"SceneEnumerator: GameObject Type resolution failed across "
             + $"[CoreModule, monolithic]. last error: {lastErr ?? "<none>"}.");
