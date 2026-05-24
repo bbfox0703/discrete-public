@@ -92,6 +92,52 @@ std::string StripDllSuffix(const std::string& s) {
     return s;
 }
 
+// v0.2.2 — walk the declaring-type chain to build a fully-qualified
+// nested-type name ("Outer/Middle/Leaf"). Mirror of the live UI's
+// il2cpp_class_get_declaring_type loop in IL2CPPClassWalker. Uses
+// MetadataParser::GetDeclaringTypeIndex which lazy-builds a child→
+// parent map from the on-disk nestedTypeIndices[] table (the on-disk
+// `TypeDefinition::declaringTypeIndex` is a TypeIndex pointing into
+// the runtime types[] table — not directly resolvable offline).
+//
+// Cap of 16 hops defends against a hypothetical declaring-chain
+// cycle; real nested chains are 2-3 levels deep.
+std::string BuildNestedTypeName(
+    const UnityCEDumper::IL2CPP::Metadata::Parser& parser,
+    const UnityCEDumper::IL2CPP::Metadata::Parser::TypeDefView& leaf) {
+    std::string out = leaf.name;
+    std::int32_t cursor = parser.GetDeclaringTypeIndex(leaf.index);
+    for (int hops = 0; hops < 16 && cursor >= 0; ++hops) {
+        auto outer = parser.GetTypeDefinition(cursor);
+        if (!outer || outer->name.empty()) break;
+        out = outer->name + "/" + out;
+        std::int32_t next = parser.GetDeclaringTypeIndex(cursor);
+        if (next == cursor) break;  // self-loop guard
+        cursor = next;
+    }
+    return out;
+}
+
+// v0.2.2 — namespace of the outermost (top-level) declaring type in
+// the chain. Nested types in IL2CPP carry ns="" themselves; the real
+// namespace lives on the outermost type. Same logic as the live
+// IL2CPPClassWalker / `Class.GetNamespace` traversal.
+std::string OutermostNamespace(
+    const UnityCEDumper::IL2CPP::Metadata::Parser& parser,
+    const UnityCEDumper::IL2CPP::Metadata::Parser::TypeDefView& leaf) {
+    std::int32_t cursor = parser.GetDeclaringTypeIndex(leaf.index);
+    if (cursor < 0) return leaf.ns;
+    for (int hops = 0; hops < 16; ++hops) {
+        auto outer = parser.GetTypeDefinition(cursor);
+        if (!outer) break;
+        std::int32_t next = parser.GetDeclaringTypeIndex(cursor);
+        if (next < 0) return outer->ns;
+        if (next == cursor) break;
+        cursor = next;
+    }
+    return leaf.ns;
+}
+
 }  // namespace
 
 std::optional<PipelineResult> ResolveSymbols(const std::wstring& metadataPath,
@@ -174,11 +220,20 @@ std::optional<PipelineResult> ResolveSymbols(const std::wstring& metadataPath,
             auto type = parser.GetTypeDefinition(ti);
             if (!type) continue;
 
+            // v0.2.2 — compute the fully-qualified nested-type name once
+            // per type (e.g. "MainGame/PLY_WORK" instead of just
+            // "PLY_WORK"). Namespace lifts from the outermost declaring
+            // type — IL2CPP stores `ns` only on the top-level type, not
+            // on nested children. Matches the live UI's
+            // IL2CPPClassWalker behaviour bit-for-bit.
+            std::string qualifiedName = BuildNestedTypeName(parser, *type);
+            std::string qualifiedNs   = OutermostNamespace(parser, *type);
+
             // Emit a class row (regardless of whether it has methods).
             ResolvedClass rc;
             rc.assembly = image.name;
-            rc.ns       = type->ns;
-            rc.name     = type->name;
+            rc.ns       = qualifiedNs;
+            rc.name     = qualifiedName;
             // classRva left 0 (see note above).
             res.classes.push_back(std::move(rc));
 
@@ -202,8 +257,8 @@ std::optional<PipelineResult> ResolveSymbols(const std::wstring& metadataPath,
                 }
                 ResolvedMethod row;
                 row.assembly   = image.name;
-                row.ns         = type->ns;
-                row.className  = type->name;
+                row.ns         = qualifiedNs;
+                row.className  = qualifiedName;
                 row.methodName = m.name;
                 row.token      = m.token;
                 row.isStatic   = (m.flags & 0x10u) != 0;

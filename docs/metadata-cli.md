@@ -409,13 +409,22 @@ JSON stats summary to stdout:
 }
 ```
 
-Cross-corpus verification (build #506):
+Cross-corpus verification (v0.2, build #511):
 
 | Game | Images matched | Methods resolved | Resolve ratio |
 |---|---|---|---|
-| SaGa F2R (v29) | 20 / 57 | 36,439 / 39,104 | **93.18%** |
-| Heroes (v31) | 57 / 108 | 124,460 / 131,353 | **94.75%** |
-| Songs of Silence (v39) | 87 / 253 | 61,307 / 68,283 | **89.78%** |
+| SaGa F2R (v29) | **54 / 57** | **49,743 / 54,134** | **91.89%** |
+| Heroes (v31) | **106 / 108** | **176,658 / 190,021** | **92.97%** |
+| Songs of Silence (v39) | **158 / 253** | **103,340 / 120,966** | **85.43%** |
+
+v0.1 → v0.2 improvements: image coverage 35-65% → 62-98%; method
+count up 37-69% per game. Remaining unmatched images (e.g. 95 on
+Songs of Silence) are metadata-only references — assemblies whose
+code lives outside this `GameAssembly.dll` (system libraries
+referenced via reflection only, etc.). The codeGenModules scanner
+now allows null entries within the run (v0.2.1) and accepts
+modules with `methodCount==0` (interface-only / attribute-only
+DLLs that were rejected as not-a-module in v0.1).
 
 Cross-validated against the test-matrix-recorded live runtime data:
 SaGa F2R's `PLY_WORK.GetWazNat` (token `0x060017D5`) resolves to
@@ -433,26 +442,32 @@ bit-for-bit).
   uses tokens because parameter-type resolution requires the
   `Il2CppType` table — deferred. Token suffix still guarantees
   uniqueness, just less human-friendly.)
+- **Nested types** (v0.2.2) — `<NS>_<Outer>_<Inner>__<Method>` via a
+  parent-walk through `nestedTypeIndices[]`. SaGa F2R's
+  `PLY_WORK.GetWazNat` (nested in `MainGame`) now emits as
+  `MainGame_PLY_WORK__GetWazNat_t060017D5`, matching what the live
+  UI export produces (the UI walks `il2cpp_class_get_declaring_type`
+  for the same result).
 
-**Limitations** (intentional v0.1):
+**Limitations** (v0.2):
 
 - **Pre-v24.2 IL2CPP not supported** — those games lack
   `codeGenModules` and use a flat `methodPointers[]` directly on
   `Il2CppCodeRegistration`. R-Type Dimensions (v24.0) returns a
   clean "image table empty" error.
-- **Nested-type names** drop the parent prefix in offline mode
-  (offline reads `name="PLY_WORK"`; live walks
-  `il2cpp_class_get_declaring_type` to prefix `MainGame/`). Token
-  suffix keeps labels unique either way.
-- **~5-10% of methods report null pointers** — these are abstract /
+- ~~Nested-type names drop the parent prefix~~ — **fixed v0.2.2**
+  via `nestedTypeIndices[]` walk; labels now match the live UI
+  shape (`MainGame_PLY_WORK__GetWazNat_t...`).
+- **~5-15% of methods report null pointers** — these are abstract /
   generic-only / inlined methods that legitimately have no AOT
   body. The live path skips them too.
-- **~10-65% of assemblies unmatched** — `mscorlib` / `UnityEngine.*`
-  and similar system assemblies often have their codeGenModules in
-  a region the v0.1 scanner doesn't reach (it stops at the first
-  null pointer in the run). The live `Tools → Export Symbols` path
-  reaches everything; offline coverage of the game code itself
-  stays ≥89%.
+- **Some assemblies unmatched per game** — fixed bulk of this in
+  v0.2.1 (35-65% miss → 2-37% miss; coverage 62-98%). Remaining
+  unmatched are metadata-only references — assemblies whose code
+  lives outside this `GameAssembly.dll` (cross-DLL system
+  references, reflection-only loads). The live `Tools → Export
+  Symbols` path reaches everything by enumerating from the runtime
+  side.
 
 ## Comparing CLI output to live RPC
 
