@@ -22,6 +22,7 @@
 
 #include "../../dll/src/il2cpp/MetadataParser.h"
 #include "PEParser.h"
+#include "RegistrationFinder.h"
 
 #include <windows.h>
 
@@ -434,6 +435,58 @@ int CmdPeInfo(const std::wstring& path) {
     return 0;
 }
 
+// Phase D step 3 — offline Il2CppMetadataRegistration finder. Combines
+// the Phase D-1 PE parser with a port of the runtime's structural-shape
+// scanner (see dll/src/il2cpp/IL2CPPMetadataRegistration.cpp), but
+// adapted for file bytes: pointer fields in the on-disk struct hold
+// absolute VAs assuming load at the PE's preferred imageBase, so we
+// translate VA → RVA → file-offset via the PE section table.
+int CmdRegistration(const std::wstring& path) {
+    using namespace UnityCEDumper::Phase_D;
+
+    std::vector<std::uint8_t> bytes;
+    std::string err;
+    auto imgOpt = PE::ParseFile(path, &bytes, &err);
+    if (!imgOpt) {
+        std::fprintf(stderr, "metadata-cli: pe-info failed: %s\n",
+                     err.empty() ? "unknown error" : err.c_str());
+        return 1;
+    }
+    const PE::Image& img = *imgOpt;
+
+    err.clear();
+    auto found = Registration::FindOffline(bytes.data(), bytes.size(), img, &err);
+    if (!found) {
+        std::fprintf(stderr, "metadata-cli: registration finder failed: %s\n",
+                     err.empty() ? "unknown error" : err.c_str());
+        // Emit a partial JSON so consumers can still see what was tried.
+        std::printf("{\"found\":false,\"image_base\":\"0x%016llX\","
+                    "\"section_count\":%zu}\n",
+                    static_cast<unsigned long long>(img.imageBase),
+                    img.sections.size());
+        return 1;
+    }
+    const Registration::Found& f = *found;
+
+    std::printf("{\"found\":true,"
+                "\"image_base\":\"0x%016llX\","
+                "\"registration_rva\":\"0x%08llX\","
+                "\"registration_va\":\"0x%016llX\","
+                "\"types_count\":%u,"
+                "\"types_array_rva\":\"0x%08llX\","
+                "\"types_array_va\":\"0x%016llX\","
+                "\"section\":",
+                static_cast<unsigned long long>(img.imageBase),
+                static_cast<unsigned long long>(f.regRva),
+                static_cast<unsigned long long>(img.imageBase + f.regRva),
+                f.typesCount,
+                static_cast<unsigned long long>(f.typesArrayRva),
+                static_cast<unsigned long long>(f.typesArrayVa));
+    PutJsonString(f.sectionName);
+    std::printf(",\"near_misses\":%d}\n", f.nearMissCount);
+    return 0;
+}
+
 void Usage() {
     std::fputs(
         "metadata-cli — offline IL2CPP global-metadata.dat parser + PE inspector\n\n"
@@ -444,7 +497,8 @@ void Usage() {
         "  metadata-cli type    <path-to-global-metadata.dat> <namespace> <name>\n"
         "  metadata-cli methods <path-to-global-metadata.dat>\n"
         "  metadata-cli method  <path-to-global-metadata.dat> <namespace> <type> <method>\n"
-        "  metadata-cli pe-info <path-to-GameAssembly.dll>\n\n"
+        "  metadata-cli pe-info      <path-to-GameAssembly.dll>\n"
+        "  metadata-cli registration <path-to-GameAssembly.dll>\n\n"
         "Output is line-oriented JSON to stdout. Errors → stderr (exit 1).\n",
         stderr);
 }
@@ -471,7 +525,8 @@ int main(int argc, char** argv) {
         if (argc < 6) { Usage(); return 2; }
         return CmdMethod(path, argv[3], argv[4], argv[5]);
     }
-    else if (sub == "pe-info") return CmdPeInfo(path);
+    else if (sub == "pe-info")      return CmdPeInfo(path);
+    else if (sub == "registration") return CmdRegistration(path);
     Usage();
     return 2;
 }

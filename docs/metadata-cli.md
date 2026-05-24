@@ -273,6 +273,51 @@ metadata-cli pe-info D:\nonexistent\file.dll
 # → "metadata-cli: pe-info failed: CreateFileW failed", exit 1
 ```
 
+#### `registration` — offline Il2CppMetadataRegistration finder
+
+Phase D step 3. Builds on `pe-info` — locates the runtime
+`Il2CppMetadataRegistration` struct inside `GameAssembly.dll` by
+porting the existing in-process AOB scanner to file bytes (see
+[RegistrationFinder.cpp](../tools/metadata-cli/RegistrationFinder.cpp)).
+No injection, no LoadLibraryEx; pure file-byte parse with
+VA → RVA → file-offset translation via the PE section table.
+
+```powershell
+metadata-cli registration "C:\Path\To\game_Data\..\GameAssembly.dll"
+```
+
+```json
+{
+  "found": true,
+  "image_base": "0x0000000180000000",
+  "registration_rva": "0x023F4970",
+  "registration_va": "0x00000001823F4970",
+  "types_count": 29456,
+  "types_array_rva": "0x023FD840",
+  "types_array_va": "0x00000001823FD840",
+  "section": ".rdata",
+  "near_misses": 8
+}
+```
+
+Cross-corpus verified (build #500) — same structural-shape scanner
+finds the registration **version-agnostically** across v24.0 / v29
+/ v31 / v39 (the metadata.dat format changes don't touch the
+runtime registration struct shape):
+
+| Game | Metadata | Section | types_count | Notes |
+|---|---|---|---|---|
+| R-Type Dimensions | v24.0 | `.data` | **19,874** | Matches the runtime scan reported in the test matrix EXACTLY |
+| SaGa F2R | v29 | `.rdata` | 29,456 | |
+| Heroes Olden Era | v31 | `.rdata` | 77,466 | |
+| Songs of Silence | v39 | `.rdata` | 145,455 | Within 0.4% of the live runtime scan (144,837) |
+
+`kernel32.dll` correctly fails with "no candidate matched the
+structural shape" — no false positives on generic Win32 DLLs.
+
+Foundation for the planned Phase D-4 (method-pointer resolution)
+and D-5 (`symbols` subcommand → `.dd64` / Ghidra / IDA outputs).
+
 ## Comparing CLI output to live RPC
 
 Quick sanity check: the CLI's `info` output should match the DLL's
