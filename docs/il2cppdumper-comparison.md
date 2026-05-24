@@ -21,7 +21,7 @@ this up across PCs.
 | Il2CppDumper feature | Status | Notes |
 |---|---|---|
 | Parse `global-metadata.dat` | ✅ Done | v24.0 / v24.1 / v24.2-v24.5 / v27 / v29 / v31 / v32-v34 / v35-v37 / v38-v39 — full coverage via [MetadataParser](../dll/src/il2cpp/MetadataParser.cpp). v24 sub-version auto-detected by `Parser::DetectV24Variant()`. |
-| Parse `GameAssembly.dll` (PE) offline | ❌ **Not done** | We read live runtime memory instead. Gap target for **Phase D**. |
+| Parse `GameAssembly.dll` (PE) offline | ✅ **Done build #506** | Full Phase D pipeline: PE parser → Il2CppMetadataRegistration finder → codeGenModules walker → method→RVA cross-link → 3 debugger formats. Runs entirely from file bytes, no game launch. |
 | Parse ELF / Mach-O / NSO / WebAssembly | ❌ Not planned | Android/iOS/Switch dump support — out of scope, no demand. |
 | TypeDefinition + Field tables | ✅ Done | `metadata-cli types` / `type` |
 | MethodDefinition + Parameter tables | ✅ **Done build #482** | `metadata-cli methods` / `method` — covers v24.0 / v24.1 / v24.2-v24.5 / v27-v30 / v31-v37 / v38 / v39 strides with the same auto-dispatch as TypeDefinition. Overloads supported (the `method` subcommand returns all matches as a JSON array). Parameter `type_index` stays opaque (resolves through the runtime types[] table, owned by Phase D). |
@@ -31,7 +31,7 @@ this up across PCs.
 | `dump.cs` (whole-game C# pseudo-source) | ❌ Not planned | Use upstream Il2CppDumper. |
 | `DummyDll/` (.NET stubs for ILSpy/dnSpy) | ❌ Not planned | Use upstream Il2CppDumper. |
 | `il2cpp.h` (whole-game C struct header) | ✅ **Done build #486** | Tools menu → "Export il2cpp.h (whole game)…" walks every user assembly via existing `getClasses` + `getClassInfo` RPCs (no DLL changes); concatenates one big `.h` with FQN-based struct names, offset comments, and trailing **method AOT addresses inline** (Il2CppDumper only emits RVAs in `dump.cs`). [Il2cppHeaderBatchExporter.cs](../ui/UnityDumpUI.Core/Services/Export/Il2cppHeaderBatchExporter.cs) — see [export-formats.md](export-formats.md). |
-| `script.json` / Ghidra / IDA symbol scripts | ✅ Done (build #477) | `.dd64` (x64dbg) + `ImportSymbolsScript.py` (Ghidra) + `.idc` (IDA) — live-DLL driven. Offline equivalent depends on Phase D. |
+| `script.json` / Ghidra / IDA symbol scripts | ✅ Done — **both live AND offline** | Live path (build #477): `.dd64` / `.txt` / `.idc` from Tools menu via `dumpIl2cppSymbols`. **Offline path (build #506, Phase D-5)**: `metadata-cli symbols <ga.dll> <metadata.dat> <prefix>` emits the same three formats. Resolve rate 89-95% across the v29/v31/v39 corpus. |
 | Detect "dumped" metadata (process-dump replay) | ❌ Not done | Not in roadmap. |
 
 ### What we have that Il2CppDumper doesn't
@@ -114,7 +114,7 @@ and Il2CppDumper's `il2cpp.h`.
 Path A ships sooner; Path B is more valuable. Likely build both —
 share the formatting code, vary the input source.
 
-### Phase D — Offline PE parser  🚧 **in progress** (D-1 + D-2 shipped build #499)
+### Phase D — Offline PE parser  ✅ **shipped** (D-1..D-5, build #506)
 
 **Why last**: biggest investment, biggest payoff. Lets the CLI
 produce native method addresses without launching the game —
@@ -169,7 +169,7 @@ dev usable (no need to run the game).
 | #499 | 2026-05-24 | **D-1 + D-2 (PE parser + pe-info CLI)** | ✅ **Shipped.** [`tools/metadata-cli/PEParser.{h,cpp}`](../tools/metadata-cli/PEParser.h) — minimal DOS/NT/section walker with RVA↔file-offset mapping. `metadata-cli pe-info <GameAssembly.dll>` emits machine type, image base, sections, IL2CPP marker presence. Cross-corpus verified across all 4 test-matrix IL2CPP targets (R-Type 12 MB / SaGa F2R 45 MB / Heroes 95 MB / Songs of Silence 170 MB). Negative cases (non-PE, missing file, kernel32.dll) all behave correctly. Foundation for D-3 (offline registration finder) + D-4 (method address resolution) + D-5 (`symbols` subcommand → .dd64 / Ghidra / IDA). |
 | #500 | 2026-05-24 | **D-3 (offline registration finder)** | ✅ **Shipped.** [`RegistrationFinder.{h,cpp}`](../tools/metadata-cli/RegistrationFinder.h) — port of the runtime `IL2CPPMetadataRegistration::Find()` AOB scanner to file bytes, with VA→RVA→file-offset translation via the PE section table. `metadata-cli registration <GameAssembly.dll>` emits the registration RVA + types[] array RVA + count. **Works version-agnostically across v24.0 / v29 / v31 / v39** — the metadata.dat format changes don't touch the runtime registration struct shape (same finding the Phase 5 segment 2d in-process scanner has). R-Type Dimensions (v24.0) reports `types_count=19874` matching the test-matrix-recorded live runtime scan **exactly**. Songs of Silence (v39) reports 145,455 vs the recorded live 144,837 (within 0.4%). `kernel32.dll` correctly rejects with "no candidate matched". |
 | #501 | 2026-05-24 | **D-4 (offline codeGenModules walker)** | ✅ **Shipped.** [`CodeGenModulesFinder.{h,cpp}`](../tools/metadata-cli/CodeGenModulesFinder.h) — scans for the codeGenModules array directly (instead of finding the heavily-version-variant `Il2CppCodeRegistration` first). Strong-signal heuristic: contiguous run of 8-byte pointers where every entry dereferences to a struct whose first field points to a string ending in `.dll`. `metadata-cli code-modules <GameAssembly.dll>` emits per-module name + methodPointers RVA + method count + sample addresses. Verified on v29 (SaGa F2R, 20 modules), v31 (Heroes, 57 modules), v39 (Songs of Silence, 87 modules). R-Type Dimensions (v24.0) correctly rejected — pre-v24.2 IL2CPP uses the flat `methodPointers` path, deferred until a consumer asks. Foundation for D-5. |
-| TBD | TBD | D-5 (`symbols` CLI → .dd64/Ghidra/IDA) | Next session — walk metadata.dat Image table to compute each method's (image, image-local index) pair, look up `codeGenModules[image].methodPointers[index]`, project through the existing `SymbolExporter` formatters. The Il2CppDumper `script.json` equivalent in our pipeline. |
+| #506 | 2026-05-24 | **D-5 (`symbols` CLI → .dd64/Ghidra/IDA)** ✅ **Phase D closed.** | [`SymbolPipeline.{h,cpp}`](../tools/metadata-cli/SymbolPipeline.h) plus Image-table parsing in [`MetadataParser`](../dll/src/il2cpp/MetadataParser.h) (`ImageDefView`, `EnumerateImages`, `FindImageContainingMethod` — v24.2-v37 flat + v38+ hand-walked). `metadata-cli symbols <GameAssembly.dll> <global-metadata.dat> <out-prefix>` cross-links every metadata MethodDefinition to its native AOT RVA via `codeGenModules[image_name].methodPointers[localIdx]`, then renders ALL THREE formats (`<prefix>.dd64` / `<prefix>.ghidra.txt` / `<prefix>.idc`) in one shot. Same label-naming convention as the live UI path (`SymbolExporter.cs`) so files load identically into x64dbg / Ghidra / IDA. **Resolve rates across the corpus: SaGa F2R 93.18%, Heroes 94.75%, Songs of Silence 89.78%.** Cross-validated against test-matrix-recorded live data: SaGa F2R `PLY_WORK.GetWazNat token=0x060017D5` resolved to RVA 0x86C6D0 — back-computes to exact match of the recorded live absolute address. Closes Il2CppDumper's headline `script.json` equivalence in our pipeline. |
 
 Update this table when each phase ships.
 

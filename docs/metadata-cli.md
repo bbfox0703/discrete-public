@@ -373,6 +373,87 @@ each module's `methodPointers[]` base + count, the remaining
 work is to walk metadata.dat's Image table to compute each
 method's (image, image-local index) pair and look up the address.
 
+#### `symbols` — offline debugger-symbol export (Phase D-5, closes Phase D)
+
+End-to-end pipeline: PE parse + offline `Il2CppMetadataRegistration`
+finder + codeGenModules walker + metadata Image table walk + cross-
+link to native AOT addresses + emit `.dd64` (x64dbg) + `.ghidra.txt`
++ `.idc` in one go. Equivalent of running the UI's Tools menu
+**Export Symbols → x64dbg / Ghidra / IDA** triple without launching
+the game.
+
+```powershell
+metadata-cli symbols `
+    "C:\Path\To\GameAssembly.dll" `
+    "C:\Path\To\game_Data\il2cpp_data\Metadata\global-metadata.dat" `
+    "D:\out\mygame"
+# → produces D:\out\mygame.dd64
+#            D:\out\mygame.ghidra.txt
+#            D:\out\mygame.idc
+```
+
+JSON stats summary to stdout:
+
+```json
+{
+  "ok": true,
+  "image_base": "0x0000000180000000",
+  "images_total": 108,
+  "images_matched": 57,
+  "classes_total": 24682,
+  "methods_total": 131353,
+  "methods_resolved": 124460,
+  "methods_null_ptr": 6893,
+  "resolve_ratio": 0.9475,
+  "output_prefix": "D:\\out\\mygame"
+}
+```
+
+Cross-corpus verification (build #506):
+
+| Game | Images matched | Methods resolved | Resolve ratio |
+|---|---|---|---|
+| SaGa F2R (v29) | 20 / 57 | 36,439 / 39,104 | **93.18%** |
+| Heroes (v31) | 57 / 108 | 124,460 / 131,353 | **94.75%** |
+| Songs of Silence (v39) | 87 / 253 | 61,307 / 68,283 | **89.78%** |
+
+Cross-validated against the test-matrix-recorded live runtime data:
+SaGa F2R's `PLY_WORK.GetWazNat` (token `0x060017D5`) resolves to
+RVA `0x86C6D0`, which back-computes to the exact same RVA the live
+`dumpIl2cppSymbols` path records (different absolute addresses
+because of runtime ASLR base, but file-relative offsets match
+bit-for-bit).
+
+**Label naming** (matches the live `SymbolExporter.cs` convention):
+
+- Class labels: `Class_<Namespace>_<Class>` — sanitised to `[A-Za-z0-9_]`.
+- Method labels: `<Namespace>_<Class>__<Method>_t<TokenHex>` — token
+  suffix disambiguates overloads. (The live path also computes a
+  human-readable `humanSuffix` from parameter types; the offline path
+  uses tokens because parameter-type resolution requires the
+  `Il2CppType` table — deferred. Token suffix still guarantees
+  uniqueness, just less human-friendly.)
+
+**Limitations** (intentional v0.1):
+
+- **Pre-v24.2 IL2CPP not supported** — those games lack
+  `codeGenModules` and use a flat `methodPointers[]` directly on
+  `Il2CppCodeRegistration`. R-Type Dimensions (v24.0) returns a
+  clean "image table empty" error.
+- **Nested-type names** drop the parent prefix in offline mode
+  (offline reads `name="PLY_WORK"`; live walks
+  `il2cpp_class_get_declaring_type` to prefix `MainGame/`). Token
+  suffix keeps labels unique either way.
+- **~5-10% of methods report null pointers** — these are abstract /
+  generic-only / inlined methods that legitimately have no AOT
+  body. The live path skips them too.
+- **~10-65% of assemblies unmatched** — `mscorlib` / `UnityEngine.*`
+  and similar system assemblies often have their codeGenModules in
+  a region the v0.1 scanner doesn't reach (it stops at the first
+  null pointer in the run). The live `Tools → Export Symbols` path
+  reaches everything; offline coverage of the game code itself
+  stays ≥89%.
+
 ## Comparing CLI output to live RPC
 
 Quick sanity check: the CLI's `info` output should match the DLL's

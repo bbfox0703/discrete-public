@@ -108,6 +108,17 @@ struct HeaderV29 {
     std::int32_t interfaceOffsetsSize;
     std::int32_t typeDefinitionsOffset;
     std::int32_t typeDefinitionsSize;
+    // Phase D-5.1 — needed to cross-link MethodDefinitions to native
+    // AOT addresses via the codeGenModules table. These follow
+    // typeDefinitions in the v24.2+ flat header (v24.0/v24.1 have
+    // `rgctxEntriesOffset/Count` between, but that pre-v24.2 path
+    // doesn't have codeGenModules anyway, so we deliberately offset-
+    // mismatch on the old versions — EnumerateImages stays a no-op
+    // there).
+    std::int32_t imagesOffset;
+    std::int32_t imagesSize;
+    std::int32_t assembliesOffset;
+    std::int32_t assembliesSize;
 };
 
 // Il2CppTypeDefinition for v29 (matches Unity 2021.3 source).
@@ -377,6 +388,32 @@ struct MethodDefinition_v24_0 {
     std::uint16_t parameterCount;
 };
 
+// Il2CppImageDefinition — assembly-file (DLL/EXE) descriptor in metadata.
+// Phase D-5 needs this to map a global method index to its owning image,
+// so the cross-link to `codeGenModules[image_name].methodPointers[]` can
+// happen offline (live runtime path uses il2cpp_class_get_image which
+// reads MethodInfo->klass->image directly).
+//
+// Layout cross-checked against vendor/Il2CppDumperV35plus/Il2Cpp/Metadata
+// Class.cs:267-288. v24.0 / v24.1 variants differ (Min=24.1 fields gain/
+// lose customAttribute pair); the v29 layout below covers v24.2 through
+// v37. v38+ shrinks typeStart / exportedTypeStart to variable-width
+// TypeDefinitionIndex (TDIS) — hand-walked in MetadataParser.
+//
+// 10 int32/uint32 = 40 bytes.
+struct ImageDefinition_v29 {
+    std::uint32_t nameIndex;
+    std::int32_t  assemblyIndex;
+    std::int32_t  typeStart;            // first TypeDefinition index belonging to this image
+    std::uint32_t typeCount;
+    std::int32_t  exportedTypeStart;
+    std::uint32_t exportedTypeCount;
+    std::int32_t  entryPointIndex;
+    std::uint32_t token;
+    std::int32_t  customAttributeStart;
+    std::uint32_t customAttributeCount;
+};
+
 // ParameterDefinition — same v24.0-only customAttributeIndex story.
 //   v24.0: 16 bytes (with customAttributeIndex)
 //   v24.1 through v37: 12 bytes (uint nameIndex + uint token + int typeIndex)
@@ -558,7 +595,7 @@ inline int GetIndexSize(std::int64_t count) noexcept {
 static_assert(sizeof(HeaderPrefix)            == 32,  "HeaderPrefix must be 32 bytes");
 static_assert(sizeof(StringLiteralEntry)      == 8,   "StringLiteralEntry must be 8 bytes");
 static_assert(sizeof(StringLiteralEntry_v35)  == 4,   "StringLiteralEntry_v35 must be 4 bytes");
-static_assert(sizeof(HeaderV29)               == 168, "HeaderV29 must be 168 bytes");
+static_assert(sizeof(HeaderV29)               == 184, "HeaderV29 must be 184 bytes (Phase D-5: imagesOffset/Size + assembliesOffset/Size added after typeDefinitions)");
 static_assert(sizeof(TypeDefinition_v29)      == 88,  "TypeDefinition_v29 must be 88 bytes");
 static_assert(sizeof(TypeDefinition_v24)      == 92,  "TypeDefinition_v24 (v24.2-v24.5) must be 92 bytes");
 static_assert(sizeof(TypeDefinition_v24_1)    == 100, "TypeDefinition_v24_1 must be 100 bytes (v24 + rgctx pair)");
@@ -570,6 +607,7 @@ static_assert(sizeof(MethodDefinition_v24_1)  == 52,  "MethodDefinition_v24_1 mu
 static_assert(sizeof(MethodDefinition_v24_0)  == 56,  "MethodDefinition_v24_0 must be 56 bytes (v24.1 + customAttributeIndex)");
 static_assert(sizeof(ParameterDefinition_v29) == 12,  "ParameterDefinition_v29 must be 12 bytes");
 static_assert(sizeof(ParameterDefinition_v24_0) == 16, "ParameterDefinition_v24_0 must be 16 bytes (v29 + customAttributeIndex)");
+static_assert(sizeof(ImageDefinition_v29)     == 40,  "ImageDefinition_v29 must be 40 bytes");
 static_assert(sizeof(TypeDefinition_v31)      == 88,  "TypeDefinition_v31 must be 88 bytes (== v29)");
 static_assert(sizeof(TypeDefinition_v35)      == 84,  "TypeDefinition_v35 must be 84 bytes (v29 minus elementTypeIndex)");
 static_assert(sizeof(FieldDefinition_v29)     == 12,  "FieldDefinition_v29 must be 12 bytes");

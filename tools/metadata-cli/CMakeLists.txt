@@ -9,6 +9,7 @@ add_executable(metadata-cli
     PEParser.cpp
     RegistrationFinder.cpp
     CodeGenModulesFinder.cpp
+    SymbolPipeline.cpp
     ../../dll/src/il2cpp/MetadataParser.cpp
     ../../dll/src/shared/Logger.cpp
 )
