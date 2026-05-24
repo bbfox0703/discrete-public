@@ -24,7 +24,24 @@ available.
 **Phase 20 (Scene/GameObject explorer)** is the agreed follow-up per
 [[project-phase-20-22-roadmap]] — picks up after Phase 28 live-smoke
 clears. Phase 20-MT main-thread marshaling already shipped earlier
-(build #408); 20b (UI tab) was the remaining piece.
+(build #408); 20a/b/c/d are also ✅ shipped. **One open issue
+recorded** as Phase 20e in [plan.md](plan.md): Scene tab fails on
+legacy-Unity Mono with `Type.GetType("UnityEngine.GameObject,
+UnityEngine.CoreModule")` returning null — needs the monolithic
+`UnityEngine.dll` fallback that Symbol Finder already has. Reported
+2026-05-24 on 活俠傳 (Unity 2020.3.49f1 / Mono / x86); fix is
+strictly UI-side (`SceneEnumerator.ResolveGameObjectTypeAsync` should
+probe `[CoreModule, monolithic]` in order). <½ day.
+
+**Phase 28 live-smoke COMPLETE** (build #523, 2026-05-24):
+* 活俠傳 (Mono x86 / Unity 2020.3) — `Mortal.Core.GameStat._value`
+  → 15 exact matches: `get_Value` / `get_FinalValue` (reads) +
+  `Reset` / `SetValue` (5 calls, 3 reads + 2 writes) /
+  `AddValue` (3 calls, 2 reads + 1 write). Cross-checked semantically
+  — matches dnSpy IL view shape.
+* SaGa F2R (IL2CPP v29 / Unity 2021.3) — instance fields cleanly
+  surface "not supported in v1" error (28c deferred per scope
+  decision). Static-field path TODO to live-verify.
 
 (Earlier session content below — Phase 27 + READMEs + minor open
 issues kept for context.)

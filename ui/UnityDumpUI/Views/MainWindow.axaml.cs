@@ -817,11 +817,25 @@ public partial class MainWindow : Window
         // Prefer the field's DeclaredIn class — inherited fields belong on
         // the parent class, not the target. Fall back to the inspector's
         // TargetClass when DeclaredIn is empty (synthetic / array-slot rows).
+        //
+        // Caveat: walkInstance's `from` field returns `res.info.self.name`
+        // (the SIMPLE class name, without namespace) — so a field declared
+        // on `Mortal.Core.GameStat` shows DeclaredIn=`"GameStat"`, not the
+        // FQN. When ParseClassFqn finds no namespace dot we fall back to
+        // the inspector's TargetNamespace; this is correct for the common
+        // case (field declared on target class or on a parent in the same
+        // namespace) and surfaces a clean "class not found" error for the
+        // cross-namespace inheritance edge case (e.g. UnityEngine.MonoBehaviour
+        // parent in Assembly-CSharp inspector) which is v1-out-of-scope.
         string declaredIn = node.DeclaredIn ?? string.Empty;
         string ns; string clsName;
         if (!string.IsNullOrEmpty(declaredIn))
         {
             (ns, clsName) = ParseClassFqn(declaredIn);
+            if (string.IsNullOrEmpty(ns))
+            {
+                ns = inspector.TargetNamespace ?? string.Empty;
+            }
         }
         else
         {

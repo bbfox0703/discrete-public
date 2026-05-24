@@ -881,6 +881,37 @@ Out (v2 candidates):
 Estimated effort: ~½–1 day total. No DLL changes. No new wire
 commands.
 
+### Open issues / follow-ups
+
+- [ ] **20e** — *Scene tab fails on legacy-Unity Mono 32-bit.* Reported
+  2026-05-24 on 活俠傳 (Legend of Mortal, Unity 2020.3.49f1 / Mono /
+  x86). Scene tab shows: `Type.GetType("UnityEngine.GameObject,
+  UnityEngine.CoreModule") returned null. Probably mscorlib not loaded
+  yet or Unity hasn't initialised its assemblies.`
+  
+  **Root cause** (probable): [`SceneEnumerator.cs:42`](../ui/UnityDumpUI.Core/Services/SceneEnumerator.cs)
+  hardcodes the post-Unity-5.4 module-split FQN
+  `"UnityEngine.GameObject, UnityEngine.CoreModule"`. Some legacy
+  Mono builds (older Unity or 32-bit-specific builds) ship a
+  monolithic `UnityEngine.dll` instead, where `Type.GetType` only
+  resolves under the bare `"UnityEngine.GameObject, UnityEngine"`
+  form. Symbol Finder already handles this monolithic-fallback path —
+  Scene tab needs the symmetric fix.
+  
+  **Proposed fix**: in `ResolveGameObjectTypeAsync`, try a list of
+  candidate FQNs in order:
+  1. `"UnityEngine.GameObject, UnityEngine.CoreModule"` (Unity 5.4+
+     module split — current behaviour)
+  2. `"UnityEngine.GameObject, UnityEngine"` (Unity 5.3- / legacy
+     monolithic)
+  Return the first non-null + non-`0x0` address. Cache the survivor
+  per pipe lifetime so subsequent calls don't re-probe.
+  
+  Same pattern applies to any other type the Scene enumerator
+  resolves through `Type.GetType` if added later.
+  
+  **Effort**: <½ day. Strictly UI-side change, no DLL touch.
+
 ---
 
 ## Phase 21 — Inspector field write-back
