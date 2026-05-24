@@ -79,14 +79,31 @@ int CmdInfo(const std::wstring& path) {
     // to the strings-only path with a stderr note.
     std::uint32_t typeCount = p.TypeDefinitionCount();
     bool typeTablesParsed = typeCount > 0;
-    std::printf("{\"version\":%d,\"loaded\":true,"
-                "\"type_tables_parsed\":%s,"
-                "\"type_definition_count\":%u,"
-                "\"string_literal_count\":%u}\n",
-                p.version(),
-                typeTablesParsed ? "true" : "false",
-                typeCount,
-                p.StringLiteralCount());
+    std::string v24Label = p.v24SubVersionLabel();
+    // For v24 metadata only, emit a "v24_sub_version" field so consumers
+    // can tell apart Unity-2018-era v24.0 / v24.1 (with extra deprecated
+    // struct fields) from the standard 92-byte v24.2-v24.5. Auto-detected
+    // by Parser::DetectV24Variant() at load time.
+    if (!v24Label.empty()) {
+        std::printf("{\"version\":%d,\"v24_sub_version\":\"%s\","
+                    "\"loaded\":true,"
+                    "\"type_tables_parsed\":%s,"
+                    "\"type_definition_count\":%u,"
+                    "\"string_literal_count\":%u}\n",
+                    p.version(), v24Label.c_str(),
+                    typeTablesParsed ? "true" : "false",
+                    typeCount,
+                    p.StringLiteralCount());
+    } else {
+        std::printf("{\"version\":%d,\"loaded\":true,"
+                    "\"type_tables_parsed\":%s,"
+                    "\"type_definition_count\":%u,"
+                    "\"string_literal_count\":%u}\n",
+                    p.version(),
+                    typeTablesParsed ? "true" : "false",
+                    typeCount,
+                    p.StringLiteralCount());
+    }
     if (!typeTablesParsed) {
         // Two reasons this fires:
         //   1. Version dispatch doesn't ship a TypeDefinition layout (e.g.

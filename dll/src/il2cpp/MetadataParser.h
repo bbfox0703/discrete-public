@@ -22,6 +22,14 @@ public:
     bool         loaded() const noexcept  { return loaded_; }
     std::int32_t version() const noexcept { return version_; }
 
+    // For v24 metadata, returns the auto-detected sub-version label
+    // ("v24.0" / "v24.1" / "v24" for v24.2-v24.5). Empty string
+    // otherwise. Useful for logs / CLI diagnostics — Unity dropped
+    // fields from Il2CppTypeDefinition over the 2018.x release cycle
+    // without bumping the metadata version number, and the parser
+    // probes the right stride at load time.
+    std::string v24SubVersionLabel() const;
+
     std::uint32_t StringLiteralCount() const noexcept;
 
     // Returns the i-th string literal, or std::nullopt on invalid index /
@@ -116,6 +124,23 @@ private:
     // but token drifts — so checking token guarantees alignment. Returns
     // true when the row looks sane, false when the stride is mis-matched.
     bool ValidateTypeTable();
+
+    // v24 has 3 distinct strides (92 / 100 / 104 — see MetadataLayout.h
+    // §TypeDefinition_v24*). Called from LoadTables() for v24 only;
+    // probes which candidate stride lands TypeDef[0].token at the CLR
+    // canonical 0x02000001, and latches the matching variant. If none
+    // match (encrypted metadata, brand new sub-version) the variant
+    // stays at v24.5 and ValidateTypeTable() will demote to strings-only.
+    void DetectV24Variant();
+
+    // Which v24 TypeDefinition layout to use. Latched by DetectV24Variant()
+    // at load time. Defaults to v24.2-v24.5 (the most common shape).
+    enum class V24Variant {
+        V24_2_THROUGH_5 = 0,  // 92-byte stride; current TypeDefinition_v24
+        V24_1,                // 100-byte stride; adds rgctxStart/rgctxCount
+        V24_0,                // 104-byte stride; adds customAttributeIndex too
+    };
+    V24Variant v24Variant_ = V24Variant::V24_2_THROUGH_5;
 
     // Returns sizeof(TypeDefinition) for the loaded metadata version.
     // For v38+ this is computed from the runtime-variable index sizes
