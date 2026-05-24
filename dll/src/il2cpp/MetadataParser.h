@@ -108,6 +108,15 @@ private:
     bool LoadHeader();
     bool LoadTables();
 
+    // Post-LoadTables() sanity check: the first TypeDefinition in any
+    // well-formed IL2CPP metadata is `<Module>` with IL token 0x02000001.
+    // If our version dispatch picked the wrong stride (e.g. a Unity-2018.1
+    // v24 build whose TypeDefinition layout differs from the 2019.x v24
+    // we calibrated against), the name happens to still land at offset 0
+    // but token drifts — so checking token guarantees alignment. Returns
+    // true when the row looks sane, false when the stride is mis-matched.
+    bool ValidateTypeTable();
+
     // Returns sizeof(TypeDefinition) for the loaded metadata version.
     // For v38+ this is computed from the runtime-variable index sizes
     // (typeIndexSize, genericContainerIndexSize); for v24-v37 it's a fixed

@@ -78,10 +78,21 @@ bool Parser::LoadFromPath(const std::wstring& path) {
         data_.clear();
         return false;
     }
+    // Mark `loaded_` early so GetHeapString() (called transitively by
+    // ValidateTypeTable below) doesn't short-circuit on its own
+    // `!loaded_` guard. Set back to false on the failure paths.
+    loaded_ = true;
     // Phase 14c: load TypeDefinition / Fields / FieldDefaults tables for
     // v24 / v29 / v31. v27 still falls through to the strings-only path.
     if (TypeDefSizeof() != 0) {
         tablesLoaded_ = LoadTables();
+        if (tablesLoaded_ && !ValidateTypeTable()) {
+            // Stride-mismatch detected (e.g. Unity 2018.1 v24 metadata —
+            // the layout dispatcher only covers Unity 2019.x v24). Demote
+            // to strings-only so callers don't consume silently-corrupt
+            // type rows. loaded_ stays true; string-literal queries work.
+            tablesLoaded_ = false;
+        }
     }
 
     char line[320];
@@ -93,7 +104,6 @@ bool Parser::LoadFromPath(const std::wstring& path) {
         typeDefinitionsSize_, fieldsSize_, fieldDefaultsSize_,
         tablesLoaded_ ? "yes" : "no");
     UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
-    loaded_ = true;
     return true;
 }
 
@@ -233,6 +243,46 @@ bool Parser::LoadTables() {
         return false;
     }
     return true;
+}
+
+bool Parser::ValidateTypeTable() {
+    // The first TypeDefinition in every IL2CPP assembly is `<Module>` and
+    // its IL token is always 0x02000001 (TypeDef table, rid=1). Both the
+    // name and the token must match — checking just the name isn't enough
+    // because nameIndex sits at offset 0 of the row and survives stride
+    // drift, but token sits at the row tail so it tips over the moment
+    // the stride is wrong. See R-Type Dimensions (Unity 2018.1.9, v24)
+    // — the layout we ship is calibrated for Unity 2019.x v24 and parses
+    // the 2018.1 file with a wrong stride: name still reads `<Module>`
+    // but token reads 0 and every subsequent row's namespace string
+    // points into mid-word offsets in the string heap.
+    if (TypeDefinitionCount() == 0) {
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+            "MetadataParser: ValidateTypeTable — table is empty, nothing to validate");
+        return false;
+    }
+    auto first = GetTypeDefinition(0);
+    if (!first) {
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+            "MetadataParser: ValidateTypeTable — could not read TypeDef[0]");
+        return false;
+    }
+    constexpr std::uint32_t kModuleToken = 0x02000001u;
+    bool nameOk  = (first->name == "<Module>");
+    bool tokenOk = (first->token == kModuleToken);
+    if (nameOk && tokenOk) return true;
+
+    char line[320];
+    ::_snprintf_s(line, sizeof(line), _TRUNCATE,
+        "MetadataParser: ValidateTypeTable FAILED for v%d — TypeDef[0] "
+        "name='%s' token=0x%08X (expected '<Module>' / 0x02000001). "
+        "Layout dispatcher likely picked a stride that doesn't match this "
+        "Unity build's metadata variant; demoting to strings-only.",
+        version_,
+        first->name.empty() ? "(empty)" : first->name.c_str(),
+        first->token);
+    UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+    return false;
 }
 
 bool Parser::LoadHeader() {

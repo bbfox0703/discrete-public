@@ -88,9 +88,23 @@ int CmdInfo(const std::wstring& path) {
                 typeCount,
                 p.StringLiteralCount());
     if (!typeTablesParsed) {
+        // Two reasons this fires:
+        //   1. Version dispatch doesn't ship a TypeDefinition layout (e.g.
+        //      a brand new version > 39, or v16-v23 / v25-v26 / v28 /
+        //      v30 — string heap still parses).
+        //   2. Layout *was* dispatched but ValidateTypeTable() rejected
+        //      the table because TypeDef[0] failed the `<Module>` /
+        //      token=0x02000001 invariant. Surfaces Unity-build-specific
+        //      variants like Unity 2018.1's v24, whose stride differs
+        //      from the 2019.x v24 our layout is calibrated against.
+        // The DLL log records which case; from the CLI just point users
+        // at the log for the per-version detail.
         std::fprintf(stderr,
-            "metadata-cli: note — version %d type tables not parsed (v24, v27, "
-            "v29, v31 supported today). String-literal queries still work.\n",
+            "metadata-cli: note — version %d type tables not parsed. Either "
+            "the version has no TypeDefinition layout shipped, or the table "
+            "failed the TypeDef[0]='<Module>'/token=0x02000001 sanity check "
+            "(layout-stride mismatch — see MetadataParser log). String-literal "
+            "queries still work.\n",
             p.version());
     }
     return 0;
