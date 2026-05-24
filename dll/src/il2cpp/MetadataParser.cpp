@@ -270,6 +270,8 @@ bool Parser::LoadTables() {
         parametersSize_         = static_cast<std::int32_t>(h.parameters.size);
         imagesOffset_           = static_cast<std::int32_t>(h.images.offset);
         imagesSize_             = static_cast<std::int32_t>(h.images.size);
+        nestedTypesOffset_      = static_cast<std::int32_t>(h.nestedTypes.offset);
+        nestedTypesSize_        = static_cast<std::int32_t>(h.nestedTypes.size);
 
         parametersCount_ = static_cast<std::int64_t>(h.parameters.count);
 
@@ -329,6 +331,13 @@ bool Parser::LoadTables() {
         parametersSize_         = h.parametersSize;
         // imagesOffset_ / imagesSize_ are deferred — see "Phase D-5.1
         // images deferred read" block after DetectV24Variant() below.
+        // nestedTypesOffset_ / nestedTypesSize_ live BEFORE images in
+        // the flat header (line 101-102 of HeaderV29), at file offset
+        // 0x90 which is the same across all v24.2-v37 layouts. Safe to
+        // read regardless of v24 sub-variant since the offset doesn't
+        // depend on rgctx-gap presence.
+        nestedTypesOffset_ = h.nestedTypesOffset;
+        nestedTypesSize_   = h.nestedTypesSize;
     }
 
     if (!inBounds(typeDefinitionsOffset_,  typeDefinitionsSize_)  ||
@@ -664,14 +673,15 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         // methodStart/counts/flags/token, and those names match across
         // the structs).
         auto project = [&](auto&& td) {
-            v.ns          = GetHeapString(td.namespaceIndex);
-            v.name        = GetHeapString(td.nameIndex);
-            v.fieldStart  = td.fieldStart;
-            v.fieldCount  = td.field_count;
-            v.methodStart = td.methodStart;
-            v.methodCount = td.method_count;
-            v.flags       = td.flags;
-            v.token       = td.token;
+            v.ns                  = GetHeapString(td.namespaceIndex);
+            v.name                = GetHeapString(td.nameIndex);
+            v.declaringTypeIndex  = td.declaringTypeIndex;
+            v.fieldStart          = td.fieldStart;
+            v.fieldCount          = td.field_count;
+            v.methodStart         = td.methodStart;
+            v.methodCount         = td.method_count;
+            v.flags               = td.flags;
+            v.token               = td.token;
         };
         if (v24Variant_ == V24Variant::V24_0) {
             TypeDefinition_v24_0 td{};
@@ -691,14 +701,15 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         // 84-byte stride; field offsets after parentIndex shift -4 bytes.
         TypeDefinition_v35 td{};
         std::memcpy(&td, row, sizeof(td));
-        v.ns          = GetHeapString(td.namespaceIndex);
-        v.name        = GetHeapString(td.nameIndex);
-        v.fieldStart  = td.fieldStart;
-        v.fieldCount  = td.field_count;
-        v.methodStart = td.methodStart;
-        v.methodCount = td.method_count;
-        v.flags       = td.flags;
-        v.token       = td.token;
+        v.ns                 = GetHeapString(td.namespaceIndex);
+        v.name               = GetHeapString(td.nameIndex);
+        v.declaringTypeIndex = td.declaringTypeIndex;
+        v.fieldStart         = td.fieldStart;
+        v.fieldCount         = td.field_count;
+        v.methodStart        = td.methodStart;
+        v.methodCount        = td.method_count;
+        v.flags              = td.flags;
+        v.token              = td.token;
     } else if (version_ >= 38) {
         // v38+: variable-width metadata-index plumbing. Hand-walk the row
         // since the stride depends on runtime-computed sizes. Layout per
@@ -744,6 +755,22 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         std::uint32_t token         = 0;
         std::memcpy(&nameIndex,      row + 0, 4);
         std::memcpy(&namespaceIndex, row + 4, 4);
+        // v0.2 — declaringTypeIndex is the 2nd TypeIndex in the
+        // varBlock: byvalTypeIndex (TIS), declaringTypeIndex (TIS),
+        // parentIndex (TIS), genericContainerIndex (GCIS).
+        std::int32_t declaringTypeIndex = -1;
+        {
+            std::uint32_t raw = 0;
+            std::memcpy(&raw, row + fixedPrefix + TIS, TIS);
+            // Sign-extend if TIS < 4. v38+ uses unsigned indices in the
+            // wire format; -1 sentinel for "no declaring type" is the
+            // all-ones value of that width.
+            std::uint32_t maxByWidth =
+                (TIS >= 4) ? 0xFFFFFFFFu
+                           : ((1u << (TIS * 8)) - 1u);
+            declaringTypeIndex = (raw == maxByWidth)
+                ? -1 : static_cast<std::int32_t>(raw);
+        }
         std::memcpy(&flags,          row + fixedPrefix + varBlock + 0, 4);
         std::memcpy(&fieldStart,     row + fixedPrefix + varBlock + 4, 4);
         std::memcpy(&methodStart,    row + fixedPrefix + varBlock + 8, 4);
@@ -754,14 +781,15 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         // Then uint bitfield (+52), uint token (+56). Total stride = +60.
         std::memcpy(&token,          row + fixedPrefix + varBlock + 56,      4);
 
-        v.ns          = GetHeapString(namespaceIndex);
-        v.name        = GetHeapString(nameIndex);
-        v.fieldStart  = fieldStart;
-        v.fieldCount  = field_count;
-        v.methodStart = methodStart;
-        v.methodCount = method_count;
-        v.flags       = flags;
-        v.token       = token;
+        v.ns                 = GetHeapString(namespaceIndex);
+        v.name               = GetHeapString(nameIndex);
+        v.declaringTypeIndex = declaringTypeIndex;
+        v.fieldStart         = fieldStart;
+        v.fieldCount         = field_count;
+        v.methodStart        = methodStart;
+        v.methodCount        = method_count;
+        v.flags              = flags;
+        v.token              = token;
     } else {
         // v27 / v29 / v31 / v32-v34: same 88-byte TypeDefinition layout —
         // confirmed empirically against SaGa F2R / Farthest Frontier /
@@ -769,14 +797,15 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         // the canonical 0x02000003 token at row 2 offset 84 with stride 88.
         TypeDefinition_v29 td{};
         std::memcpy(&td, row, sizeof(td));
-        v.ns          = GetHeapString(td.namespaceIndex);
-        v.name        = GetHeapString(td.nameIndex);
-        v.fieldStart  = td.fieldStart;
-        v.fieldCount  = td.field_count;
-        v.methodStart = td.methodStart;
-        v.methodCount = td.method_count;
-        v.flags       = td.flags;
-        v.token       = td.token;
+        v.ns                 = GetHeapString(td.namespaceIndex);
+        v.name               = GetHeapString(td.nameIndex);
+        v.declaringTypeIndex = td.declaringTypeIndex;
+        v.fieldStart         = td.fieldStart;
+        v.fieldCount         = td.field_count;
+        v.methodStart        = td.methodStart;
+        v.methodCount        = td.method_count;
+        v.flags              = td.flags;
+        v.token              = td.token;
     }
     return v;
 }
@@ -1143,6 +1172,76 @@ Parser::FindImageContainingMethod(std::int32_t globalMethodIdx) const {
         }
     }
     return std::nullopt;
+}
+
+std::int32_t Parser::GetDeclaringTypeIndex(std::int32_t typeDefIdx) const {
+    if (!tablesLoaded_) return -1;
+    std::uint32_t total = TypeDefinitionCount();
+    if (typeDefIdx < 0 || static_cast<std::uint32_t>(typeDefIdx) >= total) return -1;
+
+    // Lazy-build child→parent map on first call. The map is sized to
+    // TypeDefinitionCount and initialised to -1. We then iterate every
+    // TypeDef T, read its nested_type_count + nestedTypesStart, walk
+    // the global nestedTypeIndices[] table for that range, and for each
+    // child index set declaringTypeMap_[child] = T's index.
+    if (!declaringTypeMapBuilt_) {
+        declaringTypeMap_.assign(total, -1);
+        declaringTypeMapBuilt_ = true;  // mark built BEFORE the loop so
+                                        // any reentrant calls (shouldn't
+                                        // happen, but defensive) hit the
+                                        // partially-built map cleanly.
+
+        if (nestedTypesOffset_ > 0 && nestedTypesSize_ > 0 &&
+            static_cast<std::uint64_t>(nestedTypesOffset_) +
+                static_cast<std::uint64_t>(nestedTypesSize_) <= data_.size()) {
+            std::uint32_t nestedCount = static_cast<std::uint32_t>(nestedTypesSize_) / 4u;
+            const std::uint8_t* nestedBase = data_.data() + nestedTypesOffset_;
+            for (std::uint32_t pi = 0; pi < total; ++pi) {
+                auto parent = GetTypeDefinition(static_cast<std::int32_t>(pi));
+                if (!parent) continue;
+                // nested_type_count is read via TypeDefView indirectly —
+                // we need the raw struct value. Re-read from the row.
+                // For simplicity, we use GetTypeDefinition's projection
+                // which doesn't expose nested_type_count. So we read it
+                // out of the raw bytes here.
+                std::size_t sz = TypeDefSizeof();
+                if (sz == 0) continue;
+                const std::uint8_t* row = data_.data() + typeDefinitionsOffset_ +
+                                          static_cast<std::size_t>(pi) * sz;
+                std::int32_t  nestedStart = 0;
+                std::uint16_t nestedCt    = 0;
+                // Find the correct offsets per version. The ushort
+                // counts block sits at a known offset from the end of
+                // the row: bitfield(4) + token(4) = 8 bytes from end,
+                // then 8 ushorts (16 bytes) before that. nested_type_
+                // count is the 5th ushort (index 4), so at
+                // row_end - 8 - 16 + 4*2 = row_end - 16.
+                // nestedTypesStart is the 5th *Start int (index 4) in
+                // the 8-int *Start block which sits at row_end - 24 - 32:
+                // bitfield(4) + token(4) + 8*ushort(16) + 8*int(32) = 56
+                // bytes from row_end. nested_types_start is at
+                // row_end - 56 + 4*4 = row_end - 40.
+                std::size_t rowEnd = sz;
+                // Defensive bounds.
+                if (rowEnd < 56) continue;
+                std::memcpy(&nestedStart, row + rowEnd - 40, 4);
+                std::memcpy(&nestedCt,    row + rowEnd - 16, 2);
+                if (nestedCt == 0 || nestedStart < 0) continue;
+                std::uint32_t end = static_cast<std::uint32_t>(nestedStart) + nestedCt;
+                if (end > nestedCount) continue;
+                for (std::uint32_t k = nestedStart;
+                     k < end; ++k) {
+                    std::int32_t child = 0;
+                    std::memcpy(&child, nestedBase + k * 4, 4);
+                    if (child >= 0 && static_cast<std::uint32_t>(child) < total) {
+                        declaringTypeMap_[static_cast<std::size_t>(child)] =
+                            static_cast<std::int32_t>(pi);
+                    }
+                }
+            }
+        }
+    }
+    return declaringTypeMap_[static_cast<std::size_t>(typeDefIdx)];
 }
 
 std::optional<std::string> Parser::TryDecodeStringDefault(std::int32_t dataIndex) const {

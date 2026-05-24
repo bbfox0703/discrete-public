@@ -49,6 +49,11 @@ public:
         std::int32_t  index;        // global TypeDefinition index
         std::string   ns;
         std::string   name;
+        // v0.2 — declaringTypeIndex (-1 for top-level types). Used
+        // offline to walk the nested-type chain so labels carry the
+        // full `Outer/Inner/Leaf` shape (matches the live UI's
+        // il2cpp_class_get_declaring_type walk in IL2CPPClassWalker).
+        std::int32_t  declaringTypeIndex = -1;
         std::int32_t  fieldStart   = 0;
         std::uint16_t fieldCount   = 0;
         std::int32_t  methodStart  = 0;
@@ -137,6 +142,19 @@ public:
     // std::nullopt on miss (method belongs to no image, or images
     // table not loaded).
     std::optional<ImageDefView> FindImageContainingMethod(std::int32_t globalMethodIdx) const;
+
+    // Phase D v0.2.2 — child→parent TypeDefinition map for nested types.
+    // The on-disk `declaringTypeIndex` field is actually a TypeIndex
+    // (points into the runtime types[] table which lives in the binary,
+    // not metadata.dat), so we can't follow it offline directly. Instead
+    // we walk metadata's `nestedTypeIndices[]` table — the parent→child
+    // direction is fully expressible in metadata. Build that map once
+    // and look up the parent of a given child cheaply.
+    //
+    // Returns -1 when the type is top-level OR when the nestedTypes
+    // table hasn't been populated (only available for v24.2+ via the
+    // same gating as the Image table).
+    std::int32_t GetDeclaringTypeIndex(std::int32_t typeDefIdx) const;
 
     // Linear search by namespace + name. Returns the first match or nullopt.
     std::optional<TypeDefView> FindTypeByName(const std::string& ns, const std::string& name) const;
@@ -270,6 +288,19 @@ private:
     // v38+ (section header).
     std::int32_t imagesOffset_           = 0;
     std::int32_t imagesSize_             = 0;
+
+    // Phase D v0.2.2: nestedTypeIndices[] table — flat array of int32
+    // TypeDefinitionIndex values. Each TypeDef carries nestedTypesStart
+    // + nested_type_count pointing into this table; the entries are the
+    // global TypeDef indices of the children. Same gating as images
+    // (deferred for v24.0/v24.1).
+    std::int32_t nestedTypesOffset_      = 0;
+    std::int32_t nestedTypesSize_        = 0;
+
+    // Lazy-built child→parent map. -1 entries mean "top-level or not
+    // yet built". Mutable so const accessors can populate it on demand.
+    mutable std::vector<std::int32_t> declaringTypeMap_;
+    mutable bool                       declaringTypeMapBuilt_ = false;
 
     // For v38+ derive the variable-width metadata-index sizes at load time
     // from each table's row count (and the parameter row's TIS-inferred

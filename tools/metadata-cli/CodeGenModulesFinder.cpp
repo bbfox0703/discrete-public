@@ -102,13 +102,22 @@ std::optional<Module> ProbeCodeGenModule(
         return std::nullopt;
     }
 
-    // methodCount sanity.
-    if (methodCount == 0 || methodCount >= kMaxMethodCount) return std::nullopt;
+    // methodCount sanity. v0.2: allow methodCount == 0 — real assemblies
+    // (e.g. interface-only DLLs, attribute-only DLLs, some Unity bridge
+    // assemblies) legitimately have zero AOT methods, and rejecting
+    // those was terminating the codeGenModules run early.
+    if (methodCount >= kMaxMethodCount) return std::nullopt;
 
-    // methodPointers VA must translate cleanly and start non-null.
-    if (methodPtrsVa == 0 || (methodPtrsVa & 7ull) != 0) return std::nullopt;
-    auto methodPtrsFileOff = VaToFileOffset(img, methodPtrsVa);
-    if (!methodPtrsFileOff) return std::nullopt;
+    // methodPointers VA must translate cleanly. v0.2: when methodCount
+    // is 0, methodPtrsVa is allowed to be null (no array to point at).
+    if (methodCount > 0) {
+        if (methodPtrsVa == 0 || (methodPtrsVa & 7ull) != 0) return std::nullopt;
+        auto methodPtrsFileOff = VaToFileOffset(img, methodPtrsVa);
+        if (!methodPtrsFileOff) return std::nullopt;
+    } else if (methodPtrsVa != 0 && (methodPtrsVa & 7ull) != 0) {
+        // methodCount==0 but a non-null mis-aligned ptr ⇒ not a real module.
+        return std::nullopt;
+    }
 
     Module m;
     m.name              = std::move(name);
@@ -179,19 +188,53 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
             auto firstModule = ProbeCodeGenModule(bytes, size, img, firstPtr);
             if (!firstModule) continue;
 
-            // Extend the run.
+            // Extend the run. v0.2 fix: allow nulls within the run.
+            // Real codeGenModules arrays carry null entries for assemblies
+            // with no AOT methods (mscorlib / UnityEngine.* / similar). The
+            // v0.1 scanner stopped at the first null and missed 10-65% of
+            // entries per game (87/253 on Songs of Silence). Keep extending
+            // through any number of nulls; stop only when we hit a non-null
+            // pointer that does NOT probe as a codeGenModule (= we've fallen
+            // off the array end into something else in .data). Cap of 64
+            // consecutive nulls as a safety net against runs that disappear
+            // into a BSS region.
             std::vector<Module> run;
+            std::vector<std::size_t> nullIndices;  // run-positions where we inserted a sentinel
             run.push_back(*firstModule);
             std::uint64_t cursor = off + 8;
-            while (run.size() < maxModules && cursor + 8 <= endFileOff) {
+            std::size_t   consecutiveNulls = 0;
+            // v0.2.1: 64 was too restrictive for large games (Songs of
+            // Silence with 253 codeGenModules had clusters of null
+            // entries past the cap). 512 is a safer bound — the array
+            // can't be larger than that in practice because the
+            // codeGenModulesCount in CodeRegistration is also bounded
+            // by `maxModules` (default 1024).
+            constexpr std::size_t kMaxConsecutiveNulls = 512;
+            while (run.size() + nullIndices.size() < maxModules && cursor + 8 <= endFileOff) {
                 std::uint64_t nextPtr = 0;
                 if (!ReadAt(bytes, size, cursor, &nextPtr, 8)) break;
-                if (nextPtr == 0 || (nextPtr & 7ull) != 0) break;
+                if (nextPtr == 0) {
+                    if (++consecutiveNulls > kMaxConsecutiveNulls) break;
+                    // Record a sentinel entry so module-index → moduleName
+                    // mapping stays aligned with the on-disk array slot.
+                    nullIndices.push_back(run.size() + nullIndices.size());
+                    cursor += 8;
+                    continue;
+                }
+                if ((nextPtr & 7ull) != 0) break;  // mis-aligned ⇒ end of array
                 auto m = ProbeCodeGenModule(bytes, size, img, nextPtr);
                 if (!m) break;
                 run.push_back(*m);
+                consecutiveNulls = 0;
                 cursor += 8;
             }
+            // We don't keep the trailing nulls — only the entries up to
+            // the LAST non-null module count toward the run length. This
+            // avoids "fake" extension into the BSS gap after the array.
+            // The intermediate nulls (those followed by a real module
+            // later) ARE preserved as null slots in the per-image lookup
+            // by SymbolPipeline (which keys by name, so nulls just don't
+            // contribute names — correct).
 
             if (run.size() < minModules) {
                 // Skip past the failed run so we don't re-probe its members.
