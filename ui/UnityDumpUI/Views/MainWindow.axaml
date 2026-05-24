@@ -55,6 +55,10 @@
               <MenuItem Header="{StaticResource Tools.ExportSymbolsIda}"
                         Command="{Binding ExportSymbolsIdaCommand}"
                         ToolTip.Tip="{StaticResource Tools.ExportSymbolsTooltip}" />
+              <Separator/>
+              <MenuItem Header="{StaticResource Tools.ExportIl2cppHeader}"
+                        Command="{Binding ExportIl2cppHeaderCommand}"
+                        ToolTip.Tip="{StaticResource Tools.ExportIl2cppHeaderTooltip}" />
             </MenuFlyout>
           </Button.Flyout>
         </Button>

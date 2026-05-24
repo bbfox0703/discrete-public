@@ -199,6 +199,8 @@
   <sys:String x:Key="Tools.ExportSymbolsGhidra">Export Symbols → Ghidra (.txt)…</sys:String>
   <sys:String x:Key="Tools.ExportSymbolsIda">Export Symbols → IDA (.idc)…</sys:String>
   <sys:String x:Key="Tools.ExportSymbolsTooltip">IL2CPP only. Walks every user assembly (system / UnityEngine assemblies are filtered out) and emits one label per Il2CppClass* + one per AOT method entry point. Imports into x64dbg, Ghidra, or IDA against GameAssembly.dll.</sys:String>
+  <sys:String x:Key="Tools.ExportIl2cppHeader">Export il2cpp.h (whole game)…</sys:String>
+  <sys:String x:Key="Tools.ExportIl2cppHeaderTooltip">IL2CPP only. Walks every user assembly and emits one big C header (.h) with field layouts + offset comments for each class. Each class also gets a trailing comment block of method AOT addresses for the disassembler. Equivalent to Il2CppDumper's il2cpp.h, but with real method addresses inline (Il2CppDumper only emits RVAs in dump.cs). Can take several seconds on large games (Heroes / Songs of Silence: ~20-40s).</sys:String>
 
   <!-- Proxy Deploy window (Phase 12c, redesigned to UE5CEDumper-style
        multi-select bulk panel). -->
