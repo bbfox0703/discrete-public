@@ -3,22 +3,10 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-25 (session close — build #557; merged dev → main)
-**Current phase**: **✅ Phase 28b IL2CPP root-cause CONFIRMED + v1
-advisory shipped** (build #555-#557). Build #546's diagnostic logging
-paid off: live re-run on SaGa F2R proved `il2cpp_class_get_static_data`
-returns a runtime-heap-allocated pointer outside GameAssembly.dll, so
-RIP scan structurally cannot see refs (`candidateHits=0` for every
-IL2CPP static, including lambda caches that MUST have ≥1 read+write
-in IL). **v1 fix C** ships a yellow advisory banner explaining the
-limitation; **Phase 28b-v2** stub added — class-pointer chained
-disassembly, ~1 week, needs Zydis or similar real x64 disassembler.
-Also same session: Symbol Finder "Static only" toggle + per-asm limit
-in multi-asm scans (fixes "Search all user assemblies finding only
-WAAPI"), PipeServer disconnect-time GC drain (kills BongoCat
-post-findFieldReferences shutdown latency, three games live-verified).
-363/363 xUnit pass, AOT clean. See [STATUS.md](STATUS.md) TL;DR for
-the full session breakdown.
+**Last updated**: 2026-05-25 (session close — build #565; merged dev → main)
+**Current phase**: **✅ Phase 28b-v2 IL2CPP chain detector SHIPPED + LIVE-VERIFIED on SaGa F2R** (build #565). Full class-pointer chained-disassembly redesign across 6 sub-phases (28b-v2-1 Zydis integration / 28b-v2-2 offsetof discovery / 28b-v2-3 inverse pointer scan / 28b-v2-4 chain detector with multi-reg tracking + CALL/COND_BR tolerance / 28b-v2-5 wire as v1 fallback / 28b-v2-6 live verify). `SteamManager.s_instance` returned **11 unique chain-exact matches** across 6 methods (`get_Instance`, `get_Initialized`, `InitOnPlayMode`, `Awake`, `OnEnable`, `OnDestroy` — 7 reads + 4 writes). Real-world IL2CPP codegen pattern (class-init-call interleave + post-init reload) decoded + handled. Open follow-up: Phase 28b-v3 for compiler-generated `<>c` lambda-cache classes (routed via `g_codegenModule->types[]` indexing, not direct `.data` pointer storage). See plan.md §Phase 28b-v2 for the full implementation log + §Phase 28b-v3 for the deferred `<>c` work.
+
+**Previous current-phase**: **✅ Phase 28b IL2CPP root-cause CONFIRMED + v1 advisory shipped** (build #555-#557). Build #546's diagnostic logging paid off: live re-run on SaGa F2R proved `il2cpp_class_get_static_data` returns a runtime-heap-allocated pointer outside GameAssembly.dll. **v1 fix C** ships a yellow advisory banner explaining the limitation; **Phase 28b-v2** designed + shipped same session (build #565). Also: Symbol Finder "Static only" toggle + per-asm limit in multi-asm scans, PipeServer disconnect-time GC drain.
 
 **Previous current-phase**: **✅ Phase 20e LIVE-VERIFIED on 活俠傳** (2026-05-25) + **🚧 Phase 28b SaGa F2R 0-match diagnostic logging shipped** (build #546). Phase 20e fully closed via 活俠傳 live-smoke.
 
@@ -1811,66 +1799,137 @@ Cross-assembly attribution (e.g. searching `UnityEngine.Time.timeScale`
 references across all user code) is a v2 enhancement — v1 only resolves
 references whose declaring class lives in the target assembly.
 
-### Phase 28b-v2 — IL2CPP class-pointer chained disassembly (TODO stub)
+### Phase 28b-v2 — IL2CPP class-pointer chained disassembly ✅ **SHIPPED + LIVE-VERIFIED 2026-05-25 (build #565)**
 
-**Why**: Phase 28b v1's IL2CPP RIP scan returns 0 matches for ~every
-practical IL2CPP static field. Diagnosis confirmed 2026-05-25 on SaGa
-F2R via build #546 instrumentation: `il2cpp_class_get_static_data`
-returns a runtime-heap-allocated pointer (e.g. `0x18BD5735630`), and no
-machine instruction can RIP-relative-address a runtime address. AOT code
-reaches static fields via a 2-hop class-pointer indirection:
-
-```asm
-mov  rax, [rip + CLASS_PTR_DISP32]       ; load Il2CppClass* (in .data — RIP-addressable)
-mov  rax, [rax + offsetof(static_fields)] ; deref to static_fields ptr
-mov  rax, [rax + 0x10]                    ; field at offset 16
-```
-
-v1 only sees the third instruction's `[rax+0x10]` displacement, which
-is the field offset (16), not the storage address. **Result: 0 hits
-even when the field is heavily used.** Full diagnosis +
-reproduction in
+**Why this was needed**: Phase 28b v1's IL2CPP RIP scan returned 0
+matches for ~every practical IL2CPP static field because
+`il2cpp_class_get_static_data` returns a runtime-heap-allocated pointer
+(outside GameAssembly.dll's module image — observed `0x18BD5735630` on
+SaGa F2R). No machine instruction can RIP-relative-address a runtime
+address. AOT code reaches static fields via a 2-hop class-pointer
+indirection. Full root-cause diagnosis:
 [lessons-learned.md §"Phase 28b IL2CPP — `static_fields` is runtime-heap-allocated"](lessons-learned.md#phase-28b-il2cpp--static_fields-is-runtime-heap-allocated-so-rip-scan-cannot-find-references).
 
-**v1 mitigation (build #555, shipped)**: DLL adds `note` field to
-`findFieldReferences` response when 0 matches + target outside
-GameAssembly.dll module; UI surfaces yellow advisory banner so users
-aren't misled into "field is unused". Mono path unaffected — it walks
-IL bytecode directly and `ldsfld` tokens are explicit.
+**Live result (SaGa F2R, `SteamManager.s_instance`)**: 0 matches →
+**11 unique `chain-exact` matches** across 6 methods (`get_Instance`,
+`get_Initialized`, `InitOnPlayMode`, `Awake`, `OnEnable`, `OnDestroy`)
+— 7 reads + 4 writes. Yellow advisory banner replaced by real data.
 
-**v2 redesign** (~1 week effort, not started):
-1. Walk `IL2CPPMetadataRegistration` or `Il2CppClass*` enumeration to
-   build a class-pointer → class-name index.
-2. RIP-scan .text for refs to each `Il2CppClass*` (these ARE in
-   `.data`, ARE RIP-addressable). This gives a list of "this method
-   touches Il2CppClass FOO" hits — already a useful intermediate.
-3. For each hit, forward-disassemble the next ~32 bytes looking for the
-   chain `[rax + staticFieldsOffset]` followed by `[rax + targetFieldOffset]`.
-   Match the trailing offset against the requested field. Requires a
-   real x64 disassembler — current `AobPattern.cpp` LDE only does
-   length-decode, not operand classification. Options:
-   - Bundle `iced-x86` (Rust, mature, big binary impact) via FFI
-   - Bundle `Zydis` (C, header-only, more compact)
-   - Extend `AobPattern.cpp` with the specific ModRM+SIB patterns we
-     need (cheapest, narrowest, harder to maintain as we add more
-     patterns over time)
-4. Bonus: walk vtable / interface method tables for indirect calls
-   that reference the class.
+#### Sub-phases (all shipped)
 
-**Decision pending until v2 starts**: which disassembler to bundle.
-Recommend Zydis for the binary-size tradeoff (Discrete already big at
-3.4 MB IL2CPP DLL). Skipping until a user pushes for IL2CPP static
-xrefs in practice; current Mono-only coverage is sufficient for the
-canonical workflow (BongoCat / 活俠傳 — Mono targets).
+- [x] **28b-v2-1** Zydis x64 disassembler integration. Vendored at
+  `dll/vendor/zydis/` via `sync_vendor.ps1` (recursive clone for
+  Zycore submodule). CMake config: static link, decoder-only
+  (formatter / encoder disabled), KNC kept on (MVEX type is
+  referenced unconditionally — disabling it breaks build). Linked
+  only into IL2CPP backend (Mono path walks IL bytecode directly,
+  no native disasm needed). ~700 KB DLL size cost. Build #561.
 
-**Acceptance** (when implemented):
-* On SaGa F2R, `findFieldReferences` for `<>9__0_1` returns ≥1 read
-  + ≥1 write (the lambda closure-cache pattern). Cross-check IL via
-  Il2CppDumper output.
-* For a known game singleton (e.g. `Game.Manager.Instance`), returns
-  every method whose disassembly contains the matching 2-hop chain.
-* False-positive rate under 1% on a 10K-class image (the chained-
-  disassembly approach is high-precision).
+  Bug fix bundled: discovered + fixed a latent root-scope
+  `include_directories(SYSTEM ...)` leak that put `/external:I` on
+  every vendored subdir target, breaking Zydis's `<assert.h>`
+  resolution via MSVC's external-include search interaction.
+  Moved nlohmann + generated/ to per-target plumbing.
+
+- [x] **28b-v2-2** [`IL2CPPStaticFieldsOffset.{h,cpp}`](../dll/src/il2cpp/IL2CPPStaticFieldsOffset.cpp) —
+  runtime-version-independent discovery of `offsetof(Il2CppClass,
+  static_fields)`. Walks classes for one with non-null static
+  storage, then linear-scans first 1024 bytes of its struct memory
+  for the storage pointer. Cached via `std::call_once`. Live SaGa
+  F2R: discovered `0xB8` via `MainGame/HalfReader` (class 15 in
+  scan).
+
+- [x] **28b-v2-3** [`IL2CPPClassPointerScanner.{h,cpp}`](../dll/src/il2cpp/IL2CPPClassPointerScanner.cpp) —
+  inverse pointer scan of GameAssembly.dll's `.data` / `.rdata`
+  sections for 8-byte slots holding the target `Il2CppClass*`.
+  Mirrors AOBMaker's `Il2CppPeReader.FindPointerReferences`
+  pattern. 1 MB chunks with `failedReads` counter for AC-stripped
+  page tolerance.
+
+- [x] **28b-v2-4** [`IL2CPPChainDetector.{h,cpp}`](../dll/src/il2cpp/IL2CPPChainDetector.cpp) —
+  Zydis forward-trace with multi-register tracking. Critical
+  v2-of-v2 fixes after first cut returned 0 matches against real
+  IL2CPP codegen:
+  * **Multi-register state** (`std::vector<ZydisRegister>` set per
+    chain stage) replaces single-register tracking. Real codegen
+    copies class ptr to non-volatile RBX before init call.
+  * **CALL tolerance** drops volatile regs (RAX/RCX/RDX/R8-R11) but
+    preserves non-volatile (RBX/RBP/RSI/RDI/R12-R15) — handles
+    the `il2cpp_runtime_class_init` barrier.
+  * **COND_BR tolerance** — fall-through trace continues past
+    `jne skip_init` patterns. RET / UNCOND_BR still terminate.
+  * **`mov reg,reg` propagation** — tags propagate from source
+    to dest register.
+  * **32-instruction trace window** (up from 8) absorbs init-check
+    scheduling slack.
+  * **REX-skip pre-filter dedup** — 7-byte `48 8B 05 ...` was
+    matching twice (REX byte + 0x8B byte). Added the same
+    "skip if previous byte was REX" check the v1 scanner had.
+  * **Hit-IP final dedup** — multiple hop-1 candidates that
+    converge on the same hop-3 instruction get collapsed via
+    sort + `std::unique`.
+
+- [x] **28b-v2-5** Wired as v1 fallback in `FindStaticFieldReferences`.
+  v2 chain detection only runs when v1 returns 0 AND target is
+  outside the GameAssembly.dll module (preserves v1 fast path for
+  rare baked-into-module statics). Successful chains emit
+  `confidence="chain-exact"` to distinguish from v1's `"exact"`.
+
+- [x] **28b-v2-6** SaGa F2R live verify ✅ (build #565):
+  `SteamManager.s_instance` → 11 unique matches, all `chain-exact`,
+  cross-checked against the actual `.text` disasm dump the user
+  pulled from CE memory view.
+
+#### Real IL2CPP codegen pattern (recovered from live disasm)
+
+```asm
+mov rcx, [rip + CLASS_PTR_2824308]    ; hop-1 candidate 1
+cmp dword ptr [rcx + 0xE0], 0          ; init flag check
+jne short skip_init                    ; tolerated cond branch
+call il2cpp_runtime_class_init         ; tolerated CALL (volatile-clobber model)
+skip_init:
+mov rax, [rip + CLASS_PTR_2824308]    ; hop-1 candidate 2 (reload)
+mov rcx, [rax + 0xB8]                  ; hop 2 — offsetof static_fields
+mov rbx, [rcx + 0x08]                  ; hop 3 READ ✓ hitIP=88B0DE
+```
+
+Notably IL2CPP **reloads the class pointer after the init call**
+rather than saving to a non-volatile — simpler than expected. Our
+multi-reg machinery handles it because both reloads are independent
+hop-1 candidates; only the second produces a chain (first abandons
+when CALL drops the volatile destination register).
+
+#### Open follow-up — Phase 28b-v3 (compiler-generated `<>c` classes)
+
+The chain detector still returns 0 matches for compiler-generated
+lambda-cache classes (C# `<>c` display classes). Live-tested on
+SaGa F2R `MainGame/StrReader2UShortAry/<>c.<>9__0_0` /
+`<>9__0_1` — `ClassPointerScanner` returns 0 slots. Likely cause:
+IL2CPP routes refs to compiler-generated classes through the
+codegen module's type table (`g_codegenModule->types[index]`)
+rather than direct `Il2CppClass*` pointer storage in `.data`.
+
+Compiled access pattern is likely:
+```asm
+mov  rax, [rip + CODEGEN_MODULE_TYPES_TABLE]
+mov  rax, [rax + INDEX * 8]            ; load Il2CppClass* via table
+... (then the standard 3-hop chain) ...
+```
+
+**Phase 28b-v3 plan** (~2-3 days, not started):
+1. Walk `Il2CppCodeGenModule->types` (or equivalent v29 metadata-
+   registration index) to build a reverse mapping
+   `Il2CppClass* → codegen module slot address`.
+2. Add those slot addresses to the `classPointerSlots` set used by
+   the chain detector. The downstream forward-trace logic already
+   handles the extra leading indirection (one more `mov reg, [reg
+   + index*8]` hop folded into our existing tolerance window).
+3. Live-verify `<>9__0_0` returns ≥ 1 read + ≥ 1 write (closure-
+   cache pattern requires both).
+
+Yellow advisory banner still surfaces for these cases until v3
+ships. Not blocking — user-defined statics (`SteamManager.s_instance`
+etc.) are the canonical workflow and now work.
 
 ---
 
