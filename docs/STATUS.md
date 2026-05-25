@@ -1,8 +1,61 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-24 **session close** — build #527).
+**Branch**: `dev` (2026-05-25 **session close** — build #546).
 
 ## TL;DR — what's left to pick up
+
+**Phase 20e LIVE-VERIFIED on 活俠傳** (2026-05-25, PID 50236, Mono x86 /
+Unity 2020.3.49f1). User confirmed Scene tab now enumerates GameObjects
+end-to-end. Log location: `%LOCALAPPDATA%\Discrete_UEDumper\Logs\50236\`.
+Closes the live-verify TODO that was carried over from 2026-05-24's
+20e ship. **Phase 20e fully closed.**
+
+**Phase 28b SaGa F2R 0-match — diagnostic instrumentation added** (build
+#546, 2026-05-25). Previous-session smoke against SaGa F2R IL2CPP
+returned 0 matches for `SteamManager` static field. To disambiguate
+the three competing hypotheses (cross-assembly drop / opcode coverage
+gap / field truly unreferenced) without committing to v2 work yet,
+[IL2CPPFieldXref.cpp](../dll/src/il2cpp/IL2CPPFieldXref.cpp)
+`FindStaticFieldReferences` now emits three diagnostic lines to the
+`walk` log category per RPC:
+
+```
+FieldXref: target <ns.Class>.<field> staticAddress=0x... offset=N type=...
+FieldXref: methodIndex built — M methods indexed (of W walked), executable sections=K
+FieldXref: scan complete — candidateHits=A emitted=B droppedKindFilter=C droppedNoEnclose=D truncated=0/1
+```
+
+The new `candidateHits` / `droppedNoEnclose` split decides next move:
+* `candidateHits=0` → opcode coverage gap or field truly unreferenced
+  → Phase 28 v2 needs to add `0xC7 MOV imm32` / `0x83 0x3D CMP imm` /
+  SIMD `0xF3 0x0F 0x10/0x11 movss/movsd` / 8-bit `0x88/0x8A` to the
+  scan loop in [IL2CPPFieldXref.cpp:442-488](../dll/src/il2cpp/IL2CPPFieldXref.cpp)
+* `candidateHits>0` but `droppedNoEnclose==candidateHits` →
+  cross-assembly attribution drop (the comment at line 13-16 explicitly
+  warns about this) → Phase 28 v2 needs `BuildMethodIndex` widened to
+  walk every image and return a single global sorted method index
+* `methodIndex=0` or `candidateHits>0 && emitted>0 but UI shows 0` →
+  resolver / wire bug
+
+**Next-session PC pickup** (build #546 already in `dist/`):
+1. Launch SaGa F2R + DiscreteUI
+2. Re-run the same `SteamManager` static field → Methods cross-ref
+3. Grab `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<PID>\walk\current.log`
+4. The three `FieldXref:` lines decide whether Phase 28 v2 needs
+   opcode-set widening, cross-image method index, or both
+5. Also useful: pick a static field whose readers/writers are
+   obviously in the **same** assembly (e.g. a private static singleton
+   used only by its declaring class) — comparing log output against
+   SteamManager isolates the cross-assembly variable
+
+Phase 28 v1 itself remains shipped (Mono path 100% verified on 活俠傳;
+IL2CPP static-only path passes its build-time tests; only the live
+SaGa F2R static-field smoke is pending root-cause).
+
+(Earlier session content below — Phase 20e ship, Phase 28 v1, Phase 27
++ READMEs + minor open issues kept for context.)
+
+---
 
 **Phase 20e shipped** (build #527, 2026-05-24). `SceneEnumerator` now
 probes both `(CoreModule, monolithic)` FQNs in `ResolveGameObjectTypeAsync`
@@ -11,10 +64,7 @@ assembly name (Object.FindObjects, get_name, GameObject.get_transform,
 Transform.get_childCount, Transform.GetChild, Component.get_gameObject).
 Existing fake-pipe tests still pass under the CoreModule-first probe
 order; +1 new test pins the monolithic-fallback path end-to-end. Suite
-357 → **358 pass**. **Live-verify TODO**: re-test on 活俠傳 — Scene
-tab should now enumerate GameObjects instead of erroring with the old
-`Type.GetType … returned null` message. Log line "resolved GameObject
-Type via … (downstream assembly = …)" confirms which probe survived.
+357 → **358 pass**. ✅ Live-verified on 活俠傳 2026-05-25.
 
 **Phase 28 v1 shipped** (build #515 UI / #518 with tests). 28a Mono IL
 walker + 28b IL2CPP static-field RIP scanner + 28d UI modal with 3
@@ -23,20 +73,17 @@ tab) all landed clean. 28c (IL2CPP instance fields, AOB heuristic) and
 28e (CE Lua bridge) deferred per the
 [[project-phase-28-scope]] memory.
 
-**Phase 28 live-smoke COMPLETE** (build #523, 2026-05-24):
+**Phase 28 live-smoke**:
 * 活俠傳 (Mono x86 / Unity 2020.3) — `Mortal.Core.GameStat._value`
   → 15 exact matches: `get_Value` / `get_FinalValue` (reads) +
   `Reset` / `SetValue` (5 calls, 3 reads + 2 writes) /
   `AddValue` (3 calls, 2 reads + 1 write). Cross-checked semantically
-  — matches dnSpy IL view shape.
+  — matches dnSpy IL view shape. ✅ COMPLETE.
 * SaGa F2R (IL2CPP v29 / Unity 2021.3) — instance fields cleanly
   surface "not supported in v1" error (28c deferred per scope
   decision). Static-field path live-tried via `SteamManager` static
-  → **0 matches** returned. Could be (a) cross-assembly attribution
-  drop (v1 same-assembly limit), (b) thunk / SIMD load opcode pattern
-  not yet covered by the v1 matcher, or (c) the field was simply
-  unreferenced in the running build. Recorded as a Phase 28 v2
-  follow-up to investigate when more static-field targets show up.
+  → **0 matches** returned. 🚧 Build #546 added diagnostic logging
+  (see TL;DR above) — root-cause pending next-session re-run.
 
 (Earlier session content below — Phase 27 + READMEs + minor open
 issues kept for context.)
