@@ -21,9 +21,12 @@
 
 #include "IL2CPPFieldXref.h"
 
+#include "IL2CPPChainDetector.h"
+#include "IL2CPPClassPointerScanner.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
+#include "IL2CPPStaticFieldsOffset.h"
 #include "IL2CPPThreadAttach.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
@@ -528,6 +531,104 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                " droppedKindFilter=" + std::to_string(droppedKindFilter) +
                " droppedNoEnclose=" + std::to_string(droppedNoEnclose) +
                " truncated=" + (result.truncated ? "1" : "0"));
+
+    // ---------------------------------------------------------------------
+    // Phase 28b-v2 — class-pointer chained-disassembly fallback.
+    //
+    // When v1's single-hop RIP scan returned 0 matches AND the field's
+    // static-storage address sits OUTSIDE GameAssembly.dll's module image
+    // (= IL2CPP allocated `static_fields` on the runtime heap, which is
+    // the ~universal case for user-code statics), the v1 scanner was
+    // structurally unable to see references. v2 chases the 2-hop chain
+    // the AOT code actually emits:
+    //     mov R1, [rip + CLASS_PTR_DISP32]    ; hop 1 — class pointer load
+    //     mov R2, [R1 + STATIC_FIELDS_OFF]    ; hop 2 — deref to static block
+    //     mov R3, [R2 + FIELD_OFFSET]         ; hop 3 — read (or write/lea)
+    //
+    // Stage A (offline-ish): locate every `.data` / `.rdata` slot holding
+    //   `(uintptr_t)target.klass` — these are the `[rip + DISP32]` targets
+    //   we'll scan for in stage B.
+    // Stage B (executable scan + Zydis forward-trace): for each candidate
+    //   hop-1 load, decode forward via Zydis to confirm hops 2 + 3 with
+    //   the expected offsets.
+    //
+    // Only fires when v1 returned 0 — preserves backward compatibility
+    // for the rare case where the static IS baked into the module image
+    // (then v1 is authoritative + already returned the matches).
+    {
+        const std::size_t gaSize = ModuleHelper::GetModuleSize(MagicStrings::ModuleIL2CPP);
+        const std::uintptr_t gaLo = reinterpret_cast<std::uintptr_t>(gaBase);
+        const std::uintptr_t gaHi = gaLo + gaSize;
+        const bool outsideModule  = (targetAddr < gaLo) || (targetAddr >= gaHi);
+
+        if (result.matches.empty() && outsideModule && target.klass != nullptr) {
+            const std::size_t sfo = GetStaticFieldsOffsetInClass();
+            if (sfo == 0) {
+                Log::Write(MagicStrings::LogCategoryWalk,
+                    "FieldXref: v2 chain detection unavailable — "
+                    "offsetof(static_fields) discovery failed at init");
+            } else {
+                auto slots = EnumerateClassPointerSlots(target.klass);
+                Log::Write(MagicStrings::LogCategoryWalk,
+                    "FieldXref: v2 starting — staticFieldsOffset=" +
+                    std::to_string(sfo) + " fieldOffset=" +
+                    std::to_string(target.offset) + " classPointerSlots=" +
+                    std::to_string(slots.size()));
+
+                if (!slots.empty()) {
+                    ChainScanStats v2stats{};
+                    auto chains = DetectFieldAccessChains(
+                        slots, sfo, target.offset, limit, &v2stats);
+                    Log::Write(MagicStrings::LogCategoryWalk,
+                        "FieldXref: v2 scan complete — hopOneCandidates=" +
+                        std::to_string(v2stats.hopOneCandidates) +
+                        " chainBroken=" + std::to_string(v2stats.chainBroken) +
+                        " chainsEmitted=" + std::to_string(v2stats.chainsEmitted) +
+                        " bytesScanned=" + std::to_string(v2stats.bytesScanned) +
+                        " failedReads=" + std::to_string(v2stats.failedReads));
+
+                    // Attribute each chain hit to its enclosing method via
+                    // the existing v1 method-pointer index. Apply read/write
+                    // filter at this layer (v2 already knows kind from the
+                    // chain shape, but the user-requested filter is enforced
+                    // here for parity with the v1 path).
+                    std::size_t v2Dropped = 0;
+                    for (const auto& c : chains) {
+                        if (kindFilter == FieldRefKind::Read  && c.refKind != "read")  {
+                            ++v2Dropped; continue;
+                        }
+                        if (kindFilter == FieldRefKind::Write && c.refKind != "write") {
+                            ++v2Dropped; continue;
+                        }
+                        const MethodIndexEntry* enc =
+                            FindEnclosing(methodIndex, c.hitIP);
+                        if (enc == nullptr) {
+                            ++v2Dropped;  // hit in a different assembly's code
+                            continue;
+                        }
+                        FieldRefMatch m;
+                        m.ns             = enc->ns;
+                        m.className      = enc->className;
+                        m.methodName     = enc->methodName;
+                        m.methodToken    = enc->methodToken;
+                        m.methodFlags    = enc->methodFlags;
+                        m.isMethodStatic = enc->isMethodStatic;
+                        m.methodAddress  = reinterpret_cast<void*>(enc->address);
+                        m.hitAddress     = reinterpret_cast<void*>(c.hitIP);
+                        m.isStatic       = true;
+                        m.refKind        = c.refKind;
+                        m.confidence     = "chain-exact";  // distinguish from v1 "exact"
+                        result.matches.push_back(std::move(m));
+                    }
+                    Log::Write(MagicStrings::LogCategoryWalk,
+                        "FieldXref: v2 emitted " +
+                        std::to_string(result.matches.size()) +
+                        " matches (dropped " + std::to_string(v2Dropped) +
+                        " on kind/enclose filter)");
+                }
+            }
+        }
+    }
 
     // Build #555 follow-up — IL2CPP structural-limit advisory.
     // Diagnosis from 活俠傳/SaGa F2R smoke 2026-05-25: every IL2CPP static field

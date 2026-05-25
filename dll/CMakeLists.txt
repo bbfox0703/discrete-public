@@ -180,6 +180,21 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPMainThreadHook.h
     src/il2cpp/IL2CPPFieldXref.cpp
     src/il2cpp/IL2CPPFieldXref.h
+    # Phase 28b-v2 — runtime-version-independent offsetof(Il2CppClass,
+    # static_fields) discovery. Needed by the chain detector to recognise
+    # the 2-hop class-pointer → static_fields → field-value access pattern.
+    src/il2cpp/IL2CPPStaticFieldsOffset.cpp
+    src/il2cpp/IL2CPPStaticFieldsOffset.h
+    # Phase 28b-v2 — inverse pointer scan: find .data slots holding a
+    # given Il2CppClass*. Mirrors AOBMaker's Il2CppPeReader.FindPointerReferences
+    # (runs against live mapped module instead of PE-on-disk).
+    src/il2cpp/IL2CPPClassPointerScanner.cpp
+    src/il2cpp/IL2CPPClassPointerScanner.h
+    # Phase 28b-v2 — chain detector. Forward-traces with Zydis to
+    # recognise the 2-hop class-pointer → static_fields → field-value
+    # access pattern IL2CPP AOT emits.
+    src/il2cpp/IL2CPPChainDetector.cpp
+    src/il2cpp/IL2CPPChainDetector.h
 )
 
 # ---------------------------------------------------------------------------
