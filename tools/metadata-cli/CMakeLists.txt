@@ -17,6 +17,15 @@ add_executable(metadata-cli
 target_include_directories(metadata-cli PRIVATE
     ../../dll/src
 )
+# Phase 28b-v2 follow-up: nlohmann + generated/ used to come from root-scope
+# include_directories(SYSTEM). Plumb per-target now to avoid the MSVC
+# /external:I leak into Zydis's vendor subdir compiles.
+target_include_directories(metadata-cli SYSTEM PRIVATE
+    ${DISCRETE_NLOHMANN_INCLUDE_DIR}
+)
+target_include_directories(metadata-cli PRIVATE
+    ${DISCRETE_GENERATED_INCLUDE_DIR}
+)
 
 # Logger emits Log::Write(...) calls but is a no-op until Log::Init() is
 # called; the CLI never inits, so the log dir under %LOCALAPPDATA% is not

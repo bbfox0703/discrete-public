@@ -23,6 +23,13 @@ $dll_deps = @{
     "minihook"    = "https://github.com/TsudaKageyu/minhook.git"
 }
 
+# Recursive deps — clone with --recurse-submodules. Zydis bundles Zycore
+# as a submodule; flat clone won't pull it and CMake configure will fail.
+# Phase 28b-v2 x64 disassembler for IL2CPP class-pointer chain detection.
+$dll_deps_recursive = @{
+    "zydis"       = "https://github.com/zyantific/zydis.git"
+}
+
 $deps = @{
     "Il2CppDumper"             = "https://github.com/Perfare/Il2CppDumper"
 	"Il2CppDumperV35plus"      = "https://github.com/roytu/Il2CppDumper"
@@ -39,18 +46,26 @@ if (!(Test-Path "dll\vendor")) { New-Item -ItemType Directory -Path "dll\vendor"
 if (!(Test-Path "vendor"))     { New-Item -ItemType Directory -Path "vendor" | Out-Null }
 
 function Sync-One {
-    param([string]$path, [string]$url)
+    param([string]$path, [string]$url, [switch]$Recursive)
     if (Test-Path "$path\.git") {
         Write-Host "[更新] $path" -ForegroundColor Cyan
         Push-Location $path
-        try { git pull --ff-only } finally { Pop-Location }
+        try {
+            git pull --ff-only
+            if ($Recursive) { git submodule update --init --recursive --depth 1 }
+        } finally { Pop-Location }
     } else {
         Write-Host "[下載] $path" -ForegroundColor Green
-        git clone --depth 1 $url $path
+        if ($Recursive) {
+            git clone --depth 1 --recurse-submodules --shallow-submodules $url $path
+        } else {
+            git clone --depth 1 $url $path
+        }
     }
 }
 
-foreach ($item in $dll_deps.GetEnumerator()) { Sync-One "dll\vendor\$($item.Key)" $item.Value }
-foreach ($item in $deps.GetEnumerator())     { Sync-One     "vendor\$($item.Key)" $item.Value }
+foreach ($item in $dll_deps.GetEnumerator())           { Sync-One "dll\vendor\$($item.Key)" $item.Value }
+foreach ($item in $dll_deps_recursive.GetEnumerator()) { Sync-One "dll\vendor\$($item.Key)" $item.Value -Recursive }
+foreach ($item in $deps.GetEnumerator())               { Sync-One     "vendor\$($item.Key)" $item.Value }
 
 Write-Host "同步完成！" -ForegroundColor Yellow

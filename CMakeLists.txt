@@ -3,7 +3,10 @@ cmake_minimum_required(VERSION 3.25)
 project(UnityCEDumper
     VERSION 0.1.0
     DESCRIPTION "Unity Engine Dumper (Mono + IL2CPP) for Cheat Engine"
-    LANGUAGES CXX
+    # Phase 28b-v2 needs C alongside CXX — Zydis is pure C. MinHook also C
+    # but its CMake auto-enabled it; declaring it here is cleaner + makes
+    # sure the C INCLUDE env path is consistently bootstrapped.
+    LANGUAGES C CXX
 )
 
 # ---------------------------------------------------------------------------
@@ -121,10 +124,20 @@ message(STATUS "Version: ${VER_MAJOR}.${VER_MINOR}.${VER_PATCH}.${BUILD_NUMBER} 
 # Vendored headers — cloned by `sync_vendor.ps1` (see .gitmodules note).
 # Path was `dll/vendor/nlohmann_json/` until the submodule was retired in
 # favour of the sync-script approach.
-include_directories(SYSTEM
-    ${CMAKE_SOURCE_DIR}/dll/vendor/nlohmann/single_include
-)
-include_directories(${CMAKE_BINARY_DIR}/generated)
+#
+# Phase 28b-v2 follow-up: these used to be `include_directories(SYSTEM ...)`
+# at root scope, which leaked the `-external:I` flag onto every vendor
+# subdirectory CMake target (MinHook + Zydis + Zycore). On MSVC that
+# caused a subtle interaction where Zydis's `SharedData.c` couldn't find
+# `<assert.h>` — the external-search list partially shadowed the env-INCLUDE
+# lookup for some translation units while leaving others intact (MinHook
+# worked, Zydis didn't — same compiler invocation pattern). Exposing the
+# headers as CMake variables instead lets `add_backend_dll` / `add_cli` /
+# etc add them per-target, keeping vendor subdirs free of the bleed.
+set(DISCRETE_NLOHMANN_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/dll/vendor/nlohmann/single_include
+    CACHE INTERNAL "")
+set(DISCRETE_GENERATED_INCLUDE_DIR ${CMAKE_BINARY_DIR}/generated
+    CACHE INTERNAL "")
 
 add_subdirectory(dll)
 
