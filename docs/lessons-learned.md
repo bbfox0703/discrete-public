@@ -37,6 +37,13 @@
   idempotency, autorun script wire encoding.
 - [AOBMaker CE plugin](#aobmaker-ce-plugin) — pipe protocol,
   concurrent-client constraint pre-Phase 22f, AOB extraction surface.
+- [x86 / WOW64 portability (Phase 12d)](#x86--wow64-portability-phase-12d)
+  — TEB-offset bug in `CollectThreadStackRanges`, kObjectHeader
+  arch-scaling, cross-bitness pipe ABI is bitness-neutral.
+- [Obfuscated / packed IL2CPP target diagnostic fingerprint](#obfuscated--packed-il2cpp-target-diagnostic-fingerprint)
+  — three-symptom signature in `init` + `metadata` logs that identifies
+  packed / encrypted IL2CPP builds within seconds; why `walk` log
+  category never appears; what work would be needed to support them.
 
 ---
 
@@ -1881,3 +1888,95 @@ on-the-wire `walkInstance` already gets this right because it
 relies on `mono_field_get_offset` which the runtime computes per-
 arch; the doc concern is purely about explaining offsets to
 human readers without leading them to assume x64.
+
+---
+
+## Obfuscated / packed IL2CPP target diagnostic fingerprint
+
+### Three-symptom signature identifies packed / encrypted IL2CPP within seconds of injection
+
+**Symptom**: pipe connects cleanly, no crash, no hang — but every RPC
+beyond the handshake returns `"il2cpp runtime not resolved"`. The UI
+shows a connected backend that can't do anything useful. No `walk`
+log category gets created for the PID at all.
+
+**First sample**: [Leaf it Alone](test-matrix.md#unsupported-targets-confirmed-failures)
+(Steam #3981100, Unity 6000.2.6f2 / Unity 6.1, IL2CPP x64), reported
+2026-05-25.
+
+**Root cause**: the target ships an obfuscated / packed IL2CPP runtime.
+Three independent symptoms always appear together because they're all
+side-effects of the same protection toolchain:
+
+1. **All `il2cpp_*` exports stripped or renamed** — in `init\current.log`:
+   ```
+   IL2CPPResolver: missing REQUIRED export il2cpp_domain_get
+   IL2CPPResolver: missing REQUIRED export il2cpp_thread_attach
+   ...
+   IL2CPPResolver: GameAssembly.dll — required 0/16, optional 0/27 (resolved=no)
+   ```
+   `GameAssembly.dll` is loaded (visible in the module-list dump just
+   above the resolver lines) but none of the 43 standard exports
+   resolve through `GetProcAddress`. Packers usually replace the
+   PE export table with a stub that returns null, or rename every
+   export to a non-discoverable symbol.
+
+2. **`global-metadata.dat` encrypted** — in `metadata\current.log`:
+   ```
+   global-metadata.dat magic mismatch (corrupt or encrypted)
+   ```
+   The canonical IL2CPP magic word `0xFAB11BAF` is missing from
+   offset 0. Packers commonly XOR or AES the metadata at rest; the
+   runtime decrypts it in-memory on first access, so an on-disk
+   reader (our parser) can never see the cleartext.
+
+3. **Third-party anti-hook DLL co-loaded** — in `init\current.log`
+   module dump, a module appears that's neither a Unity standard
+   (`UnityPlayer.dll`, `GameAssembly.dll`, `baselib.dll`, etc.) nor
+   a Windows / OS DLL (`ntdll.dll`, `kernel32.dll`, etc.):
+   ```
+   module: AnvirHook8_64.dll
+   ```
+   On Leaf it Alone this was `AnvirHook8_64.dll`. Other targets may
+   load `BeebyteProtector.dll`, `il2cpp_inspector_anti.dll`, custom
+   in-house names, etc. The naming is a strong heuristic — anything
+   `*Hook*` / `*Protector*` / `*Anti*` in a Unity game's module list
+   warrants suspicion.
+
+**Why no `walk` log appears**: every pipe handler that does real work
+starts with `if (!IsResolved()) return json{{"error", "..."}};`. With
+the resolver at `resolved=no`, every RPC short-circuits before reaching
+a single `Log::Write(LogCategoryWalk, ...)` call site. The `pipe\`
+log shows the connect succeeded; no other category gets data.
+
+**Diagnostic recipe** (30 seconds, no code changes needed):
+1. Grab `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\init\current.log`
+2. Look at the last 5 lines before `Init: main thread id = ...`
+3. If you see `required 0/16, optional 0/27 (resolved=no)` → symptom 1 confirmed
+4. `metadata\current.log` will show `magic mismatch` → symptom 2 confirmed
+5. Scan the module-dump section of `init` for non-standard DLLs → symptom 3
+6. Verify no `walk\` subdirectory exists for the PID
+
+If all four hold, the target is packed/obfuscated. **Stop investigating
+the user's setup** — it's not their config, not a Discrete bug, not
+the wrong DLL version. Don't try to "fix" anything; document the
+target as unsupported in the matrix.
+
+**What would be needed to support these targets** (NOT scheduled):
+
+| Layer | Work | Effort |
+|---|---|---|
+| Metadata | Phase 5-2d (`IL2CPPMetadataRegistration` AOB cross-link, already noted in `plan.md` Phase 5 as a non-blocking follow-up) — find the runtime's in-memory `Il2CppMetadataRegistration` struct by AOB pattern, read decrypted metadata pointers from RAM instead of parsing `global-metadata.dat` from disk | ~2-3 days |
+| Runtime API | New phase: **export-less IL2CPP fallback** — instead of `GetProcAddress("il2cpp_domain_get")`, AOB-scan `GameAssembly.dll`'s `.text` for the known function prologue patterns of each `il2cpp_*` API and self-bind. Highly version-fragile (Unity 2019.x vs 2021.x vs 6.x emit different prologues) but the only path that survives export stripping | ~3-4 days for the v1, ongoing maintenance per Unity major |
+| Anti-hook coexistence | Profile what the loaded `*Hook*` DLL actually does (often nothing to injected pipe-server DLLs — it usually targets game-state cheats). Document tolerance class | ~1 day per protector |
+
+Total: ~6-8 days for a v1 obfuscated-target backend. Defer until at
+least 2 more samples land, so the AOB patterns can be cross-validated
+across protector flavours.
+
+**Rule**: when a user reports "DLL injects but nothing works on this
+Unity game", FIRST check the 3-symptom fingerprint before any other
+debugging. Saves a 30-min wild-goose chase ~95% of the time. If even
+one symptom is absent, fall back to normal debugging — the issue is
+something else (wrong DLL bitness, AV quarantine, pipe-name
+collision, etc.).
