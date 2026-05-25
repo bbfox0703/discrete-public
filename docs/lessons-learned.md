@@ -553,17 +553,143 @@ target with `candidateHits=0`. The Mono backend's IL walker handles
 this case correctly because IL bytecode preserves the `ldsfld <token>`
 op — recommend Mono targets for x-ref work until Phase 28b-v2 lands.
 
-**Cross-reference**: Phase 28b-v2 in [plan.md](plan.md) plans the
-proper fix — scan for RIP refs to the `Il2CppClass*` pointer (which
-DOES live in .data and IS RIP-addressable), then forward-disassemble
-each hit to follow the 2-hop chain and confirm the trailing
-`[rax+staticFieldsOffset]+[rax+fieldOffset]` matches. Needs a real
-x64 disassembler (current `AobPattern.cpp` LDE only does length-
-decode, not operand classification). Effort estimate ~1 week.
+**Cross-reference**: Phase 28b-v2 in [plan.md](plan.md) shipped the
+proper fix (build #565) — scan for RIP refs to the `Il2CppClass*`
+pointer (which DOES live in .data and IS RIP-addressable), then
+Zydis forward-disassemble each hit to follow the 2-hop chain.
+Live-verified on SaGa F2R: `SteamManager.s_instance` returned
+**11 unique chain-exact matches** (7 reads + 4 writes across 6
+methods).
 
 **Source**: [`IL2CPPFieldXref.cpp::FindStaticFieldReferences`](../dll/src/il2cpp/IL2CPPFieldXref.cpp)
 sets `result.note` when scan completes with 0 matches and target
-sits outside the GameAssembly.dll module.
+sits outside the GameAssembly.dll module. Phase 28b-v2 chain
+detector ([`IL2CPPChainDetector.cpp`](../dll/src/il2cpp/IL2CPPChainDetector.cpp))
+fires as fallback before the advisory note is set; only fields the
+v2 chain detector ALSO can't find still trigger the banner (e.g.
+the deferred Phase 28b-v3 `<>c` lambda-cache codegen pattern).
+
+### Phase 28b-v2 chain detector — single-register tracking misses real IL2CPP codegen
+
+**Symptom**: First-cut Phase 28b-v2 chain detector returned 0 chain
+matches against SaGa F2R `SteamManager.s_instance` despite finding
+220 hop-1 candidates (`mov reg, [rip+CLASS_PTR]` instructions where
+disp resolved to the class-pointer slot in `.data`). Build #562
+diagnostic log:
+
+```
+ClassPointerScanner: 1 slot(s) found ✓
+FieldXref: v2 scan complete — hopOneCandidates=220 chainBroken=220 chainsEmitted=0
+```
+
+Every forward-trace failed within the 8-instruction window. Pattern
+recognition was theoretically sound (the 3-hop chain `mov R1,[rip+ptr]
+→ mov R2,[R1+sfo] → mov R3,[R2+fo]`) but it never matched.
+
+**Root cause**: IL2CPP AOT codegen interleaves the chain with a
+class-init check that EITHER conditionally branches around the init
+call OR makes a CALL to `il2cpp_runtime_class_init`. Live disasm from
+SaGa F2R's `SteamManager.get_Instance`:
+
+```asm
+mov rcx, [rip + CLASS_PTR_2824308]    ; hop-1 candidate (rcx = class*)
+cmp dword ptr [rcx + 0xE0], 0          ; init flag check
+jne short skip_init                    ; ← first-cut trace abandoned here (COND_BR)
+call il2cpp_runtime_class_init         ; ← and here (CALL clobbers volatile rcx)
+skip_init:
+mov rax, [rip + CLASS_PTR_2824308]    ; class ptr RELOAD (second hop-1 candidate)
+mov rcx, [rax + 0xB8]                  ; hop 2 — offsetof static_fields
+mov rbx, [rcx + 0x08]                  ; hop 3 READ ✓
+```
+
+Three independent issues, all surfaced by this single pattern:
+
+1. **Single-register tracking** can't carry the class pointer across
+   `mov rbx, rax` (a save-to-non-volatile that's standard before any
+   CALL).
+2. **COND_BR abandonment** kills the trace at `jne skip_init` even
+   though the fall-through path eventually re-merges at the same
+   hop-2 site.
+3. **CALL abandonment** kills the trace at `il2cpp_runtime_class_init`
+   even though the calling convention's non-volatile registers
+   (RBX/RBP/RSI/RDI/R12-R15) survive across the call.
+
+**Fix** ([`IL2CPPChainDetector.cpp`](../dll/src/il2cpp/IL2CPPChainDetector.cpp)
+build #565):
+
+* **Multi-register state** — replace single `classPtrReg` /
+  `staticFieldsReg` with `std::vector<ZydisRegister>` sets per
+  chain stage. Class pointer can live in N registers simultaneously
+  after copy propagation.
+* **`mov reg, reg` propagation** — when source register holds class
+  ptr / static_fields ptr tag, propagate to dest. Done AFTER
+  clobbering dest (handles `mov rax, rax` correctly — no-op).
+* **CALL tolerance** — drop only volatile regs (RAX/RCX/RDX/R8-R11)
+  from tracking sets. Non-volatile regs preserve their tags.
+* **COND_BR tolerance** — skip cond branches without state update.
+  Fall-through trace continues. Init-check patterns merge back to
+  the same hop-2 site.
+* **Trace window** — 8 → 32 instructions to absorb the scheduling
+  slack between hops.
+* **RET / UNCOND_BR** — still terminate (could be tail call into
+  unrelated code; not worth tracing).
+
+**Surprising observation**: IL2CPP doesn't actually save to a
+non-volatile across the init call — it RELOADS the class pointer
+from `.data` after the call. So both hop-1 candidates (pre-init
+and post-init) are independent chain starts. The first one
+abandons (CALL drops volatile), the second succeeds. Our multi-reg
+machinery handles it because each hop-1 candidate spawns its own
+trace.
+
+**Result**: 0 chains → 11 unique `chain-exact` matches on
+`SteamManager.s_instance`. See plan.md §Phase 28b-v2 for the
+full session log.
+
+### Phase 28b-v2 byte-pattern pre-filter — REX-prefixed insns match twice without explicit skip
+
+**Symptom**: After the multi-register chain detector started
+matching, every chain hit was reported twice in the UI. SaGa F2R
+SteamManager.s_instance showed **22 rows** when the actual unique
+count was 11.
+
+**Root cause**: The byte-pattern pre-filter that gates the expensive
+Zydis decode was checking `IsRexByte(buf[p])` to detect 7-byte
+REX-prefixed `mov reg, [rip+disp32]` instructions, but NOT skipping
+when the previous byte was a REX prefix. So a 7-byte instruction
+`48 8B 05 XX XX XX XX` at IP=N would match TWICE in the scanner:
+
+1. At p=N: REX-prefix path matches the 7-byte form correctly.
+2. At p=N+1: 6-byte form path interprets the 0x8B as a fresh
+   opcode, ModRM=0x05 still indicates RIP-relative, disp32 is the
+   same 4 bytes — and `IP=(N+1) + 6 + disp == N + 7 + disp` =
+   same resolved target. Spurious match.
+
+Both candidates would Zydis-decode + forward-trace + emit the
+same chain.
+
+**Fix** ([`IL2CPPChainDetector.cpp:512`](../dll/src/il2cpp/IL2CPPChainDetector.cpp)
+build #565):
+
+```cpp
+// Skip 6-byte form when previous byte was a REX prefix — the
+// 7-byte form already covered this instruction at p-1.
+if (p > 0 && IsRexByte(buf[p - 1])) continue;
+```
+
+This is the same check the v1 scanner (`FindStaticFieldReferences`
+v1 path) has in `IL2CPPFieldXref.cpp:505`. The chain detector
+forgot to mirror it because it inlines its own pre-filter rather
+than reusing the v1 helper. Belt-and-braces hit-IP `std::unique`
+at the end of `DetectFieldAccessChains` catches any remaining
+convergence cases (e.g. multiple hop-1 candidates that legitimately
+fall through to the same hop-3 IP).
+
+**Rule for the codebase**: any new byte-pattern scanner for x64
+RIP-relative instructions must skip when the previous byte was a
+REX prefix (`0x40-0x4F`). Otherwise REX-prefixed instructions are
+double-counted. Failure mode is silent — duplicate results
+look like correct results unless you cross-check counts.
 
 ---
 

@@ -1,8 +1,77 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-25 **session close** — build #555).
+**Branch**: `dev` (2026-05-25 **session close** — build #565).
 
 ## TL;DR — what's left to pick up
+
+**Phase 28b-v2 IL2CPP chain detector — LIVE-VERIFIED on SaGa F2R**
+(2026-05-25 late evening, build #565). The full class-pointer
+chained-disassembly redesign shipped + live-verified end-to-end:
+`SteamManager.s_instance` (singleton with init-call interleave +
+heap-allocated `static_fields` — the canonical case v1 couldn't see)
+returned **11 unique chain-exact matches** across 6 methods
+(`get_Instance`, `get_Initialized`, `InitOnPlayMode`, `Awake`,
+`OnEnable`, `OnDestroy` — 7 reads + 4 writes). Yellow advisory banner
+is gone for this case, replaced by real data.
+
+What shipped in Phase 28b-v2 (six sub-phases):
+* **28b-v2-1**: Zydis x64 disassembler integrated into IL2CPP DLL
+  (~700 KB cost). Mono DLL byte-identical — Zydis only linked into
+  the IL2CPP path.
+* **28b-v2-2**: [`IL2CPPStaticFieldsOffset.cpp`](../dll/src/il2cpp/IL2CPPStaticFieldsOffset.cpp) —
+  runtime-version-independent discovery of `offsetof(Il2CppClass,
+  static_fields)`. Auto-discovered `0xB8` on SaGa F2R (v29 IL2CPP /
+  Unity 2021.3).
+* **28b-v2-3**: [`IL2CPPClassPointerScanner.cpp`](../dll/src/il2cpp/IL2CPPClassPointerScanner.cpp) —
+  inverse pointer scan of `.data` / `.rdata` for stored
+  `Il2CppClass*` slots. Mirrors AOBMaker's `Il2CppPeReader.FindPointerReferences`
+  pattern.
+* **28b-v2-4**: [`IL2CPPChainDetector.cpp`](../dll/src/il2cpp/IL2CPPChainDetector.cpp) —
+  Zydis forward-trace with **multi-register tracking** (set of regs
+  per chain stage, not single reg), CALL tolerance (drop volatile,
+  keep non-volatile), COND_BR tolerance (fall-through trace continues
+  past `jne skip_init`), `mov reg,reg` propagation, 32-instr trace
+  window. Plus REX-skip dedup + hit-IP final dedup so the same chain
+  endpoint isn't reported twice.
+* **28b-v2-5**: Wired as v1 fallback in `FindStaticFieldReferences` —
+  only runs when v1 returns 0 AND target is outside module (preserves
+  v1 fast path for the rare baked-into-module statics).
+* **28b-v2-6**: SaGa F2R live verify ✅.
+
+Real-world IL2CPP codegen pattern decoded:
+
+```asm
+mov rcx, [rip + CLASS_PTR_2824308]    ; hop-1 candidate 1
+cmp dword ptr [rcx + 0xE0], 0          ; init flag check
+jne short skip_init                    ; ← we tolerate cond branches now
+call il2cpp_runtime_class_init         ; ← we tolerate CALLs (volatile-clobber model)
+skip_init:
+mov rax, [rip + CLASS_PTR_2824308]    ; hop-1 candidate 2 (reload after CALL)
+mov rcx, [rax + 0xB8]                  ; hop 2 — offsetof static_fields
+mov rbx, [rcx + 0x08]                  ; hop 3 READ ✓ hitIP = 0x88B0DE
+```
+
+Both hop-1 candidates run forward; only the second produces a chain.
+Final dedup collapses the case where they'd converge on the same
+hop-3 IP.
+
+Open follow-up (deferred to Phase 28b-v3 / sub-phase):
+* **`<>c` compiler-generated lambda-cache classes**: 0 class-pointer
+  slots in `.data` because IL2CPP routes those through
+  `g_codegenModule->types[index]` rather than direct pointer storage.
+  Live-tested on `<>9__0_0` / `<>9__0_1` — still hits the yellow
+  advisory banner. Needs a separate codegen-module index discovery
+  pass; not blocking real-world workflows (user-defined statics like
+  `SteamManager.s_instance` are the common case and now work).
+* **`<>c` follow-up TODO**: walk `Il2CppCodeGenModule->types` table
+  (or the equivalent v29 metadata-registration index), build a
+  reverse mapping `Il2CppClass* → codegen module slot`, RIP-scan
+  for refs to that slot. Estimated ~2-3 days.
+
+---
+
+(Previous TL;DR — for the build #555 IL2CPP advisory ship and earlier,
+kept below for cross-PC handoff context.)
 
 **Phase 28b IL2CPP static x-ref — root-cause CONFIRMED (build #555,
 2026-05-25 evening)**. The build #546 diagnostic logging paid off: live
