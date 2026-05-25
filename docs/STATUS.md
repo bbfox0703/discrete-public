@@ -4,13 +4,31 @@
 
 ## TL;DR — what's left to pick up
 
-**New unsupported-target reference card** (2026-05-25): another user reported
+**Diagnostic-fingerprint correction** (2026-05-25 later same day):
+yesterday's Leaf it Alone obfuscation diagnosis originally listed
+`AnvirHook8_64.dll` as the 3rd of three definitive symptoms.
+**Demoted to weak / cross-check-only evidence** after a Subnautica log
+sample (Unity 2019.4 Mono, fully unprotected — every Discrete Mono
+DLL primitive resolves cleanly on it: `bound 29/29`, main-thread hook
+armed, 104 assemblies enumerable) showed the same `AnvirHook8_64.dll`
+in its module list. Only consistent explanation: user-machine-wide
+sysadmin tooling (likely Anvir Task Manager Pro), not game protection.
+Updated [lessons-learned.md
+§"Obfuscated / packed IL2CPP target diagnostic fingerprint"](lessons-learned.md#obfuscated--packed-il2cpp-target-diagnostic-fingerprint)
+to a 2-symptom fingerprint; Subnautica added to
+[test-matrix.md](test-matrix.md#unity-targets-verified) as passive
+control sample (fills the Unity 2019.4 Mono gap between 2017.x and
+2020.3 coverage).
+
+---
+
+**Unsupported-target reference card** (2026-05-25): a user reported
 their build (`ba17b88` / 549) couldn't do anything on **Leaf it Alone**
 ([Steam #3981100](https://store.steampowered.com/app/3981100/Leaf_it_Alone/),
 Unity 6.1 / IL2CPP). Diagnosed from their `init` + `metadata` logs as
 the canonical **packed/obfuscated IL2CPP** signature: all 43 `il2cpp_*`
-exports stripped (`resolved=no`), `global-metadata.dat` encrypted
-(`magic mismatch`), `AnvirHook8_64.dll` co-loaded. Recorded as:
+exports stripped (`resolved=no`) + `global-metadata.dat` encrypted
+(`magic mismatch`). Recorded as:
 * [test-matrix.md §"Unsupported targets (confirmed failures)"](test-matrix.md#unsupported-targets-confirmed-failures)
   — failure-mode row
 * [lessons-learned.md §"Obfuscated / packed IL2CPP target diagnostic fingerprint"](lessons-learned.md#obfuscated--packed-il2cpp-target-diagnostic-fingerprint)
