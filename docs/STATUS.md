@@ -4,6 +4,27 @@
 
 ## TL;DR — what's left to pick up
 
+**New unsupported-target reference card** (2026-05-25): another user reported
+their build (`ba17b88` / 549) couldn't do anything on **Leaf it Alone**
+([Steam #3981100](https://store.steampowered.com/app/3981100/Leaf_it_Alone/),
+Unity 6.1 / IL2CPP). Diagnosed from their `init` + `metadata` logs as
+the canonical **packed/obfuscated IL2CPP** signature: all 43 `il2cpp_*`
+exports stripped (`resolved=no`), `global-metadata.dat` encrypted
+(`magic mismatch`), `AnvirHook8_64.dll` co-loaded. Recorded as:
+* [test-matrix.md §"Unsupported targets (confirmed failures)"](test-matrix.md#unsupported-targets-confirmed-failures)
+  — failure-mode row
+* [lessons-learned.md §"Obfuscated / packed IL2CPP target diagnostic fingerprint"](lessons-learned.md#obfuscated--packed-il2cpp-target-diagnostic-fingerprint)
+  — 30-second diagnostic recipe so we don't re-investigate the same
+  class of target twice
+* Closes the long-open `test-matrix.md` "Stripped metadata via mismatched magic"
+  coverage-gap row.
+
+Supporting this class of target needs **Phase 5-2d** (`IL2CPPMetadataRegistration`
+AOB cross-link, already noted as non-blocking) **plus a new "export-less
+IL2CPP fallback" phase** (AOB-scan `il2cpp_*` prologues + self-bind, no
+`GetProcAddress`). ~6-8 days total; deferred until at least 2 more
+samples land so AOB patterns can cross-validate.
+
 **Phase 20e LIVE-VERIFIED on 活俠傳** (2026-05-25, PID 50236, Mono x86 /
 Unity 2020.3.49f1). User confirmed Scene tab now enumerates GameObjects
 end-to-end. Log location: `%LOCALAPPDATA%\Discrete_UEDumper\Logs\50236\`.
