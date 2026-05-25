@@ -41,9 +41,12 @@
   — TEB-offset bug in `CollectThreadStackRanges`, kObjectHeader
   arch-scaling, cross-bitness pipe ABI is bitness-neutral.
 - [Obfuscated / packed IL2CPP target diagnostic fingerprint](#obfuscated--packed-il2cpp-target-diagnostic-fingerprint)
-  — three-symptom signature in `init` + `metadata` logs that identifies
-  packed / encrypted IL2CPP builds within seconds; why `walk` log
-  category never appears; what work would be needed to support them.
+  — two-symptom signature (stripped exports + encrypted metadata) in
+  `init` + `metadata` logs that identifies packed / encrypted IL2CPP
+  builds within seconds; why `walk` log category never appears;
+  third-party `*Hook*` DLLs are *not* definitive evidence (counter-
+  example: Subnautica); what work would be needed to support these
+  targets (~6-8 days, deferred until 2+ samples land).
 
 ---
 
@@ -1905,7 +1908,7 @@ log category gets created for the PID at all.
 2026-05-25.
 
 **Root cause**: the target ships an obfuscated / packed IL2CPP runtime.
-Three independent symptoms always appear together because they're all
+**Two definitive symptoms** appear together because they're both
 side-effects of the same protection toolchain:
 
 1. **All `il2cpp_*` exports stripped or renamed** — in `init\current.log`:
@@ -1930,18 +1933,24 @@ side-effects of the same protection toolchain:
    runtime decrypts it in-memory on first access, so an on-disk
    reader (our parser) can never see the cleartext.
 
-3. **Third-party anti-hook DLL co-loaded** — in `init\current.log`
-   module dump, a module appears that's neither a Unity standard
-   (`UnityPlayer.dll`, `GameAssembly.dll`, `baselib.dll`, etc.) nor
-   a Windows / OS DLL (`ntdll.dll`, `kernel32.dll`, etc.):
-   ```
-   module: AnvirHook8_64.dll
-   ```
-   On Leaf it Alone this was `AnvirHook8_64.dll`. Other targets may
-   load `BeebyteProtector.dll`, `il2cpp_inspector_anti.dll`, custom
-   in-house names, etc. The naming is a strong heuristic — anything
-   `*Hook*` / `*Protector*` / `*Anti*` in a Unity game's module list
-   warrants suspicion.
+**Symptom that is NOT definitive — was originally listed as #3 but
+demoted 2026-05-25 after a counter-example**: a third-party `*Hook*` /
+`*Protector*` DLL in the module list (e.g. `AnvirHook8_64.dll`,
+`BeebyteProtector.dll`, `il2cpp_inspector_anti.dll`). This *can* be
+game-side protection, but it can equally be **user-machine-wide
+injected sysadmin tooling**. The counter-example: `AnvirHook8_64.dll`
+appeared in both Leaf it Alone (packed IL2CPP) AND
+[Subnautica](test-matrix.md#unity-targets-verified) (unprotected Mono /
+Unity 2019.4 — every Discrete Mono DLL-side primitive resolves cleanly
+on it: `MonoResolver bound 29/29`, main-thread hook armed, 104
+assemblies enumerable). Subnautica is not plausibly self-protected;
+the only consistent explanation is the user has Anvir Task Manager Pro
+(or equivalent) installed and it injects into every running process at
+the OS level. **Rule**: treat `*Hook*` / `*Protector*` modules as
+*weak* evidence at best — cross-check with another known-good target
+from the same user before concluding it's game protection. The two
+real symptoms above (export stripping + metadata encryption) are
+sufficient on their own.
 
 **Why no `walk` log appears**: every pipe handler that does real work
 starts with `if (!IsResolved()) return json{{"error", "..."}};`. With
@@ -1954,13 +1963,19 @@ log shows the connect succeeded; no other category gets data.
 2. Look at the last 5 lines before `Init: main thread id = ...`
 3. If you see `required 0/16, optional 0/27 (resolved=no)` → symptom 1 confirmed
 4. `metadata\current.log` will show `magic mismatch` → symptom 2 confirmed
-5. Scan the module-dump section of `init` for non-standard DLLs → symptom 3
-6. Verify no `walk\` subdirectory exists for the PID
+5. Verify no `walk\` subdirectory exists for the PID (proves every RPC
+   short-circuited at the `!IsResolved` gate)
+6. *Optional cross-check*: scan the module-dump for `*Hook*` /
+   `*Protector*` DLLs — but **do not rely on this alone**, see the
+   "NOT definitive" note above. If you find one, ask the user to
+   run a known-good Unity game (any unprotected Mono / IL2CPP target)
+   and check if the same DLL appears in that PID's `init\current.log`
+   too; if yes, it's machine-wide tooling, not game protection.
 
-If all four hold, the target is packed/obfuscated. **Stop investigating
-the user's setup** — it's not their config, not a Discrete bug, not
-the wrong DLL version. Don't try to "fix" anything; document the
-target as unsupported in the matrix.
+If symptoms 1 + 2 + 5 all hold, the target is packed/obfuscated.
+**Stop investigating the user's setup** — it's not their config, not
+a Discrete bug, not the wrong DLL version. Don't try to "fix"
+anything; document the target as unsupported in the matrix.
 
 **What would be needed to support these targets** (NOT scheduled):
 
@@ -1975,8 +1990,9 @@ least 2 more samples land, so the AOB patterns can be cross-validated
 across protector flavours.
 
 **Rule**: when a user reports "DLL injects but nothing works on this
-Unity game", FIRST check the 3-symptom fingerprint before any other
-debugging. Saves a 30-min wild-goose chase ~95% of the time. If even
-one symptom is absent, fall back to normal debugging — the issue is
-something else (wrong DLL bitness, AV quarantine, pipe-name
-collision, etc.).
+Unity game", FIRST check the 2-symptom fingerprint (export stripping +
+metadata encryption) plus the missing-`walk\`-subdir tell before any
+other debugging. Saves a 30-min wild-goose chase ~95% of the time. If
+either of the two real symptoms is absent, fall back to normal
+debugging — the issue is something else (wrong DLL bitness, AV
+quarantine, pipe-name collision, etc.).
