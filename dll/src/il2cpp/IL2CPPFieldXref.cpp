@@ -529,6 +529,56 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                " droppedNoEnclose=" + std::to_string(droppedNoEnclose) +
                " truncated=" + (result.truncated ? "1" : "0"));
 
+    // Build #555 follow-up — IL2CPP structural-limit advisory.
+    // Diagnosis from 活俠傳/SaGa F2R smoke 2026-05-25: every IL2CPP static field
+    // we tried returned 0 matches (`SteamManager` static, `<>9__0_0` /
+    // `<>9__0_1` lambda caches). Lambda caches MUST have ≥1 read+write in IL
+    // (the closure-cache pattern), so 0 matches is structurally impossible
+    // unless the RIP scanner physically cannot see the references.
+    //
+    // Root cause: IL2CPP allocates `static_fields` blocks on the runtime
+    // heap during class init (`il2cpp_class_get_static_data` returns a
+    // pointer into a high-VA heap region like 0x18BD5735630). No machine
+    // instruction in the AOT-compiled .text can RIP-relative-address a
+    // runtime-allocated address — the displacement isn't known at compile
+    // time. So compiled code reaches the field via class-pointer indirection:
+    //     mov rax, [rip+CLASS_PTR]            ; load Il2CppClass* (in .data)
+    //     mov rax, [rax + offsetof(static_fields)]
+    //     mov rax, [rax + 0x10]               ; field at offset 16
+    // The RIP scan would have to be redesigned to chase this 2-hop chain
+    // (Phase 28b-v2, see plan.md) which needs a proper x64 disassembler.
+    //
+    // Heuristic for surfacing the note: address sits outside the
+    // GameAssembly.dll module image. If it's inside (rare — only happens
+    // when IL2CPP baked the static into .data, which AFAICT modern Unity
+    // never does for user code), the scan IS authoritative and 0 matches
+    // means the field really is unused; no note needed.
+    if (result.matches.empty()) {
+        std::size_t gaSize = ModuleHelper::GetModuleSize(MagicStrings::ModuleIL2CPP);
+        std::uintptr_t gaLo = reinterpret_cast<std::uintptr_t>(gaBase);
+        std::uintptr_t gaHi = gaLo + gaSize;
+        bool outsideModule = (targetAddr < gaLo) || (targetAddr >= gaHi);
+        if (outsideModule && candidateHits == 0) {
+            result.note =
+                "IL2CPP static_fields are runtime-heap-allocated by the IL2CPP "
+                "runtime at class-init time (this field's storage is at 0x" +
+                [](std::uintptr_t v) {
+                    char buf[24]; std::snprintf(buf, sizeof(buf), "%llX",
+                        static_cast<unsigned long long>(v)); return std::string(buf);
+                }(targetAddr) +
+                ", which sits outside the GameAssembly.dll module). No "
+                "compiled instruction can RIP-relative-address a runtime "
+                "address, so this scanner cannot find readers/writers via "
+                "RIP scanning — even though the IL almost certainly contains "
+                "ldsfld/stsfld ops. This is a structural limitation of Phase "
+                "28b v1's IL2CPP path, not evidence that the field is unused. "
+                "Phase 28b-v2 (see plan.md) plans a class-pointer chained-"
+                "disassembly redesign to address this. For now, the Mono "
+                "backend's IL walker handles this case correctly — use a "
+                "Mono target to inspect equivalent fields.";
+        }
+    }
+
     result.ok = true;
     return result;
 }

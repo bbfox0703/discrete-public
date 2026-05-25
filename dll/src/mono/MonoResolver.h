@@ -106,6 +106,18 @@ using fn_method_header_get_code = const unsigned char* (*)(MonoMethodHeader*, st
 using fn_metadata_free_mh       = void           (*)(MonoMethodHeader*);
 using fn_class_get_field_token  = std::uint32_t  (*)(MonoClassField*);
 
+// --- Disconnect-time GC drain (build #547 follow-up) ----------------------
+// `mono_gc_collect(int generation)` triggers a Mono / BDWGC collection
+// cycle. Generation -1 means "full collection (max generation)". We call
+// this from the PipeServer disconnect hook so finalizers queued during a
+// long-running batch RPC (Phase 28 IL walker over 2000+ methods is the
+// canonical trigger) drain incrementally while DiscreteUI / the bridge is
+// still attached, instead of all-at-once at game shutdown (observed
+// symptom: BongoCat shutdown 10-30s post-findFieldReferences).
+// Optional binding — older Mono builds may not export it; the disconnect
+// hook silently no-ops when unbound.
+using fn_gc_collect             = void           (*)(int /*generation, -1 = full*/);
+
 // MONO_TABLE_TYPEDEF row index in a MonoImage; pass to image_get_table_info.
 inline constexpr int          MonoTableTypedef = 2;
 // CLI metadata token base for TypeDef rows.
@@ -182,6 +194,9 @@ struct Resolver {
     fn_method_header_get_code method_header_get_code = nullptr;
     fn_metadata_free_mh       metadata_free_mh       = nullptr;
     fn_class_get_field_token  class_get_field_token  = nullptr;
+
+    // Disconnect-time GC drain — see header comment on fn_gc_collect.
+    fn_gc_collect             gc_collect             = nullptr;
 };
 
 // Singleton accessor. First call probes the loaded mono module and binds every

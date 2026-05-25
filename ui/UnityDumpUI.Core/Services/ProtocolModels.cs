@@ -488,6 +488,14 @@ public sealed class SearchSymbolsResult
     /// resolve (multi-assembly mode only). Empty / omitted on the wire
     /// in single-assembly mode where a missing assembly is a hard error.</summary>
     [JsonPropertyName("missing_assemblies")] public List<string>?        MissingAssemblies { get; set; }
+    /// <summary>Per-assembly truncation (build #547 follow-up). In
+    /// multi-assembly mode each assembly gets its own <c>limit</c> budget
+    /// so a single big assembly (e.g. <c>Ak.Wwise.Api.WAAPI</c>) can't
+    /// starve the rest. Any assembly that filled its per-asm budget is
+    /// reported here so the UI can surface a "raise the limit to see more
+    /// from X, Y, Z" hint. Empty / omitted in single-assembly mode (use
+    /// <see cref="Truncated"/> there).</summary>
+    [JsonPropertyName("truncated_assemblies")] public List<string>?      TruncatedAssemblies { get; set; }
     [JsonPropertyName("error")]           public string?                 Error          { get; set; }
 }
 
@@ -623,6 +631,15 @@ public sealed class FindFieldReferencesResult
     [JsonPropertyName("scanned_methods")] public int                        ScannedMethods { get; set; }
     [JsonPropertyName("truncated")]       public bool                       Truncated      { get; set; }
     [JsonPropertyName("error")]           public string?                    Error          { get; set; }
+    /// <summary>Build #555 — IL2CPP advisory. Set when the backend scan ran
+    /// successfully but returned 0 matches AND the static-storage address
+    /// sits outside the GameAssembly.dll module (= heap-allocated by IL2CPP
+    /// runtime at class-init time, no compiled instruction can RIP-address
+    /// it). Tells the user the 0-match result reflects a structural
+    /// limitation of v1's IL2CPP scanner, not "field is unused". Surfaced
+    /// as a yellow advisory banner in <c>FieldReferencesWindow</c>. Null on
+    /// Mono and on IL2CPP scans whose static lived in the module (rare).</summary>
+    [JsonPropertyName("note")]            public string?                    Note           { get; set; }
 }
 
 public sealed class FieldReferenceFieldInfo

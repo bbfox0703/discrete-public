@@ -1,8 +1,63 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-25 **session close** — build #546).
+**Branch**: `dev` (2026-05-25 **session close** — build #555).
 
 ## TL;DR — what's left to pick up
+
+**Phase 28b IL2CPP static x-ref — root-cause CONFIRMED (build #555,
+2026-05-25 evening)**. The build #546 diagnostic logging paid off: live
+re-run on SaGa F2R with `MainGame/StrReader2UShortAry/<>c.<>9__0_0` and
+`<>9__0_1` (C# lambda-cache delegates that structurally MUST have ≥1
+read+write in IL) showed:
+
+```
+FieldXref: methodIndex built — 19477 methods indexed (of 20161 walked), executable sections=2
+FieldXref: scan complete — candidateHits=0 emitted=0 droppedKindFilter=0 droppedNoEnclose=0 truncated=0
+```
+
+`candidateHits=0` (NOT `droppedNoEnclose>0`) → not cross-asm attribution.
+Method index green → not resolver bug. Root cause: **IL2CPP
+`il2cpp_class_get_static_data` returns a runtime-heap-allocated
+pointer** (observed at `0x18BD5735630`, well outside GameAssembly.dll
+image). No machine instruction can RIP-relative-address a runtime
+address; AOT code reaches the field via 2-hop class-pointer indirection.
+Phase 28b v1's RIP scan is fundamentally unable to see these references.
+
+**Mitigation shipped (build #555)** — chose user-approved option C +
+v2 stub:
+* DLL adds `note` field to IL2CPP `findFieldReferences` response. Set
+  when 0 matches AND target sits outside GameAssembly.dll module.
+* UI [`FieldReferencesWindow`](../ui/UnityDumpUI/Views/FieldReferencesWindow.axaml)
+  surfaces a yellow advisory banner: "IL2CPP `static_fields` are
+  runtime-heap-allocated; this scanner cannot see refs via RIP scan
+  — Mono backend handles this correctly."
+* New [lessons-learned.md §Phase 28b IL2CPP `static_fields` is runtime-heap-allocated](lessons-learned.md#phase-28b-il2cpp--static_fields-is-runtime-heap-allocated-so-rip-scan-cannot-find-references)
+  with the diagnostic recipe + asm reproduction.
+* Phase 28b-v2 added as TODO stub in [plan.md](plan.md): class-pointer
+  chained-disassembly redesign. Needs real x64 disassembler. ~1 week.
+
+**Earlier this session (build #547-#554)** — three follow-up fixes
+from user live-smoke:
+1. **Symbol Finder "search all user assemblies" only finding WAAPI** —
+   global limit was draining on the alphabetically-first big assembly.
+   DLL `searchSymbols` now per-asm budget in multi-asm mode + new
+   `truncated_assemblies` wire field + UI surfaces "per-asm cap hit on
+   X, Y, Z — raise the limit" hint.
+2. **BongoCat post-findFieldReferences slow game shutdown** — disconnect-
+   time GC drain hook. New `PipeServer::RegisterDisconnectHook` API +
+   Mono/IL2CPP backends register hooks that call `mono_gc_collect(-1)` /
+   `il2cpp_gc_collect(0)` after every client disconnects. Drains the
+   finalizer queue while DiscreteUI is still attached. Three games
+   live-verified: no more shutdown slowness.
+3. **"Static only" toggle in Symbol Finder** (earlier in session) — new
+   checkbox in MainWindow Symbol Finder tab + DLL `staticOnly` arg
+   relaxes the pattern-required rule when set. Closes the "static fields
+   are hard to find" gap.
+
+---
+
+(Previous TL;DR — for the build #546 diagnostic-instrumentation
+session and earlier, kept below for cross-PC handoff context.)
 
 **Diagnostic-fingerprint correction** (2026-05-25 later same day):
 yesterday's Leaf it Alone obfuscation diagnosis originally listed

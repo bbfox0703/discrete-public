@@ -991,8 +991,8 @@
                             IsChecked="{Binding SymbolFinder.SearchAllUserAssemblies, Mode=TwoWay}"
                             VerticalAlignment="Center" />
                 </Grid>
-                <!-- Row 1: pattern + kinds + limit + Search. -->
-                <Grid ColumnDefinitions="*,Auto,Auto,Auto,140,Auto">
+                <!-- Row 1: pattern + kinds + static-only + limit + Search. -->
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,140,Auto">
                   <TextBox Grid.Column="0"
                            PlaceholderText="{StaticResource SymbolFinder.PatternWatermark}"
                            Text="{Binding SymbolFinder.Pattern, Mode=TwoWay}"
@@ -1006,16 +1006,21 @@
                             Content="{StaticResource SymbolFinder.IncludeMethods}"
                             IsChecked="{Binding SymbolFinder.IncludeMethods, Mode=TwoWay}"
                             VerticalAlignment="Center" Margin="0,0,12,0" />
-                  <TextBlock Grid.Column="3"
+                  <CheckBox Grid.Column="3"
+                            Content="{StaticResource SymbolFinder.StaticOnly}"
+                            ToolTip.Tip="{StaticResource SymbolFinder.StaticOnlyTooltip}"
+                            IsChecked="{Binding SymbolFinder.StaticOnly, Mode=TwoWay}"
+                            VerticalAlignment="Center" Margin="0,0,12,0" />
+                  <TextBlock Grid.Column="4"
                              Text="{StaticResource SymbolFinder.LimitLabel}"
                              VerticalAlignment="Center" Margin="0,0,6,0" />
-                  <NumericUpDown Grid.Column="4"
+                  <NumericUpDown Grid.Column="5"
                                  Value="{Binding SymbolFinder.Limit, Mode=TwoWay}"
                                  Minimum="1" Maximum="5000" Increment="100"
                                  FormatString="0"
                                  MinWidth="120"
                                  Margin="0,0,8,0" />
-                  <Button Grid.Column="5"
+                  <Button Grid.Column="6"
                           Content="{StaticResource SymbolFinder.SearchButton}"
                           Command="{Binding SymbolFinder.SearchCommand}"
                           Classes="accent" />

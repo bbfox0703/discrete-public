@@ -158,6 +158,11 @@ void DoResolve() {
     optBind("mono_metadata_free_mh",            g_resolver.metadata_free_mh);
     optBind("mono_class_get_field_token",       g_resolver.class_get_field_token);
 
+    // Disconnect-time GC drain — closes the "game shutdown is slow after
+    // a Phase 28 IL walker run" complaint. Exported by every BDWGC-based
+    // Mono build (Unity 5+) under the canonical name.
+    optBind("mono_gc_collect",                  g_resolver.gc_collect);
+
     g_resolver.resolved = (ok == total);
 
     char line[256];

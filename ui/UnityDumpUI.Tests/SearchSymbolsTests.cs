@@ -77,7 +77,7 @@ public class SearchSymbolsTests
         {
             SearchSymbolsResult result = await adapter.SearchSymbolsAsync(
                 "Assembly-CSharp", "MaxHP",
-                kinds: new[] { "field", "method" }, limit: 200, ct)
+                kinds: new[] { "field", "method" }, limit: 200, ct: ct)
                 .ConfigureAwait(true);
 
             // Wire-shape pin: cmd + args must match what the DLL handler expects.
@@ -140,7 +140,7 @@ public class SearchSymbolsTests
         try
         {
             _ = await adapter.SearchSymbolsAsync("UnityEngine.CoreModule", "Foo",
-                                                 kinds: null, limit: null, ct)
+                                                 kinds: null, limit: null, ct: ct)
                 .ConfigureAwait(true);
             string requestLine = await serverTask.ConfigureAwait(true);
             using var doc = JsonDocument.Parse(requestLine);
@@ -187,7 +187,7 @@ public class SearchSymbolsTests
             SearchSymbolsResult result = await adapter.SearchSymbolsAsync(
                 new[] { "Assembly-CSharp", "ThirdPartyMods", "DeadAsm" },
                 "MaxHP",
-                kinds: new[] { "field", "method" }, limit: 500, ct)
+                kinds: new[] { "field", "method" }, limit: 500, ct: ct)
                 .ConfigureAwait(true);
 
             string requestLine = await serverTask.ConfigureAwait(true);
@@ -240,13 +240,148 @@ public class SearchSymbolsTests
         try
         {
             SearchSymbolsResult result = await adapter.SearchSymbolsAsync(
-                "Assembly-CSharp", "x", kinds: null, limit: 1, ct)
+                "Assembly-CSharp", "x", kinds: null, limit: 1, ct: ct)
                 .ConfigureAwait(true);
             await serverTask.ConfigureAwait(true);
 
             Assert.Single(result.Matches);
             Assert.Equal(99, result.ScannedClasses);
             Assert.True(result.Truncated, "truncated flag must surface to the UI");
+        }
+        finally
+        {
+            await client.DisposeAsync().ConfigureAwait(true);
+            await server.DisposeAsync().ConfigureAwait(true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchSymbols_StaticOnlyFlag_ThreadsThroughAsBoolArg()
+    {
+        // Static-only mode: the adapter must send `staticOnly: true` to the
+        // DLL so the backend handler filters out instance members. Empty
+        // pattern is allowed in this mode — the wire pin verifies both
+        // (empty pattern + staticOnly bool) reach the backend faithfully.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string response = """
+        {
+          "matches": [
+            { "namespace": "Game", "class": "GameManager", "name": "Instance",
+              "kind": "field", "type": "Game.GameManager", "offset": 0, "static": true },
+            { "namespace": "UnityEngine", "class": "Vector3", "name": "kEpsilon",
+              "kind": "field", "type": "System.Single", "offset": 0, "static": true }
+          ],
+          "scanned_classes": 412,
+          "truncated": false
+        }
+        """;
+        var (adapter, serverTask, server, client) = await StartPairAsync(response, ct);
+        try
+        {
+            SearchSymbolsResult result = await adapter.SearchSymbolsAsync(
+                "Assembly-CSharp", pattern: string.Empty,
+                kinds: new[] { "field" }, limit: 500,
+                staticOnly: true, ct: ct)
+                .ConfigureAwait(true);
+
+            string requestLine = await serverTask.ConfigureAwait(true);
+            using var doc = JsonDocument.Parse(requestLine);
+            JsonElement args = doc.RootElement.GetProperty("args");
+
+            // staticOnly threads through as a boolean true.
+            Assert.True(args.TryGetProperty("staticOnly", out var staticOnly),
+                        "staticOnly arg must be present when caller enables it");
+            Assert.Equal(JsonValueKind.True, staticOnly.ValueKind);
+
+            // Empty pattern is sent verbatim — DLL handler accepts it when
+            // staticOnly is true, rejects it otherwise.
+            Assert.Equal(string.Empty, args.GetProperty("pattern").GetString());
+
+            // Result decode pin.
+            Assert.Equal(2, result.Matches.Count);
+            Assert.All(result.Matches, m => Assert.True(m.IsStatic));
+        }
+        finally
+        {
+            await client.DisposeAsync().ConfigureAwait(true);
+            await server.DisposeAsync().ConfigureAwait(true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchSymbols_StaticOnlyDefault_OmitsTheArgEntirely()
+    {
+        // Backward-compat pin: when caller doesn't request staticOnly, the
+        // adapter must NOT send the field at all. Older DLL builds (pre-
+        // staticOnly) wouldn't know how to handle it gracefully — keep the
+        // wire minimal.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string response = """
+        { "matches": [], "scanned_classes": 0, "truncated": false }
+        """;
+        var (adapter, serverTask, server, client) = await StartPairAsync(response, ct);
+        try
+        {
+            _ = await adapter.SearchSymbolsAsync(
+                "Assembly-CSharp", "MaxHP", kinds: null, limit: null, ct: ct)
+                .ConfigureAwait(true);
+
+            string requestLine = await serverTask.ConfigureAwait(true);
+            using var doc = JsonDocument.Parse(requestLine);
+            JsonElement args = doc.RootElement.GetProperty("args");
+            Assert.False(args.TryGetProperty("staticOnly", out _),
+                         "staticOnly must be omitted when caller leaves it at default false");
+        }
+        finally
+        {
+            await client.DisposeAsync().ConfigureAwait(true);
+            await server.DisposeAsync().ConfigureAwait(true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchSymbols_TruncatedAssemblies_DecodesNewWireField()
+    {
+        // Build #547 — per-assembly limit fix. The DLL now emits
+        // `truncated_assemblies` (in addition to the existing global
+        // `truncated`) so the UI can tell users which assemblies hit their
+        // per-asm budget vs the global cap. Wire-shape pin so a future DLL
+        // refactor doesn't accidentally drop this field.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string response = """
+        {
+          "matches": [
+            { "namespace": "Game", "class": "Player", "assembly": "Assembly-CSharp",
+              "name": "MaxHP", "kind": "field", "type": "System.Int32",
+              "offset": 64, "static": true },
+            { "namespace": "Ak.Wwise.Api", "class": "WAAPI", "assembly": "Ak.Wwise.Api.WAAPI",
+              "name": "Init", "kind": "method", "token": 100663552, "static": true }
+          ],
+          "scanned_classes": 8431,
+          "truncated": false,
+          "truncated_assemblies": ["Ak.Wwise.Api.WAAPI", "ThirdPartyMods"]
+        }
+        """;
+        var (adapter, serverTask, server, client) = await StartPairAsync(response, ct);
+        try
+        {
+            SearchSymbolsResult result = await adapter.SearchSymbolsAsync(
+                new[] { "Assembly-CSharp", "Ak.Wwise.Api.WAAPI", "ThirdPartyMods" },
+                pattern: string.Empty,
+                kinds: new[] { "field", "method" }, limit: 200,
+                staticOnly: true, ct: ct)
+                .ConfigureAwait(true);
+            await serverTask.ConfigureAwait(true);
+
+            // Global truncated stays false — only per-asm budgets hit.
+            Assert.False(result.Truncated);
+            Assert.NotNull(result.TruncatedAssemblies);
+            Assert.Equal(2, result.TruncatedAssemblies!.Count);
+            Assert.Equal("Ak.Wwise.Api.WAAPI", result.TruncatedAssemblies[0]);
+            Assert.Equal("ThirdPartyMods",     result.TruncatedAssemblies[1]);
+
+            // And rows from the un-capped assembly still surface.
+            Assert.Equal(2, result.Matches.Count);
         }
         finally
         {

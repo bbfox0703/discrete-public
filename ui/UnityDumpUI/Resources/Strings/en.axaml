@@ -162,6 +162,8 @@
   <sys:String x:Key="SymbolFinder.PatternWatermark">name substring (case-insensitive), e.g. MaxHP</sys:String>
   <sys:String x:Key="SymbolFinder.IncludeFields">Fields</sys:String>
   <sys:String x:Key="SymbolFinder.IncludeMethods">Methods</sys:String>
+  <sys:String x:Key="SymbolFinder.StaticOnly">Static only</sys:String>
+  <sys:String x:Key="SymbolFinder.StaticOnlyTooltip">When checked, drops every instance field / method at the DLL — pattern becomes optional, so leaving it blank lists every static member in the chosen scope. Handy for hunting singletons, constants (e.g. kEpsilon), and game-wide manager classes.</sys:String>
   <sys:String x:Key="SymbolFinder.LimitLabel">Limit</sys:String>
   <sys:String x:Key="SymbolFinder.SearchButton">Search</sys:String>
   <sys:String x:Key="SymbolFinder.ColKind">Kind</sys:String>

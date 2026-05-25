@@ -509,6 +509,62 @@ Callers should check `IsHealthy` (exposed via `getDispatcherStats` /
 the `main_thread.is_healthy` handshake field) before routing through
 the queue, and fall back to the worker-thread path when stale.
 
+### Phase 28b IL2CPP — `static_fields` is runtime-heap-allocated so RIP scan cannot find references
+
+**Symptom**: `findFieldReferences` on an IL2CPP static field that
+clearly MUST have readers/writers (e.g. C# compiler-generated lambda-
+cache field `<>9__0_1` of type `Action<...>` — the cache pattern
+literally requires `ldsfld` + `stsfld` ops at every lambda site)
+returns `0 matches` with `methods scanned > 19000` and no error.
+Diagnostic log shows `candidateHits=0` (not "candidates dropped" —
+candidates literally never materialised). Multiple unrelated static
+fields all hit the same symptom on SaGa F2R (build #546 instrumentation
++ build #555 root-cause).
+
+**Root cause**: IL2CPP's `il2cpp_class_get_static_data(klass)` returns
+the `Il2CppClass::static_fields` pointer. That pointer is allocated by
+the IL2CPP runtime at class-init time via the runtime heap — observed
+addresses live in `0x18xxxxxxxx` (Windows high-VA heap), well outside
+the GameAssembly.dll module's image. Phase 28b v1's scanner walks
+GameAssembly.dll's .text for `mov reg, [rip+disp32]` / `lea reg,
+[rip+disp32]` / `mov [rip+disp32], reg` whose absolute target equals
+`static_fields + fieldOffset`. **No machine instruction can RIP-
+relative-address a runtime-allocated heap address — the displacement
+isn't known at compile time.** AOT-compiled code reaches the field
+via a 2-hop indirection:
+
+```asm
+mov  rax, [rip + CLASS_PTR_DISP32]       ; load Il2CppClass* (in .data — RIP-addressable)
+mov  rax, [rax + offsetof(static_fields)] ; deref to static_fields ptr
+mov  rax, [rax + 0x10]                    ; read field at offset 16 (immediate, NOT RIP)
+```
+
+So the scan structurally cannot see any reference. Returning 0 matches
+is technically correct but misleading — the user infers "field is
+unused" when really "this scanner can't see them".
+
+**Rule**: Phase 28b v1's IL2CPP path is fundamentally unable to find
+references for any IL2CPP static whose `static_fields` lives outside
+the module image (AFAICT in modern Unity, that's every user-code
+static). Build #555 surfaces a yellow advisory banner in
+[FieldReferencesWindow.axaml](../ui/UnityDumpUI/Views/FieldReferencesWindow.axaml)
+explaining the limitation when the scanner detects an out-of-module
+target with `candidateHits=0`. The Mono backend's IL walker handles
+this case correctly because IL bytecode preserves the `ldsfld <token>`
+op — recommend Mono targets for x-ref work until Phase 28b-v2 lands.
+
+**Cross-reference**: Phase 28b-v2 in [plan.md](plan.md) plans the
+proper fix — scan for RIP refs to the `Il2CppClass*` pointer (which
+DOES live in .data and IS RIP-addressable), then forward-disassemble
+each hit to follow the 2-hop chain and confirm the trailing
+`[rax+staticFieldsOffset]+[rax+fieldOffset]` matches. Needs a real
+x64 disassembler (current `AobPattern.cpp` LDE only does length-
+decode, not operand classification). Effort estimate ~1 week.
+
+**Source**: [`IL2CPPFieldXref.cpp::FindStaticFieldReferences`](../dll/src/il2cpp/IL2CPPFieldXref.cpp)
+sets `result.note` when scan completes with 0 matches and target
+sits outside the GameAssembly.dll module.
+
 ---
 
 ## Overload disambiguation

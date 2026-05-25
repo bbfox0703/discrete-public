@@ -1809,6 +1809,67 @@ Cross-assembly attribution (e.g. searching `UnityEngine.Time.timeScale`
 references across all user code) is a v2 enhancement — v1 only resolves
 references whose declaring class lives in the target assembly.
 
+### Phase 28b-v2 — IL2CPP class-pointer chained disassembly (TODO stub)
+
+**Why**: Phase 28b v1's IL2CPP RIP scan returns 0 matches for ~every
+practical IL2CPP static field. Diagnosis confirmed 2026-05-25 on SaGa
+F2R via build #546 instrumentation: `il2cpp_class_get_static_data`
+returns a runtime-heap-allocated pointer (e.g. `0x18BD5735630`), and no
+machine instruction can RIP-relative-address a runtime address. AOT code
+reaches static fields via a 2-hop class-pointer indirection:
+
+```asm
+mov  rax, [rip + CLASS_PTR_DISP32]       ; load Il2CppClass* (in .data — RIP-addressable)
+mov  rax, [rax + offsetof(static_fields)] ; deref to static_fields ptr
+mov  rax, [rax + 0x10]                    ; field at offset 16
+```
+
+v1 only sees the third instruction's `[rax+0x10]` displacement, which
+is the field offset (16), not the storage address. **Result: 0 hits
+even when the field is heavily used.** Full diagnosis +
+reproduction in
+[lessons-learned.md §"Phase 28b IL2CPP — `static_fields` is runtime-heap-allocated"](lessons-learned.md#phase-28b-il2cpp--static_fields-is-runtime-heap-allocated-so-rip-scan-cannot-find-references).
+
+**v1 mitigation (build #555, shipped)**: DLL adds `note` field to
+`findFieldReferences` response when 0 matches + target outside
+GameAssembly.dll module; UI surfaces yellow advisory banner so users
+aren't misled into "field is unused". Mono path unaffected — it walks
+IL bytecode directly and `ldsfld` tokens are explicit.
+
+**v2 redesign** (~1 week effort, not started):
+1. Walk `IL2CPPMetadataRegistration` or `Il2CppClass*` enumeration to
+   build a class-pointer → class-name index.
+2. RIP-scan .text for refs to each `Il2CppClass*` (these ARE in
+   `.data`, ARE RIP-addressable). This gives a list of "this method
+   touches Il2CppClass FOO" hits — already a useful intermediate.
+3. For each hit, forward-disassemble the next ~32 bytes looking for the
+   chain `[rax + staticFieldsOffset]` followed by `[rax + targetFieldOffset]`.
+   Match the trailing offset against the requested field. Requires a
+   real x64 disassembler — current `AobPattern.cpp` LDE only does
+   length-decode, not operand classification. Options:
+   - Bundle `iced-x86` (Rust, mature, big binary impact) via FFI
+   - Bundle `Zydis` (C, header-only, more compact)
+   - Extend `AobPattern.cpp` with the specific ModRM+SIB patterns we
+     need (cheapest, narrowest, harder to maintain as we add more
+     patterns over time)
+4. Bonus: walk vtable / interface method tables for indirect calls
+   that reference the class.
+
+**Decision pending until v2 starts**: which disassembler to bundle.
+Recommend Zydis for the binary-size tradeoff (Discrete already big at
+3.4 MB IL2CPP DLL). Skipping until a user pushes for IL2CPP static
+xrefs in practice; current Mono-only coverage is sufficient for the
+canonical workflow (BongoCat / 活俠傳 — Mono targets).
+
+**Acceptance** (when implemented):
+* On SaGa F2R, `findFieldReferences` for `<>9__0_1` returns ≥1 read
+  + ≥1 write (the lambda closure-cache pattern). Cross-check IL via
+  Il2CppDumper output.
+* For a known game singleton (e.g. `Game.Manager.Instance`), returns
+  every method whose disassembly contains the matching 2-hop chain.
+* False-positive rate under 1% on a 10K-class image (the chained-
+  disassembly approach is high-precision).
+
 ---
 
 ## Cross-PC Workflow

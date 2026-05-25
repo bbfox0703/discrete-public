@@ -87,6 +87,18 @@
       <TextBlock Text="{Binding ErrorMessage}" Foreground="#FFD32F2F" TextWrapping="Wrap" />
     </Border>
 
+    <!-- Build #555 — IL2CPP structural-limit advisory banner. Yellow tint
+         distinguishes it from the red ErrorMessage banner above: scan
+         succeeded but result is misleading because static_fields is
+         runtime-heap-allocated. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding AdvisoryMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+            Background="#33D9A300" BorderBrush="#88D9A300"
+            BorderThickness="1" CornerRadius="4" Padding="10,6"
+            Margin="0,0,0,8">
+      <TextBlock Text="{Binding AdvisoryMessage}" Foreground="#FFD9A300" TextWrapping="Wrap" />
+    </Border>
+
     <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
       <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
         <Button Content="{StaticResource FieldRefs.CloseButton}"

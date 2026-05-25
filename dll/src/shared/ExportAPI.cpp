@@ -1882,7 +1882,13 @@ void RegisterCoreHandlers() {
         [](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
         std::string pattern = args.value("pattern", std::string{});
-        if (pattern.empty()) return json{{"error", "missing 'pattern' arg"}};
+        // `staticOnly` lets callers list every static member without supplying
+        // a name pattern (Symbol Finder "Static only" toggle). Pattern is
+        // still required for the legacy name-substring flow.
+        bool staticOnly = args.value("staticOnly", false);
+        if (pattern.empty() && !staticOnly) {
+            return json{{"error", "missing 'pattern' arg (or pass staticOnly=true)"}};
+        }
 
         // Resolve target assembly list — accept legacy single `assembly` OR
         // new `assemblies` array. Order in `assemblies` is preserved.
@@ -1923,17 +1929,31 @@ void RegisterCoreHandlers() {
         if (limit <= 0)      limit = 200;
         if (limit > 5000)    limit = 5000;
 
+        // Build #547 follow-up — per-assembly limit in multi-asm mode.
+        // Pre-fix bug: when caller passed `assemblies: [WAAPI, Assembly-CSharp,
+        // ...]` the global limit drained on the alphabetically-first hit
+        // (WAAPI / Audio middleware with hundreds of static methods) and the
+        // outer loop broke before reaching Assembly-CSharp. User saw "Search
+        // all user assemblies" appearing to ignore everything but the first.
+        // Fix: in multi-asm mode each assembly gets its OWN limit budget;
+        // a separate global hard cap (5x limit, ceiling 25k) prevents pathological
+        // runaway when the user keeps the default 200 limit + scans 100 assemblies.
+        const bool multiAsm = assemblyNames.size() > 1;
+        const std::size_t perAsmLimit  = static_cast<std::size_t>(limit);
+        const std::size_t globalCap    = multiAsm
+            ? std::min<std::size_t>(25000, perAsmLimit * 5 * assemblyNames.size())
+            : perAsmLimit;  // single-asm: behave exactly as before
+
         json matches  = json::array();
-        bool truncated = false;
+        bool truncated = false;          // GLOBAL truncation — caller hit overall ceiling
         std::size_t scanned = 0;
         std::vector<std::string> missingAssemblies;
+        std::vector<std::string> truncatedAssemblies;  // per-asm budgets that filled
 
         for (const auto& assemblyName : assemblyNames) {
-            if (truncated) break;
+            if (matches.size() >= globalCap) { truncated = true; break; }
             Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
             if (img == nullptr) {
-                // Single-arg legacy: hard error preserves byte-identical
-                // behaviour. Multi-arg: skip missing + report via response.
                 if (assemblyNames.size() == 1) {
                     return json{{"error", "assembly not found: " + assemblyName}};
                 }
@@ -1941,16 +1961,26 @@ void RegisterCoreHandlers() {
                 continue;
             }
 
+            std::size_t startCount = matches.size();
+            bool thisAsmCapped = false;
+            auto isAsmCapped = [&]() {
+                return matches.size() - startCount >= perAsmLimit;
+            };
+
             auto classes = Mono::EnumerateClasses(img);
             for (const auto& ce : classes) {
                 if (ce.klass == nullptr) continue;
+                if (thisAsmCapped) break;
+                if (matches.size() >= globalCap) { truncated = true; break; }
                 ++scanned;
                 auto res = Mono::ReadClassInfo(ce.klass);
                 if (!res.ok) continue;
 
                 if (wantFields) {
                     for (const auto& f : res.info.fields) {
-                        if (!ICaseContainsAscii(f.name, pattern)) continue;
+                        bool isStatic = (f.flags & 0x10u) != 0;
+                        if (staticOnly && !isStatic) continue;
+                        if (!pattern.empty() && !ICaseContainsAscii(f.name, pattern)) continue;
                         matches.push_back({
                             {"namespace", ce.ns},
                             {"class",     ce.name},
@@ -1959,17 +1989,18 @@ void RegisterCoreHandlers() {
                             {"kind",      "field"},
                             {"type",      f.typeName},
                             {"offset",    f.offset},
-                            {"static",    (f.flags & 0x10u) != 0},
+                            {"static",    isStatic},
                         });
-                        if (matches.size() >= static_cast<std::size_t>(limit)) {
-                            truncated = true; break;
-                        }
+                        if (isAsmCapped())              { thisAsmCapped = true; break; }
+                        if (matches.size() >= globalCap){ truncated = true;     break; }
                     }
-                    if (truncated) break;
+                    if (thisAsmCapped || truncated) break;
                 }
                 if (wantMethods) {
                     for (const auto& m : res.info.methods) {
-                        if (!ICaseContainsAscii(m.name, pattern)) continue;
+                        bool isStatic = (m.flags & 0x10u) != 0;
+                        if (staticOnly && !isStatic) continue;
+                        if (!pattern.empty() && !ICaseContainsAscii(m.name, pattern)) continue;
                         matches.push_back({
                             {"namespace", ce.ns},
                             {"class",     ce.name},
@@ -1977,15 +2008,17 @@ void RegisterCoreHandlers() {
                             {"name",      m.name},
                             {"kind",      "method"},
                             {"token",     m.token},
-                            {"static",    (m.flags & 0x10u) != 0},
+                            {"static",    isStatic},
                         });
-                        if (matches.size() >= static_cast<std::size_t>(limit)) {
-                            truncated = true; break;
-                        }
+                        if (isAsmCapped())              { thisAsmCapped = true; break; }
+                        if (matches.size() >= globalCap){ truncated = true;     break; }
                     }
-                    if (truncated) break;
+                    if (thisAsmCapped || truncated) break;
                 }
             }
+
+            if (thisAsmCapped) truncatedAssemblies.push_back(assemblyName);
+            if (truncated) break;  // global ceiling — abandon remaining assemblies
         }
         json response = {
             {"matches",         std::move(matches)},
@@ -1994,6 +2027,9 @@ void RegisterCoreHandlers() {
         };
         if (!missingAssemblies.empty()) {
             response["missing_assemblies"] = std::move(missingAssemblies);
+        }
+        if (!truncatedAssemblies.empty()) {
+            response["truncated_assemblies"] = std::move(truncatedAssemblies);
         }
         return response;
     });
@@ -3537,7 +3573,13 @@ void RegisterCoreHandlers() {
         [formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string pattern = args.value("pattern", std::string{});
-        if (pattern.empty()) return json{{"error", "missing 'pattern' arg"}};
+        // `staticOnly` lets callers list every static member without supplying
+        // a name pattern (Symbol Finder "Static only" toggle). Pattern is
+        // still required for the legacy name-substring flow.
+        bool staticOnly = args.value("staticOnly", false);
+        if (pattern.empty() && !staticOnly) {
+            return json{{"error", "missing 'pattern' arg (or pass staticOnly=true)"}};
+        }
 
         std::vector<std::string> assemblyNames;
         if (args.contains("assemblies") && args["assemblies"].is_array()) {
@@ -3576,13 +3618,22 @@ void RegisterCoreHandlers() {
         if (limit <= 0)   limit = 200;
         if (limit > 5000) limit = 5000;
 
+        // Build #547 follow-up — per-assembly limit in multi-asm mode.
+        // Mirror of Mono path; see that handler for the bug-fix rationale.
+        const bool multiAsm = assemblyNames.size() > 1;
+        const std::size_t perAsmLimit = static_cast<std::size_t>(limit);
+        const std::size_t globalCap   = multiAsm
+            ? std::min<std::size_t>(25000, perAsmLimit * 5 * assemblyNames.size())
+            : perAsmLimit;
+
         json matches   = json::array();
         bool truncated = false;
         std::size_t scanned = 0;
         std::vector<std::string> missingAssemblies;
+        std::vector<std::string> truncatedAssemblies;
 
         for (const auto& assemblyName : assemblyNames) {
-            if (truncated) break;
+            if (matches.size() >= globalCap) { truncated = true; break; }
             const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
             if (img == nullptr) {
                 if (assemblyNames.size() == 1) {
@@ -3592,16 +3643,26 @@ void RegisterCoreHandlers() {
                 continue;
             }
 
+            std::size_t startCount = matches.size();
+            bool thisAsmCapped = false;
+            auto isAsmCapped = [&]() {
+                return matches.size() - startCount >= perAsmLimit;
+            };
+
             auto classes = IL2CPP::EnumerateClasses(img);
             for (const auto& ce : classes) {
                 if (ce.klass == nullptr) continue;
+                if (thisAsmCapped) break;
+                if (matches.size() >= globalCap) { truncated = true; break; }
                 ++scanned;
                 auto res = IL2CPP::ReadClassInfo(ce.klass);
                 if (!res.ok) continue;
 
                 if (wantFields) {
                     for (const auto& f : res.info.fields) {
-                        if (!ICaseContainsAscii(f.name, pattern)) continue;
+                        bool isStatic = (f.flags & 0x10u) != 0;
+                        if (staticOnly && !isStatic) continue;
+                        if (!pattern.empty() && !ICaseContainsAscii(f.name, pattern)) continue;
                         matches.push_back({
                             {"namespace", ce.ns},
                             {"class",     ce.name},
@@ -3610,17 +3671,18 @@ void RegisterCoreHandlers() {
                             {"kind",      "field"},
                             {"type",      f.typeName},
                             {"offset",    f.offset},
-                            {"static",    (f.flags & 0x10u) != 0},
+                            {"static",    isStatic},
                         });
-                        if (matches.size() >= static_cast<std::size_t>(limit)) {
-                            truncated = true; break;
-                        }
+                        if (isAsmCapped())              { thisAsmCapped = true; break; }
+                        if (matches.size() >= globalCap){ truncated = true;     break; }
                     }
-                    if (truncated) break;
+                    if (thisAsmCapped || truncated) break;
                 }
                 if (wantMethods) {
                     for (const auto& m : res.info.methods) {
-                        if (!ICaseContainsAscii(m.name, pattern)) continue;
+                        bool isStatic = (m.flags & 0x10u) != 0;
+                        if (staticOnly && !isStatic) continue;
+                        if (!pattern.empty() && !ICaseContainsAscii(m.name, pattern)) continue;
                         matches.push_back({
                             {"namespace", ce.ns},
                             {"class",     ce.name},
@@ -3628,16 +3690,18 @@ void RegisterCoreHandlers() {
                             {"name",      m.name},
                             {"kind",      "method"},
                             {"token",     m.token},
-                            {"static",    (m.flags & 0x10u) != 0},
+                            {"static",    isStatic},
                             {"address",   formatHex(reinterpret_cast<std::uintptr_t>(m.pointer))},
                         });
-                        if (matches.size() >= static_cast<std::size_t>(limit)) {
-                            truncated = true; break;
-                        }
+                        if (isAsmCapped())              { thisAsmCapped = true; break; }
+                        if (matches.size() >= globalCap){ truncated = true;     break; }
                     }
-                    if (truncated) break;
+                    if (thisAsmCapped || truncated) break;
                 }
             }
+
+            if (thisAsmCapped) truncatedAssemblies.push_back(assemblyName);
+            if (truncated) break;
         }
         json response = {
             {"matches",         std::move(matches)},
@@ -3646,6 +3710,9 @@ void RegisterCoreHandlers() {
         };
         if (!missingAssemblies.empty()) {
             response["missing_assemblies"] = std::move(missingAssemblies);
+        }
+        if (!truncatedAssemblies.empty()) {
+            response["truncated_assemblies"] = std::move(truncatedAssemblies);
         }
         return response;
     });
@@ -3726,13 +3793,18 @@ void RegisterCoreHandlers() {
             });
         }
 
-        return json{
+        json response = {
             {"ok",              true},
             {"field",           std::move(fieldInfo)},
             {"references",     std::move(refs)},
             {"scanned_methods", fr.scannedMethods},
             {"truncated",       fr.truncated},
         };
+        // Build #555 — surface the structural-limit advisory when the
+        // scanner couldn't possibly see the references (runtime-heap
+        // static_fields). UI shows this prominently when matches=0.
+        if (!fr.note.empty()) response["note"] = fr.note;
+        return response;
     });
 
     // Debugger symbol dump (IL2CPP only). Walks every requested assembly,
@@ -5526,6 +5598,62 @@ int UnityDumper_Init() {
     UnityCEDumper::Log::Init();
     UnityCEDumper::Log::Init("ExportAPI: UnityDumper_Init");
     RegisterCoreHandlers();
+
+    // Build #547 follow-up — disconnect-time GC drain.
+    // Long-running batch RPCs (Phase 28 findFieldReferences walking 2000+
+    // method headers, Phase 27 value scans, Phase 25 multi-asm searchSymbols)
+    // leave Mono / IL2CPP metadata-cache + finalizer-queue entries behind.
+    // Each entry is individually small, but BDWGC processes the resulting
+    // queue at process shutdown rather than incrementally — observed live:
+    // BongoCat post-findFieldReferences game-shutdown latency tens of
+    // seconds (user reported 2026-05-25). Draining at the disconnect
+    // boundary (after EVERY client disconnects, while DiscreteUI / the
+    // bridge is still attached) keeps the user-perceptible game shutdown
+    // back at ~1s.
+    //
+    // The hook runs on the per-client worker thread that's about to exit,
+    // AFTER ::DisconnectNamedPipe + ::CloseHandle — so the pipe slot is
+    // already returned to the OS and the next client can connect
+    // concurrently with this drain. Safe to be slow (~50-200ms on
+    // BongoCat-sized images).
+    //
+    // Bound under both compile branches — the resolver `gc_collect` slot
+    // is optional, so a runtime that doesn't export `mono_gc_collect` /
+    // `il2cpp_gc_collect` (legacy / stripped) silently no-ops.
+#if defined(UNITYCEDUMPER_BACKEND_MONO)
+    UnityCEDumper::PipeServer::RegisterDisconnectHook([]() {
+        const auto& r = UnityCEDumper::Mono::GetResolver();
+        if (!r.resolved || r.gc_collect == nullptr) return;
+        UnityCEDumper::Mono::MonoDomain* domain =
+            UnityCEDumper::Mono::GetRootDomain();
+        if (domain == nullptr) return;
+        // -1 = full collection (max generation). Wrap in ThreadAttachGuard
+        // for the same reason every other Mono runtime call does — pipe
+        // worker isn't a Mono-known thread.
+        UnityCEDumper::Mono::ThreadAttachGuard guard(domain);
+        if (!guard.Attached()) return;
+        r.gc_collect(-1);
+    });
+    UnityCEDumper::Log::Init(
+        "ExportAPI: registered Mono GC-drain disconnect hook");
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+    UnityCEDumper::PipeServer::RegisterDisconnectHook([]() {
+        const auto& r = UnityCEDumper::IL2CPP::GetResolver();
+        if (!r.resolved || r.gc_collect == nullptr) return;
+        UnityCEDumper::IL2CPP::Il2CppDomain* domain =
+            UnityCEDumper::IL2CPP::GetDomain();
+        if (domain == nullptr) return;
+        // 0 = collect any generation (IL2CPP signature differs from Mono;
+        // documented in il2cpp-api-types.h as "generation hint", 0 means
+        // collect everything reachable).
+        UnityCEDumper::IL2CPP::ThreadAttachGuard guard(domain);
+        if (!guard.Attached()) return;
+        r.gc_collect(0);
+    });
+    UnityCEDumper::Log::Init(
+        "ExportAPI: registered IL2CPP GC-drain disconnect hook");
+#endif
+
     return 0;
 }
 

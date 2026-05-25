@@ -68,6 +68,14 @@ using fn_string_new             = Il2CppString*  (*)(const char* /*utf8*/);
 using fn_string_chars           = std::uint16_t* (*)(Il2CppString*);
 using fn_string_length          = std::int32_t   (*)(Il2CppString*);
 
+// Disconnect-time GC drain (build #547 follow-up). `il2cpp_gc_collect`
+// takes a generation arg; passing 0 means "any generation". Used by the
+// PipeServer disconnect hook so finalizers queued during a long RPC drain
+// while DiscreteUI is still attached, instead of all-at-once at game
+// shutdown. Mirror of `mono_gc_collect`. Optional — older Unity IL2CPP
+// builds may not export it; hook silently no-ops when unbound.
+using fn_gc_collect             = void           (*)(int /*generation*/);
+
 struct Resolver {
     bool         resolved = false;
     std::wstring moduleName;        // L"GameAssembly.dll"
@@ -117,6 +125,9 @@ struct Resolver {
     fn_string_new             string_new             = nullptr;
     fn_string_chars           string_chars           = nullptr;
     fn_string_length          string_length          = nullptr;
+
+    // Disconnect-time GC drain — see header comment on fn_gc_collect.
+    fn_gc_collect             gc_collect             = nullptr;
 };
 
 const Resolver& GetResolver();
