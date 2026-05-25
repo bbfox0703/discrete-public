@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace UnityCEDumper::IL2CPP {
@@ -361,6 +362,16 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     if (!target.error.empty()) { result.error = std::move(target.error); return result; }
     result.staticAddress = target.address;
 
+    Log::Write(MagicStrings::LogCategoryWalk,
+               "FieldXref: target " + (ns.empty() ? className : ns + "." + className) +
+               "." + fieldName + " staticAddress=0x" +
+               [](std::uintptr_t v) {
+                   char buf[32]; std::snprintf(buf, sizeof(buf), "%016llX",
+                       static_cast<unsigned long long>(v)); return std::string(buf);
+               }(reinterpret_cast<std::uintptr_t>(target.address)) +
+               " offset=" + std::to_string(target.offset) +
+               " type=" + target.typeName);
+
     // GameAssembly.dll module bounds for the RIP scan.
     void* gaBase = ModuleHelper::GetModuleBase(MagicStrings::ModuleIL2CPP);
     if (gaBase == nullptr) {
@@ -379,16 +390,37 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     std::vector<MethodIndexEntry> methodIndex = BuildMethodIndex(image,
                                                                  &result.scannedMethods);
 
+    Log::Write(MagicStrings::LogCategoryWalk,
+               "FieldXref: methodIndex built — " +
+               std::to_string(methodIndex.size()) + " methods indexed (of " +
+               std::to_string(result.scannedMethods) + " walked), executable sections=" +
+               std::to_string(sections.size()));
+
     const std::uintptr_t targetAddr = reinterpret_cast<std::uintptr_t>(target.address);
+
+    // Diagnostic counters — distinguish "no candidates matched the target" from
+    // "candidates matched but were dropped" (cross-assembly attribution / kind
+    // filter). Logged once at end of scan.
+    std::size_t candidateHits     = 0;  // disp32 resolved to targetAddr
+    std::size_t droppedKindFilter = 0;  // candidate dropped by Read/Write filter
+    std::size_t droppedNoEnclose  = 0;  // candidate dropped — not in this image
 
     // Helper: emit one hit if it survives kind + assembly attribution.
     // Captures all the lambda state to keep the inner scan loop tight.
     auto emitHit = [&](std::uintptr_t startIP, std::uint8_t op) -> bool {
+        ++candidateHits;
         const char* k = OpcodeKind(op);
-        if (kindFilter == FieldRefKind::Read  && std::strcmp(k, "read")  != 0) return false;
-        if (kindFilter == FieldRefKind::Write && std::strcmp(k, "write") != 0) return false;
+        if (kindFilter == FieldRefKind::Read  && std::strcmp(k, "read")  != 0) {
+            ++droppedKindFilter; return false;
+        }
+        if (kindFilter == FieldRefKind::Write && std::strcmp(k, "write") != 0) {
+            ++droppedKindFilter; return false;
+        }
         const MethodIndexEntry* enc = FindEnclosing(methodIndex, startIP);
-        if (enc == nullptr) return false;   // hit in a method outside the target image
+        if (enc == nullptr) {  // hit in a method outside the target image
+            ++droppedNoEnclose;
+            return false;
+        }
         FieldRefMatch hit;
         hit.ns             = enc->ns;
         hit.className      = enc->className;
@@ -489,6 +521,13 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
             pos += want;
         }
     }
+
+    Log::Write(MagicStrings::LogCategoryWalk,
+               "FieldXref: scan complete — candidateHits=" + std::to_string(candidateHits) +
+               " emitted=" + std::to_string(result.matches.size()) +
+               " droppedKindFilter=" + std::to_string(droppedKindFilter) +
+               " droppedNoEnclose=" + std::to_string(droppedNoEnclose) +
+               " truncated=" + (result.truncated ? "1" : "0"));
 
     result.ok = true;
     return result;

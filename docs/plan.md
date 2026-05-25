@@ -3,8 +3,16 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-21 (session close — build #465; ready for next-session handoff)
-**Current phase**: **✅ Phase 27 SHIPPED + LIVE-VERIFIED + 5 follow-up polish commits**. See [STATUS.md](STATUS.md) "TL;DR — what's left to pick up" for the carry-forward list. One known minor open issue: dual-monitor window-restore stays at maximize bounds instead of snapping back to pre-maximize Position+Size. Not blocking. Otherwise Phase 27 is done, README rewritten for end-user audience, lessons documented.
+**Last updated**: 2026-05-25 (session close — build #546; cross-PC handoff)
+**Current phase**: **✅ Phase 20e LIVE-VERIFIED on 活俠傳** (2026-05-25) +
+**🚧 Phase 28b SaGa F2R 0-match diagnostic logging shipped** (build #546).
+Next-session pickup: re-run SaGa F2R `SteamManager` static-field cross-ref
+on the new IL2CPP DLL and grab `walk\current.log` — three new
+`FieldXref:` lines will disambiguate cross-assembly drop vs opcode gap
+vs zero-references. See [STATUS.md](STATUS.md) "TL;DR — what's left to
+pick up" for the full pickup checklist + decision tree.
+
+**Previous current-phase**: **✅ Phase 27 SHIPPED + LIVE-VERIFIED + 5 follow-up polish commits** (build #465). One known minor open issue: dual-monitor window-restore stays at maximize bounds instead of snapping back to pre-maximize Position+Size. Not blocking.
 
 **Previous current-phase**: **✅ Phase 27 — Unity-aware Value Search SHIPPED + LIVE-VERIFIED** (all sub-phases 27a-27e). Build #452, 283/283 xUnit pass, AOT clean. Three production-bug follow-ups landed post-ship: (1) `SessionManager` heap-leaked to skip ~400K destructor calls at process exit; (2) `MonoAddressFinder` / `IL2CPPAddressFinder` caches also heap-leaked; (3) **Reentrant `ThreadAttachGuard`** — 4000+ per-WhatIsAt attach cycles were accumulating BDWGC finalizers that ran on game shutdown, hanging 活俠傳 for 44 s post-scan. Now: outer guard at scan-handler level + reentrancy counter make inner guards no-ops, batch goes from 4000 cycles → 1. Shutdown verified back to ~1 s on 活俠傳. New lesson recorded in [lessons-learned.md](lessons-learned.md). Live-smoked on SaGa F2R (IL2CPP) + 活俠傳 (Mono x86) for the DLL-level RPCs. UI Value Search tab landed; pending user click-through to verify the cross-tab handoff + DataGrid sort. Closes the long-standing "CE has value search, we don't" gap with a Unity-aware twist: every candidate row carries class/field/instance context (via whatIsAt), and the **`Mortal.Core.GameStat._value` vs `PLY_WORK_SAVEDATA.purse`** distinction (active state vs persisted state) emerges naturally from the refine workflow — CE alone cannot tell them apart. v2 candidates: 27f (libgc heap-section pre-filter) would close Phase 20-HEAP and accelerate global scans ~10x.
 
