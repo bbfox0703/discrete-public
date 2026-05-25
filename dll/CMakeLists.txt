@@ -41,6 +41,50 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# Phase 28b-v2 — Zydis x64 disassembler for IL2CPP class-pointer chain
+# detection. v1's RIP scan only matches single-hop instructions; v2 must
+# forward-trace 2-3 instructions to recognise the
+#   mov reg, [rip+CLASS_PTR] → mov reg, [reg+static_fields_off] → mov reg, [reg+field_off]
+# pattern that AOT IL2CPP code uses for static-field access. Vendored at
+# dll/vendor/zydis/ with bundled Zycore submodule.
+#
+# Config: STATIC, decoder-only (no formatter/encoder — we never print
+# disassembly, just decode + match). AVX-512 kept on so modern Burst SIMD
+# loops don't desync the scan. Build cost: ~250 KB statically linked into
+# UnityDumper-IL2CPP.dll (IL2CPP backend only; Mono backend doesn't need
+# it — IL bytecode walking is the Mono path).
+set(ZYDIS_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_EXAMPLES   OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_TOOLS      OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_MAN        OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_DOXYGEN    OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
+set(ZYDIS_FEATURE_DECODER  ON  CACHE BOOL "" FORCE)
+set(ZYDIS_FEATURE_ENCODER  OFF CACHE BOOL "" FORCE)
+set(ZYDIS_FEATURE_FORMATTER OFF CACHE BOOL "" FORCE)
+set(ZYDIS_FEATURE_AVX512   ON  CACHE BOOL "" FORCE)
+# KNC kept ON — disabling it breaks compile because the generated
+# InstructionDefinitions.inc references ZydisInstructionDefinitionMVEX
+# unconditionally even when ZYDIS_DISABLE_KNC is defined. Build cost is
+# negligible (~50 KB of obsolete Knights Corner opcode tables).
+set(ZYDIS_FEATURE_KNC      ON  CACHE BOOL "" FORCE)
+set(ZYDIS_MINIMAL_MODE     OFF CACHE BOOL "" FORCE)
+set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
+add_subdirectory(vendor/zydis EXCLUDE_FROM_ALL)
+unset(CMAKE_WARN_DEPRECATED CACHE)
+set(CMAKE_WARN_DEPRECATED ON CACHE BOOL "Suppress deprecated CMake feature warnings" FORCE)
+
+# Zydis emits a few MSVC warnings in its generated decoder tables. Same
+# pattern as MinHook above — scope suppression to the vendor target so
+# our own code keeps its strict warning level. C4244 is the common one
+# (deliberate narrowing in opcode tables); other Cs guard against
+# future churn.
+if(MSVC)
+    target_compile_options(Zydis  PRIVATE /wd4100 /wd4101 /wd4244 /wd4245 /wd4267)
+    target_compile_options(Zycore PRIVATE /wd4100 /wd4101 /wd4244 /wd4245 /wd4267)
+endif()
+
+# ---------------------------------------------------------------------------
 # Helper: configure_file the shared version.rc.in template per target with
 # the right InternalName / OriginalFilename / FileDescription, then add the
 # generated .rc to the target's sources. Each DLL gets its own VERSIONINFO
@@ -150,11 +194,31 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
     endif()
     add_library(${TARGET_NAME} SHARED ${SOURCES})
     target_include_directories(${TARGET_NAME} PRIVATE src)
+    # Header-only deps that used to be at root via include_directories(SYSTEM ...)
+    # — see root CMakeLists.txt for the Phase 28b-v2 rationale on why they
+    # moved here. SYSTEM marker keeps warning-suppression for nlohmann.
+    target_include_directories(${TARGET_NAME} SYSTEM PRIVATE
+        ${DISCRETE_NLOHMANN_INCLUDE_DIR}
+    )
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${DISCRETE_GENERATED_INCLUDE_DIR}
+    )
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
     # Phase 20-MT: link MinHook (vendored as `minhook` target — see
     # add_subdirectory above). Static C-only library, ~50 KB per backend.
     target_link_libraries(${TARGET_NAME} PRIVATE minhook)
     target_include_directories(${TARGET_NAME} PRIVATE vendor/minihook/include)
+    # Phase 28b-v2: link Zydis ONLY into IL2CPP backend — Mono path walks IL
+    # bytecode directly (no native disassembly needed). Keeps Mono DLL size
+    # unchanged. ~250 KB cost on the IL2CPP DLL.
+    if(BACKEND_DEFINE STREQUAL "UNITYCEDUMPER_BACKEND_IL2CPP")
+        target_link_libraries(${TARGET_NAME} PRIVATE Zydis)
+        target_include_directories(${TARGET_NAME} PRIVATE
+            vendor/zydis/include
+            vendor/zydis/dependencies/zycore/include
+            ${CMAKE_BINARY_DIR}/dll/vendor/zydis  # generated ZydisExportConfig.h
+        )
+    endif()
     set_target_properties(${TARGET_NAME} PROPERTIES
         OUTPUT_NAME "${TARGET_NAME}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -210,6 +274,11 @@ function(add_proxy_dll TARGET_NAME OUTPUT_NAME EXTRA_SOURCE DEF_FILE)
         ${EXTRA_SOURCE}
     )
     target_include_directories(${TARGET_NAME} PRIVATE src)
+    # generated/ — BuildInfo.h for the VERSIONINFO resource (see root
+    # CMakeLists.txt rationale for the per-target plumbing).
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${DISCRETE_GENERATED_INCLUDE_DIR}
+    )
     set_target_properties(${TARGET_NAME} PROPERTIES
         OUTPUT_NAME              "${OUTPUT_NAME}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
