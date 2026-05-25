@@ -132,27 +132,8 @@ ZydisRegister Canonical(ZydisRegister r) {
     return canon != ZYDIS_REGISTER_NONE ? canon : r;
 }
 
-// Returns true if the instruction's *first written operand* (op0 for
-// 2-operand insns; the writeback target for arithmetic etc.) is a
-// register that aliases `victim`. Used to detect register clobber
-// during the forward trace — a clobber abandons whichever chain piece
-// was riding on that register.
-//
-// Conservative: only checks REGISTER writes. Memory writes don't
-// affect register state. Skipped instructions (NOP, branches that
-// don't write a reg) return false.
-bool WritesRegister(const ZydisDecodedInstruction& instr,
-                    const ZydisDecodedOperand*     ops,
-                    ZydisRegister                  victim) {
-    if (victim == ZYDIS_REGISTER_NONE) return false;
-    for (std::uint8_t i = 0; i < instr.operand_count_visible; ++i) {
-        const auto& op = ops[i];
-        if (op.type != ZYDIS_OPERAND_TYPE_REGISTER) continue;
-        if ((op.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) == 0) continue;
-        if (Canonical(op.reg.value) == victim) return true;
-    }
-    return false;
-}
+// (former single-reg-clobber helper `WritesRegister` removed —
+// multi-register ChainState below does its own per-operand iteration.)
 
 // Tries to match the hop-2 pattern at `instr`:
 //     mov R2, [classPtrReg + staticFieldsOffset]
@@ -231,24 +212,95 @@ bool MatchHopThreeWrite(const ZydisDecodedInstruction& instr,
     return static_cast<std::size_t>(ops[0].mem.disp.value) == targetFieldOffset;
 }
 
+// MS x64 ABI volatile registers — clobbered by CALL. Drop these from
+// the chain-tracking set when we see a CALL; non-volatile registers
+// (RBX/RBP/RSI/RDI/R12-R15) survive across the call and may carry the
+// class-pointer or static-fields-pointer across the il2cpp_runtime_class_init
+// barrier that IL2CPP inserts before lazy-init static-field accesses.
+constexpr ZydisRegister kVolatileRegs[] = {
+    ZYDIS_REGISTER_RAX, ZYDIS_REGISTER_RCX, ZYDIS_REGISTER_RDX,
+    ZYDIS_REGISTER_R8,  ZYDIS_REGISTER_R9,  ZYDIS_REGISTER_R10,
+    ZYDIS_REGISTER_R11,
+};
+
+// Multi-register tracking state. Replaces the single-register tracking
+// from v2-of-v2's first cut (which couldn't handle the very common
+// IL2CPP pattern where the compiler copies the class pointer to a
+// non-volatile RBX before calling `il2cpp_runtime_class_init`).
+//
+// Two parallel sets of canonical 64-bit registers:
+//   classPtrRegs    — registers currently holding the target Il2CppClass*
+//   staticFieldsRegs — registers currently holding the static_fields ptr
+//                      (populated only after we observe a successful hop-2)
+//
+// Set membership is checked / updated as each instruction is traced:
+//   * MOV reg, reg → propagate source tags to dest (after clobbering dest)
+//   * CALL → drop volatile regs from both sets
+//   * Any reg write → remove dest from both sets (then re-add tags for
+//     the special MOV-propagation / hop-2-match cases that explicitly
+//     re-tag the dest)
+//
+// Linear vector + std::find — sets are typically 1-4 entries, the
+// overhead of std::set / std::unordered_set isn't worth it.
+struct ChainState {
+    std::vector<ZydisRegister> classPtrRegs;
+    std::vector<ZydisRegister> staticFieldsRegs;
+
+    bool ContainsClassPtr(ZydisRegister r) const noexcept {
+        return std::find(classPtrRegs.begin(), classPtrRegs.end(), r)
+               != classPtrRegs.end();
+    }
+    bool ContainsStaticFields(ZydisRegister r) const noexcept {
+        return std::find(staticFieldsRegs.begin(), staticFieldsRegs.end(), r)
+               != staticFieldsRegs.end();
+    }
+    void AddClassPtr(ZydisRegister r) {
+        if (r != ZYDIS_REGISTER_NONE && !ContainsClassPtr(r))
+            classPtrRegs.push_back(r);
+    }
+    void AddStaticFields(ZydisRegister r) {
+        if (r != ZYDIS_REGISTER_NONE && !ContainsStaticFields(r))
+            staticFieldsRegs.push_back(r);
+    }
+    void RemoveReg(ZydisRegister r) {
+        if (r == ZYDIS_REGISTER_NONE) return;
+        classPtrRegs.erase(
+            std::remove(classPtrRegs.begin(), classPtrRegs.end(), r),
+            classPtrRegs.end());
+        staticFieldsRegs.erase(
+            std::remove(staticFieldsRegs.begin(), staticFieldsRegs.end(), r),
+            staticFieldsRegs.end());
+    }
+    bool Empty() const noexcept {
+        return classPtrRegs.empty() && staticFieldsRegs.empty();
+    }
+};
+
 // Forward-trace from `start` (hop-1 instruction's address, register
-// holding class pointer = `classPtrReg`). Returns true on success +
-// populates `*outHitIP` + `*outKind`. Returns false if the chain
-// breaks (clobber, function call, instruction limit, decode error).
-constexpr std::size_t kMaxForwardTrace = 8;
+// holding class pointer = `initialClassPtrReg`). Returns true on
+// success + populates `*outHitIP` + `*outKind`. Returns false if the
+// chain breaks (state empty, instruction limit, decode error).
+//
+// Window of 32 instructions: empirically large enough to absorb the
+// init-call pattern (hop-1 → save-to-rbx → init-flag-check → cond-jmp
+// → call init → re-merge → hop-2 → hop-3 ≈ 10-15 insns) plus any
+// scheduling slack the compiler inserts, without admitting false
+// chains across function boundaries (a RET still terminates the trace).
+constexpr std::size_t kMaxForwardTrace = 32;
 
 bool TryForwardTrace(ZydisDecoder*       decoder,
                      const std::uint8_t* startBytes,
                      std::size_t         availBytes,
                      std::uintptr_t      startIP,
-                     ZydisRegister       classPtrReg,
+                     ZydisRegister       initialClassPtrReg,
                      std::size_t         staticFieldsOffset,
                      std::size_t         targetFieldOffset,
                      std::uintptr_t*     outHitIP,
                      std::string*        outKind) {
-    ZydisRegister      staticFieldsReg = ZYDIS_REGISTER_NONE;
-    std::size_t        consumed        = 0;
-    std::uintptr_t     ip              = startIP;
+    ChainState     state;
+    state.AddClassPtr(initialClassPtrReg);
+    std::size_t    consumed = 0;
+    std::uintptr_t ip       = startIP;
 
     for (std::size_t step = 0; step < kMaxForwardTrace; ++step) {
         if (consumed >= availBytes) return false;
@@ -259,60 +311,100 @@ bool TryForwardTrace(ZydisDecoder*       decoder,
             &instr, operands);
         if (!ZYAN_SUCCESS(status)) return false;
 
-        // CALL / RET / branches that leave the basic block break the chain.
-        // (Unconditional JMP could be followed if we wanted; conservative
-        // for v1 — only follow fall-through.)
-        if (instr.meta.category == ZYDIS_CATEGORY_CALL ||
-            instr.meta.category == ZYDIS_CATEGORY_RET  ||
-            instr.meta.category == ZYDIS_CATEGORY_COND_BR ||
-            instr.meta.category == ZYDIS_CATEGORY_UNCOND_BR) {
-            return false;
-        }
-
-        // Try hop-3 first when we have a static-fields reg — the hop-2
-        // and hop-3 may be the same instruction in the rare case where
-        // the field offset equals 0 + the compiler folded the chain.
-        if (staticFieldsReg != ZYDIS_REGISTER_NONE) {
-            if (MatchHopThreeRead(instr, operands, staticFieldsReg,
-                                   targetFieldOffset)) {
+        // --- hop-3 match (highest priority — terminal) ------------------
+        // Try every live static-fields reg against the read/write patterns.
+        for (auto sf : state.staticFieldsRegs) {
+            if (MatchHopThreeRead(instr, operands, sf, targetFieldOffset)) {
                 *outHitIP = ip;
                 *outKind  = "read";
                 return true;
             }
-            if (MatchHopThreeWrite(instr, operands, staticFieldsReg,
-                                    targetFieldOffset)) {
+            if (MatchHopThreeWrite(instr, operands, sf, targetFieldOffset)) {
                 *outHitIP = ip;
                 *outKind  = "write";
                 return true;
             }
         }
 
-        // Try hop-2 when we still have the class pointer live.
-        if (classPtrReg != ZYDIS_REGISTER_NONE) {
-            ZydisRegister sf = ZYDIS_REGISTER_NONE;
-            if (MatchHopTwo(instr, operands, classPtrReg,
-                            staticFieldsOffset, &sf)) {
-                staticFieldsReg = sf;
-                // Don't return — the same insn doesn't double as hop-3
-                // (different displacement). Continue forward trace.
+        // --- terminal categories ----------------------------------------
+        // RET always ends the trace (left the function).
+        // UNCOND_BR with unknown / off-window target also terminates —
+        //   could be a jump back into a different basic block.
+        if (instr.meta.category == ZYDIS_CATEGORY_RET) return false;
+        if (instr.meta.category == ZYDIS_CATEGORY_UNCOND_BR) return false;
+
+        // --- hop-2 match (records new static-fields reg) ----------------
+        // Try each live class-pointer reg. First match wins — same
+        // instruction can't match hop-2 with two different bases.
+        ZydisRegister newSfReg = ZYDIS_REGISTER_NONE;
+        bool hopTwoMatched = false;
+        for (auto cp : state.classPtrRegs) {
+            if (MatchHopTwo(instr, operands, cp, staticFieldsOffset,
+                            &newSfReg)) {
+                hopTwoMatched = true;
+                break;
             }
         }
 
-        // Clobber checks AFTER attempting matches (so an instruction
-        // that both matches a hop AND writes its destination doesn't
-        // erase the very state it just established).
-        if (WritesRegister(instr, operands, classPtrReg)) {
-            classPtrReg = ZYDIS_REGISTER_NONE;
-        }
-        if (WritesRegister(instr, operands, staticFieldsReg)) {
-            staticFieldsReg = ZYDIS_REGISTER_NONE;
+        // --- register state update --------------------------------------
+        const ZydisInstructionCategory cat = instr.meta.category;
+
+        if (cat == ZYDIS_CATEGORY_CALL) {
+            // CALL clobbers volatile registers. Drop them from both
+            // sets; non-volatile regs (RBX/RBP/RSI/RDI/R12-R15) keep
+            // their tags. The il2cpp_runtime_class_init call site is
+            // the canonical example — class ptr lives in RBX across
+            // the call.
+            for (auto r : kVolatileRegs) state.RemoveReg(r);
+        } else if (cat == ZYDIS_CATEGORY_COND_BR) {
+            // Skip — let fall-through trace continue. Init-check
+            // patterns use `jnz skip_init` to bypass the init call
+            // when the class is already initialized; the fall-through
+            // (= init not yet done, perform init) eventually merges
+            // back to the same hop-2 site. Tracing fall-through
+            // catches both paths.
+            //
+            // Note: we don't follow the branch target. If the chain's
+            // hop-2 is on the taken-branch path only, we miss it.
+            // Acceptable for v1; refine if a real-world miss surfaces.
+            //
+            // Critical: do NOT update state (the branch insn itself
+            // doesn't write any tracked reg).
+        } else if (instr.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                   instr.operand_count_visible >= 2 &&
+                   operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                   operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            // Register-to-register MOV — propagation. Read source tags
+            // BEFORE clobbering dest (in case dest == source, which is
+            // a no-op anyway but the analysis still works).
+            const ZydisRegister dst = Canonical(operands[0].reg.value);
+            const ZydisRegister src = Canonical(operands[1].reg.value);
+            const bool srcIsClassPtr     = state.ContainsClassPtr(src);
+            const bool srcIsStaticFields = state.ContainsStaticFields(src);
+            state.RemoveReg(dst);
+            if (srcIsClassPtr)     state.AddClassPtr(dst);
+            if (srcIsStaticFields) state.AddStaticFields(dst);
+        } else {
+            // Standard clobber: any reg this insn writes loses its tag.
+            // Iterate operands looking for register WRITEs.
+            for (std::uint8_t i = 0; i < instr.operand_count_visible; ++i) {
+                const auto& op = operands[i];
+                if (op.type != ZYDIS_OPERAND_TYPE_REGISTER) continue;
+                if ((op.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) == 0) continue;
+                state.RemoveReg(Canonical(op.reg.value));
+            }
         }
 
-        // No more live registers + no hop-3 match yet → chain dead.
-        if (classPtrReg == ZYDIS_REGISTER_NONE &&
-            staticFieldsReg == ZYDIS_REGISTER_NONE) {
-            return false;
+        // Hop-2 match's dest gets re-added AFTER the clobber pass
+        // (the hop-2 instruction IS a write to its dest reg, which
+        // we just removed in the standard clobber branch above). The
+        // re-add re-tags the dest as the new static-fields-ptr reg.
+        if (hopTwoMatched && newSfReg != ZYDIS_REGISTER_NONE) {
+            state.AddStaticFields(newSfReg);
         }
+
+        // No more live registers → chain dead, abandon.
+        if (state.Empty()) return false;
 
         consumed += instr.length;
         ip       += instr.length;
@@ -409,6 +501,18 @@ std::vector<ChainMatch> DetectFieldAccessChains(
                 const std::size_t avail = readWant - p;
                 const std::uintptr_t insnIP = sec.va + pos + p;
 
+                // Build #565-followup bugfix — REX-skip dedup. A 7-byte
+                // REX-prefixed insn `48 8B 05 ...` would otherwise match
+                // TWICE: once at the REX byte (7-byte form), once at the
+                // op byte (6-byte form would interpret the 0x8B as a
+                // standalone opcode). Same disp, same resolved target,
+                // same hit. Detected live on SaGa F2R: SteamManager
+                // hits showed up doubled (4 rows for get_Instance when
+                // real chain count was 2). Skipping when the previous
+                // byte was a REX prefix means the 7-byte form already
+                // covered this instruction at p-1.
+                if (p > 0 && IsRexByte(buf[p - 1])) continue;
+
                 // Try every slot's target (still O(1) per slot via hash).
                 // In practice we just check if THIS insn's resolved
                 // target is in slotSet — cheaper than nested loop.
@@ -470,6 +574,27 @@ std::vector<ChainMatch> DetectFieldAccessChains(
             bytesScanned += want;
             pos += want;
         }
+    }
+
+    // Build #565-followup — dedup by hitIP. Multiple hop-1 candidates
+    // can converge on the same hop-3 instruction when the compiler
+    // emits 2+ class-pointer loads at different IPs that all fall
+    // through to the same field-access basic block (canonical IL2CPP
+    // pattern: pre-init check load + post-init reload, both reach the
+    // same `mov rax, [rbx + 0xB8]` → same hop-3 IP). Without dedup the
+    // user sees N copies of every match. Stable sort + unique by hitIP
+    // preserves insertion order (first-detected match wins).
+    if (result.size() > 1) {
+        std::sort(result.begin(), result.end(),
+            [](const ChainMatch& a, const ChainMatch& b) {
+                return a.hitIP < b.hitIP;
+            });
+        result.erase(
+            std::unique(result.begin(), result.end(),
+                [](const ChainMatch& a, const ChainMatch& b) {
+                    return a.hitIP == b.hitIP;
+                }),
+            result.end());
     }
 
     if (stats != nullptr) {
