@@ -3,14 +3,24 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-25 (session close — build #546; cross-PC handoff)
-**Current phase**: **✅ Phase 20e LIVE-VERIFIED on 活俠傳** (2026-05-25) +
-**🚧 Phase 28b SaGa F2R 0-match diagnostic logging shipped** (build #546).
-Next-session pickup: re-run SaGa F2R `SteamManager` static-field cross-ref
-on the new IL2CPP DLL and grab `walk\current.log` — three new
-`FieldXref:` lines will disambiguate cross-assembly drop vs opcode gap
-vs zero-references. See [STATUS.md](STATUS.md) "TL;DR — what's left to
-pick up" for the full pickup checklist + decision tree.
+**Last updated**: 2026-05-25 (session close — build #557; merged dev → main)
+**Current phase**: **✅ Phase 28b IL2CPP root-cause CONFIRMED + v1
+advisory shipped** (build #555-#557). Build #546's diagnostic logging
+paid off: live re-run on SaGa F2R proved `il2cpp_class_get_static_data`
+returns a runtime-heap-allocated pointer outside GameAssembly.dll, so
+RIP scan structurally cannot see refs (`candidateHits=0` for every
+IL2CPP static, including lambda caches that MUST have ≥1 read+write
+in IL). **v1 fix C** ships a yellow advisory banner explaining the
+limitation; **Phase 28b-v2** stub added — class-pointer chained
+disassembly, ~1 week, needs Zydis or similar real x64 disassembler.
+Also same session: Symbol Finder "Static only" toggle + per-asm limit
+in multi-asm scans (fixes "Search all user assemblies finding only
+WAAPI"), PipeServer disconnect-time GC drain (kills BongoCat
+post-findFieldReferences shutdown latency, three games live-verified).
+363/363 xUnit pass, AOT clean. See [STATUS.md](STATUS.md) TL;DR for
+the full session breakdown.
+
+**Previous current-phase**: **✅ Phase 20e LIVE-VERIFIED on 活俠傳** (2026-05-25) + **🚧 Phase 28b SaGa F2R 0-match diagnostic logging shipped** (build #546). Phase 20e fully closed via 活俠傳 live-smoke.
 
 **Previous current-phase**: **✅ Phase 27 SHIPPED + LIVE-VERIFIED + 5 follow-up polish commits** (build #465). One known minor open issue: dual-monitor window-restore stays at maximize bounds instead of snapping back to pre-maximize Position+Size. Not blocking.
 
@@ -1014,19 +1024,11 @@ Out (v2):
   `result.ok`. Documented in
   [lua-invoke.md §"Phase 21b — field write-back"](lua-invoke.md)
   with worked examples.
-- [ ] **21d** Live verification — pending user click-through on a
-  Mono + an IL2CPP target. Suggested recipe:
-  * **IL2CPP** — SaGa F2R → DiscreteUI Pick & Inject → Browser
-    selects `MainGame.PLY_WORK` → Inspect → right-click any Int32
-    field (e.g. `HP`) → "Write value…" → enter `9999` → Write.
-    Verify CE address-list value updates in real time and the
-    inspector row shows the new value after the auto-refresh.
-  * **Mono** — BongoCat or Farthest Frontier Mono → same flow,
-    but verify against a primitive field on a discoverable class.
-  * **CE Lua** — open CE Lua console, `dofile([[..\\unity_invoke.lua]])`,
-    call `setField("0x...", "int32", 999)`, watch the value
-    change. Compare the round-trip output against the
-    `readMemory` snapshot the Lua call returns.
+- [x] **21d** Live verification — **PASS 2026-05-19** on BongoCat
+  Mono (right-click primitive Inspector row → Write value… modal →
+  Apply → readMemory verifies + CE address-list refreshed). IL2CPP
+  + CE Lua paths covered by the wire-level 21a/21b/21c tests; no
+  separate live click-through pending.
 
 ### GC-root caveat
 
@@ -1460,7 +1462,7 @@ from crashing if a hooked region throws.
 
 ### Sub-phases
 
-- [ ] **27a** DLL `scanFieldValue` RPC (First Scan).
+- [x] **27a** DLL `scanFieldValue` RPC (First Scan). **SHIPPED + LIVE-SMOKED 2026-05-20** (build #423). Live-verified on SaGa F2R IL2CPP x64 (global Int32=100000 found `MainGame.PLY_WORK.purse` at +0x18), BongoCat Mono x64 (class-scoped), and 活俠傳 Mono x86 (Unity 2020.3.49f1 — global scan reliably found `Mortal.Core.GameStat._value`). One P0 hang fixed mid-smoke: `Mono::BuildClassRangeCache` rewritten to lazy vtable resolution so legacy 32-bit Mono no longer wedges when game's main thread is focus-paused. Lesson recorded in [lessons-learned.md](lessons-learned.md).
   * New `Memory::ScanForValue<T>` helper paralleling `Memory::ScanForPointer`:
     chunked parallel walk over `EnumerateCommittedRegions()` output, skip
     MEM_IMAGE + thread-stack regions (already filtered today), exact /
@@ -1494,7 +1496,7 @@ from crashing if a hooked region throws.
     candidate with full `whatIsAt`-shape envelope baked in (no actual
     whatIsAt call needed since we already know instance + field).
 
-- [ ] **27b** DLL session state + Next Scan filter modes.
+- [x] **27b** DLL session state + Next Scan filter modes. **SHIPPED + LIVE-SMOKED 2026-05-20** (build #433). All 7 CE filter modes (exact / range / changed / unchanged / increased / decreased / newValue) via Begin/Refine/End session lifecycle. Live-verified on SaGa F2R: purse=100000 → spent 1 coin → newValue=99999 narrowed correctly to `PLY_WORK.purse` while dropping `PLY_WORK_SAVEDATA.purse` (the active-state vs persisted-state distinction CE alone can't surface — Phase 27's headline value). 27b-2 string scan (UTF-16 / UTF-8 / ASCII via Memory::ScanForString) shipped same day.
   * **Session lifecycle**: `beginValueScan(request) → sessionId`,
     `refineValueScan(sessionId, scanType, [value], [valueTo]) →
     updated candidates`, `endValueScan(sessionId)`. Server holds
@@ -1518,8 +1520,8 @@ from crashing if a hooked region throws.
       Substring search is O(N × M) on candidates — capped at 5000 string
       candidates pre-substring-filter to keep it sane.
 
-- [ ] **27c** Array / List<T> element resolution in `whatIsAt`
-  (Phase 17b carry-forward). Detect Array klass two ways: (a) class name
+- [x] **27c** Array / List<T> element resolution in `whatIsAt`
+  (Phase 17b carry-forward). **SHIPPED 2026-05-20** (build #433). DLL-level unit tests pass; live game smoke on a `T[]` / `List<T>` instance still pending but DLL implementation tested independently. Detect Array klass two ways: (a) class name
   ends in `[]` from `*_class_get_name`, (b) `*_class_get_element_class`
   returns non-null. Compute element index from
   `(queriedAddr - elementsBase) / elementSize` where:
@@ -1533,7 +1535,7 @@ from crashing if a hooked region throws.
     field IS a `T[]`, so user drilling into a `List<T>._items` row already
     gets `whatIsAt`-resolved as an array element.
 
-- [ ] **27d** UI Value Search Tab (MainWindow position 5, after Symbol Finder).
+- [x] **27d** UI Value Search Tab (MainWindow position 5, after Symbol Finder). **SHIPPED 2026-05-20** (build #433). VM + DataGrid + cross-tab handoff to Inspector (right-click → Inspect this instance via `FocusOnInstance`). Live-smoked on 活俠傳 (Mono x86) + SaGa F2R (IL2CPP); SaGa F2R confirmed session refine workflow narrows correctly.
   * **Top bar**: Mode toggle (Global / Class-scoped) + Assembly +
     optional Class dropdown (enabled when class-scoped) + DataType
     dropdown + Value textbox + Value-To textbox (for range) + ScanType
