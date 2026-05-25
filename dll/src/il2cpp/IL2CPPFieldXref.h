@@ -56,6 +56,20 @@ struct FindFieldRefsResult {
     std::vector<FieldRefMatch> matches;
     std::size_t   scannedMethods = 0;
     bool          truncated = false;
+
+    // Build #555 follow-up. A user-facing advisory string set when the scan
+    // completed cleanly but returned 0 matches AND the static-storage
+    // address sits OUTSIDE the GameAssembly.dll module (heap-allocated by
+    // IL2CPP runtime at class-init time, which covers ~every IL2CPP static
+    // in practice). In that case there is NO RIP-relative immediate in the
+    // entire .text section that can possibly reference the storage, so
+    // returning "0 matches" is technically correct but misleading — the
+    // user infers "field has no readers/writers" when really "this scanner
+    // can't see them". The note documents the structural limitation and
+    // points at the Mono backend as the working alternative. Empty
+    // otherwise (any error path / nonzero matches / RIP-addressable
+    // storage). See lessons-learned.md.
+    std::string   note;
 };
 
 // Resolves `(image, ns, className, fieldName)`, walks the .text section of

@@ -118,6 +118,11 @@ void DoResolve() {
     bindOpt("il2cpp_string_chars",              g_resolver.string_chars);
     bindOpt("il2cpp_string_length",             g_resolver.string_length);
 
+    // Disconnect-time GC drain — closes the "game shutdown is slow after
+    // a Phase 28 IL walker / value-scan run" complaint. Exported by every
+    // modern Unity IL2CPP runtime under the canonical name.
+    bindOpt("il2cpp_gc_collect",                g_resolver.gc_collect);
+
     g_resolver.resolved = (okReq == totalReq);
 
     char line[200];

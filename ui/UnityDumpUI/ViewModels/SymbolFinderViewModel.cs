@@ -72,6 +72,17 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
     private bool _includeMethods = true;
 
+    /// <summary>
+    /// When true, the DLL drops every instance member before applying the
+    /// name substring filter. Two-way bonus: pattern becomes optional, so
+    /// leaving the textbox blank now yields "every static member in the
+    /// chosen assembly scope" — closes the gap users hit when hunting
+    /// singletons / constants without knowing a name fragment.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
+    private bool _staticOnly;
+
     [ObservableProperty]
     private int _limit = 200;
 
@@ -162,8 +173,8 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
         try
         {
             SearchSymbolsResult result = userAssemblies is not null
-                ? await _backend.SearchSymbolsAsync(userAssemblies, pat, kinds, Limit, ct).ConfigureAwait(true)
-                : await _backend.SearchSymbolsAsync(SelectedAssembly!.Name, pat, kinds, Limit, ct).ConfigureAwait(true);
+                ? await _backend.SearchSymbolsAsync(userAssemblies, pat, kinds, Limit, StaticOnly, ct).ConfigureAwait(true)
+                : await _backend.SearchSymbolsAsync(SelectedAssembly!.Name, pat, kinds, Limit, StaticOnly, ct).ConfigureAwait(true);
 
             if (!string.IsNullOrEmpty(result.Error))
             {
@@ -179,9 +190,18 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
             string missingNote = result.MissingAssemblies is { Count: > 0 }
                 ? $" {result.MissingAssemblies.Count} assembl{(result.MissingAssemblies.Count == 1 ? "y" : "ies")} not found in the backend (probably stripped or renamed)."
                 : string.Empty;
+            // Build #547 follow-up — per-asm truncation note. When the
+            // multi-asm scan hits the per-assembly budget on one or more
+            // assemblies (but not the global cap), surface which assemblies
+            // got cut short so the user knows where to look if they raise
+            // the limit. Distinct from the global Truncated flag which only
+            // fires when the overall ceiling (5x*N or 25k) was reached.
+            string perAsmNote = result.TruncatedAssemblies is { Count: > 0 }
+                ? $" Per-asm cap ({Limit}) hit on: {string.Join(", ", result.TruncatedAssemblies)} — raise the limit to see more from those."
+                : string.Empty;
             StatusMessage = result.Truncated
-                ? $"{Matches.Count} hit(s) (truncated at limit={Limit}); scanned {result.ScannedClasses} class(es) across {scopeLabel} in {sw.ElapsedMilliseconds} ms. Narrow the pattern or raise the limit.{missingNote}"
-                : $"{Matches.Count} hit(s) in {result.ScannedClasses} class(es) across {scopeLabel} ({sw.ElapsedMilliseconds} ms).{missingNote}";
+                ? $"{Matches.Count} hit(s) (GLOBAL truncated); scanned {result.ScannedClasses} class(es) across {scopeLabel} in {sw.ElapsedMilliseconds} ms. Narrow the pattern or raise the limit.{missingNote}{perAsmNote}"
+                : $"{Matches.Count} hit(s) in {result.ScannedClasses} class(es) across {scopeLabel} ({sw.ElapsedMilliseconds} ms).{missingNote}{perAsmNote}";
         }
         catch (OperationCanceledException) { /* superseded by a fresher search */ }
         catch (Exception ex)
@@ -199,7 +219,10 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
 
     private bool CanSearch() =>
         !IsBusy
-        && !string.IsNullOrWhiteSpace(Pattern)
+        // StaticOnly mode relaxes the pattern requirement at the DLL, so
+        // the UI follows suit — empty pattern + StaticOnly = "list every
+        // static in the chosen scope".
+        && (StaticOnly || !string.IsNullOrWhiteSpace(Pattern))
         && (IncludeFields || IncludeMethods)
         && (SearchAllUserAssemblies
                 ? Assemblies.Count > 0

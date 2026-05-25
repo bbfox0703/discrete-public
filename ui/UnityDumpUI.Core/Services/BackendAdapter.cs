@@ -170,16 +170,20 @@ public sealed class BackendAdapter : ILiveExportSource
     /// `kinds` filters by row type (`"field"` / `"method"`); leave empty/null
     /// for both. `limit` caps the result set (DLL caps at 5000, default 200);
     /// when the cap fires <see cref="SearchSymbolsResult.Truncated"/> is true.
+    /// Passing <paramref name="staticOnly"/>=true drops every instance member
+    /// at the DLL — this is the only path that accepts an empty
+    /// <paramref name="pattern"/> ("list every static member in this assembly").
     /// </summary>
     public async Task<SearchSymbolsResult> SearchSymbolsAsync(
         string assembly, string pattern,
         IReadOnlyList<string>? kinds = null, int? limit = null,
+        bool staticOnly = false,
         CancellationToken ct = default)
         => await SearchSymbolsCoreAsync(
-            assembly, assemblies: null, pattern, kinds, limit, ct).ConfigureAwait(false);
+            assembly, assemblies: null, pattern, kinds, limit, staticOnly, ct).ConfigureAwait(false);
 
     /// <summary>
-    /// Multi-assembly variant of <see cref="SearchSymbolsAsync(string,string,IReadOnlyList{string}?,int?,CancellationToken)"/>.
+    /// Multi-assembly variant of <see cref="SearchSymbolsAsync(string,string,IReadOnlyList{string}?,int?,bool,CancellationToken)"/>.
     /// Walks every assembly in <paramref name="assemblies"/> under a single
     /// global <paramref name="limit"/>. Used by the Symbol Finder's
     /// "Search all user assemblies" toggle so the user can hunt a property
@@ -188,13 +192,15 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<SearchSymbolsResult> SearchSymbolsAsync(
         IReadOnlyList<string> assemblies, string pattern,
         IReadOnlyList<string>? kinds = null, int? limit = null,
+        bool staticOnly = false,
         CancellationToken ct = default)
         => await SearchSymbolsCoreAsync(
-            assembly: null, assemblies, pattern, kinds, limit, ct).ConfigureAwait(false);
+            assembly: null, assemblies, pattern, kinds, limit, staticOnly, ct).ConfigureAwait(false);
 
     private async Task<SearchSymbolsResult> SearchSymbolsCoreAsync(
         string? assembly, IReadOnlyList<string>? assemblies,
         string pattern, IReadOnlyList<string>? kinds, int? limit,
+        bool staticOnly,
         CancellationToken ct)
     {
         var args = new Dictionary<string, JsonElement>
@@ -224,6 +230,7 @@ public sealed class BackendAdapter : ILiveExportSource
             args["kinds"] = doc.RootElement.Clone();
         }
         if (limit.HasValue) args["limit"] = Int(limit.Value);
+        if (staticOnly)     args["staticOnly"] = Bool(true);
 
         var env = await _pipe.SendAsync(
             "searchSymbols", args,
@@ -253,7 +260,7 @@ public sealed class BackendAdapter : ILiveExportSource
 
     /// <summary>
     /// Phase 28 — Field → Methods cross-reference. Inverse of
-    /// <see cref="SearchSymbolsAsync(string,string,IReadOnlyList{string}?,int?,CancellationToken)"/>:
+    /// <see cref="SearchSymbolsAsync(string,string,IReadOnlyList{string}?,int?,bool,CancellationToken)"/>:
     /// given the FQN of a Unity field, list every method that reads
     /// and/or writes it. Mono walks IL bytecode (exact, no false
     /// positives). IL2CPP scans GameAssembly.dll's .text for

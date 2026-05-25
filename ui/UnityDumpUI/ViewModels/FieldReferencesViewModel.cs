@@ -81,6 +81,11 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
     [ObservableProperty] private string? _resolvedFieldOffsetLabel;
     [ObservableProperty] private string? _resolvedStaticAddressLabel;
     [ObservableProperty] private int     _scannedMethods;
+    /// <summary>Build #555 — IL2CPP structural-limit advisory message
+    /// surfaced when the scan found 0 matches because static_fields is
+    /// runtime-heap-allocated. Null when the result is authoritative.
+    /// Bound to the AdvisoryBanner in FieldReferencesWindow.</summary>
+    [ObservableProperty] private string? _advisoryMessage;
 
     public string CountLabel => Truncated
         ? $"{MatchCount}+ matches (truncated)"
@@ -99,6 +104,7 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
 
         IsBusy = true;
         ErrorMessage = null;
+        AdvisoryMessage = null;
         try
         {
             FindFieldReferencesResult result = await _backend
@@ -148,6 +154,11 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
             ResolvedStaticAddressLabel  = !string.IsNullOrEmpty(result.Field?.StaticAddress)
                 ? result.Field!.StaticAddress
                 : null;
+            // Build #555 — IL2CPP structural-limit note. DLL sets this when
+            // 0 matches came back from an unaddressable heap-allocated
+            // static; UI surfaces it so the user knows "0 matches" doesn't
+            // mean "field is unused".
+            AdvisoryMessage = result.Note;
 
             _logger.Write(Constants.LogCategoryView,
                 $"findFieldReferences {ClassLabel}::{FieldName} kind={KindFilter}: "

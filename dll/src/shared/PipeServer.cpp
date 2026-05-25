@@ -22,6 +22,10 @@ namespace {
 
 std::mutex g_mutex;
 std::unordered_map<std::string, Handler> g_handlers;
+// Per-client disconnect hooks. Fires once per accepted-client lifetime.
+// Read-mostly: written at init (backends register one hook each), read on
+// every disconnect. Snapshotted under the same g_mutex as the handler map.
+std::vector<DisconnectHook> g_disconnectHooks;
 std::thread g_worker;
 std::atomic<bool> g_running{false};
 HANDLE g_stopEvent = nullptr;
@@ -257,10 +261,38 @@ void WorkerThread() {
             // threads on shutdown — DLL unload only happens at game
             // exit and any in-flight ServeClient pipe handle gets
             // forcibly closed when the process tears down.
+            //
+            // Disconnect hooks fire AFTER ::DisconnectNamedPipe so the
+            // OS-side pipe object is already torn down — backends are
+            // free to take their time inside the hook (e.g. a Mono GC
+            // drain on a 60K-class image is ~100 ms) without holding
+            // the pipe slot open against the next ::CreateNamedPipeW
+            // in the main loop. Hooks run on the per-client worker
+            // thread which is about to exit anyway, so no extra
+            // thread cost.
             std::thread([pipe]() {
                 ServeClient(pipe);
                 ::DisconnectNamedPipe(pipe);
                 ::CloseHandle(pipe);
+
+                // Snapshot the hook list under the mutex so a concurrent
+                // RegisterDisconnectHook (unlikely after init but cheap to
+                // be safe) doesn't race with iteration.
+                std::vector<DisconnectHook> hooks;
+                {
+                    std::lock_guard lock(g_mutex);
+                    hooks = g_disconnectHooks;
+                }
+                for (const auto& h : hooks) {
+                    if (!h) continue;
+                    try {
+                        h();
+                    } catch (const std::exception& ex) {
+                        LogPipe(std::string("disconnect hook threw: ") + ex.what());
+                    } catch (...) {
+                        LogPipe("disconnect hook threw non-std exception");
+                    }
+                }
             }).detach();
         } else {
             ::DisconnectNamedPipe(pipe);
@@ -275,6 +307,12 @@ void WorkerThread() {
 void RegisterHandler(std::string name, Handler handler) {
     std::lock_guard lock(g_mutex);
     g_handlers[std::move(name)] = std::move(handler);
+}
+
+void RegisterDisconnectHook(DisconnectHook hook) {
+    if (!hook) return;
+    std::lock_guard lock(g_mutex);
+    g_disconnectHooks.push_back(std::move(hook));
 }
 
 bool Start() {
