@@ -780,36 +780,55 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
         std::uintptr_t gaHi = gaLo + gaSize;
         bool outsideModule = (targetAddr < gaLo) || (targetAddr >= gaHi);
         if (outsideModule && candidateHits == 0) {
-            // Phase 28b-v3 follow-up — rewrote the advisory to reflect
-            // current scanner coverage (v1 RIP scan + v2 direct-class-ptr
-            // chain detection + v3.0 lazy-init slot scan all tried + all
-            // failed). Most likely cause for `<>c`-style lambda-cache
-            // classes is that no AOT method has executed the lambda's
-            // per-method init call in the current session, so all
-            // lazy-init slots are still null. v3.1 (parse
-            // `MetadataInitializerEntry` for static slot→class mapping)
-            // would close this gap. See plan.md §Phase 28b-v3.
+            // ----------------------------------------------------------
+            // User-facing note: kept short + jargon-free per user
+            // feedback (the prior 6-sentence technical wall-of-text was
+            // unhelpful for the UI banner — most users hitting this case
+            // aren't IL2CPP internals experts).
+            //
+            // The full technical reasoning lives below in this comment
+            // block and in the DLL log line above. Future maintainers:
+            // do NOT inline the technical detail back into the user-
+            // facing string — keep it here.
+            //
+            // What's actually going on:
+            //   * v1 RIP scan checks for `mov reg, [rip+disp]` where
+            //     disp points directly at the field's storage. Fails on
+            //     modern IL2CPP because `static_fields` is heap-allocated
+            //     by the runtime — no compile-time disp can address it.
+            //   * v2 chain detector looks for the 2-hop pattern
+            //     `mov reg, [rip+CLASS_PTR]; mov reg2, [reg+0xB8]; ...`.
+            //     Works when AOT code has cached the `Il2CppClass*` in
+            //     `.data` (singletons, user-statics initialised early).
+            //   * v3.0 lazy-init slot scanner finds per-method init-call
+            //     cache slots in `.text` (`lea reg, [SLOT]; call init`).
+            //     Resolves slot→class via runtime value comparison —
+            //     works when the AOT method that uses the slot has
+            //     executed at least once.
+            //   * The remaining case is "AOT method has never run in
+            //     this session" (e.g. compiler-generated `<>c` lambda
+            //     caches whose lambda body hasn't been called). v3.1
+            //     attempted static slot→class mapping but hit a v29
+            //     `metadataUsages=NULL` layout dead-end. v3.2 plan in
+            //     STATUS.md but deferred indefinitely (niche use case).
+            //
+            // For end users:
+            //   * Singletons / regular game state: v2/v3.0 usually work.
+            //     If hitting this banner on those, the class hasn't been
+            //     initialised yet — exercise the code path first.
+            //   * Compiler-generated `<>c` lambda caches: not supported
+            //     on IL2CPP. Use Mono backend if available.
+            // ----------------------------------------------------------
             result.note =
-                "IL2CPP static_fields are runtime-heap-allocated (this field's storage is at 0x" +
-                [](std::uintptr_t v) {
-                    char buf[24]; std::snprintf(buf, sizeof(buf), "%llX",
-                        static_cast<unsigned long long>(v)); return std::string(buf);
-                }(targetAddr) +
-                ", outside GameAssembly.dll). All three IL2CPP scanners ran "
-                "with no matches: v1 RIP scan (direct static-address refs), "
-                "v2 direct-class-pointer chain detection (`.data` slots holding "
-                "this Il2CppClass*), AND v3.0 lazy-init slot scan (per-method "
-                "init-call slots populated by `il2cpp_codegen_initialize_method`). "
-                "Two likely causes: (1) for compiler-generated `<>c` lambda-cache "
-                "classes, no AOT method that uses this class has executed yet in "
-                "the current game session — try playing the relevant game content "
-                "to trigger the lambda body, then re-scan. (2) The class is "
-                "referenced only through a metadata-initialiser entry whose slot "
-                "is still null because of (1) — Phase 28b-v3.1 (planned) will "
-                "parse the entry layout to map slots → classes statically. "
-                "Workaround for now: use the Mono backend's IL walker (works for "
-                "Mono targets) or inspect a related class that's already been "
-                "exercised in this session.";
+                "No matches found. The IL2CPP scanner can't detect "
+                "references to this field type yet. This usually means "
+                "either (a) the code that uses this field hasn't run in "
+                "the current game session — try playing the relevant "
+                "game content first, then re-scan, or (b) it's a "
+                "compiler-generated field (lambda cache, async-state-"
+                "machine, etc.) which isn't supported on the IL2CPP "
+                "backend in this build. Mono targets handle these cases "
+                "correctly via IL walking.";
         }
     }
 
