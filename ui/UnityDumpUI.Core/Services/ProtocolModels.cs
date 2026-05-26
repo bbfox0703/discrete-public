@@ -43,6 +43,12 @@ public sealed class HandshakeResult
     [JsonPropertyName("assemblies_count")]  public int     AssembliesCount { get; set; }
     [JsonPropertyName("build")]             public uint    Build           { get; set; }
     [JsonPropertyName("protocol")]          public int     Protocol        { get; set; }
+    /// <summary>Phase 29b — fingerprint hash of the active game module
+    /// (FNV-1a over file path + size + last-write-time). Same value
+    /// <see cref="SnapshotBeginResult.GameBuildId"/> carries; the UI
+    /// uses it to detect "reconnected to a different game build"
+    /// and mark old snapshots stale.</summary>
+    [JsonPropertyName("game_build_id")]     public string? GameBuildId     { get; set; }
 }
 
 /// <summary>
@@ -919,4 +925,160 @@ public sealed class EnumValueEntry
     [JsonPropertyName("enc_bytes")]    public int?         EncBytes    { get; set; }
     [JsonPropertyName("raw_hex")]      public string?      RawHex      { get; set; }
     [JsonPropertyName("decode_error")] public string?      DecodeError { get; set; }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 29 — Snapshot & Diff (snapshotBegin / snapshotChunk / snapshotEnd).
+// ---------------------------------------------------------------------------
+
+/// <summary>Per-assembly summary returned in the Begin response's `plan`
+/// array. UI uses this for the "X classes / Y instances per assembly"
+/// progress feedback.</summary>
+public sealed class SnapshotPlanEntry
+{
+    [JsonPropertyName("assembly")]      public string Assembly      { get; set; } = string.Empty;
+    [JsonPropertyName("classCount")]    public int    ClassCount    { get; set; }
+    [JsonPropertyName("instanceCount")] public int    InstanceCount { get; set; }
+}
+
+public sealed class SnapshotScanStats
+{
+    [JsonPropertyName("regionsTotal")]     public int  RegionsTotal     { get; set; }
+    [JsonPropertyName("regionsScanned")]   public int  RegionsScanned   { get; set; }
+    [JsonPropertyName("regionsSkipImage")] public int  RegionsSkipImage { get; set; }
+    [JsonPropertyName("regionsSkipStack")] public int  RegionsSkipStack { get; set; }
+    [JsonPropertyName("bytesScanned")]     public long BytesScanned     { get; set; }
+    /// <summary>Mono-only stat — number of vtable→klass derefs the wide scan
+    /// resolved on its first pass. IL2CPP returns null.</summary>
+    [JsonPropertyName("vtablesResolved")]  public int? VtablesResolved  { get; set; }
+}
+
+public sealed class SnapshotDecodeStats
+{
+    [JsonPropertyName("decodedClasses")]           public int DecodedClasses           { get; set; }
+    [JsonPropertyName("decodedInstances")]         public int DecodedInstances         { get; set; }
+    [JsonPropertyName("decodedArrays")]            public int DecodedArrays            { get; set; }
+    [JsonPropertyName("skippedOpenGenericArrays")] public int SkippedOpenGenericArrays { get; set; }
+    [JsonPropertyName("classInfoCacheHits")]       public int ClassInfoCacheHits       { get; set; }
+    [JsonPropertyName("classInfoCacheMisses")]     public int ClassInfoCacheMisses     { get; set; }
+}
+
+public sealed class SnapshotBeginResult
+{
+    [JsonPropertyName("ok")]              public bool   Ok              { get; set; }
+    [JsonPropertyName("snapshotId")]      public string SnapshotId      { get; set; } = string.Empty;
+    [JsonPropertyName("capturedAt")]      public string CapturedAt      { get; set; } = string.Empty;
+    [JsonPropertyName("gameBuildId")]     public string GameBuildId     { get; set; } = string.Empty;
+    [JsonPropertyName("gameSessionId")]   public string GameSessionId   { get; set; } = string.Empty;
+    [JsonPropertyName("instanceCap")]     public int    InstanceCap     { get; set; }
+    [JsonPropertyName("arrayCap")]        public int    ArrayCap        { get; set; }
+    [JsonPropertyName("totalClasses")]    public int    TotalClasses    { get; set; }
+    [JsonPropertyName("totalInstances")]  public int    TotalInstances  { get; set; }
+    [JsonPropertyName("plan")]            public List<SnapshotPlanEntry> Plan       { get; set; } = new();
+    [JsonPropertyName("scanStats")]       public SnapshotScanStats?      ScanStats   { get; set; }
+    [JsonPropertyName("decodeStats")]     public SnapshotDecodeStats?    DecodeStats { get; set; }
+    [JsonPropertyName("excludedSystemAssemblies")] public int            ExcludedSystemAssemblies { get; set; }
+    [JsonPropertyName("includeSystemAssemblies")]  public bool           IncludeSystemAssemblies  { get; set; }
+    [JsonPropertyName("error")]           public string?                 Error       { get; set; }
+}
+
+/// <summary>One field inside an instance (or one static field of a class).
+/// The shape mirrors the existing <see cref="WalkedField"/> with the
+/// addition of <see cref="ArrayElements"/> (inline T[] capture from the
+/// snapshot walker) and <see cref="ArrayError"/> for arrays whose stored
+/// pointer didn't point at a valid managed array header (false-positive
+/// instances).</summary>
+public sealed class SnapshotFieldEntry
+{
+    [JsonPropertyName("name")]              public string       Name             { get; set; } = string.Empty;
+    [JsonPropertyName("type")]              public string       Type             { get; set; } = string.Empty;
+    // ulong: C++ writes IL2CPP::FieldEntry::offset which is std::size_t
+    // (uint64 on x64). Most fields have small offsets, but garbage values
+    // from false-positive class entries (live-smoke #629 SaGa F2R:
+    // classes[8].statics[3].offset exceeded Int64.MaxValue) trip
+    // Int64 deserialization. Match C++ type.
+    [JsonPropertyName("offset")]            public ulong        Offset           { get; set; }
+    [JsonPropertyName("from")]              public string?      From             { get; set; }
+    [JsonPropertyName("is_enum")]           public bool?        IsEnum           { get; set; }
+    [JsonPropertyName("is_value_type")]     public bool?        IsValueType      { get; set; }
+    [JsonPropertyName("address")]           public string?      Address          { get; set; }
+    [JsonPropertyName("value")]             public JsonElement? Value            { get; set; }
+    [JsonPropertyName("ptr")]               public string?      Ptr              { get; set; }
+    [JsonPropertyName("string")]            public string?      StringValue      { get; set; }
+    [JsonPropertyName("string_length")]     public int?         StringLength     { get; set; }
+    [JsonPropertyName("string_error")]      public string?      StringError      { get; set; }
+    [JsonPropertyName("error")]             public string?      Error            { get; set; }
+    [JsonPropertyName("arrayElements")]     public SnapshotArrayElements? ArrayElements    { get; set; }
+    [JsonPropertyName("arrayError")]        public string?      ArrayError       { get; set; }
+    // ulong? not long?: C++ writes std::uintptr_t which on x64 is uint64.
+    // False-positive instances can have garbage values > Int64.MaxValue
+    // (build #627 SaGa F2R / BongoCat smoke: JsonException at this field
+    // when value didn't fit signed long). ulong covers the full range.
+    [JsonPropertyName("arrayErrorLength")]  public ulong?       ArrayErrorLength { get; set; }
+}
+
+public sealed class SnapshotArrayElement
+{
+    [JsonPropertyName("index")]   public int          Index   { get; set; }
+    [JsonPropertyName("value")]   public JsonElement? Value   { get; set; }
+    [JsonPropertyName("ptr")]     public string?      Ptr     { get; set; }
+    [JsonPropertyName("string")]  public string?      String  { get; set; }
+    [JsonPropertyName("error")]   public string?      Error   { get; set; }
+    [JsonPropertyName("address")] public string?      Address { get; set; }
+}
+
+public sealed class SnapshotArrayElements
+{
+    // ulong: C++ writes std::uintptr_t. Legitimate arrays are capped
+    // at 16M by the DLL implausible-length check before reaching here,
+    // so values comfortably fit in any integer. ulong (not long) is
+    // defensive against future garbage paths and matches the C++ type.
+    [JsonPropertyName("length")]       public ulong                         Length       { get; set; }
+    [JsonPropertyName("count")]        public int                           Count        { get; set; }
+    [JsonPropertyName("element_type")] public string?                       ElementType  { get; set; }
+    [JsonPropertyName("element_size")] public ulong                         ElementSize  { get; set; }
+    [JsonPropertyName("is_pointer")]   public bool                          IsPointer    { get; set; }
+    [JsonPropertyName("elements")]     public List<SnapshotArrayElement>    Elements     { get; set; } = new();
+}
+
+public sealed class SnapshotInstanceEntry
+{
+    [JsonPropertyName("address")] public string                     Address { get; set; } = string.Empty;
+    [JsonPropertyName("fields")]  public List<SnapshotFieldEntry>   Fields  { get; set; } = new();
+}
+
+public sealed class SnapshotClassParent
+{
+    [JsonPropertyName("namespace")] public string Namespace { get; set; } = string.Empty;
+    [JsonPropertyName("name")]      public string Name      { get; set; } = string.Empty;
+}
+
+public sealed class SnapshotClassEntry
+{
+    [JsonPropertyName("assembly")]  public string                       Assembly  { get; set; } = string.Empty;
+    [JsonPropertyName("namespace")] public string                       Namespace { get; set; } = string.Empty;
+    [JsonPropertyName("name")]      public string                       Name      { get; set; } = string.Empty;
+    [JsonPropertyName("parent")]    public SnapshotClassParent?         Parent    { get; set; }
+    [JsonPropertyName("statics")]   public List<SnapshotFieldEntry>?    Statics   { get; set; }
+    [JsonPropertyName("instances")] public List<SnapshotInstanceEntry>? Instances { get; set; }
+    [JsonPropertyName("error")]     public string?                      Error     { get; set; }
+}
+
+public sealed class SnapshotChunkResult
+{
+    [JsonPropertyName("ok")]         public bool                       Ok         { get; set; }
+    [JsonPropertyName("snapshotId")] public string                     SnapshotId { get; set; } = string.Empty;
+    [JsonPropertyName("cursor")]     public int                        Cursor     { get; set; }
+    [JsonPropertyName("nextCursor")] public int                        NextCursor { get; set; }
+    [JsonPropertyName("done")]       public bool                       Done       { get; set; }
+    [JsonPropertyName("classes")]    public List<SnapshotClassEntry>   Classes    { get; set; } = new();
+    [JsonPropertyName("error")]      public string?                    Error      { get; set; }
+}
+
+public sealed class SnapshotEndResult
+{
+    [JsonPropertyName("ok")]         public bool   Ok         { get; set; }
+    [JsonPropertyName("snapshotId")] public string SnapshotId { get; set; } = string.Empty;
+    [JsonPropertyName("dropped")]    public bool   Dropped    { get; set; }
+    [JsonPropertyName("error")]      public string? Error     { get; set; }
 }

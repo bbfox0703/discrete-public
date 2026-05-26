@@ -1,6 +1,144 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-26 **session close** — build #593).
+**Branch**: `dev` (2026-05-26 night — **Phase 29b SHIPPED + LIVE-VERIFIED across SaGa F2R / BongoCat / 활俠傳**, build #637).
+
+## TL;DR — what's left to pick up (build #637 session)
+
+**Phase 29b — Snapshot tab + diff UI SHIPPED + LIVE-VERIFIED on all
+three Mono / IL2CPP / x86 targets**. The Snapshot tab (MainWindow
+position 7) captures the running game's managed state via Phase 29a
+RPCs, diffs two snapshots, and surfaces row-level changes with
+class.field.instance context attached. Strategy C UI filter (synthetic-
+types checkbox, default ON) shipped. Cross-game snapshot stale-marking
+shipped (game_build_id added to handshake). AOT sort comparers wired
+for the diff DataGrid (avoiding the documented three-layer sort trap).
+
+Took **five iterations of debugging** to get there because Mono on
+32-bit + x64 has surprisingly different freeze behaviour from IL2CPP.
+
+| Build | Iteration | What landed |
+|---|---|---|
+| #596 | v1 | Per-chunk decode under per-chunk attach. 활俠傳 froze mid-snapshot AND post-snapshot. |
+| #598 | v2 — decode-in-Begin | One outer attach for whole decode. 활俠傳 freeze gone; BongoCat post-close hang appeared. |
+| #602 | v2.1 — memoise ReadClassInfo | Global ClassInfo cache. BongoCat close-hang fixed. |
+| #604–612 | 29b UI + system-asm exclude + 27c smoke fix | UI tab + ulong DTO + JSON parse fixes + open-generic filter. |
+| #629 | v4 round 1 — batch attach + heap-walk yield | Tried "yield often" approach. BongoCat regressed (game hangs after RPC). |
+| #631–633 | v4 round 2–3 — revert batch + gc_collect drain + Sleep | Drain ran in 19-22ms; didn't help. |
+| #637 | **v4 round 4 — skip Mono static field VALUES** | **The actual fix.** mono_class_vtable from worker thread → BDWGC tracking entries → game's main thread runs catch-up GC on next allocation → freeze. Removed the call. Static field METADATA still captured; user gets value on-demand via Browser tab. **All three targets responsive.** |
+
+Live-verified at build #637 across:
+* **SaGa F2R (IL2CPP v29 / Unity 2021.3 / x64)**: full snapshot + diff
+  with real numeric Δ values (e.g. `MainGame/DVECTOR.vx 110 → 267 (+157)`).
+  Static field VALUES captured (IL2CPP path keeps ResolveStaticBaseAddress
+  — different GC architecture, no main-thread catch-up problem).
+* **BongoCat (Mono / Unity 6000.2 / x64)**: snapshot completes, game
+  stays responsive (cat animates, can be closed cleanly).
+* **활俠傳 (Mono x86 / Unity 2020.3)**: snapshot completes
+  (~60s for 3,647 user classes / 78K instances), BGM continues
+  uninterrupted, game closeable normally.
+
+Strategy C UI filter (synthetic-types checkbox, default ON), changed-
+only / added / removed toggles, class-name substring filter all
+working. Cross-tab handoff (diff row → Inspector / Address Lookup)
+shipped. DataGrid sort comparers wired per `aot-pitfalls.md` §4.5.
+
+### Known follow-ups (deferred — Phase 29 polish / 29c / 29d)
+
+1. **Noise reduction on diff result** (user feedback): with 1,186
+   changed rows on 활俠傳 + SaGa F2R diff, hard to find signal. UI
+   could expose:
+   - Old/New value range filter (numeric)
+   - Pointer mask toggle (hide rows where Old/New start with "ptr=")
+   - Field-name keyword filter (currently only class-name filter)
+   - Distinct-count statistics (fields appearing in N+ rows often
+     turn out to be noise)
+   - Skip rows where Δ is just a pointer-address change (e.g.
+     re-allocated object — value moved, content same)
+2. **Stack-trace strings appearing in diff** — System.Exception
+   instances have a `_stackTrace` field that's a managed array;
+   when captured + serialized + diffed, produces huge string blobs
+   that drown out real changes. Filter or truncate.
+3. **Static field VALUE on Mono** — currently only metadata.
+   Possible future: opt-in "include static values (may freeze
+   game briefly)" checkbox.
+4. **Phase 29c — SQLite cross-session persistence** — original
+   29 plan item; will need to handle the "stale" flag and
+   game_build_id properly when reading snapshots from a previous
+   game launch.
+
+---
+
+## TL;DR — what's left to pick up (build #602 session)
+
+**Phase 29a — Snapshot DLL layer SHIPPED + LIVE-VERIFIED + bundled Phase
+27c live-smoke closed.** Three RPCs (`snapshotBegin` / `snapshotChunk` /
+`snapshotEnd`) ship on both backends. The "全抓" default scope works as
+designed — user doesn't have to pick a class; system grabs everything.
+Three iterations took it from "concept" to "stable on the freeze-prone
+32-bit Mono target":
+
+| Build | Iteration | What landed |
+|---|---|---|
+| #596 | v1 baseline | Per-chunk decode under per-chunk attach guard. Worked on SaGa F2R but **hung 活俠傳** mid-snapshot AND left a residual game freeze (BDWGC finalizer accumulation across 542 attach cycles — same family as the 44s shutdown-stall lesson from Phase 27). |
+| #598 | v2 — decode-in-Begin | All per-class decode moved to `snapshotBegin` under ONE outer `ThreadAttachGuard`. Chunks became pure JSON slicers (zero Mono runtime calls). 活俠傳 freeze gone; **but BongoCat now froze on game-close**. |
+| #602 | v2.1 — memoise ReadClassInfo | Volume math caught the BongoCat regression: 20K instances × ~4 parent chain depth = ~80K ReadClassInfo calls per snapshot → BDWGC small-object pressure → game stalls when forced to drain on close. Fix: build chain + ChainInfo ONCE per class, reuse for all its instances. Mono call volume drops 40x. BongoCat: 12.3s → 8.4s and **no close hang**. |
+
+Live-verified across three targets at build #602:
+* **SaGa F2R (IL2CPP v29 / Unity 2021.3 / x64)**: `Assembly-CSharp`
+  narrow scan → 2,451 classes / 73K instances / 7,804 array fields
+  captured / 1,228 open-generic skipped / 53K array errors (correctly
+  flagged as `arrayError = implausible_length | header_unreadable` —
+  false-positive instances from synthetic types like `<Module>`,
+  `<>f__AnonymousType*` etc). Total 42.4s.
+* **BongoCat (Mono / Unity 6000.2 / x64)**: 448 classes / 20K instances
+  / 44 array fields captured (`SteamInventoryTest.m_SerializedBuffer:
+  Byte[1900545]`, `BattleRoyale._roundDuration: RoundDuration[95]`,
+  etc). Total 10.3s. **No close hang.**
+* **活俠傳 (Mono x86 / Unity 2020.3)**: 21 classes / 787 instances /
+  14 array fields captured. Total 48.7s. No freeze. (32-bit heap walk
+  is the bottleneck — 1.1 GB scanned per snapshot.)
+
+**Bundled Phase 27c live-smoke — CLOSED**. The snapshot walker drills
+into every `T[]` field it finds, exercising the `whatIsAt` array
+element resolver path. Real arrays decode element-by-element; false-
+positive arrays (open-generic `T[]` placeholders, garbage pointer
+targets) get filtered or surface as `arrayError`. Three game targets
+all produced sane array captures + sane error rejections.
+
+### Known subtle behaviour (not blocking)
+
+* **BongoCat post-snapshot timer pause** — user reported the in-game
+  timer stops updating until mouse motion over the game UI nudges
+  Unity's input system to wake coroutines. Almost certainly BongoCat's
+  own coroutine pacing recovery after our brief Mono attach; not a
+  Discrete bug. Transient, not blocking.
+* **SaGa F2R array-error rate** — 53K of 73K instances flag
+  `arrayError`. These are false-positive "instances" of synthetic
+  types: heap holds class-pointer references for metadata / RGCTX
+  cache that aren't real object headers. Phase 29b UI strategy **C**
+  (no DLL-side filtering; UI ships a "Hide synthetic types" checkbox
+  default ON) handles this — see Phase 29b plan.
+
+### Next: Phase 29b — In-memory snapshot store + diff UI
+
+* Add `Snapshot` tab to MainWindow (position 7).
+* VM holds `ObservableCollection<SnapshotEnvelope>` — in-memory only at
+  this stage. Take Snapshot button fires `snapshotBegin`, loops
+  `snapshotChunk` until done, builds local map per (class FQN, instance
+  addr, field offset) → value.
+* Diff between two snapshots: changed-only DataGrid columns
+  `Class / Field / Instance / Old / New / Δ / %Δ`.
+* **UI filter strategy C** (per user decision 2026-05-26): no DLL-side
+  filtering of synthetic types; UI checkbox "Hide synthetic types"
+  default ON filters by name pattern (`<Module>`, `<>f__*`, names
+  containing backtick + no generic argument resolution).
+* Cross-tab handoff: right-click diff row → Inspector / Address Lookup
+  / Copy address.
+* No DB dependency yet — that's 29c.
+
+Estimated ~1 day.
+
+---
 
 ## TL;DR — what's left to pick up (build #593 session)
 
@@ -397,19 +535,27 @@ ready for handoff.
   Avalonia's pass, or override OnPropertyChangedCore instead of
   subscribing to the event. Code at MainWindow.axaml.cs `OnWindowPropertyChanged`.
 
-**Other carry-forward** (from earlier session notes — still open):
-* **27c live click-through smoke** — array element resolution in
-  `whatIsAt` shipped + DLL-level unit-tested; no live game smoke yet
-  on a `T[]` / `List<T>` instance.
+**Other carry-forward** (from earlier session notes):
+* **27c live click-through smoke** — ✅ **CLOSED 2026-05-26** via Phase
+  29a's snapshot walker bundled smoke. Verified on SaGa F2R (IL2CPP /
+  Unity 2021.3 — `MainGame/DR_ENV.code: UInt32[]` length=2451 captured=50,
+  `MainGame/HalfReader.buff: Byte[]` length=0 captured=0) AND BongoCat
+  (Mono / Unity 6000.2 — `SteamInventoryTest.m_SerializedBuffer: Byte[]`
+  length=1900545 captured=50, `BattleRoyale._roundDuration:
+  RoundDuration[]` length=95 captured=50) AND 活俠傳 (Mono x86 / Unity
+  2020.3 — `MultiKeyDictionary\`3.buckets: Int32[]` length=786438
+  captured=50). Real arrays decode correctly; false-positive instances
+  surface as `arrayError = implausible_length | header_unreadable` and
+  count separately. Builds #598 / #602.
 * **27b-4 live smoke** — UTF-16 / UTF-8 / ASCII string scan shipped;
-  no live game smoke.
+  no live game smoke. (Same flow as 27a global scan; lower priority.)
 * **27d live UI click-through** — Value Search tab shipped + live-
   smoked on 活俠傳 (Mono x86) and SaGa F2R (IL2CPP); SaGa F2R confirmed
   the session refine workflow narrows correctly.
 * **Phase 27f** *(deferred, v2 acceleration)* — libgc heap-section
   binding. Doubles as Phase 20-HEAP closure. Not blocking.
-* **Phase 28** (Field → Methods cross-reference) — TODO stub, picks
-  up after Phase 27 stabilises.
+* **Phase 28** (Field → Methods cross-reference) — ✅ Shipped in earlier
+  session.
 
 ---
 

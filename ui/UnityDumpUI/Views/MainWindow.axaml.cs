@@ -105,6 +105,11 @@ public partial class MainWindow : Window
             .WireSortComparers(InspectorFieldsSortComparers);
         this.FindControl<DataGrid>("MethodsDataGrid")?
             .WireSortComparers(MethodsSortComparers);
+        // Phase 29b — wire the Snapshot diff grid. Without this the
+        // header-click sort silently no-ops under AOT
+        // (docs/aot-pitfalls.md §4.5 "three-layer trap").
+        this.FindControl<DataGrid>("SnapshotDiffGrid")?
+            .WireSortComparers(SnapshotDiffSortComparers);
     }
 
     private static readonly IReadOnlyDictionary<string, IComparer> BrowserFieldsSortComparers =
@@ -138,6 +143,28 @@ public partial class MainWindow : Window
             ["Flags"]      = DataGridSortComparers.Number <MethodRow>(r => r.Flags),
             ["IsStatic"]   = DataGridSortComparers.Bool   <MethodRow>(r => r.IsStatic),
             ["DeclaredIn"] = DataGridSortComparers.Ordinal<MethodRow>(r => r.DeclaredIn),
+        };
+
+    // Phase 29b — Snapshot diff grid. SortMemberPath keys must match
+    // the XAML's <DataGridTextColumn SortMemberPath="…"> values. Note
+    // that Old/New/Delta sort as strings — they hold heterogeneous
+    // shapes (int/float/ptr/quoted string), and a single numeric
+    // comparer would mis-sort the non-numeric rows. Future polish
+    // (Phase 29d) could expose typed delta filters.
+    private static readonly IReadOnlyDictionary<string, IComparer> SnapshotDiffSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["ClassDisplay"]  = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.ClassDisplay),
+            ["Field"]         = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.Field),
+            // Cast ulong → long (unchecked preserves bit pattern; field
+            // offsets stay well below Int64.MaxValue in practice anyway).
+            ["FieldOffset"]   = DataGridSortComparers.Number <SnapshotDiffRow>(r => unchecked((long)r.FieldOffset)),
+            ["InstanceLabel"] = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.InstanceLabel),
+            ["OldValue"]      = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.OldValue),
+            ["NewValue"]      = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.NewValue),
+            ["Delta"]         = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.Delta),
+            ["ChangeKind"]    = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.ChangeKind),
+            ["FieldType"]     = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.FieldType),
         };
 
     /// <summary>Last expanded widths for the Assemblies / Classes columns.
@@ -991,6 +1018,53 @@ public partial class MainWindow : Window
         var row = ResolveDataGridRow<ValueSearchRow>(sender, this.FindControl<DataGrid>("ValueSearchGrid"));
         if (row is null) return;
         await CopyToClipboardAsync(row.ClassDisplay);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 29b — Snapshot diff row activation + context menu.
+    // -----------------------------------------------------------------------
+
+    private void OnSnapshotRowActivated(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("SnapshotDiffGrid");
+        if (grid?.SelectedItem is SnapshotDiffRow row)
+            vm.Snapshot.NavigateToInspector(row);
+    }
+
+    private void OnSnapshotInspectInstance(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is not null) vm.Snapshot.NavigateToInspector(row);
+    }
+
+    private void OnSnapshotAddressLookup(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is not null) vm.Snapshot.NavigateToAddressLookup(row);
+    }
+
+    private async void OnSnapshotCopyInstanceAddr(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.InstanceAddress);
+    }
+
+    private async void OnSnapshotCopyClass(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.ClassDisplay);
+    }
+
+    private async void OnSnapshotCopyField(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.Field);
     }
 
     private void OnSymbolFinderNavigateMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

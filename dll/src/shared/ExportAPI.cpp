@@ -12,6 +12,7 @@
 #include "Memory.h"
 #include "ModuleHelper.h"
 #include "PipeServer.h"
+#include "SnapshotSession.h"
 #include "ValueScanSession.h"
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
@@ -46,6 +47,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -102,6 +104,56 @@ bool ICaseContainsAscii(std::string_view haystack, std::string_view needle) {
     return false;
 }
 
+// Phase 29a-v3 — default-exclude for the snapshot "全抓" scope. Live-smoke
+// on 活俠傳 (Mono x86) showed that capturing every assembly grabs 15,935
+// classes — ~80% of which are mscorlib / System.* / UnityEngine.* /
+// Unity.* / Fungus noise that the user almost certainly doesn't care
+// about as game state. Same pattern across all Unity Mono targets:
+// system + engine assemblies dominate the class count, drowning the
+// user-game assemblies in the diff results.
+//
+// The user-facing rule: an empty `assemblies` arg means "every USER
+// assembly" — exclude well-known system/engine prefixes by default.
+// Caller can pass `includeSystemAssemblies: true` to keep everything.
+//
+// Match shape: exact prefix match where the next character (if any) is
+// '.' or ' '. Catches:
+//   "mscorlib"            → excluded
+//   "System"              → excluded (exact)
+//   "System.Xml"          → excluded (System. prefix)
+//   "SystemException"     → NOT excluded (no '.')
+//   "UnityEngine"         → excluded (older Unity monolithic)
+//   "UnityEngine.CoreModule" → excluded
+//   "Unity.InputSystem"   → excluded
+//   "Mortal.Core"         → NOT excluded (user game)
+//   "Assembly-CSharp"     → NOT excluded (default user assembly)
+bool IsSystemOrEngineAssembly(const std::string& name) {
+    static const char* const kSystemPrefixes[] = {
+        "mscorlib",
+        "System",
+        "Microsoft",
+        "netstandard",
+        "Mono",
+        "UnityEngine",
+        "Unity",
+        // Common large support libraries that ship with many Unity games
+        // and that aren't gameplay state. Add more as new targets reveal
+        // similar bloat.
+        "Fungus",
+    };
+    for (const char* p : kSystemPrefixes) {
+        const std::size_t pl = std::strlen(p);
+        if (name.size() < pl) continue;
+        if (name.compare(0, pl, p) != 0) continue;
+        // Strict suffix: exact match OR followed by '.' / ' '. Rejects
+        // false-matches like "SystemException".
+        if (name.size() == pl || name[pl] == '.' || name[pl] == ' ') {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Phase 27a — shared helpers for the scanFieldValue handler (both backends).
 // `Memory::` below resolves to UnityCEDumper::Memory:: via this using; the
 // alternative is to fully qualify each occurrence, which makes the helper
@@ -109,6 +161,7 @@ bool ICaseContainsAscii(std::string_view haystack, std::string_view needle) {
 // session container — same rationale.
 namespace Memory    = ::UnityCEDumper::Memory;
 namespace ValueScan = ::UnityCEDumper::ValueScan;
+namespace Snapshot  = ::UnityCEDumper::Snapshot;
 
 // Wire dataType string → ValueDataType enum. Returns false on unknown string.
 bool ParseValueDataType(std::string_view s, Memory::ValueDataType& out) {
@@ -534,6 +587,18 @@ json BuildHandshakeJson() {
     j["assemblies_count"] = assembliesCount;
     j["build"]    = static_cast<std::uint32_t>(UNITYCEDUMPER_BUILD_NUMBER);
     j["protocol"] = 1;
+    // Phase 29b — compute the same gameBuildId hash that snapshotBegin
+    // emits so the UI can detect "we reconnected to a different game"
+    // without taking a snapshot first. Same fingerprint scheme
+    // (FNV-1a over module path + file size + last-write-time).
+#if defined(UNITYCEDUMPER_BACKEND_MONO)
+    j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
+    if (j["game_build_id"].get<std::string>().empty()) {
+        j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
+    }
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+    j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
+#endif
     return j;
 }
 
@@ -944,6 +1009,105 @@ void RegisterCoreHandlers() {
         }
         (void)bytesToHex;  // reserved for future raw-bytes inclusion
         return out;
+    };
+
+    // ------------------------------------------------------------------------
+    // Phase 29 — inline array-element capture used by the snapshot handlers.
+    // Given a non-null managed array pointer + the element type name + a cap,
+    // reads the array header and emits up to `cap` elements with their values
+    // decoded by the same `decodeField` lambda used by walkInstance. Backend-
+    // agnostic — relies on ManagedLayout's pointer-sized offsets for header
+    // layout (16-byte object header + length at +0x18 + data at +0x20 on x64;
+    // half that on x86).
+    //
+    // Element-size resolution is the same primitive-name table CmdWalkArray
+    // uses. Value-type-struct arrays (`Vector3[]`, custom user struct) fall
+    // through to the "unknown element width" branch and emit a raw hex blob
+    // of `elemSize` bytes per slot when the caller supplied a width hint;
+    // otherwise we default to 8 bytes per element (pointer-sized — matches
+    // reference-type arrays).
+    //
+    // Bundled Phase 27c live smoke: this is where the `T[]` element decode
+    // path gets exercised on real game targets. Any bug we find here also
+    // gets fixed in the parallel CmdWalkArray path so the array-element
+    // contract stays consistent across walkInstance / Snapshot / whatIsAt.
+    // ------------------------------------------------------------------------
+    auto walkArrayElementsInline = [formatHex, decodeField, bytesToHex](
+        std::uintptr_t arrayPtr, const std::string& elementTypeRaw, std::size_t cap) -> json {
+        if (arrayPtr == 0 || cap == 0) {
+            return json{{"length", 0}, {"count", 0}, {"elements", json::array()}};
+        }
+
+        auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
+            return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+        };
+
+        std::uintptr_t bounds = 0;
+        std::uintptr_t length = 0;
+        if (!rd(arrayPtr + ManagedLayout::kArrayBoundsOffset,    &bounds, sizeof(std::uintptr_t)) ||
+            !rd(arrayPtr + ManagedLayout::kArrayMaxLengthOffset, &length, sizeof(std::uintptr_t))) {
+            return json{{"error", "header_unreadable"}};
+        }
+        if (length > 16u * 1024u * 1024u) {
+            return json{{"error", "implausible_length"}, {"length", length}};
+        }
+
+        // Element type comes in as "System.Int32[]" / "MainGame.PLY_WORK[]"
+        // etc. — strip the trailing "[]" so the primitive table + decodeField
+        // see the bare element type. We tolerate `[][]` (jagged) by stripping
+        // one level only; the inner array reads as a pointer.
+        std::string elementType = elementTypeRaw;
+        if (elementType.size() >= 2 &&
+            elementType[elementType.size() - 1] == ']' &&
+            elementType[elementType.size() - 2] == '[') {
+            elementType.resize(elementType.size() - 2);
+        }
+
+        auto knownElemSize = [](const std::string& t) -> std::size_t {
+            if (t == "System.Boolean" || t == "System.Byte" || t == "System.SByte") return 1;
+            if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
+            if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
+            if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
+            if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+            return 0;
+        };
+
+        const std::size_t elemSize  = knownElemSize(elementType);
+        const bool        isPointer = (elemSize == 0);   // ref-type or struct → pointer-sized slot default
+        const std::size_t effectiveElemSize = isPointer ? sizeof(std::uintptr_t) : elemSize;
+
+        std::uintptr_t dataAddr = arrayPtr + ManagedLayout::kArrayDataOffset;
+        std::size_t    n = (length < cap) ? static_cast<std::size_t>(length) : cap;
+
+        json elements = json::array();
+        for (std::size_t i = 0; i < n; ++i) {
+            std::uintptr_t slotAddr = dataAddr + i * effectiveElemSize;
+            json e = { {"index", i} };
+            if (elementType == "System.String") {
+                // Decode via decodeField's String branch (follows the pointer
+                // and inlines UTF-8) so element rows carry actual text.
+                json d = decodeField(elementType, slotAddr);
+                for (auto kv = d.begin(); kv != d.end(); ++kv) e[kv.key()] = kv.value();
+            } else if (!isPointer) {
+                json d = decodeField(elementType, slotAddr);
+                for (auto kv = d.begin(); kv != d.end(); ++kv) e[kv.key()] = kv.value();
+            } else {
+                std::uintptr_t v = 0;
+                if (rd(slotAddr, &v, sizeof(std::uintptr_t))) e["ptr"] = formatHex(v);
+                else                                          e["error"] = "unreadable";
+            }
+            elements.push_back(std::move(e));
+        }
+
+        (void)bytesToHex;  // reserved for future raw-bytes inclusion of struct slots
+        return json{
+            {"length",       length},
+            {"count",        n},
+            {"element_type", elementType},
+            {"element_size", effectiveElemSize},
+            {"is_pointer",   isPointer},
+            {"elements",     std::move(elements)},
+        };
     };
 
     PipeServer::RegisterHandler(MagicStrings::CmdReadMemory,
@@ -1867,6 +2031,519 @@ void RegisterCoreHandlers() {
             response["missing_assemblies"] = std::move(missingAssemblies);
         }
         return response;
+    });
+
+    // ------------------------------------------------------------------------
+    // Phase 29a-v2 — snapshotBegin / snapshotChunk / snapshotEnd (Mono).
+    //
+    // Architecture lesson from build #597 live-smoke on 活俠傳 (Mono x86 /
+    // Unity 2020.3): the original design did per-class decode work inside
+    // the Chunk handler under a fresh ThreadAttachGuard per chunk. With
+    // 17K classes / 297K instances → 542 chunks → 542 attach/detach cycles
+    // → BDWGC finalizer queue accumulation → game-thread freeze partway
+    // through the snapshot AND a residual freeze after the snapshot ended.
+    // Same root cause as the 44s shutdown stall documented in
+    // lessons-learned.md "Reentrant ThreadAttachGuard".
+    //
+    // Fix: do ALL decode work in `snapshotBegin` under ONE outer attach
+    // guard. The decoded JSON for each class is pre-built and stored in
+    // the session. `snapshotChunk` then becomes pure slicing — zero Mono
+    // runtime calls per chunk, zero further attach cycles. Trade-off:
+    // Begin takes longer (everything happens up-front) instead of being
+    // amortised across chunks. Total time is unchanged; the user-visible
+    // game freeze risk goes from "definitely freezes mid-snapshot on
+    // legacy 32-bit Mono" to "doesn't freeze".
+    //
+    // End: drops the session. 5-min idle auto-expiry covers crashes.
+    // ------------------------------------------------------------------------
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
+        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        // Parse args ----------------------------------------------------------
+        std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
+        if (instanceCap == 0)    instanceCap = 100;
+        if (instanceCap > 1024)  instanceCap = 1024;
+
+        std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
+        if (arrayCap > 256)      arrayCap = 256;
+
+        bool includeSystemAsm = args.value("includeSystemAssemblies", false);
+        std::vector<std::string> requestedAssemblies;
+        bool explicitScope = false;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) requestedAssemblies.push_back(s);
+            }
+            explicitScope = !requestedAssemblies.empty();
+        }
+        // Default "全抓" mode: every assembly the runtime reports, EXCEPT
+        // well-known system / engine / large-support-library noise. The
+        // user-game assemblies (Assembly-CSharp / Mortal.Core / ...) get
+        // through; mscorlib / System.* / UnityEngine.* / Fungus get
+        // filtered. Caller can set includeSystemAssemblies=true to keep
+        // everything (matches the original Phase 29 plan §"全抓 default,
+        // opt-in narrow" semantics).
+        std::size_t excludedSystemCount = 0;
+        if (!explicitScope) {
+            for (const auto& a : Mono::EnumerateAssemblies()) {
+                if (!includeSystemAsm && IsSystemOrEngineAssembly(a.name)) {
+                    ++excludedSystemCount;
+                    continue;
+                }
+                requestedAssemblies.push_back(a.name);
+            }
+        }
+        if (requestedAssemblies.empty()) {
+            return json{{"error", "no assemblies visible (default exclude removed every assembly; try includeSystemAssemblies=true)"}};
+        }
+
+        // Wide heap walk ------------------------------------------------------
+        auto bulk = Mono::FindAllInstances(instanceCap);
+
+        // Build klass → (assembly, ns, name) index by enumerating each
+        // requested assembly's classes ONCE — much cheaper than per-instance
+        // resolver calls.
+        struct ClassDesc {
+            std::string  assembly;
+            std::string  ns;
+            std::string  name;
+            Mono::MonoClass* klass = nullptr;
+        };
+        std::vector<ClassDesc> descs;
+        std::unordered_map<Mono::MonoClass*, std::size_t> klassToDescIdx;
+        for (const auto& assemblyName : requestedAssemblies) {
+            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            if (img == nullptr) continue;
+            auto classes = Mono::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ClassDesc d;
+                d.assembly = assemblyName;
+                d.ns       = ce.ns;
+                d.name     = ce.name;
+                d.klass    = ce.klass;
+                klassToDescIdx[ce.klass] = descs.size();
+                descs.push_back(std::move(d));
+            }
+        }
+
+        // Build the plan: one row per class. Statics are always captured
+        // (cheap, even classes with no live instances may have interesting
+        // global values like `MAX_HP`). Instances are attached from the
+        // wide-scan result.
+        auto session = std::make_unique<Snapshot::Session>();
+        session->capturedAt    = Snapshot::CapturedAtUtcNow();
+        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
+        // Fallback to legacy mono.dll for Unity < 5.4 builds.
+        if (session->gameBuildId.empty()) {
+            session->gameBuildId = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
+        }
+        session->gameSessionId = Snapshot::SessionManager::GameSessionId();
+        session->instanceCap   = instanceCap;
+        session->arrayCap      = arrayCap;
+        session->plan.reserve(descs.size());
+
+        std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
+        for (const auto& asmName : requestedAssemblies) {
+            planByAsm[asmName].assembly = asmName;
+        }
+
+        for (const auto& d : descs) {
+            Snapshot::ClassPlanItem item;
+            item.assembly = d.assembly;
+            item.ns       = d.ns;
+            item.name     = d.name;
+            item.klass    = static_cast<void*>(d.klass);
+
+            auto it = bulk.byClass.find(d.klass);
+            if (it != bulk.byClass.end()) {
+                item.instances = std::move(it->second);
+            }
+            // Skip classes that have neither statics nor instances — pure
+            // type definitions we'd just emit empty for. Cheap heuristic:
+            // we don't know yet which classes have statics, so include
+            // every class for now (chunk emit decides whether to skip
+            // empty-output rows).
+            planByAsm[d.assembly].classCount++;
+            planByAsm[d.assembly].instanceCount += item.instances.size();
+            session->totalInstances += item.instances.size();
+            session->plan.push_back(std::move(item));
+        }
+
+        // ---- Decode ALL classes under ONE outer attach guard --------------
+        // Phase 29a-v2 fix: one outer ThreadAttachGuard for the whole
+        // decode loop (was per-chunk in v1, accumulated BDWGC finalizers).
+        // Phase 29a-v3 fix: GLOBAL ClassInfo cache across the entire
+        // decode loop. Without this, System.Object's class info was
+        // read 15,000+ times on 活俠傳 (every class's parent chain root)
+        // and ResolveStaticFieldAddress was calling mono_class_vtable
+        // per static field. Walk-log evidence: 23K `EnumerateAssemblies`
+        // / `vtable_get_static_field_data` log lines for one snapshot →
+        // game freeze. New shape: one ReadClassInfo per unique class
+        // (cache hit on shared ancestors), one ResolveStaticBaseAddress
+        // per class with statics, per-static-field becomes pure offset
+        // arithmetic on the cached base.
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        session->classes.reserve(session->plan.size());
+        std::size_t decodedClasses = 0;
+        std::size_t decodedInstances = 0;
+        std::size_t decodedArrays = 0;
+        std::size_t skippedOpenGenericArrays = 0;
+        std::size_t classInfoCacheHits = 0;
+        std::size_t classInfoCacheMisses = 0;
+        std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> globalClassInfo;
+
+        // Open-generic array detection: real array types are namespaced
+        // ("System.Int32[]") or nested with slash ("MainGame/Foo[]"). Open
+        // generic placeholders like "T[]" / "TKey[]" have neither separator
+        // and reading them as managed arrays leads to garbage at random
+        // pointer offsets (live-smoke build #597 reported length=1.9e12).
+        auto isCapturableArrayType = [](const std::string& tn) -> bool {
+            if (tn.size() < 4) return false;
+            if (tn[tn.size() - 1] != ']' || tn[tn.size() - 2] != '[') return false;
+            return tn.find('.') != std::string::npos ||
+                   tn.find('/') != std::string::npos;
+        };
+
+        if (domain != nullptr) {
+            // Phase 29a-v4 round 3 — one big attach (reverted from
+            // batch-attach). Build #631 batch-attach attempt regressed
+            // BongoCat (Mono x64) — game hangs after snapshot, but
+            // worked fine in earlier one-big-attach builds. v4 yields
+            // moved into the heap-walk path (where most game-thread
+            // bandwidth pressure actually originates) and the
+            // post-decode GC drain + Sleep(500) breathe.
+            auto getClassInfo = [&](Mono::MonoClass* c)
+                -> const Mono::ClassInfoResult& {
+                auto it = globalClassInfo.find(c);
+                if (it != globalClassInfo.end()) {
+                    ++classInfoCacheHits;
+                    return it->second;
+                }
+                ++classInfoCacheMisses;
+                auto inserted = globalClassInfo.emplace(c, Mono::ReadClassInfo(c));
+                return inserted.first->second;
+            };
+
+            auto decodeOneClass = [&](Snapshot::ClassPlanItem& item) {
+                // (entire per-class decode body — moved from the inline
+                // for-loop into a lambda so the outer batch loop can
+                // re-enter attach state between batches without
+                // duplicating code.)
+                Mono::MonoClass* k = static_cast<Mono::MonoClass*>(item.klass);
+                if (k == nullptr) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "klass null"},
+                    });
+                    return;
+                }
+
+                Snapshot::ClassPayload classEntry = {
+                    {"assembly",  item.assembly},
+                    {"namespace", item.ns},
+                    {"name",      item.name},
+                };
+
+                // Build parent chain + cache ClassInfo for every entry up
+                // front. chainInfo[0] is k itself, so the previously-
+                // duplicate outer ReadClassInfo(k) call is gone.
+                std::vector<Mono::MonoClass*> chain;
+                for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                    chain.push_back(cur);
+                    if (Mono::GetResolver().class_get_parent == nullptr) break;
+                    cur = Mono::GetResolver().class_get_parent(cur);
+                }
+                std::vector<const Mono::ClassInfoResult*> chainInfo;
+                chainInfo.reserve(chain.size());
+                for (auto* c : chain) chainInfo.push_back(&getClassInfo(c));
+
+                const auto& res = *chainInfo[0];
+                if (!res.ok) {
+                    classEntry["error"] = "ReadClassInfo failed";
+                    session->classes.push_back(std::move(classEntry));
+                    return;
+                }
+                ++decodedClasses;
+                if (!res.info.parent.name.empty()) {
+                    classEntry["parent"] = Snapshot::ClassPayload{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+
+                // Static field METADATA only (Mono). Live-smoke build
+                // #633 on BongoCat + 활俠傳: game freezes AFTER our RPC
+                // returns; BGM keeps playing (audio thread fine), only
+                // game main thread wedges. Pattern matches BDWGC
+                // catching up on `mono_class_vtable` allocations we
+                // triggered via ResolveStaticBaseAddress (one per
+                // class with statics, then VTable for the class gets
+                // created in managed heap). Game's main thread runs
+                // GC catch-up on next allocation → freeze.
+                //
+                // Trade-off: snapshot captures static field NAME / TYPE /
+                // OFFSET but not VALUE. Users who want static values
+                // can use the Browser tab's static-field path on demand
+                // (which goes through mono_class_vtable only for the
+                // specific class they're viewing — single call, no
+                // bulk GC pressure). Diff workflow loses static value
+                // tracking on Mono but instance fields still work.
+                Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
+                for (const auto& f : res.info.fields) {
+                    if ((f.flags & 0x10u) == 0u) continue;
+                    statics.push_back(Snapshot::ClassPayload{
+                        {"name",   f.name},
+                        {"type",   f.typeName},
+                        {"offset", f.offset},
+                        {"error",  "static_value_skipped_mono"},
+                    });
+                }
+                if (!statics.empty()) classEntry["statics"] = std::move(statics);
+
+                // Instance walk with array element capture — uses cached
+                // chainInfo, no Mono calls inside the loop.
+                Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
+                for (std::uintptr_t instAddr : item.instances) {
+                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
+                    Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
+                    // Walk base→derived so field offsets come out in memory
+                    // order (chainInfo is k→base; reverse-iterate).
+                    for (std::size_t ci = chain.size(); ci > 0; --ci) {
+                        const auto& pr = *chainInfo[ci - 1];
+                        if (!pr.ok) continue;
+                        for (const auto& f : pr.info.fields) {
+                            if (f.flags & 0x10u) continue;
+                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
+                            Snapshot::ClassPayload entry = {
+                                {"name",   f.name},
+                                {"type",   f.typeName},
+                                {"offset", f.offset},
+                                {"from",   pr.info.self.name},
+                            };
+                            if (f.isEnum)      entry["is_enum"]       = true;
+                            if (f.isValueType) entry["is_value_type"] = true;
+                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                                ? f.underlyingTypeName : f.typeName;
+                            json d = decodeField(decodeType, fieldAddr);
+                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                            const bool isArrayShape =
+                                f.typeName.size() >= 2 &&
+                                f.typeName[f.typeName.size() - 1] == ']' &&
+                                f.typeName[f.typeName.size() - 2] == '[';
+                            if (isArrayShape) {
+                                if (!isCapturableArrayType(f.typeName)) {
+                                    ++skippedOpenGenericArrays;
+                                } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                                    std::uintptr_t arrPtr = 0;
+                                    const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                    if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                        arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                    }
+                                    if (arrPtr != 0) {
+                                        json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                        // Only record successful captures
+                                        // as "arrayElements"; error-path
+                                        // responses (implausible_length /
+                                        // header_unreadable) get prefixed
+                                        // with arrayError so the UI can
+                                        // distinguish.
+                                        if (elems.contains("error")) {
+                                            entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                            if (elems.contains("length")) {
+                                                entry["arrayErrorLength"] = elems["length"];
+                                            }
+                                        } else {
+                                            entry["arrayElements"] = std::move(elems);
+                                            ++decodedArrays;
+                                        }
+                                    }
+                                }
+                            }
+                            fields.push_back(std::move(entry));
+                            if (fields.size() >= 4096) break;
+                        }
+                        if (fields.size() >= 4096) break;
+                    }
+                    std::sort(fields.begin(), fields.end(),
+                        [](const json& a, const json& b) {
+                            return a.value("offset", 0) < b.value("offset", 0);
+                        });
+                    instEntry["fields"] = std::move(fields);
+                    instArr.push_back(std::move(instEntry));
+                    ++decodedInstances;
+                }
+                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
+
+                session->classes.push_back(std::move(classEntry));
+            };  // end decodeOneClass lambda
+
+            // Phase 29a-v4 round 3 — REVERTED to one outer
+            // ThreadAttachGuard for the whole decode loop. Build #631
+            // live-smoke on BongoCat (Mono x64, 1,112 classes) hung
+            // the game after snapshot, but build #602 with the v2
+            // one-big-attach + memoised ClassInfo design ran cleanly.
+            // The batch attach + per-batch Sleep(0) yields added
+            // attach-cycle overhead that turned out worse than the
+            // benefit. Reverting; 활俠傳 (Mono x86) still has a
+            // separate freeze that v4's yields are addressing via the
+            // heap-walk yield path.
+            Mono::ThreadAttachGuard guard(domain);
+            if (guard.Attached()) {
+                for (auto& item : session->plan) {
+                    decodeOneClass(item);
+                }
+            } else {
+                for (auto& item : session->plan) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "mono_thread_attach failed"},
+                    });
+                }
+            }
+
+            // (Phase 29a-v4 round 4 — gc_collect drain + 500ms Sleep
+            // both REMOVED on Mono. The drain runs on our worker
+            // thread but doesn't actually drain the queue that affects
+            // the game's main thread; the 500ms sleep just delayed
+            // the inevitable wedge. Real fix landed above: skip
+            // ResolveStaticBaseAddress to avoid mono_class_vtable
+            // allocations entirely. If wedge persists, more drastic
+            // changes needed.)
+        }
+
+        // Preserve assembly order in the response.
+        for (const auto& asmName : requestedAssemblies) {
+            session->planByAssembly.push_back(planByAsm[asmName]);
+        }
+        const std::size_t totalClasses = session->plan.size();
+        const std::size_t totalInst    = session->totalInstances;
+        const std::string capturedAt   = session->capturedAt;
+        const std::string buildId      = session->gameBuildId;
+        const std::string sessionGuid  = session->gameSessionId;
+
+        json planArr = json::array();
+        for (const auto& pe : session->planByAssembly) {
+            planArr.push_back({
+                {"assembly",      pe.assembly},
+                {"classCount",    pe.classCount},
+                {"instanceCount", pe.instanceCount},
+            });
+        }
+
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+
+        json scanStats = {
+            {"regionsTotal",     bulk.regionsTotal},
+            {"regionsScanned",   bulk.regionsScanned},
+            {"regionsSkipImage", bulk.regionsSkipImage},
+            {"regionsSkipStack", bulk.regionsSkipStack},
+            {"bytesScanned",     bulk.bytesScanned},
+            {"vtablesResolved",  bulk.vtablesResolved},
+        };
+        json decodeStats = {
+            {"decodedClasses",           decodedClasses},
+            {"decodedInstances",         decodedInstances},
+            {"decodedArrays",            decodedArrays},
+            {"skippedOpenGenericArrays", skippedOpenGenericArrays},
+            {"classInfoCacheHits",       classInfoCacheHits},
+            {"classInfoCacheMisses",     classInfoCacheMisses},
+        };
+
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+            "snapshotBegin(Mono) id=" + std::to_string(sid) +
+            " classes=" + std::to_string(totalClasses) +
+            " instances=" + std::to_string(totalInst) +
+            " decoded=" + std::to_string(decodedClasses) +
+            " arrays=" + std::to_string(decodedArrays) +
+            " buildId=" + buildId);
+
+        return json{
+            {"ok",                      true},
+            {"snapshotId",              std::to_string(sid)},
+            {"capturedAt",              capturedAt},
+            {"gameBuildId",             buildId},
+            {"gameSessionId",           sessionGuid},
+            {"instanceCap",             instanceCap},
+            {"arrayCap",                arrayCap},
+            {"totalClasses",            totalClasses},
+            {"totalInstances",          totalInst},
+            {"excludedSystemAssemblies", excludedSystemCount},
+            {"includeSystemAssemblies",  includeSystemAsm},
+            {"plan",                    std::move(planArr)},
+            {"scanStats",               std::move(scanStats)},
+            {"decodeStats",             std::move(decodeStats)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotChunk,
+        [](const json& args) -> json {
+        // Phase 29a-v2: pure slicer. All decode work happened in Begin
+        // under one outer attach guard. Chunk just hands back the next
+        // window of pre-built class payloads. Zero Mono runtime calls
+        // here — that's the rule that keeps 活俠傳 from freezing.
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+
+        std::int64_t cursorIn = args.value("cursor", static_cast<std::int64_t>(-1));
+        std::size_t  limit    = static_cast<std::size_t>(args.value("limit", 32));
+        if (limit == 0)   limit = 32;
+        if (limit > 200)  limit = 200;
+
+        json classes = json::array();
+        std::size_t totalPlan   = 0;
+        std::size_t startCursor = 0;
+        bool found = Snapshot::SessionManager::Instance().View(sid,
+            [&](Snapshot::Session& s) {
+                totalPlan = s.classes.size();
+                startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
+                if (startCursor > totalPlan) startCursor = totalPlan;
+                std::size_t end = std::min(totalPlan, startCursor + limit);
+                for (std::size_t i = startCursor; i < end; ++i) {
+                    classes.push_back(s.classes[i]);   // json copy — small per entry
+                }
+            });
+        if (!found) {
+            return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
+        }
+        std::size_t nextCursor = startCursor + static_cast<std::size_t>(classes.size());
+        bool done = (nextCursor >= totalPlan);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"cursor",     startCursor},
+            {"nextCursor", nextCursor},
+            {"done",       done},
+            {"classes",    std::move(classes)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotEnd,
+        [](const json& args) -> json {
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"dropped",    dropped},
+        };
     });
 
     // Phase 25 — cross-class symbol finder (Mono). Walks every class in the
@@ -4351,6 +5028,447 @@ void RegisterCoreHandlers() {
             response["missing_assemblies"] = std::move(missingAssemblies);
         }
         return response;
+    });
+
+    // ------------------------------------------------------------------------
+    // Phase 29a-v2 — snapshotBegin / snapshotChunk / snapshotEnd (IL2CPP).
+    // Mirror of the Mono handlers above — see that block for the decode-
+    // in-Begin design rationale (lesson from build #597 live-smoke on
+    // 活俠傳). IL2CPP differences: wide heap walk uses direct class-ptr
+    // membership (no vtable indirection); build-id source module is
+    // GameAssembly.dll; no BDWGC finalizer accumulation but uniform
+    // architecture keeps the codebase symmetric.
+    // ------------------------------------------------------------------------
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
+        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
+        if (instanceCap == 0)    instanceCap = 100;
+        if (instanceCap > 1024)  instanceCap = 1024;
+        std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
+        if (arrayCap > 256)      arrayCap = 256;
+
+        bool includeSystemAsm = args.value("includeSystemAssemblies", false);
+        std::vector<std::string> requestedAssemblies;
+        bool explicitScope = false;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) requestedAssemblies.push_back(s);
+            }
+            explicitScope = !requestedAssemblies.empty();
+        }
+        std::size_t excludedSystemCount = 0;
+        if (!explicitScope) {
+            for (const auto& a : IL2CPP::EnumerateAssemblies()) {
+                if (!includeSystemAsm && IsSystemOrEngineAssembly(a.name)) {
+                    ++excludedSystemCount;
+                    continue;
+                }
+                requestedAssemblies.push_back(a.name);
+            }
+        }
+        if (requestedAssemblies.empty()) {
+            return json{{"error", "no assemblies visible (default exclude removed every assembly; try includeSystemAssemblies=true)"}};
+        }
+
+        // Wide heap walk first — groups instances by Il2CppClass*.
+        auto bulk = IL2CPP::FindAllInstances(instanceCap);
+
+        struct ClassDesc {
+            std::string         assembly;
+            std::string         ns;
+            std::string         name;
+            IL2CPP::Il2CppClass* klass = nullptr;
+        };
+        std::vector<ClassDesc> descs;
+        for (const auto& assemblyName : requestedAssemblies) {
+            const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
+            if (img == nullptr) continue;
+            auto classes = IL2CPP::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ClassDesc d;
+                d.assembly = assemblyName;
+                d.ns       = ce.ns;
+                d.name     = ce.name;
+                d.klass    = ce.klass;
+                descs.push_back(std::move(d));
+            }
+        }
+
+        auto session = std::make_unique<Snapshot::Session>();
+        session->capturedAt    = Snapshot::CapturedAtUtcNow();
+        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
+        session->gameSessionId = Snapshot::SessionManager::GameSessionId();
+        session->instanceCap   = instanceCap;
+        session->arrayCap      = arrayCap;
+        session->plan.reserve(descs.size());
+
+        std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
+        for (const auto& asmName : requestedAssemblies) {
+            planByAsm[asmName].assembly = asmName;
+        }
+
+        for (const auto& d : descs) {
+            Snapshot::ClassPlanItem item;
+            item.assembly = d.assembly;
+            item.ns       = d.ns;
+            item.name     = d.name;
+            item.klass    = static_cast<void*>(d.klass);
+
+            auto it = bulk.byClass.find(d.klass);
+            if (it != bulk.byClass.end()) {
+                item.instances = std::move(it->second);
+            }
+            planByAsm[d.assembly].classCount++;
+            planByAsm[d.assembly].instanceCount += item.instances.size();
+            session->totalInstances += item.instances.size();
+            session->plan.push_back(std::move(item));
+        }
+
+        // ---- Decode ALL classes under ONE outer attach guard --------------
+        IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
+        session->classes.reserve(session->plan.size());
+        std::size_t decodedClasses = 0;
+        std::size_t decodedInstances = 0;
+        std::size_t decodedArrays = 0;
+        std::size_t skippedOpenGenericArrays = 0;
+        std::size_t classInfoCacheHits = 0;
+        std::size_t classInfoCacheMisses = 0;
+
+        auto isCapturableArrayType = [](const std::string& tn) -> bool {
+            if (tn.size() < 4) return false;
+            if (tn[tn.size() - 1] != ']' || tn[tn.size() - 2] != '[') return false;
+            return tn.find('.') != std::string::npos ||
+                   tn.find('/') != std::string::npos;
+        };
+
+        if (domain != nullptr) {
+            // Phase 29a-v4 round 3 — one big attach (mirror of Mono).
+            // Global ClassInfo cache across the whole decode loop —
+            // mirror of the Mono path. System.Object shows up as the
+            // ancestor of every class; without this it would be re-read
+            // N-classes times.
+            std::unordered_map<IL2CPP::Il2CppClass*, IL2CPP::ClassInfoResult> globalClassInfoIl;
+            auto getClassInfoIl = [&](IL2CPP::Il2CppClass* c)
+                -> const IL2CPP::ClassInfoResult& {
+                auto it = globalClassInfoIl.find(c);
+                if (it != globalClassInfoIl.end()) {
+                    ++classInfoCacheHits;
+                    return it->second;
+                }
+                ++classInfoCacheMisses;
+                auto inserted = globalClassInfoIl.emplace(c, IL2CPP::ReadClassInfo(c));
+                return inserted.first->second;
+            };
+
+            const auto& rIl = IL2CPP::GetResolver();
+
+            auto decodeOneClassIl = [&](Snapshot::ClassPlanItem& item) {
+                IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(item.klass);
+                if (k == nullptr) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "klass null"},
+                    });
+                    return;
+                }
+
+                Snapshot::ClassPayload classEntry = {
+                    {"assembly",  item.assembly},
+                    {"namespace", item.ns},
+                    {"name",      item.name},
+                };
+
+                // Build chain + cached ChainInfo first — chainInfo[0]
+                // doubles as k's own info (replaces the duplicate
+                // ReadClassInfo(k) outer call).
+                std::vector<IL2CPP::Il2CppClass*> chain;
+                for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                    chain.push_back(cur);
+                    if (rIl.class_get_parent == nullptr) break;
+                    cur = rIl.class_get_parent(cur);
+                }
+                std::vector<const IL2CPP::ClassInfoResult*> chainInfo;
+                chainInfo.reserve(chain.size());
+                for (auto* c : chain) chainInfo.push_back(&getClassInfoIl(c));
+
+                const auto& res = *chainInfo[0];
+                if (!res.ok) {
+                    classEntry["error"] = "ReadClassInfo failed";
+                    session->classes.push_back(std::move(classEntry));
+                    return;
+                }
+                ++decodedClasses;
+                if (!res.info.parent.name.empty()) {
+                    classEntry["parent"] = Snapshot::ClassPayload{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+
+                // Static fields — ONE ResolveStaticBaseAddress call per
+                // class, then per-field is offset arithmetic.
+                Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
+                void* staticBase = nullptr;
+                bool staticBaseResolved = false;
+                for (const auto& f : res.info.fields) {
+                    if ((f.flags & 0x10u) == 0u) continue;
+                    if (!staticBaseResolved) {
+                        staticBase = IL2CPP::ResolveStaticBaseAddress(k);
+                        staticBaseResolved = true;
+                    }
+                    Snapshot::ClassPayload srow = {
+                        {"name",   f.name},
+                        {"type",   f.typeName},
+                        {"offset", f.offset},
+                    };
+                    if (staticBase == nullptr) {
+                        srow["error"] = "static_unresolved";
+                    } else {
+                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
+                                            + static_cast<std::uintptr_t>(f.offset);
+                        srow["address"] = formatHex(fa);
+                        json d = decodeField(f.typeName, fa);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
+                            srow[kv.key()] = kv.value();
+                        }
+                    }
+                    statics.push_back(std::move(srow));
+                }
+                if (!statics.empty()) classEntry["statics"] = std::move(statics);
+
+                Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
+                for (std::uintptr_t instAddr : item.instances) {
+                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
+                    Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
+                    for (std::size_t ci = chain.size(); ci > 0; --ci) {
+                        const auto& pr = *chainInfo[ci - 1];
+                        if (!pr.ok) continue;
+                        for (const auto& f : pr.info.fields) {
+                            if (f.flags & 0x10u) continue;
+                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
+                            Snapshot::ClassPayload entry = {
+                                {"name",   f.name},
+                                {"type",   f.typeName},
+                                {"offset", f.offset},
+                                {"from",   pr.info.self.name},
+                            };
+                            if (f.isEnum)      entry["is_enum"]       = true;
+                            if (f.isValueType) entry["is_value_type"] = true;
+                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                                ? f.underlyingTypeName : f.typeName;
+                            json d = decodeField(decodeType, fieldAddr);
+                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                            const bool isArrayShape =
+                                f.typeName.size() >= 2 &&
+                                f.typeName[f.typeName.size() - 1] == ']' &&
+                                f.typeName[f.typeName.size() - 2] == '[';
+                            if (isArrayShape) {
+                                if (!isCapturableArrayType(f.typeName)) {
+                                    ++skippedOpenGenericArrays;
+                                } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                                    std::uintptr_t arrPtr = 0;
+                                    const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                    if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                        arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                    }
+                                    if (arrPtr != 0) {
+                                        json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                        if (elems.contains("error")) {
+                                            entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                            if (elems.contains("length")) {
+                                                entry["arrayErrorLength"] = elems["length"];
+                                            }
+                                        } else {
+                                            entry["arrayElements"] = std::move(elems);
+                                            ++decodedArrays;
+                                        }
+                                    }
+                                }
+                            }
+                            fields.push_back(std::move(entry));
+                            if (fields.size() >= 4096) break;
+                        }
+                        if (fields.size() >= 4096) break;
+                    }
+                    std::sort(fields.begin(), fields.end(),
+                        [](const json& a, const json& b) {
+                            return a.value("offset", 0) < b.value("offset", 0);
+                        });
+                    instEntry["fields"] = std::move(fields);
+                    instArr.push_back(std::move(instEntry));
+                    ++decodedInstances;
+                }
+                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
+
+                session->classes.push_back(std::move(classEntry));
+            };  // end decodeOneClassIl lambda
+
+            // Phase 29a-v4 round 3 — REVERTED to one outer attach
+            // (see Mono mirror above). IL2CPP doesn't have the same
+            // sensitivity, but uniform architecture across backends.
+            IL2CPP::ThreadAttachGuard guard(domain);
+            if (guard.Attached()) {
+                for (auto& item : session->plan) {
+                    decodeOneClassIl(item);
+                }
+            } else {
+                for (auto& item : session->plan) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "il2cpp_thread_attach failed"},
+                    });
+                }
+            }
+
+            // Mirror of the Mono path's post-decode drain. IL2CPP GC
+            // doesn't have the same catch-up behaviour as Mono BDWGC,
+            // but keep the architecture symmetric.
+            {
+                const auto& rDrainIl = IL2CPP::GetResolver();
+                if (rDrainIl.gc_collect != nullptr) {
+                    IL2CPP::ThreadAttachGuard drainGuard(domain);
+                    if (drainGuard.Attached()) {
+                        auto drainStart = std::chrono::steady_clock::now();
+                        rDrainIl.gc_collect(0);
+                        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - drainStart).count();
+                        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+                            "snapshotBegin(IL2CPP) post-decode drain " + std::to_string(drainMs) + " ms");
+                    }
+                }
+            }
+            ::Sleep(500);
+        }
+
+        for (const auto& asmName : requestedAssemblies) {
+            session->planByAssembly.push_back(planByAsm[asmName]);
+        }
+        const std::size_t totalClasses = session->plan.size();
+        const std::size_t totalInst    = session->totalInstances;
+        const std::string capturedAt   = session->capturedAt;
+        const std::string buildId      = session->gameBuildId;
+        const std::string sessionGuid  = session->gameSessionId;
+
+        json planArr = json::array();
+        for (const auto& pe : session->planByAssembly) {
+            planArr.push_back({
+                {"assembly",      pe.assembly},
+                {"classCount",    pe.classCount},
+                {"instanceCount", pe.instanceCount},
+            });
+        }
+
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+
+        json scanStats = {
+            {"regionsTotal",     bulk.regionsTotal},
+            {"regionsScanned",   bulk.regionsScanned},
+            {"regionsSkipImage", bulk.regionsSkipImage},
+            {"regionsSkipStack", bulk.regionsSkipStack},
+            {"bytesScanned",     bulk.bytesScanned},
+        };
+        json decodeStats = {
+            {"decodedClasses",           decodedClasses},
+            {"decodedInstances",         decodedInstances},
+            {"decodedArrays",            decodedArrays},
+            {"skippedOpenGenericArrays", skippedOpenGenericArrays},
+            {"classInfoCacheHits",       classInfoCacheHits},
+            {"classInfoCacheMisses",     classInfoCacheMisses},
+        };
+
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+            "snapshotBegin(IL2CPP) id=" + std::to_string(sid) +
+            " classes=" + std::to_string(totalClasses) +
+            " instances=" + std::to_string(totalInst) +
+            " decoded=" + std::to_string(decodedClasses) +
+            " arrays=" + std::to_string(decodedArrays) +
+            " buildId=" + buildId);
+
+        return json{
+            {"ok",                      true},
+            {"snapshotId",              std::to_string(sid)},
+            {"capturedAt",              capturedAt},
+            {"gameBuildId",             buildId},
+            {"gameSessionId",           sessionGuid},
+            {"instanceCap",             instanceCap},
+            {"arrayCap",                arrayCap},
+            {"totalClasses",            totalClasses},
+            {"totalInstances",          totalInst},
+            {"excludedSystemAssemblies", excludedSystemCount},
+            {"includeSystemAssemblies",  includeSystemAsm},
+            {"plan",                    std::move(planArr)},
+            {"scanStats",               std::move(scanStats)},
+            {"decodeStats",             std::move(decodeStats)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotChunk,
+        [](const json& args) -> json {
+        // Phase 29a-v2: pure slicer (same as Mono mirror above).
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+
+        std::int64_t cursorIn = args.value("cursor", static_cast<std::int64_t>(-1));
+        std::size_t  limit    = static_cast<std::size_t>(args.value("limit", 32));
+        if (limit == 0)   limit = 32;
+        if (limit > 200)  limit = 200;
+
+        json classes = json::array();
+        std::size_t totalPlan   = 0;
+        std::size_t startCursor = 0;
+        bool found = Snapshot::SessionManager::Instance().View(sid,
+            [&](Snapshot::Session& s) {
+                totalPlan = s.classes.size();
+                startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
+                if (startCursor > totalPlan) startCursor = totalPlan;
+                std::size_t end = std::min(totalPlan, startCursor + limit);
+                for (std::size_t i = startCursor; i < end; ++i) {
+                    classes.push_back(s.classes[i]);
+                }
+            });
+        if (!found) {
+            return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
+        }
+        std::size_t nextCursor = startCursor + static_cast<std::size_t>(classes.size());
+        bool done = (nextCursor >= totalPlan);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"cursor",     startCursor},
+            {"nextCursor", nextCursor},
+            {"done",       done},
+            {"classes",    std::move(classes)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotEnd,
+        [](const json& args) -> json {
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"dropped",    dropped},
+        };
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,

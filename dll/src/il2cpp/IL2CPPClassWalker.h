@@ -71,6 +71,13 @@ struct StaticFieldAddress {
 };
 StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::string& fieldName);
 
+/// Phase 29a-v3 — batch static-base resolver. Mirror of
+/// `Mono::ResolveStaticBaseAddress`. Returns nullptr when the class has
+/// no static storage or the resolver isn't bound. Caller computes
+/// per-field addresses as `base + f.offset` using offsets already in
+/// hand from <see cref="ReadClassInfo"/>.
+void* ResolveStaticBaseAddress(Il2CppClass* klass);
+
 struct MethodPointer {
     bool          ok      = false;
     void*         address = nullptr;

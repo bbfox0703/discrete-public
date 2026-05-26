@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace UnityCEDumper::Mono {
 
@@ -72,5 +74,25 @@ void InvalidateClassRangeCache();
 ClassRangeStats GetClassRangeStats();
 
 AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan);
+
+// Phase 29 — wide-heap "all instances of all known classes" scan. Mirror
+// of the IL2CPP function but with Mono's vtable indirection: the qword
+// at instance+0 is a MonoVTable*, not a MonoClass*, so per-qword we
+// SEH-deref vtable→klass and binary-search the resulting klass against
+// `classSet`. The vtable→klass mapping is memoised across the scan
+// (and persists into the address-finder cache for follow-up WhatIsAt
+// calls) so repeat vtables are O(1) instead of O(log N + deref).
+struct BulkInstancesResult {
+    std::unordered_map<MonoClass*, std::vector<std::uintptr_t>> byClass;
+    std::size_t                          totalQwordsScanned = 0;
+    std::size_t                          totalInstances     = 0;
+    std::size_t                          regionsTotal       = 0;
+    std::size_t                          regionsScanned     = 0;
+    std::size_t                          regionsSkipImage   = 0;
+    std::size_t                          regionsSkipStack   = 0;
+    std::size_t                          bytesScanned       = 0;
+    std::size_t                          vtablesResolved    = 0;
+};
+BulkInstancesResult FindAllInstances(std::size_t perClassCap);
 
 }  // namespace UnityCEDumper::Mono

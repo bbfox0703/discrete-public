@@ -411,6 +411,19 @@ StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::stri
     return out;
 }
 
+// Phase 29a-v3 — batch static-base resolver (mirror of Mono's). For
+// IL2CPP this is just one il2cpp_class_get_static_data call per class
+// — no vtable indirection. Returns nullptr when the export isn't
+// bound or the runtime returns null (some classes legitimately have
+// no static storage). Caller computes per-static-field addresses as
+// base + f.offset.
+void* ResolveStaticBaseAddress(Il2CppClass* klass) {
+    if (klass == nullptr) return nullptr;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_static_data == nullptr) return nullptr;
+    return SehStaticData(r.class_get_static_data, klass);
+}
+
 MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& methodName) {
     MethodPointer out;
     if (klass == nullptr || methodName.empty()) return out;

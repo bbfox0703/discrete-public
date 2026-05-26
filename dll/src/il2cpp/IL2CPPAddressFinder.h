@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace UnityCEDumper::IL2CPP {
 
@@ -93,5 +95,30 @@ ClassRangeStats GetClassRangeStats();
 // cache + SEH-protected name probe, returns the first hit. Builds the cache
 // implicitly on first use.
 AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan);
+
+// Phase 29 — wide-heap "all instances of all known classes" scan in one
+// pass. Walks committed RW non-image non-stack regions once; for every
+// 8-aligned qword, checks the existing class range cache (binary search
+// against the same sorted vector WhatIsAt uses), and groups instance
+// addresses by their class pointer.
+//
+// Returns at most `perClassCap` instance addresses per class — early-out
+// happens at push time, so a class with 100K instances doesn't blow the
+// session's memory budget. Total heap walk cost on SaGa F2R-scale: 5-15s
+// for ~4-8 GB of RW heap, vs. N × ScanForPointer which would be hours.
+//
+// The map's keys are raw Il2CppClass* — caller resolves them to names
+// outside this function (where ThreadAttachGuard is already held).
+struct BulkInstancesResult {
+    std::unordered_map<Il2CppClass*, std::vector<std::uintptr_t>> byClass;
+    std::size_t                          totalQwordsScanned = 0;
+    std::size_t                          totalInstances     = 0;
+    std::size_t                          regionsTotal       = 0;
+    std::size_t                          regionsScanned     = 0;
+    std::size_t                          regionsSkipImage   = 0;
+    std::size_t                          regionsSkipStack   = 0;
+    std::size_t                          bytesScanned       = 0;
+};
+BulkInstancesResult FindAllInstances(std::size_t perClassCap);
 
 }  // namespace UnityCEDumper::IL2CPP

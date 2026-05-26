@@ -1551,6 +1551,177 @@
               </DataGrid>
             </DockPanel>
           </TabItem>
+
+          <!-- Phase 29b — Snapshot &amp; Diff tab. Default "全抓" capture
+               scope (every assembly the runtime reports) + diff between
+               any two snapshots in memory. UI strategy C: synthetic-type
+               filtering is local (checkbox), not DLL-side. -->
+          <TabItem Header="Snapshot">
+            <DockPanel Margin="6">
+
+              <!-- Top: capture controls -->
+              <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
+                      Background="#1F808080" CornerRadius="3">
+                <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                      RowDefinitions="Auto,Auto">
+
+                  <!-- Row 0 — label + scope + caps + Take button -->
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Label:"
+                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                  <TextBox Grid.Row="0" Grid.Column="1"
+                           Text="{Binding Snapshot.PendingLabel, Mode=TwoWay}"
+                           PlaceholderText="(optional — e.g. &quot;before boss&quot;)"
+                           Margin="0,0,12,0"/>
+
+                  <TextBlock Grid.Row="0" Grid.Column="2" Text="Instance cap:"
+                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                  <NumericUpDown Grid.Row="0" Grid.Column="3"
+                                 Value="{Binding Snapshot.InstanceCap, Mode=TwoWay}"
+                                 Minimum="1" Maximum="1024" Increment="50"
+                                 MinWidth="150" Margin="0,0,12,0"/>
+
+                  <TextBlock Grid.Row="0" Grid.Column="4" Text="Array cap:"
+                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                  <NumericUpDown Grid.Row="0" Grid.Column="5"
+                                 Value="{Binding Snapshot.ArrayCap, Mode=TwoWay}"
+                                 Minimum="0" Maximum="256" Increment="10"
+                                 MinWidth="150" Margin="0,0,12,0"/>
+
+                  <Button Grid.Row="0" Grid.Column="6"
+                          Content="Take Snapshot"
+                          Command="{Binding Snapshot.TakeSnapshotCommand}"
+                          MinWidth="120" Margin="0,0,6,0"/>
+                  <Button Grid.Row="0" Grid.Column="7"
+                          Content="Drop Selected"
+                          Command="{Binding Snapshot.DropSnapshotCommand}"
+                          MinWidth="100" Margin="0,0,6,0"/>
+                  <Button Grid.Row="0" Grid.Column="8"
+                          Content="Clear All"
+                          Command="{Binding Snapshot.ClearAllCommand}"
+                          MinWidth="80"/>
+
+                  <!-- Row 1 — scope assemblies + include-system toggle -->
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="Scope:"
+                             VerticalAlignment="Center" Margin="0,6,6,0"/>
+                  <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="6"
+                           Text="{Binding Snapshot.ScopeAssembliesText, Mode=TwoWay}"
+                           PlaceholderText="(empty = 全抓 user assemblies. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"
+                           Margin="0,6,12,0"/>
+                  <CheckBox Grid.Row="1" Grid.Column="7" Grid.ColumnSpan="2"
+                            Content="Include system assemblies"
+                            IsChecked="{Binding Snapshot.IncludeSystemAssemblies, Mode=TwoWay}"
+                            Margin="0,6,0,0"
+                            ToolTip.Tip="When unchecked (default), 全抓 mode skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus — common Unity engine + .NET system + popular-support assemblies that flood the snapshot with non-gameplay state. Check to keep everything."/>
+                </Grid>
+              </Border>
+
+              <!-- Status + error -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F808080" CornerRadius="3">
+                <TextBlock Text="{Binding Snapshot.StatusMessage}"
+                           TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1FFF6060" CornerRadius="3"
+                      IsVisible="{Binding Snapshot.ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding Snapshot.ErrorMessage}"
+                           Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+
+              <!-- Mid: A/B selection + Diff button -->
+              <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
+                      Background="#1F808080" CornerRadius="3">
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto"
+                      RowDefinitions="Auto">
+                  <TextBlock Grid.Column="0" Text="A:"
+                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                  <ComboBox Grid.Column="1"
+                            ItemsSource="{Binding Snapshot.Snapshots}"
+                            SelectedItem="{Binding Snapshot.SelectedSnapshotA, Mode=TwoWay}"
+                            DisplayMemberBinding="{Binding DisplayName}"
+                            HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+
+                  <TextBlock Grid.Column="2" Text="B:"
+                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                  <ComboBox Grid.Column="3"
+                            ItemsSource="{Binding Snapshot.Snapshots}"
+                            SelectedItem="{Binding Snapshot.SelectedSnapshotB, Mode=TwoWay}"
+                            DisplayMemberBinding="{Binding DisplayName}"
+                            HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+
+                  <Button Grid.Column="4" Content="Diff A → B"
+                          Command="{Binding Snapshot.DiffCommand}"
+                          MinWidth="120"/>
+                </Grid>
+              </Border>
+
+              <!-- Filter bar -->
+              <Border DockPanel.Dock="Top" Padding="6,3" Margin="0,0,0,6"
+                      Background="#1F808080" CornerRadius="3">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                  <CheckBox Content="Hide synthetic types"
+                            IsChecked="{Binding Snapshot.HideSyntheticTypes, Mode=TwoWay}"
+                            ToolTip.Tip="Hide rows whose class name starts with '&lt;' (compiler-generated: &lt;Module&gt;, &lt;&gt;f__AnonymousType*, &lt;&gt;c, &lt;Start&gt;d__N, async-state-machines). These are usually false-positive 'instances' from wide-scan picking up metadata references — not real game objects."/>
+                  <CheckBox Content="Changed only"
+                            IsChecked="{Binding Snapshot.ChangedOnly, Mode=TwoWay}"/>
+                  <CheckBox Content="Show added"
+                            IsChecked="{Binding Snapshot.ShowAdded, Mode=TwoWay}"/>
+                  <CheckBox Content="Show removed"
+                            IsChecked="{Binding Snapshot.ShowRemoved, Mode=TwoWay}"/>
+                  <TextBlock Text="Class filter:" VerticalAlignment="Center"/>
+                  <TextBox Text="{Binding Snapshot.ClassFilterText, Mode=TwoWay}"
+                           PlaceholderText="substring (case-insensitive)"
+                           Width="220"/>
+                </StackPanel>
+              </Border>
+
+              <!-- Diff grid -->
+              <DataGrid ItemsSource="{Binding Snapshot.FilteredDiffRows}"
+                        AutoGenerateColumns="False" CanUserReorderColumns="True"
+                        CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
+                        IsReadOnly="True"
+                        CanUserSortColumns="True"
+                        DoubleTapped="OnSnapshotRowActivated"
+                        Name="SnapshotDiffGrid">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Class" Binding="{Binding ClassDisplay}"
+                                       Width="240" SortMemberPath="ClassDisplay" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Field" Binding="{Binding Field}"
+                                       Width="180" SortMemberPath="Field" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Offset" Binding="{Binding OffsetLabel}"
+                                       Width="80" SortMemberPath="FieldOffset" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Instance" Binding="{Binding InstanceLabel}"
+                                       Width="180" FontFamily="Consolas,Menlo,monospace"
+                                       SortMemberPath="InstanceLabel" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Old" Binding="{Binding OldValue}"
+                                       Width="160" SortMemberPath="OldValue" CanUserSort="True"/>
+                  <DataGridTextColumn Header="New" Binding="{Binding NewValue}"
+                                       Width="160" SortMemberPath="NewValue" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Δ" Binding="{Binding Delta}"
+                                       Width="90" SortMemberPath="Delta" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Kind" Binding="{Binding ChangeKind}"
+                                       Width="80" SortMemberPath="ChangeKind" CanUserSort="True"/>
+                  <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
+                                       Width="160" SortMemberPath="FieldType" CanUserSort="True"/>
+                </DataGrid.Columns>
+                <DataGrid.ContextMenu>
+                  <ContextMenu>
+                    <MenuItem Header="Inspect this instance"
+                              Click="OnSnapshotInspectInstance"/>
+                    <MenuItem Header="Find what's at this address (Address Lookup)"
+                              Click="OnSnapshotAddressLookup"/>
+                    <Separator/>
+                    <MenuItem Header="Copy instance address"
+                              Click="OnSnapshotCopyInstanceAddr"/>
+                    <MenuItem Header="Copy class name"
+                              Click="OnSnapshotCopyClass"/>
+                    <MenuItem Header="Copy field name"
+                              Click="OnSnapshotCopyField"/>
+                  </ContextMenu>
+                </DataGrid.ContextMenu>
+              </DataGrid>
+            </DockPanel>
+          </TabItem>
         </TabControl>
         </Grid>
       </DockPanel>

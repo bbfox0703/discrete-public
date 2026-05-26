@@ -3,7 +3,7 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-26 (session close — build #593)
+**Last updated**: 2026-05-26 night — **Phase 29b (Snapshot UI + Diff) SHIPPED + LIVE-VERIFIED across all three Mono / IL2CPP targets, build #637**. Phase 29a + 27c also closed. Five iterations of Mono-freeze debugging — the root cause turned out to be `mono_class_vtable` called from our worker thread leaving BDWGC tracking entries that the game's main thread had to GC catch-up on. Fix: skip static field VALUE capture on Mono (metadata only). See lessons-learned.md §"Phase 29a-v4 — mono_class_vtable from worker thread wedges game main thread post-RPC".
 **Current phase**: **✅ Phase 28b-v3.0 shipped + LIVE-VERIFIED, ⚠ v3.1 attempted but hit v29 layout dead-end** (build #593). v3.0 lazy-init slot scanner works for slots that have been populated by ANY init mechanism — `SteamManager.s_instance` returns 11 chain-exact matches with no regression. v3.1 attempted to map never-populated slots to classes statically via token decode but discovered three layout hypotheses all fail on v29: (1) `types[]` index → out of range (29456 < 50999); (2) typeDefIndex via per-image typeStart + il2cpp_image_get_class → out of range (10001 < 50999); (3) `Il2CppMetadataRegistration.metadataUsages[]` is **NULL** in v29 (entire indirection system removed). v29's per-method init protocol uses a different lookup mechanism (likely `Il2CppMetadataUsageList` in global-metadata.dat) whose decode needs proper reverse-engineering — deferred to v3.2 (2-4 days). v3.0 + diagnostic infra (`diagnoseClassReferences`, `dumpLazyInitSlots`, `IL2CPPLazyInitSlotScanner`, `MetadataUsagesArray()`, `Test-LazyInitSlots.ps1`) all in place. Banner advisory + lessons-learned.md document the dead-end + v3.2 cookbook for next attempt.
 
 **Previous current-phase**: **✅ Phase 28b IL2CPP root-cause CONFIRMED + v1 advisory shipped** (build #555-#557). Build #546's diagnostic logging paid off: live re-run on SaGa F2R proved `il2cpp_class_get_static_data` returns a runtime-heap-allocated pointer outside GameAssembly.dll. **v1 fix C** ships a yellow advisory banner explaining the limitation; **Phase 28b-v2** designed + shipped same session (build #565). Also: Symbol Finder "Static only" toggle + per-asm limit in multi-asm scans, PipeServer disconnect-time GC drain.
@@ -144,6 +144,7 @@
 | 25 | Cross-class Symbol Finder | New `searchSymbols` pipe RPC + Symbol Finder Tab in MainWindow. Walks every class in a named assembly for fields + methods whose name contains an ASCII case-insensitive substring. Row double-click navigates back to Browser Fields/Methods tab with the class + member filter pre-selected. Replaces the historical "click each class in turn" loop the user reported when hunting properties like `MaxHP` across a few-hundred-class assembly. | ✅ **Shipped + live-smoked 2026-05-19** (build #363) on BongoCat Mono — pattern `MaxHP` → `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) in < 1s. 3 new fake-pipe `SearchSymbolsTests`. Properties surfaced via `get_*`/`set_*` methods (Mono/IL2CPP runtime convention; no separate property row kind). 25b (Interesting preset — curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties) deferred until basic finder shakes out — needs a Unity-tuned keyword list distinct from UE5CEDumper's FProperty-flavored one. |
 | 27 | Unity-aware Value Search | CE-style First Scan / Next Scan but filtered to Unity managed instances only. New `scanFieldValue` + `refineValueScan` pipe RPCs; reuses `Memory::EnumerateCommittedRegions` + `whatIsAt` (Phase 17) to drop non-managed candidates. Two scan modes: **global** (CE flow — type + value → walks all committed RW pages, filters via `whatIsAt`) + **class-scoped** (Discrete flow — pick class first, equivalent to `listFieldValuesAcrossInstances` plus value filter; orders-of-magnitude faster). Supports int8-64 / uint8-64 / float / double / string (managed UTF-16). Full CE filter set: exact / range / changed / unchanged / increased / decreased / newValue. New Value Search tab (MainWindow position 6). Includes **Phase 17b carry-forward** — Array / List<T> element resolution in `whatIsAt`. | ✅ **All shipped sub-phases live-verified 2026-05-20** (builds #410→#452). 27a (global + class-scoped + whatIsAt filter) live-smoked on SaGa F2R + 活俠傳; 27b (Begin/Refine/End session + 7 CE filter modes) live-smoked on SaGa F2R (purse=100000 → spent 1 coin → newValue=99999 narrowed to PLY_WORK.purse, dropped SAVEDATA.purse correctly); 27a-bugfix (lazy vtable resolution) closed the 32-bit Mono hang; 27c (Array / List<T> element resolution); 27b-4 (UTF-16 / UTF-8 / ASCII string scan via Memory::ScanForString); 27d (UI Value Search tab — VM + DataGrid + cross-tab handoff to Inspector). 27e (CE Lua bridge `unity_valuescan.lua`) **dropped** 2026-05-20 — CE already has its own native value scan; nobody needs to call our scan from CE Lua, so the bridge has no realistic use case. 283/283 xUnit pass. |
 | 28 | Field → Methods cross-reference (TODO stub) | Inverse of Symbol Finder's "find by name": given a field, list methods that read/write it. **Mono path**: walk method IL bytecode (`mono_method_header_get_code`) for `ldfld`/`stfld`/`ldsfld`/`stsfld` referencing the target field token — high-confidence, clean. **IL2CPP static fields**: reuse AOBMaker's `RipReferenceScanner` against the field's runtime address — scan executable pages for RIP-relative references, attribute hits to enclosing methods via Phase 18a range-check. **IL2CPP instance fields**: heuristic — AOB-scan declaring-class methods for `[reg+offset]` patterns matching field offset; mark "low confidence" in UI. | 📝 **TODO / not started** — picks up after Phase 27 ships. Approach drafted below. |
+| 29 | Snapshot & Diff (跨 session 數值監視) | "全抓" snapshot walker (default scope = all user assemblies, opt-in narrow) + diff UI + SQLite cross-session persistence. Strict superset of CE's value-finder — instead of "find addresses with value X", surfaces "any field that changed" with class.field.instance context attached. **Bundles Phase 27c live smoke** — array element capture exercises the existing `whatIsAt` array resolver on SaGa F2R / BongoCat / 活俠傳; bugs fixed on both sides. Sub-phases 29a (DLL `snapshotAll` RPC + array smoke), 29b (in-memory diff UI), 29c (SQLite + cross-session). 29d (SPC-style multi-field constraint query) deferred until 29a-c stabilise. | ✅ **29a + 29b SHIPPED + LIVE-VERIFIED 2026-05-26** across SaGa F2R / BongoCat / 활俠傳 (builds #596 → #637 — five iterations of Mono-freeze debugging, root cause was `mono_class_vtable` from worker thread leaving BDWGC tracking entries; fix: skip static-field VALUE capture on Mono). Phase 27c array-element live-smoke **CLOSED** as bundled side-effect. **29c (SQLite) + Phase 29 polish (noise-reduction filters on diff result) next**. |
 | 26 | Anti-tamper protection | 3-slot SHA256 self-check spread across two assemblies + 2 poison surfaces (CT export offsets + Inspector grid values) + XOR-shielded credit string + AOT-stamped hash via `tools/inject-hash.ps1`. Inspired by AOBMaker's pattern but redesigned for cross-assembly slot distribution (Slot A in Core/Services / Slot B in Core/Services/Export / **Slot C cross-assembly in ui/UnityDumpUI/Platform**). Dev-mode bypass (0xCC placeholders) keeps all factors at 0 in Debug/Release single-file builds — exports + Inspector + tests stay byte-identical to pre-Phase-26. Class names renamed to non-suggestive forms so binary metadata no longer leaks "Integrity" / "Guardian" / "Shield". | ✅ **Shipped + AOT-verified 2026-05-20** (build #408). Two iterations: `ccaae6e` single-slot baseline + `348cbb6` 3-slot cross-assembly upgrade. `TokenAggregator.Combined() = A \| B \| C` ORs all three factors (UI registers `WindowsRuntimeMetadata.Read` into Core via `Program.Main`). Poison 1: `CloakOffset(off) => off ^ (factor & 0x7F)` in `CeXmlExporter` + `CsxExporter` shifts every emitted offset 0-127 bytes (CT loads cleanly in CE; reads wrong fields). Poison 2: `LiveInspectionViewModel.MaybePerturbDisplay` corrupts 1/11 numeric `DisplayValue` rows via per-row deterministic seed (string `GetHashCode` XOR offset XOR salt) — same row corrupts same way within session, different rows across sessions. Anti-trace: `Read()` returns 0 for first N calls (A:3 / B:2 / C:4) even when tampered. Anti-debug: `Debugger.IsAttached` on published binary returns poison code. AOT round-trip verified end-to-end: 3 sentinels at `0x02438F98` / `0x02438E80` / `0x0243ABF8` (C ~11 KB away from A/B). `inject-hash.ps1` 3-slot AOBMaker-style: zero all 3 slots → SHA256 once → write same hash into all 3. Footer credit `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. New [`USAGE.md`](../USAGE.md) end-user guide for CT makers. |
 
 ---
@@ -2003,6 +2004,222 @@ a given session.
 * [tools/Test-DiagnoseClassRefs.ps1](../tools/Test-DiagnoseClassRefs.ps1) —
   test harness; auto-extracts navigation-candidate AOT addresses + calls
   `getMethodAobPattern` to pull raw `.text` bytes for offline disasm.
+
+---
+
+## Phase 29 — Snapshot & Diff (跨 session 數值監視) 📝 PLANNING 2026-05-26
+
+**Goal**: Capture a wide "everything" snapshot of the running game's
+managed state, diff two snapshots, surface what changed with class /
+field / instance context attached. Strict superset of CE's value-finder
+flow — instead of "find addresses with value X" the user gets "any
+field that changed" automatically labelled.
+
+### Design pivot — scope inversion
+
+Earlier drafts started from "user picks a class". Wrong. The user
+typically **does not know where the data lives** — that's the whole
+problem we're solving. Forcing per-class selection means the user
+has to repeat the whole flow per class. Default scope is therefore
+"全抓 — all user assemblies"; narrowing to a single class is opt-in.
+
+| Mode | Default | Opt-in |
+|---|---|---|
+| **Scope** | All user-assembly classes (static + any with live instances) | Single class / set of classes |
+| **Type filter** | All primitives + string + enum + inline struct + array / `List<T>` | Toggle per-type |
+| **Instance cap per class** | 100 | 0–unlimited |
+| **Array element cap** | 50 | 0–unlimited |
+| **Assembly excludes** | `mscorlib`, `System.*`, `UnityEngine.CoreModule` base types | Editable |
+
+### Why this is the real value-finder superset
+
+CE first-scan / next-scan requires: knowing the *type* (int? float?),
+knowing the *approximate value*, and running one scan per type. Our
+snapshot diff requires: nothing. One click before action, one click
+after, diff result auto-labelled with `class.field`. Information
+density is an order of magnitude higher (CE gives N nameless
+addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
+500→350 (Δ-150)`).
+
+### Sub-phases
+
+- [x] **29a — `snapshotAll` DLL RPC** ✅ **Shipped + live-verified 2026-05-26**, builds #596→#598→#602.
+  - New pipe RPC `snapshotAll(scopeFilter?, instanceCap?, arrayCap?)`
+    on **both** backends.
+  - Returns `{snapshotId, capturedAt, gameBuildId, gameSessionId,
+    classes: [{fqn, assembly, statics: [...], instances: [{addr,
+    fields: [...]}]}]}`.
+  - Reuses existing `dumpClassInfo` bulk RPC (Phase C, build #496)
+    for metadata + field layout. Reuses `findInstances` per class
+    (capped at `instanceCap`). Reuses `getStaticFieldData` for
+    statics. **No new metadata-walking code**.
+  - **Bundles Phase 27c live smoke**: when the walker hits a `T[]`
+    or `List<T>` field, it calls the existing `whatIsAt` array
+    element resolver to capture length + per-element values. Bugs
+    surfaced here get fixed on both sides (snapshot walker + the
+    `whatIsAt` array path).
+  - Default `scopeFilter` excludes `mscorlib`, `System.*`,
+    `UnityEngine.CoreModule`. User can toggle.
+  - `gameBuildId` derived from `SHA256(GameAssembly.dll)` prefix —
+    enables 29c cross-session safety check.
+  - Estimated data size: 50–200 MB JSON for SaGa F2R-scale (~3,700
+    classes). Walk time: 5–15s. Acceptable for explicit user action,
+    *not* for continuous polling.
+
+- [x] **29b — In-memory snapshot store + diff UI** ✅ **SHIPPED + LIVE-VERIFIED 2026-05-26** (builds #604 → #637). Snapshot tab (MainWindow position 7) with capture controls, A/B selector, filter checkboxes (Hide synthetic types ON / Changed only ON / Show added / Show removed / Class filter substring), diff DataGrid with sort comparers (AOT-safe per §4.5 of aot-pitfalls.md), context menu (Inspect / Address Lookup / Copy address/class/field), cross-tab handoff. **Strategy C** filter (local UI synthetic-type hiding by `<` prefix) confirmed working. Cross-game stale-marking via `game_build_id` in handshake. **Five iterations of Mono-freeze debugging** to reach a stable state — culminated in the v4-round-4 fix: skip static field VALUE capture on Mono (mono_class_vtable from worker thread is the root cause of the post-RPC main-thread wedge). Metadata still captured. Live-verified on SaGa F2R (IL2CPP) full diff + BongoCat (Mono x64) responsive post-snapshot + 활俠傳 (Mono x86 / 1.1 GB heap walk) responsive post-snapshot.
+  - New `Snapshot` tab in MainWindow (position 7).
+  - "Take Snapshot" button → fires `snapshotAll` → stores in
+    `ObservableCollection<SnapshotEnvelope>` (in-memory only at
+    this stage).
+  - Diff algorithm:
+    - Static field key: `(class_fqn, field_offset)`.
+    - Instance field key: `(class_fqn, instance_addr, field_offset)`
+      — instance addr is stable *within* a session.
+    - Array diff: element-by-element, output rows like
+      `inventory[2]: 50 → 75`.
+    - String diff: full string old vs new (capped display length).
+  - Diff result DataGrid with columns
+    `Class / Field / Instance / Old / New / Δ / %Δ`.
+  - Filter checkboxes: changed-only (default on), added, removed,
+    by class regex.
+  - Right-click row → existing cross-tab handoff (Inspector /
+    Address Lookup / Copy address).
+  - No DB dependency at this stage.
+
+- [ ] **29c — SQLite persistence + cross-session** (~1.5 days)
+  - New NuGet: `Microsoft.Data.Sqlite` (AOT-clean since .NET 9).
+    Bundles native `sqlite3.dll` (~1.5 MB).
+  - DB path: `%LOCALAPPDATA%\UnityCEDumper\snapshots\{game_build_id}.db`.
+  - Schema (denormalised — joins are simple, indexes do the heavy
+    lifting):
+    ```sql
+    CREATE TABLE snapshot (
+      id INTEGER PRIMARY KEY, label TEXT, captured_at TEXT,
+      game_build_id TEXT, game_session_id TEXT, scope_summary TEXT);
+    CREATE TABLE field_value (
+      snapshot_id INTEGER, class_fqn TEXT, field_offset INTEGER,
+      field_name TEXT, field_type TEXT,
+      instance_addr INTEGER,    -- 0 = static
+      value_int INTEGER, value_real REAL, value_text TEXT, value_blob BLOB);
+    CREATE INDEX idx_fv_cls_off_snap ON field_value(class_fqn, field_offset, snapshot_id);
+    CREATE INDEX idx_fv_inst ON field_value(instance_addr, snapshot_id);
+    ```
+  - Cross-session rules (honest):
+    - Different `game_build_id` → big yellow warning banner, allow
+      proceed-anyway with "offsets may not match" disclaimer.
+    - **Static fields**: perfect cross-session match (offset stable).
+    - **Single-instance singletons** (1 instance in both snaps):
+      cross-session diff works fine.
+    - **Multi-instance classes**: instance address is not portable
+      across launches, so cross-session view only surfaces
+      class-level aggregates (instance count delta, sum-of-HP delta);
+      per-instance diff disabled until 29d optional fingerprint.
+
+- [ ] **29d — Multi-field constraint query (SPC angle)** — DEFERRED
+  - Originally proposed: query "find fields where A=100 AND B=50"
+    across snapshots / sessions; "find fields whose values match
+    bounded oscillation pattern" (Energy/Stamina detection); etc.
+  - Designing the input UI for this is harder than implementing the
+    backend. Wait for a real use case to emerge from 29a-c
+    deployment before designing.
+  - Schema in 29c is already amenable — `field_value` joins by
+    `(class_fqn, field_offset)` across snapshot_ids would back any
+    such query.
+
+### Bundled Phase 27c live smoke ✅ **CLOSED 2026-05-26**
+
+Phase 27c (array / `List<T>` element resolution in `whatIsAt`) shipped
+DLL-side at build #433 but never got a live-game smoke. Phase 29a's
+snapshot walker hits the same code path on every `T[]` / `List<T>`
+field it encounters, so live targets become smoke targets for both
+features simultaneously:
+
+| Target | What it exercised | Result |
+|---|---|---|
+| SaGa F2R (IL2CPP v29 / x64) | Multiple `T[]` fields — `MainGame/DR_ENV.code: UInt32[2451]`, `MainGame/HalfReader.buff: Byte[0]`, `MainGame/DIRENTRY.system: SByte[0]` | ✅ 7,804 successful captures, 1,228 open-generic `T[]` placeholders correctly filtered, 53K false-positive arrays flagged as `arrayError` (synthetic-type "instances") |
+| BongoCat (Mono / x64) | `SteamInventoryTest.m_SerializedBuffer: Byte[1900545]`, `BattleRoyale._roundDuration: RoundDuration[95]`, `SelectionMenu._options: Option[]` | ✅ 44 successful captures + 1,109 `arrayError` (mostly false-positive `SelectionMenu._options` instances) |
+| 活俠傳 (Mono x86 / Unity 2020.3) | `MultiKeyDictionary\`3.buckets: Int32[786438]`, `.entries: Dictionary.Entry<T1,Dictionary<T2,T3>>[2]` | ✅ 14 successful captures with 32-bit pointer width working correctly |
+
+**Rule**: any bug surfaced by 29a's array path gets fixed on **both**
+sides (snapshot walker + the original `whatIsAt` array resolver). One
+issue surfaced + fixed: open-generic placeholder type names like `T[]`
+were being treated as real arrays and reading garbage at random
+pointer offsets (reported length values in the 10^9–10^12 range).
+Fix: only attempt array decode when `typeName` contains `.` or `/`
+(real types are namespaced; open generics aren't).
+
+### Out of scope (deferred — not v1)
+
+- `Dictionary<K,V>` / `HashSet<T>` internal bucket walker (would
+  need hash table decode).
+- `Task<T>` / `Lazy<T>` async wrapper unwrap.
+- Reference-type **recursive** content expansion — v1 records only
+  the pointer address; user manually opens Inspector for content.
+- Cross-build offset reconciliation — different game versions get
+  a warning banner, no auto-translation.
+- Phase 29d (constraint query / SPC) — deferred until 29a–c
+  validated by real use.
+
+### Phase 29 polish — TODO (deferred from 2026-05-26 live-smoke)
+
+Filed after 29a + 29b shipped + user reported the diff result has
+too much noise to spot the signal. None blocks v1; all are quality-
+of-life improvements over the existing "Hide synthetic types +
+Changed only + Class filter" stack.
+
+- [ ] **Noise-reduction filters on diff DataGrid**:
+  - Old/New value range filter (numeric — e.g. "show only rows
+    where the new value is in [0, 100]"). Useful for HP / stamina /
+    bounded resources.
+  - Pointer mask toggle (hide rows where Old/New start with
+    `ptr=` — pointer changes are usually re-allocation noise, not
+    semantic state change).
+  - Field-name keyword filter (substring on the Field column —
+    currently only the Class column has one).
+  - Distinct-count statistics (sidebar: "this snapshot's diff has
+    1,186 changed rows across N distinct field names — top by
+    count: `m_CachedPtr` 412, `<>1__state` 198, …"). Fields with
+    extreme counts are usually noise; user can one-click filter
+    them out.
+  - Skip "stack-trace strings" (`System.Exception._stackTrace`
+    and similar deeply-nested string fields produce huge blob diffs
+    that drown out real changes — auto-skip or truncate).
+- [ ] **Mono static field VALUE capture** (optional, user-opt-in
+  checkbox in Snapshot tab): currently statics on Mono only
+  capture metadata (per build #637 fix). A "Capture static values
+  (may freeze game briefly)" toggle would let users get static
+  diff when they accept the freeze trade-off.
+- [ ] **Phase 29c — SQLite cross-session persistence** — original
+  29 sub-phase. With 29b's stale-marking via `game_build_id` in
+  handshake, the persistence layer just needs to key snapshots
+  by `(game_build_id, captured_at, label)` and load the matching
+  ones on reconnect.
+- [ ] **Phase 29d — SPC-style multi-field constraint query** —
+  long-deferred design.
+
+### Acceptance criteria
+
+- **29a** ✅ — `snapshotAll` against SaGa F2R Assembly-CSharp scope
+  completes in 28-29s on build #602 (full decode + heap walk; chunks
+  are pure JSON slicing after that). 73K instances captured, 7,804
+  arrays decoded successfully. **Closes Phase 27c live-smoke** —
+  array element walker verified on three games.
+- **29b** — Two in-memory BongoCat snapshots taken before/after an
+  in-game action surface ≥ 1 field change with correct class.field
+  label in the diff DataGrid.
+- **29c** — SQLite-persisted snapshot survives game restart;
+  static-field cross-session diff works on the same `game_build_id`.
+- **27c live-smoke** ✅ **CLOSED 2026-05-26**.
+
+### v1 effort estimate
+
+| Sub-phase | Days |
+|---|---|
+| 29a (DLL walker + array smoke) | 1.5 |
+| 29b (in-memory diff UI) | 1 |
+| 29c (SQLite + cross-session) | 1.5 |
+| **Total v1** | **~4** |
+| 29d (deferred) | TBD |
 
 ---
 

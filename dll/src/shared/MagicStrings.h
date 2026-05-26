@@ -318,4 +318,52 @@ inline constexpr const char* CmdDumpIl2cppSymbols     = "dumpIl2cppSymbols";
 //     count, scanned, truncated, missing_assemblies? }
 inline constexpr const char* CmdDumpClassInfo         = "dumpClassInfo";
 
+// Phase 29 — "全抓" snapshot & diff. Three-RPC lifecycle (mirrors the
+// Phase 27b beginValueScan / refineValueScan / endValueScan shape):
+//
+//   snapshotBegin  — runs ONE wide heap walk on the active backend,
+//     groups every live managed instance by its class pointer, and
+//     caches the (assembly, class, instances[]) plan under a server-
+//     allocated sessionId. Default scope = all assemblies returned by
+//     `getAssemblies`; caller can narrow via the `assemblies` array.
+//     Default `instanceCap=100` per class, `arrayCap=50` per T[] /
+//     List<T> field.
+//     Request:
+//       { assemblies?: string[],   // default = all visible assemblies
+//         instanceCap?: int,       // default 100, hard-cap 1024
+//         arrayCap?: int }         // default 50,  hard-cap 256
+//     Response:
+//       { ok, snapshotId, capturedAt, gameBuildId, gameSessionId,
+//         instanceCap, arrayCap,
+//         totalClasses, totalInstances,
+//         plan: [{ assembly, classCount, instanceCount }],
+//         scanStats: { regionsTotal, regionsScanned, bytesScanned, ... } }
+//
+//   snapshotChunk — emits the next N classes' decoded data. Reads each
+//     class's static fields (via the existing ResolveStaticFieldAddress
+//     primitive) and walks every captured instance's fields (the same
+//     code path walkInstance uses). T[] / List<T> fields are walked
+//     inline up to `arrayCap` elements — Phase 27c element resolution
+//     is exercised here as a bundled live smoke.
+//     Request:
+//       { snapshotId: string,
+//         cursor?: int,            // default 0; pass `nextCursor` from
+//                                  // the previous response to continue
+//         limit?:  int }           // max classes per chunk; default 32,
+//                                  // hard-cap 200
+//     Response:
+//       { ok, snapshotId, cursor, nextCursor, done,
+//         classes: [{ assembly, namespace, name, parent?,
+//                     statics:  [...],         // {name, type, offset, address, value/ptr/string/error}
+//                     instances:[{ address,
+//                                  fields:[...same shape + arrayElements?] }] }] }
+//
+//   snapshotEnd — drops the cached plan. Sessions also auto-expire 5
+//     minutes after the last Chunk call.
+//     Request:  { snapshotId: string }
+//     Response: { ok, snapshotId, dropped }
+inline constexpr const char* CmdSnapshotBegin         = "snapshotBegin";
+inline constexpr const char* CmdSnapshotChunk         = "snapshotChunk";
+inline constexpr const char* CmdSnapshotEnd           = "snapshotEnd";
+
 }  // namespace UnityCEDumper::MagicStrings
