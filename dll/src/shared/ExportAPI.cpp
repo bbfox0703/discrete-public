@@ -1971,29 +1971,30 @@ void RegisterCoreHandlers() {
     });
 
     // ------------------------------------------------------------------------
-    // Phase 29 — snapshotBegin / snapshotChunk / snapshotEnd (Mono).
+    // Phase 29a-v2 — snapshotBegin / snapshotChunk / snapshotEnd (Mono).
     //
-    // Begin: builds the class range cache, runs ONE wide heap walk, groups
-    // every live MonoObject by its class, builds an ordered plan vector
-    // (one ClassPlanItem per (assembly, class) with non-empty static fields
-    // OR a non-empty instance list), and caches the plan in a Session.
-    // Default scope = every assembly EnumerateAssemblies returns; caller
-    // can narrow via the `assemblies` array.
+    // Architecture lesson from build #597 live-smoke on 活俠傳 (Mono x86 /
+    // Unity 2020.3): the original design did per-class decode work inside
+    // the Chunk handler under a fresh ThreadAttachGuard per chunk. With
+    // 17K classes / 297K instances → 542 chunks → 542 attach/detach cycles
+    // → BDWGC finalizer queue accumulation → game-thread freeze partway
+    // through the snapshot AND a residual freeze after the snapshot ended.
+    // Same root cause as the 44s shutdown stall documented in
+    // lessons-learned.md "Reentrant ThreadAttachGuard".
     //
-    // Chunk: walks the next `limit` plan items under ONE outer
-    // ThreadAttachGuard (avoids the per-class attach-cycle accumulation
-    // documented in lessons-learned.md). Per class: reads field layout +
-    // capture static values, then for each captured instance walks its
-    // parent chain, decodes fields, and emits array elements inline
-    // (bundled Phase 27c live smoke). T[] fields are walked; List<T> is
-    // recorded as a raw pointer for v1 (recursive List._items deref
-    // deferred).
+    // Fix: do ALL decode work in `snapshotBegin` under ONE outer attach
+    // guard. The decoded JSON for each class is pre-built and stored in
+    // the session. `snapshotChunk` then becomes pure slicing — zero Mono
+    // runtime calls per chunk, zero further attach cycles. Trade-off:
+    // Begin takes longer (everything happens up-front) instead of being
+    // amortised across chunks. Total time is unchanged; the user-visible
+    // game freeze risk goes from "definitely freezes mid-snapshot on
+    // legacy 32-bit Mono" to "doesn't freeze".
     //
-    // End: drops the session immediately. Sessions also auto-expire after
-    // 5 min of inactivity.
+    // End: drops the session. 5-min idle auto-expiry covers crashes.
     // ------------------------------------------------------------------------
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
-        [formatHex](const json& args) -> json {
+        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
 
         // Parse args ----------------------------------------------------------
@@ -2102,6 +2103,173 @@ void RegisterCoreHandlers() {
             session->plan.push_back(std::move(item));
         }
 
+        // ---- Decode ALL classes under ONE outer attach guard --------------
+        // This is the Phase 29a-v2 fix: previously each chunk opened its
+        // own ThreadAttachGuard, accumulating BDWGC finalizers. Doing
+        // every class decode here under one guard means 1 attach/detach
+        // cycle total, regardless of class count. Memory cost: ~50-200 MB
+        // of pre-built JSON per session; auto-expire 5min keeps it
+        // bounded.
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        session->classes.reserve(session->plan.size());
+        std::size_t decodedClasses = 0;
+        std::size_t decodedInstances = 0;
+        std::size_t decodedArrays = 0;
+        std::size_t skippedOpenGenericArrays = 0;
+
+        // Open-generic array detection: real array types are namespaced
+        // ("System.Int32[]") or nested with slash ("MainGame/Foo[]"). Open
+        // generic placeholders like "T[]" / "TKey[]" have neither separator
+        // and reading them as managed arrays leads to garbage at random
+        // pointer offsets (live-smoke build #597 reported length=1.9e12).
+        auto isCapturableArrayType = [](const std::string& tn) -> bool {
+            if (tn.size() < 4) return false;
+            if (tn[tn.size() - 1] != ']' || tn[tn.size() - 2] != '[') return false;
+            return tn.find('.') != std::string::npos ||
+                   tn.find('/') != std::string::npos;
+        };
+
+        if (domain != nullptr) {
+            Mono::ThreadAttachGuard guard(domain);
+
+            for (auto& item : session->plan) {
+                Mono::MonoClass* k = static_cast<Mono::MonoClass*>(item.klass);
+                if (k == nullptr) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "klass null"},
+                    });
+                    continue;
+                }
+
+                Snapshot::ClassPayload classEntry = {
+                    {"assembly",  item.assembly},
+                    {"namespace", item.ns},
+                    {"name",      item.name},
+                };
+
+                auto res = Mono::ReadClassInfo(k);
+                if (!res.ok) {
+                    classEntry["error"] = "ReadClassInfo failed";
+                    session->classes.push_back(std::move(classEntry));
+                    continue;
+                }
+                ++decodedClasses;
+                if (!res.info.parent.name.empty()) {
+                    classEntry["parent"] = Snapshot::ClassPayload{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+
+                // Static fields with values.
+                Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
+                for (const auto& f : res.info.fields) {
+                    if ((f.flags & 0x10u) == 0u) continue;
+                    auto sa = Mono::ResolveStaticFieldAddress(k, f.name);
+                    Snapshot::ClassPayload srow = {
+                        {"name",   f.name},
+                        {"type",   f.typeName},
+                        {"offset", f.offset},
+                    };
+                    if (!sa.ok || sa.address == nullptr) {
+                        srow["error"] = "static_unresolved";
+                    } else {
+                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
+                        srow["address"] = formatHex(fa);
+                        json d = decodeField(f.typeName, fa);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
+                            srow[kv.key()] = kv.value();
+                        }
+                    }
+                    statics.push_back(std::move(srow));
+                }
+                if (!statics.empty()) classEntry["statics"] = std::move(statics);
+
+                // Instance walk with array element capture.
+                Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
+                for (std::uintptr_t instAddr : item.instances) {
+                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
+                    std::vector<Mono::MonoClass*> chain;
+                    for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (Mono::GetResolver().class_get_parent == nullptr) break;
+                        cur = Mono::GetResolver().class_get_parent(cur);
+                    }
+                    Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
+                    for (auto chIt = chain.rbegin(); chIt != chain.rend(); ++chIt) {
+                        auto pr = Mono::ReadClassInfo(*chIt);
+                        if (!pr.ok) continue;
+                        for (const auto& f : pr.info.fields) {
+                            if (f.flags & 0x10u) continue;
+                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
+                            Snapshot::ClassPayload entry = {
+                                {"name",   f.name},
+                                {"type",   f.typeName},
+                                {"offset", f.offset},
+                                {"from",   pr.info.self.name},
+                            };
+                            if (f.isEnum)      entry["is_enum"]       = true;
+                            if (f.isValueType) entry["is_value_type"] = true;
+                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                                ? f.underlyingTypeName : f.typeName;
+                            json d = decodeField(decodeType, fieldAddr);
+                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                            const bool isArrayShape =
+                                f.typeName.size() >= 2 &&
+                                f.typeName[f.typeName.size() - 1] == ']' &&
+                                f.typeName[f.typeName.size() - 2] == '[';
+                            if (isArrayShape) {
+                                if (!isCapturableArrayType(f.typeName)) {
+                                    ++skippedOpenGenericArrays;
+                                } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                                    std::uintptr_t arrPtr = 0;
+                                    const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                    if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                        arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                    }
+                                    if (arrPtr != 0) {
+                                        json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                        // Only record successful captures
+                                        // as "arrayElements"; error-path
+                                        // responses (implausible_length /
+                                        // header_unreadable) get prefixed
+                                        // with arrayError so the UI can
+                                        // distinguish.
+                                        if (elems.contains("error")) {
+                                            entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                            if (elems.contains("length")) {
+                                                entry["arrayErrorLength"] = elems["length"];
+                                            }
+                                        } else {
+                                            entry["arrayElements"] = std::move(elems);
+                                            ++decodedArrays;
+                                        }
+                                    }
+                                }
+                            }
+                            fields.push_back(std::move(entry));
+                            if (fields.size() >= 4096) break;
+                        }
+                        if (fields.size() >= 4096) break;
+                    }
+                    std::sort(fields.begin(), fields.end(),
+                        [](const json& a, const json& b) {
+                            return a.value("offset", 0) < b.value("offset", 0);
+                        });
+                    instEntry["fields"] = std::move(fields);
+                    instArr.push_back(std::move(instEntry));
+                    ++decodedInstances;
+                }
+                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
+
+                session->classes.push_back(std::move(classEntry));
+            }
+        }
+
         // Preserve assembly order in the response.
         for (const auto& asmName : requestedAssemblies) {
             session->planByAssembly.push_back(planByAsm[asmName]);
@@ -2131,11 +2299,19 @@ void RegisterCoreHandlers() {
             {"bytesScanned",     bulk.bytesScanned},
             {"vtablesResolved",  bulk.vtablesResolved},
         };
+        json decodeStats = {
+            {"decodedClasses",           decodedClasses},
+            {"decodedInstances",         decodedInstances},
+            {"decodedArrays",            decodedArrays},
+            {"skippedOpenGenericArrays", skippedOpenGenericArrays},
+        };
 
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
             "snapshotBegin(Mono) id=" + std::to_string(sid) +
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
+            " decoded=" + std::to_string(decodedClasses) +
+            " arrays=" + std::to_string(decodedArrays) +
             " buildId=" + buildId);
 
         return json{
@@ -2150,13 +2326,16 @@ void RegisterCoreHandlers() {
             {"totalInstances", totalInst},
             {"plan",           std::move(planArr)},
             {"scanStats",      std::move(scanStats)},
+            {"decodeStats",    std::move(decodeStats)},
         };
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotChunk,
-        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
-        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
-
+        [](const json& args) -> json {
+        // Phase 29a-v2: pure slicer. All decode work happened in Begin
+        // under one outer attach guard. Chunk just hands back the next
+        // window of pre-built class payloads. Zero Mono runtime calls
+        // here — that's the rule that keeps 活俠傳 from freezing.
         std::string sidStr = args.value("snapshotId", std::string{});
         if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
         std::uint64_t sid = 0;
@@ -2169,160 +2348,23 @@ void RegisterCoreHandlers() {
         if (limit == 0)   limit = 32;
         if (limit > 200)  limit = 200;
 
-        // Look up the session, capture what we need under the lock, then
-        // do the heavy emit work after releasing.
-        struct PlanCopy { Snapshot::ClassPlanItem item; };
-        std::vector<PlanCopy> work;
-        std::size_t totalPlan = 0;
+        json classes = json::array();
+        std::size_t totalPlan   = 0;
         std::size_t startCursor = 0;
-        std::size_t arrayCap = 50;
         bool found = Snapshot::SessionManager::Instance().View(sid,
             [&](Snapshot::Session& s) {
-                totalPlan = s.plan.size();
-                arrayCap  = s.arrayCap;
+                totalPlan = s.classes.size();
                 startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
                 if (startCursor > totalPlan) startCursor = totalPlan;
                 std::size_t end = std::min(totalPlan, startCursor + limit);
-                work.reserve(end - startCursor);
                 for (std::size_t i = startCursor; i < end; ++i) {
-                    PlanCopy pc;
-                    pc.item = s.plan[i];   // shallow copy of strings + addr vec
-                    work.push_back(std::move(pc));
+                    classes.push_back(s.classes[i]);   // json copy — small per entry
                 }
             });
         if (!found) {
             return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
         }
-
-        // Single outer ThreadAttachGuard for the whole chunk — lesson from
-        // Phase 27 follow-up (`44s game-shutdown stall on 活俠傳` when
-        // each per-class read opened its own guard).
-        Mono::MonoDomain* domain = Mono::GetRootDomain();
-        json classes = json::array();
-        if (!work.empty() && domain != nullptr) {
-            Mono::ThreadAttachGuard guard(domain);
-            const auto& r = Mono::GetResolver();
-            (void)r;
-
-            for (auto& pc : work) {
-                Mono::MonoClass* k = static_cast<Mono::MonoClass*>(pc.item.klass);
-                if (k == nullptr) continue;
-
-                json classEntry = {
-                    {"assembly",  pc.item.assembly},
-                    {"namespace", pc.item.ns},
-                    {"name",      pc.item.name},
-                };
-
-                auto res = Mono::ReadClassInfo(k);
-                if (!res.ok) {
-                    classEntry["error"] = "ReadClassInfo failed";
-                    classes.push_back(std::move(classEntry));
-                    continue;
-                }
-                if (!res.info.parent.name.empty()) {
-                    classEntry["parent"] = json{
-                        {"namespace", res.info.parent.ns},
-                        {"name",      res.info.parent.name},
-                    };
-                }
-
-                // ---- Static fields with values ------------------------
-                json statics = json::array();
-                for (const auto& f : res.info.fields) {
-                    if ((f.flags & 0x10u) == 0u) continue;   // skip instance fields here
-                    auto sa = Mono::ResolveStaticFieldAddress(k, f.name);
-                    json srow = {
-                        {"name",   f.name},
-                        {"type",   f.typeName},
-                        {"offset", f.offset},
-                    };
-                    if (!sa.ok || sa.address == nullptr) {
-                        srow["error"] = "static_unresolved";
-                    } else {
-                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
-                        srow["address"] = formatHex(fa);
-                        json d = decodeField(f.typeName, fa);
-                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
-                            srow[kv.key()] = kv.value();
-                        }
-                    }
-                    statics.push_back(std::move(srow));
-                }
-                if (!statics.empty()) classEntry["statics"] = std::move(statics);
-
-                // ---- Instance walk with array element capture ---------
-                json instArr = json::array();
-                for (std::uintptr_t instAddr : pc.item.instances) {
-                    json instEntry = {
-                        {"address", formatHex(instAddr)},
-                    };
-                    // Walk parent chain like CmdWalkInstance does.
-                    std::vector<Mono::MonoClass*> chain;
-                    for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
-                        chain.push_back(cur);
-                        if (Mono::GetResolver().class_get_parent == nullptr) break;
-                        cur = Mono::GetResolver().class_get_parent(cur);
-                    }
-                    json fields = json::array();
-                    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-                        auto pr = Mono::ReadClassInfo(*it);
-                        if (!pr.ok) continue;
-                        for (const auto& f : pr.info.fields) {
-                            if (f.flags & 0x10u) continue;  // skip static
-                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
-                            json entry = {
-                                {"name",    f.name},
-                                {"type",    f.typeName},
-                                {"offset",  f.offset},
-                                {"from",    pr.info.self.name},
-                            };
-                            if (f.isEnum)      entry["is_enum"]       = true;
-                            if (f.isValueType) entry["is_value_type"] = true;
-                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
-                                ? f.underlyingTypeName : f.typeName;
-                            json d = decodeField(decodeType, fieldAddr);
-                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
-
-                            // Phase 27c bundled smoke: when the field's type
-                            // is a managed array (T[]) AND the stored pointer
-                            // is non-null, capture array elements inline.
-                            const bool isArray =
-                                f.typeName.size() >= 2 &&
-                                f.typeName[f.typeName.size() - 1] == ']' &&
-                                f.typeName[f.typeName.size() - 2] == '[';
-                            if (isArray && entry.contains("ptr") && entry["ptr"].is_string()) {
-                                // entry["ptr"] is "0x..." — parse back to a
-                                // uintptr_t (decodeField formatted it via formatHex).
-                                std::uintptr_t arrPtr = 0;
-                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
-                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
-                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
-                                }
-                                if (arrPtr != 0) {
-                                    json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
-                                    entry["arrayElements"] = std::move(elems);
-                                }
-                            }
-                            fields.push_back(std::move(entry));
-                            if (fields.size() >= 4096) break;
-                        }
-                        if (fields.size() >= 4096) break;
-                    }
-                    std::sort(fields.begin(), fields.end(),
-                        [](const json& a, const json& b) {
-                            return a.value("offset", 0) < b.value("offset", 0);
-                        });
-                    instEntry["fields"] = std::move(fields);
-                    instArr.push_back(std::move(instEntry));
-                }
-                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
-
-                classes.push_back(std::move(classEntry));
-            }
-        }
-
-        std::size_t nextCursor = startCursor + work.size();
+        std::size_t nextCursor = startCursor + static_cast<std::size_t>(classes.size());
         bool done = (nextCursor >= totalPlan);
         return json{
             {"ok",         true},
@@ -4835,14 +4877,16 @@ void RegisterCoreHandlers() {
     });
 
     // ------------------------------------------------------------------------
-    // Phase 29 — snapshotBegin / snapshotChunk / snapshotEnd (IL2CPP).
-    // Mirror of the Mono handlers — same wire contract, same session
-    // semantics. IL2CPP differences: the wide heap walk checks the qword
-    // directly against the class range cache (no vtable indirection), and
-    // the build-id source module is GameAssembly.dll.
+    // Phase 29a-v2 — snapshotBegin / snapshotChunk / snapshotEnd (IL2CPP).
+    // Mirror of the Mono handlers above — see that block for the decode-
+    // in-Begin design rationale (lesson from build #597 live-smoke on
+    // 活俠傳). IL2CPP differences: wide heap walk uses direct class-ptr
+    // membership (no vtable indirection); build-id source module is
+    // GameAssembly.dll; no BDWGC finalizer accumulation but uniform
+    // architecture keeps the codebase symmetric.
     // ------------------------------------------------------------------------
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
-        [formatHex](const json& args) -> json {
+        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
         std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
@@ -4923,6 +4967,155 @@ void RegisterCoreHandlers() {
             session->plan.push_back(std::move(item));
         }
 
+        // ---- Decode ALL classes under ONE outer attach guard --------------
+        IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
+        session->classes.reserve(session->plan.size());
+        std::size_t decodedClasses = 0;
+        std::size_t decodedInstances = 0;
+        std::size_t decodedArrays = 0;
+        std::size_t skippedOpenGenericArrays = 0;
+
+        auto isCapturableArrayType = [](const std::string& tn) -> bool {
+            if (tn.size() < 4) return false;
+            if (tn[tn.size() - 1] != ']' || tn[tn.size() - 2] != '[') return false;
+            return tn.find('.') != std::string::npos ||
+                   tn.find('/') != std::string::npos;
+        };
+
+        if (domain != nullptr) {
+            IL2CPP::ThreadAttachGuard guard(domain);
+
+            for (auto& item : session->plan) {
+                IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(item.klass);
+                if (k == nullptr) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "klass null"},
+                    });
+                    continue;
+                }
+
+                Snapshot::ClassPayload classEntry = {
+                    {"assembly",  item.assembly},
+                    {"namespace", item.ns},
+                    {"name",      item.name},
+                };
+
+                auto res = IL2CPP::ReadClassInfo(k);
+                if (!res.ok) {
+                    classEntry["error"] = "ReadClassInfo failed";
+                    session->classes.push_back(std::move(classEntry));
+                    continue;
+                }
+                ++decodedClasses;
+                if (!res.info.parent.name.empty()) {
+                    classEntry["parent"] = Snapshot::ClassPayload{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+
+                Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
+                for (const auto& f : res.info.fields) {
+                    if ((f.flags & 0x10u) == 0u) continue;
+                    auto sa = IL2CPP::ResolveStaticFieldAddress(k, f.name);
+                    Snapshot::ClassPayload srow = {
+                        {"name",   f.name},
+                        {"type",   f.typeName},
+                        {"offset", f.offset},
+                    };
+                    if (!sa.ok || sa.address == nullptr) {
+                        srow["error"] = "static_unresolved";
+                    } else {
+                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
+                        srow["address"] = formatHex(fa);
+                        json d = decodeField(f.typeName, fa);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
+                            srow[kv.key()] = kv.value();
+                        }
+                    }
+                    statics.push_back(std::move(srow));
+                }
+                if (!statics.empty()) classEntry["statics"] = std::move(statics);
+
+                Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
+                const auto& rIl = IL2CPP::GetResolver();
+                for (std::uintptr_t instAddr : item.instances) {
+                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
+                    std::vector<IL2CPP::Il2CppClass*> chain;
+                    for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (rIl.class_get_parent == nullptr) break;
+                        cur = rIl.class_get_parent(cur);
+                    }
+                    Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
+                    for (auto chIt = chain.rbegin(); chIt != chain.rend(); ++chIt) {
+                        auto pr = IL2CPP::ReadClassInfo(*chIt);
+                        if (!pr.ok) continue;
+                        for (const auto& f : pr.info.fields) {
+                            if (f.flags & 0x10u) continue;
+                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
+                            Snapshot::ClassPayload entry = {
+                                {"name",   f.name},
+                                {"type",   f.typeName},
+                                {"offset", f.offset},
+                                {"from",   pr.info.self.name},
+                            };
+                            if (f.isEnum)      entry["is_enum"]       = true;
+                            if (f.isValueType) entry["is_value_type"] = true;
+                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                                ? f.underlyingTypeName : f.typeName;
+                            json d = decodeField(decodeType, fieldAddr);
+                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                            const bool isArrayShape =
+                                f.typeName.size() >= 2 &&
+                                f.typeName[f.typeName.size() - 1] == ']' &&
+                                f.typeName[f.typeName.size() - 2] == '[';
+                            if (isArrayShape) {
+                                if (!isCapturableArrayType(f.typeName)) {
+                                    ++skippedOpenGenericArrays;
+                                } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                                    std::uintptr_t arrPtr = 0;
+                                    const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                    if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                        arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                    }
+                                    if (arrPtr != 0) {
+                                        json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                        if (elems.contains("error")) {
+                                            entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                            if (elems.contains("length")) {
+                                                entry["arrayErrorLength"] = elems["length"];
+                                            }
+                                        } else {
+                                            entry["arrayElements"] = std::move(elems);
+                                            ++decodedArrays;
+                                        }
+                                    }
+                                }
+                            }
+                            fields.push_back(std::move(entry));
+                            if (fields.size() >= 4096) break;
+                        }
+                        if (fields.size() >= 4096) break;
+                    }
+                    std::sort(fields.begin(), fields.end(),
+                        [](const json& a, const json& b) {
+                            return a.value("offset", 0) < b.value("offset", 0);
+                        });
+                    instEntry["fields"] = std::move(fields);
+                    instArr.push_back(std::move(instEntry));
+                    ++decodedInstances;
+                }
+                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
+
+                session->classes.push_back(std::move(classEntry));
+            }
+        }
+
         for (const auto& asmName : requestedAssemblies) {
             session->planByAssembly.push_back(planByAsm[asmName]);
         }
@@ -4950,11 +5143,19 @@ void RegisterCoreHandlers() {
             {"regionsSkipStack", bulk.regionsSkipStack},
             {"bytesScanned",     bulk.bytesScanned},
         };
+        json decodeStats = {
+            {"decodedClasses",           decodedClasses},
+            {"decodedInstances",         decodedInstances},
+            {"decodedArrays",            decodedArrays},
+            {"skippedOpenGenericArrays", skippedOpenGenericArrays},
+        };
 
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
             "snapshotBegin(IL2CPP) id=" + std::to_string(sid) +
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
+            " decoded=" + std::to_string(decodedClasses) +
+            " arrays=" + std::to_string(decodedArrays) +
             " buildId=" + buildId);
 
         return json{
@@ -4969,13 +5170,13 @@ void RegisterCoreHandlers() {
             {"totalInstances", totalInst},
             {"plan",           std::move(planArr)},
             {"scanStats",      std::move(scanStats)},
+            {"decodeStats",    std::move(decodeStats)},
         };
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotChunk,
-        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
-        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
-
+        [](const json& args) -> json {
+        // Phase 29a-v2: pure slicer (same as Mono mirror above).
         std::string sidStr = args.value("snapshotId", std::string{});
         if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
         std::uint64_t sid = 0;
@@ -4988,146 +5189,23 @@ void RegisterCoreHandlers() {
         if (limit == 0)   limit = 32;
         if (limit > 200)  limit = 200;
 
-        struct PlanCopy { Snapshot::ClassPlanItem item; };
-        std::vector<PlanCopy> work;
+        json classes = json::array();
         std::size_t totalPlan   = 0;
         std::size_t startCursor = 0;
-        std::size_t arrayCap    = 50;
         bool found = Snapshot::SessionManager::Instance().View(sid,
             [&](Snapshot::Session& s) {
-                totalPlan = s.plan.size();
-                arrayCap  = s.arrayCap;
+                totalPlan = s.classes.size();
                 startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
                 if (startCursor > totalPlan) startCursor = totalPlan;
                 std::size_t end = std::min(totalPlan, startCursor + limit);
-                work.reserve(end - startCursor);
                 for (std::size_t i = startCursor; i < end; ++i) {
-                    PlanCopy pc;
-                    pc.item = s.plan[i];
-                    work.push_back(std::move(pc));
+                    classes.push_back(s.classes[i]);
                 }
             });
         if (!found) {
             return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
         }
-
-        IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
-        json classes = json::array();
-        if (!work.empty() && domain != nullptr) {
-            IL2CPP::ThreadAttachGuard guard(domain);
-
-            for (auto& pc : work) {
-                IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(pc.item.klass);
-                if (k == nullptr) continue;
-
-                json classEntry = {
-                    {"assembly",  pc.item.assembly},
-                    {"namespace", pc.item.ns},
-                    {"name",      pc.item.name},
-                };
-
-                auto res = IL2CPP::ReadClassInfo(k);
-                if (!res.ok) {
-                    classEntry["error"] = "ReadClassInfo failed";
-                    classes.push_back(std::move(classEntry));
-                    continue;
-                }
-                if (!res.info.parent.name.empty()) {
-                    classEntry["parent"] = json{
-                        {"namespace", res.info.parent.ns},
-                        {"name",      res.info.parent.name},
-                    };
-                }
-
-                // Statics
-                json statics = json::array();
-                for (const auto& f : res.info.fields) {
-                    if ((f.flags & 0x10u) == 0u) continue;
-                    auto sa = IL2CPP::ResolveStaticFieldAddress(k, f.name);
-                    json srow = {
-                        {"name",   f.name},
-                        {"type",   f.typeName},
-                        {"offset", f.offset},
-                    };
-                    if (!sa.ok || sa.address == nullptr) {
-                        srow["error"] = "static_unresolved";
-                    } else {
-                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
-                        srow["address"] = formatHex(fa);
-                        json d = decodeField(f.typeName, fa);
-                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
-                            srow[kv.key()] = kv.value();
-                        }
-                    }
-                    statics.push_back(std::move(srow));
-                }
-                if (!statics.empty()) classEntry["statics"] = std::move(statics);
-
-                // Instances
-                json instArr = json::array();
-                for (std::uintptr_t instAddr : pc.item.instances) {
-                    json instEntry = { {"address", formatHex(instAddr)} };
-                    std::vector<IL2CPP::Il2CppClass*> chain;
-                    const auto& rIl = IL2CPP::GetResolver();
-                    for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
-                        chain.push_back(cur);
-                        if (rIl.class_get_parent == nullptr) break;
-                        cur = rIl.class_get_parent(cur);
-                    }
-                    json fields = json::array();
-                    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-                        auto pr = IL2CPP::ReadClassInfo(*it);
-                        if (!pr.ok) continue;
-                        for (const auto& f : pr.info.fields) {
-                            if (f.flags & 0x10u) continue;
-                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
-                            json entry = {
-                                {"name",   f.name},
-                                {"type",   f.typeName},
-                                {"offset", f.offset},
-                                {"from",   pr.info.self.name},
-                            };
-                            if (f.isEnum)      entry["is_enum"]       = true;
-                            if (f.isValueType) entry["is_value_type"] = true;
-                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
-                                ? f.underlyingTypeName : f.typeName;
-                            json d = decodeField(decodeType, fieldAddr);
-                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
-
-                            const bool isArray =
-                                f.typeName.size() >= 2 &&
-                                f.typeName[f.typeName.size() - 1] == ']' &&
-                                f.typeName[f.typeName.size() - 2] == '[';
-                            if (isArray && entry.contains("ptr") && entry["ptr"].is_string()) {
-                                std::uintptr_t arrPtr = 0;
-                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
-                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
-                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
-                                }
-                                if (arrPtr != 0) {
-                                    json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
-                                    entry["arrayElements"] = std::move(elems);
-                                }
-                            }
-                            fields.push_back(std::move(entry));
-                            if (fields.size() >= 4096) break;
-                        }
-                        if (fields.size() >= 4096) break;
-                    }
-                    std::sort(fields.begin(), fields.end(),
-                        [](const json& a, const json& b) {
-                            return a.value("offset", 0) < b.value("offset", 0);
-                        });
-                    instEntry["fields"] = std::move(fields);
-                    instArr.push_back(std::move(instEntry));
-                }
-                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
-
-                classes.push_back(std::move(classEntry));
-            }
-        }
-
-        std::size_t nextCursor = startCursor + work.size();
+        std::size_t nextCursor = startCursor + static_cast<std::size_t>(classes.size());
         bool done = (nextCursor >= totalPlan);
         return json{
             {"ok",         true},

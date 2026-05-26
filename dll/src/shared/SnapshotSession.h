@@ -24,6 +24,8 @@
 // × ~100 instance addresses each) so swap-on-move matters.
 #pragma once
 
+#include <nlohmann/json.hpp>
+
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -53,6 +55,18 @@ struct PlanAssemblyEntry {
     std::size_t  instanceCount = 0;   // sum across all classes in this assembly
 };
 
+// One class's fully-decoded snapshot payload. Built once at snapshotBegin
+// time so snapshotChunk can stream it without making any further runtime
+// calls — that's the design rule that eliminates the per-chunk attach
+// accumulation Mono BDWGC suffers from (the 32-bit Mono 活俠傳 freeze
+// pattern: N chunks × N attach cycles × N queued finalizers → main-
+// thread stall once the queue gets long enough).
+//
+// Type is `nlohmann::json` because that's already the wire serializer the
+// pipe layer uses; storing the decoded payload in its final shape lets
+// chunk emit be a single move into the response array.
+using ClassPayload = nlohmann::json;
+
 struct Session {
     std::uint64_t                          id              = 0;
     std::string                            capturedAt;     // ISO-8601 UTC
@@ -60,9 +74,16 @@ struct Session {
     std::string                            gameSessionId;  // per-DLL-load random hex
     std::size_t                            instanceCap     = 100;
     std::size_t                            arrayCap        = 50;
-    std::vector<ClassPlanItem>             plan;
-    std::vector<PlanAssemblyEntry>         planByAssembly; // for the Begin response
+    std::vector<ClassPlanItem>             plan;            // for the heap-walk result (kept for diagnostics)
+    std::vector<PlanAssemblyEntry>         planByAssembly;  // for the Begin response
     std::size_t                            totalInstances  = 0;
+
+    // Phase 29a-v2 — pre-decoded per-class payload. One entry per plan
+    // item, in plan order. Chunk emit slices [cursor, cursor+limit) and
+    // copies into the response. Decoded once under a single outer
+    // ThreadAttachGuard at Begin time.
+    std::vector<ClassPayload>              classes;
+
     std::chrono::steady_clock::time_point  lastUse;
 };
 
