@@ -2420,6 +2420,37 @@ void RegisterCoreHandlers() {
                 // Cheap (~µs) on any modern Windows scheduler.
                 ::Sleep(0);
             }
+
+            // Phase 29a-v4 round 2 — drain Mono GC ONCE at the end of
+            // the batched decode, then a brief Sleep before returning
+            // the RPC. Build #629 ran in 19ms (the v3 trial) so the
+            // drain itself isn't slow, but we left it out in v4 to
+            // simplify. The 활俠傳 game still hangs in the "next step
+            // after heap walk + decode" phase (user observation).
+            // Hypothesis: game's main thread runs GC catch-up on the
+            // vtables we touched via mono_class_vtable in
+            // ResolveStaticBaseAddress, blocking the message loop.
+            // Drain (under a fresh attach for safety) + brief Sleep
+            // gives the game's main thread CPU before the chunk
+            // streaming phase floods the pipe.
+            {
+                const auto& rDrain = Mono::GetResolver();
+                if (rDrain.gc_collect != nullptr) {
+                    Mono::ThreadAttachGuard drainGuard(domain);
+                    if (drainGuard.Attached()) {
+                        auto drainStart = std::chrono::steady_clock::now();
+                        rDrain.gc_collect(-1);
+                        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - drainStart).count();
+                        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+                            "snapshotBegin(Mono) post-decode drain " + std::to_string(drainMs) + " ms");
+                    }
+                }
+            }
+            // 500ms is empirical — short enough not to dominate total
+            // RPC time, long enough to give the game's main thread
+            // 30+ frame budgets at 60 fps to catch up.
+            ::Sleep(500);
         }
 
         // Preserve assembly order in the response.
@@ -5347,6 +5378,25 @@ void RegisterCoreHandlers() {
                 }
                 ::Sleep(0);
             }
+
+            // Mirror of the Mono path's post-decode drain. IL2CPP GC
+            // doesn't have the same catch-up behaviour as Mono BDWGC,
+            // but keep the architecture symmetric.
+            {
+                const auto& rDrainIl = IL2CPP::GetResolver();
+                if (rDrainIl.gc_collect != nullptr) {
+                    IL2CPP::ThreadAttachGuard drainGuard(domain);
+                    if (drainGuard.Attached()) {
+                        auto drainStart = std::chrono::steady_clock::now();
+                        rDrainIl.gc_collect(0);
+                        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - drainStart).count();
+                        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+                            "snapshotBegin(IL2CPP) post-decode drain " + std::to_string(drainMs) + " ms");
+                    }
+                }
+            }
+            ::Sleep(500);
         }
 
         for (const auto& asmName : requestedAssemblies) {

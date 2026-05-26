@@ -624,7 +624,7 @@ public sealed class SnapshotFieldValue
     public bool   IsStatic        { get; init; }
     public string FieldName       { get; init; } = string.Empty;
     public string FieldType       { get; init; } = string.Empty;
-    public long   FieldOffset     { get; init; }
+    public ulong  FieldOffset     { get; init; }
     public string ValueDisplay    { get; init; } = string.Empty;
     public bool   IsSynthetic     { get; init; }
 }
@@ -641,7 +641,7 @@ public sealed class SnapshotDiffRow
     public required string FieldType       { get; init; }
     public required string InstanceLabel   { get; init; }   // "0x..." or "static"
     public required string InstanceAddress { get; init; }   // raw for handoff (empty for static)
-    public required long   FieldOffset     { get; init; }
+    public required ulong  FieldOffset     { get; init; }
     public required string OldValue        { get; init; }
     public required string NewValue        { get; init; }
     public required string Delta           { get; init; }

@@ -986,7 +986,12 @@ public sealed class SnapshotFieldEntry
 {
     [JsonPropertyName("name")]              public string       Name             { get; set; } = string.Empty;
     [JsonPropertyName("type")]              public string       Type             { get; set; } = string.Empty;
-    [JsonPropertyName("offset")]            public long         Offset           { get; set; }
+    // ulong: C++ writes IL2CPP::FieldEntry::offset which is std::size_t
+    // (uint64 on x64). Most fields have small offsets, but garbage values
+    // from false-positive class entries (live-smoke #629 SaGa F2R:
+    // classes[8].statics[3].offset exceeded Int64.MaxValue) trip
+    // Int64 deserialization. Match C++ type.
+    [JsonPropertyName("offset")]            public ulong        Offset           { get; set; }
     [JsonPropertyName("from")]              public string?      From             { get; set; }
     [JsonPropertyName("is_enum")]           public bool?        IsEnum           { get; set; }
     [JsonPropertyName("is_value_type")]     public bool?        IsValueType      { get; set; }
