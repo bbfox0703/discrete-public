@@ -2197,12 +2197,21 @@ void RegisterCoreHandlers() {
         };
 
         if (domain != nullptr) {
-            Mono::ThreadAttachGuard guard(domain);
+            // Phase 29a-v4 — batch attach. Live-smoke on 활俠傳 (Mono
+            // x86 / Unity 2020.3) build #621 showed the game freezing
+            // (Windows DWM "Mortal (沒有回應)") during snapshot. Root
+            // cause isn't the BDWGC queue (gc_collect drain took 19ms
+            // and didn't help) — it's that holding ONE mono attach
+            // across 7s of intense work prevents Mono GC from advancing
+            // safely (worker thread never reaches a Mono safepoint).
+            // Same family as Phase 27a lesson "mass-batch wedges
+            // 32-bit Mono". Fix: chunk decode into batches of N
+            // classes, attach/detach per batch, Sleep(0) between
+            // batches so the game's main thread can schedule + Mono GC
+            // can checkpoint. Global ClassInfo cache lives in function
+            // scope so it persists across batches.
+            constexpr std::size_t kDecodeBatchSize = 100;
 
-            // Lookup-or-insert helper for the global ClassInfo cache. The
-            // ClassInfoResult is stored by value (copy-cheap; ~hundreds of
-            // bytes per class). Subsequent calls for the same MonoClass*
-            // skip ReadClassInfo entirely.
             auto getClassInfo = [&](Mono::MonoClass* c)
                 -> const Mono::ClassInfoResult& {
                 auto it = globalClassInfo.find(c);
@@ -2215,7 +2224,11 @@ void RegisterCoreHandlers() {
                 return inserted.first->second;
             };
 
-            for (auto& item : session->plan) {
+            auto decodeOneClass = [&](Snapshot::ClassPlanItem& item) {
+                // (entire per-class decode body — moved from the inline
+                // for-loop into a lambda so the outer batch loop can
+                // re-enter attach state between batches without
+                // duplicating code.)
                 Mono::MonoClass* k = static_cast<Mono::MonoClass*>(item.klass);
                 if (k == nullptr) {
                     session->classes.push_back(Snapshot::ClassPayload{
@@ -2224,7 +2237,7 @@ void RegisterCoreHandlers() {
                         {"name", item.name},
                         {"error", "klass null"},
                     });
-                    continue;
+                    return;
                 }
 
                 Snapshot::ClassPayload classEntry = {
@@ -2250,7 +2263,7 @@ void RegisterCoreHandlers() {
                 if (!res.ok) {
                     classEntry["error"] = "ReadClassInfo failed";
                     session->classes.push_back(std::move(classEntry));
-                    continue;
+                    return;
                 }
                 ++decodedClasses;
                 if (!res.info.parent.name.empty()) {
@@ -2370,29 +2383,42 @@ void RegisterCoreHandlers() {
                 if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
 
                 session->classes.push_back(std::move(classEntry));
-            }
+            };  // end decodeOneClass lambda
 
-            // Phase 29a-v3 — drain BDWGC INSIDE our attach window. Live-
-            // smoke on 活俠傳 (Mono x86 / Unity 2020.3) build #609 showed
-            // the game freezing for ~50s AFTER our snapshotBegin RPC
-            // returned: thousands of mono_type_get_name + mono_class_*
-            // calls during decode leave small-object allocations queued
-            // in BDWGC. The game's main thread eventually has to catch
-            // up — that catch-up shows up as a long freeze (50s on
-            // 32-bit Mono). Same family as the lessons-learned.md
-            // disconnect-time GC entry; this is the per-RPC analogue.
-            // Bound under our outer attach guard so the drain runs on
-            // OUR worker thread, costs land inside the user's already-
-            // waiting RPC budget instead of leaking into the game frame.
-            const auto& rDrain = Mono::GetResolver();
-            if (rDrain.gc_collect != nullptr) {
-                auto drainStart = std::chrono::steady_clock::now();
-                rDrain.gc_collect(-1);
-                auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - drainStart).count();
-                UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
-                    "snapshotBegin(Mono): mono_gc_collect(-1) drained in "
-                    + std::to_string(drainMs) + " ms");
+            // Batch loop: attach for N classes, detach, yield, repeat.
+            // Each batch gives the game's main thread + Mono GC a
+            // chance to schedule between bursts of our runtime calls.
+            const std::size_t totalPlanSz = session->plan.size();
+            for (std::size_t batchStart = 0; batchStart < totalPlanSz;
+                 batchStart += kDecodeBatchSize)
+            {
+                std::size_t batchEnd =
+                    std::min(batchStart + kDecodeBatchSize, totalPlanSz);
+                {
+                    Mono::ThreadAttachGuard guard(domain);
+                    if (!guard.Attached()) {
+                        // Couldn't attach — surface as per-class error
+                        // for this batch and move on.
+                        for (std::size_t j = batchStart; j < batchEnd; ++j) {
+                            const auto& it = session->plan[j];
+                            session->classes.push_back(Snapshot::ClassPayload{
+                                {"assembly", it.assembly},
+                                {"namespace", it.ns},
+                                {"name", it.name},
+                                {"error", "mono_thread_attach failed"},
+                            });
+                        }
+                        continue;
+                    }
+                    for (std::size_t j = batchStart; j < batchEnd; ++j) {
+                        decodeOneClass(session->plan[j]);
+                    }
+                    // guard destructs here → mono_thread_detach
+                }
+                // Yield. Sleep(0) gives up our timeslice to any thread
+                // ready to run — typically the game's main thread.
+                // Cheap (~µs) on any modern Windows scheduler.
+                ::Sleep(0);
             }
         }
 
@@ -5123,7 +5149,14 @@ void RegisterCoreHandlers() {
         };
 
         if (domain != nullptr) {
-            IL2CPP::ThreadAttachGuard guard(domain);
+            // Phase 29a-v4 — batch attach mirror of the Mono path. IL2CPP
+            // doesn't have the same GC-safepoint sensitivity as Mono
+            // BDWGC (different runtime architecture), but keeping the
+            // batch/yield pattern symmetric across backends prevents
+            // a future regression where IL2CPP-specific games tip into
+            // the same wedge. ClassInfo cache lives in function scope
+            // so it survives across batches.
+            constexpr std::size_t kDecodeBatchSize = 100;
 
             // Global ClassInfo cache across the whole decode loop —
             // mirror of the Mono path. System.Object shows up as the
@@ -5144,7 +5177,7 @@ void RegisterCoreHandlers() {
 
             const auto& rIl = IL2CPP::GetResolver();
 
-            for (auto& item : session->plan) {
+            auto decodeOneClassIl = [&](Snapshot::ClassPlanItem& item) {
                 IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(item.klass);
                 if (k == nullptr) {
                     session->classes.push_back(Snapshot::ClassPayload{
@@ -5153,7 +5186,7 @@ void RegisterCoreHandlers() {
                         {"name", item.name},
                         {"error", "klass null"},
                     });
-                    continue;
+                    return;
                 }
 
                 Snapshot::ClassPayload classEntry = {
@@ -5179,7 +5212,7 @@ void RegisterCoreHandlers() {
                 if (!res.ok) {
                     classEntry["error"] = "ReadClassInfo failed";
                     session->classes.push_back(std::move(classEntry));
-                    continue;
+                    return;
                 }
                 ++decodedClasses;
                 if (!res.info.parent.name.empty()) {
@@ -5286,23 +5319,33 @@ void RegisterCoreHandlers() {
                 if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
 
                 session->classes.push_back(std::move(classEntry));
-            }
+            };  // end decodeOneClassIl lambda
 
-            // Phase 29a-v3 — drain IL2CPP GC inside our attach window.
-            // Mirror of the Mono path. IL2CPP doesn't have BDWGC's
-            // shutdown-stall behaviour to the same extent (different GC
-            // architecture) but draining symmetrically keeps the per-
-            // RPC cost predictable + matches the disconnect-time hook
-            // pattern. `il2cpp_gc_collect(0)` = full collection.
-            const auto& rDrainIl = IL2CPP::GetResolver();
-            if (rDrainIl.gc_collect != nullptr) {
-                auto drainStart = std::chrono::steady_clock::now();
-                rDrainIl.gc_collect(0);
-                auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - drainStart).count();
-                UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
-                    "snapshotBegin(IL2CPP): il2cpp_gc_collect(0) drained in "
-                    + std::to_string(drainMs) + " ms");
+            const std::size_t totalPlanSz = session->plan.size();
+            for (std::size_t batchStart = 0; batchStart < totalPlanSz;
+                 batchStart += kDecodeBatchSize)
+            {
+                std::size_t batchEnd =
+                    std::min(batchStart + kDecodeBatchSize, totalPlanSz);
+                {
+                    IL2CPP::ThreadAttachGuard guard(domain);
+                    if (!guard.Attached()) {
+                        for (std::size_t j = batchStart; j < batchEnd; ++j) {
+                            const auto& it = session->plan[j];
+                            session->classes.push_back(Snapshot::ClassPayload{
+                                {"assembly", it.assembly},
+                                {"namespace", it.ns},
+                                {"name", it.name},
+                                {"error", "il2cpp_thread_attach failed"},
+                            });
+                        }
+                        continue;
+                    }
+                    for (std::size_t j = batchStart; j < batchEnd; ++j) {
+                        decodeOneClassIl(session->plan[j]);
+                    }
+                }
+                ::Sleep(0);
             }
         }
 
