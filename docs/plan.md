@@ -1956,15 +1956,30 @@ a given session.
   playing the relevant game content to trigger the lambda body, then
   re-scan. Replaces the old v1-only advisory that pre-dated v2/v3.
 
-- [ ] **v3.1** Parse `MetadataInitializerEntry` struct layout that
-  `il2cpp_codegen_initialize_method` consumes — recover the typeIndex
-  field, cross-look in `Il2CppMetadataRegistration->types[]` (already
-  discovered by [IL2CPPMetadataRegistration](../dll/src/il2cpp/IL2CPPMetadataRegistration.cpp)),
-  resolve via `il2cpp_class_from_il2cpp_type` to get the class. Then
-  the slot→class mapping is **static** — no runtime population required,
-  and `<>c` xref works even when the lambda has never run. Layout
-  needs reverse-engineering empirically (the v3.0 diagnostic can dump
-  `[lazy_init_slot..+32]` bytes for inspection). Estimated 1-2 days.
+- [⚠] **v3.1** Attempted 2026-05-26 (build #581→#593) — hit IL2CPP v29
+  layout dead-end. Three slot→class mapping hypotheses all failed:
+  (1) `types[]` index out of range (typesCount=29456 vs observed
+  50999), (2) typeDef index via per-image walk out of range (10001
+  classes vs 50999), (3) `Il2CppMetadataRegistration.metadataUsages[]`
+  at +0x78 is **NULL on v29** — the central indirection array was
+  removed in IL2CPP v29 and replaced with an unknown per-method init
+  protocol. Diagnostic infrastructure + token capture + scanner all
+  in place ready for v3.2 (see lessons-learned.md §"Phase 28b-v3.1
+  dead-end" for the cookbook).
+
+- [📋] **v3.2** ⚠ **DEFERRED INDEFINITELY** — `<>c.<>9__0_X`
+  lambda-cache xref is a niche use case. The 95% real-world workflow
+  (singletons / user statics / instance fields / method xref) already
+  works without it (v1/v2/v3.0 + Phase 18). Cheat-table makers don't
+  need it (lambda caches aren't gameplay state). Reverse engineers
+  who want to trace LINQ logic can reach the lambda body via Methods
+  tab navigation on the parent class. **Only revisit if an actual
+  user reports needing it** — at which point the v3.2 cookbook
+  (Zydis-disasm `il2cpp_codegen_initialize_runtime_metadata` + extend
+  MetadataParser to read `Il2CppMetadataUsageList` from
+  global-metadata.dat) is documented and ready to execute, estimated
+  2-4 days. Until then v3.0's banner advisory cleanly explains the
+  limitation to anyone who stumbles onto it.
 
 #### Live-verify (build #581, SaGa F2R, 2026-05-26)
 

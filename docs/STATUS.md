@@ -26,7 +26,21 @@ Diagnostic + scaffolding infra all shipped + ready for v3.2:
   null on v29 but works on v24/v27 if back-port needed)
 * `Test-LazyInitSlots.ps1` pretty-printer
 
-### v3.2 cookbook (next session pickup)
+### v3.2 — DEFERRED INDEFINITELY (was: next session pickup)
+
+After user feedback: `<>c.<>9__0_X` xref is a genuinely niche use case.
+v3.0 already covers the 95% real-world workflow (singletons, user
+statics, instance fields, method xref). Cheat-table makers don't need
+lambda-cache xref (lambda caches aren't gameplay state). Reverse
+engineers who want to trace LINQ logic can reach the lambda body via
+Methods tab navigation on the parent class.
+
+**Only resurrect v3.2 if an actual user reports needing it.** Until
+then the v3.0 banner advisory ("try playing the relevant game content
+to trigger the lambda body, then re-scan") cleanly explains the
+limitation to anyone who stumbles onto it.
+
+### v3.2 cookbook (preserved here for future revival)
 
 Reverse-engineer v29's `il2cpp_codegen_initialize_runtime_metadata`
 function — the canonical init target shared by all 7,900 lazy-init
@@ -43,13 +57,9 @@ slots on SaGa F2R. Steps:
 4. Extend `MetadataParser` to read those tables; build
    `tokenIndex → (kind, sourceIndex)` map at startup.
 5. For sourceIndex with kind=TypeInfo, look up in `typeDefMap` (already
-   built). Replace `ResolveTypeInfoSlotClass`'s current
-   metadataUsages-based stub.
+   built). Replace `ResolveTypeInfoSlotClass`'s current stub.
 
-Estimated 2-4 days. Not blocking — v3.0 covers all classes that get
-init'd via any path (singleton accessors, UI controllers, etc.) which
-is the common case. Only `<>c`-style classes whose lambda body has
-never run in the current session stay unmappable.
+Estimated 2-4 days when/if needed.
 
 ---
 
