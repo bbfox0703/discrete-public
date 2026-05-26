@@ -1,6 +1,72 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-26 late evening — build #602 — Phase 29a closed).
+**Branch**: `dev` (2026-05-26 night — **Phase 29b SHIPPED + LIVE-VERIFIED across SaGa F2R / BongoCat / 활俠傳**, build #637).
+
+## TL;DR — what's left to pick up (build #637 session)
+
+**Phase 29b — Snapshot tab + diff UI SHIPPED + LIVE-VERIFIED on all
+three Mono / IL2CPP / x86 targets**. The Snapshot tab (MainWindow
+position 7) captures the running game's managed state via Phase 29a
+RPCs, diffs two snapshots, and surfaces row-level changes with
+class.field.instance context attached. Strategy C UI filter (synthetic-
+types checkbox, default ON) shipped. Cross-game snapshot stale-marking
+shipped (game_build_id added to handshake). AOT sort comparers wired
+for the diff DataGrid (avoiding the documented three-layer sort trap).
+
+Took **five iterations of debugging** to get there because Mono on
+32-bit + x64 has surprisingly different freeze behaviour from IL2CPP.
+
+| Build | Iteration | What landed |
+|---|---|---|
+| #596 | v1 | Per-chunk decode under per-chunk attach. 활俠傳 froze mid-snapshot AND post-snapshot. |
+| #598 | v2 — decode-in-Begin | One outer attach for whole decode. 활俠傳 freeze gone; BongoCat post-close hang appeared. |
+| #602 | v2.1 — memoise ReadClassInfo | Global ClassInfo cache. BongoCat close-hang fixed. |
+| #604–612 | 29b UI + system-asm exclude + 27c smoke fix | UI tab + ulong DTO + JSON parse fixes + open-generic filter. |
+| #629 | v4 round 1 — batch attach + heap-walk yield | Tried "yield often" approach. BongoCat regressed (game hangs after RPC). |
+| #631–633 | v4 round 2–3 — revert batch + gc_collect drain + Sleep | Drain ran in 19-22ms; didn't help. |
+| #637 | **v4 round 4 — skip Mono static field VALUES** | **The actual fix.** mono_class_vtable from worker thread → BDWGC tracking entries → game's main thread runs catch-up GC on next allocation → freeze. Removed the call. Static field METADATA still captured; user gets value on-demand via Browser tab. **All three targets responsive.** |
+
+Live-verified at build #637 across:
+* **SaGa F2R (IL2CPP v29 / Unity 2021.3 / x64)**: full snapshot + diff
+  with real numeric Δ values (e.g. `MainGame/DVECTOR.vx 110 → 267 (+157)`).
+  Static field VALUES captured (IL2CPP path keeps ResolveStaticBaseAddress
+  — different GC architecture, no main-thread catch-up problem).
+* **BongoCat (Mono / Unity 6000.2 / x64)**: snapshot completes, game
+  stays responsive (cat animates, can be closed cleanly).
+* **활俠傳 (Mono x86 / Unity 2020.3)**: snapshot completes
+  (~60s for 3,647 user classes / 78K instances), BGM continues
+  uninterrupted, game closeable normally.
+
+Strategy C UI filter (synthetic-types checkbox, default ON), changed-
+only / added / removed toggles, class-name substring filter all
+working. Cross-tab handoff (diff row → Inspector / Address Lookup)
+shipped. DataGrid sort comparers wired per `aot-pitfalls.md` §4.5.
+
+### Known follow-ups (deferred — Phase 29 polish / 29c / 29d)
+
+1. **Noise reduction on diff result** (user feedback): with 1,186
+   changed rows on 활俠傳 + SaGa F2R diff, hard to find signal. UI
+   could expose:
+   - Old/New value range filter (numeric)
+   - Pointer mask toggle (hide rows where Old/New start with "ptr=")
+   - Field-name keyword filter (currently only class-name filter)
+   - Distinct-count statistics (fields appearing in N+ rows often
+     turn out to be noise)
+   - Skip rows where Δ is just a pointer-address change (e.g.
+     re-allocated object — value moved, content same)
+2. **Stack-trace strings appearing in diff** — System.Exception
+   instances have a `_stackTrace` field that's a managed array;
+   when captured + serialized + diffed, produces huge string blobs
+   that drown out real changes. Filter or truncate.
+3. **Static field VALUE on Mono** — currently only metadata.
+   Possible future: opt-in "include static values (may freeze
+   game briefly)" checkbox.
+4. **Phase 29c — SQLite cross-session persistence** — original
+   29 plan item; will need to handle the "stale" flag and
+   game_build_id properly when reading snapshots from a previous
+   game launch.
+
+---
 
 ## TL;DR — what's left to pick up (build #602 session)
 

@@ -424,6 +424,118 @@ process kill required.
 
 ---
 
+### Phase 29a-v4 — mono_class_vtable from worker thread wedges game's main thread on next allocation  ✅ **Fixed build #637**
+
+**Symptom**: After Phase 29b snapshot tab landed (build #604), and
+through five iterations of "fix the Mono freeze" debugging (#618 GC
+drain, #627 batch attach + yields, #629 heap-walk yield, #631 ulong
+DTO + revert batch-attach), BongoCat (Mono x64) AND 활俠傳 (Mono x86)
+both continued to wedge the game window AFTER our snapshotBegin RPC
+returned. Three diagnostic clues converged:
+
+1. **BGM kept playing** on 활俠傳 — audio thread was alive, only
+   game's main thread (rendering + input) frozen.
+2. **BongoCat's cat moved once on mouse click then wedged** — main
+   thread processed ONE input event, then blocked.
+3. **Hang happened AFTER Capturing ended** — not during our work,
+   but right when our pipe worker stopped doing things and game's
+   main thread tried to resume.
+
+SaGa F2R (IL2CPP x64) had ZERO freeze with the same code paths.
+
+**Root cause**: `Mono::ResolveStaticBaseAddress` calls
+`mono_class_vtable(domain, klass)` once per class with static fields
+— under our worker thread's `ThreadAttachGuard`. `mono_class_vtable`
+lazily allocates a `MonoVTable*` in BDWGC's managed heap when one
+doesn't already exist. For 활俠傳 with 3,647 user classes that's
+~700-1000 vtable allocations during a snapshot; for BongoCat ~100-
+200.
+
+BDWGC tracks every allocation it makes. When the game's main thread
+NEXT tries to allocate anything (which is roughly every frame for a
+Unity game — UI rendering, boxed values, interned strings, etc.),
+BDWGC's allocation path may trigger a major GC. With our 700+
+vtable refs added since the last GC, that major GC takes much longer
+than usual — long enough for Windows DWM to mark the window
+unresponsive (≥5 s of no WM_PAINT).
+
+The mono_gc_collect drain we added at the end of our decode (build
+#618-633) ran in 19-22ms on our worker thread. It did COLLECT
+unreachable objects, but it didn't drain the work the game's
+main thread is responsible for — the bookkeeping for the new vtable
+refs sits in metadata structures the game's main thread needs to
+acknowledge on its own GC cycle.
+
+The 500ms Sleep "breathe" we added didn't help either — the game's
+main thread won't be CPU-starved by us during that sleep (we
+released the attach + we're sleeping), but it has nothing else to
+GC against until it tries to ALLOCATE again, which is whatever the
+next frame happens to do.
+
+**Why IL2CPP doesn't have this**: IL2CPP uses a different GC
+implementation (typically Boehm-Demers-Weiser variant in il2cpp.dll's
+managed heap, but with different collection scheduling that doesn't
+piggyback on the next allocation from the main thread). Also,
+`il2cpp_class_get_static_data(klass)` doesn't trigger vtable
+allocation — IL2CPP's static fields are AOT-laid-out, so the static
+data pointer is already resolved at compile time.
+
+**Fix**: stop calling `mono_class_vtable` from the snapshot decode
+path on Mono. The snapshot still captures static field METADATA
+(name, type, offset) for diff purposes — those come from
+`Mono::ReadClassInfo` which doesn't trigger vtable allocation. The
+VALUE read (`base + offset`) requires the static base, which
+requires the vtable, which is the part we skip. Static rows now
+appear with `error: "static_value_skipped_mono"` in the wire shape;
+UI shows "(static, value not captured on Mono)" so users know it's
+intentional, not a bug.
+
+Trade-off acknowledged: snapshot diff on Mono loses static-value
+tracking. Users who specifically need a static value still get it
+via the Browser tab's static-field path — that's a single
+`mono_class_vtable` call for one class, no bulk pressure on the
+game.
+
+**Generalization**:
+
+1. ANY Mono runtime call that lazily allocates managed memory
+   (vtables, type info, JIT trampolines, string interning) from a
+   non-main thread defers cleanup work to the game's main thread.
+   On heavy batch workloads this stalls the main thread for as long
+   as the next GC cycle takes.
+2. Calling such APIs from a `mono_thread_attach`'d worker thread
+   doesn't make them safe — attach just lets you call them without
+   crashing. It doesn't make Mono's GC scheduling treat your
+   allocations as the main thread's.
+3. The disconnect-time drain hook (Phase 27 follow-up entry above)
+   covers the OPPOSITE direction: you've ALREADY done the work, the
+   queue is sitting there, drain it before disconnect. That doesn't
+   help WITHIN a session.
+
+**How to spot this in the future**: if a Mono-only feature shows
+"game responsive during our work, freezes AFTER our work returns",
+suspect lazy-allocation calls in your worker-thread runtime API
+usage. Audit for `mono_class_vtable`, `mono_class_init`,
+`mono_runtime_class_init`, `mono_compile_method`,
+`mono_string_intern`, and anything in the `mono_object_new` /
+`mono_array_new` family. If you find any: either move them to the
+game's main thread via the Phase 20-MT dispatcher, or find a
+metadata-driven alternative.
+
+**Cross-check**: BongoCat at build #602 (where this lesson didn't
+exist) didn't freeze the game — but that's because #602 used the
+LEGACY `ResolveStaticFieldAddress(class, fieldName)` per-static-
+field path, which called `mono_class_vtable` once per static
+INSTEAD of once per CLASS. Larger absolute call count BUT each call
+returned an existing vtable (from build #602's earlier scan paths),
+so few new allocations. Build #631's per-class `ResolveStaticBaseAddress`
+optimisation that LOOKED like a perf win was actually triggering
+MORE fresh vtable allocations because the call rate was lower so
+the runtime had less chance to satisfy each call from cache.
+Counter-intuitive but logged here.
+
+---
+
 ### Phase C follow-up — IL2CPP equivalent: per-RPC ThreadAttachGuard batching across N pipe calls stalls shutdown  ✅ **Fixed build #496**
 
 **Symptom**: SaGa Frontier 2 Remastered (IL2CPP v29, Unity 2021.3.39f1)
