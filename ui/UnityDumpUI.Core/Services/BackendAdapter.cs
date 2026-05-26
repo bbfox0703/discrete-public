@@ -936,6 +936,81 @@ public sealed class BackendAdapter : ILiveExportSource
         return env.Result ?? throw new PipeProtocolException("endValueScan returned no result");
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 29 — Snapshot & Diff.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// <c>snapshotBegin</c> — run one wide heap walk + decode every class
+    /// (statics + instances + array elements) under one outer
+    /// ThreadAttachGuard, cache the per-class JSON payload server-side,
+    /// return the snapshot id + plan summary.
+    /// </summary>
+    /// <param name="assemblies">Optional narrowing list. <c>null</c> or
+    /// empty → server defaults to every visible assembly ("全抓").</param>
+    /// <param name="instanceCap">Max instances captured per class. Default
+    /// 100; hard-cap 1024 server-side.</param>
+    /// <param name="arrayCap">Max elements per <c>T[]</c> / <c>List&lt;T&gt;</c>
+    /// field. Default 50; hard-cap 256 server-side.</param>
+    public async Task<SnapshotBeginResult> SnapshotBeginAsync(
+        IReadOnlyList<string>? assemblies = null,
+        int? instanceCap = null,
+        int? arrayCap    = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>();
+        if (assemblies is { Count: > 0 })
+        {
+            using var doc = JsonDocument.Parse(BuildStringArrayJson(assemblies));
+            args["assemblies"] = doc.RootElement.Clone();
+        }
+        if (instanceCap.HasValue) args["instanceCap"] = Int(instanceCap.Value);
+        if (arrayCap.HasValue)    args["arrayCap"]    = Int(arrayCap.Value);
+
+        var env = await _pipe.SendAsync(
+            "snapshotBegin", args,
+            ProtocolJsonContext.Default.RpcEnvelopeSnapshotBeginResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("snapshotBegin returned no result");
+    }
+
+    /// <summary>
+    /// <c>snapshotChunk</c> — fetch the next slice of pre-decoded class
+    /// payloads. Loop until <see cref="SnapshotChunkResult.Done"/>.
+    /// </summary>
+    public async Task<SnapshotChunkResult> SnapshotChunkAsync(
+        string snapshotId, int cursor, int? limit = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["snapshotId"] = Str(snapshotId),
+            ["cursor"]     = Int(cursor),
+        };
+        if (limit.HasValue) args["limit"] = Int(limit.Value);
+
+        var env = await _pipe.SendAsync(
+            "snapshotChunk", args,
+            ProtocolJsonContext.Default.RpcEnvelopeSnapshotChunkResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
+    }
+
+    /// <summary><c>snapshotEnd</c> — drop the server-side cached plan.</summary>
+    public async Task<SnapshotEndResult> SnapshotEndAsync(
+        string snapshotId, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["snapshotId"] = Str(snapshotId),
+        };
+        var env = await _pipe.SendAsync(
+            "snapshotEnd", args,
+            ProtocolJsonContext.Default.RpcEnvelopeSnapshotEndResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("snapshotEnd returned no result");
+    }
+
     private static void ThrowIfError(RpcError? error)
     {
         if (error is not null)

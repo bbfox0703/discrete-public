@@ -920,3 +920,142 @@ public sealed class EnumValueEntry
     [JsonPropertyName("raw_hex")]      public string?      RawHex      { get; set; }
     [JsonPropertyName("decode_error")] public string?      DecodeError { get; set; }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 29 — Snapshot & Diff (snapshotBegin / snapshotChunk / snapshotEnd).
+// ---------------------------------------------------------------------------
+
+/// <summary>Per-assembly summary returned in the Begin response's `plan`
+/// array. UI uses this for the "X classes / Y instances per assembly"
+/// progress feedback.</summary>
+public sealed class SnapshotPlanEntry
+{
+    [JsonPropertyName("assembly")]      public string Assembly      { get; set; } = string.Empty;
+    [JsonPropertyName("classCount")]    public int    ClassCount    { get; set; }
+    [JsonPropertyName("instanceCount")] public int    InstanceCount { get; set; }
+}
+
+public sealed class SnapshotScanStats
+{
+    [JsonPropertyName("regionsTotal")]     public int  RegionsTotal     { get; set; }
+    [JsonPropertyName("regionsScanned")]   public int  RegionsScanned   { get; set; }
+    [JsonPropertyName("regionsSkipImage")] public int  RegionsSkipImage { get; set; }
+    [JsonPropertyName("regionsSkipStack")] public int  RegionsSkipStack { get; set; }
+    [JsonPropertyName("bytesScanned")]     public long BytesScanned     { get; set; }
+    /// <summary>Mono-only stat — number of vtable→klass derefs the wide scan
+    /// resolved on its first pass. IL2CPP returns null.</summary>
+    [JsonPropertyName("vtablesResolved")]  public int? VtablesResolved  { get; set; }
+}
+
+public sealed class SnapshotDecodeStats
+{
+    [JsonPropertyName("decodedClasses")]           public int DecodedClasses           { get; set; }
+    [JsonPropertyName("decodedInstances")]         public int DecodedInstances         { get; set; }
+    [JsonPropertyName("decodedArrays")]            public int DecodedArrays            { get; set; }
+    [JsonPropertyName("skippedOpenGenericArrays")] public int SkippedOpenGenericArrays { get; set; }
+}
+
+public sealed class SnapshotBeginResult
+{
+    [JsonPropertyName("ok")]              public bool   Ok              { get; set; }
+    [JsonPropertyName("snapshotId")]      public string SnapshotId      { get; set; } = string.Empty;
+    [JsonPropertyName("capturedAt")]      public string CapturedAt      { get; set; } = string.Empty;
+    [JsonPropertyName("gameBuildId")]     public string GameBuildId     { get; set; } = string.Empty;
+    [JsonPropertyName("gameSessionId")]   public string GameSessionId   { get; set; } = string.Empty;
+    [JsonPropertyName("instanceCap")]     public int    InstanceCap     { get; set; }
+    [JsonPropertyName("arrayCap")]        public int    ArrayCap        { get; set; }
+    [JsonPropertyName("totalClasses")]    public int    TotalClasses    { get; set; }
+    [JsonPropertyName("totalInstances")]  public int    TotalInstances  { get; set; }
+    [JsonPropertyName("plan")]            public List<SnapshotPlanEntry> Plan       { get; set; } = new();
+    [JsonPropertyName("scanStats")]       public SnapshotScanStats?      ScanStats   { get; set; }
+    [JsonPropertyName("decodeStats")]     public SnapshotDecodeStats?    DecodeStats { get; set; }
+    [JsonPropertyName("error")]           public string?                 Error       { get; set; }
+}
+
+/// <summary>One field inside an instance (or one static field of a class).
+/// The shape mirrors the existing <see cref="WalkedField"/> with the
+/// addition of <see cref="ArrayElements"/> (inline T[] capture from the
+/// snapshot walker) and <see cref="ArrayError"/> for arrays whose stored
+/// pointer didn't point at a valid managed array header (false-positive
+/// instances).</summary>
+public sealed class SnapshotFieldEntry
+{
+    [JsonPropertyName("name")]              public string       Name             { get; set; } = string.Empty;
+    [JsonPropertyName("type")]              public string       Type             { get; set; } = string.Empty;
+    [JsonPropertyName("offset")]            public long         Offset           { get; set; }
+    [JsonPropertyName("from")]              public string?      From             { get; set; }
+    [JsonPropertyName("is_enum")]           public bool?        IsEnum           { get; set; }
+    [JsonPropertyName("is_value_type")]     public bool?        IsValueType      { get; set; }
+    [JsonPropertyName("address")]           public string?      Address          { get; set; }
+    [JsonPropertyName("value")]             public JsonElement? Value            { get; set; }
+    [JsonPropertyName("ptr")]               public string?      Ptr              { get; set; }
+    [JsonPropertyName("string")]            public string?      StringValue      { get; set; }
+    [JsonPropertyName("string_length")]     public int?         StringLength     { get; set; }
+    [JsonPropertyName("string_error")]      public string?      StringError      { get; set; }
+    [JsonPropertyName("error")]             public string?      Error            { get; set; }
+    [JsonPropertyName("arrayElements")]     public SnapshotArrayElements? ArrayElements    { get; set; }
+    [JsonPropertyName("arrayError")]        public string?      ArrayError       { get; set; }
+    [JsonPropertyName("arrayErrorLength")]  public long?        ArrayErrorLength { get; set; }
+}
+
+public sealed class SnapshotArrayElement
+{
+    [JsonPropertyName("index")]   public int          Index   { get; set; }
+    [JsonPropertyName("value")]   public JsonElement? Value   { get; set; }
+    [JsonPropertyName("ptr")]     public string?      Ptr     { get; set; }
+    [JsonPropertyName("string")]  public string?      String  { get; set; }
+    [JsonPropertyName("error")]   public string?      Error   { get; set; }
+    [JsonPropertyName("address")] public string?      Address { get; set; }
+}
+
+public sealed class SnapshotArrayElements
+{
+    [JsonPropertyName("length")]       public long                          Length       { get; set; }
+    [JsonPropertyName("count")]        public int                           Count        { get; set; }
+    [JsonPropertyName("element_type")] public string?                       ElementType  { get; set; }
+    [JsonPropertyName("element_size")] public long                          ElementSize  { get; set; }
+    [JsonPropertyName("is_pointer")]   public bool                          IsPointer    { get; set; }
+    [JsonPropertyName("elements")]     public List<SnapshotArrayElement>    Elements     { get; set; } = new();
+}
+
+public sealed class SnapshotInstanceEntry
+{
+    [JsonPropertyName("address")] public string                     Address { get; set; } = string.Empty;
+    [JsonPropertyName("fields")]  public List<SnapshotFieldEntry>   Fields  { get; set; } = new();
+}
+
+public sealed class SnapshotClassParent
+{
+    [JsonPropertyName("namespace")] public string Namespace { get; set; } = string.Empty;
+    [JsonPropertyName("name")]      public string Name      { get; set; } = string.Empty;
+}
+
+public sealed class SnapshotClassEntry
+{
+    [JsonPropertyName("assembly")]  public string                       Assembly  { get; set; } = string.Empty;
+    [JsonPropertyName("namespace")] public string                       Namespace { get; set; } = string.Empty;
+    [JsonPropertyName("name")]      public string                       Name      { get; set; } = string.Empty;
+    [JsonPropertyName("parent")]    public SnapshotClassParent?         Parent    { get; set; }
+    [JsonPropertyName("statics")]   public List<SnapshotFieldEntry>?    Statics   { get; set; }
+    [JsonPropertyName("instances")] public List<SnapshotInstanceEntry>? Instances { get; set; }
+    [JsonPropertyName("error")]     public string?                      Error     { get; set; }
+}
+
+public sealed class SnapshotChunkResult
+{
+    [JsonPropertyName("ok")]         public bool                       Ok         { get; set; }
+    [JsonPropertyName("snapshotId")] public string                     SnapshotId { get; set; } = string.Empty;
+    [JsonPropertyName("cursor")]     public int                        Cursor     { get; set; }
+    [JsonPropertyName("nextCursor")] public int                        NextCursor { get; set; }
+    [JsonPropertyName("done")]       public bool                       Done       { get; set; }
+    [JsonPropertyName("classes")]    public List<SnapshotClassEntry>   Classes    { get; set; } = new();
+    [JsonPropertyName("error")]      public string?                    Error      { get; set; }
+}
+
+public sealed class SnapshotEndResult
+{
+    [JsonPropertyName("ok")]         public bool   Ok         { get; set; }
+    [JsonPropertyName("snapshotId")] public string SnapshotId { get; set; } = string.Empty;
+    [JsonPropertyName("dropped")]    public bool   Dropped    { get; set; }
+    [JsonPropertyName("error")]      public string? Error     { get; set; }
+}

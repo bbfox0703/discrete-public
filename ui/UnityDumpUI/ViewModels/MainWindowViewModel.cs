@@ -75,6 +75,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         SymbolFinder.NavigateRequested += OnSymbolFinderNavigateRequested;
         ValueSearch     = new ValueSearchViewModel(_backend, _logger);
         ValueSearch.NavigateToInspectorRequested += OnValueSearchNavigateToInspector;
+        // Phase 29b — Snapshot tab. Wraps snapshotBegin/Chunk/End RPCs,
+        // builds local in-memory envelope per capture, diffs two
+        // snapshots into a flat row set. Same cross-tab handoff
+        // contract as the other tabs (Inspector / Address Lookup).
+        Snapshot        = new SnapshotViewModel(_backend, _logger);
+        Snapshot.NavigateToInspectorRequested     += OnSnapshotNavigateToInspector;
+        Snapshot.NavigateToAddressLookupRequested += OnSnapshotNavigateToAddressLookup;
         // Phase 20b: Scene Explorer tab. SceneEnumerator wraps the
         // UnityEngine.Object.FindObjects* + Transform-walk recipe from
         // unity_scene.lua; Phase 20-MT keeps main-thread routing on
@@ -267,6 +274,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public ValueSearchViewModel ValueSearch { get; }
 
     /// <summary>
+    /// Phase 29b — Snapshot &amp; Diff tab. Captures the running game's
+    /// managed state (statics + live instances + array elements) via
+    /// the Phase 29a DLL RPCs and diffs two snapshots locally. "全抓"
+    /// default scope per Phase 29 design — user doesn't have to pick a
+    /// class. UI handles synthetic-type filtering locally (strategy C).
+    /// </summary>
+    public SnapshotViewModel Snapshot { get; }
+
+    /// <summary>
     /// Phase 20b — Scene Explorer tab. Filter-driven TreeView walking
     /// Unity's authoritative scene graph via Object.FindObjects* +
     /// Transform.GetChild. All icalls main-thread-routed (Phase 20-MT)
@@ -312,6 +328,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexSymbolFinder  = 4;
     public const int TabIndexScene         = 5;
     public const int TabIndexValueSearch   = 6;
+    public const int TabIndexSnapshot      = 7;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -1343,6 +1360,63 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             ErrorMessage = $"Navigate to inspector failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"OnValueSearchNavigateToInspector: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Phase 29b — Snapshot diff row → Inspector handoff. Pulls the
+    /// (assembly, ns, class, instance address) tuple off the diff row,
+    /// drops the Inspector on that instance, switches tab. Diff rows
+    /// where the change is at "static" scope have an empty
+    /// InstanceAddress; we still switch the inspector's class context
+    /// so the user can browse statics from there.
+    /// </summary>
+    private void OnSnapshotNavigateToInspector(SnapshotDiffRow row)
+    {
+        try
+        {
+            // ClassDisplay = "Namespace.ClassName" (or just ClassName for
+            // global-namespace types). Split off the namespace prefix —
+            // Inspector.SetTarget expects the bare class name.
+            string ns = string.Empty;
+            string name = row.ClassDisplay;
+            int lastDot = row.ClassDisplay.LastIndexOf('.');
+            if (lastDot > 0 && lastDot < row.ClassDisplay.Length - 1)
+            {
+                ns   = row.ClassDisplay.Substring(0, lastDot);
+                name = row.ClassDisplay.Substring(lastDot + 1);
+            }
+            Inspector.SetTarget(row.Assembly, ns, name);
+            if (!string.IsNullOrEmpty(row.InstanceAddress))
+                Inspector.FocusOnInstance(row.InstanceAddress);
+            SelectedDetailTabIndex = TabIndexInspector;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Navigate from snapshot to inspector failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnSnapshotNavigateToInspector: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Phase 29b — Snapshot diff row → Address Lookup handoff. Fire-and-
+    /// forget the prefill+lookup call; failures land in the lookup
+    /// VM's own ErrorMessage so the user sees them in the right place.
+    /// </summary>
+    private void OnSnapshotNavigateToAddressLookup(SnapshotDiffRow row)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(row.InstanceAddress)) return;
+            SelectedDetailTabIndex = TabIndexAddressLookup;
+            _ = AddressLookup.PrefillAndLookupAsync(row.InstanceAddress);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Navigate from snapshot to address lookup failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnSnapshotNavigateToAddressLookup: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

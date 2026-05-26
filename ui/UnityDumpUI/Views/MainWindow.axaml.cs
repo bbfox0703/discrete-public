@@ -993,6 +993,53 @@ public partial class MainWindow : Window
         await CopyToClipboardAsync(row.ClassDisplay);
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 29b — Snapshot diff row activation + context menu.
+    // -----------------------------------------------------------------------
+
+    private void OnSnapshotRowActivated(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("SnapshotDiffGrid");
+        if (grid?.SelectedItem is SnapshotDiffRow row)
+            vm.Snapshot.NavigateToInspector(row);
+    }
+
+    private void OnSnapshotInspectInstance(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is not null) vm.Snapshot.NavigateToInspector(row);
+    }
+
+    private void OnSnapshotAddressLookup(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is not null) vm.Snapshot.NavigateToAddressLookup(row);
+    }
+
+    private async void OnSnapshotCopyInstanceAddr(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.InstanceAddress);
+    }
+
+    private async void OnSnapshotCopyClass(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.ClassDisplay);
+    }
+
+    private async void OnSnapshotCopyField(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.Field);
+    }
+
     private void OnSymbolFinderNavigateMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
