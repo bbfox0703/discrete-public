@@ -60,9 +60,30 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// works for free.</summary>
     public ObservableCollection<SnapshotEnvelope> Snapshots { get; } = new();
 
-    /// <summary>Rows currently shown in the diff DataGrid. Rebuilt on
-    /// every Diff press + every filter toggle.</summary>
+    /// <summary>Full set of rows produced by the last <see cref="Diff"/>
+    /// — the canonical, unfiltered result. <see cref="FilteredDiffRows"/>
+    /// is the projection the UI actually binds.</summary>
     public ObservableCollection<SnapshotDiffRow> DiffRows { get; } = new();
+
+    /// <summary>Materialized projection of <see cref="DiffRows"/> under the
+    /// current filter set — what the diff DataGrid binds. Rebuilt by
+    /// <see cref="RebuildFilteredRows"/> on any filter property change
+    /// (single O(N) pass rather than per-render predicate evaluation as
+    /// the lazy IEnumerable variant did pre-noise-filter).</summary>
+    public ObservableCollection<SnapshotDiffRow> FilteredDiffRows { get; } = new();
+
+    /// <summary>Per-field-name occurrence counts in the current diff,
+    /// sorted desc. Drives the right-side stats panel — fields appearing
+    /// across many rows are often noise (e.g. <c>m_CachedPtr</c>,
+    /// <c>&lt;&gt;1__state</c>), and the user can one-click exclude them.
+    /// Rebuilt only on <see cref="Diff"/> (not on every filter toggle —
+    /// the panel reflects the underlying diff, not the filter result).</summary>
+    public ObservableCollection<FieldNameStat> FieldNameStats { get; } = new();
+
+    /// <summary>Field names the user has explicitly excluded via the stats
+    /// panel. Bound to a chip-list in the UI; <see cref="HideNoisyFields"/>
+    /// must be ON for this set to take effect.</summary>
+    public ObservableCollection<string> ExcludedFieldNames { get; } = new();
 
     // -----------------------------------------------------------------------
     // Capture options ("全抓" defaults; user can opt in to narrowing).
@@ -90,6 +111,15 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// taking it. Surfaced in the Snapshots list + diff status line.</summary>
     [ObservableProperty] private string _pendingLabel = string.Empty;
 
+    /// <summary>When set, the next <see cref="Diff"/> walks the joined
+    /// field index and emits <c>unchanged</c> rows in addition to
+    /// changed/added/removed. Default OFF — unchanged-row capture can
+    /// add 10–100× more rows on a wide diff (107K instances × ~30
+    /// fields ⇒ millions of "still equal" rows), so it's opt-in. The
+    /// payoff: lets the user filter by value range across the whole
+    /// captured state, not just what differed between A and B.</summary>
+    [ObservableProperty] private bool _includeUnchangedRows;
+
     // -----------------------------------------------------------------------
     // Selection state.
     // -----------------------------------------------------------------------
@@ -104,65 +134,93 @@ public sealed partial class SnapshotViewModel : ObservableObject
     private SnapshotEnvelope? _selectedSnapshotB;
 
     // -----------------------------------------------------------------------
-    // Diff filter options (Strategy C — UI-side filtering only).
+    // Diff filter options (Strategy C — UI-side filtering only). All
+    // filter properties below funnel through OnPropertyChanged into
+    // RebuildFilteredRows so the materialized FilteredDiffRows stays in
+    // sync without per-render predicate work.
     // -----------------------------------------------------------------------
 
     /// <summary>Default ON. Filters out classes whose names start with
     /// '&lt;' (synthetic compiler-generated types like
     /// <c>&lt;Module&gt;</c>, <c>&lt;&gt;f__AnonymousType*</c>,
-    /// <c>&lt;&gt;c</c>, <c>&lt;Start&gt;d__N</c>) and rows where the
-    /// field's "from" hint indicates open-generic context.</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredDiffRows))]
-    private bool _hideSyntheticTypes = true;
+    /// <c>&lt;&gt;c</c>, <c>&lt;Start&gt;d__N</c>).</summary>
+    [ObservableProperty] private bool _hideSyntheticTypes = true;
 
-    /// <summary>Default ON. Shows only rows where value actually differs
-    /// between snapshots — added/removed rows alone (no value change)
-    /// stay hidden unless <see cref="ShowAdded"/> / <see cref="ShowRemoved"/>
-    /// is also on.</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredDiffRows))]
-    private bool _changedOnly = true;
+    /// <summary>Show "changed" rows (value differs between A and B).
+    /// Default ON — the dominant case for the diff workflow.</summary>
+    [ObservableProperty] private bool _showChanged = true;
 
-    /// <summary>Show "added" rows (in B but not A). Off by default —
-    /// most diffs are about value changes, not net new fields.</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredDiffRows))]
-    private bool _showAdded;
+    /// <summary>Show "added" rows (in B but not A). Default OFF.</summary>
+    [ObservableProperty] private bool _showAdded;
 
-    /// <summary>Show "removed" rows (in A but not B). Same default as
-    /// <see cref="ShowAdded"/>.</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredDiffRows))]
-    private bool _showRemoved;
+    /// <summary>Show "removed" rows (in A but not B). Default OFF.</summary>
+    [ObservableProperty] private bool _showRemoved;
 
-    /// <summary>Class-name regex / substring filter on the diff result.
-    /// Lets the user narrow to a single class quickly after a wide diff.</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredDiffRows))]
-    private string _classFilterText = string.Empty;
+    /// <summary>Show "unchanged" rows (key present in both with equal
+    /// value). Default ON — when the user opts in to capturing them
+    /// they almost always want them visible too. Has no effect unless
+    /// <see cref="IncludeUnchangedRows"/> was set when <see cref="Diff"/>
+    /// last ran.</summary>
+    [ObservableProperty] private bool _showUnchanged = true;
 
-    /// <summary>Live-projection over <see cref="DiffRows"/>. The view
-    /// binds to this; the underlying <c>DiffRows</c> stays canonical.</summary>
-    public IEnumerable<SnapshotDiffRow> FilteredDiffRows
-    {
-        get
-        {
-            var clsFilter = ClassFilterText;
-            bool hasClsFilter = !string.IsNullOrWhiteSpace(clsFilter);
-            foreach (var r in DiffRows)
-            {
-                if (HideSyntheticTypes && r.IsSynthetic) continue;
-                if (ChangedOnly && r.ChangeKind != "changed" && !ShowAdded && !ShowRemoved) continue;
-                if (r.ChangeKind == "added"   && !ShowAdded   && !(r.ChangeKind == "changed")) continue;
-                if (r.ChangeKind == "removed" && !ShowRemoved && !(r.ChangeKind == "changed")) continue;
-                if (hasClsFilter &&
-                    r.ClassDisplay.IndexOf(clsFilter, StringComparison.OrdinalIgnoreCase) < 0)
-                    continue;
-                yield return r;
-            }
-        }
-    }
+    /// <summary>Class-name substring filter (case-insensitive).</summary>
+    [ObservableProperty] private string _classFilterText = string.Empty;
+
+    /// <summary>Field-name substring filter (case-insensitive). Symmetric
+    /// to <see cref="ClassFilterText"/>; both must match if both set.</summary>
+    [ObservableProperty] private string _fieldFilterText = string.Empty;
+
+    /// <summary>Lower bound (inclusive) for the numeric value range filter.
+    /// <c>null</c> = no lower bound. Applies on the "either side in range"
+    /// semantics: a row passes if Old OR New parses as numeric and falls
+    /// in <c>[Min, Max]</c>. Non-numeric rows are filtered out entirely
+    /// once any range bound is set.
+    /// Typed as <c>decimal?</c> to match Avalonia 12 <c>NumericUpDown.Value</c>
+    /// — the value-range check casts to <c>double</c> internally.</summary>
+    [ObservableProperty] private decimal? _valueRangeMin;
+
+    /// <summary>Upper bound (inclusive) for the numeric value range filter.
+    /// <c>null</c> = no upper bound.</summary>
+    [ObservableProperty] private decimal? _valueRangeMax;
+
+    /// <summary>Hide rows where both sides are pointer-formatted
+    /// (<c>ptr=0x…</c>). These are usually re-allocation noise — the
+    /// pointer changes but the referenced content's diff would show
+    /// up elsewhere if it actually differs.</summary>
+    [ObservableProperty] private bool _hidePointerChanges;
+
+    /// <summary>Hide string rows whose longer side exceeds
+    /// <see cref="LargeStringThreshold"/> characters. Targets
+    /// <c>System.Exception._stackTrace</c> / <c>_remoteStackTraceString</c>
+    /// blobs that drown out signal.</summary>
+    [ObservableProperty] private bool _hideLargeStrings = true;
+
+    /// <summary>Character threshold above which a string row is
+    /// considered "large". 256 catches typical stack-trace strings on
+    /// both Mono and CoreCLR shapes.</summary>
+    [ObservableProperty] private int _largeStringThreshold = 256;
+
+    /// <summary>Honour <see cref="ExcludedFieldNames"/> when set. Default
+    /// ON — once the user one-clicks a noisy field name from the stats
+    /// panel they expect it to disappear immediately.</summary>
+    [ObservableProperty] private bool _hideNoisyFields = true;
+
+    // CommunityToolkit source-gen OnXxxChanged hooks — each filter
+    // property triggers a single materialized rebuild. Cheaper than
+    // per-render predicate evaluation as filter count grows.
+    partial void OnHideSyntheticTypesChanged(bool value)  => RebuildFilteredRows();
+    partial void OnShowChangedChanged(bool value)         => RebuildFilteredRows();
+    partial void OnShowAddedChanged(bool value)           => RebuildFilteredRows();
+    partial void OnShowRemovedChanged(bool value)         => RebuildFilteredRows();
+    partial void OnShowUnchangedChanged(bool value)       => RebuildFilteredRows();
+    partial void OnClassFilterTextChanged(string value)   => RebuildFilteredRows();
+    partial void OnFieldFilterTextChanged(string value)   => RebuildFilteredRows();
+    partial void OnValueRangeMinChanged(decimal? value)   => RebuildFilteredRows();
+    partial void OnValueRangeMaxChanged(decimal? value)   => RebuildFilteredRows();
+    partial void OnHidePointerChangesChanged(bool value)  => RebuildFilteredRows();
+    partial void OnHideLargeStringsChanged(bool value)    => RebuildFilteredRows();
+    partial void OnLargeStringThresholdChanged(int value) => RebuildFilteredRows();
+    partial void OnHideNoisyFieldsChanged(bool value)     => RebuildFilteredRows();
 
     // -----------------------------------------------------------------------
     // Status / progress.
@@ -353,10 +411,11 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
         var sw = Stopwatch.StartNew();
         DiffRows.Clear();
-        int changed = 0, added = 0, removed = 0;
+        int changed = 0, added = 0, removed = 0, unchanged = 0;
+        bool includeUnchanged = IncludeUnchangedRows;
 
-        // Walk A → B keys to find changed + removed; second pass walks B → A
-        // to catch the added.
+        // Walk A → B keys to find changed + removed (+ optionally unchanged);
+        // second pass walks B → A to catch the added.
         foreach (var (key, va) in a.FieldIndex)
         {
             if (b.FieldIndex.TryGetValue(key, out var vb))
@@ -365,6 +424,11 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 {
                     DiffRows.Add(SnapshotDiffRow.Changed(va, vb));
                     changed++;
+                }
+                else if (includeUnchanged)
+                {
+                    DiffRows.Add(SnapshotDiffRow.Unchanged(va, vb));
+                    unchanged++;
                 }
             }
             else
@@ -383,8 +447,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
         }
 
         sw.Stop();
-        OnPropertyChanged(nameof(FilteredDiffRows));
-        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed (in {sw.ElapsedMilliseconds} ms).";
+        RecomputeFieldStats();
+        RebuildFilteredRows();
+        string unchangedNote = includeUnchanged
+            ? $", {unchanged:N0} unchanged"
+            : string.Empty;
+        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote} (in {sw.ElapsedMilliseconds} ms). Showing {FilteredDiffRows.Count:N0} after filters.";
     }
 
     [RelayCommand(CanExecute = nameof(CanDropSnapshot))]
@@ -395,7 +463,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
             Snapshots.Remove(a);
             SelectedSnapshotA = null;
             DiffRows.Clear();
-            OnPropertyChanged(nameof(FilteredDiffRows));
+            FieldNameStats.Clear();
+            RebuildFilteredRows();
             StatusMessage = "Snapshot dropped.";
         }
     }
@@ -407,9 +476,144 @@ public sealed partial class SnapshotViewModel : ObservableObject
         SelectedSnapshotA = null;
         SelectedSnapshotB = null;
         DiffRows.Clear();
-        OnPropertyChanged(nameof(FilteredDiffRows));
+        FieldNameStats.Clear();
+        ExcludedFieldNames.Clear();
+        RebuildFilteredRows();
         StatusMessage = "All snapshots cleared.";
         ErrorMessage  = null;
+    }
+
+    /// <summary>Toggle a field name in / out of <see cref="ExcludedFieldNames"/>
+    /// from the stats panel. The list is small (typically top-20) so the
+    /// O(N) scan is fine.</summary>
+    [RelayCommand]
+    public void ToggleFieldNameExclusion(string? fieldName)
+    {
+        if (string.IsNullOrEmpty(fieldName)) return;
+        int idx = -1;
+        for (int i = 0; i < ExcludedFieldNames.Count; i++)
+        {
+            if (string.Equals(ExcludedFieldNames[i], fieldName, StringComparison.Ordinal))
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx >= 0) ExcludedFieldNames.RemoveAt(idx);
+        else          ExcludedFieldNames.Add(fieldName);
+
+        // Flip the FieldNameStat.IsExcluded indicator for live UI feedback.
+        foreach (var s in FieldNameStats)
+        {
+            if (string.Equals(s.FieldName, fieldName, StringComparison.Ordinal))
+                s.IsExcluded = idx < 0;
+        }
+        RebuildFilteredRows();
+    }
+
+    /// <summary>Drop every exclusion the user has accumulated. Wired to
+    /// a "Clear exclusions" button under the stats panel.</summary>
+    [RelayCommand]
+    public void ClearFieldExclusions()
+    {
+        if (ExcludedFieldNames.Count == 0) return;
+        ExcludedFieldNames.Clear();
+        foreach (var s in FieldNameStats) s.IsExcluded = false;
+        RebuildFilteredRows();
+    }
+
+    /// <summary>Apply every filter against <see cref="DiffRows"/> and
+    /// rebuild <see cref="FilteredDiffRows"/> in place. Called by every
+    /// filter property's <c>OnXxxChanged</c> hook + by <see cref="Diff"/>
+    /// when the underlying row set itself changes. Single O(N) pass.</summary>
+    private void RebuildFilteredRows()
+    {
+        var clsFilter   = ClassFilterText;
+        var fieldFilter = FieldFilterText;
+        bool hasClsFilter   = !string.IsNullOrWhiteSpace(clsFilter);
+        bool hasFieldFilter = !string.IsNullOrWhiteSpace(fieldFilter);
+        bool useRange  = ValueRangeMin.HasValue || ValueRangeMax.HasValue;
+        double rangeMin = ValueRangeMin.HasValue ? (double)ValueRangeMin.Value : double.NegativeInfinity;
+        double rangeMax = ValueRangeMax.HasValue ? (double)ValueRangeMax.Value : double.PositiveInfinity;
+        int largeStrLimit = HideLargeStrings ? Math.Max(0, LargeStringThreshold) : int.MaxValue;
+
+        // Snapshot the exclusion set into a HashSet for O(1) lookups in
+        // the inner loop. Ordinal — field names are case-sensitive.
+        HashSet<string>? excluded = null;
+        if (HideNoisyFields && ExcludedFieldNames.Count > 0)
+            excluded = new HashSet<string>(ExcludedFieldNames, StringComparer.Ordinal);
+
+        FilteredDiffRows.Clear();
+        foreach (var r in DiffRows)
+        {
+            if (HideSyntheticTypes && r.IsSynthetic) continue;
+
+            // Three independent change-kind toggles (Phase-29-polish refactor —
+            // replaces the prior ChangedOnly + ShowAdded + ShowRemoved triad
+            // whose interaction had dead-code branches).
+            if (r.ChangeKind == "changed"   && !ShowChanged)   continue;
+            if (r.ChangeKind == "added"     && !ShowAdded)     continue;
+            if (r.ChangeKind == "removed"   && !ShowRemoved)   continue;
+            if (r.ChangeKind == "unchanged" && !ShowUnchanged) continue;
+
+            if (hasClsFilter &&
+                r.ClassDisplay.IndexOf(clsFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            if (hasFieldFilter &&
+                r.Field.IndexOf(fieldFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+
+            if (excluded is not null && excluded.Contains(r.Field)) continue;
+
+            if (HidePointerChanges && r.Kind == DiffRowKind.Pointer) continue;
+
+            if (r.Kind == DiffRowKind.String && r.MaxValueLength > largeStrLimit) continue;
+
+            if (useRange)
+            {
+                if (r.Kind != DiffRowKind.Numeric) continue;
+                bool oldIn = r.NumericOld is double o && o >= rangeMin && o <= rangeMax;
+                bool newIn = r.NumericNew is double n && n >= rangeMin && n <= rangeMax;
+                if (!oldIn && !newIn) continue;
+            }
+
+            FilteredDiffRows.Add(r);
+        }
+    }
+
+    /// <summary>Build the per-field-name occurrence histogram from the
+    /// current <see cref="DiffRows"/>, sorted descending by count, top 30.
+    /// Cheap O(N) — typical N is ~1k–2k changed rows.</summary>
+    private void RecomputeFieldStats()
+    {
+        FieldNameStats.Clear();
+        if (DiffRows.Count == 0) return;
+
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var r in DiffRows)
+        {
+            if (string.IsNullOrEmpty(r.Field)) continue;
+            counts.TryGetValue(r.Field, out int c);
+            counts[r.Field] = c + 1;
+        }
+
+        var excludedSet = ExcludedFieldNames.Count > 0
+            ? new HashSet<string>(ExcludedFieldNames, StringComparer.Ordinal)
+            : null;
+
+        const int kTopN = 30;
+        foreach (var kvp in counts
+                            .OrderByDescending(kv => kv.Value)
+                            .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+                            .Take(kTopN))
+        {
+            FieldNameStats.Add(new FieldNameStat
+            {
+                FieldName  = kvp.Key,
+                Count      = kvp.Value,
+                IsExcluded = excludedSet?.Contains(kvp.Key) ?? false,
+            });
+        }
     }
 
     private bool CanTakeSnapshot()    => !IsBusy;
@@ -636,6 +840,18 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     }
 }
 
+/// <summary>One row in the right-side stats panel — a field name + how
+/// many diff rows it occurs on. The <see cref="IsExcluded"/> flag is
+/// bound to a chip / checkbox so live toggling reflects the user's
+/// current exclusion set.</summary>
+public sealed partial class FieldNameStat : ObservableObject
+{
+    public required string FieldName { get; init; }
+    public required int    Count     { get; init; }
+
+    [ObservableProperty] private bool _isExcluded;
+}
+
 public sealed class SnapshotFieldValue
 {
     public string Assembly        { get; init; } = string.Empty;
@@ -655,6 +871,22 @@ public sealed class SnapshotFieldValue
 // Diff row — surfaces in the result DataGrid.
 // ===========================================================================
 
+/// <summary>Coarse classifier for a diff row's value shape — computed once
+/// at row construction so the noise-reduction filters key off it in O(1).
+/// "Pointer" rows are the re-allocation noise the user flagged: both sides
+/// formatted as <c>ptr=0x...</c>, no semantic content change visible.
+/// "String" carries <see cref="SnapshotDiffRow.MaxValueLength"/> so the
+/// "hide large strings" filter (stack traces etc.) can apply a dynamic
+/// threshold without re-classifying.</summary>
+public enum DiffRowKind
+{
+    Other,
+    Numeric,
+    Pointer,
+    String,
+    Error,
+}
+
 public sealed class SnapshotDiffRow
 {
     public required string Assembly        { get; init; }
@@ -670,10 +902,30 @@ public sealed class SnapshotDiffRow
     public required string ChangeKind      { get; init; }   // "changed" | "added" | "removed"
     public required bool   IsSynthetic     { get; init; }
 
+    /// <summary>Shape of the value(s) in this row. Drives the pointer-mask,
+    /// value-range, and large-string filters. See <see cref="DiffRowKind"/>.</summary>
+    public required DiffRowKind Kind        { get; init; }
+
+    /// <summary>Old value parsed as <c>double</c> when <see cref="Kind"/>
+    /// is <see cref="DiffRowKind.Numeric"/>; <c>null</c> for "added" or
+    /// non-numeric rows. Used by the value-range filter.</summary>
+    public required double? NumericOld     { get; init; }
+
+    /// <summary>New value parsed as <c>double</c> when <see cref="Kind"/>
+    /// is <see cref="DiffRowKind.Numeric"/>; <c>null</c> for "removed" or
+    /// non-numeric rows.</summary>
+    public required double? NumericNew     { get; init; }
+
+    /// <summary>max(Old.Length, New.Length). Used only for the
+    /// "hide large strings" filter so the threshold stays dynamic.</summary>
+    public required int    MaxValueLength  { get; init; }
+
     public string OffsetLabel  => $"0x{FieldOffset:X}";
 
     public static SnapshotDiffRow Changed(SnapshotFieldValue a, SnapshotFieldValue b)
-        => new()
+    {
+        var (kind, oldNum, newNum) = ClassifyValues(a.ValueDisplay, b.ValueDisplay);
+        return new()
         {
             Assembly        = a.Assembly,
             ClassDisplay    = a.ClassFqn,
@@ -684,13 +936,20 @@ public sealed class SnapshotDiffRow
             FieldOffset     = a.FieldOffset,
             OldValue        = a.ValueDisplay,
             NewValue        = b.ValueDisplay,
-            Delta           = ComputeDelta(a.ValueDisplay, b.ValueDisplay),
+            Delta           = ComputeDelta(oldNum, newNum),
             ChangeKind      = "changed",
             IsSynthetic     = a.IsSynthetic || b.IsSynthetic,
+            Kind            = kind,
+            NumericOld      = oldNum,
+            NumericNew      = newNum,
+            MaxValueLength  = Math.Max(a.ValueDisplay.Length, b.ValueDisplay.Length),
         };
+    }
 
     public static SnapshotDiffRow Added(SnapshotFieldValue b)
-        => new()
+    {
+        var (kind, _, newNum) = ClassifyValues(string.Empty, b.ValueDisplay);
+        return new()
         {
             Assembly        = b.Assembly,
             ClassDisplay    = b.ClassFqn,
@@ -704,10 +963,45 @@ public sealed class SnapshotDiffRow
             Delta           = "+",
             ChangeKind      = "added",
             IsSynthetic     = b.IsSynthetic,
+            Kind            = kind,
+            NumericOld      = null,
+            NumericNew      = newNum,
+            MaxValueLength  = b.ValueDisplay.Length,
         };
+    }
+
+    /// <summary>"Unchanged" row — value identical between A and B but the
+    /// user opted in to capturing them via <c>IncludeUnchangedRows</c>.
+    /// Carries the same numeric/length metadata as <see cref="Changed"/>
+    /// so the value-range and large-string filters apply uniformly.</summary>
+    public static SnapshotDiffRow Unchanged(SnapshotFieldValue a, SnapshotFieldValue b)
+    {
+        var (kind, oldNum, newNum) = ClassifyValues(a.ValueDisplay, b.ValueDisplay);
+        return new()
+        {
+            Assembly        = a.Assembly,
+            ClassDisplay    = a.ClassFqn,
+            Field           = a.FieldName,
+            FieldType       = a.FieldType,
+            InstanceLabel   = a.IsStatic ? "static" : a.InstanceAddress,
+            InstanceAddress = a.InstanceAddress,
+            FieldOffset     = a.FieldOffset,
+            OldValue        = a.ValueDisplay,
+            NewValue        = b.ValueDisplay,
+            Delta           = "=",
+            ChangeKind      = "unchanged",
+            IsSynthetic     = a.IsSynthetic || b.IsSynthetic,
+            Kind            = kind,
+            NumericOld      = oldNum,
+            NumericNew      = newNum,
+            MaxValueLength  = Math.Max(a.ValueDisplay.Length, b.ValueDisplay.Length),
+        };
+    }
 
     public static SnapshotDiffRow Removed(SnapshotFieldValue a)
-        => new()
+    {
+        var (kind, oldNum, _) = ClassifyValues(a.ValueDisplay, string.Empty);
+        return new()
         {
             Assembly        = a.Assembly,
             ClassDisplay    = a.ClassFqn,
@@ -721,17 +1015,75 @@ public sealed class SnapshotDiffRow
             Delta           = "-",
             ChangeKind      = "removed",
             IsSynthetic     = a.IsSynthetic,
+            Kind            = kind,
+            NumericOld      = oldNum,
+            NumericNew      = null,
+            MaxValueLength  = a.ValueDisplay.Length,
         };
+    }
 
-    /// <summary>Best-effort numeric delta. Tries to parse both sides as
-    /// double; if both parse, emits <c>{newer-older}</c> formatted with
-    /// sign. Falls back to a sentinel for non-numeric changes ("…").</summary>
-    private static string ComputeDelta(string oldVal, string newVal)
+    /// <summary>Classify Old/New value pair into a <see cref="DiffRowKind"/>
+    /// + extract numeric values when applicable. One side may be empty
+    /// (added: Old empty / removed: New empty); classification then keys
+    /// off the populated side only. Side-classify order: error → pointer
+    /// → numeric → quoted string → other.</summary>
+    private static (DiffRowKind kind, double? oldNum, double? newNum)
+        ClassifyValues(string oldVal, string newVal)
     {
-        if (double.TryParse(oldVal, NumberStyles.Float, CultureInfo.InvariantCulture, out double a) &&
-            double.TryParse(newVal, NumberStyles.Float, CultureInfo.InvariantCulture, out double b))
+        var oSide = ClassifySide(oldVal);
+        var nSide = ClassifySide(newVal);
+
+        // Any error marker on either side dominates.
+        if (oSide.IsError || nSide.IsError)
+            return (DiffRowKind.Error, null, null);
+
+        // Pointer-only diff — both populated sides are ptr= (or one side
+        // is empty for added/removed).
+        bool oPtrOk = oSide.IsPointer || oldVal.Length == 0;
+        bool nPtrOk = nSide.IsPointer || newVal.Length == 0;
+        if (oPtrOk && nPtrOk && (oSide.IsPointer || nSide.IsPointer))
+            return (DiffRowKind.Pointer, null, null);
+
+        // Numeric — both populated sides parse as double (empty side ok).
+        bool oNumOk = oSide.Numeric.HasValue || oldVal.Length == 0;
+        bool nNumOk = nSide.Numeric.HasValue || newVal.Length == 0;
+        if (oNumOk && nNumOk && (oSide.Numeric.HasValue || nSide.Numeric.HasValue))
+            return (DiffRowKind.Numeric, oSide.Numeric, nSide.Numeric);
+
+        // Quoted string on either side → String row.
+        if (oSide.IsString || nSide.IsString)
+            return (DiffRowKind.String, null, null);
+
+        return (DiffRowKind.Other, null, null);
+    }
+
+    private readonly record struct SideClassification(
+        bool IsError, bool IsPointer, bool IsString, double? Numeric);
+
+    private static SideClassification ClassifySide(string s)
+    {
+        if (string.IsNullOrEmpty(s))
+            return new SideClassification(false, false, false, null);
+        if (s.StartsWith("(err:", StringComparison.Ordinal) ||
+            s.StartsWith("(arr-err:", StringComparison.Ordinal))
+            return new SideClassification(true, false, false, null);
+        if (s.StartsWith("ptr=", StringComparison.Ordinal))
+            return new SideClassification(false, true, false, null);
+        if (s[0] == '"')
+            return new SideClassification(false, false, true, null);
+        if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out double d))
+            return new SideClassification(false, false, false, d);
+        return new SideClassification(false, false, false, null);
+    }
+
+    /// <summary>Best-effort numeric delta using the pre-classified numeric
+    /// values. Returns sign-prefixed decimal for numeric pairs, "+" /
+    /// "-" sentinels for added / removed, "…" otherwise.</summary>
+    private static string ComputeDelta(double? oldNum, double? newNum)
+    {
+        if (oldNum.HasValue && newNum.HasValue)
         {
-            double d = b - a;
+            double d = newNum.Value - oldNum.Value;
             return d switch
             {
                 > 0 => $"+{d.ToString("0.######", CultureInfo.InvariantCulture)}",

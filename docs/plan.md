@@ -2167,23 +2167,38 @@ too much noise to spot the signal. None blocks v1; all are quality-
 of-life improvements over the existing "Hide synthetic types +
 Changed only + Class filter" stack.
 
-- [ ] **Noise-reduction filters on diff DataGrid**:
-  - Old/New value range filter (numeric — e.g. "show only rows
-    where the new value is in [0, 100]"). Useful for HP / stamina /
-    bounded resources.
-  - Pointer mask toggle (hide rows where Old/New start with
-    `ptr=` — pointer changes are usually re-allocation noise, not
-    semantic state change).
-  - Field-name keyword filter (substring on the Field column —
-    currently only the Class column has one).
-  - Distinct-count statistics (sidebar: "this snapshot's diff has
-    1,186 changed rows across N distinct field names — top by
-    count: `m_CachedPtr` 412, `<>1__state` 198, …"). Fields with
-    extreme counts are usually noise; user can one-click filter
-    them out.
-  - Skip "stack-trace strings" (`System.Exception._stackTrace`
-    and similar deeply-nested string fields produce huge blob diffs
-    that drown out real changes — auto-skip or truncate).
+- [x] **Noise-reduction filters on diff DataGrid** — SHIPPED 2026-05-26.
+  Filter bar in [MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml)
+  Snapshot tab expanded to two rows; collapsible right-side stats
+  panel hangs off the diff DataGrid. Backing logic in
+  [SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs).
+  - Value range filter (numeric Min/Max, "either side in range"
+    semantics) — bound via `NumericUpDown` to `decimal?` so null =
+    unbounded.
+  - Pointer-mask toggle — keys off the new `DiffRowKind.Pointer`
+    classifier (both Old and New start with `ptr=`). Re-allocation
+    noise drops out in one click.
+  - Field-name substring filter symmetric to the existing Class
+    filter (`FieldFilterText`).
+  - Distinct-count stats panel (top-30 field names by occurrence,
+    sorted desc). Double-click a row or right-click "Exclude this
+    field name" on the diff grid → name lands in `ExcludedFieldNames`
+    and disappears from results. "Clear exclusions" button + an
+    "Apply field exclusions" master toggle.
+  - Large-string mask (default ON, threshold 256 chars) — drops
+    `System.Exception._stackTrace`-class blobs without needing a
+    name pattern. Threshold is user-editable in the same filter bar.
+
+  **Design fixes folded in same edit**:
+  - `SnapshotDiffRow` gained `Kind` / `NumericOld` / `NumericNew` /
+    `MaxValueLength` populated once at construction, so every noise
+    filter is an O(1) predicate.
+  - Replaced `ChangedOnly` with three independent
+    `ShowChanged` / `ShowAdded` / `ShowRemoved` toggles (defaults
+    `ON, OFF, OFF`); dropped dead-code branches.
+  - `FilteredDiffRows` materialized into `ObservableCollection<>` —
+    single O(N) rebuild on any filter-property change, was lazy
+    `IEnumerable` re-evaluated per render.
 - [ ] **Mono static field VALUE capture** (optional, user-opt-in
   checkbox in Snapshot tab): currently statics on Mono only
   capture metadata (per build #637 fix). A "Capture static values
