@@ -1,6 +1,59 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-26 **session close** — build #581).
+**Branch**: `dev` (2026-05-26 **session close** — build #593).
+
+## TL;DR — what's left to pick up (build #593 session)
+
+**Phase 28b-v3.1 attempted, hit v29 layout dead-end** — v3.0 still ships
+fine (no regression vs build #581). Three slot→class mapping hypotheses
+all failed:
+
+| Attempt | Result |
+|---|---|
+| (1) types[] index | out of range (typesCount=29456, observed indices reach 50999) |
+| (2) typeDef via per-image typeStart + image_get_class | out of range (typeDefMap size=10001) |
+| (3) `Il2CppMetadataRegistration.metadataUsages[]` at +0x78 | **NULL in v29** — entire array was removed in IL2CPP v29 |
+
+Confirmed by live diagnostic on SaGa F2R (PID 36064 init log:
+`metadataUsages=0x0000000000000000 count=0`).
+
+Diagnostic + scaffolding infra all shipped + ready for v3.2:
+* `diagnoseClassReferences` pipe RPC
+* `dumpLazyInitSlots` pipe RPC
+* `IL2CPPLazyInitSlotScanner` with token capture (`tokenKind`/`tokenIndex`
+  per slot)
+* `IL2CPPMetadataRegistration::MetadataUsagesArray()` exposure (returns
+  null on v29 but works on v24/v27 if back-port needed)
+* `Test-LazyInitSlots.ps1` pretty-printer
+
+### v3.2 cookbook (next session pickup)
+
+Reverse-engineer v29's `il2cpp_codegen_initialize_runtime_metadata`
+function — the canonical init target shared by all 7,900 lazy-init
+slots on SaGa F2R. Steps:
+
+1. Find the function (frequency analysis on `callTarget` field in
+   `EnumerateLazyInitSlots` — it's `0x...1306CFF0` on SaGa F2R).
+2. Zydis-disassemble it (Zydis already vendored). Trace what it reads
+   from `rcx` arg — that's where the token-decode protocol lives.
+3. Likely path: the function reads `Il2CppMetadataUsageList` /
+   `Il2CppMetadataUsagePair` from global-metadata.dat (these tables
+   still exist on disk per Il2CppDumper; Phase 5's `MetadataParser`
+   doesn't expose them yet).
+4. Extend `MetadataParser` to read those tables; build
+   `tokenIndex → (kind, sourceIndex)` map at startup.
+5. For sourceIndex with kind=TypeInfo, look up in `typeDefMap` (already
+   built). Replace `ResolveTypeInfoSlotClass`'s current
+   metadataUsages-based stub.
+
+Estimated 2-4 days. Not blocking — v3.0 covers all classes that get
+init'd via any path (singleton accessors, UI controllers, etc.) which
+is the common case. Only `<>c`-style classes whose lambda body has
+never run in the current session stay unmappable.
+
+---
+
+## TL;DR — what's left to pick up (build #581 session)
 
 ## TL;DR — what's left to pick up
 

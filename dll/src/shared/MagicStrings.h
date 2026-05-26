@@ -187,6 +187,28 @@ inline constexpr const char* CmdFindFieldReferences   = "findFieldReferences";
 //              heapRegionsSkipped, heapCapHit } }
 inline constexpr const char* CmdDiagnoseClassReferences = "diagnoseClassReferences";
 
+// Phase 28b-v3.1 step 1 — dump N sample lazy-init slot addresses
+// with raw bytes captured around each. Used to empirically determine
+// the layout of the IL2CPP runtime's "metadata initializer entry" that
+// `il2cpp_codegen_initialize_method` consumes when called via the
+// `lea reg, [rip+SLOT]; call rel32` codegen pattern. v3.1 will use the
+// recovered layout to map slot→class statically (no runtime population
+// required), closing the never-executed-lambda case v3.0 can't handle.
+//
+// Request args:
+//   limit       : int (default 32; cap on returned slots)
+//   bytesBefore : int (default 16; bytes captured before the slot)
+//   bytesAfter  : int (default 48; bytes captured starting at the slot)
+//   onlyNonZero : bool (default false — when true, only emit slots whose
+//                 current value at offset 0 is non-zero, i.e. already
+//                 populated with a class pointer)
+// Response:
+//   { ok, totalSlots, returned,
+//     slots: [{ slotAddress, leaIP, callIP, callTarget, currentValue,
+//               currentValueClassName? (resolved if value is a valid klass),
+//               contextHex, contextSlotOffset }] }
+inline constexpr const char* CmdDumpLazyInitSlots       = "dumpLazyInitSlots";
+
 // Phase 27a — Unity-aware value scan (First Scan).
 // Searches process memory (or a single class's live instances in
 // class-scoped mode) for primitive values matching the request and

@@ -763,6 +763,84 @@ classes.
 diagnostic in
 [`IL2CPPClassReferenceDiagnostic.{h,cpp}`](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp).
 
+### Phase 28b-v3.1 dead-end — `Il2CppMetadataRegistration.metadataUsages` is NULL on v29
+
+**Symptom**: Phase 28b-v3.1 attempt to statically map lazy-init slots
+to classes (so `<>c.<>9__0_X` xref works even when the lambda has never
+executed). Walked SaGa F2R lazy-init slots, captured the original tokens
+(format `(kind << 29) | index`), confirmed decoding produces sensible
+kind values (1=TypeInfo, 5=StringLiteral, 6=MethodRef). But every
+mapping attempt failed:
+
+| Attempt | Hypothesis | Result |
+|---|---|---|
+| (1) `types[index]` | index → `Il2CppType*` in `Il2CppMetadataRegistration.types[]` | typesCount=29456, indices reach 50999 — out of range |
+| (2) `typeDefMap[index]` | index → `Il2CppClass*` via per-image typeStart + il2cpp_image_get_class | map size=10001, indices reach 50999 — out of range |
+| (3) `metadataUsages[index]` | index → slot pointer in central usage array (v27 layout) | **metadataUsages = NULL, count = 0 in v29** |
+
+**Root cause**: `metadataUsages` (the central indirection array at
+`Il2CppMetadataRegistration + 0x78` in v24-v27) was **removed in IL2CPP
+v29**. The new per-method init system (`il2cpp_codegen_initialize_runtime_metadata`
+called via `lea reg,[slot]; call init` per the lessons above) uses a
+completely different lookup mechanism whose static decode layout is not
+yet reverse-engineered. The tokens we observe in slot cells (e.g.
+`0x20007CD7` with kind=1, index=31959) are presumably keys into per-image
+or per-method init data structures inside `global-metadata.dat` or the
+new `Il2CppCodeGenModule` extensions, not into any runtime array we
+currently expose.
+
+**What works in v3.0**: when a lazy-init slot's CURRENT value is the
+target class pointer (= the AOT method that uses the slot has executed
+at least once in the current session), the runtime-value comparison
+matches and v3.0 surfaces the xref correctly with `confidence=chain-lazy`.
+This catches singletons + UI controller-style classes that initialise
+early in game lifecycle. Compiler-generated `<>c` lambda caches whose
+bodies haven't run stay unmappable.
+
+**Diagnostic infrastructure left in place** (so v3.2 doesn't have to
+rebuild it):
+
+* [`IL2CPPClassReferenceDiagnostic.{h,cpp}`](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp)
+  + `diagnoseClassReferences` pipe RPC — dumps every storage slot
+  (module + heap + FieldInfo) holding a target's class ptr / static_fields /
+  FieldInfo pointers, with surrounding context.
+* `dumpLazyInitSlots` pipe RPC (in `ExportAPI.cpp`) — samples lazy-init
+  slots with token decode + `valueLocation` heuristic + 64 B context.
+* [`IL2CPPLazyInitSlotScanner.cpp`](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp)
+  — captures `tokenAtScan` + `tokenKind` + `tokenIndex` per slot at scan
+  time, ready for v3.2 to consume once the v29 decode layout is known.
+* [`IL2CPPMetadataRegistration.{h,cpp}`](../dll/src/il2cpp/IL2CPPMetadataRegistration.cpp)
+  — exposes `MetadataUsagesArray()` + `MetadataUsagesCount()` (return null
+  on v29 but populated on v24/v27 if a back-port is ever needed).
+* `tools/Test-LazyInitSlots.ps1` — pretty-printer for live verification.
+
+**v3.2 cookbook** (estimated 2-4 days, deferred until needed):
+
+1. Find the v29 IL2CPP runtime's `il2cpp_codegen_initialize_runtime_metadata`
+   function (frequency analysis: it's the single callTarget appearing
+   thousands of times in the lazy-init pattern matches).
+2. Disassemble that function with Zydis (already vendored). Trace
+   what it reads from its `rcx` argument — that gives us the entry layout.
+3. Likely path: the function reads a `MetadataInitializerToken` structure
+   (probably 4-8 bytes after the slot, or pointed to by it). The token
+   contains `(kind, source_index)` where source_index can be cross-looked
+   in the global-metadata.dat's `Il2CppMetadataUsageList` /
+   `Il2CppMetadataUsagePair` tables (these still exist on disk per
+   Il2CppDumper).
+4. Extend `MetadataParser` to read those tables.
+5. Build `tokenIndex → (kind, sourceIndex)` map at startup. For
+   sourceIndex with kind=TypeInfo, look up in `typeDefMap` (already
+   built). For other kinds, ignore (not relevant to class-xref).
+6. Wire into `ResolveTypeInfoSlotClass` — replace the current
+   "metadataUsages lookup" stub.
+
+**Rule**: when a documented offset (`0x78` for `metadataUsages`)
+unexpectedly reads NULL on a target whose registration struct is
+otherwise valid, suspect a runtime-version layout change rather than
+your scanner being broken. Verify by reading offsets BEFORE and AFTER
+the suspect field — if they're sensible, the struct's there but the
+field has moved or been removed.
+
 ---
 
 ## Overload disambiguation
@@ -1379,6 +1457,25 @@ if the UI's status bar reads a build # lower than `cat build_number.txt`,
 2026-05-08 burning ~15 minutes on a 4-target verification run where
 all four "failures" turned out to be stale DLLs from before the fix
 commits.
+
+### `build.ps1` prints `dist/` listing even when ninja fails — always grep for `Status:`
+
+**Symptom**: Made a header-only edit (added a function decl referencing a forward-declared type but forgot the include), ran `build.ps1`, saw the script print its usual `Output: D:\Github\discrete\dist\` listing with all files. Assumed success, told user to test. User runs against an outdated DLL because the actual `.dll` file in `dist/` is from an earlier commit — the failed build never overwrote it. Wasted two round-trips before realising the build never actually succeeded.
+
+**Root cause**: `build.ps1`'s tail block (`Get-ChildItem dist | Format-Table`) runs unconditionally and prints the EXISTING `dist/` contents whether or not the build itself succeeded. The build status (`Status: FAILED`) is printed ABOVE that listing in the summary block, but if the script's output is truncated (e.g. `Select-Object -Last 12`), the listing dominates and the status line gets cut. The only reliable signal is `ninja: build stopped: subcommand failed.` somewhere mid-output, or `Status: FAILED` in the summary table.
+
+**Rules**:
+1. After invoking `build.ps1`, **always** check `Status: SUCCESS` explicitly (or `[FAIL]` / `FAILED` if you're greping for the bad path).
+   ```powershell
+   .\build.cmd -Target DLL -Backend IL2CPP 2>&1 | Select-String -Pattern 'Status:|FAIL|ninja: build stopped'
+   ```
+2. After a build that touched the DLL, **also verify the binary actually changed** — compare the `.dll` LastWriteTime to "now", or grep for a string you know is new in this session:
+   ```powershell
+   (Get-Item dist\UnityDumper-IL2CPP.dll).LastWriteTime
+   grep -c '<some-new-marker>' dist\UnityDumper-IL2CPP.dll
+   ```
+3. **User runs from `dist/`, not from `build/dll-both-release-x64/bin/`.** Even though `Inject-Dll.ps1` reads from `build/.../bin/` (per the lesson above), DiscreteUI and the proxy DLLs that the user manually copies into game folders come from `dist/`. After any partial backend rebuild, ensure `dist/` got refreshed — `build.ps1` does this only when its install step succeeds.
+4. **Prefer `build.cmd` over `build.ps1`**: `build.cmd` is the canonical entry point and matches how the user invokes it manually. It also captures a transcript (`-LogFile`) which makes post-mortem diagnosis easier.
 
 ### AOB decoder bailout is by design
 

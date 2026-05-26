@@ -574,53 +574,90 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                 auto slots = EnumerateClassPointerSlots(target.klass);
                 const std::size_t v2SlotCount = slots.size();
 
-                // ---- v3 lazy-init slots (Phase 28b-v3) ----------------------
+                // ---- v3 lazy-init slots (Phase 28b-v3 + v3.1) ---------------
                 //
                 // For each per-method lazy-init slot discovered in `.text`,
-                // read the slot's current value. If it equals the target
-                // class pointer, treat the slot as additional input to the
-                // chain detector — same forward-trace + same hop-3 matching
-                // logic, just an expanded set of hop-1 candidates.
+                // try TWO complementary methods to determine if the slot is
+                // associated with our target class:
                 //
-                // v3.0 caveat: this only finds slots that have ALREADY been
-                // populated by `il2cpp_codegen_initialize_method`. Slots
-                // for methods that have never executed in this session
-                // stay null and are skipped here. v3.1 will parse the
-                // `MetadataInitializerEntry` arg layout to map slot →
-                // class statically, closing the never-executed case.
-                std::size_t v3CandidateSlots = 0;
-                std::size_t v3MatchingSlots  = 0;
+                //   v3.0 — runtime value match: read the slot's current
+                //   value with `SafeRead`. If equals target class pointer,
+                //   slot is associated. Works only when the AOT method
+                //   that uses the slot has executed at least once in this
+                //   session (so the slot has been populated by IL2CPP's
+                //   `il2cpp_codegen_initialize_runtime_metadata`).
+                //
+                //   v3.1 — static token decode: at scan time the scanner
+                //   captured each slot's initial value. If it was a
+                //   metadata-usage token of kind=TypeInfo, decode the
+                //   embedded type index, look up `Il2CppType*` in the
+                //   runtime types[] array, bridge to `Il2CppClass*` via
+                //   `il2cpp_class_from_il2cpp_type`. Compare to target.
+                //   This works EVEN WHEN THE LAMBDA / METHOD HAS NEVER
+                //   EXECUTED — the slot is still token-shaped but we
+                //   can resolve what it WOULD become.
+                //
+                // Both paths union into the chain detector's input set.
+                std::size_t v3CandidateSlots   = 0;
+                std::size_t v3MatchingRuntime  = 0;  // v3.0 hits
+                std::size_t v3MatchingStatic   = 0;  // v3.1 hits
                 {
                     const std::uintptr_t targetClassVal =
                         reinterpret_cast<std::uintptr_t>(target.klass);
                     const auto& lazySlots = EnumerateLazyInitSlots();
                     v3CandidateSlots = lazySlots.size();
+
+                    // Fast dedup against v2 slots — small set, linear scan
+                    // is fine for the common case (v2 returns 0-12 slots).
+                    auto slotAlreadyKnown = [&slots](std::uintptr_t addr) {
+                        for (const auto& existing : slots) {
+                            if (existing.address == addr) return true;
+                        }
+                        return false;
+                    };
+
                     for (const auto& ls : lazySlots) {
+                        if (slotAlreadyKnown(ls.slotAddress)) continue;
+
+                        bool matched     = false;
+                        bool matchedHow  = false;  // false=runtime, true=static
+                        (void)matchedHow;
+
+                        // v3.0 — runtime value match
                         std::uintptr_t slotValue = 0;
-                        if (!Memory::SafeReadBytes(
+                        if (Memory::SafeReadBytes(
                                 reinterpret_cast<const void*>(ls.slotAddress),
                                 &slotValue, sizeof(slotValue))) {
-                            continue;  // unreadable slot — skip
-                        }
-                        if (slotValue != targetClassVal) continue;  // not our class
-                        // Dedup against v2 slots — same slotAddress could
-                        // appear in both lists when AOT code references the
-                        // same `.data` cell from a direct `mov reg,[rip+disp]`
-                        // AND from a `lea reg,[rip+disp]; call init`.
-                        bool dup = false;
-                        for (const auto& existing : slots) {
-                            if (existing.address == ls.slotAddress) {
-                                dup = true; break;
+                            if (slotValue == targetClassVal) {
+                                matched = true;
+                                ++v3MatchingRuntime;
                             }
                         }
-                        if (dup) continue;
+
+                        // v3.1 — static token decode (only if v3.0 didn't match)
+                        if (!matched && ls.tokenKind ==
+                                static_cast<std::uint8_t>(MetadataUsageKind::TypeInfo)) {
+                            if (Il2CppClass* staticClass =
+                                    ResolveTypeInfoSlotClass(ls)) {
+                                if (reinterpret_cast<std::uintptr_t>(staticClass)
+                                        == targetClassVal) {
+                                    matched = true;
+                                    matchedHow = true;
+                                    ++v3MatchingStatic;
+                                }
+                            }
+                        }
+
+                        if (!matched) continue;
+
                         ClassPointerSlot extra{};
                         extra.address   = ls.slotAddress;
-                        extra.sectionVa = 0;  // section attribution not tracked for v3
+                        extra.sectionVa = 0;
                         slots.push_back(extra);
-                        ++v3MatchingSlots;
                     }
                 }
+                const std::size_t v3MatchingSlots =
+                    v3MatchingRuntime + v3MatchingStatic;
 
                 Log::Write(MagicStrings::LogCategoryWalk,
                     "FieldXref: v2 starting — staticFieldsOffset=" +
@@ -628,7 +665,8 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     std::to_string(target.offset) +
                     " v2DirectSlots=" + std::to_string(v2SlotCount) +
                     " v3LazyInitCandidates=" + std::to_string(v3CandidateSlots) +
-                    " v3LazyInitMatching=" + std::to_string(v3MatchingSlots) +
+                    " v3MatchingRuntime=" + std::to_string(v3MatchingRuntime) +
+                    " v3MatchingStatic=" + std::to_string(v3MatchingStatic) +
                     " totalSlots=" + std::to_string(slots.size()));
 
                 if (!slots.empty()) {

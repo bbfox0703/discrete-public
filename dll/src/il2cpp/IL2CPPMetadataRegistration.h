@@ -34,4 +34,14 @@ std::size_t        TypesCount();
 // unreadable type pointer).
 std::uint8_t GetTypeTag(std::int32_t typeIndex);
 
+// Phase 28b-v3.1 — `metadataUsages` array exposure.
+// Layout at registration + 0x70 (count u64) + 0x78 (ptr).
+// Each entry is `void**` — pointing to a SLOT that AOT code reads to
+// get a resolved metadata pointer (Il2CppClass* / Il2CppType* / etc.).
+// The lazy-init slots `IL2CPPLazyInitSlotScanner` finds in `.text` are
+// EXACTLY the slots pointed to by entries of this array. Decoding a
+// metadata-usage token's `index` field selects the entry directly.
+const void* const* MetadataUsagesArray();
+std::size_t        MetadataUsagesCount();
+
 }  // namespace UnityCEDumper::IL2CPP::MetadataRegistration

@@ -47,6 +47,8 @@
 // index — that closes the never-executed-lambda case.
 #pragma once
 
+#include "IL2CPPTypes.h"  // forward decl of Il2CppClass / Il2CppType
+
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -55,9 +57,11 @@ namespace UnityCEDumper::IL2CPP {
 
 struct LazyInitSlot {
     /// Absolute VA of the `.data` / `.bss` slot the lea instruction pointed to.
-    /// After `il2cpp_codegen_initialize_method` runs, this slot holds an
-    /// `Il2CppClass*` (well — typically; v3.1 will refine for non-class
-    /// metadata-initialiser slots).
+    /// After `il2cpp_codegen_initialize_runtime_metadata` runs, this slot
+    /// holds either an `Il2CppClass*` (kind=1), `Il2CppType*` (kind=2),
+    /// `MethodInfo*` (kind=3/6), `FieldInfo*` (kind=4), or `Il2CppString*`
+    /// (kind=5). Before init, the slot holds the encoded token (see
+    /// `tokenAtScan` below).
     std::uintptr_t slotAddress = 0;
 
     /// IP of the matched `lea` instruction. Useful for cross-reference
@@ -68,25 +72,80 @@ struct LazyInitSlot {
     /// lea's start: 7-byte lea + 0 padding).
     std::uintptr_t callIP      = 0;
 
-    /// Resolved absolute target of the call. Typically one of a small
-    /// set of IL2CPP runtime init functions (e.g.
-    /// `il2cpp_codegen_initialize_method`, `il2cpp_codegen_initialize_runtime_metadata`).
-    /// We don't filter by which function — the lea + immediate-call
-    /// sequence with the right addressing modes is signature enough.
+    /// Resolved absolute target of the call. The IL2CPP runtime init
+    /// function (typically `il2cpp_codegen_initialize_runtime_metadata`).
+    /// All slots in a given session share the same callTarget; the
+    /// scanner doesn't filter by it (the signature is sufficient).
     std::uintptr_t callTarget  = 0;
+
+    /// Phase 28b-v3.1 — slot's value as observed at scan time.
+    /// When the high 32 bits are zero AND the low 32 bits look like a
+    /// metadata-usage token (high 3 bits = kind in 1..6), the slot was
+    /// uninitialised at scan time and we captured the original token.
+    /// Otherwise tokenAtScan == 0 and the slot was either already
+    /// initialised (holds a heap pointer) or held a non-token value.
+    ///
+    /// Token encoding (standard IL2CPP `Il2CppMetadataUsage`):
+    ///   bits 29-31: kind   (1=TypeInfo / 2=Il2CppType / 3=MethodDef /
+    ///                       4=FieldInfo / 5=StringLiteral / 6=MethodRef)
+    ///   bits 0-28:  index  (into the corresponding metadata table)
+    ///
+    /// For v3.1's class-pointer xref purpose, only kind=1 (TypeInfo)
+    /// slots matter — those resolve to an `Il2CppClass*` after init.
+    /// Other kinds are kept in the list for diagnostic visibility but
+    /// the `FieldXref` consumer ignores them.
+    std::uint32_t tokenAtScan = 0;
+    /// Decoded kind from `tokenAtScan` (0 if no token was captured).
+    std::uint8_t  tokenKind   = 0;
+    /// Decoded index from `tokenAtScan` (0 if no token was captured).
+    /// Note: encoding may be 1-based or 0-based depending on IL2CPP
+    /// version — `ResolveTypeInfoSlotClass` tries both forms.
+    std::uint32_t tokenIndex  = 0;
 };
 
-/// Walks GameAssembly.dll's executable sections, recognises every
-/// `lea reg, [rip+disp32]; call rel32` 2-instruction sequence where:
-///   * the lea target falls inside a `.data` / `.bss`-class section of
-///     GameAssembly.dll, and
-///   * the call target falls inside an executable section of the same
-///     module.
+/// Kind enum mirroring IL2CPP's `Il2CppMetadataUsage`. Kept here as
+/// constants since `IL2CPPTypes.h` is intentionally minimal.
+enum class MetadataUsageKind : std::uint8_t {
+    Invalid       = 0,
+    TypeInfo      = 1,  // -> Il2CppClass*
+    Il2CppType    = 2,  // -> Il2CppType*
+    MethodDef     = 3,  // -> MethodInfo*
+    FieldInfo     = 4,  // -> FieldInfo*
+    StringLiteral = 5,  // -> Il2CppString*
+    MethodRef     = 6,  // -> MethodInfo*
+};
+
+/// Walks GameAssembly.dll's `il2cpp` exec section for the canonical
+/// IL2CPP class-init signature (`lea reg,[rip+SLOT]; call rel32;
+/// lock or [rsp],0; mov byte [rip+FLAG],1`). For each match, captures
+/// the slot address + 4 IPs + the slot's current value at scan time
+/// (decoded into a `tokenAtScan` if it's a metadata-usage token, so
+/// Phase 28b-v3.1 can statically map slot → class even when the
+/// slot hasn't been runtime-populated yet).
+///
 /// Returns a deduplicated list of LazyInitSlots sorted by slotAddress.
 ///
 /// Internally cached via `std::call_once` — first call pays the
 /// ~50-200 ms scan cost on a typical IL2CPP module, every subsequent
 /// call is a `const&` return.
 const std::vector<LazyInitSlot>& EnumerateLazyInitSlots();
+
+/// v3.1 — given a kind=TypeInfo slot's captured token, resolve to the
+/// `Il2CppClass*` it would point to after init. Looks up the type
+/// index in `IL2CPPMetadataRegistration::TypesArray()`, then calls
+/// `il2cpp_class_from_il2cpp_type` to bridge `Il2CppType*` → `Il2CppClass*`.
+///
+/// Returns nullptr when:
+///   * slot has no token (was already initialised at scan time, or
+///     was never token-shaped to begin with),
+///   * slot kind is not `TypeInfo`,
+///   * the `Il2CppMetadataRegistration` finder hasn't located the
+///     types[] array (rare — usually located at startup),
+///   * the index is out of bounds, or
+///   * the `il2cpp_class_from_il2cpp_type` resolver export is unbound.
+///
+/// Tries both 1-based and 0-based index encodings (IL2CPP versions
+/// differ on whether `tokenIndex` needs `-1`).
+Il2CppClass* ResolveTypeInfoSlotClass(const LazyInitSlot& slot);
 
 }  // namespace UnityCEDumper::IL2CPP

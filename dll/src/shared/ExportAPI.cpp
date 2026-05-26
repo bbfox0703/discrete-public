@@ -30,6 +30,7 @@
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
 #  include "../il2cpp/IL2CPPFieldXref.h"
+#  include "../il2cpp/IL2CPPLazyInitSlotScanner.h"
 #  include "../il2cpp/IL2CPPMainThreadHook.h"
 #  include "../il2cpp/IL2CPPMethodFinder.h"
 #  include "../il2cpp/IL2CPPMethodInvoker.h"
@@ -3935,6 +3936,164 @@ void RegisterCoreHandlers() {
             }},
         };
         return response;
+    });
+
+    // Phase 28b-v3.1 step 1 — dumpLazyInitSlots.
+    // Returns a sample of the lazy-init slot map (cached after first
+    // call to EnumerateLazyInitSlots), with raw bytes captured around
+    // each slot so we can determine the IL2CPP MetadataInitializerEntry
+    // struct layout empirically. v3.1 needs the typeIndex offset within
+    // the entry to map slot → class statically (= without depending on
+    // the AOT method to have executed in the current session).
+    PipeServer::RegisterHandler(MagicStrings::CmdDumpLazyInitSlots,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        int  limit       = args.value("limit",       32);
+        int  bytesBefore = args.value("bytesBefore", 16);
+        int  bytesAfter  = args.value("bytesAfter",  48);
+        bool onlyNonZero = args.value("onlyNonZero", false);
+        if (limit <= 0)       limit = 32;
+        if (limit > 1024)     limit = 1024;
+        if (bytesBefore < 0)  bytesBefore = 0;
+        if (bytesBefore > 128) bytesBefore = 128;
+        if (bytesAfter <= 0)  bytesAfter = 48;
+        if (bytesAfter > 256) bytesAfter = 256;
+
+        auto bytesToHex = [](const std::vector<std::uint8_t>& bytes) {
+            std::string out;
+            out.reserve(bytes.size() * 2);
+            static constexpr char kHex[] = "0123456789ABCDEF";
+            for (auto b : bytes) {
+                out.push_back(kHex[(b >> 4) & 0xF]);
+                out.push_back(kHex[b & 0xF]);
+            }
+            return out;
+        };
+
+        // v3.1 step 1 — keep this handler RUTHLESSLY safe. Earlier
+        // iteration crashed the host: the v3 lea+call scanner pattern
+        // over-matches (every `lea reg,[data]; call rel32` in `.text`
+        // matches, including thousands of non-init calls), so many
+        // slots hold things that AREN'T `Il2CppClass*` (string literals,
+        // MethodInfo*, plain globals, etc). Calling `class_get_name` on
+        // those AVs the runtime in places SEH can't always intercept.
+        // Resolution: this handler now ONLY does SEH-protected raw
+        // reads. The caller correlates `currentValue` with class
+        // pointers from `diagnoseClassReferences` manually.
+        const auto& allSlots = IL2CPP::EnumerateLazyInitSlots();
+
+        // Module bounds — used to classify currentValue as "in
+        // GameAssembly.dll module" vs "heap-managed" vs "null".
+        void* gaBase = ModuleHelper::GetModuleBase(MagicStrings::ModuleIL2CPP);
+        const std::uintptr_t gaLo = reinterpret_cast<std::uintptr_t>(gaBase);
+        const std::uintptr_t gaSize = ModuleHelper::GetModuleSize(MagicStrings::ModuleIL2CPP);
+        const std::uintptr_t gaHi = gaLo + gaSize;
+
+        json slotsJson = json::array();
+        std::size_t emitted = 0;
+        std::size_t nonZeroCount = 0;
+        std::size_t pointerLikeCount = 0;  // value > 0x10000 + 8-byte aligned
+        for (const auto& s : allSlots) {
+            // Read slot value (SEH-protected).
+            std::uintptr_t curVal = 0;
+            bool readOk = Memory::SafeReadBytes(
+                reinterpret_cast<const void*>(s.slotAddress),
+                &curVal, sizeof(curVal));
+            const bool isNonZero    = (readOk && curVal != 0);
+            const bool isPointerLike =
+                isNonZero && (curVal & 7u) == 0 && curVal > 0x10000;
+            if (isNonZero)     ++nonZeroCount;
+            if (isPointerLike) ++pointerLikeCount;
+            if (onlyNonZero && !isNonZero) continue;
+            if (emitted >= static_cast<std::size_t>(limit)) continue;
+
+            // Context window (SEH-protected).
+            const std::size_t totalCtx =
+                static_cast<std::size_t>(bytesBefore + bytesAfter);
+            std::vector<std::uint8_t> ctx(totalCtx);
+            std::size_t actualCtxStart = static_cast<std::size_t>(bytesBefore);
+            if (s.slotAddress > static_cast<std::uintptr_t>(bytesBefore)) {
+                const std::uintptr_t readAddr = s.slotAddress - bytesBefore;
+                if (!Memory::SafeReadBytes(
+                        reinterpret_cast<const void*>(readAddr),
+                        ctx.data(), totalCtx)) {
+                    // Partial — try just the after window.
+                    ctx.assign(static_cast<std::size_t>(bytesAfter), 0);
+                    actualCtxStart = 0;
+                    if (!Memory::SafeReadBytes(
+                            reinterpret_cast<const void*>(s.slotAddress),
+                            ctx.data(), bytesAfter)) {
+                        ctx.clear();
+                    }
+                }
+            } else {
+                ctx.clear();
+            }
+
+            // Classify currentValue location heuristically. No class
+            // name lookup — that's what crashed the previous iteration.
+            std::string valueLocation = "null";
+            if (isNonZero) {
+                if (curVal >= gaLo && curVal < gaHi) {
+                    valueLocation = "in-module";  // probably .rdata string or similar
+                } else if (isPointerLike) {
+                    valueLocation = "heap";       // could be Il2CppClass* / Il2CppType* / etc
+                } else {
+                    valueLocation = "non-pointer-like";  // small uint64
+                }
+            }
+
+            // v3.1 — token decode + (best-effort) static class resolution.
+            // Token info is captured at scan time so this is non-crashy:
+            // it's just looking up a typeIndex in an already-validated array.
+            json tokenJson = nullptr;
+            if (s.tokenKind != 0) {
+                static const char* kKindNames[] = {
+                    "Invalid", "TypeInfo", "Il2CppType",
+                    "MethodDef", "FieldInfo", "StringLiteral", "MethodRef"
+                };
+                const char* kindName =
+                    (s.tokenKind < (sizeof(kKindNames)/sizeof(kKindNames[0])))
+                        ? kKindNames[s.tokenKind] : "Unknown";
+                tokenJson = {
+                    {"raw",      formatHex(s.tokenAtScan)},
+                    {"kind",     s.tokenKind},
+                    {"kindName", kindName},
+                    {"index",    s.tokenIndex},
+                };
+                if (s.tokenKind == static_cast<std::uint8_t>(
+                        IL2CPP::MetadataUsageKind::TypeInfo)) {
+                    if (IL2CPP::Il2CppClass* k =
+                            IL2CPP::ResolveTypeInfoSlotClass(s)) {
+                        tokenJson["resolvedClassPtr"] =
+                            formatHex(reinterpret_cast<std::uintptr_t>(k));
+                    }
+                }
+            }
+
+            slotsJson.push_back({
+                {"slotAddress",       formatHex(s.slotAddress)},
+                {"leaIP",             formatHex(s.leaIP)},
+                {"callIP",            formatHex(s.callIP)},
+                {"callTarget",        formatHex(s.callTarget)},
+                {"currentValue",      formatHex(curVal)},
+                {"valueLocation",     valueLocation},
+                {"token",             std::move(tokenJson)},
+                {"contextHex",        bytesToHex(ctx)},
+                {"contextSlotOffset", actualCtxStart},
+            });
+            ++emitted;
+        }
+
+        return json{
+            {"ok",                true},
+            {"totalSlots",        allSlots.size()},
+            {"nonZeroSlots",      nonZeroCount},
+            {"pointerLikeSlots",  pointerLikeCount},
+            {"returned",          emitted},
+            {"slots",             std::move(slotsJson)},
+        };
     });
 
     // Debugger symbol dump (IL2CPP only). Walks every requested assembly,
