@@ -53,10 +53,14 @@ namespace {
 
 std::once_flag g_once;
 struct State {
-    bool                    found      = false;
-    const std::uint8_t*     reg        = nullptr;
-    const void* const*      types      = nullptr;
-    std::size_t             typesCount = 0;
+    bool                    found            = false;
+    const std::uint8_t*     reg              = nullptr;
+    const void* const*      types            = nullptr;
+    std::size_t             typesCount       = 0;
+    // Phase 28b-v3.1 — metadataUsages array (registration + 0x78,
+    // count at +0x70).
+    const void* const*      metadataUsages   = nullptr;
+    std::size_t             metadataUsagesCount = 0;
 } g_state;
 
 constexpr std::uint32_t kMaxCount32   = 1u << 27;        // 134M, generous
@@ -232,13 +236,26 @@ void DoFind() {
             g_state.typesCount = typesCnt;
             g_state.types = reinterpret_cast<const void* const*>(typesPtr);
 
+            // Phase 28b-v3.1 — pull metadataUsages too (offsets 0x70/0x78).
+            std::uint64_t usagesCnt = 0;
+            std::memcpy(&usagesCnt, p + 0x70, 8);
+            std::uintptr_t usagesPtr = 0;
+            std::memcpy(&usagesPtr, p + 0x78, 8);
+            g_state.metadataUsagesCount = static_cast<std::size_t>(usagesCnt);
+            g_state.metadataUsages =
+                reinterpret_cast<const void* const*>(usagesPtr);
+
             char line[256];
             ::_snprintf_s(line, sizeof(line), _TRUNCATE,
-                "MetadataRegistration: hit at 0x%p, types=0x%p count=%u "
+                "MetadataRegistration: hit at 0x%p, types=0x%p count=%u, "
+                "metadataUsages=0x%p count=%llu "
                 "(scanned %zu bytes across %zu sections)",
                 static_cast<const void*>(p),
                 reinterpret_cast<const void*>(typesPtr),
-                typesCnt, scanBytes, sections.size());
+                typesCnt,
+                reinterpret_cast<const void*>(usagesPtr),
+                static_cast<unsigned long long>(usagesCnt),
+                scanBytes, sections.size());
             Log::Write(MagicStrings::LogCategoryInit, line);
             return;
         }
@@ -259,9 +276,11 @@ bool Find() {
     return g_state.found;
 }
 
-const void*        GetBase()     { Find(); return g_state.reg; }
-const void* const* TypesArray()  { Find(); return g_state.types; }
-std::size_t        TypesCount()  { Find(); return g_state.typesCount; }
+const void*        GetBase()                { Find(); return g_state.reg; }
+const void* const* TypesArray()             { Find(); return g_state.types; }
+std::size_t        TypesCount()             { Find(); return g_state.typesCount; }
+const void* const* MetadataUsagesArray()    { Find(); return g_state.metadataUsages; }
+std::size_t        MetadataUsagesCount()    { Find(); return g_state.metadataUsagesCount; }
 
 std::uint8_t GetTypeTag(std::int32_t typeIndex) {
     if (!Find()) return 0;

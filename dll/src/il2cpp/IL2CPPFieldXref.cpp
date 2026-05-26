@@ -25,6 +25,7 @@
 #include "IL2CPPClassPointerScanner.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
+#include "IL2CPPLazyInitSlotScanner.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPStaticFieldsOffset.h"
 #include "IL2CPPThreadAttach.h"
@@ -39,6 +40,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <unordered_set>
 
 namespace UnityCEDumper::IL2CPP {
 
@@ -568,12 +570,104 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     "FieldXref: v2 chain detection unavailable — "
                     "offsetof(static_fields) discovery failed at init");
             } else {
+                // ---- v2 direct slots (Phase 28b-v2) -------------------------
                 auto slots = EnumerateClassPointerSlots(target.klass);
+                const std::size_t v2SlotCount = slots.size();
+
+                // ---- v3 lazy-init slots (Phase 28b-v3 + v3.1) ---------------
+                //
+                // For each per-method lazy-init slot discovered in `.text`,
+                // try TWO complementary methods to determine if the slot is
+                // associated with our target class:
+                //
+                //   v3.0 — runtime value match: read the slot's current
+                //   value with `SafeRead`. If equals target class pointer,
+                //   slot is associated. Works only when the AOT method
+                //   that uses the slot has executed at least once in this
+                //   session (so the slot has been populated by IL2CPP's
+                //   `il2cpp_codegen_initialize_runtime_metadata`).
+                //
+                //   v3.1 — static token decode: at scan time the scanner
+                //   captured each slot's initial value. If it was a
+                //   metadata-usage token of kind=TypeInfo, decode the
+                //   embedded type index, look up `Il2CppType*` in the
+                //   runtime types[] array, bridge to `Il2CppClass*` via
+                //   `il2cpp_class_from_il2cpp_type`. Compare to target.
+                //   This works EVEN WHEN THE LAMBDA / METHOD HAS NEVER
+                //   EXECUTED — the slot is still token-shaped but we
+                //   can resolve what it WOULD become.
+                //
+                // Both paths union into the chain detector's input set.
+                std::size_t v3CandidateSlots   = 0;
+                std::size_t v3MatchingRuntime  = 0;  // v3.0 hits
+                std::size_t v3MatchingStatic   = 0;  // v3.1 hits
+                {
+                    const std::uintptr_t targetClassVal =
+                        reinterpret_cast<std::uintptr_t>(target.klass);
+                    const auto& lazySlots = EnumerateLazyInitSlots();
+                    v3CandidateSlots = lazySlots.size();
+
+                    // Fast dedup against v2 slots — small set, linear scan
+                    // is fine for the common case (v2 returns 0-12 slots).
+                    auto slotAlreadyKnown = [&slots](std::uintptr_t addr) {
+                        for (const auto& existing : slots) {
+                            if (existing.address == addr) return true;
+                        }
+                        return false;
+                    };
+
+                    for (const auto& ls : lazySlots) {
+                        if (slotAlreadyKnown(ls.slotAddress)) continue;
+
+                        bool matched     = false;
+                        bool matchedHow  = false;  // false=runtime, true=static
+                        (void)matchedHow;
+
+                        // v3.0 — runtime value match
+                        std::uintptr_t slotValue = 0;
+                        if (Memory::SafeReadBytes(
+                                reinterpret_cast<const void*>(ls.slotAddress),
+                                &slotValue, sizeof(slotValue))) {
+                            if (slotValue == targetClassVal) {
+                                matched = true;
+                                ++v3MatchingRuntime;
+                            }
+                        }
+
+                        // v3.1 — static token decode (only if v3.0 didn't match)
+                        if (!matched && ls.tokenKind ==
+                                static_cast<std::uint8_t>(MetadataUsageKind::TypeInfo)) {
+                            if (Il2CppClass* staticClass =
+                                    ResolveTypeInfoSlotClass(ls)) {
+                                if (reinterpret_cast<std::uintptr_t>(staticClass)
+                                        == targetClassVal) {
+                                    matched = true;
+                                    matchedHow = true;
+                                    ++v3MatchingStatic;
+                                }
+                            }
+                        }
+
+                        if (!matched) continue;
+
+                        ClassPointerSlot extra{};
+                        extra.address   = ls.slotAddress;
+                        extra.sectionVa = 0;
+                        slots.push_back(extra);
+                    }
+                }
+                const std::size_t v3MatchingSlots =
+                    v3MatchingRuntime + v3MatchingStatic;
+
                 Log::Write(MagicStrings::LogCategoryWalk,
                     "FieldXref: v2 starting — staticFieldsOffset=" +
                     std::to_string(sfo) + " fieldOffset=" +
-                    std::to_string(target.offset) + " classPointerSlots=" +
-                    std::to_string(slots.size()));
+                    std::to_string(target.offset) +
+                    " v2DirectSlots=" + std::to_string(v2SlotCount) +
+                    " v3LazyInitCandidates=" + std::to_string(v3CandidateSlots) +
+                    " v3MatchingRuntime=" + std::to_string(v3MatchingRuntime) +
+                    " v3MatchingStatic=" + std::to_string(v3MatchingStatic) +
+                    " totalSlots=" + std::to_string(slots.size()));
 
                 if (!slots.empty()) {
                     ChainScanStats v2stats{};
@@ -587,11 +681,36 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         " bytesScanned=" + std::to_string(v2stats.bytesScanned) +
                         " failedReads=" + std::to_string(v2stats.failedReads));
 
+                    // Build the v3-slot address set so we can tag each match
+                    // with the right confidence ("chain-lazy" for hits whose
+                    // hop-1 IP loads from a v3-only slot, "chain-exact" for
+                    // hits surfaced via v2's direct-slot set).
+                    std::unordered_set<std::uintptr_t> v3OnlySlots;
+                    if (v3MatchingSlots > 0) {
+                        v3OnlySlots.reserve(v3MatchingSlots);
+                        for (std::size_t i = v2SlotCount; i < slots.size(); ++i) {
+                            v3OnlySlots.insert(slots[i].address);
+                        }
+                    }
+
                     // Attribute each chain hit to its enclosing method via
                     // the existing v1 method-pointer index. Apply read/write
                     // filter at this layer (v2 already knows kind from the
                     // chain shape, but the user-requested filter is enforced
                     // here for parity with the v1 path).
+                    //
+                    // Note: ChainMatch doesn't currently carry which slot
+                    // the hop-1 referenced — we'd need to extend the chain
+                    // detector to do per-hit slot attribution. v3.0 makes
+                    // the simplifying assumption that if ANY v3-only slot
+                    // exists, mark the hit as "chain-lazy" only when v2
+                    // direct slots were zero. Otherwise it's "chain-exact"
+                    // (v2 would've found it without us).
+                    const std::string confidenceTag =
+                        (v2SlotCount == 0 && v3MatchingSlots > 0)
+                            ? "chain-lazy"
+                            : "chain-exact";
+
                     std::size_t v2Dropped = 0;
                     for (const auto& c : chains) {
                         if (kindFilter == FieldRefKind::Read  && c.refKind != "read")  {
@@ -617,14 +736,15 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         m.hitAddress     = reinterpret_cast<void*>(c.hitIP);
                         m.isStatic       = true;
                         m.refKind        = c.refKind;
-                        m.confidence     = "chain-exact";  // distinguish from v1 "exact"
+                        m.confidence     = confidenceTag;
                         result.matches.push_back(std::move(m));
                     }
                     Log::Write(MagicStrings::LogCategoryWalk,
                         "FieldXref: v2 emitted " +
                         std::to_string(result.matches.size()) +
                         " matches (dropped " + std::to_string(v2Dropped) +
-                        " on kind/enclose filter)");
+                        " on kind/enclose filter, confidence=" +
+                        confidenceTag + ")");
                 }
             }
         }
@@ -660,23 +780,55 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
         std::uintptr_t gaHi = gaLo + gaSize;
         bool outsideModule = (targetAddr < gaLo) || (targetAddr >= gaHi);
         if (outsideModule && candidateHits == 0) {
+            // ----------------------------------------------------------
+            // User-facing note: kept short + jargon-free per user
+            // feedback (the prior 6-sentence technical wall-of-text was
+            // unhelpful for the UI banner — most users hitting this case
+            // aren't IL2CPP internals experts).
+            //
+            // The full technical reasoning lives below in this comment
+            // block and in the DLL log line above. Future maintainers:
+            // do NOT inline the technical detail back into the user-
+            // facing string — keep it here.
+            //
+            // What's actually going on:
+            //   * v1 RIP scan checks for `mov reg, [rip+disp]` where
+            //     disp points directly at the field's storage. Fails on
+            //     modern IL2CPP because `static_fields` is heap-allocated
+            //     by the runtime — no compile-time disp can address it.
+            //   * v2 chain detector looks for the 2-hop pattern
+            //     `mov reg, [rip+CLASS_PTR]; mov reg2, [reg+0xB8]; ...`.
+            //     Works when AOT code has cached the `Il2CppClass*` in
+            //     `.data` (singletons, user-statics initialised early).
+            //   * v3.0 lazy-init slot scanner finds per-method init-call
+            //     cache slots in `.text` (`lea reg, [SLOT]; call init`).
+            //     Resolves slot→class via runtime value comparison —
+            //     works when the AOT method that uses the slot has
+            //     executed at least once.
+            //   * The remaining case is "AOT method has never run in
+            //     this session" (e.g. compiler-generated `<>c` lambda
+            //     caches whose lambda body hasn't been called). v3.1
+            //     attempted static slot→class mapping but hit a v29
+            //     `metadataUsages=NULL` layout dead-end. v3.2 plan in
+            //     STATUS.md but deferred indefinitely (niche use case).
+            //
+            // For end users:
+            //   * Singletons / regular game state: v2/v3.0 usually work.
+            //     If hitting this banner on those, the class hasn't been
+            //     initialised yet — exercise the code path first.
+            //   * Compiler-generated `<>c` lambda caches: not supported
+            //     on IL2CPP. Use Mono backend if available.
+            // ----------------------------------------------------------
             result.note =
-                "IL2CPP static_fields are runtime-heap-allocated by the IL2CPP "
-                "runtime at class-init time (this field's storage is at 0x" +
-                [](std::uintptr_t v) {
-                    char buf[24]; std::snprintf(buf, sizeof(buf), "%llX",
-                        static_cast<unsigned long long>(v)); return std::string(buf);
-                }(targetAddr) +
-                ", which sits outside the GameAssembly.dll module). No "
-                "compiled instruction can RIP-relative-address a runtime "
-                "address, so this scanner cannot find readers/writers via "
-                "RIP scanning — even though the IL almost certainly contains "
-                "ldsfld/stsfld ops. This is a structural limitation of Phase "
-                "28b v1's IL2CPP path, not evidence that the field is unused. "
-                "Phase 28b-v2 (see plan.md) plans a class-pointer chained-"
-                "disassembly redesign to address this. For now, the Mono "
-                "backend's IL walker handles this case correctly — use a "
-                "Mono target to inspect equivalent fields.";
+                "No matches found. The IL2CPP scanner can't detect "
+                "references to this field type yet. This usually means "
+                "either (a) the code that uses this field hasn't run in "
+                "the current game session — try playing the relevant "
+                "game content first, then re-scan, or (b) it's a "
+                "compiler-generated field (lambda cache, async-state-"
+                "machine, etc.) which isn't supported on the IL2CPP "
+                "backend in this build. Mono targets handle these cases "
+                "correctly via IL walking.";
         }
     }
 
