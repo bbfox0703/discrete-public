@@ -333,6 +333,97 @@ fix for (b) is heap-leaked singletons (the prior lesson above).
 
 ---
 
+### Phase 29a — even ONE attach guard isn't enough if the work volume inside the guard explodes ReadClassInfo calls — close-hang via BDWGC small-object pressure  ✅ **Fixed build #602**
+
+**Symptom**: After Phase 29a's snapshot RPCs landed at build #598, the
+BongoCat (Mono / Unity 6000.2 / x64) target stopped freezing
+*during* the snapshot — but **the game then hung on close** and
+required force-kill. 活俠傳 (Mono x86) at the same build was clean.
+SaGa F2R (IL2CPP) was clean.
+
+Cross-target matrix:
+* BongoCat: ~12s snapshot, **game hangs on close**.
+* 活俠傳:    ~48s snapshot, no close-hang.
+* SaGa F2R: ~29s snapshot, no close-hang (IL2CPP has no BDWGC).
+
+Diff between BongoCat and 活俠傳 wasn't the platform (both Mono BDWGC)
+— it was the *instance volume captured*: BongoCat 20,664 vs 活俠傳
+787. The instance walker did per-instance × per-parent-class
+`Mono::ReadClassInfo` calls (in turn calling `mono_type_get_name` →
+small string allocs → BDWGC bookkeeping). BongoCat math: 20,664 ×
+~4 parent depth ≈ **80,000 ReadClassInfo calls per snapshot**.
+活俠傳: 787 × ~3 ≈ 2,400 calls — well within tolerance.
+
+**Root cause**: even under ONE outer `ThreadAttachGuard` (the build
+#598 fix vs the per-chunk attach pattern), the *workload* inside the
+guard can saturate BDWGC's small-object pool with intermediate
+allocations. When the game eventually shuts down, BDWGC has to drain
+all those allocs through its finalizer / sweep pipeline → main
+thread stalls.
+
+Two distinct flavours of "BDWGC stall on shutdown" now documented:
+1. **Many attach/detach cycles** (this file's earlier "Phase 27
+   follow-up" entry) — runtime queues a thread-handle ref per cycle;
+   accumulates regardless of work volume.
+2. **One attach but heavy runtime-call traffic inside** (this entry) —
+   accumulated small-object allocs from `mono_type_get_name` etc.
+
+The first is fixed by reentrant guard; the second is fixed by
+**deduping the runtime calls themselves**.
+
+**Fix**: pre-cache `ReadClassInfo` per chain entry, ONCE per class
+plan item, reuse across all instances of that class. New call volume:
+448 classes × ~4 chain depth = **~1,800 ReadClassInfo calls** instead
+of 80,000 — a 40× reduction. The per-instance inner loop becomes
+pure memory reads via `SafeReadBytes`, zero Mono calls.
+
+Per [`dll/src/shared/ExportAPI.cpp` snapshot handlers](../dll/src/shared/ExportAPI.cpp):
+
+```cpp
+// Bad — per-instance × per-parent ReadClassInfo (build #598):
+for (auto instAddr : item.instances) {
+    std::vector<MonoClass*> chain;  // rebuilt every iteration
+    for (MonoClass* cur = k; ...) chain.push_back(cur);
+    for (auto chIt = chain.rbegin(); chIt != chain.rend(); ++chIt) {
+        auto pr = Mono::ReadClassInfo(*chIt);  // ← N × M calls
+        ...
+    }
+}
+
+// Good — chain + ChainInfo built ONCE per class (build #602):
+std::vector<MonoClass*> chain;
+for (MonoClass* cur = k; ...) chain.push_back(cur);
+std::vector<Mono::ClassInfoResult> chainInfo;
+for (auto* c : chain) chainInfo.push_back(Mono::ReadClassInfo(c));
+
+for (auto instAddr : item.instances) {
+    for (std::size_t ci = chain.size(); ci > 0; --ci) {
+        const auto& pr = chainInfo[ci - 1];  // ← cached
+        ...
+    }
+}
+```
+
+Verified end-to-end on BongoCat at build #602: 12.3s → 8.4s (30%
+faster) AND **no close hang**.
+
+**Generalization**: when a batch loop calls into Mono / IL2CPP
+metadata APIs that return "the same answer per class", cache by
+class pointer. The reentrant-guard rule (one outer attach) is
+necessary but **not sufficient** if the volume of inner runtime
+calls is itself high enough to strain BDWGC. Always check the
+volume math: instance count × parent chain depth × API-calls-per-
+ReadClassInfo. If product > ~10K, cache or batch.
+
+**How to spot this in the future**: if a feature works on a small
+target but causes "game hangs on close" on a big target with the
+same platform, suspect heavy runtime-API traffic inside the work
+loop. Symptom signature: the script/UI completes normally, but
+killing the game window blocks for tens of seconds → forced
+process kill required.
+
+---
+
 ### Phase C follow-up — IL2CPP equivalent: per-RPC ThreadAttachGuard batching across N pipe calls stalls shutdown  ✅ **Fixed build #496**
 
 **Symptom**: SaGa Frontier 2 Remastered (IL2CPP v29, Unity 2021.3.39f1)
