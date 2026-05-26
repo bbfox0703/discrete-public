@@ -202,7 +202,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
         var ct = _cts.Token;
 
         IsBusy = true; ErrorMessage = null;
-        StartElapsedTimer("Snapshotting");
+        // Phase 1 — heap walk + per-class decode + GC drain on the
+        // server side. The elapsed-time DispatcherTimer updates the
+        // visible status every 200ms so the user can see we're alive.
+        // This phase dominates on big targets (60-90s on 활俠傳 with
+        // 全抓 scope after exclusions); the wide heap walk is the
+        // unavoidable cost.
+        StartElapsedTimer("Capturing (heap walk + decode)");
 
         var sw = Stopwatch.StartNew();
         try
@@ -221,6 +227,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
             var begin = await _backend.SnapshotBeginAsync(
                 scope, cap, arr, IncludeSystemAssemblies, ct).ConfigureAwait(true);
+            StopElapsedTimer();  // Phase 1 done; manual status from here.
             if (!string.IsNullOrEmpty(begin.Error))
             {
                 ErrorMessage  = begin.Error;
@@ -228,15 +235,26 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 return;
             }
 
-            // Drain Chunks. Each call is now a pure JSON slice (Phase
-            // 29a-v2 design); latency is dominated by message size, not
-            // server-side work.
-            var classes = new List<SnapshotClassEntry>(begin.TotalClasses);
+            // Phase 2 — stream pre-built class payloads in chunks. Each
+            // snapshotChunk RPC is a pure JSON slice server-side (Phase
+            // 29a-v2 design), so latency is dominated by IPC throughput,
+            // not server work. Chunk size 100 (was 32) cuts round-trip
+            // count by ~3x — on 활俠傳's 3.6K-class workload that's 37
+            // round-trips instead of 114. Server caps at 200.
+            const int kChunkSize = 100;
+            int totalClasses = begin.TotalClasses;
+            int expectedChunks = totalClasses > 0
+                ? (totalClasses + kChunkSize - 1) / kChunkSize
+                : 0;
+            double beginElapsedSec = sw.Elapsed.TotalSeconds;
+
+            var classes = new List<SnapshotClassEntry>(totalClasses);
             int cursor = 0;
             int chunkCount = 0;
+            var chunkPhaseSw = Stopwatch.StartNew();
             while (true)
             {
-                var chunk = await _backend.SnapshotChunkAsync(begin.SnapshotId, cursor, 32, ct)
+                var chunk = await _backend.SnapshotChunkAsync(begin.SnapshotId, cursor, kChunkSize, ct)
                     .ConfigureAwait(true);
                 if (!string.IsNullOrEmpty(chunk.Error))
                 {
@@ -246,6 +264,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 }
                 classes.AddRange(chunk.Classes);
                 chunkCount++;
+                // Live progress for the streaming phase. Updates every
+                // chunk so the user sees the counter move — fixes the
+                // "looks frozen" perception when total snapshot is 100s+.
+                StatusMessage = string.Format(CultureInfo.InvariantCulture,
+                    "Streaming chunk {0}/{1} ({2:N0} of {3:N0} classes)… capture {4:F1}s + stream {5:F1}s",
+                    chunkCount, expectedChunks,
+                    classes.Count, totalClasses,
+                    beginElapsedSec, chunkPhaseSw.Elapsed.TotalSeconds);
                 if (chunk.Done) break;
                 cursor = chunk.NextCursor;
             }

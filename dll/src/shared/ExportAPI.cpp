@@ -47,6 +47,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -2385,7 +2386,13 @@ void RegisterCoreHandlers() {
             // waiting RPC budget instead of leaking into the game frame.
             const auto& rDrain = Mono::GetResolver();
             if (rDrain.gc_collect != nullptr) {
+                auto drainStart = std::chrono::steady_clock::now();
                 rDrain.gc_collect(-1);
+                auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - drainStart).count();
+                UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+                    "snapshotBegin(Mono): mono_gc_collect(-1) drained in "
+                    + std::to_string(drainMs) + " ms");
             }
         }
 
@@ -5289,7 +5296,13 @@ void RegisterCoreHandlers() {
             // pattern. `il2cpp_gc_collect(0)` = full collection.
             const auto& rDrainIl = IL2CPP::GetResolver();
             if (rDrainIl.gc_collect != nullptr) {
+                auto drainStart = std::chrono::steady_clock::now();
                 rDrainIl.gc_collect(0);
+                auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - drainStart).count();
+                UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+                    "snapshotBegin(IL2CPP): il2cpp_gc_collect(0) drained in "
+                    + std::to_string(drainMs) + " ms");
             }
         }
 
