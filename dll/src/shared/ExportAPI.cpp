@@ -2188,19 +2188,33 @@ void RegisterCoreHandlers() {
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
-                // Instance walk with array element capture.
+                // Build parent chain ONCE per class (was: per instance × per
+                // class = ~80K mono runtime calls on BongoCat → BDWGC pressure
+                // → game freezes on close per build #598 live-smoke). Also
+                // memoise ReadClassInfo for each chain entry so the per-
+                // instance loop below is pure memory reads.
+                std::vector<Mono::MonoClass*> chain;
+                for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                    chain.push_back(cur);
+                    if (Mono::GetResolver().class_get_parent == nullptr) break;
+                    cur = Mono::GetResolver().class_get_parent(cur);
+                }
+                std::vector<Mono::ClassInfoResult> chainInfo;
+                chainInfo.reserve(chain.size());
+                for (auto* c : chain) {
+                    chainInfo.push_back(Mono::ReadClassInfo(c));
+                }
+
+                // Instance walk with array element capture — uses cached
+                // chainInfo, no Mono calls inside the loop.
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
                     Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
-                    std::vector<Mono::MonoClass*> chain;
-                    for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
-                        chain.push_back(cur);
-                        if (Mono::GetResolver().class_get_parent == nullptr) break;
-                        cur = Mono::GetResolver().class_get_parent(cur);
-                    }
                     Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
-                    for (auto chIt = chain.rbegin(); chIt != chain.rend(); ++chIt) {
-                        auto pr = Mono::ReadClassInfo(*chIt);
+                    // Walk base→derived so field offsets come out in memory
+                    // order (chainInfo is k→base; reverse-iterate).
+                    for (std::size_t ci = chain.size(); ci > 0; --ci) {
+                        const auto& pr = chainInfo[ci - 1];
                         if (!pr.ok) continue;
                         for (const auto& f : pr.info.fields) {
                             if (f.flags & 0x10u) continue;
@@ -5040,19 +5054,28 @@ void RegisterCoreHandlers() {
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
-                Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
+                // Build parent chain + cache ReadClassInfo per chain entry
+                // ONCE per class — see Mono mirror above for the BongoCat
+                // freeze that forced this optimisation.
                 const auto& rIl = IL2CPP::GetResolver();
+                std::vector<IL2CPP::Il2CppClass*> chain;
+                for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                    chain.push_back(cur);
+                    if (rIl.class_get_parent == nullptr) break;
+                    cur = rIl.class_get_parent(cur);
+                }
+                std::vector<IL2CPP::ClassInfoResult> chainInfo;
+                chainInfo.reserve(chain.size());
+                for (auto* c : chain) {
+                    chainInfo.push_back(IL2CPP::ReadClassInfo(c));
+                }
+
+                Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
                     Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
-                    std::vector<IL2CPP::Il2CppClass*> chain;
-                    for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
-                        chain.push_back(cur);
-                        if (rIl.class_get_parent == nullptr) break;
-                        cur = rIl.class_get_parent(cur);
-                    }
                     Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
-                    for (auto chIt = chain.rbegin(); chIt != chain.rend(); ++chIt) {
-                        auto pr = IL2CPP::ReadClassInfo(*chIt);
+                    for (std::size_t ci = chain.size(); ci > 0; --ci) {
+                        const auto& pr = chainInfo[ci - 1];
                         if (!pr.ok) continue;
                         for (const auto& f : pr.info.fields) {
                             if (f.flags & 0x10u) continue;
