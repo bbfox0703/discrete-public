@@ -747,7 +747,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         out.bytesScanned += r.size;
         bytesSinceYield += r.size;
         if (bytesSinceYield >= kYieldEveryBytes) {
-            ::Sleep(0);
+            ::Sleep(1);
             bytesSinceYield = 0;
         }
         SehSweepRegion(r.base, r.size, minKlass, maxKlass, classSet,

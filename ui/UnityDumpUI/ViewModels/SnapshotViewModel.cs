@@ -454,7 +454,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
 // Local model — one captured snapshot held in memory for the session.
 // ===========================================================================
 
-public sealed class SnapshotEnvelope
+public sealed partial class SnapshotEnvelope : ObservableObject
 {
     public string   ServerId       { get; init; } = string.Empty;
     public string   Label          { get; set; }  = string.Empty;
@@ -465,6 +465,13 @@ public sealed class SnapshotEnvelope
     public int      TotalClasses   { get; init; }
     public int      TotalInstances { get; init; }
     public List<SnapshotClassEntry> Classes { get; init; } = new();
+
+    /// <summary>Phase 29b — flipped by MainWindowViewModel when the
+    /// current handshake's gameBuildId doesn't match this snapshot's
+    /// gameBuildId (user reconnected to a different game). Visible in
+    /// the snapshot dropdown via <see cref="DisplayName"/>.</summary>
+    [ObservableProperty]
+    private bool _isStale;
 
     /// <summary>Flat lookup: <c>"asm|ns|class|instance|offset"</c> →
     /// per-field value snapshot. Built once at capture time, reused on
@@ -481,9 +488,17 @@ public sealed class SnapshotEnvelope
             : $"\"{Label}\"";
 
     public string DisplayName
-        => string.IsNullOrEmpty(Label)
-            ? $"{CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst"
-            : $"{Label} — {CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst";
+    {
+        get
+        {
+            string body = string.IsNullOrEmpty(Label)
+                ? $"{CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst"
+                : $"{Label} — {CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst";
+            return IsStale ? $"⚠ stale (different game) — {body}" : body;
+        }
+    }
+
+    partial void OnIsStaleChanged(bool value) => OnPropertyChanged(nameof(DisplayName));
 
     /// <summary>Walk classes / statics / instance fields and stash each
     /// observed value in <see cref="FieldIndex"/>. Key shape:

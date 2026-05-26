@@ -587,6 +587,18 @@ json BuildHandshakeJson() {
     j["assemblies_count"] = assembliesCount;
     j["build"]    = static_cast<std::uint32_t>(UNITYCEDUMPER_BUILD_NUMBER);
     j["protocol"] = 1;
+    // Phase 29b — compute the same gameBuildId hash that snapshotBegin
+    // emits so the UI can detect "we reconnected to a different game"
+    // without taking a snapshot first. Same fingerprint scheme
+    // (FNV-1a over module path + file size + last-write-time).
+#if defined(UNITYCEDUMPER_BACKEND_MONO)
+    j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
+    if (j["game_build_id"].get<std::string>().empty()) {
+        j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
+    }
+#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+    j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
+#endif
     return j;
 }
 
@@ -2197,21 +2209,13 @@ void RegisterCoreHandlers() {
         };
 
         if (domain != nullptr) {
-            // Phase 29a-v4 — batch attach. Live-smoke on 활俠傳 (Mono
-            // x86 / Unity 2020.3) build #621 showed the game freezing
-            // (Windows DWM "Mortal (沒有回應)") during snapshot. Root
-            // cause isn't the BDWGC queue (gc_collect drain took 19ms
-            // and didn't help) — it's that holding ONE mono attach
-            // across 7s of intense work prevents Mono GC from advancing
-            // safely (worker thread never reaches a Mono safepoint).
-            // Same family as Phase 27a lesson "mass-batch wedges
-            // 32-bit Mono". Fix: chunk decode into batches of N
-            // classes, attach/detach per batch, Sleep(0) between
-            // batches so the game's main thread can schedule + Mono GC
-            // can checkpoint. Global ClassInfo cache lives in function
-            // scope so it persists across batches.
-            constexpr std::size_t kDecodeBatchSize = 100;
-
+            // Phase 29a-v4 round 3 — one big attach (reverted from
+            // batch-attach). Build #631 batch-attach attempt regressed
+            // BongoCat (Mono x64) — game hangs after snapshot, but
+            // worked fine in earlier one-big-attach builds. v4 yields
+            // moved into the heap-walk path (where most game-thread
+            // bandwidth pressure actually originates) and the
+            // post-decode GC drain + Sleep(500) breathe.
             auto getClassInfo = [&](Mono::MonoClass* c)
                 -> const Mono::ClassInfoResult& {
                 auto it = globalClassInfo.find(c);
@@ -2385,40 +2389,30 @@ void RegisterCoreHandlers() {
                 session->classes.push_back(std::move(classEntry));
             };  // end decodeOneClass lambda
 
-            // Batch loop: attach for N classes, detach, yield, repeat.
-            // Each batch gives the game's main thread + Mono GC a
-            // chance to schedule between bursts of our runtime calls.
-            const std::size_t totalPlanSz = session->plan.size();
-            for (std::size_t batchStart = 0; batchStart < totalPlanSz;
-                 batchStart += kDecodeBatchSize)
-            {
-                std::size_t batchEnd =
-                    std::min(batchStart + kDecodeBatchSize, totalPlanSz);
-                {
-                    Mono::ThreadAttachGuard guard(domain);
-                    if (!guard.Attached()) {
-                        // Couldn't attach — surface as per-class error
-                        // for this batch and move on.
-                        for (std::size_t j = batchStart; j < batchEnd; ++j) {
-                            const auto& it = session->plan[j];
-                            session->classes.push_back(Snapshot::ClassPayload{
-                                {"assembly", it.assembly},
-                                {"namespace", it.ns},
-                                {"name", it.name},
-                                {"error", "mono_thread_attach failed"},
-                            });
-                        }
-                        continue;
-                    }
-                    for (std::size_t j = batchStart; j < batchEnd; ++j) {
-                        decodeOneClass(session->plan[j]);
-                    }
-                    // guard destructs here → mono_thread_detach
+            // Phase 29a-v4 round 3 — REVERTED to one outer
+            // ThreadAttachGuard for the whole decode loop. Build #631
+            // live-smoke on BongoCat (Mono x64, 1,112 classes) hung
+            // the game after snapshot, but build #602 with the v2
+            // one-big-attach + memoised ClassInfo design ran cleanly.
+            // The batch attach + per-batch Sleep(0) yields added
+            // attach-cycle overhead that turned out worse than the
+            // benefit. Reverting; 활俠傳 (Mono x86) still has a
+            // separate freeze that v4's yields are addressing via the
+            // heap-walk yield path.
+            Mono::ThreadAttachGuard guard(domain);
+            if (guard.Attached()) {
+                for (auto& item : session->plan) {
+                    decodeOneClass(item);
                 }
-                // Yield. Sleep(0) gives up our timeslice to any thread
-                // ready to run — typically the game's main thread.
-                // Cheap (~µs) on any modern Windows scheduler.
-                ::Sleep(0);
+            } else {
+                for (auto& item : session->plan) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "mono_thread_attach failed"},
+                    });
+                }
             }
 
             // Phase 29a-v4 round 2 — drain Mono GC ONCE at the end of
@@ -5180,15 +5174,7 @@ void RegisterCoreHandlers() {
         };
 
         if (domain != nullptr) {
-            // Phase 29a-v4 — batch attach mirror of the Mono path. IL2CPP
-            // doesn't have the same GC-safepoint sensitivity as Mono
-            // BDWGC (different runtime architecture), but keeping the
-            // batch/yield pattern symmetric across backends prevents
-            // a future regression where IL2CPP-specific games tip into
-            // the same wedge. ClassInfo cache lives in function scope
-            // so it survives across batches.
-            constexpr std::size_t kDecodeBatchSize = 100;
-
+            // Phase 29a-v4 round 3 — one big attach (mirror of Mono).
             // Global ClassInfo cache across the whole decode loop —
             // mirror of the Mono path. System.Object shows up as the
             // ancestor of every class; without this it would be re-read
@@ -5352,31 +5338,23 @@ void RegisterCoreHandlers() {
                 session->classes.push_back(std::move(classEntry));
             };  // end decodeOneClassIl lambda
 
-            const std::size_t totalPlanSz = session->plan.size();
-            for (std::size_t batchStart = 0; batchStart < totalPlanSz;
-                 batchStart += kDecodeBatchSize)
-            {
-                std::size_t batchEnd =
-                    std::min(batchStart + kDecodeBatchSize, totalPlanSz);
-                {
-                    IL2CPP::ThreadAttachGuard guard(domain);
-                    if (!guard.Attached()) {
-                        for (std::size_t j = batchStart; j < batchEnd; ++j) {
-                            const auto& it = session->plan[j];
-                            session->classes.push_back(Snapshot::ClassPayload{
-                                {"assembly", it.assembly},
-                                {"namespace", it.ns},
-                                {"name", it.name},
-                                {"error", "il2cpp_thread_attach failed"},
-                            });
-                        }
-                        continue;
-                    }
-                    for (std::size_t j = batchStart; j < batchEnd; ++j) {
-                        decodeOneClassIl(session->plan[j]);
-                    }
+            // Phase 29a-v4 round 3 — REVERTED to one outer attach
+            // (see Mono mirror above). IL2CPP doesn't have the same
+            // sensitivity, but uniform architecture across backends.
+            IL2CPP::ThreadAttachGuard guard(domain);
+            if (guard.Attached()) {
+                for (auto& item : session->plan) {
+                    decodeOneClassIl(item);
                 }
-                ::Sleep(0);
+            } else {
+                for (auto& item : session->plan) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"error", "il2cpp_thread_attach failed"},
+                    });
+                }
             }
 
             // Mirror of the Mono path's post-decode drain. IL2CPP GC

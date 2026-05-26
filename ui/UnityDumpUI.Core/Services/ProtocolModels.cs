@@ -43,6 +43,12 @@ public sealed class HandshakeResult
     [JsonPropertyName("assemblies_count")]  public int     AssembliesCount { get; set; }
     [JsonPropertyName("build")]             public uint    Build           { get; set; }
     [JsonPropertyName("protocol")]          public int     Protocol        { get; set; }
+    /// <summary>Phase 29b — fingerprint hash of the active game module
+    /// (FNV-1a over file path + size + last-write-time). Same value
+    /// <see cref="SnapshotBeginResult.GameBuildId"/> carries; the UI
+    /// uses it to detect "reconnected to a different game build"
+    /// and mark old snapshots stale.</summary>
+    [JsonPropertyName("game_build_id")]     public string? GameBuildId     { get; set; }
 }
 
 /// <summary>

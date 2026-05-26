@@ -815,6 +815,13 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     // game's main thread scheduling slices without meaningfully
     // slowing the walk (Sleep(0) returns in microseconds when no
     // other thread is ready). 16 MB on a 1 GB heap = ~64 yields.
+    // Sleep(1) instead of Sleep(0). Sleep(0) only yields if another
+    // thread is ready; Sleep(1) forcibly gives up >=1ms of timeslice
+    // regardless. For 활俠傳-class targets the game's main thread may
+    // not be "ready" by Windows scheduler accounting (waiting on
+    // page-ins after our scan cleared its working set from L3), so
+    // Sleep(0) returned immediately and yielded nothing. Sleep(1)
+    // gives the kernel time to page the game's working set back in.
     constexpr std::size_t kYieldEveryBytes = 16ull * 1024ull * 1024ull;
     std::size_t bytesSinceYield = 0;
 
@@ -836,7 +843,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         out.bytesScanned += r.size;
         bytesSinceYield += r.size;
         if (bytesSinceYield >= kYieldEveryBytes) {
-            ::Sleep(0);
+            ::Sleep(1);
             bytesSinceYield = 0;
         }
 

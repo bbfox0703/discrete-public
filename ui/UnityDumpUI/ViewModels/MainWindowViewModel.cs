@@ -585,6 +585,23 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
                 $"connected backend={hs.Backend} build={hs.Build} unity={hs.UnityVersion}");
 
+            // Phase 29b — mark snapshots from a different game build
+            // as stale. User feedback: if I take a snapshot of 활俠傳,
+            // disconnect (game hung), then connect to SaGa F2R, the
+            // 활俠傳 snapshot is still in the dropdown but it's not
+            // diffable against SaGa snapshots. Visual flag in the
+            // snapshot's DisplayName tells the user. We DON'T delete
+            // them — user might reconnect to the same game later and
+            // want to keep them.
+            if (!string.IsNullOrEmpty(hs.GameBuildId))
+            {
+                foreach (var s in Snapshot.Snapshots)
+                {
+                    s.IsStale = !string.Equals(
+                        s.GameBuildId, hs.GameBuildId, StringComparison.Ordinal);
+                }
+            }
+
             // Phase 8: kick off assembly fetch so the left pane populates
             // without an extra click. Failures surface on Browser.ErrorMessage.
             _ = Browser.RefreshAssembliesCommand.ExecuteAsync(null);
