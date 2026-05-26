@@ -2277,37 +2277,32 @@ void RegisterCoreHandlers() {
                     };
                 }
 
-                // Static fields — Phase 29a-v3: ONE ResolveStaticBaseAddress
-                // call per class, then per-field addresses are pure offset
-                // arithmetic. Was: ResolveStaticFieldAddress (with internal
-                // mono_class_vtable) per static field → ~50K vtable calls
-                // on 活俠傳 → game freeze.
+                // Static field METADATA only (Mono). Live-smoke build
+                // #633 on BongoCat + 활俠傳: game freezes AFTER our RPC
+                // returns; BGM keeps playing (audio thread fine), only
+                // game main thread wedges. Pattern matches BDWGC
+                // catching up on `mono_class_vtable` allocations we
+                // triggered via ResolveStaticBaseAddress (one per
+                // class with statics, then VTable for the class gets
+                // created in managed heap). Game's main thread runs
+                // GC catch-up on next allocation → freeze.
+                //
+                // Trade-off: snapshot captures static field NAME / TYPE /
+                // OFFSET but not VALUE. Users who want static values
+                // can use the Browser tab's static-field path on demand
+                // (which goes through mono_class_vtable only for the
+                // specific class they're viewing — single call, no
+                // bulk GC pressure). Diff workflow loses static value
+                // tracking on Mono but instance fields still work.
                 Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
-                void* staticBase = nullptr;
-                bool staticBaseResolved = false;
                 for (const auto& f : res.info.fields) {
                     if ((f.flags & 0x10u) == 0u) continue;
-                    if (!staticBaseResolved) {
-                        staticBase = Mono::ResolveStaticBaseAddress(k);
-                        staticBaseResolved = true;
-                    }
-                    Snapshot::ClassPayload srow = {
+                    statics.push_back(Snapshot::ClassPayload{
                         {"name",   f.name},
                         {"type",   f.typeName},
                         {"offset", f.offset},
-                    };
-                    if (staticBase == nullptr) {
-                        srow["error"] = "static_unresolved";
-                    } else {
-                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
-                                            + static_cast<std::uintptr_t>(f.offset);
-                        srow["address"] = formatHex(fa);
-                        json d = decodeField(f.typeName, fa);
-                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
-                            srow[kv.key()] = kv.value();
-                        }
-                    }
-                    statics.push_back(std::move(srow));
+                        {"error",  "static_value_skipped_mono"},
+                    });
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
@@ -2415,36 +2410,14 @@ void RegisterCoreHandlers() {
                 }
             }
 
-            // Phase 29a-v4 round 2 — drain Mono GC ONCE at the end of
-            // the batched decode, then a brief Sleep before returning
-            // the RPC. Build #629 ran in 19ms (the v3 trial) so the
-            // drain itself isn't slow, but we left it out in v4 to
-            // simplify. The 활俠傳 game still hangs in the "next step
-            // after heap walk + decode" phase (user observation).
-            // Hypothesis: game's main thread runs GC catch-up on the
-            // vtables we touched via mono_class_vtable in
-            // ResolveStaticBaseAddress, blocking the message loop.
-            // Drain (under a fresh attach for safety) + brief Sleep
-            // gives the game's main thread CPU before the chunk
-            // streaming phase floods the pipe.
-            {
-                const auto& rDrain = Mono::GetResolver();
-                if (rDrain.gc_collect != nullptr) {
-                    Mono::ThreadAttachGuard drainGuard(domain);
-                    if (drainGuard.Attached()) {
-                        auto drainStart = std::chrono::steady_clock::now();
-                        rDrain.gc_collect(-1);
-                        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - drainStart).count();
-                        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
-                            "snapshotBegin(Mono) post-decode drain " + std::to_string(drainMs) + " ms");
-                    }
-                }
-            }
-            // 500ms is empirical — short enough not to dominate total
-            // RPC time, long enough to give the game's main thread
-            // 30+ frame budgets at 60 fps to catch up.
-            ::Sleep(500);
+            // (Phase 29a-v4 round 4 — gc_collect drain + 500ms Sleep
+            // both REMOVED on Mono. The drain runs on our worker
+            // thread but doesn't actually drain the queue that affects
+            // the game's main thread; the 500ms sleep just delayed
+            // the inevitable wedge. Real fix landed above: skip
+            // ResolveStaticBaseAddress to avoid mono_class_vtable
+            // allocations entirely. If wedge persists, more drastic
+            // changes needed.)
         }
 
         // Preserve assembly order in the response.

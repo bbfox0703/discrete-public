@@ -597,7 +597,14 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     private static string FormatFieldValue(SnapshotFieldEntry f)
     {
         if (!string.IsNullOrEmpty(f.Error))
+        {
+            // Phase 29a-v4 round 4: Mono static fields capture metadata
+            // only — value reads removed to eliminate mono_class_vtable
+            // calls that wedge the game's main thread post-RPC. Give
+            // the row a friendly label instead of the raw error code.
+            if (f.Error == "static_value_skipped_mono") return "(static, value not captured on Mono)";
             return $"(err: {f.Error})";
+        }
         if (f.Value.HasValue && f.Value.Value.ValueKind != JsonValueKind.Null
                               && f.Value.Value.ValueKind != JsonValueKind.Undefined)
         {
