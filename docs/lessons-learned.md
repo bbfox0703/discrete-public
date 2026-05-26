@@ -691,6 +691,78 @@ REX prefix (`0x40-0x4F`). Otherwise REX-prefixed instructions are
 double-counted. Failure mode is silent — duplicate results
 look like correct results unless you cross-check counts.
 
+### Phase 28b-v3 — `<>c` lambda-cache classes use per-AOT-method lazy-init slots
+
+**Symptom**: Phase 28b-v2 chain detector finds `SteamManager.s_instance`
+fine (11 chain-exact matches) but returns 0 matches for compiler-generated
+`<>c` lambda-cache classes (e.g. SaGa F2R
+`MainGame/StrReader2UShortAry/<>c.<>9__0_0`). Original plan-doc hypothesis
+was that IL2CPP routed compiler-generated classes through
+`g_codegenModule->types[index]` — investigation showed that field doesn't
+even exist in `Il2CppCodeGenModule`
+([vendor/Il2CppDumper/Il2CppDumper/Il2Cpp/Il2CppClass.cs:261](../vendor/Il2CppDumper/Il2CppDumper/Il2Cpp/Il2CppClass.cs)).
+
+**Root cause** (recovered by `diagnoseClassReferences` pipe RPC +
+`getMethodAobPattern` disasm pull on live SaGa F2R, 2026-05-26): the
+`<>c` class pointer IS stored in `.data`/`.bss`, but in **per-AOT-method
+lazy-init cache slots** populated by `il2cpp_codegen_initialize_method`.
+Each AOT method that touches a class has its own dedicated slot. The
+codegen pattern is:
+
+```asm
+; Per-method lazy-init guard
+cmp  byte [rip + INIT_FLAG], 0
+jne  skip_init
+lea  rcx, [rip + SLOT_ADDR]              ; pass &slot to init
+call il2cpp_codegen_initialize_method    ; ← runtime writes Il2CppClass* into slot
+lock or [rsp], 0                          ; memory barrier
+mov  byte [rip + INIT_FLAG], 1
+skip_init:
+; Standard Phase 28b-v2 3-hop chain follows
+mov  rcx, [rip + SLOT_ADDR]              ; hop 1 — now holds Il2CppClass*
+mov  rdx, [rcx + 0xB8]                   ; hop 2 — static_fields
+mov  [rdx + FIELD_OFFSET], rax           ; hop 3
+```
+
+Crucially, the slot stays **NULL until the AOT method first executes**.
+`SteamManager` accessor methods run during game startup, so their slots
+are always populated by the time the user scans for xrefs.
+`<>c.<>9__0_X` lambda body methods may never execute in a given game
+session (e.g. if the user hasn't triggered the LINQ query that uses the
+lambda), in which case ALL the slots holding the `<>c` class pointer
+stay NULL and v2's scanner finds nothing in `.data`.
+
+**Fix** (Phase 28b-v3.0, build #581): new
+[`IL2CPPLazyInitSlotScanner`](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp)
+that one-time `.text` walks for `lea reg, [rip+disp32]; call rel32`
+2-instruction sequences (`lea` target in `.data`/`.bss` of the module,
+`call` target in an exec section of the same module). Result cached via
+`std::call_once`. `IL2CPPFieldXref::FindStaticFieldReferences` reads
+each slot's current value with `Memory::SafeRead` — slots holding the
+target class pointer get merged into the v2 chain detector's input set.
+Matches surfaced solely via v3 lazy slots get `confidence="chain-lazy"`.
+
+**v3.0 limitation**: slots whose values are still NULL can't be linked
+to a class via runtime value comparison. v3.1 (deferred, ~1-2 days)
+plans to parse the `MetadataInitializerEntry` struct that the `lea`
+target points to and recover the typeIndex statically, cross-lookup in
+`Il2CppMetadataRegistration->types[]`, derive the class — making the
+mapping work even for never-executed methods.
+
+**Rule**: when designing scanners for IL2CPP `.data` references, don't
+assume every reference uses a stable cache cell — compiler-generated
+classes use per-method lazy-init slots that are zero until the method
+runs. The detection has to handle both "direct cache" and "lazy-init
+cache" patterns, and the lazy path needs either runtime value snooping
+(v3.0) or static metadata-entry parsing (v3.1) to attribute slots to
+classes.
+
+**Source**:
+[`IL2CPPLazyInitSlotScanner.{h,cpp}`](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp),
+[`IL2CPPFieldXref.cpp` v2 fallback block](../dll/src/il2cpp/IL2CPPFieldXref.cpp),
+diagnostic in
+[`IL2CPPClassReferenceDiagnostic.{h,cpp}`](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp).
+
 ---
 
 ## Overload disambiguation

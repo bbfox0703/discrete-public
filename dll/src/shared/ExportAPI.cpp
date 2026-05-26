@@ -26,6 +26,7 @@
 #  include "../mono/MonoThreadAttach.h"
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
 #  include "../il2cpp/IL2CPPAddressFinder.h"
+#  include "../il2cpp/IL2CPPClassReferenceDiagnostic.h"
 #  include "../il2cpp/IL2CPPClassWalker.h"
 #  include "../il2cpp/IL2CPPDomain.h"
 #  include "../il2cpp/IL2CPPFieldXref.h"
@@ -3804,6 +3805,135 @@ void RegisterCoreHandlers() {
         // scanner couldn't possibly see the references (runtime-heap
         // static_fields). UI shows this prominently when matches=0.
         if (!fr.note.empty()) response["note"] = fr.note;
+        return response;
+    });
+
+    // Phase 28b-v3 investigation — diagnoseClassReferences. Given a class
+    // FQN, reports every storage slot (GameAssembly.dll non-exec sections
+    // + committed RW heap) holding the Il2CppClass* and its
+    // static_fields ptr, with 128 bytes of surrounding context per hit.
+    // Used to figure out how compiler-generated `<>c` classes are
+    // referenced from AOT code when the v2 ClassPointerScanner returns
+    // 0 module slots (so we can design the v3 chain detector).
+    PipeServer::RegisterHandler(MagicStrings::CmdDiagnoseClassReferences,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::string assembly = args.value("assembly", std::string{});
+        if (assembly.empty()) return json{{"error", "missing 'assembly' arg"}};
+        std::string ns       = args.value("ns",       std::string{});
+        std::string klassNm  = args.value("class",    std::string{});
+        if (klassNm.empty()) return json{{"error", "missing 'class' arg"}};
+        std::string fieldNm  = args.value("fieldName", std::string{});
+
+        bool heapScan = args.value("heapScan", true);
+        int  heapLimit = args.value("heapLimit", 64);
+        if (heapLimit <= 0)   heapLimit = 64;
+        if (heapLimit > 1024) heapLimit = 1024;
+
+        const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assembly);
+        if (img == nullptr) return json{{"error", "assembly not found: " + assembly}};
+
+        IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
+        if (domain == nullptr) return json{{"error", "il2cpp domain unavailable"}};
+        IL2CPP::ThreadAttachGuard guard(domain);
+        if (!guard.Attached()) return json{{"error", "il2cpp thread attach failed"}};
+
+        IL2CPP::Il2CppClass* klass = IL2CPP::FindClass(img, ns, klassNm);
+        if (klass == nullptr) {
+            return json{{"error", "class not found: " +
+                         (ns.empty() ? klassNm : ns + "." + klassNm)}};
+        }
+
+        auto d = IL2CPP::DiagnoseClassReferences(
+            klass, fieldNm, heapScan, static_cast<std::size_t>(heapLimit));
+        if (!d.ok) return json{{"error", d.error}};
+
+        // Hex-encode byte buffers for the wire (no base64 — keeps the
+        // response copy-pasteable into a debugger watch window).
+        auto bytesToHex = [](const std::vector<std::uint8_t>& bytes) {
+            std::string out;
+            out.reserve(bytes.size() * 2);
+            static constexpr char kHex[] = "0123456789ABCDEF";
+            for (auto b : bytes) {
+                out.push_back(kHex[(b >> 4) & 0xF]);
+                out.push_back(kHex[b & 0xF]);
+            }
+            return out;
+        };
+
+        auto slotToJson = [&](const IL2CPP::DiagnosticSlot& s) {
+            json j = {
+                {"address",          formatHex(s.address)},
+                {"section",          s.sectionName},
+                {"contextHex",       bytesToHex(s.context)},
+                {"contextSlotOffset", s.contextSlotOffset},
+            };
+            if (s.regionBase != 0) {
+                j["regionBase"]    = formatHex(s.regionBase);
+                j["regionSize"]    = s.regionSize;
+                j["regionProtect"] = s.regionProtect;
+                j["regionType"]    = s.regionType;
+            }
+            return j;
+        };
+
+        json sectionsJson = json::array();
+        for (const auto& sec : d.sections) {
+            sectionsJson.push_back({
+                {"name",         sec.name},
+                {"va",           formatHex(sec.va)},
+                {"size",         sec.size},
+                {"isExecutable", sec.isExecutable},
+                {"isWritable",   sec.isWritable},
+            });
+        }
+
+        auto slotListToJson = [&](const std::vector<IL2CPP::DiagnosticSlot>& v) {
+            json out = json::array();
+            out.get_ptr<json::array_t*>()->reserve(v.size());
+            for (const auto& s : v) out.push_back(slotToJson(s));
+            return out;
+        };
+
+        json navJson = json::array();
+        for (const auto& c : d.navigationCandidates) {
+            navJson.push_back({
+                {"methodPointer", formatHex(c.methodPointer)},
+                {"slotAddress",   formatHex(c.slotAddress)},
+            });
+        }
+
+        json response = {
+            {"ok",                        true},
+            {"classFqn",                  ns.empty() ? klassNm : ns + "." + klassNm},
+            {"classPtr",                  formatHex(d.classPtr)},
+            {"staticFieldsPtr",           formatHex(d.staticFieldsPtr)},
+            {"staticFieldsOffsetInClass", d.staticFieldsOffsetInClass},
+            {"targetFieldName",           d.targetFieldName},
+            {"targetFieldInfoPtr",        formatHex(d.targetFieldInfoPtr)},
+            {"targetFieldOffset",         d.targetFieldOffset},
+            {"module", {
+                {"base",     formatHex(d.moduleBase)},
+                {"size",     d.moduleSize},
+                {"sections", std::move(sectionsJson)},
+            }},
+            {"classStructHex",            bytesToHex(d.classStructDump)},
+            {"moduleClassPtrSlots",       slotListToJson(d.moduleClassPtrSlots)},
+            {"moduleStaticFieldsSlots",   slotListToJson(d.moduleStaticFieldsSlots)},
+            {"moduleFieldInfoSlots",      slotListToJson(d.moduleFieldInfoSlots)},
+            {"heapClassPtrSlots",         slotListToJson(d.heapClassPtrSlots)},
+            {"heapStaticFieldsSlots",     slotListToJson(d.heapStaticFieldsSlots)},
+            {"heapFieldInfoSlots",        slotListToJson(d.heapFieldInfoSlots)},
+            {"navigationCandidates",      std::move(navJson)},
+            {"stats", {
+                {"moduleBytesScanned", d.moduleBytesScanned},
+                {"heapRegionsScanned", d.heapRegionsScanned},
+                {"heapBytesScanned",   d.heapBytesScanned},
+                {"heapRegionsSkipped", d.heapRegionsSkipped},
+                {"heapCapHit",         d.heapCapHit},
+            }},
+        };
         return response;
     });
 

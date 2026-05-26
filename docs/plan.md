@@ -3,8 +3,8 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-25 (session close — build #565; merged dev → main)
-**Current phase**: **✅ Phase 28b-v2 IL2CPP chain detector SHIPPED + LIVE-VERIFIED on SaGa F2R** (build #565). Full class-pointer chained-disassembly redesign across 6 sub-phases (28b-v2-1 Zydis integration / 28b-v2-2 offsetof discovery / 28b-v2-3 inverse pointer scan / 28b-v2-4 chain detector with multi-reg tracking + CALL/COND_BR tolerance / 28b-v2-5 wire as v1 fallback / 28b-v2-6 live verify). `SteamManager.s_instance` returned **11 unique chain-exact matches** across 6 methods (`get_Instance`, `get_Initialized`, `InitOnPlayMode`, `Awake`, `OnEnable`, `OnDestroy` — 7 reads + 4 writes). Real-world IL2CPP codegen pattern (class-init-call interleave + post-init reload) decoded + handled. Open follow-up: Phase 28b-v3 for compiler-generated `<>c` lambda-cache classes (routed via `g_codegenModule->types[]` indexing, not direct `.data` pointer storage). See plan.md §Phase 28b-v2 for the full implementation log + §Phase 28b-v3 for the deferred `<>c` work.
+**Last updated**: 2026-05-26 (session close — build #581)
+**Current phase**: **✅ Phase 28b-v3.0 lazy-init slot scanner SHIPPED + LIVE-VERIFIED on SaGa F2R** (build #581). Empirical investigation via new `diagnoseClassReferences` pipe RPC ([IL2CPPClassReferenceDiagnostic.cpp](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp)) + raw `.text` disasm via Phase 18 `getMethodAobPattern` showed plan-doc's original `g_codegenModule->types[]` hypothesis was wrong — the `<>c` class pointer IS in `.data`, but in **per-AOT-method lazy-init cache slots** populated by `il2cpp_codegen_initialize_method` on first method execution. Built [IL2CPPLazyInitSlotScanner.cpp](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) that scans `.text` for `lea reg, [rip+SLOT]; call rel32` 2-instruction sequences (cache via `std::call_once`), merges into v2 chain-detector input when slot value matches target class ptr (confidence=`chain-lazy`). Test 1 (`SteamManager.s_instance`): 11 chain-exact matches preserved (no regression). Test 2 (`<>c.<>9__0_0`): still 0 matches because no AOT lambda body has executed this session (`v3LazyInitMatching=0` per log). v3.1 deferred to next session — needs `MetadataInitializerEntry` layout reverse-engineering to map slot→class statically (1-2 day estimate). Banner advisory rewritten to mention all 3 scanners + actionable hint ("play the relevant game content to trigger the lambda body first"). See plan.md §Phase 28b-v3 for full implementation log.
 
 **Previous current-phase**: **✅ Phase 28b IL2CPP root-cause CONFIRMED + v1 advisory shipped** (build #555-#557). Build #546's diagnostic logging paid off: live re-run on SaGa F2R proved `il2cpp_class_get_static_data` returns a runtime-heap-allocated pointer outside GameAssembly.dll. **v1 fix C** ships a yellow advisory banner explaining the limitation; **Phase 28b-v2** designed + shipped same session (build #565). Also: Symbol Finder "Static only" toggle + per-asm limit in multi-asm scans, PipeServer disconnect-time GC drain.
 
@@ -1899,37 +1899,95 @@ multi-reg machinery handles it because both reloads are independent
 hop-1 candidates; only the second produces a chain (first abandons
 when CALL drops the volatile destination register).
 
-#### Open follow-up — Phase 28b-v3 (compiler-generated `<>c` classes)
+### Phase 28b-v3 — Per-method lazy-init slot scanner ✅ **SHIPPED v3.0 (2026-05-26 build #581)**
 
-The chain detector still returns 0 matches for compiler-generated
-lambda-cache classes (C# `<>c` display classes). Live-tested on
-SaGa F2R `MainGame/StrReader2UShortAry/<>c.<>9__0_0` /
-`<>9__0_1` — `ClassPointerScanner` returns 0 slots. Likely cause:
-IL2CPP routes refs to compiler-generated classes through the
-codegen module's type table (`g_codegenModule->types[index]`)
-rather than direct `Il2CppClass*` pointer storage in `.data`.
+**Original hypothesis was wrong.** Plan-doc speculated `<>c` classes
+went through `g_codegenModule->types[]`, but empirical investigation
+showed that field doesn't exist in `Il2CppCodeGenModule` (vendor/Il2CppDumper/Il2Cpp/Il2CppClass.cs:261).
+Built `diagnoseClassReferences` pipe RPC ([IL2CPPClassReferenceDiagnostic.cpp](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp))
+that dumps every storage slot in module + heap holding the class
+pointer + `static_fields` + `FieldInfo*`, with 128 B of surrounding
+context. Cross-verified by pulling raw `.text` bytes via Phase 18's
+`getMethodAobPattern` for the AOT methods that surfaced as candidate
+references.
 
-Compiled access pattern is likely:
+**Real codegen pattern (decoded from SaGa F2R `<>c.<>9__0_0` callers)**:
+
 ```asm
-mov  rax, [rip + CODEGEN_MODULE_TYPES_TABLE]
-mov  rax, [rax + INDEX * 8]            ; load Il2CppClass* via table
-... (then the standard 3-hop chain) ...
+; Per-method lazy-init guard
+cmp  byte [rip + INIT_FLAG], 0
+jne  skip_init
+lea  rcx, [rip + SLOT_ADDR]              ; pass &slot to init
+call il2cpp_codegen_initialize_method    ; populates slot with Il2CppClass*
+lock or [rsp], 0                          ; memory barrier
+mov  byte [rip + INIT_FLAG], 1
+skip_init:
+; Standard Phase 28b-v2 3-hop chain
+mov  rcx, [rip + SLOT_ADDR]              ; hop 1 — Il2CppClass* (now populated)
+mov  rdx, [rcx + 0xB8]                   ; hop 2 — static_fields
+mov  [rdx + 0], rax                      ; hop 3 — WRITE field
 ```
 
-**Phase 28b-v3 plan** (~2-3 days, not started):
-1. Walk `Il2CppCodeGenModule->types` (or equivalent v29 metadata-
-   registration index) to build a reverse mapping
-   `Il2CppClass* → codegen module slot address`.
-2. Add those slot addresses to the `classPointerSlots` set used by
-   the chain detector. The downstream forward-trace logic already
-   handles the extra leading indirection (one more `mov reg, [reg
-   + index*8]` hop folded into our existing tolerance window).
-3. Live-verify `<>9__0_0` returns ≥ 1 read + ≥ 1 write (closure-
-   cache pattern requires both).
+**Key insight**: the `.data` slot referenced via `mov rcx, [rip+SLOT_ADDR]`
+in compiler-generated lambda-cache classes is **per-AOT-method**, not
+per-class. The slot stays NULL until the AOT method first runs and
+`il2cpp_codegen_initialize_method` populates it. `SteamManager.s_instance`
+works under v2 because its accessor methods all run at game startup;
+`<>c.<>9__X_Y` doesn't because the lambda body may never execute in
+a given session.
 
-Yellow advisory banner still surfaces for these cases until v3
-ships. Not blocking — user-defined statics (`SteamManager.s_instance`
-etc.) are the canonical workflow and now work.
+#### Sub-phases (v3.0 shipped, v3.1 deferred)
+
+- [x] **v3.0** [`IL2CPPLazyInitSlotScanner.cpp`](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) —
+  one-time `.text` walk that recognises `lea reg, [rip+disp32]; call rel32`
+  2-instruction sequences where the `lea` target lands in `.data`/`.bss`
+  and the `call` target lands in an exec section of the same module.
+  Result cached via `std::call_once`, dedup-sorted by slot address.
+  Wired into `IL2CPPFieldXref::FindStaticFieldReferences` v2 fallback:
+  after `EnumerateClassPointerSlots` returns the v2 direct-cache set,
+  iterate the lazy-init slots, read each slot's current value with
+  `Memory::SafeRead`, and if equal to the target class pointer, append
+  to the v2 chain detector input. Matches surfaced solely via v3 lazy
+  slots get `confidence="chain-lazy"` (vs. v2's `"chain-exact"`).
+
+- [x] **v3.0-banner** Banner advisory rewritten to mention all three
+  scanners (v1 + v2 + v3.0) ran with no matches, and gives the user
+  an actionable hint: for `<>c`-style lambda-cache classes, try
+  playing the relevant game content to trigger the lambda body, then
+  re-scan. Replaces the old v1-only advisory that pre-dated v2/v3.
+
+- [ ] **v3.1** Parse `MetadataInitializerEntry` struct layout that
+  `il2cpp_codegen_initialize_method` consumes — recover the typeIndex
+  field, cross-look in `Il2CppMetadataRegistration->types[]` (already
+  discovered by [IL2CPPMetadataRegistration](../dll/src/il2cpp/IL2CPPMetadataRegistration.cpp)),
+  resolve via `il2cpp_class_from_il2cpp_type` to get the class. Then
+  the slot→class mapping is **static** — no runtime population required,
+  and `<>c` xref works even when the lambda has never run. Layout
+  needs reverse-engineering empirically (the v3.0 diagnostic can dump
+  `[lazy_init_slot..+32]` bytes for inspection). Estimated 1-2 days.
+
+#### Live-verify (build #581, SaGa F2R, 2026-05-26)
+
+- **Test 1 — `SteamManager.s_instance` (regression check)**: ✅ still
+  returns 11 chain-exact matches across 6 methods, identical to v2-only
+  output. v3.0 doesn't change v2's working path.
+- **Test 2 — `MainGame/StrReader2UShortAry/<>c.<>9__0_0`**: ⚠️ still 0
+  matches in this session. Log shows `v3LazyInitMatching=0` — no
+  lazy-init slot held the `<>c` class pointer because no AOT lambda
+  method ran. Confirms the v3.0 limitation; v3.1 needed to close it.
+
+#### Files
+
+* [dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.{h,cpp}](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp) —
+  diagnostic helper + pipe RPC `diagnoseClassReferences`. Survives as
+  debugging aid for future codegen-pattern investigations.
+* [dll/src/il2cpp/IL2CPPLazyInitSlotScanner.{h,cpp}](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) —
+  the v3.0 scanner itself.
+* [dll/src/il2cpp/IL2CPPFieldXref.cpp](../dll/src/il2cpp/IL2CPPFieldXref.cpp) —
+  v2 fallback now merges v3 lazy-init slots into the chain detector input.
+* [tools/Test-DiagnoseClassRefs.ps1](../tools/Test-DiagnoseClassRefs.ps1) —
+  test harness; auto-extracts navigation-candidate AOT addresses + calls
+  `getMethodAobPattern` to pull raw `.text` bytes for offline disasm.
 
 ---
 

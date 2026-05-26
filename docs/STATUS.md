@@ -1,8 +1,75 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-25 **session close** — build #565).
+**Branch**: `dev` (2026-05-26 **session close** — build #581).
 
 ## TL;DR — what's left to pick up
+
+**Phase 28b-v3.0 lazy-init slot scanner — SHIPPED + LIVE-VERIFIED on SaGa F2R**
+(2026-05-26, build #581). The `<>c` follow-up flagged at the end of v2
+turned out to be a different beast than the plan-doc hypothesised. New
+diagnostic tooling + empirical disasm analysis revealed:
+
+* **Plan-doc hypothesis was wrong**: `g_codegenModule->types[]` doesn't
+  exist in `Il2CppCodeGenModule` ([vendor/Il2CppDumper/.../Il2CppClass.cs:261](../vendor/Il2CppDumper/Il2CppDumper/Il2Cpp/Il2CppClass.cs)).
+* **Real codegen pattern**: `<>c` class pointer IS stored in `.data`, but
+  in **per-AOT-method lazy-init cache slots** populated by
+  `il2cpp_codegen_initialize_method` on first method execution. Slot is
+  NULL until the AOT method first runs.
+* **v3.0 fix**: new [`IL2CPPLazyInitSlotScanner`](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp)
+  scans `.text` for `lea reg, [rip+SLOT]; call rel32` 2-instruction
+  sequences. Caches the slot list. v2 fallback reads each slot's current
+  value with `SafeRead`; if equal to target class ptr, merges into chain
+  detector input. New `confidence="chain-lazy"` tag distinguishes v3
+  matches from v2's `"chain-exact"`.
+
+Live-verify results (SaGa F2R, build #581):
+* **Test 1 — `SteamManager.s_instance`**: ✅ 11 chain-exact matches preserved
+  (no regression vs v2-only build #565).
+* **Test 2 — `MainGame/StrReader2UShortAry/<>c.<>9__0_0`**: ⚠️ still 0
+  matches in this session. Log shows `v3LazyInitMatching=0` — no AOT
+  lambda method had executed in the session, so all lazy-init slots
+  were null. Banner advisory rewritten to mention all 3 scanners ran +
+  give actionable hint ("play the relevant game content to trigger the
+  lambda body first, then re-scan").
+
+**v3.1 (deferred to next session)**: parse `MetadataInitializerEntry`
+struct layout to map slot → class statically, closing the never-executed
+case. Diagnostic tooling already in place to dump entry bytes for
+empirical layout reverse-engineering. Estimated 1-2 days.
+
+### Files added this session
+
+* [dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.{h,cpp}](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp) —
+  diagnostic helper that dumps every storage slot (module + heap)
+  holding the target class ptr / `static_fields` ptr / `FieldInfo*`,
+  plus 128 B context per hit + navigation candidates with auto-pulled
+  AOB.
+* [dll/src/il2cpp/IL2CPPLazyInitSlotScanner.{h,cpp}](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) —
+  v3.0 scanner itself.
+* [tools/Test-DiagnoseClassRefs.ps1](../tools/Test-DiagnoseClassRefs.ps1) —
+  test harness; pretty-prints diagnostic + auto-pulls raw `.text` bytes
+  from candidate AOT methods via `getMethodAobPattern`.
+* New pipe RPC `diagnoseClassReferences` (in [ExportAPI.cpp](../dll/src/shared/ExportAPI.cpp))
+  + magic-string `CmdDiagnoseClassReferences`.
+
+### v3.1 next-steps cookbook
+
+1. Add fieldName arg to diagnostic (already done) → run on `<>c.<>9__0_0`
+2. Walk lazy-init slots, dump 32 bytes at each → look for `MetadataInitializerEntry`
+   layout. Likely shape `{Il2CppClass* slot; uint32_t typeIndex; …}` with
+   typeIndex < `Il2CppMetadataRegistration->typesCount`.
+3. Once layout confirmed, extend `IL2CPPLazyInitSlotScanner` to also
+   capture typeIndex per slot. Cross-look via existing
+   [`IL2CPPMetadataRegistration::TypesArray()`](../dll/src/il2cpp/IL2CPPMetadataRegistration.h)
+   + `il2cpp_class_from_il2cpp_type`.
+4. In `IL2CPPFieldXref` v2 fallback, also use this static mapping
+   (in addition to v3.0's runtime value check). Then `<>c.<>9__0_0`
+   xref works regardless of whether the lambda has run.
+
+---
+
+(Previous TL;DR — for Phase 28b-v2 ship (build #565) and earlier, kept
+below for cross-PC handoff context.)
 
 **Phase 28b-v2 IL2CPP chain detector — LIVE-VERIFIED on SaGa F2R**
 (2026-05-25 late evening, build #565). The full class-pointer

@@ -25,6 +25,7 @@
 #include "IL2CPPClassPointerScanner.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
+#include "IL2CPPLazyInitSlotScanner.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPStaticFieldsOffset.h"
 #include "IL2CPPThreadAttach.h"
@@ -39,6 +40,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <unordered_set>
 
 namespace UnityCEDumper::IL2CPP {
 
@@ -568,12 +570,66 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     "FieldXref: v2 chain detection unavailable — "
                     "offsetof(static_fields) discovery failed at init");
             } else {
+                // ---- v2 direct slots (Phase 28b-v2) -------------------------
                 auto slots = EnumerateClassPointerSlots(target.klass);
+                const std::size_t v2SlotCount = slots.size();
+
+                // ---- v3 lazy-init slots (Phase 28b-v3) ----------------------
+                //
+                // For each per-method lazy-init slot discovered in `.text`,
+                // read the slot's current value. If it equals the target
+                // class pointer, treat the slot as additional input to the
+                // chain detector — same forward-trace + same hop-3 matching
+                // logic, just an expanded set of hop-1 candidates.
+                //
+                // v3.0 caveat: this only finds slots that have ALREADY been
+                // populated by `il2cpp_codegen_initialize_method`. Slots
+                // for methods that have never executed in this session
+                // stay null and are skipped here. v3.1 will parse the
+                // `MetadataInitializerEntry` arg layout to map slot →
+                // class statically, closing the never-executed case.
+                std::size_t v3CandidateSlots = 0;
+                std::size_t v3MatchingSlots  = 0;
+                {
+                    const std::uintptr_t targetClassVal =
+                        reinterpret_cast<std::uintptr_t>(target.klass);
+                    const auto& lazySlots = EnumerateLazyInitSlots();
+                    v3CandidateSlots = lazySlots.size();
+                    for (const auto& ls : lazySlots) {
+                        std::uintptr_t slotValue = 0;
+                        if (!Memory::SafeReadBytes(
+                                reinterpret_cast<const void*>(ls.slotAddress),
+                                &slotValue, sizeof(slotValue))) {
+                            continue;  // unreadable slot — skip
+                        }
+                        if (slotValue != targetClassVal) continue;  // not our class
+                        // Dedup against v2 slots — same slotAddress could
+                        // appear in both lists when AOT code references the
+                        // same `.data` cell from a direct `mov reg,[rip+disp]`
+                        // AND from a `lea reg,[rip+disp]; call init`.
+                        bool dup = false;
+                        for (const auto& existing : slots) {
+                            if (existing.address == ls.slotAddress) {
+                                dup = true; break;
+                            }
+                        }
+                        if (dup) continue;
+                        ClassPointerSlot extra{};
+                        extra.address   = ls.slotAddress;
+                        extra.sectionVa = 0;  // section attribution not tracked for v3
+                        slots.push_back(extra);
+                        ++v3MatchingSlots;
+                    }
+                }
+
                 Log::Write(MagicStrings::LogCategoryWalk,
                     "FieldXref: v2 starting — staticFieldsOffset=" +
                     std::to_string(sfo) + " fieldOffset=" +
-                    std::to_string(target.offset) + " classPointerSlots=" +
-                    std::to_string(slots.size()));
+                    std::to_string(target.offset) +
+                    " v2DirectSlots=" + std::to_string(v2SlotCount) +
+                    " v3LazyInitCandidates=" + std::to_string(v3CandidateSlots) +
+                    " v3LazyInitMatching=" + std::to_string(v3MatchingSlots) +
+                    " totalSlots=" + std::to_string(slots.size()));
 
                 if (!slots.empty()) {
                     ChainScanStats v2stats{};
@@ -587,11 +643,36 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         " bytesScanned=" + std::to_string(v2stats.bytesScanned) +
                         " failedReads=" + std::to_string(v2stats.failedReads));
 
+                    // Build the v3-slot address set so we can tag each match
+                    // with the right confidence ("chain-lazy" for hits whose
+                    // hop-1 IP loads from a v3-only slot, "chain-exact" for
+                    // hits surfaced via v2's direct-slot set).
+                    std::unordered_set<std::uintptr_t> v3OnlySlots;
+                    if (v3MatchingSlots > 0) {
+                        v3OnlySlots.reserve(v3MatchingSlots);
+                        for (std::size_t i = v2SlotCount; i < slots.size(); ++i) {
+                            v3OnlySlots.insert(slots[i].address);
+                        }
+                    }
+
                     // Attribute each chain hit to its enclosing method via
                     // the existing v1 method-pointer index. Apply read/write
                     // filter at this layer (v2 already knows kind from the
                     // chain shape, but the user-requested filter is enforced
                     // here for parity with the v1 path).
+                    //
+                    // Note: ChainMatch doesn't currently carry which slot
+                    // the hop-1 referenced — we'd need to extend the chain
+                    // detector to do per-hit slot attribution. v3.0 makes
+                    // the simplifying assumption that if ANY v3-only slot
+                    // exists, mark the hit as "chain-lazy" only when v2
+                    // direct slots were zero. Otherwise it's "chain-exact"
+                    // (v2 would've found it without us).
+                    const std::string confidenceTag =
+                        (v2SlotCount == 0 && v3MatchingSlots > 0)
+                            ? "chain-lazy"
+                            : "chain-exact";
+
                     std::size_t v2Dropped = 0;
                     for (const auto& c : chains) {
                         if (kindFilter == FieldRefKind::Read  && c.refKind != "read")  {
@@ -617,14 +698,15 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         m.hitAddress     = reinterpret_cast<void*>(c.hitIP);
                         m.isStatic       = true;
                         m.refKind        = c.refKind;
-                        m.confidence     = "chain-exact";  // distinguish from v1 "exact"
+                        m.confidence     = confidenceTag;
                         result.matches.push_back(std::move(m));
                     }
                     Log::Write(MagicStrings::LogCategoryWalk,
                         "FieldXref: v2 emitted " +
                         std::to_string(result.matches.size()) +
                         " matches (dropped " + std::to_string(v2Dropped) +
-                        " on kind/enclose filter)");
+                        " on kind/enclose filter, confidence=" +
+                        confidenceTag + ")");
                 }
             }
         }
@@ -660,23 +742,36 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
         std::uintptr_t gaHi = gaLo + gaSize;
         bool outsideModule = (targetAddr < gaLo) || (targetAddr >= gaHi);
         if (outsideModule && candidateHits == 0) {
+            // Phase 28b-v3 follow-up — rewrote the advisory to reflect
+            // current scanner coverage (v1 RIP scan + v2 direct-class-ptr
+            // chain detection + v3.0 lazy-init slot scan all tried + all
+            // failed). Most likely cause for `<>c`-style lambda-cache
+            // classes is that no AOT method has executed the lambda's
+            // per-method init call in the current session, so all
+            // lazy-init slots are still null. v3.1 (parse
+            // `MetadataInitializerEntry` for static slot→class mapping)
+            // would close this gap. See plan.md §Phase 28b-v3.
             result.note =
-                "IL2CPP static_fields are runtime-heap-allocated by the IL2CPP "
-                "runtime at class-init time (this field's storage is at 0x" +
+                "IL2CPP static_fields are runtime-heap-allocated (this field's storage is at 0x" +
                 [](std::uintptr_t v) {
                     char buf[24]; std::snprintf(buf, sizeof(buf), "%llX",
                         static_cast<unsigned long long>(v)); return std::string(buf);
                 }(targetAddr) +
-                ", which sits outside the GameAssembly.dll module). No "
-                "compiled instruction can RIP-relative-address a runtime "
-                "address, so this scanner cannot find readers/writers via "
-                "RIP scanning — even though the IL almost certainly contains "
-                "ldsfld/stsfld ops. This is a structural limitation of Phase "
-                "28b v1's IL2CPP path, not evidence that the field is unused. "
-                "Phase 28b-v2 (see plan.md) plans a class-pointer chained-"
-                "disassembly redesign to address this. For now, the Mono "
-                "backend's IL walker handles this case correctly — use a "
-                "Mono target to inspect equivalent fields.";
+                ", outside GameAssembly.dll). All three IL2CPP scanners ran "
+                "with no matches: v1 RIP scan (direct static-address refs), "
+                "v2 direct-class-pointer chain detection (`.data` slots holding "
+                "this Il2CppClass*), AND v3.0 lazy-init slot scan (per-method "
+                "init-call slots populated by `il2cpp_codegen_initialize_method`). "
+                "Two likely causes: (1) for compiler-generated `<>c` lambda-cache "
+                "classes, no AOT method that uses this class has executed yet in "
+                "the current game session — try playing the relevant game content "
+                "to trigger the lambda body, then re-scan. (2) The class is "
+                "referenced only through a metadata-initialiser entry whose slot "
+                "is still null because of (1) — Phase 28b-v3.1 (planned) will "
+                "parse the entry layout to map slots → classes statically. "
+                "Workaround for now: use the Mono backend's IL walker (works for "
+                "Mono targets) or inspect a related class that's already been "
+                "exercised in this session.";
         }
     }
 

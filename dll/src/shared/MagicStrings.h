@@ -155,6 +155,38 @@ inline constexpr const char* CmdSearchSymbols         = "searchSymbols";
 //     error?: string }
 inline constexpr const char* CmdFindFieldReferences   = "findFieldReferences";
 
+// Phase 28b-v3 — investigation diagnostic. Given a class FQN, reports
+// every storage slot (GameAssembly.dll non-exec sections + committed RW
+// heap regions) holding the Il2CppClass* and its static_fields pointer,
+// plus 128 bytes of surrounding context for each. Used to determine
+// empirically how compiler-generated `<>c` lambda-cache classes are
+// referenced from AOT code when the Phase 28b-v2 ClassPointerScanner
+// finds 0 module slots.
+//
+// Request args:
+//   assembly  : string (required)
+//   ns        : string (default "")
+//   class     : string (required)
+//   heapScan  : bool   (default true — scan committed RW heap too)
+//   heapLimit : int    (default 64; per-pointer cap on heap slots)
+//
+// Response (success):
+//   { ok: true,
+//     classFqn,
+//     classPtr, staticFieldsPtr,
+//     staticFieldsOffsetInClass,
+//     module: { base, size, sections: [{ name, va, size, characteristics }] },
+//     classStructDump : "hex...",
+//     moduleClassPtrSlots:        [{ address, section, surroundingHex }],
+//     moduleStaticFieldsSlots:    [{ address, section, surroundingHex }],
+//     heapClassPtrSlots:          [{ address, regionBase, regionSize,
+//                                    regionProtect, regionType,
+//                                    surroundingHex }],
+//     heapStaticFieldsSlots:      same as above,
+//     stats: { moduleBytesScanned, heapRegionsScanned, heapBytesScanned,
+//              heapRegionsSkipped, heapCapHit } }
+inline constexpr const char* CmdDiagnoseClassReferences = "diagnoseClassReferences";
+
 // Phase 27a — Unity-aware value scan (First Scan).
 // Searches process memory (or a single class's live instances in
 // class-scoped mode) for primitive values matching the request and

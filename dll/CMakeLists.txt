@@ -195,6 +195,18 @@ set(DLL_IL2CPP_SOURCES
     # access pattern IL2CPP AOT emits.
     src/il2cpp/IL2CPPChainDetector.cpp
     src/il2cpp/IL2CPPChainDetector.h
+    # Phase 28b-v3 — investigation helper. Reports every storage slot
+    # (module + heap) holding a given Il2CppClass* / static_fields ptr,
+    # so we can empirically determine how compiler-generated `<>c`
+    # classes are referenced when the v2 ClassPointerScanner returns 0.
+    src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp
+    src/il2cpp/IL2CPPClassReferenceDiagnostic.h
+    # Phase 28b-v3 — lazy-init slot scanner. Finds .data slots that are
+    # filled by `il2cpp_codegen_initialize_method` at runtime — covers
+    # the per-method class-pointer caches the v2 scanner misses when the
+    # lambda has never run in the current session.
+    src/il2cpp/IL2CPPLazyInitSlotScanner.cpp
+    src/il2cpp/IL2CPPLazyInitSlotScanner.h
 )
 
 # ---------------------------------------------------------------------------
