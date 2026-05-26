@@ -126,6 +126,12 @@ set(DLL_SHARED_SOURCES
     src/shared/MethodSignatureFormat.h
     src/shared/ValueScanSession.cpp
     src/shared/ValueScanSession.h
+    # Phase 29 — snapshot & diff session container. Holds the per-class
+    # plan + cached instance address map between snapshotBegin / Chunk /
+    # End RPCs so chunk emit can stream without re-running the wide heap
+    # walk on every call.
+    src/shared/SnapshotSession.cpp
+    src/shared/SnapshotSession.h
 )
 
 # Mono-specific sources: only compiled into UnityDumper-Mono.dll.

@@ -687,4 +687,218 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 29 — wide-heap "every instance of every known class" scan (Mono).
+// ---------------------------------------------------------------------------
+//
+// Mono difference vs IL2CPP: an object's first qword is a MonoVTable*,
+// not a MonoClass*. We can't binary-search the qword against `classSet`
+// directly. Instead, we read the qword as a vtable pointer, lazily
+// dereference vtable→klass (vtable[0] is `MonoClass *klass`), and check
+// THAT against `classSet`. A per-scan vtable→klass memo absorbs the
+// cost: a class with N instances triggers ONE deref (the first), then
+// (N-1) cache hits.
+//
+// The memo also persists into the global `cache().vtableToKlass` map so
+// follow-up WhatIsAt calls don't have to re-derive the same vtables.
+
+namespace {
+
+#pragma warning(push)
+#pragma warning(disable: 4509)  // SEH in function with non-trivial dtor — none here.
+
+// Inner SEH leaf: scan one region, calling Visit() for each qword. Visit
+// takes the qword's payload (the supposed vtable) and the slot's address.
+// Returns true to keep going, false to stop. SEH catches an AV inside
+// the inner read so a single bad page only loses that region.
+//
+// For Mono we don't get to do a cheap range filter on the qword itself —
+// it might be ANY vtable, not a class. So we capture the qword, check
+// cheap filters (non-null, aligned), then defer the heavy check to the
+// caller via the visit lambda. The visit lambda holds the unordered_maps
+// (with destructors), which means we can't __try around it; SEH must
+// wrap only the inner read of the qword from process memory.
+//
+// Result: we __try around `for(i) load(arr[i])`. Visit (out-of-__try)
+// then validates the loaded value. Costs one extra ld + br vs IL2CPP's
+// single-__try path but stays SEH-safe.
+void SehSweepRegionLoad(const std::uint8_t* base, std::size_t size,
+                         std::vector<std::uintptr_t>& outQwords,
+                         std::vector<const std::uint8_t*>& outAddrs) noexcept
+{
+    __try {
+        const std::size_t count = size / sizeof(std::uintptr_t);
+        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
+        outQwords.reserve(outQwords.size() + count);
+        outAddrs.reserve(outAddrs.size() + count);
+        for (std::size_t i = 0; i < count; ++i) {
+            std::uintptr_t qw = arr[i];
+            if (qw == 0) continue;
+            if ((qw & 7u) != 0) continue;
+            // Quick range sanity — typical user-mode ptrs sit in
+            // [0x10000, 0x7FFFFFFFFFFF] on x64; we want to throw away
+            // obvious garbage before paying the deref cost in the caller.
+            if (qw < 0x10000u) continue;
+            outQwords.push_back(qw);
+            outAddrs.push_back(base + i * sizeof(std::uintptr_t));
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Region had an unreadable page partway through; bail out with
+        // what we collected so far.
+    }
+}
+
+// Leaf SEH for dereferencing a candidate vtable. The deref might AV if
+// the qword wasn't actually a vtable; we silently drop those.
+bool SehReadKlassAt(std::uintptr_t vtable, std::uintptr_t& outKlass) noexcept {
+    __try {
+        outKlass = *reinterpret_cast<const std::uintptr_t*>(vtable);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+#pragma warning(pop)
+
+}  // namespace
+
+BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
+    BulkInstancesResult out;
+    if (perClassCap == 0) perClassCap = 100;
+    if (perClassCap > 4096) perClassCap = 4096;
+
+    if (!BuildClassRangeCache()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "Snapshot: FindAllInstances(Mono) aborted — class range cache unavailable");
+        return out;
+    }
+
+    // Snapshot class set + cache pointers under lock, then release. We
+    // also snapshot vtableToKlass so the scan can read from it without
+    // holding the cache lock; we'll merge new discoveries back at the
+    // end.
+    std::vector<std::uintptr_t> classSet;
+    std::uintptr_t minKlass = 0, maxKlass = 0;
+    std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        classSet = cache().classSet;
+        minKlass = g_minKlass;
+        maxKlass = g_maxKlass;
+        vtMemo   = cache().vtableToKlass;  // copy any prior discoveries
+    }
+    if (classSet.empty()) return out;
+
+    constexpr DWORD kRW =
+        PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    auto regions = Memory::EnumerateCommittedRegions();
+    auto stacks  = Memory::CollectThreadStackRanges();
+
+    // Per-region: collect all qwords + slot addrs (SEH-safe), then walk
+    // them outside __try doing the deref + classSet membership check.
+    std::vector<std::uintptr_t>     qwords;
+    std::vector<const std::uint8_t*> slots;
+    qwords.reserve(1024);
+    slots.reserve(1024);
+
+    for (const auto& r : regions) {
+        if ((r.protect & kRW) == 0) continue;
+        out.regionsTotal++;
+
+        if (r.type == MEM_IMAGE) { out.regionsSkipImage++; continue; }
+
+        const std::uint8_t* regionEnd = r.base + r.size;
+        bool onStack = false;
+        for (const auto& s : stacks) {
+            if (s.low >= regionEnd) break;
+            if (s.high > r.base && s.low < regionEnd) { onStack = true; break; }
+        }
+        if (onStack) { out.regionsSkipStack++; continue; }
+
+        out.regionsScanned++;
+        out.bytesScanned += r.size;
+
+        qwords.clear();
+        slots.clear();
+        SehSweepRegionLoad(r.base, r.size, qwords, slots);
+        out.totalQwordsScanned += (r.size / sizeof(std::uintptr_t));
+
+        // Phase: classify each qword as a vtable → instance.
+        for (std::size_t i = 0; i < qwords.size(); ++i) {
+            std::uintptr_t qw = qwords[i];
+
+            // Cache hit path. Most qwords after the first few thousand
+            // are repeat vtables; the memo skips the deref entirely.
+            auto memoIt = vtMemo.find(qw);
+            std::uintptr_t klass = 0;
+            if (memoIt != vtMemo.end()) {
+                klass = memoIt->second;
+                if (klass == 0) continue;   // memoised negative (not a vtable)
+            } else {
+                std::uintptr_t derefed = 0;
+                if (!SehReadKlassAt(qw, derefed)) {
+                    vtMemo[qw] = 0;  // memo negative
+                    continue;
+                }
+                // Klass candidate range filter (cheap reject).
+                if (derefed < minKlass || derefed > maxKlass) {
+                    vtMemo[qw] = 0;
+                    continue;
+                }
+                if ((derefed & 7u) != 0) { vtMemo[qw] = 0; continue; }
+                if (!std::binary_search(classSet.begin(), classSet.end(), derefed)) {
+                    vtMemo[qw] = 0;
+                    continue;
+                }
+                klass = derefed;
+                vtMemo[qw] = klass;
+                out.vtablesResolved++;
+            }
+
+            auto* k = reinterpret_cast<MonoClass*>(klass);
+            auto& list = out.byClass[k];
+            if (list.size() < perClassCap) {
+                list.push_back(reinterpret_cast<std::uintptr_t>(slots[i]));
+                ++out.totalInstances;
+            }
+        }
+    }
+
+    // Merge new discoveries back into the global vtable→klass cache so
+    // follow-up WhatIsAt calls don't pay the deref again.
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        for (const auto& [vt, kl] : vtMemo) {
+            if (kl == 0) continue;
+            cache().vtableToKlass.emplace(vt, kl);
+            // Maintain the vtableSet alongside the map so callers that
+            // binary-search via ContainsVtable benefit too.
+            if (cache().vtableSet.empty() ||
+                !std::binary_search(cache().vtableSet.begin(),
+                                    cache().vtableSet.end(), vt)) {
+                cache().vtableSet.push_back(vt);
+                if (vt < g_minVtable) g_minVtable = vt;
+                if (vt > g_maxVtable) g_maxVtable = vt;
+            }
+        }
+        // Re-sort the vtable vector if we added anything (cheap; vector
+        // is typically tens of thousands).
+        std::sort(cache().vtableSet.begin(), cache().vtableSet.end());
+        cache().vtableSet.erase(
+            std::unique(cache().vtableSet.begin(), cache().vtableSet.end()),
+            cache().vtableSet.end());
+    }
+
+    Log::Write(MagicStrings::LogCategoryScan,
+               "Snapshot: FindAllInstances(Mono) classes=" + std::to_string(out.byClass.size()) +
+               " instances=" + std::to_string(out.totalInstances) +
+               " vtablesResolved=" + std::to_string(out.vtablesResolved) +
+               " regionsScanned=" + std::to_string(out.regionsScanned) +
+               " bytes=" + std::to_string(out.bytesScanned));
+    return out;
+}
+
 }  // namespace UnityCEDumper::Mono

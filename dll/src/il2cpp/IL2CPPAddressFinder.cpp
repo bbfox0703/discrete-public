@@ -616,4 +616,139 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 29 — wide-heap "every instance of every known class" scan.
+// ---------------------------------------------------------------------------
+//
+// Visits each 8-aligned qword in committed RW non-image non-stack memory
+// exactly once. For each qword that's a known Il2CppClass* (binary search
+// the same `classSet` WhatIsAt uses), record (klass, instance addr) into
+// the per-class map. Per-class cap stops a singleton-leak class from
+// consuming the whole budget.
+//
+// Filters mirror Memory::ScanForPointer exactly so module .data / stack
+// residue don't pollute the result (they hold class-pointer values for
+// other legitimate reasons — RGCTX cache, stale locals).
+//
+// SEH-protected per-region scan: inner loop sits inside __try so an AV
+// inside an AC-stripped page only loses that region, not the whole walk.
+
+namespace {
+
+#pragma warning(push)
+#pragma warning(disable: 4509)  // SEH in function with non-trivial dtor — none here.
+
+void SehSweepRegion(
+    const std::uint8_t* base, std::size_t size,
+    std::uintptr_t minKlass, std::uintptr_t maxKlass,
+    const std::vector<std::uintptr_t>& classSet,
+    std::unordered_map<Il2CppClass*, std::vector<std::uintptr_t>>& byClass,
+    std::size_t perClassCap,
+    std::size_t& totalInstances,
+    std::size_t& qwordsScanned) noexcept
+{
+    __try {
+        const std::size_t count = size / sizeof(std::uintptr_t);
+        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
+        for (std::size_t i = 0; i < count; ++i) {
+            ++qwordsScanned;
+            std::uintptr_t qw = arr[i];
+            if (qw == 0) continue;
+            if (qw < minKlass || qw > maxKlass) continue;
+            if ((qw & 7u) != 0) continue;
+            if (!std::binary_search(classSet.begin(), classSet.end(), qw)) continue;
+
+            auto* k = reinterpret_cast<Il2CppClass*>(qw);
+            auto& list = byClass[k];
+            if (list.size() < perClassCap) {
+                list.push_back(reinterpret_cast<std::uintptr_t>(
+                    base + i * sizeof(std::uintptr_t)));
+                ++totalInstances;
+            }
+            // Else: cap hit for this class — count the qword as scanned
+            // but don't grow the vector. The user-visible result is "this
+            // class had at least `perClassCap` live instances".
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Region had an unreadable page partway through; the bytes
+        // already pushed stay in the map. Move on to the next region.
+    }
+}
+
+#pragma warning(pop)
+
+}  // namespace
+
+BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
+    BulkInstancesResult out;
+    if (perClassCap == 0) perClassCap = 100;
+    if (perClassCap > 4096) perClassCap = 4096;
+
+    // Cache is mandatory — without it we have no class-pointer set to
+    // binary-search against.
+    if (!BuildClassRangeCache()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "Snapshot: FindAllInstances aborted — class range cache unavailable");
+        return out;
+    }
+
+    // Snapshot the class set under the cache lock, then release. The
+    // wide heap walk takes seconds; we don't want to hold the cache
+    // mutex across it (would block any concurrent WhatIsAt).
+    std::vector<std::uintptr_t> classSet;
+    std::uintptr_t minKlass = 0;
+    std::uintptr_t maxKlass = 0;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        classSet = cache().classSet;   // copy — typically ~10K entries × 8 B = 80 KB
+        minKlass = g_minKlass;
+        maxKlass = g_maxKlass;
+    }
+    if (classSet.empty()) return out;
+
+    constexpr DWORD kRW =
+        PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    auto regions = Memory::EnumerateCommittedRegions();
+    auto stacks  = Memory::CollectThreadStackRanges();
+
+    for (const auto& r : regions) {
+        if ((r.protect & kRW) == 0) continue;
+        out.regionsTotal++;
+
+        if (r.type == MEM_IMAGE) {
+            out.regionsSkipImage++;
+            continue;
+        }
+
+        const std::uint8_t* regionEnd = r.base + r.size;
+        bool onStack = false;
+        for (const auto& s : stacks) {
+            if (s.low >= regionEnd) break;
+            if (s.high > r.base && s.low < regionEnd) {
+                onStack = true;
+                break;
+            }
+        }
+        if (onStack) {
+            out.regionsSkipStack++;
+            continue;
+        }
+
+        out.regionsScanned++;
+        out.bytesScanned += r.size;
+        SehSweepRegion(r.base, r.size, minKlass, maxKlass, classSet,
+                       out.byClass, perClassCap,
+                       out.totalInstances, out.totalQwordsScanned);
+    }
+
+    Log::Write(MagicStrings::LogCategoryScan,
+               "Snapshot: FindAllInstances(IL2CPP) classes=" + std::to_string(out.byClass.size()) +
+               " instances=" + std::to_string(out.totalInstances) +
+               " regionsScanned=" + std::to_string(out.regionsScanned) +
+               " bytes=" + std::to_string(out.bytesScanned));
+    return out;
+}
+
 }  // namespace UnityCEDumper::IL2CPP

@@ -12,6 +12,7 @@
 #include "Memory.h"
 #include "ModuleHelper.h"
 #include "PipeServer.h"
+#include "SnapshotSession.h"
 #include "ValueScanSession.h"
 
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
@@ -109,6 +110,7 @@ bool ICaseContainsAscii(std::string_view haystack, std::string_view needle) {
 // session container — same rationale.
 namespace Memory    = ::UnityCEDumper::Memory;
 namespace ValueScan = ::UnityCEDumper::ValueScan;
+namespace Snapshot  = ::UnityCEDumper::Snapshot;
 
 // Wire dataType string → ValueDataType enum. Returns false on unknown string.
 bool ParseValueDataType(std::string_view s, Memory::ValueDataType& out) {
@@ -944,6 +946,105 @@ void RegisterCoreHandlers() {
         }
         (void)bytesToHex;  // reserved for future raw-bytes inclusion
         return out;
+    };
+
+    // ------------------------------------------------------------------------
+    // Phase 29 — inline array-element capture used by the snapshot handlers.
+    // Given a non-null managed array pointer + the element type name + a cap,
+    // reads the array header and emits up to `cap` elements with their values
+    // decoded by the same `decodeField` lambda used by walkInstance. Backend-
+    // agnostic — relies on ManagedLayout's pointer-sized offsets for header
+    // layout (16-byte object header + length at +0x18 + data at +0x20 on x64;
+    // half that on x86).
+    //
+    // Element-size resolution is the same primitive-name table CmdWalkArray
+    // uses. Value-type-struct arrays (`Vector3[]`, custom user struct) fall
+    // through to the "unknown element width" branch and emit a raw hex blob
+    // of `elemSize` bytes per slot when the caller supplied a width hint;
+    // otherwise we default to 8 bytes per element (pointer-sized — matches
+    // reference-type arrays).
+    //
+    // Bundled Phase 27c live smoke: this is where the `T[]` element decode
+    // path gets exercised on real game targets. Any bug we find here also
+    // gets fixed in the parallel CmdWalkArray path so the array-element
+    // contract stays consistent across walkInstance / Snapshot / whatIsAt.
+    // ------------------------------------------------------------------------
+    auto walkArrayElementsInline = [formatHex, decodeField, bytesToHex](
+        std::uintptr_t arrayPtr, const std::string& elementTypeRaw, std::size_t cap) -> json {
+        if (arrayPtr == 0 || cap == 0) {
+            return json{{"length", 0}, {"count", 0}, {"elements", json::array()}};
+        }
+
+        auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
+            return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+        };
+
+        std::uintptr_t bounds = 0;
+        std::uintptr_t length = 0;
+        if (!rd(arrayPtr + ManagedLayout::kArrayBoundsOffset,    &bounds, sizeof(std::uintptr_t)) ||
+            !rd(arrayPtr + ManagedLayout::kArrayMaxLengthOffset, &length, sizeof(std::uintptr_t))) {
+            return json{{"error", "header_unreadable"}};
+        }
+        if (length > 16u * 1024u * 1024u) {
+            return json{{"error", "implausible_length"}, {"length", length}};
+        }
+
+        // Element type comes in as "System.Int32[]" / "MainGame.PLY_WORK[]"
+        // etc. — strip the trailing "[]" so the primitive table + decodeField
+        // see the bare element type. We tolerate `[][]` (jagged) by stripping
+        // one level only; the inner array reads as a pointer.
+        std::string elementType = elementTypeRaw;
+        if (elementType.size() >= 2 &&
+            elementType[elementType.size() - 1] == ']' &&
+            elementType[elementType.size() - 2] == '[') {
+            elementType.resize(elementType.size() - 2);
+        }
+
+        auto knownElemSize = [](const std::string& t) -> std::size_t {
+            if (t == "System.Boolean" || t == "System.Byte" || t == "System.SByte") return 1;
+            if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
+            if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
+            if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
+            if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+            return 0;
+        };
+
+        const std::size_t elemSize  = knownElemSize(elementType);
+        const bool        isPointer = (elemSize == 0);   // ref-type or struct → pointer-sized slot default
+        const std::size_t effectiveElemSize = isPointer ? sizeof(std::uintptr_t) : elemSize;
+
+        std::uintptr_t dataAddr = arrayPtr + ManagedLayout::kArrayDataOffset;
+        std::size_t    n = (length < cap) ? static_cast<std::size_t>(length) : cap;
+
+        json elements = json::array();
+        for (std::size_t i = 0; i < n; ++i) {
+            std::uintptr_t slotAddr = dataAddr + i * effectiveElemSize;
+            json e = { {"index", i} };
+            if (elementType == "System.String") {
+                // Decode via decodeField's String branch (follows the pointer
+                // and inlines UTF-8) so element rows carry actual text.
+                json d = decodeField(elementType, slotAddr);
+                for (auto kv = d.begin(); kv != d.end(); ++kv) e[kv.key()] = kv.value();
+            } else if (!isPointer) {
+                json d = decodeField(elementType, slotAddr);
+                for (auto kv = d.begin(); kv != d.end(); ++kv) e[kv.key()] = kv.value();
+            } else {
+                std::uintptr_t v = 0;
+                if (rd(slotAddr, &v, sizeof(std::uintptr_t))) e["ptr"] = formatHex(v);
+                else                                          e["error"] = "unreadable";
+            }
+            elements.push_back(std::move(e));
+        }
+
+        (void)bytesToHex;  // reserved for future raw-bytes inclusion of struct slots
+        return json{
+            {"length",       length},
+            {"count",        n},
+            {"element_type", elementType},
+            {"element_size", effectiveElemSize},
+            {"is_pointer",   isPointer},
+            {"elements",     std::move(elements)},
+        };
     };
 
     PipeServer::RegisterHandler(MagicStrings::CmdReadMemory,
@@ -1867,6 +1968,386 @@ void RegisterCoreHandlers() {
             response["missing_assemblies"] = std::move(missingAssemblies);
         }
         return response;
+    });
+
+    // ------------------------------------------------------------------------
+    // Phase 29 — snapshotBegin / snapshotChunk / snapshotEnd (Mono).
+    //
+    // Begin: builds the class range cache, runs ONE wide heap walk, groups
+    // every live MonoObject by its class, builds an ordered plan vector
+    // (one ClassPlanItem per (assembly, class) with non-empty static fields
+    // OR a non-empty instance list), and caches the plan in a Session.
+    // Default scope = every assembly EnumerateAssemblies returns; caller
+    // can narrow via the `assemblies` array.
+    //
+    // Chunk: walks the next `limit` plan items under ONE outer
+    // ThreadAttachGuard (avoids the per-class attach-cycle accumulation
+    // documented in lessons-learned.md). Per class: reads field layout +
+    // capture static values, then for each captured instance walks its
+    // parent chain, decodes fields, and emits array elements inline
+    // (bundled Phase 27c live smoke). T[] fields are walked; List<T> is
+    // recorded as a raw pointer for v1 (recursive List._items deref
+    // deferred).
+    //
+    // End: drops the session immediately. Sessions also auto-expire after
+    // 5 min of inactivity.
+    // ------------------------------------------------------------------------
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
+        [formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        // Parse args ----------------------------------------------------------
+        std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
+        if (instanceCap == 0)    instanceCap = 100;
+        if (instanceCap > 1024)  instanceCap = 1024;
+
+        std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
+        if (arrayCap > 256)      arrayCap = 256;
+
+        std::vector<std::string> requestedAssemblies;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) requestedAssemblies.push_back(s);
+            }
+        }
+        // If caller didn't narrow, default to every assembly the runtime
+        // reports. The "全抓" design rule: user shouldn't have to know
+        // where data lives.
+        if (requestedAssemblies.empty()) {
+            for (const auto& a : Mono::EnumerateAssemblies()) {
+                requestedAssemblies.push_back(a.name);
+            }
+        }
+        if (requestedAssemblies.empty()) {
+            return json{{"error", "no assemblies visible"}};
+        }
+        // Membership set for fast filtering of the wide-scan results.
+        std::unordered_map<std::string, std::size_t> requestedIdx;
+        for (std::size_t i = 0; i < requestedAssemblies.size(); ++i) {
+            requestedIdx[requestedAssemblies[i]] = i;
+        }
+
+        // Wide heap walk ------------------------------------------------------
+        auto bulk = Mono::FindAllInstances(instanceCap);
+
+        // Build klass → (assembly, ns, name) index by enumerating each
+        // requested assembly's classes ONCE — much cheaper than per-instance
+        // resolver calls.
+        struct ClassDesc {
+            std::string  assembly;
+            std::string  ns;
+            std::string  name;
+            Mono::MonoClass* klass = nullptr;
+        };
+        std::vector<ClassDesc> descs;
+        std::unordered_map<Mono::MonoClass*, std::size_t> klassToDescIdx;
+        for (const auto& assemblyName : requestedAssemblies) {
+            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            if (img == nullptr) continue;
+            auto classes = Mono::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ClassDesc d;
+                d.assembly = assemblyName;
+                d.ns       = ce.ns;
+                d.name     = ce.name;
+                d.klass    = ce.klass;
+                klassToDescIdx[ce.klass] = descs.size();
+                descs.push_back(std::move(d));
+            }
+        }
+
+        // Build the plan: one row per class. Statics are always captured
+        // (cheap, even classes with no live instances may have interesting
+        // global values like `MAX_HP`). Instances are attached from the
+        // wide-scan result.
+        auto session = std::make_unique<Snapshot::Session>();
+        session->capturedAt    = Snapshot::CapturedAtUtcNow();
+        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
+        // Fallback to legacy mono.dll for Unity < 5.4 builds.
+        if (session->gameBuildId.empty()) {
+            session->gameBuildId = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
+        }
+        session->gameSessionId = Snapshot::SessionManager::GameSessionId();
+        session->instanceCap   = instanceCap;
+        session->arrayCap      = arrayCap;
+        session->plan.reserve(descs.size());
+
+        std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
+        for (const auto& asmName : requestedAssemblies) {
+            planByAsm[asmName].assembly = asmName;
+        }
+
+        for (const auto& d : descs) {
+            Snapshot::ClassPlanItem item;
+            item.assembly = d.assembly;
+            item.ns       = d.ns;
+            item.name     = d.name;
+            item.klass    = static_cast<void*>(d.klass);
+
+            auto it = bulk.byClass.find(d.klass);
+            if (it != bulk.byClass.end()) {
+                item.instances = std::move(it->second);
+            }
+            // Skip classes that have neither statics nor instances — pure
+            // type definitions we'd just emit empty for. Cheap heuristic:
+            // we don't know yet which classes have statics, so include
+            // every class for now (chunk emit decides whether to skip
+            // empty-output rows).
+            planByAsm[d.assembly].classCount++;
+            planByAsm[d.assembly].instanceCount += item.instances.size();
+            session->totalInstances += item.instances.size();
+            session->plan.push_back(std::move(item));
+        }
+
+        // Preserve assembly order in the response.
+        for (const auto& asmName : requestedAssemblies) {
+            session->planByAssembly.push_back(planByAsm[asmName]);
+        }
+        const std::size_t totalClasses = session->plan.size();
+        const std::size_t totalInst    = session->totalInstances;
+        const std::string capturedAt   = session->capturedAt;
+        const std::string buildId      = session->gameBuildId;
+        const std::string sessionGuid  = session->gameSessionId;
+
+        json planArr = json::array();
+        for (const auto& pe : session->planByAssembly) {
+            planArr.push_back({
+                {"assembly",      pe.assembly},
+                {"classCount",    pe.classCount},
+                {"instanceCount", pe.instanceCount},
+            });
+        }
+
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+
+        json scanStats = {
+            {"regionsTotal",     bulk.regionsTotal},
+            {"regionsScanned",   bulk.regionsScanned},
+            {"regionsSkipImage", bulk.regionsSkipImage},
+            {"regionsSkipStack", bulk.regionsSkipStack},
+            {"bytesScanned",     bulk.bytesScanned},
+            {"vtablesResolved",  bulk.vtablesResolved},
+        };
+
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+            "snapshotBegin(Mono) id=" + std::to_string(sid) +
+            " classes=" + std::to_string(totalClasses) +
+            " instances=" + std::to_string(totalInst) +
+            " buildId=" + buildId);
+
+        return json{
+            {"ok",             true},
+            {"snapshotId",     std::to_string(sid)},
+            {"capturedAt",     capturedAt},
+            {"gameBuildId",    buildId},
+            {"gameSessionId",  sessionGuid},
+            {"instanceCap",    instanceCap},
+            {"arrayCap",       arrayCap},
+            {"totalClasses",   totalClasses},
+            {"totalInstances", totalInst},
+            {"plan",           std::move(planArr)},
+            {"scanStats",      std::move(scanStats)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotChunk,
+        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+
+        std::int64_t cursorIn = args.value("cursor", static_cast<std::int64_t>(-1));
+        std::size_t  limit    = static_cast<std::size_t>(args.value("limit", 32));
+        if (limit == 0)   limit = 32;
+        if (limit > 200)  limit = 200;
+
+        // Look up the session, capture what we need under the lock, then
+        // do the heavy emit work after releasing.
+        struct PlanCopy { Snapshot::ClassPlanItem item; };
+        std::vector<PlanCopy> work;
+        std::size_t totalPlan = 0;
+        std::size_t startCursor = 0;
+        std::size_t arrayCap = 50;
+        bool found = Snapshot::SessionManager::Instance().View(sid,
+            [&](Snapshot::Session& s) {
+                totalPlan = s.plan.size();
+                arrayCap  = s.arrayCap;
+                startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
+                if (startCursor > totalPlan) startCursor = totalPlan;
+                std::size_t end = std::min(totalPlan, startCursor + limit);
+                work.reserve(end - startCursor);
+                for (std::size_t i = startCursor; i < end; ++i) {
+                    PlanCopy pc;
+                    pc.item = s.plan[i];   // shallow copy of strings + addr vec
+                    work.push_back(std::move(pc));
+                }
+            });
+        if (!found) {
+            return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
+        }
+
+        // Single outer ThreadAttachGuard for the whole chunk — lesson from
+        // Phase 27 follow-up (`44s game-shutdown stall on 活俠傳` when
+        // each per-class read opened its own guard).
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        json classes = json::array();
+        if (!work.empty() && domain != nullptr) {
+            Mono::ThreadAttachGuard guard(domain);
+            const auto& r = Mono::GetResolver();
+            (void)r;
+
+            for (auto& pc : work) {
+                Mono::MonoClass* k = static_cast<Mono::MonoClass*>(pc.item.klass);
+                if (k == nullptr) continue;
+
+                json classEntry = {
+                    {"assembly",  pc.item.assembly},
+                    {"namespace", pc.item.ns},
+                    {"name",      pc.item.name},
+                };
+
+                auto res = Mono::ReadClassInfo(k);
+                if (!res.ok) {
+                    classEntry["error"] = "ReadClassInfo failed";
+                    classes.push_back(std::move(classEntry));
+                    continue;
+                }
+                if (!res.info.parent.name.empty()) {
+                    classEntry["parent"] = json{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+
+                // ---- Static fields with values ------------------------
+                json statics = json::array();
+                for (const auto& f : res.info.fields) {
+                    if ((f.flags & 0x10u) == 0u) continue;   // skip instance fields here
+                    auto sa = Mono::ResolveStaticFieldAddress(k, f.name);
+                    json srow = {
+                        {"name",   f.name},
+                        {"type",   f.typeName},
+                        {"offset", f.offset},
+                    };
+                    if (!sa.ok || sa.address == nullptr) {
+                        srow["error"] = "static_unresolved";
+                    } else {
+                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
+                        srow["address"] = formatHex(fa);
+                        json d = decodeField(f.typeName, fa);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
+                            srow[kv.key()] = kv.value();
+                        }
+                    }
+                    statics.push_back(std::move(srow));
+                }
+                if (!statics.empty()) classEntry["statics"] = std::move(statics);
+
+                // ---- Instance walk with array element capture ---------
+                json instArr = json::array();
+                for (std::uintptr_t instAddr : pc.item.instances) {
+                    json instEntry = {
+                        {"address", formatHex(instAddr)},
+                    };
+                    // Walk parent chain like CmdWalkInstance does.
+                    std::vector<Mono::MonoClass*> chain;
+                    for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (Mono::GetResolver().class_get_parent == nullptr) break;
+                        cur = Mono::GetResolver().class_get_parent(cur);
+                    }
+                    json fields = json::array();
+                    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                        auto pr = Mono::ReadClassInfo(*it);
+                        if (!pr.ok) continue;
+                        for (const auto& f : pr.info.fields) {
+                            if (f.flags & 0x10u) continue;  // skip static
+                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
+                            json entry = {
+                                {"name",    f.name},
+                                {"type",    f.typeName},
+                                {"offset",  f.offset},
+                                {"from",    pr.info.self.name},
+                            };
+                            if (f.isEnum)      entry["is_enum"]       = true;
+                            if (f.isValueType) entry["is_value_type"] = true;
+                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                                ? f.underlyingTypeName : f.typeName;
+                            json d = decodeField(decodeType, fieldAddr);
+                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                            // Phase 27c bundled smoke: when the field's type
+                            // is a managed array (T[]) AND the stored pointer
+                            // is non-null, capture array elements inline.
+                            const bool isArray =
+                                f.typeName.size() >= 2 &&
+                                f.typeName[f.typeName.size() - 1] == ']' &&
+                                f.typeName[f.typeName.size() - 2] == '[';
+                            if (isArray && entry.contains("ptr") && entry["ptr"].is_string()) {
+                                // entry["ptr"] is "0x..." — parse back to a
+                                // uintptr_t (decodeField formatted it via formatHex).
+                                std::uintptr_t arrPtr = 0;
+                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                }
+                                if (arrPtr != 0) {
+                                    json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                    entry["arrayElements"] = std::move(elems);
+                                }
+                            }
+                            fields.push_back(std::move(entry));
+                            if (fields.size() >= 4096) break;
+                        }
+                        if (fields.size() >= 4096) break;
+                    }
+                    std::sort(fields.begin(), fields.end(),
+                        [](const json& a, const json& b) {
+                            return a.value("offset", 0) < b.value("offset", 0);
+                        });
+                    instEntry["fields"] = std::move(fields);
+                    instArr.push_back(std::move(instEntry));
+                }
+                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
+
+                classes.push_back(std::move(classEntry));
+            }
+        }
+
+        std::size_t nextCursor = startCursor + work.size();
+        bool done = (nextCursor >= totalPlan);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"cursor",     startCursor},
+            {"nextCursor", nextCursor},
+            {"done",       done},
+            {"classes",    std::move(classes)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotEnd,
+        [](const json& args) -> json {
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"dropped",    dropped},
+        };
     });
 
     // Phase 25 — cross-class symbol finder (Mono). Walks every class in the
@@ -4351,6 +4832,327 @@ void RegisterCoreHandlers() {
             response["missing_assemblies"] = std::move(missingAssemblies);
         }
         return response;
+    });
+
+    // ------------------------------------------------------------------------
+    // Phase 29 — snapshotBegin / snapshotChunk / snapshotEnd (IL2CPP).
+    // Mirror of the Mono handlers — same wire contract, same session
+    // semantics. IL2CPP differences: the wide heap walk checks the qword
+    // directly against the class range cache (no vtable indirection), and
+    // the build-id source module is GameAssembly.dll.
+    // ------------------------------------------------------------------------
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
+        if (instanceCap == 0)    instanceCap = 100;
+        if (instanceCap > 1024)  instanceCap = 1024;
+        std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
+        if (arrayCap > 256)      arrayCap = 256;
+
+        std::vector<std::string> requestedAssemblies;
+        if (args.contains("assemblies") && args["assemblies"].is_array()) {
+            for (const auto& a : args["assemblies"]) {
+                if (!a.is_string()) continue;
+                const auto& s = a.get_ref<const std::string&>();
+                if (!s.empty()) requestedAssemblies.push_back(s);
+            }
+        }
+        if (requestedAssemblies.empty()) {
+            for (const auto& a : IL2CPP::EnumerateAssemblies()) {
+                requestedAssemblies.push_back(a.name);
+            }
+        }
+        if (requestedAssemblies.empty()) {
+            return json{{"error", "no assemblies visible"}};
+        }
+
+        // Wide heap walk first — groups instances by Il2CppClass*.
+        auto bulk = IL2CPP::FindAllInstances(instanceCap);
+
+        struct ClassDesc {
+            std::string         assembly;
+            std::string         ns;
+            std::string         name;
+            IL2CPP::Il2CppClass* klass = nullptr;
+        };
+        std::vector<ClassDesc> descs;
+        for (const auto& assemblyName : requestedAssemblies) {
+            const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
+            if (img == nullptr) continue;
+            auto classes = IL2CPP::EnumerateClasses(img);
+            for (const auto& ce : classes) {
+                if (ce.klass == nullptr) continue;
+                ClassDesc d;
+                d.assembly = assemblyName;
+                d.ns       = ce.ns;
+                d.name     = ce.name;
+                d.klass    = ce.klass;
+                descs.push_back(std::move(d));
+            }
+        }
+
+        auto session = std::make_unique<Snapshot::Session>();
+        session->capturedAt    = Snapshot::CapturedAtUtcNow();
+        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
+        session->gameSessionId = Snapshot::SessionManager::GameSessionId();
+        session->instanceCap   = instanceCap;
+        session->arrayCap      = arrayCap;
+        session->plan.reserve(descs.size());
+
+        std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
+        for (const auto& asmName : requestedAssemblies) {
+            planByAsm[asmName].assembly = asmName;
+        }
+
+        for (const auto& d : descs) {
+            Snapshot::ClassPlanItem item;
+            item.assembly = d.assembly;
+            item.ns       = d.ns;
+            item.name     = d.name;
+            item.klass    = static_cast<void*>(d.klass);
+
+            auto it = bulk.byClass.find(d.klass);
+            if (it != bulk.byClass.end()) {
+                item.instances = std::move(it->second);
+            }
+            planByAsm[d.assembly].classCount++;
+            planByAsm[d.assembly].instanceCount += item.instances.size();
+            session->totalInstances += item.instances.size();
+            session->plan.push_back(std::move(item));
+        }
+
+        for (const auto& asmName : requestedAssemblies) {
+            session->planByAssembly.push_back(planByAsm[asmName]);
+        }
+        const std::size_t totalClasses = session->plan.size();
+        const std::size_t totalInst    = session->totalInstances;
+        const std::string capturedAt   = session->capturedAt;
+        const std::string buildId      = session->gameBuildId;
+        const std::string sessionGuid  = session->gameSessionId;
+
+        json planArr = json::array();
+        for (const auto& pe : session->planByAssembly) {
+            planArr.push_back({
+                {"assembly",      pe.assembly},
+                {"classCount",    pe.classCount},
+                {"instanceCount", pe.instanceCount},
+            });
+        }
+
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+
+        json scanStats = {
+            {"regionsTotal",     bulk.regionsTotal},
+            {"regionsScanned",   bulk.regionsScanned},
+            {"regionsSkipImage", bulk.regionsSkipImage},
+            {"regionsSkipStack", bulk.regionsSkipStack},
+            {"bytesScanned",     bulk.bytesScanned},
+        };
+
+        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+            "snapshotBegin(IL2CPP) id=" + std::to_string(sid) +
+            " classes=" + std::to_string(totalClasses) +
+            " instances=" + std::to_string(totalInst) +
+            " buildId=" + buildId);
+
+        return json{
+            {"ok",             true},
+            {"snapshotId",     std::to_string(sid)},
+            {"capturedAt",     capturedAt},
+            {"gameBuildId",    buildId},
+            {"gameSessionId",  sessionGuid},
+            {"instanceCap",    instanceCap},
+            {"arrayCap",       arrayCap},
+            {"totalClasses",   totalClasses},
+            {"totalInstances", totalInst},
+            {"plan",           std::move(planArr)},
+            {"scanStats",      std::move(scanStats)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotChunk,
+        [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+
+        std::int64_t cursorIn = args.value("cursor", static_cast<std::int64_t>(-1));
+        std::size_t  limit    = static_cast<std::size_t>(args.value("limit", 32));
+        if (limit == 0)   limit = 32;
+        if (limit > 200)  limit = 200;
+
+        struct PlanCopy { Snapshot::ClassPlanItem item; };
+        std::vector<PlanCopy> work;
+        std::size_t totalPlan   = 0;
+        std::size_t startCursor = 0;
+        std::size_t arrayCap    = 50;
+        bool found = Snapshot::SessionManager::Instance().View(sid,
+            [&](Snapshot::Session& s) {
+                totalPlan = s.plan.size();
+                arrayCap  = s.arrayCap;
+                startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
+                if (startCursor > totalPlan) startCursor = totalPlan;
+                std::size_t end = std::min(totalPlan, startCursor + limit);
+                work.reserve(end - startCursor);
+                for (std::size_t i = startCursor; i < end; ++i) {
+                    PlanCopy pc;
+                    pc.item = s.plan[i];
+                    work.push_back(std::move(pc));
+                }
+            });
+        if (!found) {
+            return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
+        }
+
+        IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
+        json classes = json::array();
+        if (!work.empty() && domain != nullptr) {
+            IL2CPP::ThreadAttachGuard guard(domain);
+
+            for (auto& pc : work) {
+                IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(pc.item.klass);
+                if (k == nullptr) continue;
+
+                json classEntry = {
+                    {"assembly",  pc.item.assembly},
+                    {"namespace", pc.item.ns},
+                    {"name",      pc.item.name},
+                };
+
+                auto res = IL2CPP::ReadClassInfo(k);
+                if (!res.ok) {
+                    classEntry["error"] = "ReadClassInfo failed";
+                    classes.push_back(std::move(classEntry));
+                    continue;
+                }
+                if (!res.info.parent.name.empty()) {
+                    classEntry["parent"] = json{
+                        {"namespace", res.info.parent.ns},
+                        {"name",      res.info.parent.name},
+                    };
+                }
+
+                // Statics
+                json statics = json::array();
+                for (const auto& f : res.info.fields) {
+                    if ((f.flags & 0x10u) == 0u) continue;
+                    auto sa = IL2CPP::ResolveStaticFieldAddress(k, f.name);
+                    json srow = {
+                        {"name",   f.name},
+                        {"type",   f.typeName},
+                        {"offset", f.offset},
+                    };
+                    if (!sa.ok || sa.address == nullptr) {
+                        srow["error"] = "static_unresolved";
+                    } else {
+                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
+                        srow["address"] = formatHex(fa);
+                        json d = decodeField(f.typeName, fa);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
+                            srow[kv.key()] = kv.value();
+                        }
+                    }
+                    statics.push_back(std::move(srow));
+                }
+                if (!statics.empty()) classEntry["statics"] = std::move(statics);
+
+                // Instances
+                json instArr = json::array();
+                for (std::uintptr_t instAddr : pc.item.instances) {
+                    json instEntry = { {"address", formatHex(instAddr)} };
+                    std::vector<IL2CPP::Il2CppClass*> chain;
+                    const auto& rIl = IL2CPP::GetResolver();
+                    for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (rIl.class_get_parent == nullptr) break;
+                        cur = rIl.class_get_parent(cur);
+                    }
+                    json fields = json::array();
+                    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                        auto pr = IL2CPP::ReadClassInfo(*it);
+                        if (!pr.ok) continue;
+                        for (const auto& f : pr.info.fields) {
+                            if (f.flags & 0x10u) continue;
+                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
+                            json entry = {
+                                {"name",   f.name},
+                                {"type",   f.typeName},
+                                {"offset", f.offset},
+                                {"from",   pr.info.self.name},
+                            };
+                            if (f.isEnum)      entry["is_enum"]       = true;
+                            if (f.isValueType) entry["is_value_type"] = true;
+                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                                ? f.underlyingTypeName : f.typeName;
+                            json d = decodeField(decodeType, fieldAddr);
+                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                            const bool isArray =
+                                f.typeName.size() >= 2 &&
+                                f.typeName[f.typeName.size() - 1] == ']' &&
+                                f.typeName[f.typeName.size() - 2] == '[';
+                            if (isArray && entry.contains("ptr") && entry["ptr"].is_string()) {
+                                std::uintptr_t arrPtr = 0;
+                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                }
+                                if (arrPtr != 0) {
+                                    json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                    entry["arrayElements"] = std::move(elems);
+                                }
+                            }
+                            fields.push_back(std::move(entry));
+                            if (fields.size() >= 4096) break;
+                        }
+                        if (fields.size() >= 4096) break;
+                    }
+                    std::sort(fields.begin(), fields.end(),
+                        [](const json& a, const json& b) {
+                            return a.value("offset", 0) < b.value("offset", 0);
+                        });
+                    instEntry["fields"] = std::move(fields);
+                    instArr.push_back(std::move(instEntry));
+                }
+                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
+
+                classes.push_back(std::move(classEntry));
+            }
+        }
+
+        std::size_t nextCursor = startCursor + work.size();
+        bool done = (nextCursor >= totalPlan);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"cursor",     startCursor},
+            {"nextCursor", nextCursor},
+            {"done",       done},
+            {"classes",    std::move(classes)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdSnapshotEnd,
+        [](const json& args) -> json {
+        std::string sidStr = args.value("snapshotId", std::string{});
+        if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
+        std::uint64_t sid = 0;
+        try { sid = std::stoull(sidStr); } catch (...) {
+            return json{{"error", "bad 'snapshotId'"}};
+        }
+        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        return json{
+            {"ok",         true},
+            {"snapshotId", sidStr},
+            {"dropped",    dropped},
+        };
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,
