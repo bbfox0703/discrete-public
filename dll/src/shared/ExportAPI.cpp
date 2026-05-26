@@ -103,6 +103,56 @@ bool ICaseContainsAscii(std::string_view haystack, std::string_view needle) {
     return false;
 }
 
+// Phase 29a-v3 — default-exclude for the snapshot "全抓" scope. Live-smoke
+// on 活俠傳 (Mono x86) showed that capturing every assembly grabs 15,935
+// classes — ~80% of which are mscorlib / System.* / UnityEngine.* /
+// Unity.* / Fungus noise that the user almost certainly doesn't care
+// about as game state. Same pattern across all Unity Mono targets:
+// system + engine assemblies dominate the class count, drowning the
+// user-game assemblies in the diff results.
+//
+// The user-facing rule: an empty `assemblies` arg means "every USER
+// assembly" — exclude well-known system/engine prefixes by default.
+// Caller can pass `includeSystemAssemblies: true` to keep everything.
+//
+// Match shape: exact prefix match where the next character (if any) is
+// '.' or ' '. Catches:
+//   "mscorlib"            → excluded
+//   "System"              → excluded (exact)
+//   "System.Xml"          → excluded (System. prefix)
+//   "SystemException"     → NOT excluded (no '.')
+//   "UnityEngine"         → excluded (older Unity monolithic)
+//   "UnityEngine.CoreModule" → excluded
+//   "Unity.InputSystem"   → excluded
+//   "Mortal.Core"         → NOT excluded (user game)
+//   "Assembly-CSharp"     → NOT excluded (default user assembly)
+bool IsSystemOrEngineAssembly(const std::string& name) {
+    static const char* const kSystemPrefixes[] = {
+        "mscorlib",
+        "System",
+        "Microsoft",
+        "netstandard",
+        "Mono",
+        "UnityEngine",
+        "Unity",
+        // Common large support libraries that ship with many Unity games
+        // and that aren't gameplay state. Add more as new targets reveal
+        // similar bloat.
+        "Fungus",
+    };
+    for (const char* p : kSystemPrefixes) {
+        const std::size_t pl = std::strlen(p);
+        if (name.size() < pl) continue;
+        if (name.compare(0, pl, p) != 0) continue;
+        // Strict suffix: exact match OR followed by '.' / ' '. Rejects
+        // false-matches like "SystemException".
+        if (name.size() == pl || name[pl] == '.' || name[pl] == ' ') {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Phase 27a — shared helpers for the scanFieldValue handler (both backends).
 // `Memory::` below resolves to UnityCEDumper::Memory:: via this using; the
 // alternative is to fully qualify each occurrence, which makes the helper
@@ -2005,29 +2055,36 @@ void RegisterCoreHandlers() {
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 256)      arrayCap = 256;
 
+        bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
+        bool explicitScope = false;
         if (args.contains("assemblies") && args["assemblies"].is_array()) {
             for (const auto& a : args["assemblies"]) {
                 if (!a.is_string()) continue;
                 const auto& s = a.get_ref<const std::string&>();
                 if (!s.empty()) requestedAssemblies.push_back(s);
             }
+            explicitScope = !requestedAssemblies.empty();
         }
-        // If caller didn't narrow, default to every assembly the runtime
-        // reports. The "全抓" design rule: user shouldn't have to know
-        // where data lives.
-        if (requestedAssemblies.empty()) {
+        // Default "全抓" mode: every assembly the runtime reports, EXCEPT
+        // well-known system / engine / large-support-library noise. The
+        // user-game assemblies (Assembly-CSharp / Mortal.Core / ...) get
+        // through; mscorlib / System.* / UnityEngine.* / Fungus get
+        // filtered. Caller can set includeSystemAssemblies=true to keep
+        // everything (matches the original Phase 29 plan §"全抓 default,
+        // opt-in narrow" semantics).
+        std::size_t excludedSystemCount = 0;
+        if (!explicitScope) {
             for (const auto& a : Mono::EnumerateAssemblies()) {
+                if (!includeSystemAsm && IsSystemOrEngineAssembly(a.name)) {
+                    ++excludedSystemCount;
+                    continue;
+                }
                 requestedAssemblies.push_back(a.name);
             }
         }
         if (requestedAssemblies.empty()) {
-            return json{{"error", "no assemblies visible"}};
-        }
-        // Membership set for fast filtering of the wide-scan results.
-        std::unordered_map<std::string, std::size_t> requestedIdx;
-        for (std::size_t i = 0; i < requestedAssemblies.size(); ++i) {
-            requestedIdx[requestedAssemblies[i]] = i;
+            return json{{"error", "no assemblies visible (default exclude removed every assembly; try includeSystemAssemblies=true)"}};
         }
 
         // Wide heap walk ------------------------------------------------------
@@ -2104,18 +2161,27 @@ void RegisterCoreHandlers() {
         }
 
         // ---- Decode ALL classes under ONE outer attach guard --------------
-        // This is the Phase 29a-v2 fix: previously each chunk opened its
-        // own ThreadAttachGuard, accumulating BDWGC finalizers. Doing
-        // every class decode here under one guard means 1 attach/detach
-        // cycle total, regardless of class count. Memory cost: ~50-200 MB
-        // of pre-built JSON per session; auto-expire 5min keeps it
-        // bounded.
+        // Phase 29a-v2 fix: one outer ThreadAttachGuard for the whole
+        // decode loop (was per-chunk in v1, accumulated BDWGC finalizers).
+        // Phase 29a-v3 fix: GLOBAL ClassInfo cache across the entire
+        // decode loop. Without this, System.Object's class info was
+        // read 15,000+ times on 活俠傳 (every class's parent chain root)
+        // and ResolveStaticFieldAddress was calling mono_class_vtable
+        // per static field. Walk-log evidence: 23K `EnumerateAssemblies`
+        // / `vtable_get_static_field_data` log lines for one snapshot →
+        // game freeze. New shape: one ReadClassInfo per unique class
+        // (cache hit on shared ancestors), one ResolveStaticBaseAddress
+        // per class with statics, per-static-field becomes pure offset
+        // arithmetic on the cached base.
         Mono::MonoDomain* domain = Mono::GetRootDomain();
         session->classes.reserve(session->plan.size());
         std::size_t decodedClasses = 0;
         std::size_t decodedInstances = 0;
         std::size_t decodedArrays = 0;
         std::size_t skippedOpenGenericArrays = 0;
+        std::size_t classInfoCacheHits = 0;
+        std::size_t classInfoCacheMisses = 0;
+        std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> globalClassInfo;
 
         // Open-generic array detection: real array types are namespaced
         // ("System.Int32[]") or nested with slash ("MainGame/Foo[]"). Open
@@ -2131,6 +2197,22 @@ void RegisterCoreHandlers() {
 
         if (domain != nullptr) {
             Mono::ThreadAttachGuard guard(domain);
+
+            // Lookup-or-insert helper for the global ClassInfo cache. The
+            // ClassInfoResult is stored by value (copy-cheap; ~hundreds of
+            // bytes per class). Subsequent calls for the same MonoClass*
+            // skip ReadClassInfo entirely.
+            auto getClassInfo = [&](Mono::MonoClass* c)
+                -> const Mono::ClassInfoResult& {
+                auto it = globalClassInfo.find(c);
+                if (it != globalClassInfo.end()) {
+                    ++classInfoCacheHits;
+                    return it->second;
+                }
+                ++classInfoCacheMisses;
+                auto inserted = globalClassInfo.emplace(c, Mono::ReadClassInfo(c));
+                return inserted.first->second;
+            };
 
             for (auto& item : session->plan) {
                 Mono::MonoClass* k = static_cast<Mono::MonoClass*>(item.klass);
@@ -2150,7 +2232,20 @@ void RegisterCoreHandlers() {
                     {"name",      item.name},
                 };
 
-                auto res = Mono::ReadClassInfo(k);
+                // Build parent chain + cache ClassInfo for every entry up
+                // front. chainInfo[0] is k itself, so the previously-
+                // duplicate outer ReadClassInfo(k) call is gone.
+                std::vector<Mono::MonoClass*> chain;
+                for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                    chain.push_back(cur);
+                    if (Mono::GetResolver().class_get_parent == nullptr) break;
+                    cur = Mono::GetResolver().class_get_parent(cur);
+                }
+                std::vector<const Mono::ClassInfoResult*> chainInfo;
+                chainInfo.reserve(chain.size());
+                for (auto* c : chain) chainInfo.push_back(&getClassInfo(c));
+
+                const auto& res = *chainInfo[0];
                 if (!res.ok) {
                     classEntry["error"] = "ReadClassInfo failed";
                     session->classes.push_back(std::move(classEntry));
@@ -2164,20 +2259,30 @@ void RegisterCoreHandlers() {
                     };
                 }
 
-                // Static fields with values.
+                // Static fields — Phase 29a-v3: ONE ResolveStaticBaseAddress
+                // call per class, then per-field addresses are pure offset
+                // arithmetic. Was: ResolveStaticFieldAddress (with internal
+                // mono_class_vtable) per static field → ~50K vtable calls
+                // on 活俠傳 → game freeze.
                 Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
+                void* staticBase = nullptr;
+                bool staticBaseResolved = false;
                 for (const auto& f : res.info.fields) {
                     if ((f.flags & 0x10u) == 0u) continue;
-                    auto sa = Mono::ResolveStaticFieldAddress(k, f.name);
+                    if (!staticBaseResolved) {
+                        staticBase = Mono::ResolveStaticBaseAddress(k);
+                        staticBaseResolved = true;
+                    }
                     Snapshot::ClassPayload srow = {
                         {"name",   f.name},
                         {"type",   f.typeName},
                         {"offset", f.offset},
                     };
-                    if (!sa.ok || sa.address == nullptr) {
+                    if (staticBase == nullptr) {
                         srow["error"] = "static_unresolved";
                     } else {
-                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
+                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
+                                            + static_cast<std::uintptr_t>(f.offset);
                         srow["address"] = formatHex(fa);
                         json d = decodeField(f.typeName, fa);
                         for (auto kv = d.begin(); kv != d.end(); ++kv) {
@@ -2188,23 +2293,6 @@ void RegisterCoreHandlers() {
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
-                // Build parent chain ONCE per class (was: per instance × per
-                // class = ~80K mono runtime calls on BongoCat → BDWGC pressure
-                // → game freezes on close per build #598 live-smoke). Also
-                // memoise ReadClassInfo for each chain entry so the per-
-                // instance loop below is pure memory reads.
-                std::vector<Mono::MonoClass*> chain;
-                for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
-                    chain.push_back(cur);
-                    if (Mono::GetResolver().class_get_parent == nullptr) break;
-                    cur = Mono::GetResolver().class_get_parent(cur);
-                }
-                std::vector<Mono::ClassInfoResult> chainInfo;
-                chainInfo.reserve(chain.size());
-                for (auto* c : chain) {
-                    chainInfo.push_back(Mono::ReadClassInfo(c));
-                }
-
                 // Instance walk with array element capture — uses cached
                 // chainInfo, no Mono calls inside the loop.
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
@@ -2214,7 +2302,7 @@ void RegisterCoreHandlers() {
                     // Walk base→derived so field offsets come out in memory
                     // order (chainInfo is k→base; reverse-iterate).
                     for (std::size_t ci = chain.size(); ci > 0; --ci) {
-                        const auto& pr = chainInfo[ci - 1];
+                        const auto& pr = *chainInfo[ci - 1];
                         if (!pr.ok) continue;
                         for (const auto& f : pr.info.fields) {
                             if (f.flags & 0x10u) continue;
@@ -2318,6 +2406,8 @@ void RegisterCoreHandlers() {
             {"decodedInstances",         decodedInstances},
             {"decodedArrays",            decodedArrays},
             {"skippedOpenGenericArrays", skippedOpenGenericArrays},
+            {"classInfoCacheHits",       classInfoCacheHits},
+            {"classInfoCacheMisses",     classInfoCacheMisses},
         };
 
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
@@ -2329,18 +2419,20 @@ void RegisterCoreHandlers() {
             " buildId=" + buildId);
 
         return json{
-            {"ok",             true},
-            {"snapshotId",     std::to_string(sid)},
-            {"capturedAt",     capturedAt},
-            {"gameBuildId",    buildId},
-            {"gameSessionId",  sessionGuid},
-            {"instanceCap",    instanceCap},
-            {"arrayCap",       arrayCap},
-            {"totalClasses",   totalClasses},
-            {"totalInstances", totalInst},
-            {"plan",           std::move(planArr)},
-            {"scanStats",      std::move(scanStats)},
-            {"decodeStats",    std::move(decodeStats)},
+            {"ok",                      true},
+            {"snapshotId",              std::to_string(sid)},
+            {"capturedAt",              capturedAt},
+            {"gameBuildId",             buildId},
+            {"gameSessionId",           sessionGuid},
+            {"instanceCap",             instanceCap},
+            {"arrayCap",                arrayCap},
+            {"totalClasses",            totalClasses},
+            {"totalInstances",          totalInst},
+            {"excludedSystemAssemblies", excludedSystemCount},
+            {"includeSystemAssemblies",  includeSystemAsm},
+            {"plan",                    std::move(planArr)},
+            {"scanStats",               std::move(scanStats)},
+            {"decodeStats",             std::move(decodeStats)},
         };
     });
 
@@ -4909,21 +5001,29 @@ void RegisterCoreHandlers() {
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 256)      arrayCap = 256;
 
+        bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
+        bool explicitScope = false;
         if (args.contains("assemblies") && args["assemblies"].is_array()) {
             for (const auto& a : args["assemblies"]) {
                 if (!a.is_string()) continue;
                 const auto& s = a.get_ref<const std::string&>();
                 if (!s.empty()) requestedAssemblies.push_back(s);
             }
+            explicitScope = !requestedAssemblies.empty();
         }
-        if (requestedAssemblies.empty()) {
+        std::size_t excludedSystemCount = 0;
+        if (!explicitScope) {
             for (const auto& a : IL2CPP::EnumerateAssemblies()) {
+                if (!includeSystemAsm && IsSystemOrEngineAssembly(a.name)) {
+                    ++excludedSystemCount;
+                    continue;
+                }
                 requestedAssemblies.push_back(a.name);
             }
         }
         if (requestedAssemblies.empty()) {
-            return json{{"error", "no assemblies visible"}};
+            return json{{"error", "no assemblies visible (default exclude removed every assembly; try includeSystemAssemblies=true)"}};
         }
 
         // Wide heap walk first — groups instances by Il2CppClass*.
@@ -4988,6 +5088,8 @@ void RegisterCoreHandlers() {
         std::size_t decodedInstances = 0;
         std::size_t decodedArrays = 0;
         std::size_t skippedOpenGenericArrays = 0;
+        std::size_t classInfoCacheHits = 0;
+        std::size_t classInfoCacheMisses = 0;
 
         auto isCapturableArrayType = [](const std::string& tn) -> bool {
             if (tn.size() < 4) return false;
@@ -4998,6 +5100,25 @@ void RegisterCoreHandlers() {
 
         if (domain != nullptr) {
             IL2CPP::ThreadAttachGuard guard(domain);
+
+            // Global ClassInfo cache across the whole decode loop —
+            // mirror of the Mono path. System.Object shows up as the
+            // ancestor of every class; without this it would be re-read
+            // N-classes times.
+            std::unordered_map<IL2CPP::Il2CppClass*, IL2CPP::ClassInfoResult> globalClassInfoIl;
+            auto getClassInfoIl = [&](IL2CPP::Il2CppClass* c)
+                -> const IL2CPP::ClassInfoResult& {
+                auto it = globalClassInfoIl.find(c);
+                if (it != globalClassInfoIl.end()) {
+                    ++classInfoCacheHits;
+                    return it->second;
+                }
+                ++classInfoCacheMisses;
+                auto inserted = globalClassInfoIl.emplace(c, IL2CPP::ReadClassInfo(c));
+                return inserted.first->second;
+            };
+
+            const auto& rIl = IL2CPP::GetResolver();
 
             for (auto& item : session->plan) {
                 IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(item.klass);
@@ -5017,7 +5138,20 @@ void RegisterCoreHandlers() {
                     {"name",      item.name},
                 };
 
-                auto res = IL2CPP::ReadClassInfo(k);
+                // Build chain + cached ChainInfo first — chainInfo[0]
+                // doubles as k's own info (replaces the duplicate
+                // ReadClassInfo(k) outer call).
+                std::vector<IL2CPP::Il2CppClass*> chain;
+                for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                    chain.push_back(cur);
+                    if (rIl.class_get_parent == nullptr) break;
+                    cur = rIl.class_get_parent(cur);
+                }
+                std::vector<const IL2CPP::ClassInfoResult*> chainInfo;
+                chainInfo.reserve(chain.size());
+                for (auto* c : chain) chainInfo.push_back(&getClassInfoIl(c));
+
+                const auto& res = *chainInfo[0];
                 if (!res.ok) {
                     classEntry["error"] = "ReadClassInfo failed";
                     session->classes.push_back(std::move(classEntry));
@@ -5031,19 +5165,27 @@ void RegisterCoreHandlers() {
                     };
                 }
 
+                // Static fields — ONE ResolveStaticBaseAddress call per
+                // class, then per-field is offset arithmetic.
                 Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
+                void* staticBase = nullptr;
+                bool staticBaseResolved = false;
                 for (const auto& f : res.info.fields) {
                     if ((f.flags & 0x10u) == 0u) continue;
-                    auto sa = IL2CPP::ResolveStaticFieldAddress(k, f.name);
+                    if (!staticBaseResolved) {
+                        staticBase = IL2CPP::ResolveStaticBaseAddress(k);
+                        staticBaseResolved = true;
+                    }
                     Snapshot::ClassPayload srow = {
                         {"name",   f.name},
                         {"type",   f.typeName},
                         {"offset", f.offset},
                     };
-                    if (!sa.ok || sa.address == nullptr) {
+                    if (staticBase == nullptr) {
                         srow["error"] = "static_unresolved";
                     } else {
-                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(sa.address);
+                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
+                                            + static_cast<std::uintptr_t>(f.offset);
                         srow["address"] = formatHex(fa);
                         json d = decodeField(f.typeName, fa);
                         for (auto kv = d.begin(); kv != d.end(); ++kv) {
@@ -5054,28 +5196,12 @@ void RegisterCoreHandlers() {
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
-                // Build parent chain + cache ReadClassInfo per chain entry
-                // ONCE per class — see Mono mirror above for the BongoCat
-                // freeze that forced this optimisation.
-                const auto& rIl = IL2CPP::GetResolver();
-                std::vector<IL2CPP::Il2CppClass*> chain;
-                for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
-                    chain.push_back(cur);
-                    if (rIl.class_get_parent == nullptr) break;
-                    cur = rIl.class_get_parent(cur);
-                }
-                std::vector<IL2CPP::ClassInfoResult> chainInfo;
-                chainInfo.reserve(chain.size());
-                for (auto* c : chain) {
-                    chainInfo.push_back(IL2CPP::ReadClassInfo(c));
-                }
-
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
                     Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
                     Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
                     for (std::size_t ci = chain.size(); ci > 0; --ci) {
-                        const auto& pr = chainInfo[ci - 1];
+                        const auto& pr = *chainInfo[ci - 1];
                         if (!pr.ok) continue;
                         for (const auto& f : pr.info.fields) {
                             if (f.flags & 0x10u) continue;
@@ -5171,6 +5297,8 @@ void RegisterCoreHandlers() {
             {"decodedInstances",         decodedInstances},
             {"decodedArrays",            decodedArrays},
             {"skippedOpenGenericArrays", skippedOpenGenericArrays},
+            {"classInfoCacheHits",       classInfoCacheHits},
+            {"classInfoCacheMisses",     classInfoCacheMisses},
         };
 
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
@@ -5182,18 +5310,20 @@ void RegisterCoreHandlers() {
             " buildId=" + buildId);
 
         return json{
-            {"ok",             true},
-            {"snapshotId",     std::to_string(sid)},
-            {"capturedAt",     capturedAt},
-            {"gameBuildId",    buildId},
-            {"gameSessionId",  sessionGuid},
-            {"instanceCap",    instanceCap},
-            {"arrayCap",       arrayCap},
-            {"totalClasses",   totalClasses},
-            {"totalInstances", totalInst},
-            {"plan",           std::move(planArr)},
-            {"scanStats",      std::move(scanStats)},
-            {"decodeStats",    std::move(decodeStats)},
+            {"ok",                      true},
+            {"snapshotId",              std::to_string(sid)},
+            {"capturedAt",              capturedAt},
+            {"gameBuildId",             buildId},
+            {"gameSessionId",           sessionGuid},
+            {"instanceCap",             instanceCap},
+            {"arrayCap",                arrayCap},
+            {"totalClasses",            totalClasses},
+            {"totalInstances",          totalInst},
+            {"excludedSystemAssemblies", excludedSystemCount},
+            {"includeSystemAssemblies",  includeSystemAsm},
+            {"plan",                    std::move(planArr)},
+            {"scanStats",               std::move(scanStats)},
+            {"decodeStats",             std::move(decodeStats)},
         };
     });
 

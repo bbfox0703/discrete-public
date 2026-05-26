@@ -956,6 +956,7 @@ public sealed class BackendAdapter : ILiveExportSource
         IReadOnlyList<string>? assemblies = null,
         int? instanceCap = null,
         int? arrayCap    = null,
+        bool includeSystemAssemblies = false,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>();
@@ -966,6 +967,7 @@ public sealed class BackendAdapter : ILiveExportSource
         }
         if (instanceCap.HasValue) args["instanceCap"] = Int(instanceCap.Value);
         if (arrayCap.HasValue)    args["arrayCap"]    = Int(arrayCap.Value);
+        if (includeSystemAssemblies) args["includeSystemAssemblies"] = Bool(true);
 
         var env = await _pipe.SendAsync(
             "snapshotBegin", args,

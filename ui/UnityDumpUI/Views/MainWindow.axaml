@@ -1578,14 +1578,14 @@
                   <NumericUpDown Grid.Row="0" Grid.Column="3"
                                  Value="{Binding Snapshot.InstanceCap, Mode=TwoWay}"
                                  Minimum="1" Maximum="1024" Increment="50"
-                                 Width="100" Margin="0,0,12,0"/>
+                                 MinWidth="150" Margin="0,0,12,0"/>
 
                   <TextBlock Grid.Row="0" Grid.Column="4" Text="Array cap:"
                              VerticalAlignment="Center" Margin="0,0,6,0"/>
                   <NumericUpDown Grid.Row="0" Grid.Column="5"
                                  Value="{Binding Snapshot.ArrayCap, Mode=TwoWay}"
                                  Minimum="0" Maximum="256" Increment="10"
-                                 Width="100" Margin="0,0,12,0"/>
+                                 MinWidth="150" Margin="0,0,12,0"/>
 
                   <Button Grid.Row="0" Grid.Column="6"
                           Content="Take Snapshot"
@@ -1600,13 +1600,18 @@
                           Command="{Binding Snapshot.ClearAllCommand}"
                           MinWidth="80"/>
 
-                  <!-- Row 1 — scope assemblies -->
+                  <!-- Row 1 — scope assemblies + include-system toggle -->
                   <TextBlock Grid.Row="1" Grid.Column="0" Text="Scope:"
                              VerticalAlignment="Center" Margin="0,6,6,0"/>
-                  <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="8"
+                  <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="6"
                            Text="{Binding Snapshot.ScopeAssembliesText, Mode=TwoWay}"
-                           PlaceholderText="(empty = 全抓 — all assemblies. Or comma-separate names: Assembly-CSharp, Mortal.Core, ...)"
-                           Margin="0,6,0,0"/>
+                           PlaceholderText="(empty = 全抓 user assemblies. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"
+                           Margin="0,6,12,0"/>
+                  <CheckBox Grid.Row="1" Grid.Column="7" Grid.ColumnSpan="2"
+                            Content="Include system assemblies"
+                            IsChecked="{Binding Snapshot.IncludeSystemAssemblies, Mode=TwoWay}"
+                            Margin="0,6,0,0"
+                            ToolTip.Tip="When unchecked (default), 全抓 mode skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus — common Unity engine + .NET system + popular-support assemblies that flood the snapshot with non-gameplay state. Check to keep everything."/>
                 </Grid>
               </Border>
 

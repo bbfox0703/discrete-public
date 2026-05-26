@@ -328,6 +328,29 @@ StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string
     return out;
 }
 
+// Phase 29a-v3 — batch static-base resolver. Calls vtable + static_data
+// once per class; caller computes per-field addresses locally.
+void* ResolveStaticBaseAddress(MonoClass* klass) {
+    if (klass == nullptr) return nullptr;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_vtable == nullptr || r.vtable_get_static_data == nullptr) {
+        return nullptr;
+    }
+    MonoDomain* domain = GetRootDomain();
+    if (domain == nullptr) return nullptr;
+
+    // Caller is expected to hold a ThreadAttachGuard (reentrant guard
+    // turns this into a no-op when nested under the snapshot's outer
+    // guard). We still open a fallback guard here so direct callers
+    // outside the snapshot path stay correct.
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return nullptr;
+
+    MonoVTable* vt = SehVTable(r.class_vtable, domain, klass);
+    if (vt == nullptr) return nullptr;
+    return SehStaticData(r.vtable_get_static_data, vt);
+}
+
 CompiledMethodAddress CompileMethodByName(MonoClass* klass, const std::string& methodName) {
     CompiledMethodAddress out;
     if (klass == nullptr || methodName.empty()) return out;

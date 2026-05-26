@@ -76,6 +76,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [ObservableProperty] private int _instanceCap = 100;
     [ObservableProperty] private int _arrayCap    = 50;
 
+    /// <summary>When unchecked (default), the server skips
+    /// mscorlib / System.* / Microsoft.* / netstandard / Mono.* /
+    /// UnityEngine.* / Unity.* / Fungus assemblies on 全抓 mode.
+    /// Per Phase 29a-v3 live-smoke on 活俠傳: capturing all 15K
+    /// classes including system noise made the snapshot too heavy
+    /// (game freeze + drown user data in metadata). Checking this
+    /// box passes <c>includeSystemAssemblies: true</c> to keep
+    /// everything (useful for diagnostic / advanced workflows).</summary>
+    [ObservableProperty] private bool _includeSystemAssemblies;
+
     /// <summary>Optional label the user can attach to a snapshot before
     /// taking it. Surfaced in the Snapshots list + diff status line.</summary>
     [ObservableProperty] private string _pendingLabel = string.Empty;
@@ -209,7 +219,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
             int cap = InstanceCap > 0 ? InstanceCap : 100;
             int arr = ArrayCap    > 0 ? ArrayCap    : 50;
 
-            var begin = await _backend.SnapshotBeginAsync(scope, cap, arr, ct).ConfigureAwait(true);
+            var begin = await _backend.SnapshotBeginAsync(
+                scope, cap, arr, IncludeSystemAssemblies, ct).ConfigureAwait(true);
             if (!string.IsNullOrEmpty(begin.Error))
             {
                 ErrorMessage  = begin.Error;
@@ -270,9 +281,15 @@ public sealed partial class SnapshotViewModel : ObservableObject
             PendingLabel = string.Empty;
             sw.Stop();
             string label = string.IsNullOrEmpty(env.Label) ? "(no label)" : $"\"{env.Label}\"";
-            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldIndex.Count:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks).";
+            string excluded = begin.ExcludedSystemAssemblies > 0
+                ? $", excluded {begin.ExcludedSystemAssemblies} system asm"
+                : string.Empty;
+            string cacheNote = begin.DecodeStats is { } ds && (ds.ClassInfoCacheHits + ds.ClassInfoCacheMisses) > 0
+                ? $", ClassInfo cache {ds.ClassInfoCacheHits:N0}/{ds.ClassInfoCacheHits + ds.ClassInfoCacheMisses:N0}"
+                : string.Empty;
+            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldIndex.Count:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}).";
             _logger.Write(Constants.LogCategoryView,
-                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldIndex.Count} elapsed={sw.Elapsed.TotalSeconds:F1}s");
+                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldIndex.Count} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies}");
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)

@@ -953,6 +953,8 @@ public sealed class SnapshotDecodeStats
     [JsonPropertyName("decodedInstances")]         public int DecodedInstances         { get; set; }
     [JsonPropertyName("decodedArrays")]            public int DecodedArrays            { get; set; }
     [JsonPropertyName("skippedOpenGenericArrays")] public int SkippedOpenGenericArrays { get; set; }
+    [JsonPropertyName("classInfoCacheHits")]       public int ClassInfoCacheHits       { get; set; }
+    [JsonPropertyName("classInfoCacheMisses")]     public int ClassInfoCacheMisses     { get; set; }
 }
 
 public sealed class SnapshotBeginResult
@@ -969,6 +971,8 @@ public sealed class SnapshotBeginResult
     [JsonPropertyName("plan")]            public List<SnapshotPlanEntry> Plan       { get; set; } = new();
     [JsonPropertyName("scanStats")]       public SnapshotScanStats?      ScanStats   { get; set; }
     [JsonPropertyName("decodeStats")]     public SnapshotDecodeStats?    DecodeStats { get; set; }
+    [JsonPropertyName("excludedSystemAssemblies")] public int            ExcludedSystemAssemblies { get; set; }
+    [JsonPropertyName("includeSystemAssemblies")]  public bool           IncludeSystemAssemblies  { get; set; }
     [JsonPropertyName("error")]           public string?                 Error       { get; set; }
 }
 

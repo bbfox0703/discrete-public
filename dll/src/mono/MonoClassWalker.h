@@ -75,6 +75,18 @@ struct StaticFieldAddress {
 // field is not declared on `klass` or it is not actually static.
 StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string& fieldName);
 
+// Phase 29a-v3 — batch helper for snapshot decode. Calls
+// `mono_class_vtable(domain, klass)` + `mono_vtable_get_static_data(vt)`
+// exactly ONCE per class and returns the static-fields base pointer. The
+// caller then computes per-static-field addresses as `base + f.offset`
+// using offsets already in hand from `ReadClassInfo`. Replaces the
+// `ResolveStaticFieldAddress(k, name)` call-per-static-field pattern
+// that was triggering tens of thousands of mono_class_vtable calls on
+// large Mono targets (15K-class 活俠傳 snapshot → ~50K vtable calls →
+// BDWGC pressure → game freeze). Returns nullptr when the class has no
+// static storage or vtable resolution fails.
+void* ResolveStaticBaseAddress(MonoClass* klass);
+
 struct CompiledMethodAddress {
     bool          ok      = false;
     void*         address = nullptr;   // native code pointer after JIT
