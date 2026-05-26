@@ -804,6 +804,20 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     qwords.reserve(1024);
     slots.reserve(1024);
 
+    // Phase 29a-v4 — yield every N bytes scanned (running tally
+    // across regions). Live-smoke on 활俠傳 (Mono x86 / Unity
+    // 2020.3) build #627 showed the heap walk freezing the game
+    // even though the decode loop already yields per batch: the
+    // walk reads ~1.1 GB of process memory in a tight inner loop,
+    // saturating memory bandwidth + polluting CPU cache, starving
+    // the game's main thread regardless of attach state (walk does
+    // not hold an attach). Sleep(0) every ~16 MB scanned gives the
+    // game's main thread scheduling slices without meaningfully
+    // slowing the walk (Sleep(0) returns in microseconds when no
+    // other thread is ready). 16 MB on a 1 GB heap = ~64 yields.
+    constexpr std::size_t kYieldEveryBytes = 16ull * 1024ull * 1024ull;
+    std::size_t bytesSinceYield = 0;
+
     for (const auto& r : regions) {
         if ((r.protect & kRW) == 0) continue;
         out.regionsTotal++;
@@ -820,6 +834,11 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
 
         out.regionsScanned++;
         out.bytesScanned += r.size;
+        bytesSinceYield += r.size;
+        if (bytesSinceYield >= kYieldEveryBytes) {
+            ::Sleep(0);
+            bytesSinceYield = 0;
+        }
 
         qwords.clear();
         slots.clear();

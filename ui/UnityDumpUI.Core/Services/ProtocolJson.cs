@@ -111,6 +111,7 @@ namespace UnityDumpUI.Core.Services;
 [JsonSerializable(typeof(EnumValueEntry))]
 [JsonSerializable(typeof(double))]
 [JsonSerializable(typeof(long))]
+[JsonSerializable(typeof(ulong))]
 [JsonSerializable(typeof(RpcError))]
 [JsonSerializable(typeof(PipeRequest))]
 [JsonSerializable(typeof(string))]

@@ -713,6 +713,13 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     auto regions = Memory::EnumerateCommittedRegions();
     auto stacks  = Memory::CollectThreadStackRanges();
 
+    // Phase 29a-v4 — yield every N bytes (mirror of Mono path). IL2CPP
+    // doesn't have the Mono safepoint sensitivity, but the memory-
+    // bandwidth + CPU-cache pressure from a 1+ GB scan also affects
+    // IL2CPP targets. Keep symmetric.
+    constexpr std::size_t kYieldEveryBytes = 16ull * 1024ull * 1024ull;
+    std::size_t bytesSinceYield = 0;
+
     for (const auto& r : regions) {
         if ((r.protect & kRW) == 0) continue;
         out.regionsTotal++;
@@ -738,6 +745,11 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
 
         out.regionsScanned++;
         out.bytesScanned += r.size;
+        bytesSinceYield += r.size;
+        if (bytesSinceYield >= kYieldEveryBytes) {
+            ::Sleep(0);
+            bytesSinceYield = 0;
+        }
         SehSweepRegion(r.base, r.size, minKlass, maxKlass, classSet,
                        out.byClass, perClassCap,
                        out.totalInstances, out.totalQwordsScanned);

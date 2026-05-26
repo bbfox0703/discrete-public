@@ -999,7 +999,11 @@ public sealed class SnapshotFieldEntry
     [JsonPropertyName("error")]             public string?      Error            { get; set; }
     [JsonPropertyName("arrayElements")]     public SnapshotArrayElements? ArrayElements    { get; set; }
     [JsonPropertyName("arrayError")]        public string?      ArrayError       { get; set; }
-    [JsonPropertyName("arrayErrorLength")]  public long?        ArrayErrorLength { get; set; }
+    // ulong? not long?: C++ writes std::uintptr_t which on x64 is uint64.
+    // False-positive instances can have garbage values > Int64.MaxValue
+    // (build #627 SaGa F2R / BongoCat smoke: JsonException at this field
+    // when value didn't fit signed long). ulong covers the full range.
+    [JsonPropertyName("arrayErrorLength")]  public ulong?       ArrayErrorLength { get; set; }
 }
 
 public sealed class SnapshotArrayElement
@@ -1014,10 +1018,14 @@ public sealed class SnapshotArrayElement
 
 public sealed class SnapshotArrayElements
 {
-    [JsonPropertyName("length")]       public long                          Length       { get; set; }
+    // ulong: C++ writes std::uintptr_t. Legitimate arrays are capped
+    // at 16M by the DLL implausible-length check before reaching here,
+    // so values comfortably fit in any integer. ulong (not long) is
+    // defensive against future garbage paths and matches the C++ type.
+    [JsonPropertyName("length")]       public ulong                         Length       { get; set; }
     [JsonPropertyName("count")]        public int                           Count        { get; set; }
     [JsonPropertyName("element_type")] public string?                       ElementType  { get; set; }
-    [JsonPropertyName("element_size")] public long                          ElementSize  { get; set; }
+    [JsonPropertyName("element_size")] public ulong                         ElementSize  { get; set; }
     [JsonPropertyName("is_pointer")]   public bool                          IsPointer    { get; set; }
     [JsonPropertyName("elements")]     public List<SnapshotArrayElement>    Elements     { get; set; } = new();
 }
