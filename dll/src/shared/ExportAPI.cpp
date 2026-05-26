@@ -2370,6 +2370,23 @@ void RegisterCoreHandlers() {
 
                 session->classes.push_back(std::move(classEntry));
             }
+
+            // Phase 29a-v3 — drain BDWGC INSIDE our attach window. Live-
+            // smoke on 活俠傳 (Mono x86 / Unity 2020.3) build #609 showed
+            // the game freezing for ~50s AFTER our snapshotBegin RPC
+            // returned: thousands of mono_type_get_name + mono_class_*
+            // calls during decode leave small-object allocations queued
+            // in BDWGC. The game's main thread eventually has to catch
+            // up — that catch-up shows up as a long freeze (50s on
+            // 32-bit Mono). Same family as the lessons-learned.md
+            // disconnect-time GC entry; this is the per-RPC analogue.
+            // Bound under our outer attach guard so the drain runs on
+            // OUR worker thread, costs land inside the user's already-
+            // waiting RPC budget instead of leaking into the game frame.
+            const auto& rDrain = Mono::GetResolver();
+            if (rDrain.gc_collect != nullptr) {
+                rDrain.gc_collect(-1);
+            }
         }
 
         // Preserve assembly order in the response.
@@ -5262,6 +5279,17 @@ void RegisterCoreHandlers() {
                 if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
 
                 session->classes.push_back(std::move(classEntry));
+            }
+
+            // Phase 29a-v3 — drain IL2CPP GC inside our attach window.
+            // Mirror of the Mono path. IL2CPP doesn't have BDWGC's
+            // shutdown-stall behaviour to the same extent (different GC
+            // architecture) but draining symmetrically keeps the per-
+            // RPC cost predictable + matches the disconnect-time hook
+            // pattern. `il2cpp_gc_collect(0)` = full collection.
+            const auto& rDrainIl = IL2CPP::GetResolver();
+            if (rDrainIl.gc_collect != nullptr) {
+                rDrainIl.gc_collect(0);
             }
         }
 
