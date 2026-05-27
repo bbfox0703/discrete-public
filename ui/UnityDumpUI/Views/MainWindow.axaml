@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:UnityDumpUI.ViewModels"
         xmlns:controls="using:UnityDumpUI.Controls"
+        xmlns:converters="using:UnityDumpUI.Views.Converters"
         x:Class="UnityDumpUI.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1280" Height="780"
@@ -1998,6 +1999,163 @@
                                              Width="60" SortMemberPath="Count" CanUserSort="True"/>
                         <DataGridCheckBoxColumn Header="Excl." Binding="{Binding IsExcluded}"
                                                  Width="50" IsReadOnly="True"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Grid>
+            </DockPanel>
+          </TabItem>
+
+          <!-- Phase 29d — SPC Query tab. N snapshots × N predicates
+               killer use case: identify a field by its value SIGNATURE
+               across multiple game sessions (e.g. 10160 → 9910 → 9410
+               → 9410 across 4 sessions uniquely locates the 銀兩
+               GameStat by its spending pattern, no matter how much
+               noise is in the heap). -->
+          <TabItem Header="SPC Query">
+            <DockPanel Margin="6">
+              <!-- Status + error + mode banner -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F808080" CornerRadius="3">
+                <TextBlock Text="{Binding SpcQuery.StatusMessage}"
+                           TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1FFF6060" CornerRadius="3"
+                      IsVisible="{Binding SpcQuery.ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding SpcQuery.ErrorMessage}"
+                           Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#26FFA640" CornerRadius="3"
+                      IsVisible="{Binding SpcQuery.ModeBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding SpcQuery.ModeBanner}"
+                           TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+
+              <!-- Filters row -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="True" Header="🔍 Filters">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <StackPanel Orientation="Horizontal" Spacing="12">
+                    <CheckBox Content="Statics only"
+                              IsChecked="{Binding SpcQuery.StaticsOnly, Mode=TwoWay}"
+                              ToolTip.Tip="Match only static-field rows. Auto-enabled when selected snapshots span multiple game sessions (instance addresses don't survive game launches)."/>
+                    <CheckBox Content="Exclude synthetic"
+                              IsChecked="{Binding SpcQuery.ExcludeSynthetic, Mode=TwoWay}"
+                              ToolTip.Tip="Skip rows whose class name starts with '&lt;' (compiler-generated types)."/>
+                    <CheckBox Content="Numeric only"
+                              IsChecked="{Binding SpcQuery.NumericOnly, Mode=TwoWay}"
+                              ToolTip.Tip="Drop rows where any snapshot's value doesn't parse as a finite double. Required for Increased / Decreased / Delta predicates to mean anything; leave OFF when chasing string fields via Exact / Unchanged."/>
+                    <TextBlock Text="Class:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    <TextBox Text="{Binding SpcQuery.ClassFilter, Mode=TwoWay}"
+                             PlaceholderText="substring" Width="180"/>
+                    <TextBlock Text="Type:" VerticalAlignment="Center"/>
+                    <TextBox Text="{Binding SpcQuery.TypeFilter, Mode=TwoWay}"
+                             PlaceholderText="e.g. Int32" Width="120"/>
+                  </StackPanel>
+                </Border>
+              </Expander>
+
+              <!-- Run button row -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6"
+                      Background="#1F808080" CornerRadius="3">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Button Content="▶ Run SPC Query"
+                          Command="{Binding SpcQuery.RunCommand}"
+                          MinWidth="180" Padding="10,4"/>
+                  <TextBlock VerticalAlignment="Center" Opacity="0.7" FontSize="11"
+                             Text="Tip: at least 2 snapshots; first predicate must be absolute (Any / Exact / Range / NotEqual)."/>
+                </StackPanel>
+              </Border>
+
+              <!-- Snapshot picker + predicates grid (top half) and
+                   Results grid (bottom half) split via Grid rows. -->
+              <Grid RowDefinitions="*,6,*">
+                <!-- Top: snapshot rows with per-row predicate editor -->
+                <Border Grid.Row="0" Padding="0"
+                        Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Snapshots + per-snapshot predicate"
+                               FontWeight="SemiBold" Margin="6,4,6,4"/>
+                    <DataGrid ItemsSource="{Binding SpcQuery.SelectionRows}"
+                              AutoGenerateColumns="False"
+                              HeadersVisibility="Column"
+                              IsReadOnly="False"
+                              GridLinesVisibility="Horizontal">
+                      <DataGrid.Columns>
+                        <DataGridCheckBoxColumn Header="Use"
+                                                Binding="{Binding Include, Mode=TwoWay}"
+                                                Width="50"/>
+                        <DataGridTextColumn Header="Snapshot"
+                                            Binding="{Binding DisplayLabel}"
+                                            IsReadOnly="True"
+                                            Width="2*"/>
+                        <DataGridTemplateColumn Header="Predicate" Width="170">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <ComboBox SelectedItem="{Binding PredicateKind, Mode=TwoWay}"
+                                        ItemsSource="{x:Static vm:SpcQueryViewModel.AllPredicateKinds}"
+                                        Margin="2"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Operand"
+                                            Binding="{Binding OperandText, Mode=TwoWay}"
+                                            Width="120"/>
+                        <DataGridTextColumn Header="Operand 2 (Range only)"
+                                            Binding="{Binding Operand2Text, Mode=TwoWay}"
+                                            Width="160"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+
+                <GridSplitter Grid.Row="1" ResizeDirection="Rows"
+                              Height="6" Background="#33808080"/>
+
+                <!-- Bottom: results -->
+                <Border Grid.Row="2" Padding="0"
+                        Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Results"
+                               FontWeight="SemiBold" Margin="6,4,6,4"/>
+                    <DataGrid Name="SpcResultsGrid"
+                              ItemsSource="{Binding SpcQuery.Results}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              GridLinesVisibility="Horizontal"
+                              DoubleTapped="OnSpcResultDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Inspect this instance"
+                                    Click="OnSpcInspectInstanceClicked"/>
+                          <Separator/>
+                          <MenuItem Header="Copy Class.Field"
+                                    Click="OnSpcCopyClassFieldClicked"/>
+                          <MenuItem Header="Copy instance address"
+                                    Click="OnSpcCopyInstanceAddressClicked"/>
+                          <MenuItem Header="Copy value sequence"
+                                    Click="OnSpcCopyValueSequenceClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Class"
+                                            Binding="{Binding ClassFqn}"
+                                            Width="2*"/>
+                        <DataGridTextColumn Header="Field"
+                                            Binding="{Binding FieldName}"
+                                            Width="*"/>
+                        <DataGridTextColumn Header="Type"
+                                            Binding="{Binding FieldType}"
+                                            Width="*"/>
+                        <DataGridTextColumn Header="Instance"
+                                            Binding="{Binding InstanceAddress}"
+                                            Width="160"/>
+                        <DataGridTextColumn Header="Values (per snap →)"
+                                            Binding="{Binding ValueDisplays, Converter={x:Static converters:SpcValueSequenceConverter.Instance}}"
+                                            Width="3*"/>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>

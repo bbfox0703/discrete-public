@@ -38,6 +38,7 @@ public partial class MainWindow : Window
         // Phase 17c — clipboard hook for the "Copy instance address" button
         // on the Address Lookup tab.
         vm.AddressLookup.CopyToClipboardAsync = CopyToClipboardAsync;
+        vm.SpcQuery.CopyToClipboardAsync      = CopyToClipboardAsync;
         vm.ShowProxyDeploy                    = ShowProxyDeployWindow;
         DataContext = vm;
         // Pane-collapse plumbing — IsVisible bindings on the panes' content
@@ -280,6 +281,60 @@ public partial class MainWindow : Window
         var transfer = new DataTransfer();
         transfer.Add(item);
         await clipboard.SetDataAsync(transfer);
+    }
+
+    /// <summary>Phase 29d-2: double-clicking a SPC result row pushes
+    /// the instance address into the Inspector cross-tab handoff
+    /// (static rows are no-op since there's no instance to inspect).</summary>
+    private void OnSpcResultDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.SpcMatch match) return;
+        vm.SpcQuery.RequestInspectInstance(match);
+    }
+
+    /// <summary>Phase 29d-5: helper for the SPC result context-menu —
+    /// the four handlers below all need the currently right-clicked
+    /// row, which Avalonia surfaces via the DataGrid's SelectedItem
+    /// (right-click selects under the standard interaction). Returns
+    /// null if no row is selected so handlers can no-op gracefully.</summary>
+    private UnityDumpUI.ViewModels.SpcMatch? GetSelectedSpcMatch()
+    {
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("SpcResultsGrid");
+        return grid?.SelectedItem as UnityDumpUI.ViewModels.SpcMatch;
+    }
+
+    private void OnSpcInspectInstanceClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var m = GetSelectedSpcMatch();
+        if (m is null) return;
+        vm.SpcQuery.RequestInspectInstance(m);
+    }
+
+    private async void OnSpcCopyClassFieldClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var m = GetSelectedSpcMatch();
+        if (m is null) return;
+        await vm.SpcQuery.CopyClassFieldAsync(m).ConfigureAwait(true);
+    }
+
+    private async void OnSpcCopyInstanceAddressClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var m = GetSelectedSpcMatch();
+        if (m is null) return;
+        await vm.SpcQuery.CopyInstanceAddressAsync(m).ConfigureAwait(true);
+    }
+
+    private async void OnSpcCopyValueSequenceClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var m = GetSelectedSpcMatch();
+        if (m is null) return;
+        await vm.SpcQuery.CopyValueSequenceAsync(m).ConfigureAwait(true);
     }
 
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
