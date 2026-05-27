@@ -658,11 +658,22 @@ void SehSweepRegion(
             if ((qw & 7u) != 0) continue;
             if (!std::binary_search(classSet.begin(), classSet.end(), qw)) continue;
 
+            // 2026-05-28 — false-positive filter on the instance slot,
+            // mirror of the Mono finder. Real Il2CppObjects are 8-byte
+            // aligned. The 4-byte loop stride on x86 (IL2CPP doesn't
+            // ship there today, but the code is bitness-symmetric)
+            // can land on 4-byte-aligned-but-not-8-byte-aligned
+            // qwords that happen to equal a class pointer — those are
+            // structurally not object headers and would only add
+            // noise to the per-class cap.
+            const std::uintptr_t instAddr =
+                reinterpret_cast<std::uintptr_t>(base + i * sizeof(std::uintptr_t));
+            if ((instAddr & 7u) != 0) continue;
+
             auto* k = reinterpret_cast<Il2CppClass*>(qw);
             auto& list = byClass[k];
             if (list.size() < perClassCap) {
-                list.push_back(reinterpret_cast<std::uintptr_t>(
-                    base + i * sizeof(std::uintptr_t)));
+                list.push_back(instAddr);
                 ++totalInstances;
             }
             // Else: cap hit for this class — count the qword as scanned
@@ -727,6 +738,15 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         out.regionsTotal++;
 
         if (r.type == MEM_IMAGE) {
+            out.regionsSkipImage++;
+            continue;
+        }
+        // 2026-05-28: skip MEM_MAPPED in lockstep with the Mono finder.
+        // IL2CPP managed heap (libil2cpp / libgc-derived) is allocated
+        // via VirtualAlloc → MEM_PRIVATE; file-backed mappings hold
+        // game data that happens to contain Il2CppClass* values and
+        // generates noise on the snapshot.
+        if (r.type == MEM_MAPPED) {
             out.regionsSkipImage++;
             continue;
         }

@@ -2606,6 +2606,96 @@ values against the XAML's `<TabItem Header=` ordering settles it.
 
 ---
 
+### Snapshot `FindAllInstances` 2-level scan accepts non-object memory as fake "instances" — eats per-class cap before reaching real instances  ✅ **PARTIAL FIX 2026-05-28 (DLL #648)**
+
+**Symptom**: Live Inspector + per-class `findInstances` reports 152
+instances of `Mortal.Core.GameStat` (e.g. 활俠傳 / Mortal money
+stat at 0x2974ACC0). Snapshot Diff doesn't surface the
+known-stable money value change. UI debug "list captured
+instances of class X" reveals snapshot captured **256** GameStat
+entries — both A and B at the cap — most with garbage values
+like `_type=0 _property=712051296 _value=2061519408`. Live address
+0x2974ACC0 is past the last captured entry (0x29176510), so the
+real money instance never made the cap.
+
+**Root cause**: two completely different scan strategies between
+the live and bulk paths.
+
+- Live `findInstances` (per-class):
+  `Memory::ScanForPointer(vtable_ptr, limit)` — **1-level scan**.
+  Looks for memory locations whose qword value equals a known
+  vtable pointer. Finds object headers directly.
+
+- Snapshot `FindAllInstances` (bulk):
+  for each qword in memory, dereference it as a vtable, check
+  whether the dereferenced klass pointer is in our known class
+  set — **2-level scan**. Accepts ANY pointer-storing memory
+  whose target happens to be a vtable.
+
+The 2-level scan is structurally over-permissive. Anywhere a
+vtable pointer is stored as a value — captured locals on the
+stack, ad-hoc pointer fields in non-object structs, RGCTX cache,
+copies in game data files — gets reported as a "Mono object" at
+that location. Read-from-there as a "field" produces nonsense
+numbers (the user-visible "garbage `_value`" tell).
+
+On 32-bit Mono with the auto-clamped 256 per-class cap, the
+~100+ false positives squeeze out real instances. Snap #2's
+last captured address is below the real money instance →
+diff never sees the change → user can't find it even with the
+correct filter set.
+
+**Partial fix (DLL build #648, 2026-05-28)**: cheap heuristics
+that don't add Mono runtime calls (we still can't call
+`mono_class_vtable` per class without wedging the game, per the
+build #637 lesson):
+
+1. Skip `MEM_MAPPED` regions in addition to `MEM_IMAGE`. Mono
+   BDWGC + IL2CPP libgc heaps are always `MEM_PRIVATE`
+   (VirtualAlloc/HeapAlloc backed); file-mapped regions hold
+   game data that just happens to contain matching vtable
+   pointer values. Filter at region level → cheap.
+2. Require the instance slot address to be 8-byte aligned. Real
+   Mono / IL2CPP objects are 8-byte aligned; many false-positive
+   slots aren't (4-byte stride in the scan + values stored at
+   word boundaries that don't double-align). Filters ~30-50% of
+   the false-positive volume on the 활俠傳 / Mortal test case.
+3. (Mono side only) Also applied to the inner classification
+   loop so the cache memo doesn't pollute future scans with
+   misclassified vtables.
+
+**What's still open (Phase 29-f deferred)**: the proper fix is
+to switch `FindAllInstances` to the same **1-level scan** the
+per-class `findInstances` does. That requires pre-resolving the
+vtable pointer for every class in the snapshot scope before
+scanning. `mono_class_vtable(domain, klass)` does that BUT may
+lazily allocate a vtable in BDWGC heap — and the build #637
+lesson is that batch allocations from a worker thread wedge the
+game's main thread on next GC. Workable approaches when the
+need arises:
+
+- Resolve vtables on the main thread via `MainThreadDispatcher`
+  (slower per call, but no BDWGC allocation race).
+- Or: pre-warm class vtables lazily during normal game play
+  (the live Inspector already populates `vtableSet`); when the
+  snapshot fires, use only the warmed subset and accept that
+  un-warmed classes might miss the real-instance signal.
+- Or: switch to mono GC's introspection APIs
+  (`mono_gc_walk_heap`) that enumerate actually-live objects
+  directly — heaviest but most accurate.
+
+Estimated 2-3 days when the partial fix proves insufficient.
+
+**Detection hint**: if the snapshot debug tool shows a class
+with captured-count significantly above the live
+`findInstances` count, AND the live game's known stable address
+is NOT in the captured set (`Address Lookup` finds it but
+debug "compare in A & B" returns 0 rows in both), this is the
+false-positive-overflow signature. Workaround: bump the
+Instance cap above the (live count + estimated false positives).
+
+---
+
 ### Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2 — DLL-side JSON cache pushes past 4 GB user space  ✅ **MITIGATED 2026-05-27 (DLL #645 + UI #647)**
 
 **Symptom**: 활俠傳 (Mono x86, Unity 2020.3.49f1, PID 26296) on

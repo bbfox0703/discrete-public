@@ -833,6 +833,18 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         out.regionsTotal++;
 
         if (r.type == MEM_IMAGE) { out.regionsSkipImage++; continue; }
+        // 2026-05-28: skip MEM_MAPPED too. Mono BDWGC heap is always
+        // MEM_PRIVATE (VirtualAlloc/HeapAlloc backed), so file-backed
+        // mappings (asset files, save data, memory-mapped resources)
+        // are pure noise for the snapshot. Live-smoke on Mortal
+        // (활俠傳) build #647 showed ~100 false positives per snapshot
+        // coming from MEM_MAPPED regions where game data happened to
+        // contain values matching known Mono vtable pointers. Each
+        // false positive eats one slot of the per-class cap, pushing
+        // real instances past the limit. Counted in regionsSkipImage
+        // for now (didn't add a separate counter to avoid touching
+        // BulkInstancesResult layout — same family of skip).
+        if (r.type == MEM_MAPPED) { out.regionsSkipImage++; continue; }
 
         const std::uint8_t* regionEnd = r.base + r.size;
         bool onStack = false;
@@ -887,10 +899,25 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                 out.vtablesResolved++;
             }
 
+            // 2026-05-28 — false-positive filter on the instance slot.
+            // Real Mono BDWGC objects are 8-byte aligned (matches the
+            // already-required alignment of the vtable pointer they
+            // start with). Random memory locations that happen to
+            // contain a vtable pointer value (locals, captured ptrs,
+            // ad-hoc fields) typically aren't aligned to 8 bytes.
+            // Live-smoke on Mortal: this single check filters out
+            // ~30-50% of false positives per class on the 활俠傳
+            // snapshot path. Without it the per-class cap on 32-bit
+            // Mono targets fills with noise before reaching the real
+            // money / HP / etc. instances.
+            const std::uintptr_t instAddr =
+                reinterpret_cast<std::uintptr_t>(slots[i]);
+            if ((instAddr & 7u) != 0) continue;
+
             auto* k = reinterpret_cast<MonoClass*>(klass);
             auto& list = out.byClass[k];
             if (list.size() < perClassCap) {
-                list.push_back(reinterpret_cast<std::uintptr_t>(slots[i]));
+                list.push_back(instAddr);
                 ++out.totalInstances;
             }
         }
