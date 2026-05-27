@@ -1625,11 +1625,20 @@
                            Foreground="#60C0FF" TextWrapping="Wrap" FontSize="11"/>
               </Border>
 
-              <!-- Status + error -->
+              <!-- Status + error. Two-row layout: Diff/Take/Drop summary
+                   on top (overwritten by command actions), live filter
+                   tally underneath (auto-refreshed every RebuildFilteredRows
+                   pass so the breakdown stays current as the user toggles
+                   filters). Empty FilterResultLine collapses cleanly. -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1F808080" CornerRadius="3">
-                <TextBlock Text="{Binding Snapshot.StatusMessage}"
-                           TextWrapping="Wrap" FontSize="11"/>
+                <StackPanel>
+                  <TextBlock Text="{Binding Snapshot.StatusMessage}"
+                             TextWrapping="Wrap" FontSize="11"/>
+                  <TextBlock Text="{Binding Snapshot.FilterResultLine}"
+                             FontSize="11" Opacity="0.85"
+                             IsVisible="{Binding Snapshot.FilterResultLine, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                </StackPanel>
               </Border>
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1FFF6060" CornerRadius="3"
@@ -1734,12 +1743,20 @@
                              PlaceholderText="substring (case-insensitive)"
                              Width="200"/>
                     <TextBlock Text="Value range:" VerticalAlignment="Center"
-                               ToolTip.Tip="Restrict to numeric rows whose Old OR New value lies in [Min, Max]. Empty Min/Max = unbounded on that side. Non-numeric rows are filtered out as soon as either bound is set."/>
-                    <NumericUpDown Value="{Binding Snapshot.ValueRangeMin, Mode=TwoWay}"
+                               ToolTip.Tip="Restrict to numeric rows whose Old OR New value lies in [Min, Max]. Empty Min/Max = unbounded on that side. Non-numeric rows are filtered out as soon as either bound is set. Press Apply to commit — the range filter is intentionally NOT live (each pass walks 800K+ rows on a wide diff, real-time updating would freeze the UI)."/>
+                    <NumericUpDown Value="{Binding Snapshot.PendingValueRangeMin, Mode=TwoWay}"
                                    PlaceholderText="min" MinWidth="120"/>
                     <TextBlock Text="–" VerticalAlignment="Center"/>
-                    <NumericUpDown Value="{Binding Snapshot.ValueRangeMax, Mode=TwoWay}"
+                    <NumericUpDown Value="{Binding Snapshot.PendingValueRangeMax, Mode=TwoWay}"
                                    PlaceholderText="max" MinWidth="120"/>
+                    <Button Content="Apply"
+                            Command="{Binding Snapshot.ApplyValueRangeFilterCommand}"
+                            MinWidth="60"
+                            ToolTip.Tip="Commit the Min/Max above into the live filter. Run only when both bounds are typed in so the rebuild fires once instead of per-keystroke."/>
+                    <Button Content="Clear"
+                            Command="{Binding Snapshot.ClearValueRangeFilterCommand}"
+                            MinWidth="60"
+                            ToolTip.Tip="Reset Min and Max to empty (unbounded). NumericUpDown can't go back to empty via spinner clicks, so this is the only way out once a value is typed."/>
                   </StackPanel>
                 </StackPanel>
               </Border>

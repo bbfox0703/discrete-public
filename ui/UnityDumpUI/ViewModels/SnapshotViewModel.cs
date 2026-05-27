@@ -308,13 +308,51 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// semantics: a row passes if Old OR New parses as numeric and falls
     /// in <c>[Min, Max]</c>. Non-numeric rows are filtered out entirely
     /// once any range bound is set.
+    /// <para/>
+    /// This is the <b>committed</b> value — the actual filter input. UI
+    /// binds the NumericUpDowns to <see cref="PendingValueRangeMin"/> /
+    /// <see cref="PendingValueRangeMax"/> and an Apply button copies
+    /// pending → committed. Without that indirection every spinner click
+    /// fired a 500ms RebuildFilteredRows over 800K+ DiffRows and the UI
+    /// looked frozen (2026-05-28 user feedback).
     /// Typed as <c>decimal?</c> to match Avalonia 12 <c>NumericUpDown.Value</c>
     /// — the value-range check casts to <c>double</c> internally.</summary>
     [ObservableProperty] private decimal? _valueRangeMin;
 
     /// <summary>Upper bound (inclusive) for the numeric value range filter.
-    /// <c>null</c> = no upper bound.</summary>
+    /// <c>null</c> = no upper bound. See <see cref="ValueRangeMin"/> for
+    /// the pending/committed split rationale.</summary>
     [ObservableProperty] private decimal? _valueRangeMax;
+
+    /// <summary>Pending lower bound bound to the Min NumericUpDown. Not
+    /// applied to the filter until <see cref="ApplyValueRangeFilter"/>
+    /// runs.</summary>
+    [ObservableProperty] private decimal? _pendingValueRangeMin;
+
+    /// <summary>Pending upper bound bound to the Max NumericUpDown.</summary>
+    [ObservableProperty] private decimal? _pendingValueRangeMax;
+
+    /// <summary>Commit pending Min/Max into the live filter. Triggers
+    /// a single RebuildFilteredRows pass via the existing
+    /// <c>OnValueRangeMin/MaxChanged</c> hooks.</summary>
+    [RelayCommand]
+    public void ApplyValueRangeFilter()
+    {
+        ValueRangeMin = PendingValueRangeMin;
+        ValueRangeMax = PendingValueRangeMax;
+    }
+
+    /// <summary>Null both pending + committed bounds and rebuild — the
+    /// only safe way to escape "I typed a value, now I can't unset it"
+    /// (NumericUpDown can't go back to empty via spinner clicks).</summary>
+    [RelayCommand]
+    public void ClearValueRangeFilter()
+    {
+        PendingValueRangeMin = null;
+        PendingValueRangeMax = null;
+        ValueRangeMin = null;
+        ValueRangeMax = null;
+    }
 
     /// <summary>Hide rows where both sides are pointer-formatted
     /// (<c>ptr=0x…</c>). These are usually re-allocation noise — the
@@ -368,6 +406,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
     [ObservableProperty] private string _statusMessage = "Press Take Snapshot to capture the game's current managed-state. Two snapshots needed for a diff.";
     [ObservableProperty] private string? _errorMessage;
+
+    /// <summary>Live tally of the current filter pass — separated from
+    /// <see cref="StatusMessage"/> because the breakdown has to refresh
+    /// on every filter-property change, but the Diff line (which records
+    /// "A → B: changed/added/removed in N ms") shouldn't be overwritten
+    /// when the user just toggles a checkbox. Wired to a separate
+    /// TextBlock in the snapshot tab so each line owns its own
+    /// reactivity. Empty until the first <see cref="RebuildFilteredRows"/>
+    /// call after a diff produces rows.</summary>
+    [ObservableProperty] private string _filterResultLine = string.Empty;
 
     /// <summary>Activation handoff — the view's "Inspect this instance"
     /// context-menu item raises this through the VM so MainWindowViewModel
@@ -621,7 +669,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
         string unchangedNote = includeUnchanged
             ? $", {unchanged:N0} unchanged"
             : string.Empty;
-        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote} (in {sw.ElapsedMilliseconds} ms). Showing {FilteredDiffRows.Count:N0} after filters ({FormatFilteredKindBreakdown()}).";
+        // FilterResultLine owns the post-filter breakdown — RebuildFilteredRows
+        // above already published it. The Diff status itself just carries the
+        // pre-filter totals so the user can compare "raw" vs "filtered".
+        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote} (in {sw.ElapsedMilliseconds} ms).";
     }
 
     /// <summary>Drop the snapshot currently selected as A. Status line
@@ -815,6 +866,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 case "unchanged": _filteredUnchangedCount++; break;
             }
         }
+
+        // Live-publish the breakdown so the UI shows current numbers
+        // regardless of whether this rebuild was triggered by Diff or
+        // by a filter-property toggle. Empty source = empty line so
+        // the TextBlock collapses cleanly.
+        FilterResultLine = DiffRows.Count == 0
+            ? string.Empty
+            : $"Filter: {FilteredDiffRows.Count:N0} of {DiffRows.Count:N0} rows ({FormatFilteredKindBreakdown()})";
     }
 
     /// <summary>Format the per-kind counts as
