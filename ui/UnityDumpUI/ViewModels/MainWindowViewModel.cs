@@ -321,11 +321,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// Tab indices for <see cref="SelectedDetailTabIndex"/>. Kept here so
     /// callers don't need magic numbers.
     /// </summary>
+    // Must mirror the TabItem order in MainWindow.axaml. Symbol Finder
+    // sits before Address Lookup in the XAML (Phase 25 → Phase 17c
+    // ordering) — these two used to be swapped here, which silently
+    // mis-routed every Address Lookup cross-tab handoff into Symbol
+    // Finder. Caught 2026-05-26 by snapshot-diff right-click smoke.
     public const int TabIndexFields        = 0;
     public const int TabIndexInspector     = 1;
     public const int TabIndexMethods       = 2;
-    public const int TabIndexAddressLookup = 3;
-    public const int TabIndexSymbolFinder  = 4;
+    public const int TabIndexSymbolFinder  = 3;
+    public const int TabIndexAddressLookup = 4;
     public const int TabIndexScene         = 5;
     public const int TabIndexValueSearch   = 6;
     public const int TabIndexSnapshot      = 7;
@@ -601,6 +606,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                         s.GameBuildId, hs.GameBuildId, StringComparison.Ordinal);
                 }
             }
+
+            // Phase 29-polish (2026-05-27) — hand the game-process
+            // bitness + current memory to the Snapshot VM. On 32-bit
+            // targets this auto-clamps InstanceCap/ArrayCap downward
+            // to safe defaults (256 / 64) so the user doesn't trip
+            // the 4 GB OOM CTD that build #646 hit on 활俠傳. Also
+            // populates the "Game: 32-bit Mono — WorkingSet X GB"
+            // banner that warns as memory climbs toward 3 GB.
+            Snapshot.OnGameConnected(
+                hs.GamePointerSize ?? 0,
+                hs.GameWorkingSet  ?? 0UL,
+                hs.GamePrivateUsage ?? 0UL);
 
             // Phase 8: kick off assembly fetch so the left pane populates
             // without an extra click. Failures surface on Browser.ErrorMessage.

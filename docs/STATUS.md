@@ -1,6 +1,212 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-26 night — **Phase 29b SHIPPED + LIVE-VERIFIED across SaGa F2R / BongoCat / 활俠傳**, build #637).
+**Branch**: `dev` (2026-05-28 — **Snapshot FindAllInstances false-positive root-cause FIX SHIPPED + LIVE-VERIFIED**, build #664 UI / DLL #650).
+
+## TL;DR — what's left to pick up (build #664 session)
+
+**Snapshot false-positive bug — proper fix SHIPPED + live-verified on
+Mortal (Legend of Mortal / 活俠傳, Mono x86).** Eliminates the multi-
+session mystery where known-stable instance addresses (CE-pinned
+money 銀兩 GameStat) didn't surface in the diff DataGrid even with
+the right filters.
+
+### Root cause
+
+`FindAllInstances` does a 2-level scan — for each qword in memory,
+deref it and check whether the deref is in our known class set.
+That accepts not just real `MonoVTable*` pointers, but also any
+**non-vtable Mono structure whose first qword happens to be a
+class pointer** — RGCTX cache slots, internal Mono lookup tables
+that store vtable pointer values as their payload, etc. On dense
+classes (Mortal's `GameStat` has 152 live instances) the false
+positives crowded out real instances on the auto-clamped 256 cap,
+silently dropping the money instance and making the diff useless.
+
+### Fix (DLL #650, MonoAddressFinder.cpp)
+
+**Structural validation via the MonoDomain field.** MonoVTable
+layout (from `mono/metadata/class-internals.h`):
+
+```
++0           MonoClass*       (existing classSet check)
++ptr_size    MonoGCDescriptor gc_descr
++2*ptr_size  MonoDomain*      ← NEW: must equal GetRootDomain()
++3*ptr_size  MonoType*
+```
+
+Real vtables ALWAYS have the root domain pointer at offset
+`2*ptr_size`. Random non-vtable structures whose first qword is a
+class pointer almost never coincidentally also have the root
+domain pointer at exactly that offset. One extra SEH-safe pointer
+read per candidate, no Mono runtime calls, zero BDWGC interaction
+= zero risk of the build #637 wedge.
+
+### Live-verify result on Mortal
+
+| Metric | Before (DLL #648 partial fix) | After (DLL #650 proper fix) |
+|---|---|---|
+| GameStat captured per snapshot | 256 (cap hit, mostly garbage) | **134-135** (matches live `findInstances` ~152) |
+| UI memory per snapshot | 1.5+ GB | **~99-139 MB** (15× reduction) |
+| Total UI memory (2 snapshots) | 3+ GB | **~238 MB** |
+| Money diff row | Missing — known-stable address not in capture | **`Mortal.Core.GameStat _value 0x28 at 0x29BFACC0 10160 → 9910 (Δ=-250)`** ✓ |
+| Diff total | `7,110 changed, 759,804 added, ... 0 found in value range` | `1,688 changed, 46,999 added, 18,839 removed → 50 in [9000+]` |
+
+Per-instance diff dump on the money GameStat now reads as expected:
+
+```
+[=] _name = "銀兩"   _property = 99   _type = 3
+[~] +0x28 _value : 10160 → 9910
+[=] _min, _max, _limitAddition, _default, m_CachedPtr, OnValueChanged, _levelText, _statAdditionData, _totalAddData (all unchanged)
+```
+
+### Residual / known minor
+
+One stray entry slipping through per snapshot at addresses in
+0xB2Dxxxxxx range (Mono-related family of structures that happen
+to have both a class pointer + domain pointer at the right
+offsets — probably per-method or generic-instantiation MonoVTable
+aliases). ~99% precision, not blocking. Could refine further by
+also validating `*(qw + 3*ptr_size)` is a plausible `MonoType*`,
+but diminishing returns.
+
+### Companion mitigations from yesterday (still active)
+
+The 32-bit OOM mitigation bundle from yesterday (build #645)
+stays as a safety net but is **much less essential now** that
+capture isn't bloated with noise:
+
+1. **DLL pre-check abort gate**: refuses `snapshotBegin` if game
+   process committed memory ≥ 3 GB.
+2. **UI auto-clamp**: handshake carries pointer size; 32-bit
+   targets get InstanceCap ≤ 256 / ArrayCap ≤ 64 by default.
+3. **Live game-memory banner** in Snapshot tab: real-time
+   WorkingSet + committed display with warning thresholds at
+   2 GB / 3 GB.
+
+With #650's noise reduction the user could probably push
+InstanceCap back to 512 or higher on 32-bit Mortal without
+hitting the OOM ceiling.
+
+### Outstanding for next session
+
+- Phase 29c (SQLite cross-session persistence) still deferred.
+- Phase 29d (SPC constraint query) still deferred.
+- Phase 29e (Full/Differential snapshot architecture) proposal
+  documented in plan.md, deferred until multi-snapshot workflow
+  needs it.
+- Phase 29f (residual false-positives — the 0xB2D family) —
+  pure polish, defer unless they cause user-visible issues.
+- Mono static field VALUE capture (opt-in checkbox) still
+  deferred.
+
+---
+
+## TL;DR — what's left to pick up (build #647 session)
+
+**32-bit snapshot OOM mitigation SHIPPED.** Closes the build #646
+활俠傳 CTD with a four-layer defense:
+
+1. **DLL pre-check abort gate** (Mono + IL2CPP `snapshotBegin`):
+   refuses the snapshot if game is x86 AND `PrivateUsage` ≥ 3 GB.
+   Returns structured `{"error": "Game process at X.X GB private
+   memory — refusing snapshot to avoid OOM crash on this 32-bit
+   Mono target. Lower InstanceCap (try 128) and ArrayCap (try 32)
+   then retry, or restart the game to free memory before
+   snapshotting."}`. Game-CTD becomes a recoverable UI banner.
+2. **UI auto-clamp on x86 connect**: handshake now carries
+   `game_pointer_size` / `game_working_set` / `game_private_usage`.
+   `SnapshotViewModel.OnGameConnected(ps, ws, pu)` clamps
+   `InstanceCap` ≤ 256 + `ArrayCap` ≤ 64 on 32-bit targets if
+   currently above. Never clamps upward — manual user picks stay
+   respected.
+3. **Game memory banner** in the Snapshot tab: post-handshake row
+   shows `Game: 32-bit Mono — WorkingSet 1.42 GB, committed 1.78 GB
+    — snapshot caps auto-clamped for safety`. Suffix escalates to
+   `⚠ approaching 4 GB ceiling` at 2 GB and `⛔ over 3 GB — DLL
+   will refuse next snapshot` at 3 GB. User sees danger before
+   they hit the wall.
+4. **Status enrichment**: streaming + final status messages now
+   show both UI WorkingSet AND game-process memory (WorkingSet +
+   committed), so the user can watch the game grow during
+   capture.
+
+**`ShowChanged` default flipped to OFF** the same session — user
+moved primary workflow to value-range / unchanged / added+removed.
+
+DLL build #645 clean (both Mono + IL2CPP + x86 Mono, fresh
+10:50 timestamps). UI build clean, 363 tests still green.
+
+### Outstanding for next session
+
+* Live-smoke the mitigation: take snap #1 on 활俠傳, **verify**:
+  - Banner shows "Game: 32-bit Mono ..." after inject
+  - Defaults auto-clamp to 256/64 (NumericUpDowns reflect)
+  - Snap #2 either completes safely OR fails fast with the
+    "Game process at X.X GB" refusal banner (no game CTD)
+* Phase 29c (SQLite persistence) and 29d (SPC constraint query)
+  still deferred from the original Phase 29 plan.
+* Mono static field VALUE capture (opt-in checkbox) still
+  deferred.
+
+---
+
+## TL;DR — what's left to pick up (build #644 session)
+
+**Phase 29 polish bundle SHIPPED.** Five things landed across three
+commits + one DLL rebuild on top of the build #637 Phase 29b ship:
+
+| Commit | What landed | Trigger |
+|---|---|---|
+| `db8bb9b` | Noise-reduction filters on diff DataGrid: `DiffRowKind` classifier (Numeric/Pointer/String/Error/Other), value-range filter (decimal? Min/Max, either-side semantics), pointer-only mask, large-string mask (default 256 chars — catches `System.Exception._stackTrace` blobs), field-name substring filter, top-30 field-name stats panel with one-click exclusion. `ChangedOnly` refactored into independent `ShowChanged`/`ShowAdded`/`ShowRemoved`. `FilteredDiffRows` materialised into `ObservableCollection` (single O(N) rebuild on filter-prop change vs prior per-render predicate eval). | User's 1,186-changed-row 활俠傳 diff was too noisy to scan |
+| `db8bb9b` (same) | "Include unchanged" capture toggle + "Unchanged" filter toggle — lets the user use value-range / field-name filters across the whole captured state, not just what differed between A and B. Default OFF (10–100× row count when on). | User asked for value-range filtering on unchanged data ("uncheck Changed → empty grid" UX confusion) |
+| `db8bb9b` (same) | **Tab-index constant swap fix** in [MainWindowViewModel.cs:324](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs) — `TabIndexAddressLookup` (3) and `TabIndexSymbolFinder` (4) were inverted relative to actual XAML order. Every Address Lookup cross-tab handoff has been silently landing on Symbol Finder since Phase 25. Surfaced when the new snapshot-diff right-click menu exposed it. | User: "address lookup, UI 卻帶我到 Symbol Finder tab" |
+| `d18443f` | Capture cap defaults bumped: InstanceCap 100→512, ArrayCap 50→256 (still under the prior hard-cap). Live `Process.WorkingSet64` tracking added to every status-line tick — `Capturing… 12.3 s — process 1.42 GB (+340 MB)`. Final snapshot + log line carry the same memory annotation. | User's GameStat instance at `0x29B0ACE8` sat past position 100 in the heap-walk order; lower defaults silently missed it |
+| `06984bf` | DLL hard-caps raised: instanceCap 1024→**8192** (ExportAPI both backends + internal `FindAllInstances` ceilings), arrayCap 256→**4096**. UI `NumericUpDown.Maximum` raised to match. Defaults stay at 512/256 — this is just headroom. **Rebuilt DLL build #643** (both Mono + IL2CPP + x86 Mono, fresh 10:21 timestamps). | User: "DLL's hard-caps 應該要再拉高" |
+
+UI build clean, 363 tests still green across the bundle.
+
+### Live-smoke result (build #646, 활俠傳, Mono x86 PID 26296)
+
+* Snap #1 (InstanceCap=512, ArrayCap=256, the new defaults):
+  ✅ 3,647 classes / 119,370 instances / 19,680 arrays captured
+  in 15s. UI WorkingSet 1.83 GB (+1.62 GB).
+* Snap #2 (~2min later, same caps):
+  🚨 **Game CTD** during chunk drain. DLL `snapshotBegin` returned
+  clean with 258K instances / 30K arrays; ~6s later UI logged
+  `Snapshot.Take failed: server closed pipe before responding`.
+* Root cause: DLL caches the entire snapshot's JSON payload in the
+  game process; on 32-bit Mono the 5–10× scaling vs old defaults
+  pushes past the 4 GB user space. See
+  [lessons-learned.md §"Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2"](lessons-learned.md#phase-29-high-default-caps-wedge-32-bit-mono-games-on-snapshot-2--dll-side-json-cache-pushes-past-4-gb-user-space).
+* **`ShowChanged` default flipped to OFF** (`5f2-tbd`) — user
+  feedback: the value-range / unchanged / added+removed
+  workflows are now the primary entry points.
+* New plan.md TODO: **32-bit snapshot OOM mitigation** (auto-clamp
+  defaults when `IsWow64`, surface game-process working-set in
+  `snapshotBegin` response, streaming-chunk architecture as
+  bigger-refactor backstop).
+
+**Workaround until mitigation lands**: on 32-bit Mono targets,
+**manually lower InstanceCap to ≤256 / ArrayCap to ≤64** before
+the second snapshot if the first one shows UI WorkingSet > 1 GB.
+
+### Known follow-ups (deferred — Phase 29c / 29d)
+
+1. ~~**Noise reduction on diff result**~~ — ✅ SHIPPED `db8bb9b`.
+2. ~~**Stack-trace strings appearing in diff**~~ — ✅ Covered by
+   the "Hide large strings > N chars" filter (default ON, 256 char
+   threshold).
+3. **Static field VALUE on Mono** — still metadata only. Optional
+   "Capture static values (may freeze game briefly)" checkbox is
+   the design; not started.
+4. **Phase 29c — SQLite cross-session persistence** — original 29
+   plan item; will need to handle the "stale" flag and
+   `game_build_id` properly when reading snapshots from a previous
+   game launch.
+5. **Phase 29d — SPC-style multi-field constraint query** — long-
+   deferred design.
+
+---
 
 ## TL;DR — what's left to pick up (build #637 session)
 

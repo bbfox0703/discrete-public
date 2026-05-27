@@ -49,6 +49,25 @@ public sealed class HandshakeResult
     /// uses it to detect "reconnected to a different game build"
     /// and mark old snapshots stale.</summary>
     [JsonPropertyName("game_build_id")]     public string? GameBuildId     { get; set; }
+
+    /// <summary>Phase 29-polish (2026-05-27) — sizeof(void*) inside the
+    /// game process. 4 on WOW64 / x86 targets, 8 on x64. UI uses this
+    /// to auto-clamp snapshot caps on 32-bit games where the DLL-side
+    /// JSON cache can push past the 4 GB user-space ceiling (build #646
+    /// 활俠傳 CTD).</summary>
+    [JsonPropertyName("game_pointer_size")]  public int?  GamePointerSize  { get; set; }
+
+    /// <summary>Current game-process WorkingSet in bytes (physical
+    /// memory mapping). Sampled fresh per handshake call. UI displays
+    /// alongside its own WorkingSet so the user sees real memory
+    /// pressure on the target.</summary>
+    [JsonPropertyName("game_working_set")]   public ulong? GameWorkingSet  { get; set; }
+
+    /// <summary>Current game-process PrivateUsage in bytes — total
+    /// committed virtual memory. Closer-to-real metric for the 32-bit
+    /// address-space pressure that triggers OOM. Used by the DLL's
+    /// snapshotBegin pre-check (>3 GB on x86 refuses the snapshot).</summary>
+    [JsonPropertyName("game_private_usage")] public ulong? GamePrivateUsage { get; set; }
 }
 
 /// <summary>
@@ -980,6 +999,21 @@ public sealed class SnapshotBeginResult
     [JsonPropertyName("excludedSystemAssemblies")] public int            ExcludedSystemAssemblies { get; set; }
     [JsonPropertyName("includeSystemAssemblies")]  public bool           IncludeSystemAssemblies  { get; set; }
     [JsonPropertyName("error")]           public string?                 Error       { get; set; }
+
+    /// <summary>Phase 29-polish — game-process pointer size echoed back
+    /// from the DLL on every snapshotBegin. 4 = x86 (32-bit OOM risk),
+    /// 8 = x64. Populated even when Error is set (the 32-bit OOM
+    /// refusal includes it so the UI can show the right banner).</summary>
+    [JsonPropertyName("gamePointerSize")]    public int?   GamePointerSize  { get; set; }
+
+    /// <summary>Post-decode game-process WorkingSet in bytes. UI surfaces
+    /// this in the snapshot status line alongside its own WorkingSet.</summary>
+    [JsonPropertyName("gameWorkingSet")]     public ulong? GameWorkingSet   { get; set; }
+
+    /// <summary>Post-decode game-process PrivateUsage in bytes — used
+    /// by the UI to warn before snap #2 if we're approaching the
+    /// 32-bit OOM threshold.</summary>
+    [JsonPropertyName("gamePrivateUsage")]   public ulong? GamePrivateUsage { get; set; }
 }
 
 /// <summary>One field inside an instance (or one static field of a class).

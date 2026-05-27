@@ -2167,23 +2167,215 @@ too much noise to spot the signal. None blocks v1; all are quality-
 of-life improvements over the existing "Hide synthetic types +
 Changed only + Class filter" stack.
 
-- [ ] **Noise-reduction filters on diff DataGrid**:
-  - Old/New value range filter (numeric — e.g. "show only rows
-    where the new value is in [0, 100]"). Useful for HP / stamina /
-    bounded resources.
-  - Pointer mask toggle (hide rows where Old/New start with
-    `ptr=` — pointer changes are usually re-allocation noise, not
-    semantic state change).
-  - Field-name keyword filter (substring on the Field column —
-    currently only the Class column has one).
-  - Distinct-count statistics (sidebar: "this snapshot's diff has
-    1,186 changed rows across N distinct field names — top by
-    count: `m_CachedPtr` 412, `<>1__state` 198, …"). Fields with
-    extreme counts are usually noise; user can one-click filter
-    them out.
-  - Skip "stack-trace strings" (`System.Exception._stackTrace`
-    and similar deeply-nested string fields produce huge blob diffs
-    that drown out real changes — auto-skip or truncate).
+- [x] **Noise-reduction filters on diff DataGrid** — SHIPPED 2026-05-26.
+  Filter bar in [MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml)
+  Snapshot tab expanded to two rows; collapsible right-side stats
+  panel hangs off the diff DataGrid. Backing logic in
+  [SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs).
+  - Value range filter (numeric Min/Max, "either side in range"
+    semantics) — bound via `NumericUpDown` to `decimal?` so null =
+    unbounded.
+  - Pointer-mask toggle — keys off the new `DiffRowKind.Pointer`
+    classifier (both Old and New start with `ptr=`). Re-allocation
+    noise drops out in one click.
+  - Field-name substring filter symmetric to the existing Class
+    filter (`FieldFilterText`).
+  - Distinct-count stats panel (top-30 field names by occurrence,
+    sorted desc). Double-click a row or right-click "Exclude this
+    field name" on the diff grid → name lands in `ExcludedFieldNames`
+    and disappears from results. "Clear exclusions" button + an
+    "Apply field exclusions" master toggle.
+  - Large-string mask (default ON, threshold 256 chars) — drops
+    `System.Exception._stackTrace`-class blobs without needing a
+    name pattern. Threshold is user-editable in the same filter bar.
+
+  **Design fixes folded in same edit**:
+  - `SnapshotDiffRow` gained `Kind` / `NumericOld` / `NumericNew` /
+    `MaxValueLength` populated once at construction, so every noise
+    filter is an O(1) predicate.
+  - Replaced `ChangedOnly` with three independent
+    `ShowChanged` / `ShowAdded` / `ShowRemoved` toggles (defaults
+    `ON, OFF, OFF`); dropped dead-code branches.
+  - `FilteredDiffRows` materialized into `ObservableCollection<>` —
+    single O(N) rebuild on any filter-property change, was lazy
+    `IEnumerable` re-evaluated per render.
+- [x] **Capture cap defaults bumped + live memory tracking** —
+  SHIPPED 2026-05-27 (`d18443f`). User's 활俠傳 GameStat money
+  instance at `0x29B0ACE8` sat past position 100 in the heap-walk
+  order; prior 100-instance default silently missed it.
+  - `InstanceCap` 100 → 512, `ArrayCap` 50 → 256 in
+    [SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs).
+  - Sample `Process.WorkingSet64` at `TakeSnapshotAsync` entry; live
+    ticker (200ms cadence) shows current value + Δ from start:
+    `Capturing… 12.3 s — process 1.42 GB (+340 MB)`. Same
+    annotation lands in the streaming-chunk status + final
+    snapshot status + log line.
+
+- [x] **DLL hard-cap raise** — SHIPPED 2026-05-27 (`06984bf`, DLL
+  build #643). Defaults stay at 512/256; the raise just gives
+  users room to push higher.
+  - `ExportAPI.cpp` snapshotBegin Mono + IL2CPP: instanceCap
+    `> 1024` → `> 8192`, arrayCap `> 256` → `> 4096`.
+  - `MonoAddressFinder.cpp` + `IL2CPPAddressFinder.cpp`
+    `FindAllInstances` `perClassCap` ceiling 4096 → 8192 so
+    the internal cap doesn't silently clip the new ExportAPI
+    ceiling.
+  - `MainWindow.axaml` `NumericUpDown.Maximum` 1024→8192 and
+    256→4096; tooltips updated.
+  - `MagicStrings.h` snapshotBegin doc-comment updated.
+
+- [x] **Cross-tab Address Lookup bug** — SHIPPED 2026-05-27
+  (`db8bb9b`). `TabIndexAddressLookup` / `TabIndexSymbolFinder`
+  constants in [MainWindowViewModel.cs:324](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs)
+  were inverted relative to XAML TabItem order; every Address
+  Lookup cross-tab handoff has been silently routing to Symbol
+  Finder since Phase 25. Surfaced when the new snapshot-diff
+  right-click "Find what's at this address" menu item exposed it.
+  Constants swapped + comment added so future tab insertions
+  notice the sync requirement.
+
+- [x] **32-bit snapshot OOM mitigation — options #1 + #2 +
+  pre-snapshot abort gate SHIPPED 2026-05-27** (DLL build #645).
+  Options #1 (auto-clamp on x86) + #2 (surface game memory) +
+  the user's bonus ask ("can we abort if approaching 2 G/4 G
+  boundary?") landed in one bundle.
+  - **DLL**: new `QueryProcessMemory` helper using
+    `GetProcessMemoryInfo` returns `workingSet` / `privateUsage`
+    / `pointerSize` (= `sizeof(void*)` in the game's address
+    space). Wired into `BuildHandshakeJson` (so UI sees bitness
+    + current memory on every connect) and both `snapshotBegin`
+    handlers (Mono + IL2CPP) as a fresh post-decode sample in
+    the response.
+  - **DLL pre-check abort gate** at the top of each
+    `snapshotBegin`: if pointerSize == 4 AND privateUsage ≥
+    3 GB, return a structured error refusing to run the
+    snapshot. Threshold chosen as 4 GB ceiling − ~1 GB
+    safety margin for our own JSON cache. The 활俠傳 build
+    #646 CTD becomes a clean "Game process at 3.2 GB private
+    memory — refusing snapshot to avoid OOM crash" instead.
+  - **UI Core**: `HandshakeResult` + `SnapshotBeginResult`
+    gained `GamePointerSize` / `GameWorkingSet` /
+    `GamePrivateUsage` JSON-bound properties.
+  - **UI VM**: `SnapshotViewModel.OnGameConnected(ps, ws, pu)`
+    called from `MainWindowViewModel.ConnectAsync` after every
+    handshake. On 32-bit targets, clamps InstanceCap down to
+    256 + ArrayCap down to 64 if currently above (never
+    clamps upward — manual user picks stay respected).
+  - **UI banner**: `GameMemoryBanner` property surfaces
+    "Game: 32-bit Mono — WorkingSet 1.42 GB, committed 1.78 GB
+     — snapshot caps auto-clamped for safety". Suffix
+    escalates to "⚠ approaching 4 GB ceiling" at 2 GB and
+    "⛔ over 3 GB — DLL will refuse next snapshot" at 3 GB.
+    New Border bound to `IsNotNullOrEmpty` so the banner
+    only appears post-handshake.
+  - **Status enrichment**: streaming-chunk + final-snapshot
+    status lines now show game-process memory alongside the
+    UI process memory.
+
+  **Option #3 (streaming-chunk architecture)** stays deferred —
+  the pre-check refusal closes the hard-CTD path, and the
+  auto-clamp keeps snap #2 inside safe range on the common
+  32-bit cases. Streaming only matters if a user wants to
+  push past 256/64 caps on x86 (and the DLL refusal banner
+  will make that obvious).
+
+- [x] **Snapshot `FindAllInstances` false-positive root-cause fix**
+  — SHIPPED 2026-05-28 (DLL #650, commit `b4bd935`).
+  See [lessons-learned.md §"Snapshot FindAllInstances 2-level scan accepts non-object memory"](lessons-learned.md#snapshot-findallinstances-2-level-scan-accepts-non-object-memory-as-fake-instances--eats-per-class-cap-before-reaching-real-instances--proper-fix-2026-05-28-dll-650)
+  for the full diagnostic + design walk.
+
+  **Root cause**: bulk heap walk did a 2-level scan — for each
+  qword, dereference and check whether the deref is in the
+  known class set. That accepts not just real `MonoVTable*` but
+  also non-vtable Mono structures whose first qword happens to
+  be a class pointer (RGCTX cache slots, internal lookup
+  tables that store vtable pointer values as their payload,
+  etc.). Per-class `findInstances` doesn't have this problem
+  because it does a 1-level scan against a specific vtable
+  address.
+
+  **Fix**: validate the candidate vtable structurally. Real
+  `MonoVTable` has the root `MonoDomain*` at offset
+  `2 * sizeof(uintptr_t)` (per
+  `mono/metadata/class-internals.h`). One extra SEH-safe
+  pointer read per candidate, no Mono runtime calls, zero
+  BDWGC interaction (so zero risk of the build #637 wedge
+  recurring).
+
+  **Live-verify on Mortal (활俠傳, Mono x86)**:
+  - GameStat capture: 256 (cap hit, mostly garbage) → 134-135
+    (matches live `findInstances` ~152)
+  - UI memory per snapshot: 1.5+ GB → ~99-139 MB (15× reduction)
+  - Total UI memory for 2 snapshots: 3+ GB → ~238 MB
+  - Money diff at known-stable address 0x29BFACC0 finally
+    surfaces as proper `changed` row: `_value 10160 → 9910
+    (Δ=-250)`
+  - Diff totals dropped to reasonable order
+    (1,688 changed vs prior 7,110+ noise floor)
+
+  **Residual (Phase 29f polish — deferred)**: ~1 stray entry
+  per snapshot in 0xB2Dxxxxxx range — probably a per-method or
+  generic-instantiation `MonoVTable` alias family that
+  coincidentally also has a domain pointer at the right offset.
+  ~99% precision, not blocking. Could refine further by also
+  validating `*(qw + 3*ptr_size)` looks like a `MonoType*`, but
+  diminishing returns unless a user complains.
+
+  **Companion impact**: yesterday's 32-bit OOM mitigation
+  bundle (auto-clamp + DLL refusal gate + memory banner) stays
+  as safety net but is much less essential now. With the noise
+  floor gone the user can push `InstanceCap` back to 512+ on
+  32-bit Mortal without hitting OOM.
+
+- [ ] **Phase 29e — Full / Differential snapshot architecture**
+  (proposed by user 2026-05-27, **DEFERRED**). UI-side feature
+  that adds a second snapshot kind so multi-snapshot workflows
+  don't bloat UI memory linearly.
+
+  **Design (user-supplied)**:
+  - Two snapshot kinds: `Full` (today's behaviour) and
+    `Differential`. Each Diff is anchored to exactly one base
+    Full and only stores fields whose value differs from the
+    base. Typical size: 1–5% of base.
+  - Rules: Diff cannot be based on another Diff (no chains).
+    Dropping a Full cascade-drops every Diff anchored to it.
+  - Cross-pair compare logic:
+    | A kind | B kind | Behaviour |
+    |---|---|---|
+    | Full | Full | direct compare (current) |
+    | Full | Diff (base = A) | direct — Diff already IS the delta |
+    | Full | Diff (base ≠ A) | reconstruct virtual Full from Diff+base, then compare |
+    | Diff | Diff (same base) | direct delta-vs-delta, missing key on either = unchanged |
+    | Diff | Diff (different base) | reconstruct both virtual Fulls, then compare |
+  - The `Unchanged` row toggle is only available on `Full vs Full`
+    pairs (Diff has already discarded its unchanged data).
+
+  **What it solves**: UI-side multi-snapshot memory bloat. After
+  10 snapshots on 활俠傳-scale the UI would hold ~16 GB; with
+  differential it's ~2 GB (one Full + 9 small deltas).
+
+  **What it doesn't solve**: capture-time game OOM on x86 (DLL
+  still does a full heap walk + decode + JSON build each time;
+  the OOM gate from `35ab309` handles that). Pipe bandwidth
+  also unchanged.
+
+  **Cost estimate**: ~2–3 days of code + ≥1 live-smoke round.
+  Touches `SnapshotEnvelope` (kind + base ref), `Diff()` (five
+  cases instead of one), `DropSnapshot*` (cascade), filter
+  panel (Unchanged availability gating), DisplayName (kind +
+  base linkage rendered in dropdown), persistence path (29c
+  has to know how to store the relationship).
+
+  **Inspiration**: Oracle DB Materialized View incremental
+  refresh — same shape, just no mlog (we have the base full
+  snapshot directly instead of a change journal).
+
+  **Recommendation**: defer until a real workflow needs 5+
+  snapshots in one session. The current 2-snapshot
+  Full+Full diff is well-served and the OOM mitigation
+  bundle from `35ab309` removes the immediate pressure that
+  prompted this discussion.
+
 - [ ] **Mono static field VALUE capture** (optional, user-opt-in
   checkbox in Snapshot tab): currently statics on Mono only
   capture metadata (per build #637 fix). A "Capture static values

@@ -327,11 +327,13 @@ inline constexpr const char* CmdDumpClassInfo         = "dumpClassInfo";
 //     allocated sessionId. Default scope = all assemblies returned by
 //     `getAssemblies`; caller can narrow via the `assemblies` array.
 //     Default `instanceCap=100` per class, `arrayCap=50` per T[] /
-//     List<T> field.
+//     List<T> field. Hard-caps 8192 / 4096 (raised 2026-05-27 from
+//     1024 / 256 — dense classes were silently clipped at the prior
+//     ceiling).
 //     Request:
 //       { assemblies?: string[],   // default = all visible assemblies
-//         instanceCap?: int,       // default 100, hard-cap 1024
-//         arrayCap?: int }         // default 50,  hard-cap 256
+//         instanceCap?: int,       // default 100, hard-cap 8192
+//         arrayCap?: int }         // default 50,  hard-cap 4096
 //     Response:
 //       { ok, snapshotId, capturedAt, gameBuildId, gameSessionId,
 //         instanceCap, arrayCap,

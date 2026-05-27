@@ -1067,6 +1067,22 @@ public partial class MainWindow : Window
         await CopyToClipboardAsync(row.Field);
     }
 
+    private void OnSnapshotExcludeFieldName(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is null) return;
+        vm.Snapshot.ToggleFieldNameExclusion(row.Field);
+    }
+
+    private void OnSnapshotFieldStatActivated(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("SnapshotFieldStatsGrid");
+        if (grid?.SelectedItem is FieldNameStat stat)
+            vm.Snapshot.ToggleFieldNameExclusion(stat.FieldName);
+    }
+
     private void OnSymbolFinderNavigateMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;

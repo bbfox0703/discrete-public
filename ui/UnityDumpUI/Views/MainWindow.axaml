@@ -1574,31 +1574,30 @@
                            Margin="0,0,12,0"/>
 
                   <TextBlock Grid.Row="0" Grid.Column="2" Text="Instance cap:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                             VerticalAlignment="Center" Margin="0,0,6,0"
+                             ToolTip.Tip="Per-class cap on instances captured per snapshot (max 8192, raised 2026-05-27 from 1024). If a class has more live instances than the cap, the heap-walk-order subset is captured. Different snapshots may capture different subsets — frequently re-allocated objects (e.g. UI text wrappers) often surface as added+removed pairs in the diff rather than 'changed', because the instance addresses differ between snapshots.&#x0a;&#x0a;Note (DLL #648): the bulk heap walk is a 2-level scan (qword → vtable → class) and can pick up non-object memory holding vtable-pointer values as fake 'instances' with garbage values. Filters at the DLL (MEM_MAPPED skip + 8-byte alignment) cut the noise, but on dense classes the cap may still need to be raised above the (live count + ~50%) headroom to capture every real instance. If the debug 'list captured instances' shows captured-count well above live findInstances and your target address isn't in the captured set, bump the cap."/>
                   <NumericUpDown Grid.Row="0" Grid.Column="3"
                                  Value="{Binding Snapshot.InstanceCap, Mode=TwoWay}"
-                                 Minimum="1" Maximum="1024" Increment="50"
+                                 Minimum="1" Maximum="8192" Increment="100"
                                  MinWidth="150" Margin="0,0,12,0"/>
 
                   <TextBlock Grid.Row="0" Grid.Column="4" Text="Array cap:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                             VerticalAlignment="Center" Margin="0,0,6,0"
+                             ToolTip.Tip="Per-field cap on captured array / List&lt;T&gt; elements (max 4096, raised 2026-05-27 from 256). Longer arrays are truncated; the field's row shows '[N elements, captured M]'."/>
                   <NumericUpDown Grid.Row="0" Grid.Column="5"
                                  Value="{Binding Snapshot.ArrayCap, Mode=TwoWay}"
-                                 Minimum="0" Maximum="256" Increment="10"
+                                 Minimum="0" Maximum="4096" Increment="50"
                                  MinWidth="150" Margin="0,0,12,0"/>
 
                   <Button Grid.Row="0" Grid.Column="6"
                           Content="Take Snapshot"
                           Command="{Binding Snapshot.TakeSnapshotCommand}"
                           MinWidth="120" Margin="0,0,6,0"/>
-                  <Button Grid.Row="0" Grid.Column="7"
-                          Content="Drop Selected"
-                          Command="{Binding Snapshot.DropSnapshotCommand}"
-                          MinWidth="100" Margin="0,0,6,0"/>
-                  <Button Grid.Row="0" Grid.Column="8"
+                  <Button Grid.Row="0" Grid.Column="7" Grid.ColumnSpan="2"
                           Content="Clear All"
                           Command="{Binding Snapshot.ClearAllCommand}"
-                          MinWidth="80"/>
+                          MinWidth="100"
+                          ToolTip.Tip="Drop every captured snapshot. Frees UI memory. Status line reports the amount freed."/>
 
                   <!-- Row 1 — scope assemblies + include-system toggle -->
                   <TextBlock Grid.Row="1" Grid.Column="0" Text="Scope:"
@@ -1615,11 +1614,31 @@
                 </Grid>
               </Border>
 
-              <!-- Status + error -->
+              <!-- Game-process memory + bitness banner. Hidden until
+                   handshake populates GamePointerSize. Color-coded by
+                   the GameMemoryBanner text itself (suffix changes from
+                   ⚠ → ⛔ as committed memory climbs toward 4 GB). -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F60A0FF" CornerRadius="3"
+                      IsVisible="{Binding Snapshot.GameMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding Snapshot.GameMemoryBanner}"
+                           Foreground="#60C0FF" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+
+              <!-- Status + error. Two-row layout: Diff/Take/Drop summary
+                   on top (overwritten by command actions), live filter
+                   tally underneath (auto-refreshed every RebuildFilteredRows
+                   pass so the breakdown stays current as the user toggles
+                   filters). Empty FilterResultLine collapses cleanly. -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1F808080" CornerRadius="3">
-                <TextBlock Text="{Binding Snapshot.StatusMessage}"
-                           TextWrapping="Wrap" FontSize="11"/>
+                <StackPanel>
+                  <TextBlock Text="{Binding Snapshot.StatusMessage}"
+                             TextWrapping="Wrap" FontSize="11"/>
+                  <TextBlock Text="{Binding Snapshot.FilterResultLine}"
+                             FontSize="11" Opacity="0.85"
+                             IsVisible="{Binding Snapshot.FilterResultLine, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                </StackPanel>
               </Border>
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1FFF6060" CornerRadius="3"
@@ -1628,98 +1647,279 @@
                            Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
               </Border>
 
-              <!-- Mid: A/B selection + Diff button -->
+              <!-- Mid: A/B selection + per-side Drop + Diff button +
+                   include-unchanged toggle. Drop A / Drop B are independent
+                   so the user can clear either side without swapping. -->
               <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
                       Background="#1F808080" CornerRadius="3">
-                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto"
-                      RowDefinitions="Auto">
-                  <TextBlock Grid.Column="0" Text="A:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"/>
-                  <ComboBox Grid.Column="1"
-                            ItemsSource="{Binding Snapshot.Snapshots}"
-                            SelectedItem="{Binding Snapshot.SelectedSnapshotA, Mode=TwoWay}"
-                            DisplayMemberBinding="{Binding DisplayName}"
-                            HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+                <StackPanel Spacing="4">
+                  <!-- Cumulative memory banner — visible only after at least
+                       one snapshot exists. Shows "N snapshots — ~X GB total UI
+                       memory" so the user can decide when to drop. -->
+                  <TextBlock Text="{Binding Snapshot.TotalSnapshotsMemoryBanner}"
+                             FontSize="11" Opacity="0.75"
+                             IsVisible="{Binding Snapshot.TotalSnapshotsMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                  <Grid ColumnDefinitions="Auto,*,Auto,Auto,*,Auto,Auto,Auto"
+                        RowDefinitions="Auto">
+                    <TextBlock Grid.Column="0" Text="A:"
+                               VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding Snapshot.Snapshots}"
+                              SelectedItem="{Binding Snapshot.SelectedSnapshotA, Mode=TwoWay}"
+                              DisplayMemberBinding="{Binding DisplayName}"
+                              HorizontalAlignment="Stretch" Margin="0,0,4,0"/>
+                    <Button Grid.Column="2" Content="Drop A"
+                            Command="{Binding Snapshot.DropSnapshotACommand}"
+                            MinWidth="70" Margin="0,0,12,0"
+                            ToolTip.Tip="Drop the snapshot selected in A. Frees its ~estimated UI memory."/>
 
-                  <TextBlock Grid.Column="2" Text="B:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"/>
-                  <ComboBox Grid.Column="3"
-                            ItemsSource="{Binding Snapshot.Snapshots}"
-                            SelectedItem="{Binding Snapshot.SelectedSnapshotB, Mode=TwoWay}"
-                            DisplayMemberBinding="{Binding DisplayName}"
-                            HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+                    <TextBlock Grid.Column="3" Text="B:"
+                               VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox Grid.Column="4"
+                              ItemsSource="{Binding Snapshot.Snapshots}"
+                              SelectedItem="{Binding Snapshot.SelectedSnapshotB, Mode=TwoWay}"
+                              DisplayMemberBinding="{Binding DisplayName}"
+                              HorizontalAlignment="Stretch" Margin="0,0,4,0"/>
+                    <Button Grid.Column="5" Content="Drop B"
+                            Command="{Binding Snapshot.DropSnapshotBCommand}"
+                            MinWidth="70" Margin="0,0,12,0"
+                            ToolTip.Tip="Drop the snapshot selected in B. Independent from Drop A — no need to swap sides."/>
 
-                  <Button Grid.Column="4" Content="Diff A → B"
-                          Command="{Binding Snapshot.DiffCommand}"
-                          MinWidth="120"/>
-                </Grid>
-              </Border>
+                    <CheckBox Grid.Column="6"
+                              Content="Include unchanged"
+                              IsChecked="{Binding Snapshot.IncludeUnchangedRows, Mode=TwoWay}"
+                              VerticalAlignment="Center" Margin="0,0,12,0"
+                              ToolTip.Tip="When ON, the next Diff also emits rows where the value is identical in A and B. Lets you use the value-range / field-name filters to find fields by their value even when they didn't change between snapshots (e.g. spotting other money / HP fields in the same numeric range). Cost: 10–100× more rows on a wide diff."/>
 
-              <!-- Filter bar -->
-              <Border DockPanel.Dock="Top" Padding="6,3" Margin="0,0,0,6"
-                      Background="#1F808080" CornerRadius="3">
-                <StackPanel Orientation="Horizontal" Spacing="12">
-                  <CheckBox Content="Hide synthetic types"
-                            IsChecked="{Binding Snapshot.HideSyntheticTypes, Mode=TwoWay}"
-                            ToolTip.Tip="Hide rows whose class name starts with '&lt;' (compiler-generated: &lt;Module&gt;, &lt;&gt;f__AnonymousType*, &lt;&gt;c, &lt;Start&gt;d__N, async-state-machines). These are usually false-positive 'instances' from wide-scan picking up metadata references — not real game objects."/>
-                  <CheckBox Content="Changed only"
-                            IsChecked="{Binding Snapshot.ChangedOnly, Mode=TwoWay}"/>
-                  <CheckBox Content="Show added"
-                            IsChecked="{Binding Snapshot.ShowAdded, Mode=TwoWay}"/>
-                  <CheckBox Content="Show removed"
-                            IsChecked="{Binding Snapshot.ShowRemoved, Mode=TwoWay}"/>
-                  <TextBlock Text="Class filter:" VerticalAlignment="Center"/>
-                  <TextBox Text="{Binding Snapshot.ClassFilterText, Mode=TwoWay}"
-                           PlaceholderText="substring (case-insensitive)"
-                           Width="220"/>
+                    <Button Grid.Column="7" Content="Diff A → B"
+                            Command="{Binding Snapshot.DiffCommand}"
+                            MinWidth="120"/>
+                  </Grid>
                 </StackPanel>
               </Border>
 
-              <!-- Diff grid -->
-              <DataGrid ItemsSource="{Binding Snapshot.FilteredDiffRows}"
-                        AutoGenerateColumns="False" CanUserReorderColumns="True"
-                        CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
-                        IsReadOnly="True"
-                        CanUserSortColumns="True"
-                        DoubleTapped="OnSnapshotRowActivated"
-                        Name="SnapshotDiffGrid">
-                <DataGrid.Columns>
-                  <DataGridTextColumn Header="Class" Binding="{Binding ClassDisplay}"
-                                       Width="240" SortMemberPath="ClassDisplay" CanUserSort="True"/>
-                  <DataGridTextColumn Header="Field" Binding="{Binding Field}"
-                                       Width="180" SortMemberPath="Field" CanUserSort="True"/>
-                  <DataGridTextColumn Header="Offset" Binding="{Binding OffsetLabel}"
-                                       Width="80" SortMemberPath="FieldOffset" CanUserSort="True"/>
-                  <DataGridTextColumn Header="Instance" Binding="{Binding InstanceLabel}"
-                                       Width="180" FontFamily="Consolas,Menlo,monospace"
-                                       SortMemberPath="InstanceLabel" CanUserSort="True"/>
-                  <DataGridTextColumn Header="Old" Binding="{Binding OldValue}"
-                                       Width="160" SortMemberPath="OldValue" CanUserSort="True"/>
-                  <DataGridTextColumn Header="New" Binding="{Binding NewValue}"
-                                       Width="160" SortMemberPath="NewValue" CanUserSort="True"/>
-                  <DataGridTextColumn Header="Δ" Binding="{Binding Delta}"
-                                       Width="90" SortMemberPath="Delta" CanUserSort="True"/>
-                  <DataGridTextColumn Header="Kind" Binding="{Binding ChangeKind}"
-                                       Width="80" SortMemberPath="ChangeKind" CanUserSort="True"/>
-                  <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
-                                       Width="160" SortMemberPath="FieldType" CanUserSort="True"/>
-                </DataGrid.Columns>
-                <DataGrid.ContextMenu>
-                  <ContextMenu>
-                    <MenuItem Header="Inspect this instance"
-                              Click="OnSnapshotInspectInstance"/>
-                    <MenuItem Header="Find what's at this address (Address Lookup)"
-                              Click="OnSnapshotAddressLookup"/>
-                    <Separator/>
-                    <MenuItem Header="Copy instance address"
-                              Click="OnSnapshotCopyInstanceAddr"/>
-                    <MenuItem Header="Copy class name"
-                              Click="OnSnapshotCopyClass"/>
-                    <MenuItem Header="Copy field name"
-                              Click="OnSnapshotCopyField"/>
-                  </ContextMenu>
-                </DataGrid.ContextMenu>
-              </DataGrid>
+              <!-- Filter bar — Phase 29 polish: noise-reduction filters
+                   layered over Strategy C synthetic-type masking. Row 1 =
+                   structural toggles; Row 2 = textual / numeric narrowing. -->
+              <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
+                      Background="#1F808080" CornerRadius="3">
+                <StackPanel Spacing="6">
+                  <StackPanel Orientation="Horizontal" Spacing="12">
+                    <CheckBox Content="Hide synthetic types"
+                              IsChecked="{Binding Snapshot.HideSyntheticTypes, Mode=TwoWay}"
+                              ToolTip.Tip="Hide rows whose class name starts with '&lt;' (compiler-generated: &lt;Module&gt;, &lt;&gt;f__AnonymousType*, &lt;&gt;c, &lt;Start&gt;d__N, async-state-machines). These are usually false-positive 'instances' from wide-scan picking up metadata references — not real game objects."/>
+                    <!-- "Changed" trichotomy (Phase 29-polish 2026-05-29):
+                         the single Changed checkbox was split into three
+                         sub-toggles so the user can express direction
+                         filters via set unions with Unchanged:
+                           ≥  →  Unchanged + Increased
+                           ≤  →  Unchanged + Decreased
+                         Combined with the numeric Value-range filter below,
+                         this answers "I don't know the exact value but it's
+                         somewhere in 0-1000 and it just went down". -->
+                    <CheckBox Content="↑ Increased"
+                              IsChecked="{Binding Snapshot.ShowIncreased, Mode=TwoWay}"
+                              ToolTip.Tip="Show numeric rows where the new value is greater than the old value. Combine with 'Unchanged' to express ≥ (value grew or stayed the same)."/>
+                    <CheckBox Content="↓ Decreased"
+                              IsChecked="{Binding Snapshot.ShowDecreased, Mode=TwoWay}"
+                              ToolTip.Tip="Show numeric rows where the new value is less than the old value. Combine with 'Unchanged' to express ≤ (value shrank or stayed the same)."/>
+                    <CheckBox Content="Δ Other changed"
+                              IsChecked="{Binding Snapshot.ShowOtherChanged, Mode=TwoWay}"
+                              ToolTip.Tip="Show 'changed' rows that aren't numerically comparable — string content changes, pointer-address changes, error rows, or numeric rows where one side failed to parse."/>
+                    <CheckBox Content="Added"
+                              IsChecked="{Binding Snapshot.ShowAdded, Mode=TwoWay}"/>
+                    <CheckBox Content="Removed"
+                              IsChecked="{Binding Snapshot.ShowRemoved, Mode=TwoWay}"/>
+                    <CheckBox Content="Unchanged"
+                              IsChecked="{Binding Snapshot.ShowUnchanged, Mode=TwoWay}"
+                              ToolTip.Tip="Show rows that didn't change between A and B. Only populated when the prior Diff ran with 'Include unchanged' ON — otherwise no unchanged rows exist to show. Combine with Increased/Decreased to express ≥ or ≤ semantics."/>
+                    <CheckBox Content="Hide pointer-only Δ"
+                              IsChecked="{Binding Snapshot.HidePointerChanges, Mode=TwoWay}"
+                              ToolTip.Tip="Hide rows where both Old and New are formatted as ptr=0x… (reference fields whose pointer changed but content diff would show up separately as field-value rows). Usually re-allocation noise."/>
+                    <CheckBox Content="Hide large strings &gt;"
+                              IsChecked="{Binding Snapshot.HideLargeStrings, Mode=TwoWay}"
+                              VerticalAlignment="Center"
+                              ToolTip.Tip="Hide string rows whose longer side exceeds the threshold. Targets System.Exception._stackTrace / _remoteStackTraceString and similar large blob fields that drown out signal."/>
+                    <NumericUpDown Value="{Binding Snapshot.LargeStringThreshold, Mode=TwoWay}"
+                                   Minimum="0" Maximum="65536" Increment="64"
+                                   MinWidth="110"/>
+                    <TextBlock Text="chars" VerticalAlignment="Center"/>
+                    <CheckBox Content="Apply field exclusions"
+                              IsChecked="{Binding Snapshot.HideNoisyFields, Mode=TwoWay}"
+                              ToolTip.Tip="When ON, field names you've excluded via the right-side stats panel are filtered out of the result. Turn OFF to peek at them again without losing the exclusion list."/>
+                  </StackPanel>
+
+                  <StackPanel Orientation="Horizontal" Spacing="12">
+                    <TextBlock Text="Class:" VerticalAlignment="Center"/>
+                    <TextBox Text="{Binding Snapshot.ClassFilterText, Mode=TwoWay}"
+                             PlaceholderText="substring (case-insensitive)"
+                             Width="200"/>
+                    <TextBlock Text="Field:" VerticalAlignment="Center"/>
+                    <TextBox Text="{Binding Snapshot.FieldFilterText, Mode=TwoWay}"
+                             PlaceholderText="substring (case-insensitive)"
+                             Width="200"/>
+                    <TextBlock Text="Value range:" VerticalAlignment="Center"
+                               ToolTip.Tip="Restrict to numeric rows whose Old OR New value lies in [Min, Max]. Empty Min/Max = unbounded on that side. Non-numeric rows are filtered out as soon as either bound is set. Press Apply to commit — the range filter is intentionally NOT live (each pass walks 800K+ rows on a wide diff, real-time updating would freeze the UI)."/>
+                    <NumericUpDown Value="{Binding Snapshot.PendingValueRangeMin, Mode=TwoWay}"
+                                   PlaceholderText="min" MinWidth="120"/>
+                    <TextBlock Text="–" VerticalAlignment="Center"/>
+                    <NumericUpDown Value="{Binding Snapshot.PendingValueRangeMax, Mode=TwoWay}"
+                                   PlaceholderText="max" MinWidth="120"/>
+                    <Button Content="Apply"
+                            Command="{Binding Snapshot.ApplyValueRangeFilterCommand}"
+                            MinWidth="60"
+                            ToolTip.Tip="Commit the Min/Max above into the live filter. Run only when both bounds are typed in so the rebuild fires once instead of per-keystroke."/>
+                    <Button Content="Clear"
+                            Command="{Binding Snapshot.ClearValueRangeFilterCommand}"
+                            MinWidth="60"
+                            ToolTip.Tip="Reset Min and Max to empty (unbounded). NumericUpDown can't go back to empty via spinner clicks, so this is the only way out once a value is typed."/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+
+              <!-- Phase 29-polish (2026-05-28) — instance lookup diagnostic.
+                   Collapsed by default; expand to type an address and dump
+                   everything both snapshots captured for that instance,
+                   side-by-side. Built for the 銀兩 GameStat case where the
+                   address is stable across snapshots but the value change
+                   isn't surfacing in the regular diff result. -->
+              <Expander DockPanel.Dock="Top" Header="🔍 Snapshot debug — instance &amp; class lookup"
+                        IsExpanded="False" Margin="0,0,0,6">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,0,0,6">
+                      <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Address:" VerticalAlignment="Center" Width="60"/>
+                        <TextBox Text="{Binding Snapshot.DebugLookupAddress, Mode=TwoWay}"
+                                 Width="280"
+                                 FontFamily="Consolas,Menlo,monospace"
+                                 PlaceholderText="e.g. 0x000000002986ACC0 or 2986ACC0"/>
+                        <Button Content="Compare in A &amp; B"
+                                Command="{Binding Snapshot.DebugLookupInstanceCommand}"
+                                MinWidth="140"
+                                ToolTip.Tip="Normalises the address, then walks both selected snapshots' FieldIndex for matching keys. Output below shows every captured field for this instance + per-field changed/added/removed/unchanged tally."/>
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Class:" VerticalAlignment="Center" Width="60"/>
+                        <TextBox Text="{Binding Snapshot.DebugLookupClass, Mode=TwoWay}"
+                                 Width="280"
+                                 PlaceholderText="e.g. Mortal.Core.GameStat or just GameStat"/>
+                        <Button Content="List captured instances"
+                                Command="{Binding Snapshot.DebugLookupClassInstancesCommand}"
+                                MinWidth="170"
+                                ToolTip.Tip="Walks each snapshot's Classes list for matches, dumps every captured instance address sorted numerically with a few spotlight fields (_name, _value). Use to confirm whether the snapshot saw the full instance set — e.g. 'live game has 152 GameStat instances, snap #2 only captured 80, and 0x2962ACC0 isn't among them'."/>
+                      </StackPanel>
+                      <TextBlock VerticalAlignment="Center" FontSize="11" Opacity="0.7"
+                                 Text="Pick A and B above first — empty selection = empty result."/>
+                    </StackPanel>
+                    <TextBox Text="{Binding Snapshot.DebugLookupOutput}"
+                             IsReadOnly="True"
+                             AcceptsReturn="True"
+                             FontFamily="Consolas,Menlo,monospace"
+                             FontSize="11"
+                             TextWrapping="NoWrap"
+                             MinHeight="200"
+                             MaxHeight="400"
+                             VerticalContentAlignment="Top"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+                  </DockPanel>
+                </Border>
+              </Expander>
+
+              <!-- Diff result area: DataGrid + collapsible stats panel.
+                   GridSplitter lets the user resize; the stats panel can
+                   also be toggled off entirely via the column-header button. -->
+              <Grid ColumnDefinitions="*,Auto,Auto">
+                <DataGrid Grid.Column="0"
+                          ItemsSource="{Binding Snapshot.FilteredDiffRows}"
+                          AutoGenerateColumns="False" CanUserReorderColumns="True"
+                          CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
+                          IsReadOnly="True"
+                          CanUserSortColumns="True"
+                          DoubleTapped="OnSnapshotRowActivated"
+                          Name="SnapshotDiffGrid">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="Class" Binding="{Binding ClassDisplay}"
+                                         Width="240" SortMemberPath="ClassDisplay" CanUserSort="True"/>
+                    <DataGridTextColumn Header="Field" Binding="{Binding Field}"
+                                         Width="180" SortMemberPath="Field" CanUserSort="True"/>
+                    <DataGridTextColumn Header="Offset" Binding="{Binding OffsetLabel}"
+                                         Width="80" SortMemberPath="FieldOffset" CanUserSort="True"/>
+                    <DataGridTextColumn Header="Instance" Binding="{Binding InstanceLabel}"
+                                         Width="180" FontFamily="Consolas,Menlo,monospace"
+                                         SortMemberPath="InstanceLabel" CanUserSort="True"/>
+                    <DataGridTextColumn Header="Old" Binding="{Binding OldValue}"
+                                         Width="160" SortMemberPath="OldValue" CanUserSort="True"/>
+                    <DataGridTextColumn Header="New" Binding="{Binding NewValue}"
+                                         Width="160" SortMemberPath="NewValue" CanUserSort="True"/>
+                    <DataGridTextColumn Header="Δ" Binding="{Binding Delta}"
+                                         Width="90" SortMemberPath="Delta" CanUserSort="True"/>
+                    <DataGridTextColumn Header="Kind" Binding="{Binding ChangeKind}"
+                                         Width="80" SortMemberPath="ChangeKind" CanUserSort="True"/>
+                    <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
+                                         Width="160" SortMemberPath="FieldType" CanUserSort="True"/>
+                  </DataGrid.Columns>
+                  <DataGrid.ContextMenu>
+                    <ContextMenu>
+                      <MenuItem Header="Inspect this instance"
+                                Click="OnSnapshotInspectInstance"/>
+                      <MenuItem Header="Find what's at this address (Address Lookup)"
+                                Click="OnSnapshotAddressLookup"/>
+                      <Separator/>
+                      <MenuItem Header="Exclude this field name from results"
+                                Click="OnSnapshotExcludeFieldName"/>
+                      <Separator/>
+                      <MenuItem Header="Copy instance address"
+                                Click="OnSnapshotCopyInstanceAddr"/>
+                      <MenuItem Header="Copy class name"
+                                Click="OnSnapshotCopyClass"/>
+                      <MenuItem Header="Copy field name"
+                                Click="OnSnapshotCopyField"/>
+                    </ContextMenu>
+                  </DataGrid.ContextMenu>
+                </DataGrid>
+
+                <GridSplitter Grid.Column="1" Width="3" ResizeDirection="Columns"
+                              Background="#3F808080"
+                              IsVisible="{Binding #SnapshotStatsPanel.IsVisible}"/>
+
+                <!-- Right-side stats panel — toggleable via the header button. -->
+                <Border Grid.Column="2" Name="SnapshotStatsPanel"
+                        Width="300" Padding="6"
+                        Background="#1F808080" CornerRadius="3"
+                        Margin="0,0,0,0">
+                  <DockPanel>
+                    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto"
+                          Margin="0,0,0,4">
+                      <TextBlock Grid.Column="0" Text="Top field names in diff"
+                                 FontWeight="Bold" VerticalAlignment="Center"/>
+                      <Button Grid.Column="1" Content="Clear exclusions"
+                              Command="{Binding Snapshot.ClearFieldExclusionsCommand}"
+                              FontSize="11" Padding="6,2"
+                              ToolTip.Tip="Remove every field name from the exclusion list. Excluded names are not lost when you toggle 'Apply field exclusions' off — only this button clears them."/>
+                    </Grid>
+                    <TextBlock DockPanel.Dock="Top" FontSize="11" Opacity="0.7"
+                               TextWrapping="Wrap" Margin="0,0,0,6"
+                               Text="Click a row to toggle exclusion. Field names that appear on many diff rows are often noise (m_CachedPtr, &lt;&gt;1__state, etc.)."/>
+                    <DataGrid Name="SnapshotFieldStatsGrid"
+                              ItemsSource="{Binding Snapshot.FieldNameStats}"
+                              AutoGenerateColumns="False" GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True" CanUserSortColumns="True"
+                              IsReadOnly="True"
+                              DoubleTapped="OnSnapshotFieldStatActivated">
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
+                                             Width="*" SortMemberPath="FieldName" CanUserSort="True"/>
+                        <DataGridTextColumn Header="#" Binding="{Binding Count}"
+                                             Width="60" SortMemberPath="Count" CanUserSort="True"/>
+                        <DataGridCheckBoxColumn Header="Excl." Binding="{Binding IsExcluded}"
+                                                 Width="50" IsReadOnly="True"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Grid>
             </DockPanel>
           </TabItem>
         </TabControl>

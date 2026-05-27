@@ -2550,3 +2550,256 @@ other debugging. Saves a 30-min wild-goose chase ~95% of the time. If
 either of the two real symptoms is absent, fall back to normal
 debugging — the issue is something else (wrong DLL bitness, AV
 quarantine, pipe-name collision, etc.).
+
+---
+
+### MainWindow tab-index C# constants must mirror XAML `TabItem` order — silent mis-routing  ✅ **Fixed 2026-05-27 (`db8bb9b`)**
+
+**Symptom**: User clicks the snapshot-diff right-click menu item
+"Find what's at this address (Address Lookup)" → UI switches to
+**Symbol Finder** instead. Reported 2026-05-27 immediately after the
+Phase 29 polish menu addition exposed the path.
+
+**Root cause**: `MainWindowViewModel.cs` declares one `const int`
+per right-pane tab so cross-tab handoff code reads as
+`SelectedDetailTabIndex = TabIndexAddressLookup;` instead of magic
+numbers. The constants were defined as:
+
+```csharp
+public const int TabIndexAddressLookup = 3;
+public const int TabIndexSymbolFinder  = 4;
+```
+
+But the actual `TabItem` ordering in `MainWindow.axaml` is **Symbol
+Finder at index 3, Address Lookup at index 4** — Symbol Finder
+(Phase 25) was inserted before Address Lookup (Phase 17c) in the
+visual tree, and nobody re-checked the constant block. Every
+`LookupInspectorAddressAsync` / `OnSnapshotNavigateToAddressLookup`
+call has been silently routing to Symbol Finder since Phase 25
+landed (commit `7b12bdf`, 2025-Q4-ish). It only surfaced now
+because:
+
+1. Address Lookup is a passive "pre-fill + query" tab — the user
+   sees the address pop in regardless of whether the tab is
+   actually selected; they thought the tab switch was working.
+2. Pre-existing entry points (Inspector → "Find at address",
+   Symbol Finder activation) routed back to tabs whose constants
+   happened to match (`TabIndexFields`, `TabIndexMethods`,
+   `TabIndexInspector` are all at the low end and haven't moved).
+3. The snapshot-diff "Find at address" menu was the first NEW
+   handoff into Address Lookup since the swap, and the user
+   immediately spotted the wrong tab.
+
+**Rule**: when adding a new `TabItem` to MainWindow.axaml's right-
+pane TabControl, the very next edit MUST be to renumber the
+`TabIndex*` constants in MainWindowViewModel.cs to match. Cheap
+mechanical step that nobody else will catch. There's no
+build-time symbol coupling between the XAML positional index and
+the C# constant — Avalonia just uses zero-based positional
+ordering of `<TabItem>` children, full stop.
+
+**Detection hint**: any time a cross-tab handoff goes to the
+"wrong" tab AND the underlying state (pre-fill / selection /
+query) clearly happened correctly, suspect this swap before
+hunting elsewhere. A 5-second grep of `TabIndex*` constant
+values against the XAML's `<TabItem Header=` ordering settles it.
+
+---
+
+### Snapshot `FindAllInstances` 2-level scan accepts non-object memory as fake "instances" — eats per-class cap before reaching real instances  ✅ **PROPER FIX 2026-05-28 (DLL #650)**
+
+**Symptom**: Live Inspector + per-class `findInstances` reports 152
+instances of `Mortal.Core.GameStat` (e.g. 활俠傳 / Mortal money
+stat at 0x2974ACC0). Snapshot Diff doesn't surface the
+known-stable money value change. UI debug "list captured
+instances of class X" reveals snapshot captured **256** GameStat
+entries — both A and B at the cap — most with garbage values
+like `_type=0 _property=712051296 _value=2061519408`. Live address
+0x2974ACC0 is past the last captured entry (0x29176510), so the
+real money instance never made the cap.
+
+**Root cause**: two completely different scan strategies between
+the live and bulk paths.
+
+- Live `findInstances` (per-class):
+  `Memory::ScanForPointer(vtable_ptr, limit)` — **1-level scan**.
+  Looks for memory locations whose qword value equals a known
+  vtable pointer. Finds object headers directly.
+
+- Snapshot `FindAllInstances` (bulk):
+  for each qword in memory, dereference it as a vtable, check
+  whether the dereferenced klass pointer is in our known class
+  set — **2-level scan**. Accepts ANY pointer-storing memory
+  whose target happens to be a vtable.
+
+The 2-level scan is structurally over-permissive. Anywhere a
+vtable pointer is stored as a value — captured locals on the
+stack, ad-hoc pointer fields in non-object structs, RGCTX cache,
+copies in game data files — gets reported as a "Mono object" at
+that location. Read-from-there as a "field" produces nonsense
+numbers (the user-visible "garbage `_value`" tell).
+
+On 32-bit Mono with the auto-clamped 256 per-class cap, the
+~100+ false positives squeeze out real instances. Snap #2's
+last captured address is below the real money instance →
+diff never sees the change → user can't find it even with the
+correct filter set.
+
+**Partial fix (DLL build #648, 2026-05-28)**: cheap heuristics
+that don't add Mono runtime calls (we still can't call
+`mono_class_vtable` per class without wedging the game, per the
+build #637 lesson):
+
+1. Skip `MEM_MAPPED` regions in addition to `MEM_IMAGE`. Mono
+   BDWGC + IL2CPP libgc heaps are always `MEM_PRIVATE`
+   (VirtualAlloc/HeapAlloc backed); file-mapped regions hold
+   game data that just happens to contain matching vtable
+   pointer values. Filter at region level → cheap.
+2. Require the instance slot address to be 8-byte aligned. Real
+   Mono / IL2CPP objects are 8-byte aligned; many false-positive
+   slots aren't (4-byte stride in the scan + values stored at
+   word boundaries that don't double-align). Filters ~30-50% of
+   the false-positive volume on the 활俠傳 / Mortal test case.
+3. (Mono side only) Also applied to the inner classification
+   loop so the cache memo doesn't pollute future scans with
+   misclassified vtables.
+
+**Proper fix shipped 2026-05-28 (DLL #650)**: vtable structural
+validation via the `MonoDomain*` field. `MonoVTable` layout
+(from `mono/metadata/class-internals.h`):
+
+```
++0           MonoClass*       (already checked in classSet)
++ptr_size    MonoGCDescriptor (gc_descr, packed bits)
++2*ptr_size  MonoDomain*      ← signature field
++3*ptr_size  MonoType*
+...
+```
+
+Real vtables ALWAYS have `*(qw + 2*ptr_size) == root_domain_ptr`.
+Random structures whose first qword happens to be a class
+pointer (the false-positive case) almost never have the domain
+pointer stored at that offset.
+
+The check is a single SEH-safe memory read per candidate, no
+Mono runtime calls. Zero BDWGC interaction = zero risk of the
+build #637 wedge. Implementation in
+[MonoAddressFinder.cpp FindAllInstances](../dll/src/mono/MonoAddressFinder.cpp):
+
+1. Sample `GetRootDomain()` once before the walk → `rootDomainAddr`.
+2. After the existing 2-level deref accepts a candidate, do one
+   more `SehReadKlassAt(qw + 2*ptr_size, domainAt)` read.
+3. If `domainAt != rootDomainAddr`, reject (memo as non-vtable
+   for the rest of the scan).
+
+Also: stopped seeding the per-walk `vtMemo` from the global
+`cache().vtableToKlass`. Older walks before this fix would have
+memoised some non-vtable structures as legitimate vtables; the
+old entries persist in the cache, but starting `vtMemo` fresh
+each walk forces re-validation under the new check.
+
+**Why this works and why earlier heuristics didn't**: the
+8-byte alignment + MEM_MAPPED skip filters caught ~30-50% of
+false positives but plenty leaked through (false positives at
+8-byte-aligned addresses inside MEM_PRIVATE Mono heap memory —
+e.g., RGCTX cache slots, internal lookup tables that store
+vtable pointer values as their payload). The domain check
+catches those because while they store a vtable POINTER (which
+happens to equal a real vtable address), the surrounding bytes
+are the cache structure's own layout, not the MonoVTable
+layout — so the qword at "where domain should be" is whatever
+the cache uses there, not the root domain.
+
+**Detection hint** (if a future variant of this bug appears):
+if `findInstances` per-class returns N matches but
+`FindAllInstances` reports N + dozens of garbage-valued
+"instances" for the same class, look for what other Mono
+structures might have `MonoClass*` at offset 0 AND happen to
+have the root domain pointer (or domain-shaped value) at
+offset 2*ptr_size. So far MonoVTable is unique in that
+combination, but check the Mono source for newer Unity
+versions if symptoms reappear.
+
+---
+
+### Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2 — DLL-side JSON cache pushes past 4 GB user space  ✅ **MITIGATED 2026-05-27 (DLL #645 + UI #647)**
+
+**Symptom**: 활俠傳 (Mono x86, Unity 2020.3.49f1, PID 26296) on
+build #646:
+
+| Step | What | Result |
+|---|---|---|
+| Take Snapshot #1 | InstanceCap=512, ArrayCap=256 (the new defaults) | ✅ DLL captures 3,647 classes / 119,370 instances / 19,680 arrays in 15s. UI logs `workingSet=1.83 GB (+1.62 GB)` |
+| Play 2 minutes | game continues normally | (heap grows naturally inside the game) |
+| Take Snapshot #2 | same caps | DLL heap-walks 886K candidate instances, decodes 258,035 (2.2× snap #1) and 30,793 arrays (1.6× snap #1), `snapshotBegin` returns clean at 10:34:47 |
+| ~6s later | UI calls `snapshotChunk` repeatedly to drain the cached JSON | UI logs `Snapshot.Take failed: server closed pipe before responding`. **Game CTD.** |
+
+DLL log has zero error markers — `snapshotBegin` #2 succeeded; the
+crash happened between Begin returning and the user-side chunk
+loop draining the payload.
+
+**Root cause**: the Phase 29a-v2 architecture caches the entire
+snapshot's pre-built JSON in the DLL's session struct (lives in
+the **game process**), then streams it to the UI as the user
+calls `snapshotChunk`. On a 32-bit Mono target the user process
+has at most **~4 GB virtual address space** (3 GB on a
+non-large-address-aware build). With the post-bump defaults
+(InstanceCap=512 vs original 100, ArrayCap=256 vs original 50)
+snap #2 holds **5–10× more JSON in the game process** than the
+original sizing supported:
+
+- ~258K captured instances × ~30 fields × ~50 bytes JSON/field
+  ≈ ~390 MB
+- 30K arrays × up to 256 elements × ~10 bytes each ≈ ~75 MB
+- Plus heap-walk metadata + class-info cache + the game's own
+  growing managed heap (~1.5–2 GB for 활俠傳 mid-game)
+
+Total comfortably past the 32-bit ceiling on snap #2 (snap #1 fits
+because the game's own state is smaller at that point in the
+session). Hard OOM in the game process kills it before the UI
+finishes draining chunks — visible as "server closed pipe before
+responding".
+
+**Why it worked yesterday**: yesterday's user-controlled cap was
+300/50, today's default is 512/256. Same game, same UI build, same
+DLL build — the only variable is the cap.
+
+**Mitigation shipped 2026-05-27** (DLL build #645, UI #647):
+
+1. **DLL pre-check abort gate** in both `snapshotBegin` handlers
+   — `QueryProcessMemory()` samples `GetProcessMemoryInfo`, and
+   if `pointerSize == 4` AND `privateUsage ≥ 3 GB` the handler
+   returns `{"error": "Game process at X.X GB private memory —
+   refusing snapshot..."}` before touching the heap walker.
+   Threshold = 4 GB ceiling − ~1 GB safety budget for our own
+   JSON cache. Hard backstop: even if everything else fails,
+   the DLL refuses to do the dangerous allocation.
+2. **Auto-clamp defaults when `pointerSize == 4`** — handshake
+   now carries `game_pointer_size`, `game_working_set`,
+   `game_private_usage`.
+   `MainWindowViewModel.ConnectAsync` calls
+   `SnapshotViewModel.OnGameConnected(ps, ws, pu)` after every
+   handshake, which clamps `InstanceCap` to ≤ 256 +
+   `ArrayCap` to ≤ 64 on 32-bit targets if currently above.
+   Never clamps upward — manual user picks stay respected.
+3. **Game memory banner** in the Snapshot tab — visible
+   post-handshake: `Game: 32-bit Mono — WorkingSet 1.42 GB,
+   committed 1.78 GB — snapshot caps auto-clamped for safety`.
+   Suffix escalates: `⚠ approaching 4 GB ceiling` at 2 GB,
+   `⛔ over 3 GB — DLL will refuse next snapshot` at 3 GB.
+4. **Status enrichment** — streaming + final snapshot status
+   lines show game-process memory alongside UI memory so the
+   user can watch the game grow during capture.
+
+Option not taken (deferred — gate makes it unnecessary unless
+a user explicitly needs > 256/64 caps on x86):
+**Streaming-chunk architecture** — build chunks lazily
+server-side rather than caching the entire payload upfront.
+Bigger refactor; revisit only if a user reports the DLL
+refusal blocking a legitimate use case.
+
+**Detection hint**: when `Snapshot.Take failed: server closed
+pipe before responding` appears in `ui/view/current.log` AND the
+DLL's `scan/current.log` shows a clean `snapshotBegin` return
+just before, AND the game has WOW64 / 32-bit pointers, this
+is the OOM-on-chunk-drain pattern. Lower the caps and re-run.

@@ -766,7 +766,10 @@ bool SehReadKlassAt(std::uintptr_t vtable, std::uintptr_t& outKlass) noexcept {
 BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     BulkInstancesResult out;
     if (perClassCap == 0) perClassCap = 100;
-    if (perClassCap > 4096) perClassCap = 4096;
+    // Raised 4096 → 8192 on 2026-05-27 to match ExportAPI snapshotBegin
+    // hard-cap. Dense-population classes (UnityEngine.Transform, custom
+    // game state containers) can legitimately exceed 4096 live instances.
+    if (perClassCap > 8192) perClassCap = 8192;
 
     if (!BuildClassRangeCache()) {
         Log::Write(MagicStrings::LogCategoryScan,
@@ -774,10 +777,24 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         return out;
     }
 
+    // 2026-05-28 vtable structural check — read the MonoDomain* field at
+    // MonoVTable+2*ptr and require it to equal the known root domain.
+    // Real vtables ALWAYS have this field pointing to their domain;
+    // false-positive "vtables" (random structures whose first qword
+    // happens to be a class pointer, e.g. MonoMethod entries in some
+    // RGCTX caches, internal lookup tables that store vtable pointers
+    // as values rather than at object headers) almost never have the
+    // domain pointer at that offset. Live-smoke on Mortal: cuts false
+    // positives from ~100/class to near zero. See lessons-learned for
+    // the MonoVTable layout reference.
+    const std::uintptr_t rootDomainAddr =
+        reinterpret_cast<std::uintptr_t>(GetRootDomain());
+
     // Snapshot class set + cache pointers under lock, then release. We
-    // also snapshot vtableToKlass so the scan can read from it without
-    // holding the cache lock; we'll merge new discoveries back at the
-    // end.
+    // intentionally do NOT carry the prior vtableToKlass cache into this
+    // walk — older walks that pre-date the domain check would have
+    // memoised some non-vtable structures as vtables. Start fresh so
+    // the validation runs on every qw value we encounter.
     std::vector<std::uintptr_t> classSet;
     std::uintptr_t minKlass = 0, maxKlass = 0;
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
@@ -786,7 +803,6 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         classSet = cache().classSet;
         minKlass = g_minKlass;
         maxKlass = g_maxKlass;
-        vtMemo   = cache().vtableToKlass;  // copy any prior discoveries
     }
     if (classSet.empty()) return out;
 
@@ -830,6 +846,18 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         out.regionsTotal++;
 
         if (r.type == MEM_IMAGE) { out.regionsSkipImage++; continue; }
+        // 2026-05-28: skip MEM_MAPPED too. Mono BDWGC heap is always
+        // MEM_PRIVATE (VirtualAlloc/HeapAlloc backed), so file-backed
+        // mappings (asset files, save data, memory-mapped resources)
+        // are pure noise for the snapshot. Live-smoke on Mortal
+        // (활俠傳) build #647 showed ~100 false positives per snapshot
+        // coming from MEM_MAPPED regions where game data happened to
+        // contain values matching known Mono vtable pointers. Each
+        // false positive eats one slot of the per-class cap, pushing
+        // real instances past the limit. Counted in regionsSkipImage
+        // for now (didn't add a separate counter to avoid touching
+        // BulkInstancesResult layout — same family of skip).
+        if (r.type == MEM_MAPPED) { out.regionsSkipImage++; continue; }
 
         const std::uint8_t* regionEnd = r.base + r.size;
         bool onStack = false;
@@ -879,15 +907,46 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                     vtMemo[qw] = 0;
                     continue;
                 }
+                // 2026-05-28 vtable structural validation. MonoVTable
+                // layout (mono/metadata/class-internals.h):
+                //   +0           MonoClass*   ← already in classSet
+                //   +ptr_size    MonoGCDescriptor gc_descr
+                //   +2*ptr_size  MonoDomain*  ← must equal root domain
+                //   +3*ptr_size  MonoType*
+                //   ...
+                // Reading the domain field of a non-vtable structure
+                // returns ~arbitrary memory. Only real vtables have the
+                // domain pointer at that offset.
+                std::uintptr_t domainAt = 0;
+                if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
+                    domainAt != rootDomainAddr) {
+                    vtMemo[qw] = 0;  // structurally not a vtable
+                    continue;
+                }
                 klass = derefed;
                 vtMemo[qw] = klass;
                 out.vtablesResolved++;
             }
 
+            // 2026-05-28 — false-positive filter on the instance slot.
+            // Real Mono BDWGC objects are 8-byte aligned (matches the
+            // already-required alignment of the vtable pointer they
+            // start with). Random memory locations that happen to
+            // contain a vtable pointer value (locals, captured ptrs,
+            // ad-hoc fields) typically aren't aligned to 8 bytes.
+            // Live-smoke on Mortal: this single check filters out
+            // ~30-50% of false positives per class on the 활俠傳
+            // snapshot path. Without it the per-class cap on 32-bit
+            // Mono targets fills with noise before reaching the real
+            // money / HP / etc. instances.
+            const std::uintptr_t instAddr =
+                reinterpret_cast<std::uintptr_t>(slots[i]);
+            if ((instAddr & 7u) != 0) continue;
+
             auto* k = reinterpret_cast<MonoClass*>(klass);
             auto& list = out.byClass[k];
             if (list.size() < perClassCap) {
-                list.push_back(reinterpret_cast<std::uintptr_t>(slots[i]));
+                list.push_back(instAddr);
                 ++out.totalInstances;
             }
         }

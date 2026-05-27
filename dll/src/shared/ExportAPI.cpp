@@ -44,6 +44,7 @@
 #include <nlohmann/json.hpp>
 
 #include <windows.h>
+#include <psapi.h>   // GetProcessMemoryInfo for 32-bit snapshot OOM guard
 
 #include <algorithm>
 #include <atomic>
@@ -62,6 +63,41 @@ using nlohmann::json;
 namespace {
 
 std::atomic<bool> g_initialized{false};
+
+// Game-process memory snapshot used both by the handshake (so UI can
+// auto-clamp snapshot caps on x86 targets) and by snapshotBegin's
+// pre-check that refuses to run when the game is already near the
+// 4 GB user-space limit. workingSet = current physical mapping;
+// privateUsage = total committed virtual (closer to real address-
+// space pressure); pointerSize = sizeof(void*) inside the game
+// process (4 on WOW64 / x86, 8 on x64).
+struct ProcessMemorySnapshot {
+    std::uint64_t workingSet   = 0;
+    std::uint64_t privateUsage = 0;
+    std::uint32_t pointerSize  = sizeof(void*);
+};
+
+ProcessMemorySnapshot QueryProcessMemory() noexcept {
+    ProcessMemorySnapshot out;
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    pmc.cb = sizeof(pmc);
+    if (::GetProcessMemoryInfo(::GetCurrentProcess(),
+                                reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                                sizeof(pmc))) {
+        out.workingSet   = static_cast<std::uint64_t>(pmc.WorkingSetSize);
+        out.privateUsage = static_cast<std::uint64_t>(pmc.PrivateUsage);
+    }
+    return out;
+}
+
+// 32-bit guard threshold. Process user-space ceiling on 32-bit
+// Windows is 2 GB by default, 3 GB with /3GB-aware OS, 4 GB on
+// WOW64-with-LARGEADDRESSAWARE (the common case for modern Unity
+// 32-bit builds). Snapshot capture adds 300-500 MB of DLL-side
+// JSON cache, so 3.0 GB current private-usage is the danger line —
+// past it we're one bad allocation away from the game CTD that
+// build #646 hit on 활俠傳.
+constexpr std::uint64_t kX86PrivateUsageRefuseThreshold = 3ULL * 1024 * 1024 * 1024;
 
 constexpr UnityDumperBackend BackendOfBuild() {
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
@@ -599,6 +635,16 @@ json BuildHandshakeJson() {
 #elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
     j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
 #endif
+    // Game-process memory + bitness so UI can auto-clamp snapshot caps
+    // on x86 targets (where DLL-side JSON cache can push past 4 GB
+    // user space). pointer_size is sizeof(void*) in the game's
+    // address space — 4 on WOW64/x86, 8 on x64. workingSet and
+    // privateUsage are sampled fresh per handshake call so the UI
+    // sees current pressure (handshake fires on every reconnect).
+    const ProcessMemorySnapshot mem = QueryProcessMemory();
+    j["game_pointer_size"] = mem.pointerSize;
+    j["game_working_set"]  = mem.workingSet;
+    j["game_private_usage"] = mem.privateUsage;
     return j;
 }
 
@@ -2061,12 +2107,40 @@ void RegisterCoreHandlers() {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
 
         // Parse args ----------------------------------------------------------
+        // Hard-caps raised 2026-05-27 — old 1024/256 ceiling forced the
+        // UI to under-cap on dense classes (활俠傳: 139 GameStat instances
+        // with cap=100 missed positions 100..139 entirely; user wanted
+        // headroom to push past 1024 for genuinely-large populations).
+        // New 8192/4096 stays inside the per-class memory budget the
+        // address-finder layer was already designed for (FindAllInstances
+        // internal cap raised in lockstep).
         std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
         if (instanceCap == 0)    instanceCap = 100;
-        if (instanceCap > 1024)  instanceCap = 1024;
+        if (instanceCap > 8192)  instanceCap = 8192;
 
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
-        if (arrayCap > 256)      arrayCap = 256;
+        if (arrayCap > 4096)     arrayCap = 4096;
+
+        // 32-bit OOM guard — refuse before doing any work if game is x86
+        // and already near the 4 GB user-space ceiling. Build #646 live-
+        // smoke on 활俠傳 (Mono x86) crashed snap #2 when the DLL-side
+        // JSON cache pushed past 4 GB; refusing here prevents the CTD
+        // at the cost of asking the user to lower caps + retry.
+        const ProcessMemorySnapshot memBefore = QueryProcessMemory();
+        if (memBefore.pointerSize == 4 &&
+            memBefore.privateUsage >= kX86PrivateUsageRefuseThreshold) {
+            const double gb = memBefore.privateUsage / (1024.0 * 1024.0 * 1024.0);
+            return json{
+                {"error",
+                 "Game process at " + std::to_string(static_cast<int>(gb * 100) / 100.0).substr(0, 4)
+                 + " GB private memory — refusing snapshot to avoid OOM crash on this 32-bit Mono target. "
+                   "Lower InstanceCap (try 128) and ArrayCap (try 32) then retry, "
+                   "or restart the game to free memory before snapshotting."},
+                {"gamePointerSize", memBefore.pointerSize},
+                {"gameWorkingSet",  memBefore.workingSet},
+                {"gamePrivateUsage", memBefore.privateUsage},
+            };
+        }
 
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
@@ -2458,13 +2532,20 @@ void RegisterCoreHandlers() {
             {"classInfoCacheMisses",     classInfoCacheMisses},
         };
 
+        // Post-decode memory snapshot for the response. UI surfaces this
+        // alongside its own WorkingSet so the user sees how much the
+        // game grew during capture (the 32-bit OOM danger metric).
+        const ProcessMemorySnapshot memAfter = QueryProcessMemory();
+
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
             "snapshotBegin(Mono) id=" + std::to_string(sid) +
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
             " arrays=" + std::to_string(decodedArrays) +
-            " buildId=" + buildId);
+            " buildId=" + buildId +
+            " gameWorkingSet=" + std::to_string(memAfter.workingSet) +
+            " gamePrivateUsage=" + std::to_string(memAfter.privateUsage));
 
         return json{
             {"ok",                      true},
@@ -2481,6 +2562,9 @@ void RegisterCoreHandlers() {
             {"plan",                    std::move(planArr)},
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
+            {"gamePointerSize",         memAfter.pointerSize},
+            {"gameWorkingSet",          memAfter.workingSet},
+            {"gamePrivateUsage",        memAfter.privateUsage},
         };
     });
 
@@ -5043,11 +5127,32 @@ void RegisterCoreHandlers() {
         [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
+        // Hard-caps mirror the Mono handler — see 2026-05-27 raise note above.
         std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
         if (instanceCap == 0)    instanceCap = 100;
-        if (instanceCap > 1024)  instanceCap = 1024;
+        if (instanceCap > 8192)  instanceCap = 8192;
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
-        if (arrayCap > 256)      arrayCap = 256;
+        if (arrayCap > 4096)     arrayCap = 4096;
+
+        // 32-bit OOM guard — mirrors the Mono handler. IL2CPP x86 isn't
+        // a shipping target today (the UI rejects it at inject time)
+        // but the guard stays symmetric in case a future IL2CPP x86
+        // build appears.
+        const ProcessMemorySnapshot memBeforeIl = QueryProcessMemory();
+        if (memBeforeIl.pointerSize == 4 &&
+            memBeforeIl.privateUsage >= kX86PrivateUsageRefuseThreshold) {
+            const double gb = memBeforeIl.privateUsage / (1024.0 * 1024.0 * 1024.0);
+            return json{
+                {"error",
+                 "Game process at " + std::to_string(static_cast<int>(gb * 100) / 100.0).substr(0, 4)
+                 + " GB private memory — refusing snapshot to avoid OOM crash on this 32-bit IL2CPP target. "
+                   "Lower InstanceCap and ArrayCap then retry, "
+                   "or restart the game to free memory before snapshotting."},
+                {"gamePointerSize", memBeforeIl.pointerSize},
+                {"gameWorkingSet",  memBeforeIl.workingSet},
+                {"gamePrivateUsage", memBeforeIl.privateUsage},
+            };
+        }
 
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
@@ -5386,13 +5491,18 @@ void RegisterCoreHandlers() {
             {"classInfoCacheMisses",     classInfoCacheMisses},
         };
 
+        // Post-decode memory snapshot for the response — mirrors Mono.
+        const ProcessMemorySnapshot memAfterIl = QueryProcessMemory();
+
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
             "snapshotBegin(IL2CPP) id=" + std::to_string(sid) +
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
             " arrays=" + std::to_string(decodedArrays) +
-            " buildId=" + buildId);
+            " buildId=" + buildId +
+            " gameWorkingSet=" + std::to_string(memAfterIl.workingSet) +
+            " gamePrivateUsage=" + std::to_string(memAfterIl.privateUsage));
 
         return json{
             {"ok",                      true},
@@ -5409,6 +5519,9 @@ void RegisterCoreHandlers() {
             {"plan",                    std::move(planArr)},
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
+            {"gamePointerSize",         memAfterIl.pointerSize},
+            {"gameWorkingSet",          memAfterIl.workingSet},
+            {"gamePrivateUsage",        memAfterIl.privateUsage},
         };
     });
 
