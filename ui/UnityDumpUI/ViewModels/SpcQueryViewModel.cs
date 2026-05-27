@@ -39,10 +39,83 @@ public sealed partial class SpcQueryViewModel : ObservableObject
         _snapshot = snapshot;
         _logger   = logger;
 
+        // Seed known-type list with the common managed primitives so the
+        // Type-filter autocomplete is useful even before any snapshot is
+        // hydrated. Augmented at hydrate time via RefreshKnownTypesAndClasses.
+        foreach (var t in CuratedSeedTypes) KnownTypes.Add(t);
+
         // Re-publish the snapshot pool so the SPC tab tracks adds/removes
-        // from the Snapshot tab without separate plumbing.
-        _snapshot.Snapshots.CollectionChanged += (_, _) => SyncSelectionRows();
+        // from the Snapshot tab without separate plumbing. Two side-effects
+        // on every change: re-sync SelectionRows + re-evaluate Run button's
+        // CanExecute (default RelayCommand source-gen only checks on its
+        // own property changes — we have to call NotifyCanExecuteChanged
+        // when external state crosses the canRun gate).
+        _snapshot.Snapshots.CollectionChanged += (_, _) =>
+        {
+            SyncSelectionRows();
+            RunCommand.NotifyCanExecuteChanged();
+        };
         SyncSelectionRows();
+        RunCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>Curated managed-primitive list used as the initial seed
+    /// for <see cref="KnownTypes"/>. Covers ~95% of what an SPC user
+    /// types when narrowing by Type — full set of integer widths +
+    /// float / double / string / bool / Unity Vector / Color /
+    /// Quaternion / GameObject / Transform.</summary>
+    private static readonly string[] CuratedSeedTypes = new[]
+    {
+        "System.Boolean", "System.Byte", "System.SByte",
+        "System.Int16", "System.UInt16",
+        "System.Int32", "System.UInt32",
+        "System.Int64", "System.UInt64",
+        "System.Single", "System.Double",
+        "System.String", "System.Char",
+        "System.IntPtr", "System.UIntPtr",
+        "UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4",
+        "UnityEngine.Color", "UnityEngine.Quaternion",
+        "UnityEngine.GameObject", "UnityEngine.Transform",
+    };
+
+    /// <summary>Types observed across currently-hydrated snapshots,
+    /// merged with the curated seed. Drives the Type-filter
+    /// AutoCompleteBox.</summary>
+    public ObservableCollection<string> KnownTypes { get; } = new();
+
+    /// <summary>Class FQNs observed across currently-hydrated snapshots.
+    /// Empty until at least one snapshot is hydrated; AutoCompleteBox
+    /// then suggests as the user types. Curated seed isn't useful here —
+    /// class names are game-specific.</summary>
+    public ObservableCollection<string> KnownClasses { get; } = new();
+
+    /// <summary>Walk every hydrated snapshot's FieldIndex once + populate
+    /// <see cref="KnownTypes"/> + <see cref="KnownClasses"/>. Cheap on
+    /// real data (1 pass over what's already in RAM) — called on every
+    /// successful RunAsync so the autocomplete keeps catching up to
+    /// whatever's loaded.</summary>
+    private void RefreshKnownTypesAndClasses()
+    {
+        var typeSet  = new HashSet<string>(CuratedSeedTypes, StringComparer.Ordinal);
+        var classSet = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var env in _snapshot.Snapshots)
+        {
+            if (!env.ClassesLoaded) continue;
+            foreach (var v in env.FieldIndex.Values)
+            {
+                if (!string.IsNullOrEmpty(v.FieldType)) typeSet.Add(v.FieldType);
+                if (!string.IsNullOrEmpty(v.ClassFqn))  classSet.Add(v.ClassFqn);
+            }
+        }
+        // Replace-all semantics — cheap (lists are short) + simple.
+        // Sort alphabetically so the user sees a predictable order in
+        // the dropdown.
+        KnownTypes.Clear();
+        foreach (var t in typeSet.OrderBy(s => s, StringComparer.Ordinal))
+            KnownTypes.Add(t);
+        KnownClasses.Clear();
+        foreach (var c in classSet.OrderBy(s => s, StringComparer.Ordinal))
+            KnownClasses.Add(c);
     }
 
     /// <summary>Each row in the snapshot-picker list. Wraps an envelope
@@ -229,6 +302,11 @@ public sealed partial class SpcQueryViewModel : ObservableObject
             {
                 await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
             }
+
+            // Refresh autocomplete pools now that more snapshots are
+            // hydrated — picks up Type / Class names the user can then
+            // narrow against on subsequent runs.
+            RefreshKnownTypesAndClasses();
 
             var query = new SpcQuery
             {
