@@ -144,7 +144,7 @@
 | 25 | Cross-class Symbol Finder | New `searchSymbols` pipe RPC + Symbol Finder Tab in MainWindow. Walks every class in a named assembly for fields + methods whose name contains an ASCII case-insensitive substring. Row double-click navigates back to Browser Fields/Methods tab with the class + member filter pre-selected. Replaces the historical "click each class in turn" loop the user reported when hunting properties like `MaxHP` across a few-hundred-class assembly. | ✅ **Shipped + live-smoked 2026-05-19** (build #363) on BongoCat Mono — pattern `MaxHP` → `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) in < 1s. 3 new fake-pipe `SearchSymbolsTests`. Properties surfaced via `get_*`/`set_*` methods (Mono/IL2CPP runtime convention; no separate property row kind). 25b (Interesting preset — curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties) deferred until basic finder shakes out — needs a Unity-tuned keyword list distinct from UE5CEDumper's FProperty-flavored one. |
 | 27 | Unity-aware Value Search | CE-style First Scan / Next Scan but filtered to Unity managed instances only. New `scanFieldValue` + `refineValueScan` pipe RPCs; reuses `Memory::EnumerateCommittedRegions` + `whatIsAt` (Phase 17) to drop non-managed candidates. Two scan modes: **global** (CE flow — type + value → walks all committed RW pages, filters via `whatIsAt`) + **class-scoped** (Discrete flow — pick class first, equivalent to `listFieldValuesAcrossInstances` plus value filter; orders-of-magnitude faster). Supports int8-64 / uint8-64 / float / double / string (managed UTF-16). Full CE filter set: exact / range / changed / unchanged / increased / decreased / newValue. New Value Search tab (MainWindow position 6). Includes **Phase 17b carry-forward** — Array / List<T> element resolution in `whatIsAt`. | ✅ **All shipped sub-phases live-verified 2026-05-20** (builds #410→#452). 27a (global + class-scoped + whatIsAt filter) live-smoked on SaGa F2R + 活俠傳; 27b (Begin/Refine/End session + 7 CE filter modes) live-smoked on SaGa F2R (purse=100000 → spent 1 coin → newValue=99999 narrowed to PLY_WORK.purse, dropped SAVEDATA.purse correctly); 27a-bugfix (lazy vtable resolution) closed the 32-bit Mono hang; 27c (Array / List<T> element resolution); 27b-4 (UTF-16 / UTF-8 / ASCII string scan via Memory::ScanForString); 27d (UI Value Search tab — VM + DataGrid + cross-tab handoff to Inspector). 27e (CE Lua bridge `unity_valuescan.lua`) **dropped** 2026-05-20 — CE already has its own native value scan; nobody needs to call our scan from CE Lua, so the bridge has no realistic use case. 283/283 xUnit pass. |
 | 28 | Field → Methods cross-reference (TODO stub) | Inverse of Symbol Finder's "find by name": given a field, list methods that read/write it. **Mono path**: walk method IL bytecode (`mono_method_header_get_code`) for `ldfld`/`stfld`/`ldsfld`/`stsfld` referencing the target field token — high-confidence, clean. **IL2CPP static fields**: reuse AOBMaker's `RipReferenceScanner` against the field's runtime address — scan executable pages for RIP-relative references, attribute hits to enclosing methods via Phase 18a range-check. **IL2CPP instance fields**: heuristic — AOB-scan declaring-class methods for `[reg+offset]` patterns matching field offset; mark "low confidence" in UI. | 📝 **TODO / not started** — picks up after Phase 27 ships. Approach drafted below. |
-| 29 | Snapshot & Diff (跨 session 數值監視) | "全抓" snapshot walker (default scope = all user assemblies, opt-in narrow) + diff UI + SQLite cross-session persistence. Strict superset of CE's value-finder — instead of "find addresses with value X", surfaces "any field that changed" with class.field.instance context attached. **Bundles Phase 27c live smoke** — array element capture exercises the existing `whatIsAt` array resolver on SaGa F2R / BongoCat / 活俠傳; bugs fixed on both sides. Sub-phases 29a (DLL `snapshotAll` RPC + array smoke), 29b (in-memory diff UI), 29c (SQLite + cross-session). 29d (SPC-style multi-field constraint query) deferred until 29a-c stabilise. | ✅ **29a + 29b + 29c SHIPPED 2026-05-29 (29a/b LIVE-VERIFIED 2026-05-26; 29c green on 421 unit tests, live-smoke handed off)** across SaGa F2R / BongoCat / 활俠傳 (builds #596 → #637 — five iterations of Mono-freeze debugging, root cause was `mono_class_vtable` from worker thread leaving BDWGC tracking entries; fix: skip static-field VALUE capture on Mono). Phase 27c array-element live-smoke **CLOSED** as bundled side-effect. **29c (SQLite) + Phase 29 polish (noise-reduction filters on diff result) next**. |
+| 29 | Snapshot & Diff (跨 session 數值監視) | "全抓" snapshot walker (default scope = all user assemblies, opt-in narrow) + diff UI + SQLite cross-session persistence. Strict superset of CE's value-finder — instead of "find addresses with value X", surfaces "any field that changed" with class.field.instance context attached. **Bundles Phase 27c live smoke** — array element capture exercises the existing `whatIsAt` array resolver on SaGa F2R / BongoCat / 活俠傳; bugs fixed on both sides. Sub-phases 29a (DLL `snapshotAll` RPC + array smoke), 29b (in-memory diff UI), 29c (SQLite + cross-session). 29d (SPC-style multi-field constraint query) deferred until 29a-c stabilise. | ✅ **29a + 29b + 29c + 29d SHIPPED 2026-05-29 (29a/b LIVE-VERIFIED 2026-05-26; 29c/d green on 457 unit tests, live-smoke handed off; 29d adds SpcQueryEngine + SPC Query tab for N-snapshot constraint queries — kills CE's two-snap diff limitation)** across SaGa F2R / BongoCat / 활俠傳 (builds #596 → #637 — five iterations of Mono-freeze debugging, root cause was `mono_class_vtable` from worker thread leaving BDWGC tracking entries; fix: skip static-field VALUE capture on Mono). Phase 27c array-element live-smoke **CLOSED** as bundled side-effect. **29c (SQLite) + Phase 29 polish (noise-reduction filters on diff result) next**. |
 | 26 | Anti-tamper protection | 3-slot SHA256 self-check spread across two assemblies + 2 poison surfaces (CT export offsets + Inspector grid values) + XOR-shielded credit string + AOT-stamped hash via `tools/inject-hash.ps1`. Inspired by AOBMaker's pattern but redesigned for cross-assembly slot distribution (Slot A in Core/Services / Slot B in Core/Services/Export / **Slot C cross-assembly in ui/UnityDumpUI/Platform**). Dev-mode bypass (0xCC placeholders) keeps all factors at 0 in Debug/Release single-file builds — exports + Inspector + tests stay byte-identical to pre-Phase-26. Class names renamed to non-suggestive forms so binary metadata no longer leaks "Integrity" / "Guardian" / "Shield". | ✅ **Shipped + AOT-verified 2026-05-20** (build #408). Two iterations: `ccaae6e` single-slot baseline + `348cbb6` 3-slot cross-assembly upgrade. `TokenAggregator.Combined() = A \| B \| C` ORs all three factors (UI registers `WindowsRuntimeMetadata.Read` into Core via `Program.Main`). Poison 1: `CloakOffset(off) => off ^ (factor & 0x7F)` in `CeXmlExporter` + `CsxExporter` shifts every emitted offset 0-127 bytes (CT loads cleanly in CE; reads wrong fields). Poison 2: `LiveInspectionViewModel.MaybePerturbDisplay` corrupts 1/11 numeric `DisplayValue` rows via per-row deterministic seed (string `GetHashCode` XOR offset XOR salt) — same row corrupts same way within session, different rows across sessions. Anti-trace: `Read()` returns 0 for first N calls (A:3 / B:2 / C:4) even when tampered. Anti-debug: `Debugger.IsAttached` on published binary returns poison code. AOT round-trip verified end-to-end: 3 sentinels at `0x02438F98` / `0x02438E80` / `0x0243ABF8` (C ~11 KB away from A/B). `inject-hash.ps1` 3-slot AOBMaker-style: zero all 3 slots → SHA256 once → write same hash into all 3. Footer credit `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. New [`USAGE.md`](../USAGE.md) end-user guide for CT makers. |
 
 ---
@@ -2174,16 +2174,78 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
     paths warned but not blocked; settings corruption → fallback to
     defaults + log warning (non-fatal at startup).
 
-- [ ] **29d — Multi-field constraint query (SPC angle)** — DEFERRED
-  - Originally proposed: query "find fields where A=100 AND B=50"
-    across snapshots / sessions; "find fields whose values match
-    bounded oscillation pattern" (Energy/Stamina detection); etc.
-  - Designing the input UI for this is harder than implementing the
-    backend. Wait for a real use case to emerge from 29a-c
-    deployment before designing.
-  - Schema in 29c is already amenable — `field_value` joins by
-    `(class_fqn, field_offset)` across snapshot_ids would back any
-    such query.
+- [x] **29d — SPC-style multi-snapshot constraint query** ✅ **SHIPPED 2026-05-29**
+  - **Killer use case** (verbatim from user): given 4 snapshots from
+    the same game build, find every field whose value sequence walks a
+    specific signature — e.g. `10160 → 9910 → 9410 → 9410` uniquely
+    locates the 銀兩 GameStat by its real-world spending pattern
+    (bought 250, bought 500, slept-no-change), filtering out all noise
+    fields that happen to land in plausible ranges.
+  - **6 sub-phases, ~4.5 days total**:
+    - [x] **29d-1** `SpcQueryEngine` Core service + 22 unit tests.
+      `SpcPredicate{Any|Exact|Range|NotEqual|Unchanged|Increased|Decreased|DeltaExact|DeltaRange}` —
+      absolute predicates work on any index; relative predicates
+      require index > 0 (compare vs previous snap's value). "Increased
+      by N" / "Decreased by N" intentionally not exposed as separate
+      kinds — `DeltaRange [-N,-N]` or `DeltaRange [-max,-min]` covers
+      the same surface without bloat. `Run()` anchors on smallest
+      FieldIndex, walks intersection, evaluates per-predicate per-key,
+      first-failure short-circuits.
+    - [x] **29d-2** `SpcQueryViewModel` + "SPC Query" tab (MainWindow
+      position 8). Shares the Snapshot tab's envelope pool — saves /
+      drops visible to both tabs. Per-snapshot row DataGrid (Include
+      checkbox + ComboBox PredicateKind + two operand TextBoxes).
+      Filters (StaticsOnly / ExcludeSynthetic / NumericOnly / Class /
+      Type). Big Run button. Results DataGrid with per-snap "Values"
+      column rendered via `SpcValueSequenceConverter` (`v0 → v1 → v2`).
+    - [x] **29d-3** Cross-session / cross-build auto-mode mirrors
+      Phase 29c-5 diff: sessions differ → auto-enable StaticsOnly +
+      blue banner; builds differ → yellow warning banner.
+    - [x] **29d-4** Non-additive RAM: post-Run, unload envelopes the
+      VM itself hydrated for the query (envelopes that were already
+      loaded — e.g. via Snapshot tab — stay loaded). N>5 advisory
+      status line with estimated peak RAM. Real per-key streaming
+      (constant RAM regardless of N) deferred to optional future
+      optimization; current behavior is fine for typical N≤10.
+    - [x] **29d-5** Result row context menu: Inspect this instance
+      (cross-tab to Inspector) / Copy Class.Field / Copy instance
+      address / Copy value sequence. Same `CopyToClipboardAsync`
+      delegate pattern the other tabs use.
+    - [x] **29d-6** 11 ViewModel integration tests + plan.md +
+      STATUS.md updates. Total Phase 29c+d coverage: 457/457 tests.
+
+- [ ] **29e — Class-centric Key/Value pivot analysis** — RESEARCH
+  - **User insight (2026-05-29)**: SPC current design treats every
+    field independently. The Class-centric pivot question is
+    different: pick a class C, pick a key field K (e.g. `Player.id`
+    or `Item.name`), pick a value field V (e.g. `Player.hp` or
+    `Item.count`); for each instance of C with K == X across N
+    snapshots, show V's trajectory.
+  - Example: "For the `Player` instance with name='Bob', show HP across
+    yesterday's 5 save points." Or "for the `Item` with id=42, show
+    count change across each shop visit."
+  - User's note: "this is like old-style Crystal Report"
+    — accurate. A more ambitious version would auto-surface anomalies
+    / cluster behaviors / "interesting variances" without the user
+    nominating K and V manually.
+  - **Open design questions**:
+    1. Cross-session instance identity: instance addresses change per
+       game launch, so matching "the Player with name='Bob'" requires
+       walking the K field at each snap to find which address holds
+       that K value. Doable but quadratic in snap count.
+    2. Multi-instance Key collisions: if Bob and another player both
+       happened to share `id=42` at some moment, the pivot has to
+       split / annotate.
+    3. UI: pivot table (rows = K values, columns = snapshots, cells =
+       V values) vs grouped DataGrid vs chart.
+    4. Could subsume SPC: SPC is the K=address (or K=class+field+offset)
+       degenerate case. Worth unifying or leave SPC distinct?
+  - **Stretch**: anomaly detection. Auto-tag "fields whose value
+    changed in N>=K out of N snapshots" / "fields that dropped to 0
+    for the first time at snap X" / etc. — closer to APM pattern
+    detection than CE's value scanning.
+  - **Status**: research-phase. Not designed in detail. Open until a
+    concrete use case lands that 29d can't satisfy.
 
 ### Bundled Phase 27c live smoke ✅ **CLOSED 2026-05-26**
 

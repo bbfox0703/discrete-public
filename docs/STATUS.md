@@ -1,6 +1,66 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29c SQLite cross-session persistence shipped (8 sub-phases)** + Phase 29-polish direction-filter trichotomy, build #665+ UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29c SQLite cross-session persistence + Phase 29d SPC multi-snapshot constraint query both shipped**, build #680+ UI / DLL #650).
+
+## TL;DR — what's left to pick up (Phase 29d session, 2026-05-29)
+
+**Phase 29d SPC-style multi-snapshot constraint query SHIPPED**. New
+"SPC Query" tab (MainWindow position 8) answers the user's killer use
+case: given N snapshots from the same game build, find every field
+whose value sequence walks a specific signature — e.g. `10160 → 9910
+→ 9410 → 9410` across 4 sessions uniquely identifies the 銀兩 GameStat
+by its real-world spending pattern, ignoring every noise field that
+happens to land in plausible ranges. CE's two-snap diff fundamentally
+can't do this.
+
+### What shipped
+
+| Sub-phase | What landed |
+|---|---|
+| **29d-1** | [SpcQueryEngine.cs](../ui/UnityDumpUI/ViewModels/SpcQueryEngine.cs) — `SpcPredicate{Any|Exact|Range|NotEqual|Unchanged|Increased|Decreased|DeltaExact|DeltaRange}` enum + factory helpers. `SpcQuery` (snapshots + predicates + filters) + `SpcMatch` (per-snap value/numeric arrays). `Run()` anchors on smallest FieldIndex, walks intersection, short-circuits on first failing predicate. "Increased by N" / "Decreased by N" intentionally not separate predicates — `DeltaRange [-N,-N]` covers it. 22 unit tests covering every predicate kind, cross-session key collapse, all filters, anchor selection, edge cases. |
+| **29d-2** | [SpcQueryViewModel.cs](../ui/UnityDumpUI/ViewModels/SpcQueryViewModel.cs) + new "SPC Query" tab in MainWindow.axaml. Shares Snapshot tab's envelope pool. Per-snapshot row DataGrid (Include + PredicateKind ComboBox + 2 operand TextBoxes), filters (Statics / Synthetic / Numeric / Class / Type), Run button, results DataGrid with per-snap "Values" column rendered via [SpcValueSequenceConverter.cs](../ui/UnityDumpUI/Views/Converters/SpcValueSequenceConverter.cs) (`v0 → v1 → v2`). GridSplitter between picker + results. |
+| **29d-3** | Cross-session / cross-build auto-mode (mirrors Phase 29c-5 diff): different `session_id` → auto-enable StaticsOnly + blue banner; different `build_id` → yellow warning. |
+| **29d-4** | Non-additive RAM: post-Run, evict envelopes that were hydrated **for this query** (envelopes already loaded — e.g. via Snapshot tab — stay loaded so the user's next diff doesn't re-hydrate). N>5 advisory status line with estimated peak RAM. Real per-key streaming (constant RAM regardless of N) deferred to future optimization. |
+| **29d-5** | Result row context menu: Inspect this instance / Copy Class.Field / Copy instance address / Copy value sequence. Uses the standard `CopyToClipboardAsync` delegate that the other tabs are wired through. |
+| **29d-6** | 11 ViewModel integration tests in [SpcQueryViewModelTests.cs](../ui/UnityDumpUI.Tests/SpcQueryViewModelTests.cs) — selection sync, preflight rejection of bad predicate-at-index-0, cross-session/build auto-mode, killer-use-case end-to-end, eviction contract, clipboard hooks. Total Phase 29c+d coverage: **457/457 unit tests pass**. |
+
+### Live-smoke TODO (user)
+
+Same DLL as before (no changes); only UI work. Live cases to try:
+
+1. **Killer use case literal** — take 4 snapshots while playing
+   활俠傳, spend exact amounts between each. On SPC Query tab,
+   select all 4 → predicates `[Exact 10160, DeltaExact -250,
+   DeltaExact -500, Unchanged]` → Run. Expect 1 match
+   (`Mortal.Core.GameStat._value`).
+2. **Constant-value finder** — 4+ snapshots from anywhere → all
+   predicates `Exact 10160` (or any number you know). Surfaces every
+   field that held that value across all snaps. Often more useful
+   for "find this address" than CE's first-scan.
+3. **Range narrowing** — `Range 9000..11000` on every snap → narrow
+   the field universe down to fields that stay in a sensible range
+   for the whole session sequence.
+4. **Cross-session statics-only** — pick snapshots from different
+   game launches (close + relaunch game). StaticsOnly should
+   auto-enable + blue banner should appear.
+5. **Context menu** — right-click a result row → Inspect / Copy
+   variants. Verify clipboard contents.
+6. **Logs** at `%LOCALAPPDATA%\Discrete_UEDumper\Logs\ui\snapshot\current.log`
+   should record `SpcQuery: snaps=N preds=[...] → M matches in Xms`
+   per Run.
+
+### Post-29d research (Phase 29e)
+
+User noted SPC's current design is field-centric. A class-centric
+Key/Value pivot would answer "for the Player instance with
+name='Bob', show HP across N sessions" — different question, needs
+cross-session instance identity matching. Documented as Phase 29e
+research stub in plan.md. Not designed in detail yet — waiting for
+a concrete real-world need.
+
+### Previous milestone — Phase 29c SQLite cross-session persistence
+
+---
 
 ## TL;DR — what's left to pick up (Phase 29c session, 2026-05-29)
 
