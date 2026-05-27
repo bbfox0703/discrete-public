@@ -155,6 +155,64 @@ public class SpcQueryViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Run_ExactWithEmptyOperandReportsErrorInsteadOfZeroMatches()
+    {
+        // Regression: user picked Exact but left the Operand cell empty
+        // → engine silently returned 0 matches, indistinguishable from
+        // "no field met the criteria". Preflight now catches the missing
+        // operand and surfaces a row-specific error.
+        var (snap, spc) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("b1", "s1", "A", "2026-05-29T10:00:00Z",
+            ("Foo", "x", "10160", true)));
+        snap.Snapshots.Add(MakeEnv("b1", "s1", "B", "2026-05-29T11:00:00Z",
+            ("Foo", "x", "9910", true)));
+        spc.SelectionRows[0].PredicateKind = SpcPredicateKind.Any;
+        spc.SelectionRows[1].PredicateKind = SpcPredicateKind.Exact;
+        // OperandText intentionally left blank.
+
+        await spc.RunAsync();
+        Assert.Contains("needs a numeric Operand", spc.ErrorMessage);
+        Assert.Empty(spc.Results);
+    }
+
+    [Fact]
+    public async Task Run_RangeWithBothBoundsEmptyReportsError()
+    {
+        var (snap, spc) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("b1", "s1", "A", "2026-05-29T10:00:00Z",
+            ("Foo", "x", "10", true)));
+        snap.Snapshots.Add(MakeEnv("b1", "s1", "B", "2026-05-29T11:00:00Z",
+            ("Foo", "x", "20", true)));
+        spc.SelectionRows[0].PredicateKind = SpcPredicateKind.Range;
+        spc.SelectionRows[1].PredicateKind = SpcPredicateKind.Any;
+        // Both operand fields empty for a Range predicate.
+
+        await spc.RunAsync();
+        Assert.Contains("needs at least one of Operand or Operand 2", spc.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task Run_RangeWithOnlyMinSetSucceeds()
+    {
+        var (snap, spc) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("b1", "s1", "A", "2026-05-29T10:00:00Z",
+            ("Foo", "above", "50", true),
+            ("Foo", "below", "5",  true)));
+        snap.Snapshots.Add(MakeEnv("b1", "s1", "B", "2026-05-29T11:00:00Z",
+            ("Foo", "above", "60", true),
+            ("Foo", "below", "6",  true)));
+        spc.SelectionRows[0].PredicateKind = SpcPredicateKind.Range;
+        spc.SelectionRows[0].OperandText   = "10";  // min only — open upper bound
+        spc.SelectionRows[1].PredicateKind = SpcPredicateKind.Any;
+
+        await spc.RunAsync();
+        Assert.Empty(spc.ErrorMessage);
+        // Only "above" passes Range(min=10, max=null) in snap A.
+        Assert.Single(spc.Results);
+        Assert.Equal("above", spc.Results[0].FieldName);
+    }
+
+    [Fact]
     public async Task Run_FirstPredicateRelativeBlocksWithExplanation()
     {
         var (snap, spc) = BuildVms();

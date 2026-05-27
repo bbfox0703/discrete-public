@@ -64,6 +64,41 @@
           </Button.Flyout>
         </Button>
 
+        <!-- Handshake summary moved out of the right-pane (was an
+             Expander above the tab strip eating a whole row).  Now
+             sits as a Flyout button on the top toolbar — same content
+             grid, one click reveals; click anywhere outside dismisses.
+             Keeps the right pane focused on its tabs. -->
+        <Button Content="ℹ Handshake"
+                ToolTip.Tip="Engine / Backend / DllVariant / GameModule / UnityVersion / MetadataVersion / AssembliesCount / Build / Protocol — the post-connect inventory the DLL reports back.">
+          <Button.Flyout>
+            <Flyout Placement="Bottom">
+              <Grid ColumnDefinitions="180,260"
+                    RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                    RowSpacing="6" Margin="4">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="{StaticResource Handshake.Engine}"          Opacity="0.7" />
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Engine}" />
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="{StaticResource Handshake.Backend}"         Opacity="0.7" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Backend2}" />
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="{StaticResource Handshake.DllVariant}"      Opacity="0.7" />
+                <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding DllVariant}" />
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="{StaticResource Handshake.GameModule}"      Opacity="0.7" />
+                <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding GameModule}" />
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="{StaticResource Handshake.UnityVersion}"    Opacity="0.7" />
+                <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding UnityVersion}" />
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="{StaticResource Handshake.MetadataVersion}" Opacity="0.7" />
+                <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding MetadataVersion}" />
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="{StaticResource Handshake.AssembliesCount}" Opacity="0.7" />
+                <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding AssembliesCount}" />
+                <TextBlock Grid.Row="7" Grid.Column="0" Text="{StaticResource Handshake.Build}"           Opacity="0.7" />
+                <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding Build}" />
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="{StaticResource Handshake.Protocol}"        Opacity="0.7" />
+                <TextBlock Grid.Row="8" Grid.Column="1" Text="{Binding Protocol}" />
+              </Grid>
+            </Flyout>
+          </Button.Flyout>
+        </Button>
+
         <TextBlock Text="{StaticResource Conn.StatusLabel}"
                    VerticalAlignment="Center"
                    Opacity="0.7" />
@@ -329,37 +364,10 @@
                     ResizeDirection="Columns"
                     IsVisible="{Binding !IsClassesPaneCollapsed}" />
 
-      <!-- Pane 3: Detail (handshake summary on top, then fields/methods) -->
+      <!-- Pane 3: Detail (fields/methods/etc tabs). Handshake summary
+           lives on the top toolbar now (ℹ Handshake flyout button) so
+           the right pane goes straight to errors + tabs. -->
       <DockPanel Grid.Column="4" Margin="8">
-
-        <!-- Handshake summary (collapsible) -->
-        <Expander DockPanel.Dock="Top"
-                  Header="{StaticResource Handshake.Title}"
-                  IsExpanded="False"
-                  Margin="0,0,0,8">
-          <Grid ColumnDefinitions="160,*"
-                RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                RowSpacing="4" Margin="4,4,0,4">
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="{StaticResource Handshake.Engine}"          Opacity="0.7" />
-            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Engine}" />
-            <TextBlock Grid.Row="1" Grid.Column="0" Text="{StaticResource Handshake.Backend}"         Opacity="0.7" />
-            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Backend2}" />
-            <TextBlock Grid.Row="2" Grid.Column="0" Text="{StaticResource Handshake.DllVariant}"      Opacity="0.7" />
-            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding DllVariant}" />
-            <TextBlock Grid.Row="3" Grid.Column="0" Text="{StaticResource Handshake.GameModule}"      Opacity="0.7" />
-            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding GameModule}" />
-            <TextBlock Grid.Row="4" Grid.Column="0" Text="{StaticResource Handshake.UnityVersion}"    Opacity="0.7" />
-            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding UnityVersion}" />
-            <TextBlock Grid.Row="5" Grid.Column="0" Text="{StaticResource Handshake.MetadataVersion}" Opacity="0.7" />
-            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding MetadataVersion}" />
-            <TextBlock Grid.Row="6" Grid.Column="0" Text="{StaticResource Handshake.AssembliesCount}" Opacity="0.7" />
-            <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding AssembliesCount}" />
-            <TextBlock Grid.Row="7" Grid.Column="0" Text="{StaticResource Handshake.Build}"           Opacity="0.7" />
-            <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding Build}" />
-            <TextBlock Grid.Row="8" Grid.Column="0" Text="{StaticResource Handshake.Protocol}"        Opacity="0.7" />
-            <TextBlock Grid.Row="8" Grid.Column="1" Text="{Binding Protocol}" />
-          </Grid>
-        </Expander>
 
         <!-- Top errors banner -->
         <Border DockPanel.Dock="Top"
