@@ -888,6 +888,182 @@ public sealed partial class SnapshotViewModel : ObservableObject
             : baseStr;
     }
 
+    // ----- Instance lookup diagnostic (Phase 29-polish, 2026-05-28) -----
+    //
+    // User-driven diagnostic: given a known instance address (e.g. the
+    // CE-pinned "銀兩 GameStat at 0x2986ACC0" case that wasn't surfacing in
+    // diff results despite the address being stable across snapshots),
+    // dump every FieldIndex entry from both selected snapshots that
+    // touches that address. Answers "was the instance captured at all?
+    // what value was recorded for each field? does the diff key match
+    // between A and B?" — without re-snapshotting the game.
+    //
+    // Pure UI-side: walks the already-built FieldIndex dictionaries.
+    // No DLL round-trip, no game pressure.
+
+    /// <summary>Address the user typed into the diagnostic input. Accepted
+    /// in any of "0x000000002986ACC0", "0x2986ACC0", "2986ACC0", lower or
+    /// upper case. Normalised to the canonical 16-digit upper form before
+    /// matching.</summary>
+    [ObservableProperty] private string _debugLookupAddress = string.Empty;
+
+    /// <summary>Result of the last <see cref="DebugLookupInstance"/>.
+    /// Multi-line text bound to a read-only TextBox so the user can
+    /// copy / inspect freely. Empty until first lookup runs.</summary>
+    [ObservableProperty] private string _debugLookupOutput = string.Empty;
+
+    /// <summary>Walk FieldIndex of A and B, dump everything matching the
+    /// normalised address. Emits one block per snapshot followed by a
+    /// per-field diff section so the user can see at a glance whether
+    /// the address was missed by one snapshot, captured with different
+    /// values, or captured with identical values (= unchanged, default-
+    /// filtered out).</summary>
+    [RelayCommand]
+    public void DebugLookupInstance()
+    {
+        var sb = new System.Text.StringBuilder();
+        string normalised = NormaliseAddressForLookup(DebugLookupAddress);
+        if (string.IsNullOrEmpty(normalised))
+        {
+            DebugLookupOutput = "Enter an address — accepted: 0x000000002986ACC0, 0x2986ACC0, or 2986ACC0 (case-insensitive).";
+            return;
+        }
+
+        sb.Append("Lookup '").Append(normalised).AppendLine("' across selected snapshots.");
+        sb.Append("A = ").Append(SelectedSnapshotA?.ShortLabel ?? "(not set)").AppendLine();
+        sb.Append("B = ").Append(SelectedSnapshotB?.ShortLabel ?? "(not set)").AppendLine();
+        sb.AppendLine();
+
+        var aRows = CollectMatchingRows(SelectedSnapshotA, normalised);
+        var bRows = CollectMatchingRows(SelectedSnapshotB, normalised);
+
+        DumpSnapshotSection(sb, "Snapshot A", aRows);
+        sb.AppendLine();
+        DumpSnapshotSection(sb, "Snapshot B", bRows);
+        sb.AppendLine();
+
+        // Pair by full key — same {asm|class|addr|offset|name} → same logical field.
+        var keyUnion = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var r in aRows) keyUnion.Add(r.key);
+        foreach (var r in bRows) keyUnion.Add(r.key);
+
+        var aMap = aRows.ToDictionary(r => r.key, r => r.value, StringComparer.Ordinal);
+        var bMap = bRows.ToDictionary(r => r.key, r => r.value, StringComparer.Ordinal);
+
+        sb.Append("=== Per-field diff at this address (").Append(keyUnion.Count).AppendLine(" keys) ===");
+        int changedN = 0, addedN = 0, removedN = 0, unchangedN = 0;
+        foreach (var key in keyUnion.OrderBy(k => k, StringComparer.Ordinal))
+        {
+            bool inA = aMap.TryGetValue(key, out var va);
+            bool inB = bMap.TryGetValue(key, out var vb);
+            string label = ExtractFieldLabel(key);
+            if (inA && inB)
+            {
+                if (string.Equals(va!.ValueDisplay, vb!.ValueDisplay, StringComparison.Ordinal))
+                {
+                    sb.Append("  [=] ").Append(label).Append(" = ").AppendLine(va.ValueDisplay);
+                    unchangedN++;
+                }
+                else
+                {
+                    sb.Append("  [~] ").Append(label).Append(" : ")
+                      .Append(va.ValueDisplay).Append(" → ").AppendLine(vb!.ValueDisplay);
+                    changedN++;
+                }
+            }
+            else if (inB)
+            {
+                sb.Append("  [+] ").Append(label).Append(" = ").AppendLine(bMap[key].ValueDisplay);
+                addedN++;
+            }
+            else
+            {
+                sb.Append("  [-] ").Append(label).Append(" = ").AppendLine(aMap[key].ValueDisplay);
+                removedN++;
+            }
+        }
+        sb.AppendLine();
+        sb.Append("Summary: ")
+          .Append(changedN).Append(" changed, ")
+          .Append(addedN).Append(" added (B-only), ")
+          .Append(removedN).Append(" removed (A-only), ")
+          .Append(unchangedN).AppendLine(" unchanged.");
+
+        if (aRows.Count == 0 && bRows.Count == 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("⚠ No rows matched in either snapshot. Possible causes:");
+            sb.AppendLine("  - Address typed isn't in the captured set (instance cap, scope filter)");
+            sb.AppendLine("  - Address typed differs from the snapshot's stored format");
+            sb.AppendLine("  - The instance's class wasn't in the capture scope");
+        }
+        DebugLookupOutput = sb.ToString();
+    }
+
+    private static string NormaliseAddressForLookup(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return string.Empty;
+        var s = input.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
+        // strip any thousands-separator chrome the user might have typed
+        s = s.Replace("_", string.Empty).Replace(" ", string.Empty);
+        if (s.Length == 0) return string.Empty;
+        if (!ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong v))
+            return string.Empty;
+        // Canonical form matches the DLL's formatHex output: "0x%016llX".
+        return "0x" + v.ToString("X16", CultureInfo.InvariantCulture);
+    }
+
+    private static List<(string key, SnapshotFieldValue value)> CollectMatchingRows(
+        SnapshotEnvelope? env, string normalisedAddress)
+    {
+        var hits = new List<(string, SnapshotFieldValue)>();
+        if (env is null) return hits;
+        foreach (var kvp in env.FieldIndex)
+        {
+            // Key shape: "{asm}|{fqn}|{instAddrOrStatic}|{offset}|{fieldName}".
+            // Just substring-match the address piece — cheap, unambiguous
+            // because the 16-digit hex won't accidentally appear in
+            // assembly/class/field strings.
+            if (kvp.Key.IndexOf(normalisedAddress, StringComparison.Ordinal) >= 0)
+                hits.Add((kvp.Key, kvp.Value));
+        }
+        return hits;
+    }
+
+    private static void DumpSnapshotSection(System.Text.StringBuilder sb, string label,
+        List<(string key, SnapshotFieldValue value)> rows)
+    {
+        sb.Append("=== ").Append(label).Append(" — ").Append(rows.Count).AppendLine(" rows ===");
+        if (rows.Count == 0)
+        {
+            sb.AppendLine("  (no field-index entries match this address)");
+            return;
+        }
+        foreach (var (key, value) in rows.OrderBy(r => r.value.FieldOffset))
+        {
+            sb.Append("  +0x").Append(value.FieldOffset.ToString("X", CultureInfo.InvariantCulture))
+              .Append("  ").Append(value.FieldName)
+              .Append(" (").Append(value.FieldType).Append(")")
+              .Append(" = ").AppendLine(value.ValueDisplay);
+        }
+    }
+
+    private static string ExtractFieldLabel(string key)
+    {
+        // "{asm}|{fqn}|{instAddrOrStatic}|{offset}|{fieldName}" → "+0xN fieldName"
+        int last = key.LastIndexOf('|');
+        if (last < 0) return key;
+        int prev = key.LastIndexOf('|', last - 1);
+        if (prev < 0) return key.Substring(last + 1);
+        string offsetStr = key.Substring(prev + 1, last - prev - 1);
+        string name      = key.Substring(last + 1);
+        // FieldOffset is stored as a ulong — printed in decimal here. Re-render as hex.
+        if (ulong.TryParse(offsetStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out ulong off))
+            return $"+0x{off:X} {name}";
+        return $"+{offsetStr} {name}";
+    }
+
     /// <summary>Build the per-field-name occurrence histogram from the
     /// current <see cref="DiffRows"/>, sorted descending by count, top 30.
     /// Cheap O(N) — typical N is ~1k–2k changed rows.</summary>
