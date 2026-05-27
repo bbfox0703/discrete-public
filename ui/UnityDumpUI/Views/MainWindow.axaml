@@ -2049,11 +2049,33 @@
                               IsChecked="{Binding SpcQuery.NumericOnly, Mode=TwoWay}"
                               ToolTip.Tip="Drop rows where any snapshot's value doesn't parse as a finite double. Required for Increased / Decreased / Delta predicates to mean anything; leave OFF when chasing string fields via Exact / Unchanged."/>
                     <TextBlock Text="Class:" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                    <TextBox Text="{Binding SpcQuery.ClassFilter, Mode=TwoWay}"
-                             PlaceholderText="substring" Width="180"/>
+                    <!-- AutoCompleteBox dropdown is populated from KnownClasses,
+                         which RefreshKnownTypesAndClasses fills with every
+                         ClassFqn seen across hydrated snapshots. Empty until
+                         the first Run hydrates at least one snap — the
+                         control still works as a plain TextBox until then. -->
+                    <AutoCompleteBox Text="{Binding SpcQuery.ClassFilter, Mode=TwoWay}"
+                                     ItemsSource="{Binding SpcQuery.KnownClasses}"
+                                     PlaceholderText="substring"
+                                     MinimumPrefixLength="1"
+                                     FilterMode="ContainsOrdinalCaseSensitive"
+                                     Width="240"
+                                     VerticalAlignment="Center"
+                                     ToolTip.Tip="Substring match against the class fully-qualified name. Dropdown suggestions are sourced from snapshots already loaded into memory; if the list is short, run the query once to hydrate snapshots + populate it."/>
                     <TextBlock Text="Type:" VerticalAlignment="Center"/>
-                    <TextBox Text="{Binding SpcQuery.TypeFilter, Mode=TwoWay}"
-                             PlaceholderText="e.g. Int32" Width="120"/>
+                    <!-- KnownTypes is seeded with the curated managed-primitive
+                         list (System.Int32 / UInt32 / Single / etc.) so even
+                         before any hydrate the user gets useful suggestions
+                         for the common types. Hydrate union adds game-specific
+                         types (UnityEngine.Color, Mortal.Core.GameStat, ...). -->
+                    <AutoCompleteBox Text="{Binding SpcQuery.TypeFilter, Mode=TwoWay}"
+                                     ItemsSource="{Binding SpcQuery.KnownTypes}"
+                                     PlaceholderText="e.g. Int32"
+                                     MinimumPrefixLength="1"
+                                     FilterMode="ContainsOrdinalCaseSensitive"
+                                     Width="180"
+                                     VerticalAlignment="Center"
+                                     ToolTip.Tip="Substring match against the field type. Type 'u' to surface System.UInt16 / UInt32 / UInt64; type 'Vector' for the Unity vector types. Suggestions come from a curated primitive list plus types observed in already-hydrated snapshots."/>
                   </StackPanel>
                 </Border>
               </Expander>
@@ -2083,7 +2105,8 @@
                               AutoGenerateColumns="False"
                               HeadersVisibility="Column"
                               IsReadOnly="False"
-                              GridLinesVisibility="Horizontal">
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True">
                       <DataGrid.Columns>
                         <DataGridCheckBoxColumn Header="Use"
                                                 Binding="{Binding Include, Mode=TwoWay}"
@@ -2101,12 +2124,30 @@
                             </DataTemplate>
                           </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
-                        <DataGridTextColumn Header="Operand"
-                                            Binding="{Binding OperandText, Mode=TwoWay}"
-                                            Width="120"/>
-                        <DataGridTextColumn Header="Operand 2 (Range only)"
-                                            Binding="{Binding Operand2Text, Mode=TwoWay}"
-                                            Width="160"/>
+                        <!-- Operand 1 + 2: TemplateColumn with a live TextBox
+                             rather than DataGridTextColumn. DataGridTextColumn
+                             needs double-click to enter edit mode before
+                             typing works — surprised users into thinking
+                             the field was read-only. Live TextBox accepts
+                             typing on first click. -->
+                        <DataGridTemplateColumn Header="Operand" Width="130">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <TextBox Text="{Binding OperandText, Mode=TwoWay}"
+                                       Margin="2"
+                                       VerticalAlignment="Center"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Operand 2 (Range / DeltaRange only)" Width="220">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <TextBox Text="{Binding Operand2Text, Mode=TwoWay}"
+                                       Margin="2"
+                                       VerticalAlignment="Center"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>
@@ -2126,6 +2167,7 @@
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
                               DoubleTapped="OnSpcResultDoubleTapped">
                       <DataGrid.ContextMenu>
                         <ContextMenu>
