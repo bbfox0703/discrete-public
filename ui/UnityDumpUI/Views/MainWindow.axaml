@@ -1575,18 +1575,18 @@
 
                   <TextBlock Grid.Row="0" Grid.Column="2" Text="Instance cap:"
                              VerticalAlignment="Center" Margin="0,0,6,0"
-                             ToolTip.Tip="Per-class cap on instances captured per snapshot (max 1024). If a class has more live instances than the cap, the heap-walk-order subset is captured. Different snapshots may capture different subsets — frequently re-allocated objects (e.g. UI text wrappers) often surface as added+removed pairs in the diff rather than 'changed', because the instance addresses differ between snapshots."/>
+                             ToolTip.Tip="Per-class cap on instances captured per snapshot (max 8192, raised 2026-05-27 from 1024). If a class has more live instances than the cap, the heap-walk-order subset is captured. Different snapshots may capture different subsets — frequently re-allocated objects (e.g. UI text wrappers) often surface as added+removed pairs in the diff rather than 'changed', because the instance addresses differ between snapshots."/>
                   <NumericUpDown Grid.Row="0" Grid.Column="3"
                                  Value="{Binding Snapshot.InstanceCap, Mode=TwoWay}"
-                                 Minimum="1" Maximum="1024" Increment="50"
+                                 Minimum="1" Maximum="8192" Increment="100"
                                  MinWidth="150" Margin="0,0,12,0"/>
 
                   <TextBlock Grid.Row="0" Grid.Column="4" Text="Array cap:"
                              VerticalAlignment="Center" Margin="0,0,6,0"
-                             ToolTip.Tip="Per-field cap on captured array / List&lt;T&gt; elements (max 256). Longer arrays are truncated; the field's row shows '[N elements, captured M]'."/>
+                             ToolTip.Tip="Per-field cap on captured array / List&lt;T&gt; elements (max 4096, raised 2026-05-27 from 256). Longer arrays are truncated; the field's row shows '[N elements, captured M]'."/>
                   <NumericUpDown Grid.Row="0" Grid.Column="5"
                                  Value="{Binding Snapshot.ArrayCap, Mode=TwoWay}"
-                                 Minimum="0" Maximum="256" Increment="10"
+                                 Minimum="0" Maximum="4096" Increment="50"
                                  MinWidth="150" Margin="0,0,12,0"/>
 
                   <Button Grid.Row="0" Grid.Column="6"

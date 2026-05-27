@@ -2061,12 +2061,19 @@ void RegisterCoreHandlers() {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
 
         // Parse args ----------------------------------------------------------
+        // Hard-caps raised 2026-05-27 — old 1024/256 ceiling forced the
+        // UI to under-cap on dense classes (활俠傳: 139 GameStat instances
+        // with cap=100 missed positions 100..139 entirely; user wanted
+        // headroom to push past 1024 for genuinely-large populations).
+        // New 8192/4096 stays inside the per-class memory budget the
+        // address-finder layer was already designed for (FindAllInstances
+        // internal cap raised in lockstep).
         std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
         if (instanceCap == 0)    instanceCap = 100;
-        if (instanceCap > 1024)  instanceCap = 1024;
+        if (instanceCap > 8192)  instanceCap = 8192;
 
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
-        if (arrayCap > 256)      arrayCap = 256;
+        if (arrayCap > 4096)     arrayCap = 4096;
 
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
@@ -5043,11 +5050,12 @@ void RegisterCoreHandlers() {
         [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
+        // Hard-caps mirror the Mono handler — see 2026-05-27 raise note above.
         std::size_t instanceCap = static_cast<std::size_t>(args.value("instanceCap", 100));
         if (instanceCap == 0)    instanceCap = 100;
-        if (instanceCap > 1024)  instanceCap = 1024;
+        if (instanceCap > 8192)  instanceCap = 8192;
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
-        if (arrayCap > 256)      arrayCap = 256;
+        if (arrayCap > 4096)     arrayCap = 4096;
 
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;

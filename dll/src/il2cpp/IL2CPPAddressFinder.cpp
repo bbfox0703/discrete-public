@@ -682,7 +682,9 @@ void SehSweepRegion(
 BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     BulkInstancesResult out;
     if (perClassCap == 0) perClassCap = 100;
-    if (perClassCap > 4096) perClassCap = 4096;
+    // Raised 4096 → 8192 on 2026-05-27 in lockstep with the Mono finder
+    // + ExportAPI snapshotBegin ceiling raise.
+    if (perClassCap > 8192) perClassCap = 8192;
 
     // Cache is mandatory — without it we have no class-pointer set to
     // binary-search against.

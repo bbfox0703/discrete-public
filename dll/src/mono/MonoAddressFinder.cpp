@@ -766,7 +766,10 @@ bool SehReadKlassAt(std::uintptr_t vtable, std::uintptr_t& outKlass) noexcept {
 BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     BulkInstancesResult out;
     if (perClassCap == 0) perClassCap = 100;
-    if (perClassCap > 4096) perClassCap = 4096;
+    // Raised 4096 → 8192 on 2026-05-27 to match ExportAPI snapshotBegin
+    // hard-cap. Dense-population classes (UnityEngine.Transform, custom
+    // game state containers) can legitimately exceed 4096 live instances.
+    if (perClassCap > 8192) perClassCap = 8192;
 
     if (!BuildClassRangeCache()) {
         Log::Write(MagicStrings::LogCategoryScan,
