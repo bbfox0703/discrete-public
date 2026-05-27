@@ -1,6 +1,105 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-27 — **Phase 29 polish bundle + 32-bit OOM mitigation SHIPPED**, build #647 / DLL #645).
+**Branch**: `dev` (2026-05-28 — **Snapshot FindAllInstances false-positive root-cause FIX SHIPPED + LIVE-VERIFIED**, build #664 UI / DLL #650).
+
+## TL;DR — what's left to pick up (build #664 session)
+
+**Snapshot false-positive bug — proper fix SHIPPED + live-verified on
+Mortal (Legend of Mortal / 活俠傳, Mono x86).** Eliminates the multi-
+session mystery where known-stable instance addresses (CE-pinned
+money 銀兩 GameStat) didn't surface in the diff DataGrid even with
+the right filters.
+
+### Root cause
+
+`FindAllInstances` does a 2-level scan — for each qword in memory,
+deref it and check whether the deref is in our known class set.
+That accepts not just real `MonoVTable*` pointers, but also any
+**non-vtable Mono structure whose first qword happens to be a
+class pointer** — RGCTX cache slots, internal Mono lookup tables
+that store vtable pointer values as their payload, etc. On dense
+classes (Mortal's `GameStat` has 152 live instances) the false
+positives crowded out real instances on the auto-clamped 256 cap,
+silently dropping the money instance and making the diff useless.
+
+### Fix (DLL #650, MonoAddressFinder.cpp)
+
+**Structural validation via the MonoDomain field.** MonoVTable
+layout (from `mono/metadata/class-internals.h`):
+
+```
++0           MonoClass*       (existing classSet check)
++ptr_size    MonoGCDescriptor gc_descr
++2*ptr_size  MonoDomain*      ← NEW: must equal GetRootDomain()
++3*ptr_size  MonoType*
+```
+
+Real vtables ALWAYS have the root domain pointer at offset
+`2*ptr_size`. Random non-vtable structures whose first qword is a
+class pointer almost never coincidentally also have the root
+domain pointer at exactly that offset. One extra SEH-safe pointer
+read per candidate, no Mono runtime calls, zero BDWGC interaction
+= zero risk of the build #637 wedge.
+
+### Live-verify result on Mortal
+
+| Metric | Before (DLL #648 partial fix) | After (DLL #650 proper fix) |
+|---|---|---|
+| GameStat captured per snapshot | 256 (cap hit, mostly garbage) | **134-135** (matches live `findInstances` ~152) |
+| UI memory per snapshot | 1.5+ GB | **~99-139 MB** (15× reduction) |
+| Total UI memory (2 snapshots) | 3+ GB | **~238 MB** |
+| Money diff row | Missing — known-stable address not in capture | **`Mortal.Core.GameStat _value 0x28 at 0x29BFACC0 10160 → 9910 (Δ=-250)`** ✓ |
+| Diff total | `7,110 changed, 759,804 added, ... 0 found in value range` | `1,688 changed, 46,999 added, 18,839 removed → 50 in [9000+]` |
+
+Per-instance diff dump on the money GameStat now reads as expected:
+
+```
+[=] _name = "銀兩"   _property = 99   _type = 3
+[~] +0x28 _value : 10160 → 9910
+[=] _min, _max, _limitAddition, _default, m_CachedPtr, OnValueChanged, _levelText, _statAdditionData, _totalAddData (all unchanged)
+```
+
+### Residual / known minor
+
+One stray entry slipping through per snapshot at addresses in
+0xB2Dxxxxxx range (Mono-related family of structures that happen
+to have both a class pointer + domain pointer at the right
+offsets — probably per-method or generic-instantiation MonoVTable
+aliases). ~99% precision, not blocking. Could refine further by
+also validating `*(qw + 3*ptr_size)` is a plausible `MonoType*`,
+but diminishing returns.
+
+### Companion mitigations from yesterday (still active)
+
+The 32-bit OOM mitigation bundle from yesterday (build #645)
+stays as a safety net but is **much less essential now** that
+capture isn't bloated with noise:
+
+1. **DLL pre-check abort gate**: refuses `snapshotBegin` if game
+   process committed memory ≥ 3 GB.
+2. **UI auto-clamp**: handshake carries pointer size; 32-bit
+   targets get InstanceCap ≤ 256 / ArrayCap ≤ 64 by default.
+3. **Live game-memory banner** in Snapshot tab: real-time
+   WorkingSet + committed display with warning thresholds at
+   2 GB / 3 GB.
+
+With #650's noise reduction the user could probably push
+InstanceCap back to 512 or higher on 32-bit Mortal without
+hitting the OOM ceiling.
+
+### Outstanding for next session
+
+- Phase 29c (SQLite cross-session persistence) still deferred.
+- Phase 29d (SPC constraint query) still deferred.
+- Phase 29e (Full/Differential snapshot architecture) proposal
+  documented in plan.md, deferred until multi-snapshot workflow
+  needs it.
+- Phase 29f (residual false-positives — the 0xB2D family) —
+  pure polish, defer unless they cause user-visible issues.
+- Mono static field VALUE capture (opt-in checkbox) still
+  deferred.
+
+---
 
 ## TL;DR — what's left to pick up (build #647 session)
 
