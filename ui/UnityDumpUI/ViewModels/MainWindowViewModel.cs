@@ -607,6 +607,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 }
             }
 
+            // Phase 29-polish (2026-05-27) — hand the game-process
+            // bitness + current memory to the Snapshot VM. On 32-bit
+            // targets this auto-clamps InstanceCap/ArrayCap downward
+            // to safe defaults (256 / 64) so the user doesn't trip
+            // the 4 GB OOM CTD that build #646 hit on 활俠傳. Also
+            // populates the "Game: 32-bit Mono — WorkingSet X GB"
+            // banner that warns as memory climbs toward 3 GB.
+            Snapshot.OnGameConnected(
+                hs.GamePointerSize ?? 0,
+                hs.GameWorkingSet  ?? 0UL,
+                hs.GamePrivateUsage ?? 0UL);
+
             // Phase 8: kick off assembly fetch so the left pane populates
             // without an extra click. Failures surface on Browser.ErrorMessage.
             _ = Browser.RefreshAssembliesCommand.ExecuteAsync(null);

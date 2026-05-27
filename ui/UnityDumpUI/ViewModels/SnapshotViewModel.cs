@@ -55,6 +55,25 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// 256 array elements (5–10× the earlier defaults).</summary>
     private long _captureStartWorkingSet;
 
+    /// <summary>Defaults for the non-32-bit case (modern x64 games).
+    /// Kept as the "safe high water mark" so <see cref="OnGameConnected"/>
+    /// can restore them when the user reconnects to an x64 game after
+    /// having been clamped on an earlier x86 connection.</summary>
+    private const int kDefaultInstanceCapX64 = 512;
+    private const int kDefaultArrayCapX64    = 256;
+
+    /// <summary>Clamped defaults for 32-bit Mono games. Chosen 2026-05-27
+    /// after the build #646 활俠傳 CTD: the DLL caches the whole
+    /// snapshot's JSON payload inside the game process, so on a target
+    /// with a 4 GB user-space ceiling the post-bump 512/256 defaults
+    /// pushed snap #2 past OOM. 256/64 leaves comfortable headroom
+    /// (smaller cache + smaller per-class metadata). User can still
+    /// push higher manually via the NumericUpDowns if they accept the
+    /// risk — and the DLL also has a 3 GB pre-check refusal as a hard
+    /// backstop.</summary>
+    private const int kDefaultInstanceCapX86 = 256;
+    private const int kDefaultArrayCapX86    = 64;
+
     public SnapshotViewModel(BackendAdapter backend, FileLogger logger)
     {
         _backend = backend;
@@ -138,6 +157,88 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// payoff: lets the user filter by value range across the whole
     /// captured state, not just what differed between A and B.</summary>
     [ObservableProperty] private bool _includeUnchangedRows;
+
+    // ----- Game-process memory + bitness (Phase 29-polish 2026-05-27) -----
+
+    /// <summary>Game-process pointer size, populated from the handshake.
+    /// <c>4</c> = 32-bit Mono target (where DLL-side JSON cache risks
+    /// 4 GB OOM on snap #2); <c>8</c> = x64 (no such risk); <c>0</c> =
+    /// not yet connected / unknown.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsTarget32Bit))]
+    [NotifyPropertyChangedFor(nameof(GameMemoryBanner))]
+    private int _gamePointerSize;
+
+    /// <summary>Last game-process WorkingSet sample (bytes), updated on
+    /// every handshake + every snapshotBegin response.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(GameMemoryBanner))]
+    private ulong _gameWorkingSet;
+
+    /// <summary>Last game-process PrivateUsage sample (bytes). On x86
+    /// targets this is the metric that matters — physical mapping
+    /// (WorkingSet) can stay low while committed virtual climbs and
+    /// triggers OOM.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(GameMemoryBanner))]
+    private ulong _gamePrivateUsage;
+
+    /// <summary>True when the connected game is 32-bit. Drives the
+    /// auto-clamped defaults + the "32-bit safety banner" in the
+    /// snapshot tab.</summary>
+    public bool IsTarget32Bit => GamePointerSize == 4;
+
+    /// <summary>Human-friendly status string shown above the capture
+    /// controls: "Game: 32-bit Mono, 1.42 GB / 1.78 GB committed
+    /// (approaching 4 GB ceiling — snapshot caps auto-clamped)".
+    /// Empty when not connected.</summary>
+    public string GameMemoryBanner
+    {
+        get
+        {
+            if (GamePointerSize == 0) return string.Empty;
+            string bits = GamePointerSize == 4 ? "32-bit" : "64-bit";
+            string ws   = GameWorkingSet   > 0 ? FormatMemory((long)GameWorkingSet)   : "?";
+            string pu   = GamePrivateUsage > 0 ? FormatMemory((long)GamePrivateUsage) : "?";
+            string suffix = string.Empty;
+            if (GamePointerSize == 4 && GamePrivateUsage > 0)
+            {
+                // 3 GB is the DLL's pre-check refusal threshold; warn earlier.
+                const ulong kWarnAt = 2UL * 1024 * 1024 * 1024;       // 2 GB
+                const ulong kDanger = 3UL * 1024 * 1024 * 1024;       // 3 GB (DLL refuses)
+                if (GamePrivateUsage >= kDanger)
+                    suffix = " ⛔ over 3 GB — DLL will refuse next snapshot";
+                else if (GamePrivateUsage >= kWarnAt)
+                    suffix = " ⚠ approaching 4 GB ceiling — consider lowering caps further";
+                else
+                    suffix = " — snapshot caps auto-clamped for safety";
+            }
+            return $"Game: {bits} Mono — WorkingSet {ws}, committed {pu}{suffix}";
+        }
+    }
+
+    /// <summary>Hook fired from <c>MainWindowViewModel</c> after every
+    /// successful handshake. Updates the bitness + memory display and,
+    /// on 32-bit targets, clamps <see cref="InstanceCap"/> /
+    /// <see cref="ArrayCap"/> downward to the safe defaults (256 / 64)
+    /// if they're currently above. Never clamps upward — user manually-
+    /// chosen lower caps stay respected.</summary>
+    public void OnGameConnected(int pointerSize, ulong workingSet, ulong privateUsage)
+    {
+        GamePointerSize  = pointerSize;
+        GameWorkingSet   = workingSet;
+        GamePrivateUsage = privateUsage;
+
+        if (pointerSize == 4)
+        {
+            if (InstanceCap > kDefaultInstanceCapX86) InstanceCap = kDefaultInstanceCapX86;
+            if (ArrayCap    > kDefaultArrayCapX86)    ArrayCap    = kDefaultArrayCapX86;
+        }
+        // On x64 we don't auto-raise. If the user manually picked low caps
+        // on a previous x86 session and reconnects to x64, they probably
+        // still want their pick — the high defaults are a fresh-install
+        // thing, not a "snap back to wide-open" behaviour.
+    }
 
     // -----------------------------------------------------------------------
     // Selection state.
@@ -312,6 +413,25 @@ public sealed partial class SnapshotViewModel : ObservableObject
             var begin = await _backend.SnapshotBeginAsync(
                 scope, cap, arr, IncludeSystemAssemblies, ct).ConfigureAwait(true);
             StopElapsedTimer();  // Phase 1 done; manual status from here.
+
+            // Refresh game-process memory + bitness from the response,
+            // even on the error path — the DLL's 32-bit OOM refusal
+            // includes those fields so the banner reflects current state
+            // (and the auto-clamp re-fires if the user reconnected
+            // between snapshots).
+            if (begin.GamePointerSize is int ps && ps > 0)
+            {
+                OnGameConnected(
+                    ps,
+                    begin.GameWorkingSet  ?? GameWorkingSet,
+                    begin.GamePrivateUsage ?? GamePrivateUsage);
+            }
+            else if (begin.GameWorkingSet is { } gws)
+            {
+                GameWorkingSet = gws;
+                if (begin.GamePrivateUsage is { } gpu) GamePrivateUsage = gpu;
+            }
+
             if (!string.IsNullOrEmpty(begin.Error))
             {
                 ErrorMessage  = begin.Error;
@@ -352,12 +472,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 // chunk so the user sees the counter move — fixes the
                 // "looks frozen" perception when total snapshot is 100s+.
                 long wsNow = GetWorkingSet();
+                string gameMem = GameWorkingSet > 0
+                    ? $" — game {FormatMemory((long)GameWorkingSet)}"
+                    : string.Empty;
                 StatusMessage = string.Format(CultureInfo.InvariantCulture,
-                    "Streaming chunk {0}/{1} ({2:N0} of {3:N0} classes)… capture {4:F1}s + stream {5:F1}s — process {6} (+{7})",
+                    "Streaming chunk {0}/{1} ({2:N0} of {3:N0} classes)… capture {4:F1}s + stream {5:F1}s — UI {6} (+{7}){8}",
                     chunkCount, expectedChunks,
                     classes.Count, totalClasses,
                     beginElapsedSec, chunkPhaseSw.Elapsed.TotalSeconds,
-                    FormatMemory(wsNow), FormatMemory(wsNow - _captureStartWorkingSet));
+                    FormatMemory(wsNow), FormatMemory(wsNow - _captureStartWorkingSet),
+                    gameMem);
                 if (chunk.Done) break;
                 cursor = chunk.NextCursor;
             }
@@ -401,11 +525,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 : string.Empty;
             long wsEnd = GetWorkingSet();
             string memNote = wsEnd > 0
-                ? $", process {FormatMemory(wsEnd)} (+{FormatMemory(wsEnd - _captureStartWorkingSet)})"
+                ? $", UI {FormatMemory(wsEnd)} (+{FormatMemory(wsEnd - _captureStartWorkingSet)})"
                 : string.Empty;
-            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldIndex.Count:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}).";
+            string gameMemNote = GameWorkingSet > 0
+                ? $", game {FormatMemory((long)GameWorkingSet)} ws / {FormatMemory((long)GamePrivateUsage)} committed"
+                : string.Empty;
+            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldIndex.Count:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).";
             _logger.Write(Constants.LogCategoryView,
-                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldIndex.Count} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet}");
+                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldIndex.Count} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)

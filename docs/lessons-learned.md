@@ -2606,7 +2606,7 @@ values against the XAML's `<TabItem Header=` ordering settles it.
 
 ---
 
-### Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2 — DLL-side JSON cache pushes past 4 GB user space  🚧 **OPEN (mitigation pending)**
+### Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2 — DLL-side JSON cache pushes past 4 GB user space  ✅ **MITIGATED 2026-05-27 (DLL #645 + UI #647)**
 
 **Symptom**: 활俠傳 (Mono x86, Unity 2020.3.49f1, PID 26296) on
 build #646:
@@ -2648,32 +2648,39 @@ responding".
 300/50, today's default is 512/256. Same game, same UI build, same
 DLL build — the only variable is the cap.
 
-**Mitigation plan** (deferred to next session — recorded as a
-plan.md TODO):
+**Mitigation shipped 2026-05-27** (DLL build #645, UI #647):
 
-1. **Auto-clamp defaults when `IsWow64`** — the UI already
-   tracks bitness at inject time (`row.IsWow64` in
-   [MainWindowViewModel.cs:873](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs)).
-   Plumb that flag into `SnapshotViewModel` and clamp
-   `InstanceCap` to ≤ 256 + `ArrayCap` to ≤ 64 on x86 targets
-   by default, with a banner explaining the rationale. User
-   can still push higher manually if they accept the risk.
-2. **Surface game-process working-set** — the DLL knows
-   `GetCurrentProcess().WorkingSet64`; report it in the
-   `snapshotBegin` response so the UI status line shows
-   *game* memory in addition to the UI's own WorkingSet.
-   Today we only see UI-side memory, which is misleading.
-3. **Streaming-chunk architecture (deeper fix)** — build
-   chunks lazily server-side rather than caching the entire
-   payload up front. Each `snapshotChunk` does its own walk
-   slice, returns immediately, no long-lived in-game cache.
-   Bigger refactor; defer unless option 1 isn't enough.
+1. **DLL pre-check abort gate** in both `snapshotBegin` handlers
+   — `QueryProcessMemory()` samples `GetProcessMemoryInfo`, and
+   if `pointerSize == 4` AND `privateUsage ≥ 3 GB` the handler
+   returns `{"error": "Game process at X.X GB private memory —
+   refusing snapshot..."}` before touching the heap walker.
+   Threshold = 4 GB ceiling − ~1 GB safety budget for our own
+   JSON cache. Hard backstop: even if everything else fails,
+   the DLL refuses to do the dangerous allocation.
+2. **Auto-clamp defaults when `pointerSize == 4`** — handshake
+   now carries `game_pointer_size`, `game_working_set`,
+   `game_private_usage`.
+   `MainWindowViewModel.ConnectAsync` calls
+   `SnapshotViewModel.OnGameConnected(ps, ws, pu)` after every
+   handshake, which clamps `InstanceCap` to ≤ 256 +
+   `ArrayCap` to ≤ 64 on 32-bit targets if currently above.
+   Never clamps upward — manual user picks stay respected.
+3. **Game memory banner** in the Snapshot tab — visible
+   post-handshake: `Game: 32-bit Mono — WorkingSet 1.42 GB,
+   committed 1.78 GB — snapshot caps auto-clamped for safety`.
+   Suffix escalates: `⚠ approaching 4 GB ceiling` at 2 GB,
+   `⛔ over 3 GB — DLL will refuse next snapshot` at 3 GB.
+4. **Status enrichment** — streaming + final snapshot status
+   lines show game-process memory alongside UI memory so the
+   user can watch the game grow during capture.
 
-**Rule** (until mitigation lands): on 32-bit Mono targets, the
-**user must manually lower InstanceCap to ≤ 256** before taking
-the second snapshot if the first one shows UI WorkingSet > 1 GB.
-ArrayCap is more forgiving but ≤ 128 is a safe ceiling on
-games with lots of array fields.
+Option not taken (deferred — gate makes it unnecessary unless
+a user explicitly needs > 256/64 caps on x86):
+**Streaming-chunk architecture** — build chunks lazily
+server-side rather than caching the entire payload upfront.
+Bigger refactor; revisit only if a user reports the DLL
+refusal blocking a legitimate use case.
 
 **Detection hint**: when `Snapshot.Take failed: server closed
 pipe before responding` appears in `ui/view/current.log` AND the

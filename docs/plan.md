@@ -2234,29 +2234,50 @@ Changed only + Class filter" stack.
   Constants swapped + comment added so future tab insertions
   notice the sync requirement.
 
-- [ ] **32-bit snapshot OOM mitigation** — NEW 2026-05-27.
-  Build #646 live-smoke on 활俠傳 (Mono x86) showed snap #2
-  CTDs the game when the post-bump defaults (InstanceCap=512 /
-  ArrayCap=256) push the DLL-side cached JSON past the 4 GB
-  user space. See
-  [lessons-learned.md §"Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2"](lessons-learned.md#phase-29-high-default-caps-wedge-32-bit-mono-games-on-snapshot-2--dll-side-json-cache-pushes-past-4-gb-user-space)
-  for the full diagnostic. Three mitigation paths, in
-  preference order:
-  1. **Auto-clamp defaults when game is x86** — plumb
-     `row.IsWow64` from
-     [MainWindowViewModel.cs:873](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs)
-     into `SnapshotViewModel` + clamp to ≤256 instance /
-     ≤64 array on x86 by default, with banner. Manual
-     override still allowed. Estimated 0.5 day.
-  2. **Surface game-process working-set** in `snapshotBegin`
-     response so UI shows game memory alongside its own
-     (today's `Process.WorkingSet64` only sees UI). Lets
-     users see the actual danger zone in real time.
-     Estimated 0.5 day.
-  3. **Streaming-chunk architecture** — build chunks
-     lazily server-side; abandon the upfront full-payload
-     cache. Bigger refactor, defer unless 1+2 isn't enough.
-     Estimated 2-3 days.
+- [x] **32-bit snapshot OOM mitigation — options #1 + #2 +
+  pre-snapshot abort gate SHIPPED 2026-05-27** (DLL build #645).
+  Options #1 (auto-clamp on x86) + #2 (surface game memory) +
+  the user's bonus ask ("can we abort if approaching 2 G/4 G
+  boundary?") landed in one bundle.
+  - **DLL**: new `QueryProcessMemory` helper using
+    `GetProcessMemoryInfo` returns `workingSet` / `privateUsage`
+    / `pointerSize` (= `sizeof(void*)` in the game's address
+    space). Wired into `BuildHandshakeJson` (so UI sees bitness
+    + current memory on every connect) and both `snapshotBegin`
+    handlers (Mono + IL2CPP) as a fresh post-decode sample in
+    the response.
+  - **DLL pre-check abort gate** at the top of each
+    `snapshotBegin`: if pointerSize == 4 AND privateUsage ≥
+    3 GB, return a structured error refusing to run the
+    snapshot. Threshold chosen as 4 GB ceiling − ~1 GB
+    safety margin for our own JSON cache. The 활俠傳 build
+    #646 CTD becomes a clean "Game process at 3.2 GB private
+    memory — refusing snapshot to avoid OOM crash" instead.
+  - **UI Core**: `HandshakeResult` + `SnapshotBeginResult`
+    gained `GamePointerSize` / `GameWorkingSet` /
+    `GamePrivateUsage` JSON-bound properties.
+  - **UI VM**: `SnapshotViewModel.OnGameConnected(ps, ws, pu)`
+    called from `MainWindowViewModel.ConnectAsync` after every
+    handshake. On 32-bit targets, clamps InstanceCap down to
+    256 + ArrayCap down to 64 if currently above (never
+    clamps upward — manual user picks stay respected).
+  - **UI banner**: `GameMemoryBanner` property surfaces
+    "Game: 32-bit Mono — WorkingSet 1.42 GB, committed 1.78 GB
+     — snapshot caps auto-clamped for safety". Suffix
+    escalates to "⚠ approaching 4 GB ceiling" at 2 GB and
+    "⛔ over 3 GB — DLL will refuse next snapshot" at 3 GB.
+    New Border bound to `IsNotNullOrEmpty` so the banner
+    only appears post-handshake.
+  - **Status enrichment**: streaming-chunk + final-snapshot
+    status lines now show game-process memory alongside the
+    UI process memory.
+
+  **Option #3 (streaming-chunk architecture)** stays deferred —
+  the pre-check refusal closes the hard-CTD path, and the
+  auto-clamp keeps snap #2 inside safe range on the common
+  32-bit cases. Streaming only matters if a user wants to
+  push past 256/64 caps on x86 (and the DLL refusal banner
+  will make that obvious).
 
 - [ ] **Mono static field VALUE capture** (optional, user-opt-in
   checkbox in Snapshot tab): currently statics on Mono only

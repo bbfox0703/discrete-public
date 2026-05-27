@@ -1,6 +1,55 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-27 — **Phase 29 polish bundle SHIPPED** — noise-reduction filters + Show Unchanged + DLL cap raise + live memory tracking + tab-index fix, build #644).
+**Branch**: `dev` (2026-05-27 — **Phase 29 polish bundle + 32-bit OOM mitigation SHIPPED**, build #647 / DLL #645).
+
+## TL;DR — what's left to pick up (build #647 session)
+
+**32-bit snapshot OOM mitigation SHIPPED.** Closes the build #646
+활俠傳 CTD with a four-layer defense:
+
+1. **DLL pre-check abort gate** (Mono + IL2CPP `snapshotBegin`):
+   refuses the snapshot if game is x86 AND `PrivateUsage` ≥ 3 GB.
+   Returns structured `{"error": "Game process at X.X GB private
+   memory — refusing snapshot to avoid OOM crash on this 32-bit
+   Mono target. Lower InstanceCap (try 128) and ArrayCap (try 32)
+   then retry, or restart the game to free memory before
+   snapshotting."}`. Game-CTD becomes a recoverable UI banner.
+2. **UI auto-clamp on x86 connect**: handshake now carries
+   `game_pointer_size` / `game_working_set` / `game_private_usage`.
+   `SnapshotViewModel.OnGameConnected(ps, ws, pu)` clamps
+   `InstanceCap` ≤ 256 + `ArrayCap` ≤ 64 on 32-bit targets if
+   currently above. Never clamps upward — manual user picks stay
+   respected.
+3. **Game memory banner** in the Snapshot tab: post-handshake row
+   shows `Game: 32-bit Mono — WorkingSet 1.42 GB, committed 1.78 GB
+    — snapshot caps auto-clamped for safety`. Suffix escalates to
+   `⚠ approaching 4 GB ceiling` at 2 GB and `⛔ over 3 GB — DLL
+   will refuse next snapshot` at 3 GB. User sees danger before
+   they hit the wall.
+4. **Status enrichment**: streaming + final status messages now
+   show both UI WorkingSet AND game-process memory (WorkingSet +
+   committed), so the user can watch the game grow during
+   capture.
+
+**`ShowChanged` default flipped to OFF** the same session — user
+moved primary workflow to value-range / unchanged / added+removed.
+
+DLL build #645 clean (both Mono + IL2CPP + x86 Mono, fresh
+10:50 timestamps). UI build clean, 363 tests still green.
+
+### Outstanding for next session
+
+* Live-smoke the mitigation: take snap #1 on 활俠傳, **verify**:
+  - Banner shows "Game: 32-bit Mono ..." after inject
+  - Defaults auto-clamp to 256/64 (NumericUpDowns reflect)
+  - Snap #2 either completes safely OR fails fast with the
+    "Game process at X.X GB" refusal banner (no game CTD)
+* Phase 29c (SQLite persistence) and 29d (SPC constraint query)
+  still deferred from the original Phase 29 plan.
+* Mono static field VALUE capture (opt-in checkbox) still
+  deferred.
+
+---
 
 ## TL;DR — what's left to pick up (build #644 session)
 
