@@ -282,6 +282,44 @@ public partial class MainWindow : Window
         await clipboard.SetDataAsync(transfer);
     }
 
+    /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
+    /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir
+    /// or the platform default — either way it's created lazily so the
+    /// shell call never sees a missing path.</summary>
+    private void OnOpenSnapshotDbFolderClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        string folder = vm.Snapshot.SnapshotDbFolder;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName        = folder,
+                UseShellExecute = true,
+            });
+        }
+        catch (System.Exception ex)
+        {
+            vm.Snapshot.ErrorMessage = $"Open folder failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>Phase 29c-7: launch the Settings modal so the user can
+    /// change DB directory / AutoSave / AutoPrune threshold. The modal
+    /// edits a clone of UserSettings and hands the updated copy back via
+    /// ApplySettingsAsync on OK.</summary>
+    private async void OnSnapshotSettingsClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var draft = vm.Snapshot.Settings.Clone();
+        var dialog = new SnapshotSettingsWindow(draft, this.StorageProvider);
+        var result = await dialog.ShowDialog<UserSettings?>(this);
+        if (result is not null)
+        {
+            await vm.Snapshot.ApplySettingsAsync(result).ConfigureAwait(true);
+        }
+    }
+
     private async Task<ProcessRow?> ShowPickerDialogAsync()
     {
         if (DataContext is not MainWindowViewModel vm) return null;

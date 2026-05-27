@@ -1604,13 +1604,13 @@
                              VerticalAlignment="Center" Margin="0,6,6,0"/>
                   <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="6"
                            Text="{Binding Snapshot.ScopeAssembliesText, Mode=TwoWay}"
-                           PlaceholderText="(empty = 全抓 user assemblies. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"
+                           PlaceholderText="(empty = capture every user assembly. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"
                            Margin="0,6,12,0"/>
                   <CheckBox Grid.Row="1" Grid.Column="7" Grid.ColumnSpan="2"
                             Content="Include system assemblies"
                             IsChecked="{Binding Snapshot.IncludeSystemAssemblies, Mode=TwoWay}"
                             Margin="0,6,0,0"
-                            ToolTip.Tip="When unchecked (default), 全抓 mode skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus — common Unity engine + .NET system + popular-support assemblies that flood the snapshot with non-gameplay state. Check to keep everything."/>
+                            ToolTip.Tip="When unchecked (default), full-capture mode skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus — common Unity engine + .NET system + popular-support assemblies that flood the snapshot with non-gameplay state. Check to keep everything."/>
                 </Grid>
               </Border>
 
@@ -1639,6 +1639,43 @@
                              FontSize="11" Opacity="0.85"
                              IsVisible="{Binding Snapshot.FilterResultLine, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                 </StackPanel>
+              </Border>
+
+              <!-- Phase 29c-7: DB status line + folder / settings buttons.
+                   Auto-hides when no game is connected (DbStatusLine empty). -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F60C0FF" CornerRadius="3"
+                      IsVisible="{Binding Snapshot.DbStatusLine, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Text="{Binding Snapshot.DbStatusLine}"
+                             FontSize="11" VerticalAlignment="Center"
+                             TextWrapping="NoWrap"/>
+                  <Button Content="📁 Open folder"
+                          Click="OnOpenSnapshotDbFolderClicked"
+                          Padding="6,2" Margin="6,0,0,0"
+                          ToolTip.Tip="Open the snapshots directory in Explorer."/>
+                  <Button Content="⚙ Settings…"
+                          Click="OnSnapshotSettingsClicked"
+                          Padding="6,2"
+                          ToolTip.Tip="Configure snapshot DB directory, auto-save, and auto-prune threshold."/>
+                </StackPanel>
+              </Border>
+
+              <!-- Phase 29c-5: cross-session / cross-build banner. Color
+                   shifts from blue (info, statics-only auto-applied) to
+                   yellow (cross-build, more aggressive warning) via a
+                   simple "⚠" leading-char check; empty banner collapses. -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#26FFA640" CornerRadius="3"
+                      IsVisible="{Binding Snapshot.CrossSessionBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <DockPanel>
+                  <CheckBox DockPanel.Dock="Right"
+                            Content="Force include instances"
+                            IsChecked="{Binding Snapshot.ForceIncludeInstancesCrossSession, Mode=TwoWay}"
+                            ToolTip.Tip="Cross-session diff defaults to statics-only because instance addresses change every game launch. Tick to include instances anyway — produces add/remove noise."/>
+                  <TextBlock Text="{Binding Snapshot.CrossSessionBanner}"
+                             TextWrapping="Wrap" FontSize="11"/>
+                </DockPanel>
               </Border>
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1FFF6060" CornerRadius="3"
@@ -1670,8 +1707,8 @@
                               HorizontalAlignment="Stretch" Margin="0,0,4,0"/>
                     <Button Grid.Column="2" Content="Drop A"
                             Command="{Binding Snapshot.DropSnapshotACommand}"
-                            MinWidth="70" Margin="0,0,12,0"
-                            ToolTip.Tip="Drop the snapshot selected in A. Frees its ~estimated UI memory."/>
+                            MinWidth="70" Margin="0,0,4,0"
+                            ToolTip.Tip="Drop the snapshot selected in A from memory. Does NOT touch the saved DB copy."/>
 
                     <TextBlock Grid.Column="3" Text="B:"
                                VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -1694,6 +1731,45 @@
                     <Button Grid.Column="7" Content="Diff A → B"
                             Command="{Binding Snapshot.DiffCommand}"
                             MinWidth="120"/>
+                  </Grid>
+
+                  <!-- Phase 29c-4: per-side persistence row. Save flips the
+                       envelope from in-memory only ("💾 not saved") to
+                       on-disk ("✓ saved"); Delete removes from BOTH memory
+                       AND the DB. Drop A/B (above) only frees memory. -->
+                  <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto" RowDefinitions="Auto" Margin="0,4,0,0">
+                    <TextBlock Grid.Column="0" Text="A:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <Button Grid.Column="1" Content="💾 Save A"
+                            Command="{Binding Snapshot.SaveSnapshotCommand}"
+                            CommandParameter="{Binding Snapshot.SelectedSnapshotA}"
+                            Margin="0,0,4,0"
+                            ToolTip.Tip="Persist the snapshot selected in A to the per-game DB. Idempotent — already-saved snapshots are skipped."/>
+                    <Button Grid.Column="2" Content="🗑 Delete A from DB"
+                            Command="{Binding Snapshot.DeleteSnapshotFromDbCommand}"
+                            CommandParameter="{Binding Snapshot.SelectedSnapshotA}"
+                            ToolTip.Tip="Permanently remove A from both memory AND the saved DB. Cannot be undone."/>
+
+                    <TextBlock Grid.Column="4" Text="B:" VerticalAlignment="Center" Margin="12,0,6,0"/>
+                    <Button Grid.Column="5" Content="💾 Save B"
+                            Command="{Binding Snapshot.SaveSnapshotCommand}"
+                            CommandParameter="{Binding Snapshot.SelectedSnapshotB}"
+                            Margin="0,0,4,0"/>
+                    <Button Grid.Column="6" Content="🗑 Delete B from DB"
+                            Command="{Binding Snapshot.DeleteSnapshotFromDbCommand}"
+                            CommandParameter="{Binding Snapshot.SelectedSnapshotB}"/>
+                  </Grid>
+
+                  <!-- Persistence-status hints for the currently-selected pair.
+                       Show even for envelopes the user hasn't pressed Save on
+                       yet so they know what's at risk. -->
+                  <Grid ColumnDefinitions="Auto,*,Auto,*" RowDefinitions="Auto" Margin="0,2,0,0"
+                        IsVisible="{Binding Snapshot.SelectedSnapshotA, Converter={x:Static ObjectConverters.IsNotNull}}">
+                    <TextBlock Grid.Column="0" Text="A status:" Opacity="0.7" FontSize="11" Margin="0,0,6,0"/>
+                    <TextBlock Grid.Column="1" Text="{Binding Snapshot.SelectedSnapshotA.PersistenceStatus}" FontSize="11"/>
+                    <TextBlock Grid.Column="2" Text="B status:" Opacity="0.7" FontSize="11" Margin="12,0,6,0"
+                               IsVisible="{Binding Snapshot.SelectedSnapshotB, Converter={x:Static ObjectConverters.IsNotNull}}"/>
+                    <TextBlock Grid.Column="3" Text="{Binding Snapshot.SelectedSnapshotB.PersistenceStatus}" FontSize="11"
+                               IsVisible="{Binding Snapshot.SelectedSnapshotB, Converter={x:Static ObjectConverters.IsNotNull}}"/>
                   </Grid>
                 </StackPanel>
               </Border>

@@ -1,0 +1,67 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="UnityDumpUI.Views.SnapshotSettingsWindow"
+        Title="Snapshot Settings"
+        Width="640" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+    <DockPanel Margin="14">
+        <!-- Footer buttons -->
+        <StackPanel DockPanel.Dock="Bottom"
+                    Orientation="Horizontal" HorizontalAlignment="Right"
+                    Spacing="8" Margin="0,14,0,0">
+            <Button Content="Cancel" Click="OnCancelClicked" MinWidth="80"/>
+            <Button Content="Save"   Click="OnSaveClicked"   MinWidth="80" IsDefault="True"/>
+        </StackPanel>
+
+        <StackPanel Spacing="12">
+            <!-- DB directory -->
+            <StackPanel Spacing="2">
+                <TextBlock Text="Snapshot DB directory" FontWeight="SemiBold"/>
+                <TextBlock Text="Where per-game .db files live. Leave blank to use the default under %LOCALAPPDATA%\Discrete_UEDumper\snapshots\."
+                           TextWrapping="Wrap" Opacity="0.75" FontSize="11"/>
+                <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,4,0,0">
+                    <TextBox Grid.Column="0" Name="DirectoryBox"
+                             PlaceholderText="(default)"
+                             VerticalAlignment="Center"
+                             Margin="0,0,4,0"/>
+                    <Button Grid.Column="1" Content="Browse…"
+                            Click="OnBrowseClicked"
+                            VerticalAlignment="Center" Padding="10,4"
+                            Margin="0,0,4,0"/>
+                    <Button Grid.Column="2" Content="Reset to default"
+                            Click="OnResetDirectoryClicked"
+                            VerticalAlignment="Center" Padding="10,4"/>
+                </Grid>
+                <TextBlock Name="EffectiveDirHint"
+                           Text=""
+                           Opacity="0.6" FontSize="11" Margin="0,2,0,0"
+                           TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <!-- Auto-save -->
+            <StackPanel Spacing="2">
+                <CheckBox Name="AutoSaveCheckbox"
+                          Content="Auto-save every snapshot to disk after capture"
+                          FontWeight="SemiBold"/>
+                <TextBlock Text="When OFF (default), captured snapshots stay in memory until you click 💾 Save. ON persists every capture immediately — convenient but can fill disk fast on wide snaps."
+                           TextWrapping="Wrap" Opacity="0.75" FontSize="11"
+                           Margin="22,0,0,0"/>
+            </StackPanel>
+
+            <!-- Auto-prune threshold -->
+            <StackPanel Spacing="2">
+                <TextBlock Text="Auto-prune threshold" FontWeight="SemiBold"/>
+                <TextBlock Text="When the per-game DB exceeds this size, the oldest snapshots are deleted (always keeping the latest 1). 0 = pruning disabled."
+                           TextWrapping="Wrap" Opacity="0.75" FontSize="11"/>
+                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,4,0,0">
+                    <NumericUpDown Name="PruneGbBox"
+                                   Minimum="0" Maximum="1024" Increment="1"
+                                   FormatString="0.##"
+                                   Width="140"/>
+                    <TextBlock Text="GB" VerticalAlignment="Center"/>
+                </StackPanel>
+            </StackPanel>
+        </StackPanel>
+    </DockPanel>
+</Window>

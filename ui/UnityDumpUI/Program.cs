@@ -29,6 +29,13 @@ internal static class Program
         // would only guard UI-side consumers.
         TokenAggregator.RegisterExternal(WindowsRuntimeMetadata.Read);
 
+        // Phase 29c — initialise the SQLitePCLRaw provider so
+        // Microsoft.Data.Sqlite finds the bundled native sqlite3
+        // implementation. Idempotent; safe to call multiple times.
+        // Must happen BEFORE any SnapshotStore.OpenAsync — putting it
+        // in Program.Main ensures every UI startup is covered.
+        SQLitePCL.Batteries_V2.Init();
+
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 

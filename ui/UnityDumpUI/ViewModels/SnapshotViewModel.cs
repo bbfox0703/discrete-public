@@ -76,16 +76,311 @@ public sealed partial class SnapshotViewModel : ObservableObject
     private const int kDefaultInstanceCapX86 = 256;
     private const int kDefaultArrayCapX86    = 64;
 
-    public SnapshotViewModel(BackendAdapter backend, FileLogger logger)
+    // ── Phase 29c persistence layer ────────────────────────────────────
+    private readonly UserSettingsStore?  _settingsStore;
+    private          UserSettings        _settings;
+    private          SnapshotStore?      _store;
+    private          string?             _currentGameModule;
+
+    /// <summary>Active per-game SQLite DB, or <c>null</c> when not yet
+    /// connected to a game (no handshake). Switched on every successful
+    /// connect via <see cref="OnGameDbContextAsync"/>.</summary>
+    public SnapshotStore? Store => _store;
+
+    /// <summary>The user-settings instance shared with the Settings dialog.
+    /// Mutate through <see cref="ApplySettingsAsync"/> so the change
+    /// reaches disk + downstream consumers atomically.</summary>
+    public UserSettings Settings => _settings;
+
+    public SnapshotViewModel(
+        BackendAdapter backend,
+        FileLogger logger,
+        UserSettingsStore? settingsStore = null,
+        UserSettings? initialSettings = null)
     {
-        _backend = backend;
-        _logger  = logger;
+        _backend       = backend;
+        _logger        = logger;
+        _settingsStore = settingsStore;
+        _settings      = initialSettings ?? new UserSettings();
         // Re-fire the rollup banner whenever the list mutates (Take /
         // Drop / ClearAll). DisplayName for each envelope is per-row
         // and doesn't need this — only the cumulative count + memory
         // estimate does.
         Snapshots.CollectionChanged += (_, _) =>
             OnPropertyChanged(nameof(TotalSnapshotsMemoryBanner));
+    }
+
+    /// <summary>Phase 29c-3: open (or switch to) the per-game DB keyed
+    /// by <paramref name="gameBuildId"/>. Reloads <see cref="Snapshots"/>
+    /// from disk metadata only (lazy load — class blobs stay on disk
+    /// until first diff selection touches them). Called by
+    /// <c>MainWindowViewModel.ConnectAsync</c> after a successful
+    /// handshake. Idempotent — if the same build_id is already open the
+    /// call is a no-op.
+    /// <para/>
+    /// Caller is expected to have flagged in-memory unsaved snapshots
+    /// for the user (via <see cref="GetUnsavedDirtySnapshots"/>) BEFORE
+    /// invoking this — switching DB drops the in-memory list.</summary>
+    public async Task OnGameDbContextAsync(
+        string gameBuildId, string gameModule, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(gameBuildId))
+        {
+            _logger.Write(SnapshotStore.LogCategory,
+                "OnGameDbContextAsync: empty buildId — leaving snapshot store closed");
+            return;
+        }
+        if (_store is not null && string.Equals(_store.GameBuildId, gameBuildId, StringComparison.Ordinal))
+        {
+            // Same game build → keep the existing store + in-memory list.
+            return;
+        }
+
+        // Switching context: tear down any prior store + clear in-memory
+        // list (caller is responsible for warning the user about unsaved
+        // snapshots first).
+        if (_store is not null)
+        {
+            try { await _store.DisposeAsync().ConfigureAwait(true); } catch { /* best effort */ }
+            _store = null;
+        }
+        Snapshots.Clear();
+        SelectedSnapshotA = null;
+        SelectedSnapshotB = null;
+        DiffRows.Clear();
+        FilteredDiffRows.ReplaceAll(null);
+
+        try
+        {
+            string dir = ResolveSnapshotDbDirectory();
+            string fileName = SnapshotStore.ResolveDatabaseFileName(gameModule, gameBuildId);
+            string dbPath = System.IO.Path.Combine(dir, fileName);
+            _store = await SnapshotStore.OpenAsync(
+                dbPath, gameBuildId, gameModule,
+                logger: _logger, ct: ct).ConfigureAwait(true);
+            _currentGameModule = gameModule;
+
+            // Lazy-load metadata only — class blobs decompress on
+            // first diff selection (see EnsureLoadedAsync).
+            var rows = await _store.ListSnapshotsAsync(ct).ConfigureAwait(true);
+            foreach (var meta in rows)
+            {
+                Snapshots.Add(BuildEnvelopeFromMeta(meta));
+            }
+            RecomputeStaleFlags(gameBuildId, currentSessionId: null);
+
+            // Phase 29c-6: auto-prune on open so cross-session bloat
+            // accumulated while the UI was closed gets reclaimed.
+            await AutoPruneAndMaybeVacuumAsync(ct).ConfigureAwait(true);
+
+            await RefreshDbStatusAsync(ct).ConfigureAwait(true);
+            StatusMessage = $"Snapshot DB: {fileName} — {Snapshots.Count:N0} saved snapshot(s), {FormatMemory(_dbTotalBytes)}.";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"opened per-game DB {fileName} for buildId={gameBuildId} ({Snapshots.Count} saved)");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Failed to open snapshot DB: {ex.Message}";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"OnGameDbContextAsync FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Called by MainWindowViewModel once UserSettingsStore
+    /// finishes loading from disk. Hot-swaps the in-memory settings so
+    /// later TakeSnapshot / OnGameDbContext calls honour the disk values.</summary>
+    public void ApplyLoadedSettings(UserSettings loaded)
+    {
+        if (loaded is null) return;
+        _settings = loaded;
+        OnPropertyChanged(nameof(DbStatusLine));
+    }
+
+    /// <summary>One-line summary of the active per-game SQLite store.
+    /// Bound to the Snapshot tab status line. Empty when no DB is open
+    /// (UI hides the row in that case).</summary>
+    public string DbStatusLine
+    {
+        get
+        {
+            if (_store is null) return string.Empty;
+            int count = Snapshots.Count(s => s.PersistedId is not null);
+            string filename = System.IO.Path.GetFileName(_store.DatabasePath);
+            string threshold = _settings.AutoPruneThresholdBytes > 0
+                ? $" / {FormatMemory(_settings.AutoPruneThresholdBytes)}"
+                : string.Empty;
+            return $"DB: {filename}  ·  {count:N0} saved  ·  {FormatMemory(_dbTotalBytes)}{threshold}";
+        }
+    }
+    private long _dbTotalBytes;
+
+    /// <summary>Recompute <see cref="DbStatusLine"/> with a fresh SUM
+    /// query. Called after every save / delete / prune so the line
+    /// reflects current on-disk usage.</summary>
+    public async Task RefreshDbStatusAsync(CancellationToken ct = default)
+    {
+        if (_store is null)
+        {
+            _dbTotalBytes = 0;
+        }
+        else
+        {
+            _dbTotalBytes = await _store.GetTotalPayloadBytesAsync(ct).ConfigureAwait(true);
+        }
+        OnPropertyChanged(nameof(DbStatusLine));
+    }
+
+    /// <summary>Path to the folder containing the active DB, or the
+    /// resolved default directory when no DB is open. Used by the "📁
+    /// Open folder" button. The folder is created lazily on first
+    /// access so the open-button never fails for a missing dir.</summary>
+    public string SnapshotDbFolder
+    {
+        get
+        {
+            string dir = _store is not null
+                ? System.IO.Path.GetDirectoryName(_store.DatabasePath) ?? ResolveSnapshotDbDirectory()
+                : ResolveSnapshotDbDirectory();
+            try { System.IO.Directory.CreateDirectory(dir); } catch { /* best-effort */ }
+            return dir;
+        }
+    }
+
+    /// <summary>Persist + apply a new UserSettings instance. Triggers a
+    /// re-open of the snapshot store if <c>SnapshotDbDirectory</c>
+    /// changed; otherwise just kicks an auto-prune so the threshold
+    /// update takes immediate effect.</summary>
+    public async Task ApplySettingsAsync(UserSettings updated, CancellationToken ct = default)
+    {
+        if (updated is null) return;
+        bool dirChanged = !string.Equals(
+            _settings.SnapshotDbDirectory ?? string.Empty,
+            updated.SnapshotDbDirectory   ?? string.Empty,
+            StringComparison.OrdinalIgnoreCase);
+
+        _settings = updated;
+        if (_settingsStore is not null)
+        {
+            try { await _settingsStore.SaveAsync(updated, ct).ConfigureAwait(true); }
+            catch (Exception ex)
+            {
+                ErrorMessage = $"Settings save failed: {ex.Message}";
+                _logger.Write(SnapshotStore.LogCategory,
+                    $"ApplySettingsAsync save FAILED: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        if (dirChanged && _store is not null)
+        {
+            // Reopen against the same buildId/module under the new dir.
+            string buildId = _store.GameBuildId;
+            string module  = _currentGameModule ?? "unknown";
+            await _store.DisposeAsync().ConfigureAwait(true);
+            _store = null;
+            await OnGameDbContextAsync(buildId, module, ct).ConfigureAwait(true);
+        }
+        else
+        {
+            await AutoPruneAndMaybeVacuumAsync(ct).ConfigureAwait(true);
+        }
+        OnPropertyChanged(nameof(DbStatusLine));
+    }
+
+    private string ResolveSnapshotDbDirectory()
+    {
+        string? overridePath = _settings.SnapshotDbDirectory;
+        if (!string.IsNullOrWhiteSpace(overridePath))
+            return overridePath;
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        // Same parent root as the logger so user finds them together.
+        string sub = Constants.LogRootSubpath;
+        int slash = sub.IndexOf('\\');
+        string appRoot = slash > 0 ? sub[..slash] : sub;
+        return System.IO.Path.Combine(local, appRoot, "snapshots");
+    }
+
+    private async Task AutoPruneAndMaybeVacuumAsync(CancellationToken ct)
+    {
+        if (_store is null) return;
+        var result = await _store.PruneAsync(_settings.AutoPruneThresholdBytes, ct: ct).ConfigureAwait(true);
+        if (result.Removed > 0)
+        {
+            // Drop pruned snapshots from the in-memory list too.
+            var alive = await _store.ListSnapshotsAsync(ct).ConfigureAwait(true);
+            var aliveIds = new HashSet<long>(alive.Select(m => m.Id));
+            for (int i = Snapshots.Count - 1; i >= 0; i--)
+            {
+                var env = Snapshots[i];
+                if (env.PersistedId is long pid && !aliveIds.Contains(pid))
+                {
+                    if (ReferenceEquals(SelectedSnapshotA, env)) SelectedSnapshotA = null;
+                    if (ReferenceEquals(SelectedSnapshotB, env)) SelectedSnapshotB = null;
+                    Snapshots.RemoveAt(i);
+                }
+            }
+            StatusMessage = $"Auto-pruned {result.Removed:N0} snapshot(s) (freed {FormatMemory(result.FreedBytes)}) to stay under {FormatMemory(_settings.AutoPruneThresholdBytes)}.";
+
+            if (await _store.ShouldVacuumAsync(ct: ct).ConfigureAwait(true))
+            {
+                await _store.VacuumAsync(ct).ConfigureAwait(true);
+            }
+        }
+    }
+
+    private static SnapshotEnvelope BuildEnvelopeFromMeta(PersistedSnapshotMeta meta)
+    {
+        // Lazy envelope — Classes / FieldIndex stay empty until the
+        // user picks this snapshot for diff. EnsureLoadedAsync hydrates.
+        DateTime captured;
+        if (!DateTime.TryParse(meta.CapturedAtUtc, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out captured))
+        {
+            captured = DateTime.UtcNow;
+        }
+        return new SnapshotEnvelope
+        {
+            ServerId       = string.Empty,
+            Label          = meta.Label ?? string.Empty,
+            CapturedAt     = captured.ToLocalTime(),
+            CapturedAtUtc  = meta.CapturedAtUtc,
+            GameBuildId    = meta.GameBuildId,
+            GameSessionId  = meta.GameSessionId,
+            TotalClasses   = meta.TotalClasses,
+            TotalInstances = meta.TotalInstances,
+            Classes        = new List<SnapshotClassEntry>(),  // lazy
+            PersistedId    = meta.Id,
+            PersistedBytes = meta.PayloadBytes,
+            IsDirty        = false,
+            ClassesLoaded  = false,
+        };
+    }
+
+    /// <summary>Hydrate an envelope's <see cref="SnapshotEnvelope.Classes"/>
+    /// + <see cref="SnapshotEnvelope.FieldIndex"/> from disk on demand.
+    /// No-op if already loaded or if this envelope isn't persisted.</summary>
+    public async Task EnsureLoadedAsync(SnapshotEnvelope env, CancellationToken ct = default)
+    {
+        if (env.ClassesLoaded) return;
+        if (_store is null || env.PersistedId is not long id) return;
+        var classes = await _store.LoadClassesAsync(id, ct).ConfigureAwait(true);
+        env.Classes.AddRange(classes);
+        env.BuildFieldIndex();
+        env.ClassesLoaded = true;
+        _logger.Write(SnapshotStore.LogCategory,
+            $"lazy-loaded snapshot id={id} → {env.FieldIndex.Count:N0} field-values");
+    }
+
+    /// <summary>Flip <see cref="SnapshotEnvelope.IsStale"/> on every
+    /// envelope whose <c>GameBuildId</c> differs from the active game.
+    /// Same-build envelopes from prior sessions stay NOT stale (cross-
+    /// session diff still works for statics — see Phase 29c-5).</summary>
+    private void RecomputeStaleFlags(string activeBuildId, string? currentSessionId)
+    {
+        foreach (var s in Snapshots)
+        {
+            s.IsStale = !string.Equals(s.GameBuildId, activeBuildId, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>Snapshots the user has taken in this session. List
@@ -598,12 +893,28 @@ public sealed partial class SnapshotViewModel : ObservableObject
             };
             env.BuildFieldIndex();
 
+            // Phase 29c-4: brand-new envelope is in-memory only until
+            // user clicks 💾 (or AutoSaveSnapshots is ON, below).
+            env.IsDirty       = true;
+            env.ClassesLoaded = true;
             Snapshots.Add(env);
             // Auto-pick: if this is the first snapshot, set A; if it's the
             // second (and no B yet), set B; otherwise leave selections
             // alone so the user keeps control.
             if (SelectedSnapshotA is null)      SelectedSnapshotA = env;
             else if (SelectedSnapshotB is null) SelectedSnapshotB = env;
+
+            // Phase 29c-4: auto-save on capture if the user opted in via
+            // Settings dialog. Failure is non-fatal — envelope stays dirty.
+            if (_settings.AutoSaveSnapshots && _store is not null)
+            {
+                try { await SaveSnapshotAsync(env).ConfigureAwait(true); }
+                catch (Exception saveEx)
+                {
+                    _logger.Write(SnapshotStore.LogCategory,
+                        $"auto-save FAILED for fresh capture: {saveEx.GetType().Name}: {saveEx.Message}");
+                }
+            }
 
             PendingLabel = string.Empty;
             sw.Stop();
@@ -639,8 +950,30 @@ public sealed partial class SnapshotViewModel : ObservableObject
         }
     }
 
+    /// <summary>Phase 29c-5: classify a Diff pair into Live (same
+    /// session), CrossSession (same build, different session id), or
+    /// CrossBuild (different game-build hash entirely). Drives the
+    /// statics-only auto-filter + banner copy.</summary>
+    public enum DiffSessionMode { Live, CrossSession, CrossBuild }
+
+    /// <summary>Banner text published after each Diff call describing the
+    /// session relationship between the two snapshots. Empty when Live.
+    /// The UI binds a colored stripe above the diff DataGrid to this.</summary>
+    [ObservableProperty] private string _crossSessionBanner = string.Empty;
+
+    /// <summary>Diff-time toggle: when ON, instance-keyed rows participate
+    /// in cross-session diff even though instance addresses are not stable
+    /// across game launches (produces noisy add/remove pairs). Default OFF.</summary>
+    [ObservableProperty] private bool _forceIncludeInstancesCrossSession;
+    partial void OnForceIncludeInstancesCrossSessionChanged(bool value)
+    {
+        // Re-run diff so the user sees the change without an extra click.
+        if (SelectedSnapshotA is not null && SelectedSnapshotB is not null)
+            _ = DiffAsync();
+    }
+
     [RelayCommand(CanExecute = nameof(CanDiff))]
-    public void Diff()
+    public async Task DiffAsync()
     {
         ErrorMessage = null;
         var a = SelectedSnapshotA;
@@ -652,22 +985,36 @@ public sealed partial class SnapshotViewModel : ObservableObject
             StatusMessage = "Diff failed.";
             return;
         }
-        if (!string.Equals(a.GameBuildId, b.GameBuildId, StringComparison.Ordinal))
+
+        // Phase 29c-3: lazy-load class blobs on demand. After this both
+        // envelopes have FieldIndex populated regardless of whether they
+        // came from disk or from a fresh capture.
+        try
         {
-            ErrorMessage  = "Snapshots are from different game builds — field offsets may not align. Cross-build diff is a Phase 29c feature.";
-            StatusMessage = "Diff blocked.";
+            await EnsureLoadedAsync(a).ConfigureAwait(true);
+            await EnsureLoadedAsync(b).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Failed to load snapshot data: {ex.Message}";
             return;
         }
 
+        // Phase 29c-5: pick session mode + apply statics-only auto-filter.
+        var sessionMode = ClassifySessionMode(a, b);
+        bool staticsOnly = sessionMode != DiffSessionMode.Live
+                           && !ForceIncludeInstancesCrossSession;
+
         var sw = Stopwatch.StartNew();
         DiffRows.Clear();
-        int changed = 0, added = 0, removed = 0, unchanged = 0;
+        int changed = 0, added = 0, removed = 0, unchanged = 0, suppressed = 0;
         bool includeUnchanged = IncludeUnchangedRows;
 
         // Walk A → B keys to find changed + removed (+ optionally unchanged);
         // second pass walks B → A to catch the added.
         foreach (var (key, va) in a.FieldIndex)
         {
+            if (staticsOnly && !va.IsStatic) { suppressed++; continue; }
             if (b.FieldIndex.TryGetValue(key, out var vb))
             {
                 if (!string.Equals(va.ValueDisplay, vb.ValueDisplay, StringComparison.Ordinal))
@@ -689,6 +1036,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
         }
         foreach (var (key, vb) in b.FieldIndex)
         {
+            if (staticsOnly && !vb.IsStatic) { suppressed++; continue; }
             if (!a.FieldIndex.ContainsKey(key))
             {
                 DiffRows.Add(SnapshotDiffRow.Added(vb));
@@ -699,13 +1047,85 @@ public sealed partial class SnapshotViewModel : ObservableObject
         sw.Stop();
         RecomputeFieldStats();
         RebuildFilteredRows();
+        UpdateCrossSessionBanner(sessionMode, staticsOnly, suppressed);
+
+        // Phase 29c-eviction: Diff is the natural "done with the old
+        // pair" moment. Unload every persisted envelope that isn't the
+        // current A or B so the user can keep 10+ saved snapshots
+        // without paying their FieldIndex cost in memory all the time.
+        int evicted = EvictUnusedEnvelopes();
+
         string unchangedNote = includeUnchanged
             ? $", {unchanged:N0} unchanged"
             : string.Empty;
-        // FilterResultLine owns the post-filter breakdown — RebuildFilteredRows
-        // above already published it. The Diff status itself just carries the
-        // pre-filter totals so the user can compare "raw" vs "filtered".
-        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote} (in {sw.ElapsedMilliseconds} ms).";
+        string suppressedNote = suppressed > 0
+            ? $" ({suppressed:N0} instance rows suppressed)"
+            : string.Empty;
+        string evictionNote = evicted > 0
+            ? $" — evicted {evicted:N0} stale envelope(s) from RAM"
+            : string.Empty;
+        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote}{suppressedNote} (in {sw.ElapsedMilliseconds} ms){evictionNote}.";
+    }
+
+    /// <summary>Phase 29c-eviction: unload every envelope that isn't
+    /// currently selected and IS safe to drop (persisted to DB so
+    /// EnsureLoadedAsync can re-hydrate on demand). Returns the number
+    /// of envelopes evicted so the diff status line can surface it.
+    /// In-memory-only (dirty) envelopes are NEVER unloaded — losing
+    /// them would mean losing the user's unsaved snapshot.</summary>
+    private int EvictUnusedEnvelopes()
+    {
+        int evicted = 0;
+        long freedEstimate = 0;
+        foreach (var env in Snapshots)
+        {
+            if (!env.ClassesLoaded) continue;
+            if (env.PersistedId is null) continue;
+            if (ReferenceEquals(env, SelectedSnapshotA)) continue;
+            if (ReferenceEquals(env, SelectedSnapshotB)) continue;
+            freedEstimate += env.EstimatedMemoryBytes;
+            env.Unload();
+            evicted++;
+        }
+        if (evicted > 0)
+        {
+            _logger.Write(SnapshotStore.LogCategory,
+                $"auto-eviction: dropped {evicted} envelope(s) from memory (~{freedEstimate:N0} B estimated freed)");
+            OnPropertyChanged(nameof(TotalSnapshotsMemoryBanner));
+        }
+        return evicted;
+    }
+
+    /// <summary>Sync wrapper retained for any caller already binding to
+    /// the parameterless Diff command. New code should await
+    /// <see cref="DiffAsync"/> directly to surface lazy-load errors.</summary>
+    public void Diff() => _ = DiffAsync();
+
+    private static DiffSessionMode ClassifySessionMode(SnapshotEnvelope a, SnapshotEnvelope b)
+    {
+        if (!string.Equals(a.GameBuildId, b.GameBuildId, StringComparison.Ordinal))
+            return DiffSessionMode.CrossBuild;
+        if (!string.Equals(a.GameSessionId, b.GameSessionId, StringComparison.Ordinal))
+            return DiffSessionMode.CrossSession;
+        return DiffSessionMode.Live;
+    }
+
+    private void UpdateCrossSessionBanner(DiffSessionMode mode, bool staticsOnly, int suppressed)
+    {
+        CrossSessionBanner = mode switch
+        {
+            DiffSessionMode.Live => string.Empty,
+            DiffSessionMode.CrossSession when staticsOnly =>
+                $"ℹ Cross-session diff — {suppressed:N0} instance-field rows suppressed because addresses change every game launch. " +
+                "Static fields diff cleanly. Toggle \"Force include instances\" to override (will produce add/remove noise).",
+            DiffSessionMode.CrossSession =>
+                "ℹ Cross-session diff — instance fields included (Force-include is ON). Expect add/remove noise from rebased addresses.",
+            DiffSessionMode.CrossBuild when staticsOnly =>
+                $"⚠ Cross-build diff — game build_id differs. Static field offsets may have shifted between versions; {suppressed:N0} instance rows suppressed.",
+            DiffSessionMode.CrossBuild =>
+                "⚠ Cross-build diff — instance fields included AND offsets may have shifted between game versions. Result is best-effort only.",
+            _ => string.Empty,
+        };
     }
 
     /// <summary>Drop the snapshot currently selected as A. Status line
@@ -735,6 +1155,117 @@ public sealed partial class SnapshotViewModel : ObservableObject
         RebuildFilteredRows();
         OnPropertyChanged(nameof(TotalSnapshotsMemoryBanner));
         StatusMessage = $"Snapshot {slotLabel} dropped (~{FormatMemory(freed)} freed). {Snapshots.Count:N0} remaining.";
+    }
+
+    // ── Phase 29c-4: persistence commands ──────────────────────────────
+
+    /// <summary>Snapshots present in the in-memory list that have NOT
+    /// been persisted to disk yet. Caller (UI / app-close handler)
+    /// surfaces these to the user before destructive actions like
+    /// closing the app or switching games.</summary>
+    public IReadOnlyList<SnapshotEnvelope> GetUnsavedDirtySnapshots()
+    {
+        var list = new List<SnapshotEnvelope>();
+        foreach (var s in Snapshots)
+            if (s.IsDirty) list.Add(s);
+        return list;
+    }
+
+    /// <summary>Persist a single envelope. Idempotent — if already saved
+    /// (<see cref="SnapshotEnvelope.PersistedId"/> != null), no-op.
+    /// Triggers prune + vacuum heuristic after success.</summary>
+    [RelayCommand]
+    public async Task SaveSnapshotAsync(SnapshotEnvelope env)
+    {
+        if (env is null) return;
+        if (env.PersistedId is not null) return;
+        if (_store is null)
+        {
+            ErrorMessage = "Snapshot DB is not open — connect to a game first.";
+            return;
+        }
+        try
+        {
+            int fieldValueCount = env.ClassesLoaded ? env.FieldIndex.Count : 0;
+            var req = new SnapshotPersistRequest
+            {
+                Label             = string.IsNullOrEmpty(env.Label) ? null : env.Label,
+                CapturedAtUtc     = string.IsNullOrEmpty(env.CapturedAtUtc)
+                                        ? env.CapturedAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
+                                        : env.CapturedAtUtc,
+                GameBuildId       = env.GameBuildId,
+                GameSessionId     = env.GameSessionId,
+                TargetProcess     = _currentGameModule ?? string.Empty,
+                Backend           = _store.GameBuildId == env.GameBuildId ? GuessBackend() : "unknown",
+                UnityVersion      = null,
+                PointerSize       = null,
+                TotalClasses      = env.TotalClasses,
+                TotalInstances    = env.TotalInstances,
+                FieldValueCount   = fieldValueCount,
+                InstanceCap       = InstanceCap,
+                ArrayCap          = ArrayCap,
+                IncludeUnchanged  = IncludeUnchangedRows,
+                AssemblyFilter    = string.IsNullOrWhiteSpace(ScopeAssembliesText) ? null : ScopeAssembliesText.Trim(),
+                Classes           = env.Classes,
+            };
+            long id = await _store.SaveSnapshotAsync(req).ConfigureAwait(true);
+            env.PersistedId    = id;
+            env.PersistedBytes = await _store.GetTotalPayloadBytesAsync().ConfigureAwait(true)
+                                 - (await SumOtherPersistedBytesAsync(id).ConfigureAwait(true));
+            env.IsDirty        = false;
+            StatusMessage = $"Saved snapshot {env.ShortLabel} to DB (id={id}).";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"SaveSnapshotAsync ok id={id} label=\"{env.Label}\"");
+
+            await AutoPruneAndMaybeVacuumAsync(CancellationToken.None).ConfigureAwait(true);
+            await RefreshDbStatusAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Save failed: {ex.GetType().Name}: {ex.Message}";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"SaveSnapshotAsync FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Sum of payload_bytes for every snapshot EXCEPT the given
+    /// id — used to back out the freshly-saved envelope's own bytes
+    /// when computing its PersistedBytes display value.</summary>
+    private async Task<long> SumOtherPersistedBytesAsync(long excludeId)
+    {
+        if (_store is null) return 0;
+        long total = 0;
+        var list = await _store.ListSnapshotsAsync().ConfigureAwait(true);
+        foreach (var m in list)
+            if (m.Id != excludeId) total += m.PayloadBytes;
+        return total;
+    }
+
+    /// <summary>Remove a snapshot from BOTH the in-memory list AND disk.
+    /// Distinct from <see cref="DropSnapshotA"/>/<see cref="DropSnapshotB"/>
+    /// which only free in-memory state.</summary>
+    [RelayCommand]
+    public async Task DeleteSnapshotFromDbAsync(SnapshotEnvelope env)
+    {
+        if (env is null) return;
+        if (env.PersistedId is long id && _store is not null)
+        {
+            await _store.DeleteSnapshotAsync(id).ConfigureAwait(true);
+            env.PersistedId    = null;
+            env.PersistedBytes = 0;
+            await RefreshDbStatusAsync().ConfigureAwait(true);
+        }
+        DropOne(env, "DB-delete");
+    }
+
+    /// <summary>Best-effort backend tag — Mono module names contain "mono",
+    /// IL2CPP uses "GameAssembly". Falls back to <c>"unknown"</c>.</summary>
+    private string GuessBackend()
+    {
+        var m = (_currentGameModule ?? string.Empty).ToLowerInvariant();
+        if (m.Contains("mono")) return "mono";
+        if (m.Contains("gameassembly") || m.Contains("il2cpp")) return "il2cpp";
+        return "unknown";
     }
 
     [RelayCommand]
@@ -1423,6 +1954,57 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     public int      TotalInstances { get; init; }
     public List<SnapshotClassEntry> Classes { get; init; } = new();
 
+    // ── Phase 29c persistence flags ────────────────────────────────────
+
+    /// <summary>SQLite row id this envelope was last persisted as, or
+    /// <c>null</c> if it lives only in memory. Surfaced in the per-row
+    /// "💾 Save" button (label flips to "✓ Saved" once set).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayName))]
+    [NotifyPropertyChangedFor(nameof(PersistenceStatus))]
+    private long? _persistedId;
+
+    /// <summary>Bytes occupied on disk for this snapshot (sum of its
+    /// class-blob payload_bytes). 0 for in-memory-only envelopes.</summary>
+    public long PersistedBytes { get; set; }
+
+    /// <summary>Mirrors <see cref="PersistedId"/> for binding clarity:
+    /// <c>true</c> = in-memory only, the user could lose it on app close.</summary>
+    public bool IsDirty
+    {
+        get => _isDirty;
+        set
+        {
+            if (_isDirty != value)
+            {
+                _isDirty = value;
+                OnPropertyChanged(nameof(IsDirty));
+                OnPropertyChanged(nameof(DisplayName));
+                OnPropertyChanged(nameof(PersistenceStatus));
+            }
+        }
+    }
+    private bool _isDirty;
+
+    /// <summary>Lazy-load flag: <c>false</c> when this envelope was
+    /// constructed from <c>ListSnapshotsAsync</c> metadata only and
+    /// its <see cref="Classes"/> / <see cref="FieldIndex"/> haven't
+    /// been hydrated from disk yet. Diff path calls
+    /// <c>SnapshotViewModel.EnsureLoadedAsync</c> before reading these.</summary>
+    public bool ClassesLoaded { get; set; } = true;
+
+    /// <summary>UI-friendly label for the save/load state: "💾 not saved",
+    /// "✓ saved (12 MB)", "📁 loaded (12 MB)".</summary>
+    public string PersistenceStatus
+    {
+        get
+        {
+            if (PersistedId is null) return "💾 not saved";
+            string size = PersistedBytes > 0 ? $" ({FormatMb(PersistedBytes)})" : string.Empty;
+            return ClassesLoaded ? $"✓ saved{size}" : $"📁 saved{size} (load on diff)";
+        }
+    }
+
     /// <summary>Phase 29b — flipped by MainWindowViewModel when the
     /// current handshake's gameBuildId doesn't match this snapshot's
     /// gameBuildId (user reconnected to a different game). Visible in
@@ -1436,6 +2018,22 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// for sub-second diff latency.</summary>
     public Dictionary<string, SnapshotFieldValue> FieldIndex { get; private set; }
         = new();
+
+    /// <summary>Phase 29c-eviction: clear the in-memory class + field
+    /// index, returning this envelope to the metadata-only state it had
+    /// after <c>BuildEnvelopeFromMeta</c>. Caller MUST have a persisted
+    /// id so the data can be reloaded later via
+    /// <c>SnapshotViewModel.EnsureLoadedAsync</c>. No-op if already
+    /// unloaded or never loaded.</summary>
+    public void Unload()
+    {
+        if (!ClassesLoaded) return;
+        if (PersistedId is null) return;  // can't reload — refuse
+        Classes.Clear();
+        FieldIndex = new Dictionary<string, SnapshotFieldValue>(StringComparer.Ordinal);
+        ClassesLoaded = false;
+        OnPropertyChanged(nameof(PersistenceStatus));
+    }
 
     /// <summary>Short label for status messages / dropdown display.
     /// Falls back to "#N (capture time)" if no user label was set.</summary>

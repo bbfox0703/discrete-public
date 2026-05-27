@@ -1,6 +1,83 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-28 — **Snapshot FindAllInstances false-positive root-cause FIX SHIPPED + LIVE-VERIFIED**, build #664 UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29c SQLite cross-session persistence shipped (8 sub-phases)** + Phase 29-polish direction-filter trichotomy, build #665+ UI / DLL #650).
+
+## TL;DR — what's left to pick up (Phase 29c session, 2026-05-29)
+
+**Phase 29c SQLite cross-session persistence SHIPPED** in 8 sub-phases —
+DLL untouched, pure UI feature. Per-game `.db` files live under
+`%LOCALAPPDATA%\Discrete_UEDumper\snapshots\` by default (override via
+Settings dialog). Filename pattern `{exe_basename}_{build_id[0:8]}.db`
+so the user can navigate the folder without checksum-decoding.
+
+### What shipped
+
+| Sub-phase | What landed |
+|---|---|
+| **29c-1** | [SnapshotStore.cs](../ui/UnityDumpUI.Core/Services/SnapshotStore.cs) — `OpenAsync` / `SaveSnapshotAsync` / `ListSnapshotsAsync` / `LoadClassesAsync` / `DeleteSnapshotAsync` / `GetTotalPayloadBytesAsync` / `ShouldVacuumAsync` / `VacuumAsync` / `PruneAsync`. Hybrid schema (per-class gzipped JSON blob), reuses existing `SnapshotClassEntry` source-gen JsonContext for AOT. Migration runner + WAL + FK cascade. 24 unit tests in [SnapshotStoreTests.cs](../ui/UnityDumpUI.Tests/SnapshotStoreTests.cs). |
+| **29c-2** | [UserSettings.cs](../ui/UnityDumpUI.Core/Services/UserSettings.cs) + [UserSettingsStore.cs](../ui/UnityDumpUI.Core/Services/UserSettingsStore.cs) — atomic `.tmp` + `File.Move` write, fallback-to-defaults on corrupt/missing/permission-denied, source-gen JsonContext (`UserSettingsJsonContext`). 16 unit tests in [UserSettingsStoreTests.cs](../ui/UnityDumpUI.Tests/UserSettingsStoreTests.cs). |
+| **29c-3** | `SnapshotViewModel.OnGameDbContextAsync(buildId, gameModule)` — opens (or switches) per-game DB on every handshake. Lazy `ListSnapshotsAsync` populates `Snapshots` collection with metadata-only envelopes; class blobs hydrate on first diff via `EnsureLoadedAsync`. Wired from `MainWindowViewModel.ConnectAsync` post-handshake. |
+| **29c-4** | 💾 per-envelope `SaveSnapshotCommand` + 🗑 `DeleteSnapshotFromDbCommand`. `IsDirty` / `PersistedId` flags on `SnapshotEnvelope`. Auto-save hook in `TakeSnapshotAsync` honours `UserSettings.AutoSaveSnapshots` toggle. `GetUnsavedDirtySnapshots()` API for the close-time warning. |
+| **29c-5** | Diff cross-session semantics. Removed the cross-build block at `SnapshotViewModel.cs:655`. New `DiffSessionMode` enum + auto statics-only filter + `CrossSessionBanner` ObservableProperty + `ForceIncludeInstancesCrossSession` toggle that re-runs Diff on change. Same-build / cross-session → blue info banner; different build → yellow warning. |
+| **29c-6** | `SnapshotStore.PruneAsync(thresholdBytes, minRetain)` — deletes oldest until under threshold, always keeps `minRetain` (default 1). `ShouldVacuumAsync` heuristic (`freelist_count / page_count > 0.30`). `SnapshotViewModel.AutoPruneAndMaybeVacuumAsync` chained after every Save + on DB open. |
+| **29c-7** | UI: blue DB status line (`DB: filename · N saved · X MB / Y GB`) + 📁 Open folder button (`Process.Start("explorer.exe", path)`) + ⚙ Settings… button. [SnapshotSettingsWindow.axaml](../ui/UnityDumpUI/Views/SnapshotSettingsWindow.axaml) modal with directory picker via `IStorageProvider.OpenFolderPickerAsync`, AutoSave checkbox, AutoPrune NumericUpDown (GB). Cross-session banner row above filter bar. Per-side `💾 Save A / Delete A / Save B / Delete B` row below A/B selection. |
+| **29c-8** | 15 integration tests in [SnapshotViewModelPersistenceTests.cs](../ui/UnityDumpUI.Tests/SnapshotViewModelPersistenceTests.cs) covering `OnGameDbContextAsync` round-trip, lazy load, save/delete commands, cross-session diff modes, ApplySettingsAsync persistence + reopen-on-dir-change. Total 421/421 tests pass (was 363; +58 from Phase 29c). `SQLitePCL.Batteries_V2.Init()` wired into `Program.Main`. |
+
+### NuGet additions
+
+- `Microsoft.Data.Sqlite.Core` 10.0.0
+- `SQLitePCLRaw.bundle_e_sqlite3` 3.0.3
+
+Both NativeAOT-safe, no EF Core, no reflection. AOT publish size impact:
+~1-1.5 MB.
+
+### Live-smoke TODO (user)
+
+Cannot be tested without a live game — handing off to you:
+
+1. **Fresh DB on first connect** — connect to any Unity game; Snapshot tab
+   should show "DB: `{exe}_{build_id_prefix}.db` · 0 saved · 0 MB / 200 MB"
+   in the blue status line.
+2. **Save round-trip** — take a snapshot, click 💾 Save A. Status flips
+   from "💾 not saved" to "✓ saved (X MB)". DB file appears under
+   `%LOCALAPPDATA%\Discrete_UEDumper\snapshots\`.
+3. **Cross-session diff** — take snapshot, close UI, reopen UI, connect
+   to SAME game (must be relaunched too, so session_id differs). The
+   prior snapshot reappears in the dropdown. Take a fresh snapshot and
+   Diff against it — blue banner "Cross-session diff: instance fields
+   suppressed (N rows)." should appear. Toggle "Force include instances"
+   → diff re-runs with instance rows included.
+4. **Cross-build diff** — connect to game A, save snapshot, then connect
+   to game B (different build_id), take a snapshot. The list switches DB;
+   user can't directly diff across games (each game's DB is separate).
+   Within the same game, upgrading the game executable (changes
+   build_id) makes the older snapshot show "⚠ stale (different game)"
+   in the dropdown.
+5. **Auto-prune** — Settings → AutoPrune 0.1 GB. Take several wide
+   snapshots until total > 100 MB. Status line should report
+   "Auto-pruned N snapshot(s) (freed X MB)".
+6. **Settings dialog** — change DB directory via Browse… → click Save.
+   UI should reopen DB under new dir + log line in
+   `%LOCALAPPDATA%\Discrete_UEDumper\Logs\ui\snapshot\current.log`.
+7. **Logs** — every Phase 29c operation writes to the `snapshot` log
+   category. Inspect `%LOCALAPPDATA%\Discrete_UEDumper\Logs\ui\snapshot\current.log`
+   after testing.
+
+### Known v1 limitations (deferred, not bugs)
+
+- **Cross-session instance fields suppressed** by default (Q3 decision).
+  Toggle `Force include instances` exists but produces add/remove
+  noise from rebased addresses. Identity matching (singleton via
+  static-root walk, MonoBehaviour via GameObject path) is Phase 29d.
+- **Settings dialog uses a separate window**, not inline. Keeps the
+  Snapshot tab uncluttered for users not actively configuring.
+- **No batch delete UI** — user opens the snapshots folder and deletes
+  `.db` files manually if they want to nuke a whole game's history
+  (per Q5 decision).
+
+### Previous milestone — Snapshot FindAllInstances false-positive root-cause FIX (build #664 UI / DLL #650)
+
+---
 
 ## TL;DR — what's left to pick up (build #664 session)
 
