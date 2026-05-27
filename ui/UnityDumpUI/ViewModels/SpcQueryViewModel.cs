@@ -259,6 +259,39 @@ public sealed partial class SpcQueryViewModel : ObservableObject
             return;
         }
 
+        // Phase 29d-2 polish: validate per-row operand presence BEFORE
+        // running the engine. Without this guard, "Exact" with an empty
+        // Operand field silently parses to null → engine never matches →
+        // user sees "0 matches" and assumes no field hits, when in
+        // reality they forgot to type the value. Same trap for NotEqual
+        // / DeltaExact / Range / DeltaRange.
+        for (int i = 0; i < selected.Count; i++)
+        {
+            var row = selected[i];
+            var pred = row.BuildPredicate();
+            var k = pred.Kind;
+            bool needsOperand =
+                k is SpcPredicateKind.Exact
+                  or SpcPredicateKind.NotEqual
+                  or SpcPredicateKind.DeltaExact;
+            bool needsAnyBound =
+                k is SpcPredicateKind.Range
+                  or SpcPredicateKind.DeltaRange;
+
+            if (needsOperand && !pred.Operand.HasValue)
+            {
+                ErrorMessage  = $"Snapshot [{row.Index}] predicate '{k}' needs a numeric Operand value. Type one into the Operand cell (e.g. 10160) or change the predicate.";
+                StatusMessage = string.Empty;
+                return;
+            }
+            if (needsAnyBound && !pred.Operand.HasValue && !pred.Operand2.HasValue)
+            {
+                ErrorMessage  = $"Snapshot [{row.Index}] predicate '{k}' needs at least one of Operand or Operand 2 (otherwise it matches everything — pick 'Any' if that's what you meant).";
+                StatusMessage = string.Empty;
+                return;
+            }
+        }
+
         try
         {
             IsRunning = true;

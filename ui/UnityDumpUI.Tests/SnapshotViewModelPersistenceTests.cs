@@ -491,6 +491,29 @@ public class SnapshotViewModelPersistenceTests : IDisposable
     }
 
     [Fact]
+    public void DisplayName_BadgesUnsavedEnvelopes()
+    {
+        var env = MakeFreshEnvelope("b1", "s1", "fresh");
+        // IsDirty defaults to true on a freshly captured envelope.
+        Assert.True(env.IsDirty);
+        Assert.Contains("● unsaved", env.DisplayName);
+
+        env.IsDirty = false;  // simulate post-save state
+        Assert.DoesNotContain("● unsaved", env.DisplayName);
+    }
+
+    [Fact]
+    public void DisplayName_StaleBadgeWinsOverUnsavedWhenBothFire()
+    {
+        var env = MakeFreshEnvelope("b1", "s1", "label");
+        env.IsDirty = true;
+        env.IsStale = true;
+        // Stale prefix is at the front; unsaved badge sits inside.
+        Assert.StartsWith("⚠ stale", env.DisplayName);
+        Assert.Contains("● unsaved", env.DisplayName);
+    }
+
+    [Fact]
     public async Task ApplySettingsAsync_PersistsToDiskAndUpdatesInMemorySettings()
     {
         var vm = BuildVm(out _, out var settingsPath);

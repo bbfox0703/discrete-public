@@ -2062,6 +2062,12 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             string body = string.IsNullOrEmpty(Label)
                 ? $"{CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst / ~{FormatMb(EstimatedMemoryBytes)}"
                 : $"{Label} — {CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst / ~{FormatMb(EstimatedMemoryBytes)}";
+            // Phase 29c-4 polish: prefix a "● unsaved" badge when the
+            // envelope is in-memory only, so the snapshot dropdown shows
+            // at a glance which entries would be lost on app close.
+            // Stale flag (different game build) takes precedence — both
+            // prefixes can coexist but stale is the bigger warning.
+            if (IsDirty) body = $"● unsaved · {body}";
             return IsStale ? $"⚠ stale (different game) — {body}" : body;
         }
     }
