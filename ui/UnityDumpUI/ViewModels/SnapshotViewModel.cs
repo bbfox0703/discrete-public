@@ -48,6 +48,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
     private DispatcherTimer?         _elapsedTimer;
     private Stopwatch?               _elapsedStopwatch;
 
+    /// <summary>Process working-set sampled at <see cref="TakeSnapshotAsync"/>
+    /// entry. The elapsed-timer ticks compute Δ against this so the user
+    /// sees how much memory the current capture is costing in real time —
+    /// useful guard rail now that the default caps are 512 instances /
+    /// 256 array elements (5–10× the earlier defaults).</summary>
+    private long _captureStartWorkingSet;
+
     public SnapshotViewModel(BackendAdapter backend, FileLogger logger)
     {
         _backend = backend;
@@ -94,8 +101,20 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// shouldn't have to know where data lives).</summary>
     [ObservableProperty] private string _scopeAssembliesText = string.Empty;
 
-    [ObservableProperty] private int _instanceCap = 100;
-    [ObservableProperty] private int _arrayCap    = 50;
+    /// <summary>Per-class instance cap (server-side hard limit 1024).
+    /// Raised from 100 → 512 on 2026-05-26 user feedback: 활俠傳 player
+    /// hit a GameStat instance past position 100 in the heap-walk order
+    /// that diff therefore missed entirely. 512 covers the typical
+    /// per-class population on the live targets while leaving headroom
+    /// before OOM territory. Memory cost is reported in the status line
+    /// during capture so the user can dial it back if needed.</summary>
+    [ObservableProperty] private int _instanceCap = 512;
+
+    /// <summary>Per-field array element cap (server-side hard limit 256).
+    /// Raised from 50 → 256 same session — at the hard cap by default,
+    /// since the server already truncates beyond 256 and the user has
+    /// no reason to artificially under-cap.</summary>
+    [ObservableProperty] private int _arrayCap    = 256;
 
     /// <summary>When unchecked (default), the server skips
     /// mscorlib / System.* / Microsoft.* / netstandard / Mono.* /
@@ -260,9 +279,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
         var ct = _cts.Token;
 
         IsBusy = true; ErrorMessage = null;
+        _captureStartWorkingSet = GetWorkingSet();
         // Phase 1 — heap walk + per-class decode + GC drain on the
         // server side. The elapsed-time DispatcherTimer updates the
-        // visible status every 200ms so the user can see we're alive.
+        // visible status every 200ms so the user can see we're alive +
+        // the current process memory + delta-from-start so they can
+        // dial back the caps if the snapshot is heading toward OOM.
         // This phase dominates on big targets (60-90s on 활俠傳 with
         // 全抓 scope after exclusions); the wide heap walk is the
         // unavoidable cost.
@@ -280,8 +302,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 if (parts.Length > 0) scope = parts;
             }
 
-            int cap = InstanceCap > 0 ? InstanceCap : 100;
-            int arr = ArrayCap    > 0 ? ArrayCap    : 50;
+            int cap = InstanceCap > 0 ? InstanceCap : 512;
+            int arr = ArrayCap    > 0 ? ArrayCap    : 256;
 
             var begin = await _backend.SnapshotBeginAsync(
                 scope, cap, arr, IncludeSystemAssemblies, ct).ConfigureAwait(true);
@@ -325,11 +347,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 // Live progress for the streaming phase. Updates every
                 // chunk so the user sees the counter move — fixes the
                 // "looks frozen" perception when total snapshot is 100s+.
+                long wsNow = GetWorkingSet();
                 StatusMessage = string.Format(CultureInfo.InvariantCulture,
-                    "Streaming chunk {0}/{1} ({2:N0} of {3:N0} classes)… capture {4:F1}s + stream {5:F1}s",
+                    "Streaming chunk {0}/{1} ({2:N0} of {3:N0} classes)… capture {4:F1}s + stream {5:F1}s — process {6} (+{7})",
                     chunkCount, expectedChunks,
                     classes.Count, totalClasses,
-                    beginElapsedSec, chunkPhaseSw.Elapsed.TotalSeconds);
+                    beginElapsedSec, chunkPhaseSw.Elapsed.TotalSeconds,
+                    FormatMemory(wsNow), FormatMemory(wsNow - _captureStartWorkingSet));
                 if (chunk.Done) break;
                 cursor = chunk.NextCursor;
             }
@@ -371,9 +395,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
             string cacheNote = begin.DecodeStats is { } ds && (ds.ClassInfoCacheHits + ds.ClassInfoCacheMisses) > 0
                 ? $", ClassInfo cache {ds.ClassInfoCacheHits:N0}/{ds.ClassInfoCacheHits + ds.ClassInfoCacheMisses:N0}"
                 : string.Empty;
-            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldIndex.Count:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}).";
+            long wsEnd = GetWorkingSet();
+            string memNote = wsEnd > 0
+                ? $", process {FormatMemory(wsEnd)} (+{FormatMemory(wsEnd - _captureStartWorkingSet)})"
+                : string.Empty;
+            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldIndex.Count:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}).";
             _logger.Write(Constants.LogCategoryView,
-                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldIndex.Count} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies}");
+                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldIndex.Count} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet}");
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
@@ -649,8 +677,47 @@ public sealed partial class SnapshotViewModel : ObservableObject
         if (_elapsedStopwatch is null) return;
         if (sender is DispatcherTimer t && t.Tag is string verb)
         {
-            StatusMessage = $"{verb}… {_elapsedStopwatch.Elapsed.TotalSeconds:F1} s";
+            long ws = GetWorkingSet();
+            string memNote = ws > 0
+                ? $" — process {FormatMemory(ws)} (+{FormatMemory(ws - _captureStartWorkingSet)})"
+                : string.Empty;
+            StatusMessage = $"{verb}… {_elapsedStopwatch.Elapsed.TotalSeconds:F1} s{memNote}";
         }
+    }
+
+    /// <summary>Current process working-set in bytes, or 0 on failure
+    /// (the rare path where Process.GetCurrentProcess throws — e.g.
+    /// sandboxed test host). Caller treats 0 as "unknown" and skips
+    /// the memory annotation rather than displaying garbage.</summary>
+    private static long GetWorkingSet()
+    {
+        try
+        {
+            using var p = Process.GetCurrentProcess();
+            return p.WorkingSet64;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>Human-friendly bytes formatter. Switches to GB at 1 GB
+    /// so the snapshot status doesn't read "1843 MB" once we're past
+    /// the gigabyte threshold. Signed input handled — negative deltas
+    /// (memory dropped after GC) show as e.g. "-120 MB".</summary>
+    private static string FormatMemory(long bytes)
+    {
+        if (bytes == 0) return "0 MB";
+        long abs = Math.Abs(bytes);
+        string sign = bytes < 0 ? "-" : string.Empty;
+        if (abs >= 1024L * 1024 * 1024)
+        {
+            double gb = abs / (1024.0 * 1024.0 * 1024.0);
+            return $"{sign}{gb.ToString("0.00", CultureInfo.InvariantCulture)} GB";
+        }
+        double mb = abs / (1024.0 * 1024.0);
+        return $"{sign}{mb.ToString("0", CultureInfo.InvariantCulture)} MB";
     }
 }
 
