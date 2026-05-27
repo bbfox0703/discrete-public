@@ -322,9 +322,17 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
       cross-session (engine is address-agnostic by design), KeyFilter,
       assembly/FQN match, chunked SnapshotClassEntry merge,
       missing-key sentinel, duplicate-field-name first-wins.
-    - [ ] **29e-1b** Layer A: primitive array index expansion in
+    - [x] **29e-1b** Layer A: primitive array index expansion in
       `BuildFieldIndex` (`{addr}|{offset}|inventory[3]` pseudo-keys).
-      SPC tab inherits per-element tracking for free. ≥6 tests.
+      SPC tab inherits per-element tracking for free. 10 tests at
+      build #685, 488/488 green. New `ExpandArrayElements` +
+      `FormatArrayElement` helpers in `SnapshotEnvelope` — mirrors
+      FormatFieldValue's ladder for element-level rendering. Statics
+      + instance fields handled identically. Reference-array slots
+      render as `ptr=…` rows (Layer A doesn't dive into element
+      fields). Edge cases tested: empty array, ArrayError, cap-hit
+      (Length > Count), element-level error, non-array fields
+      unaffected.
     - [ ] **29e-2**  "Class Pivot" tab — Stage 2 only, manual class +
       K + V picker, repurposed cross-session banner.
     - [ ] **29e-3**  Stage 0 class shortlisting DataGrid (CV / null %

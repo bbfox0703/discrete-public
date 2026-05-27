@@ -1,19 +1,29 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29e-1 PivotEngine shipped**; head pending commit / build #684 UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29e-1 + 29e-1b shipped**; head `e84209f` + array-expansion commit / build #685 UI / DLL #650).
 
 ## TL;DR — what's left to pick up (next session, mid-29e)
 
-Phase 29e-1 landed: pure-engine `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
-+ 16 unit tests ([PivotEngineTests.cs](../ui/UnityDumpUI.Tests/PivotEngineTests.cs)),
-478/478 green. No UI yet, no DLL change. `SnapshotEnvelope.FormatFieldValue`
-promoted from `private` to `internal` so engine reuses the shared formatter.
-Full design at [class-pivot.md](class-pivot.md); plan.md 29e ledger
-shows the remaining waves:
+Two engine waves landed back-to-back:
 
+* **29e-1**  Pure-engine `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
+  + 16 tests ([PivotEngineTests.cs](../ui/UnityDumpUI.Tests/PivotEngineTests.cs)).
+  Class-centric pivot keyed by field values inside each instance —
+  sidesteps address drift cross-session AND within-session.
 * **29e-1b** Primitive array index expansion in `BuildFieldIndex`
-  (`inventory[0..N]` pseudo-keys) — SPC tab inherits per-element
-  tracking for free.
+  ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
+  + 10 tests ([SnapshotFieldIndexArrayExpansionTests.cs](../ui/UnityDumpUI.Tests/SnapshotFieldIndexArrayExpansionTests.cs)).
+  Array fields now fan out as `{addr}|{offset}|{fieldName}[{i}]`
+  pseudo-rows in addition to the existing summary row — SPC tab
+  inherits per-element tracking for free. Ref-arrays render as
+  `ptr=…` (Layer B will key by inner field; needs DLL change).
+
+**488/488 green** (was 462 before 29e). No UI yet, no DLL change.
+`SnapshotEnvelope.FormatFieldValue` promoted to `internal` so
+PivotEngine reuses the shared formatter. Full design at
+[class-pivot.md](class-pivot.md); plan.md 29e ledger shows the
+remaining waves:
+
 * **29e-2** "Class Pivot" tab — Stage 2 only, manual class + K + V
   picker, cross-session banner repurposed for pivot semantics.
 * **29e-3** Stage 0 class-shortlisting DataGrid (CV / null % /
@@ -22,7 +32,9 @@ shows the remaining waves:
   (S_stable + S_cardinality + TypePrior + NamePrior) + greedy
   compound-key suggestion.
 
-DB schema untouched. Existing `.db` files keep working.
+DB schema untouched. Existing `.db` files keep working — `BuildFieldIndex`
+is in-memory only, so re-hydrating any saved snapshot now yields the
+new pseudo-rows automatically.
 
 ## Previous TL;DR — Phase 29d live-smoke polish (head `82647cd` / build #682)
 
