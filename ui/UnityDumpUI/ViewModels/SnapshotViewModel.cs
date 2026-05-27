@@ -274,12 +274,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [ObservableProperty] private bool _hideSyntheticTypes = true;
 
     /// <summary>Show "changed" rows (value differs between A and B).
-    /// Default OFF as of 2026-05-27 — user feedback: the value-range +
-    /// unchanged + added/removed workflows are now the primary entry
-    /// points (find-by-value, not just see-what-changed), so the
-    /// raw changed list more often gets in the way than helps.
-    /// Re-checking it stays a one-click switch.</summary>
-    [ObservableProperty] private bool _showChanged;
+    /// Default ON (reverted 2026-05-28 after one session of OFF): the
+    /// added+removed pair pattern that 32-bit Mono GC behaviour
+    /// produces (instance moves between snapshots → shows as
+    /// add+remove rather than change) means most diff sessions want
+    /// changed rows visible by default. Re-checking unchanged stays
+    /// a one-click opt-in.</summary>
+    [ObservableProperty] private bool _showChanged = true;
 
     /// <summary>Show "added" rows (in B but not A). Default OFF.</summary>
     [ObservableProperty] private bool _showAdded;
@@ -288,11 +289,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [ObservableProperty] private bool _showRemoved;
 
     /// <summary>Show "unchanged" rows (key present in both with equal
-    /// value). Default ON — when the user opts in to capturing them
-    /// they almost always want them visible too. Has no effect unless
-    /// <see cref="IncludeUnchangedRows"/> was set when <see cref="Diff"/>
-    /// last ran.</summary>
-    [ObservableProperty] private bool _showUnchanged = true;
+    /// value). Default OFF as of 2026-05-28 — opting in to
+    /// <see cref="IncludeUnchangedRows"/> at capture time is the
+    /// "I want to see them" signal; turning this on then is the
+    /// second step. With unchanged-row counts often 10–100× the
+    /// changed-row count, default-ON drowned the diff result.</summary>
+    [ObservableProperty] private bool _showUnchanged;
 
     /// <summary>Class-name substring filter (case-insensitive).</summary>
     [ObservableProperty] private string _classFilterText = string.Empty;
@@ -619,7 +621,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
         string unchangedNote = includeUnchanged
             ? $", {unchanged:N0} unchanged"
             : string.Empty;
-        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote} (in {sw.ElapsedMilliseconds} ms). Showing {FilteredDiffRows.Count:N0} after filters.";
+        StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote} (in {sw.ElapsedMilliseconds} ms). Showing {FilteredDiffRows.Count:N0} after filters ({FormatFilteredKindBreakdown()}).";
     }
 
     /// <summary>Drop the snapshot currently selected as A. Status line
@@ -730,6 +732,21 @@ public sealed partial class SnapshotViewModel : ObservableObject
         RebuildFilteredRows();
     }
 
+    /// <summary>Filter-pass kind counts from the last
+    /// <see cref="RebuildFilteredRows"/>. Used to surface a
+    /// "(X changed, Y added, Z removed, W unchanged)" breakdown in
+    /// the status line so the user can tell at a glance which
+    /// bucket their value-range / class / field filter narrowed to.
+    /// Particularly important for the re-allocation pattern: when
+    /// the game GC moves an instance between snapshots the field
+    /// value diff shows up as add+remove pair, NOT as changed —
+    /// users hunting "where did my HP/money go?" often miss the
+    /// pair entirely if the breakdown isn't visible.</summary>
+    private int _filteredChangedCount;
+    private int _filteredAddedCount;
+    private int _filteredRemovedCount;
+    private int _filteredUnchangedCount;
+
     /// <summary>Apply every filter against <see cref="DiffRows"/> and
     /// rebuild <see cref="FilteredDiffRows"/> in place. Called by every
     /// filter property's <c>OnXxxChanged</c> hook + by <see cref="Diff"/>
@@ -752,6 +769,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
             excluded = new HashSet<string>(ExcludedFieldNames, StringComparer.Ordinal);
 
         FilteredDiffRows.Clear();
+        _filteredChangedCount   = 0;
+        _filteredAddedCount     = 0;
+        _filteredRemovedCount   = 0;
+        _filteredUnchangedCount = 0;
         foreach (var r in DiffRows)
         {
             if (HideSyntheticTypes && r.IsSynthetic) continue;
@@ -786,7 +807,26 @@ public sealed partial class SnapshotViewModel : ObservableObject
             }
 
             FilteredDiffRows.Add(r);
+            switch (r.ChangeKind)
+            {
+                case "changed":   _filteredChangedCount++;   break;
+                case "added":     _filteredAddedCount++;     break;
+                case "removed":   _filteredRemovedCount++;   break;
+                case "unchanged": _filteredUnchangedCount++; break;
+            }
         }
+    }
+
+    /// <summary>Format the per-kind counts as
+    /// "(X changed, Y added, Z removed[, W unchanged])". Skips the
+    /// unchanged term when zero so the line doesn't read noisy.</summary>
+    private string FormatFilteredKindBreakdown()
+    {
+        if (FilteredDiffRows.Count == 0) return "0 rows";
+        string baseStr = $"{_filteredChangedCount:N0} changed, {_filteredAddedCount:N0} added, {_filteredRemovedCount:N0} removed";
+        return _filteredUnchangedCount > 0
+            ? $"{baseStr}, {_filteredUnchangedCount:N0} unchanged"
+            : baseStr;
     }
 
     /// <summary>Build the per-field-name occurrence histogram from the
@@ -809,7 +849,11 @@ public sealed partial class SnapshotViewModel : ObservableObject
             ? new HashSet<string>(ExcludedFieldNames, StringComparer.Ordinal)
             : null;
 
-        const int kTopN = 30;
+        // Bumped 30 → 40 (2026-05-28 user ask) — the stats panel is
+        // tall enough on a typical 1080p+ display to show ~40 rows
+        // before needing the scrollbar, and the long tail of noisy
+        // field names tends to keep adding signal past 30.
+        const int kTopN = 40;
         foreach (var kvp in counts
                             .OrderByDescending(kv => kv.Value)
                             .ThenBy(kv => kv.Key, StringComparer.Ordinal)
