@@ -1776,8 +1776,14 @@
 
               <!-- Filter bar — Phase 29 polish: noise-reduction filters
                    layered over Strategy C synthetic-type masking. Row 1 =
-                   structural toggles; Row 2 = textual / numeric narrowing. -->
-              <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
+                   structural toggles; Row 2 = textual / numeric narrowing.
+                   Wrapped in an Expander (default open) so the user can
+                   collapse it once they're settled on a filter set —
+                   reclaims ~80 px of vertical space for the diff grid. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="True"
+                        Header="🔍 Filters">
+              <Border Padding="6"
                       Background="#1F808080" CornerRadius="3">
                 <StackPanel Spacing="6">
                   <StackPanel Orientation="Horizontal" Spacing="12">
@@ -1852,6 +1858,7 @@
                   </StackPanel>
                 </StackPanel>
               </Border>
+              </Expander>
 
               <!-- Phase 29-polish (2026-05-28) — instance lookup diagnostic.
                    Collapsed by default; expand to type an address and dump
