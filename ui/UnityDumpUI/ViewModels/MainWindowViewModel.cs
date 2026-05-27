@@ -79,7 +79,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // builds local in-memory envelope per capture, diffs two
         // snapshots into a flat row set. Same cross-tab handoff
         // contract as the other tabs (Inspector / Address Lookup).
-        Snapshot        = new SnapshotViewModel(_backend, _logger);
+        // Phase 29c — also receives the UserSettingsStore so the
+        // per-game SQLite DB respects the user's custom directory /
+        // auto-save / auto-prune preferences. Settings load is async
+        // so we kick it off as fire-and-forget; until LoadAsync
+        // returns, Snapshot uses the defaults baked into UserSettings.
+        SettingsStore   = new UserSettingsStore(logger: _logger);
+        _settings       = new UserSettings();
+        Snapshot        = new SnapshotViewModel(_backend, _logger, SettingsStore, _settings);
+        _ = LoadUserSettingsAsync();
         Snapshot.NavigateToInspectorRequested     += OnSnapshotNavigateToInspector;
         Snapshot.NavigateToAddressLookupRequested += OnSnapshotNavigateToAddressLookup;
         // Phase 20b: Scene Explorer tab. SceneEnumerator wraps the
@@ -281,6 +289,26 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// class. UI handles synthetic-type filtering locally (strategy C).
     /// </summary>
     public SnapshotViewModel Snapshot { get; }
+
+    /// <summary>Phase 29c — JSON-persisted user preferences (snapshot DB
+    /// directory override, auto-save toggle, auto-prune threshold).
+    /// Surfaced here so the Settings dialog (29c-7) can bind to it.</summary>
+    public UserSettingsStore SettingsStore { get; }
+
+    private UserSettings _settings;
+    private async Task LoadUserSettingsAsync()
+    {
+        try
+        {
+            _settings = await SettingsStore.LoadAsync().ConfigureAwait(true);
+            Snapshot.ApplyLoadedSettings(_settings);
+        }
+        catch (Exception ex)
+        {
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+                $"UserSettings load failed: {ex.Message}");
+        }
+    }
 
     /// <summary>
     /// Phase 20b — Scene Explorer tab. Filter-driven TreeView walking
@@ -618,6 +646,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 hs.GamePointerSize ?? 0,
                 hs.GameWorkingSet  ?? 0UL,
                 hs.GamePrivateUsage ?? 0UL);
+
+            // Phase 29c-3 — open (or switch to) the per-game SQLite DB.
+            // Lazy-loads metadata from disk into Snapshot.Snapshots so
+            // the user sees their saved snapshots from previous sessions
+            // immediately. Soft-fail — DB errors don't block the
+            // already-completed handshake.
+            if (!string.IsNullOrEmpty(hs.GameBuildId))
+            {
+                _ = Snapshot.OnGameDbContextAsync(hs.GameBuildId, hs.GameModule ?? "unknown");
+            }
 
             // Phase 8: kick off assembly fetch so the left pane populates
             // without an extra click. Failures surface on Browser.ErrorMessage.

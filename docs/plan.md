@@ -144,7 +144,7 @@
 | 25 | Cross-class Symbol Finder | New `searchSymbols` pipe RPC + Symbol Finder Tab in MainWindow. Walks every class in a named assembly for fields + methods whose name contains an ASCII case-insensitive substring. Row double-click navigates back to Browser Fields/Methods tab with the class + member filter pre-selected. Replaces the historical "click each class in turn" loop the user reported when hunting properties like `MaxHP` across a few-hundred-class assembly. | ✅ **Shipped + live-smoked 2026-05-19** (build #363) on BongoCat Mono — pattern `MaxHP` → `MainGame/CALC_WORK.maxHp` (`System.Int32` @ `0x2C`) in < 1s. 3 new fake-pipe `SearchSymbolsTests`. Properties surfaced via `get_*`/`set_*` methods (Mono/IL2CPP runtime convention; no separate property row kind). 25b (Interesting preset — curated Unity keyword scan + scoring, mirror of UE5CEDumper's Interesting Properties) deferred until basic finder shakes out — needs a Unity-tuned keyword list distinct from UE5CEDumper's FProperty-flavored one. |
 | 27 | Unity-aware Value Search | CE-style First Scan / Next Scan but filtered to Unity managed instances only. New `scanFieldValue` + `refineValueScan` pipe RPCs; reuses `Memory::EnumerateCommittedRegions` + `whatIsAt` (Phase 17) to drop non-managed candidates. Two scan modes: **global** (CE flow — type + value → walks all committed RW pages, filters via `whatIsAt`) + **class-scoped** (Discrete flow — pick class first, equivalent to `listFieldValuesAcrossInstances` plus value filter; orders-of-magnitude faster). Supports int8-64 / uint8-64 / float / double / string (managed UTF-16). Full CE filter set: exact / range / changed / unchanged / increased / decreased / newValue. New Value Search tab (MainWindow position 6). Includes **Phase 17b carry-forward** — Array / List<T> element resolution in `whatIsAt`. | ✅ **All shipped sub-phases live-verified 2026-05-20** (builds #410→#452). 27a (global + class-scoped + whatIsAt filter) live-smoked on SaGa F2R + 活俠傳; 27b (Begin/Refine/End session + 7 CE filter modes) live-smoked on SaGa F2R (purse=100000 → spent 1 coin → newValue=99999 narrowed to PLY_WORK.purse, dropped SAVEDATA.purse correctly); 27a-bugfix (lazy vtable resolution) closed the 32-bit Mono hang; 27c (Array / List<T> element resolution); 27b-4 (UTF-16 / UTF-8 / ASCII string scan via Memory::ScanForString); 27d (UI Value Search tab — VM + DataGrid + cross-tab handoff to Inspector). 27e (CE Lua bridge `unity_valuescan.lua`) **dropped** 2026-05-20 — CE already has its own native value scan; nobody needs to call our scan from CE Lua, so the bridge has no realistic use case. 283/283 xUnit pass. |
 | 28 | Field → Methods cross-reference (TODO stub) | Inverse of Symbol Finder's "find by name": given a field, list methods that read/write it. **Mono path**: walk method IL bytecode (`mono_method_header_get_code`) for `ldfld`/`stfld`/`ldsfld`/`stsfld` referencing the target field token — high-confidence, clean. **IL2CPP static fields**: reuse AOBMaker's `RipReferenceScanner` against the field's runtime address — scan executable pages for RIP-relative references, attribute hits to enclosing methods via Phase 18a range-check. **IL2CPP instance fields**: heuristic — AOB-scan declaring-class methods for `[reg+offset]` patterns matching field offset; mark "low confidence" in UI. | 📝 **TODO / not started** — picks up after Phase 27 ships. Approach drafted below. |
-| 29 | Snapshot & Diff (跨 session 數值監視) | "全抓" snapshot walker (default scope = all user assemblies, opt-in narrow) + diff UI + SQLite cross-session persistence. Strict superset of CE's value-finder — instead of "find addresses with value X", surfaces "any field that changed" with class.field.instance context attached. **Bundles Phase 27c live smoke** — array element capture exercises the existing `whatIsAt` array resolver on SaGa F2R / BongoCat / 活俠傳; bugs fixed on both sides. Sub-phases 29a (DLL `snapshotAll` RPC + array smoke), 29b (in-memory diff UI), 29c (SQLite + cross-session). 29d (SPC-style multi-field constraint query) deferred until 29a-c stabilise. | ✅ **29a + 29b SHIPPED + LIVE-VERIFIED 2026-05-26** across SaGa F2R / BongoCat / 활俠傳 (builds #596 → #637 — five iterations of Mono-freeze debugging, root cause was `mono_class_vtable` from worker thread leaving BDWGC tracking entries; fix: skip static-field VALUE capture on Mono). Phase 27c array-element live-smoke **CLOSED** as bundled side-effect. **29c (SQLite) + Phase 29 polish (noise-reduction filters on diff result) next**. |
+| 29 | Snapshot & Diff (跨 session 數值監視) | "全抓" snapshot walker (default scope = all user assemblies, opt-in narrow) + diff UI + SQLite cross-session persistence. Strict superset of CE's value-finder — instead of "find addresses with value X", surfaces "any field that changed" with class.field.instance context attached. **Bundles Phase 27c live smoke** — array element capture exercises the existing `whatIsAt` array resolver on SaGa F2R / BongoCat / 活俠傳; bugs fixed on both sides. Sub-phases 29a (DLL `snapshotAll` RPC + array smoke), 29b (in-memory diff UI), 29c (SQLite + cross-session). 29d (SPC-style multi-field constraint query) deferred until 29a-c stabilise. | ✅ **29a + 29b + 29c SHIPPED 2026-05-29 (29a/b LIVE-VERIFIED 2026-05-26; 29c green on 421 unit tests, live-smoke handed off)** across SaGa F2R / BongoCat / 활俠傳 (builds #596 → #637 — five iterations of Mono-freeze debugging, root cause was `mono_class_vtable` from worker thread leaving BDWGC tracking entries; fix: skip static-field VALUE capture on Mono). Phase 27c array-element live-smoke **CLOSED** as bundled side-effect. **29c (SQLite) + Phase 29 polish (noise-reduction filters on diff result) next**. |
 | 26 | Anti-tamper protection | 3-slot SHA256 self-check spread across two assemblies + 2 poison surfaces (CT export offsets + Inspector grid values) + XOR-shielded credit string + AOT-stamped hash via `tools/inject-hash.ps1`. Inspired by AOBMaker's pattern but redesigned for cross-assembly slot distribution (Slot A in Core/Services / Slot B in Core/Services/Export / **Slot C cross-assembly in ui/UnityDumpUI/Platform**). Dev-mode bypass (0xCC placeholders) keeps all factors at 0 in Debug/Release single-file builds — exports + Inspector + tests stay byte-identical to pre-Phase-26. Class names renamed to non-suggestive forms so binary metadata no longer leaks "Integrity" / "Guardian" / "Shield". | ✅ **Shipped + AOT-verified 2026-05-20** (build #408). Two iterations: `ccaae6e` single-slot baseline + `348cbb6` 3-slot cross-assembly upgrade. `TokenAggregator.Combined() = A \| B \| C` ORs all three factors (UI registers `WindowsRuntimeMetadata.Read` into Core via `Program.Main`). Poison 1: `CloakOffset(off) => off ^ (factor & 0x7F)` in `CeXmlExporter` + `CsxExporter` shifts every emitted offset 0-127 bytes (CT loads cleanly in CE; reads wrong fields). Poison 2: `LiveInspectionViewModel.MaybePerturbDisplay` corrupts 1/11 numeric `DisplayValue` rows via per-row deterministic seed (string `GetHashCode` XOR offset XOR salt) — same row corrupts same way within session, different rows across sessions. Anti-trace: `Read()` returns 0 for first N calls (A:3 / B:2 / C:4) even when tampered. Anti-debug: `Debugger.IsAttached` on published binary returns poison code. AOT round-trip verified end-to-end: 3 sentinels at `0x02438F98` / `0x02438E80` / `0x0243ABF8` (C ~11 KB away from A/B). `inject-hash.ps1` 3-slot AOBMaker-style: zero all 3 slots → SHA256 once → write same hash into all 3. Footer credit `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. New [`USAGE.md`](../USAGE.md) end-user guide for CT makers. |
 
 ---
@@ -2086,34 +2086,93 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
     Address Lookup / Copy address).
   - No DB dependency at this stage.
 
-- [ ] **29c — SQLite persistence + cross-session** (~1.5 days)
-  - New NuGet: `Microsoft.Data.Sqlite` (AOT-clean since .NET 9).
-    Bundles native `sqlite3.dll` (~1.5 MB).
-  - DB path: `%LOCALAPPDATA%\UnityCEDumper\snapshots\{game_build_id}.db`.
-  - Schema (denormalised — joins are simple, indexes do the heavy
-    lifting):
+- [ ] **29c — SQLite cross-session persistence** (~5 days, finalized 2026-05-29)
+  - **Goal**: snapshots survive UI restart + game relaunch. Per-game
+    DB. Cross-session diff is honest about address instability — static
+    fields diff cleanly, instance fields suppressed by default
+    cross-session (v1; identity matching pushed to 29d).
+  - **5 decisions confirmed with user 2026-05-29**:
+    1. Auto-save **OFF** by default + global toggle in Settings.
+    2. **Per-game DB** keyed by `game_build_id` (FNV-1a of mono / IL2CPP
+       module path+size+write_time, already produced by DLL — see
+       [SnapshotSession.cpp:96](../dll/src/shared/SnapshotSession.cpp)).
+       Filename `{exe_basename}_{build_id[0:8]}.db` for human readability.
+    3. **v1 drops instance fields cross-session** — banner explains why.
+    4. **Lazy load** — startup reads metadata only; class blobs loaded
+       on first diff selection.
+    5. **Auto-prune** older snapshots when DB > N (default 200 MB —
+       gzip per-class compresses ~50× vs raw JSON so this comfortably
+       holds 100+ wide snapshots; lowered from initial 1 GB on
+       2026-05-29 after live observation),
+       always keeping the latest 1. `VACUUM` when freed page ratio >30%.
+       Threshold 0 = off.
+  - **NuGet** (NativeAOT-safe): `Microsoft.Data.Sqlite.Core` 10.0.0 +
+    `SQLitePCLRaw.bundle_e_sqlite3` 3.0.4. Adds ~1-1.5 MB to AOT
+    publish. Needs `SQLitePCL.Batteries_V2.Init()` early in
+    `Program.Main`.
+  - **Default DB location**: `%LOCALAPPDATA%\Discrete_UEDumper\snapshots\`.
+    Settable via Settings dialog → persisted to
+    `%LOCALAPPDATA%\Discrete_UEDumper\settings.json` (new user-settings
+    infrastructure, also AOT-safe via `[JsonSerializable]` source-gen).
+  - **Schema** (hybrid: normalized metadata + per-class gzipped JSON blob —
+    reuses existing `SnapshotClassEntry` DTO, no new mapping code):
     ```sql
-    CREATE TABLE snapshot (
-      id INTEGER PRIMARY KEY, label TEXT, captured_at TEXT,
-      game_build_id TEXT, game_session_id TEXT, scope_summary TEXT);
-    CREATE TABLE field_value (
-      snapshot_id INTEGER, class_fqn TEXT, field_offset INTEGER,
-      field_name TEXT, field_type TEXT,
-      instance_addr INTEGER,    -- 0 = static
-      value_int INTEGER, value_real REAL, value_text TEXT, value_blob BLOB);
-    CREATE INDEX idx_fv_cls_off_snap ON field_value(class_fqn, field_offset, snapshot_id);
-    CREATE INDEX idx_fv_inst ON field_value(instance_addr, snapshot_id);
+    CREATE TABLE snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label TEXT, captured_at_utc TEXT NOT NULL,
+        game_build_id TEXT NOT NULL, game_session_id TEXT NOT NULL,
+        target_process TEXT NOT NULL, backend TEXT NOT NULL,
+        unity_version TEXT, ptr_size INTEGER,
+        total_classes INTEGER NOT NULL, total_instances INTEGER NOT NULL,
+        field_value_count INTEGER NOT NULL,
+        instance_cap INTEGER, array_cap INTEGER,
+        include_unchanged INTEGER NOT NULL DEFAULT 0,
+        asm_filter TEXT,
+        payload_bytes INTEGER NOT NULL DEFAULT 0  -- for prune accounting
+    );
+    CREATE INDEX ix_snapshots_captured ON snapshots(captured_at_utc DESC);
+
+    CREATE TABLE snapshot_classes (
+        snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+        assembly TEXT NOT NULL, class_fqn TEXT NOT NULL,
+        instance_count INTEGER NOT NULL, static_count INTEGER NOT NULL,
+        payload_gzip BLOB NOT NULL,
+        PRIMARY KEY (snapshot_id, assembly, class_fqn)
+    );
+    CREATE INDEX ix_classes_fqn ON snapshot_classes(class_fqn);
+
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    -- schema_version, target_process, game_build_id seeded on create
     ```
-  - Cross-session rules (honest):
-    - Different `game_build_id` → big yellow warning banner, allow
-      proceed-anyway with "offsets may not match" disclaimer.
-    - **Static fields**: perfect cross-session match (offset stable).
-    - **Single-instance singletons** (1 instance in both snaps):
-      cross-session diff works fine.
-    - **Multi-instance classes**: instance address is not portable
-      across launches, so cross-session view only surfaces
-      class-level aggregates (instance count delta, sum-of-HP delta);
-      per-instance diff disabled until 29d optional fingerprint.
+    Open with `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL`.
+  - **Cross-session diff semantics** (unblocks current
+    [SnapshotViewModel.cs:655](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs) guard):
+    | Scenario | Behavior |
+    |---|---|
+    | Same `session_id` (live) | Current 29b flow, no change |
+    | Different `session_id`, same `build_id` | Auto statics-only + blue banner "Cross-session diff: instance fields suppressed (addresses change per launch). [Force include] [Learn more]" |
+    | Different `build_id` | Statics-only + yellow banner "⚠ Cross-build diff — static offsets may have shifted" |
+  - **Sub-phases**:
+    - [ ] **29c-1** SnapshotStore + schema + migration runner + in-memory unit tests (1 day)
+    - [ ] **29c-2** UserSettingsStore (atomic JSON, source-gen, AOT-safe) (0.5 day)
+    - [ ] **29c-3** UI startup wiring — per-game DB resolution, lazy metadata load, switch on reconnect (0.5 day)
+    - [ ] **29c-4** 💾 Save / Delete commands per envelope + AutoSave hook + unsaved-snapshot warning on app close / DB switch (0.5 day)
+    - [ ] **29c-5** Cross-session / cross-build diff banner + force-include checkbox + remove existing block (0.5 day)
+    - [ ] **29c-6** Auto-prune algorithm + VACUUM heuristic + status notification (0.5 day)
+    - [ ] **29c-7** Snapshot tab status line ("DB: name · 7 snapshots · 124 MB / 200 MB · 📁 Open folder · ⚙ Settings") + folder picker via `IStorageProvider` + open folder via `Process.Start("explorer.exe", path)` + Settings modal (0.5 day)
+    - [ ] **29c-8** Tests (round-trip / migration / prune boundary / cross-session detect) + live-smoke on 활俠傳 + SaGa F2R + BongoCat (relaunch between snaps → confirm stale flag + statics-only + per-game DB switch) + docs (1 day)
+  - **Folder picker strategy**: `IStorageProvider.OpenFolderPickerAsync`
+    for choosing dir (modern Avalonia 12 API), `Process.Start("explorer.exe", path)`
+    for one-click "open this folder" button. Two APIs each suited to its
+    job.
+  - **Unsaved-snapshot UX**: app close or DB switch with any
+    `IsDirty=true` (in-memory but not persisted) envelope → modal
+    "You have N unsaved snapshots. Save them? [Save all] [Discard]
+    [Cancel]". Prevents accidental loss when user toggled AutoSave OFF.
+  - **Known risks + mitigations**: WAL handles crash-safety; cross-DB
+    Mutex prevents race during DB switch; remote-drive (OneDrive/SMB)
+    paths warned but not blocked; settings corruption → fallback to
+    defaults + log warning (non-fatal at startup).
 
 - [ ] **29d — Multi-field constraint query (SPC angle)** — DEFERRED
   - Originally proposed: query "find fields where A=100 AND B=50"
