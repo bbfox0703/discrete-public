@@ -2279,6 +2279,55 @@ Changed only + Class filter" stack.
   push past 256/64 caps on x86 (and the DLL refusal banner
   will make that obvious).
 
+- [ ] **Phase 29e — Full / Differential snapshot architecture**
+  (proposed by user 2026-05-27, **DEFERRED**). UI-side feature
+  that adds a second snapshot kind so multi-snapshot workflows
+  don't bloat UI memory linearly.
+
+  **Design (user-supplied)**:
+  - Two snapshot kinds: `Full` (today's behaviour) and
+    `Differential`. Each Diff is anchored to exactly one base
+    Full and only stores fields whose value differs from the
+    base. Typical size: 1–5% of base.
+  - Rules: Diff cannot be based on another Diff (no chains).
+    Dropping a Full cascade-drops every Diff anchored to it.
+  - Cross-pair compare logic:
+    | A kind | B kind | Behaviour |
+    |---|---|---|
+    | Full | Full | direct compare (current) |
+    | Full | Diff (base = A) | direct — Diff already IS the delta |
+    | Full | Diff (base ≠ A) | reconstruct virtual Full from Diff+base, then compare |
+    | Diff | Diff (same base) | direct delta-vs-delta, missing key on either = unchanged |
+    | Diff | Diff (different base) | reconstruct both virtual Fulls, then compare |
+  - The `Unchanged` row toggle is only available on `Full vs Full`
+    pairs (Diff has already discarded its unchanged data).
+
+  **What it solves**: UI-side multi-snapshot memory bloat. After
+  10 snapshots on 활俠傳-scale the UI would hold ~16 GB; with
+  differential it's ~2 GB (one Full + 9 small deltas).
+
+  **What it doesn't solve**: capture-time game OOM on x86 (DLL
+  still does a full heap walk + decode + JSON build each time;
+  the OOM gate from `35ab309` handles that). Pipe bandwidth
+  also unchanged.
+
+  **Cost estimate**: ~2–3 days of code + ≥1 live-smoke round.
+  Touches `SnapshotEnvelope` (kind + base ref), `Diff()` (five
+  cases instead of one), `DropSnapshot*` (cascade), filter
+  panel (Unchanged availability gating), DisplayName (kind +
+  base linkage rendered in dropdown), persistence path (29c
+  has to know how to store the relationship).
+
+  **Inspiration**: Oracle DB Materialized View incremental
+  refresh — same shape, just no mlog (we have the base full
+  snapshot directly instead of a change journal).
+
+  **Recommendation**: defer until a real workflow needs 5+
+  snapshots in one session. The current 2-snapshot
+  Full+Full diff is well-served and the OOM mitigation
+  bundle from `35ab309` removes the immediate pressure that
+  prompted this discussion.
+
 - [ ] **Mono static field VALUE capture** (optional, user-opt-in
   checkbox in Snapshot tab): currently statics on Mono only
   capture metadata (per build #637 fix). A "Capture static values

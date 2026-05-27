@@ -78,6 +78,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
     {
         _backend = backend;
         _logger  = logger;
+        // Re-fire the rollup banner whenever the list mutates (Take /
+        // Drop / ClearAll). DisplayName for each envelope is per-row
+        // and doesn't need this — only the cumulative count + memory
+        // estimate does.
+        Snapshots.CollectionChanged += (_, _) =>
+            OnPropertyChanged(nameof(TotalSnapshotsMemoryBanner));
     }
 
     /// <summary>Snapshots the user has taken in this session. List
@@ -246,11 +252,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(DiffCommand))]
-    [NotifyCanExecuteChangedFor(nameof(DropSnapshotCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DropSnapshotACommand))]
     private SnapshotEnvelope? _selectedSnapshotA;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(DiffCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DropSnapshotBCommand))]
     private SnapshotEnvelope? _selectedSnapshotB;
 
     // -----------------------------------------------------------------------
@@ -353,7 +360,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(TakeSnapshotCommand))]
     [NotifyCanExecuteChangedFor(nameof(DiffCommand))]
-    [NotifyCanExecuteChangedFor(nameof(DropSnapshotCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DropSnapshotACommand))]
+    [NotifyCanExecuteChangedFor(nameof(DropSnapshotBCommand))]
     private bool _isBusy;
 
     [ObservableProperty] private string _statusMessage = "Press Take Snapshot to capture the game's current managed-state. Two snapshots needed for a diff.";
@@ -614,23 +622,40 @@ public sealed partial class SnapshotViewModel : ObservableObject
         StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote} (in {sw.ElapsedMilliseconds} ms). Showing {FilteredDiffRows.Count:N0} after filters.";
     }
 
-    [RelayCommand(CanExecute = nameof(CanDropSnapshot))]
-    public void DropSnapshot()
+    /// <summary>Drop the snapshot currently selected as A. Status line
+    /// reports the freed estimate so the user sees memory drop.</summary>
+    [RelayCommand(CanExecute = nameof(CanDropSnapshotA))]
+    public void DropSnapshotA() => DropOne(SelectedSnapshotA, "A");
+
+    /// <summary>Drop the snapshot currently selected as B. Independent
+    /// from <see cref="DropSnapshotA"/> so the user doesn't have to
+    /// swap A↔B to drop the B side.</summary>
+    [RelayCommand(CanExecute = nameof(CanDropSnapshotB))]
+    public void DropSnapshotB() => DropOne(SelectedSnapshotB, "B");
+
+    private void DropOne(SnapshotEnvelope? env, string slotLabel)
     {
-        if (SelectedSnapshotA is { } a)
-        {
-            Snapshots.Remove(a);
-            SelectedSnapshotA = null;
-            DiffRows.Clear();
-            FieldNameStats.Clear();
-            RebuildFilteredRows();
-            StatusMessage = "Snapshot dropped.";
-        }
+        if (env is null) return;
+        long freed = env.EstimatedMemoryBytes;
+        Snapshots.Remove(env);
+        // If the dropped envelope was also referenced by the other slot,
+        // clear that selection too — ComboBox.SelectedItem would otherwise
+        // dangle on a no-longer-in-source item.
+        if (ReferenceEquals(SelectedSnapshotA, env)) SelectedSnapshotA = null;
+        if (ReferenceEquals(SelectedSnapshotB, env)) SelectedSnapshotB = null;
+        // Diff result targeted this envelope — clear it.
+        DiffRows.Clear();
+        FieldNameStats.Clear();
+        RebuildFilteredRows();
+        OnPropertyChanged(nameof(TotalSnapshotsMemoryBanner));
+        StatusMessage = $"Snapshot {slotLabel} dropped (~{FormatMemory(freed)} freed). {Snapshots.Count:N0} remaining.";
     }
 
     [RelayCommand]
     public void ClearAll()
     {
+        long freed = TotalSnapshotsMemoryBytes;
+        int count = Snapshots.Count;
         Snapshots.Clear();
         SelectedSnapshotA = null;
         SelectedSnapshotB = null;
@@ -638,9 +663,33 @@ public sealed partial class SnapshotViewModel : ObservableObject
         FieldNameStats.Clear();
         ExcludedFieldNames.Clear();
         RebuildFilteredRows();
-        StatusMessage = "All snapshots cleared.";
+        OnPropertyChanged(nameof(TotalSnapshotsMemoryBanner));
+        StatusMessage = count > 0
+            ? $"All {count:N0} snapshots cleared (~{FormatMemory(freed)} freed)."
+            : "Snapshot list already empty.";
         ErrorMessage  = null;
     }
+
+    /// <summary>Sum of <see cref="SnapshotEnvelope.EstimatedMemoryBytes"/>
+    /// over every snapshot in the list. UI surfaces this so the user
+    /// sees the cumulative cost as snapshots accumulate.</summary>
+    public long TotalSnapshotsMemoryBytes
+    {
+        get
+        {
+            long sum = 0;
+            foreach (var s in Snapshots) sum += s.EstimatedMemoryBytes;
+            return sum;
+        }
+    }
+
+    /// <summary>Header line shown above the A/B selectors, e.g.
+    /// "3 snapshots — ~4.2 GB total (UI memory)". Empty when no
+    /// snapshots yet so the row collapses.</summary>
+    public string TotalSnapshotsMemoryBanner
+        => Snapshots.Count == 0
+            ? string.Empty
+            : $"{Snapshots.Count:N0} snapshot{(Snapshots.Count == 1 ? string.Empty : "s")} held — ~{FormatMemory(TotalSnapshotsMemoryBytes)} total UI memory";
 
     /// <summary>Toggle a field name in / out of <see cref="ExcludedFieldNames"/>
     /// from the stats panel. The list is small (typically top-20) so the
@@ -777,7 +826,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
     private bool CanTakeSnapshot()    => !IsBusy;
     private bool CanDiff()            => !IsBusy && SelectedSnapshotA is not null && SelectedSnapshotB is not null;
-    private bool CanDropSnapshot()    => !IsBusy && SelectedSnapshotA is not null;
+    private bool CanDropSnapshotA()   => !IsBusy && SelectedSnapshotA is not null;
+    private bool CanDropSnapshotB()   => !IsBusy && SelectedSnapshotB is not null;
 
     // -----------------------------------------------------------------------
     // Elapsed-time dispatcher timer (same pattern as ValueSearchViewModel —
@@ -889,15 +939,43 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             ? CapturedAt.ToString("HH:mm:ss", CultureInfo.InvariantCulture)
             : $"\"{Label}\"";
 
+    /// <summary>Heuristic UI-side memory cost of this envelope, in bytes.
+    /// Empirical ratio from build #646 live-smoke on 활俠傳 / Mortal:
+    /// 1.13M field-values consumed ~1.62 GB of UI WorkingSet delta →
+    /// ~1500 bytes per FieldIndex entry once you account for the
+    /// dictionary's bucket overhead, the SnapshotFieldValue object
+    /// header, the per-field strings (assembly, class fqn, instance
+    /// address, field name, type, value display), and the parallel
+    /// Classes list. The estimate is rough — within 2× — but plenty
+    /// good for "is this snapshot small or huge?" UX. Re-computed on
+    /// demand from FieldIndex.Count so it doesn't bloat the envelope.</summary>
+    public long EstimatedMemoryBytes
+        => (long)FieldIndex.Count * 1500L;
+
     public string DisplayName
     {
         get
         {
             string body = string.IsNullOrEmpty(Label)
-                ? $"{CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst"
-                : $"{Label} — {CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst";
+                ? $"{CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst / ~{FormatMb(EstimatedMemoryBytes)}"
+                : $"{Label} — {CapturedAt:HH:mm:ss} — {TotalClasses:N0} cls / {TotalInstances:N0} inst / ~{FormatMb(EstimatedMemoryBytes)}";
             return IsStale ? $"⚠ stale (different game) — {body}" : body;
         }
+    }
+
+    /// <summary>Format bytes for the dropdown line — MB unless huge,
+    /// then GB. Shorter than the per-status line's FormatMemory so
+    /// dropdowns stay readable.</summary>
+    private static string FormatMb(long bytes)
+    {
+        if (bytes <= 0) return "0 MB";
+        if (bytes >= 1024L * 1024 * 1024)
+        {
+            double gb = bytes / (1024.0 * 1024.0 * 1024.0);
+            return gb.ToString("0.0", CultureInfo.InvariantCulture) + " GB";
+        }
+        double mb = bytes / (1024.0 * 1024.0);
+        return mb.ToString("0", CultureInfo.InvariantCulture) + " MB";
     }
 
     partial void OnIsStaleChanged(bool value) => OnPropertyChanged(nameof(DisplayName));

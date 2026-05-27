@@ -1593,14 +1593,11 @@
                           Content="Take Snapshot"
                           Command="{Binding Snapshot.TakeSnapshotCommand}"
                           MinWidth="120" Margin="0,0,6,0"/>
-                  <Button Grid.Row="0" Grid.Column="7"
-                          Content="Drop Selected"
-                          Command="{Binding Snapshot.DropSnapshotCommand}"
-                          MinWidth="100" Margin="0,0,6,0"/>
-                  <Button Grid.Row="0" Grid.Column="8"
+                  <Button Grid.Row="0" Grid.Column="7" Grid.ColumnSpan="2"
                           Content="Clear All"
                           Command="{Binding Snapshot.ClearAllCommand}"
-                          MinWidth="80"/>
+                          MinWidth="100"
+                          ToolTip.Tip="Drop every captured snapshot. Frees UI memory. Status line reports the amount freed."/>
 
                   <!-- Row 1 — scope assemblies + include-system toggle -->
                   <TextBlock Grid.Row="1" Grid.Column="0" Text="Scope:"
@@ -1641,37 +1638,55 @@
                            Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
               </Border>
 
-              <!-- Mid: A/B selection + Diff button + include-unchanged toggle -->
+              <!-- Mid: A/B selection + per-side Drop + Diff button +
+                   include-unchanged toggle. Drop A / Drop B are independent
+                   so the user can clear either side without swapping. -->
               <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
                       Background="#1F808080" CornerRadius="3">
-                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,Auto"
-                      RowDefinitions="Auto">
-                  <TextBlock Grid.Column="0" Text="A:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"/>
-                  <ComboBox Grid.Column="1"
-                            ItemsSource="{Binding Snapshot.Snapshots}"
-                            SelectedItem="{Binding Snapshot.SelectedSnapshotA, Mode=TwoWay}"
-                            DisplayMemberBinding="{Binding DisplayName}"
-                            HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+                <StackPanel Spacing="4">
+                  <!-- Cumulative memory banner — visible only after at least
+                       one snapshot exists. Shows "N snapshots — ~X GB total UI
+                       memory" so the user can decide when to drop. -->
+                  <TextBlock Text="{Binding Snapshot.TotalSnapshotsMemoryBanner}"
+                             FontSize="11" Opacity="0.75"
+                             IsVisible="{Binding Snapshot.TotalSnapshotsMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                  <Grid ColumnDefinitions="Auto,*,Auto,Auto,*,Auto,Auto,Auto"
+                        RowDefinitions="Auto">
+                    <TextBlock Grid.Column="0" Text="A:"
+                               VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding Snapshot.Snapshots}"
+                              SelectedItem="{Binding Snapshot.SelectedSnapshotA, Mode=TwoWay}"
+                              DisplayMemberBinding="{Binding DisplayName}"
+                              HorizontalAlignment="Stretch" Margin="0,0,4,0"/>
+                    <Button Grid.Column="2" Content="Drop A"
+                            Command="{Binding Snapshot.DropSnapshotACommand}"
+                            MinWidth="70" Margin="0,0,12,0"
+                            ToolTip.Tip="Drop the snapshot selected in A. Frees its ~estimated UI memory."/>
 
-                  <TextBlock Grid.Column="2" Text="B:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"/>
-                  <ComboBox Grid.Column="3"
-                            ItemsSource="{Binding Snapshot.Snapshots}"
-                            SelectedItem="{Binding Snapshot.SelectedSnapshotB, Mode=TwoWay}"
-                            DisplayMemberBinding="{Binding DisplayName}"
-                            HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+                    <TextBlock Grid.Column="3" Text="B:"
+                               VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox Grid.Column="4"
+                              ItemsSource="{Binding Snapshot.Snapshots}"
+                              SelectedItem="{Binding Snapshot.SelectedSnapshotB, Mode=TwoWay}"
+                              DisplayMemberBinding="{Binding DisplayName}"
+                              HorizontalAlignment="Stretch" Margin="0,0,4,0"/>
+                    <Button Grid.Column="5" Content="Drop B"
+                            Command="{Binding Snapshot.DropSnapshotBCommand}"
+                            MinWidth="70" Margin="0,0,12,0"
+                            ToolTip.Tip="Drop the snapshot selected in B. Independent from Drop A — no need to swap sides."/>
 
-                  <CheckBox Grid.Column="4"
-                            Content="Include unchanged"
-                            IsChecked="{Binding Snapshot.IncludeUnchangedRows, Mode=TwoWay}"
-                            VerticalAlignment="Center" Margin="0,0,12,0"
-                            ToolTip.Tip="When ON, the next Diff also emits rows where the value is identical in A and B. Lets you use the value-range / field-name filters to find fields by their value even when they didn't change between snapshots (e.g. spotting other money / HP fields in the same numeric range). Cost: 10–100× more rows on a wide diff."/>
+                    <CheckBox Grid.Column="6"
+                              Content="Include unchanged"
+                              IsChecked="{Binding Snapshot.IncludeUnchangedRows, Mode=TwoWay}"
+                              VerticalAlignment="Center" Margin="0,0,12,0"
+                              ToolTip.Tip="When ON, the next Diff also emits rows where the value is identical in A and B. Lets you use the value-range / field-name filters to find fields by their value even when they didn't change between snapshots (e.g. spotting other money / HP fields in the same numeric range). Cost: 10–100× more rows on a wide diff."/>
 
-                  <Button Grid.Column="5" Content="Diff A → B"
-                          Command="{Binding Snapshot.DiffCommand}"
-                          MinWidth="120"/>
-                </Grid>
+                    <Button Grid.Column="7" Content="Diff A → B"
+                            Command="{Binding Snapshot.DiffCommand}"
+                            MinWidth="120"/>
+                  </Grid>
+                </StackPanel>
               </Border>
 
               <!-- Filter bar — Phase 29 polish: noise-reduction filters
