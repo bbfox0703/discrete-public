@@ -2108,9 +2108,21 @@
                               GridLinesVisibility="Horizontal"
                               CanUserResizeColumns="True">
                       <DataGrid.Columns>
-                        <DataGridCheckBoxColumn Header="Use"
-                                                Binding="{Binding Include, Mode=TwoWay}"
-                                                Width="50"/>
+                        <!-- Use-column: same single-click fix as the
+                             Operand cells below. DataGridCheckBoxColumn
+                             would force the user to click twice (first
+                             click selects the row, second toggles). Live
+                             CheckBox in a template column makes the first
+                             click flip Include. -->
+                        <DataGridTemplateColumn Header="Use" Width="50">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <CheckBox IsChecked="{Binding Include, Mode=TwoWay}"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                         <DataGridTextColumn Header="Snapshot"
                                             Binding="{Binding DisplayLabel}"
                                             IsReadOnly="True"
