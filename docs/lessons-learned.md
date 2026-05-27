@@ -3044,3 +3044,117 @@ snapshots (typical: 3 wide game snaps + 1 quick boot snap to anchor
 `Run()` entry to pick the anchor index, then the rest of the engine
 treats it identically to the canonical first snapshot. See
 [SpcQueryEngine.Run](../ui/UnityDumpUI/ViewModels/SpcQueryEngine.cs).
+
+---
+
+### Phase 29d-polish — Avalonia 12 DataGrid built-in column types need a double-click before they accept input ✅ **Surfaced 3× on the SPC Query tab, 2026-05-29**
+
+**Symptom**: user clicks an "Operand" cell on the SPC predicate
+DataGrid, types a value, nothing happens. Same with the "Use"
+checkbox column — first click selects the row, second click finally
+toggles. Users reasonably conclude the cells are read-only — and
+the Run button stays disabled because predicates are missing
+operands, compounding the confusion.
+
+**Root cause**: Avalonia 12's `DataGridTextColumn` /
+`DataGridCheckBoxColumn` / `DataGridComboBoxColumn` are
+"edit-on-double-click" by design. First click selects the row,
+second click enters edit mode, only the third interaction
+actually mutates the cell. This matches WPF behaviour but is
+surprising in a 2026 UI where Excel / Google Sheets / VS Code etc.
+accept single-click-edit.
+
+**Fix**: replace the built-in single-purpose columns with
+`DataGridTemplateColumn` + a live control:
+
+```xml
+<!-- DON'T — needs double-click to enter edit mode -->
+<DataGridTextColumn Header="Operand"
+                    Binding="{Binding OperandText, Mode=TwoWay}" />
+
+<!-- DO — single click → focus → type -->
+<DataGridTemplateColumn Header="Operand">
+  <DataGridTemplateColumn.CellTemplate>
+    <DataTemplate>
+      <TextBox Text="{Binding OperandText, Mode=TwoWay}"
+               Margin="2" VerticalAlignment="Center" />
+    </DataTemplate>
+  </DataGridTemplateColumn.CellTemplate>
+</DataGridTemplateColumn>
+```
+
+Same pattern works for `CheckBox` and `ComboBox`. **Rule**: if the
+user mutates a cell on a single click, use `DataGridTemplateColumn`
+and put a live control inside. The single-purpose `DataGrid*Column`
+types are only ergonomic for infrequent edits where the
+row-select-first interaction is fine. Hit this three times in one
+session (Operand cell, Operand 2 cell, Use checkbox) before adding
+the rule.
+
+---
+
+### Phase 29d-polish — `RelayCommand` CanExecute doesn't re-fire on external collection changes ✅ **Surfaced 2026-05-29**
+
+**Symptom**: SPC Query "Run" button stayed grayed even after 4
+snapshots were taken (and visible in the picker grid). `CanRun`
+returned `true` when inspected manually; the button just never
+re-evaluated.
+
+**Root cause**: `CommunityToolkit.Mvvm`'s `[RelayCommand]` source
+generator hooks `CanExecuteChanged` to the VM's own
+`PropertyChanged` events — but only for `[ObservableProperty]`-
+decorated fields on the same VM. Our `CanRun` reads
+`_snapshot.Snapshots.Count`, which is an external
+`ObservableCollection` not surfaced as an `[ObservableProperty]`
+here. When that collection mutates, the source-gen has no hook to
+know we need to re-evaluate.
+
+**Fix**: subscribe to the external collection's
+`CollectionChanged` event and call the generated
+`<Name>Command.NotifyCanExecuteChanged()` method explicitly:
+
+```csharp
+_snapshot.Snapshots.CollectionChanged += (_, _) =>
+{
+    SyncSelectionRows();
+    RunCommand.NotifyCanExecuteChanged();   // ← without this the
+                                            //   button stays stale
+};
+```
+
+Same pattern applies whenever a command's CanExecute depends on
+state that isn't a local `[ObservableProperty]`. The source-gen
+DOES generate the `NotifyCanExecuteChanged()` method automatically
+— you just have to call it.
+
+---
+
+### Phase 29d-polish — empty Operand on a value-required predicate silently returns 0 matches ✅ **Surfaced + caught with preflight 2026-05-29**
+
+**Symptom**: user picked `Exact` on a SPC predicate row but didn't
+type a value in the Operand cell. Run produced `0 matches`,
+indistinguishable from "no field met the criteria". User wasted
+~5 minutes assuming the engine was working but their predicates
+were wrong.
+
+**Root cause**: `SpcSnapshotRow.BuildPredicate()` parses the
+Operand text via `double.TryParse` — empty / unparseable → null.
+The engine's `Evaluate(Exact)` short-circuits when `pred.Operand`
+is null: returns false for every row. Same path for `NotEqual`,
+`DeltaExact`, and `Range`/`DeltaRange` with both bounds empty.
+
+**Fix**: preflight validation in `RunAsync` BEFORE calling the
+engine. For each selected row, check the predicate kind's
+operand requirements:
+
+| Predicate | Operand 1 | Operand 2 |
+|---|---|---|
+| Any / Unchanged / Increased / Decreased | not needed | not needed |
+| Exact / NotEqual / DeltaExact | **required** | not used |
+| Range / DeltaRange | at least one of | the two must be set |
+
+If validation fails, surface a row-specific error message naming
+the index + kind so the user knows exactly which cell to fix.
+**Rule**: any "user-facing predicate language with optional
+operands" needs explicit empty-vs-meaningful-zero validation;
+silent fail-to-zero-results is the worst UX outcome.

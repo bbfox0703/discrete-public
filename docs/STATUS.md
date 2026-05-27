@@ -1,8 +1,54 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29c SQLite cross-session persistence + Phase 29d SPC multi-snapshot constraint query both shipped**, build #680+ UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29d SPC tab live-smoke polish complete**, head `82647cd` / build #682+ UI / DLL #650).
 
-## TL;DR — what's left to pick up (Phase 29d session, 2026-05-29)
+## TL;DR — what's left to pick up (next session, post-29d polish)
+
+Phase 29d shipped earlier this day. User ran the SPC Query tab live and
+surfaced six UX issues across three batches of fixes. All shipped +
+green on 462/462 unit tests, both branches in sync.
+
+### What landed since the Phase 29d ship (commits 832f471 → 82647cd)
+
+| # | Issue | Fix |
+|---|---|---|
+| 1 | **Run SPC Query button stayed disabled** with 4 snapshots in the pool | `RelayCommand` `CanExecute` doesn't auto-fire on external collection changes — wired `RunCommand.NotifyCanExecuteChanged()` into the `Snapshots.CollectionChanged` hook |
+| 2 | **Operand / Operand 2 cells uneditable on first click** | Avalonia `DataGridTextColumn` needs double-click to enter edit mode. Swapped to `DataGridTemplateColumn` with live `TextBox` so single click works |
+| 3 | **Use-column checkbox same trap** — first click selected the row, didn't toggle | Swapped to `DataGridTemplateColumn` with live `CheckBox` |
+| 4 | **Columns couldn't be resized** | `CanUserResizeColumns="True"` on both DataGrids. Sort stays off (would scramble per-snap value sequences) |
+| 5 | **Class / Type filters were plain TextBoxes** — user couldn't remember exact names | Upgraded to `AutoCompleteBox`. `KnownTypes` seeded with 22 curated managed primitives (Int*/UInt*, Single, Double, Vector*, Color, Quaternion, GameObject, Transform); both lists augment from hydrated snapshots on each Run. Typing `u` surfaces all UInt* on first keystroke |
+| 6 | **Silent "0 matches" when Exact predicate had empty Operand** | Preflight in `RunAsync` now validates per-row that required operand(s) are filled. Error names the row index + predicate kind so the user knows where to look |
+| 7 | **Snapshot dropdown didn't show which were unsaved** | `SnapshotEnvelope.DisplayName` prefixes `● unsaved · ` when `IsDirty=true`. Stale badge still wins position |
+| 8 | **Handshake Expander wasted a row in the right pane** | Moved into a Flyout button `ℹ Handshake` on the top toolbar next to Tools |
+
+### Live-smoke STILL TODO (from Phase 29d, partly verified)
+
+| # | Case | Status |
+|---|---|---|
+| 1 | **Killer use case literal** — 4 snaps with `10160→9910→9410→9410` SPC signature on Mortal.Core.GameStat | ✅ Verified 2026-05-29 — screenshot showed `Values: 10160 → 10160 → 9910 → 9860` so the engine + UI works end-to-end |
+| 2 | Constant-value finder — all `Exact V` | Not yet tried live |
+| 3 | Range narrowing — all `Range min..max` | Not yet tried live |
+| 4 | Cross-session statics-only auto-mode + banner | Not yet tried live (needs game relaunch between snaps) |
+| 5 | Cross-build diff banner | Not yet tried live (needs game version change) |
+| 6 | Context menu — right-click result row → Inspect / Copy variants | Not yet tried live |
+| 7 | Logs at `…\Logs\ui\snapshot\current.log` show `SpcQuery: snaps=N preds=[...] → M matches in Xms` | Not yet inspected |
+| 8 | Auto-prune at 200 MB threshold across many wide snaps | Not yet tried live |
+| 9 | Settings dialog DB-directory change → live DB switch | Not yet tried live |
+
+### Next priorities
+
+* Continue live-smoke on the items above; surface any further UX papercuts.
+* Phase 29e research stub (Class-centric Key/Value pivot — "for the
+  Player instance with name='Bob', show HP across N snaps") still
+  documented in plan.md. Waiting on a concrete real-world need before
+  designing it.
+* Per-key streaming hydrate (constant RAM regardless of N) deferred
+  from 29d-4 — not needed until live data hits the practical N>10
+  wall.
+
+---
+
+## Previous milestone — Phase 29d SPC ship (same day, earlier)
 
 **Phase 29d SPC-style multi-snapshot constraint query SHIPPED**. New
 "SPC Query" tab (MainWindow position 8) answers the user's killer use
