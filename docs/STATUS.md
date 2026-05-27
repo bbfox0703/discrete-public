@@ -1,40 +1,66 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29e-1 + 29e-1b shipped**; head `e84209f` + array-expansion commit / build #685 UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29e-1 + 29e-1b + 29e-2 shipped**; head pending commit / build #687 UI / DLL #650).
 
 ## TL;DR — what's left to pick up (next session, mid-29e)
 
-Two engine waves landed back-to-back:
+29e-2 ships the manual-pick Class Pivot tab on top of the 29e-1/-1b
+engine. Three waves of Phase 29e landed so far:
 
-* **29e-1**  Pure-engine `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
-  + 16 tests ([PivotEngineTests.cs](../ui/UnityDumpUI.Tests/PivotEngineTests.cs)).
-  Class-centric pivot keyed by field values inside each instance —
-  sidesteps address drift cross-session AND within-session.
+* **29e-1**  `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
+  + 16 tests. Class-centric pivot keyed by field values inside each
+  instance — sidesteps address drift cross-session AND within-session.
 * **29e-1b** Primitive array index expansion in `BuildFieldIndex`
   ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
-  + 10 tests ([SnapshotFieldIndexArrayExpansionTests.cs](../ui/UnityDumpUI.Tests/SnapshotFieldIndexArrayExpansionTests.cs)).
-  Array fields now fan out as `{addr}|{offset}|{fieldName}[{i}]`
-  pseudo-rows in addition to the existing summary row — SPC tab
-  inherits per-element tracking for free. Ref-arrays render as
-  `ptr=…` (Layer B will key by inner field; needs DLL change).
+  + 10 tests. Array fields fan out as
+  `{addr}|{offset}|{fieldName}[{i}]` pseudo-rows. SPC tab inherits
+  per-element tracking for free. Ref-arrays render as `ptr=…`
+  (Layer B will key by inner field; needs DLL change).
+* **29e-2**  Class Pivot tab — new TabItem at index 9 in
+  [MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml).
+  [PivotViewModel.cs](../ui/UnityDumpUI/ViewModels/PivotViewModel.cs) +
+  18 tests in [PivotViewModelTests.cs](../ui/UnityDumpUI.Tests/PivotViewModelTests.cs).
+  Shares envelope pool with Snapshot + SPC tabs; cross-session
+  banner reads as a feature, not a warning.
 
-**488/488 green** (was 462 before 29e). No UI yet, no DLL change.
-`SnapshotEnvelope.FormatFieldValue` promoted to `internal` so
-PivotEngine reuses the shared formatter. Full design at
-[class-pivot.md](class-pivot.md); plan.md 29e ledger shows the
-remaining waves:
+**506/506 green** (was 462 before 29e). No DLL change. Full design at
+[class-pivot.md](class-pivot.md).
 
-* **29e-2** "Class Pivot" tab — Stage 2 only, manual class + K + V
-  picker, cross-session banner repurposed for pivot semantics.
+### Live-smoke TODO (29e-2)
+
+UI was unit-tested but not live-game-smoked. To verify in a live
+session:
+
+1. Take 3-4 snapshots in 활俠傳 (same session, spend money between snaps).
+2. Switch to **Class Pivot** tab. Type `Mortal.Core.GameStat` in the
+   Class FQN box — AutoCompleteBox should suggest it after the first
+   character once any snapshot is hydrated.
+3. Type `_propertyID` in Key fields, `_value` in Value fields.
+4. (Optional) Type `101` in Key filter to narrow to the 銀兩 (Money) row.
+5. Press Run. Expect 1 row with key `101` and a trajectory like
+   `10160 → 9910 → 9410`. Address column will show drifting addresses
+   if any hydrated session boundary appears between snaps.
+6. Right-click the row → "Inspect (latest snap)" should switch to
+   Inspector tab loaded with the latest address.
+7. Repeat with snapshots taken from DIFFERENT sessions (close game,
+   reopen, take more snapshots) — verify the cross-session blue
+   banner says "Cross-session pivot — keying by (_propertyID)
+   sidesteps address drift." and the row still tracks the same key.
+
+### Remaining 29e waves
+
 * **29e-3** Stage 0 class-shortlisting DataGrid (CV / null % /
-  field-type ratios) — replaces manual class picker.
+  field-type ratios) — replaces the manual class picker with a
+  sortable shortlist of stable, instance-bearing classes.
 * **29e-4** Stage 1 field-level key auto-discovery
   (S_stable + S_cardinality + TypePrior + NamePrior) + greedy
   compound-key suggestion.
 
-DB schema untouched. Existing `.db` files keep working — `BuildFieldIndex`
-is in-memory only, so re-hydrating any saved snapshot now yields the
-new pseudo-rows automatically.
+Deferred: Layer B (reference-array inner pivot — needs DLL changes)
++ anomaly auto-surface (stretch goal).
+
+DB schema untouched. Existing `.db` files keep working — every
+29e wave is in-memory only.
 
 ## Previous TL;DR — Phase 29d live-smoke polish (head `82647cd` / build #682)
 

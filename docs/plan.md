@@ -333,8 +333,22 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
       fields). Edge cases tested: empty array, ArrayError, cap-hit
       (Length > Count), element-level error, non-array fields
       unaffected.
-    - [ ] **29e-2**  "Class Pivot" tab — Stage 2 only, manual class +
-      K + V picker, repurposed cross-session banner.
+    - [x] **29e-2**  "Class Pivot" tab — Stage 2 only, manual class +
+      K + V picker, repurposed cross-session banner. New tab at
+      MainWindow position 9 ([MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml),
+      [PivotViewModel.cs](../ui/UnityDumpUI/ViewModels/PivotViewModel.cs)).
+      18 ViewModel tests at build #687, 506/506 green. Shares the
+      snapshot envelope pool with Snapshot + SPC tabs.
+      AutoCompleteBox suggestions for Class FQN + field names sourced
+      from hydrated snapshots. Cross-session banner reads as a
+      feature ("Cross-session pivot — keying by (k1, k2) sidesteps
+      address drift") rather than the SPC warning. Cross-build still
+      a yellow warning. Results render via a single AOT-safe
+      "Trajectory" column (CompiledBinding compatible) — same
+      mental model as SPC's "v0 → v1 → v2" cell, with multi-line
+      "fieldName: …" prefix for multi-value-field queries.
+      DoubleTapped + 4-entry ContextMenu (Inspect / Copy key tuple /
+      Copy value sequence / Copy instance address latest).
     - [ ] **29e-3**  Stage 0 class shortlisting DataGrid (CV / null %
       / field-type ratios) — replaces the manual class picker.
     - [ ] **29e-4**  Stage 1 field-level key auto-discovery

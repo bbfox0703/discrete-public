@@ -39,6 +39,7 @@ public partial class MainWindow : Window
         // on the Address Lookup tab.
         vm.AddressLookup.CopyToClipboardAsync = CopyToClipboardAsync;
         vm.SpcQuery.CopyToClipboardAsync      = CopyToClipboardAsync;
+        vm.ClassPivot.CopyToClipboardAsync    = CopyToClipboardAsync;
         vm.ShowProxyDeploy                    = ShowProxyDeployWindow;
         DataContext = vm;
         // Pane-collapse plumbing — IsVisible bindings on the panes' content
@@ -336,6 +337,55 @@ public partial class MainWindow : Window
         if (m is null) return;
         await vm.SpcQuery.CopyValueSequenceAsync(m).ConfigureAwait(true);
     }
+
+    // ── Phase 29e-2 Class Pivot tab — context menu + DoubleTapped ────
+
+    private UnityDumpUI.ViewModels.PivotResultRow? GetSelectedPivotRow()
+    {
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotResultsGrid");
+        return grid?.SelectedItem as UnityDumpUI.ViewModels.PivotResultRow;
+    }
+
+    private void OnPivotResultDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.PivotResultRow row) return;
+        vm.ClassPivot.RequestInspectInstance(row);
+    }
+
+    private void OnPivotInspectInstanceClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        vm.ClassPivot.RequestInspectInstance(row);
+    }
+
+    private async void OnPivotCopyKeyTupleClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        await vm.ClassPivot.CopyKeyTupleAsync(row).ConfigureAwait(true);
+    }
+
+    private async void OnPivotCopyValueSequenceClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        await vm.ClassPivot.CopyValueSequenceAsync(row).ConfigureAwait(true);
+    }
+
+    private async void OnPivotCopyAddressLatestClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        await vm.ClassPivot.CopyAddressLatestAsync(row).ConfigureAwait(true);
+    }
+
 
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
     /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir
