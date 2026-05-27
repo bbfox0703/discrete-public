@@ -2606,7 +2606,7 @@ values against the XAML's `<TabItem Header=` ordering settles it.
 
 ---
 
-### Snapshot `FindAllInstances` 2-level scan accepts non-object memory as fake "instances" — eats per-class cap before reaching real instances  ✅ **PARTIAL FIX 2026-05-28 (DLL #648)**
+### Snapshot `FindAllInstances` 2-level scan accepts non-object memory as fake "instances" — eats per-class cap before reaching real instances  ✅ **PROPER FIX 2026-05-28 (DLL #650)**
 
 **Symptom**: Live Inspector + per-class `findInstances` reports 152
 instances of `Mortal.Core.GameStat` (e.g. 활俠傳 / Mortal money
@@ -2664,35 +2664,61 @@ build #637 lesson):
    loop so the cache memo doesn't pollute future scans with
    misclassified vtables.
 
-**What's still open (Phase 29-f deferred)**: the proper fix is
-to switch `FindAllInstances` to the same **1-level scan** the
-per-class `findInstances` does. That requires pre-resolving the
-vtable pointer for every class in the snapshot scope before
-scanning. `mono_class_vtable(domain, klass)` does that BUT may
-lazily allocate a vtable in BDWGC heap — and the build #637
-lesson is that batch allocations from a worker thread wedge the
-game's main thread on next GC. Workable approaches when the
-need arises:
+**Proper fix shipped 2026-05-28 (DLL #650)**: vtable structural
+validation via the `MonoDomain*` field. `MonoVTable` layout
+(from `mono/metadata/class-internals.h`):
 
-- Resolve vtables on the main thread via `MainThreadDispatcher`
-  (slower per call, but no BDWGC allocation race).
-- Or: pre-warm class vtables lazily during normal game play
-  (the live Inspector already populates `vtableSet`); when the
-  snapshot fires, use only the warmed subset and accept that
-  un-warmed classes might miss the real-instance signal.
-- Or: switch to mono GC's introspection APIs
-  (`mono_gc_walk_heap`) that enumerate actually-live objects
-  directly — heaviest but most accurate.
+```
++0           MonoClass*       (already checked in classSet)
++ptr_size    MonoGCDescriptor (gc_descr, packed bits)
++2*ptr_size  MonoDomain*      ← signature field
++3*ptr_size  MonoType*
+...
+```
 
-Estimated 2-3 days when the partial fix proves insufficient.
+Real vtables ALWAYS have `*(qw + 2*ptr_size) == root_domain_ptr`.
+Random structures whose first qword happens to be a class
+pointer (the false-positive case) almost never have the domain
+pointer stored at that offset.
 
-**Detection hint**: if the snapshot debug tool shows a class
-with captured-count significantly above the live
-`findInstances` count, AND the live game's known stable address
-is NOT in the captured set (`Address Lookup` finds it but
-debug "compare in A & B" returns 0 rows in both), this is the
-false-positive-overflow signature. Workaround: bump the
-Instance cap above the (live count + estimated false positives).
+The check is a single SEH-safe memory read per candidate, no
+Mono runtime calls. Zero BDWGC interaction = zero risk of the
+build #637 wedge. Implementation in
+[MonoAddressFinder.cpp FindAllInstances](../dll/src/mono/MonoAddressFinder.cpp):
+
+1. Sample `GetRootDomain()` once before the walk → `rootDomainAddr`.
+2. After the existing 2-level deref accepts a candidate, do one
+   more `SehReadKlassAt(qw + 2*ptr_size, domainAt)` read.
+3. If `domainAt != rootDomainAddr`, reject (memo as non-vtable
+   for the rest of the scan).
+
+Also: stopped seeding the per-walk `vtMemo` from the global
+`cache().vtableToKlass`. Older walks before this fix would have
+memoised some non-vtable structures as legitimate vtables; the
+old entries persist in the cache, but starting `vtMemo` fresh
+each walk forces re-validation under the new check.
+
+**Why this works and why earlier heuristics didn't**: the
+8-byte alignment + MEM_MAPPED skip filters caught ~30-50% of
+false positives but plenty leaked through (false positives at
+8-byte-aligned addresses inside MEM_PRIVATE Mono heap memory —
+e.g., RGCTX cache slots, internal lookup tables that store
+vtable pointer values as their payload). The domain check
+catches those because while they store a vtable POINTER (which
+happens to equal a real vtable address), the surrounding bytes
+are the cache structure's own layout, not the MonoVTable
+layout — so the qword at "where domain should be" is whatever
+the cache uses there, not the root domain.
+
+**Detection hint** (if a future variant of this bug appears):
+if `findInstances` per-class returns N matches but
+`FindAllInstances` reports N + dozens of garbage-valued
+"instances" for the same class, look for what other Mono
+structures might have `MonoClass*` at offset 0 AND happen to
+have the root domain pointer (or domain-shaped value) at
+offset 2*ptr_size. So far MonoVTable is unique in that
+combination, but check the Mono source for newer Unity
+versions if symptoms reappear.
 
 ---
 

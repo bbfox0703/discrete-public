@@ -777,10 +777,24 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         return out;
     }
 
+    // 2026-05-28 vtable structural check — read the MonoDomain* field at
+    // MonoVTable+2*ptr and require it to equal the known root domain.
+    // Real vtables ALWAYS have this field pointing to their domain;
+    // false-positive "vtables" (random structures whose first qword
+    // happens to be a class pointer, e.g. MonoMethod entries in some
+    // RGCTX caches, internal lookup tables that store vtable pointers
+    // as values rather than at object headers) almost never have the
+    // domain pointer at that offset. Live-smoke on Mortal: cuts false
+    // positives from ~100/class to near zero. See lessons-learned for
+    // the MonoVTable layout reference.
+    const std::uintptr_t rootDomainAddr =
+        reinterpret_cast<std::uintptr_t>(GetRootDomain());
+
     // Snapshot class set + cache pointers under lock, then release. We
-    // also snapshot vtableToKlass so the scan can read from it without
-    // holding the cache lock; we'll merge new discoveries back at the
-    // end.
+    // intentionally do NOT carry the prior vtableToKlass cache into this
+    // walk — older walks that pre-date the domain check would have
+    // memoised some non-vtable structures as vtables. Start fresh so
+    // the validation runs on every qw value we encounter.
     std::vector<std::uintptr_t> classSet;
     std::uintptr_t minKlass = 0, maxKlass = 0;
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
@@ -789,7 +803,6 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         classSet = cache().classSet;
         minKlass = g_minKlass;
         maxKlass = g_maxKlass;
-        vtMemo   = cache().vtableToKlass;  // copy any prior discoveries
     }
     if (classSet.empty()) return out;
 
@@ -892,6 +905,22 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                 if ((derefed & 7u) != 0) { vtMemo[qw] = 0; continue; }
                 if (!std::binary_search(classSet.begin(), classSet.end(), derefed)) {
                     vtMemo[qw] = 0;
+                    continue;
+                }
+                // 2026-05-28 vtable structural validation. MonoVTable
+                // layout (mono/metadata/class-internals.h):
+                //   +0           MonoClass*   ← already in classSet
+                //   +ptr_size    MonoGCDescriptor gc_descr
+                //   +2*ptr_size  MonoDomain*  ← must equal root domain
+                //   +3*ptr_size  MonoType*
+                //   ...
+                // Reading the domain field of a non-vtable structure
+                // returns ~arbitrary memory. Only real vtables have the
+                // domain pointer at that offset.
+                std::uintptr_t domainAt = 0;
+                if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
+                    domainAt != rootDomainAddr) {
+                    vtMemo[qw] = 0;  // structurally not a vtable
                     continue;
                 }
                 klass = derefed;
