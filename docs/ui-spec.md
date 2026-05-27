@@ -186,11 +186,27 @@ MainWindowViewModel
 ├── BackendAdapter (Core.Services.BackendAdapter)
 ├── Logger (Core.Services.FileLogger)
 ├── ProcessEnumerator (Platform.IProcessEnumerator)
-├── Browser   : AssemblyBrowserViewModel
-├── Inspector : LiveInspectionViewModel
-├── AddressLookup : AddressLookupViewModel
+├── SettingsStore (Core.Services.UserSettingsStore)        ─ Phase 29c
+├── Browser       : AssemblyBrowserViewModel
+├── Inspector     : LiveInspectionViewModel
+├── AddressLookup : AddressLookupViewModel                 ─ Phase 17
+├── SymbolFinder  : SymbolFinderViewModel                  ─ Phase 25
+├── ValueSearch   : ValueSearchViewModel                   ─ Phase 27
+├── Scene         : SceneExplorerViewModel                 ─ Phase 20
+├── Snapshot      : SnapshotViewModel                      ─ Phase 29a/b/c
+├── SpcQuery      : SpcQueryViewModel                      ─ Phase 29d
 └── (lazy) ProxyDeploy : ProxyDeployViewModel
 ```
+
+Each VM owns its tab in the right pane of MainWindow (zero-based
+indices declared as `MainWindowViewModel.TabIndex*` constants — see
+[lessons-learned.md](lessons-learned.md) for the silent-mis-routing
+trap when XAML order drifts from these constants).
+
+The Snapshot + SpcQuery pair share state intentionally: SpcQuery
+takes a `SnapshotViewModel` in its constructor so saves / drops /
+DB-switches in either tab propagate to the other through the
+shared `Snapshots` ObservableCollection.
 
 ### Cross-VM communication
 
@@ -238,14 +254,72 @@ Avalonia context.
 
 | Window | Modal? | Purpose |
 |---|---|---|
-| `MainWindow` | — | Main shell. Tabbed right pane: Fields / Inspector / Methods / Address Lookup. |
+| `MainWindow` | — | Main shell. Tabbed right pane: Fields / Inspector / Methods / Symbol Finder / Address Lookup / Scene / Value Search / Snapshot / SPC Query. |
 | `ProcessPickerWindow` | Yes | Pick a Unity process to inject into. Shown via `vm.PickProcessAsync`. |
 | `ProxyDeployWindow` | No (top-level) | Bulk install/uninstall version.dll/winmm.dll across the user's Steam library. |
 | `MethodOverloadsWindow` | Yes | Phase 18c — list every overload of a method, multi-select for AOB AA-script generation. |
 | `MethodCallWindow` | Yes | Phase 19d — invoke a single method overload with args + see result / exception. |
+| `SnapshotSettingsWindow` | Yes | Phase 29c-7 — configure snapshot DB directory (with `IStorageProvider` folder picker), AutoSave-on-capture toggle, AutoPrune threshold (GB). Returns the updated `UserSettings` via `Close(result)`; caller passes it to `SnapshotViewModel.ApplySettingsAsync` which persists + may reopen the DB. |
 
-All five share an icon (`avares://DiscreteUI/Assets/MainIcon.ico`)
+All six share an icon (`avares://DiscreteUI/Assets/MainIcon.ico`)
 and the Inter font set up in `App.axaml`.
+
+### Snapshot tab (Phase 29a-c)
+
+Three responsibilities layered on one tab:
+
+1. **Capture** (Phase 29a): `Take Snapshot` runs the DLL-side
+   `snapshotBegin` → `snapshotChunk` loop, builds a local
+   `SnapshotEnvelope` with `Classes` + lazy `FieldIndex` for diff.
+   Cap NumericUpDowns (instance / array) honour auto-clamp on
+   x86 targets to avoid the 32-bit OOM trap.
+2. **Diff** (Phase 29b): pick A and B, hit "Diff A → B" → walks
+   FieldIndex intersection, classifies each row Changed /
+   Increased / Decreased / OtherChanged / Added / Removed /
+   Unchanged. Result DataGrid with collapsible filter Expander.
+   Cross-session diff auto-applies Statics-only mode with a
+   blue banner; cross-build adds a yellow warning.
+3. **Persistence** (Phase 29c): per-game SQLite under
+   `%LOCALAPPDATA%\Discrete_UEDumper\snapshots\` (overridable in
+   Settings). Filename `{exe_basename}_{build_id[0:8]}.db`. 💾 Save
+   button per envelope; 🗑 Delete-from-DB removes both memory + disk.
+   Auto-eviction after Diff drops every persisted envelope NOT
+   currently in A/B back to lazy metadata-only. Auto-prune keeps
+   the DB under threshold (default 200 MB).
+
+### SPC Query tab (Phase 29d)
+
+Cross-snapshot constraint queries. UI shape:
+
+```
+┌── Status / Error / Mode banner ────────────────────────────────┐
+│ "Cross-session SPC query — Statics-only auto-enabled..."       │
+├── Filter Expander (Statics / Synthetic / Numeric / Class /Type)┤
+├── ▶ Run SPC Query                                              │
+├── Snapshots + per-snapshot predicate (DataGrid, editable) ─────┤
+│ ☑ [0] before-quest      Any        —           —               │
+│ ☑ [1] after-shop1       DeltaExact -250        —               │
+│ ☑ [2] after-shop2       DeltaExact -500        —               │
+│ ☑ [3] after-sleep       Unchanged  —           —               │
+├── GridSplitter ────────────────────────────────────────────────┤
+│ Results (DataGrid, read-only, double-tap → Inspector handoff)  │
+│ Class                    Field   Type    Instance  Values      │
+│ Mortal.Core.GameStat     _value  Int32   static    10160→9910… │
+└────────────────────────────────────────────────────────────────┘
+```
+
+Predicates: absolute (`Any` / `Exact` / `Range` / `NotEqual`) +
+relative-to-previous (`Unchanged` / `Increased` / `Decreased` /
+`DeltaExact` / `DeltaRange`). Predicate at index 0 must be absolute
+(no previous snap to compare against — engine enforces).
+
+Engine is `SpcQueryEngine.Run(SpcQuery)` in
+[SpcQueryEngine.cs](../ui/UnityDumpUI/ViewModels/SpcQueryEngine.cs).
+Pure CPU + heap; selected envelopes must already be hydrated via
+`SnapshotViewModel.EnsureLoadedAsync` (the VM does this in `RunAsync`
+before calling the engine). After the engine returns, the VM evicts
+any envelope it itself hydrated for the query, leaving "already
+loaded by user" envelopes untouched.
 
 ### `avares://` URIs key off `AssemblyName`
 

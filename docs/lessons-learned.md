@@ -2803,3 +2803,244 @@ pipe before responding` appears in `ui/view/current.log` AND the
 DLL's `scan/current.log` shows a clean `snapshotBegin` return
 just before, AND the game has WOW64 / 32-bit pointers, this
 is the OOM-on-chunk-drain pattern. Lower the caps and re-run.
+
+---
+
+### Phase 29c — `SQLitePCLRaw.bundle_e_sqlite3` needs `Batteries_V2.Init()` early in `Program.Main`  ✅ **Wired 2026-05-29 (UI build #680)**
+
+**Symptom (during development)**: every `SqliteConnection.Open` throws
+`Unable to load DLL 'e_sqlite3' or one of its dependencies` /
+`InvalidOperationException: You need to call SQLitePCL.raw.SetProvider().`
+even though the NuGet packages are referenced correctly.
+
+**Root cause**: `Microsoft.Data.Sqlite.Core` is provider-agnostic by
+design — it defers SQLite-native binding to whichever
+`SQLitePCLRaw.bundle_*` package the app pulls in. The provider isn't
+auto-registered just by referencing the bundle — there must be an
+explicit `SQLitePCL.Batteries_V2.Init()` call somewhere on the
+startup path **before any `SqliteConnection` is constructed**.
+
+The trap: in a test process running individual `[Fact]`s the call
+can sit in each test's constructor. In the production UI we need it
+exactly once, and it must precede `SnapshotViewModel.OnGameDbContextAsync`
+(which fires on handshake, very early).
+
+**Fix**: a single `SQLitePCL.Batteries_V2.Init();` in
+[Program.Main](../ui/UnityDumpUI/Program.cs) immediately after the
+`SingleInstanceMutex` setup. Idempotent — safe to call again from
+tests.
+
+**AOT note**: `bundle_e_sqlite3` static-links the SQLite C source so
+there's no runtime DLL resolution to fail at publish time. The `Init`
+call IS still required because the .NET-side provider hookup is
+explicit even when the native is statically linked.
+
+---
+
+### Phase 29c — atomic JSON writes for `settings.json` need `.tmp` + `File.Move(overwrite: true)`, not `Set-Content`  ✅ **Shipped 2026-05-29**
+
+**Symptom**: if `JsonSerializer.SerializeAsync` is called directly
+against the live `settings.json` path and the process is killed
+mid-write (or the disk fills mid-write), the on-disk file is
+truncated / half-formed JSON. Next launch reads it, sees
+`JsonException`, falls back to defaults — **silently losing the
+user's preferences**.
+
+**Fix**: [UserSettingsStore.SaveAsync](../ui/UnityDumpUI.Core/Services/UserSettingsStore.cs)
+writes to `settings.json.tmp` first, flushes, then calls
+`File.Move(tmp, target, overwrite: true)`. On NTFS, same-volume
+`Move` with `overwrite: true` is atomic at the directory-entry
+level — either the new contents are visible or the old contents
+are, never half-and-half. Same pattern git uses for its index.
+
+**Defensive catch in `LoadAsync`**: corrupt-file path still exists
+even with atomic writes (disk corruption, network share quirks, the
+user editing the file manually). Catch `JsonException` +
+`IOException` + `UnauthorizedAccessException`, log with a recovery
+hint ("delete the file to reset to defaults"), return a fresh
+`UserSettings()`. Never throw out of Load.
+
+---
+
+### Phase 29c — `Microsoft.Data.Sqlite` schema: per-class gzipped JSON blobs beat full normalization for snapshot row counts  ✅ **Shipped 2026-05-29**
+
+**Symptom (designing the schema)**: fully normalized snapshot
+schema (one row per field-value across all snapshots) means
+~1M INSERT/snapshot on a wide 활俠傳 capture. Even batched inside
+one transaction, this is 8-15s per save and the resulting DB grows
+unboundedly past the prune threshold within 3-4 snapshots.
+
+**Fix**: hybrid schema — `snapshots` table holds metadata (one row
+per snapshot, 17 columns) + `snapshot_classes` table holds one row
+per `SnapshotClassEntry` with the entry's fields/instances/arrays as
+a **gzipped JSON blob** in a `BLOB` column. Reuses the existing
+source-gen `ProtocolJsonContext.SnapshotClassEntry` serializer →
+zero new mapping code, AOT-safe automatically.
+
+Wide snap: ~3,647 classes → 3,647 INSERTs per save (sub-second).
+Gzip cuts payload ~50× over raw JSON (verified live — 100 MB
+in-memory snapshot lands at <2 MB on disk because class FQN /
+field name / type strings repeat heavily within a snap).
+
+**Cost**: can't `WHERE field_name = 'x'` directly with SQL — every
+query that filters fields has to decompress blobs. Acceptable for
+the v1 workload (diff intersects N snaps anyway, decompresses each
+once); future SQL-side analytics would need a materialized view or
+schema v2.
+
+**Default prune threshold lowered from 1 GB to 200 MB on the same
+day**: with ~50× compression, 200 MB DB holds 100+ wide snapshots,
+which is already overkill for the practical "two-or-three snaps
+per session" workflow.
+
+---
+
+### Phase 29c-eviction — `SnapshotEnvelope.Unload()` MUST replace the FieldIndex dictionary, not just clear it  ✅ **Wired 2026-05-29**
+
+**Symptom**: clearing `FieldIndex` in place via
+`FieldIndex.Clear()` releases the value entries but **NOT the
+dictionary's bucket array** — for a 1M-key dictionary that's
+already grown its capacity, the bucket array hangs around at
+~8 MB per envelope. Eviction "works" but memory only drops
+fractionally.
+
+**Fix**: `Unload()` assigns `FieldIndex = new Dictionary<...>()`,
+making the entire old dictionary (entries + buckets +
+auxiliary arrays) eligible for GC. Combined with `Classes.Clear()`
+which drops the list of `SnapshotClassEntry` (and transitively the
+`SnapshotFieldEntry` JsonElement objects), this returns the
+envelope to roughly the same RAM cost as a freshly-loaded
+metadata-only stub.
+
+Verify locally: take 5 wide snapshots, run diff or SPC, watch
+`Process.WorkingSet64` in Task Manager — should drop hundreds of
+MB after the post-Diff `EvictUnusedEnvelopes` fires.
+
+**Side note**: same pattern applies to any cache where the
+underlying collection's capacity vs count divergence is large.
+`Dictionary` / `List<T>` / `HashSet` all have this "Clear keeps
+capacity" semantic by design (so re-use is cheap); but if the
+goal is releasing memory, reassign.
+
+---
+
+### Phase 29c — .NET 10 SDK + `Microsoft.Testing.Platform.MSBuild` 2.2.3 explicit pin breaks `dotnet test` two ways  ✅ **Fixed 2026-05-29**
+
+**Symptom**: after a routine NuGet bump that pulled
+`Microsoft.Testing.Extensions.Telemetry` /
+`Microsoft.Testing.Extensions.TrxReport.Abstractions` /
+`Microsoft.Testing.Platform.MSBuild` to version 2.2.3, `dotnet test`
+fails with:
+
+```
+Microsoft.Testing.Platform.MSBuild.targets(263,5): error :
+  Testing with VSTest target is no longer supported by
+  Microsoft.Testing.Platform on .NET 10 SDK and later. If you use
+  dotnet test, you should opt-in to the new dotnet test experience.
+```
+
+And even after opting in via
+`<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>`,
+the runner throws `MissingMethodException` on
+`IOutputDevice.DisplayAsync` because xunit.v3 3.2.2 was built against
+an older `Microsoft.Testing.Platform` API surface.
+
+**Two issues, one fix**:
+
+1. `Microsoft.Testing.Platform.MSBuild` 2.2.3 actively refuses the
+   classic VSTest target on .NET 10 SDK.
+2. `Microsoft.Testing.Platform` 2.2.3's `IOutputDevice` changed
+   `DisplayAsync` signature; xunit.v3 3.2.2's bundled runner calls the
+   old shape.
+
+**Fix**: don't pin any `Microsoft.Testing.*` package version
+explicitly — let `xunit.v3` transitively select a compatible
+`Microsoft.Testing.Platform` version. Keep the
+`UseMicrosoftTestingPlatformRunner` + `TestingPlatformDotnetTestSupport`
+properties (required by SDK 10 regardless).
+
+```xml
+<PropertyGroup>
+  <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+</PropertyGroup>
+<ItemGroup>
+  <PackageReference Include="xunit.v3" Version="3.*" />
+  <PackageReference Include="xunit.runner.visualstudio" Version="3.*" />
+  <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.*" />
+  <!-- NO explicit Microsoft.Testing.* refs -->
+</ItemGroup>
+```
+
+`dotnet test` then drives the MTP runner directly through xunit.v3's
+auto-generated `XunitAutoGeneratedEntryPoint.Main`. Test output looks
+slightly different (one-line `成功! - 失敗: 0，通過: N` vs the
+legacy multi-line VSTest summary) but the wall-clock behaviour is
+identical.
+
+---
+
+### Phase 29d-2 — `CommunityToolkit.Mvvm` `[RelayCommand]` strips `Async` suffix when naming the generated command  ✅ **Surfaced 2026-05-29**
+
+**Symptom**: XAML binding `Command="{Binding SpcQuery.SaveSnapshotAsyncCommand}"`
+fails with `AVLN2000: Unable to resolve suitable regular or attached
+property SaveSnapshotAsyncCommand on type SpcQueryViewModel`.
+
+**Why**: `[RelayCommand]` source generator looks at the C# method
+name, strips `Async` if present, and appends `Command`. So:
+
+| C# method name | Generated property |
+|---|---|
+| `Save()` | `SaveCommand` |
+| `SaveAsync()` | `SaveCommand` (NOT `SaveAsyncCommand`) |
+| `RefreshSpcAsync()` | `RefreshSpcCommand` |
+
+This is documented but easy to miss when porting binding code from
+older projects that used `Async` explicitly in the property name.
+
+**Fix**: drop the `Async` suffix in the XAML binding name. Same
+applies to event names, message tags, etc. — anywhere the source-gen
+contract surfaces the public command identifier.
+
+---
+
+### Phase 29d-2 — Avalonia 12 `DataGrid` does NOT expose WPF's `CanUserAddRows` / `CanUserDeleteRows`  ✅ **Surfaced 2026-05-29**
+
+**Symptom**: copy-pasting WPF DataGrid XAML throws
+`AVLN2000: Unable to resolve suitable regular or attached property
+CanUserAddRows on type Avalonia.Controls.DataGrid`.
+
+**Why**: Avalonia's DataGrid intentionally omits the WPF
+"new-row footer" / "Delete-key handler" properties because they
+require row-CRUD plumbing Avalonia doesn't ship by default. Read-only
+behavior is achieved through `IsReadOnly="True"` (covers both add
+and delete + edit). For per-column edit control there's no need
+to disable add/delete separately.
+
+**Fix**: drop the two attributes. Use `IsReadOnly="True"` for fully
+read-only grids; for editable grids (like SPC's per-snapshot
+predicate row), leave `IsReadOnly="False"` and bind individual cells
+to mutable VM properties.
+
+---
+
+### Phase 29d — SPC engine anchor selection: walk the **smallest** FieldIndex, not the first  ✅ **Designed 2026-05-29**
+
+**Problem**: the engine's intersection over N snapshots' FieldIndex
+sets is N×K dictionary `TryGetValue` calls where K is the anchor
+size. Picking the wrong anchor multiplies query latency.
+
+**Example**: 4 snapshots with FieldIndex sizes 1,200,000 / 12,000 /
+1,150,000 / 1,180,000. Anchoring on snap[0] = 1.2M keys means 1.2M
+× 3 lookups = 3.6M Dictionary probes. Anchoring on snap[1] = 12K
+keys means 12K × 3 lookups = 36K probes. **100× speedup from a
+two-line min-size pick.**
+
+When does this matter? Any time the user mixes wide and narrow
+snapshots (typical: 3 wide game snaps + 1 quick boot snap to anchor
+"the field already existed pre-game-start").
+
+**Implementation**: a single O(N) pass over the snapshot list at
+`Run()` entry to pick the anchor index, then the rest of the engine
+treats it identically to the canonical first snapshot. See
+[SpcQueryEngine.Run](../ui/UnityDumpUI/ViewModels/SpcQueryEngine.cs).

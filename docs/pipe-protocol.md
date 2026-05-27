@@ -1256,6 +1256,111 @@ overloads will collide in the rendered output.
 
 ---
 
+## Phase 29a — Snapshot capture (Both)
+
+Three-RPC streaming protocol so the UI can capture a wide
+"every-class, every-instance, every-field" managed-state dump without
+holding a single 100 MB JSON response in memory. Server caches the
+pre-built JSON inside a per-session struct; the UI drains it via
+fixed-size chunks then sends `snapshotEnd` to release.
+
+### `snapshotBegin`
+
+Request keys (all optional; sensible defaults map to "全抓 user
+assemblies"):
+
+```json
+{
+  "asmFilter":          "Assembly-CSharp,Mortal.Core",  // CSV; empty=all
+  "instanceCap":        512,                            // per-class
+  "arrayCap":           256,                            // per-array
+  "includeUnchanged":   false,                          // see snapshot store
+  "includeSystemAssemblies": false                      // skip mscorlib/Unity*
+}
+```
+
+Response:
+
+```json
+{
+  "ok":             true,
+  "snapshotId":     "snap-1722340800-7f3a",
+  "capturedAt":     "2026-05-29T12:34:56Z",
+  "gameBuildId":    "7f3a2b1c89e44d10",  // FNV-1a(modulepath+size+writeTime)
+  "gameSessionId":  "5e8c1...",          // per-inject GUID
+  "totalClasses":   3647,
+  "totalInstances": 119370,
+  "plan":           [ { "assembly": "...", "classes": 152 }, ... ],
+  "scanStats":      { ... },
+  "decodeStats":    { ... },
+  "instanceCap":    512,
+  "arrayCap":       256,
+  "excludedSystemAssemblies": 14,
+  "includeSystemAssemblies":  false,
+  "gamePointerSize": 4,                  // x86 game → UI auto-clamps caps
+  "gameWorkingSet":  1932735283,
+  "gamePrivateUsage":2068054016
+}
+```
+
+On x86 targets with PrivateUsage ≥ 3 GB the server **refuses** the
+snapshot with `{ "ok": false, "error": "Game process at X.X GB
+private memory — refusing snapshot to avoid OOM crash on this 32-bit
+Mono target. Lower InstanceCap (try 128) and ArrayCap (try 32) then
+retry, or restart the game to free memory before snapshotting." }`.
+This is the 32-bit OOM mitigation from build #645 — see lessons-learned.
+
+### `snapshotChunk`
+
+```json
+{
+  "snapshotId": "snap-...",
+  "cursor":     0,    // client-tracked; resumes from server's nextCursor
+  "limit":      32    // max class entries this chunk
+}
+```
+
+Response is a slice of the pre-built payload:
+
+```json
+{
+  "ok":         true,
+  "snapshotId": "snap-...",
+  "cursor":     0,
+  "nextCursor": 32,
+  "done":       false,
+  "classes":    [ /* SnapshotClassEntry[] */ ]
+}
+```
+
+The UI loops until `done=true`. Per-class payload shape matches
+existing `WalkInstanceResult` field structure with array-element
+support: each `instances[].fields[]` may carry `arrayElements` /
+`arrayError`.
+
+### `snapshotEnd`
+
+```json
+{ "snapshotId": "snap-..." }
+```
+
+Releases the server-side session struct (frees the cached JSON in
+the game process). UI calls this in a `finally` so the slot is
+freed even if the chunk loop errored.
+
+### Lifecycle
+
+| Step | Server state |
+|---|---|
+| `snapshotBegin` | Heap walk → per-class decode → JSON build → cache in session struct. ~5–60 s depending on InstanceCap × class count. |
+| `snapshotChunk` (loop) | Zero-Mono-runtime slicing of the cached JSON. ~10–50 ms each. |
+| `snapshotEnd` | Drop the session struct + free the cache. |
+
+The DLL allows multiple concurrent snapshot sessions (per
+`snapshotId`) so a future workflow can run two captures in parallel.
+
+---
+
 ## Quick tour by use case
 
 | Goal | Path |
@@ -1275,6 +1380,7 @@ overloads will collide in the rendered output.
 | Generate a CE AOB pattern from a method's native address | `getMethodAobPattern` |
 | Invoke a managed method with marshaled args (IL2CPP + Mono, static + instance) | `callMethod` |
 | Dump every class + method as debugger labels (IL2CPP) | `dumpIl2cppSymbols` |
+| Capture managed-state snapshot of the game (Phase 29a) | `snapshotBegin` → `snapshotChunk` loop → `snapshotEnd` |
 
 ---
 
