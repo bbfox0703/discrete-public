@@ -2234,6 +2234,30 @@ Changed only + Class filter" stack.
   Constants swapped + comment added so future tab insertions
   notice the sync requirement.
 
+- [ ] **32-bit snapshot OOM mitigation** — NEW 2026-05-27.
+  Build #646 live-smoke on 활俠傳 (Mono x86) showed snap #2
+  CTDs the game when the post-bump defaults (InstanceCap=512 /
+  ArrayCap=256) push the DLL-side cached JSON past the 4 GB
+  user space. See
+  [lessons-learned.md §"Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2"](lessons-learned.md#phase-29-high-default-caps-wedge-32-bit-mono-games-on-snapshot-2--dll-side-json-cache-pushes-past-4-gb-user-space)
+  for the full diagnostic. Three mitigation paths, in
+  preference order:
+  1. **Auto-clamp defaults when game is x86** — plumb
+     `row.IsWow64` from
+     [MainWindowViewModel.cs:873](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs)
+     into `SnapshotViewModel` + clamp to ≤256 instance /
+     ≤64 array on x86 by default, with banner. Manual
+     override still allowed. Estimated 0.5 day.
+  2. **Surface game-process working-set** in `snapshotBegin`
+     response so UI shows game memory alongside its own
+     (today's `Process.WorkingSet64` only sees UI). Lets
+     users see the actual danger zone in real time.
+     Estimated 0.5 day.
+  3. **Streaming-chunk architecture** — build chunks
+     lazily server-side; abandon the upfront full-payload
+     cache. Bigger refactor, defer unless 1+2 isn't enough.
+     Estimated 2-3 days.
+
 - [ ] **Mono static field VALUE capture** (optional, user-opt-in
   checkbox in Snapshot tab): currently statics on Mono only
   capture metadata (per build #637 fix). A "Capture static values

@@ -2603,3 +2603,80 @@ ordering of `<TabItem>` children, full stop.
 query) clearly happened correctly, suspect this swap before
 hunting elsewhere. A 5-second grep of `TabIndex*` constant
 values against the XAML's `<TabItem Header=` ordering settles it.
+
+---
+
+### Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2 — DLL-side JSON cache pushes past 4 GB user space  🚧 **OPEN (mitigation pending)**
+
+**Symptom**: 활俠傳 (Mono x86, Unity 2020.3.49f1, PID 26296) on
+build #646:
+
+| Step | What | Result |
+|---|---|---|
+| Take Snapshot #1 | InstanceCap=512, ArrayCap=256 (the new defaults) | ✅ DLL captures 3,647 classes / 119,370 instances / 19,680 arrays in 15s. UI logs `workingSet=1.83 GB (+1.62 GB)` |
+| Play 2 minutes | game continues normally | (heap grows naturally inside the game) |
+| Take Snapshot #2 | same caps | DLL heap-walks 886K candidate instances, decodes 258,035 (2.2× snap #1) and 30,793 arrays (1.6× snap #1), `snapshotBegin` returns clean at 10:34:47 |
+| ~6s later | UI calls `snapshotChunk` repeatedly to drain the cached JSON | UI logs `Snapshot.Take failed: server closed pipe before responding`. **Game CTD.** |
+
+DLL log has zero error markers — `snapshotBegin` #2 succeeded; the
+crash happened between Begin returning and the user-side chunk
+loop draining the payload.
+
+**Root cause**: the Phase 29a-v2 architecture caches the entire
+snapshot's pre-built JSON in the DLL's session struct (lives in
+the **game process**), then streams it to the UI as the user
+calls `snapshotChunk`. On a 32-bit Mono target the user process
+has at most **~4 GB virtual address space** (3 GB on a
+non-large-address-aware build). With the post-bump defaults
+(InstanceCap=512 vs original 100, ArrayCap=256 vs original 50)
+snap #2 holds **5–10× more JSON in the game process** than the
+original sizing supported:
+
+- ~258K captured instances × ~30 fields × ~50 bytes JSON/field
+  ≈ ~390 MB
+- 30K arrays × up to 256 elements × ~10 bytes each ≈ ~75 MB
+- Plus heap-walk metadata + class-info cache + the game's own
+  growing managed heap (~1.5–2 GB for 활俠傳 mid-game)
+
+Total comfortably past the 32-bit ceiling on snap #2 (snap #1 fits
+because the game's own state is smaller at that point in the
+session). Hard OOM in the game process kills it before the UI
+finishes draining chunks — visible as "server closed pipe before
+responding".
+
+**Why it worked yesterday**: yesterday's user-controlled cap was
+300/50, today's default is 512/256. Same game, same UI build, same
+DLL build — the only variable is the cap.
+
+**Mitigation plan** (deferred to next session — recorded as a
+plan.md TODO):
+
+1. **Auto-clamp defaults when `IsWow64`** — the UI already
+   tracks bitness at inject time (`row.IsWow64` in
+   [MainWindowViewModel.cs:873](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs)).
+   Plumb that flag into `SnapshotViewModel` and clamp
+   `InstanceCap` to ≤ 256 + `ArrayCap` to ≤ 64 on x86 targets
+   by default, with a banner explaining the rationale. User
+   can still push higher manually if they accept the risk.
+2. **Surface game-process working-set** — the DLL knows
+   `GetCurrentProcess().WorkingSet64`; report it in the
+   `snapshotBegin` response so the UI status line shows
+   *game* memory in addition to the UI's own WorkingSet.
+   Today we only see UI-side memory, which is misleading.
+3. **Streaming-chunk architecture (deeper fix)** — build
+   chunks lazily server-side rather than caching the entire
+   payload up front. Each `snapshotChunk` does its own walk
+   slice, returns immediately, no long-lived in-game cache.
+   Bigger refactor; defer unless option 1 isn't enough.
+
+**Rule** (until mitigation lands): on 32-bit Mono targets, the
+**user must manually lower InstanceCap to ≤ 256** before taking
+the second snapshot if the first one shows UI WorkingSet > 1 GB.
+ArrayCap is more forgiving but ≤ 128 is a safe ceiling on
+games with lots of array fields.
+
+**Detection hint**: when `Snapshot.Take failed: server closed
+pipe before responding` appears in `ui/view/current.log` AND the
+DLL's `scan/current.log` shows a clean `snapshotBegin` return
+just before, AND the game has WOW64 / 32-bit pointers, this
+is the OOM-on-chunk-drain pattern. Lower the caps and re-run.

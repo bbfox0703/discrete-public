@@ -166,8 +166,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [ObservableProperty] private bool _hideSyntheticTypes = true;
 
     /// <summary>Show "changed" rows (value differs between A and B).
-    /// Default ON — the dominant case for the diff workflow.</summary>
-    [ObservableProperty] private bool _showChanged = true;
+    /// Default OFF as of 2026-05-27 — user feedback: the value-range +
+    /// unchanged + added/removed workflows are now the primary entry
+    /// points (find-by-value, not just see-what-changed), so the
+    /// raw changed list more often gets in the way than helps.
+    /// Re-checking it stays a one-click switch.</summary>
+    [ObservableProperty] private bool _showChanged;
 
     /// <summary>Show "added" rows (in B but not A). Default OFF.</summary>
     [ObservableProperty] private bool _showAdded;

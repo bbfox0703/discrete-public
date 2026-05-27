@@ -15,12 +15,32 @@ commits + one DLL rebuild on top of the build #637 Phase 29b ship:
 | `d18443f` | Capture cap defaults bumped: InstanceCap 100→512, ArrayCap 50→256 (still under the prior hard-cap). Live `Process.WorkingSet64` tracking added to every status-line tick — `Capturing… 12.3 s — process 1.42 GB (+340 MB)`. Final snapshot + log line carry the same memory annotation. | User's GameStat instance at `0x29B0ACE8` sat past position 100 in the heap-walk order; lower defaults silently missed it |
 | `06984bf` | DLL hard-caps raised: instanceCap 1024→**8192** (ExportAPI both backends + internal `FindAllInstances` ceilings), arrayCap 256→**4096**. UI `NumericUpDown.Maximum` raised to match. Defaults stay at 512/256 — this is just headroom. **Rebuilt DLL build #643** (both Mono + IL2CPP + x86 Mono, fresh 10:21 timestamps). | User: "DLL's hard-caps 應該要再拉高" |
 
-UI build clean, 363 tests still green across the bundle. No live-smoke
-yet on the cap raise — pickup task: re-run the 활俠傳 GameStat diff
-with InstanceCap pushed to ~2048, confirm the money instance at
-`0x29B0ACE8` now lands in both snapshots and surfaces as a `changed`
-row (or as added+removed pair if the game re-allocates the
-underlying instance).
+UI build clean, 363 tests still green across the bundle.
+
+### Live-smoke result (build #646, 활俠傳, Mono x86 PID 26296)
+
+* Snap #1 (InstanceCap=512, ArrayCap=256, the new defaults):
+  ✅ 3,647 classes / 119,370 instances / 19,680 arrays captured
+  in 15s. UI WorkingSet 1.83 GB (+1.62 GB).
+* Snap #2 (~2min later, same caps):
+  🚨 **Game CTD** during chunk drain. DLL `snapshotBegin` returned
+  clean with 258K instances / 30K arrays; ~6s later UI logged
+  `Snapshot.Take failed: server closed pipe before responding`.
+* Root cause: DLL caches the entire snapshot's JSON payload in the
+  game process; on 32-bit Mono the 5–10× scaling vs old defaults
+  pushes past the 4 GB user space. See
+  [lessons-learned.md §"Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2"](lessons-learned.md#phase-29-high-default-caps-wedge-32-bit-mono-games-on-snapshot-2--dll-side-json-cache-pushes-past-4-gb-user-space).
+* **`ShowChanged` default flipped to OFF** (`5f2-tbd`) — user
+  feedback: the value-range / unchanged / added+removed
+  workflows are now the primary entry points.
+* New plan.md TODO: **32-bit snapshot OOM mitigation** (auto-clamp
+  defaults when `IsWow64`, surface game-process working-set in
+  `snapshotBegin` response, streaming-chunk architecture as
+  bigger-refactor backstop).
+
+**Workaround until mitigation lands**: on 32-bit Mono targets,
+**manually lower InstanceCap to ≤256 / ArrayCap to ≤64** before
+the second snapshot if the first one shows UI WorkingSet > 1 GB.
 
 ### Known follow-ups (deferred — Phase 29c / 29d)
 
