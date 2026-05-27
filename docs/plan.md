@@ -2199,6 +2199,41 @@ Changed only + Class filter" stack.
   - `FilteredDiffRows` materialized into `ObservableCollection<>` —
     single O(N) rebuild on any filter-property change, was lazy
     `IEnumerable` re-evaluated per render.
+- [x] **Capture cap defaults bumped + live memory tracking** —
+  SHIPPED 2026-05-27 (`d18443f`). User's 활俠傳 GameStat money
+  instance at `0x29B0ACE8` sat past position 100 in the heap-walk
+  order; prior 100-instance default silently missed it.
+  - `InstanceCap` 100 → 512, `ArrayCap` 50 → 256 in
+    [SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs).
+  - Sample `Process.WorkingSet64` at `TakeSnapshotAsync` entry; live
+    ticker (200ms cadence) shows current value + Δ from start:
+    `Capturing… 12.3 s — process 1.42 GB (+340 MB)`. Same
+    annotation lands in the streaming-chunk status + final
+    snapshot status + log line.
+
+- [x] **DLL hard-cap raise** — SHIPPED 2026-05-27 (`06984bf`, DLL
+  build #643). Defaults stay at 512/256; the raise just gives
+  users room to push higher.
+  - `ExportAPI.cpp` snapshotBegin Mono + IL2CPP: instanceCap
+    `> 1024` → `> 8192`, arrayCap `> 256` → `> 4096`.
+  - `MonoAddressFinder.cpp` + `IL2CPPAddressFinder.cpp`
+    `FindAllInstances` `perClassCap` ceiling 4096 → 8192 so
+    the internal cap doesn't silently clip the new ExportAPI
+    ceiling.
+  - `MainWindow.axaml` `NumericUpDown.Maximum` 1024→8192 and
+    256→4096; tooltips updated.
+  - `MagicStrings.h` snapshotBegin doc-comment updated.
+
+- [x] **Cross-tab Address Lookup bug** — SHIPPED 2026-05-27
+  (`db8bb9b`). `TabIndexAddressLookup` / `TabIndexSymbolFinder`
+  constants in [MainWindowViewModel.cs:324](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs)
+  were inverted relative to XAML TabItem order; every Address
+  Lookup cross-tab handoff has been silently routing to Symbol
+  Finder since Phase 25. Surfaced when the new snapshot-diff
+  right-click "Find what's at this address" menu item exposed it.
+  Constants swapped + comment added so future tab insertions
+  notice the sync requirement.
+
 - [ ] **Mono static field VALUE capture** (optional, user-opt-in
   checkbox in Snapshot tab): currently statics on Mono only
   capture metadata (per build #637 fix). A "Capture static values

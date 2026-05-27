@@ -1,6 +1,44 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-26 night — **Phase 29b SHIPPED + LIVE-VERIFIED across SaGa F2R / BongoCat / 활俠傳**, build #637).
+**Branch**: `dev` (2026-05-27 — **Phase 29 polish bundle SHIPPED** — noise-reduction filters + Show Unchanged + DLL cap raise + live memory tracking + tab-index fix, build #644).
+
+## TL;DR — what's left to pick up (build #644 session)
+
+**Phase 29 polish bundle SHIPPED.** Five things landed across three
+commits + one DLL rebuild on top of the build #637 Phase 29b ship:
+
+| Commit | What landed | Trigger |
+|---|---|---|
+| `db8bb9b` | Noise-reduction filters on diff DataGrid: `DiffRowKind` classifier (Numeric/Pointer/String/Error/Other), value-range filter (decimal? Min/Max, either-side semantics), pointer-only mask, large-string mask (default 256 chars — catches `System.Exception._stackTrace` blobs), field-name substring filter, top-30 field-name stats panel with one-click exclusion. `ChangedOnly` refactored into independent `ShowChanged`/`ShowAdded`/`ShowRemoved`. `FilteredDiffRows` materialised into `ObservableCollection` (single O(N) rebuild on filter-prop change vs prior per-render predicate eval). | User's 1,186-changed-row 활俠傳 diff was too noisy to scan |
+| `db8bb9b` (same) | "Include unchanged" capture toggle + "Unchanged" filter toggle — lets the user use value-range / field-name filters across the whole captured state, not just what differed between A and B. Default OFF (10–100× row count when on). | User asked for value-range filtering on unchanged data ("uncheck Changed → empty grid" UX confusion) |
+| `db8bb9b` (same) | **Tab-index constant swap fix** in [MainWindowViewModel.cs:324](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs) — `TabIndexAddressLookup` (3) and `TabIndexSymbolFinder` (4) were inverted relative to actual XAML order. Every Address Lookup cross-tab handoff has been silently landing on Symbol Finder since Phase 25. Surfaced when the new snapshot-diff right-click menu exposed it. | User: "address lookup, UI 卻帶我到 Symbol Finder tab" |
+| `d18443f` | Capture cap defaults bumped: InstanceCap 100→512, ArrayCap 50→256 (still under the prior hard-cap). Live `Process.WorkingSet64` tracking added to every status-line tick — `Capturing… 12.3 s — process 1.42 GB (+340 MB)`. Final snapshot + log line carry the same memory annotation. | User's GameStat instance at `0x29B0ACE8` sat past position 100 in the heap-walk order; lower defaults silently missed it |
+| `06984bf` | DLL hard-caps raised: instanceCap 1024→**8192** (ExportAPI both backends + internal `FindAllInstances` ceilings), arrayCap 256→**4096**. UI `NumericUpDown.Maximum` raised to match. Defaults stay at 512/256 — this is just headroom. **Rebuilt DLL build #643** (both Mono + IL2CPP + x86 Mono, fresh 10:21 timestamps). | User: "DLL's hard-caps 應該要再拉高" |
+
+UI build clean, 363 tests still green across the bundle. No live-smoke
+yet on the cap raise — pickup task: re-run the 활俠傳 GameStat diff
+with InstanceCap pushed to ~2048, confirm the money instance at
+`0x29B0ACE8` now lands in both snapshots and surfaces as a `changed`
+row (or as added+removed pair if the game re-allocates the
+underlying instance).
+
+### Known follow-ups (deferred — Phase 29c / 29d)
+
+1. ~~**Noise reduction on diff result**~~ — ✅ SHIPPED `db8bb9b`.
+2. ~~**Stack-trace strings appearing in diff**~~ — ✅ Covered by
+   the "Hide large strings > N chars" filter (default ON, 256 char
+   threshold).
+3. **Static field VALUE on Mono** — still metadata only. Optional
+   "Capture static values (may freeze game briefly)" checkbox is
+   the design; not started.
+4. **Phase 29c — SQLite cross-session persistence** — original 29
+   plan item; will need to handle the "stale" flag and
+   `game_build_id` properly when reading snapshots from a previous
+   game launch.
+5. **Phase 29d — SPC-style multi-field constraint query** — long-
+   deferred design.
+
+---
 
 ## TL;DR — what's left to pick up (build #637 session)
 

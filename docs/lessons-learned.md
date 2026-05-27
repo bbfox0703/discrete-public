@@ -2550,3 +2550,56 @@ other debugging. Saves a 30-min wild-goose chase ~95% of the time. If
 either of the two real symptoms is absent, fall back to normal
 debugging — the issue is something else (wrong DLL bitness, AV
 quarantine, pipe-name collision, etc.).
+
+---
+
+### MainWindow tab-index C# constants must mirror XAML `TabItem` order — silent mis-routing  ✅ **Fixed 2026-05-27 (`db8bb9b`)**
+
+**Symptom**: User clicks the snapshot-diff right-click menu item
+"Find what's at this address (Address Lookup)" → UI switches to
+**Symbol Finder** instead. Reported 2026-05-27 immediately after the
+Phase 29 polish menu addition exposed the path.
+
+**Root cause**: `MainWindowViewModel.cs` declares one `const int`
+per right-pane tab so cross-tab handoff code reads as
+`SelectedDetailTabIndex = TabIndexAddressLookup;` instead of magic
+numbers. The constants were defined as:
+
+```csharp
+public const int TabIndexAddressLookup = 3;
+public const int TabIndexSymbolFinder  = 4;
+```
+
+But the actual `TabItem` ordering in `MainWindow.axaml` is **Symbol
+Finder at index 3, Address Lookup at index 4** — Symbol Finder
+(Phase 25) was inserted before Address Lookup (Phase 17c) in the
+visual tree, and nobody re-checked the constant block. Every
+`LookupInspectorAddressAsync` / `OnSnapshotNavigateToAddressLookup`
+call has been silently routing to Symbol Finder since Phase 25
+landed (commit `7b12bdf`, 2025-Q4-ish). It only surfaced now
+because:
+
+1. Address Lookup is a passive "pre-fill + query" tab — the user
+   sees the address pop in regardless of whether the tab is
+   actually selected; they thought the tab switch was working.
+2. Pre-existing entry points (Inspector → "Find at address",
+   Symbol Finder activation) routed back to tabs whose constants
+   happened to match (`TabIndexFields`, `TabIndexMethods`,
+   `TabIndexInspector` are all at the low end and haven't moved).
+3. The snapshot-diff "Find at address" menu was the first NEW
+   handoff into Address Lookup since the swap, and the user
+   immediately spotted the wrong tab.
+
+**Rule**: when adding a new `TabItem` to MainWindow.axaml's right-
+pane TabControl, the very next edit MUST be to renumber the
+`TabIndex*` constants in MainWindowViewModel.cs to match. Cheap
+mechanical step that nobody else will catch. There's no
+build-time symbol coupling between the XAML positional index and
+the C# constant — Avalonia just uses zero-based positional
+ordering of `<TabItem>` children, full stop.
+
+**Detection hint**: any time a cross-tab handoff goes to the
+"wrong" tab AND the underlying state (pre-fill / selection /
+query) clearly happened correctly, suspect this swap before
+hunting elsewhere. A 5-second grep of `TabIndex*` constant
+values against the XAML's `<TabItem Header=` ordering settles it.
