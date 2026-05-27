@@ -1767,20 +1767,32 @@
                    side-by-side. Built for the 銀兩 GameStat case where the
                    address is stable across snapshots but the value change
                    isn't surfacing in the regular diff result. -->
-              <Expander DockPanel.Dock="Top" Header="🔍 Instance lookup (debug)"
+              <Expander DockPanel.Dock="Top" Header="🔍 Snapshot debug — instance &amp; class lookup"
                         IsExpanded="False" Margin="0,0,0,6">
                 <Border Padding="6" Background="#1F808080" CornerRadius="3">
                   <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6" Margin="0,0,0,6">
-                      <TextBlock Text="Address:" VerticalAlignment="Center"/>
-                      <TextBox Text="{Binding Snapshot.DebugLookupAddress, Mode=TwoWay}"
-                               Width="280"
-                               FontFamily="Consolas,Menlo,monospace"
-                               PlaceholderText="e.g. 0x000000002986ACC0 or 2986ACC0"/>
-                      <Button Content="Compare in A &amp; B"
-                              Command="{Binding Snapshot.DebugLookupInstanceCommand}"
-                              MinWidth="140"
-                              ToolTip.Tip="Normalises the address, then walks both selected snapshots' FieldIndex for matching keys. Output below shows every captured field for this instance + per-field changed/added/removed/unchanged tally. Use to confirm whether a known-stable address was actually captured by both snapshots."/>
+                    <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,0,0,6">
+                      <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Address:" VerticalAlignment="Center" Width="60"/>
+                        <TextBox Text="{Binding Snapshot.DebugLookupAddress, Mode=TwoWay}"
+                                 Width="280"
+                                 FontFamily="Consolas,Menlo,monospace"
+                                 PlaceholderText="e.g. 0x000000002986ACC0 or 2986ACC0"/>
+                        <Button Content="Compare in A &amp; B"
+                                Command="{Binding Snapshot.DebugLookupInstanceCommand}"
+                                MinWidth="140"
+                                ToolTip.Tip="Normalises the address, then walks both selected snapshots' FieldIndex for matching keys. Output below shows every captured field for this instance + per-field changed/added/removed/unchanged tally."/>
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Class:" VerticalAlignment="Center" Width="60"/>
+                        <TextBox Text="{Binding Snapshot.DebugLookupClass, Mode=TwoWay}"
+                                 Width="280"
+                                 PlaceholderText="e.g. Mortal.Core.GameStat or just GameStat"/>
+                        <Button Content="List captured instances"
+                                Command="{Binding Snapshot.DebugLookupClassInstancesCommand}"
+                                MinWidth="170"
+                                ToolTip.Tip="Walks each snapshot's Classes list for matches, dumps every captured instance address sorted numerically with a few spotlight fields (_name, _value). Use to confirm whether the snapshot saw the full instance set — e.g. 'live game has 152 GameStat instances, snap #2 only captured 80, and 0x2962ACC0 isn't among them'."/>
+                      </StackPanel>
                       <TextBlock VerticalAlignment="Center" FontSize="11" Opacity="0.7"
                                  Text="Pick A and B above first — empty selection = empty result."/>
                     </StackPanel>

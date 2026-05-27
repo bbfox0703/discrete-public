@@ -26,6 +26,8 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
@@ -100,9 +102,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// <summary>Materialized projection of <see cref="DiffRows"/> under the
     /// current filter set — what the diff DataGrid binds. Rebuilt by
     /// <see cref="RebuildFilteredRows"/> on any filter property change
-    /// (single O(N) pass rather than per-render predicate evaluation as
-    /// the lazy IEnumerable variant did pre-noise-filter).</summary>
-    public ObservableCollection<SnapshotDiffRow> FilteredDiffRows { get; } = new();
+    /// via a SINGLE Reset CollectionChanged event (see
+    /// <see cref="BulkObservableCollection{T}.ReplaceAll"/>). Prior
+    /// implementation used the standard <see cref="ObservableCollection{T}"/>
+    /// with Clear + per-row Add — that fired 740K+ Add events on the
+    /// "show all added rows" toggle and the DataGrid re-layout each
+    /// time, hanging the UI for minutes (2026-05-28 user feedback).</summary>
+    public BulkObservableCollection<SnapshotDiffRow> FilteredDiffRows { get; } = new();
 
     /// <summary>Per-field-name occurrence counts in the current diff,
     /// sorted desc. Drives the right-side stats panel — fields appearing
@@ -819,7 +825,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
         if (HideNoisyFields && ExcludedFieldNames.Count > 0)
             excluded = new HashSet<string>(ExcludedFieldNames, StringComparer.Ordinal);
 
-        FilteredDiffRows.Clear();
+        // Build into a local List first, then ReplaceAll in one Reset
+        // notification so the DataGrid doesn't re-layout per row. Avoids
+        // the 740K-Add-events hang on "show all added" toggle.
+        var staged = new List<SnapshotDiffRow>(DiffRows.Count);
         _filteredChangedCount   = 0;
         _filteredAddedCount     = 0;
         _filteredRemovedCount   = 0;
@@ -857,7 +866,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 if (!oldIn && !newIn) continue;
             }
 
-            FilteredDiffRows.Add(r);
+            staged.Add(r);
             switch (r.ChangeKind)
             {
                 case "changed":   _filteredChangedCount++;   break;
@@ -866,6 +875,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 case "unchanged": _filteredUnchangedCount++; break;
             }
         }
+        FilteredDiffRows.ReplaceAll(staged);
 
         // Live-publish the breakdown so the UI shows current numbers
         // regardless of whether this rebuild was triggered by Diff or
@@ -906,6 +916,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// upper case. Normalised to the canonical 16-digit upper form before
     /// matching.</summary>
     [ObservableProperty] private string _debugLookupAddress = string.Empty;
+
+    /// <summary>Class name pattern for the class-listing diagnostic. Substring
+    /// match against <c>"{ns}.{name}"</c>, case-insensitive. E.g.
+    /// "Mortal.Core.GameStat" or just "GameStat" both match the 銀兩 class.
+    /// Used to answer "did the snapshot actually capture every instance
+    /// of this class, or only a subset?" — typing a class name then
+    /// "List instances" dumps every captured address in A and B sorted
+    /// numerically, so a missing address (e.g. 0x2962ACC0 that the live
+    /// Inspector shows but the snapshot didn't see) is obvious.</summary>
+    [ObservableProperty] private string _debugLookupClass = string.Empty;
 
     /// <summary>Result of the last <see cref="DebugLookupInstance"/>.
     /// Multi-line text bound to a read-only TextBox so the user can
@@ -998,6 +1018,130 @@ public sealed partial class SnapshotViewModel : ObservableObject
             sb.AppendLine("  - The instance's class wasn't in the capture scope");
         }
         DebugLookupOutput = sb.ToString();
+    }
+
+    /// <summary>Class-listing diagnostic — walks each snapshot's Classes
+    /// list for entries whose FQN matches the user's substring, then
+    /// dumps every captured instance address + a small set of "spotlight"
+    /// field values (string, int32, enum where present) per row.
+    /// Reveals (a) whether the class was captured at all (b) how many
+    /// instances each snapshot saw (c) the address-sorted set so a
+    /// missing address compared to the live game stands out
+    /// instantly.</summary>
+    [RelayCommand]
+    public void DebugLookupClassInstances()
+    {
+        var sb = new System.Text.StringBuilder();
+        string pattern = (DebugLookupClass ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(pattern))
+        {
+            DebugLookupOutput = "Enter a class-name substring (e.g. \"Mortal.Core.GameStat\" or \"GameStat\").";
+            return;
+        }
+        sb.Append("Class lookup '").Append(pattern).AppendLine("' across selected snapshots.");
+        sb.Append("A = ").Append(SelectedSnapshotA?.ShortLabel ?? "(not set)").AppendLine();
+        sb.Append("B = ").Append(SelectedSnapshotB?.ShortLabel ?? "(not set)").AppendLine();
+        sb.AppendLine();
+
+        DumpClassSection(sb, "Snapshot A", SelectedSnapshotA, pattern);
+        sb.AppendLine();
+        DumpClassSection(sb, "Snapshot B", SelectedSnapshotB, pattern);
+
+        DebugLookupOutput = sb.ToString();
+    }
+
+    private static void DumpClassSection(System.Text.StringBuilder sb, string label,
+        SnapshotEnvelope? env, string pattern)
+    {
+        sb.Append("=== ").Append(label).AppendLine(" ===");
+        if (env is null) { sb.AppendLine("  (not selected)"); return; }
+
+        var matches = env.Classes
+            .Where(c => MatchClassName(c, pattern))
+            .ToList();
+        if (matches.Count == 0)
+        {
+            sb.AppendLine("  (no class matched the pattern)");
+            return;
+        }
+
+        foreach (var c in matches)
+        {
+            string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
+            int instCount = c.Instances?.Count ?? 0;
+            int staticCount = c.Statics?.Count ?? 0;
+            sb.Append("  ").Append(c.Assembly).Append(" | ").Append(fqn)
+              .Append("  — ").Append(instCount).Append(" instance(s), ")
+              .Append(staticCount).AppendLine(" static(s)");
+            if (!string.IsNullOrEmpty(c.Error))
+                sb.Append("    error: ").AppendLine(c.Error);
+            if (c.Instances is { Count: > 0 } insts)
+            {
+                // Sort numerically so missing addresses are obvious next
+                // to a live Inspector listing (which is also sorted).
+                var sorted = insts
+                    .Select(i => new { Inst = i, Numeric = ParseAddrToUlong(i.Address) })
+                    .OrderBy(x => x.Numeric)
+                    .ToList();
+                int idx = 0;
+                foreach (var row in sorted)
+                {
+                    sb.Append("    #").Append(idx).Append("  ").Append(row.Inst.Address);
+                    // Spotlight fields: anything that looks like a name or value.
+                    string spotlight = ExtractSpotlightFields(row.Inst);
+                    if (!string.IsNullOrEmpty(spotlight))
+                        sb.Append("  ").Append(spotlight);
+                    sb.AppendLine();
+                    idx++;
+                }
+            }
+        }
+    }
+
+    private static bool MatchClassName(SnapshotClassEntry c, string pattern)
+    {
+        string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
+        return fqn.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static ulong ParseAddrToUlong(string addr)
+    {
+        if (string.IsNullOrEmpty(addr)) return 0;
+        string s = addr.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? addr.Substring(2) : addr;
+        return ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong v) ? v : 0;
+    }
+
+    /// <summary>Pull a few human-readable values from an instance's
+    /// captured fields — the first string-typed value and the first
+    /// integer-typed value found, formatted as "_name=銀兩 _value=9910"-
+    /// style. Helps the user spot the money row in a list of 152
+    /// GameStat addresses.</summary>
+    private static string ExtractSpotlightFields(SnapshotInstanceEntry inst)
+    {
+        if (inst.Fields is null || inst.Fields.Count == 0) return string.Empty;
+        var bits = new List<string>();
+        // Prefer a string field (typically _name) and an int32 field
+        // (typically _value) — capped at 3 hits to keep the line short.
+        int hits = 0;
+        foreach (var f in inst.Fields)
+        {
+            if (hits >= 3) break;
+            if (string.IsNullOrEmpty(f.Name)) continue;
+            if (!string.IsNullOrEmpty(f.StringValue))
+            {
+                bits.Add($"{f.Name}=\"{f.StringValue}\"");
+                hits++;
+                continue;
+            }
+            if (f.Value.HasValue &&
+                (f.Value.Value.ValueKind == JsonValueKind.Number ||
+                 f.Value.Value.ValueKind == JsonValueKind.String))
+            {
+                bits.Add($"{f.Name}={f.Value.Value.GetRawText().Trim('"')}");
+                hits++;
+            }
+        }
+        return bits.Count == 0 ? string.Empty : string.Join(" ", bits);
     }
 
     private static string NormaliseAddressForLookup(string input)
@@ -1392,6 +1536,39 @@ public sealed partial class SnapshotEnvelope : ObservableObject
         if (f.ArrayElements is { Count: 0 } arr0)
             return $"[{arr0.Length} elements, empty]";
         return "(no value)";
+    }
+}
+
+/// <summary><see cref="ObservableCollection{T}"/> that supports bulk
+/// replacement with a SINGLE <see cref="NotifyCollectionChangedAction.Reset"/>
+/// event instead of N separate <c>Add</c> events. Critical for the
+/// diff DataGrid — toggling "show added" causes ~740K rows to enter
+/// the filtered set; per-row Add notifications hang the UI for
+/// minutes (Avalonia DataGrid re-layouts on each event), while a
+/// single Reset is fast.
+/// <para/>
+/// <c>ReplaceAll</c> internally swaps the underlying <c>Items</c> list
+/// and emits Count + Item[] + Reset notifications in the order
+/// .NET's reference implementation does — bindings that listen to
+/// any of the three stay correct.</summary>
+public sealed class BulkObservableCollection<T> : ObservableCollection<T>
+{
+    /// <summary>Drop every current item and stage the given sequence as
+    /// the new content. Fires one Reset event (and Count + Item[]
+    /// PropertyChanged), regardless of how many items were added or
+    /// removed. Pass <c>null</c> or an empty sequence to clear.</summary>
+    public void ReplaceAll(IEnumerable<T>? items)
+    {
+        CheckReentrancy();
+        Items.Clear();
+        if (items is not null)
+        {
+            foreach (var item in items) Items.Add(item);
+        }
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+        OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+        OnCollectionChanged(new NotifyCollectionChangedEventArgs(
+            NotifyCollectionChangedAction.Reset));
     }
 }
 
