@@ -293,38 +293,48 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
     - [x] **29d-6** 11 ViewModel integration tests + plan.md +
       STATUS.md updates. Total Phase 29c+d coverage: 457/457 tests.
 
-- [ ] **29e — Class-centric Key/Value pivot analysis** — RESEARCH
-  - **User insight (2026-05-29)**: SPC current design treats every
-    field independently. The Class-centric pivot question is
-    different: pick a class C, pick a key field K (e.g. `Player.id`
-    or `Item.name`), pick a value field V (e.g. `Player.hp` or
-    `Item.count`); for each instance of C with K == X across N
-    snapshots, show V's trajectory.
-  - Example: "For the `Player` instance with name='Bob', show HP across
-    yesterday's 5 save points." Or "for the `Item` with id=42, show
-    count change across each shop visit."
-  - User's note: "this is like old-style Crystal Report"
-    — accurate. A more ambitious version would auto-surface anomalies
-    / cluster behaviors / "interesting variances" without the user
-    nominating K and V manually.
-  - **Open design questions**:
-    1. Cross-session instance identity: instance addresses change per
-       game launch, so matching "the Player with name='Bob'" requires
-       walking the K field at each snap to find which address holds
-       that K value. Doable but quadratic in snap count.
-    2. Multi-instance Key collisions: if Bob and another player both
-       happened to share `id=42` at some moment, the pivot has to
-       split / annotate.
-    3. UI: pivot table (rows = K values, columns = snapshots, cells =
-       V values) vs grouped DataGrid vs chart.
-    4. Could subsume SPC: SPC is the K=address (or K=class+field+offset)
-       degenerate case. Worth unifying or leave SPC distinct?
-  - **Stretch**: anomaly detection. Auto-tag "fields whose value
-    changed in N>=K out of N snapshots" / "fields that dropped to 0
-    for the first time at snap X" / etc. — closer to APM pattern
-    detection than CE's value scanning.
-  - **Status**: research-phase. Not designed in detail. Open until a
-    concrete use case lands that 29d can't satisfy.
+- [ ] **29e — Class-centric Key/Value pivot** — DESIGNED, ready to start
+  - **User insight (2026-05-29)**: SPC's `{asm}|{fqn}|{instAddr}|{offset}|{field}`
+    key collapses across game sessions (address drift) and even within
+    a session when instance order drifts (활俠傳 銀兩 GameStat lands at
+    #123 or #124 depending on walk). Real game data has stable
+    business keys *inside* each instance (`_propertyID`, `_itemGroup`),
+    so pivoting on key field values instead of addresses sidesteps
+    both drift problems at once.
+  - **Design doc**: see [class-pivot.md](class-pivot.md) for the
+    full spec — 3-stage funnel (Stage 0 class shortlist by CV /
+    null ratio / field-type ratios → Stage 1 field-level key
+    auto-discovery → Stage 2 PivotEngine), array element handling
+    (Layer A primitive index expansion now, Layer B reference inner
+    pivot deferred), cross-session banner repurposing, schema
+    impact (none — existing `.db` files keep working).
+  - **DB compatibility**: zero migration. `BuildFieldIndex` is
+    in-memory only; payload_gzip stores raw `SnapshotClassEntry[]`
+    with full `SnapshotArrayElements` intact, so 29e ships on every
+    existing saved snapshot without re-capture.
+  - **Sub-phases** (each ships green on the full test suite, with a
+    STATUS.md TL;DR refresh):
+    - [x] **29e-1**  `PivotEngine` + unit tests (no UI). 16 tests
+      shipped at build #684, 478/478 green. `SnapshotEnvelope.FormatFieldValue`
+      promoted from `private` to `internal` so the engine reuses the
+      shared formatter. Engine handles single + compound keys, collisions
+      (HasCollision flag + `<N: v1, v2>` cell rendering), absent cells,
+      cross-session (engine is address-agnostic by design), KeyFilter,
+      assembly/FQN match, chunked SnapshotClassEntry merge,
+      missing-key sentinel, duplicate-field-name first-wins.
+    - [ ] **29e-1b** Layer A: primitive array index expansion in
+      `BuildFieldIndex` (`{addr}|{offset}|inventory[3]` pseudo-keys).
+      SPC tab inherits per-element tracking for free. ≥6 tests.
+    - [ ] **29e-2**  "Class Pivot" tab — Stage 2 only, manual class +
+      K + V picker, repurposed cross-session banner.
+    - [ ] **29e-3**  Stage 0 class shortlisting DataGrid (CV / null %
+      / field-type ratios) — replaces the manual class picker.
+    - [ ] **29e-4**  Stage 1 field-level key auto-discovery
+      (S_stable + S_cardinality + TypePrior + NamePrior) + greedy
+      compound-key suggestion.
+  - **Deferred to follow-up Phase**: Layer B (reference-type array
+    elements pivot by inner key — needs DLL-side capture of element
+    `Fields[]`), anomaly auto-surface (stretch).
 
 ### Bundled Phase 27c live smoke ✅ **CLOSED 2026-05-26**
 

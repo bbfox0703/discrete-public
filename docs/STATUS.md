@@ -1,8 +1,30 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29d SPC tab live-smoke polish complete**, head `82647cd` / build #682+ UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29e-1 PivotEngine shipped**; head pending commit / build #684 UI / DLL #650).
 
-## TL;DR — what's left to pick up (next session, post-29d polish)
+## TL;DR — what's left to pick up (next session, mid-29e)
+
+Phase 29e-1 landed: pure-engine `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
++ 16 unit tests ([PivotEngineTests.cs](../ui/UnityDumpUI.Tests/PivotEngineTests.cs)),
+478/478 green. No UI yet, no DLL change. `SnapshotEnvelope.FormatFieldValue`
+promoted from `private` to `internal` so engine reuses the shared formatter.
+Full design at [class-pivot.md](class-pivot.md); plan.md 29e ledger
+shows the remaining waves:
+
+* **29e-1b** Primitive array index expansion in `BuildFieldIndex`
+  (`inventory[0..N]` pseudo-keys) — SPC tab inherits per-element
+  tracking for free.
+* **29e-2** "Class Pivot" tab — Stage 2 only, manual class + K + V
+  picker, cross-session banner repurposed for pivot semantics.
+* **29e-3** Stage 0 class-shortlisting DataGrid (CV / null % /
+  field-type ratios) — replaces manual class picker.
+* **29e-4** Stage 1 field-level key auto-discovery
+  (S_stable + S_cardinality + TypePrior + NamePrior) + greedy
+  compound-key suggestion.
+
+DB schema untouched. Existing `.db` files keep working.
+
+## Previous TL;DR — Phase 29d live-smoke polish (head `82647cd` / build #682)
 
 Phase 29d shipped earlier this day. User ran the SPC Query tab live and
 surfaced six UX issues across three batches of fixes. All shipped +
@@ -38,10 +60,16 @@ green on 462/462 unit tests, both branches in sync.
 ### Next priorities
 
 * Continue live-smoke on the items above; surface any further UX papercuts.
-* Phase 29e research stub (Class-centric Key/Value pivot — "for the
-  Player instance with name='Bob', show HP across N snaps") still
-  documented in plan.md. Waiting on a concrete real-world need before
-  designing it.
+* **Phase 29e Class-centric Key/Value pivot — designed, ready to start.**
+  Full spec at [class-pivot.md](class-pivot.md); plan.md 29e stub
+  expanded to a 5-wave breakdown (29e-1 PivotEngine, 29e-1b primitive
+  array index expansion, 29e-2 Pivot tab, 29e-3 Stage 0 class
+  shortlisting, 29e-4 Stage 1 key auto-discovery). Layer B
+  (reference-array inner pivot, requires DLL change) deferred to a
+  follow-up Phase. Existing `.db` files keep working — `BuildFieldIndex`
+  is in-memory only, payload_gzip stores raw `SnapshotClassEntry[]`
+  with `SnapshotArrayElements` intact, so 29e ships on every saved
+  snapshot without migration or manual delete.
 * Per-key streaming hydrate (constant RAM regardless of N) deferred
   from 29d-4 — not needed until live data hits the practical N>10
   wall.

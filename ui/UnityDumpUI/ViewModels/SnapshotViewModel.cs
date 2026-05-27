@@ -2183,7 +2183,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// quoted form for strings, and explicit error markers for the
     /// unreadable / open-generic-array / implausible-length cases so
     /// noise stays clearly distinguishable from real changes.</summary>
-    private static string FormatFieldValue(SnapshotFieldEntry f)
+    internal static string FormatFieldValue(SnapshotFieldEntry f)
     {
         if (!string.IsNullOrEmpty(f.Error))
         {
