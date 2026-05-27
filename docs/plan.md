@@ -2279,6 +2279,54 @@ Changed only + Class filter" stack.
   push past 256/64 caps on x86 (and the DLL refusal banner
   will make that obvious).
 
+- [x] **Snapshot `FindAllInstances` false-positive root-cause fix**
+  — SHIPPED 2026-05-28 (DLL #650, commit `b4bd935`).
+  See [lessons-learned.md §"Snapshot FindAllInstances 2-level scan accepts non-object memory"](lessons-learned.md#snapshot-findallinstances-2-level-scan-accepts-non-object-memory-as-fake-instances--eats-per-class-cap-before-reaching-real-instances--proper-fix-2026-05-28-dll-650)
+  for the full diagnostic + design walk.
+
+  **Root cause**: bulk heap walk did a 2-level scan — for each
+  qword, dereference and check whether the deref is in the
+  known class set. That accepts not just real `MonoVTable*` but
+  also non-vtable Mono structures whose first qword happens to
+  be a class pointer (RGCTX cache slots, internal lookup
+  tables that store vtable pointer values as their payload,
+  etc.). Per-class `findInstances` doesn't have this problem
+  because it does a 1-level scan against a specific vtable
+  address.
+
+  **Fix**: validate the candidate vtable structurally. Real
+  `MonoVTable` has the root `MonoDomain*` at offset
+  `2 * sizeof(uintptr_t)` (per
+  `mono/metadata/class-internals.h`). One extra SEH-safe
+  pointer read per candidate, no Mono runtime calls, zero
+  BDWGC interaction (so zero risk of the build #637 wedge
+  recurring).
+
+  **Live-verify on Mortal (활俠傳, Mono x86)**:
+  - GameStat capture: 256 (cap hit, mostly garbage) → 134-135
+    (matches live `findInstances` ~152)
+  - UI memory per snapshot: 1.5+ GB → ~99-139 MB (15× reduction)
+  - Total UI memory for 2 snapshots: 3+ GB → ~238 MB
+  - Money diff at known-stable address 0x29BFACC0 finally
+    surfaces as proper `changed` row: `_value 10160 → 9910
+    (Δ=-250)`
+  - Diff totals dropped to reasonable order
+    (1,688 changed vs prior 7,110+ noise floor)
+
+  **Residual (Phase 29f polish — deferred)**: ~1 stray entry
+  per snapshot in 0xB2Dxxxxxx range — probably a per-method or
+  generic-instantiation `MonoVTable` alias family that
+  coincidentally also has a domain pointer at the right offset.
+  ~99% precision, not blocking. Could refine further by also
+  validating `*(qw + 3*ptr_size)` looks like a `MonoType*`, but
+  diminishing returns unless a user complains.
+
+  **Companion impact**: yesterday's 32-bit OOM mitigation
+  bundle (auto-clamp + DLL refusal gate + memory banner) stays
+  as safety net but is much less essential now. With the noise
+  floor gone the user can push `InstanceCap` back to 512+ on
+  32-bit Mortal without hitting OOM.
+
 - [ ] **Phase 29e — Full / Differential snapshot architecture**
   (proposed by user 2026-05-27, **DEFERRED**). UI-side feature
   that adds a second snapshot kind so multi-snapshot workflows
