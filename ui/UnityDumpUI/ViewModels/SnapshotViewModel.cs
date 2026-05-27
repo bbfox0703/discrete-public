@@ -279,14 +279,39 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// <c>&lt;&gt;c</c>, <c>&lt;Start&gt;d__N</c>).</summary>
     [ObservableProperty] private bool _hideSyntheticTypes = true;
 
-    /// <summary>Show "changed" rows (value differs between A and B).
-    /// Default ON (reverted 2026-05-28 after one session of OFF): the
-    /// added+removed pair pattern that 32-bit Mono GC behaviour
-    /// produces (instance moves between snapshots → shows as
-    /// add+remove rather than change) means most diff sessions want
-    /// changed rows visible by default. Re-checking unchanged stays
-    /// a one-click opt-in.</summary>
-    [ObservableProperty] private bool _showChanged = true;
+    // ── "Changed" trichotomy (Phase 29-polish, 2026-05-29) ─────────────
+    // The single ShowChanged toggle was split into three independent
+    // sub-toggles so the user can express direction-based filters
+    // naturally as set unions:
+    //
+    //   • "value ≥ old"     → ShowUnchanged + ShowIncreased
+    //   • "value ≤ old"     → ShowUnchanged + ShowDecreased
+    //   • "any direction"   → ShowIncreased + ShowDecreased
+    //   • "non-numeric Δ"   → ShowOtherChanged (string / pointer / error)
+    //
+    // Combined with the numeric ValueRangeMin/Max filter this answers
+    // the canonical CE-style "I don't know the exact value but it's
+    // somewhere in 0–1000 and it just went down" workflow.
+    //
+    // Defaults preserve the previous "ShowChanged = true" behaviour —
+    // all three sub-kinds default ON so first-time users see the same
+    // unfiltered changed result as before.
+
+    /// <summary>Show numeric rows where <c>new &gt; old</c>. Default ON.
+    /// Combined with <see cref="ShowUnchanged"/> expresses the ≥ filter
+    /// (value grew or stayed the same).</summary>
+    [ObservableProperty] private bool _showIncreased = true;
+
+    /// <summary>Show numeric rows where <c>new &lt; old</c>. Default ON.
+    /// Combined with <see cref="ShowUnchanged"/> expresses the ≤ filter
+    /// (value shrank or stayed the same).</summary>
+    [ObservableProperty] private bool _showDecreased = true;
+
+    /// <summary>Show "changed" rows that aren't numerically comparable —
+    /// string content changes, pointer-address changes, error rows, or
+    /// numeric rows whose Old or New side failed to parse. Default ON
+    /// so legacy "Changed = true" behaviour is preserved out-of-box.</summary>
+    [ObservableProperty] private bool _showOtherChanged = true;
 
     /// <summary>Show "added" rows (in B but not A). Default OFF.</summary>
     [ObservableProperty] private bool _showAdded;
@@ -386,7 +411,9 @@ public sealed partial class SnapshotViewModel : ObservableObject
     // property triggers a single materialized rebuild. Cheaper than
     // per-render predicate evaluation as filter count grows.
     partial void OnHideSyntheticTypesChanged(bool value)  => RebuildFilteredRows();
-    partial void OnShowChangedChanged(bool value)         => RebuildFilteredRows();
+    partial void OnShowIncreasedChanged(bool value)       => RebuildFilteredRows();
+    partial void OnShowDecreasedChanged(bool value)       => RebuildFilteredRows();
+    partial void OnShowOtherChangedChanged(bool value)    => RebuildFilteredRows();
     partial void OnShowAddedChanged(bool value)           => RebuildFilteredRows();
     partial void OnShowRemovedChanged(bool value)         => RebuildFilteredRows();
     partial void OnShowUnchangedChanged(bool value)       => RebuildFilteredRows();
@@ -799,7 +826,9 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// value diff shows up as add+remove pair, NOT as changed —
     /// users hunting "where did my HP/money go?" often miss the
     /// pair entirely if the breakdown isn't visible.</summary>
-    private int _filteredChangedCount;
+    private int _filteredIncreasedCount;
+    private int _filteredDecreasedCount;
+    private int _filteredOtherChangedCount;
     private int _filteredAddedCount;
     private int _filteredRemovedCount;
     private int _filteredUnchangedCount;
@@ -829,21 +858,42 @@ public sealed partial class SnapshotViewModel : ObservableObject
         // notification so the DataGrid doesn't re-layout per row. Avoids
         // the 740K-Add-events hang on "show all added" toggle.
         var staged = new List<SnapshotDiffRow>(DiffRows.Count);
-        _filteredChangedCount   = 0;
-        _filteredAddedCount     = 0;
-        _filteredRemovedCount   = 0;
-        _filteredUnchangedCount = 0;
+        _filteredIncreasedCount    = 0;
+        _filteredDecreasedCount    = 0;
+        _filteredOtherChangedCount = 0;
+        _filteredAddedCount        = 0;
+        _filteredRemovedCount      = 0;
+        _filteredUnchangedCount    = 0;
+        // Classification cache so the inner-loop dispatch sees the same
+        // sub-kind that's later used for counter increment + value-range
+        // gating below. Avoids re-reading NumericOld/NumericNew twice.
+        DiffRowKindSubclass sub = DiffRowKindSubclass.None;
         foreach (var r in DiffRows)
         {
             if (HideSyntheticTypes && r.IsSynthetic) continue;
 
-            // Three independent change-kind toggles (Phase-29-polish refactor —
-            // replaces the prior ChangedOnly + ShowAdded + ShowRemoved triad
-            // whose interaction had dead-code branches).
-            if (r.ChangeKind == "changed"   && !ShowChanged)   continue;
-            if (r.ChangeKind == "added"     && !ShowAdded)     continue;
-            if (r.ChangeKind == "removed"   && !ShowRemoved)   continue;
-            if (r.ChangeKind == "unchanged" && !ShowUnchanged) continue;
+            // ChangeKind dispatch (Phase 29-polish 2026-05-29): the
+            // single "changed" lane is partitioned into three sub-kinds
+            // — Increased / Decreased / OtherChanged — so the user can
+            // express direction filters as set unions with Unchanged.
+            sub = DiffRowKindSubclass.None;
+            switch (r.ChangeKind)
+            {
+                case "changed":
+                    sub = ClassifyChangedDirection(r);
+                    bool keep = sub switch
+                    {
+                        DiffRowKindSubclass.Increased    => ShowIncreased,
+                        DiffRowKindSubclass.Decreased    => ShowDecreased,
+                        DiffRowKindSubclass.OtherChanged => ShowOtherChanged,
+                        _ => false,
+                    };
+                    if (!keep) continue;
+                    break;
+                case "added":     if (!ShowAdded)     continue; break;
+                case "removed":   if (!ShowRemoved)   continue; break;
+                case "unchanged": if (!ShowUnchanged) continue; break;
+            }
 
             if (hasClsFilter &&
                 r.ClassDisplay.IndexOf(clsFilter, StringComparison.OrdinalIgnoreCase) < 0)
@@ -869,7 +919,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
             staged.Add(r);
             switch (r.ChangeKind)
             {
-                case "changed":   _filteredChangedCount++;   break;
+                case "changed":
+                    switch (sub)
+                    {
+                        case DiffRowKindSubclass.Increased:    _filteredIncreasedCount++;    break;
+                        case DiffRowKindSubclass.Decreased:    _filteredDecreasedCount++;    break;
+                        case DiffRowKindSubclass.OtherChanged: _filteredOtherChangedCount++; break;
+                    }
+                    break;
                 case "added":     _filteredAddedCount++;     break;
                 case "removed":   _filteredRemovedCount++;   break;
                 case "unchanged": _filteredUnchangedCount++; break;
@@ -886,16 +943,41 @@ public sealed partial class SnapshotViewModel : ObservableObject
             : $"Filter: {FilteredDiffRows.Count:N0} of {DiffRows.Count:N0} rows ({FormatFilteredKindBreakdown()})";
     }
 
-    /// <summary>Format the per-kind counts as
-    /// "(X changed, Y added, Z removed[, W unchanged])". Skips the
-    /// unchanged term when zero so the line doesn't read noisy.</summary>
+    /// <summary>Classify a "changed" row into a numeric-direction
+    /// subclass. Numeric rows with both sides parseable are split into
+    /// Increased / Decreased; everything else (strings, pointers, error
+    /// rows, numeric rows with one unparseable side, and the edge case
+    /// where old == new but ChangeKind still says "changed") falls into
+    /// OtherChanged so it's still reachable via a single checkbox.</summary>
+    private static DiffRowKindSubclass ClassifyChangedDirection(SnapshotDiffRow r)
+    {
+        if (r.Kind == DiffRowKind.Numeric &&
+            r.NumericOld is double oldN &&
+            r.NumericNew is double newN)
+        {
+            if (newN > oldN) return DiffRowKindSubclass.Increased;
+            if (newN < oldN) return DiffRowKindSubclass.Decreased;
+        }
+        return DiffRowKindSubclass.OtherChanged;
+    }
+
+    /// <summary>Format the per-kind counts. Three "changed" sub-counts
+    /// (↑ increased / ↓ decreased / Δ other) replace the prior single
+    /// "changed" term so the status line reflects the new UI partition.
+    /// Zero-valued sub-counts are dropped to keep the line readable on
+    /// diffs where only one direction has data.</summary>
     private string FormatFilteredKindBreakdown()
     {
         if (FilteredDiffRows.Count == 0) return "0 rows";
-        string baseStr = $"{_filteredChangedCount:N0} changed, {_filteredAddedCount:N0} added, {_filteredRemovedCount:N0} removed";
-        return _filteredUnchangedCount > 0
-            ? $"{baseStr}, {_filteredUnchangedCount:N0} unchanged"
-            : baseStr;
+
+        var parts = new List<string>(6);
+        if (_filteredIncreasedCount    > 0) parts.Add($"{_filteredIncreasedCount:N0} ↑");
+        if (_filteredDecreasedCount    > 0) parts.Add($"{_filteredDecreasedCount:N0} ↓");
+        if (_filteredOtherChangedCount > 0) parts.Add($"{_filteredOtherChangedCount:N0} Δ");
+        if (_filteredAddedCount        > 0) parts.Add($"{_filteredAddedCount:N0} added");
+        if (_filteredRemovedCount      > 0) parts.Add($"{_filteredRemovedCount:N0} removed");
+        if (_filteredUnchangedCount    > 0) parts.Add($"{_filteredUnchangedCount:N0} unchanged");
+        return parts.Count == 0 ? "0 rows" : string.Join(", ", parts);
     }
 
     // ----- Instance lookup diagnostic (Phase 29-polish, 2026-05-28) -----
@@ -1617,6 +1699,18 @@ public enum DiffRowKind
     Pointer,
     String,
     Error,
+}
+
+/// <summary>Sub-classification of a row whose top-level ChangeKind is
+/// "changed". Drives the three-way Increased/Decreased/OtherChanged
+/// checkbox dispatch in <see cref="SnapshotViewModel.RebuildFilteredRows"/>
+/// + the matching counter increment.</summary>
+public enum DiffRowKindSubclass
+{
+    None,           // not a "changed" row (added/removed/unchanged)
+    Increased,      // numeric, new > old
+    Decreased,      // numeric, new < old
+    OtherChanged,   // non-numeric change, or numeric with unparseable side
 }
 
 public sealed class SnapshotDiffRow

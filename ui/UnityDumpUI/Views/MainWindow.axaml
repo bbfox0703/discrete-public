@@ -1708,15 +1708,31 @@
                     <CheckBox Content="Hide synthetic types"
                               IsChecked="{Binding Snapshot.HideSyntheticTypes, Mode=TwoWay}"
                               ToolTip.Tip="Hide rows whose class name starts with '&lt;' (compiler-generated: &lt;Module&gt;, &lt;&gt;f__AnonymousType*, &lt;&gt;c, &lt;Start&gt;d__N, async-state-machines). These are usually false-positive 'instances' from wide-scan picking up metadata references — not real game objects."/>
-                    <CheckBox Content="Changed"
-                              IsChecked="{Binding Snapshot.ShowChanged, Mode=TwoWay}"/>
+                    <!-- "Changed" trichotomy (Phase 29-polish 2026-05-29):
+                         the single Changed checkbox was split into three
+                         sub-toggles so the user can express direction
+                         filters via set unions with Unchanged:
+                           ≥  →  Unchanged + Increased
+                           ≤  →  Unchanged + Decreased
+                         Combined with the numeric Value-range filter below,
+                         this answers "I don't know the exact value but it's
+                         somewhere in 0-1000 and it just went down". -->
+                    <CheckBox Content="↑ Increased"
+                              IsChecked="{Binding Snapshot.ShowIncreased, Mode=TwoWay}"
+                              ToolTip.Tip="Show numeric rows where the new value is greater than the old value. Combine with 'Unchanged' to express ≥ (value grew or stayed the same)."/>
+                    <CheckBox Content="↓ Decreased"
+                              IsChecked="{Binding Snapshot.ShowDecreased, Mode=TwoWay}"
+                              ToolTip.Tip="Show numeric rows where the new value is less than the old value. Combine with 'Unchanged' to express ≤ (value shrank or stayed the same)."/>
+                    <CheckBox Content="Δ Other changed"
+                              IsChecked="{Binding Snapshot.ShowOtherChanged, Mode=TwoWay}"
+                              ToolTip.Tip="Show 'changed' rows that aren't numerically comparable — string content changes, pointer-address changes, error rows, or numeric rows where one side failed to parse."/>
                     <CheckBox Content="Added"
                               IsChecked="{Binding Snapshot.ShowAdded, Mode=TwoWay}"/>
                     <CheckBox Content="Removed"
                               IsChecked="{Binding Snapshot.ShowRemoved, Mode=TwoWay}"/>
                     <CheckBox Content="Unchanged"
                               IsChecked="{Binding Snapshot.ShowUnchanged, Mode=TwoWay}"
-                              ToolTip.Tip="Show rows that didn't change between A and B. Only populated when the prior Diff ran with 'Include unchanged' ON — otherwise no unchanged rows exist to show."/>
+                              ToolTip.Tip="Show rows that didn't change between A and B. Only populated when the prior Diff ran with 'Include unchanged' ON — otherwise no unchanged rows exist to show. Combine with Increased/Decreased to express ≥ or ≤ semantics."/>
                     <CheckBox Content="Hide pointer-only Δ"
                               IsChecked="{Binding Snapshot.HidePointerChanges, Mode=TwoWay}"
                               ToolTip.Tip="Hide rows where both Old and New are formatted as ptr=0x… (reference fields whose pointer changed but content diff would show up separately as field-value rows). Usually re-allocation noise."/>
