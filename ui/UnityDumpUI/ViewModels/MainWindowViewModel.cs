@@ -90,6 +90,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _ = LoadUserSettingsAsync();
         Snapshot.NavigateToInspectorRequested     += OnSnapshotNavigateToInspector;
         Snapshot.NavigateToAddressLookupRequested += OnSnapshotNavigateToAddressLookup;
+
+        // Phase 29d — SPC Query tab. Shares the Snapshot tab's pool so
+        // saves / drops in one are visible to the other.
+        SpcQuery = new SpcQueryViewModel(Snapshot, _logger);
+        SpcQuery.NavigateToInspectorRequested += OnSpcNavigateToInspector;
         // Phase 20b: Scene Explorer tab. SceneEnumerator wraps the
         // UnityEngine.Object.FindObjects* + Transform-walk recipe from
         // unity_scene.lua; Phase 20-MT keeps main-thread routing on
@@ -290,6 +295,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     public SnapshotViewModel Snapshot { get; }
 
+    /// <summary>
+    /// Phase 29d — SPC Query tab. Cross-session multi-snapshot
+    /// constraint queries — given N snapshots + N per-snapshot
+    /// predicates, find every field whose value sequence satisfies the
+    /// chain. The killer use case: identify the 銀兩 GameStat by its
+    /// real-world spending pattern across 4 sessions
+    /// (10160 → 9910 → 9410 → 9410).
+    /// </summary>
+    public SpcQueryViewModel SpcQuery { get; }
+
     /// <summary>Phase 29c — JSON-persisted user preferences (snapshot DB
     /// directory override, auto-save toggle, auto-prune threshold).
     /// Surfaced here so the Settings dialog (29c-7) can bind to it.</summary>
@@ -362,6 +377,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexScene         = 5;
     public const int TabIndexValueSearch   = 6;
     public const int TabIndexSnapshot      = 7;
+    public const int TabIndexSpcQuery      = 8;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -1443,6 +1459,24 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// InstanceAddress; we still switch the inspector's class context
     /// so the user can browse statics from there.
     /// </summary>
+    /// <summary>Phase 29d-2 — SPC result row → Inspector handoff. SPC
+    /// only carries the instance address (not the surrounding diff-row
+    /// context) so the wire is just a string. Inspector lazy-resolves
+    /// class context off the address via its existing flow.</summary>
+    private void OnSpcNavigateToInspector(object? sender, string instanceAddress)
+    {
+        if (string.IsNullOrWhiteSpace(instanceAddress)) return;
+        try
+        {
+            _ = LookupInspectorAddressAsync(instanceAddress);
+        }
+        catch (Exception ex)
+        {
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnSpcNavigateToInspector failed: {ex.Message}");
+        }
+    }
+
     private void OnSnapshotNavigateToInspector(SnapshotDiffRow row)
     {
         try

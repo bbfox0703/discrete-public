@@ -282,6 +282,17 @@ public partial class MainWindow : Window
         await clipboard.SetDataAsync(transfer);
     }
 
+    /// <summary>Phase 29d-2: double-clicking a SPC result row pushes
+    /// the instance address into the Inspector cross-tab handoff
+    /// (static rows are no-op since there's no instance to inspect).</summary>
+    private void OnSpcResultDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.SpcMatch match) return;
+        vm.SpcQuery.RequestInspectInstance(match);
+    }
+
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
     /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir
     /// or the platform default — either way it's created lazily so the
