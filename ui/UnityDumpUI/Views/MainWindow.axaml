@@ -2127,6 +2127,19 @@
                               IsReadOnly="True"
                               GridLinesVisibility="Horizontal"
                               DoubleTapped="OnSpcResultDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Inspect this instance"
+                                    Click="OnSpcInspectInstanceClicked"/>
+                          <Separator/>
+                          <MenuItem Header="Copy Class.Field"
+                                    Click="OnSpcCopyClassFieldClicked"/>
+                          <MenuItem Header="Copy instance address"
+                                    Click="OnSpcCopyInstanceAddressClicked"/>
+                          <MenuItem Header="Copy value sequence"
+                                    Click="OnSpcCopyValueSequenceClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Class"
                                             Binding="{Binding ClassFqn}"

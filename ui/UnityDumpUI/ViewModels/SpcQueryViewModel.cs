@@ -90,6 +90,37 @@ public sealed partial class SpcQueryViewModel : ObservableObject
         NavigateToInspectorRequested?.Invoke(this, match.InstanceAddress);
     }
 
+    /// <summary>Phase 29d-5: clipboard hook installed by MainWindow so
+    /// Core stays platform-free. Receives a single string to copy.</summary>
+    public Func<string, Task>? CopyToClipboardAsync { get; set; }
+
+    [RelayCommand]
+    public async Task CopyClassFieldAsync(SpcMatch match)
+    {
+        if (match is null || CopyToClipboardAsync is null) return;
+        string text = $"{match.ClassFqn}.{match.FieldName}";
+        await CopyToClipboardAsync(text).ConfigureAwait(true);
+        StatusMessage = $"Copied: {text}";
+    }
+
+    [RelayCommand]
+    public async Task CopyInstanceAddressAsync(SpcMatch match)
+    {
+        if (match is null || CopyToClipboardAsync is null) return;
+        if (string.IsNullOrEmpty(match.InstanceAddress)) return;
+        await CopyToClipboardAsync(match.InstanceAddress).ConfigureAwait(true);
+        StatusMessage = $"Copied instance address: {match.InstanceAddress}";
+    }
+
+    [RelayCommand]
+    public async Task CopyValueSequenceAsync(SpcMatch match)
+    {
+        if (match is null || CopyToClipboardAsync is null) return;
+        string text = string.Join(" → ", match.ValueDisplays);
+        await CopyToClipboardAsync(text).ConfigureAwait(true);
+        StatusMessage = $"Copied value sequence: {text}";
+    }
+
     /// <summary>Sync SelectionRows to mirror the underlying snapshots
     /// pool. Preserves the per-row Predicate + Include flag when an
     /// envelope was already in the list. New rows default to Include=ON
@@ -128,6 +159,12 @@ public sealed partial class SpcQueryViewModel : ObservableObject
         }
     }
 
+    /// <summary>Threshold at which the run-status line emits a memory
+    /// warning. Empirical: 5 × wide 활俠傳 snapshot (each ~100 MB
+    /// FieldIndex) ≈ 500 MB during query. Above this, suggest the user
+    /// narrows scope or splits the query.</summary>
+    private const int kLargeNAdvisory = 5;
+
     [RelayCommand(CanExecute = nameof(CanRun))]
     public async Task RunAsync()
     {
@@ -161,8 +198,33 @@ public sealed partial class SpcQueryViewModel : ObservableObject
                                StringComparison.Ordinal));
             if (anySessionMismatch) StaticsOnly = true;
 
-            // Hydrate all selected envelopes — 29d-4 will swap this for
-            // a streaming path when count > 5.
+            // Phase 29d-4: track which envelopes were already hydrated
+            // BEFORE this run so we can evict only the ones we ourselves
+            // loaded. Snap that the user had open via the Snapshot tab
+            // stays loaded after Run — feels less surprising. Real
+            // per-key streaming (keep RAM at ~1 snap regardless of N)
+            // is deferred to Phase 29e; in the meantime the advisory
+            // banner below warns when N grows.
+            var preloaded = new HashSet<SnapshotEnvelope>();
+            foreach (var r in selected)
+            {
+                if (r.Snapshot.ClassesLoaded) preloaded.Add(r.Snapshot);
+            }
+            if (selected.Count > kLargeNAdvisory)
+            {
+                long estPerSnap = selected[0].Snapshot.EstimatedMemoryBytes;
+                if (estPerSnap == 0)
+                {
+                    // Snap not loaded — rough fallback estimate using the
+                    // persisted byte size × 50 (gzip ratio observed in
+                    // 29c live-smoke).
+                    estPerSnap = selected[0].Snapshot.PersistedBytes * 50;
+                }
+                long total = estPerSnap * selected.Count;
+                StatusMessage = $"Hydrating {selected.Count:N0} snapshots (~{FormatMb(total)} estimated peak RAM). Consider narrowing scope if memory pressure builds.";
+            }
+
+            // Hydrate all selected envelopes.
             foreach (var r in selected)
             {
                 await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
@@ -186,10 +248,28 @@ public sealed partial class SpcQueryViewModel : ObservableObject
             Results.Clear();
             foreach (var m in matches) Results.Add(m);
 
-            StatusMessage = $"SPC: {matches.Count:N0} match(es) across {selected.Count:N0} snapshot(s) in {sw.ElapsedMilliseconds} ms.";
+            // Phase 29d-4: post-run eviction. Drop only envelopes that
+            // weren't loaded before we started — keeps "user already
+            // had it open" envelopes hot for re-diff, while not
+            // permanently bloating RAM with snapshots we just hydrated
+            // for this query.
+            int evicted = 0;
+            foreach (var r in selected)
+            {
+                if (preloaded.Contains(r.Snapshot)) continue;
+                if (!r.Snapshot.ClassesLoaded) continue;
+                if (r.Snapshot.PersistedId is null) continue;
+                r.Snapshot.Unload();
+                evicted++;
+            }
+            string evictionNote = evicted > 0
+                ? $" — evicted {evicted:N0} hydrated-for-query envelope(s)"
+                : string.Empty;
+
+            StatusMessage = $"SPC: {matches.Count:N0} match(es) across {selected.Count:N0} snapshot(s) in {sw.ElapsedMilliseconds} ms{evictionNote}.";
             _logger.Write(SnapshotStore.LogCategory,
                 $"SpcQuery: snaps={selected.Count} preds=[{string.Join(',', selected.Select(r => r.PredicateKind))}] " +
-                $"staticsOnly={StaticsOnly} → {matches.Count} matches in {sw.ElapsedMilliseconds}ms");
+                $"staticsOnly={StaticsOnly} → {matches.Count} matches in {sw.ElapsedMilliseconds}ms evicted={evicted}");
         }
         catch (ArgumentException ax)
         {
@@ -239,6 +319,18 @@ public sealed partial class SpcQueryViewModel : ObservableObject
     /// row's editable PredicateKind without typing too much XAML.</summary>
     public static IReadOnlyList<SpcPredicateKind> AllPredicateKinds { get; } =
         Enum.GetValues<SpcPredicateKind>();
+
+    private static string FormatMb(long bytes)
+    {
+        if (bytes <= 0) return "0 MB";
+        if (bytes >= 1024L * 1024 * 1024)
+        {
+            double gb = bytes / (1024.0 * 1024.0 * 1024.0);
+            return gb.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " GB";
+        }
+        double mb = bytes / (1024.0 * 1024.0);
+        return mb.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + " MB";
+    }
 }
 
 /// <summary>One row in the snapshot-picker / predicate-editor grid.</summary>
