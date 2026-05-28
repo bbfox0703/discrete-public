@@ -2326,7 +2326,7 @@
                                 ToolTip.Tip="Include classes not present in every selected snapshot. Partial presence means instances appear/vanish between snaps, so the pivot can't line them all up."/>
                       <TextBlock Text="Class:" VerticalAlignment="Center" Margin="12,0,0,0"/>
                       <TextBox Text="{Binding ClassPivot.ClassNameFilter, Mode=TwoWay}"
-                               Watermark="name substring" Width="180" VerticalAlignment="Center"
+                               PlaceholderText="name substring" Width="180" VerticalAlignment="Center"
                                ToolTip.Tip="Case-insensitive substring filter on the class FQN — narrow 500+ classes to the one you half-remember."/>
                       <Button Content="⟳ Analyze classes"
                               Command="{Binding ClassPivot.AnalyzeClassesCommand}"
@@ -2394,7 +2394,7 @@
                               Padding="10,4"/>
                       <TextBlock Text="Filter:" VerticalAlignment="Center"/>
                       <TextBox Text="{Binding ClassPivot.FieldScoreFilter, Mode=TwoWay}"
-                               Watermark="field name" Width="160" VerticalAlignment="Center"/>
+                               PlaceholderText="field name" Width="160" VerticalAlignment="Center"/>
                       <TextBlock Text="Suggested key:" VerticalAlignment="Center" Margin="12,0,0,0"/>
                       <TextBlock Text="{Binding ClassPivot.SuggestedKeyDisplay}"
                                  VerticalAlignment="Center" FontWeight="SemiBold"/>
@@ -2482,7 +2482,7 @@
                   <TextBlock Grid.Row="2" Grid.Column="4" Text="Key filter:" VerticalAlignment="Center"/>
                   <TextBox Grid.Row="2" Grid.Column="5"
                            Text="{Binding ClassPivot.KeyFilter, Mode=TwoWay}"
-                           Watermark="optional substring"
+                           PlaceholderText="optional substring"
                            ToolTip.Tip="Case-insensitive substring filter applied to the rendered key tuple. Useful when a class has thousands of instances and you want to focus on one group."/>
 
                   <Button Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="6"

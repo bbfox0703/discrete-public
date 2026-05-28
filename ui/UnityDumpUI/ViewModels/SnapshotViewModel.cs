@@ -1087,14 +1087,23 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // per-chunk pipe-read JSON byte[]/char[]). 29g-2 cut the rest of
             // capture's allocation enough that natural gen2 GCs fire rarely,
             // so those collectable buffers linger — live-smoke saw ~4.5 GB of
-            // dead Byte[]/Char[] still resident (14.8 GB private) that a forced
-            // GC reclaimed (post-GC gcdump showed them gone). Force one
-            // compacting gen2 collection so the process returns that memory
-            // promptly. Off the UI thread (fire-and-forget) so the collect
-            // doesn't freeze the window; it's harmless if it overlaps the next
-            // capture's allocation.
-            _ = Task.Run(static () =>
-                GC.Collect(2, System.GCCollectionMode.Forced, blocking: true, compacting: true));
+            // dead Byte[]/Char[] still resident (14.8 GB private) that a GC
+            // reclaimed (post-GC gcdump showed them gone). A plain Forced
+            // compacting collect frees the objects but Workstation GC may keep
+            // the committed segments mapped (process stays large); GCCollectionMode
+            // .Aggressive additionally DECOMMITS / returns memory to the OS.
+            // Off the UI thread (fire-and-forget) so the collect doesn't freeze
+            // the window; logs before/after so we can confirm it ran + its effect.
+            long gcBeforeManaged = GC.GetTotalMemory(forceFullCollection: false);
+            long gcBeforeWs      = GetWorkingSet();
+            _ = Task.Run(() =>
+            {
+                GC.Collect(GC.MaxGeneration, System.GCCollectionMode.Aggressive, blocking: true);
+                long afterManaged = GC.GetTotalMemory(forceFullCollection: false);
+                _logger.Write(SnapshotStore.LogCategory,
+                    $"post-capture GC (Aggressive): managed {gcBeforeManaged:N0} -> {afterManaged:N0} B, " +
+                    $"WS {gcBeforeWs:N0} -> {GetWorkingSet():N0} B");
+            });
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)

@@ -945,13 +945,25 @@ of profiler data, #3 is profiler-gated):
   fire rarely. **Confirmed transient by a post-GC gcdump** (`Capture-GcDump.ps1`
   forces a GC): the giants + the FieldIndex dict were gone, heap back to the
   baseline shape minus FieldIndex.
-* **29g-2b ✅ SHIPPED (583/583 green)** — fire-and-forget compacting gen2
-  `GC.Collect(2, Forced, blocking, compacting)` on a background thread at the end
-  of a successful capture ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)
-  TakeSnapshotAsync) so the process returns the transient LOH capture buffers
-  promptly instead of waiting for pressure (live-smoke: 14.8 GB private with
-  ~4.5 GB of dead Byte[]/Char[] a GC reclaimed). Off the UI thread to avoid a
-  freeze.
+* **29g-2b ✅ SHIPPED (583/583 green)** — fire-and-forget background
+  `GC.Collect(MaxGeneration, GCCollectionMode.Aggressive, blocking)` at the end of
+  a successful capture ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)
+  TakeSnapshotAsync) + a `post-capture GC (Aggressive): managed X->Y, WS A->B`
+  log line. **Started with plain `Forced` compacting — it freed the objects but
+  Workstation GC kept the committed segments mapped (process stayed ~14.5 GB);
+  `Aggressive` additionally DECOMMITS to the OS.** Live result: WS 17→**7.36 GB**
+  / Private →**9.43 GB** for 3 snaps. Off the UI thread to avoid a freeze.
+* **Transient char[]/byte[] root cause (code-confirmed):** the residual giant
+  `Char[]` (~33 MB each, ~1.95 GB) + `Byte[]` (~2.6 GB of a few big ones) a
+  dotnet-dump still shows are **per-chunk pipe-read buffers** —
+  [PipeClient.cs:154](../ui/UnityDumpUI.Core/Services/PipeClient.cs) reads each
+  `snapshotChunk` response with `ReadLineAsync()` into a `string` (up to 100
+  classes/line → tens of MB) then `Deserialize(string)` re-encodes to UTF8.
+  Transient + collectable (forced-GC gcdump shows them gone). **Durable fix
+  (deferred, optional 29g-2c):** read the line as UTF8 bytes + `Deserialize(
+  ReadOnlySpan<byte>)` to skip the giant string + re-encode — but it rewrites the
+  core line-framing used by every RPC, so needs care; cheap alt = smaller chunk
+  size to cap the per-chunk peak.
 * **Acceptance status:** post-29g-2 steady-state (post-GC) ≈ **5.3 GB managed for
   3 snapshots** (String 2.92 + SnapshotFieldEntry 1.01 + ArrayElement 0.56 +
   JsonDocument 0.38 + small Byte[] 0.37), down from ~9.5 GB → **already meets
