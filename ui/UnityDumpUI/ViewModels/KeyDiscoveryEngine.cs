@@ -269,7 +269,7 @@ public static class KeyDiscoveryEngine
         {
             if (!string.Equals(c.Assembly, assembly, StringComparison.Ordinal)) continue;
             string cfqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
-            if (!string.Equals(cfqn, fqn, StringComparison.Ordinal)) continue;
+            if (!SnapshotEnvelope.ClassFqnEquals(cfqn, fqn)) continue;
             if (c.Instances is null) continue;
             foreach (var inst in c.Instances) yield return inst;
         }

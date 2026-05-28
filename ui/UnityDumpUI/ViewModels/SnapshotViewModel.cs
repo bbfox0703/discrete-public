@@ -1193,9 +1193,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
         // without paying their FieldIndex cost in memory all the time.
         int evicted = EvictUnusedEnvelopes();
 
+        // When "Include unchanged" is OFF the diff only carries changed/
+        // added/removed rows, so a value that stayed the same (e.g. purse
+        // you never spent between snaps) won't appear even with the
+        // "Unchanged" filter checked — flag that so the user knows to re-run
+        // with it on, or use SPC/Value Search for a static-looking value.
         string unchangedNote = includeUnchanged
             ? $", {unchanged:N0} unchanged"
-            : string.Empty;
+            : ", unchanged NOT captured — tick \"Include unchanged\" + re-Diff to compare values that didn't change";
         string suppressedNote = suppressed > 0
             ? $" ({suppressed:N0} instance rows suppressed)"
             : string.Empty;
@@ -1534,7 +1539,9 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// when the underlying row set itself changes. Single O(N) pass.</summary>
     private void RebuildFilteredRows()
     {
-        var clsFilter   = ClassFilterText;
+        // Class filter is separator-insensitive: fold '/' → '.' on both sides
+        // so the user can type CE's "MainGame.PLY_WORK" or our "MainGame/PLY_WORK".
+        var clsFilter   = SnapshotEnvelope.NormalizeClassSeparators(ClassFilterText ?? string.Empty);
         var fieldFilter = FieldFilterText;
         bool hasClsFilter   = !string.IsNullOrWhiteSpace(clsFilter);
         bool hasFieldFilter = !string.IsNullOrWhiteSpace(fieldFilter);
@@ -1591,7 +1598,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
             }
 
             if (hasClsFilter &&
-                r.ClassDisplay.IndexOf(clsFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                SnapshotEnvelope.NormalizeClassSeparators(r.ClassDisplay)
+                    .IndexOf(clsFilter, StringComparison.OrdinalIgnoreCase) < 0)
                 continue;
             if (hasFieldFilter &&
                 r.Field.IndexOf(fieldFilter, StringComparison.OrdinalIgnoreCase) < 0)
@@ -2411,6 +2419,20 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// machines the C# compiler emits. Avoids flagging legitimate
     /// generic types like <c>Dictionary`2</c> (those have backticks
     /// but no leading '&lt;').</summary>
+    /// <summary>Normalize a class FQN's nested-type separator so the two
+    /// conventions compare equal: this tool surfaces nested types as
+    /// <c>Outer/Inner</c> (slash, for unambiguous runtime round-trip via
+    /// FindClass), while CE / .NET-style tooling shows <c>Outer.Inner</c>
+    /// (dot). Folding '/' → '.' lets a user paste either form into a class
+    /// filter / FQN box and have it match.</summary>
+    internal static string NormalizeClassSeparators(string fqn)
+        => string.IsNullOrEmpty(fqn) ? fqn : fqn.Replace('/', '.');
+
+    /// <summary>Separator-insensitive FQN equality (see
+    /// <see cref="NormalizeClassSeparators"/>).</summary>
+    internal static bool ClassFqnEquals(string a, string b)
+        => string.Equals(NormalizeClassSeparators(a), NormalizeClassSeparators(b), StringComparison.Ordinal);
+
     internal static bool IsSyntheticClassName(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;

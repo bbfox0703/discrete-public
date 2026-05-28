@@ -83,6 +83,24 @@
     Expanders so the user can reclaim vertical height for the results grid
     at any resolution. (Stage 0/1 were already collapsible; side-by-side
     was rejected — the wide grids would force h-scroll at 1080p.)
+* **29f live-smoke #4 follow-ups (SaGa Frontier 2 Remastered, x64 IL2CPP)**:
+  - **`MainGame/PLY_WORK` "missing" from diff = NOT a slash/dot bug** — the
+    debug class-lookup proved it WAS captured (340 instances, stored with a
+    slash, matching the user's filter). The diff showed 0 rows because the
+    basic Diff only carries changed/added/removed (`116803 = 7910 + 47708 +
+    61185`, no unchanged) and `purse=100000` was **unchanged**. The diff
+    status now says *"unchanged NOT captured — tick Include unchanged + re-Diff"*
+    when that mode is off. **SPC found it correctly** (`MainGame/PLY_WORK.purse
+    = 100000→100000→100000`), and Class Pivot Layer B returned rows — both
+    tools work; the Diff is for *changes*, SPC/Pivot for unknown/unchanged.
+  - **Separator-insensitive class matching** — nested types surface as
+    `Outer/Inner` here (slash, for FindClass round-trip) but CE/.NET shows
+    `Outer.Inner` (dot). New `SnapshotEnvelope.NormalizeClassSeparators` /
+    `ClassFqnEquals` fold `/`→`.`; applied to the diff Class filter +
+    Pivot/ArrayPivot/KeyDiscovery/SPC class match + PivotViewModel resolve, so
+    either form works (+1 test, 578). **Canonical display unification to `.`
+    across DLL + FindClass + tool scripts is the bigger deferred task** (the
+    `/` is load-bearing for unambiguous nested round-trip).
 * **29f live-smoke #3 follow-ups (SaGa Frontier 2 Remastered, x64 IL2CPP)**:
   - **Save progress now works** — `SaveSnapshotAsync`'s gzip+insert runs
     synchronously (Microsoft.Data.Sqlite), so it was blocking the UI thread and

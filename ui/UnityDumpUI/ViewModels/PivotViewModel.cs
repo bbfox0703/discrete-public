@@ -790,7 +790,7 @@ public sealed partial class PivotViewModel : ObservableObject
         foreach (var c in env.Classes)
         {
             string cfqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
-            if (string.Equals(cfqn, fqn, StringComparison.Ordinal))
+            if (SnapshotEnvelope.ClassFqnEquals(cfqn, fqn))
                 return c.Assembly;
         }
         return null;
@@ -857,7 +857,7 @@ public sealed partial class PivotViewModel : ObservableObject
                 foreach (var c in env.Classes)
                 {
                     string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
-                    if (!string.Equals(fqn, ClassFqn, StringComparison.Ordinal)) continue;
+                    if (!SnapshotEnvelope.ClassFqnEquals(fqn, ClassFqn)) continue;
                     if (c.Instances is not null)
                     {
                         foreach (var inst in c.Instances)
@@ -932,7 +932,7 @@ public sealed partial class PivotViewModel : ObservableObject
             foreach (var c in env.Classes)
             {
                 string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
-                if (string.Equals(fqn, ClassFqn, StringComparison.Ordinal))
+                if (SnapshotEnvelope.ClassFqnEquals(fqn, ClassFqn))
                     yield return c;
             }
         }

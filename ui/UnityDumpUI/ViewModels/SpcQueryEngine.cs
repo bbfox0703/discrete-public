@@ -192,7 +192,10 @@ public static class SpcQueryEngine
         }
 
         var anchor = query.Snapshots[anchorIdx];
-        string? classFilter = string.IsNullOrWhiteSpace(query.ClassFilter) ? null : query.ClassFilter;
+        // Separator-insensitive: fold '/' → '.' so "MainGame.PLY_WORK" (CE) and
+        // "MainGame/PLY_WORK" (this tool) both match.
+        string? classFilter = string.IsNullOrWhiteSpace(query.ClassFilter)
+            ? null : SnapshotEnvelope.NormalizeClassSeparators(query.ClassFilter);
         string? typeFilter  = string.IsNullOrWhiteSpace(query.TypeFilter)  ? null : query.TypeFilter;
 
         var results = new List<SpcMatch>();
@@ -205,7 +208,8 @@ public static class SpcQueryEngine
             if (query.StaticsOnly && !anchorVal.IsStatic) continue;
             if (query.ExcludeSynthetic && anchorVal.IsSynthetic) continue;
             if (classFilter is not null &&
-                anchorVal.ClassFqn.IndexOf(classFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                SnapshotEnvelope.NormalizeClassSeparators(anchorVal.ClassFqn)
+                    .IndexOf(classFilter, StringComparison.OrdinalIgnoreCase) < 0)
                 continue;
             if (typeFilter is not null &&
                 anchorVal.FieldType.IndexOf(typeFilter, StringComparison.OrdinalIgnoreCase) < 0)

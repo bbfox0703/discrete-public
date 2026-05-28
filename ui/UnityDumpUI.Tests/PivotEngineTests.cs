@@ -219,6 +219,35 @@ public class PivotEngineTests
         Assert.Equal(new string?[] { "0x1f3a000", "0x1f60a20" }, money.AddressPerSnap.ToArray());
     }
 
+    // ─── Separator-insensitive class match (slash vs dot) ──────────────
+
+    [Fact]
+    public void Run_NestedClass_MatchesEitherSeparator()
+    {
+        // The snapshot stores nested types as "Outer/Inner" (slash); the user
+        // may type CE's "Outer.Inner" (dot). Both must resolve to the class.
+        var snap = MakeEnv("s1",
+            MakeClass("MainGame/PLY_WORK",
+                MakeInstance("0x1", ("_id", "System.Int32", 1), ("v", "System.Int32", 100))));
+
+        var dot = PivotEngine.Run(new PivotQuery
+        {
+            Snapshots = new[] { snap }, Assembly = "asm",
+            ClassFqn = "MainGame.PLY_WORK",   // dotted (CE form)
+            KeyFields = new[] { "_id" }, ValueFields = new[] { "v" },
+        });
+        Assert.Single(dot);
+        Assert.Equal("100", dot[0].Values[0][0]);
+
+        var slash = PivotEngine.Run(new PivotQuery
+        {
+            Snapshots = new[] { snap }, Assembly = "asm",
+            ClassFqn = "MainGame/PLY_WORK",   // slashed (our form)
+            KeyFields = new[] { "_id" }, ValueFields = new[] { "v" },
+        });
+        Assert.Single(slash);
+    }
+
     // ─── Compound key ──────────────────────────────────────────────────
 
     [Fact]

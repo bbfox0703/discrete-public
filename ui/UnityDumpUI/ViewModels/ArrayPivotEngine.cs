@@ -116,7 +116,7 @@ public static class ArrayPivotEngine
             {
                 if (!string.Equals(c.Assembly, query.Assembly, StringComparison.Ordinal)) continue;
                 string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
-                if (!string.Equals(fqn, query.ClassFqn, StringComparison.Ordinal)) continue;
+                if (!SnapshotEnvelope.ClassFqnEquals(fqn, query.ClassFqn)) continue;
                 if (c.Instances is null) continue;
 
                 foreach (var inst in c.Instances)
