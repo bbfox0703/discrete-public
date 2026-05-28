@@ -479,6 +479,84 @@ public partial class MainWindow : Window
         vm.ClassPivot.SortResults(path, ToggleDir(ref _resultsSort, path));
     }
 
+    // ── Phase 29e-6: AOT-safe sort for the legacy grids ─────────────────
+    // Same manual pattern as the Pivot grids — comparers live in
+    // LegacyGridSort; here we just resolve by SortMemberPath, toggle the
+    // direction, and sort the bound collection in place.
+
+    private (string? Member, bool Asc) _browserFieldsSort;
+    private (string? Member, bool Asc) _browserMethodsSort;
+    private (string? Member, bool Asc) _symbolFinderSort;
+    private (string? Member, bool Asc) _valueSearchSort;
+    private (string? Member, bool Asc) _snapshotDiffSort;
+    private (string? Member, bool Asc) _fieldStatsSort;
+
+    private void OnBrowserFieldsSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var cmp = UnityDumpUI.ViewModels.LegacyGridSort.Field(path);
+        if (cmp is null) return;
+        UnityDumpUI.ViewModels.LegacyGridSort.InPlace(vm.Browser.FilteredFields, cmp, ToggleDir(ref _browserFieldsSort, path));
+    }
+
+    private void OnBrowserMethodsSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var cmp = UnityDumpUI.ViewModels.LegacyGridSort.Method(path);
+        if (cmp is null) return;
+        UnityDumpUI.ViewModels.LegacyGridSort.InPlace(vm.Browser.FilteredMethods, cmp, ToggleDir(ref _browserMethodsSort, path));
+    }
+
+    private void OnSymbolFinderSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var cmp = UnityDumpUI.ViewModels.LegacyGridSort.Symbol(path);
+        if (cmp is null) return;
+        UnityDumpUI.ViewModels.LegacyGridSort.InPlace(vm.SymbolFinder.Matches, cmp, ToggleDir(ref _symbolFinderSort, path));
+    }
+
+    private void OnValueSearchSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var cmp = UnityDumpUI.ViewModels.LegacyGridSort.ValueSearch(path);
+        if (cmp is null) return;
+        UnityDumpUI.ViewModels.LegacyGridSort.InPlace(vm.ValueSearch.Results, cmp, ToggleDir(ref _valueSearchSort, path));
+    }
+
+    private void OnSnapshotDiffSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var cmp = UnityDumpUI.ViewModels.LegacyGridSort.Diff(path);
+        if (cmp is null) return;
+        UnityDumpUI.ViewModels.LegacyGridSort.InPlace(vm.Snapshot.FilteredDiffRows, cmp, ToggleDir(ref _snapshotDiffSort, path));
+    }
+
+    private void OnSnapshotFieldStatsSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var cmp = UnityDumpUI.ViewModels.LegacyGridSort.FieldStat(path);
+        if (cmp is null) return;
+        UnityDumpUI.ViewModels.LegacyGridSort.InPlace(vm.Snapshot.FieldNameStats, cmp, ToggleDir(ref _fieldStatsSort, path));
+    }
+
 
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
     /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir

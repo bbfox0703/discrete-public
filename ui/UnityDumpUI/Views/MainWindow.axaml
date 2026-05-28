@@ -502,6 +502,7 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
+                        Sorting="OnBrowserFieldsSorting"
                         GridLinesVisibility="Horizontal">
                 <DataGrid.ContextMenu>
                   <ContextMenu>
@@ -526,7 +527,7 @@
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
-                                          Width="*" SortMemberPath="Name" CanUserSort="True">
+                                          Width="Auto" MinWidth="200" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
                         <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"
@@ -542,7 +543,7 @@
                                       Binding="{Binding OffsetHex}"
                                       SortMemberPath="Offset" CanUserSort="True" />
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColType}"
-                                          Width="*" SortMemberPath="Type" CanUserSort="True">
+                                          Width="Auto" MinWidth="180" SortMemberPath="Type" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
                         <controls:HighlightedTextBlock SourceText="{Binding FriendlyType}"
@@ -793,7 +794,8 @@
                       </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
-                      <DataGridTemplateColumn Header="{StaticResource Browser.ColName}" Width="*"
+                      <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
+                                              Width="Auto" MinWidth="220"
                                               SortMemberPath="Name" CanUserSort="True">
                         <DataGridTemplateColumn.CellTemplate>
                           <DataTemplate x:DataType="vm:WalkedFieldNode">
@@ -832,7 +834,8 @@
                                           Binding="{Binding Address}"
                                           SortMemberPath="Address" CanUserSort="True"
                                           FontFamily="Consolas,Cascadia Mono,monospace" />
-                      <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
+                      <DataGridTextColumn Header="{StaticResource Browser.ColType}"
+                                          Width="Auto" MinWidth="160"
                                           Binding="{Binding Type}"
                                           SortMemberPath="Type" CanUserSort="True" />
                       <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
@@ -896,6 +899,7 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
+                        Sorting="OnBrowserMethodsSorting"
                         GridLinesVisibility="Horizontal">
                 <DataGrid.ContextMenu>
                   <!-- Phase 18c / 19d / 19d-2: right-click any row →
@@ -931,7 +935,7 @@
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
-                                          Width="*" SortMemberPath="Name" CanUserSort="True">
+                                          Width="Auto" MinWidth="220" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:MethodRow">
                         <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"
@@ -1062,6 +1066,7 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
+                        Sorting="OnSymbolFinderSorting"
                         GridLinesVisibility="Horizontal"
                         DoubleTapped="OnSymbolFinderResultDoubleTapped">
                 <DataGrid.ContextMenu>
@@ -1094,15 +1099,15 @@
                                       SortMemberPath="Assembly" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColClass}"
-                                      Binding="{Binding ClassDisplay}" Width="*"
+                                      Binding="{Binding ClassDisplay}" Width="Auto" MinWidth="200"
                                       SortMemberPath="ClassDisplay" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColMember}"
-                                      Binding="{Binding Member}" Width="2*"
+                                      Binding="{Binding Member}" Width="Auto" MinWidth="240"
                                       SortMemberPath="Member" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColType}"
-                                      Binding="{Binding Type}" Width="1.5*"
+                                      Binding="{Binding Type}" Width="Auto" MinWidth="160"
                                       SortMemberPath="Type" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColOffset}"
@@ -1522,6 +1527,7 @@
                         CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
                         IsReadOnly="True"
                         CanUserSortColumns="True"
+                        Sorting="OnValueSearchSorting"
                         DoubleTapped="OnValueSearchRowActivated"
                         Name="ValueSearchGrid">
                 <DataGrid.Columns>
@@ -1929,6 +1935,7 @@
                           CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
                           IsReadOnly="True"
                           CanUserSortColumns="True"
+                          Sorting="OnSnapshotDiffSorting"
                           DoubleTapped="OnSnapshotRowActivated"
                           Name="SnapshotDiffGrid">
                   <DataGrid.Columns>
@@ -1998,6 +2005,7 @@
                               ItemsSource="{Binding Snapshot.FieldNameStats}"
                               AutoGenerateColumns="False" GridLinesVisibility="Horizontal"
                               CanUserResizeColumns="True" CanUserSortColumns="True"
+                              Sorting="OnSnapshotFieldStatsSorting"
                               IsReadOnly="True"
                               DoubleTapped="OnSnapshotFieldStatActivated">
                       <DataGrid.Columns>
