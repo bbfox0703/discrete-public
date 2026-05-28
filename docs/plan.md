@@ -742,10 +742,20 @@ both Layer A's index-shuffle weakness and address drift. Full design in
   as `arrayElementFields` in the Begin response (+ mirrored on
   `SnapshotBeginResult`). MagicStrings snapshotBegin doc updated.
   DLL build #714, 555/555 UI tests still green.
-- [ ] **29f-3** `ArrayPivotEngine` (mirror `PivotEngine`) + unit
-  tests: single/compound inner key, collisions, absent cells,
-  cross-session, element-cap-hit, ref-array with no inner fields
-  (old snapshot) → honest empty. (1 day)
+- [x] **29f-3** `ArrayPivotEngine` (mirror `PivotEngine`) + unit
+  tests — ✅ **Shipped 2026-05-28, 569/569 green** (+14).
+  [ArrayPivotEngine.cs](../ui/UnityDumpUI/ViewModels/ArrayPivotEngine.cs)
+  pivots reference-array elements by a compound `(outer instance key,
+  inner element key)` tuple, value = element inner field(s). Reuses
+  `PivotRow` + `PivotEngine.FormatCollisionCell` (made internal) so the
+  UI consumes array + instance pivots through the same row shape.
+  `AddressPerSnap` = element object address (falls back to owning
+  instance). Tests in
+  [ArrayPivotEngineTests.cs](../ui/UnityDumpUI.Tests/ArrayPivotEngineTests.cs):
+  slot-shuffle resilience, compound key, collision, absent cells,
+  cross-session, elements-without-fields skipped + honest-empty,
+  KeyFilter, missing-inner-key sentinel (= elementFieldCap clip),
+  element-address handoff, multi-value, validation.
 - [ ] **29f-4** Class Pivot tab inner-pivot UI: array-field selector
   (reference arrays only), inner key/value pickers auto-discovered
   from hydrated element fields, x86 banner + target picker,

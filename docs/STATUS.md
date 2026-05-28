@@ -42,7 +42,15 @@
   gate** disables capture on 32-bit unless explicit targets are given
   (OOM safety), echoing the effective state back. **Live-smoke pending
   → bundled into 29f-5** (game closed during this session; DLL needs
-  injection to exercise). Next: 29f-3 `ArrayPivotEngine`.
+  injection to exercise).
+* **Phase 29f-3 (ArrayPivotEngine) shipped — 569/569 green** (+14).
+  `ArrayPivotEngine` pivots reference-array elements by a compound
+  `(outer instance key, inner element key)` tuple, value = element inner
+  field(s); reuses `PivotRow` + `PivotEngine.FormatCollisionCell` so the
+  UI treats array + instance pivots identically. `AddressPerSnap` =
+  element object address. Elements without inner fields (pre-Layer-B /
+  primitive / `element_class_error`) are skipped. Next: 29f-4 (UI
+  inner-pivot mode in the Class Pivot tab), then 29f-5 live-smoke.
 
 ## TL;DR — what's left to pick up (next session)
 

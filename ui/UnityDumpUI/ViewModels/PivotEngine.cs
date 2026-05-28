@@ -297,7 +297,7 @@ public static class PivotEngine
     /// more discriminating key). The leading <c>⟨…⟩</c> brackets make
     /// collision cells visually distinct from clean single-instance
     /// rows at a glance.</summary>
-    private static string FormatCollisionCell(
+    internal static string FormatCollisionCell(
         List<(string Addr, string?[] Vals)> list, int valueIdx)
     {
         var distinct = new List<string>();
