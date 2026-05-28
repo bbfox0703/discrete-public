@@ -976,6 +976,23 @@ of profiler data, #3 is profiler-gated):
   ReadOnlySpan<byte>)` to skip the giant string + re-encode — but it rewrites the
   core line-framing used by every RPC, so needs care; cheap alt = smaller chunk
   size to cap the per-chunk peak.
+* **SPC vs Pivot tab memory (audited 2026-05-28):** both share the Snapshot
+  tab's envelope pool + `EnsureLoadedAsync` + post-run `Unload()` of
+  hydrated-for-query envelopes.
+  - **Pivot is light** — [PivotViewModel.cs:789-932](../ui/UnityDumpUI/ViewModels/PivotViewModel.cs)
+    reads `Classes` directly, **never builds a FieldIndex** (fully benefits from
+    29g-2). Peak = selected snapshots' Classes (~1.08 GB/snap); result `PivotRow`s
+    are bounded by distinct keys.
+  - **SPC is the remaining hotspot** — [SpcQueryEngine.Run](../ui/UnityDumpUI/ViewModels/SpcQueryEngine.cs)
+    intersects field-value keys across **all** selected snapshots, so every
+    selected snapshot's FieldIndex must be live *simultaneously* during Run
+    (`EnsureFieldIndex` per snap). Peak ≈ N × (Classes 1.08 + FieldIndex ~0.9) ≈
+    N × ~2 GB (built fresh each Run; the composite keys + ValueDisplay aren't
+    interned). 29g-2 release + 29d-4 eviction drop it back after Run, and there's
+    an N>5 advisory ([SpcQueryViewModel.cs:319](../ui/UnityDumpUI/ViewModels/SpcQueryViewModel.cs)).
+    **Deferred fix if N>5 ever bites:** per-key streaming hydrate (walk one
+    composite key across all snaps from disk → constant RAM regardless of N),
+    already noted under 29d-4.
 * **Acceptance status:** post-29g-2 steady-state (post-GC) ≈ **5.3 GB managed for
   3 snapshots** (String 2.92 + SnapshotFieldEntry 1.01 + ArrayElement 0.56 +
   JsonDocument 0.38 + small Byte[] 0.37), down from ~9.5 GB → **already meets
