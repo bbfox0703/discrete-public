@@ -373,32 +373,12 @@ public sealed partial class PivotViewModel : ObservableObject
         }
     }
 
-    /// <summary>AOT-safe shortlist sort. Avalonia's built-in DataGrid
-    /// header sort resolves <c>SortMemberPath</c> via reflection
-    /// (IL2026/IL3050) which no-ops under Native AOT, so the view layer
-    /// routes header clicks here. We sort the unfiltered backing list
-    /// with a typed comparer (no reflection) + rebuild the filtered
-    /// view, so sort and filter compose.</summary>
-    public void SortShortlist(string member, bool ascending)
-    {
-        Comparison<ClassShortlistRow>? cmp = member switch
-        {
-            nameof(ClassShortlistRow.ClassFqn)            => (a, b) => string.CompareOrdinal(a.ClassFqn, b.ClassFqn),
-            nameof(ClassShortlistRow.Assembly)            => (a, b) => string.CompareOrdinal(a.Assembly, b.Assembly),
-            nameof(ClassShortlistRow.Presence)            => (a, b) => a.Presence.CompareTo(b.Presence),
-            nameof(ClassShortlistRow.AvgInstances)        => (a, b) => a.AvgInstances.CompareTo(b.AvgInstances),
-            nameof(ClassShortlistRow.Cv)                  => (a, b) => a.Cv.CompareTo(b.Cv),
-            nameof(ClassShortlistRow.FieldCount)          => (a, b) => a.FieldCount.CompareTo(b.FieldCount),
-            nameof(ClassShortlistRow.PrimitiveFieldRatio) => (a, b) => a.PrimitiveFieldRatio.CompareTo(b.PrimitiveFieldRatio),
-            nameof(ClassShortlistRow.NullFieldRatio)      => (a, b) => a.NullFieldRatio.CompareTo(b.NullFieldRatio),
-            nameof(ClassShortlistRow.StringFieldRatio)    => (a, b) => a.StringFieldRatio.CompareTo(b.StringFieldRatio),
-            nameof(ClassShortlistRow.ArrayFieldRatio)     => (a, b) => a.ArrayFieldRatio.CompareTo(b.ArrayFieldRatio),
-            _ => null,
-        };
-        if (cmp is null) return;
-        _allShortlistRows.Sort(ascending ? cmp : (a, b) => cmp(b, a));
-        RebuildShortlistView();
-    }
+    // Column sort for the shortlist grid uses the shared AOT-safe
+    // CustomSortComparer mechanism (DataGridSortComparers +
+    // WireSortComparers in MainWindow.axaml.cs) — keeps the native arrow
+    // glyph. The flat sort composes with the ClassNameFilter because the
+    // DataGridCollectionView re-applies the active sort when the bound
+    // collection rebuilds.
 
     /// <summary>Stage-0 → Stage-2 handoff: a double-clicked shortlist row
     /// fills <see cref="ClassFqn"/> + scopes the assembly filter so
@@ -514,43 +494,9 @@ public sealed partial class PivotViewModel : ObservableObject
         }
     }
 
-    /// <summary>AOT-safe field-score sort (see <see cref="SortShortlist"/>
-    /// for why manual). Sorts the unfiltered backing list + rebuilds.</summary>
-    public void SortFieldScores(string member, bool ascending)
-    {
-        Comparison<FieldScore>? cmp = member switch
-        {
-            nameof(FieldScore.FieldName)    => (a, b) => string.CompareOrdinal(a.FieldName, b.FieldName),
-            nameof(FieldScore.FieldType)    => (a, b) => string.CompareOrdinal(a.FieldType, b.FieldType),
-            nameof(FieldScore.Score)        => (a, b) => a.Score.CompareTo(b.Score),
-            nameof(FieldScore.SStable)      => (a, b) => a.SStable.CompareTo(b.SStable),
-            nameof(FieldScore.SCardinality) => (a, b) => a.SCardinality.CompareTo(b.SCardinality),
-            nameof(FieldScore.TypePrior)    => (a, b) => a.TypePrior.CompareTo(b.TypePrior),
-            nameof(FieldScore.NamePrior)    => (a, b) => a.NamePrior.CompareTo(b.NamePrior),
-            _ => null,
-        };
-        if (cmp is null) return;
-        _allFieldScores.Sort(ascending ? cmp : (a, b) => cmp(b, a));
-        RebuildFieldScoresView();
-    }
-
-    /// <summary>AOT-safe pivot-result sort (key tuple / collision).
-    /// Sorts the visible collection in place — results are rebuilt on
-    /// every Run, so there's no separate backing list to keep.</summary>
-    public void SortResults(string member, bool ascending)
-    {
-        Comparison<PivotResultRow>? cmp = member switch
-        {
-            nameof(PivotResultRow.KeyTupleDisplay) => (a, b) => string.CompareOrdinal(a.KeyTupleDisplay, b.KeyTupleDisplay),
-            nameof(PivotResultRow.HasCollision)    => (a, b) => a.HasCollision.CompareTo(b.HasCollision),
-            _ => null,
-        };
-        if (cmp is null) return;
-        var list = Results.ToList();
-        list.Sort(ascending ? cmp : (a, b) => cmp(b, a));
-        Results.Clear();
-        foreach (var r in list) Results.Add(r);
-    }
+    // Field-score + results grids sort via the shared CustomSortComparer
+    // mechanism (DataGridSortComparers + WireSortComparers) — see
+    // MainWindow.axaml.cs. No ViewModel sort method needed.
 
     /// <summary>Fill <see cref="KeyFieldsText"/> with the greedy
     /// compound-key suggestion.</summary>

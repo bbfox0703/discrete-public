@@ -702,38 +702,9 @@ public class PivotViewModelTests : IDisposable
         Assert.Equal("Game.GameStat", pivot.ClassShortlist[0].ClassFqn);
     }
 
-    [Fact]
-    public async Task SortShortlist_ByFieldCount_Ascending_ThenDescending()
-    {
-        var (snap, pivot) = BuildVms();
-        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
-            MakeClass("Game.Small", "asm",
-                MakeInstance("0x1", ("a", "System.Int32", 1), ("b", "System.Int32", 2))),
-            MakeClass("Game.Big", "asm",
-                MakeInstance("0x2", ("a", "System.Int32", 1), ("b", "System.Int32", 2),
-                                    ("c", "System.Int32", 3), ("d", "System.Int32", 4)))));
-        await pivot.AnalyzeClassesAsync();
-
-        pivot.SortShortlist(nameof(ClassShortlistRow.FieldCount), ascending: true);
-        Assert.Equal("Game.Small", pivot.ClassShortlist[0].ClassFqn);
-
-        pivot.SortShortlist(nameof(ClassShortlistRow.FieldCount), ascending: false);
-        Assert.Equal("Game.Big", pivot.ClassShortlist[0].ClassFqn);
-    }
-
-    [Fact]
-    public async Task SortFieldScores_ByFieldName_Ascending()
-    {
-        var (snap, pivot) = BuildVms();
-        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
-            MakeClass("Game.Stat", "asm",
-                MakeInstance("0x1", ("zeta", "System.Int32", 1), ("alpha", "System.Int32", 2)))));
-        pivot.ClassFqn = "Game.Stat";
-        await pivot.ScoreFieldsAsync();
-
-        pivot.SortFieldScores(nameof(FieldScore.FieldName), ascending: true);
-        Assert.Equal("alpha", pivot.FieldScores[0].FieldName);
-    }
+    // (Column sort for the shortlist / field-score / results grids now
+    // goes through the shared CustomSortComparer mechanism wired in
+    // MainWindow.axaml.cs — a view-layer concern, not unit-tested here.)
 
     // ─── Stage 0 DB-seeded autocomplete (29e-7) ───────────────────────
 
@@ -771,23 +742,4 @@ public class PivotViewModelTests : IDisposable
         Assert.Empty(pivot.KnownClasses);   // soft no-op, no throw
     }
 
-    [Fact]
-    public async Task SortResults_ByKeyTuple_Ascending()
-    {
-        var (snap, pivot) = BuildVms();
-        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
-            MakeClass("Game.Stat", "asm",
-                MakeInstance("0x1", ("id", "System.Int32", 3), ("v", "System.Int32", 30)),
-                MakeInstance("0x2", ("id", "System.Int32", 1), ("v", "System.Int32", 10)),
-                MakeInstance("0x3", ("id", "System.Int32", 2), ("v", "System.Int32", 20)))));
-        pivot.ClassFqn = "Game.Stat";
-        pivot.KeyFieldsText = "id";
-        pivot.ValueFieldsText = "v";
-        await pivot.RunAsync();
-        Assert.Equal(3, pivot.Results.Count);
-
-        pivot.SortResults(nameof(PivotResultRow.KeyTupleDisplay), ascending: true);
-        Assert.Equal("1", pivot.Results[0].KeyTupleDisplay);
-        Assert.Equal("3", pivot.Results[2].KeyTupleDisplay);
-    }
 }

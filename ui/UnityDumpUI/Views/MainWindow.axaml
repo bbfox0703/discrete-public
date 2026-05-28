@@ -502,7 +502,6 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
-                        Sorting="OnBrowserFieldsSorting"
                         GridLinesVisibility="Horizontal">
                 <DataGrid.ContextMenu>
                   <ContextMenu>
@@ -900,7 +899,6 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
-                        Sorting="OnBrowserMethodsSorting"
                         GridLinesVisibility="Horizontal">
                 <DataGrid.ContextMenu>
                   <!-- Phase 18c / 19d / 19d-2: right-click any row →
@@ -1067,7 +1065,6 @@
                         CanUserResizeColumns="True"
                         CanUserReorderColumns="True"
                         CanUserSortColumns="True"
-                        Sorting="OnSymbolFinderSorting"
                         GridLinesVisibility="Horizontal"
                         DoubleTapped="OnSymbolFinderResultDoubleTapped">
                 <DataGrid.ContextMenu>
@@ -1528,7 +1525,6 @@
                         CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
                         IsReadOnly="True"
                         CanUserSortColumns="True"
-                        Sorting="OnValueSearchSorting"
                         DoubleTapped="OnValueSearchRowActivated"
                         Name="ValueSearchGrid">
                 <DataGrid.Columns>
@@ -1936,7 +1932,6 @@
                           CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
                           IsReadOnly="True"
                           CanUserSortColumns="True"
-                          Sorting="OnSnapshotDiffSorting"
                           DoubleTapped="OnSnapshotRowActivated"
                           Name="SnapshotDiffGrid">
                   <DataGrid.Columns>
@@ -2006,7 +2001,6 @@
                               ItemsSource="{Binding Snapshot.FieldNameStats}"
                               AutoGenerateColumns="False" GridLinesVisibility="Horizontal"
                               CanUserResizeColumns="True" CanUserSortColumns="True"
-                              Sorting="OnSnapshotFieldStatsSorting"
                               IsReadOnly="True"
                               DoubleTapped="OnSnapshotFieldStatActivated">
                       <DataGrid.Columns>
@@ -2314,29 +2308,28 @@
                               CanUserResizeColumns="True"
                               CanUserSortColumns="True"
                               MaxHeight="300"
-                              DoubleTapped="OnPivotShortlistDoubleTapped"
-                              Sorting="OnPivotShortlistSorting">
+                              DoubleTapped="OnPivotShortlistDoubleTapped">
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
-                                            Width="Auto" MinWidth="240" SortMemberPath="ClassFqn"/>
+                                            Width="Auto" MinWidth="240" SortMemberPath="ClassFqn" CanUserSort="True"/>
                         <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
-                                            Width="Auto" MinWidth="140" SortMemberPath="Assembly"/>
+                                            Width="Auto" MinWidth="140" SortMemberPath="Assembly" CanUserSort="True"/>
                         <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80"
-                                            SortMemberPath="Presence"/>
+                                            SortMemberPath="Presence" CanUserSort="True"/>
                         <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120"
-                                            SortMemberPath="AvgInstances"/>
+                                            SortMemberPath="AvgInstances" CanUserSort="True"/>
                         <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70"
-                                            SortMemberPath="Cv"/>
+                                            SortMemberPath="Cv" CanUserSort="True"/>
                         <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55"
-                                            SortMemberPath="FieldCount"/>
+                                            SortMemberPath="FieldCount" CanUserSort="True"/>
                         <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65"
-                                            SortMemberPath="PrimitiveFieldRatio"/>
+                                            SortMemberPath="PrimitiveFieldRatio" CanUserSort="True"/>
                         <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65"
-                                            SortMemberPath="NullFieldRatio"/>
+                                            SortMemberPath="NullFieldRatio" CanUserSort="True"/>
                         <DataGridTextColumn Header="Str%" Binding="{Binding StringPctDisplay}" Width="65"
-                                            SortMemberPath="StringFieldRatio"/>
+                                            SortMemberPath="StringFieldRatio" CanUserSort="True"/>
                         <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65"
-                                            SortMemberPath="ArrayFieldRatio"/>
+                                            SortMemberPath="ArrayFieldRatio" CanUserSort="True"/>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>
@@ -2381,8 +2374,7 @@
                               CanUserResizeColumns="True"
                               CanUserSortColumns="True"
                               MaxHeight="300"
-                              DoubleTapped="OnPivotFieldScoreDoubleTapped"
-                              Sorting="OnPivotFieldScoreSorting">
+                              DoubleTapped="OnPivotFieldScoreDoubleTapped">
                       <DataGrid.ContextMenu>
                         <ContextMenu>
                           <MenuItem Header="Add to Key fields"
@@ -2393,19 +2385,19 @@
                       </DataGrid.ContextMenu>
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
-                                            Width="Auto" MinWidth="200" SortMemberPath="FieldName"/>
+                                            Width="Auto" MinWidth="200" SortMemberPath="FieldName" CanUserSort="True"/>
                         <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
-                                            Width="Auto" MinWidth="160" SortMemberPath="FieldType"/>
+                                            Width="Auto" MinWidth="160" SortMemberPath="FieldType" CanUserSort="True"/>
                         <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70"
-                                            SortMemberPath="Score"/>
+                                            SortMemberPath="Score" CanUserSort="True"/>
                         <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70"
-                                            SortMemberPath="SStable"/>
+                                            SortMemberPath="SStable" CanUserSort="True"/>
                         <DataGridTextColumn Header="Card" Binding="{Binding CardPctDisplay}" Width="70"
-                                            SortMemberPath="SCardinality"/>
+                                            SortMemberPath="SCardinality" CanUserSort="True"/>
                         <DataGridTextColumn Header="Type pr." Binding="{Binding TypePriorDisplay}" Width="70"
-                                            SortMemberPath="TypePrior"/>
+                                            SortMemberPath="TypePrior" CanUserSort="True"/>
                         <DataGridTextColumn Header="Name pr." Binding="{Binding NamePriorDisplay}" Width="70"
-                                            SortMemberPath="NamePrior"/>
+                                            SortMemberPath="NamePrior" CanUserSort="True"/>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>
@@ -2508,8 +2500,7 @@
                               GridLinesVisibility="Horizontal"
                               CanUserResizeColumns="True"
                               CanUserSortColumns="True"
-                              DoubleTapped="OnPivotResultDoubleTapped"
-                              Sorting="OnPivotResultsSorting">
+                              DoubleTapped="OnPivotResultDoubleTapped">
                       <DataGrid.ContextMenu>
                         <ContextMenu>
                           <MenuItem Header="Inspect (latest snap)"
@@ -2526,11 +2517,11 @@
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="⚠"
                                             Binding="{Binding CollisionMarker}"
-                                            Width="32" SortMemberPath="HasCollision"/>
+                                            Width="32" SortMemberPath="HasCollision" CanUserSort="True"/>
                         <DataGridTextColumn Header="Key tuple"
                                             Binding="{Binding KeyTupleDisplay}"
                                             Width="Auto" MinWidth="180"
-                                            SortMemberPath="KeyTupleDisplay"/>
+                                            SortMemberPath="KeyTupleDisplay" CanUserSort="True"/>
                         <!-- Single Trajectory column — pre-rendered by
                              PivotViewModel as "fieldName: v0 → v1 → …"
                              (multi-line when >1 value field).

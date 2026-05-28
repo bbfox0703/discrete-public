@@ -293,7 +293,7 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
     - [x] **29d-6** 11 ViewModel integration tests + plan.md +
       STATUS.md updates. Total Phase 29c+d coverage: 457/457 tests.
 
-- [x] **29e — Class-centric Key/Value pivot** — COMPLETE (29e-1 … 29e-4 funnel + 29e-5/6/7/8 polish: AOT-safe sort across all grids, DB-side class enumeration, Inspector tree-aware sort. 562/562 tests. Deferred: Layer B reference-array inner pivot [needs DLL], field-name pre-hydrate, anomaly auto-surface, sort-arrow glyph)
+- [x] **29e — Class-centric Key/Value pivot** — COMPLETE (29e-1 … 29e-4 funnel + 29e-5/6/7/8/9 polish: every flat DataGrid on the AOT-safe CustomSortComparer pattern [arrows work], Inspector tree-aware sort, DB-side class enumeration. 550/550 tests. Deferred: Layer B reference-array inner pivot [needs DLL], field-name pre-hydrate, anomaly auto-surface)
   - **User insight (2026-05-29)**: SPC's `{asm}|{fqn}|{instAddr}|{offset}|{field}`
     key collapses across game sessions (address drift) and even within
     a session when instance order drifts (활俠傳 銀兩 GameStat lands at
