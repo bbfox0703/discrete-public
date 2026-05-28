@@ -1,6 +1,14 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `main` (Phase 29e merged) — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7/8/9 polish**; build #706 UI / DLL #650. 552/552 tests green. Every flat DataGrid uses the `CustomSortComparer` pattern (arrows work); Inspector tree uses `SortTree`.
+**Branch**: `main` == `dev` (kept in lockstep) — **Phase 29e + Phase 29f Layer B (29f-1…4) COMPLETE + shipped**; DLL #728 (Mono+IL2CPP, x64+x86), 578/578 UI tests green. Layer B live-smoke validated on 활俠傳 (x86 targeted) + SaGa Frontier 2 Remastered (x64; blanket CTD fixed via known-class gate + attempts-budget).
+
+> **▶ NEXT SESSION — Phase 29g: Snapshot UI memory optimization.** DiscreteUI
+> holds ~5.7 GB per 132K-instance snapshot (3 ≈ 17 GB); the game itself is only
+> ~1.5 GB. Full spec + root causes + fix order (string interning → lazy/released
+> FieldIndex → JsonElement.Clone) + acceptance targets in
+> [plan.md "Phase 29g"](plan.md). UI/Core only, no DLL change expected. Start by
+> profiling a live capture (`dotnet-gcdump` / `tools/Inspect-Memory.ps1`) before
+> optimizing.
 
 ### Post-29e fixes (2026-05-28)
 

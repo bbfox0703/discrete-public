@@ -803,6 +803,67 @@ both Layer A's index-shuffle weakness and address drift. Full design in
 
 ---
 
+## Phase 29g — Snapshot UI memory optimization 📝 PLANNED 2026-05-28 (next session)
+
+**Problem (live, SaGa Frontier 2 Remastered, x64 IL2CPP)**: DiscreteUI holds
+**~5.7 GB per snapshot** (2,451 classes / ~132K instances of Assembly-CSharp);
+3 held ≈ **17 GB** (`Inspect-Memory.ps1`: DiscreteUI 10.5 GB after snap #1,
+17.6 GB after #3). The GAME itself is only ~1.5 GB — the bloat is entirely
+UI-side, and Scope=Assembly-CSharp doesn't help because that's where all the
+instances live. Static-value capture is NOT the cause (already opt-out, modest).
+Tools (SPC/Pivot) work; this is purely a footprint problem that makes 3+ snaps
+impractical.
+
+**Root causes** (verify first with a `dotnet-gcdump` / memory profiler on a
+live capture — don't optimize blind):
+1. **String duplication** — every `SnapshotFieldEntry.Name` / `.Type` / `.From`
+   and `SnapshotClassEntry.Namespace` / `.Name` is a distinct `string`,
+   repeated across ~6.6M field entries (132K instances × ~50 fields).
+   `"System.Byte"`, `"MainGame/PLY_WORK"` etc. exist millions of times. No
+   interning. Likely the single biggest contributor.
+2. **FieldIndex doubling** — `SnapshotEnvelope.BuildFieldIndex`
+   ([SnapshotViewModel.cs:2132](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
+   builds a `Dictionary<string, SnapshotFieldValue>` keyed by a composite
+   `{asm}|{fqn}|{instanceKey}|{offset}|{fieldName}` string per field — ~6.6M
+   long keys + a `SnapshotFieldValue` object each. Built **eagerly** at capture
+   ([:1032](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)) and on lazy load
+   ([EnsureLoadedAsync :383](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)),
+   held for every hydrated snapshot → roughly doubles per-snapshot memory on
+   top of the raw `Classes` tree.
+3. **JsonElement retention** — `SnapshotFieldEntry.Value` is `JsonElement?`. If
+   the source-gen deserializer doesn't `.Clone()`, each element pins a slice of
+   its chunk's `JsonDocument` buffer, retaining whole parsed chunks. Verify in
+   `SnapshotStore.DeserializeGzipped` + the chunk path.
+
+**Fixes (priority order)**:
+1. **String interning at deserialize** — a *per-snapshot* `Dictionary<string,string>`
+   pool (NOT `string.Intern`, which never frees) applied to field Name/Type/From
+   + class FQN parts as chunks land (TakeSnapshot chunk merge + EnsureLoadedAsync
+   / DeserializeGzipped). Collapses millions of dups. Highest ROI.
+2. **Lazy + released FieldIndex** — don't build at capture; build on first
+   diff/SPC use, release (null it) for envelopes that aren't the active diff
+   A/B pair. Pivot/ArrayPivot read `Classes` directly and don't need it.
+   `EvictUnusedEnvelopes` ([:1219](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
+   already evicts non-A/B after diff — extend it to drop FieldIndex while
+   keeping metadata, and make `BuildFieldIndex` lazy.
+3. **Verify/fix JsonElement** — ensure `.Clone()` (or store the decoded scalar
+   in a compact form instead of `JsonElement`).
+4. **(stretch)** compact `SnapshotFieldValue` (struct / smaller fields), or a
+   columnar layout.
+
+**Acceptance**: 1 snapshot < ~2 GB UI (from 5.7), 3 snapshots < ~6 GB, measured
+via `tools/Inspect-Memory.ps1` before/after on SaGa F2R. 578+ tests stay green;
+add an interning unit test (two fields with the same type name share the same
+`string` reference after load) + a FieldIndex lazy/release test. No DLL change
+expected — this is UI/Core only.
+
+**Related deferred** (separate, smaller): unify nested-class display separator
+to `.` across DLL `DescribeClass` + `FindClass` round-trip + tool scripts (today
+the DLL uses `/`; matching is already separator-insensitive UI-side as of
+2026-05-28, but the canonical/display form + tools still differ from CE's `.`).
+
+---
+
 ## Cross-PC Workflow
 
 每次切換 PC：
