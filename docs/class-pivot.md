@@ -332,17 +332,62 @@ is Layer B.
 typical 活俠傳 snap this is < 50 K rows on top of ~1 M existing →
 +5% memory. Acceptable.
 
-### Layer B — inner-pivot on reference array elements (deferred to next Phase)
+### Layer B — inner-pivot on reference array elements (Phase 29f — planned 2026-05-28)
 
 For `List<Item>` / `Item[]` where each element has its own key field
-(`_propertyID`), the correct fix is pivot keyed by an *inner* field,
-not by index. This needs DLL change:
-`SnapshotArrayElement` must carry the inner instance's `Fields[]`,
-not just `{Address, Ptr, Value}`. Plus instance-cap / depth-cap design
-to bound capture size.
+(`_propertyID`), the correct fix is pivot keyed by an *inner* field, not
+by index. Motivating case: `Mortal.Core.GameStat._statAdditionData :
+StatConvertCollectionData[]` on 活俠傳 — each element is an object with
+its own fields; we want to key elements by `_propertyID` and track an
+inner value across snaps, sidestepping BOTH Layer A's index-shuffle
+weakness and address drift.
 
-Layer B = own Phase, sequel to 29e. Tracked separately in plan.md once
-29e ships.
+**Why DLL-side (can't be done in the UI after the fact)**: cross-session
+is the primary Pivot use case, and an element object's address is dead in
+older snapshots. So the element's inner fields must be frozen into the
+gzipped blob at capture time. `SnapshotArrayElement` gains
+`Fields : List<SnapshotFieldEntry>?` (one level deep only — element
+objects' own array/reference fields render as summary/`ptr=`, no further
+recursion).
+
+**Confirmed DLL extension points** (from the 2026-05-28 source survey):
+
+| Concern | Location | Action |
+|---|---|---|
+| Array element loop | `walkArrayElementsInline` ([ExportAPI.cpp:1081](../dll/src/shared/ExportAPI.cpp)) | when `is_pointer` + feature on, decode element fields |
+| Element runtime class | Mono `object_get_class` / IL2CPP same ([MonoResolver.h:187](../dll/src/mono/MonoResolver.h)) | per-element `object_get_class(elemPtr)` under SEH — element type is **not** known statically from `element_type` |
+| Field layout | `ReadClassInfo` ([MonoClassWalker.cpp:197](../dll/src/mono/MonoClassWalker.cpp) / [IL2CPPClassWalker.cpp:272](../dll/src/il2cpp/IL2CPPClassWalker.cpp)) | reuse the global class-info cache |
+| Field value decode | existing `decodeField` lambda (same one top-level instance fields use) | apply at `elemPtr + offset` |
+| Caps / params | snapshotBegin ([ExportAPI.cpp:2117](../dll/src/shared/ExportAPI.cpp) / :5131) + session struct | new `arrayElementFields` (bool) + `elementFieldCap` (default 16, hard cap 64) |
+| Safe reads | `Memory::SafeReadBytes` ([Memory.cpp:35](../dll/src/shared/Memory.cpp)) | already SEH-wrapped; null/garbage element → `element_class_error` |
+
+**Mono freeze note**: inner fields are *instance* fields (not statics),
+decoded by raw offset reads — they do **not** call `mono_class_vtable`,
+so the Phase 29a-v4 worker-thread wedge does not apply (top-level
+instance fields are already captured fine on Mono).
+
+**Capture model — bitness-adaptive** (user decision 2026-05-28):
+
+| Target | Default | Override |
+|---|---|---|
+| **x64** | **Blanket** — inner fields captured for every reference array (true 全抓; memory is plentiful) | user may narrow to a target set |
+| **x86 (32-bit)** | **OFF** + banner ("Inner-field capture disabled on 32-bit — OOM risk; pick a target class.arrayField to enable") | user may enable, but **targeted only** (must nominate one or more `class.arrayField` — blanket on x86 is not offered) |
+
+The 활俠傳 motivating case is x86, so the targeted-on-x86 path is the one
+the real use case runs through. The Phase-29-polish OOM gate (DLL refusal
+≥ 3 GB private + auto-clamp) stays as the backstop.
+
+**Pivot key scope — compound** (user decision 2026-05-28): result rows
+key on `(owner-instance Stage-1 key, element inner key)`. The outer key
+identifies the owning instance (drift-proof via existing Stage 1), the
+inner key identifies the element within the array — both segments dodge
+drift. Value = element's inner value field(s) across snaps.
+
+**Persistence**: schema unchanged — `Fields` rides along inside
+`payload_gzip`. Old `.db` files stay compatible; their elements have no
+inner fields, so Layer B honestly shows nothing for them.
+
+See plan.md **Phase 29f** for the wave breakdown + acceptance criteria.
 
 ---
 

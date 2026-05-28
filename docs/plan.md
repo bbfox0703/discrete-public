@@ -385,7 +385,8 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
       user asked for during 29e-2 smoke.
   - **Deferred to follow-up Phase**: Layer B (reference-type array
     elements pivot by inner key — needs DLL-side capture of element
-    `Fields[]`), anomaly auto-surface (stretch).
+    `Fields[]`) — **now planned as Phase 29f below**; anomaly
+    auto-surface (stretch) still deferred.
 
 ### Bundled Phase 27c live smoke ✅ **CLOSED 2026-05-26**
 
@@ -673,6 +674,85 @@ Changed only + Class filter" stack.
 | 29c (SQLite + cross-session) | 1.5 |
 | **Total v1** | **~4** |
 | 29d (deferred) | TBD |
+
+---
+
+## Phase 29f — Class Pivot Layer B (reference-array inner-pivot) 📝 PLANNED 2026-05-28
+
+**Goal**: pivot the elements of a reference-type array/`List<T>` field
+keyed by an *inner* field of each element, tracked across snapshots —
+e.g. `Mortal.Core.GameStat._statAdditionData : StatConvertCollectionData[]`
+keyed by element `_propertyID`, value = element inner value. Sidesteps
+both Layer A's index-shuffle weakness and address drift. Full design in
+[class-pivot.md §7 "Layer B"](class-pivot.md).
+
+### Design decisions (confirmed with user 2026-05-28)
+
+1. **DLL-side capture required** — element inner fields must be frozen
+   into `payload_gzip` at capture time (element addresses are dead in
+   older snapshots; cross-session is the primary use case).
+   `SnapshotArrayElement` gains `Fields: List<SnapshotFieldEntry>?`,
+   **one level deep only** (no recursion into element arrays/refs).
+2. **Capture model is bitness-adaptive**:
+   - **x64** → blanket by default (inner fields for every reference
+     array; true 全抓). User may narrow.
+   - **x86** → OFF by default + banner; if the user enables it, it is
+     **targeted only** (must nominate `class.arrayField` target(s)).
+     Blanket-on-x86 is not offered — 活俠傳 (the motivating game) is
+     x86 and OOM-prone; the Phase-29-polish refusal gate stays as the
+     backstop.
+3. **Pivot key = compound** `(owner-instance Stage-1 key, element
+   inner key)`. Outer key identifies the owning instance, inner key
+   identifies the element within the array — both drift-proof.
+4. **No schema change** — `Fields` rides inside the existing gzipped
+   blob; old `.db` files stay compatible (their elements have no inner
+   fields → Layer B honestly shows nothing).
+
+### Sub-phases (each ships green on the full suite + STATUS.md TL;DR)
+
+- [ ] **29f-1** Protocol: `SnapshotArrayElement.Fields` +
+  source-gen JsonContext coverage + round-trip tests. (0.5 day)
+- [ ] **29f-2** DLL element-field capture on **both** backends —
+  `walkArrayElementsInline` reference branch calls
+  `object_get_class(elemPtr)` (SEH) → cached `ReadClassInfo` →
+  `decodeField` per field (capped `elementFieldCap`, hard cap 64);
+  new `arrayElementFields` + `elementFieldCap` RPC params threaded
+  through snapshotBegin + session; bitness-adaptive default + x86
+  refusal/targeted gate; `element_class_error` on bad pointer. One
+  backend live-smoke. (1.5 days)
+- [ ] **29f-3** `ArrayPivotEngine` (mirror `PivotEngine`) + unit
+  tests: single/compound inner key, collisions, absent cells,
+  cross-session, element-cap-hit, ref-array with no inner fields
+  (old snapshot) → honest empty. (1 day)
+- [ ] **29f-4** Class Pivot tab inner-pivot UI: array-field selector
+  (reference arrays only), inner key/value pickers auto-discovered
+  from hydrated element fields, x86 banner + target picker,
+  ViewModel tests. (1 day)
+- [ ] **29f-5** Live-smoke on 活俠傳 `GameStat._statAdditionData`
+  (x86 targeted path) + a x64 blanket smoke + docs. (0.5 day + ≥1
+  live round)
+
+### v1 effort estimate
+
+| Sub-phase | Days |
+|---|---|
+| 29f-1 (protocol) | 0.5 |
+| 29f-2 (DLL capture, both backends) | 1.5 |
+| 29f-3 (ArrayPivotEngine + tests) | 1 |
+| 29f-4 (UI inner-pivot) | 1 |
+| 29f-5 (live-smoke + docs) | 0.5 |
+| **Total** | **~4.5** |
+
+### Risks
+
+- **Capture-size blow-up** = instances × arrayCap × elementFieldCap.
+  Bounded by the bitness-adaptive model + hard caps; x64 blanket still
+  needs a projected-size advisory in the status line.
+- **Per-element `object_get_class`** adds a deref + class-cache lookup
+  per reference element. Mitigated by the existing global class-info
+  cache; measure on a wide x64 snap before shipping blanket default.
+- Element class can differ per slot (polymorphic arrays) — must read
+  runtime class per element, not assume `element_type`.
 
 ---
 

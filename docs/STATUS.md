@@ -173,6 +173,10 @@ take 3-4 snapshots, open Class Pivot tab.
   list as a metadata column at save time.
 * **Layer B**: reference-array inner pivot (key array elements by an
   inner field) — needs DLL-side per-element child-field capture.
+  **Now planned in detail as Phase 29f** (plan.md + class-pivot.md §7):
+  `SnapshotArrayElement.Fields`, bitness-adaptive capture (x64 blanket /
+  x86 targeted-with-banner), compound (owner-key, element-inner-key)
+  pivot. ~4.5 days, 5 waves. Ready to start.
 * **Anomaly auto-surface** (stretch): auto-tag "dropped to 0 at snap
   X", "monotonic decrease", etc.
 
