@@ -263,10 +263,7 @@ public static class PivotEngine
                     hasCollision = true;
                     addressPerSnap[s] = list[0].Addr;   // spec §5: first address
                     for (int v = 0; v < valueCount; v++)
-                    {
-                        var rendered = list.Select(t => t.Vals[v] ?? "(null)");
-                        values[v][s] = $"<{list.Count}: {string.Join(", ", rendered)}>";
-                    }
+                        values[v][s] = FormatCollisionCell(list, v);
                 }
             }
 
@@ -283,5 +280,39 @@ public static class PivotEngine
         }
 
         return results;
+    }
+
+    /// <summary>Max distinct values shown inside a collision cell before
+    /// the "+N more" suffix kicks in. A 21-way collision dumped in full
+    /// is unreadable and overflows the grid cell; the distinct set with
+    /// a count tells the user what they actually need — "how many
+    /// instances collided, and do they even disagree".</summary>
+    private const int kCollisionDistinctCap = 6;
+
+    /// <summary>Render a collided snapshot slot compactly: the instance
+    /// count plus the DISTINCT set of values (first-seen order, capped).
+    /// <c>⟨21: 100⟩</c> means 21 instances all hold 100 (the key just
+    /// isn't unique — but the value agrees); <c>⟨21: 100, 50, 250,+3⟩</c>
+    /// means 21 instances with 6+ distinct values (the user needs a
+    /// more discriminating key). The leading <c>⟨…⟩</c> brackets make
+    /// collision cells visually distinct from clean single-instance
+    /// rows at a glance.</summary>
+    private static string FormatCollisionCell(
+        List<(string Addr, string?[] Vals)> list, int valueIdx)
+    {
+        var distinct = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var t in list)
+        {
+            string val = t.Vals[valueIdx] ?? "(null)";
+            if (seen.Add(val)) distinct.Add(val);
+        }
+        IEnumerable<string> shown = distinct.Count > kCollisionDistinctCap
+            ? distinct.Take(kCollisionDistinctCap)
+            : distinct;
+        string suffix = distinct.Count > kCollisionDistinctCap
+            ? $",+{distinct.Count - kCollisionDistinctCap}"
+            : string.Empty;
+        return $"⟨{list.Count}: {string.Join(", ", shown)}{suffix}⟩";
     }
 }

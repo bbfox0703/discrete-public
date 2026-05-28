@@ -278,9 +278,60 @@ public class PivotEngineTests
         var row = Assert.Single(rows);
         Assert.True(row.HasCollision);
         Assert.Equal("5", row.Values[0][0]);
-        Assert.Equal("<2: 7, 9>", row.Values[0][1]);
+        // Collision cell: instance count + distinct value set.
+        Assert.Equal("⟨2: 7, 9⟩", row.Values[0][1]);
         Assert.Equal("0x1", row.AddressPerSnap[0]);
         Assert.Equal("0x2", row.AddressPerSnap[1]);  // spec §5: first address on collision
+    }
+
+    [Fact]
+    public void Run_CollisionAllSameValue_RendersSingleValueWithCount()
+    {
+        // 5 instances share key=7 and ALL have _count=100. The cell
+        // should collapse to "⟨5: 100⟩" — the key isn't unique but the
+        // value agrees, so there's nothing to disambiguate value-wise.
+        var insts = Enumerable.Range(0, 5)
+            .Select(i => MakeInstance($"0x{i}", ("k", "System.Int32", 7), ("v", "System.Int32", 100)))
+            .ToArray();
+        var snap = MakeEnv("snap1", MakeClass("Game.Item", insts));
+
+        var rows = PivotEngine.Run(new PivotQuery
+        {
+            Snapshots   = new[] { snap },
+            Assembly    = "asm",
+            ClassFqn    = "Game.Item",
+            KeyFields   = new[] { "k" },
+            ValueFields = new[] { "v" },
+        });
+
+        var row = Assert.Single(rows);
+        Assert.True(row.HasCollision);
+        Assert.Equal("⟨5: 100⟩", row.Values[0][0]);
+    }
+
+    [Fact]
+    public void Run_CollisionManyDistinct_CapsWithMoreSuffix()
+    {
+        // 10 instances, 10 distinct values → cell shows the first 6
+        // distinct + "+4" suffix so it doesn't overflow the grid.
+        var insts = Enumerable.Range(0, 10)
+            .Select(i => MakeInstance($"0x{i}", ("k", "System.Int32", 7), ("v", "System.Int32", i * 10)))
+            .ToArray();
+        var snap = MakeEnv("snap1", MakeClass("Game.Item", insts));
+
+        var rows = PivotEngine.Run(new PivotQuery
+        {
+            Snapshots   = new[] { snap },
+            Assembly    = "asm",
+            ClassFqn    = "Game.Item",
+            KeyFields   = new[] { "k" },
+            ValueFields = new[] { "v" },
+        });
+
+        var row = Assert.Single(rows);
+        Assert.True(row.HasCollision);
+        // First 6 distinct (0,10,20,30,40,50) then "+4".
+        Assert.Equal("⟨10: 0, 10, 20, 30, 40, 50,+4⟩", row.Values[0][0]);
     }
 
     // ─── Absent cells ──────────────────────────────────────────────────

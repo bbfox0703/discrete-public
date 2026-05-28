@@ -22,30 +22,30 @@ engine. Three waves of Phase 29e landed so far:
   18 tests in [PivotViewModelTests.cs](../ui/UnityDumpUI.Tests/PivotViewModelTests.cs).
   Shares envelope pool with Snapshot + SPC tabs; cross-session
   banner reads as a feature, not a warning.
+* **29e-2 polish** (live-smoke on 활俠傳) — collision cells now render
+  distinct-value set + count + cap (`⟨21: 100, 50, 250,+2⟩`) instead
+  of an unreadable wall; Trajectory column wraps + has a ToolTip;
+  AutoCompleteBoxes browse-on-focus (`MinimumPrefixLength=0`). +2
+  collision tests.
 
-**506/506 green** (was 462 before 29e). No DLL change. Full design at
-[class-pivot.md](class-pivot.md).
+**508/508 green** (was 462 before 29e). No DLL change. Full design +
+live-smoke findings at [class-pivot.md](class-pivot.md) §13.
 
-### Live-smoke TODO (29e-2)
+### Live-smoke status (29e-2)
 
-UI was unit-tested but not live-game-smoked. To verify in a live
-session:
+✅ **Verified on 활俠傳** (2026-05-28): `Mortal.Core.GameStat`,
+key=`_type`, value=`_value` → key `3` walks
+`10160 → 9910 → 10160 → 10060`, the real 銀兩 spend trajectory across
+4 captures / 3 sessions. The cross-session pivot works where SPC
+can't (SPC cross-session on Mono is empty — Mono statics carry no
+values; see §13).
 
-1. Take 3-4 snapshots in 활俠傳 (same session, spend money between snaps).
-2. Switch to **Class Pivot** tab. Type `Mortal.Core.GameStat` in the
-   Class FQN box — AutoCompleteBox should suggest it after the first
-   character once any snapshot is hydrated.
-3. Type `_propertyID` in Key fields, `_value` in Value fields.
-4. (Optional) Type `101` in Key filter to narrow to the 銀兩 (Money) row.
-5. Press Run. Expect 1 row with key `101` and a trajectory like
-   `10160 → 9910 → 9410`. Address column will show drifting addresses
-   if any hydrated session boundary appears between snaps.
-6. Right-click the row → "Inspect (latest snap)" should switch to
-   Inspector tab loaded with the latest address.
-7. Repeat with snapshots taken from DIFFERENT sessions (close game,
-   reopen, take more snapshots) — verify the cross-session blue
-   banner says "Cross-session pivot — keying by (_propertyID)
-   sidesteps address drift." and the row still tracks the same key.
+**Two constraints to remember** (documented in [class-pivot.md](class-pivot.md) §13):
+- SPC cross-session on Mono finds nothing → use Class Pivot instead.
+- Instance "Inspect" only resolves addresses from the **live** game
+  session, so take the final capture in the session you're still
+  attached to. Trajectory across older snapshots stays valid; only
+  the address handoff needs the live process.
 
 ### Remaining 29e waves
 

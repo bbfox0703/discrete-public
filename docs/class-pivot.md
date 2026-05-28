@@ -451,3 +451,73 @@ Each wave ends green on the full unit test suite and writes a STATUS.md TL;DR.
       would benefit when Layer B lands"? Lean: yes, surface hint.
 
 These are settled at implementation time, not blockers for starting.
+
+---
+
+## 13. Live-smoke findings (29e-2, 활俠傳, 2026-05-28)
+
+First live run on 활俠傳 Mono (4 captures across 3 game sessions,
+3,647 classes / 12-18 K instances each). The core flow works:
+`Mortal.Core.GameStat`, key=`_type`, value=`_value` → key `3` shows
+`10160 → 9910 → 10160 → 10060`, exactly the 銀兩 (Money) spend
+trajectory. Findings + resolutions:
+
+1. **Collision cells were unreadable** — a 21-way key collision dumped
+   all 21 values inline (`<21: 100, 100, 100, …>`) and overflowed the
+   grid. **Fixed (29e-2 polish)**: collision cells now render the
+   instance count + DISTINCT value set, capped at 6 with a `,+N`
+   suffix: `⟨21: 100, 50, 250, 18, 60, 43,+2⟩`. All-agree collisions
+   collapse to `⟨21: 100⟩`. The `⟨…⟩` brackets flag the cell visually.
+   The Trajectory column is now a wrapping TemplateColumn with a
+   ToolTip so even long non-collision sequences are fully readable.
+
+2. **Field-name autocomplete required typing** — empty box showed
+   nothing. **Fixed**: `MinimumPrefixLength=0` on the Class / Key /
+   Value boxes so the dropdown opens on focus and lists everything
+   available. (Field names still require at least one hydrated
+   snapshot of the chosen class.)
+
+3. **Bad-key collisions are expected, not a bug** — `_property=99`
+   matches many GameStat instances, so keying by it produces
+   collision rows. The user resolved this by switching to `_type`
+   (more unique paths). A compound key (e.g. `_type, _property` or
+   just `_name`) disambiguates further. This is the intended
+   workflow; 29e-4's key auto-discovery will surface good keys
+   automatically.
+
+### Known constraints surfaced during smoke
+
+- **SPC cross-session on Mono finds nothing.** Mono static-field
+  values aren't captured (`static_value_skipped_mono` — reading them
+  wedges the game's main thread, see Phase 29a notes). Cross-session
+  SPC auto-enables StaticsOnly because instance addresses don't align
+  across launches — but on Mono those statics have no values, so the
+  result is empty. **Class Pivot is the cross-session answer**: it
+  keys by instance field VALUES, which survive session boundaries, so
+  the user gets real instance-data trajectories where SPC can't.
+
+- **Instance "Inspect" only resolves for the live session.** Pivot's
+  value trajectory is just stored strings — it works across dead
+  sessions fine. But the per-snap `AddressPerSnap` entries are
+  process-local managed pointers; clicking "Inspect (latest snap)"
+  reads that address in the *currently connected* game process. If
+  the latest selected snapshot came from an earlier, now-dead
+  session, the address is stale and the Inspector will read garbage
+  (or fail). **Practical rule: take your final capture in the game
+  session you're still attached to**, so the latest snapshot's
+  addresses are live. The trajectory across older snapshots remains
+  valid regardless; only the address handoff needs the live session.
+  A future polish could tag each snapshot with whether its session
+  is the live one and warn on Inspect — tracked but not yet built.
+
+### Deferred to later 29e waves (confirmed with user)
+
+- **Assembly → class picker with stability scoring** = Phase 29e-3
+  (Stage 0). Replaces the manual Class FQN box: pick an assembly,
+  see a sortable shortlist of classes with instance-count CV, null
+  ratio, field-type ratios, so the user narrows to a good candidate
+  class without knowing the FQN up front.
+- **Scored field picker (popup with filter)** = Phase 29e-4
+  (Stage 1). Instead of typing field names, the user sees ranked
+  key candidates (S_stable / S_cardinality / TypePrior / NamePrior)
+  + a greedy compound-key suggestion, in a filterable picker.

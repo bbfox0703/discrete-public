@@ -2264,26 +2264,26 @@
                                    Text="{Binding ClassPivot.ClassFqn, Mode=TwoWay}"
                                    ItemsSource="{Binding ClassPivot.KnownClasses}"
                                    PlaceholderText="e.g. Mortal.Core.GameStat"
-                                   MinimumPrefixLength="1"
+                                   MinimumPrefixLength="0"
                                    FilterMode="ContainsOrdinalCaseSensitive"
-                                   ToolTip.Tip="Fully-qualified class name (Namespace.Name). Suggestions come from snapshots already loaded into memory; if the list is short, run the query once to hydrate snapshots + populate it."/>
+                                   ToolTip.Tip="Fully-qualified class name (Namespace.Name). Suggestions come from snapshots already loaded into memory; the list is empty until the first Run hydrates a snapshot (a dedicated assembly → class picker with stability scoring lands in Phase 29e-3)."/>
 
                   <TextBlock Grid.Row="2" Grid.Column="0" Text="Key fields:" VerticalAlignment="Center"/>
                   <AutoCompleteBox Grid.Row="2" Grid.Column="1"
                                    Text="{Binding ClassPivot.KeyFieldsText, Mode=TwoWay}"
                                    ItemsSource="{Binding ClassPivot.KnownFieldNames}"
                                    PlaceholderText="_propertyID  (or '_itemGroup, _propertyID')"
-                                   MinimumPrefixLength="1"
+                                   MinimumPrefixLength="0"
                                    FilterMode="ContainsOrdinalCaseSensitive"
-                                   ToolTip.Tip="Comma-separated field names whose values jointly identify a logical instance across snapshots. Compound key (multiple names) helps when a single field has collisions, e.g. (_itemGroup, _propertyID)."/>
+                                   ToolTip.Tip="Comma-separated field names whose values jointly identify a logical instance across snapshots. Click to browse all field names of the typed class (populated after a class is chosen + snapshots hydrated). Compound key (multiple names) helps when a single field has collisions, e.g. (_itemGroup, _propertyID)."/>
                   <TextBlock Grid.Row="2" Grid.Column="2" Text="Value fields:" VerticalAlignment="Center"/>
                   <AutoCompleteBox Grid.Row="2" Grid.Column="3"
                                    Text="{Binding ClassPivot.ValueFieldsText, Mode=TwoWay}"
                                    ItemsSource="{Binding ClassPivot.KnownFieldNames}"
                                    PlaceholderText="_value  (or '_hp, _mp')"
-                                   MinimumPrefixLength="1"
+                                   MinimumPrefixLength="0"
                                    FilterMode="ContainsOrdinalCaseSensitive"
-                                   ToolTip.Tip="Comma-separated field names whose trajectory across snapshots you want to see — one column per (value field, snapshot) pair in the results grid."/>
+                                   ToolTip.Tip="Comma-separated field names whose trajectory across snapshots you want to see. Click to browse all field names of the typed class. Multiple value fields stack as 'fieldName: v0 → v1 → …' lines in the Trajectory column."/>
                   <TextBlock Grid.Row="2" Grid.Column="4" Text="Key filter:" VerticalAlignment="Center"/>
                   <TextBox Grid.Row="2" Grid.Column="5"
                            Text="{Binding ClassPivot.KeyFilter, Mode=TwoWay}"
@@ -2374,11 +2374,22 @@
                              PivotViewModel as "fieldName: v0 → v1 → …"
                              (multi-line when >1 value field).
                              AOT-safe — no reflection bindings.
-                             SPC tab uses the same shape and users
-                             already know how to read it. -->
-                        <DataGridTextColumn Header="Trajectory (per snap →)"
-                                            Binding="{Binding TrajectoryDisplay}"
-                                            Width="5*"/>
+                             TextWrapping + ToolTip so wide rows
+                             (many snaps) and collision cells
+                             (⟨N: …⟩) are fully readable rather than
+                             clipped at the cell edge. SPC tab uses the
+                             same value-sequence shape. -->
+                        <DataGridTemplateColumn Header="Trajectory (per snap →)" Width="5*">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <TextBlock Text="{Binding TrajectoryDisplay}"
+                                         TextWrapping="Wrap"
+                                         VerticalAlignment="Center"
+                                         Margin="2"
+                                         ToolTip.Tip="{Binding TrajectoryDisplay}"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>
