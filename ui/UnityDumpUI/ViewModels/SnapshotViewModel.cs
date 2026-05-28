@@ -473,6 +473,25 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// everything (useful for diagnostic / advanced workflows).</summary>
     [ObservableProperty] private bool _includeSystemAssemblies;
 
+    /// <summary>Phase 29f (Layer B) — capture each reference-type array
+    /// element's own fields one level deep, so the Class Pivot tab can
+    /// inner-pivot array elements by an inner field. OFF by default
+    /// (multiplies capture size). On x64 it captures every reference array
+    /// (blanket); on x86 it is disabled unless
+    /// <see cref="ArrayElementTargetsText"/> nominates targets (OOM
+    /// safety — the DLL refuses 32-bit blanket capture).</summary>
+    [ObservableProperty] private bool _captureArrayElementFields;
+
+    /// <summary>Per-element inner-field cap (server hard-cap 64). Only used
+    /// when <see cref="CaptureArrayElementFields"/> is on.</summary>
+    [ObservableProperty] private int _elementFieldCap = 16;
+
+    /// <summary>Optional comma/semicolon-separated inner-pivot targets —
+    /// <c>"Namespace.Class"</c> (all its reference arrays) or
+    /// <c>"Namespace.Class.fieldName"</c>. Required to enable Layer B
+    /// capture on 32-bit targets; on x64 leave blank for blanket capture.</summary>
+    [ObservableProperty] private string _arrayElementTargetsText = string.Empty;
+
     /// <summary>Optional label the user can attach to a snapshot before
     /// taking it. Surfaced in the Snapshots list + diff status line.</summary>
     [ObservableProperty] private string _pendingLabel = string.Empty;
@@ -817,8 +836,30 @@ public sealed partial class SnapshotViewModel : ObservableObject
             int cap = InstanceCap > 0 ? InstanceCap : 512;
             int arr = ArrayCap    > 0 ? ArrayCap    : 256;
 
+            // Phase 29f (Layer B) — element inner-field capture opt-in.
+            string[]? elemTargets = null;
+            if (!string.IsNullOrWhiteSpace(ArrayElementTargetsText))
+            {
+                var parts = ArrayElementTargetsText
+                    .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (parts.Length > 0) elemTargets = parts;
+            }
+
             var begin = await _backend.SnapshotBeginAsync(
-                scope, cap, arr, IncludeSystemAssemblies, ct).ConfigureAwait(true);
+                scope, cap, arr, IncludeSystemAssemblies,
+                CaptureArrayElementFields,
+                CaptureArrayElementFields ? ElementFieldCap : (int?)null,
+                elemTargets, ct).ConfigureAwait(true);
+
+            // The DLL echoes the EFFECTIVE capture state after its x86
+            // blanket gate. If the user asked for Layer B capture but the
+            // server disabled it (32-bit, no targets), say so plainly.
+            if (CaptureArrayElementFields && !begin.ArrayElementFields && string.IsNullOrEmpty(begin.Error))
+            {
+                StatusMessage = "Note: array element-field capture was disabled by the DLL " +
+                    "(32-bit target needs explicit targets — set \"Array element targets\" to a " +
+                    "class.field, e.g. Mortal.Core.GameStat._statAdditionData).";
+            }
             StopElapsedTimer();  // Phase 1 done; manual status from here.
 
             // Refresh game-process memory + bitness from the response,

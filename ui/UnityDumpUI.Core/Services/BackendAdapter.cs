@@ -957,6 +957,9 @@ public sealed class BackendAdapter : ILiveExportSource
         int? instanceCap = null,
         int? arrayCap    = null,
         bool includeSystemAssemblies = false,
+        bool arrayElementFields = false,
+        int? elementFieldCap = null,
+        IReadOnlyList<string>? arrayElementTargets = null,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>();
@@ -968,6 +971,14 @@ public sealed class BackendAdapter : ILiveExportSource
         if (instanceCap.HasValue) args["instanceCap"] = Int(instanceCap.Value);
         if (arrayCap.HasValue)    args["arrayCap"]    = Int(arrayCap.Value);
         if (includeSystemAssemblies) args["includeSystemAssemblies"] = Bool(true);
+        // Phase 29f (Layer B) — reference-array element inner-field capture.
+        if (arrayElementFields) args["arrayElementFields"] = Bool(true);
+        if (elementFieldCap.HasValue) args["elementFieldCap"] = Int(elementFieldCap.Value);
+        if (arrayElementTargets is { Count: > 0 })
+        {
+            using var doc = JsonDocument.Parse(BuildStringArrayJson(arrayElementTargets));
+            args["arrayElementTargets"] = doc.RootElement.Clone();
+        }
 
         var env = await _pipe.SendAsync(
             "snapshotBegin", args,

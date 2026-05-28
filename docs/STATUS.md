@@ -49,8 +49,18 @@
   field(s); reuses `PivotRow` + `PivotEngine.FormatCollisionCell` so the
   UI treats array + instance pivots identically. `AddressPerSnap` =
   element object address. Elements without inner fields (pre-Layer-B /
-  primitive / `element_class_error`) are skipped. Next: 29f-4 (UI
-  inner-pivot mode in the Class Pivot tab), then 29f-5 live-smoke.
+  primitive / `element_class_error`) are skipped.
+* **Phase 29f-4 (Layer B UI) shipped — 575/575 green** (+6). Two
+  surfaces: the **Snapshot tab** gains a "Capture array element fields
+  (Layer B)" checkbox + cap + targets (wired through
+  `BackendAdapter.SnapshotBeginAsync`; x86 disabled-without-targets is
+  surfaced from the DLL's echoed state); the **Class Pivot tab** gains an
+  `ArrayPivotMode` toggle with Array-field + Inner-key + Inner-value
+  AutoCompleteBoxes (auto-discovered from hydrated element fields),
+  "Key fields" doubling as the outer key, branching `RunAsync` to
+  `ArrayPivotEngine`. **Next: 29f-5 live-smoke** on 活俠傳
+  `GameStat._statAdditionData` (x86 targeted) + an x64 blanket smoke —
+  needs an injected DLL, so it's the user's to run.
 
 ## TL;DR — what's left to pick up (next session)
 

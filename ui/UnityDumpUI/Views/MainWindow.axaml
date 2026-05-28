@@ -1575,7 +1575,7 @@
               <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
                       Background="#1F808080" CornerRadius="3">
                 <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                      RowDefinitions="Auto,Auto">
+                      RowDefinitions="Auto,Auto,Auto">
 
                   <!-- Row 0 — label + scope + caps + Take button -->
                   <TextBlock Grid.Row="0" Grid.Column="0" Text="Label:"
@@ -1623,6 +1623,27 @@
                             IsChecked="{Binding Snapshot.IncludeSystemAssemblies, Mode=TwoWay}"
                             Margin="0,6,0,0"
                             ToolTip.Tip="When unchecked (default), full-capture mode skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus — common Unity engine + .NET system + popular-support assemblies that flood the snapshot with non-gameplay state. Check to keep everything."/>
+
+                  <!-- Row 2 — Phase 29f Layer B: reference-array element inner-field capture -->
+                  <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
+                            Content="Capture array element fields (Layer B)"
+                            IsChecked="{Binding Snapshot.CaptureArrayElementFields, Mode=TwoWay}"
+                            Margin="0,6,12,0"
+                            ToolTip.Tip="Capture each reference-type array element's own fields one level deep, so the Class Pivot tab can pivot array elements by an inner field (e.g. StatConvertCollectionData[] keyed by _propertyID). OFF by default — it multiplies capture size. On 64-bit this captures every reference array (blanket); on 32-bit it is disabled unless you name targets below (OOM safety)."/>
+                  <TextBlock Grid.Row="2" Grid.Column="2" Text="Elem field cap:"
+                             VerticalAlignment="Center" Margin="0,6,6,0"
+                             ToolTip.Tip="Max fields captured per array element (server hard-cap 64). Only used when 'Capture array element fields' is on."/>
+                  <NumericUpDown Grid.Row="2" Grid.Column="3"
+                                 Value="{Binding Snapshot.ElementFieldCap, Mode=TwoWay}"
+                                 Minimum="1" Maximum="64" Increment="1"
+                                 MinWidth="150" Margin="0,6,12,0"/>
+                  <TextBlock Grid.Row="2" Grid.Column="4" Text="Targets:"
+                             VerticalAlignment="Center" Margin="0,6,6,0"/>
+                  <TextBox Grid.Row="2" Grid.Column="5" Grid.ColumnSpan="4"
+                           Text="{Binding Snapshot.ArrayElementTargetsText, Mode=TwoWay}"
+                           PlaceholderText="(x64: blank = all ref arrays. x86: required, e.g. Mortal.Core.GameStat._statAdditionData)"
+                           Margin="0,6,0,0"
+                           ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' (all its reference arrays) or 'Namespace.Class.fieldName', comma/semicolon separated. Required to enable Layer B capture on 32-bit targets; leave blank on 64-bit for blanket capture."/>
                 </Grid>
               </Border>
 
@@ -2445,6 +2466,50 @@
                           Command="{Binding ClassPivot.RunCommand}"
                           HorizontalAlignment="Left" MinWidth="180" Padding="10,4"/>
                 </Grid>
+              </Border>
+
+              <!-- Phase 29f Layer B: reference-array element inner-pivot.
+                   When on, "Key fields" above acts as the OUTER (owner-
+                   instance) key and these three fields target the array
+                   element. Requires snapshots captured with "Capture array
+                   element fields" (Snapshot tab). -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6"
+                      Background="#1F808080" CornerRadius="3">
+                <DockPanel>
+                  <CheckBox DockPanel.Dock="Top"
+                            Content="Array inner-pivot (Layer B) — pivot a reference array's elements by an inner field"
+                            IsChecked="{Binding ClassPivot.ArrayPivotMode, Mode=TwoWay}"
+                            ToolTip.Tip="Instead of pivoting whole instances, pivot the ELEMENTS of a reference-type array field on the class (e.g. StatConvertCollectionData[]) by a field INSIDE each element. The 'Key fields' box above becomes the outer owner-instance key (may be empty); the fields here key/value the element. Needs snapshots captured with Layer B (Snapshot tab → 'Capture array element fields')."/>
+                  <Grid Margin="0,6,0,0"
+                        ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto"
+                        ColumnSpacing="6"
+                        IsVisible="{Binding ClassPivot.ArrayPivotMode}">
+                    <TextBlock Grid.Column="0" Text="Array field:" VerticalAlignment="Center"/>
+                    <AutoCompleteBox Grid.Column="1"
+                                     Text="{Binding ClassPivot.ArrayFieldName, Mode=TwoWay}"
+                                     ItemsSource="{Binding ClassPivot.KnownArrayFields}"
+                                     PlaceholderText="_statAdditionData"
+                                     MinimumPrefixLength="0"
+                                     FilterMode="ContainsOrdinal"
+                                     ToolTip.Tip="Reference-type array field on the class whose elements to pivot. Suggestions are the reference arrays observed on the typed class (populated after a Layer-B snapshot hydrates)."/>
+                    <TextBlock Grid.Column="2" Text="Inner key:" VerticalAlignment="Center"/>
+                    <AutoCompleteBox Grid.Column="3"
+                                     Text="{Binding ClassPivot.InnerKeyFieldsText, Mode=TwoWay}"
+                                     ItemsSource="{Binding ClassPivot.KnownElementFieldNames}"
+                                     PlaceholderText="_propertyID"
+                                     MinimumPrefixLength="0"
+                                     FilterMode="ContainsOrdinal"
+                                     ToolTip.Tip="Comma-separated field name(s) INSIDE each array element that identify it (e.g. _propertyID). Suggestions are the element's captured inner fields."/>
+                    <TextBlock Grid.Column="4" Text="Inner value:" VerticalAlignment="Center"/>
+                    <AutoCompleteBox Grid.Column="5"
+                                     Text="{Binding ClassPivot.InnerValueFieldsText, Mode=TwoWay}"
+                                     ItemsSource="{Binding ClassPivot.KnownElementFieldNames}"
+                                     PlaceholderText="_amount"
+                                     MinimumPrefixLength="0"
+                                     FilterMode="ContainsOrdinal"
+                                     ToolTip.Tip="Comma-separated field name(s) INSIDE each array element whose trajectory to track across snapshots (e.g. _amount)."/>
+                  </Grid>
+                </DockPanel>
               </Border>
 
               <!-- Snapshot picker (top half) + Results (bottom half) -->

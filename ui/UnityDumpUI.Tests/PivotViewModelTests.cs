@@ -123,6 +123,56 @@ public class PivotViewModelTests : IDisposable
         return inst;
     }
 
+    // ─── Layer B (29f-4) array-element fixtures ────────────────────────
+
+    private static SnapshotFieldEntry MakeFieldEntry(string name, string type, object? value)
+    {
+        var fe = new SnapshotFieldEntry { Name = name, Type = type };
+        switch (value)
+        {
+            case int i:
+                fe.Value = JsonDocument.Parse(i.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                      .RootElement.Clone();
+                break;
+            case string s: fe.StringValue = s; break;
+            case null: break;
+            default: throw new ArgumentException($"Unhandled value type {value.GetType()}");
+        }
+        return fe;
+    }
+
+    private static SnapshotArrayElement Elem(string addr,
+        params (string name, string type, object? value)[] fields)
+        => new()
+        {
+            Address = addr, Ptr = addr,
+            Fields = fields.Select(f => MakeFieldEntry(f.name, f.type, f.value)).ToList(),
+        };
+
+    private static SnapshotArrayElement ElemNoFields(string addr)
+        => new() { Address = addr, Ptr = addr };   // pre-Layer-B / primitive slot
+
+    /// <summary>Instance with optional owner fields + a reference-array
+    /// field whose elements carry inner Fields (Layer B).</summary>
+    private static SnapshotInstanceEntry MakeInstanceWithArray(
+        string address, string arrayFieldName, string elementType,
+        SnapshotArrayElement[] elements,
+        params (string name, string type, object? value)[] ownerFields)
+    {
+        var inst = MakeInstance(address, ownerFields);
+        inst.Fields.Add(new SnapshotFieldEntry
+        {
+            Name = arrayFieldName, Type = elementType + "[]",
+            ArrayElements = new SnapshotArrayElements
+            {
+                Length = (ulong)elements.Length, Count = elements.Length,
+                ElementType = elementType, ElementSize = 8, IsPointer = true,
+                Elements = elements.ToList(),
+            },
+        });
+        return inst;
+    }
+
     // ─── Selection sync + ordering ─────────────────────────────────────
 
     [Fact]
@@ -740,6 +790,145 @@ public class PivotViewModelTests : IDisposable
         var (_, pivot) = BuildVms();   // no OnGameDbContextAsync → no store
         await pivot.SeedKnownClassesFromDbAsync();
         Assert.Empty(pivot.KnownClasses);   // soft no-op, no throw
+    }
+
+    // ─── Layer B array inner-pivot (29f-4) ─────────────────────────────
+
+    [Fact]
+    public async Task ArrayPivot_TracksElementInnerValue_AcrossSlotShuffle()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("s1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.GameStat", "asm",
+                MakeInstanceWithArray("0xI1", "_statAdditionData", "Game.Add", new[]
+                {
+                    Elem("0xA", ("_propertyID", "System.Int32", 101), ("_amount", "System.Int32", 10)),
+                    Elem("0xB", ("_propertyID", "System.Int32", 202), ("_amount", "System.Int32", 20)),
+                }))));
+        snap.Snapshots.Add(MakeEnv("s2", "b1", "s1", "2026-05-29T11:00:00Z",
+            MakeClass("Game.GameStat", "asm",
+                MakeInstanceWithArray("0xI1", "_statAdditionData", "Game.Add", new[]
+                {   // reordered slots — index keying would report a false change
+                    Elem("0xC", ("_propertyID", "System.Int32", 202), ("_amount", "System.Int32", 25)),
+                    Elem("0xD", ("_propertyID", "System.Int32", 101), ("_amount", "System.Int32", 15)),
+                }))));
+
+        pivot.ClassFqn             = "Game.GameStat";
+        pivot.ArrayPivotMode       = true;
+        pivot.ArrayFieldName       = "_statAdditionData";
+        pivot.InnerKeyFieldsText   = "_propertyID";
+        pivot.InnerValueFieldsText = "_amount";
+
+        await pivot.RunAsync();
+
+        Assert.Empty(pivot.ErrorMessage);
+        Assert.Equal(2, pivot.Results.Count);
+        Assert.Equal("10 → 15", pivot.Results.Single(r => r.KeyTupleDisplay == "101").TrajectoryDisplay);
+        Assert.Equal("20 → 25", pivot.Results.Single(r => r.KeyTupleDisplay == "202").TrajectoryDisplay);
+    }
+
+    [Fact]
+    public async Task ArrayPivot_CompoundOuterKey_SeparatesSameInnerKey()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("s1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.GameStat", "asm",
+                MakeInstanceWithArray("0xI1", "_data", "Game.Add",
+                    new[] { Elem("0xA", ("_pid", "System.Int32", 101), ("_amt", "System.Int32", 10)) },
+                    ("_statId", "System.Int32", 1)),
+                MakeInstanceWithArray("0xI2", "_data", "Game.Add",
+                    new[] { Elem("0xB", ("_pid", "System.Int32", 101), ("_amt", "System.Int32", 99)) },
+                    ("_statId", "System.Int32", 2)))));
+
+        pivot.ClassFqn             = "Game.GameStat";
+        pivot.ArrayPivotMode       = true;
+        pivot.ArrayFieldName       = "_data";
+        pivot.KeyFieldsText        = "_statId";   // outer key
+        pivot.InnerKeyFieldsText   = "_pid";
+        pivot.InnerValueFieldsText = "_amt";
+
+        await pivot.RunAsync();
+
+        Assert.Equal(2, pivot.Results.Count);
+        Assert.Equal("10", pivot.Results.Single(r => r.KeyTupleDisplay == "1, 101").TrajectoryDisplay);
+        Assert.Equal("99", pivot.Results.Single(r => r.KeyTupleDisplay == "2, 101").TrajectoryDisplay);
+    }
+
+    [Fact]
+    public async Task ArrayPivot_MissingArrayField_ReportsError()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("s1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.GameStat", "asm", MakeInstance("0x1", ("id", "System.Int32", 1)))));
+        pivot.ClassFqn             = "Game.GameStat";
+        pivot.ArrayPivotMode       = true;
+        pivot.InnerKeyFieldsText   = "_pid";
+        pivot.InnerValueFieldsText = "_amt";
+        // ArrayFieldName left blank
+        await pivot.RunAsync();
+        Assert.Contains("Array field is required", pivot.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ArrayPivot_MissingInnerKeyOrValue_ReportsError()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("s1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.GameStat", "asm", MakeInstance("0x1", ("id", "System.Int32", 1)))));
+        pivot.ClassFqn       = "Game.GameStat";
+        pivot.ArrayPivotMode = true;
+        pivot.ArrayFieldName = "_data";
+        pivot.InnerValueFieldsText = "_amt";   // inner key blank
+        await pivot.RunAsync();
+        Assert.Contains("inner key field", pivot.ErrorMessage);
+
+        pivot.ErrorMessage         = string.Empty;
+        pivot.InnerKeyFieldsText   = "_pid";
+        pivot.InnerValueFieldsText = string.Empty;   // inner value blank
+        await pivot.RunAsync();
+        Assert.Contains("inner value field", pivot.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ArrayPivot_NoCapturedElements_ZeroRowsWithLayerBHint()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("s1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.GameStat", "asm",
+                MakeInstanceWithArray("0xI1", "_data", "Game.Add", new[]
+                {   // pre-Layer-B elements: no inner fields captured
+                    ElemNoFields("0xA"), ElemNoFields("0xB"),
+                }))));
+        pivot.ClassFqn             = "Game.GameStat";
+        pivot.ArrayPivotMode       = true;
+        pivot.ArrayFieldName       = "_data";
+        pivot.InnerKeyFieldsText   = "_pid";
+        pivot.InnerValueFieldsText = "_amt";
+
+        await pivot.RunAsync();
+
+        Assert.Empty(pivot.ErrorMessage);
+        Assert.Empty(pivot.Results);
+        Assert.Contains("Capture array element fields", pivot.StatusMessage);
+    }
+
+    [Fact]
+    public void ArrayPivot_AutocompletePopulatesFromHydratedElements()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("s1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.GameStat", "asm",
+                MakeInstanceWithArray("0xI1", "_statAdditionData", "Game.Add", new[]
+                {
+                    Elem("0xA", ("_propertyID", "System.Int32", 101), ("_amount", "System.Int32", 10)),
+                }))));
+
+        pivot.ClassFqn = "Game.GameStat";
+        Assert.Contains("_statAdditionData", pivot.KnownArrayFields);
+
+        pivot.ArrayFieldName = "_statAdditionData";
+        Assert.Contains("_propertyID", pivot.KnownElementFieldNames);
+        Assert.Contains("_amount", pivot.KnownElementFieldNames);
     }
 
 }

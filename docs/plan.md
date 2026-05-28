@@ -756,10 +756,25 @@ both Layer A's index-shuffle weakness and address drift. Full design in
   cross-session, elements-without-fields skipped + honest-empty,
   KeyFilter, missing-inner-key sentinel (= elementFieldCap clip),
   element-address handoff, multi-value, validation.
-- [ ] **29f-4** Class Pivot tab inner-pivot UI: array-field selector
-  (reference arrays only), inner key/value pickers auto-discovered
-  from hydrated element fields, x86 banner + target picker,
-  ViewModel tests. (1 day)
+- [x] **29f-4** Class Pivot tab inner-pivot UI — ✅ **Shipped
+  2026-05-28, 575/575 green** (+6). Two UI surfaces:
+  - **Snapshot tab (produce)**: "Capture array element fields (Layer B)"
+    checkbox + "Elem field cap" NumericUpDown + "Targets" TextBox; wired
+    through `SnapshotViewModel` → extended `BackendAdapter.SnapshotBeginAsync`
+    (`arrayElementFields` / `elementFieldCap` / `arrayElementTargets`). On
+    x86 the DLL's echoed effective state drives a "capture disabled — name
+    targets" status note.
+  - **Pivot tab (consume)**: `ArrayPivotMode` toggle reveals Array-field +
+    Inner-key + Inner-value `AutoCompleteBox`es; "Key fields" doubles as the
+    outer owner-instance key. `RunAsync` branches to `ArrayPivotEngine`.
+    `KnownArrayFields` (reference arrays on the class) + `KnownElementFieldNames`
+    (captured inner fields) auto-discover from hydrated snapshots. 0-row
+    inner-pivot adds a "re-take with Layer B enabled" hint.
+  ViewModel tests in [PivotViewModelTests.cs](../ui/UnityDumpUI.Tests/PivotViewModelTests.cs):
+  slot-shuffle tracking, compound outer key, missing array-field /
+  inner-key / inner-value errors, no-captured-elements hint, autocomplete
+  population. UI (DiscreteUI.dll) compiles; bindings match the existing
+  AOT-shipping Class Pivot pattern.
 - [ ] **29f-5** Live-smoke on 活俠傳 `GameStat._statAdditionData`
   (x86 targeted path) + a x64 blanket smoke + docs. (0.5 day + ≥1
   live round)

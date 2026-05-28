@@ -182,6 +182,40 @@ public sealed partial class PivotViewModel : ObservableObject
 
     partial void OnClassFqnChanged(string value) => RefreshKnownFieldNamesForClass();
 
+    // ── Layer B: array inner-pivot (29f-4) ─────────────────────────────
+
+    /// <summary>When on, Run pivots the ELEMENTS of <see cref="ArrayFieldName"/>
+    /// (a reference-type array on the class) by an inner element field via
+    /// <see cref="ArrayPivotEngine"/> instead of pivoting whole instances.
+    /// Requires snapshots captured with Layer B (Snapshot tab → "Capture
+    /// array element fields"); old snapshots produce 0 rows.</summary>
+    [ObservableProperty] private bool _arrayPivotMode;
+
+    /// <summary>Reference-array field on the class whose elements are
+    /// pivoted (e.g. <c>_statAdditionData</c>). Suggestions from
+    /// <see cref="KnownArrayFields"/>.</summary>
+    [ObservableProperty] private string _arrayFieldName = string.Empty;
+
+    /// <summary>Comma-separated element-key field names (fields INSIDE each
+    /// array element, e.g. <c>_propertyID</c>). The owning-instance key
+    /// reuses <see cref="KeyFieldsText"/> as the outer key (may be empty).</summary>
+    [ObservableProperty] private string _innerKeyFieldsText = string.Empty;
+
+    /// <summary>Comma-separated element-value field names (e.g.
+    /// <c>_amount</c>).</summary>
+    [ObservableProperty] private string _innerValueFieldsText = string.Empty;
+
+    /// <summary>Reference-array field names observed on the typed class —
+    /// drives the Array field AutoCompleteBox.</summary>
+    public ObservableCollection<string> KnownArrayFields { get; } = new();
+
+    /// <summary>Inner field names observed on captured elements of the
+    /// typed <see cref="ArrayFieldName"/> — drives the inner key / value
+    /// AutoCompleteBoxes. Empty until a Layer-B snapshot is hydrated.</summary>
+    public ObservableCollection<string> KnownElementFieldNames { get; } = new();
+
+    partial void OnArrayFieldNameChanged(string value) => RefreshKnownElementFieldNames();
+
     /// <summary>NavigateToInspector handoff — wired by MainWindow to
     /// the cross-tab navigation handler that switches to Inspector
     /// and seeds the address. Mirrors SpcQuery + Snapshot tab.</summary>
@@ -550,23 +584,52 @@ public sealed partial class PivotViewModel : ObservableObject
             ErrorMessage = "Class FQN is required (e.g. 'Mortal.Core.GameStat').";
             return;
         }
-        var keyFields = SplitFieldList(KeyFieldsText);
-        if (keyFields.Count == 0)
+        // Mode-aware field lists. Instance mode keys on KeyFieldsText;
+        // array mode reuses KeyFieldsText as the OUTER (owner-instance) key
+        // (may be empty) and adds inner element key + value fields.
+        var keyFields      = SplitFieldList(KeyFieldsText);   // outer in array mode
+        var innerKeyFields = new List<string>();
+        List<string> valueFields;
+        if (ArrayPivotMode)
         {
-            ErrorMessage = "List at least one key field name (e.g. '_propertyID' or '_itemGroup, _propertyID').";
-            return;
+            if (string.IsNullOrWhiteSpace(ArrayFieldName))
+            {
+                ErrorMessage = "Array field is required for inner-pivot (e.g. '_statAdditionData').";
+                return;
+            }
+            innerKeyFields = SplitFieldList(InnerKeyFieldsText);
+            if (innerKeyFields.Count == 0)
+            {
+                ErrorMessage = "List at least one inner key field — a field INSIDE the array element (e.g. '_propertyID').";
+                return;
+            }
+            valueFields = SplitFieldList(InnerValueFieldsText);
+            if (valueFields.Count == 0)
+            {
+                ErrorMessage = "List at least one inner value field — a field INSIDE the array element (e.g. '_amount').";
+                return;
+            }
         }
-        var valueFields = SplitFieldList(ValueFieldsText);
-        if (valueFields.Count == 0)
+        else
         {
-            ErrorMessage = "List at least one value field name (e.g. '_value' or '_hp, _mp').";
-            return;
+            if (keyFields.Count == 0)
+            {
+                ErrorMessage = "List at least one key field name (e.g. '_propertyID' or '_itemGroup, _propertyID').";
+                return;
+            }
+            valueFields = SplitFieldList(ValueFieldsText);
+            if (valueFields.Count == 0)
+            {
+                ErrorMessage = "List at least one value field name (e.g. '_value' or '_hp, _mp').";
+                return;
+            }
         }
 
         try
         {
             IsRunning = true;
-            UpdateModeBanner(selected, keyFields);
+            UpdateModeBanner(selected,
+                ArrayPivotMode ? keyFields.Concat(innerKeyFields).ToList() : keyFields);
 
             // Track which envelopes were already hydrated BEFORE this run
             // so we evict only the ones we ourselves loaded (same policy
@@ -604,18 +667,37 @@ public sealed partial class PivotViewModel : ObservableObject
                 return;
             }
 
-            var query = new PivotQuery
-            {
-                Snapshots   = selected.Select(r => r.Snapshot).ToList(),
-                Assembly    = assembly!,
-                ClassFqn    = ClassFqn.Trim(),
-                KeyFields   = keyFields,
-                ValueFields = valueFields,
-                KeyFilter   = string.IsNullOrWhiteSpace(KeyFilter) ? null : KeyFilter.Trim(),
-            };
+            var snaps     = selected.Select(r => r.Snapshot).ToList();
+            string? keyFilterArg = string.IsNullOrWhiteSpace(KeyFilter) ? null : KeyFilter.Trim();
 
             var sw = Stopwatch.StartNew();
-            var matches = PivotEngine.Run(query);
+            List<PivotRow> matches;
+            if (ArrayPivotMode)
+            {
+                matches = ArrayPivotEngine.Run(new ArrayPivotQuery
+                {
+                    Snapshots      = snaps,
+                    Assembly       = assembly!,
+                    ClassFqn       = ClassFqn.Trim(),
+                    ArrayField     = ArrayFieldName.Trim(),
+                    OuterKeyFields = keyFields,        // KeyFieldsText = outer key (may be empty)
+                    InnerKeyFields = innerKeyFields,
+                    ValueFields    = valueFields,
+                    KeyFilter      = keyFilterArg,
+                });
+            }
+            else
+            {
+                matches = PivotEngine.Run(new PivotQuery
+                {
+                    Snapshots   = snaps,
+                    Assembly    = assembly!,
+                    ClassFqn    = ClassFqn.Trim(),
+                    KeyFields   = keyFields,
+                    ValueFields = valueFields,
+                    KeyFilter   = keyFilterArg,
+                });
+            }
             sw.Stop();
 
             // Build PivotResultRow per match — pre-render the trajectory
@@ -670,7 +752,10 @@ public sealed partial class PivotViewModel : ObservableObject
 
             int collisionCount = matches.Count(m => m.HasCollision);
             string collisionNote = collisionCount > 0 ? $", {collisionCount} with collisions" : string.Empty;
-            StatusMessage = $"Pivot: {matches.Count:N0} row(s){collisionNote} across {snapCount:N0} snapshot(s) in {sw.ElapsedMilliseconds} ms{evictionNote}.";
+            string layerBHint = (ArrayPivotMode && matches.Count == 0)
+                ? " — no captured element fields. Re-take the snapshot with \"Capture array element fields\" enabled on the Snapshot tab (Layer B)."
+                : string.Empty;
+            StatusMessage = $"Pivot: {matches.Count:N0} row(s){collisionNote} across {snapCount:N0} snapshot(s) in {sw.ElapsedMilliseconds} ms{evictionNote}.{layerBHint}";
             _logger.Write(SnapshotStore.LogCategory,
                 $"Pivot: class={ClassFqn} keys=[{string.Join(',', keyFields)}] vals=[{string.Join(',', valueFields)}] " +
                 $"snaps={snapCount} → {matches.Count} rows ({collisionCount} collisions) in {sw.ElapsedMilliseconds}ms evicted={evicted}");
@@ -785,6 +870,72 @@ public sealed partial class PivotViewModel : ObservableObject
         KnownFieldNames.Clear();
         foreach (var n in nameSet.OrderBy(s => s, StringComparer.Ordinal))
             KnownFieldNames.Add(n);
+
+        RefreshKnownArrayFields();
+        RefreshKnownElementFieldNames();
+    }
+
+    /// <summary>Discover reference-type array field names on the typed
+    /// class (fields whose <c>ArrayElements.IsPointer</c> is set) so the
+    /// Array field AutoCompleteBox can suggest inner-pivot targets.</summary>
+    private void RefreshKnownArrayFields()
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(ClassFqn))
+        {
+            foreach (var c in EnumerateTypedClass())
+                if (c.Instances is not null)
+                    foreach (var inst in c.Instances)
+                        foreach (var f in inst.Fields)
+                            if (f.ArrayElements is { IsPointer: true } && !string.IsNullOrEmpty(f.Name))
+                                set.Add(f.Name);
+        }
+        KnownArrayFields.Clear();
+        foreach (var n in set.OrderBy(s => s, StringComparer.Ordinal))
+            KnownArrayFields.Add(n);
+    }
+
+    /// <summary>Discover inner field names captured on the elements of the
+    /// typed <see cref="ArrayFieldName"/> (Layer B) so the inner key /
+    /// value AutoCompleteBoxes can suggest them.</summary>
+    private void RefreshKnownElementFieldNames()
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(ClassFqn) && !string.IsNullOrWhiteSpace(ArrayFieldName))
+        {
+            foreach (var c in EnumerateTypedClass())
+                if (c.Instances is not null)
+                    foreach (var inst in c.Instances)
+                        foreach (var f in inst.Fields)
+                        {
+                            if (!string.Equals(f.Name, ArrayFieldName, StringComparison.Ordinal)) continue;
+                            var els = f.ArrayElements?.Elements;
+                            if (els is null) continue;
+                            foreach (var el in els)
+                                if (el.Fields is not null)
+                                    foreach (var ef in el.Fields)
+                                        if (!string.IsNullOrEmpty(ef.Name)) set.Add(ef.Name);
+                        }
+        }
+        KnownElementFieldNames.Clear();
+        foreach (var n in set.OrderBy(s => s, StringComparer.Ordinal))
+            KnownElementFieldNames.Add(n);
+    }
+
+    /// <summary>Yield hydrated <see cref="SnapshotClassEntry"/> rows whose
+    /// FQN matches the typed <see cref="ClassFqn"/> across all snapshots.</summary>
+    private IEnumerable<SnapshotClassEntry> EnumerateTypedClass()
+    {
+        foreach (var env in _snapshot.Snapshots)
+        {
+            if (!env.ClassesLoaded || env.Classes is null) continue;
+            foreach (var c in env.Classes)
+            {
+                string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
+                if (string.Equals(fqn, ClassFqn, StringComparison.Ordinal))
+                    yield return c;
+            }
+        }
     }
 
     /// <summary>Compose the pivot-specific banner. Pivot is built for
