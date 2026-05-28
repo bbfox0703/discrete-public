@@ -2280,12 +2280,22 @@
                       <CheckBox Content="Show partial-presence"
                                 IsChecked="{Binding ClassPivot.ShortlistShowPartial, Mode=TwoWay}"
                                 ToolTip.Tip="Include classes not present in every selected snapshot. Partial presence means instances appear/vanish between snaps, so the pivot can't line them all up."/>
+                      <TextBlock Text="Class:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                      <TextBox Text="{Binding ClassPivot.ClassNameFilter, Mode=TwoWay}"
+                               Watermark="name substring" Width="180" VerticalAlignment="Center"
+                               ToolTip.Tip="Case-insensitive substring filter on the class FQN — narrow 500+ classes to the one you half-remember."/>
                       <Button Content="⟳ Analyze classes"
                               Command="{Binding ClassPivot.AnalyzeClassesCommand}"
                               Padding="10,4"/>
                     </StackPanel>
                     <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ShortlistStatus}"
                                Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <!-- Columns are Auto/fixed (not star) so the grid can
+                         exceed the pane width → horizontal scrollbar +
+                         no truncation. Header clicks route to a manual
+                         AOT-safe sort (Avalonia's built-in sort uses
+                         reflection on SortMemberPath, which no-ops under
+                         Native AOT). -->
                     <DataGrid Name="PivotShortlistGrid"
                               ItemsSource="{Binding ClassPivot.ClassShortlist}"
                               AutoGenerateColumns="False"
@@ -2295,15 +2305,21 @@
                               CanUserResizeColumns="True"
                               CanUserSortColumns="True"
                               MaxHeight="300"
-                              DoubleTapped="OnPivotShortlistDoubleTapped">
+                              DoubleTapped="OnPivotShortlistDoubleTapped"
+                              Sorting="OnPivotShortlistSorting">
                       <DataGrid.Columns>
-                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}" Width="2*"/>
-                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}" Width="*"/>
-                        <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80"/>
-                        <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120"/>
+                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
+                                            Width="Auto" MinWidth="240" SortMemberPath="ClassFqn"/>
+                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
+                                            Width="Auto" MinWidth="140" SortMemberPath="Assembly"/>
+                        <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80"
+                                            SortMemberPath="Presence"/>
+                        <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120"
+                                            SortMemberPath="AvgInstances"/>
                         <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70"
                                             SortMemberPath="Cv"/>
-                        <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55"/>
+                        <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55"
+                                            SortMemberPath="FieldCount"/>
                         <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65"
                                             SortMemberPath="PrimitiveFieldRatio"/>
                         <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65"
@@ -2356,7 +2372,8 @@
                               CanUserResizeColumns="True"
                               CanUserSortColumns="True"
                               MaxHeight="300"
-                              DoubleTapped="OnPivotFieldScoreDoubleTapped">
+                              DoubleTapped="OnPivotFieldScoreDoubleTapped"
+                              Sorting="OnPivotFieldScoreSorting">
                       <DataGrid.ContextMenu>
                         <ContextMenu>
                           <MenuItem Header="Add to Key fields"
@@ -2366,8 +2383,10 @@
                         </ContextMenu>
                       </DataGrid.ContextMenu>
                       <DataGrid.Columns>
-                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}" Width="2*"/>
-                        <DataGridTextColumn Header="Type" Binding="{Binding FieldType}" Width="*"/>
+                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
+                                            Width="Auto" MinWidth="200" SortMemberPath="FieldName"/>
+                        <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
+                                            Width="Auto" MinWidth="160" SortMemberPath="FieldType"/>
                         <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70"
                                             SortMemberPath="Score"/>
                         <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70"
@@ -2468,18 +2487,20 @@
                   <DockPanel>
                     <TextBlock DockPanel.Dock="Top" Text="Pivot results"
                                FontWeight="SemiBold" Margin="6,4,6,4"/>
-                    <!-- Per-snap value columns get added by code-behind
-                         (OnPivotResultsSchemaChanged) every Run — the
-                         dimension depends on selected snap count and
-                         value field count, which Avalonia DataGrid
-                         doesn't auto-discover from the bound type. -->
+                    <!-- Collision + key columns are sortable via the
+                         manual AOT-safe handler. Trajectory wraps + has a
+                         tooltip (29e-2 polish), so it stays star-sized to
+                         fill remaining width — no truncation to scroll
+                         past. -->
                     <DataGrid Name="PivotResultsGrid"
                               ItemsSource="{Binding ClassPivot.Results}"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               GridLinesVisibility="Horizontal"
                               CanUserResizeColumns="True"
-                              DoubleTapped="OnPivotResultDoubleTapped">
+                              CanUserSortColumns="True"
+                              DoubleTapped="OnPivotResultDoubleTapped"
+                              Sorting="OnPivotResultsSorting">
                       <DataGrid.ContextMenu>
                         <ContextMenu>
                           <MenuItem Header="Inspect (latest snap)"
@@ -2496,10 +2517,11 @@
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="⚠"
                                             Binding="{Binding CollisionMarker}"
-                                            Width="32"/>
+                                            Width="32" SortMemberPath="HasCollision"/>
                         <DataGridTextColumn Header="Key tuple"
                                             Binding="{Binding KeyTupleDisplay}"
-                                            Width="2*"/>
+                                            Width="Auto" MinWidth="180"
+                                            SortMemberPath="KeyTupleDisplay"/>
                         <!-- Single Trajectory column — pre-rendered by
                              PivotViewModel as "fieldName: v0 → v1 → …"
                              (multi-line when >1 value field).

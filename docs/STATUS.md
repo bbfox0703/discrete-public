@@ -1,6 +1,6 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29e CORE COMPLETE (29e-1 … 29e-4)**; head pending commit / build #696 UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29e CORE COMPLETE (29e-1 … 29e-4) + 29e-5 DataGrid polish**; head pending commit / build #698 UI / DLL #650).
 
 ## TL;DR — what's left to pick up (next session)
 
@@ -46,8 +46,20 @@ on top of the 29e-1/-1b engine. Waves of Phase 29e:
   key + Apply; scored DataGrid (sortable), double-click → add as key,
   right-click → add as value. The filterable field picker requested
   during 29e-2 smoke.
+* **29e-5 polish** (live-smoke #2 on 활俠傳) — three recurring
+  DataGrid papercuts, fixed on all three Pivot grids: (1) **AOT-safe
+  sort** — Avalonia's built-in header sort is reflection-based and
+  no-ops under AOT; replaced with a manual `Sorting`-event handler +
+  typed ViewModel comparers. (2) **Auto-width + h-scroll** — text
+  columns moved off star-sizing so long FQNs / field names aren't
+  truncated and a horizontal scrollbar appears. (3) **class-name
+  keyword filter** added to Stage 0. +4 ViewModel tests. Verified
+  live: key=`_type` correctly walked the 銀兩 money trajectory; the
+  full funnel (Analyze → Score → pivot) works end-to-end. **Audit
+  flagged 7 legacy grids with the same two bugs — see Avalonia
+  caveats; not yet migrated.**
 
-**539/539 green** (was 462 before 29e). No DLL change. Full design +
+**543/543 green** (was 462 before 29e). No DLL change. Full design +
 live-smoke findings at [class-pivot.md](class-pivot.md) §13.
 
 ### Live-smoke status (29e-2)
@@ -87,6 +99,13 @@ take 3-4 snapshots, open Class Pivot tab.
 
 ### Deferred (post-29e-core)
 
+* **Migrate 7 legacy DataGrids** to the AOT-safe manual sort +
+  Auto-width pattern used on the Pivot grids (29e-5): Fields,
+  Inspector, Methods, Symbol Finder, Value Search, Snapshot diff,
+  SnapshotFieldStats. Each needs a typed `switch` comparer for its
+  row type. The Inspector `FieldsDataGrid` is the tricky one — its
+  sort is intentionally visual-only today to preserve `Fields` order
+  for expand/collapse, so it needs a view-vs-model decision.
 * **Cheap DB-side class enumeration** so Stage 0's class list +
   assembly list populate without a prior hydrate (currently Analyze /
   Score hydrate the selected snaps). Read distinct `class_fqn` /
@@ -390,6 +409,8 @@ discrete/
 - **Avalonia 12 clipboard API churn**: only supported writer is `IClipboard.SetDataAsync(IAsyncDataTransfer)` — wrap a `DataFormat.Text` item in a `DataTransfer`.
 - **Avalonia 12 `avares://` keys off AssemblyName, not RootNamespace.** Renamed the exe? Update `App.axaml`'s `ResourceInclude Source="avares://{AssemblyName}/..."` too.
 - **Avalonia 12 `DataGridCheckBoxColumn`** requires entering edit mode (double-click) before the checkbox responds. Use `DataGridTemplateColumn` with an inline `<CheckBox Focusable="False">` for single-click toggles.
+- **Avalonia 12 DataGrid built-in sort is reflection-based → no-op under Native AOT.** `CanUserSortColumns="True"` clicks resolve `SortMemberPath` via `ClrPropertyInfo` (IL2026/IL3050), which silently does nothing in an AOT publish. Fix pattern (Phase 29e-5, Pivot grids): keep `CanUserSortColumns="True"` for the cursor affordance, handle the `Sorting` event, set `e.Handled = true`, and route to a ViewModel method with a **typed `switch` comparer** (`nameof(Row.Member) => (a,b)=>a.Member.CompareTo(b.Member)`) that sorts the backing list + rebuilds the view. Track asc/desc yourself — `DataGridColumn.SortDirection` is NOT public in Avalonia 12 (the glyph is view-internal), so there's no built-in arrow. **Audit (2026-05-28): 7 legacy grids still use the broken built-in sort** — Fields (`BrowserFieldsDataGrid`), Inspector (`FieldsDataGrid`), Methods, Symbol Finder, Value Search, Snapshot diff, `SnapshotFieldStatsGrid`. Not yet migrated.
+- **Avalonia 12 DataGrid star-sized columns never overflow → no horizontal scrollbar + truncation.** All-`Width="*"`/`2*` columns sum to exactly the viewport, so long text (class FQNs, field names) clips with no way to scroll. Fix: give text columns `Width="Auto"` + `MinWidth` (numeric/fixed columns stay pixel-width) so the column set can exceed the pane width and the DataGrid shows its horizontal scrollbar. Same 7 legacy grids above still star-only.
 - **`CommunityToolkit.Mvvm` source-gen name collision**: a property named `Backend` collides with the generated field name. Use `Backend2`.
 - **`CommunityToolkit.Mvvm` and child-collection CanExecute**: a command's CanExecute is NOT auto-re-evaluated when an item inside an `ObservableCollection<T>` raises PropertyChanged. Subscribe to each row's `PropertyChanged` and call `Notify*Changed()` manually. Pattern: `MethodOverloadsViewModel.OnRowPropertyChanged`.
 

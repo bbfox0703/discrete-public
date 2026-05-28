@@ -431,6 +431,54 @@ public partial class MainWindow : Window
         vm.ClassPivot.AddFieldToValues(f);
     }
 
+    // ── Phase 29e-5: AOT-safe manual DataGrid sort ──────────────────────
+    //
+    // Avalonia's built-in header sort resolves DataGridColumn.SortMemberPath
+    // via reflection (ClrPropertyInfo) — IL2026/IL3050 — which silently
+    // no-ops under Native AOT. We cancel the default and route the click
+    // to a typed ViewModel comparer. DataGridColumn has no public
+    // SortDirection in Avalonia 12 (the glyph is view-internal), so we
+    // track ascending/descending ourselves per grid and toggle on repeat
+    // clicks of the same column.
+
+    private (string? Member, bool Asc) _shortlistSort;
+    private (string? Member, bool Asc) _fieldScoreSort;
+    private (string? Member, bool Asc) _resultsSort;
+
+    private static bool ToggleDir(ref (string? Member, bool Asc) state, string path)
+    {
+        bool asc = !(string.Equals(state.Member, path, StringComparison.Ordinal) && state.Asc);
+        state = (path, asc);
+        return asc;
+    }
+
+    private void OnPivotShortlistSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;   // suppress reflection-based default sort
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        vm.ClassPivot.SortShortlist(path, ToggleDir(ref _shortlistSort, path));
+    }
+
+    private void OnPivotFieldScoreSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        vm.ClassPivot.SortFieldScores(path, ToggleDir(ref _fieldScoreSort, path));
+    }
+
+    private void OnPivotResultsSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        vm.ClassPivot.SortResults(path, ToggleDir(ref _resultsSort, path));
+    }
+
 
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
     /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir

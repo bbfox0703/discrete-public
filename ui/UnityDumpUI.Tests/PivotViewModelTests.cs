@@ -682,4 +682,76 @@ public class PivotViewModelTests : IDisposable
         Assert.Single(pivot.FieldScores);
         Assert.Equal("_mp", pivot.FieldScores[0].FieldName);
     }
+
+    // ─── Stage 0 class-name filter + sort (29e-5 polish) ───────────────
+
+    [Fact]
+    public async Task ClassNameFilter_NarrowsShortlist()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.GameStat", "asm",
+                MakeInstance("0x1", ("id", "System.Int32", 1), ("v", "System.Int32", 10))),
+            MakeClass("Game.PlayerData", "asm",
+                MakeInstance("0x2", ("id", "System.Int32", 1), ("v", "System.Int32", 20)))));
+        await pivot.AnalyzeClassesAsync();
+        Assert.Equal(2, pivot.ClassShortlist.Count);
+
+        pivot.ClassNameFilter = "stat";   // case-insensitive
+        Assert.Single(pivot.ClassShortlist);
+        Assert.Equal("Game.GameStat", pivot.ClassShortlist[0].ClassFqn);
+    }
+
+    [Fact]
+    public async Task SortShortlist_ByFieldCount_Ascending_ThenDescending()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Small", "asm",
+                MakeInstance("0x1", ("a", "System.Int32", 1), ("b", "System.Int32", 2))),
+            MakeClass("Game.Big", "asm",
+                MakeInstance("0x2", ("a", "System.Int32", 1), ("b", "System.Int32", 2),
+                                    ("c", "System.Int32", 3), ("d", "System.Int32", 4)))));
+        await pivot.AnalyzeClassesAsync();
+
+        pivot.SortShortlist(nameof(ClassShortlistRow.FieldCount), ascending: true);
+        Assert.Equal("Game.Small", pivot.ClassShortlist[0].ClassFqn);
+
+        pivot.SortShortlist(nameof(ClassShortlistRow.FieldCount), ascending: false);
+        Assert.Equal("Game.Big", pivot.ClassShortlist[0].ClassFqn);
+    }
+
+    [Fact]
+    public async Task SortFieldScores_ByFieldName_Ascending()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Stat", "asm",
+                MakeInstance("0x1", ("zeta", "System.Int32", 1), ("alpha", "System.Int32", 2)))));
+        pivot.ClassFqn = "Game.Stat";
+        await pivot.ScoreFieldsAsync();
+
+        pivot.SortFieldScores(nameof(FieldScore.FieldName), ascending: true);
+        Assert.Equal("alpha", pivot.FieldScores[0].FieldName);
+    }
+
+    [Fact]
+    public async Task SortResults_ByKeyTuple_Ascending()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Stat", "asm",
+                MakeInstance("0x1", ("id", "System.Int32", 3), ("v", "System.Int32", 30)),
+                MakeInstance("0x2", ("id", "System.Int32", 1), ("v", "System.Int32", 10)),
+                MakeInstance("0x3", ("id", "System.Int32", 2), ("v", "System.Int32", 20)))));
+        pivot.ClassFqn = "Game.Stat";
+        pivot.KeyFieldsText = "id";
+        pivot.ValueFieldsText = "v";
+        await pivot.RunAsync();
+        Assert.Equal(3, pivot.Results.Count);
+
+        pivot.SortResults(nameof(PivotResultRow.KeyTupleDisplay), ascending: true);
+        Assert.Equal("1", pivot.Results[0].KeyTupleDisplay);
+        Assert.Equal("3", pivot.Results[2].KeyTupleDisplay);
+    }
 }
