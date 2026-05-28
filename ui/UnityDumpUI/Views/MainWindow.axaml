@@ -1624,26 +1624,32 @@
                             Margin="0,6,0,0"
                             ToolTip.Tip="When unchecked (default), full-capture mode skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus — common Unity engine + .NET system + popular-support assemblies that flood the snapshot with non-gameplay state. Check to keep everything."/>
 
-                  <!-- Row 2 — Phase 29f Layer B: reference-array element inner-field capture -->
-                  <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
-                            Content="Capture array element fields (Layer B)"
-                            IsChecked="{Binding Snapshot.CaptureArrayElementFields, Mode=TwoWay}"
-                            Margin="0,6,12,0"
-                            ToolTip.Tip="Capture each reference-type array element's own fields one level deep, so the Class Pivot tab can pivot array elements by an inner field (e.g. StatConvertCollectionData[] keyed by _propertyID). OFF by default — it multiplies capture size. On 64-bit this captures every reference array (blanket); on 32-bit it is disabled unless you name targets below (OOM safety)."/>
-                  <TextBlock Grid.Row="2" Grid.Column="2" Text="Elem field cap:"
-                             VerticalAlignment="Center" Margin="0,6,6,0"
-                             ToolTip.Tip="Max fields captured per array element (server hard-cap 64). Only used when 'Capture array element fields' is on."/>
-                  <NumericUpDown Grid.Row="2" Grid.Column="3"
-                                 Value="{Binding Snapshot.ElementFieldCap, Mode=TwoWay}"
-                                 Minimum="1" Maximum="64" Increment="1"
-                                 MinWidth="150" Margin="0,6,12,0"/>
-                  <TextBlock Grid.Row="2" Grid.Column="4" Text="Targets:"
-                             VerticalAlignment="Center" Margin="0,6,6,0"/>
-                  <TextBox Grid.Row="2" Grid.Column="5" Grid.ColumnSpan="4"
-                           Text="{Binding Snapshot.ArrayElementTargetsText, Mode=TwoWay}"
-                           PlaceholderText="(x64: blank = all ref arrays. x86: required, e.g. Mortal.Core.GameStat._statAdditionData)"
-                           Margin="0,6,0,0"
-                           ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' (all its reference arrays) or 'Namespace.Class.fieldName', comma/semicolon separated. Required to enable Layer B capture on 32-bit targets; leave blank on 64-bit for blanket capture."/>
+                  <!-- Row 2 — Phase 29f Layer B: reference-array element inner-field
+                       capture. A self-contained DockPanel (spanning all columns) so
+                       the long checkbox label keeps its natural width instead of
+                       being crushed into the narrow shared Auto column (which made
+                       it wrap one char per line). Targets box fills the remainder. -->
+                  <DockPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="9"
+                             Margin="0,6,0,0" LastChildFill="True">
+                    <CheckBox DockPanel.Dock="Left"
+                              Content="Capture array element fields (Layer B)"
+                              VerticalAlignment="Center" Margin="0,0,16,0"
+                              IsChecked="{Binding Snapshot.CaptureArrayElementFields, Mode=TwoWay}"
+                              ToolTip.Tip="Capture each reference-type array element's own fields one level deep, so the Class Pivot tab can pivot array elements by an inner field (e.g. StatConvertCollectionData[] keyed by _propertyID). OFF by default — it multiplies capture size. On 64-bit this captures every reference array (blanket); on 32-bit it is disabled unless you name targets below (OOM safety)."/>
+                    <TextBlock DockPanel.Dock="Left" Text="Elem field cap:"
+                               VerticalAlignment="Center" Margin="0,0,6,0"
+                               ToolTip.Tip="Max fields captured per array element (server hard-cap 64). Only used when 'Capture array element fields' is on."/>
+                    <NumericUpDown DockPanel.Dock="Left"
+                                   Value="{Binding Snapshot.ElementFieldCap, Mode=TwoWay}"
+                                   Minimum="1" Maximum="64" Increment="1"
+                                   Width="120" Margin="0,0,16,0"/>
+                    <TextBlock DockPanel.Dock="Left" Text="Targets:"
+                               VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding Snapshot.ArrayElementTargetsText, Mode=TwoWay}"
+                             VerticalAlignment="Center"
+                             PlaceholderText="(x64: blank = all ref arrays. x86: required, e.g. Mortal.Core.GameStat._statAdditionData)"
+                             ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' (all its reference arrays) or 'Namespace.Class.fieldName', comma/semicolon separated. Required to enable Layer B capture on 32-bit targets; leave blank on 64-bit for blanket capture."/>
+                  </DockPanel>
                 </Grid>
               </Border>
 

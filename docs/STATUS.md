@@ -61,6 +61,22 @@
   `ArrayPivotEngine`. **Next: 29f-5 live-smoke** on 活俠傳
   `GameStat._statAdditionData` (x86 targeted) + an x64 blanket smoke —
   needs an injected DLL, so it's the user's to run.
+* **29f live-smoke #1 (활俠傳 x86) — Layer B capture+pivot VALIDATED.**
+  Targets=`Mortal.Core.GameStat._statAdditionData`, inner value
+  `_totalRate` walked `1.0 → 1.0 → 1.0` across 3 snaps — element inner
+  fields were captured + pivoted end-to-end. (The `(missing)` inner-key
+  rows in the smoke were just a wrong field name: `_identity` isn't a
+  field on `StatConvertCollectionData`; its fields are `_list` /
+  `_totalRate`.) Two follow-up fixes landed from the smoke:
+  - **Snapshot-tab layout** — the "Capture array element fields" checkbox
+    was crammed into the shared narrow `Auto` column and wrapped one char
+    per line. Re-housed Row 2 as a self-contained full-width `DockPanel`
+    (checkbox keeps natural width, Targets box fills the rest).
+  - **Inspector expand bug (pre-existing, not Layer B)** — expanding
+    `m_CachedPtr` (System.IntPtr) / a `System.Single` gave "(struct —
+    expand)" → "class not resolved". `InstanceFieldClassifier` routed any
+    `IsValueType` field without an inline-decoded value to `ValueStruct`;
+    now `System.*` scalar value types stay `Leaf` (+2 tests, 577 total).
 
 ## TL;DR — what's left to pick up (next session)
 

@@ -108,10 +108,22 @@ public static class InstanceFieldClassifier
         // floats to ValueStruct.
         bool primitiveDecoded = f.Value.HasValue || f.String is not null;
 
+        // A System.* value type (IntPtr / UIntPtr, the numeric primitives,
+        // Boolean, Char, Decimal, …) is a scalar with no walkable managed
+        // fields. It must stay a Leaf even when its value wasn't inline-decoded
+        // — e.g. IntPtr comes back as a Ptr (not Value/String), and a field at
+        // a garbage address fails to decode entirely. Without this guard the
+        // IsValueType signal alone routed those to ValueStruct, giving an
+        // "(struct — expand)" chevron whose walkInstance then returns
+        // "class not resolved". Mirrors the System.* exclusion TryParseClassName
+        // already applies to the legacy path below.
+        bool scalarSystemType = !string.IsNullOrEmpty(f.Type)
+            && f.Type.StartsWith("System.", StringComparison.Ordinal);
+
         // Rule 3 — inline value-type struct. The field's storage IS the
         // struct — no pointer to deref — and walkInstance can iterate its
         // fields by offset starting at the field's own address.
-        bool serverStruct = f.IsValueType && !primitiveDecoded;
+        bool serverStruct = f.IsValueType && !primitiveDecoded && !scalarSystemType;
         bool legacyStruct = !primitiveDecoded
             && !string.IsNullOrEmpty(f.Type)
             && !UnityTypeMap.IsPointerType(f.Type)

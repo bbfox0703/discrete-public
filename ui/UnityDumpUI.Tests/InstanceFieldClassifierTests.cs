@@ -228,6 +228,37 @@ public class InstanceFieldClassifierTests
     }
 
     [Fact]
+    public void Classify_SystemIntPtrValueType_IsLeaf_NotExpandableStruct()
+    {
+        // m_CachedPtr (UnityEngine.Object's native handle) is System.IntPtr:
+        // IsValueType=true, decoded as a Ptr (not Value/String). It has no
+        // walkable managed fields, so it must be a Leaf — not an "(struct —
+        // expand)" chevron that fails with "class not resolved".
+        WalkedField f = Field(
+            type:        "System.IntPtr",
+            address:     "0x5200",
+            ptr:         "0x000000000EAE7B80",
+            isValueType: true);
+
+        Assert.Equal(WalkedFieldKind.Leaf, InstanceFieldClassifier.Classify(f, isPointerValue: false));
+    }
+
+    [Fact]
+    public void Classify_SystemSingleValueTypeUndecoded_IsLeaf()
+    {
+        // A System.Single whose value wasn't inline-decoded (e.g. it sits at a
+        // garbage address inside a null array element) must still be a Leaf —
+        // the IsValueType flag alone must not promote a System.* scalar to an
+        // expandable struct.
+        WalkedField f = Field(
+            type:        "System.Single",
+            address:     "0x0000000000000010",
+            isValueType: true);
+
+        Assert.Equal(WalkedFieldKind.Leaf, InstanceFieldClassifier.Classify(f, isPointerValue: false));
+    }
+
+    [Fact]
     public void Classify_ValueStructMissingAddress_DegradesAwayFromValueStruct()
     {
         // ValueStruct routing requires Address (the field's own storage location)
