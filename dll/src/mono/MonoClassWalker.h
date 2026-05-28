@@ -61,6 +61,13 @@ struct ClassInfoResult {
 };
 ClassInfoResult ReadClassInfo(MonoClass* klass);
 
+// Phase 29f (Layer B) — SEH-guarded mono_object_get_class on a raw managed
+// object pointer. Returns nullptr if the resolver lacks the export, the
+// pointer is null, or the call faults (a false-positive / garbage array
+// slot). The snapshot reference-array inner-field capture uses this to
+// resolve each element object's runtime class before walking its fields.
+MonoClass* ClassOfObject(std::uintptr_t objPtr);
+
 // --- runtime ops (Phase 3 segment 3) ---------------------------------------
 
 struct StaticFieldAddress {

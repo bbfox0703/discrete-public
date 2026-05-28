@@ -55,6 +55,13 @@ Il2CppClass*            FindClass(const Il2CppImage* image,
                                   const std::string& ns, const std::string& name);
 ClassInfoResult         ReadClassInfo(Il2CppClass* klass);
 
+// Phase 29f (Layer B) — SEH-guarded il2cpp_object_get_class on a raw managed
+// object pointer. Returns nullptr if the resolver lacks the export, the
+// pointer is null, or the call faults (false-positive / garbage array slot).
+// Used by the snapshot reference-array inner-field capture to resolve each
+// element object's runtime class before walking its fields.
+Il2CppClass*            ClassOfObject(std::uintptr_t objPtr);
+
 /// SEH-guarded sanity probe used by callers that resolve an
 /// <c>Il2CppClass*</c> from an unverified source — e.g. the first qword of
 /// an object header (klass-from-header expand path). Returns true when

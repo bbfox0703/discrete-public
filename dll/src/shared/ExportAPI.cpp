@@ -1079,7 +1079,8 @@ void RegisterCoreHandlers() {
     // contract stays consistent across walkInstance / Snapshot / whatIsAt.
     // ------------------------------------------------------------------------
     auto walkArrayElementsInline = [formatHex, decodeField, bytesToHex](
-        std::uintptr_t arrayPtr, const std::string& elementTypeRaw, std::size_t cap) -> json {
+        std::uintptr_t arrayPtr, const std::string& elementTypeRaw, std::size_t cap,
+        const std::function<json(std::uintptr_t)>& elementFieldCapturer) -> json {
         if (arrayPtr == 0 || cap == 0) {
             return json{{"length", 0}, {"count", 0}, {"elements", json::array()}};
         }
@@ -1139,8 +1140,23 @@ void RegisterCoreHandlers() {
                 for (auto kv = d.begin(); kv != d.end(); ++kv) e[kv.key()] = kv.value();
             } else {
                 std::uintptr_t v = 0;
-                if (rd(slotAddr, &v, sizeof(std::uintptr_t))) e["ptr"] = formatHex(v);
-                else                                          e["error"] = "unreadable";
+                if (rd(slotAddr, &v, sizeof(std::uintptr_t))) {
+                    e["ptr"] = formatHex(v);
+                    // Phase 29f (Layer B): chase the element object one level
+                    // deeper to capture its own fields when a capturer is
+                    // supplied. The snapshot handler passes one only when
+                    // arrayElementFields is on AND the per-target gate allows
+                    // this class.field — otherwise the capturer is empty and
+                    // we keep the legacy ptr-only behaviour. The capturer
+                    // returns {"fields":[…]} or {"element_class_error":"…"}.
+                    if (elementFieldCapturer && v != 0) {
+                        json inner = elementFieldCapturer(v);
+                        if (inner.is_object())
+                            for (auto kv = inner.begin(); kv != inner.end(); ++kv) e[kv.key()] = kv.value();
+                    }
+                } else {
+                    e["error"] = "unreadable";
+                }
             }
             elements.push_back(std::move(e));
         }
@@ -2121,6 +2137,23 @@ void RegisterCoreHandlers() {
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 4096)     arrayCap = 4096;
 
+        // Phase 29f (Layer B) — reference-array inner-field capture opt-in.
+        // arrayElementFields turns it on; elementFieldCap bounds per-element
+        // field count; arrayElementTargets (optional) limits capture to
+        // matching "FQN" / "FQN.fieldName" entries. The x86 blanket gate is
+        // applied below once the game pointer size is known.
+        const bool reqArrayElementFields = args.value("arrayElementFields", false);
+        std::size_t elementFieldCap = static_cast<std::size_t>(args.value("elementFieldCap", 16));
+        if (elementFieldCap == 0)  elementFieldCap = 16;
+        if (elementFieldCap > 64)  elementFieldCap = 64;
+        std::vector<std::string> arrayElementTargets;
+        if (args.contains("arrayElementTargets") && args["arrayElementTargets"].is_array()) {
+            for (const auto& t : args["arrayElementTargets"]) {
+                if (t.is_string() && !t.get_ref<const std::string&>().empty())
+                    arrayElementTargets.push_back(t.get_ref<const std::string&>());
+            }
+        }
+
         // 32-bit OOM guard — refuse before doing any work if game is x86
         // and already near the 4 GB user-space ceiling. Build #646 live-
         // smoke on 活俠傳 (Mono x86) crashed snap #2 when the DLL-side
@@ -2218,6 +2251,17 @@ void RegisterCoreHandlers() {
         session->gameSessionId = Snapshot::SessionManager::GameSessionId();
         session->instanceCap   = instanceCap;
         session->arrayCap      = arrayCap;
+        // Phase 29f (Layer B) — x86 blanket gate: 32-bit targets only get
+        // inner-field capture when an explicit target set is supplied
+        // (blanket on x86 risks the OOM the cap-clamp/refusal gate guards
+        // against). x64 leaves targets empty for blanket capture.
+        session->elementFieldCap     = elementFieldCap;
+        session->arrayElementTargets = std::move(arrayElementTargets);
+        session->arrayElementFields  = reqArrayElementFields &&
+            !(memBefore.pointerSize == 4 && session->arrayElementTargets.empty());
+        // Effective state echoed in the Begin response so the UI knows when
+        // the x86 blanket gate silently disabled a requested capture.
+        const bool effArrayElementFields = session->arrayElementFields;
         session->plan.reserve(descs.size());
 
         std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
@@ -2300,6 +2344,59 @@ void RegisterCoreHandlers() {
                 ++classInfoCacheMisses;
                 auto inserted = globalClassInfo.emplace(c, Mono::ReadClassInfo(c));
                 return inserted.first->second;
+            };
+
+            // Phase 29f (Layer B) — given a reference-array element object
+            // pointer, resolve its runtime class and walk its own fields one
+            // level deep, reusing the cached getClassInfo + shared decodeField
+            // exactly like the top-level instance walk. Returns
+            // {"fields":[…]} or {"element_class_error":"…"}.
+            auto captureMonoElementFields = [&](std::uintptr_t elemPtr) -> json {
+                Mono::MonoClass* ec = Mono::ClassOfObject(elemPtr);
+                if (ec == nullptr) return json{{"element_class_error", "object_get_class_failed"}};
+                std::vector<Mono::MonoClass*> echain;
+                for (Mono::MonoClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
+                    echain.push_back(cur);
+                    if (Mono::GetResolver().class_get_parent == nullptr) break;
+                    cur = Mono::GetResolver().class_get_parent(cur);
+                }
+                json efields = json::array();
+                std::size_t produced = 0;
+                const std::size_t fcap = session->elementFieldCap;
+                for (std::size_t ci = echain.size(); ci > 0 && produced < fcap; --ci) {
+                    const auto& pr = getClassInfo(echain[ci - 1]);
+                    if (!pr.ok) continue;
+                    for (const auto& f : pr.info.fields) {
+                        if (produced >= fcap) break;
+                        if (f.flags & 0x10u) continue;   // skip statics
+                        std::uintptr_t fieldAddr = elemPtr + static_cast<std::uintptr_t>(f.offset);
+                        json fe = {
+                            {"name",   f.name},
+                            {"type",   f.typeName},
+                            {"offset", f.offset},
+                            {"from",   pr.info.self.name},
+                        };
+                        if (f.isEnum)      fe["is_enum"]       = true;
+                        if (f.isValueType) fe["is_value_type"] = true;
+                        const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                            ? f.underlyingTypeName : f.typeName;
+                        json d = decodeField(decodeType, fieldAddr);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) fe[kv.key()] = kv.value();
+                        // Layer B is one level deep — nested arrays inside the
+                        // element stay as their decodeField ptr, not walked.
+                        efields.push_back(std::move(fe));
+                        ++produced;
+                    }
+                }
+                return json{{"fields", std::move(efields)}};
+            };
+            auto shouldCaptureInner = [&](const std::string& fqn, const std::string& fieldName) -> bool {
+                if (!session->arrayElementFields) return false;
+                if (session->arrayElementTargets.empty()) return true;   // blanket (x64)
+                const std::string full = fqn + "." + fieldName;
+                for (const auto& t : session->arrayElementTargets)
+                    if (t == fqn || t == full) return true;
+                return false;
             };
 
             auto decodeOneClass = [&](Snapshot::ClassPlanItem& item) {
@@ -2421,7 +2518,13 @@ void RegisterCoreHandlers() {
                                         arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
                                     }
                                     if (arrPtr != 0) {
-                                        json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                        const std::string classFqn =
+                                            item.ns.empty() ? item.name : item.ns + "." + item.name;
+                                        json elems = walkArrayElementsInline(
+                                            arrPtr, f.typeName, arrayCap,
+                                            shouldCaptureInner(classFqn, f.name)
+                                                ? captureMonoElementFields
+                                                : std::function<json(std::uintptr_t)>{});
                                         // Only record successful captures
                                         // as "arrayElements"; error-path
                                         // responses (implausible_length /
@@ -2555,6 +2658,8 @@ void RegisterCoreHandlers() {
             {"gameSessionId",           sessionGuid},
             {"instanceCap",             instanceCap},
             {"arrayCap",                arrayCap},
+            {"arrayElementFields",      effArrayElementFields},
+            {"elementFieldCap",         elementFieldCap},
             {"totalClasses",            totalClasses},
             {"totalInstances",          totalInst},
             {"excludedSystemAssemblies", excludedSystemCount},
@@ -5134,6 +5239,20 @@ void RegisterCoreHandlers() {
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 4096)     arrayCap = 4096;
 
+        // Phase 29f (Layer B) — reference-array inner-field capture opt-in
+        // (mirror of the Mono handler).
+        const bool reqArrayElementFields = args.value("arrayElementFields", false);
+        std::size_t elementFieldCap = static_cast<std::size_t>(args.value("elementFieldCap", 16));
+        if (elementFieldCap == 0)  elementFieldCap = 16;
+        if (elementFieldCap > 64)  elementFieldCap = 64;
+        std::vector<std::string> arrayElementTargets;
+        if (args.contains("arrayElementTargets") && args["arrayElementTargets"].is_array()) {
+            for (const auto& t : args["arrayElementTargets"]) {
+                if (t.is_string() && !t.get_ref<const std::string&>().empty())
+                    arrayElementTargets.push_back(t.get_ref<const std::string&>());
+            }
+        }
+
         // 32-bit OOM guard — mirrors the Mono handler. IL2CPP x86 isn't
         // a shipping target today (the UI rejects it at inject time)
         // but the guard stays symmetric in case a future IL2CPP x86
@@ -5210,6 +5329,12 @@ void RegisterCoreHandlers() {
         session->gameSessionId = Snapshot::SessionManager::GameSessionId();
         session->instanceCap   = instanceCap;
         session->arrayCap      = arrayCap;
+        // Phase 29f (Layer B) — x86 blanket gate (mirror of Mono).
+        session->elementFieldCap     = elementFieldCap;
+        session->arrayElementTargets = std::move(arrayElementTargets);
+        session->arrayElementFields  = reqArrayElementFields &&
+            !(memBeforeIl.pointerSize == 4 && session->arrayElementTargets.empty());
+        const bool effArrayElementFields = session->arrayElementFields;
         session->plan.reserve(descs.size());
 
         std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
@@ -5271,6 +5396,55 @@ void RegisterCoreHandlers() {
             };
 
             const auto& rIl = IL2CPP::GetResolver();
+
+            // Phase 29f (Layer B) — reference-array element inner-field
+            // capture (mirror of the Mono path). Returns {"fields":[…]} or
+            // {"element_class_error":"…"}.
+            auto captureIlElementFields = [&](std::uintptr_t elemPtr) -> json {
+                IL2CPP::Il2CppClass* ec = IL2CPP::ClassOfObject(elemPtr);
+                if (ec == nullptr) return json{{"element_class_error", "object_get_class_failed"}};
+                std::vector<IL2CPP::Il2CppClass*> echain;
+                for (IL2CPP::Il2CppClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
+                    echain.push_back(cur);
+                    if (rIl.class_get_parent == nullptr) break;
+                    cur = rIl.class_get_parent(cur);
+                }
+                json efields = json::array();
+                std::size_t produced = 0;
+                const std::size_t fcap = session->elementFieldCap;
+                for (std::size_t ci = echain.size(); ci > 0 && produced < fcap; --ci) {
+                    const auto& pr = getClassInfoIl(echain[ci - 1]);
+                    if (!pr.ok) continue;
+                    for (const auto& f : pr.info.fields) {
+                        if (produced >= fcap) break;
+                        if (f.flags & 0x10u) continue;   // skip statics
+                        std::uintptr_t fieldAddr = elemPtr + static_cast<std::uintptr_t>(f.offset);
+                        json fe = {
+                            {"name",   f.name},
+                            {"type",   f.typeName},
+                            {"offset", f.offset},
+                            {"from",   pr.info.self.name},
+                        };
+                        if (f.isEnum)      fe["is_enum"]       = true;
+                        if (f.isValueType) fe["is_value_type"] = true;
+                        const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                            ? f.underlyingTypeName : f.typeName;
+                        json d = decodeField(decodeType, fieldAddr);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) fe[kv.key()] = kv.value();
+                        efields.push_back(std::move(fe));
+                        ++produced;
+                    }
+                }
+                return json{{"fields", std::move(efields)}};
+            };
+            auto shouldCaptureInner = [&](const std::string& fqn, const std::string& fieldName) -> bool {
+                if (!session->arrayElementFields) return false;
+                if (session->arrayElementTargets.empty()) return true;   // blanket (x64)
+                const std::string full = fqn + "." + fieldName;
+                for (const auto& t : session->arrayElementTargets)
+                    if (t == fqn || t == full) return true;
+                return false;
+            };
 
             auto decodeOneClassIl = [&](Snapshot::ClassPlanItem& item) {
                 IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(item.klass);
@@ -5385,7 +5559,13 @@ void RegisterCoreHandlers() {
                                         arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
                                     }
                                     if (arrPtr != 0) {
-                                        json elems = walkArrayElementsInline(arrPtr, f.typeName, arrayCap);
+                                        const std::string classFqn =
+                                            item.ns.empty() ? item.name : item.ns + "." + item.name;
+                                        json elems = walkArrayElementsInline(
+                                            arrPtr, f.typeName, arrayCap,
+                                            shouldCaptureInner(classFqn, f.name)
+                                                ? captureIlElementFields
+                                                : std::function<json(std::uintptr_t)>{});
                                         if (elems.contains("error")) {
                                             entry["arrayError"] = elems.value("error", std::string{"unknown"});
                                             if (elems.contains("length")) {
@@ -5512,6 +5692,8 @@ void RegisterCoreHandlers() {
             {"gameSessionId",           sessionGuid},
             {"instanceCap",             instanceCap},
             {"arrayCap",                arrayCap},
+            {"arrayElementFields",      effArrayElementFields},
+            {"elementFieldCap",         elementFieldCap},
             {"totalClasses",            totalClasses},
             {"totalInstances",          totalInst},
             {"excludedSystemAssemblies", excludedSystemCount},

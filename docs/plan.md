@@ -724,14 +724,24 @@ both Layer A's index-shuffle weakness and address drift. Full design in
   primitive-array element stays null), wire-contract (`"fields"` key +
   recursive round-trip via `ProtocolJsonContext`), and pre-Layer-B
   backward-compat (legacy JSON with no `fields` → `Fields == null`).
-- [ ] **29f-2** DLL element-field capture on **both** backends —
-  `walkArrayElementsInline` reference branch calls
-  `object_get_class(elemPtr)` (SEH) → cached `ReadClassInfo` →
-  `decodeField` per field (capped `elementFieldCap`, hard cap 64);
-  new `arrayElementFields` + `elementFieldCap` RPC params threaded
-  through snapshotBegin + session; bitness-adaptive default + x86
-  refusal/targeted gate; `element_class_error` on bad pointer. One
-  backend live-smoke. (1.5 days)
+- [x] **29f-2** DLL element-field capture on **both** backends —
+  ✅ **Code-complete + builds green (x64 + x86), 2026-05-28**; live-smoke
+  folded into 29f-5. `walkArrayElementsInline` gained a
+  `std::function<json(uintptr_t)>` element capturer; its reference branch
+  now calls it (keeps `ptr`, adds `fields` / `element_class_error`).
+  New public SEH-safe `Mono::ClassOfObject` / `IL2CPP::ClassOfObject`
+  (wrap `object_get_class`) resolve each element's runtime class; the
+  per-backend capturer walks the element's parent chain via the cached
+  `getClassInfo` and decodes each field with the shared `decodeField`
+  (skips statics, one level deep — nested arrays stay `ptr=`, capped at
+  `session->elementFieldCap`). New `arrayElementFields` (bool) +
+  `elementFieldCap` (default 16 / hard-cap 64) + `arrayElementTargets`
+  (`"FQN"` / `"FQN.fieldName"`) RPC params on both snapshotBegin
+  handlers + `Snapshot::Session`. **x86 blanket gate**: 32-bit + empty
+  targets → capture disabled (OOM safety); effective state echoed back
+  as `arrayElementFields` in the Begin response (+ mirrored on
+  `SnapshotBeginResult`). MagicStrings snapshotBegin doc updated.
+  DLL build #714, 555/555 UI tests still green.
 - [ ] **29f-3** `ArrayPivotEngine` (mirror `PivotEngine`) + unit
   tests: single/compound inner key, collisions, absent cells,
   cross-session, element-cap-hit, ref-array with no inner fields

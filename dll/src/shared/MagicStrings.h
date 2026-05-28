@@ -330,13 +330,23 @@ inline constexpr const char* CmdDumpClassInfo         = "dumpClassInfo";
 //     List<T> field. Hard-caps 8192 / 4096 (raised 2026-05-27 from
 //     1024 / 256 — dense classes were silently clipped at the prior
 //     ceiling).
+//     Phase 29f (Layer B): when `arrayElementFields=true`, each
+//     reference-type array element's own object fields are captured one
+//     level deep (up to `elementFieldCap`, default 16 / hard-cap 64) so
+//     the UI can pivot array elements by an inner field. `arrayElementTargets`
+//     (optional) limits this to matching "FQN" / "FQN.fieldName" entries.
+//     On 32-bit (x86) targets, blanket capture (targets empty) is refused
+//     for OOM safety — the response echoes the effective `arrayElementFields`.
 //     Request:
 //       { assemblies?: string[],   // default = all visible assemblies
 //         instanceCap?: int,       // default 100, hard-cap 8192
-//         arrayCap?: int }         // default 50,  hard-cap 4096
+//         arrayCap?: int,          // default 50,  hard-cap 4096
+//         arrayElementFields?: bool,        // default false (Layer B)
+//         elementFieldCap?: int,            // default 16, hard-cap 64
+//         arrayElementTargets?: string[] }  // "FQN" or "FQN.fieldName"
 //     Response:
 //       { ok, snapshotId, capturedAt, gameBuildId, gameSessionId,
-//         instanceCap, arrayCap,
+//         instanceCap, arrayCap, arrayElementFields, elementFieldCap,
 //         totalClasses, totalInstances,
 //         plan: [{ assembly, classCount, instanceCount }],
 //         scanStats: { regionsTotal, regionsScanned, bytesScanned, ... } }

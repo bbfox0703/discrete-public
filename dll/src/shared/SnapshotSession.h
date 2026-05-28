@@ -74,6 +74,19 @@ struct Session {
     std::string                            gameSessionId;  // per-DLL-load random hex
     std::size_t                            instanceCap     = 100;
     std::size_t                            arrayCap        = 50;
+
+    // Phase 29f (Layer B) — reference-array inner-field capture. When
+    // enabled, each reference-type array element gets its element object's
+    // own fields walked one level deep (so the UI can pivot array elements
+    // by an inner field instead of by index). elementFieldCap bounds the
+    // per-element field count. arrayElementTargets, when non-empty, limits
+    // capture to matching "FQN" (all ref-array fields of that class) or
+    // "FQN.fieldName" entries — the x86 path requires targets (blanket
+    // capture on 32-bit is refused for OOM safety); x64 leaves it empty
+    // for blanket capture.
+    bool                                   arrayElementFields = false;
+    std::size_t                            elementFieldCap    = 16;
+    std::vector<std::string>               arrayElementTargets;
     std::vector<ClassPlanItem>             plan;            // for the heap-walk result (kept for diagnostics)
     std::vector<PlanAssemblyEntry>         planByAssembly;  // for the Begin response
     std::size_t                            totalInstances  = 0;

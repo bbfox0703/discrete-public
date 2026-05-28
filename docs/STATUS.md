@@ -30,7 +30,19 @@
   gained `Fields` (`List<SnapshotFieldEntry>?`) + `SnapshotElementClassError`
   for reference-array inner-pivot. Source-gen JsonContext already covered
   the recursive type; +3 round-trip / backward-compat tests (555 total).
-  No DLL change yet — that's 29f-2.
+* **Phase 29f-2 (Layer B DLL capture) code-complete + builds green
+  (x64 + x86), DLL #714** — `walkArrayElementsInline` takes an element-
+  field capturer; reference elements keep `ptr` and gain `fields` /
+  `element_class_error`. New SEH-safe `Mono::ClassOfObject` /
+  `IL2CPP::ClassOfObject` resolve the element's runtime class; the
+  per-backend capturer reuses the cached `getClassInfo` + shared
+  `decodeField` to walk the element's fields one level deep (capped by
+  `elementFieldCap`). RPC params `arrayElementFields` / `elementFieldCap`
+  / `arrayElementTargets` on both snapshotBegin handlers; **x86 blanket
+  gate** disables capture on 32-bit unless explicit targets are given
+  (OOM safety), echoing the effective state back. **Live-smoke pending
+  → bundled into 29f-5** (game closed during this session; DLL needs
+  injection to exercise). Next: 29f-3 `ArrayPivotEngine`.
 
 ## TL;DR — what's left to pick up (next session)
 

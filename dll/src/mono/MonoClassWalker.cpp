@@ -108,6 +108,9 @@ int SehClassIsValueType(fn_class_is_valuetype fn, MonoClass* k) {
 MonoType* SehEnumBasetype(fn_class_enum_basetype fn, MonoClass* k) {
     __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+MonoClass* SehObjectGetClass(fn_object_get_class fn, MonoObject* o) {
+    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 MonoVTable* SehVTable(fn_class_vtable fn, MonoDomain* d, MonoClass* k) {
     __try { return fn(d, k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
@@ -269,6 +272,13 @@ ClassInfoResult ReadClassInfo(MonoClass* klass) {
 
     result.ok = true;
     return result;
+}
+
+MonoClass* ClassOfObject(std::uintptr_t objPtr) {
+    if (objPtr == 0) return nullptr;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.object_get_class == nullptr) return nullptr;
+    return SehObjectGetClass(r.object_get_class, reinterpret_cast<MonoObject*>(objPtr));
 }
 
 StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string& fieldName) {

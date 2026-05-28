@@ -134,6 +134,9 @@ std::uint32_t SehMethodToken(fn_method_get_token fn, const MethodInfo* m) {
 std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::uint32_t* iflags) {
     __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
 }
+Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
+    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 #pragma warning(pop)
 
 void* ReadMethodPointer(const MethodInfo* m) {
@@ -360,6 +363,13 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
 
     result.ok = true;
     return result;
+}
+
+Il2CppClass* ClassOfObject(std::uintptr_t objPtr) {
+    if (objPtr == 0) return nullptr;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.object_get_class == nullptr) return nullptr;
+    return SehObjectGetClass(r.object_get_class, reinterpret_cast<Il2CppObject*>(objPtr));
 }
 
 StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::string& fieldName) {

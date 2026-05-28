@@ -991,6 +991,16 @@ public sealed class SnapshotBeginResult
     [JsonPropertyName("gameSessionId")]   public string GameSessionId   { get; set; } = string.Empty;
     [JsonPropertyName("instanceCap")]     public int    InstanceCap     { get; set; }
     [JsonPropertyName("arrayCap")]        public int    ArrayCap        { get; set; }
+
+    /// <summary>Phase 29f (Layer B) — effective reference-array inner-field
+    /// capture state for this snapshot. The DLL echoes back the value it
+    /// actually used after the x86 blanket gate, so the UI can tell when a
+    /// requested capture was silently disabled on a 32-bit target (request
+    /// true but this false → "enabled inner-field capture needs a target on
+    /// 32-bit").</summary>
+    [JsonPropertyName("arrayElementFields")] public bool ArrayElementFields { get; set; }
+    [JsonPropertyName("elementFieldCap")]    public int  ElementFieldCap    { get; set; }
+
     [JsonPropertyName("totalClasses")]    public int    TotalClasses    { get; set; }
     [JsonPropertyName("totalInstances")]  public int    TotalInstances  { get; set; }
     [JsonPropertyName("plan")]            public List<SnapshotPlanEntry> Plan       { get; set; } = new();
