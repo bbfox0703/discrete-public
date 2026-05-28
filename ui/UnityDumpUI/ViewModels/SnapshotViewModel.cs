@@ -548,6 +548,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// capture on 32-bit targets; on x64 leave blank for blanket capture.</summary>
     [ObservableProperty] private string _arrayElementTargetsText = string.Empty;
 
+    /// <summary>Capture static-field VALUES (IL2CPP). Default OFF — static
+    /// metadata (name/type/offset) is always captured, but the values are
+    /// skipped unless opted in. Mono always captures static metadata only
+    /// (the vtable-freeze fix), so this toggle has no effect on Mono.
+    /// Note: statics are a small fraction of snapshot memory — the bulk is
+    /// instance fields — so this is a modest lever, not the main one.</summary>
+    [ObservableProperty] private bool _captureStaticFieldValues;
+
     /// <summary>Optional label the user can attach to a snapshot before
     /// taking it. Surfaced in the Snapshots list + diff status line.</summary>
     [ObservableProperty] private string _pendingLabel = string.Empty;
@@ -915,7 +923,9 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 scope, cap, arr, IncludeSystemAssemblies,
                 CaptureArrayElementFields,
                 CaptureArrayElementFields ? ElementFieldCap : (int?)null,
-                elemTargets, ct).ConfigureAwait(true);
+                elemTargets,
+                CaptureStaticFieldValues,
+                ct).ConfigureAwait(true);
 
             // The DLL echoes the EFFECTIVE capture state after its x86
             // blanket gate. If the user asked for Layer B capture but the
@@ -1341,7 +1351,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // status so the UI doesn't look hung. Stays on the UI thread
             // (ConfigureAwait(true)) so the status updates marshal correctly.
             var saveSw   = Stopwatch.StartNew();
-            var saveTask = _store.SaveSnapshotAsync(req);
+            // gzip + SQLite insert are CPU/IO-bound and run synchronously
+            // (Microsoft.Data.Sqlite's async is sync under the hood), so run
+            // them on a background thread — otherwise they'd block the UI
+            // thread and the elapsed ticker below could never render. The
+            // store serialises its own access via an internal gate.
+            var saveTask = Task.Run(() => _store.SaveSnapshotAsync(req));
             bool announced = false;
             while (!saveTask.IsCompleted)
             {
@@ -2424,6 +2439,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             // calls that wedge the game's main thread post-RPC. Give
             // the row a friendly label instead of the raw error code.
             if (f.Error == "static_value_skipped_mono") return "(static, value not captured on Mono)";
+            if (f.Error == "static_value_not_captured") return "(static, value capture disabled)";
             return $"(err: {f.Error})";
         }
         if (f.Value.HasValue && f.Value.Value.ValueKind != JsonValueKind.Null

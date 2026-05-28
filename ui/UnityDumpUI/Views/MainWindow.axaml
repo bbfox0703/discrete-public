@@ -1652,6 +1652,11 @@
                                    Value="{Binding Snapshot.ElementFieldCap, Mode=TwoWay}"
                                    Minimum="1" Maximum="64" Increment="1"
                                    Width="120" Margin="0,0,16,0"/>
+                    <CheckBox DockPanel.Dock="Left"
+                              Content="Capture static values"
+                              VerticalAlignment="Center" Margin="0,0,16,0"
+                              IsChecked="{Binding Snapshot.CaptureStaticFieldValues, Mode=TwoWay}"
+                              ToolTip.Tip="Capture IL2CPP static-field VALUES (default off — static name/type/offset metadata is always captured). Statics are a small fraction of snapshot memory, so this is a modest lever. No effect on Mono (which always captures static metadata only to avoid a runtime freeze)."/>
                     <TextBlock DockPanel.Dock="Left" Text="Targets:"
                                VerticalAlignment="Center" Margin="0,0,6,0"/>
                     <TextBox Text="{Binding Snapshot.ArrayElementTargetsText, Mode=TwoWay}"

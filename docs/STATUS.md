@@ -83,11 +83,36 @@
     Expanders so the user can reclaim vertical height for the results grid
     at any resolution. (Stage 0/1 were already collapsible; side-by-side
     was rejected — the wide grids would force h-scroll at 1080p.)
+* **29f live-smoke #3 follow-ups (SaGa Frontier 2 Remastered, x64 IL2CPP)**:
+  - **Save progress now works** — `SaveSnapshotAsync`'s gzip+insert runs
+    synchronously (Microsoft.Data.Sqlite), so it was blocking the UI thread and
+    the ticker never rendered. Now offloaded via `Task.Run`; the >2 s elapsed
+    status shows.
+  - **Static-value capture opt-out (requested)** — new "Capture static values"
+    checkbox (default OFF) + `captureStaticValues` RPC param. IL2CPP now emits
+    static metadata only unless opted in (matches Mono). **Honest caveat: this
+    is a *modest* memory lever** — the snapshot bulk is instance fields, not
+    statics.
+  - **Memory reality (Inspect-Memory.ps1 confirmed correct)**: the GAME is
+    ~1.5 GB (792 MB→1.5 GB WS); the DLL's `gameWorkingSet=4.3 GB` was the game
+    process *during* capture (its in-process JSON cache, freed after). The real
+    bloat is **DiscreteUI** holding snapshots: ~5.7 GB each (132K instances ×
+    fields + duplicated metadata strings + the per-field `BuildFieldIndex`
+    dict). 3 held ≈ 17 GB. **Real fix scheduled** = string-intern field
+    Name/Type/From/FQN at deserialize + lazy/released FieldIndex (the doubler);
+    interim = scope tighter / lower caps / use Inspector+Value Search for a
+    known class.
+  - **`MainGame/PLY_WORK` not in diff** = class-filter slash-vs-dot mismatch
+    (snapshot FQN may be `MainGame.PLY_WORK`); filter by `PLY_WORK` substring.
+    Nested-name normalization between Inspector + Snapshot to be unified.
+  - **Auto-prune dropping the in-memory copy is BY DESIGN** (frees UI memory
+    along with DB space; [SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)
+    AutoPruneAndMaybeVacuumAsync).
 * **29f live-smoke #2 (SaGa Frontier 2 Remastered, x64 IL2CPP) — Layer B
   blanket CTD.** Big game: **136K–158K instances / 21K arrays** across 3,765
-  classes (`gameWorkingSet=4.7GB` — that 4-5GB is the *game* process shown in
-  the status line, not the snapshot; the snapshot is still big at this scale →
-  narrow with **Scope** assemblies / lower caps). Capture without Layer B
+  classes (`gameWorkingSet=4.7GB` — the game process *during* capture incl. the
+  DLL's transient JSON cache, not the snapshot; snapshot still big at this scale
+  → narrow with **Scope** assemblies / lower caps). Capture without Layer B
   succeeded; with blanket Layer B it **crashed during decode** (no
   `snapshotBegin id=2` completion line).
   - **#718 attempt was insufficient** — `ProbeKlassValid` (a name read) can

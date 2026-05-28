@@ -92,6 +92,12 @@ struct Session {
     // 21K arrays) can't explode the JSON cache into an OOM CTD. Once hit,
     // remaining elements stay ptr-only. Targeted captures rarely approach it.
     std::size_t                            elementCaptureBudget = 20000;
+
+    // Capture static-field VALUES (IL2CPP). Default off: static metadata
+    // (name/type/offset) is always emitted, but the value decode is skipped
+    // unless the user opts in — keeps snapshots leaner + matches the Mono
+    // path (which captures static metadata only to avoid the vtable freeze).
+    bool                                   captureStaticValues = false;
     std::vector<ClassPlanItem>             plan;            // for the heap-walk result (kept for diagnostics)
     std::vector<PlanAssemblyEntry>         planByAssembly;  // for the Begin response
     std::size_t                            totalInstances  = 0;

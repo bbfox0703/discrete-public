@@ -960,6 +960,7 @@ public sealed class BackendAdapter : ILiveExportSource
         bool arrayElementFields = false,
         int? elementFieldCap = null,
         IReadOnlyList<string>? arrayElementTargets = null,
+        bool captureStaticValues = false,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>();
@@ -979,6 +980,7 @@ public sealed class BackendAdapter : ILiveExportSource
             using var doc = JsonDocument.Parse(BuildStringArrayJson(arrayElementTargets));
             args["arrayElementTargets"] = doc.RootElement.Clone();
         }
+        if (captureStaticValues) args["captureStaticValues"] = Bool(true);
 
         var env = await _pipe.SendAsync(
             "snapshotBegin", args,

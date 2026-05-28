@@ -2143,6 +2143,7 @@ void RegisterCoreHandlers() {
         // matching "FQN" / "FQN.fieldName" entries. The x86 blanket gate is
         // applied below once the game pointer size is known.
         const bool reqArrayElementFields = args.value("arrayElementFields", false);
+        const bool reqCaptureStaticValues = args.value("captureStaticValues", false);
         std::size_t elementFieldCap = static_cast<std::size_t>(args.value("elementFieldCap", 16));
         if (elementFieldCap == 0)  elementFieldCap = 16;
         if (elementFieldCap > 64)  elementFieldCap = 64;
@@ -2260,6 +2261,7 @@ void RegisterCoreHandlers() {
         // against). x64 leaves targets empty for blanket capture.
         session->elementFieldCap     = elementFieldCap;
         session->elementCaptureBudget = elementCaptureBudget;
+        session->captureStaticValues  = reqCaptureStaticValues;
         session->arrayElementTargets = std::move(arrayElementTargets);
         session->arrayElementFields  = reqArrayElementFields &&
             !(memBefore.pointerSize == 4 && session->arrayElementTargets.empty());
@@ -5272,6 +5274,7 @@ void RegisterCoreHandlers() {
         // Phase 29f (Layer B) — reference-array inner-field capture opt-in
         // (mirror of the Mono handler).
         const bool reqArrayElementFields = args.value("arrayElementFields", false);
+        const bool reqCaptureStaticValues = args.value("captureStaticValues", false);
         std::size_t elementFieldCap = static_cast<std::size_t>(args.value("elementFieldCap", 16));
         if (elementFieldCap == 0)  elementFieldCap = 16;
         if (elementFieldCap > 64)  elementFieldCap = 64;
@@ -5372,6 +5375,7 @@ void RegisterCoreHandlers() {
         // Phase 29f (Layer B) — x86 blanket gate (mirror of Mono).
         session->elementFieldCap     = elementFieldCap;
         session->elementCaptureBudget = elementCaptureBudget;
+        session->captureStaticValues  = reqCaptureStaticValues;
         session->arrayElementTargets = std::move(arrayElementTargets);
         session->arrayElementFields  = reqArrayElementFields &&
             !(memBeforeIl.pointerSize == 4 && session->arrayElementTargets.empty());
@@ -5563,24 +5567,30 @@ void RegisterCoreHandlers() {
                 bool staticBaseResolved = false;
                 for (const auto& f : res.info.fields) {
                     if ((f.flags & 0x10u) == 0u) continue;
-                    if (!staticBaseResolved) {
-                        staticBase = IL2CPP::ResolveStaticBaseAddress(k);
-                        staticBaseResolved = true;
-                    }
                     Snapshot::ClassPayload srow = {
                         {"name",   f.name},
                         {"type",   f.typeName},
                         {"offset", f.offset},
                     };
-                    if (staticBase == nullptr) {
-                        srow["error"] = "static_unresolved";
+                    // Static VALUE capture is opt-in (default off) — metadata
+                    // only otherwise, keeping snapshots leaner + matching Mono.
+                    if (!session->captureStaticValues) {
+                        srow["error"] = "static_value_not_captured";
                     } else {
-                        std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
-                                            + static_cast<std::uintptr_t>(f.offset);
-                        srow["address"] = formatHex(fa);
-                        json d = decodeField(f.typeName, fa);
-                        for (auto kv = d.begin(); kv != d.end(); ++kv) {
-                            srow[kv.key()] = kv.value();
+                        if (!staticBaseResolved) {
+                            staticBase = IL2CPP::ResolveStaticBaseAddress(k);
+                            staticBaseResolved = true;
+                        }
+                        if (staticBase == nullptr) {
+                            srow["error"] = "static_unresolved";
+                        } else {
+                            std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
+                                                + static_cast<std::uintptr_t>(f.offset);
+                            srow["address"] = formatHex(fa);
+                            json d = decodeField(f.typeName, fa);
+                            for (auto kv = d.begin(); kv != d.end(); ++kv) {
+                                srow[kv.key()] = kv.value();
+                            }
                         }
                     }
                     statics.push_back(std::move(srow));
