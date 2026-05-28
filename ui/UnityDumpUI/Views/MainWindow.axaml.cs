@@ -386,6 +386,51 @@ public partial class MainWindow : Window
         await vm.ClassPivot.CopyAddressLatestAsync(row).ConfigureAwait(true);
     }
 
+    /// <summary>Phase 29e-3: double-clicking a Stage-0 shortlist row
+    /// fills the Class FQN box (+ scopes the assembly filter) so the
+    /// user flows straight into picking key/value fields.</summary>
+    private void OnPivotShortlistDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ClassShortlistRow row) return;
+        vm.ClassPivot.UseShortlistRow(row);
+    }
+
+    // ── Phase 29e-4 Stage 1 field-score grid ────────────────────────────
+
+    private UnityDumpUI.ViewModels.FieldScore? GetSelectedFieldScore()
+    {
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotFieldScoreGrid");
+        return grid?.SelectedItem as UnityDumpUI.ViewModels.FieldScore;
+    }
+
+    /// <summary>Double-tap a scored field → add it to Key fields (the
+    /// most common action). Right-click offers value instead.</summary>
+    private void OnPivotFieldScoreDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.FieldScore row) return;
+        vm.ClassPivot.AddFieldToKeys(row);
+    }
+
+    private void OnPivotFieldAddToKeysClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddFieldToKeys(f);
+    }
+
+    private void OnPivotFieldAddToValuesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddFieldToValues(f);
+    }
+
 
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
     /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir

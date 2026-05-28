@@ -2247,7 +2247,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// machines the C# compiler emits. Avoids flagging legitimate
     /// generic types like <c>Dictionary`2</c> (those have backticks
     /// but no leading '&lt;').</summary>
-    private static bool IsSyntheticClassName(string name)
+    internal static bool IsSyntheticClassName(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;
         if (name[0] == '<') return true;

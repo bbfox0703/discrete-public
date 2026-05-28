@@ -293,7 +293,7 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
     - [x] **29d-6** 11 ViewModel integration tests + plan.md +
       STATUS.md updates. Total Phase 29c+d coverage: 457/457 tests.
 
-- [ ] **29e — Class-centric Key/Value pivot** — DESIGNED, ready to start
+- [~] **29e — Class-centric Key/Value pivot** — CORE COMPLETE (29e-1 … 29e-4 shipped; Layer B + DB class-enum + anomaly auto-surface deferred)
   - **User insight (2026-05-29)**: SPC's `{asm}|{fqn}|{instAddr}|{offset}|{field}`
     key collapses across game sessions (address drift) and even within
     a session when instance order drifts (활俠傳 銀兩 GameStat lands at
@@ -349,11 +349,38 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
       "fieldName: …" prefix for multi-value-field queries.
       DoubleTapped + 4-entry ContextMenu (Inspect / Copy key tuple /
       Copy value sequence / Copy instance address latest).
-    - [ ] **29e-3**  Stage 0 class shortlisting DataGrid (CV / null %
-      / field-type ratios) — replaces the manual class picker.
-    - [ ] **29e-4**  Stage 1 field-level key auto-discovery
+    - [x] **29e-3**  Stage 0 class shortlisting DataGrid (CV / null %
+      / field-type ratios) — sortable shortlist of stable,
+      instance-bearing classes. [ClassShortlistEngine.cs](../ui/UnityDumpUI/ViewModels/ClassShortlistEngine.cs)
+      (pure engine, 12 tests) + Stage-0 Expander in the Class Pivot
+      tab + 4 ViewModel tests. 524/524 green. Per class: Presence,
+      InstancesPerSnap, Avg/StdDev/CV (headline stability), FieldCount,
+      Primitive/String/Array/Null field ratios, IsSynthetic. Default
+      view filters to full-presence + non-synthetic + FieldCount≥2,
+      sorted Presence↓ / CV↑ / FieldCount↓. Assembly filter +
+      show-synthetic / show-partial toggles. Double-click a row →
+      fills Class FQN + scopes assembly → flows into Stage 2.
+      `SnapshotEnvelope.IsSyntheticClassName` promoted to internal
+      for reuse. Still needs cheap DB-side class enumeration so the
+      shortlist works without a prior Run (currently Analyze hydrates
+      the selected snaps) — acceptable for now.
+    - [x] **29e-4**  Stage 1 field-level key auto-discovery
       (S_stable + S_cardinality + TypePrior + NamePrior) + greedy
-      compound-key suggestion.
+      compound-key suggestion. [KeyDiscoveryEngine.cs](../ui/UnityDumpUI/ViewModels/KeyDiscoveryEngine.cs)
+      (pure engine, 10 tests) + Stage-1 Expander in the Class Pivot
+      tab (+5 ViewModel tests). 539/539 green. Per field: S_stable
+      (avg pairwise Jaccard of per-snap value sets), S_cardinality
+      (distinct/instance avg), TypePrior (int=1.0 / string·enum=0.85 /
+      float=0.2 / bool=0.1 / ref=0.05 / array=0), NamePrior
+      (id/name/key/hash/type/group/code substrings), composite
+      Score=0.4/0.3/0.2/0.1. Greedy compound-key: starts from the
+      top field, adds fields until the key is unique in every snap or
+      a 3-field cap — directly answers the "_property=99 collides"
+      problem by proposing (_type, _property) etc. UI: Score fields
+      button + filter + suggested-key label + Apply, scored DataGrid
+      (sortable by every sub-score), double-click → add as key,
+      right-click → add as value. The filterable field picker the
+      user asked for during 29e-2 smoke.
   - **Deferred to follow-up Phase**: Layer B (reference-type array
     elements pivot by inner key — needs DLL-side capture of element
     `Fields[]`), anomaly auto-surface (stretch).

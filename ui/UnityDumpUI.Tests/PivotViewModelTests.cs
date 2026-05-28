@@ -506,4 +506,180 @@ public class PivotViewModelTests : IDisposable
         pivot.RequestInspectInstance(row);
         Assert.False(raised);
     }
+
+    // ─── Stage 0: class shortlist (29e-3) ──────────────────────────────
+
+    [Fact]
+    public async Task AnalyzeClasses_PopulatesShortlistAndAssemblies()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Stat", "Assembly-CSharp",
+                MakeInstance("0x1", ("id", "System.Int32", 1), ("v", "System.Int32", 10)),
+                MakeInstance("0x2", ("id", "System.Int32", 2), ("v", "System.Int32", 20)))));
+        snap.Snapshots.Add(MakeEnv("snap2", "b1", "s1", "2026-05-29T11:00:00Z",
+            MakeClass("Game.Stat", "Assembly-CSharp",
+                MakeInstance("0x3", ("id", "System.Int32", 1), ("v", "System.Int32", 11)),
+                MakeInstance("0x4", ("id", "System.Int32", 2), ("v", "System.Int32", 21)))));
+
+        await pivot.AnalyzeClassesAsync();
+
+        var stat = Assert.Single(pivot.ClassShortlist);
+        Assert.Equal("Game.Stat", stat.ClassFqn);
+        Assert.Equal(2, stat.Presence);
+        Assert.Equal(0.0, stat.Cv, 5);   // 2 instances both snaps → stable
+        Assert.Contains("Assembly-CSharp", pivot.KnownAssemblies);
+        Assert.Contains("Analyzed", pivot.ShortlistStatus);
+    }
+
+    [Fact]
+    public async Task AnalyzeClasses_DefaultFilterHidesSyntheticAndPartialAndTiny()
+    {
+        var (snap, pivot) = BuildVms();
+        // Real full-presence class with 2 fields → shown.
+        // Synthetic class → hidden by default.
+        // Tiny (1 field) class → hidden (nothing to key+value on).
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Good", "asm",
+                MakeInstance("0x1", ("id", "System.Int32", 1), ("v", "System.Int32", 10))),
+            MakeClass("<>c__Synthetic", "asm",
+                MakeInstance("0x2", ("id", "System.Int32", 1), ("v", "System.Int32", 2))),
+            MakeClass("Game.Tiny", "asm",
+                MakeInstance("0x3", ("only", "System.Int32", 1)))));
+
+        await pivot.AnalyzeClassesAsync();
+        Assert.Single(pivot.ClassShortlist);
+        Assert.Equal("Game.Good", pivot.ClassShortlist[0].ClassFqn);
+
+        // Toggling synthetic on surfaces the synthetic class too.
+        pivot.ShortlistShowSynthetic = true;
+        Assert.Contains(pivot.ClassShortlist, r => r.ClassFqn == "<>c__Synthetic");
+    }
+
+    [Fact]
+    public async Task AnalyzeClasses_AssemblyFilterScopesResults()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.A", "Assembly-CSharp",
+                MakeInstance("0x1", ("id", "System.Int32", 1), ("v", "System.Int32", 10))),
+            MakeClass("Plugin.B", "PluginAsm",
+                MakeInstance("0x2", ("id", "System.Int32", 1), ("v", "System.Int32", 20)))));
+        pivot.AssemblyFilter = "PluginAsm";
+
+        await pivot.AnalyzeClassesAsync();
+        Assert.Single(pivot.ClassShortlist);
+        Assert.Equal("Plugin.B", pivot.ClassShortlist[0].ClassFqn);
+    }
+
+    [Fact]
+    public void UseShortlistRow_SetsClassFqnAndAssembly()
+    {
+        var (_, pivot) = BuildVms();
+        var row = new ClassShortlistRow
+        {
+            Assembly = "Assembly-CSharp", ClassFqn = "Mortal.Core.GameStat",
+            Presence = 4, SnapCount = 4, InstancesPerSnap = new[] { 100, 101, 100, 102 },
+            AvgInstances = 100.75, StdDevInstances = 0.8, Cv = 0.008,
+            FieldCount = 13, PrimitiveFieldRatio = 0.8, StringFieldRatio = 0.1,
+            ArrayFieldRatio = 0.05, NullFieldRatio = 0.02, IsSynthetic = false,
+        };
+
+        pivot.UseShortlistRow(row);
+        Assert.Equal("Mortal.Core.GameStat", pivot.ClassFqn);
+        Assert.Equal("Assembly-CSharp", pivot.AssemblyFilter);
+        Assert.Contains("Class set to", pivot.StatusMessage);
+    }
+
+    // ─── Stage 1: field key auto-discovery (29e-4) ─────────────────────
+
+    [Fact]
+    public async Task ScoreFields_PopulatesScoresAndSuggestsKey()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Stat", "asm",
+                MakeInstance("0x1", ("_propertyID", "System.Int32", 101), ("_value", "System.Int32", 10)),
+                MakeInstance("0x2", ("_propertyID", "System.Int32", 201), ("_value", "System.Int32", 20)))));
+        snap.Snapshots.Add(MakeEnv("snap2", "b1", "s1", "2026-05-29T11:00:00Z",
+            MakeClass("Game.Stat", "asm",
+                MakeInstance("0x3", ("_propertyID", "System.Int32", 101), ("_value", "System.Int32", 11)),
+                MakeInstance("0x4", ("_propertyID", "System.Int32", 201), ("_value", "System.Int32", 21)))));
+        pivot.ClassFqn = "Game.Stat";
+
+        await pivot.ScoreFieldsAsync();
+
+        Assert.Empty(pivot.ErrorMessage);
+        Assert.NotEmpty(pivot.FieldScores);
+        // _propertyID is stable + unique → should be the suggested key.
+        Assert.Contains("_propertyID", pivot.SuggestedKeyDisplay);
+        Assert.Contains("unique", pivot.SuggestedKeyReason);
+    }
+
+    [Fact]
+    public async Task ScoreFields_MissingClass_ReportsError()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Real", "asm", MakeInstance("0x1", ("id", "System.Int32", 1)))));
+        pivot.ClassFqn = "Game.Missing";
+
+        await pivot.ScoreFieldsAsync();
+        Assert.Contains("not found", pivot.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ApplySuggestedKey_FillsKeyFieldsText()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Stat", "asm",
+                MakeInstance("0x1", ("_id", "System.Int32", 1), ("v", "System.Int32", 10)),
+                MakeInstance("0x2", ("_id", "System.Int32", 2), ("v", "System.Int32", 20)))));
+        pivot.ClassFqn = "Game.Stat";
+        await pivot.ScoreFieldsAsync();
+
+        pivot.ApplySuggestedKey();
+        Assert.Equal("_id", pivot.KeyFieldsText);
+    }
+
+    [Fact]
+    public async Task AddFieldToKeysAndValues_AppendDedup()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Stat", "asm",
+                MakeInstance("0x1", ("_itemGroup", "System.Int32", 1), ("_property", "System.Int32", 101), ("_value", "System.Int32", 10)))));
+        pivot.ClassFqn = "Game.Stat";
+        await pivot.ScoreFieldsAsync();
+
+        var group    = pivot.FieldScores.Single(f => f.FieldName == "_itemGroup");
+        var property = pivot.FieldScores.Single(f => f.FieldName == "_property");
+        var value    = pivot.FieldScores.Single(f => f.FieldName == "_value");
+
+        pivot.AddFieldToKeys(group);
+        pivot.AddFieldToKeys(property);
+        pivot.AddFieldToKeys(group);   // dedup — no double-add
+        pivot.AddFieldToValues(value);
+
+        Assert.Equal("_itemGroup, _property", pivot.KeyFieldsText);
+        Assert.Equal("_value", pivot.ValueFieldsText);
+    }
+
+    [Fact]
+    public async Task ScoreFields_FilterNarrowsTheList()
+    {
+        var (snap, pivot) = BuildVms();
+        snap.Snapshots.Add(MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Stat", "asm",
+                MakeInstance("0x1", ("_hp", "System.Int32", 1), ("_mp", "System.Int32", 2), ("_name", "string", "Bob")))));
+        pivot.ClassFqn = "Game.Stat";
+        await pivot.ScoreFieldsAsync();
+        int total = pivot.FieldScores.Count;
+        Assert.True(total >= 3);
+
+        pivot.FieldScoreFilter = "_m";   // matches _mp only
+        Assert.Single(pivot.FieldScores);
+        Assert.Equal("_mp", pivot.FieldScores[0].FieldName);
+    }
 }

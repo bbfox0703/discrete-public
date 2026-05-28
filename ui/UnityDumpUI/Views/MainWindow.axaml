@@ -2254,6 +2254,136 @@
                            TextWrapping="Wrap" FontSize="11"/>
               </Border>
 
+              <!-- Stage 0 (Phase 29e-3): class shortlist. Score every
+                   class by stability (instance-count CV), field-type
+                   ratios, null ratio so the user can pick a good pivot
+                   target without knowing the FQN up front. Collapsed by
+                   default — power users who already know the class skip
+                   straight to the pickers below. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="False" Header="🔎 Class shortlist (Stage 0 — score classes by stability)">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="8" Margin="0,0,0,6">
+                      <TextBlock Text="Assembly:" VerticalAlignment="Center"/>
+                      <AutoCompleteBox Text="{Binding ClassPivot.AssemblyFilter, Mode=TwoWay}"
+                                       ItemsSource="{Binding ClassPivot.KnownAssemblies}"
+                                       PlaceholderText="all assemblies"
+                                       MinimumPrefixLength="0"
+                                       FilterMode="ContainsOrdinalCaseSensitive"
+                                       Width="220" VerticalAlignment="Center"
+                                       ToolTip.Tip="Scope the analysis to one assembly (e.g. Assembly-CSharp). Leave blank to score every class. Suggestions appear after the first Analyze hydrates a snapshot."/>
+                      <CheckBox Content="Show synthetic"
+                                IsChecked="{Binding ClassPivot.ShortlistShowSynthetic, Mode=TwoWay}"
+                                ToolTip.Tip="Include compiler-generated &lt;…&gt; classes (rarely pivot targets)."/>
+                      <CheckBox Content="Show partial-presence"
+                                IsChecked="{Binding ClassPivot.ShortlistShowPartial, Mode=TwoWay}"
+                                ToolTip.Tip="Include classes not present in every selected snapshot. Partial presence means instances appear/vanish between snaps, so the pivot can't line them all up."/>
+                      <Button Content="⟳ Analyze classes"
+                              Command="{Binding ClassPivot.AnalyzeClassesCommand}"
+                              Padding="10,4"/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ShortlistStatus}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <DataGrid Name="PivotShortlistGrid"
+                              ItemsSource="{Binding ClassPivot.ClassShortlist}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              MaxHeight="300"
+                              DoubleTapped="OnPivotShortlistDoubleTapped">
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}" Width="2*"/>
+                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}" Width="*"/>
+                        <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80"/>
+                        <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120"/>
+                        <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70"
+                                            SortMemberPath="Cv"/>
+                        <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55"/>
+                        <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65"
+                                            SortMemberPath="PrimitiveFieldRatio"/>
+                        <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65"
+                                            SortMemberPath="NullFieldRatio"/>
+                        <DataGridTextColumn Header="Str%" Binding="{Binding StringPctDisplay}" Width="65"
+                                            SortMemberPath="StringFieldRatio"/>
+                        <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65"
+                                            SortMemberPath="ArrayFieldRatio"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Expander>
+
+              <!-- Stage 1 (Phase 29e-4): field key auto-discovery.
+                   Scores each field of the chosen class on key
+                   suitability (stability / cardinality / type / name)
+                   and proposes a greedy compound key. The popup-picker
+                   the user asked for — double-click adds a field as a
+                   key, right-click for value. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="False" Header="🔑 Suggest key/value fields (Stage 1 — rank fields by key suitability)">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="8" Margin="0,0,0,6">
+                      <Button Content="⟳ Score fields"
+                              Command="{Binding ClassPivot.ScoreFieldsCommand}"
+                              Padding="10,4"/>
+                      <TextBlock Text="Filter:" VerticalAlignment="Center"/>
+                      <TextBox Text="{Binding ClassPivot.FieldScoreFilter, Mode=TwoWay}"
+                               Watermark="field name" Width="160" VerticalAlignment="Center"/>
+                      <TextBlock Text="Suggested key:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                      <TextBlock Text="{Binding ClassPivot.SuggestedKeyDisplay}"
+                                 VerticalAlignment="Center" FontWeight="SemiBold"/>
+                      <Button Content="Apply suggested key"
+                              Command="{Binding ClassPivot.ApplySuggestedKeyCommand}"
+                              Padding="8,3"/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.SuggestedKeyReason}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.FieldScoreStatus}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <DataGrid Name="PivotFieldScoreGrid"
+                              ItemsSource="{Binding ClassPivot.FieldScores}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              MaxHeight="300"
+                              DoubleTapped="OnPivotFieldScoreDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Add to Key fields"
+                                    Click="OnPivotFieldAddToKeysClicked"/>
+                          <MenuItem Header="Add to Value fields"
+                                    Click="OnPivotFieldAddToValuesClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}" Width="2*"/>
+                        <DataGridTextColumn Header="Type" Binding="{Binding FieldType}" Width="*"/>
+                        <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70"
+                                            SortMemberPath="Score"/>
+                        <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70"
+                                            SortMemberPath="SStable"/>
+                        <DataGridTextColumn Header="Card" Binding="{Binding CardPctDisplay}" Width="70"
+                                            SortMemberPath="SCardinality"/>
+                        <DataGridTextColumn Header="Type pr." Binding="{Binding TypePriorDisplay}" Width="70"
+                                            SortMemberPath="TypePrior"/>
+                        <DataGridTextColumn Header="Name pr." Binding="{Binding NamePriorDisplay}" Width="70"
+                                            SortMemberPath="NamePrior"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Expander>
+
               <!-- Class + key + value pickers row -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6"
                       Background="#1F808080" CornerRadius="3">

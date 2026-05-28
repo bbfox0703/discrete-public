@@ -50,9 +50,13 @@ public sealed partial class PivotViewModel : ObservableObject
         {
             SyncSelectionRows();
             RunCommand.NotifyCanExecuteChanged();
+            AnalyzeClassesCommand.NotifyCanExecuteChanged();
+            ScoreFieldsCommand.NotifyCanExecuteChanged();
         };
         SyncSelectionRows();
         RunCommand.NotifyCanExecuteChanged();
+        AnalyzeClassesCommand.NotifyCanExecuteChanged();
+        ScoreFieldsCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>Class FQNs seen across currently-hydrated snapshots.
@@ -74,6 +78,64 @@ public sealed partial class PivotViewModel : ObservableObject
 
     private List<PivotSnapshotRow> SelectedRows()
         => SelectionRows.Where(r => r.Include).ToList();
+
+    // ── Stage 0: class shortlist (29e-3) ───────────────────────────────
+
+    /// <summary>Assemblies seen across hydrated snapshots — drives the
+    /// shortlist's assembly AutoCompleteBox so the user can narrow to
+    /// e.g. "Assembly-CSharp" before analysing.</summary>
+    public ObservableCollection<string> KnownAssemblies { get; } = new();
+
+    /// <summary>Filtered shortlist shown in the Stage 0 DataGrid. The
+    /// unfiltered set lives in <see cref="_allShortlistRows"/>; toggles
+    /// rebuild this view without re-analysing.</summary>
+    public ObservableCollection<ClassShortlistRow> ClassShortlist { get; } = new();
+
+    private List<ClassShortlistRow> _allShortlistRows = new();
+
+    /// <summary>Exact assembly to scope Analyze to. Empty = all.</summary>
+    [ObservableProperty] private string _assemblyFilter = string.Empty;
+
+    /// <summary>Show compiler-generated (<c>&lt;…&gt;</c>) classes in the
+    /// shortlist. Off by default — they're rarely pivot targets.</summary>
+    [ObservableProperty] private bool _shortlistShowSynthetic;
+
+    /// <summary>Show classes that aren't present in every snapshot.
+    /// Off by default — partial presence means instances appear/vanish
+    /// between snaps, so the pivot can't line them all up.</summary>
+    [ObservableProperty] private bool _shortlistShowPartial;
+
+    [ObservableProperty] private string _shortlistStatus =
+        "Pick snapshots, optionally set an assembly, press Analyze to score classes by stability.";
+
+    partial void OnShortlistShowSyntheticChanged(bool value) => RebuildShortlistView();
+    partial void OnShortlistShowPartialChanged(bool value)   => RebuildShortlistView();
+
+    // ── Stage 1: field key auto-discovery (29e-4) ──────────────────────
+
+    /// <summary>Filtered scored-field list shown in the Stage 1 DataGrid.
+    /// Unfiltered set in <see cref="_allFieldScores"/>.</summary>
+    public ObservableCollection<FieldScore> FieldScores { get; } = new();
+
+    private List<FieldScore> _allFieldScores = new();
+
+    /// <summary>Substring filter on the scored-field list (field name).</summary>
+    [ObservableProperty] private string _fieldScoreFilter = string.Empty;
+
+    /// <summary>The greedy compound-key proposal rendered for the UI,
+    /// e.g. "(_itemGroup, _property)". Empty until Score fields runs.</summary>
+    [ObservableProperty] private string _suggestedKeyDisplay = string.Empty;
+
+    /// <summary>Why the suggestion looks the way it does (unique vs
+    /// lowest-collision). Shown next to the Apply button.</summary>
+    [ObservableProperty] private string _suggestedKeyReason = string.Empty;
+
+    [ObservableProperty] private string _fieldScoreStatus =
+        "Set a Class FQN (or pick one from the shortlist), then Score fields to rank key candidates.";
+
+    private IReadOnlyList<string> _suggestedKey = System.Array.Empty<string>();
+
+    partial void OnFieldScoreFilterChanged(string value) => RebuildFieldScoresView();
 
     /// <summary>Result rows from the last successful pivot. Each row
     /// carries a pre-rendered <see cref="PivotResultRow.TrajectoryDisplay"/>
@@ -214,6 +276,251 @@ public sealed partial class PivotViewModel : ObservableObject
     }
 
     private const int kLargeNAdvisory = 5;
+
+    // ── Stage 0: Analyze classes ───────────────────────────────────────
+
+    [RelayCommand(CanExecute = nameof(CanRun))]
+    public async Task AnalyzeClassesAsync()
+    {
+        ErrorMessage = string.Empty;
+        var selected = SelectedRows();
+        if (selected.Count == 0)
+        {
+            ErrorMessage = "Pick at least 1 snapshot to analyze.";
+            return;
+        }
+
+        try
+        {
+            IsRunning = true;
+            ShortlistStatus = $"Hydrating {selected.Count:N0} snapshot(s)…";
+
+            var preloaded = new HashSet<SnapshotEnvelope>();
+            foreach (var r in selected)
+                if (r.Snapshot.ClassesLoaded) preloaded.Add(r.Snapshot);
+
+            foreach (var r in selected)
+                await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
+
+            RefreshKnownClassesAndFields();
+            RefreshKnownAssemblies();
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            _allShortlistRows = ClassShortlistEngine.Run(new ClassShortlistQuery
+            {
+                Snapshots      = selected.Select(r => r.Snapshot).ToList(),
+                AssemblyFilter = string.IsNullOrWhiteSpace(AssemblyFilter) ? null : AssemblyFilter.Trim(),
+            });
+            sw.Stop();
+
+            RebuildShortlistView();
+
+            // Evict query-only hydrates (same policy as Run).
+            int evicted = 0;
+            foreach (var r in selected)
+            {
+                if (preloaded.Contains(r.Snapshot)) continue;
+                if (!r.Snapshot.ClassesLoaded) continue;
+                if (r.Snapshot.PersistedId is null) continue;
+                r.Snapshot.Unload();
+                evicted++;
+            }
+
+            ShortlistStatus =
+                $"Analyzed {_allShortlistRows.Count:N0} class(es) in {sw.ElapsedMilliseconds} ms — " +
+                $"{ClassShortlist.Count:N0} shown. Double-click a row to set Class FQN.";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"PivotShortlist: snaps={selected.Count} asm='{AssemblyFilter}' → {_allShortlistRows.Count} classes in {sw.ElapsedMilliseconds}ms evicted={evicted}");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(SnapshotStore.LogCategory, $"PivotShortlist FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsRunning = false;
+        }
+    }
+
+    /// <summary>Re-apply the show/hide filters to <see cref="_allShortlistRows"/>
+    /// → <see cref="ClassShortlist"/>. Default keeps full-presence,
+    /// non-synthetic, field-rich classes (FieldCount ≥ 2).</summary>
+    private void RebuildShortlistView()
+    {
+        ClassShortlist.Clear();
+        foreach (var row in _allShortlistRows)
+        {
+            if (!ShortlistShowSynthetic && row.IsSynthetic) continue;
+            if (!ShortlistShowPartial && row.Presence < row.SnapCount) continue;
+            if (row.FieldCount < 2) continue;   // nothing to key+value on
+            ClassShortlist.Add(row);
+        }
+    }
+
+    /// <summary>Stage-0 → Stage-2 handoff: a double-clicked shortlist row
+    /// fills <see cref="ClassFqn"/> + scopes the assembly filter so
+    /// ResolveAssemblyForClass picks the right one, then refreshes the
+    /// field-name autocomplete for that class.</summary>
+    public void UseShortlistRow(ClassShortlistRow row)
+    {
+        if (row is null) return;
+        ClassFqn       = row.ClassFqn;
+        AssemblyFilter = row.Assembly;
+        RefreshKnownFieldNamesForClass();
+        StatusMessage  = $"Class set to {row.ClassFqn} ({row.Assembly}). Now list key + value field name(s) and press Run.";
+    }
+
+    private void RefreshKnownAssemblies()
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var env in _snapshot.Snapshots)
+        {
+            if (!env.ClassesLoaded || env.Classes is null) continue;
+            foreach (var c in env.Classes)
+                if (!string.IsNullOrEmpty(c.Assembly)) set.Add(c.Assembly);
+        }
+        KnownAssemblies.Clear();
+        foreach (var a in set.OrderBy(s => s, StringComparer.Ordinal))
+            KnownAssemblies.Add(a);
+    }
+
+    // ── Stage 1: Score fields ──────────────────────────────────────────
+
+    [RelayCommand(CanExecute = nameof(CanRun))]
+    public async Task ScoreFieldsAsync()
+    {
+        ErrorMessage = string.Empty;
+        var selected = SelectedRows();
+        if (selected.Count == 0)
+        {
+            ErrorMessage = "Pick at least 1 snapshot.";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ClassFqn))
+        {
+            ErrorMessage = "Set a Class FQN first (type one or pick it from the Stage 0 shortlist).";
+            return;
+        }
+
+        try
+        {
+            IsRunning = true;
+            FieldScoreStatus = $"Hydrating {selected.Count:N0} snapshot(s)…";
+
+            var preloaded = new HashSet<SnapshotEnvelope>();
+            foreach (var r in selected)
+                if (r.Snapshot.ClassesLoaded) preloaded.Add(r.Snapshot);
+
+            foreach (var r in selected)
+                await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
+
+            RefreshKnownClassesAndFields();
+
+            string? assembly = string.IsNullOrWhiteSpace(AssemblyFilter)
+                ? selected.Select(r => ResolveAssemblyForClass(r.Snapshot, ClassFqn.Trim()))
+                          .FirstOrDefault(a => !string.IsNullOrEmpty(a))
+                : AssemblyFilter.Trim();
+            if (string.IsNullOrEmpty(assembly))
+            {
+                ErrorMessage = $"Class '{ClassFqn}' not found in any selected snapshot. Check the FQN (case-sensitive, must include the namespace).";
+                return;
+            }
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var result = KeyDiscoveryEngine.Run(new KeyDiscoveryQuery
+            {
+                Snapshots = selected.Select(r => r.Snapshot).ToList(),
+                Assembly  = assembly!,
+                ClassFqn  = ClassFqn.Trim(),
+            });
+            sw.Stop();
+
+            _allFieldScores = result.Fields.ToList();
+            RebuildFieldScoresView();
+
+            _suggestedKey       = result.SuggestedKey;
+            SuggestedKeyDisplay = result.SuggestedKey.Count > 0
+                ? "(" + string.Join(", ", result.SuggestedKey) + ")"
+                : "(none)";
+            SuggestedKeyReason  = result.SuggestedKeyReason;
+
+            // Evict query-only hydrates.
+            int evicted = 0;
+            foreach (var r in selected)
+            {
+                if (preloaded.Contains(r.Snapshot)) continue;
+                if (!r.Snapshot.ClassesLoaded) continue;
+                if (r.Snapshot.PersistedId is null) continue;
+                r.Snapshot.Unload();
+                evicted++;
+            }
+
+            FieldScoreStatus =
+                $"Scored {_allFieldScores.Count:N0} field(s) in {sw.ElapsedMilliseconds} ms. " +
+                $"Double-click a row to add it as a key; right-click for value. Suggested key: {SuggestedKeyDisplay}.";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"PivotKeyDiscovery: class={ClassFqn} fields={_allFieldScores.Count} suggested=[{string.Join(',', result.SuggestedKey)}] in {sw.ElapsedMilliseconds}ms evicted={evicted}");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(SnapshotStore.LogCategory, $"PivotKeyDiscovery FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsRunning = false;
+        }
+    }
+
+    private void RebuildFieldScoresView()
+    {
+        string? filter = string.IsNullOrWhiteSpace(FieldScoreFilter) ? null : FieldScoreFilter.Trim();
+        FieldScores.Clear();
+        foreach (var f in _allFieldScores)
+        {
+            if (filter is not null &&
+                f.FieldName.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            FieldScores.Add(f);
+        }
+    }
+
+    /// <summary>Fill <see cref="KeyFieldsText"/> with the greedy
+    /// compound-key suggestion.</summary>
+    [RelayCommand]
+    public void ApplySuggestedKey()
+    {
+        if (_suggestedKey.Count == 0) return;
+        KeyFieldsText = string.Join(", ", _suggestedKey);
+        StatusMessage = $"Key fields set to {string.Join(", ", _suggestedKey)}.";
+    }
+
+    /// <summary>Append a field to the Key fields list (dedup, comma
+    /// separated). Wired to the Stage-1 grid's double-tap + context
+    /// menu.</summary>
+    public void AddFieldToKeys(FieldScore field)
+    {
+        if (field is null) return;
+        KeyFieldsText = AppendField(KeyFieldsText, field.FieldName);
+        StatusMessage = $"Added '{field.FieldName}' to key fields.";
+    }
+
+    public void AddFieldToValues(FieldScore field)
+    {
+        if (field is null) return;
+        ValueFieldsText = AppendField(ValueFieldsText, field.FieldName);
+        StatusMessage = $"Added '{field.FieldName}' to value fields.";
+    }
+
+    private static string AppendField(string existing, string name)
+    {
+        var parts = SplitFieldList(existing);
+        if (parts.Any(p => string.Equals(p, name, StringComparison.Ordinal)))
+            return existing;   // already present
+        parts.Add(name);
+        return string.Join(", ", parts);
+    }
 
     [RelayCommand(CanExecute = nameof(CanRun))]
     public async Task RunAsync()

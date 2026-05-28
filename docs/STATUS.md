@@ -1,11 +1,12 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29e-1 + 29e-1b + 29e-2 shipped**; head pending commit / build #687 UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29e CORE COMPLETE (29e-1 … 29e-4)**; head pending commit / build #696 UI / DLL #650).
 
-## TL;DR — what's left to pick up (next session, mid-29e)
+## TL;DR — what's left to pick up (next session)
 
-29e-2 ships the manual-pick Class Pivot tab on top of the 29e-1/-1b
-engine. Three waves of Phase 29e landed so far:
+The Class Pivot tab is feature-complete for v1: the full 3-stage funnel
+(Stage 0 class shortlist → Stage 1 key auto-discovery → Stage 2 pivot)
+on top of the 29e-1/-1b engine. Waves of Phase 29e:
 
 * **29e-1**  `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
   + 16 tests. Class-centric pivot keyed by field values inside each
@@ -27,8 +28,26 @@ engine. Three waves of Phase 29e landed so far:
   of an unreadable wall; Trajectory column wraps + has a ToolTip;
   AutoCompleteBoxes browse-on-focus (`MinimumPrefixLength=0`). +2
   collision tests.
+* **29e-3**  Stage 0 class shortlist —
+  [ClassShortlistEngine.cs](../ui/UnityDumpUI/ViewModels/ClassShortlistEngine.cs)
+  (12 tests) + a collapsible "Class shortlist" Expander in the Class
+  Pivot tab (+4 ViewModel tests). Scores every class by stability
+  (instance-count CV), field-type ratios (primitive/string/array),
+  null ratio, presence. Default view = full-presence + non-synthetic
+  + FieldCount≥2, sorted Presence↓ / CV↑ / FieldCount↓. Assembly
+  filter + toggles. Double-click a row → fills Class FQN → Stage 2.
+* **29e-4**  Stage 1 field key auto-discovery —
+  [KeyDiscoveryEngine.cs](../ui/UnityDumpUI/ViewModels/KeyDiscoveryEngine.cs)
+  (10 tests) + a "Suggest key/value fields" Expander (+5 ViewModel
+  tests). Per field: S_stable (pairwise Jaccard of value sets),
+  S_cardinality, TypePrior, NamePrior → composite Score. Greedy
+  compound-key suggestion solves the "_property collides" problem by
+  proposing (_type, _property). UI: Score fields + filter + suggested
+  key + Apply; scored DataGrid (sortable), double-click → add as key,
+  right-click → add as value. The filterable field picker requested
+  during 29e-2 smoke.
 
-**508/508 green** (was 462 before 29e). No DLL change. Full design +
+**539/539 green** (was 462 before 29e). No DLL change. Full design +
 live-smoke findings at [class-pivot.md](class-pivot.md) §13.
 
 ### Live-smoke status (29e-2)
@@ -47,17 +66,35 @@ values; see §13).
   attached to. Trajectory across older snapshots stays valid; only
   the address handoff needs the live process.
 
-### Remaining 29e waves
+### Live-smoke TODO (29e-3 + 29e-4 — full funnel)
 
-* **29e-3** Stage 0 class-shortlisting DataGrid (CV / null % /
-  field-type ratios) — replaces the manual class picker with a
-  sortable shortlist of stable, instance-bearing classes.
-* **29e-4** Stage 1 field-level key auto-discovery
-  (S_stable + S_cardinality + TypePrior + NamePrior) + greedy
-  compound-key suggestion.
+Stages 0/1 were unit-tested but not live-smoked. End-to-end on 활俠傳:
+take 3-4 snapshots, open Class Pivot tab.
+1. Expand **Class shortlist (Stage 0)**, (optionally type
+   `Assembly-CSharp`), press **Analyze classes**. Expect
+   `Mortal.Core.GameStat` near the top (full presence, low CV, high
+   primitive %). Sort by CV / Prim% / Null% to sanity-check scoring.
+   Double-click it → Class FQN box fills.
+2. Expand **Suggest key/value fields (Stage 1)**, press **Score
+   fields**. Expect `_property`/`_type`/`_propertyID`-ish fields near
+   the top; the **Suggested key** label should propose a key (likely
+   a compound like `(_type, _property)` since `_property` alone
+   collides). Click **Apply suggested key**, then double-click
+   `_value` … actually right-click `_value` → "Add to Value fields".
+3. Press **Run Pivot**. Confirm the money row trajectory
+   (`10160 → 9910 → 10160 → 10060`) appears with the auto-discovered
+   key — no manual field typing needed.
 
-Deferred: Layer B (reference-array inner pivot — needs DLL changes)
-+ anomaly auto-surface (stretch goal).
+### Deferred (post-29e-core)
+
+* **Cheap DB-side class enumeration** so Stage 0's class list +
+  assembly list populate without a prior hydrate (currently Analyze /
+  Score hydrate the selected snaps). Read distinct `class_fqn` /
+  assembly from `snapshot_classes` (indexed) — metadata only.
+* **Layer B**: reference-array inner pivot (key array elements by an
+  inner field) — needs DLL-side per-element child-field capture.
+* **Anomaly auto-surface** (stretch): auto-tag "dropped to 0 at snap
+  X", "monotonic decrease", etc.
 
 DB schema untouched. Existing `.db` files keep working — every
 29e wave is in-memory only.
