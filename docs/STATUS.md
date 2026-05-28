@@ -26,9 +26,19 @@
 > by a post-GC gcdump). **Post-GC steady-state ≈ 5.3 GB / 3 snaps → acceptance
 > ("3 snaps < 6 GB", "1 snap < 2 GB") already met.** 29g-1 (interning, 2.92 GB
 > String) + 29g-3 (JsonElement, 748 MB) are now headroom, not required.
-> ⏳ **USER**: re-measure the 29g-2b build live (expect live process ~6 GB, not
-> 14.8 GB) to confirm, then decide whether to continue to 29g-1 or stop. Code
-> ready to commit.
+> 29g-2b confirmed live: WS 17→**7.36 GB** for 3 snaps (Aggressive GC decommits;
+> the plain Forced one didn't return committed memory). Residual giant
+> Char[]/Byte[] in a no-GC dump = transient per-chunk pipe-read strings
+> ([PipeClient.cs:154](../ui/UnityDumpUI.Core/Services/PipeClient.cs) reads each
+> chunk as a `string`); durable byte-parse fix deferred as 29g-2c.
+>
+> **29g-1 string interning SHIPPED** (588/588 green) —
+> [SnapshotInterner.cs](../ui/UnityDumpUI.Core/Services/SnapshotInterner.cs)
+> dedups field Name/Type/From + class names + ElementType to shared instances at
+> deserialize (capture + lazy-load). ⏳ **USER**: `build.cmd ui`, 3 snaps SaGa
+> F2R, `tools/Capture-DotnetDump.ps1 -Label after-29g1` — expect `System.String`
+> ~1.9 GB → ~1 GB. Remaining optional: 29g-3 (JsonElement, ~748 MB) + 29g-2c
+> (pipe byte-parse). 3 commits on dev: 99639c2, 95b639d, + 29g-1 (uncommitted).
 
 ### Post-29e fixes (2026-05-28)
 

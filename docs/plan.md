@@ -908,15 +908,21 @@ of profiler data, #3 is profiler-gated):
   (interning), then 29g-3 (JsonElement). FieldIndex lazy/release is the biggest
   *and* lowest-risk lever (~2.5-3 GB, pure UI logic, no model/consumer change),
   so it leads. (Earlier 29g-1+3-first ordering was based on the truncated gcdump.)
-* **29g-1 string interning** — new `SnapshotInterner` (Core): a *per-snapshot*
-  `Dictionary<string,string>` pool (NOT `string.Intern`) walks the
-  `SnapshotClassEntry` tree post-deserialize and dedups field Name/Type/From +
-  class Assembly/Namespace/Name + Parent.* + ElementType (Address skipped — it's
-  unique). Called from `TakeSnapshotAsync` (classes assembled,
-  [SnapshotViewModel.cs:1030](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
-  + `EnsureLoadedAsync` ([:388](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)).
-  Because `BuildFieldIndex` copies those same strings into each
-  `SnapshotFieldValue`, the FieldIndex inherits the interned refs for free.
+* **29g-1 string interning ✅ SHIPPED 2026-05-28 (588/588 green, +5).**
+  [SnapshotInterner.cs](../ui/UnityDumpUI.Core/Services/SnapshotInterner.cs) (Core):
+  a *per-snapshot* `Dictionary<string,string>` pool (NOT `string.Intern`) walks
+  the `SnapshotClassEntry` tree once post-deserialize and collapses each distinct
+  field Name/Type/From + class Assembly/Namespace/Name + Parent.* + array
+  ElementType + Layer-B element inner-field metadata to one shared instance.
+  Inherently-unique strings (instance Address, Ptr, StringValue, element string
+  values) are left alone. Called from `TakeSnapshotAsync` (after the chunk loop)
+  + `EnsureLoadedAsync` (after `LoadClassesAsync`). Interned strings serialize
+  identically → DB save round-trip unaffected.
+  [SnapshotInternerTests.cs](../ui/UnityDumpUI.Tests/SnapshotInternerTests.cs)
+  covers cross-instance/cross-class dedup, unique-address preservation, Layer-B
+  nesting, null/empty. ⏳ **live re-measure pending**: expect `System.String`
+  ~1.9 GB → ~1 GB (the duplicated Name/Type/From objects collapse to thousands),
+  3-snapshot live floor → ~3.3 GB.
 * **29g-2 lazy + released FieldIndex ✅ SHIPPED 2026-05-28 (583/583 green, +5).**
   `SnapshotEnvelope` FieldIndex is now lazy: `_fieldIndex` null until
   `EnsureFieldIndex()` (build-on-demand, idempotent); `ReleaseFieldIndex()`

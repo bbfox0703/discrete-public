@@ -386,6 +386,9 @@ public sealed partial class SnapshotViewModel : ObservableObject
         if (_store is null || env.PersistedId is not long id) return;
         var classes = await _store.LoadClassesAsync(id, ct).ConfigureAwait(true);
         env.Classes.AddRange(classes);
+        // Phase 29g-1: dedup metadata strings on the lazily-loaded tree too
+        // (each blob deserializes its own copies of "System.Int32" etc.).
+        SnapshotInterner.Intern(env.Classes);
         // Phase 29g-2: don't eager-build the FieldIndex on load — only Diff /
         // SPC / address-lookup need it, and they call EnsureFieldIndex on
         // demand. Pivot/ArrayPivot read Classes directly. Just refresh the
@@ -1017,6 +1020,11 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // Always release the server-side session even if we errored mid-chunk.
             try { await _backend.SnapshotEndAsync(begin.SnapshotId, ct).ConfigureAwait(true); }
             catch { /* best effort */ }
+
+            // Phase 29g-1: dedup the millions of duplicated metadata strings
+            // (field Name/Type/From, class Assembly/Namespace/Name, ElementType)
+            // to one shared instance each before they're retained in the envelope.
+            SnapshotInterner.Intern(classes);
 
             // Build local envelope + flat lookup index for diff.
             var env = new SnapshotEnvelope
