@@ -343,6 +343,9 @@ inline constexpr const char* CmdDumpClassInfo         = "dumpClassInfo";
 //         arrayCap?: int,          // default 50,  hard-cap 4096
 //         arrayElementFields?: bool,        // default false (Layer B)
 //         elementFieldCap?: int,            // default 16, hard-cap 64
+//         elementCaptureBudget?: int,       // default 20000 total element-sets;
+//                                           //   memory ceiling so blanket capture
+//                                           //   on a huge game can't OOM-CTD
 //         arrayElementTargets?: string[] }  // "FQN" or "FQN.fieldName"
 //     Response:
 //       { ok, snapshotId, capturedAt, gameBuildId, gameSessionId,

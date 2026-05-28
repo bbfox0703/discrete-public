@@ -980,6 +980,16 @@ public sealed class SnapshotDecodeStats
     [JsonPropertyName("skippedOpenGenericArrays")] public int SkippedOpenGenericArrays { get; set; }
     [JsonPropertyName("classInfoCacheHits")]       public int ClassInfoCacheHits       { get; set; }
     [JsonPropertyName("classInfoCacheMisses")]     public int ClassInfoCacheMisses     { get; set; }
+
+    /// <summary>Phase 29f (Layer B) — number of reference-array elements whose
+    /// inner fields were captured this snapshot.</summary>
+    [JsonPropertyName("decodedElementSets")]       public int DecodedElementSets       { get; set; }
+
+    /// <summary>Phase 29f (Layer B) — true if the element-capture budget was
+    /// reached and the remaining reference-array elements were left ptr-only
+    /// (blanket capture on a large game). The UI surfaces this so the user
+    /// knows to narrow with explicit targets for full coverage.</summary>
+    [JsonPropertyName("elementBudgetHit")]         public bool ElementBudgetHit        { get; set; }
 }
 
 public sealed class SnapshotBeginResult

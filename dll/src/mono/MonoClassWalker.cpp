@@ -111,6 +111,9 @@ MonoType* SehEnumBasetype(fn_class_enum_basetype fn, MonoClass* k) {
 MonoClass* SehObjectGetClass(fn_object_get_class fn, MonoObject* o) {
     __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+const char* SehClassNameProbe(fn_class_get_name fn, MonoClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
 MonoVTable* SehVTable(fn_class_vtable fn, MonoDomain* d, MonoClass* k) {
     __try { return fn(d, k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
@@ -279,6 +282,18 @@ MonoClass* ClassOfObject(std::uintptr_t objPtr) {
     const auto& r = GetResolver();
     if (!r.resolved || r.object_get_class == nullptr) return nullptr;
     return SehObjectGetClass(r.object_get_class, reinterpret_cast<MonoObject*>(objPtr));
+}
+
+bool ProbeKlassValid(MonoClass* klass) {
+    if (klass == nullptr) return false;
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_name == nullptr) return false;
+    MonoDomain* domain = GetRootDomain();
+    if (domain == nullptr) return false;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return false;
+    const char* nm = SehClassNameProbe(r.class_get_name, klass);
+    return nm != nullptr && *nm != '\0';
 }
 
 StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string& fieldName) {

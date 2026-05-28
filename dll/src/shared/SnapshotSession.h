@@ -87,6 +87,11 @@ struct Session {
     bool                                   arrayElementFields = false;
     std::size_t                            elementFieldCap    = 16;
     std::vector<std::string>               arrayElementTargets;
+    // Total reference-array elements deep-captured per snapshot — a hard
+    // memory ceiling so blanket capture on a large game (158K instances /
+    // 21K arrays) can't explode the JSON cache into an OOM CTD. Once hit,
+    // remaining elements stay ptr-only. Targeted captures rarely approach it.
+    std::size_t                            elementCaptureBudget = 20000;
     std::vector<ClassPlanItem>             plan;            // for the heap-walk result (kept for diagnostics)
     std::vector<PlanAssemblyEntry>         planByAssembly;  // for the Begin response
     std::size_t                            totalInstances  = 0;

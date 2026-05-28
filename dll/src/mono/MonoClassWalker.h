@@ -68,6 +68,14 @@ ClassInfoResult ReadClassInfo(MonoClass* klass);
 // resolve each element object's runtime class before walking its fields.
 MonoClass* ClassOfObject(std::uintptr_t objPtr);
 
+// Phase 29f (Layer B) — SEH-guarded sanity probe for a MonoClass* that came
+// from an unverified source (e.g. object_get_class on a false-positive array
+// slot). Returns true only when mono_class_get_name yields a non-empty name
+// without faulting. Mirrors IL2CPP::ProbeKlassValid; callers gate the
+// element-field walk on this so a garbage class can't reach the (unguarded)
+// class_get_parent / field-walk path and crash the game.
+bool ProbeKlassValid(MonoClass* klass);
+
 // --- runtime ops (Phase 3 segment 3) ---------------------------------------
 
 struct StaticFieldAddress {

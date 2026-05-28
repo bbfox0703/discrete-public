@@ -2146,6 +2146,9 @@ void RegisterCoreHandlers() {
         std::size_t elementFieldCap = static_cast<std::size_t>(args.value("elementFieldCap", 16));
         if (elementFieldCap == 0)  elementFieldCap = 16;
         if (elementFieldCap > 64)  elementFieldCap = 64;
+        std::size_t elementCaptureBudget = static_cast<std::size_t>(args.value("elementCaptureBudget", 20000));
+        if (elementCaptureBudget == 0)       elementCaptureBudget = 20000;
+        if (elementCaptureBudget > 2000000)  elementCaptureBudget = 2000000;
         std::vector<std::string> arrayElementTargets;
         if (args.contains("arrayElementTargets") && args["arrayElementTargets"].is_array()) {
             for (const auto& t : args["arrayElementTargets"]) {
@@ -2256,6 +2259,7 @@ void RegisterCoreHandlers() {
         // (blanket on x86 risks the OOM the cap-clamp/refusal gate guards
         // against). x64 leaves targets empty for blanket capture.
         session->elementFieldCap     = elementFieldCap;
+        session->elementCaptureBudget = elementCaptureBudget;
         session->arrayElementTargets = std::move(arrayElementTargets);
         session->arrayElementFields  = reqArrayElementFields &&
             !(memBefore.pointerSize == 4 && session->arrayElementTargets.empty());
@@ -2312,6 +2316,10 @@ void RegisterCoreHandlers() {
         std::size_t skippedOpenGenericArrays = 0;
         std::size_t classInfoCacheHits = 0;
         std::size_t classInfoCacheMisses = 0;
+        // Phase 29f (Layer B) — shared across the whole decode loop so the
+        // element-capture budget bounds total memory (not per-class).
+        std::size_t decodedElementSets = 0;
+        bool         elementBudgetHit  = false;
         std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> globalClassInfo;
 
         // Open-generic array detection: real array types are namespaced
@@ -2352,8 +2360,18 @@ void RegisterCoreHandlers() {
             // exactly like the top-level instance walk. Returns
             // {"fields":[…]} or {"element_class_error":"…"}.
             auto captureMonoElementFields = [&](std::uintptr_t elemPtr) -> json {
+                // Memory ceiling: once the per-snapshot element budget is spent,
+                // leave remaining elements ptr-only so a large game can't OOM.
+                if (decodedElementSets >= session->elementCaptureBudget) {
+                    elementBudgetHit = true;
+                    return json::object();   // no fields → element keeps ptr= only
+                }
                 Mono::MonoClass* ec = Mono::ClassOfObject(elemPtr);
-                if (ec == nullptr) return json{{"element_class_error", "object_get_class_failed"}};
+                // Validate the class before walking it — object_get_class on a
+                // false-positive array slot can return a garbage non-null
+                // pointer whose class_get_parent / field walk would crash.
+                if (ec == nullptr || !Mono::ProbeKlassValid(ec))
+                    return json{{"element_class_error", "object_get_class_failed"}};
                 std::vector<Mono::MonoClass*> echain;
                 for (Mono::MonoClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
                     echain.push_back(cur);
@@ -2388,6 +2406,7 @@ void RegisterCoreHandlers() {
                         ++produced;
                     }
                 }
+                ++decodedElementSets;
                 return json{{"fields", std::move(efields)}};
             };
             auto shouldCaptureInner = [&](const std::string& fqn, const std::string& fieldName) -> bool {
@@ -2633,6 +2652,8 @@ void RegisterCoreHandlers() {
             {"skippedOpenGenericArrays", skippedOpenGenericArrays},
             {"classInfoCacheHits",       classInfoCacheHits},
             {"classInfoCacheMisses",     classInfoCacheMisses},
+            {"decodedElementSets",       decodedElementSets},
+            {"elementBudgetHit",         elementBudgetHit},
         };
 
         // Post-decode memory snapshot for the response. UI surfaces this
@@ -2646,6 +2667,8 @@ void RegisterCoreHandlers() {
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
             " arrays=" + std::to_string(decodedArrays) +
+            " elemSets=" + std::to_string(decodedElementSets) +
+            (elementBudgetHit ? " elemBudgetHit=1" : "") +
             " buildId=" + buildId +
             " gameWorkingSet=" + std::to_string(memAfter.workingSet) +
             " gamePrivateUsage=" + std::to_string(memAfter.privateUsage));
@@ -5245,6 +5268,9 @@ void RegisterCoreHandlers() {
         std::size_t elementFieldCap = static_cast<std::size_t>(args.value("elementFieldCap", 16));
         if (elementFieldCap == 0)  elementFieldCap = 16;
         if (elementFieldCap > 64)  elementFieldCap = 64;
+        std::size_t elementCaptureBudget = static_cast<std::size_t>(args.value("elementCaptureBudget", 20000));
+        if (elementCaptureBudget == 0)       elementCaptureBudget = 20000;
+        if (elementCaptureBudget > 2000000)  elementCaptureBudget = 2000000;
         std::vector<std::string> arrayElementTargets;
         if (args.contains("arrayElementTargets") && args["arrayElementTargets"].is_array()) {
             for (const auto& t : args["arrayElementTargets"]) {
@@ -5331,6 +5357,7 @@ void RegisterCoreHandlers() {
         session->arrayCap      = arrayCap;
         // Phase 29f (Layer B) — x86 blanket gate (mirror of Mono).
         session->elementFieldCap     = elementFieldCap;
+        session->elementCaptureBudget = elementCaptureBudget;
         session->arrayElementTargets = std::move(arrayElementTargets);
         session->arrayElementFields  = reqArrayElementFields &&
             !(memBeforeIl.pointerSize == 4 && session->arrayElementTargets.empty());
@@ -5368,6 +5395,9 @@ void RegisterCoreHandlers() {
         std::size_t skippedOpenGenericArrays = 0;
         std::size_t classInfoCacheHits = 0;
         std::size_t classInfoCacheMisses = 0;
+        // Phase 29f (Layer B) — shared element-capture budget accounting.
+        std::size_t decodedElementSets = 0;
+        bool         elementBudgetHit  = false;
 
         auto isCapturableArrayType = [](const std::string& tn) -> bool {
             if (tn.size() < 4) return false;
@@ -5401,8 +5431,20 @@ void RegisterCoreHandlers() {
             // capture (mirror of the Mono path). Returns {"fields":[…]} or
             // {"element_class_error":"…"}.
             auto captureIlElementFields = [&](std::uintptr_t elemPtr) -> json {
+                // Memory ceiling: stop deep-capturing once the per-snapshot
+                // budget is spent so blanket capture on a large game (the
+                // 158K-instance / 21K-array IL2CPP CTD) can't explode the JSON
+                // cache into an OOM. Remaining elements stay ptr-only.
+                if (decodedElementSets >= session->elementCaptureBudget) {
+                    elementBudgetHit = true;
+                    return json::object();
+                }
                 IL2CPP::Il2CppClass* ec = IL2CPP::ClassOfObject(elemPtr);
-                if (ec == nullptr) return json{{"element_class_error", "object_get_class_failed"}};
+                // Validate before walking — object_get_class on a false-positive
+                // array slot can hand back a garbage class whose class_get_parent
+                // / field walk would crash the game.
+                if (ec == nullptr || !IL2CPP::ProbeKlassValid(ec))
+                    return json{{"element_class_error", "object_get_class_failed"}};
                 std::vector<IL2CPP::Il2CppClass*> echain;
                 for (IL2CPP::Il2CppClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
                     echain.push_back(cur);
@@ -5435,6 +5477,7 @@ void RegisterCoreHandlers() {
                         ++produced;
                     }
                 }
+                ++decodedElementSets;
                 return json{{"fields", std::move(efields)}};
             };
             auto shouldCaptureInner = [&](const std::string& fqn, const std::string& fieldName) -> bool {
@@ -5669,6 +5712,8 @@ void RegisterCoreHandlers() {
             {"skippedOpenGenericArrays", skippedOpenGenericArrays},
             {"classInfoCacheHits",       classInfoCacheHits},
             {"classInfoCacheMisses",     classInfoCacheMisses},
+            {"decodedElementSets",       decodedElementSets},
+            {"elementBudgetHit",         elementBudgetHit},
         };
 
         // Post-decode memory snapshot for the response — mirrors Mono.
@@ -5680,6 +5725,8 @@ void RegisterCoreHandlers() {
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
             " arrays=" + std::to_string(decodedArrays) +
+            " elemSets=" + std::to_string(decodedElementSets) +
+            (elementBudgetHit ? " elemBudgetHit=1" : "") +
             " buildId=" + buildId +
             " gameWorkingSet=" + std::to_string(memAfterIl.workingSet) +
             " gamePrivateUsage=" + std::to_string(memAfterIl.privateUsage));

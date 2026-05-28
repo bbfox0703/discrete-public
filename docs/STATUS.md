@@ -83,6 +83,26 @@
     Expanders so the user can reclaim vertical height for the results grid
     at any resolution. (Stage 0/1 were already collapsible; side-by-side
     was rejected — the wide grids would force h-scroll at 1080p.)
+* **29f live-smoke #2 (x64 IL2CPP) — Layer B blanket CTD, FIXED (DLL #718).**
+  First snapshot WITHOUT Layer B succeeded but was large: the game had
+  **158,790 instances / 21,429 arrays** across 3,765 decoded classes
+  (`gameWorkingSet=4.83GB` — that 4-5GB is the *game* process shown in the
+  status line, not the snapshot; the snapshot is still big at this scale →
+  narrow with **Scope** assemblies / lower caps). Second snapshot WITH
+  blanket Layer B **crashed during decode** (no `snapshotBegin id=2`
+  completion in the scan log). Two root causes, both hardened:
+  - **Memory explosion** — blanket capture on 21K arrays × up to 64 elems
+    × 16 fields piled millions of JSON nodes onto an already-huge snapshot
+    → OOM. New per-snapshot **`elementCaptureBudget`** (default 20,000
+    element-sets, RPC-tunable, hard cap 2,000,000): once spent, remaining
+    elements stay `ptr=` only. Reported back as `decodedElementSets` +
+    `elementBudgetHit` (decodeStats). **Blanket Layer B on a large game is
+    inherently partial — use explicit Targets for full coverage even on x64.**
+  - **Garbage element class** — `object_get_class` on a false-positive
+    array slot can return a non-null garbage class whose (unguarded)
+    `class_get_parent` / field walk would fault. Both capturers now gate on
+    `ProbeKlassValid` (new `Mono::ProbeKlassValid`; `IL2CPP::ProbeKlassValid`
+    already existed) before walking. 577/577 tests; DLL #718 builds x64+x86.
 
 ## TL;DR — what's left to pick up (next session)
 
