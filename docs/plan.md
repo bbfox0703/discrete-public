@@ -803,7 +803,7 @@ both Layer A's index-shuffle weakness and address drift. Full design in
 
 ---
 
-## Phase 29g — Snapshot UI memory optimization 🔵 IN PROGRESS 2026-05-28 (29g-0 tooling shipped)
+## Phase 29g — Snapshot UI memory optimization ✅ ACCEPTANCE MET 2026-05-28 (29g-0/1/2/2b shipped; 29g-3/2c optional headroom)
 
 **Problem (live, SaGa Frontier 2 Remastered, x64 IL2CPP)**: DiscreteUI holds
 **~5.7 GB per snapshot** (2,451 classes / ~132K instances of Assembly-CSharp);
@@ -920,9 +920,15 @@ of profiler data, #3 is profiler-gated):
   identically → DB save round-trip unaffected.
   [SnapshotInternerTests.cs](../ui/UnityDumpUI.Tests/SnapshotInternerTests.cs)
   covers cross-instance/cross-class dedup, unique-address preservation, Layer-B
-  nesting, null/empty. ⏳ **live re-measure pending**: expect `System.String`
-  ~1.9 GB → ~1 GB (the duplicated Name/Type/From objects collapse to thousands),
-  3-snapshot live floor → ~3.3 GB.
+  nesting, null/empty. **✅ live re-measure CONFIRMS**: `System.String`
+  1.92 GB / 26.3M objects → **0.91 GB / 6.9M objects** (−1 GB, −19.4M duplicate
+  objects). Remaining strings are inherently-unique (addresses/ptrs/values).
+* **✅ ACCEPTANCE MET (29g-2 + 29g-2b + 29g-1):** 3-snapshot live floor ≈
+  **3.25 GB** (String 0.91 + SnapshotFieldEntry 1.03 + ArrayElement 0.56 +
+  JsonDocument 0.39 + small Byte[] 0.37), down from ~9.5 GB managed / ~17 GB
+  process. ~1.1 GB/snap < 2 GB and 3 snaps 3.25 GB < 6 GB targets. **29g-3
+  (JsonElement, ~750 MB) + 29g-2c (pipe byte-parse, capture peak) are optional
+  headroom.**
 * **29g-2 lazy + released FieldIndex ✅ SHIPPED 2026-05-28 (583/583 green, +5).**
   `SnapshotEnvelope` FieldIndex is now lazy: `_fieldIndex` null until
   `EnsureFieldIndex()` (build-on-demand, idempotent); `ReleaseFieldIndex()`

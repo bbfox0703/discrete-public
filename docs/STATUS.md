@@ -32,13 +32,16 @@
 > ([PipeClient.cs:154](../ui/UnityDumpUI.Core/Services/PipeClient.cs) reads each
 > chunk as a `string`); durable byte-parse fix deferred as 29g-2c.
 >
-> **29g-1 string interning SHIPPED** (588/588 green) —
+> **29g-1 string interning SHIPPED + CONFIRMED** (588/588 green) —
 > [SnapshotInterner.cs](../ui/UnityDumpUI.Core/Services/SnapshotInterner.cs)
-> dedups field Name/Type/From + class names + ElementType to shared instances at
-> deserialize (capture + lazy-load). ⏳ **USER**: `build.cmd ui`, 3 snaps SaGa
-> F2R, `tools/Capture-DotnetDump.ps1 -Label after-29g1` — expect `System.String`
-> ~1.9 GB → ~1 GB. Remaining optional: 29g-3 (JsonElement, ~748 MB) + 29g-2c
-> (pipe byte-parse). 3 commits on dev: 99639c2, 95b639d, + 29g-1 (uncommitted).
+> dedups field Name/Type/From + class names + ElementType at deserialize.
+> Measured: `System.String` 1.92 GB / 26.3M → **0.91 GB / 6.9M** (−1 GB).
+>
+> **✅ ACCEPTANCE MET.** 3-snapshot live floor ≈ **3.25 GB** (from ~9.5 GB
+> managed / ~17 GB process), ~1.1 GB/snap. Both targets cleared. **29g-3
+> (JsonElement → compact, ~750 MB) + 29g-2c (pipe byte-parse, capture peak) are
+> optional headroom — not required.** 3 commits on `dev` (99639c2, 95b639d,
+> 2c06cc2), not pushed.
 
 ### Post-29e fixes (2026-05-28)
 
