@@ -77,6 +77,12 @@
     expand)" → "class not resolved". `InstanceFieldClassifier` routed any
     `IsValueType` field without an inline-decoded value to `ValueStruct`;
     now `System.*` scalar value types stay `Leaf` (+2 tests, 577 total).
+  - **Class Pivot collapsible sections** — wrapped the Pivot-query
+    pickers (default expanded), the Array inner-pivot row (default
+    collapsed — advanced), and the Snapshots picker (default expanded) in
+    Expanders so the user can reclaim vertical height for the results grid
+    at any resolution. (Stage 0/1 were already collapsible; side-by-side
+    was rejected — the wide grids would force h-scroll at 1080p.)
 
 ## TL;DR — what's left to pick up (next session)
 

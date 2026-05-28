@@ -2431,8 +2431,12 @@
                 </Border>
               </Expander>
 
-              <!-- Class + key + value pickers row -->
-              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6"
+              <!-- Class + key + value pickers row — collapsible (29f-4 polish)
+                   so the user can reclaim vertical height for results once the
+                   query is configured. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6" IsExpanded="True"
+                        Header="⚙ Pivot query — class · key fields · value fields">
+              <Border Padding="6"
                       Background="#1F808080" CornerRadius="3">
                 <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,4,Auto,4,Auto"
                       RowSpacing="0" ColumnSpacing="6">
@@ -2473,17 +2477,21 @@
                           HorizontalAlignment="Left" MinWidth="180" Padding="10,4"/>
                 </Grid>
               </Border>
+              </Expander>
 
               <!-- Phase 29f Layer B: reference-array element inner-pivot.
-                   When on, "Key fields" above acts as the OUTER (owner-
+                   Collapsible (default collapsed — advanced/optional). When the
+                   checkbox is on, "Key fields" above acts as the OUTER (owner-
                    instance) key and these three fields target the array
                    element. Requires snapshots captured with "Capture array
                    element fields" (Snapshot tab). -->
-              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6"
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6" IsExpanded="False"
+                        Header="🧬 Array inner-pivot (Layer B)">
+              <Border Padding="6"
                       Background="#1F808080" CornerRadius="3">
                 <DockPanel>
                   <CheckBox DockPanel.Dock="Top"
-                            Content="Array inner-pivot (Layer B) — pivot a reference array's elements by an inner field"
+                            Content="Enable — pivot a reference array's elements by an inner field"
                             IsChecked="{Binding ClassPivot.ArrayPivotMode, Mode=TwoWay}"
                             ToolTip.Tip="Instead of pivoting whole instances, pivot the ELEMENTS of a reference-type array field on the class (e.g. StatConvertCollectionData[]) by a field INSIDE each element. The 'Key fields' box above becomes the outer owner-instance key (may be empty); the fields here key/value the element. Needs snapshots captured with Layer B (Snapshot tab → 'Capture array element fields')."/>
                   <Grid Margin="0,6,0,0"
@@ -2517,15 +2525,18 @@
                   </Grid>
                 </DockPanel>
               </Border>
+              </Expander>
 
-              <!-- Snapshot picker (top half) + Results (bottom half) -->
+              <!-- Snapshot picker (top half) + Results (bottom half).
+                   The snapshot picker is collapsible (default expanded) so it
+                   can be tucked away once the snapshots are selected, handing
+                   its space to the results grid. -->
               <Grid RowDefinitions="Auto,6,*">
-                <Border Grid.Row="0" Padding="0"
-                        Background="#1F808080" CornerRadius="3"
-                        MaxHeight="240">
+                <Expander Grid.Row="0" IsExpanded="True" MaxHeight="240"
+                          Header="Snapshots (capture-order)">
+                <Border Padding="0"
+                        Background="#1F808080" CornerRadius="3">
                   <DockPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="Snapshots (capture-order)"
-                               FontWeight="SemiBold" Margin="6,4,6,4"/>
                     <DataGrid ItemsSource="{Binding ClassPivot.SelectionRows}"
                               AutoGenerateColumns="False"
                               HeadersVisibility="Column"
@@ -2550,6 +2561,7 @@
                     </DataGrid>
                   </DockPanel>
                 </Border>
+                </Expander>
 
                 <GridSplitter Grid.Row="1" ResizeDirection="Rows"
                               Height="6" Background="#33808080"/>
