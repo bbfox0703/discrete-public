@@ -27,6 +27,13 @@
 //   Score = 0.40·S_stable + 0.30·S_cardinality + 0.20·TypePrior
 //         + 0.10·NamePrior
 //
+// Then a hard override: address-like fields (System.IntPtr / …Ptr, e.g.
+// Unity's m_CachedPtr) are per-instance unique + session-stable, so the raw
+// score rates them "perfect keys" — the exact trap this tab exists to avoid,
+// since addresses drift across AND within sessions. IsAddressLike zeroes their
+// TypePrior and multiplies the composite by AddressKeyPenalty so they sink
+// below every real candidate and never win the greedy suggestion.
+//
 // Plus a greedy compound-key suggestion: start from the top-scored
 // field; if it still collides (two instances share its value within a
 // snap), add the next-best field that breaks the most collisions, until
@@ -141,9 +148,16 @@ public static class KeyDiscoveryEngine
             }
             double sCard = snapsWithInst > 0 ? cardSum / snapsWithInst : 0;
 
-            double tp = TypePrior(type, isEnum);
+            bool addrLike = IsAddressLike(name, type, isEnum);
+            double tp = addrLike ? 0.0 : TypePrior(type, isEnum);
             double np = NamePrior(name);
             double score = 0.40 * sStable + 0.30 * sCard + 0.20 * tp + 0.10 * np;
+            // Raw addresses / native pointers (System.IntPtr, Unity's m_CachedPtr,
+            // any …Ptr) are per-instance unique + session-stable, so the statistical
+            // scores rate them as perfect keys — the exact trap this tab exists to
+            // avoid, since addresses drift both across AND within sessions. Sink
+            // them so they never win the suggestion or sit at the top of the picker.
+            if (addrLike) score *= AddressKeyPenalty;
 
             scores.Add(new FieldScore
             {
@@ -298,14 +312,33 @@ public static class KeyDiscoveryEngine
             "System.Int16" or "System.UInt16" or
             "System.Int32" or "System.UInt32" or
             "System.Int64" or "System.UInt64" or
-            "System.Byte"  or "System.SByte"  or
-            "System.IntPtr" or "System.UIntPtr" => 1.00,
+            "System.Byte"  or "System.SByte"  => 1.00,
             "System.String"                      => 0.85,
             "System.Char"                        => 0.80,
             "System.Single" or "System.Double" or "System.Decimal" => 0.20,
             "System.Boolean"                     => 0.10,
-            _                                    => 0.05,   // reference / struct / pointer
+            _                                    => 0.05,   // reference / struct
         };
+    }
+
+    /// <summary>Composite-score multiplier for address-like fields — they
+    /// can never be a stable cross-session key, so sink them well below any
+    /// legitimate candidate while still showing them in the picker.</summary>
+    private const double AddressKeyPenalty = 0.10;
+
+    /// <summary>A raw address / native pointer is the one thing class-pivot
+    /// must never key on: the whole reason this tab exists is that addresses
+    /// drift across (and within) sessions while business field values don't.
+    /// Unity's <c>m_CachedPtr</c> is <see cref="System.IntPtr"/>, per-instance
+    /// unique and session-stable, so the statistical scores would rate it a
+    /// "perfect key" — we override that with domain knowledge here.</summary>
+    private static bool IsAddressLike(string name, string type, bool isEnum)
+    {
+        if (isEnum) return false;
+        if (type is "System.IntPtr" or "System.UIntPtr") return true;
+        string n = name.ToLowerInvariant();
+        return n.EndsWith("ptr", StringComparison.Ordinal)
+            || n.EndsWith("pointer", StringComparison.Ordinal);
     }
 
     private static double NamePrior(string name)

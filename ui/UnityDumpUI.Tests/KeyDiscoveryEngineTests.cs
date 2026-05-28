@@ -72,6 +72,13 @@ public class KeyDiscoveryEngineTests
             Value = JsonDocument.Parse(v ? "true" : "false").RootElement.Clone(),
         };
 
+    private static SnapshotFieldEntry PtrF(string name, long v)
+        => new()
+        {
+            Name = name, Type = "System.IntPtr",
+            Value = JsonDocument.Parse(v.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement.Clone(),
+        };
+
     private static KeyDiscoveryResult RunOn(params SnapshotEnvelope[] snaps)
         => KeyDiscoveryEngine.Run(new KeyDiscoveryQuery
         {
@@ -214,6 +221,51 @@ public class KeyDiscoveryEngineTests
         Assert.Contains("_itemGroup", r.SuggestedKey);
         Assert.Contains("_property", r.SuggestedKey);
         Assert.Contains("unique in every snapshot", r.SuggestedKeyReason);
+    }
+
+    // ─── Address / native-pointer demotion ─────────────────────────────
+
+    [Fact]
+    public void Score_PointerField_IsDemoted_AndNotSuggestedAsKey()
+    {
+        // m_CachedPtr (System.IntPtr) is unique per instance + session-stable
+        // — perfect cardinality, perfect stability — so the raw score would
+        // crown it. _type collides (two instances share each value), so
+        // without the address override the pointer outranks the real key.
+        // The override must zero the pointer's TypePrior, sink its composite,
+        // and keep it out of the suggested key.
+        var s1 = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x1", PtrF("m_CachedPtr", 0x1000), IntF("_type", 1), IntF("_value", 100)),
+            Inst("0x2", PtrF("m_CachedPtr", 0x2000), IntF("_type", 1), IntF("_value", 200)),
+            Inst("0x3", PtrF("m_CachedPtr", 0x3000), IntF("_type", 2), IntF("_value", 300)),
+            Inst("0x4", PtrF("m_CachedPtr", 0x4000), IntF("_type", 2), IntF("_value", 400))));
+        var s2 = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x1", PtrF("m_CachedPtr", 0x1000), IntF("_type", 1), IntF("_value", 110)),
+            Inst("0x2", PtrF("m_CachedPtr", 0x2000), IntF("_type", 1), IntF("_value", 210)),
+            Inst("0x3", PtrF("m_CachedPtr", 0x3000), IntF("_type", 2), IntF("_value", 310)),
+            Inst("0x4", PtrF("m_CachedPtr", 0x4000), IntF("_type", 2), IntF("_value", 410))));
+        var r = RunOn(s1, s2);
+
+        var ptr = ScoreOf(r, "m_CachedPtr");
+        Assert.Equal(0.0, ptr.TypePrior, 3);
+        Assert.True(ptr.Score < 0.15, $"pointer should be penalized, was {ptr.Score}");
+        Assert.DoesNotContain("m_CachedPtr", r.SuggestedKey);
+        Assert.True(ScoreOf(r, "_type").Score > ptr.Score,
+            "a real key must outrank the demoted pointer");
+    }
+
+    [Fact]
+    public void Score_NameEndingInPtr_IsTreatedAsAddress()
+    {
+        // Even when the reported type isn't IntPtr, a …Ptr name is a native
+        // pointer by Unity convention → never a key.
+        var snap = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x1", IntF("nativePtr", 111), IntF("_id", 1)),
+            Inst("0x2", IntF("nativePtr", 222), IntF("_id", 2))));
+        var r = RunOn(snap);
+        Assert.Equal(0.0, ScoreOf(r, "nativePtr").TypePrior, 3);
+        Assert.DoesNotContain("nativePtr", r.SuggestedKey);
+        Assert.Equal(new[] { "_id" }, r.SuggestedKey.ToArray());
     }
 
     [Fact]

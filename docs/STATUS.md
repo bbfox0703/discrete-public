@@ -1,6 +1,31 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` → merging to `main` 2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7/8/9 polish**; build #706 UI / DLL #650. 550/550 tests green. Every flat DataGrid uses the `CustomSortComparer` pattern (arrows work); Inspector tree uses `SortTree`.
+**Branch**: `main` (Phase 29e merged) — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7/8/9 polish**; build #706 UI / DLL #650. 552/552 tests green. Every flat DataGrid uses the `CustomSortComparer` pattern (arrows work); Inspector tree uses `SortTree`.
+
+### Post-29e fixes (2026-05-28)
+
+* **Game-name typo** — corrected `활俠傳` (leading Korean hangul 활) → `活俠傳`
+  (Legend of Mortal) across 17 docs + source files. Byte-level swap, no
+  other bytes touched.
+* **Case-insensitive autocomplete** — all 6 `AutoCompleteBox`es in the
+  Class Pivot + SPC tabs were `FilterMode="ContainsOrdinalCaseSensitive"`
+  (Assembly, Class FQN, Key/Value field names, SPC Class/Type). Switched
+  to `ContainsOrdinal` so typeahead is case-insensitive. The VM-side
+  substring filters (Stage-0 class name, Stage-1 field name, Pivot key
+  filter) were already `OrdinalIgnoreCase`; the final data-match equality
+  (class FQN / assembly) stays `Ordinal` on purpose — identifiers are
+  case-sensitive.
+* **Key suggestion no longer proposes pointers** — `KeyDiscoveryEngine`
+  rated Unity's `m_CachedPtr` (System.IntPtr, per-instance unique +
+  session-stable) a 0.90 "perfect key", the exact address-drift trap the
+  Pivot tab exists to avoid. New `IsAddressLike` (IntPtr/UIntPtr or a
+  `…Ptr`/`…Pointer` name) zeroes TypePrior + applies `AddressKeyPenalty`
+  (×0.10), so addresses sink below every real candidate and are excluded
+  from the greedy suggestion. +2 tests (552 total). `System.IntPtr` /
+  `UIntPtr` also dropped from the 1.00 TypePrior tier.
+* **SPC live-smoke** recorded below (Exact signature / Range narrowing /
+  relative Increased·Decreased·Unchanged — all single-session, verified
+  on 活俠傳).
 
 ## TL;DR — what's left to pick up (next session)
 
@@ -178,8 +203,9 @@ green on 462/462 unit tests, both branches in sync.
 | # | Case | Status |
 |---|---|---|
 | 1 | **Killer use case literal** — 4 snaps with `10160→9910→9410→9410` SPC signature on Mortal.Core.GameStat | ✅ Verified 2026-05-29 — screenshot showed `Values: 10160 → 10160 → 9910 → 9860` so the engine + UI works end-to-end |
-| 2 | Constant-value finder — all `Exact V` | Not yet tried live |
-| 3 | Range narrowing — all `Range min..max` | Not yet tried live |
+| 2 | Exact-signature finder — per-snap `Exact` values | ✅ Verified 2026-05-28 (single session, 4 snaps) — `[Exact 10160, Exact 9910, Exact 10860, Exact 10860]` → 1 match `Mortal.Core.GameStat._value` (System.Int32), trajectory `10160 → 9910 → 10860 → 10860`. Confirms absolute Exact predicate end-to-end |
+| 3 | Range narrowing — per-snap `Range min..max` | ✅ Verified 2026-05-28 (single session) — `[10000-20000, 8000-10000, 7000-12000, 10000-15000]` → `GameStat._value` + 2× `AkCommonUserSettings/SpatialAudioSettings.m_MaxPathLength` (constant 10000.0). Range predicate + per-snap operand-2 work |
+| 3b | Relative predicates — `Increased` / `Decreased` / `Unchanged` (after a leading absolute) | ✅ Verified 2026-05-28 (single session) — `[Any, Decreased, Increased, Unchanged]` → `GameStat._value` + `Mortal.Core.GameSave` fields (CurrentYear/CurrentMonth/TimeTick). Confirms value up/down/unchanged deltas |
 | 4 | Cross-session statics-only auto-mode + banner | Not yet tried live (needs game relaunch between snaps) |
 | 5 | Cross-build diff banner | Not yet tried live (needs game version change) |
 | 6 | Context menu — right-click result row → Inspect / Copy variants | Not yet tried live |

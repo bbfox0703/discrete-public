@@ -2069,7 +2069,7 @@
                                      ItemsSource="{Binding SpcQuery.KnownClasses}"
                                      PlaceholderText="substring"
                                      MinimumPrefixLength="1"
-                                     FilterMode="ContainsOrdinalCaseSensitive"
+                                     FilterMode="ContainsOrdinal"
                                      Width="240"
                                      VerticalAlignment="Center"
                                      ToolTip.Tip="Substring match against the class fully-qualified name. Dropdown suggestions are sourced from snapshots already loaded into memory; if the list is short, run the query once to hydrate snapshots + populate it."/>
@@ -2083,7 +2083,7 @@
                                      ItemsSource="{Binding SpcQuery.KnownTypes}"
                                      PlaceholderText="e.g. Int32"
                                      MinimumPrefixLength="1"
-                                     FilterMode="ContainsOrdinalCaseSensitive"
+                                     FilterMode="ContainsOrdinal"
                                      Width="180"
                                      VerticalAlignment="Center"
                                      ToolTip.Tip="Substring match against the field type. Type 'u' to surface System.UInt16 / UInt32 / UInt64; type 'Vector' for the Unity vector types. Suggestions come from a curated primitive list plus types observed in already-hydrated snapshots."/>
@@ -2274,7 +2274,7 @@
                                        ItemsSource="{Binding ClassPivot.KnownAssemblies}"
                                        PlaceholderText="all assemblies"
                                        MinimumPrefixLength="0"
-                                       FilterMode="ContainsOrdinalCaseSensitive"
+                                       FilterMode="ContainsOrdinal"
                                        Width="220" VerticalAlignment="Center"
                                        ToolTip.Tip="Scope the analysis to one assembly (e.g. Assembly-CSharp). Leave blank to score every class. Suggestions appear after the first Analyze hydrates a snapshot."/>
                       <CheckBox Content="Show synthetic"
@@ -2415,7 +2415,7 @@
                                    ItemsSource="{Binding ClassPivot.KnownClasses}"
                                    PlaceholderText="e.g. Mortal.Core.GameStat"
                                    MinimumPrefixLength="0"
-                                   FilterMode="ContainsOrdinalCaseSensitive"
+                                   FilterMode="ContainsOrdinal"
                                    ToolTip.Tip="Fully-qualified class name (Namespace.Name). Suggestions come from snapshots already loaded into memory; the list is empty until the first Run hydrates a snapshot (a dedicated assembly → class picker with stability scoring lands in Phase 29e-3)."/>
 
                   <TextBlock Grid.Row="2" Grid.Column="0" Text="Key fields:" VerticalAlignment="Center"/>
@@ -2424,7 +2424,7 @@
                                    ItemsSource="{Binding ClassPivot.KnownFieldNames}"
                                    PlaceholderText="_propertyID  (or '_itemGroup, _propertyID')"
                                    MinimumPrefixLength="0"
-                                   FilterMode="ContainsOrdinalCaseSensitive"
+                                   FilterMode="ContainsOrdinal"
                                    ToolTip.Tip="Comma-separated field names whose values jointly identify a logical instance across snapshots. Click to browse all field names of the typed class (populated after a class is chosen + snapshots hydrated). Compound key (multiple names) helps when a single field has collisions, e.g. (_itemGroup, _propertyID)."/>
                   <TextBlock Grid.Row="2" Grid.Column="2" Text="Value fields:" VerticalAlignment="Center"/>
                   <AutoCompleteBox Grid.Row="2" Grid.Column="3"
@@ -2432,7 +2432,7 @@
                                    ItemsSource="{Binding ClassPivot.KnownFieldNames}"
                                    PlaceholderText="_value  (or '_hp, _mp')"
                                    MinimumPrefixLength="0"
-                                   FilterMode="ContainsOrdinalCaseSensitive"
+                                   FilterMode="ContainsOrdinal"
                                    ToolTip.Tip="Comma-separated field names whose trajectory across snapshots you want to see. Click to browse all field names of the typed class. Multiple value fields stack as 'fieldName: v0 → v1 → …' lines in the Trajectory column."/>
                   <TextBlock Grid.Row="2" Grid.Column="4" Text="Key filter:" VerticalAlignment="Center"/>
                   <TextBox Grid.Row="2" Grid.Column="5"
