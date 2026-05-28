@@ -1611,13 +1611,22 @@
                           MinWidth="100"
                           ToolTip.Tip="Drop every captured snapshot. Frees UI memory. Status line reports the amount freed."/>
 
-                  <!-- Row 1 — scope assemblies + include-system toggle -->
+                  <!-- Row 1 — scope assemblies + picker + include-system toggle.
+                       DockPanel so the assembly picker (a ComboBox) keeps a
+                       fixed width while the free-text scope box fills the rest. -->
                   <TextBlock Grid.Row="1" Grid.Column="0" Text="Scope:"
                              VerticalAlignment="Center" Margin="0,6,6,0"/>
-                  <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="6"
-                           Text="{Binding Snapshot.ScopeAssembliesText, Mode=TwoWay}"
-                           PlaceholderText="(empty = capture every user assembly. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"
-                           Margin="0,6,12,0"/>
+                  <DockPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="6"
+                             Margin="0,6,12,0" LastChildFill="True">
+                    <ComboBox DockPanel.Dock="Right" Width="200" Margin="6,0,0,0"
+                              ItemsSource="{Binding Snapshot.KnownScopeAssemblies}"
+                              SelectedItem="{Binding Snapshot.SelectedScopeAssembly, Mode=TwoWay}"
+                              PlaceholderText="＋ add assembly…"
+                              ToolTip.Tip="Pick a game assembly to append to the Scope filter. Populated on connect; selecting one adds it to the box on the left (deduped)."/>
+                    <TextBox Text="{Binding Snapshot.ScopeAssembliesText, Mode=TwoWay}"
+                             VerticalAlignment="Center"
+                             PlaceholderText="(empty = capture every user assembly. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"/>
+                  </DockPanel>
                   <CheckBox Grid.Row="1" Grid.Column="7" Grid.ColumnSpan="2"
                             Content="Include system assemblies"
                             IsChecked="{Binding Snapshot.IncludeSystemAssemblies, Mode=TwoWay}"

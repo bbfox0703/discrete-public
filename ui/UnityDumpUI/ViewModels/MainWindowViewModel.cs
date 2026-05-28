@@ -674,7 +674,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             Snapshot.OnGameConnected(
                 hs.GamePointerSize ?? 0,
                 hs.GameWorkingSet  ?? 0UL,
-                hs.GamePrivateUsage ?? 0UL);
+                hs.GamePrivateUsage ?? 0UL,
+                hs.Backend ?? string.Empty);
 
             // Phase 29c-3 — open (or switch to) the per-game SQLite DB.
             // Lazy-loads metadata from disk into Snapshot.Snapshots so
@@ -689,6 +690,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // Phase 8: kick off assembly fetch so the left pane populates
             // without an extra click. Failures surface on Browser.ErrorMessage.
             _ = Browser.RefreshAssembliesCommand.ExecuteAsync(null);
+
+            // 2026-05-28: populate the Snapshot Scope picker + default the
+            // scope to "Assembly-CSharp" when present. Soft-fail.
+            _ = Snapshot.LoadScopeAssembliesAsync();
 
             // Phase 14b: opportunistic metadata-stats call so the user
             // sees a "stripped/obfuscated" banner up front rather than

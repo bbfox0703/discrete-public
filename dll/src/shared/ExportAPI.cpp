@@ -2317,7 +2317,9 @@ void RegisterCoreHandlers() {
         std::size_t classInfoCacheHits = 0;
         std::size_t classInfoCacheMisses = 0;
         // Phase 29f (Layer B) — shared across the whole decode loop so the
-        // element-capture budget bounds total memory (not per-class).
+        // element-capture budget bounds total memory + object_get_class volume
+        // (elementsProcessed caps ATTEMPTS, not just captures).
+        std::size_t elementsProcessed = 0;
         std::size_t decodedElementSets = 0;
         bool         elementBudgetHit  = false;
         std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> globalClassInfo;
@@ -2360,18 +2362,23 @@ void RegisterCoreHandlers() {
             // exactly like the top-level instance walk. Returns
             // {"fields":[…]} or {"element_class_error":"…"}.
             auto captureMonoElementFields = [&](std::uintptr_t elemPtr) -> json {
-                // Memory ceiling: once the per-snapshot element budget is spent,
-                // leave remaining elements ptr-only so a large game can't OOM.
-                if (decodedElementSets >= session->elementCaptureBudget) {
+                // Budget caps ATTEMPTS (not just captures): bounds both JSON
+                // memory and per-element object_get_class volume so a blanket
+                // sweep over a large game can't OOM / over-call the runtime.
+                if (elementsProcessed >= session->elementCaptureBudget) {
                     elementBudgetHit = true;
                     return json::object();   // no fields → element keeps ptr= only
                 }
+                ++elementsProcessed;
                 Mono::MonoClass* ec = Mono::ClassOfObject(elemPtr);
-                // Validate the class before walking it — object_get_class on a
-                // false-positive array slot can return a garbage non-null
-                // pointer whose class_get_parent / field walk would crash.
-                if (ec == nullptr || !Mono::ProbeKlassValid(ec))
+                if (ec == nullptr)
                     return json{{"element_class_error", "object_get_class_failed"}};
+                // Only walk classes we enumerated in-scope. object_get_class on
+                // a false-positive array slot can return a readable-but-garbage
+                // class; the known-class set is exact (no runtime call) and keeps
+                // a garbage class out of the class_get_parent / field walk.
+                if (klassToDescIdx.find(ec) == klassToDescIdx.end())
+                    return json{{"element_class_error", "class_out_of_scope"}};
                 std::vector<Mono::MonoClass*> echain;
                 for (Mono::MonoClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
                     echain.push_back(cur);
@@ -5334,6 +5341,12 @@ void RegisterCoreHandlers() {
             IL2CPP::Il2CppClass* klass = nullptr;
         };
         std::vector<ClassDesc> descs;
+        // Phase 29f (Layer B) — set of every enumerated in-scope class. The
+        // element-field capturer only deep-walks an element whose runtime
+        // class is in here, so a garbage/out-of-scope class that
+        // object_get_class hands back for a false-positive array slot can't
+        // reach the field walk and crash the game (the x64 IL2CPP CTD).
+        std::unordered_map<IL2CPP::Il2CppClass*, char> knownIlKlasses;
         for (const auto& assemblyName : requestedAssemblies) {
             const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
             if (img == nullptr) continue;
@@ -5345,6 +5358,7 @@ void RegisterCoreHandlers() {
                 d.ns       = ce.ns;
                 d.name     = ce.name;
                 d.klass    = ce.klass;
+                knownIlKlasses[ce.klass] = 1;
                 descs.push_back(std::move(d));
             }
         }
@@ -5396,6 +5410,10 @@ void RegisterCoreHandlers() {
         std::size_t classInfoCacheHits = 0;
         std::size_t classInfoCacheMisses = 0;
         // Phase 29f (Layer B) — shared element-capture budget accounting.
+        // elementsProcessed bounds object_get_class volume (the budget caps
+        // ATTEMPTS, not just captures, so a blanket sweep over a 158K-instance
+        // game can't make hundreds of thousands of per-element runtime calls).
+        std::size_t elementsProcessed = 0;
         std::size_t decodedElementSets = 0;
         bool         elementBudgetHit  = false;
 
@@ -5431,20 +5449,24 @@ void RegisterCoreHandlers() {
             // capture (mirror of the Mono path). Returns {"fields":[…]} or
             // {"element_class_error":"…"}.
             auto captureIlElementFields = [&](std::uintptr_t elemPtr) -> json {
-                // Memory ceiling: stop deep-capturing once the per-snapshot
-                // budget is spent so blanket capture on a large game (the
-                // 158K-instance / 21K-array IL2CPP CTD) can't explode the JSON
-                // cache into an OOM. Remaining elements stay ptr-only.
-                if (decodedElementSets >= session->elementCaptureBudget) {
+                // Budget caps ATTEMPTS (not just captures): once spent, leave
+                // remaining elements ptr-only. Bounds both the JSON memory AND
+                // the per-element object_get_class volume on a large game (the
+                // 158K-instance / 21K-array x64 IL2CPP CTD).
+                if (elementsProcessed >= session->elementCaptureBudget) {
                     elementBudgetHit = true;
                     return json::object();
                 }
+                ++elementsProcessed;
                 IL2CPP::Il2CppClass* ec = IL2CPP::ClassOfObject(elemPtr);
-                // Validate before walking — object_get_class on a false-positive
-                // array slot can hand back a garbage class whose class_get_parent
-                // / field walk would crash the game.
-                if (ec == nullptr || !IL2CPP::ProbeKlassValid(ec))
+                if (ec == nullptr)
                     return json{{"element_class_error", "object_get_class_failed"}};
+                // Only walk classes we enumerated in-scope. object_get_class on
+                // a false-positive array slot can return a readable-but-garbage
+                // class that ProbeKlassValid (a name read) would wrongly accept;
+                // the known-class set is exact and needs no runtime call.
+                if (knownIlKlasses.find(ec) == knownIlKlasses.end())
+                    return json{{"element_class_error", "class_out_of_scope"}};
                 std::vector<IL2CPP::Il2CppClass*> echain;
                 for (IL2CPP::Il2CppClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
                     echain.push_back(cur);

@@ -445,8 +445,64 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
     /// <summary>Optional comma-separated assembly filter. Empty → all
     /// visible assemblies (the design rule from Phase 29 plan: user
-    /// shouldn't have to know where data lives).</summary>
+    /// shouldn't have to know where data lives). On connect, defaults to
+    /// "Assembly-CSharp" when that assembly exists (the usual gameplay
+    /// assembly) so the common case doesn't capture the whole heap.</summary>
     [ObservableProperty] private string _scopeAssembliesText = string.Empty;
+
+    /// <summary>Assembly names reported by the game — drives the Scope
+    /// picker so the user can append an assembly without typing it.</summary>
+    public ObservableCollection<string> KnownScopeAssemblies { get; } = new();
+
+    /// <summary>Picker selection — appending a chosen assembly to
+    /// <see cref="ScopeAssembliesText"/> (comma-separated, deduped), then
+    /// resetting so the same item can be re-picked.</summary>
+    [ObservableProperty] private string? _selectedScopeAssembly;
+
+    partial void OnSelectedScopeAssemblyChanged(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return;
+        var parts = ScopeAssembliesText
+            .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+        if (!parts.Any(p => string.Equals(p, value, StringComparison.Ordinal)))
+        {
+            parts.Add(value);
+            ScopeAssembliesText = string.Join(", ", parts);
+        }
+        SelectedScopeAssembly = null;   // reset for re-pick
+    }
+
+    /// <summary>Fetch the game's assemblies (post-connect) to populate the
+    /// Scope picker and default the scope to "Assembly-CSharp" when present
+    /// and the user hasn't set one. Soft-fails — a getAssemblies error must
+    /// not block the connect flow.</summary>
+    public async Task LoadScopeAssembliesAsync(System.Threading.CancellationToken ct = default)
+    {
+        try
+        {
+            var res = await _backend.GetAssembliesAsync(ct).ConfigureAwait(true);
+            var names = res.Assemblies
+                .Select(a => a.Name)
+                .Where(n => !string.IsNullOrEmpty(n))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToList();
+            KnownScopeAssemblies.Clear();
+            foreach (var n in names) KnownScopeAssemblies.Add(n);
+
+            if (string.IsNullOrWhiteSpace(ScopeAssembliesText) &&
+                names.Any(n => string.Equals(n, "Assembly-CSharp", StringComparison.Ordinal)))
+            {
+                ScopeAssembliesText = "Assembly-CSharp";
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Write(SnapshotStore.LogCategory,
+                $"LoadScopeAssembliesAsync soft-fail: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
 
     /// <summary>Per-class instance cap (server-side hard limit 1024).
     /// Raised from 100 → 512 on 2026-05-26 user feedback: 活俠傳 player
@@ -516,6 +572,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(GameMemoryBanner))]
     private int _gamePointerSize;
 
+    /// <summary>Backend reported by the handshake ("Mono" / "IL2CPP").
+    /// Drives the bitness banner so it doesn't mislabel an IL2CPP game as
+    /// "Mono". Empty until connected.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(GameMemoryBanner))]
+    private string _gameBackend = string.Empty;
+
     /// <summary>Last game-process WorkingSet sample (bytes), updated on
     /// every handshake + every snapshotBegin response.</summary>
     [ObservableProperty]
@@ -560,7 +623,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 else
                     suffix = " — snapshot caps auto-clamped for safety";
             }
-            return $"Game: {bits} Mono — WorkingSet {ws}, committed {pu}{suffix}";
+            string be = string.IsNullOrEmpty(GameBackend) ? "Unity" : GameBackend;
+            return $"Game: {bits} {be} — WorkingSet {ws}, committed {pu}{suffix}";
         }
     }
 
@@ -570,11 +634,13 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// <see cref="ArrayCap"/> downward to the safe defaults (256 / 64)
     /// if they're currently above. Never clamps upward — user manually-
     /// chosen lower caps stay respected.</summary>
-    public void OnGameConnected(int pointerSize, ulong workingSet, ulong privateUsage)
+    public void OnGameConnected(int pointerSize, ulong workingSet, ulong privateUsage,
+                                string backend = "")
     {
         GamePointerSize  = pointerSize;
         GameWorkingSet   = workingSet;
         GamePrivateUsage = privateUsage;
+        if (!string.IsNullOrEmpty(backend)) GameBackend = backend;
 
         if (pointerSize == 4)
         {
@@ -1270,7 +1336,28 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 AssemblyFilter    = string.IsNullOrWhiteSpace(ScopeAssembliesText) ? null : ScopeAssembliesText.Trim(),
                 Classes           = env.Classes,
             };
-            long id = await _store.SaveSnapshotAsync(req).ConfigureAwait(true);
+            // Large snapshots (100K+ instances) take seconds to gzip + insert.
+            // Poll the save task and, once it crosses 2 s, show a live elapsed
+            // status so the UI doesn't look hung. Stays on the UI thread
+            // (ConfigureAwait(true)) so the status updates marshal correctly.
+            var saveSw   = Stopwatch.StartNew();
+            var saveTask = _store.SaveSnapshotAsync(req);
+            bool announced = false;
+            while (!saveTask.IsCompleted)
+            {
+                var finished = await Task.WhenAny(saveTask, Task.Delay(500)).ConfigureAwait(true);
+                if (finished == saveTask) break;
+                if (saveSw.Elapsed.TotalSeconds >= 2)
+                {
+                    announced = true;
+                    StatusMessage =
+                        $"Saving snapshot {env.ShortLabel} to DB… {saveSw.Elapsed.TotalSeconds:0.0}s "
+                        + $"({env.TotalClasses:N0} classes / {env.TotalInstances:N0} instances)";
+                }
+            }
+            long id = await saveTask.ConfigureAwait(true);
+            if (announced)
+                StatusMessage = $"Saved snapshot {env.ShortLabel} to DB in {saveSw.Elapsed.TotalSeconds:0.0}s (id={id}).";
             env.PersistedId    = id;
             env.PersistedBytes = await _store.GetTotalPayloadBytesAsync().ConfigureAwait(true)
                                  - (await SumOtherPersistedBytesAsync(id).ConfigureAwait(true));

@@ -83,26 +83,40 @@
     Expanders so the user can reclaim vertical height for the results grid
     at any resolution. (Stage 0/1 were already collapsible; side-by-side
     was rejected — the wide grids would force h-scroll at 1080p.)
-* **29f live-smoke #2 (x64 IL2CPP) — Layer B blanket CTD, FIXED (DLL #718).**
-  First snapshot WITHOUT Layer B succeeded but was large: the game had
-  **158,790 instances / 21,429 arrays** across 3,765 decoded classes
-  (`gameWorkingSet=4.83GB` — that 4-5GB is the *game* process shown in the
-  status line, not the snapshot; the snapshot is still big at this scale →
-  narrow with **Scope** assemblies / lower caps). Second snapshot WITH
-  blanket Layer B **crashed during decode** (no `snapshotBegin id=2`
-  completion in the scan log). Two root causes, both hardened:
-  - **Memory explosion** — blanket capture on 21K arrays × up to 64 elems
-    × 16 fields piled millions of JSON nodes onto an already-huge snapshot
-    → OOM. New per-snapshot **`elementCaptureBudget`** (default 20,000
-    element-sets, RPC-tunable, hard cap 2,000,000): once spent, remaining
-    elements stay `ptr=` only. Reported back as `decodedElementSets` +
-    `elementBudgetHit` (decodeStats). **Blanket Layer B on a large game is
-    inherently partial — use explicit Targets for full coverage even on x64.**
-  - **Garbage element class** — `object_get_class` on a false-positive
-    array slot can return a non-null garbage class whose (unguarded)
-    `class_get_parent` / field walk would fault. Both capturers now gate on
-    `ProbeKlassValid` (new `Mono::ProbeKlassValid`; `IL2CPP::ProbeKlassValid`
-    already existed) before walking. 577/577 tests; DLL #718 builds x64+x86.
+* **29f live-smoke #2 (SaGa Frontier 2 Remastered, x64 IL2CPP) — Layer B
+  blanket CTD.** Big game: **136K–158K instances / 21K arrays** across 3,765
+  classes (`gameWorkingSet=4.7GB` — that 4-5GB is the *game* process shown in
+  the status line, not the snapshot; the snapshot is still big at this scale →
+  narrow with **Scope** assemblies / lower caps). Capture without Layer B
+  succeeded; with blanket Layer B it **crashed during decode** (no
+  `snapshotBegin id=2` completion line).
+  - **#718 attempt was insufficient** — `ProbeKlassValid` (a name read) can
+    *false-positive* on a readable-but-garbage class that `object_get_class`
+    returns for a false-positive array slot; the field walk then faulted. It
+    CTD'd again (build #720 / commit c7dcc88, log 102156).
+  - **Real fix (DLL #722/#724)** — both capturers now only deep-walk an
+    element whose runtime class is in the **enumerated in-scope class set**
+    (exact hash lookup, no runtime call): garbage / out-of-scope classes are
+    skipped (`class_out_of_scope`). Plus the **`elementCaptureBudget`** now
+    caps ATTEMPTS (not just captures, default 20,000) so blanket can't make
+    hundreds of thousands of per-element `object_get_class` calls or explode
+    JSON memory. `decodedElementSets` + `elementBudgetHit` reported in
+    decodeStats + log. **Blanket Layer B on a large game stays inherently
+    partial — use explicit Targets for full coverage even on x64.** Builds
+    x64+x86; awaiting user re-test on #724.
+* **"64-bit mono" mislabel — FIXED.** The Snapshot bitness banner hard-coded
+  "Mono" (`Game: {bits} Mono — …`) regardless of backend, so an IL2CPP game
+  showed "64-bit Mono". Now uses the handshake backend (`GameBackend`, threaded
+  through `OnGameConnected`); falls back to "Unity" if unknown.
+* **Snapshot UI improvements (2026-05-28)**:
+  - **Save progress** — `SaveSnapshotAsync` polls the gzip+insert and, once
+    it crosses 2 s, shows a live `Saving… X.Xs (N classes / M instances)`
+    status (big snapshots no longer look hung).
+  - **Scope default + picker** — on connect, `LoadScopeAssembliesAsync`
+    fetches the game's assemblies; if `Assembly-CSharp` exists and Scope is
+    empty it defaults Scope to `Assembly-CSharp`, and a ComboBox picker
+    (`KnownScopeAssemblies` / `SelectedScopeAssembly`) appends a chosen
+    assembly to the Scope box (deduped). Helps avoid the whole-heap capture.
 
 ## TL;DR — what's left to pick up (next session)
 
