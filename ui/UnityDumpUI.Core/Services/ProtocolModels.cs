@@ -54,7 +54,7 @@ public sealed class HandshakeResult
     /// game process. 4 on WOW64 / x86 targets, 8 on x64. UI uses this
     /// to auto-clamp snapshot caps on 32-bit games where the DLL-side
     /// JSON cache can push past the 4 GB user-space ceiling (build #646
-    /// 활俠傳 CTD).</summary>
+    /// 活俠傳 CTD).</summary>
     [JsonPropertyName("game_pointer_size")]  public int?  GamePointerSize  { get; set; }
 
     /// <summary>Current game-process WorkingSet in bytes (physical

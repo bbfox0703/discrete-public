@@ -2,7 +2,7 @@
 //
 // Once the user has picked a class (Stage 0), they still have to nominate
 // WHICH field is the stable business key and WHICH is the value to track.
-// On 활俠傳's GameStat that's _propertyID / _type vs _value — but the user
+// On 活俠傳's GameStat that's _propertyID / _type vs _value — but the user
 // shouldn't have to know that. Stage 1 scores every field on its
 // suitability as a key so the good candidates float to the top.
 //

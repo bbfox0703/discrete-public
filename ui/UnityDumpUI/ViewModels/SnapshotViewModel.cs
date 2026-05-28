@@ -65,7 +65,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
     private const int kDefaultArrayCapX64    = 256;
 
     /// <summary>Clamped defaults for 32-bit Mono games. Chosen 2026-05-27
-    /// after the build #646 활俠傳 CTD: the DLL caches the whole
+    /// after the build #646 活俠傳 CTD: the DLL caches the whole
     /// snapshot's JSON payload inside the game process, so on a target
     /// with a 4 GB user-space ceiling the post-bump 512/256 defaults
     /// pushed snap #2 past OOM. 256/64 leaves comfortable headroom
@@ -449,7 +449,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [ObservableProperty] private string _scopeAssembliesText = string.Empty;
 
     /// <summary>Per-class instance cap (server-side hard limit 1024).
-    /// Raised from 100 → 512 on 2026-05-26 user feedback: 활俠傳 player
+    /// Raised from 100 → 512 on 2026-05-26 user feedback: 活俠傳 player
     /// hit a GameStat instance past position 100 in the heap-walk order
     /// that diff therefore missed entirely. 512 covers the typical
     /// per-class population on the live targets while leaving headroom
@@ -797,7 +797,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
         // visible status every 200ms so the user can see we're alive +
         // the current process memory + delta-from-start so they can
         // dial back the caps if the snapshot is heading toward OOM.
-        // This phase dominates on big targets (60-90s on 활俠傳 with
+        // This phase dominates on big targets (60-90s on 活俠傳 with
         // 全抓 scope after exclusions); the wide heap walk is the
         // unavoidable cost.
         StartElapsedTimer("Capturing (heap walk + decode)");
@@ -850,7 +850,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // snapshotChunk RPC is a pure JSON slice server-side (Phase
             // 29a-v2 design), so latency is dominated by IPC throughput,
             // not server work. Chunk size 100 (was 32) cuts round-trip
-            // count by ~3x — on 활俠傳's 3.6K-class workload that's 37
+            // count by ~3x — on 活俠傳's 3.6K-class workload that's 37
             // round-trips instead of 114. Server caps at 200.
             const int kChunkSize = 100;
             int totalClasses = begin.TotalClasses;
@@ -2064,7 +2064,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             : $"\"{Label}\"";
 
     /// <summary>Heuristic UI-side memory cost of this envelope, in bytes.
-    /// Empirical ratio from build #646 live-smoke on 활俠傳 / Mortal:
+    /// Empirical ratio from build #646 live-smoke on 活俠傳 / Mortal:
     /// 1.13M field-values consumed ~1.62 GB of UI WorkingSet delta →
     /// ~1500 bytes per FieldIndex entry once you account for the
     /// dictionary's bucket overhead, the SnapshotFieldValue object

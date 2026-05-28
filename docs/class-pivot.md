@@ -20,7 +20,7 @@ across N snapshots, keyed by
 2. **Instance-index drift within a session**. The DLL emits instances in
    walk order. A class with 100 live instances at snap 1 may have 102 at
    snap 2; "instance #124" at snap 1 is not necessarily "instance #124" at
-   snap 2. Concrete case: 활俠傳 `Mortal.Core.GameStat` for 銀兩 (Money)
+   snap 2. Concrete case: 活俠傳 `Mortal.Core.GameStat` for 銀兩 (Money)
    lands at instance #124 sometimes, #123 other times — addresses move,
    so SPC's key intersection ignores both rows.
 
@@ -41,7 +41,7 @@ group-by / SQL `SELECT V FROM C GROUP BY K JOIN snap_i…snap_n`.
 
 ## 2. Three-stage funnel
 
-A real Unity game has ~3000 classes (활俠傳 Assembly-CSharp). Brute-force
+A real Unity game has ~3000 classes (活俠傳 Assembly-CSharp). Brute-force
 "for every class, for every field, score key candidates across N
 snapshots" would scan millions of values. The funnel:
 
@@ -84,7 +84,7 @@ field-rich classes at the top.
 **Default filter**: `Presence == N AND !IsSynthetic AND FieldCount >= 2`.
 
 **Cost**: O(Σ_snaps Σ_classes Σ_instances Σ_fields), but the inner work
-per field is a tiny bit-bucket update (count + null-check). For 활俠傳-
+per field is a tiny bit-bucket update (count + null-check). For 活俠傳-
 sized snap × 5 snaps: estimated < 200 ms; well within "click button →
 see table" UX.
 
@@ -329,7 +329,7 @@ has its own fields) require DLL-side capture of element fields, which
 is Layer B.
 
 **Cost**: per snap, fan-out adds rows = sum of array lengths. For a
-typical 활俠傳 snap this is < 50 K rows on top of ~1 M existing →
+typical 活俠傳 snap this is < 50 K rows on top of ~1 M existing →
 +5% memory. Acceptable.
 
 ### Layer B — inner-pivot on reference array elements (deferred to next Phase)
@@ -454,9 +454,9 @@ These are settled at implementation time, not blockers for starting.
 
 ---
 
-## 13. Live-smoke findings (29e-2, 활俠傳, 2026-05-28)
+## 13. Live-smoke findings (29e-2, 活俠傳, 2026-05-28)
 
-First live run on 활俠傳 Mono (4 captures across 3 game sessions,
+First live run on 活俠傳 Mono (4 captures across 3 game sessions,
 3,647 classes / 12-18 K instances each). The core flow works:
 `Mortal.Core.GameStat`, key=`_type`, value=`_value` → key `3` shows
 `10160 → 9910 → 10160 → 10060`, exactly the 銀兩 (Money) spend

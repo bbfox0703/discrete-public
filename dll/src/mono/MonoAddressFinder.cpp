@@ -821,7 +821,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     slots.reserve(1024);
 
     // Phase 29a-v4 — yield every N bytes scanned (running tally
-    // across regions). Live-smoke on 활俠傳 (Mono x86 / Unity
+    // across regions). Live-smoke on 活俠傳 (Mono x86 / Unity
     // 2020.3) build #627 showed the heap walk freezing the game
     // even though the decode loop already yields per batch: the
     // walk reads ~1.1 GB of process memory in a tight inner loop,
@@ -833,7 +833,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     // other thread is ready). 16 MB on a 1 GB heap = ~64 yields.
     // Sleep(1) instead of Sleep(0). Sleep(0) only yields if another
     // thread is ready; Sleep(1) forcibly gives up >=1ms of timeslice
-    // regardless. For 활俠傳-class targets the game's main thread may
+    // regardless. For 活俠傳-class targets the game's main thread may
     // not be "ready" by Windows scheduler accounting (waiting on
     // page-ins after our scan cleared its working set from L3), so
     // Sleep(0) returned immediately and yielded nothing. Sleep(1)
@@ -850,7 +850,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         // MEM_PRIVATE (VirtualAlloc/HeapAlloc backed), so file-backed
         // mappings (asset files, save data, memory-mapped resources)
         // are pure noise for the snapshot. Live-smoke on Mortal
-        // (활俠傳) build #647 showed ~100 false positives per snapshot
+        // (活俠傳) build #647 showed ~100 false positives per snapshot
         // coming from MEM_MAPPED regions where game data happened to
         // contain values matching known Mono vtable pointers. Each
         // false positive eats one slot of the per-class cap, pushing
@@ -935,7 +935,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
             // contain a vtable pointer value (locals, captured ptrs,
             // ad-hoc fields) typically aren't aligned to 8 bytes.
             // Live-smoke on Mortal: this single check filters out
-            // ~30-50% of false positives per class on the 활俠傳
+            // ~30-50% of false positives per class on the 活俠傳
             // snapshot path. Without it the per-class cap on 32-bit
             // Mono targets fills with noise before reaching the real
             // money / HP / etc. instances.

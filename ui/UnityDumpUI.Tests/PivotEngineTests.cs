@@ -2,7 +2,7 @@
 //
 // Covers the engine surface laid out in docs/class-pivot.md §5 + §10:
 //   * Input validation throws
-//   * Single-key / single-value happy path (the user's 활俠傳 GameStat case
+//   * Single-key / single-value happy path (the user's 活俠傳 GameStat case
 //     in miniature)
 //   * Compound key (_itemGroup, _propertyID)
 //   * Collision flag + value rendering
@@ -191,7 +191,7 @@ public class PivotEngineTests
     [Fact]
     public void Run_SingleKeySingleValue_TracksMoneyAcrossDriftingAddresses()
     {
-        // 활俠傳-shaped: same logical GameStat (_propertyID=101) lives at
+        // 活俠傳-shaped: same logical GameStat (_propertyID=101) lives at
         // different addresses across snapshots. Pivot keyed by _propertyID
         // must track it through the address drift.
         var snap1 = MakeEnvWithSession("snap1", "S1", "b1",

@@ -1,6 +1,6 @@
 // ClassShortlistEngine — Phase 29e-3 (Stage 0 of the Class Pivot funnel).
 //
-// A real Unity game has thousands of classes (활俠傳 Assembly-CSharp =
+// A real Unity game has thousands of classes (活俠傳 Assembly-CSharp =
 // 3,647). Asking the user to know the FQN up front is the weak point of
 // the 29e-2 manual pivot. Stage 0 scores every class on "is this worth
 // pivoting?" so the user can shortlist by stability instead of memory.
@@ -31,7 +31,7 @@
 // applies the show/hide filters so toggles don't require a re-run.
 //
 // Cost: one pass over Classes[].Instances[].Fields[] per snapshot.
-// 활俠傳 = ~15 K instances × ~15 fields × 5 snaps ≈ 1 M field
+// 活俠傳 = ~15 K instances × ~15 fields × 5 snaps ≈ 1 M field
 // observations — well under the "click → see table" budget.
 
 using System;

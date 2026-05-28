@@ -233,7 +233,7 @@ public sealed partial class SpcQueryViewModel : ObservableObject
     }
 
     /// <summary>Threshold at which the run-status line emits a memory
-    /// warning. Empirical: 5 × wide 활俠傳 snapshot (each ~100 MB
+    /// warning. Empirical: 5 × wide 活俠傳 snapshot (each ~100 MB
     /// FieldIndex) ≈ 500 MB during query. Above this, suggest the user
     /// narrows scope or splits the query.</summary>
     private const int kLargeNAdvisory = 5;

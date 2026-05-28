@@ -27,7 +27,7 @@ from the deferred list below, or live-smoke the funnel + sortable grids.
   18 tests in [PivotViewModelTests.cs](../ui/UnityDumpUI.Tests/PivotViewModelTests.cs).
   Shares envelope pool with Snapshot + SPC tabs; cross-session
   banner reads as a feature, not a warning.
-* **29e-2 polish** (live-smoke on 활俠傳) — collision cells now render
+* **29e-2 polish** (live-smoke on 活俠傳) — collision cells now render
   distinct-value set + count + cap (`⟨21: 100, 50, 250,+2⟩`) instead
   of an unreadable wall; Trajectory column wraps + has a ToolTip;
   AutoCompleteBoxes browse-on-focus (`MinimumPrefixLength=0`). +2
@@ -50,7 +50,7 @@ from the deferred list below, or live-smoke the funnel + sortable grids.
   key + Apply; scored DataGrid (sortable), double-click → add as key,
   right-click → add as value. The filterable field picker requested
   during 29e-2 smoke.
-* **29e-5 polish** (live-smoke #2 on 활俠傳) — three recurring
+* **29e-5 polish** (live-smoke #2 on 活俠傳) — three recurring
   DataGrid papercuts, fixed on all three Pivot grids: (1) **AOT-safe
   sort** — Avalonia's built-in header sort is reflection-based and
   no-ops under AOT; replaced with a manual `Sorting`-event handler +
@@ -105,7 +105,7 @@ live-smoke findings at [class-pivot.md](class-pivot.md) §13.
 
 ### Live-smoke status (29e-2)
 
-✅ **Verified on 활俠傳** (2026-05-28): `Mortal.Core.GameStat`,
+✅ **Verified on 活俠傳** (2026-05-28): `Mortal.Core.GameStat`,
 key=`_type`, value=`_value` → key `3` walks
 `10160 → 9910 → 10160 → 10060`, the real 銀兩 spend trajectory across
 4 captures / 3 sessions. The cross-session pivot works where SPC
@@ -121,7 +121,7 @@ values; see §13).
 
 ### Live-smoke TODO (29e-3 + 29e-4 — full funnel)
 
-Stages 0/1 were unit-tested but not live-smoked. End-to-end on 활俠傳:
+Stages 0/1 were unit-tested but not live-smoked. End-to-end on 活俠傳:
 take 3-4 snapshots, open Class Pivot tab.
 1. Expand **Class shortlist (Stage 0)**, (optionally type
    `Assembly-CSharp`), press **Analyze classes**. Expect
@@ -233,7 +233,7 @@ can't do this.
 Same DLL as before (no changes); only UI work. Live cases to try:
 
 1. **Killer use case literal** — take 4 snapshots while playing
-   활俠傳, spend exact amounts between each. On SPC Query tab,
+   活俠傳, spend exact amounts between each. On SPC Query tab,
    select all 4 → predicates `[Exact 10160, DeltaExact -250,
    DeltaExact -500, Unchanged]` → Run. Expect 1 match
    (`Mortal.Core.GameStat._value`).

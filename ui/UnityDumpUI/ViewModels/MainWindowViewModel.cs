@@ -648,9 +648,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 $"connected backend={hs.Backend} build={hs.Build} unity={hs.UnityVersion}");
 
             // Phase 29b — mark snapshots from a different game build
-            // as stale. User feedback: if I take a snapshot of 활俠傳,
+            // as stale. User feedback: if I take a snapshot of 活俠傳,
             // disconnect (game hung), then connect to SaGa F2R, the
-            // 활俠傳 snapshot is still in the dropdown but it's not
+            // 活俠傳 snapshot is still in the dropdown but it's not
             // diffable against SaGa snapshots. Visual flag in the
             // snapshot's DisplayName tells the user. We DON'T delete
             // them — user might reconnect to the same game later and
@@ -668,7 +668,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // bitness + current memory to the Snapshot VM. On 32-bit
             // targets this auto-clamps InstanceCap/ArrayCap downward
             // to safe defaults (256 / 64) so the user doesn't trip
-            // the 4 GB OOM CTD that build #646 hit on 활俠傳. Also
+            // the 4 GB OOM CTD that build #646 hit on 活俠傳. Also
             // populates the "Game: 32-bit Mono — WorkingSet X GB"
             // banner that warns as memory climbs toward 3 GB.
             Snapshot.OnGameConnected(

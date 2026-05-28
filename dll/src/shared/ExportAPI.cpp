@@ -96,7 +96,7 @@ ProcessMemorySnapshot QueryProcessMemory() noexcept {
 // 32-bit builds). Snapshot capture adds 300-500 MB of DLL-side
 // JSON cache, so 3.0 GB current private-usage is the danger line —
 // past it we're one bad allocation away from the game CTD that
-// build #646 hit on 활俠傳.
+// build #646 hit on 活俠傳.
 constexpr std::uint64_t kX86PrivateUsageRefuseThreshold = 3ULL * 1024 * 1024 * 1024;
 
 constexpr UnityDumperBackend BackendOfBuild() {
@@ -2108,7 +2108,7 @@ void RegisterCoreHandlers() {
 
         // Parse args ----------------------------------------------------------
         // Hard-caps raised 2026-05-27 — old 1024/256 ceiling forced the
-        // UI to under-cap on dense classes (활俠傳: 139 GameStat instances
+        // UI to under-cap on dense classes (活俠傳: 139 GameStat instances
         // with cap=100 missed positions 100..139 entirely; user wanted
         // headroom to push past 1024 for genuinely-large populations).
         // New 8192/4096 stays inside the per-class memory budget the
@@ -2123,7 +2123,7 @@ void RegisterCoreHandlers() {
 
         // 32-bit OOM guard — refuse before doing any work if game is x86
         // and already near the 4 GB user-space ceiling. Build #646 live-
-        // smoke on 활俠傳 (Mono x86) crashed snap #2 when the DLL-side
+        // smoke on 活俠傳 (Mono x86) crashed snap #2 when the DLL-side
         // JSON cache pushed past 4 GB; refusing here prevents the CTD
         // at the cost of asking the user to lower caps + retry.
         const ProcessMemorySnapshot memBefore = QueryProcessMemory();
@@ -2352,7 +2352,7 @@ void RegisterCoreHandlers() {
                 }
 
                 // Static field METADATA only (Mono). Live-smoke build
-                // #633 on BongoCat + 활俠傳: game freezes AFTER our RPC
+                // #633 on BongoCat + 活俠傳: game freezes AFTER our RPC
                 // returns; BGM keeps playing (audio thread fine), only
                 // game main thread wedges. Pattern matches BDWGC
                 // catching up on `mono_class_vtable` allocations we
@@ -2465,7 +2465,7 @@ void RegisterCoreHandlers() {
             // one-big-attach + memoised ClassInfo design ran cleanly.
             // The batch attach + per-batch Sleep(0) yields added
             // attach-cycle overhead that turned out worse than the
-            // benefit. Reverting; 활俠傳 (Mono x86) still has a
+            // benefit. Reverting; 活俠傳 (Mono x86) still has a
             // separate freeze that v4's yields are addressing via the
             // heap-walk yield path.
             Mono::ThreadAttachGuard guard(domain);

@@ -19,7 +19,7 @@
 // snap 1 vs snap 2.
 //
 // Pivot sidesteps both by keying on field VALUES inside each instance.
-// The user's killer case: GameStat instances of 활俠傳. Across 5 snaps
+// The user's killer case: GameStat instances of 活俠傳. Across 5 snaps
 // instance #124 might land at addresses 0x1f3a000, 0x1f60a00, 0x1f80a00,
 // 0x1fa1000, 0x1fc3000 — but the GameStat row whose _propertyID == 101
 // is *the same logical Money stat* every time. Pivot keyed by
@@ -38,7 +38,7 @@
 // Performance: O(Σ_snaps Σ_instances_of_C × |Fields|) to build per-snap
 // maps + O(|keyUnion|) to outer-join. Field lookups are dict-of-name
 // per instance. Field counts are small (~tens), so per-instance work is
-// dominated by the format call, not the dict. For 활俠傳's GameStat
+// dominated by the format call, not the dict. For 活俠傳's GameStat
 // (~100 instances) × 5 snaps × 6 fields: well under 50 ms.
 //
 // Out of scope for v1:

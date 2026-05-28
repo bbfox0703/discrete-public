@@ -429,11 +429,11 @@ process kill required.
 **Symptom**: After Phase 29b snapshot tab landed (build #604), and
 through five iterations of "fix the Mono freeze" debugging (#618 GC
 drain, #627 batch attach + yields, #629 heap-walk yield, #631 ulong
-DTO + revert batch-attach), BongoCat (Mono x64) AND 활俠傳 (Mono x86)
+DTO + revert batch-attach), BongoCat (Mono x64) AND 活俠傳 (Mono x86)
 both continued to wedge the game window AFTER our snapshotBegin RPC
 returned. Three diagnostic clues converged:
 
-1. **BGM kept playing** on 활俠傳 — audio thread was alive, only
+1. **BGM kept playing** on 活俠傳 — audio thread was alive, only
    game's main thread (rendering + input) frozen.
 2. **BongoCat's cat moved once on mouse click then wedged** — main
    thread processed ONE input event, then blocked.
@@ -447,7 +447,7 @@ SaGa F2R (IL2CPP x64) had ZERO freeze with the same code paths.
 `mono_class_vtable(domain, klass)` once per class with static fields
 — under our worker thread's `ThreadAttachGuard`. `mono_class_vtable`
 lazily allocates a `MonoVTable*` in BDWGC's managed heap when one
-doesn't already exist. For 활俠傳 with 3,647 user classes that's
+doesn't already exist. For 活俠傳 with 3,647 user classes that's
 ~700-1000 vtable allocations during a snapshot; for BongoCat ~100-
 200.
 
@@ -2609,7 +2609,7 @@ values against the XAML's `<TabItem Header=` ordering settles it.
 ### Snapshot `FindAllInstances` 2-level scan accepts non-object memory as fake "instances" — eats per-class cap before reaching real instances  ✅ **PROPER FIX 2026-05-28 (DLL #650)**
 
 **Symptom**: Live Inspector + per-class `findInstances` reports 152
-instances of `Mortal.Core.GameStat` (e.g. 활俠傳 / Mortal money
+instances of `Mortal.Core.GameStat` (e.g. 活俠傳 / Mortal money
 stat at 0x2974ACC0). Snapshot Diff doesn't surface the
 known-stable money value change. UI debug "list captured
 instances of class X" reveals snapshot captured **256** GameStat
@@ -2659,7 +2659,7 @@ build #637 lesson):
    Mono / IL2CPP objects are 8-byte aligned; many false-positive
    slots aren't (4-byte stride in the scan + values stored at
    word boundaries that don't double-align). Filters ~30-50% of
-   the false-positive volume on the 활俠傳 / Mortal test case.
+   the false-positive volume on the 活俠傳 / Mortal test case.
 3. (Mono side only) Also applied to the inner classification
    loop so the cache memo doesn't pollute future scans with
    misclassified vtables.
@@ -2724,7 +2724,7 @@ versions if symptoms reappear.
 
 ### Phase 29 high-default-caps wedge 32-bit Mono games on snapshot #2 — DLL-side JSON cache pushes past 4 GB user space  ✅ **MITIGATED 2026-05-27 (DLL #645 + UI #647)**
 
-**Symptom**: 활俠傳 (Mono x86, Unity 2020.3.49f1, PID 26296) on
+**Symptom**: 活俠傳 (Mono x86, Unity 2020.3.49f1, PID 26296) on
 build #646:
 
 | Step | What | Result |
@@ -2752,7 +2752,7 @@ original sizing supported:
   ≈ ~390 MB
 - 30K arrays × up to 256 elements × ~10 bytes each ≈ ~75 MB
 - Plus heap-walk metadata + class-info cache + the game's own
-  growing managed heap (~1.5–2 GB for 활俠傳 mid-game)
+  growing managed heap (~1.5–2 GB for 活俠傳 mid-game)
 
 Total comfortably past the 32-bit ceiling on snap #2 (snap #1 fits
 because the game's own state is smaller at that point in the
@@ -2866,7 +2866,7 @@ hint ("delete the file to reset to defaults"), return a fresh
 
 **Symptom (designing the schema)**: fully normalized snapshot
 schema (one row per field-value across all snapshots) means
-~1M INSERT/snapshot on a wide 활俠傳 capture. Even batched inside
+~1M INSERT/snapshot on a wide 活俠傳 capture. Even batched inside
 one transaction, this is 8-15s per save and the resulting DB grows
 unboundedly past the prune threshold within 3-4 snapshots.
 

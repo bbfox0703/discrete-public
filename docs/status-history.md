@@ -126,7 +126,7 @@ hitting the OOM ceiling.
 ## TL;DR — what's left to pick up (build #647 session)
 
 **32-bit snapshot OOM mitigation SHIPPED.** Closes the build #646
-활俠傳 CTD with a four-layer defense:
+活俠傳 CTD with a four-layer defense:
 
 1. **DLL pre-check abort gate** (Mono + IL2CPP `snapshotBegin`):
    refuses the snapshot if game is x86 AND `PrivateUsage` ≥ 3 GB.
@@ -160,7 +160,7 @@ DLL build #645 clean (both Mono + IL2CPP + x86 Mono, fresh
 
 ### Outstanding for next session
 
-* Live-smoke the mitigation: take snap #1 on 활俠傳, **verify**:
+* Live-smoke the mitigation: take snap #1 on 活俠傳, **verify**:
   - Banner shows "Game: 32-bit Mono ..." after inject
   - Defaults auto-clamp to 256/64 (NumericUpDowns reflect)
   - Snap #2 either completes safely OR fails fast with the
@@ -179,7 +179,7 @@ commits + one DLL rebuild on top of the build #637 Phase 29b ship:
 
 | Commit | What landed | Trigger |
 |---|---|---|
-| `db8bb9b` | Noise-reduction filters on diff DataGrid: `DiffRowKind` classifier (Numeric/Pointer/String/Error/Other), value-range filter (decimal? Min/Max, either-side semantics), pointer-only mask, large-string mask (default 256 chars — catches `System.Exception._stackTrace` blobs), field-name substring filter, top-30 field-name stats panel with one-click exclusion. `ChangedOnly` refactored into independent `ShowChanged`/`ShowAdded`/`ShowRemoved`. `FilteredDiffRows` materialised into `ObservableCollection` (single O(N) rebuild on filter-prop change vs prior per-render predicate eval). | User's 1,186-changed-row 활俠傳 diff was too noisy to scan |
+| `db8bb9b` | Noise-reduction filters on diff DataGrid: `DiffRowKind` classifier (Numeric/Pointer/String/Error/Other), value-range filter (decimal? Min/Max, either-side semantics), pointer-only mask, large-string mask (default 256 chars — catches `System.Exception._stackTrace` blobs), field-name substring filter, top-30 field-name stats panel with one-click exclusion. `ChangedOnly` refactored into independent `ShowChanged`/`ShowAdded`/`ShowRemoved`. `FilteredDiffRows` materialised into `ObservableCollection` (single O(N) rebuild on filter-prop change vs prior per-render predicate eval). | User's 1,186-changed-row 活俠傳 diff was too noisy to scan |
 | `db8bb9b` (same) | "Include unchanged" capture toggle + "Unchanged" filter toggle — lets the user use value-range / field-name filters across the whole captured state, not just what differed between A and B. Default OFF (10–100× row count when on). | User asked for value-range filtering on unchanged data ("uncheck Changed → empty grid" UX confusion) |
 | `db8bb9b` (same) | **Tab-index constant swap fix** in [MainWindowViewModel.cs:324](../ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs) — `TabIndexAddressLookup` (3) and `TabIndexSymbolFinder` (4) were inverted relative to actual XAML order. Every Address Lookup cross-tab handoff has been silently landing on Symbol Finder since Phase 25. Surfaced when the new snapshot-diff right-click menu exposed it. | User: "address lookup, UI 卻帶我到 Symbol Finder tab" |
 | `d18443f` | Capture cap defaults bumped: InstanceCap 100→512, ArrayCap 50→256 (still under the prior hard-cap). Live `Process.WorkingSet64` tracking added to every status-line tick — `Capturing… 12.3 s — process 1.42 GB (+340 MB)`. Final snapshot + log line carry the same memory annotation. | User's GameStat instance at `0x29B0ACE8` sat past position 100 in the heap-walk order; lower defaults silently missed it |
@@ -187,7 +187,7 @@ commits + one DLL rebuild on top of the build #637 Phase 29b ship:
 
 UI build clean, 363 tests still green across the bundle.
 
-### Live-smoke result (build #646, 활俠傳, Mono x86 PID 26296)
+### Live-smoke result (build #646, 活俠傳, Mono x86 PID 26296)
 
 * Snap #1 (InstanceCap=512, ArrayCap=256, the new defaults):
   ✅ 3,647 classes / 119,370 instances / 19,680 arrays captured
@@ -246,8 +246,8 @@ Took **five iterations of debugging** to get there because Mono on
 
 | Build | Iteration | What landed |
 |---|---|---|
-| #596 | v1 | Per-chunk decode under per-chunk attach. 활俠傳 froze mid-snapshot AND post-snapshot. |
-| #598 | v2 — decode-in-Begin | One outer attach for whole decode. 활俠傳 freeze gone; BongoCat post-close hang appeared. |
+| #596 | v1 | Per-chunk decode under per-chunk attach. 活俠傳 froze mid-snapshot AND post-snapshot. |
+| #598 | v2 — decode-in-Begin | One outer attach for whole decode. 活俠傳 freeze gone; BongoCat post-close hang appeared. |
 | #602 | v2.1 — memoise ReadClassInfo | Global ClassInfo cache. BongoCat close-hang fixed. |
 | #604–612 | 29b UI + system-asm exclude + 27c smoke fix | UI tab + ulong DTO + JSON parse fixes + open-generic filter. |
 | #629 | v4 round 1 — batch attach + heap-walk yield | Tried "yield often" approach. BongoCat regressed (game hangs after RPC). |
@@ -261,7 +261,7 @@ Live-verified at build #637 across:
   — different GC architecture, no main-thread catch-up problem).
 * **BongoCat (Mono / Unity 6000.2 / x64)**: snapshot completes, game
   stays responsive (cat animates, can be closed cleanly).
-* **활俠傳 (Mono x86 / Unity 2020.3)**: snapshot completes
+* **活俠傳 (Mono x86 / Unity 2020.3)**: snapshot completes
   (~60s for 3,647 user classes / 78K instances), BGM continues
   uninterrupted, game closeable normally.
 
@@ -273,7 +273,7 @@ shipped. DataGrid sort comparers wired per `aot-pitfalls.md` §4.5.
 ### Known follow-ups (deferred — Phase 29 polish / 29c / 29d)
 
 1. **Noise reduction on diff result** (user feedback): with 1,186
-   changed rows on 활俠傳 + SaGa F2R diff, hard to find signal. UI
+   changed rows on 活俠傳 + SaGa F2R diff, hard to find signal. UI
    could expose:
    - Old/New value range filter (numeric)
    - Pointer mask toggle (hide rows where Old/New start with "ptr=")

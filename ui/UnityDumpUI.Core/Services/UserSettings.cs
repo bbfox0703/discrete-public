@@ -38,7 +38,7 @@ public sealed class UserSettings
     /// <para/>
     /// Rationale for 200 MB (lowered from 1 GB on 2026-05-29 after live
     /// observation): gzipped per-class blobs compress ~50× vs raw JSON.
-    /// A wide 활俠傳-class snapshot that's ~100 MB in-memory lands at
+    /// A wide 活俠傳-class snapshot that's ~100 MB in-memory lands at
     /// &lt;2 MB on disk, so 200 MB comfortably holds 100+ snapshots of
     /// the largest target before pruning kicks in.</summary>
     [JsonPropertyName("auto_prune_threshold_bytes")]

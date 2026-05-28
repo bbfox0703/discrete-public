@@ -11,7 +11,7 @@
 //   meta               — schema_version, target_process, game_build_id seed
 //
 // Why per-class blob vs fully normalised?
-//   * 활俠傳 wide snap = 3,647 classes × ~30 fields × ~120 instances ≈ 1M
+//   * 活俠傳 wide snap = 3,647 classes × ~30 fields × ~120 instances ≈ 1M
 //     field-values. Fully normalised → 1M INSERTs per save (slow even
 //     batched). Per-class blob → 3,647 INSERTs and the existing
 //     SnapshotClassEntry JSON serialiser does the heavy lifting.
@@ -353,7 +353,7 @@ public sealed class SnapshotStore : IAsyncDisposable
     /// snapshot in this DB. Reads only the indexed metadata columns —
     /// the gzipped <c>payload_gzip</c> blobs are never touched — so it's
     /// cheap enough to run on connect and seed the Class Pivot tab's
-    /// autocomplete before the user hydrates anything. 활俠傳-scale
+    /// autocomplete before the user hydrates anything. 活俠傳-scale
     /// (~3,647 classes × N snaps → ~3,647 distinct rows) returns in a
     /// few ms.</summary>
     public async Task<List<PersistedClassRef>> ListDistinctClassesAsync(CancellationToken ct = default)
