@@ -361,9 +361,11 @@ addresses, we give N rows tagged with `MainGame.PLY_WORK.hp:
       show-synthetic / show-partial toggles. Double-click a row →
       fills Class FQN + scopes assembly → flows into Stage 2.
       `SnapshotEnvelope.IsSyntheticClassName` promoted to internal
-      for reuse. Still needs cheap DB-side class enumeration so the
-      shortlist works without a prior Run (currently Analyze hydrates
-      the selected snaps) — acceptable for now.
+      for reuse. **29e-7**: class + assembly autocomplete now seed from
+      DB metadata on connect (`SnapshotStore.ListDistinctClassesAsync`,
+      no blob hydrate), so the Class FQN box works before any Analyze.
+      The shortlist metrics still hydrate on Analyze (they need the
+      actual instance data).
     - [x] **29e-4**  Stage 1 field-level key auto-discovery
       (S_stable + S_cardinality + TypePrior + NamePrior) + greedy
       compound-key suggestion. [KeyDiscoveryEngine.cs](../ui/UnityDumpUI/ViewModels/KeyDiscoveryEngine.cs)

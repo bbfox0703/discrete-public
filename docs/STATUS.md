@@ -1,6 +1,6 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/29e-6 DataGrid polish**; head pending commit / build #700 UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7 polish**; head pending commit / build #702 UI / DLL #650).
 
 ## TL;DR — what's left to pick up (next session)
 
@@ -67,8 +67,18 @@ on top of the 29e-1/-1b engine. Waves of Phase 29e:
   (+9 tests) and called from thin code-behind `Sorting` handlers.
   Inspector tree grid got width-only treatment (tree-order is
   load-bearing; sort migration deferred).
+* **29e-7 DB-side class enumeration** — `SnapshotStore.ListDistinctClassesAsync`
+  (`SELECT DISTINCT assembly, class_fqn` — metadata only, no blob)
+  seeds the Class Pivot tab's class + assembly autocomplete on connect,
+  before any hydrate. Solves the chicken-and-egg where the Class FQN
+  box was empty until the user ran something. Wired via
+  `MainWindowViewModel.InitSnapshotDbAndPivotAsync` (runs right after
+  the per-game DB opens). `RefreshKnownClassesAndFields` now unions the
+  DB-seeded list with hydrated-snap classes. +4 tests. (Field-name
+  autocomplete still needs a hydrate — field names live in the gzipped
+  blob, not the metadata columns.)
 
-**552/552 green** (was 462 before 29e). No DLL change. Full design +
+**556/556 green** (was 462 before 29e). No DLL change. Full design +
 live-smoke findings at [class-pivot.md](class-pivot.md) §13.
 
 ### Live-smoke status (29e-2)
@@ -113,10 +123,12 @@ take 3-4 snapshots, open Class Pivot tab.
   flat in-place sort used everywhere else would corrupt node order.
   Needs a tree-aware sort (sort siblings within each parent) or a
   decision to drop sort on it. Width was already fixed in 29e-6.
-* **Cheap DB-side class enumeration** so Stage 0's class list +
-  assembly list populate without a prior hydrate (currently Analyze /
-  Score hydrate the selected snaps). Read distinct `class_fqn` /
-  assembly from `snapshot_classes` (indexed) — metadata only.
+* **Field-name autocomplete pre-hydrate** — class + assembly names
+  now seed from the DB (29e-7), but the Key/Value field-name boxes
+  still need a hydrate (field names are inside the gzipped blob, not
+  the metadata columns). Cheap enumeration isn't possible without
+  reading blobs; a future option is persisting a per-class field-name
+  list as a metadata column at save time.
 * **Layer B**: reference-array inner pivot (key array elements by an
   inner field) — needs DLL-side per-element child-field capture.
 * **Anomaly auto-surface** (stretch): auto-tag "dropped to 0 at snap

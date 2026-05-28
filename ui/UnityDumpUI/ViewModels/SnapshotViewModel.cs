@@ -186,6 +186,27 @@ public sealed partial class SnapshotViewModel : ObservableObject
         }
     }
 
+    /// <summary>Phase 29e-7 — distinct (assembly, class FQN) pairs from
+    /// the open per-game DB's metadata, with no blob hydration. Returns
+    /// empty when no store is open. Soft-fails to empty on error. The
+    /// Class Pivot tab uses this to seed its class / assembly
+    /// autocomplete before the user analyses anything.</summary>
+    public async Task<IReadOnlyList<PersistedClassRef>> GetPersistedClassesAsync(
+        CancellationToken ct = default)
+    {
+        if (_store is null) return System.Array.Empty<PersistedClassRef>();
+        try
+        {
+            return await _store.ListDistinctClassesAsync(ct).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.Write(SnapshotStore.LogCategory,
+                $"GetPersistedClassesAsync FAILED: {ex.GetType().Name}: {ex.Message}");
+            return System.Array.Empty<PersistedClassRef>();
+        }
+    }
+
     /// <summary>Called by MainWindowViewModel once UserSettingsStore
     /// finishes loading from disk. Hot-swaps the in-memory settings so
     /// later TakeSnapshot / OnGameDbContext calls honour the disk values.</summary>

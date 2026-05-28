@@ -93,6 +93,12 @@ public sealed partial class PivotViewModel : ObservableObject
 
     private List<ClassShortlistRow> _allShortlistRows = new();
 
+    /// <summary>Distinct classes pulled from the per-game DB metadata
+    /// (no blob hydrate) — seeds the class / assembly autocomplete
+    /// before any Analyze/Score/Run. Unioned with hydrated-snap classes
+    /// in <see cref="RefreshKnownClassesAndFields"/>.</summary>
+    private IReadOnlyList<PersistedClassRef> _persistedClasses = System.Array.Empty<PersistedClassRef>();
+
     /// <summary>Exact assembly to scope Analyze to. Empty = all.</summary>
     [ObservableProperty] private string _assemblyFilter = string.Empty;
 
@@ -309,7 +315,6 @@ public sealed partial class PivotViewModel : ObservableObject
                 await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
 
             RefreshKnownClassesAndFields();
-            RefreshKnownAssemblies();
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             _allShortlistRows = ClassShortlistEngine.Run(new ClassShortlistQuery
@@ -406,20 +411,6 @@ public sealed partial class PivotViewModel : ObservableObject
         AssemblyFilter = row.Assembly;
         RefreshKnownFieldNamesForClass();
         StatusMessage  = $"Class set to {row.ClassFqn} ({row.Assembly}). Now list key + value field name(s) and press Run.";
-    }
-
-    private void RefreshKnownAssemblies()
-    {
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var env in _snapshot.Snapshots)
-        {
-            if (!env.ClassesLoaded || env.Classes is null) continue;
-            foreach (var c in env.Classes)
-                if (!string.IsNullOrEmpty(c.Assembly)) set.Add(c.Assembly);
-        }
-        KnownAssemblies.Clear();
-        foreach (var a in set.OrderBy(s => s, StringComparer.Ordinal))
-            KnownAssemblies.Add(a);
     }
 
     // ── Stage 1: Score fields ──────────────────────────────────────────
@@ -774,12 +765,24 @@ public sealed partial class PivotViewModel : ObservableObject
         return null;
     }
 
-    /// <summary>Walk every hydrated snapshot and refresh both the
-    /// class autocomplete + the field-name autocomplete for the
-    /// currently-typed class. Cheap pass over already-loaded data.</summary>
+    /// <summary>Rebuild the class + assembly autocomplete from the union
+    /// of (a) the DB-seeded class list (<see cref="_persistedClasses"/>,
+    /// available before any hydrate) and (b) any currently-hydrated
+    /// snapshot's in-memory classes (which adds unsaved / fresh-capture
+    /// classes the DB doesn't know yet), then refresh the field-name
+    /// autocomplete for the typed class. Field names still require a
+    /// hydrate — they live in the gzipped blob, not the metadata
+    /// columns.</summary>
     private void RefreshKnownClassesAndFields()
     {
         var classSet = new HashSet<string>(StringComparer.Ordinal);
+        var asmSet   = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var pc in _persistedClasses)
+        {
+            if (!string.IsNullOrEmpty(pc.ClassFqn)) classSet.Add(pc.ClassFqn);
+            if (!string.IsNullOrEmpty(pc.Assembly)) asmSet.Add(pc.Assembly);
+        }
         foreach (var env in _snapshot.Snapshots)
         {
             if (!env.ClassesLoaded || env.Classes is null) continue;
@@ -787,12 +790,29 @@ public sealed partial class PivotViewModel : ObservableObject
             {
                 string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
                 classSet.Add(fqn);
+                if (!string.IsNullOrEmpty(c.Assembly)) asmSet.Add(c.Assembly);
             }
         }
+
         KnownClasses.Clear();
         foreach (var c in classSet.OrderBy(s => s, StringComparer.Ordinal))
             KnownClasses.Add(c);
+        KnownAssemblies.Clear();
+        foreach (var a in asmSet.OrderBy(s => s, StringComparer.Ordinal))
+            KnownAssemblies.Add(a);
+
         RefreshKnownFieldNamesForClass();
+    }
+
+    /// <summary>Phase 29e-7 — pull the distinct class / assembly list
+    /// from the open per-game DB (no blob hydration) and refresh the
+    /// autocomplete. Wired to run right after the DB opens on connect,
+    /// so the Class FQN + Assembly boxes suggest names immediately —
+    /// no "run something first to populate" chicken-and-egg.</summary>
+    public async Task SeedKnownClassesFromDbAsync()
+    {
+        _persistedClasses = await _snapshot.GetPersistedClassesAsync().ConfigureAwait(true);
+        RefreshKnownClassesAndFields();
     }
 
     private void RefreshKnownFieldNamesForClass()

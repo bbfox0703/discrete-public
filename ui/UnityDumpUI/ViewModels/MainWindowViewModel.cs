@@ -683,7 +683,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // already-completed handshake.
             if (!string.IsNullOrEmpty(hs.GameBuildId))
             {
-                _ = Snapshot.OnGameDbContextAsync(hs.GameBuildId, hs.GameModule ?? "unknown");
+                _ = InitSnapshotDbAndPivotAsync(hs.GameBuildId, hs.GameModule ?? "unknown");
             }
 
             // Phase 8: kick off assembly fetch so the left pane populates
@@ -718,6 +718,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             IsBusy = false;
         }
+    }
+
+    /// <summary>Phase 29e-7 — open the per-game DB, then seed the Class
+    /// Pivot tab's class / assembly autocomplete from its metadata (no
+    /// blob hydrate) so the FQN box suggests names immediately. Both
+    /// steps soft-fail independently; a DB error doesn't block the
+    /// already-completed handshake.</summary>
+    private async Task InitSnapshotDbAndPivotAsync(string buildId, string module)
+    {
+        await Snapshot.OnGameDbContextAsync(buildId, module).ConfigureAwait(true);
+        await ClassPivot.SeedKnownClassesFromDbAsync().ConfigureAwait(true);
     }
 
     private bool CanConnect() => !IsBusy && !IsConnected;

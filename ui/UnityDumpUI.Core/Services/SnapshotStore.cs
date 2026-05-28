@@ -349,6 +349,42 @@ public sealed class SnapshotStore : IAsyncDisposable
         return results;
     }
 
+    /// <summary>Distinct (assembly, class FQN) pairs across every saved
+    /// snapshot in this DB. Reads only the indexed metadata columns —
+    /// the gzipped <c>payload_gzip</c> blobs are never touched — so it's
+    /// cheap enough to run on connect and seed the Class Pivot tab's
+    /// autocomplete before the user hydrates anything. 활俠傳-scale
+    /// (~3,647 classes × N snaps → ~3,647 distinct rows) returns in a
+    /// few ms.</summary>
+    public async Task<List<PersistedClassRef>> ListDistinctClassesAsync(CancellationToken ct = default)
+    {
+        var results = new List<PersistedClassRef>();
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT DISTINCT assembly, class_fqn
+                  FROM snapshot_classes
+                 ORDER BY class_fqn ASC;
+                """;
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                results.Add(new PersistedClassRef
+                {
+                    Assembly = reader.GetString(0),
+                    ClassFqn = reader.GetString(1),
+                });
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+        return results;
+    }
+
     /// <summary>Delete one snapshot + its class rows (cascaded). Returns
     /// the number of rows deleted from the <c>snapshots</c> table (0 or 1).</summary>
     public async Task<int> DeleteSnapshotAsync(long snapshotId, CancellationToken ct = default)
@@ -732,6 +768,16 @@ public readonly record struct PruneResult(int Removed, long FreedBytes);
 
 /// <summary>One row of the <c>snapshots</c> table — every column except
 /// the per-class blobs. Drives the Snapshot tab's lazy metadata list.</summary>
+/// <summary>A class identity (assembly + FQN) read straight from the
+/// <c>snapshot_classes</c> metadata columns — no gzipped blob load.
+/// Powers the Class Pivot tab's class / assembly autocomplete before
+/// any snapshot is hydrated (Phase 29e-7).</summary>
+public sealed class PersistedClassRef
+{
+    public required string Assembly { get; init; }
+    public required string ClassFqn { get; init; }
+}
+
 public sealed class PersistedSnapshotMeta
 {
     public required long    Id               { get; init; }

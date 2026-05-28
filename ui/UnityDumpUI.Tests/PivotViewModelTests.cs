@@ -735,6 +735,42 @@ public class PivotViewModelTests : IDisposable
         Assert.Equal("alpha", pivot.FieldScores[0].FieldName);
     }
 
+    // ─── Stage 0 DB-seeded autocomplete (29e-7) ───────────────────────
+
+    [Fact]
+    public async Task SeedKnownClassesFromDb_PopulatesClassesAndAssembliesPreHydrate()
+    {
+        // VM #1 saves a snapshot to the per-game DB.
+        var (snap1, _) = BuildVms();
+        await snap1.OnGameDbContextAsync("b1", "mono.dll", TestContext.Current.CancellationToken);
+        var env = MakeEnv("snap1", "b1", "s1", "2026-05-29T10:00:00Z",
+            MakeClass("Game.Money", "Assembly-CSharp",
+                MakeInstance("0x1", ("id", "System.Int32", 1), ("v", "System.Int32", 10))));
+        env.IsDirty = true;
+        env.BuildFieldIndex();
+        snap1.Snapshots.Add(env);
+        await snap1.SaveSnapshotAsync(env);
+
+        // VM #2 reopens the same DB → envelopes are metadata-only (not
+        // hydrated). Seeding must still fill the autocomplete from the
+        // DB metadata columns, with no blob load.
+        var (snap2, pivot2) = BuildVms();
+        await snap2.OnGameDbContextAsync("b1", "mono.dll", TestContext.Current.CancellationToken);
+        Assert.Empty(pivot2.KnownClasses);   // nothing analysed yet
+
+        await pivot2.SeedKnownClassesFromDbAsync();
+        Assert.Contains("Game.Money", pivot2.KnownClasses);
+        Assert.Contains("Assembly-CSharp", pivot2.KnownAssemblies);
+    }
+
+    [Fact]
+    public async Task SeedKnownClassesFromDb_NoStore_IsNoOp()
+    {
+        var (_, pivot) = BuildVms();   // no OnGameDbContextAsync → no store
+        await pivot.SeedKnownClassesFromDbAsync();
+        Assert.Empty(pivot.KnownClasses);   // soft no-op, no throw
+    }
+
     [Fact]
     public async Task SortResults_ByKeyTuple_Ascending()
     {
