@@ -1,6 +1,6 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7 polish**; head pending commit / build #702 UI / DLL #650).
+**Branch**: `dev` (2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7/8 polish**; head pending commit / build #704 UI / DLL #650).
 
 ## TL;DR — what's left to pick up (next session)
 
@@ -77,8 +77,17 @@ on top of the 29e-1/-1b engine. Waves of Phase 29e:
   DB-seeded list with hydrated-snap classes. +4 tests. (Field-name
   autocomplete still needs a hydrate — field names live in the gzipped
   blob, not the metadata columns.)
+* **29e-8 Inspector tree-aware sort** —
+  [LiveInspectionViewModel.SortTree](../ui/UnityDumpUI/ViewModels/LiveInspectionViewModel.cs)
+  + [InspectorSortTreeTests.cs](../ui/UnityDumpUI.Tests/InspectorSortTreeTests.cs)
+  (+6 tests). The last grid on the broken built-in sort. Sorts each
+  sibling group recursively (roots + each node's `Children`) and
+  re-flattens `Fields` in DFS order respecting expand state, so
+  children stay grouped under their parent and collapsed subtrees keep
+  their sorted order for the next expand. Every sortable DataGrid in
+  the app is now AOT-safe.
 
-**556/556 green** (was 462 before 29e). No DLL change. Full design +
+**562/562 green** (was 462 before 29e). No DLL change. Full design +
 live-smoke findings at [class-pivot.md](class-pivot.md) §13.
 
 ### Live-smoke status (29e-2)
@@ -118,11 +127,6 @@ take 3-4 snapshots, open Class Pivot tab.
 
 ### Deferred (post-29e-core)
 
-* **Inspector `FieldsDataGrid` tree-aware sort** — the only grid left
-  on the broken built-in sort. It's an expand/collapse tree, so the
-  flat in-place sort used everywhere else would corrupt node order.
-  Needs a tree-aware sort (sort siblings within each parent) or a
-  decision to drop sort on it. Width was already fixed in 29e-6.
 * **Field-name autocomplete pre-hydrate** — class + assembly names
   now seed from the DB (29e-7), but the Key/Value field-name boxes
   still need a hydrate (field names are inside the gzipped blob, not
@@ -428,7 +432,7 @@ discrete/
 - **Avalonia 12 clipboard API churn**: only supported writer is `IClipboard.SetDataAsync(IAsyncDataTransfer)` — wrap a `DataFormat.Text` item in a `DataTransfer`.
 - **Avalonia 12 `avares://` keys off AssemblyName, not RootNamespace.** Renamed the exe? Update `App.axaml`'s `ResourceInclude Source="avares://{AssemblyName}/..."` too.
 - **Avalonia 12 `DataGridCheckBoxColumn`** requires entering edit mode (double-click) before the checkbox responds. Use `DataGridTemplateColumn` with an inline `<CheckBox Focusable="False">` for single-click toggles.
-- **Avalonia 12 DataGrid built-in sort is reflection-based → no-op under Native AOT.** `CanUserSortColumns="True"` clicks resolve `SortMemberPath` via `ClrPropertyInfo` (IL2026/IL3050), which silently does nothing in an AOT publish. Fix pattern: keep `CanUserSortColumns="True"` for the cursor affordance, handle the `Sorting` event, set `e.Handled = true`, and route to a **typed `switch` comparer** (`"Member" => (a,b)=>a.Member.CompareTo(b.Member)`) that sorts the bound collection in place. Track asc/desc yourself — `DataGridColumn.SortDirection` is NOT public in Avalonia 12 (the glyph is view-internal), so there's no built-in arrow. **Migrated**: Pivot grids (29e-5, via ViewModel sort methods) + the 6 legacy data grids (29e-6, via [LegacyGridSort.cs](../ui/UnityDumpUI/ViewModels/LegacyGridSort.cs) comparers called from code-behind): Fields, Methods, Symbol Finder, Value Search, Snapshot diff, Snapshot field-stats. **Still on broken built-in sort**: only the Inspector `FieldsDataGrid` — its rows are an expand/collapse tree whose order is load-bearing, so a flat in-place sort would corrupt it (a tree-aware sort is a separate task).
+- **Avalonia 12 DataGrid built-in sort is reflection-based → no-op under Native AOT.** `CanUserSortColumns="True"` clicks resolve `SortMemberPath` via `ClrPropertyInfo` (IL2026/IL3050), which silently does nothing in an AOT publish. Fix pattern: keep `CanUserSortColumns="True"` for the cursor affordance, handle the `Sorting` event, set `e.Handled = true`, and route to a **typed `switch` comparer** (`"Member" => (a,b)=>a.Member.CompareTo(b.Member)`) that sorts the bound collection in place. Track asc/desc yourself — `DataGridColumn.SortDirection` is NOT public in Avalonia 12 (the glyph is view-internal), so there's no built-in arrow. **Migrated**: every sortable grid. Pivot grids (29e-5, ViewModel sort methods); the 6 flat legacy grids (29e-6, [LegacyGridSort.cs](../ui/UnityDumpUI/ViewModels/LegacyGridSort.cs) comparers from code-behind): Fields, Methods, Symbol Finder, Value Search, Snapshot diff, Snapshot field-stats; and the Inspector `FieldsDataGrid` (29e-8, [LiveInspectionViewModel.SortTree](../ui/UnityDumpUI/ViewModels/LiveInspectionViewModel.cs)) — a **tree-aware** sort that reorders sibling groups (roots + each node's `Children`, recursively) and re-flattens in DFS order respecting expand state, so children stay grouped under their parent. No grids remain on the broken built-in sort.
 - **Avalonia 12 DataGrid star-sized columns never overflow → no horizontal scrollbar + truncation.** All-`Width="*"`/`2*` columns sum to exactly the viewport, so long text (class FQNs, field names) clips with no way to scroll. Fix: give text columns `Width="Auto"` + `MinWidth` (numeric/fixed columns stay pixel-width) so the column set can exceed the pane width and the DataGrid shows its horizontal scrollbar. **Fixed** on Pivot grids (29e-5) + Fields/Methods/Symbol Finder/Inspector star columns (29e-6). Value Search + Snapshot diff already used fixed pixel widths (they overflow + scroll already). **Avoid `Width="Auto"` on the Snapshot diff grid** specifically — it can hold ~740K rows and Auto would measure them all; it stays fixed-width.
 - **`CommunityToolkit.Mvvm` source-gen name collision**: a property named `Backend` collides with the generated field name. Use `Backend2`.
 - **`CommunityToolkit.Mvvm` and child-collection CanExecute**: a command's CanExecute is NOT auto-re-evaluated when an item inside an `ObservableCollection<T>` raises PropertyChanged. Subscribe to each row's `PropertyChanged` and call `Notify*Changed()` manually. Pattern: `MethodOverloadsViewModel.OnRowPropertyChanged`.

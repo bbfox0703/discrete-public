@@ -557,6 +557,20 @@ public partial class MainWindow : Window
         UnityDumpUI.ViewModels.LegacyGridSort.InPlace(vm.Snapshot.FieldNameStats, cmp, ToggleDir(ref _fieldStatsSort, path));
     }
 
+    // Phase 29e-8 — the Inspector grid is a tree; its sort recurses into
+    // sibling groups inside the ViewModel rather than flattening, so it
+    // routes to SortTree instead of LegacyGridSort.InPlace.
+    private (string? Member, bool Asc) _inspectorSort;
+
+    private void OnInspectorFieldsSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        vm.Inspector.SortTree(path, ToggleDir(ref _inspectorSort, path));
+    }
+
 
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
     /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir

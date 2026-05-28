@@ -743,6 +743,7 @@
                             CanUserResizeColumns="True"
                             CanUserReorderColumns="True"
                             CanUserSortColumns="True"
+                            Sorting="OnInspectorFieldsSorting"
                             GridLinesVisibility="Horizontal">
                     <DataGrid.ContextMenu>
                       <ContextMenu>
