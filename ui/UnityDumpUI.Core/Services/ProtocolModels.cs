@@ -1059,6 +1059,25 @@ public sealed class SnapshotArrayElement
     [JsonPropertyName("string")]  public string?      String  { get; set; }
     [JsonPropertyName("error")]   public string?      Error   { get; set; }
     [JsonPropertyName("address")] public string?      Address { get; set; }
+
+    /// <summary>Phase 29f (Layer B) — for a reference-type array element,
+    /// the element object's own captured fields, one level deep. Null on
+    /// elements captured before Layer B, on primitive elements, and when
+    /// the DLL's <c>arrayElementFields</c> capture was off. Lets the Class
+    /// Pivot tab key array elements by an inner field (e.g.
+    /// <c>StatConvertCollectionData[]</c> keyed by <c>_propertyID</c>)
+    /// instead of by array index, sidestepping index-shuffle + address
+    /// drift. <see cref="SnapshotElementClassError"/> is set instead when
+    /// the element pointer didn't resolve to a managed object.</summary>
+    [JsonPropertyName("fields")] public List<SnapshotFieldEntry>? Fields { get; set; }
+
+    /// <summary>Phase 29f — populated (in place of <see cref="Fields"/>)
+    /// when Layer B capture was requested for this element but the element
+    /// pointer didn't resolve to a valid managed object
+    /// (<c>object_get_class</c> failed / null slot / garbage). Lets the UI
+    /// distinguish "no inner capture attempted" (null) from "attempted but
+    /// the slot wasn't a live object" (this set).</summary>
+    [JsonPropertyName("element_class_error")] public string? SnapshotElementClassError { get; set; }
 }
 
 public sealed class SnapshotArrayElements

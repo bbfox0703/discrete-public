@@ -710,8 +710,20 @@ both Layer A's index-shuffle weakness and address drift. Full design in
 
 ### Sub-phases (each ships green on the full suite + STATUS.md TL;DR)
 
-- [ ] **29f-1** Protocol: `SnapshotArrayElement.Fields` +
+- [x] **29f-1** Protocol: `SnapshotArrayElement.Fields` +
   source-gen JsonContext coverage + round-trip tests. (0.5 day)
+  ✅ **Shipped 2026-05-28**, 555/555 green. Added
+  `SnapshotArrayElement.Fields` (`List<SnapshotFieldEntry>?`, JSON
+  `fields`) + `SnapshotElementClassError` (JSON `element_class_error`)
+  to [ProtocolModels.cs](../ui/UnityDumpUI.Core/Services/ProtocolModels.cs).
+  No new `[JsonSerializable]` needed — `List<SnapshotFieldEntry>` +
+  `SnapshotArrayElement` were already registered, so the recursive
+  element→fields cycle is covered. +3 tests in
+  [SnapshotStoreTests.cs](../ui/UnityDumpUI.Tests/SnapshotStoreTests.cs):
+  gzip+source-gen DB round-trip (inner fields + `element_class_error` +
+  primitive-array element stays null), wire-contract (`"fields"` key +
+  recursive round-trip via `ProtocolJsonContext`), and pre-Layer-B
+  backward-compat (legacy JSON with no `fields` → `Fields == null`).
 - [ ] **29f-2** DLL element-field capture on **both** backends —
   `walkArrayElementsInline` reference branch calls
   `object_get_class(elemPtr)` (SEH) → cached `ReadClassInfo` →

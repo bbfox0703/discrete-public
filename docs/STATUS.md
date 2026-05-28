@@ -26,6 +26,11 @@
 * **SPC live-smoke** recorded below (Exact signature / Range narrowing /
   relative Increased·Decreased·Unchanged — all single-session, verified
   on 活俠傳).
+* **Phase 29f-1 (Layer B protocol) shipped** — `SnapshotArrayElement`
+  gained `Fields` (`List<SnapshotFieldEntry>?`) + `SnapshotElementClassError`
+  for reference-array inner-pivot. Source-gen JsonContext already covered
+  the recursive type; +3 round-trip / backward-compat tests (555 total).
+  No DLL change yet — that's 29f-2.
 
 ## TL;DR — what's left to pick up (next session)
 

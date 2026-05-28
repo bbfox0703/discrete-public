@@ -9,6 +9,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using UnityDumpUI.Core.Services;
 using Xunit;
@@ -109,6 +110,184 @@ public class SnapshotStoreTests : IDisposable
         var firstField = classes[0].Instances![0].Fields[0];
         Assert.Equal("field_0", firstField.Name);
         Assert.Equal(0u, firstField.Offset);
+    }
+
+    // ─── Phase 29f-1: Layer B array-element inner fields ──────────────
+
+    [Fact]
+    public async Task SaveAndLoad_RoundTripsLayerBArrayElementInnerFields()
+    {
+        // A GameStat-like instance with a reference array
+        // (StatConvertCollectionData[]) whose elements carry inner fields
+        // (Layer B). Element 0 has inner fields; element 1 is an unresolved
+        // slot (element_class_error). A separate primitive array element
+        // carries no inner Fields (Layer B is reference-only). Exercises the
+        // real gzip + source-gen JsonContext persistence path.
+        var path = TempDb();
+        await using var store = await SnapshotStore.OpenAsync(path, "build1", "Game.exe", ct: Ct);
+
+        var refArrayField = new SnapshotFieldEntry
+        {
+            Name = "_statAdditionData",
+            Type = "Mortal.Core.StatConvertCollectionData[]",
+            Offset = 0x20,
+            ArrayElements = new SnapshotArrayElements
+            {
+                Length = 2, Count = 2,
+                ElementType = "Mortal.Core.StatConvertCollectionData",
+                ElementSize = 8, IsPointer = true,
+                Elements =
+                {
+                    new SnapshotArrayElement
+                    {
+                        Index = 0, Ptr = "0xA000", Address = "0xA000",
+                        Fields = new List<SnapshotFieldEntry>
+                        {
+                            new() { Name = "_propertyID", Type = "System.Int32", Offset = 0x10,
+                                    Value = JsonDocument.Parse("101").RootElement.Clone() },
+                            new() { Name = "_amount", Type = "System.Int32", Offset = 0x14,
+                                    Value = JsonDocument.Parse("250").RootElement.Clone() },
+                        },
+                    },
+                    new SnapshotArrayElement
+                    {
+                        Index = 1, Ptr = "0x0",
+                        SnapshotElementClassError = "null_slot",
+                    },
+                },
+            },
+        };
+        var primArrayField = new SnapshotFieldEntry
+        {
+            Name = "_levels", Type = "System.Int32[]", Offset = 0x28,
+            ArrayElements = new SnapshotArrayElements
+            {
+                Length = 1, Count = 1, ElementType = "System.Int32",
+                ElementSize = 4, IsPointer = false,
+                Elements = { new SnapshotArrayElement { Index = 0, Value = JsonDocument.Parse("7").RootElement.Clone() } },
+            },
+        };
+
+        var req = new SnapshotPersistRequest
+        {
+            Label = "layerB", CapturedAtUtc = "2026-05-28T12:00:00Z",
+            GameBuildId = "build1", GameSessionId = "session1",
+            TargetProcess = "Game.exe", Backend = "mono", UnityVersion = "2020.3.49f1",
+            PointerSize = 4, TotalClasses = 1, TotalInstances = 1, FieldValueCount = 2,
+            InstanceCap = 256, ArrayCap = 64, IncludeUnchanged = false, AssemblyFilter = null,
+            Classes = new List<SnapshotClassEntry>
+            {
+                new()
+                {
+                    Assembly = "Assembly-CSharp", Namespace = "Mortal.Core", Name = "GameStat",
+                    Instances = new List<SnapshotInstanceEntry>
+                    {
+                        new() { Address = "0x29F5ACC0",
+                                Fields = new List<SnapshotFieldEntry> { refArrayField, primArrayField } },
+                    },
+                },
+            },
+        };
+        long id = await store.SaveSnapshotAsync(req, Ct);
+
+        var classes = await store.LoadClassesAsync(id, Ct);
+        var inst = Assert.Single(classes[0].Instances!);
+
+        var loadedRef = inst.Fields.Single(f => f.Name == "_statAdditionData");
+        var els = loadedRef.ArrayElements!.Elements;
+        Assert.Equal(2, els.Count);
+
+        // Element 0 inner fields survived gzip + source-gen round-trip.
+        Assert.NotNull(els[0].Fields);
+        Assert.Equal(2, els[0].Fields!.Count);
+        var propId = els[0].Fields!.Single(f => f.Name == "_propertyID");
+        Assert.Equal("101", propId.Value!.Value.GetRawText());
+        Assert.Equal(0x10u, propId.Offset);
+        Assert.Null(els[0].SnapshotElementClassError);
+
+        // Element 1 unresolved slot carries the error in place of fields.
+        Assert.Null(els[1].Fields);
+        Assert.Equal("null_slot", els[1].SnapshotElementClassError);
+
+        // Primitive array element has no inner fields (reference-only).
+        var loadedPrim = inst.Fields.Single(f => f.Name == "_levels");
+        Assert.Null(loadedPrim.ArrayElements!.Elements[0].Fields);
+    }
+
+    [Fact]
+    public void ArrayElementFields_SerializeUnderFieldsKey_AndRoundTripViaSourceGenContext()
+    {
+        // Wire-contract + AOT source-gen check independent of SQLite: the
+        // new property emits as "fields" and the recursive type
+        // (element → fields → …) round-trips through ProtocolJsonContext.
+        var entry = new SnapshotClassEntry
+        {
+            Assembly = "Assembly-CSharp", Namespace = "N", Name = "C",
+            Instances = new List<SnapshotInstanceEntry>
+            {
+                new()
+                {
+                    Address = "0x1",
+                    Fields = new List<SnapshotFieldEntry>
+                    {
+                        new()
+                        {
+                            Name = "arr", Type = "N.Item[]", Offset = 0,
+                            ArrayElements = new SnapshotArrayElements
+                            {
+                                Length = 1, Count = 1, ElementType = "N.Item",
+                                ElementSize = 8, IsPointer = true,
+                                Elements =
+                                {
+                                    new SnapshotArrayElement
+                                    {
+                                        Index = 0, Ptr = "0x9",
+                                        Fields = new List<SnapshotFieldEntry>
+                                        {
+                                            new() { Name = "id", Type = "System.Int32", Offset = 8,
+                                                    Value = JsonDocument.Parse("42").RootElement.Clone() },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        string json = JsonSerializer.Serialize(entry, ProtocolJsonContext.Default.SnapshotClassEntry);
+        Assert.Contains("\"fields\"", json);
+
+        var back = JsonSerializer.Deserialize(json, ProtocolJsonContext.Default.SnapshotClassEntry);
+        var el = back!.Instances![0].Fields[0].ArrayElements!.Elements[0];
+        Assert.NotNull(el.Fields);
+        Assert.Equal("id", el.Fields!.Single().Name);
+        Assert.Equal("42", el.Fields!.Single().Value!.Value.GetRawText());
+    }
+
+    [Fact]
+    public void PreLayerBElement_WithoutFieldsKey_DeserializesWithNullFields()
+    {
+        // Backward compatibility: an element JSON captured before Layer B
+        // (no "fields" key) must deserialize with Fields == null, never throw.
+        const string legacy = """
+        {
+          "assembly":"A","namespace":"N","name":"C",
+          "instances":[{"address":"0x1","fields":[
+            {"name":"arr","type":"N.Item[]","offset":0,
+             "arrayElements":{"length":1,"count":1,"element_type":"N.Item",
+               "element_size":8,"is_pointer":true,
+               "elements":[{"index":0,"ptr":"0x9","address":"0x9"}]}}
+          ]}]
+        }
+        """;
+
+        var entry = JsonSerializer.Deserialize(legacy, ProtocolJsonContext.Default.SnapshotClassEntry);
+        var el = entry!.Instances![0].Fields[0].ArrayElements!.Elements[0];
+        Assert.Null(el.Fields);
+        Assert.Null(el.SnapshotElementClassError);
+        Assert.Equal("0x9", el.Ptr);
     }
 
     [Fact]
