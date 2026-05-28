@@ -39,6 +39,7 @@ public partial class MainWindow : Window
         // on the Address Lookup tab.
         vm.AddressLookup.CopyToClipboardAsync = CopyToClipboardAsync;
         vm.SpcQuery.CopyToClipboardAsync      = CopyToClipboardAsync;
+        vm.ClassPivot.CopyToClipboardAsync    = CopyToClipboardAsync;
         vm.ShowProxyDeploy                    = ShowProxyDeployWindow;
         DataContext = vm;
         // Pane-collapse plumbing — IsVisible bindings on the panes' content
@@ -102,8 +103,11 @@ public partial class MainWindow : Window
     {
         this.FindControl<DataGrid>("BrowserFieldsDataGrid")?
             .WireSortComparers(BrowserFieldsSortComparers);
-        this.FindControl<DataGrid>("FieldsDataGrid")?
-            .WireSortComparers(InspectorFieldsSortComparers);
+        // NOTE: the Inspector FieldsDataGrid is deliberately NOT wired here.
+        // It's an expand/collapse tree; a flat CustomSortComparer would tear
+        // children away from their parent. It uses the tree-aware
+        // LiveInspectionViewModel.SortTree via OnInspectorFieldsSorting
+        // instead (Phase 29e-8). It's the one grid on the Sorting-event path.
         this.FindControl<DataGrid>("MethodsDataGrid")?
             .WireSortComparers(MethodsSortComparers);
         // Phase 29b — wire the Snapshot diff grid. Without this the
@@ -111,6 +115,22 @@ public partial class MainWindow : Window
         // (docs/aot-pitfalls.md §4.5 "three-layer trap").
         this.FindControl<DataGrid>("SnapshotDiffGrid")?
             .WireSortComparers(SnapshotDiffSortComparers);
+        // Phase 29e-9 — fold the rest of the sortable grids onto the same
+        // CustomSortComparer mechanism (keeps the native arrow glyph +
+        // direction toggle; AOT-safe). Replaces the parallel Sorting-event
+        // approach 29e-5/6 briefly used.
+        this.FindControl<DataGrid>("ValueSearchGrid")?
+            .WireSortComparers(ValueSearchSortComparers);
+        this.FindControl<DataGrid>("SymbolFinderResultsGrid")?
+            .WireSortComparers(SymbolFinderSortComparers);
+        this.FindControl<DataGrid>("SnapshotFieldStatsGrid")?
+            .WireSortComparers(SnapshotFieldStatsSortComparers);
+        this.FindControl<DataGrid>("PivotShortlistGrid")?
+            .WireSortComparers(PivotShortlistSortComparers);
+        this.FindControl<DataGrid>("PivotFieldScoreGrid")?
+            .WireSortComparers(PivotFieldScoreSortComparers);
+        this.FindControl<DataGrid>("PivotResultsGrid")?
+            .WireSortComparers(PivotResultsSortComparers);
     }
 
     private static readonly IReadOnlyDictionary<string, IComparer> BrowserFieldsSortComparers =
@@ -122,17 +142,6 @@ public partial class MainWindow : Window
             ["Flags"]      = DataGridSortComparers.Number <FieldRow>(r => r.Flags),
             ["IsStatic"]   = DataGridSortComparers.Bool   <FieldRow>(r => r.IsStatic),
             ["DeclaredIn"] = DataGridSortComparers.Ordinal<FieldRow>(r => r.DeclaredIn),
-        };
-
-    private static readonly IReadOnlyDictionary<string, IComparer> InspectorFieldsSortComparers =
-        new Dictionary<string, IComparer>
-        {
-            ["Name"]         = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.Name),
-            ["Offset"]       = DataGridSortComparers.Number <WalkedFieldNode>(n => n.Offset),
-            ["Address"]      = DataGridSortComparers.Hex    <WalkedFieldNode>(n => n.Address),
-            ["Type"]         = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.Type),
-            ["DisplayValue"] = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.DisplayValue),
-            ["DeclaredIn"]   = DataGridSortComparers.Ordinal<WalkedFieldNode>(n => n.DeclaredIn),
         };
 
     private static readonly IReadOnlyDictionary<string, IComparer> MethodsSortComparers =
@@ -166,6 +175,74 @@ public partial class MainWindow : Window
             ["Delta"]         = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.Delta),
             ["ChangeKind"]    = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.ChangeKind),
             ["FieldType"]     = DataGridSortComparers.Ordinal<SnapshotDiffRow>(r => r.FieldType),
+        };
+
+    // Phase 29e-9 — comparer dicts for the grids folded onto the
+    // CustomSortComparer mechanism. Keys match each column's SortMemberPath.
+    private static readonly IReadOnlyDictionary<string, IComparer> ValueSearchSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["ClassDisplay"] = DataGridSortComparers.Ordinal<ValueSearchRow>(r => r.ClassDisplay),
+            ["Field"]        = DataGridSortComparers.Ordinal<ValueSearchRow>(r => r.Field),
+            ["FieldType"]    = DataGridSortComparers.Ordinal<ValueSearchRow>(r => r.FieldType),
+            ["FieldOffset"]  = DataGridSortComparers.Number <ValueSearchRow>(r => r.FieldOffset),
+            ["CurrentValue"] = DataGridSortComparers.Ordinal<ValueSearchRow>(r => r.CurrentValue),
+            ["InstanceAddr"] = DataGridSortComparers.Hex    <ValueSearchRow>(r => r.InstanceAddr),
+            ["Address"]      = DataGridSortComparers.Hex    <ValueSearchRow>(r => r.Address),
+            ["FieldKind"]    = DataGridSortComparers.Ordinal<ValueSearchRow>(r => r.FieldKind),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> SymbolFinderSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["KindLabel"]    = DataGridSortComparers.Ordinal<SymbolFinderRow>(r => r.KindLabel),
+            ["Assembly"]     = DataGridSortComparers.Ordinal<SymbolFinderRow>(r => r.Assembly),
+            ["ClassDisplay"] = DataGridSortComparers.Ordinal<SymbolFinderRow>(r => r.ClassDisplay),
+            ["Member"]       = DataGridSortComparers.Ordinal<SymbolFinderRow>(r => r.Member),
+            ["Type"]         = DataGridSortComparers.Ordinal<SymbolFinderRow>(r => r.Type),
+            ["OffsetLabel"]  = DataGridSortComparers.Hex    <SymbolFinderRow>(r => r.OffsetLabel),
+            ["Address"]      = DataGridSortComparers.Hex    <SymbolFinderRow>(r => r.Address),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> SnapshotFieldStatsSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["FieldName"] = DataGridSortComparers.Ordinal<FieldNameStat>(r => r.FieldName),
+            ["Count"]     = DataGridSortComparers.Number <FieldNameStat>(r => r.Count),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> PivotShortlistSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["ClassFqn"]            = DataGridSortComparers.Ordinal<ClassShortlistRow>(r => r.ClassFqn),
+            ["Assembly"]            = DataGridSortComparers.Ordinal<ClassShortlistRow>(r => r.Assembly),
+            ["Presence"]            = DataGridSortComparers.Number <ClassShortlistRow>(r => r.Presence),
+            ["AvgInstances"]        = DataGridSortComparers.Double <ClassShortlistRow>(r => r.AvgInstances),
+            ["Cv"]                  = DataGridSortComparers.Double <ClassShortlistRow>(r => r.Cv),
+            ["FieldCount"]          = DataGridSortComparers.Number <ClassShortlistRow>(r => r.FieldCount),
+            ["PrimitiveFieldRatio"] = DataGridSortComparers.Double <ClassShortlistRow>(r => r.PrimitiveFieldRatio),
+            ["NullFieldRatio"]      = DataGridSortComparers.Double <ClassShortlistRow>(r => r.NullFieldRatio),
+            ["StringFieldRatio"]    = DataGridSortComparers.Double <ClassShortlistRow>(r => r.StringFieldRatio),
+            ["ArrayFieldRatio"]     = DataGridSortComparers.Double <ClassShortlistRow>(r => r.ArrayFieldRatio),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> PivotFieldScoreSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["FieldName"]    = DataGridSortComparers.Ordinal<FieldScore>(r => r.FieldName),
+            ["FieldType"]    = DataGridSortComparers.Ordinal<FieldScore>(r => r.FieldType),
+            ["Score"]        = DataGridSortComparers.Double <FieldScore>(r => r.Score),
+            ["SStable"]      = DataGridSortComparers.Double <FieldScore>(r => r.SStable),
+            ["SCardinality"] = DataGridSortComparers.Double <FieldScore>(r => r.SCardinality),
+            ["TypePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.TypePrior),
+            ["NamePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.NamePrior),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> PivotResultsSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["HasCollision"]    = DataGridSortComparers.Bool   <PivotResultRow>(r => r.HasCollision),
+            ["KeyTupleDisplay"] = DataGridSortComparers.Ordinal<PivotResultRow>(r => r.KeyTupleDisplay),
         };
 
     /// <summary>Last expanded widths for the Assemblies / Classes columns.
@@ -336,6 +413,128 @@ public partial class MainWindow : Window
         if (m is null) return;
         await vm.SpcQuery.CopyValueSequenceAsync(m).ConfigureAwait(true);
     }
+
+    // ── Phase 29e-2 Class Pivot tab — context menu + DoubleTapped ────
+
+    private UnityDumpUI.ViewModels.PivotResultRow? GetSelectedPivotRow()
+    {
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotResultsGrid");
+        return grid?.SelectedItem as UnityDumpUI.ViewModels.PivotResultRow;
+    }
+
+    private void OnPivotResultDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.PivotResultRow row) return;
+        vm.ClassPivot.RequestInspectInstance(row);
+    }
+
+    private void OnPivotInspectInstanceClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        vm.ClassPivot.RequestInspectInstance(row);
+    }
+
+    private async void OnPivotCopyKeyTupleClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        await vm.ClassPivot.CopyKeyTupleAsync(row).ConfigureAwait(true);
+    }
+
+    private async void OnPivotCopyValueSequenceClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        await vm.ClassPivot.CopyValueSequenceAsync(row).ConfigureAwait(true);
+    }
+
+    private async void OnPivotCopyAddressLatestClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = GetSelectedPivotRow();
+        if (row is null) return;
+        await vm.ClassPivot.CopyAddressLatestAsync(row).ConfigureAwait(true);
+    }
+
+    /// <summary>Phase 29e-3: double-clicking a Stage-0 shortlist row
+    /// fills the Class FQN box (+ scopes the assembly filter) so the
+    /// user flows straight into picking key/value fields.</summary>
+    private void OnPivotShortlistDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ClassShortlistRow row) return;
+        vm.ClassPivot.UseShortlistRow(row);
+    }
+
+    // ── Phase 29e-4 Stage 1 field-score grid ────────────────────────────
+
+    private UnityDumpUI.ViewModels.FieldScore? GetSelectedFieldScore()
+    {
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotFieldScoreGrid");
+        return grid?.SelectedItem as UnityDumpUI.ViewModels.FieldScore;
+    }
+
+    /// <summary>Double-tap a scored field → add it to Key fields (the
+    /// most common action). Right-click offers value instead.</summary>
+    private void OnPivotFieldScoreDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.FieldScore row) return;
+        vm.ClassPivot.AddFieldToKeys(row);
+    }
+
+    private void OnPivotFieldAddToKeysClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddFieldToKeys(f);
+    }
+
+    private void OnPivotFieldAddToValuesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddFieldToValues(f);
+    }
+
+    // ── Phase 29e-8/9: Inspector tree-aware sort ────────────────────────
+    //
+    // Every flat grid uses the established CustomSortComparer mechanism
+    // (DataGridSortComparers + WireSortComparers — keeps the native arrow
+    // glyph + direction toggle, AOT-safe). The Inspector grid is the sole
+    // exception: it's an expand/collapse tree, so a flat comparer would
+    // tear children from their parent. It stays on the Sorting-event path,
+    // routing to the tree-aware LiveInspectionViewModel.SortTree. Direction
+    // is tracked here (Avalonia 12 has no public DataGridColumn.SortDirection).
+
+    private (string? Member, bool Asc) _inspectorSort;
+
+    private static bool ToggleDir(ref (string? Member, bool Asc) state, string path)
+    {
+        bool asc = !(string.Equals(state.Member, path, StringComparison.Ordinal) && state.Asc);
+        state = (path, asc);
+        return asc;
+    }
+
+    private void OnInspectorFieldsSorting(object? sender, Avalonia.Controls.DataGridColumnEventArgs e)
+    {
+        e.Handled = true;   // tree sort handled in the VM; suppress the flat default
+        if (DataContext is not MainWindowViewModel vm) return;
+        var path = e.Column.SortMemberPath;
+        if (string.IsNullOrEmpty(path)) return;
+        vm.Inspector.SortTree(path, ToggleDir(ref _inspectorSort, path));
+    }
+
 
     /// <summary>Phase 29c-7: open the snapshot DB directory in Windows
     /// Explorer. <c>SnapshotDbFolder</c> returns the active store's dir

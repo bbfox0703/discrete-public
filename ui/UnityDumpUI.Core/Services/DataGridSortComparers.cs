@@ -74,6 +74,12 @@ public static class DataGridSortComparers
         => new NumberComparer<TRow>(selector);
 
     /// <summary>
+    /// Numeric comparer for floating-point properties (CV, ratios, scores).
+    /// </summary>
+    public static IComparer Double<TRow>(Func<TRow, double> selector) where TRow : class
+        => new DoubleComparer<TRow>(selector);
+
+    /// <summary>
     /// Boolean comparer — false sorts before true (matches conventional
     /// "unchecked first" UX in spreadsheet apps).
     /// </summary>
@@ -141,6 +147,18 @@ public static class DataGridSortComparers
         {
             bool a = x is TRow ax && _selector(ax);
             bool b = y is TRow by && _selector(by);
+            return a.CompareTo(b);
+        }
+    }
+
+    private sealed class DoubleComparer<TRow> : IComparer where TRow : class
+    {
+        private readonly Func<TRow, double> _selector;
+        public DoubleComparer(Func<TRow, double> selector) { _selector = selector; }
+        public int Compare(object? x, object? y)
+        {
+            double a = x is TRow ax ? _selector(ax) : 0d;
+            double b = y is TRow by ? _selector(by) : 0d;
             return a.CompareTo(b);
         }
     }

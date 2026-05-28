@@ -95,6 +95,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // saves / drops in one are visible to the other.
         SpcQuery = new SpcQueryViewModel(Snapshot, _logger);
         SpcQuery.NavigateToInspectorRequested += OnSpcNavigateToInspector;
+        // Phase 29e-2 — Class Pivot tab. Shares the same envelope pool;
+        // answers the question SPC can't ("for class C, group instances
+        // by key field value across N snaps, project value field").
+        ClassPivot = new PivotViewModel(Snapshot, _logger);
+        ClassPivot.NavigateToInspectorRequested += OnSpcNavigateToInspector;
         // Phase 20b: Scene Explorer tab. SceneEnumerator wraps the
         // UnityEngine.Object.FindObjects* + Transform-walk recipe from
         // unity_scene.lua; Phase 20-MT keeps main-thread routing on
@@ -305,6 +310,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     public SpcQueryViewModel SpcQuery { get; }
 
+    /// <summary>Phase 29e-2 — Class Pivot tab. Same envelope pool as
+    /// Snapshot + SPC tabs; pivot rows are keyed by a stable business
+    /// field inside each instance rather than its managed address,
+    /// which solves the cross-session matching problem SPC can't
+    /// touch (instance addresses don't survive game launches).</summary>
+    public PivotViewModel ClassPivot { get; }
+
     /// <summary>Phase 29c — JSON-persisted user preferences (snapshot DB
     /// directory override, auto-save toggle, auto-prune threshold).
     /// Surfaced here so the Settings dialog (29c-7) can bind to it.</summary>
@@ -378,6 +390,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexValueSearch   = 6;
     public const int TabIndexSnapshot      = 7;
     public const int TabIndexSpcQuery      = 8;
+    public const int TabIndexClassPivot    = 9;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
@@ -670,7 +683,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // already-completed handshake.
             if (!string.IsNullOrEmpty(hs.GameBuildId))
             {
-                _ = Snapshot.OnGameDbContextAsync(hs.GameBuildId, hs.GameModule ?? "unknown");
+                _ = InitSnapshotDbAndPivotAsync(hs.GameBuildId, hs.GameModule ?? "unknown");
             }
 
             // Phase 8: kick off assembly fetch so the left pane populates
@@ -705,6 +718,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             IsBusy = false;
         }
+    }
+
+    /// <summary>Phase 29e-7 — open the per-game DB, then seed the Class
+    /// Pivot tab's class / assembly autocomplete from its metadata (no
+    /// blob hydrate) so the FQN box suggests names immediately. Both
+    /// steps soft-fail independently; a DB error doesn't block the
+    /// already-completed handshake.</summary>
+    private async Task InitSnapshotDbAndPivotAsync(string buildId, string module)
+    {
+        await Snapshot.OnGameDbContextAsync(buildId, module).ConfigureAwait(true);
+        await ClassPivot.SeedKnownClassesFromDbAsync().ConfigureAwait(true);
     }
 
     private bool CanConnect() => !IsBusy && !IsConnected;

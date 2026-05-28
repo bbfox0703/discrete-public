@@ -526,7 +526,7 @@
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
-                                          Width="*" SortMemberPath="Name" CanUserSort="True">
+                                          Width="Auto" MinWidth="200" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
                         <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"
@@ -542,7 +542,7 @@
                                       Binding="{Binding OffsetHex}"
                                       SortMemberPath="Offset" CanUserSort="True" />
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColType}"
-                                          Width="*" SortMemberPath="Type" CanUserSort="True">
+                                          Width="Auto" MinWidth="180" SortMemberPath="Type" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:FieldRow">
                         <controls:HighlightedTextBlock SourceText="{Binding FriendlyType}"
@@ -742,6 +742,7 @@
                             CanUserResizeColumns="True"
                             CanUserReorderColumns="True"
                             CanUserSortColumns="True"
+                            Sorting="OnInspectorFieldsSorting"
                             GridLinesVisibility="Horizontal">
                     <DataGrid.ContextMenu>
                       <ContextMenu>
@@ -793,7 +794,8 @@
                       </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
-                      <DataGridTemplateColumn Header="{StaticResource Browser.ColName}" Width="*"
+                      <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
+                                              Width="Auto" MinWidth="220"
                                               SortMemberPath="Name" CanUserSort="True">
                         <DataGridTemplateColumn.CellTemplate>
                           <DataTemplate x:DataType="vm:WalkedFieldNode">
@@ -832,7 +834,8 @@
                                           Binding="{Binding Address}"
                                           SortMemberPath="Address" CanUserSort="True"
                                           FontFamily="Consolas,Cascadia Mono,monospace" />
-                      <DataGridTextColumn Header="{StaticResource Browser.ColType}"   Width="*"
+                      <DataGridTextColumn Header="{StaticResource Browser.ColType}"
+                                          Width="Auto" MinWidth="160"
                                           Binding="{Binding Type}"
                                           SortMemberPath="Type" CanUserSort="True" />
                       <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
@@ -931,7 +934,7 @@
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
-                                          Width="*" SortMemberPath="Name" CanUserSort="True">
+                                          Width="Auto" MinWidth="220" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:MethodRow">
                         <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"
@@ -1094,15 +1097,15 @@
                                       SortMemberPath="Assembly" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColClass}"
-                                      Binding="{Binding ClassDisplay}" Width="*"
+                                      Binding="{Binding ClassDisplay}" Width="Auto" MinWidth="200"
                                       SortMemberPath="ClassDisplay" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColMember}"
-                                      Binding="{Binding Member}" Width="2*"
+                                      Binding="{Binding Member}" Width="Auto" MinWidth="240"
                                       SortMemberPath="Member" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColType}"
-                                      Binding="{Binding Type}" Width="1.5*"
+                                      Binding="{Binding Type}" Width="Auto" MinWidth="160"
                                       SortMemberPath="Type" CanUserSort="True"
                                       FontFamily="Consolas,Cascadia Mono,monospace" />
                   <DataGridTextColumn Header="{StaticResource SymbolFinder.ColOffset}"
@@ -2218,6 +2221,327 @@
                         <DataGridTextColumn Header="Values (per snap →)"
                                             Binding="{Binding ValueDisplays, Converter={x:Static converters:SpcValueSequenceConverter.Instance}}"
                                             Width="3*"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Grid>
+            </DockPanel>
+          </TabItem>
+
+          <!-- Phase 29e-2 — Class Pivot tab. SPC asks "for every
+               field, does its value sequence match these predicates?"
+               Pivot asks the inverse — "for class C, group instances
+               by a key field (e.g. _propertyID), and show how a value
+               field (e.g. _value) trajects across N snaps for each
+               key tuple". Works cross-session because keying is by
+               field VALUE inside the instance, not by managed
+               address (which drifts on every game launch). -->
+          <TabItem Header="Class Pivot">
+            <DockPanel Margin="6">
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F808080" CornerRadius="3">
+                <TextBlock Text="{Binding ClassPivot.StatusMessage}"
+                           TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1FFF6060" CornerRadius="3"
+                      IsVisible="{Binding ClassPivot.ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding ClassPivot.ErrorMessage}"
+                           Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#264080FF" CornerRadius="3"
+                      IsVisible="{Binding ClassPivot.ModeBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding ClassPivot.ModeBanner}"
+                           TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+
+              <!-- Stage 0 (Phase 29e-3): class shortlist. Score every
+                   class by stability (instance-count CV), field-type
+                   ratios, null ratio so the user can pick a good pivot
+                   target without knowing the FQN up front. Collapsed by
+                   default — power users who already know the class skip
+                   straight to the pickers below. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="False" Header="🔎 Class shortlist (Stage 0 — score classes by stability)">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="8" Margin="0,0,0,6">
+                      <TextBlock Text="Assembly:" VerticalAlignment="Center"/>
+                      <AutoCompleteBox Text="{Binding ClassPivot.AssemblyFilter, Mode=TwoWay}"
+                                       ItemsSource="{Binding ClassPivot.KnownAssemblies}"
+                                       PlaceholderText="all assemblies"
+                                       MinimumPrefixLength="0"
+                                       FilterMode="ContainsOrdinalCaseSensitive"
+                                       Width="220" VerticalAlignment="Center"
+                                       ToolTip.Tip="Scope the analysis to one assembly (e.g. Assembly-CSharp). Leave blank to score every class. Suggestions appear after the first Analyze hydrates a snapshot."/>
+                      <CheckBox Content="Show synthetic"
+                                IsChecked="{Binding ClassPivot.ShortlistShowSynthetic, Mode=TwoWay}"
+                                ToolTip.Tip="Include compiler-generated &lt;…&gt; classes (rarely pivot targets)."/>
+                      <CheckBox Content="Show partial-presence"
+                                IsChecked="{Binding ClassPivot.ShortlistShowPartial, Mode=TwoWay}"
+                                ToolTip.Tip="Include classes not present in every selected snapshot. Partial presence means instances appear/vanish between snaps, so the pivot can't line them all up."/>
+                      <TextBlock Text="Class:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                      <TextBox Text="{Binding ClassPivot.ClassNameFilter, Mode=TwoWay}"
+                               Watermark="name substring" Width="180" VerticalAlignment="Center"
+                               ToolTip.Tip="Case-insensitive substring filter on the class FQN — narrow 500+ classes to the one you half-remember."/>
+                      <Button Content="⟳ Analyze classes"
+                              Command="{Binding ClassPivot.AnalyzeClassesCommand}"
+                              Padding="10,4"/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ShortlistStatus}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <!-- Columns are Auto/fixed (not star) so the grid can
+                         exceed the pane width → horizontal scrollbar +
+                         no truncation. Header clicks route to a manual
+                         AOT-safe sort (Avalonia's built-in sort uses
+                         reflection on SortMemberPath, which no-ops under
+                         Native AOT). -->
+                    <DataGrid Name="PivotShortlistGrid"
+                              ItemsSource="{Binding ClassPivot.ClassShortlist}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              MaxHeight="300"
+                              DoubleTapped="OnPivotShortlistDoubleTapped">
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
+                                            Width="Auto" MinWidth="240" SortMemberPath="ClassFqn" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
+                                            Width="Auto" MinWidth="140" SortMemberPath="Assembly" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80"
+                                            SortMemberPath="Presence" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120"
+                                            SortMemberPath="AvgInstances" CanUserSort="True"/>
+                        <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70"
+                                            SortMemberPath="Cv" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55"
+                                            SortMemberPath="FieldCount" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65"
+                                            SortMemberPath="PrimitiveFieldRatio" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65"
+                                            SortMemberPath="NullFieldRatio" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Str%" Binding="{Binding StringPctDisplay}" Width="65"
+                                            SortMemberPath="StringFieldRatio" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65"
+                                            SortMemberPath="ArrayFieldRatio" CanUserSort="True"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Expander>
+
+              <!-- Stage 1 (Phase 29e-4): field key auto-discovery.
+                   Scores each field of the chosen class on key
+                   suitability (stability / cardinality / type / name)
+                   and proposes a greedy compound key. The popup-picker
+                   the user asked for — double-click adds a field as a
+                   key, right-click for value. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="False" Header="🔑 Suggest key/value fields (Stage 1 — rank fields by key suitability)">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="8" Margin="0,0,0,6">
+                      <Button Content="⟳ Score fields"
+                              Command="{Binding ClassPivot.ScoreFieldsCommand}"
+                              Padding="10,4"/>
+                      <TextBlock Text="Filter:" VerticalAlignment="Center"/>
+                      <TextBox Text="{Binding ClassPivot.FieldScoreFilter, Mode=TwoWay}"
+                               Watermark="field name" Width="160" VerticalAlignment="Center"/>
+                      <TextBlock Text="Suggested key:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                      <TextBlock Text="{Binding ClassPivot.SuggestedKeyDisplay}"
+                                 VerticalAlignment="Center" FontWeight="SemiBold"/>
+                      <Button Content="Apply suggested key"
+                              Command="{Binding ClassPivot.ApplySuggestedKeyCommand}"
+                              Padding="8,3"/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.SuggestedKeyReason}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.FieldScoreStatus}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <DataGrid Name="PivotFieldScoreGrid"
+                              ItemsSource="{Binding ClassPivot.FieldScores}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              MaxHeight="300"
+                              DoubleTapped="OnPivotFieldScoreDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Add to Key fields"
+                                    Click="OnPivotFieldAddToKeysClicked"/>
+                          <MenuItem Header="Add to Value fields"
+                                    Click="OnPivotFieldAddToValuesClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
+                                            Width="Auto" MinWidth="200" SortMemberPath="FieldName" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
+                                            Width="Auto" MinWidth="160" SortMemberPath="FieldType" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70"
+                                            SortMemberPath="Score" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70"
+                                            SortMemberPath="SStable" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Card" Binding="{Binding CardPctDisplay}" Width="70"
+                                            SortMemberPath="SCardinality" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Type pr." Binding="{Binding TypePriorDisplay}" Width="70"
+                                            SortMemberPath="TypePrior" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Name pr." Binding="{Binding NamePriorDisplay}" Width="70"
+                                            SortMemberPath="NamePrior" CanUserSort="True"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Expander>
+
+              <!-- Class + key + value pickers row -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6"
+                      Background="#1F808080" CornerRadius="3">
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,4,Auto,4,Auto"
+                      RowSpacing="0" ColumnSpacing="6">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Class FQN:" VerticalAlignment="Center"/>
+                  <AutoCompleteBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="5"
+                                   Text="{Binding ClassPivot.ClassFqn, Mode=TwoWay}"
+                                   ItemsSource="{Binding ClassPivot.KnownClasses}"
+                                   PlaceholderText="e.g. Mortal.Core.GameStat"
+                                   MinimumPrefixLength="0"
+                                   FilterMode="ContainsOrdinalCaseSensitive"
+                                   ToolTip.Tip="Fully-qualified class name (Namespace.Name). Suggestions come from snapshots already loaded into memory; the list is empty until the first Run hydrates a snapshot (a dedicated assembly → class picker with stability scoring lands in Phase 29e-3)."/>
+
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="Key fields:" VerticalAlignment="Center"/>
+                  <AutoCompleteBox Grid.Row="2" Grid.Column="1"
+                                   Text="{Binding ClassPivot.KeyFieldsText, Mode=TwoWay}"
+                                   ItemsSource="{Binding ClassPivot.KnownFieldNames}"
+                                   PlaceholderText="_propertyID  (or '_itemGroup, _propertyID')"
+                                   MinimumPrefixLength="0"
+                                   FilterMode="ContainsOrdinalCaseSensitive"
+                                   ToolTip.Tip="Comma-separated field names whose values jointly identify a logical instance across snapshots. Click to browse all field names of the typed class (populated after a class is chosen + snapshots hydrated). Compound key (multiple names) helps when a single field has collisions, e.g. (_itemGroup, _propertyID)."/>
+                  <TextBlock Grid.Row="2" Grid.Column="2" Text="Value fields:" VerticalAlignment="Center"/>
+                  <AutoCompleteBox Grid.Row="2" Grid.Column="3"
+                                   Text="{Binding ClassPivot.ValueFieldsText, Mode=TwoWay}"
+                                   ItemsSource="{Binding ClassPivot.KnownFieldNames}"
+                                   PlaceholderText="_value  (or '_hp, _mp')"
+                                   MinimumPrefixLength="0"
+                                   FilterMode="ContainsOrdinalCaseSensitive"
+                                   ToolTip.Tip="Comma-separated field names whose trajectory across snapshots you want to see. Click to browse all field names of the typed class. Multiple value fields stack as 'fieldName: v0 → v1 → …' lines in the Trajectory column."/>
+                  <TextBlock Grid.Row="2" Grid.Column="4" Text="Key filter:" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="2" Grid.Column="5"
+                           Text="{Binding ClassPivot.KeyFilter, Mode=TwoWay}"
+                           Watermark="optional substring"
+                           ToolTip.Tip="Case-insensitive substring filter applied to the rendered key tuple. Useful when a class has thousands of instances and you want to focus on one group."/>
+
+                  <Button Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="6"
+                          Content="▶ Run Pivot"
+                          Command="{Binding ClassPivot.RunCommand}"
+                          HorizontalAlignment="Left" MinWidth="180" Padding="10,4"/>
+                </Grid>
+              </Border>
+
+              <!-- Snapshot picker (top half) + Results (bottom half) -->
+              <Grid RowDefinitions="Auto,6,*">
+                <Border Grid.Row="0" Padding="0"
+                        Background="#1F808080" CornerRadius="3"
+                        MaxHeight="240">
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Snapshots (capture-order)"
+                               FontWeight="SemiBold" Margin="6,4,6,4"/>
+                    <DataGrid ItemsSource="{Binding ClassPivot.SelectionRows}"
+                              AutoGenerateColumns="False"
+                              HeadersVisibility="Column"
+                              IsReadOnly="False"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True">
+                      <DataGrid.Columns>
+                        <DataGridTemplateColumn Header="Use" Width="50">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <CheckBox IsChecked="{Binding Include, Mode=TwoWay}"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Snapshot"
+                                            Binding="{Binding DisplayLabel}"
+                                            IsReadOnly="True"
+                                            Width="*"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+
+                <GridSplitter Grid.Row="1" ResizeDirection="Rows"
+                              Height="6" Background="#33808080"/>
+
+                <Border Grid.Row="2" Padding="0"
+                        Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Pivot results"
+                               FontWeight="SemiBold" Margin="6,4,6,4"/>
+                    <!-- Collision + key columns are sortable via the
+                         manual AOT-safe handler. Trajectory wraps + has a
+                         tooltip (29e-2 polish), so it stays star-sized to
+                         fill remaining width — no truncation to scroll
+                         past. -->
+                    <DataGrid Name="PivotResultsGrid"
+                              ItemsSource="{Binding ClassPivot.Results}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              DoubleTapped="OnPivotResultDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Inspect (latest snap)"
+                                    Click="OnPivotInspectInstanceClicked"/>
+                          <Separator/>
+                          <MenuItem Header="Copy key tuple"
+                                    Click="OnPivotCopyKeyTupleClicked"/>
+                          <MenuItem Header="Copy value sequence"
+                                    Click="OnPivotCopyValueSequenceClicked"/>
+                          <MenuItem Header="Copy instance address (latest)"
+                                    Click="OnPivotCopyAddressLatestClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="⚠"
+                                            Binding="{Binding CollisionMarker}"
+                                            Width="32" SortMemberPath="HasCollision" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Key tuple"
+                                            Binding="{Binding KeyTupleDisplay}"
+                                            Width="Auto" MinWidth="180"
+                                            SortMemberPath="KeyTupleDisplay" CanUserSort="True"/>
+                        <!-- Single Trajectory column — pre-rendered by
+                             PivotViewModel as "fieldName: v0 → v1 → …"
+                             (multi-line when >1 value field).
+                             AOT-safe — no reflection bindings.
+                             TextWrapping + ToolTip so wide rows
+                             (many snaps) and collision cells
+                             (⟨N: …⟩) are fully readable rather than
+                             clipped at the cell edge. SPC tab uses the
+                             same value-sequence shape. -->
+                        <DataGridTemplateColumn Header="Trajectory (per snap →)" Width="5*">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <TextBlock Text="{Binding TrajectoryDisplay}"
+                                         TextWrapping="Wrap"
+                                         VerticalAlignment="Center"
+                                         Margin="2"
+                                         ToolTip.Tip="{Binding TrajectoryDisplay}"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>

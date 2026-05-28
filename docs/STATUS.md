@@ -1,8 +1,160 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29d SPC tab live-smoke polish complete**, head `82647cd` / build #682+ UI / DLL #650).
+**Branch**: `dev` → merging to `main` 2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7/8/9 polish**; build #706 UI / DLL #650. 550/550 tests green. Every flat DataGrid uses the `CustomSortComparer` pattern (arrows work); Inspector tree uses `SortTree`.
 
-## TL;DR — what's left to pick up (next session, post-29d polish)
+## TL;DR — what's left to pick up (next session)
+
+Phase 29e is fully shipped + merged. The Class Pivot tab is
+feature-complete for v1 (full 3-stage funnel: Stage 0 class shortlist →
+Stage 1 key auto-discovery → Stage 2 pivot), and every sortable
+DataGrid in the app is now AOT-safe. **Nothing is mid-flight** — pick
+from the deferred list below, or live-smoke the funnel + sortable grids.
+
+### Phase 29e waves (all shipped)
+
+* **29e-1**  `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
+  + 16 tests. Class-centric pivot keyed by field values inside each
+  instance — sidesteps address drift cross-session AND within-session.
+* **29e-1b** Primitive array index expansion in `BuildFieldIndex`
+  ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
+  + 10 tests. Array fields fan out as
+  `{addr}|{offset}|{fieldName}[{i}]` pseudo-rows. SPC tab inherits
+  per-element tracking for free. Ref-arrays render as `ptr=…`
+  (Layer B will key by inner field; needs DLL change).
+* **29e-2**  Class Pivot tab — new TabItem at index 9 in
+  [MainWindow.axaml](../ui/UnityDumpUI/Views/MainWindow.axaml).
+  [PivotViewModel.cs](../ui/UnityDumpUI/ViewModels/PivotViewModel.cs) +
+  18 tests in [PivotViewModelTests.cs](../ui/UnityDumpUI.Tests/PivotViewModelTests.cs).
+  Shares envelope pool with Snapshot + SPC tabs; cross-session
+  banner reads as a feature, not a warning.
+* **29e-2 polish** (live-smoke on 활俠傳) — collision cells now render
+  distinct-value set + count + cap (`⟨21: 100, 50, 250,+2⟩`) instead
+  of an unreadable wall; Trajectory column wraps + has a ToolTip;
+  AutoCompleteBoxes browse-on-focus (`MinimumPrefixLength=0`). +2
+  collision tests.
+* **29e-3**  Stage 0 class shortlist —
+  [ClassShortlistEngine.cs](../ui/UnityDumpUI/ViewModels/ClassShortlistEngine.cs)
+  (12 tests) + a collapsible "Class shortlist" Expander in the Class
+  Pivot tab (+4 ViewModel tests). Scores every class by stability
+  (instance-count CV), field-type ratios (primitive/string/array),
+  null ratio, presence. Default view = full-presence + non-synthetic
+  + FieldCount≥2, sorted Presence↓ / CV↑ / FieldCount↓. Assembly
+  filter + toggles. Double-click a row → fills Class FQN → Stage 2.
+* **29e-4**  Stage 1 field key auto-discovery —
+  [KeyDiscoveryEngine.cs](../ui/UnityDumpUI/ViewModels/KeyDiscoveryEngine.cs)
+  (10 tests) + a "Suggest key/value fields" Expander (+5 ViewModel
+  tests). Per field: S_stable (pairwise Jaccard of value sets),
+  S_cardinality, TypePrior, NamePrior → composite Score. Greedy
+  compound-key suggestion solves the "_property collides" problem by
+  proposing (_type, _property). UI: Score fields + filter + suggested
+  key + Apply; scored DataGrid (sortable), double-click → add as key,
+  right-click → add as value. The filterable field picker requested
+  during 29e-2 smoke.
+* **29e-5 polish** (live-smoke #2 on 활俠傳) — three recurring
+  DataGrid papercuts, fixed on all three Pivot grids: (1) **AOT-safe
+  sort** — Avalonia's built-in header sort is reflection-based and
+  no-ops under AOT; replaced with a manual `Sorting`-event handler +
+  typed ViewModel comparers. (2) **Auto-width + h-scroll** — text
+  columns moved off star-sizing so long FQNs / field names aren't
+  truncated and a horizontal scrollbar appears. (3) **class-name
+  keyword filter** added to Stage 0. +4 ViewModel tests. Verified
+  live: key=`_type` correctly walked the 銀兩 money trajectory; the
+  full funnel (Analyze → Score → pivot) works end-to-end. **Audit
+  flagged 7 legacy grids with the same two bugs — see Avalonia
+  caveats; not yet migrated.**
+
+* **29e-6 legacy-grid migration** — applied the 29e-5 AOT-safe sort +
+  Auto-width pattern to the 6 pre-29e grids that were still on the
+  broken built-in sort (Fields, Methods, Symbol Finder, Value Search,
+  Snapshot diff, Snapshot field-stats). Comparers centralised in
+  [LegacyGridSort.cs](../ui/UnityDumpUI/ViewModels/LegacyGridSort.cs)
+  (+9 tests) and called from thin code-behind `Sorting` handlers.
+  Inspector tree grid got width-only treatment here (tree-order is
+  load-bearing); its tree-aware sort followed in 29e-8.
+* **29e-7 DB-side class enumeration** — `SnapshotStore.ListDistinctClassesAsync`
+  (`SELECT DISTINCT assembly, class_fqn` — metadata only, no blob)
+  seeds the Class Pivot tab's class + assembly autocomplete on connect,
+  before any hydrate. Solves the chicken-and-egg where the Class FQN
+  box was empty until the user ran something. Wired via
+  `MainWindowViewModel.InitSnapshotDbAndPivotAsync` (runs right after
+  the per-game DB opens). `RefreshKnownClassesAndFields` now unions the
+  DB-seeded list with hydrated-snap classes. +4 tests. (Field-name
+  autocomplete still needs a hydrate — field names live in the gzipped
+  blob, not the metadata columns.)
+* **29e-8 Inspector tree-aware sort** —
+  [LiveInspectionViewModel.SortTree](../ui/UnityDumpUI/ViewModels/LiveInspectionViewModel.cs)
+  + [InspectorSortTreeTests.cs](../ui/UnityDumpUI.Tests/InspectorSortTreeTests.cs)
+  (+6 tests). The last grid on the broken built-in sort. Sorts each
+  sibling group recursively (roots + each node's `Children`) and
+  re-flattens `Fields` in DFS order respecting expand state, so
+  children stay grouped under their parent and collapsed subtrees keep
+  their sorted order for the next expand.
+* **29e-9 sort consolidation** — discovered the codebase already had an
+  AOT-safe sort (`DataGridColumn.CustomSortComparer` +
+  [DataGridSortComparers.cs](../ui/UnityDumpUI.Core/Services/DataGridSortComparers.cs)
+  + `WireSortComparers`, docs in aot-pitfalls.md §4.5) that the 29e-5/6
+  manual `Sorting`-event detour had duplicated + regressed (3 grids lost
+  their arrow glyph). Folded all flat grids back onto `CustomSortComparer`
+  (added a `Double` comparer factory for the CV/ratio/score columns),
+  deleted `LegacyGridSort.cs` + the Pivot `Sort*` methods. The Inspector
+  tree keeps `SortTree` (a flat comparer can't sort a tree). Arrows
+  restored; one mechanism for every flat grid.
+
+**550/550 green** (was 462 before 29e). No DLL change. Full design +
+live-smoke findings at [class-pivot.md](class-pivot.md) §13.
+
+### Live-smoke status (29e-2)
+
+✅ **Verified on 활俠傳** (2026-05-28): `Mortal.Core.GameStat`,
+key=`_type`, value=`_value` → key `3` walks
+`10160 → 9910 → 10160 → 10060`, the real 銀兩 spend trajectory across
+4 captures / 3 sessions. The cross-session pivot works where SPC
+can't (SPC cross-session on Mono is empty — Mono statics carry no
+values; see §13).
+
+**Two constraints to remember** (documented in [class-pivot.md](class-pivot.md) §13):
+- SPC cross-session on Mono finds nothing → use Class Pivot instead.
+- Instance "Inspect" only resolves addresses from the **live** game
+  session, so take the final capture in the session you're still
+  attached to. Trajectory across older snapshots stays valid; only
+  the address handoff needs the live process.
+
+### Live-smoke TODO (29e-3 + 29e-4 — full funnel)
+
+Stages 0/1 were unit-tested but not live-smoked. End-to-end on 활俠傳:
+take 3-4 snapshots, open Class Pivot tab.
+1. Expand **Class shortlist (Stage 0)**, (optionally type
+   `Assembly-CSharp`), press **Analyze classes**. Expect
+   `Mortal.Core.GameStat` near the top (full presence, low CV, high
+   primitive %). Sort by CV / Prim% / Null% to sanity-check scoring.
+   Double-click it → Class FQN box fills.
+2. Expand **Suggest key/value fields (Stage 1)**, press **Score
+   fields**. Expect `_property`/`_type`/`_propertyID`-ish fields near
+   the top; the **Suggested key** label should propose a key (likely
+   a compound like `(_type, _property)` since `_property` alone
+   collides). Click **Apply suggested key**, then double-click
+   `_value` … actually right-click `_value` → "Add to Value fields".
+3. Press **Run Pivot**. Confirm the money row trajectory
+   (`10160 → 9910 → 10160 → 10060`) appears with the auto-discovered
+   key — no manual field typing needed.
+
+### Deferred (post-29e-core)
+
+* **Field-name autocomplete pre-hydrate** — class + assembly names
+  now seed from the DB (29e-7), but the Key/Value field-name boxes
+  still need a hydrate (field names are inside the gzipped blob, not
+  the metadata columns). Cheap enumeration isn't possible without
+  reading blobs; a future option is persisting a per-class field-name
+  list as a metadata column at save time.
+* **Layer B**: reference-array inner pivot (key array elements by an
+  inner field) — needs DLL-side per-element child-field capture.
+* **Anomaly auto-surface** (stretch): auto-tag "dropped to 0 at snap
+  X", "monotonic decrease", etc.
+
+DB schema untouched. Existing `.db` files keep working — every
+29e wave is in-memory only.
+
+## Previous TL;DR — Phase 29d live-smoke polish (head `82647cd` / build #682)
 
 Phase 29d shipped earlier this day. User ran the SPC Query tab live and
 surfaced six UX issues across three batches of fixes. All shipped +
@@ -38,10 +190,16 @@ green on 462/462 unit tests, both branches in sync.
 ### Next priorities
 
 * Continue live-smoke on the items above; surface any further UX papercuts.
-* Phase 29e research stub (Class-centric Key/Value pivot — "for the
-  Player instance with name='Bob', show HP across N snaps") still
-  documented in plan.md. Waiting on a concrete real-world need before
-  designing it.
+* **Phase 29e Class-centric Key/Value pivot — designed, ready to start.**
+  Full spec at [class-pivot.md](class-pivot.md); plan.md 29e stub
+  expanded to a 5-wave breakdown (29e-1 PivotEngine, 29e-1b primitive
+  array index expansion, 29e-2 Pivot tab, 29e-3 Stage 0 class
+  shortlisting, 29e-4 Stage 1 key auto-discovery). Layer B
+  (reference-array inner pivot, requires DLL change) deferred to a
+  follow-up Phase. Existing `.db` files keep working — `BuildFieldIndex`
+  is in-memory only, payload_gzip stores raw `SnapshotClassEntry[]`
+  with `SnapshotArrayElements` intact, so 29e ships on every saved
+  snapshot without migration or manual delete.
 * Per-key streaming hydrate (constant RAM regardless of N) deferred
   from 29d-4 — not needed until live data hits the practical N>10
   wall.
@@ -287,6 +445,8 @@ discrete/
 - **Avalonia 12 clipboard API churn**: only supported writer is `IClipboard.SetDataAsync(IAsyncDataTransfer)` — wrap a `DataFormat.Text` item in a `DataTransfer`.
 - **Avalonia 12 `avares://` keys off AssemblyName, not RootNamespace.** Renamed the exe? Update `App.axaml`'s `ResourceInclude Source="avares://{AssemblyName}/..."` too.
 - **Avalonia 12 `DataGridCheckBoxColumn`** requires entering edit mode (double-click) before the checkbox responds. Use `DataGridTemplateColumn` with an inline `<CheckBox Focusable="False">` for single-click toggles.
+- **Avalonia 12 DataGrid built-in sort is reflection-based → no-op under Native AOT.** `CanUserSortColumns="True"` clicks resolve `SortMemberPath` via `ClrPropertyInfo` (IL2026/IL3050), which silently does nothing in an AOT publish. **The established fix (use this — don't reinvent it) is `DataGridColumn.CustomSortComparer`**: typed factories in [DataGridSortComparers.cs](../ui/UnityDumpUI.Core/Services/DataGridSortComparers.cs) (`Ordinal`/`Number`/`Double`/`Hex`/`Bool`) + the `DataGrid.WireSortComparers(dict)` extension, wired per grid at `Loaded` in `MainWindow.WireSortComparersForAllGrids()`. Each column needs `SortMemberPath="<PropertyName>"` + `CanUserSort="True"`; the dict maps that path → a row-property selector. This keeps the **native arrow glyph + direction toggle** and is AOT-safe. Full rationale in [aot-pitfalls.md §4.5](aot-pitfalls.md). **Every flat sortable grid uses this** (Fields, Methods, Symbol Finder, Value Search, Snapshot diff, Snapshot field-stats, Pivot shortlist/field-score/results — 29e-9). **The one exception is the Inspector `FieldsDataGrid`** — it's an expand/collapse tree, so a flat comparer would tear children from their parent; it uses the tree-aware [LiveInspectionViewModel.SortTree](../ui/UnityDumpUI/ViewModels/LiveInspectionViewModel.cs) via the `Sorting` event instead (the only grid on that path; no arrow glyph there). *History: 29e-5/6/8 briefly used a parallel `Sorting`-event + manual-sort mechanism; 29e-9 consolidated all flat grids back onto `CustomSortComparer` and deleted that detour (`LegacyGridSort.cs`).*
+- **Avalonia 12 DataGrid star-sized columns never overflow → no horizontal scrollbar + truncation.** All-`Width="*"`/`2*` columns sum to exactly the viewport, so long text (class FQNs, field names) clips with no way to scroll. Fix: give text columns `Width="Auto"` + `MinWidth` (numeric/fixed columns stay pixel-width) so the column set can exceed the pane width and the DataGrid shows its horizontal scrollbar. **Fixed** on Pivot grids (29e-5) + Fields/Methods/Symbol Finder/Inspector star columns (29e-6). Value Search + Snapshot diff already used fixed pixel widths (they overflow + scroll already). **Avoid `Width="Auto"` on the Snapshot diff grid** specifically — it can hold ~740K rows and Auto would measure them all; it stays fixed-width.
 - **`CommunityToolkit.Mvvm` source-gen name collision**: a property named `Backend` collides with the generated field name. Use `Backend2`.
 - **`CommunityToolkit.Mvvm` and child-collection CanExecute**: a command's CanExecute is NOT auto-re-evaluated when an item inside an `ObservableCollection<T>` raises PropertyChanged. Subscribe to each row's `PropertyChanged` and call `Notify*Changed()` manually. Pattern: `MethodOverloadsViewModel.OnRowPropertyChanged`.
 

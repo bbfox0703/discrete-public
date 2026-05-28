@@ -1044,6 +1044,71 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         }
     }
 
+    /// <summary>Phase 29e-8 — tree-aware AOT-safe column sort. Avalonia's
+    /// built-in DataGrid sort is reflection-based (no-op under Native AOT)
+    /// AND flat — it would scramble the parent/child adjacency that the
+    /// expand/collapse machinery relies on. Instead we sort each sibling
+    /// group in place (roots, then every node's <c>Children</c>,
+    /// recursively) with a typed comparer, then re-flatten
+    /// <see cref="Fields"/> in DFS order — descending only into expanded
+    /// nodes, exactly like the live tree — and refilter. Children stay
+    /// under their parent; a collapsed subtree keeps its sorted order for
+    /// when it's re-expanded. Direction is tracked by the view (Avalonia
+    /// 12 has no public DataGridColumn.SortDirection).</summary>
+    public void SortTree(string member, bool ascending)
+    {
+        Comparison<WalkedFieldNode>? cmp = member switch
+        {
+            "Name"         => (a, b) => string.CompareOrdinal(a.Name, b.Name),
+            "Offset"       => (a, b) => a.Offset.CompareTo(b.Offset),
+            "Address"      => (a, b) => string.CompareOrdinal(a.Address ?? string.Empty, b.Address ?? string.Empty),
+            "Type"         => (a, b) => string.CompareOrdinal(a.Type, b.Type),
+            "DisplayValue" => (a, b) => string.CompareOrdinal(a.DisplayValue, b.DisplayValue),
+            "DeclaredIn"   => (a, b) => string.CompareOrdinal(a.DeclaredIn, b.DeclaredIn),
+            _ => null,
+        };
+        if (cmp is null) return;
+        Comparison<WalkedFieldNode> eff = ascending ? cmp : (a, b) => cmp(b, a);
+
+        // Roots are the only nodes with no Parent; every other node in
+        // Fields is a descendant of an expanded chain (collapse removes
+        // descendants from Fields), so roots + the IsExpanded recursion
+        // reconstruct exactly the current visible set.
+        var roots = new List<WalkedFieldNode>();
+        foreach (WalkedFieldNode n in Fields)
+            if (n.Parent is null) roots.Add(n);
+        if (roots.Count == 0) return;
+
+        SortSiblingsRecursive(roots, eff);
+
+        _refilterSuppressionDepth++;
+        try
+        {
+            Fields.Clear();
+            foreach (WalkedFieldNode r in roots) FlattenSorted(r);
+        }
+        finally
+        {
+            _refilterSuppressionDepth--;
+        }
+        RefilterFields();
+    }
+
+    private static void SortSiblingsRecursive(
+        List<WalkedFieldNode> nodes, Comparison<WalkedFieldNode> eff)
+    {
+        nodes.Sort(eff);
+        foreach (WalkedFieldNode n in nodes)
+            if (n.Children.Count > 0) SortSiblingsRecursive(n.Children, eff);
+    }
+
+    private void FlattenSorted(WalkedFieldNode node)
+    {
+        Fields.Add(node);
+        if (node.IsExpanded)
+            foreach (WalkedFieldNode c in node.Children) FlattenSorted(c);
+    }
+
     // ---------- Static helpers (type / hex parsing) ----------------------
     //
     // Field-classification helpers (TryParseCollectionType / TryParseClassName /

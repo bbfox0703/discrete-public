@@ -151,6 +151,32 @@ public class SnapshotStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ListDistinctClasses_DedupesAcrossSnapshotsAndOrdersByFqn()
+    {
+        var path = TempDb();
+        await using var store = await SnapshotStore.OpenAsync(path, "build1", "Game.exe", ct: Ct);
+
+        // Two snapshots with the SAME class names → the distinct query
+        // must collapse them, not return 6 rows.
+        await store.SaveSnapshotAsync(MakeRequest("s1", classCount: 3), Ct);
+        await store.SaveSnapshotAsync(MakeRequest("s2", classCount: 3), Ct);
+
+        var classes = await store.ListDistinctClassesAsync(Ct);
+        Assert.Equal(3, classes.Count);
+        Assert.All(classes, c => Assert.Equal("Assembly-CSharp", c.Assembly));
+        Assert.Equal(new[] { "Game.Class0", "Game.Class1", "Game.Class2" },
+            classes.Select(c => c.ClassFqn).ToArray());   // ORDER BY class_fqn
+    }
+
+    [Fact]
+    public async Task ListDistinctClasses_EmptyStoreReturnsEmpty()
+    {
+        var path = TempDb();
+        await using var store = await SnapshotStore.OpenAsync(path, "build1", "Game.exe", ct: Ct);
+        Assert.Empty(await store.ListDistinctClassesAsync(Ct));
+    }
+
+    [Fact]
     public async Task DeleteSnapshot_MissingIdReturnsZero()
     {
         var path = TempDb();

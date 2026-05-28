@@ -186,6 +186,27 @@ public sealed partial class SnapshotViewModel : ObservableObject
         }
     }
 
+    /// <summary>Phase 29e-7 — distinct (assembly, class FQN) pairs from
+    /// the open per-game DB's metadata, with no blob hydration. Returns
+    /// empty when no store is open. Soft-fails to empty on error. The
+    /// Class Pivot tab uses this to seed its class / assembly
+    /// autocomplete before the user analyses anything.</summary>
+    public async Task<IReadOnlyList<PersistedClassRef>> GetPersistedClassesAsync(
+        CancellationToken ct = default)
+    {
+        if (_store is null) return System.Array.Empty<PersistedClassRef>();
+        try
+        {
+            return await _store.ListDistinctClassesAsync(ct).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.Write(SnapshotStore.LogCategory,
+                $"GetPersistedClassesAsync FAILED: {ex.GetType().Name}: {ex.Message}");
+            return System.Array.Empty<PersistedClassRef>();
+        }
+    }
+
     /// <summary>Called by MainWindowViewModel once UserSettingsStore
     /// finishes loading from disk. Hot-swaps the in-memory settings so
     /// later TakeSnapshot / OnGameDbContext calls honour the disk values.</summary>
@@ -2095,7 +2116,19 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// Field name is included in the key to handle the (rare) case where
     /// two fields share an offset (won't happen in normal C#, but our
     /// false-positive instances can show offset=0 for multiple
-    /// anonymous-type fields — and we want each row diffable).</summary>
+    /// anonymous-type fields — and we want each row diffable).
+    /// <para/>
+    /// Phase 29e-1b: array fields fan out — for any field whose
+    /// <see cref="SnapshotFieldEntry.ArrayElements"/> has captured
+    /// elements, we add N pseudo-rows keyed by <c>"…|{fieldName}[{i}]"</c>
+    /// in addition to the existing summary row. SPC's per-snap value
+    /// trajectory + the upcoming Pivot tab both see element-level
+    /// changes that previously collapsed to a single
+    /// <c>"[N elements, captured M]"</c> opaque cell. Layer A — index
+    /// is positional; arrays that get reordered between snaps look
+    /// like all elements changed even when the contents stayed the
+    /// same. Reference-array inner-pivot (key by element field) is
+    /// Layer B and needs DLL changes — deferred.</summary>
     public void BuildFieldIndex()
     {
         var map = new Dictionary<string, SnapshotFieldValue>(StringComparer.Ordinal);
@@ -2124,6 +2157,8 @@ public sealed partial class SnapshotEnvelope : ObservableObject
                         ValueDisplay   = FormatFieldValue(f),
                         IsSynthetic    = synthetic,
                     };
+                    ExpandArrayElements(map, c.Assembly, fqn, c.Name, c.Namespace,
+                                        instanceAddress: string.Empty, isStatic: true, f, synthetic);
                 }
             }
 
@@ -2149,11 +2184,80 @@ public sealed partial class SnapshotEnvelope : ObservableObject
                             ValueDisplay   = FormatFieldValue(f),
                             IsSynthetic    = synthetic,
                         };
+                        ExpandArrayElements(map, c.Assembly, fqn, c.Name, c.Namespace,
+                                            instanceAddress: inst.Address, isStatic: false, f, synthetic);
                     }
                 }
             }
         }
         FieldIndex = map;
+    }
+
+    /// <summary>Phase 29e-1b — fan out captured array elements as
+    /// pseudo-rows keyed by <c>"{fieldName}[{index}]"</c>. Uses the
+    /// element's own Index field rather than list position so that
+    /// any future sparse-capture mode (skip-null elements etc.) maps
+    /// 1:1. Element type comes from the array header
+    /// (<see cref="SnapshotArrayElements.ElementType"/>); FieldOffset
+    /// is inherited from the parent (the array slot offset). The
+    /// element's actual managed address goes unused at this layer —
+    /// Inspector jumps still target the array's owning instance, then
+    /// the element-by-index walk happens at display time.</summary>
+    private static void ExpandArrayElements(
+        Dictionary<string, SnapshotFieldValue> map,
+        string assembly, string fqn, string className, string ns,
+        string instanceAddress, bool isStatic,
+        SnapshotFieldEntry f, bool synthetic)
+    {
+        if (f.ArrayElements is not { Count: > 0 } arr) return;
+        string instanceKey = isStatic ? "static" : instanceAddress;
+        string elemType = string.IsNullOrEmpty(arr.ElementType) ? "?" : arr.ElementType!;
+        foreach (var el in arr.Elements)
+        {
+            string elFieldName = $"{f.Name}[{el.Index}]";
+            string key = $"{assembly}|{fqn}|{instanceKey}|{f.Offset}|{elFieldName}";
+            map[key] = new SnapshotFieldValue
+            {
+                Assembly       = assembly,
+                ClassFqn       = fqn,
+                ClassName      = className,
+                Namespace      = ns,
+                InstanceAddress= isStatic ? string.Empty : instanceAddress,
+                IsStatic       = isStatic,
+                FieldName      = elFieldName,
+                FieldType      = elemType,
+                FieldOffset    = f.Offset,
+                ValueDisplay   = FormatArrayElement(el),
+                IsSynthetic    = synthetic,
+            };
+        }
+    }
+
+    /// <summary>Render one captured array element. Mirrors
+    /// <see cref="FormatFieldValue"/>'s ladder for the element-level
+    /// surface area: Value JsonElement → primitives, String → quoted,
+    /// Ptr → <c>ptr=…</c>, Error → <c>(err: …)</c>. Reference-array
+    /// elements arrive with Ptr filled but no inner fields (DLL doesn't
+    /// chase children one extra level) — the ptr= row still tells
+    /// users "this slot's reference changed".</summary>
+    private static string FormatArrayElement(SnapshotArrayElement el)
+    {
+        if (!string.IsNullOrEmpty(el.Error)) return $"(err: {el.Error})";
+        if (el.Value.HasValue && el.Value.Value.ValueKind != JsonValueKind.Null
+                              && el.Value.Value.ValueKind != JsonValueKind.Undefined)
+        {
+            return el.Value.Value.ValueKind switch
+            {
+                JsonValueKind.String => el.Value.Value.GetString() ?? "(null)",
+                JsonValueKind.Number => el.Value.Value.GetRawText(),
+                JsonValueKind.True   => "true",
+                JsonValueKind.False  => "false",
+                _ => el.Value.Value.GetRawText(),
+            };
+        }
+        if (!string.IsNullOrEmpty(el.String)) return $"\"{el.String}\"";
+        if (!string.IsNullOrEmpty(el.Ptr))    return $"ptr={el.Ptr}";
+        return "(no value)";
     }
 
     /// <summary>Detection rule for compiler-generated / synthetic types
@@ -2164,7 +2268,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// machines the C# compiler emits. Avoids flagging legitimate
     /// generic types like <c>Dictionary`2</c> (those have backticks
     /// but no leading '&lt;').</summary>
-    private static bool IsSyntheticClassName(string name)
+    internal static bool IsSyntheticClassName(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;
         if (name[0] == '<') return true;
@@ -2183,7 +2287,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// quoted form for strings, and explicit error markers for the
     /// unreadable / open-generic-array / implausible-length cases so
     /// noise stays clearly distinguishable from real changes.</summary>
-    private static string FormatFieldValue(SnapshotFieldEntry f)
+    internal static string FormatFieldValue(SnapshotFieldEntry f)
     {
         if (!string.IsNullOrEmpty(f.Error))
         {
