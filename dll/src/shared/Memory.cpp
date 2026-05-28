@@ -149,16 +149,28 @@ std::vector<CommittedRegion> EnumerateCommittedRegions() {
 namespace {
 // Inner SEH helper: scans one memory region for an aligned pointer match.
 // Out parameter `matches` is appended to. Returns false on AV (region skipped).
+// A match whose address lands in [excludeLow, excludeHigh) (when the range is
+// non-empty) is dropped without counting toward `limit`; such hits are tallied
+// into `excludedMatches` so callers can report how much arena residue was
+// filtered.
 bool SehScanRegion(const std::uint8_t* base, std::size_t size,
                    std::uintptr_t target,
                    std::vector<const void*>& matches,
-                   std::size_t limit) {
+                   std::size_t limit,
+                   std::uintptr_t excludeLow, std::uintptr_t excludeHigh,
+                   std::size_t& excludedMatches) {
     __try {
+        const bool hasExclude = excludeHigh > excludeLow;
         const std::size_t count = size / sizeof(std::uintptr_t);
         const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
         for (std::size_t i = 0; i < count; ++i) {
             if (arr[i] == target) {
-                matches.push_back(static_cast<const void*>(base + i * sizeof(std::uintptr_t)));
+                auto addr = reinterpret_cast<std::uintptr_t>(base + i * sizeof(std::uintptr_t));
+                if (hasExclude && addr >= excludeLow && addr < excludeHigh) {
+                    ++excludedMatches;
+                    continue;
+                }
+                matches.push_back(reinterpret_cast<const void*>(addr));
                 if (matches.size() >= limit) return true;
             }
         }
@@ -295,7 +307,9 @@ bool RangesOverlap(const std::uint8_t* aLow, const std::uint8_t* aHigh,
 
 }  // namespace
 
-std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit, ScanStats* stats) {
+std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit, ScanStats* stats,
+                                        std::uintptr_t excludeLow, std::uintptr_t excludeHigh,
+                                        bool skipMapped) {
     std::vector<const void*> matches;
     if (target == 0 || limit == 0) return matches;
 
@@ -306,6 +320,7 @@ std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit
     auto regions = EnumerateCommittedRegions();
     auto stacks  = CollectThreadStackRanges();
 
+    std::size_t excludedMatches = 0;
     if (stats) {
         stats->threadStacks = stacks.size();
     }
@@ -323,6 +338,13 @@ std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit
         // and would otherwise be reported as instance matches.
         if (r.type == MEM_IMAGE) {
             if (stats) stats->regionsSkipImage++;
+            continue;
+        }
+
+        // Filter 1b: file-backed mappings (opt-in). Holds game data that can
+        // contain class-pointer values. Mirrors the Phase 29 snapshot sweep.
+        if (skipMapped && r.type == MEM_MAPPED) {
+            if (stats) stats->regionsSkipMapped++;
             continue;
         }
 
@@ -346,8 +368,10 @@ std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit
             stats->regionsScanned++;
             stats->bytesScanned += r.size;
         }
-        SehScanRegion(r.base, r.size, target, matches, limit);
+        SehScanRegion(r.base, r.size, target, matches, limit,
+                      excludeLow, excludeHigh, excludedMatches);
     }
+    if (stats) stats->excludedMatches = excludedMatches;
     return matches;
 }
 

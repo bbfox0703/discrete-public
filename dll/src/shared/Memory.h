@@ -73,12 +73,14 @@ std::vector<ThreadStackRange> CollectThreadStackRanges();
 // positives go" without rebuilding with logging). Populated by ScanForPointer
 // when caller passes a non-null pointer.
 struct ScanStats {
-    std::size_t regionsTotal     = 0;  // all committed RW regions enumerated
-    std::size_t regionsScanned   = 0;  // regions actually scanned (after filters)
-    std::size_t regionsSkipImage = 0;  // skipped because mbi.Type == MEM_IMAGE
-    std::size_t regionsSkipStack = 0;  // skipped because overlaps a thread stack
-    std::size_t bytesScanned     = 0;
-    std::size_t threadStacks     = 0;  // count of stack ranges collected
+    std::size_t regionsTotal      = 0;  // all committed RW regions enumerated
+    std::size_t regionsScanned    = 0;  // regions actually scanned (after filters)
+    std::size_t regionsSkipImage  = 0;  // skipped because mbi.Type == MEM_IMAGE
+    std::size_t regionsSkipMapped = 0;  // skipped because mbi.Type == MEM_MAPPED (only when skipMapped)
+    std::size_t regionsSkipStack  = 0;  // skipped because overlaps a thread stack
+    std::size_t bytesScanned      = 0;
+    std::size_t excludedMatches   = 0;  // qword==target hits dropped: addr inside [excludeLow, excludeHigh)
+    std::size_t threadStacks      = 0;  // count of stack ranges collected
 };
 
 // Phase 27a — Unity-aware value scan support.
@@ -218,9 +220,27 @@ std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
 //   • Skip regions overlapping any live thread's stack (stale local-variable
 //     pointers from old frames survive until overwritten by deeper calls).
 //
+// **Address-exclusion range (Phase 29h — findInstances metadata-arena filter):**
+//   When `excludeHigh > excludeLow`, any match whose *address* lies inside
+//   `[excludeLow, excludeHigh)` is dropped and does NOT count toward `limit`.
+//   IL2CPP findInstances passes the Il2CppClass* metadata-arena span here so
+//   that class self-references (element_class/castClass) and FieldInfo[].parent
+//   slots — which legitimately hold the class pointer but are not heap objects —
+//   stop crowding out real instances. Because excluded hits don't fill the
+//   quota, the scan keeps walking past the low-address arena up to the GC heap
+//   regions where genuine instances live (the early break then fires only on
+//   `limit` *validated* matches).
+//
+// **`skipMapped`:** when true, also skip `MEM_MAPPED` regions (file-backed
+//   game-data mappings that can contain class-pointer values). Mirrors the
+//   Phase 29 snapshot sweep (FindAllInstances).
+//
 // Passing a non-null `stats` populates per-call telemetry.
 std::vector<const void*> ScanForPointer(std::uintptr_t target,
-                                        std::size_t   limit = 256,
-                                        ScanStats*    stats = nullptr);
+                                        std::size_t    limit       = 256,
+                                        ScanStats*     stats       = nullptr,
+                                        std::uintptr_t excludeLow  = 0,
+                                        std::uintptr_t excludeHigh = 0,
+                                        bool           skipMapped  = false);
 
 }  // namespace UnityCEDumper::Memory

@@ -4333,6 +4333,36 @@ void RegisterCoreHandlers() {
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
 
+    // Phase 29h — shared helper for instance heap scans (findInstances and
+    // listFieldValuesAcrossInstances). Computes the Il2CppClass* metadata-arena
+    // address span so class self-references (element_class/castClass) and
+    // FieldInfo[].parent slots — which legitimately hold the class pointer but
+    // aren't heap objects — can be excluded from the scan. Without it the scan
+    // fills its `limit` quota with low-address arena residue and never reaches
+    // the GC heap regions where genuine objects live. The bound is widened to
+    // the committed regions holding minKlass/maxKlass because the metadata
+    // allocator places FieldInfo/method arrays just past the class structs.
+    // Capture-less so handlers can copy it by value safely. Yields [0,0) (no
+    // exclusion) when disabled or the cache is unavailable.
+    auto computeArenaExclude = [](bool excludeArena,
+                                  std::uintptr_t& exLow, std::uintptr_t& exHigh) {
+        exLow = 0; exHigh = 0;
+        if (!excludeArena || !IL2CPP::BuildClassRangeCache()) return;
+        auto crs = IL2CPP::GetClassRangeStats();
+        if (!(crs.built && crs.classCount > 0 && crs.maxKlass >= crs.minKlass)) return;
+        exLow  = crs.minKlass;
+        exHigh = crs.maxKlass;
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (::VirtualQuery(reinterpret_cast<const void*>(crs.maxKlass), &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            auto end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            if (end > exHigh) exHigh = end;
+        }
+        if (::VirtualQuery(reinterpret_cast<const void*>(crs.minKlass), &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            auto base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+            if (base < exLow) exLow = base;
+        }
+    };
+
     PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
         if (!IL2CPP::IsResolved()) {
             return json{
@@ -6248,7 +6278,7 @@ void RegisterCoreHandlers() {
     // Each Il2CppObject's first qword is its Il2CppClass*. Resolve the class
     // and scan committed RW pages for that pointer.
     PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
-        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, computeArenaExclude](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -6258,21 +6288,35 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
+
+        // Phase 29h — exclude the Il2CppClass* metadata arena (see
+        // computeArenaExclude above). Excluded hits don't count toward `limit`,
+        // so the walk continues past the low-address arena to the real
+        // instances. Both filters default on; `excludeArena` / `skipMapped`
+        // args let a caller A/B against the legacy raw scan.
+        const bool excludeArena = args.value("excludeArena", true);
+        const bool skipMapped   = args.value("skipMapped", true);
+        std::uintptr_t exLow = 0, exHigh = 0;
+        computeArenaExclude(excludeArena, exLow, exHigh);
+
         Memory::ScanStats stats{};
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit, &stats);
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
+                                              limit, &stats, exLow, exHigh, skipMapped);
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
         }
         {
-            char line[256];
+            char line[320];
             std::snprintf(line, sizeof(line),
                 "findInstances(IL2CPP) class=%p matches=%zu "
-                "regions total=%zu scanned=%zu skipImage=%zu skipStack=%zu bytes=%zu stacks=%zu",
+                "regions total=%zu scanned=%zu skipImage=%zu skipMapped=%zu skipStack=%zu "
+                "bytes=%zu stacks=%zu excluded=%zu exRange=[%p,%p)",
                 static_cast<const void*>(k), matches.size(),
                 stats.regionsTotal, stats.regionsScanned,
-                stats.regionsSkipImage, stats.regionsSkipStack,
-                stats.bytesScanned, stats.threadStacks);
+                stats.regionsSkipImage, stats.regionsSkipMapped, stats.regionsSkipStack,
+                stats.bytesScanned, stats.threadStacks, stats.excludedMatches,
+                reinterpret_cast<const void*>(exLow), reinterpret_cast<const void*>(exHigh));
             UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
         return json{
@@ -6281,12 +6325,16 @@ void RegisterCoreHandlers() {
             {"limit",     limit},
             {"matches",   std::move(arr)},
             {"scan_stats", json{
-                {"regions_total",      stats.regionsTotal},
-                {"regions_scanned",    stats.regionsScanned},
-                {"regions_skip_image", stats.regionsSkipImage},
-                {"regions_skip_stack", stats.regionsSkipStack},
-                {"bytes_scanned",      stats.bytesScanned},
-                {"thread_stacks",      stats.threadStacks},
+                {"regions_total",       stats.regionsTotal},
+                {"regions_scanned",     stats.regionsScanned},
+                {"regions_skip_image",  stats.regionsSkipImage},
+                {"regions_skip_mapped", stats.regionsSkipMapped},
+                {"regions_skip_stack",  stats.regionsSkipStack},
+                {"bytes_scanned",       stats.bytesScanned},
+                {"excluded_matches",    stats.excludedMatches},
+                {"exclude_low",         formatHex(exLow)},
+                {"exclude_high",        formatHex(exHigh)},
+                {"thread_stacks",       stats.threadStacks},
             }},
         };
     });
@@ -6296,7 +6344,7 @@ void RegisterCoreHandlers() {
     //   * heap scan target is the Il2CppClass* (not a VTable).
     //   * `vtable` is not emitted (Mono-specific).
     PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
-        [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, decodeField, computeArenaExclude](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -6315,7 +6363,18 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit, nullptr);
+
+        // Phase 29h — same metadata-arena exclusion as findInstances; this
+        // handler enumerates instances via the identical pointer scan, so it
+        // suffered the same arena-residue crowd-out.
+        const bool excludeArena = args.value("excludeArena", true);
+        const bool skipMapped   = args.value("skipMapped", true);
+        std::uintptr_t exLow = 0, exHigh = 0;
+        computeArenaExclude(excludeArena, exLow, exHigh);
+
+        Memory::ScanStats stats{};
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
+                                              limit, &stats, exLow, exHigh, skipMapped);
 
         json rows = json::array();
         for (const void* p : matches) {
@@ -6338,6 +6397,14 @@ void RegisterCoreHandlers() {
             {"fieldOffset", fieldOffset},
             {"fieldType",   fieldType},
             {"rows",        std::move(rows)},
+            {"scan_stats", json{
+                {"regions_scanned",     stats.regionsScanned},
+                {"regions_skip_mapped", stats.regionsSkipMapped},
+                {"bytes_scanned",       stats.bytesScanned},
+                {"excluded_matches",    stats.excludedMatches},
+                {"exclude_low",         formatHex(exLow)},
+                {"exclude_high",        formatHex(exHigh)},
+            }},
         };
     });
 
