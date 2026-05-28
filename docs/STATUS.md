@@ -1,12 +1,16 @@
 # UnityCEDumper — Session Hand-off
 
-**Branch**: `dev` (2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7/8 polish**; head pending commit / build #704 UI / DLL #650).
+**Branch**: `dev` (merged to `main` 2026-05-29 — **Phase 29e COMPLETE (29e-1 … 29e-4) + 29e-5/6/7/8 polish**; head `17fcbf1` / build #704 UI / DLL #650). 562/562 tests green.
 
 ## TL;DR — what's left to pick up (next session)
 
-The Class Pivot tab is feature-complete for v1: the full 3-stage funnel
-(Stage 0 class shortlist → Stage 1 key auto-discovery → Stage 2 pivot)
-on top of the 29e-1/-1b engine. Waves of Phase 29e:
+Phase 29e is fully shipped + merged. The Class Pivot tab is
+feature-complete for v1 (full 3-stage funnel: Stage 0 class shortlist →
+Stage 1 key auto-discovery → Stage 2 pivot), and every sortable
+DataGrid in the app is now AOT-safe. **Nothing is mid-flight** — pick
+from the deferred list below, or live-smoke the funnel + sortable grids.
+
+### Phase 29e waves (all shipped)
 
 * **29e-1**  `PivotEngine` ([PivotEngine.cs](../ui/UnityDumpUI/ViewModels/PivotEngine.cs))
   + 16 tests. Class-centric pivot keyed by field values inside each
@@ -65,8 +69,8 @@ on top of the 29e-1/-1b engine. Waves of Phase 29e:
   Snapshot diff, Snapshot field-stats). Comparers centralised in
   [LegacyGridSort.cs](../ui/UnityDumpUI/ViewModels/LegacyGridSort.cs)
   (+9 tests) and called from thin code-behind `Sorting` handlers.
-  Inspector tree grid got width-only treatment (tree-order is
-  load-bearing; sort migration deferred).
+  Inspector tree grid got width-only treatment here (tree-order is
+  load-bearing); its tree-aware sort followed in 29e-8.
 * **29e-7 DB-side class enumeration** — `SnapshotStore.ListDistinctClassesAsync`
   (`SELECT DISTINCT assembly, class_fqn` — metadata only, no blob)
   seeds the Class Pivot tab's class + assembly autocomplete on connect,
