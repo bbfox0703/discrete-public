@@ -386,10 +386,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
         if (_store is null || env.PersistedId is not long id) return;
         var classes = await _store.LoadClassesAsync(id, ct).ConfigureAwait(true);
         env.Classes.AddRange(classes);
-        env.BuildFieldIndex();
+        // Phase 29g-2: don't eager-build the FieldIndex on load — only Diff /
+        // SPC / address-lookup need it, and they call EnsureFieldIndex on
+        // demand. Pivot/ArrayPivot read Classes directly. Just refresh the
+        // cheap cached count for the memory estimate + status line.
+        env.RecomputeFieldValueCount();
         env.ClassesLoaded = true;
         _logger.Write(SnapshotStore.LogCategory,
-            $"lazy-loaded snapshot id={id} → {env.FieldIndex.Count:N0} field-values");
+            $"lazy-loaded snapshot id={id} → {env.FieldValueCount:N0} field-values (index lazy)");
     }
 
     /// <summary>Flip <see cref="SnapshotEnvelope.IsStale"/> on every
@@ -1029,7 +1033,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 TotalInstances = begin.TotalInstances,
                 Classes        = classes,
             };
-            env.BuildFieldIndex();
+            // Phase 29g-2: don't build the FieldIndex at capture — it was the
+            // #2 resident cost (12.2M SnapshotFieldValue + 432 MB dict arrays,
+            // all snapshots). Diff/SPC build it on demand via EnsureFieldIndex;
+            // here we only cache the cheap field-value count for the status
+            // line + memory estimate.
+            env.RecomputeFieldValueCount();
 
             // Phase 29c-4: brand-new envelope is in-memory only until
             // user clicks 💾 (or AutoSaveSnapshots is ON, below).
@@ -1070,9 +1079,22 @@ public sealed partial class SnapshotViewModel : ObservableObject
             string gameMemNote = GameWorkingSet > 0
                 ? $", game {FormatMemory((long)GameWorkingSet)} ws / {FormatMemory((long)GamePrivateUsage)} committed"
                 : string.Empty;
-            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldIndex.Count:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).";
+            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldValueCount:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).";
             _logger.Write(Constants.LogCategoryView,
-                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldIndex.Count} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
+                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldValueCount} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
+
+            // Phase 29g-2b: a capture churns large transient LOH buffers (the
+            // per-chunk pipe-read JSON byte[]/char[]). 29g-2 cut the rest of
+            // capture's allocation enough that natural gen2 GCs fire rarely,
+            // so those collectable buffers linger — live-smoke saw ~4.5 GB of
+            // dead Byte[]/Char[] still resident (14.8 GB private) that a forced
+            // GC reclaimed (post-GC gcdump showed them gone). Force one
+            // compacting gen2 collection so the process returns that memory
+            // promptly. Off the UI thread (fire-and-forget) so the collect
+            // doesn't freeze the window; it's harmless if it overlaps the next
+            // capture's allocation.
+            _ = Task.Run(static () =>
+                GC.Collect(2, System.GCCollectionMode.Forced, blocking: true, compacting: true));
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
@@ -1124,13 +1146,17 @@ public sealed partial class SnapshotViewModel : ObservableObject
             return;
         }
 
-        // Phase 29c-3: lazy-load class blobs on demand. After this both
-        // envelopes have FieldIndex populated regardless of whether they
-        // came from disk or from a fresh capture.
+        // Phase 29c-3: lazy-load class blobs on demand. Phase 29g-2: the
+        // FieldIndex is no longer built at load — build it here (only for the
+        // active A/B pair) via EnsureFieldIndex. EvictUnusedEnvelopes below
+        // releases every other snapshot's index.
+        Dictionary<string, SnapshotFieldValue> ai, bi;
         try
         {
             await EnsureLoadedAsync(a).ConfigureAwait(true);
             await EnsureLoadedAsync(b).ConfigureAwait(true);
+            ai = a.EnsureFieldIndex();
+            bi = b.EnsureFieldIndex();
         }
         catch (Exception ex)
         {
@@ -1150,10 +1176,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
         // Walk A → B keys to find changed + removed (+ optionally unchanged);
         // second pass walks B → A to catch the added.
-        foreach (var (key, va) in a.FieldIndex)
+        foreach (var (key, va) in ai)
         {
             if (staticsOnly && !va.IsStatic) { suppressed++; continue; }
-            if (b.FieldIndex.TryGetValue(key, out var vb))
+            if (bi.TryGetValue(key, out var vb))
             {
                 if (!string.Equals(va.ValueDisplay, vb.ValueDisplay, StringComparison.Ordinal))
                 {
@@ -1172,10 +1198,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 removed++;
             }
         }
-        foreach (var (key, vb) in b.FieldIndex)
+        foreach (var (key, vb) in bi)
         {
             if (staticsOnly && !vb.IsStatic) { suppressed++; continue; }
-            if (!a.FieldIndex.ContainsKey(key))
+            if (!ai.ContainsKey(key))
             {
                 DiffRows.Add(SnapshotDiffRow.Added(vb));
                 added++;
@@ -1210,30 +1236,43 @@ public sealed partial class SnapshotViewModel : ObservableObject
         StatusMessage = $"Diff {a.ShortLabel} → {b.ShortLabel}: {changed:N0} changed, {added:N0} added, {removed:N0} removed{unchangedNote}{suppressedNote} (in {sw.ElapsedMilliseconds} ms){evictionNote}.";
     }
 
-    /// <summary>Phase 29c-eviction: unload every envelope that isn't
-    /// currently selected and IS safe to drop (persisted to DB so
-    /// EnsureLoadedAsync can re-hydrate on demand). Returns the number
-    /// of envelopes evicted so the diff status line can surface it.
-    /// In-memory-only (dirty) envelopes are NEVER unloaded — losing
-    /// them would mean losing the user's unsaved snapshot.</summary>
+    /// <summary>Phase 29c-eviction + 29g-2: free memory from every envelope
+    /// that isn't the active diff A/B pair. Persisted envelopes are fully
+    /// unloaded (Classes + FieldIndex dropped; <c>EnsureLoadedAsync</c>
+    /// re-hydrates on demand). Dirty/in-memory-only envelopes are NEVER
+    /// unloaded — that would lose the user's unsaved snapshot — but their
+    /// FieldIndex is a rebuildable cache, so it's released while
+    /// <see cref="SnapshotEnvelope.Classes"/> stays put (Phase 29g-2: the
+    /// FieldIndex was the #2 resident cost, ~2.5-3 GB across snapshots).
+    /// Returns the number of fully-evicted (unloaded) envelopes for the diff
+    /// status line.</summary>
     private int EvictUnusedEnvelopes()
     {
-        int evicted = 0;
+        int evicted = 0, released = 0;
         long freedEstimate = 0;
         foreach (var env in Snapshots)
         {
             if (!env.ClassesLoaded) continue;
-            if (env.PersistedId is null) continue;
             if (ReferenceEquals(env, SelectedSnapshotA)) continue;
             if (ReferenceEquals(env, SelectedSnapshotB)) continue;
-            freedEstimate += env.EstimatedMemoryBytes;
-            env.Unload();
-            evicted++;
+            if (env.PersistedId is not null)
+            {
+                freedEstimate += env.EstimatedMemoryBytes;
+                env.Unload();
+                evicted++;
+            }
+            else if (env.FieldIndexBuilt)
+            {
+                // Dirty (unsaved) → can't drop Classes, but the FieldIndex is
+                // rebuildable. Release it; the unsaved data is preserved.
+                env.ReleaseFieldIndex();
+                released++;
+            }
         }
-        if (evicted > 0)
+        if (evicted > 0 || released > 0)
         {
             _logger.Write(SnapshotStore.LogCategory,
-                $"auto-eviction: dropped {evicted} envelope(s) from memory (~{freedEstimate:N0} B estimated freed)");
+                $"auto-eviction: unloaded {evicted} envelope(s) (~{freedEstimate:N0} B est), released {released} dirty FieldIndex(es)");
             OnPropertyChanged(nameof(TotalSnapshotsMemoryBanner));
         }
         return evicted;
@@ -1329,7 +1368,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
         }
         try
         {
-            int fieldValueCount = env.ClassesLoaded ? env.FieldIndex.Count : 0;
+            int fieldValueCount = env.ClassesLoaded ? env.FieldValueCount : 0;
             var req = new SnapshotPersistRequest
             {
                 Label             = string.IsNullOrEmpty(env.Label) ? null : env.Label,
@@ -1947,8 +1986,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
         SnapshotEnvelope? env, string normalisedAddress)
     {
         var hits = new List<(string, SnapshotFieldValue)>();
-        if (env is null) return hits;
-        foreach (var kvp in env.FieldIndex)
+        if (env is null || !env.ClassesLoaded) return hits;
+        // Phase 29g-2: build the index on demand (the debug lookup runs after
+        // the user has selected/diffed A/B, so Classes are loaded).
+        foreach (var kvp in env.EnsureFieldIndex())
         {
             // Key shape: "{asm}|{fqn}|{instAddrOrStatic}|{offset}|{fieldName}".
             // Just substring-match the address piece — cheap, unambiguous
@@ -2184,12 +2225,70 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     [ObservableProperty]
     private bool _isStale;
 
-    /// <summary>Flat lookup: <c>"asm|ns|class|instance|offset"</c> →
-    /// per-field value snapshot. Built once at capture time, reused on
-    /// every Diff. Pre-computing this trades ~10 MB of RAM per snapshot
-    /// for sub-second diff latency.</summary>
-    public Dictionary<string, SnapshotFieldValue> FieldIndex { get; private set; }
-        = new();
+    /// <summary>Phase 29g-2 — backing store for the lazily-built FieldIndex.
+    /// <c>null</c> until the first content consumer (Diff / SPC /
+    /// address-lookup / field-stats) calls <see cref="EnsureFieldIndex"/>;
+    /// released back to <c>null</c> by <see cref="ReleaseFieldIndex"/> /
+    /// <see cref="Unload"/> for any snapshot that isn't the active diff A/B
+    /// pair. **Not built at capture or lazy-load** — Phase 29g-0b
+    /// (dotnet-dump) measured 12.2M <see cref="SnapshotFieldValue"/> = 1.17 GB
+    /// + 432 MB of dictionary bucket arrays + the per-field composite-key and
+    /// ValueDisplay strings, all three snapshots resident, as the #2
+    /// structural cost. <see cref="Classes"/> stays loaded so the index
+    /// rebuilds without a disk reload.</summary>
+    private Dictionary<string, SnapshotFieldValue>? _fieldIndex;
+
+    /// <summary>Cached field-value count, set whenever the index is built
+    /// (exact, = map.Count) or at capture / lazy-load via
+    /// <see cref="CountFieldValues"/> (approximate). Survives
+    /// <see cref="ReleaseFieldIndex"/> so <see cref="EstimatedMemoryBytes"/>
+    /// + the status lines stay meaningful after the index is dropped.</summary>
+    private int _fieldValueCount;
+
+    private static readonly Dictionary<string, SnapshotFieldValue> EmptyFieldIndex
+        = new(StringComparer.Ordinal);
+
+    /// <summary>Flat lookup: <c>"asm|ns|class|instance|offset|field"</c> →
+    /// per-field value snapshot. **Read-only view — empty when not built.**
+    /// Content consumers (Diff / SPC / address-lookup / field-stats) MUST
+    /// call <see cref="EnsureFieldIndex"/> first; the empty fallback avoids a
+    /// null-deref if a site is missed (yields no rows rather than crashing).</summary>
+    public IReadOnlyDictionary<string, SnapshotFieldValue> FieldIndex
+        => _fieldIndex ?? EmptyFieldIndex;
+
+    /// <summary><c>true</c> when the FieldIndex is currently built + resident.</summary>
+    public bool FieldIndexBuilt => _fieldIndex is not null;
+
+    /// <summary>Field-value count — cheap, survives <see cref="ReleaseFieldIndex"/>.
+    /// Drives <see cref="EstimatedMemoryBytes"/> + the capture status line.</summary>
+    public int FieldValueCount => _fieldValueCount;
+
+    /// <summary>Build the FieldIndex on demand (no-op if already built) and
+    /// return it. Requires <see cref="Classes"/> to be loaded — call
+    /// <c>SnapshotViewModel.EnsureLoadedAsync</c> first for lazy envelopes.</summary>
+    public Dictionary<string, SnapshotFieldValue> EnsureFieldIndex()
+    {
+        if (_fieldIndex is null) BuildFieldIndex();
+        return _fieldIndex!;
+    }
+
+    /// <summary>Phase 29g-2 — drop the built FieldIndex (its composite-key +
+    /// ValueDisplay strings, <see cref="SnapshotFieldValue"/> objects, and
+    /// dictionary bucket array) but KEEP <see cref="Classes"/> so it can be
+    /// rebuilt on demand without a disk reload. The cached
+    /// <see cref="FieldValueCount"/> survives. No-op if not built. Safe on
+    /// dirty/in-memory-only envelopes — this loses a rebuildable cache, not
+    /// data.</summary>
+    public void ReleaseFieldIndex() => _fieldIndex = null;
+
+    /// <summary>Test seam — inject a prebuilt FieldIndex without walking
+    /// <see cref="Classes"/> (fixtures build a custom dict directly).
+    /// Production builds via <see cref="EnsureFieldIndex"/>.</summary>
+    public void SetFieldIndexForTest(Dictionary<string, SnapshotFieldValue> map)
+    {
+        _fieldIndex     = map;
+        _fieldValueCount = map.Count;
+    }
 
     /// <summary>Phase 29c-eviction: clear the in-memory class + field
     /// index, returning this envelope to the metadata-only state it had
@@ -2202,7 +2301,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
         if (!ClassesLoaded) return;
         if (PersistedId is null) return;  // can't reload — refuse
         Classes.Clear();
-        FieldIndex = new Dictionary<string, SnapshotFieldValue>(StringComparer.Ordinal);
+        _fieldIndex   = null;
         ClassesLoaded = false;
         OnPropertyChanged(nameof(PersistenceStatus));
     }
@@ -2217,15 +2316,19 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// <summary>Heuristic UI-side memory cost of this envelope, in bytes.
     /// Empirical ratio from build #646 live-smoke on 活俠傳 / Mortal:
     /// 1.13M field-values consumed ~1.62 GB of UI WorkingSet delta →
-    /// ~1500 bytes per FieldIndex entry once you account for the
-    /// dictionary's bucket overhead, the SnapshotFieldValue object
-    /// header, the per-field strings (assembly, class fqn, instance
-    /// address, field name, type, value display), and the parallel
-    /// Classes list. The estimate is rough — within 2× — but plenty
-    /// good for "is this snapshot small or huge?" UX. Re-computed on
-    /// demand from FieldIndex.Count so it doesn't bloat the envelope.</summary>
+    /// ~1500 bytes per field-value once you account for the dictionary's
+    /// bucket overhead, the SnapshotFieldValue object header, the per-field
+    /// strings (assembly, class fqn, instance address, field name, type,
+    /// value display), and the parallel Classes list. The estimate is rough
+    /// — within 2× — but plenty good for "is this snapshot small or huge?"
+    /// UX. Computed from the cached <see cref="FieldValueCount"/> (Phase
+    /// 29g-2) so it survives <see cref="ReleaseFieldIndex"/> and doesn't
+    /// force-build the index. Note: post-29g-2 the FieldIndex is usually NOT
+    /// resident (built only for the active diff/SPC pair), so this is now an
+    /// upper bound on the snapshot's actual footprint — conservative, which
+    /// is the safe direction for the RAM advisories that read it.</summary>
     public long EstimatedMemoryBytes
-        => (long)FieldIndex.Count * 1500L;
+        => (long)_fieldValueCount * 1500L;
 
     public string DisplayName
     {
@@ -2341,7 +2444,37 @@ public sealed partial class SnapshotEnvelope : ObservableObject
                 }
             }
         }
-        FieldIndex = map;
+        _fieldIndex      = map;
+        _fieldValueCount = map.Count;
+    }
+
+    /// <summary>Phase 29g-2 — refresh the cached <see cref="FieldValueCount"/>
+    /// from the current <see cref="Classes"/>, used at capture + lazy-load
+    /// (before any FieldIndex is built) so the status line +
+    /// <see cref="EstimatedMemoryBytes"/> work without paying the index cost.</summary>
+    public void RecomputeFieldValueCount() => _fieldValueCount = CountFieldValues(Classes);
+
+    /// <summary>Cheap field-value count (statics + instance fields + expanded
+    /// array elements) WITHOUT building the FieldIndex dictionary or
+    /// allocating any keys / SnapshotFieldValue objects. Mirrors
+    /// <see cref="BuildFieldIndex"/>'s row emission so the count tracks the
+    /// index size (modulo the rare offset+name key collision, which only
+    /// shrinks the real dict — fine for a memory estimate).</summary>
+    public static int CountFieldValues(IReadOnlyList<SnapshotClassEntry> classes)
+    {
+        int n = 0;
+        foreach (var c in classes)
+        {
+            if (c.Statics is { Count: > 0 } statics)
+                foreach (var f in statics) n += 1 + ArrayElemCount(f);
+            if (c.Instances is { Count: > 0 } insts)
+                foreach (var inst in insts)
+                    foreach (var f in inst.Fields) n += 1 + ArrayElemCount(f);
+        }
+        return n;
+
+        static int ArrayElemCount(SnapshotFieldEntry f)
+            => f.ArrayElements is { Count: > 0 } arr ? arr.Elements.Count : 0;
     }
 
     /// <summary>Phase 29e-1b — fan out captured array elements as

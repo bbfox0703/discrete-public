@@ -173,7 +173,12 @@ public class SnapshotViewModelPersistenceTests : IDisposable
             await vm2.EnsureLoadedAsync(reloaded, Ct);
             Assert.True(reloaded.ClassesLoaded);
             Assert.NotEmpty(reloaded.Classes);
-            Assert.NotEmpty(reloaded.FieldIndex);
+            // Phase 29g-2: the FieldIndex is lazy — not built on load. The
+            // cheap field-value count is refreshed though, and the index
+            // builds on demand from the round-tripped Classes.
+            Assert.False(reloaded.FieldIndexBuilt);
+            Assert.True(reloaded.FieldValueCount > 0);
+            Assert.NotEmpty(reloaded.EnsureFieldIndex());
         }
     }
 
@@ -449,10 +454,13 @@ public class SnapshotViewModelPersistenceTests : IDisposable
         await vm.DiffAsync();
 
         // Dirty envelope MUST stay loaded — there's no DB row to reload
-        // from, dropping it would lose the user's work.
+        // from, dropping it would lose the user's work. Phase 29g-2: its
+        // FieldIndex IS released (rebuildable cache), but Classes — the
+        // unsaved data — are preserved so it can still be saved/rebuilt.
         Assert.Null(dirty.PersistedId);
         Assert.True(dirty.ClassesLoaded);
-        Assert.NotEmpty(dirty.FieldIndex);
+        Assert.NotEmpty(dirty.Classes);
+        Assert.False(dirty.FieldIndexBuilt);
     }
 
     [Fact]

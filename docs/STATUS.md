@@ -2,13 +2,33 @@
 
 **Branch**: `main` == `dev` (kept in lockstep) — **Phase 29e + Phase 29f Layer B (29f-1…4) COMPLETE + shipped**; DLL #728 (Mono+IL2CPP, x64+x86), 578/578 UI tests green. Layer B live-smoke validated on 활俠傳 (x86 targeted) + SaGa Frontier 2 Remastered (x64; blanket CTD fixed via known-class gate + attempts-budget).
 
-> **▶ NEXT SESSION — Phase 29g: Snapshot UI memory optimization.** DiscreteUI
-> holds ~5.7 GB per 132K-instance snapshot (3 ≈ 17 GB); the game itself is only
-> ~1.5 GB. Full spec + root causes + fix order (string interning → lazy/released
-> FieldIndex → JsonElement.Clone) + acceptance targets in
-> [plan.md "Phase 29g"](plan.md). UI/Core only, no DLL change expected. Start by
-> profiling a live capture (`dotnet-gcdump` / `tools/Inspect-Memory.ps1`) before
-> optimizing.
+> **▶ NEXT — Phase 29g: Snapshot UI memory optimization (IN PROGRESS).**
+> DiscreteUI holds ~5.7 GB per 132K-instance snapshot (3 ≈ 17 GB); the game
+> itself is only ~1.5 GB. Three root causes confirmed by code read: string
+> duplication (no interning), FieldIndex doubling (eager + never released),
+> JsonElement retention. Wave plan + exact code touch-points in
+> [plan.md "Phase 29g"](plan.md). UI/Core only, no DLL change expected.
+> **29g-0 profiling SHIPPED + baseline captured** —
+> [tools/Capture-GcDump.ps1](../tools/Capture-GcDump.ps1) (10M-cap, misled on
+> FieldIndex) + [tools/Capture-DotnetDump.ps1](../tools/Capture-DotnetDump.ps1)
+> (uncapped `dumpheap -stat`, the trustworthy one). Definitive 12 GB-heap totals:
+> `System.String` 5.23 GB · `SnapshotFieldValue` 1.17 GB + 432 MB dict arrays
+> (FieldIndex, all 3 snaps resident) · `SnapshotFieldEntry` 1.01 GB · JsonElement
+> (`JsonDocument`+`Byte[]`) ≈ 748 MB. Order set by data: **29g-2 (FieldIndex,
+> ~2.5-3 GB) → 29g-1 (interning) → 29g-3 (JsonElement)**.
+>
+> **29g-2 + 29g-2b SHIPPED + VALIDATED** (583/583 green). 29g-2: FieldIndex is
+> lazy — built only for the active Diff A/B pair + SPC selection (released
+> after); dirty non-A/B keep Classes, drop the index. **dotnet-dump confirmed
+> ~3.9 GB eliminated** (SnapshotFieldValue 1.17 GB→0, dict arrays 432 MB→gone,
+> String 5.23→2.92 GB). 29g-2b: background compacting `GC.Collect` after capture
+> (the leftover ~4.5 GB Byte[]/Char[] balloon was transient pipe buffers, proven
+> by a post-GC gcdump). **Post-GC steady-state ≈ 5.3 GB / 3 snaps → acceptance
+> ("3 snaps < 6 GB", "1 snap < 2 GB") already met.** 29g-1 (interning, 2.92 GB
+> String) + 29g-3 (JsonElement, 748 MB) are now headroom, not required.
+> ⏳ **USER**: re-measure the 29g-2b build live (expect live process ~6 GB, not
+> 14.8 GB) to confirm, then decide whether to continue to 29g-1 or stop. Code
+> ready to commit.
 
 ### Post-29e fixes (2026-05-28)
 

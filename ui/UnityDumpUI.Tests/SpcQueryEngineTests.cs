@@ -70,10 +70,9 @@ public class SpcQueryEngineTests
 
     private static void InjectFieldIndex(SnapshotEnvelope env, Dictionary<string, SnapshotFieldValue> idx)
     {
-        // FieldIndex has a private setter; the test fixture pokes it via reflection
-        // ONLY in this test file (production code is reflection-free per Architecture.md).
-        var prop = typeof(SnapshotEnvelope).GetProperty(nameof(SnapshotEnvelope.FieldIndex))!;
-        prop.SetValue(env, idx);
+        // Phase 29g-2: FieldIndex is now lazy (no public setter). Use the
+        // dedicated test seam to inject a controlled fixture dict directly.
+        env.SetFieldIndexForTest(idx);
     }
 
     // ─── Predicate-count alignment ─────────────────────────────────────

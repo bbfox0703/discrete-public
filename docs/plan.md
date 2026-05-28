@@ -803,7 +803,7 @@ both Layer A's index-shuffle weakness and address drift. Full design in
 
 ---
 
-## Phase 29g — Snapshot UI memory optimization 📝 PLANNED 2026-05-28 (next session)
+## Phase 29g — Snapshot UI memory optimization 🔵 IN PROGRESS 2026-05-28 (29g-0 tooling shipped)
 
 **Problem (live, SaGa Frontier 2 Remastered, x64 IL2CPP)**: DiscreteUI holds
 **~5.7 GB per snapshot** (2,451 classes / ~132K instances of Assembly-CSharp);
@@ -814,8 +814,8 @@ instances live. Static-value capture is NOT the cause (already opt-out, modest).
 Tools (SPC/Pivot) work; this is purely a footprint problem that makes 3+ snaps
 impractical.
 
-**Root causes** (verify first with a `dotnet-gcdump` / memory profiler on a
-live capture — don't optimize blind):
+**Root causes** (verify first with `tools/Capture-GcDump.ps1` on a live
+3-snapshot capture — don't optimize blind):
 1. **String duplication** — every `SnapshotFieldEntry.Name` / `.Type` / `.From`
    and `SnapshotClassEntry.Namespace` / `.Name` is a distinct `string`,
    repeated across ~6.6M field entries (132K instances × ~50 fields).
@@ -851,8 +851,144 @@ live capture — don't optimize blind):
 4. **(stretch)** compact `SnapshotFieldValue` (struct / smaller fields), or a
    columnar layout.
 
+**Waves** (sequenced 2026-05-28; #1+#2 are structurally certain wins independent
+of profiler data, #3 is profiler-gated):
+
+* **29g-0 profiling tool ✅ SHIPPED** — [tools/Capture-GcDump.ps1](../tools/Capture-GcDump.ps1):
+  finds the running DiscreteUI PID, `dotnet-gcdump collect`, and prints a
+  type-level retained-size breakdown of the suspects (`System.String` / `Char[]`
+  / `Byte[]` / `Dictionary` / `SnapshotFieldValue` / `SnapshotFieldEntry` /
+  `JsonDocument`). **Caveat — profile a JIT build, not the shipping Native AOT
+  build**: `dotnet-gcdump` rides EventPipe heap-dump events that CoreCLR (JIT)
+  emits but Native AOT does not, so an AOT build returns an empty report. Build
+  the profiling target with `build.cmd ui` (`PublishAot=false`, self-contained,
+  per [build.ps1:359](../build.ps1)); the managed heap object layout is identical
+  AOT-vs-JIT (AOT only changes codegen), so type-level numbers are fully valid.
+* **29g-0 baseline ✅ CAPTURED 2026-05-28 (SaGa F2R, WS 19 GB / Private 21.9 GB)**
+  — `dotnet-gcdump` caps collection at **10,000,000 objects** (no flag to lift),
+  so the report is the first ~833 MB *slice* of a multi-GB heap: reliable
+  **type ranking**, not totals. Top types by object count within the slice:
+  `System.String` 3,628,187 · `System.Byte[]` 2,461,050 · `SnapshotArrayElement`
+  1,439,954 (96 B) · `System.Text.Json.JsonDocument` 1,230,240 (72 B) ·
+  `SnapshotFieldEntry` 820,937 (**160 B each**). `SnapshotFieldValue` (FieldIndex)
+  only **1,517** — hidden beyond the cap (can't confirm FieldIndex weight here).
+  **Two findings that re-order the plan:**
+  1. **JsonElement is a top-tier retainer, not a minor #3.** 1.23M `JsonDocument`
+     + 2.46M `Byte[]` (≈ 2 buffers/doc: raw UTF8 + MetadataDb) = roughly one
+     standalone `JsonDocument` per scalar field value — ~150-200 B to wrap an
+     8-byte number. **Promoted to a primary fix** (was profiler-gated 29g-3).
+  2. **FieldIndex doubling unconfirmed by this dump** — `SnapshotFieldValue` sits
+     beyond the 10M cap; the Classes tree itself (FieldEntry 160 B + ArrayElement
+     96 B + their Strings + JsonDocuments) dominates the slice. Lazy/release stays
+     (correct + cheap) but its true weight is now uncertain.
+  Acceptance metric stays process WS/Private via `Inspect-Memory.ps1`.
+* **29g-0b dotnet-dump full-heap stat ✅ DONE 2026-05-28 — DEFINITIVE baseline.**
+  [tools/Capture-DotnetDump.ps1](../tools/Capture-DotnetDump.ps1) (auto-falls back
+  `--type Heap`→`Full` — Heap throws "Value does not fall within the expected
+  range" on large heaps). Uncapped `dumpheap -stat` on the 12 GB process:
+  | Type | Count | TotalSize | Owner |
+  |---|--:|--:|---|
+  | `System.String` | 54,922,707 | **5.23 GB** | all |
+  | `SnapshotFieldValue` | 12,165,843 | **1.17 GB** | FieldIndex |
+  | `Dictionary<string,SnapshotFieldValue>+Entry[]` | 3 | **432 MB** | FieldIndex |
+  | `SnapshotFieldEntry` | 6,309,459 | **1.01 GB** | Classes tree |
+  | `SnapshotArrayElement` | 5,871,096 | 564 MB | Classes tree |
+  | `JsonDocument` | 5,306,286 | 382 MB | JsonElement |
+  | `System.Byte[]` | 10,613,225 | 366 MB | JsonElement (~2/doc) |
+
+  **The gcdump's 10M-object cap had HIDDEN FieldIndex** (it reported
+  `SnapshotFieldValue=1,517`). Truth: 12.17M live + 3 resident dict bucket arrays
+  (432 MB) — all 3 snapshots' FieldIndex fully resident. **FieldIndex doubling is
+  real and is the #2 structural cost.** Per-owner GB (strings attributed):
+  **FieldIndex ≈ 2.5-3 GB** (SnapshotFieldValue 1.17 + dict 432 MB + ~12.2M unique
+  composite-key strings ~0.7 GB + ~12.2M ValueDisplay ~0.4 GB) · JsonElement
+  ≈ 748 MB · Classes-tree duplicate strings (FieldEntry Name/Type/From as millions
+  of distinct objects) = a large interning-collapsible chunk of the rest.
+* **➡ ORDER REVISED by 29g-0b data: do 29g-2 (FieldIndex) FIRST**, then 29g-1
+  (interning), then 29g-3 (JsonElement). FieldIndex lazy/release is the biggest
+  *and* lowest-risk lever (~2.5-3 GB, pure UI logic, no model/consumer change),
+  so it leads. (Earlier 29g-1+3-first ordering was based on the truncated gcdump.)
+* **29g-1 string interning** — new `SnapshotInterner` (Core): a *per-snapshot*
+  `Dictionary<string,string>` pool (NOT `string.Intern`) walks the
+  `SnapshotClassEntry` tree post-deserialize and dedups field Name/Type/From +
+  class Assembly/Namespace/Name + Parent.* + ElementType (Address skipped — it's
+  unique). Called from `TakeSnapshotAsync` (classes assembled,
+  [SnapshotViewModel.cs:1030](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
+  + `EnsureLoadedAsync` ([:388](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)).
+  Because `BuildFieldIndex` copies those same strings into each
+  `SnapshotFieldValue`, the FieldIndex inherits the interned refs for free.
+* **29g-2 lazy + released FieldIndex ✅ SHIPPED 2026-05-28 (583/583 green, +5).**
+  `SnapshotEnvelope` FieldIndex is now lazy: `_fieldIndex` null until
+  `EnsureFieldIndex()` (build-on-demand, idempotent); `ReleaseFieldIndex()`
+  drops it keeping Classes; cached `FieldValueCount` (via `CountFieldValues` /
+  `RecomputeFieldValueCount`) survives release so `EstimatedMemoryBytes` +
+  status work without the index. **No eager build at capture
+  ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)) or
+  lazy-load** — Diff builds only the A/B pair, SPC builds the selected set and
+  releases what it built, address-lookup builds on demand. `EvictUnusedEnvelopes`
+  unloads persisted non-A/B (Classes+index) and releases the index on dirty
+  non-A/B (keeps unsaved data). SPC autocomplete (`RefreshKnownTypesAndClasses`)
+  now walks `Classes` not `FieldIndex` so it never force-builds. Pivot/ArrayPivot
+  already read `Classes` → now pay zero FieldIndex cost. New
+  [SnapshotFieldIndexLazyTests.cs](../ui/UnityDumpUI.Tests/SnapshotFieldIndexLazyTests.cs);
+  SPC/persistence tests updated to the lazy + release-on-evict semantics.
+  **✅ live re-measure CONFIRMS the win** (dotnet-dump, 3 snaps SaGa F2R, no
+  diff): `SnapshotFieldValue` 12.17M/1.17 GB → **0**; the 3
+  `Dictionary<…SnapshotFieldValue>+Entry[]` (432 MB) → **gone**; `System.String`
+  5.23 GB → **2.92 GB** (−2.31 GB / −29.1M objects). Classes tree untouched
+  (SnapshotFieldEntry 1.01 GB, ArrayElement 564 MB, JsonDocument 382 MB).
+  **~3.9 GB of FieldIndex-attributable memory eliminated.**
+  *Transient caveat — diagnosed + fixed (29g-2b):* the same dotnet-dump showed
+  `Byte[]` 366 MB→2.997 GB + `Char[]` 76 MB→1.93 GB (counts ~unchanged → a few
+  giant LOH arrays = the per-chunk pipe-read JSON buffers). They were **dead but
+  uncollected** — 29g-2 cut capture's allocation pressure so natural gen2 GCs
+  fire rarely. **Confirmed transient by a post-GC gcdump** (`Capture-GcDump.ps1`
+  forces a GC): the giants + the FieldIndex dict were gone, heap back to the
+  baseline shape minus FieldIndex.
+* **29g-2b ✅ SHIPPED (583/583 green)** — fire-and-forget compacting gen2
+  `GC.Collect(2, Forced, blocking, compacting)` on a background thread at the end
+  of a successful capture ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)
+  TakeSnapshotAsync) so the process returns the transient LOH capture buffers
+  promptly instead of waiting for pressure (live-smoke: 14.8 GB private with
+  ~4.5 GB of dead Byte[]/Char[] a GC reclaimed). Off the UI thread to avoid a
+  freeze.
+* **Acceptance status:** post-29g-2 steady-state (post-GC) ≈ **5.3 GB managed for
+  3 snapshots** (String 2.92 + SnapshotFieldEntry 1.01 + ArrayElement 0.56 +
+  JsonDocument 0.38 + small Byte[] 0.37), down from ~9.5 GB → **already meets
+  "3 snaps < 6 GB" and ~1.8 GB/snap meets "1 snap < 2 GB"**. 29g-1 (interning,
+  attacks the 2.92 GB String) + 29g-3 (JsonElement, ~748 MB) are now *headroom*,
+  not required for acceptance. Recommend a live re-measure on the 29g-2b build
+  to confirm the live process drops to ~6 GB before deciding whether to continue.
+* **29g-2 (original spec)** — gate `BuildFieldIndex`
+  ([:2283](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)) behind an
+  `EnsureFieldIndex()` (build on first use) + add `ReleaseFieldIndex()` (null the
+  dict, keep `Classes`). Stop eager build at capture ([:1032](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs))
+  + lazy-load ([:389](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs));
+  ensure-before-use in Diff, SPC ([SpcQueryViewModel.cs](../ui/UnityDumpUI/ViewModels/SpcQueryViewModel.cs)),
+  field-stats dump. Extend `EvictUnusedEnvelopes`
+  ([:1219](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)) to release
+  FieldIndex on non-A/B loaded envelopes. Cache the field-value count so
+  `EstimatedMemoryBytes` survives release. **Pivot/ArrayPivot read `Classes`
+  directly ([PivotViewModel.cs:789-932](../ui/UnityDumpUI/ViewModels/PivotViewModel.cs))
+  → stop paying FieldIndex cost entirely.**
+* **29g-3 JsonElement compaction — PROMOTED to primary (baseline confirmed
+  top-tier).** Replace `SnapshotFieldEntry.Value` / `SnapshotArrayElement.Value`
+  (`JsonElement?`) with a string-backed `RawJsonValue`: an AOT-safe custom
+  `JsonConverter` that on read does `JsonDocument.ParseValue(ref reader)` →
+  `GetRawText()` and **disposes the doc immediately** (no retention), on write
+  does `WriteRawValue(text)` (lossless DB round-trip — **required**, because
+  `SnapshotStore.SaveSnapshotAsync` re-serializes the in-memory tree at
+  [SnapshotStore.cs:180](../ui/UnityDumpUI.Core/Services/SnapshotStore.cs), so
+  the value must survive a save). Collapses ~1.23M JsonDocument + ~2.46M Byte[]
+  to one ~30-40 B string per scalar (interned alongside 29g-1 — "0"/"1"/"true"
+  dedup hard). **Fold the Value decode into the 29g-1 interning walk (one tree
+  pass).** Consumer churn: `FormatFieldValue` / `FormatArrayElement` /
+  SPC numeric parse / ArrayPivot / Inspector read `f.Value` — migrate to the raw
+  string (+ a cached `double?` for SPC).
+
 **Acceptance**: 1 snapshot < ~2 GB UI (from 5.7), 3 snapshots < ~6 GB, measured
-via `tools/Inspect-Memory.ps1` before/after on SaGa F2R. 578+ tests stay green;
+via `tools/Capture-GcDump.ps1` + `tools/Inspect-Memory.ps1` before/after on
+SaGa F2R. 578+ tests stay green;
 add an interning unit test (two fields with the same type name share the same
 `string` reference after load) + a FieldIndex lazy/release test. No DLL change
 expected — this is UI/Core only.

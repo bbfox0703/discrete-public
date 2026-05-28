@@ -98,13 +98,23 @@ public sealed partial class SpcQueryViewModel : ObservableObject
     {
         var typeSet  = new HashSet<string>(CuratedSeedTypes, StringComparer.Ordinal);
         var classSet = new HashSet<string>(StringComparer.Ordinal);
+        // Phase 29g-2: walk Classes directly (field types + class FQNs are
+        // both there) instead of FieldIndex.Values — autocomplete must NOT
+        // force-build every loaded snapshot's FieldIndex.
         foreach (var env in _snapshot.Snapshots)
         {
             if (!env.ClassesLoaded) continue;
-            foreach (var v in env.FieldIndex.Values)
+            foreach (var c in env.Classes)
             {
-                if (!string.IsNullOrEmpty(v.FieldType)) typeSet.Add(v.FieldType);
-                if (!string.IsNullOrEmpty(v.ClassFqn))  classSet.Add(v.ClassFqn);
+                string fqn = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
+                if (!string.IsNullOrEmpty(fqn)) classSet.Add(fqn);
+                if (c.Statics is { } statics)
+                    foreach (var f in statics)
+                        if (!string.IsNullOrEmpty(f.Type)) typeSet.Add(f.Type);
+                if (c.Instances is { } insts)
+                    foreach (var inst in insts)
+                        foreach (var f in inst.Fields)
+                            if (!string.IsNullOrEmpty(f.Type)) typeSet.Add(f.Type);
             }
         }
         // Replace-all semantics — cheap (lists are short) + simple.
@@ -312,9 +322,14 @@ public sealed partial class SpcQueryViewModel : ObservableObject
             // is deferred to Phase 29e; in the meantime the advisory
             // banner below warns when N grows.
             var preloaded = new HashSet<SnapshotEnvelope>();
+            // Phase 29g-2: also track which snapshots already had a built
+            // FieldIndex, so post-run we only release the ones WE built for
+            // this query (and never the active diff A/B pair).
+            var hadIndexBefore = new HashSet<SnapshotEnvelope>();
             foreach (var r in selected)
             {
                 if (r.Snapshot.ClassesLoaded) preloaded.Add(r.Snapshot);
+                if (r.Snapshot.FieldIndexBuilt) hadIndexBefore.Add(r.Snapshot);
             }
             if (selected.Count > kLargeNAdvisory)
             {
@@ -330,10 +345,12 @@ public sealed partial class SpcQueryViewModel : ObservableObject
                 StatusMessage = $"Hydrating {selected.Count:N0} snapshots (~{FormatMb(total)} estimated peak RAM). Consider narrowing scope if memory pressure builds.";
             }
 
-            // Hydrate all selected envelopes.
+            // Hydrate all selected envelopes + build their FieldIndex (29g-2:
+            // SpcQueryEngine reads FieldIndex, which is no longer eager-built).
             foreach (var r in selected)
             {
                 await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
+                r.Snapshot.EnsureFieldIndex();
             }
 
             // Refresh autocomplete pools now that more snapshots are
@@ -367,10 +384,28 @@ public sealed partial class SpcQueryViewModel : ObservableObject
             int evicted = 0;
             foreach (var r in selected)
             {
-                if (preloaded.Contains(r.Snapshot)) continue;
-                if (!r.Snapshot.ClassesLoaded) continue;
-                if (r.Snapshot.PersistedId is null) continue;
-                r.Snapshot.Unload();
+                var snap = r.Snapshot;
+                bool isActivePair = ReferenceEquals(snap, _snapshot.SelectedSnapshotA)
+                                 || ReferenceEquals(snap, _snapshot.SelectedSnapshotB);
+                if (preloaded.Contains(snap))
+                {
+                    // Already loaded before this query — keep Classes hot, but
+                    // drop a FieldIndex we built just for this run (29g-2),
+                    // unless it's the active diff pair (Diff owns that).
+                    if (!hadIndexBefore.Contains(snap) && !isActivePair)
+                        snap.ReleaseFieldIndex();
+                    continue;
+                }
+                if (!snap.ClassesLoaded) continue;
+                if (snap.PersistedId is null)
+                {
+                    // Dirty, hydrated-for-query — can't unload (would lose
+                    // data); release the index we built unless it's A/B.
+                    if (!hadIndexBefore.Contains(snap) && !isActivePair)
+                        snap.ReleaseFieldIndex();
+                    continue;
+                }
+                snap.Unload();
                 evicted++;
             }
             string evictionNote = evicted > 0

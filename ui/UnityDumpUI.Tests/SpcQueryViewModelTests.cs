@@ -95,8 +95,9 @@ public class SpcQueryViewModelTests : IDisposable
                 ValueDisplay    = value,
             };
         }
-        typeof(SnapshotEnvelope).GetProperty(nameof(SnapshotEnvelope.FieldIndex))!
-            .SetValue(env, idx);
+        // Phase 29g-2: FieldIndex is lazy (no public setter) — inject via the
+        // test seam so the engine sees the controlled fixture dict.
+        env.SetFieldIndexForTest(idx);
         return env;
     }
 
