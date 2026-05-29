@@ -1157,7 +1157,18 @@ numbers in the CE-Handwire `Memory-Scanning-Internals.md` §16.7–16.8 (backup 
   gzipped row per class; `payload_bytes = -1` sentinel marks an in-progress row,
   hidden from the list + swept on reopen for crash safety). AutoSave-OFF keeps the
   in-memory + dirty + manual-💾 path unchanged. 603 UI tests green (incl. streamed-
-  vs-one-shot round-trip parity + sweep). Live-smoke (UI peak) still TODO.
+  vs-one-shot round-trip parity + sweep).
+  **Live-smoke (Utawarerumono, budget 100000, AutoSave ON): end-state UI ~2.4 GB
+  (was ~4.3 GB pre-streaming — the snapshot is genuinely on disk, not retained),
+  no per-chunk UI hang, Diff no longer freezes the window.** Per-chunk append +
+  `EnsureLoadedAsync` were moved OFF the UI thread (the first cut ran gzip + the
+  blob reload inline → 5–15 s/chunk freeze + GC starvation → ~13.9 GB), plus a
+  periodic Aggressive GC every 8 chunks. **Caveat: the transient mid-capture peak
+  is still ~10 GB** — bounded by the *largest single chunk's* re-expansion (the
+  ascending-population sort puts the biggest classes in the final chunks), which
+  GC frequency can't shrink; only a smaller streaming chunk size would. Peak is
+  fully collected post-capture (→2.4 GB) and didn't OOM; accepted as intrinsic to
+  per-chunk processing at this budget (lower chunk size deferred).
 
 ---
 
