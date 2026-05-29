@@ -1,9 +1,19 @@
 # Snapshot memory & speed — streaming-decode + schema/value dedup (design)
 
-> Status: **PLANNED** (2026-05-29). Motivated by the Utawarerumono (受讚頌者 循白之證,
-> IL2CPP) live-smoke: snapshot took ~11 min of decode, pushed the game process to
-> ~10.8 GB and the UI to ~14.7 GB. P1c made the *find* phase 0.6 s; the *decode*
-> phase is now the entire cost. Phase 30 attacks it.
+> Status: **30a SHIPPED 2026-05-29 (both backends); 30b/30c + schema-retention deferred.**
+> Motivated by the Utawarerumono (受讚頌者 循白之證, IL2CPP) live-smoke: snapshot took
+> ~11 min of decode, pushed the game to ~10.8 GB and the UI to ~14.7 GB. P1c made the
+> *find* phase 0.6 s; the *decode* phase was the entire cost.
+>
+> **Shipped (30a):** reduce-volume budget + low-population-first sort + memory
+> watchdog (Phase 16.7); deduped wire (schema-once + per-instance `v[]`, IL2CPP +
+> Mono); **value compaction** (the decisive win — values stored as raw JSON text, not
+> retained `JsonElement`/`JsonDocument`). Live result: decode 660s→65s, game
+> 10.8→6.9 GB, **UI 14.7 GB → ~1 GB/snap steady**. The original §3 "schema/value
+> dedup" turned out lower-ROI than §1c value compaction — profiling showed the
+> dominant UI cost was the per-value `JsonDocument`s, not schema repetition; the
+> shipped fix targets that. **schema-retention dedup + 30b/30c streaming remain
+> deferred (only needed for routinely capturing *full* snapshots).**
 
 ## 0. The numbers (two live smokes)
 

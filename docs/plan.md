@@ -1093,31 +1093,44 @@ visible; fallback is to exclude *all* regions overlapping any class pointer.
 
 ---
 
-## Phase 30 — Snapshot memory & speed (streaming-decode + schema/value dedup) 📝 PLANNED 2026-05-29
+## Phase 30 — Snapshot memory & speed ✅ 30a SHIPPED 2026-05-29 (both backends)
 
-Snapshot decode is the whole cost (find is 0.6s after P1c). On Utawarerumono
+Snapshot decode was the whole cost (find is 0.6s after P1c). On Utawarerumono
 (IL2CPP) it ran ~11 min, pushed the game to 10.8 GB + the UI to 14.7 GB. Root
-causes: (1a) `snapshotBegin` decodes the *entire* snapshot into one
+causes: (1a) `snapshotBegin` decoded the *entire* snapshot into one
 `std::vector<nlohmann::json>` before streaming; (1b) the field schema
-(name/type/offset/from) is repeated **per instance** (174K× for a 69-field class).
+(name/type/offset/from) was repeated **per instance**; (1c) every value was a
+`JsonElement` → System.Text.Json backed each with its own `JsonDocument`
+(millions of them = the dominant UI cost). **Full design + Q&A in
+[docs/snapshot-streaming-dedup.md](snapshot-streaming-dedup.md); live-smoke
+numbers in the CE-Handwire `Memory-Scanning-Internals.md` §16.7–16.8 (backup at
+[docs/Memory-Scanning-Internals.md](Memory-Scanning-Internals.md)).**
 
-Two orthogonal fixes — **full design + Q&A in [docs/snapshot-streaming-dedup.md](snapshot-streaming-dedup.md)**:
-- [ ] **30a — schema/value dedup** (highest ROI): emit field schema **once per
-  class**, values per instance; UI `SnapshotFieldSchema` + `SnapshotInstanceValues`
-  replace the 12 M `SnapshotFieldEntry`. ~3–5× smaller **everywhere** (game tree,
-  wire, SQLite, UI, diff-load). Touches diff / FieldIndex / Pivot / SPC / export +
-  SQLite back-compat.
-- [ ] **30c — UI stream-to-disk**: write chunks to SQLite incrementally, don't
-  retain the full envelope; bounds UI peak.
-- [ ] **30b — game stream-decode**: decode-on-demand in `snapshotChunk`, free per
-  chunk; bounds game peak. Gated on the Mono per-chunk-attach freeze (ship
-  IL2CPP-first; session-held attach or per-chunk gc drain for Mono).
+- [x] **Interim — reduce captured volume** (Phase 16.7): `instanceDecodeBudget`
+  (default 50000, UI control) + ascending-population plan sort (truncation drops
+  high-population noise, keeps low-population game-state classes) + lower default
+  `instanceCap` (512→256) + process-memory watchdog (stops decode before OOM,
+  reports `truncatedByMemory`/`truncatedByCount`).
+- [x] **30a-1 — deduped wire**: DLL emits field `schema` once per class +
+  per-instance value-only `v[]` (both IL2CPP + Mono). UI `NormalizeDeduped`
+  re-expands on receive → zero consumer/SQLite change. Shrinks the game-side
+  decode tree + wire.
+- [x] **30a-2 — value compaction**: values stored as raw JSON text
+  (`SnapshotFieldEntry.ValueRaw`) via `RawJsonStringConverter`; `Value`
+  (`JsonElement?`) is a computed accessor → drops the millions of JsonDocuments,
+  consumers unchanged. Interner dedups `ValueRaw`.
+  **Result (Utawarerumono, budget 50000): decode 660s→65s; game 10.8→6.9 GB; UI
+  14.7 GB → ~1 GB/snap steady (3 snaps ≈ 3 GB). 595 tests green.** 活俠傳 (Mono
+  x86) verified: 4 snaps, game ~1.1 GB, UI 805 MB incl. Diff+SPC.
 
-Interim shipped (Phase 16.7): `instanceDecodeBudget` + ascending-population sort +
-lower default `instanceCap` keep the current build usable until Phase 30 lands.
-
-**Streaming bounds the transient peak; dedup shrinks the actual snapshot — both are
-needed, dedup first.**
+**Deferred (optional, none pressing — see internals doc §16.8):**
+- [ ] **schema-retention dedup** — fold per-field name/type/offset/from into a
+  shared `SnapshotFieldSchema` ref (~48 B/field). Judged **low-ROI**: value
+  compaction was the decisive win; budget is the right knob per game. Only worth
+  it for routinely capturing *full* snapshots.
+- [ ] **30b — game stream-decode** / **30c — UI stream-to-disk** — bound the
+  transient peak for full captures. Only needed if pushing the budget toward
+  complete captures of huge games.
 
 ---
 
