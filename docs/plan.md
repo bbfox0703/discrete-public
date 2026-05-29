@@ -3,8 +3,27 @@
 > 跨 PC 共用的開發進度文件。每完成一個小步驟就把 `[ ]` 改成 `[x]` 並 commit。
 > 所有里程碑驗收條件 (Acceptance) 必須通過才能往下一階段。
 
-**Last updated**: 2026-05-26 night — **Phase 29b (Snapshot UI + Diff) SHIPPED + LIVE-VERIFIED across all three Mono / IL2CPP targets, build #637**. Phase 29a + 27c also closed. Five iterations of Mono-freeze debugging — the root cause turned out to be `mono_class_vtable` called from our worker thread leaving BDWGC tracking entries that the game's main thread had to GC catch-up on. Fix: skip static field VALUE capture on Mono (metadata only). See lessons-learned.md §"Phase 29a-v4 — mono_class_vtable from worker thread wedges game main thread post-RPC".
-**Current phase**: **✅ Phase 28b-v3.0 shipped + LIVE-VERIFIED, ⚠ v3.1 attempted but hit v29 layout dead-end** (build #593). v3.0 lazy-init slot scanner works for slots that have been populated by ANY init mechanism — `SteamManager.s_instance` returns 11 chain-exact matches with no regression. v3.1 attempted to map never-populated slots to classes statically via token decode but discovered three layout hypotheses all fail on v29: (1) `types[]` index → out of range (29456 < 50999); (2) typeDefIndex via per-image typeStart + il2cpp_image_get_class → out of range (10001 < 50999); (3) `Il2CppMetadataRegistration.metadataUsages[]` is **NULL** in v29 (entire indirection system removed). v29's per-method init protocol uses a different lookup mechanism (likely `Il2CppMetadataUsageList` in global-metadata.dat) whose decode needs proper reverse-engineering — deferred to v3.2 (2-4 days). v3.0 + diagnostic infra (`diagnoseClassReferences`, `dumpLazyInitSlots`, `IL2CPPLazyInitSlotScanner`, `MetadataUsagesArray()`, `Test-LazyInitSlots.ps1`) all in place. Banner advisory + lessons-learned.md document the dead-end + v3.2 cookbook for next attempt.
+**Last updated**: 2026-05-29 — **Phase 30 (snapshot memory & speed) + scan P1/P2 all SHIPPED & merged to main** (build #820). Headline 30a/30b/30c done & live-verified; scan P1 (parallelization) + P2 (IL2CPP value-scan reverse-lookup interval-tree) done; plus low-RAM advisory banner + count-based per-PID log retention + DataGrid h-scroll fix. dev == main == origin. 603 UI tests green, both DLLs build clean.
+**Current phase**: **✅ Phase 30 complete (30a/30b/30c) + scan P1/P2 shipped.** Nothing mid-flight — all work committed + merged. See **"Next session pick-up"** below for the open backlog (all deferred-by-design, none blocking).
+
+### Next session pick-up (open backlog — all deferred, none blocking)
+
+*(The active Phase 30 + scan-accel work is shipped; these are the remaining optional follow-ups, captured here since the in-session Task list doesn't persist.)*
+
+**Scan line** (details in [Memory-Scanning-Internals.md](Memory-Scanning-Internals.md) §16.3 / §16.5b):
+- **P2 Mono port** — port the §16.5b interval-tree to `Mono::WhatIsAt` (extract a Mono `ResolveInstanceLookup` + a Mono `ReverseLookupIndex`, mirror of the IL2CPP work in `IL2CPPAddressFinder.cpp`). IL2CPP shipped build #814; 活俠傳 value scans would benefit.
+- **P2 SIMD inner loop** — `Vector256` anchor for `ScanForString`, 4-qword compare for `ScanForPointer`.
+- **Mono `FindAllInstances` parallelization** — P1 follow-up; still single-threaded (IL2CPP already parallel).
+- **P3 VirtualQuery cache** — low priority, P1 largely removed the need.
+
+**Snapshot line** (details in Phase 30 block below + [snapshot-streaming-dedup.md](snapshot-streaming-dedup.md)):
+- **30c transient ~10 GB UI peak** — lower the streaming chunk size (100→25); the per-chunk re-expansion is the peak. Now more relevant given the low-RAM banner. Needs a re-smoke.
+- **30b Mono game-side stream-decode** — session-held-attach lifecycle; HIGH-RISK (活俠傳 BDWGC freeze). Mono keeps decode-in-Begin until proven.
+- **schema-retention dedup** — fold per-field metadata into a shared ref; LOW-ROI per design doc.
+
+---
+
+**Previous current-phase**: **✅ Phase 28b-v3.0 shipped + LIVE-VERIFIED, ⚠ v3.1 attempted but hit v29 layout dead-end** (build #593). v3.0 lazy-init slot scanner works for slots that have been populated by ANY init mechanism — `SteamManager.s_instance` returns 11 chain-exact matches with no regression. v3.1 attempted to map never-populated slots to classes statically via token decode but discovered three layout hypotheses all fail on v29: (1) `types[]` index → out of range (29456 < 50999); (2) typeDefIndex via per-image typeStart + il2cpp_image_get_class → out of range (10001 < 50999); (3) `Il2CppMetadataRegistration.metadataUsages[]` is **NULL** in v29 (entire indirection system removed). v29's per-method init protocol uses a different lookup mechanism (likely `Il2CppMetadataUsageList` in global-metadata.dat) whose decode needs proper reverse-engineering — deferred to v3.2 (2-4 days). v3.0 + diagnostic infra (`diagnoseClassReferences`, `dumpLazyInitSlots`, `IL2CPPLazyInitSlotScanner`, `MetadataUsagesArray()`, `Test-LazyInitSlots.ps1`) all in place. Banner advisory + lessons-learned.md document the dead-end + v3.2 cookbook for next attempt.
 
 **Previous current-phase**: **✅ Phase 28b IL2CPP root-cause CONFIRMED + v1 advisory shipped** (build #555-#557). Build #546's diagnostic logging paid off: live re-run on SaGa F2R proved `il2cpp_class_get_static_data` returns a runtime-heap-allocated pointer outside GameAssembly.dll. **v1 fix C** ships a yellow advisory banner explaining the limitation; **Phase 28b-v2** designed + shipped same session (build #565). Also: Symbol Finder "Static only" toggle + per-asm limit in multi-asm scans, PipeServer disconnect-time GC drain.
 
