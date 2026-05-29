@@ -5,14 +5,14 @@
 > hardening, test matrix, docs finalization. All shipped + closed +
 > live-verified long before this archive was carved.
 >
-> Carved out of [plan.md](plan.md) on 2026-05-19 to keep the live
+> Carved out of [plan.md](../plan.md) on 2026-05-19 to keep the live
 > phase ledger focused on current work (Phase 17 onward). Phase
-> Overview table in [plan.md](plan.md) still references each phase
+> Overview table in [plan.md](../plan.md) still references each phase
 > by number; this file holds the detailed acceptance checklists and
 > hand-off notes for each one.
 >
 > **Editing convention**: don't. These phases are done. New work
-> appends a new phase to [plan.md](plan.md), not this archive.
+> appends a new phase to [plan.md](../plan.md), not this archive.
 
 ---
 
@@ -105,7 +105,7 @@
 ## Phase 5 — IL2CPP Backend (Metadata Deep Parse)
 
 - [x] `il2cpp/MetadataParser.{h,cpp}` — locate `global-metadata.dat`, validate magic `0xFAB11BAF`, version dispatch
-- [x] Version-specific header structs — v24 / v27 / v29 / v31 all dispatched (Phase 14c). Cross-checked against upstream Unity source in `vendor/libil2cpp/`; full audit in [docs/il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md)
+- [x] Version-specific header structs — v24 / v27 / v29 / v31 all dispatched (Phase 14c). Cross-checked against upstream Unity source in `vendor/libil2cpp/`; full audit in [docs/il2cpp-metadata-crosscheck.md](../il2cpp-metadata-crosscheck.md)
 - [x] String heap reader (`nameIndex` → UTF-8 string)
 - [partial] Tables: TypeDefinitions ✅, FieldDefinitions ✅, **StringLiterals ✅**, FieldDefaults ✅; MethodDefinitions deferred (no current consumer)
 - [x] Cross-link metadata index ↔ runtime `Il2CppClass*` via `Il2CppMetadataRegistration` AOB — landed commit `5c59077` (2026-04-29). See "2d follow-up" below for the full description.
@@ -118,7 +118,7 @@ const literals (e.g. `const int kFoo = 42`) in
 `il2cppGetMetadataTypeFields` can also be type-aware-decoded.
 
 **Approach used** — *structure-shape* scan, not a literal-byte AOB. See
-[IL2CPPMetadataRegistration.cpp](../dll/src/il2cpp/IL2CPPMetadataRegistration.cpp):
+[IL2CPPMetadataRegistration.cpp](../../dll/src/il2cpp/IL2CPPMetadataRegistration.cpp):
 
 1. Enumerate every readable / non-executable / data PE section in
    `GameAssembly.dll`.
@@ -140,7 +140,7 @@ Per-field FieldDefault decode now produces typed `value` + `enc_bytes`
 unsigned int8…int64), 0x0C–0x0D (R4 / R8 float / double), 0x0E
 (String — handled separately, doesn't need the runtime types[] table).
 
-**Smoke test**: [Test-MetadataFields.ps1](../tools/Test-MetadataFields.ps1)
+**Smoke test**: [Test-MetadataFields.ps1](../../tools/Test-MetadataFields.ps1)
 prints `Il2CppMetadataRegistration: YES/no` banner + per-field
 `tag=0x.. value=.. enc=NB` for every field with a default.
 
@@ -150,7 +150,7 @@ prints `Il2CppMetadataRegistration: YES/no` banner + per-field
 - v24 / v27 / v31 — ⏳ not formally validated. Structural-shape
   heuristic theoretically version-independent, but unverified.
   Quick win — recipe in
-  [STATUS.md §"Mono-side smoke procedure" pattern](STATUS.md).
+  [STATUS.md §"Mono-side smoke procedure" pattern](../STATUS.md).
 
 **Tag coverage extension** (out of scope, drip-feed): tags 0x11
 (ValueType), 0x12 (Class), 0x1C (Object) etc. for non-primitive const
@@ -336,7 +336,7 @@ For 32-bit Mono targets today: the proxy install path *should* still work becaus
 
 - [x] **14a** auto-disconnect on pipe teardown: `PipeClient` raises a `Disconnected` event when next read fails; `MainWindowViewModel` runs the same teardown the explicit Disconnect does, tagged `(game exited)`. Reconnect retry sized to the proxy's startup window — 12 attempts × 600 ms = ~7 s.
 - [x] **14b** stripped-metadata banner: opportunistic post-handshake `getMetadataStats` call surfaces `partial_strip` / `heavy_strip` verdicts as a yellow banner.
-- [x] **14c** IL2CPP metadata v24 / v27 / v29 / v31 dispatch — empirically-verified TypeDefinition layouts, six games tested, all four versions covered. Cross-checked against upstream Unity source in `vendor/libil2cpp/`; full audit captured in [docs/il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md).
+- [x] **14c** IL2CPP metadata v24 / v27 / v29 / v31 dispatch — empirically-verified TypeDefinition layouts, six games tested, all four versions covered. Cross-checked against upstream Unity source in `vendor/libil2cpp/`; full audit captured in [docs/il2cpp-metadata-crosscheck.md](../il2cpp-metadata-crosscheck.md).
 - [x] **14d** Mono thread-attach audit: every direct `r.<runtime_fn>` call in pipe handlers reviewed; the only gap (walkArray's Mono element-class lookup running un-attached) fixed. Nested attach/detach deliberately avoided after build #54.
 - [x] **14e** log rotation: code review confirmed `RotateIfNeeded` is correct (4 files × 8 MB caps); `tools/Get-LogStats.ps1` ships for post-session spot checks.
 - [x] **14f** SEH-leaf audit: every `__try` body in `dll/src/` verified leaf-shape (one fn call or one memcpy). Both rules (SEH-leaf + Mono attach policy) codified in `Archiutecture.md`'s "Rules (MUST follow)".
@@ -353,7 +353,7 @@ For 32-bit Mono targets today: the proxy install path *should* still work becaus
 
 ## Phase 15 — Test Matrix
 
-Detailed ledger in [docs/test-matrix.md](test-matrix.md). Summary:
+Detailed ledger in [docs/test-matrix.md](../test-matrix.md). Summary:
 
 ### Game / Engine combinations (verified)
 
@@ -368,7 +368,7 @@ Detailed ledger in [docs/test-matrix.md](test-matrix.md). Summary:
 | 7 | Hollow Knight Silksong | Unity 6 | Mono (bdwgc) | n/a | ✅ Live `PlayerData` walk + symbol registration end-to-end |
 | 8 | BongoCat | 2022.x | Mono | n/a | ✅ Reference target during Phase 3 bringup |
 
-All six leading types in each IL2CPP game match canonical `<Module>` / anonymous-types / `Mono.Runtime` etc. with correct IL token (`0x02000003` at row 2). v24/v27/v29/v31 TypeDefinition layouts cross-checked against Unity's official sources in `vendor/libil2cpp/` — see [docs/il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md).
+All six leading types in each IL2CPP game match canonical `<Module>` / anonymous-types / `Mono.Runtime` etc. with correct IL token (`0x02000003` at row 2). v24/v27/v29/v31 TypeDefinition layouts cross-checked against Unity's official sources in `vendor/libil2cpp/` — see [docs/il2cpp-metadata-crosscheck.md](../il2cpp-metadata-crosscheck.md).
 
 ### Cheat Engine compat
 

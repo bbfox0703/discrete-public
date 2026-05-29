@@ -3,6 +3,8 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 > For detailed specs, implementation history, and debugging notes, see the **[docs/](docs/)** directory.
+>
+> **進度與待辦 (start here)**: [docs/plan.md](docs/plan.md) — 正典 phase ledger + 集中 **Open Backlog / TODO**。目前狀態速覽見 [docs/STATUS.md](docs/STATUS.md);完成 phase 的長篇寫作在 [docs/archive/](docs/archive/)。
 
 ## Code Changes 
 - When asked to rename, refactor, or restructure modules, ALWAYS modify the actual code files (rename files, update imports, change class names) — not just documentation or naming tables.

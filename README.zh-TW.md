@@ -1,6 +1,6 @@
 # discrete — Unity Cheat Engine Dumper
 
-[![Phase 19](https://img.shields.io/badge/phase-19_(Lua--callable_methods)_shipped-success)](docs/STATUS.md)
+[![Phase 30](https://img.shields.io/badge/phase-30_(snapshot_memory_%26_speed)_shipped-success)](docs/plan.md)
 [![Backends](https://img.shields.io/badge/backends-Mono_x64_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
 [![AOT](https://img.shields.io/badge/UI-Avalonia_12_AOT_(0%2F0_warnings)-purple)]()
 [![License](https://img.shields.io/badge/license-TBD-lightgrey)]()
@@ -53,8 +53,9 @@
 - **Offline metadata CLI** — `metadata-cli.exe` 可獨立 parse
   `global-metadata.dat` (不需開遊戲),適合做 RE 探勘。
 
-完整 "已 ship 內容" 看 [docs/STATUS.md](docs/STATUS.md);完整 phase
-ledger 看 [docs/plan.md](docs/plan.md)。
+正典 phase ledger + **集中 Open Backlog / TODO** 看 [docs/plan.md](docs/plan.md);
+[docs/STATUS.md](docs/STATUS.md) 是一行式狀態指標,已完成 phase 的長篇寫作在
+[docs/archive/](docs/archive/)。
 
 ## 架構
 
@@ -179,8 +180,9 @@ Silksong (IL2CPP v31) 等。
 
 | 檔案 | 內容 |
 |---|---|
-| [STATUS.md](docs/STATUS.md) | 已 ship 什麼、還開著什麼、上一次 session 怎麼接 |
-| [plan.md](docs/plan.md) | 正典 phase ledger (0 → 19) — 每個 phase 的目標、子任務、驗收條件 |
+| [plan.md](docs/plan.md) | **正典 phase ledger (0 → 30) + 集中 Open Backlog / TODO** — 從這裡開始 |
+| [STATUS.md](docs/STATUS.md) | 一行式狀態指標(目前 build / phase → plan.md) |
+| [archive/](docs/archive/) | 已完成 phase 的長篇寫作 + 舊 session hand-offs |
 | [Archiutecture.md](docs/Archiutecture.md) | 規則與不變量 (rule of one backend、AOT mandate、單一 instance、async everywhere…) |
 | [pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI 線上協議 (每個指令、每個 shape) |
 | [test-matrix.md](docs/test-matrix.md) | 已驗證遊戲 + 工具版本 |

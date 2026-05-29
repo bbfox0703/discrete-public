@@ -1,6 +1,6 @@
 # discrete — Unity Cheat Engine Dumper
 
-[![Phase 19](https://img.shields.io/badge/phase-19_(Lua--callable_methods)_shipped-success)](docs/STATUS.md)
+[![Phase 30](https://img.shields.io/badge/phase-30_(snapshot_memory_%26_speed)_shipped-success)](docs/plan.md)
 [![Backends](https://img.shields.io/badge/backends-Mono_x64_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
 [![AOT](https://img.shields.io/badge/UI-Avalonia_12_AOT_(0%2F0_warnings)-purple)]()
 [![License](https://img.shields.io/badge/license-TBD-lightgrey)]()
@@ -56,9 +56,11 @@ Inject a single backend DLL into a running Unity game and get:
   `global-metadata.dat` standalone (no game required) for
   reverse-engineering scratch work.
 
-See [docs/STATUS.md](docs/STATUS.md) for the canonical "what's
-shipped" view and [docs/plan.md](docs/plan.md) for the full phase
-ledger.
+See [docs/plan.md](docs/plan.md) for the canonical phase ledger plus
+the centralized **Open Backlog / TODO** — start there.
+[docs/STATUS.md](docs/STATUS.md) is a one-line status pointer, and
+[docs/archive/](docs/archive/) holds the long-form write-ups for
+shipped phases.
 
 ## Architecture
 
@@ -187,8 +189,9 @@ SaGa F2R (IL2CPP v29), BongoCat (Mono bdwgc), Farthest Frontier
 
 | File | What it covers |
 |---|---|
-| [STATUS.md](docs/STATUS.md) | What's shipped, what's open, how to pick up where the last session ended |
-| [plan.md](docs/plan.md) | Canonical phase ledger (0 → 19) — every phase's goal, sub-tasks, acceptance |
+| [plan.md](docs/plan.md) | **Canonical phase ledger (0 → 30) + centralized Open Backlog / TODO** — start here |
+| [STATUS.md](docs/STATUS.md) | One-line status pointer (current build / phase → plan.md) |
+| [archive/](docs/archive/) | Long-form write-ups for shipped phases + old session hand-offs |
 | [Archiutecture.md](docs/Archiutecture.md) | Rules and invariants (rule of one backend, AOT mandate, single-instance, async everywhere…) |
 | [pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI wire contract (every command, every shape) |
 | [test-matrix.md](docs/test-matrix.md) | Verified games + tooling versions |
