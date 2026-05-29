@@ -2004,11 +2004,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 hits++;
                 continue;
             }
-            if (f.Value.HasValue &&
-                (f.Value.Value.ValueKind == JsonValueKind.Number ||
-                 f.Value.Value.ValueKind == JsonValueKind.String))
+            // Phase 30a-2: grab the computed value once (parses ValueRaw).
+            if (f.Value is { } fv &&
+                (fv.ValueKind == JsonValueKind.Number ||
+                 fv.ValueKind == JsonValueKind.String))
             {
-                bits.Add($"{f.Name}={f.Value.Value.GetRawText().Trim('"')}");
+                bits.Add($"{f.Name}={fv.GetRawText().Trim('"')}");
                 hits++;
             }
         }
@@ -2574,16 +2575,16 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     private static string FormatArrayElement(SnapshotArrayElement el)
     {
         if (!string.IsNullOrEmpty(el.Error)) return $"(err: {el.Error})";
-        if (el.Value.HasValue && el.Value.Value.ValueKind != JsonValueKind.Null
-                              && el.Value.Value.ValueKind != JsonValueKind.Undefined)
+        if (el.Value is { } ev && ev.ValueKind != JsonValueKind.Null
+                              && ev.ValueKind != JsonValueKind.Undefined)
         {
-            return el.Value.Value.ValueKind switch
+            return ev.ValueKind switch
             {
-                JsonValueKind.String => el.Value.Value.GetString() ?? "(null)",
-                JsonValueKind.Number => el.Value.Value.GetRawText(),
+                JsonValueKind.String => ev.GetString() ?? "(null)",
+                JsonValueKind.Number => ev.GetRawText(),
                 JsonValueKind.True   => "true",
                 JsonValueKind.False  => "false",
-                _ => el.Value.Value.GetRawText(),
+                _ => ev.GetRawText(),
             };
         }
         if (!string.IsNullOrEmpty(el.String)) return $"\"{el.String}\"";
@@ -2644,16 +2645,16 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             if (f.Error == "static_value_not_captured") return "(static, value capture disabled)";
             return $"(err: {f.Error})";
         }
-        if (f.Value.HasValue && f.Value.Value.ValueKind != JsonValueKind.Null
-                              && f.Value.Value.ValueKind != JsonValueKind.Undefined)
+        if (f.Value is { } fev && fev.ValueKind != JsonValueKind.Null
+                              && fev.ValueKind != JsonValueKind.Undefined)
         {
-            return f.Value.Value.ValueKind switch
+            return fev.ValueKind switch
             {
-                JsonValueKind.String => f.Value.Value.GetString() ?? "(null)",
-                JsonValueKind.Number => f.Value.Value.GetRawText(),
+                JsonValueKind.String => fev.GetString() ?? "(null)",
+                JsonValueKind.Number => fev.GetRawText(),
                 JsonValueKind.True   => "true",
                 JsonValueKind.False  => "false",
-                _ => f.Value.Value.GetRawText(),
+                _ => fev.GetRawText(),
             };
         }
         if (!string.IsNullOrEmpty(f.StringValue))

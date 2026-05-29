@@ -1065,7 +1065,34 @@ public sealed class SnapshotFieldEntry
     [JsonPropertyName("is_enum")]           public bool?        IsEnum           { get; set; }
     [JsonPropertyName("is_value_type")]     public bool?        IsValueType      { get; set; }
     [JsonPropertyName("address")]           public string?      Address          { get; set; }
-    [JsonPropertyName("value")]             public JsonElement? Value            { get; set; }
+
+    /// <summary>Phase 30a-2 value compaction — the field's scalar value as raw
+    /// JSON text (e.g. <c>325</c>, <c>true</c>, <c>"hi"</c>). Stored as a small
+    /// string instead of a <see cref="JsonElement"/> so the model doesn't retain
+    /// a standalone <c>JsonDocument</c> per value. Serializes under the wire key
+    /// <c>"value"</c> via <see cref="RawJsonStringConverter"/> (lossless), so old
+    /// snapshots round-trip unchanged.</summary>
+    [JsonPropertyName("value")]
+    [JsonConverter(typeof(RawJsonStringConverter))]
+    public string? ValueRaw { get; set; }
+
+    /// <summary>Back-compat accessor: the value as a <see cref="JsonElement"/>.
+    /// GET parses <see cref="ValueRaw"/> on demand (transient document, GC'd);
+    /// SET stores the element's raw text. Not serialized (the wire/DB key is
+    /// <c>"value"</c> via <see cref="ValueRaw"/>). Hot paths should prefer
+    /// <see cref="ValueRaw"/> to avoid the per-access parse.</summary>
+    [JsonIgnore]
+    public JsonElement? Value
+    {
+        get
+        {
+            if (ValueRaw is null) return null;
+            try { return JsonDocument.Parse(ValueRaw).RootElement; }
+            catch (JsonException) { return null; }
+        }
+        set => ValueRaw = value is { } v ? v.GetRawText() : null;
+    }
+
     [JsonPropertyName("ptr")]               public string?      Ptr              { get; set; }
     [JsonPropertyName("string")]            public string?      StringValue      { get; set; }
     [JsonPropertyName("string_length")]     public int?         StringLength     { get; set; }
@@ -1100,7 +1127,27 @@ public sealed class SnapshotFieldSchema
 public sealed class SnapshotArrayElement
 {
     [JsonPropertyName("index")]   public int          Index   { get; set; }
-    [JsonPropertyName("value")]   public JsonElement? Value   { get; set; }
+
+    /// <summary>Phase 30a-2 value compaction — see
+    /// <see cref="SnapshotFieldEntry.ValueRaw"/>. Raw JSON text backing store.</summary>
+    [JsonPropertyName("value")]
+    [JsonConverter(typeof(RawJsonStringConverter))]
+    public string?      ValueRaw { get; set; }
+
+    /// <summary>Back-compat accessor (computed). See
+    /// <see cref="SnapshotFieldEntry.Value"/>.</summary>
+    [JsonIgnore]
+    public JsonElement? Value
+    {
+        get
+        {
+            if (ValueRaw is null) return null;
+            try { return JsonDocument.Parse(ValueRaw).RootElement; }
+            catch (JsonException) { return null; }
+        }
+        set => ValueRaw = value is { } v ? v.GetRawText() : null;
+    }
+
     [JsonPropertyName("ptr")]     public string?      Ptr     { get; set; }
     [JsonPropertyName("string")]  public string?      String  { get; set; }
     [JsonPropertyName("error")]   public string?      Error   { get; set; }

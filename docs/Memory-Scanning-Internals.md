@@ -663,11 +663,21 @@ instance）——ascending-population sort 保留低 population 的遊戲狀態 
 雜訊。要更完整 → 調高 `instanceDecodeBudget` 或縮 assembly scope（後者大者仍需 30a-2 才
 不會讓 UI 隨之放大）。
 
+**30a-2 value compaction（已實作 2026-05-29）**：profiling 釐清 UI 記憶體主因**不是**
+schema 重複（29g-1 interning 已 dedup 字串），而是**每個 value 一個 `JsonElement` →
+STJ 各自配一個 standalone `JsonDocument`**（snapshot 規模下數百萬個 = UI 主要 retained
+成本）。修法：`SnapshotFieldEntry` / `SnapshotArrayElement` 的值改存 raw JSON 文字
+（`ValueRaw` string，`[JsonConverter] RawJsonStringConverter` 掛在 wire key `"value"`
+上）；`Value`（`JsonElement?`）改為 computed accessor（get 時解析、set 時取 raw text）
+→ **所有 consumer（diff/FieldIndex/Pivot/SPC/export）零改動**，SnapshotStore SQLite
+round-trip 無損（converter `WriteRawValue`，舊快照相容）。`SnapshotInterner` 順手 dedup
+`ValueRaw`（0/1/true/常見值大量重複）。3 個熱格式化點改成單次解析。595 測試綠（+4）。
+→ 移除數百萬 JsonDocument，UI 隨 budget 線性且輕量。
+
 **尚未做**：
-- **30a-2（UI retention dedup）**：UI 改成保留 deduped 模型（`SnapshotFieldSchema` +
-  per-instance value 陣列），不再 re-expand 成 12M 個 `SnapshotFieldEntry` → 才會打到
-  UI 端 14.7GB。需改 diff/FieldIndex/Pivot/SPC/export/SnapshotStore + 向後相容讀舊
-  snapshot。**(broad refactor，gated)**。在目前 50000 budget 下 UI 已 3.3GB 可接受；
-  此項僅在使用者要抓更大/完整快照（調高 budget）時才必要。
+- **schema-retention dedup**（combined 的另一半，次要）：把 `SnapshotFieldEntry` 的
+  name/type/offset/from 6 個欄位改為共用 `SnapshotFieldSchema` ref（每欄位省 ~48B；
+  full capture 12M 欄位 ≈ ~576MB）。churn 高（改 Fields 存取或加 Sch ref delegation +
+  舊格式合成 schema），**僅在 value compaction 後高 budget 仍嫌重時才做**。先實測再決定。
 - **Mono emit dedup**（目前 Mono 仍送舊 inline 格式；UI re-expand 兩種都吃，故相容）。
 - **30b/30c streaming**（見 docs/snapshot-streaming-dedup.md）。

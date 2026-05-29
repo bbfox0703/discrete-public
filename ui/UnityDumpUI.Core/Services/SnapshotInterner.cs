@@ -60,14 +60,22 @@ public static class SnapshotInterner
         f.Name = P(pool, f.Name);
         f.Type = P(pool, f.Type);
         if (f.From is { } from) f.From = P(pool, from);
+        // Phase 30a-2: the compacted value text (ValueRaw) repeats heavily across
+        // instances (0 / 1 / true / false / common ints + floats), so dedup it
+        // too — unlike the inherently-unique Ptr / Address / StringValue, which
+        // we still leave alone.
+        if (f.ValueRaw is { } vr) f.ValueRaw = P(pool, vr);
         if (f.ArrayElements is { } arr)
         {
             if (arr.ElementType is { } et) arr.ElementType = P(pool, et);
             // Layer B (Phase 29f): reference-array element inner fields nest one
             // level — dedup their Name/Type/From against the same pool.
             foreach (var el in arr.Elements)
+            {
+                if (el.ValueRaw is { } evr) el.ValueRaw = P(pool, evr);
                 if (el.Fields is { } elFields)
                     foreach (var ef in elFields) InternField(pool, ef);
+            }
         }
     }
 
