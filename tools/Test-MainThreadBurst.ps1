@@ -62,7 +62,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Open-Pipe {
-    $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'UnityDumpBfx', 'InOut')
+    $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'DiscreteBfx', 'InOut')
     $c.Connect(5000)
     return @{
         client = $c

@@ -18,7 +18,7 @@
 
 #include <cstdint>
 
-namespace UnityCEDumper::Mono::MainThreadHook {
+namespace Discrete::Mono::MainThreadHook {
 
 /// Install the runtime_invoke detour. Requires:
 ///   * MonoResolver has bound `mono_runtime_invoke`
@@ -33,4 +33,4 @@ void Uninstall();
 /// True if Install succeeded and the detour is currently active.
 bool IsInstalled();
 
-}  // namespace UnityCEDumper::Mono::MainThreadHook
+}  // namespace Discrete::Mono::MainThreadHook

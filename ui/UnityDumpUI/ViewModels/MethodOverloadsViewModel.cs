@@ -484,7 +484,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// DLL-free Mono path: copy an AA script that calls
     /// <c>mono_registerSymbolEx</c> from <c>mono_registersymbol_helpers.lua</c>
     /// (lazy-loaded out of the CT on enable). Works without ever
-    /// injecting the UnityCEDumper DLL — the user's existing
+    /// injecting the Discrete DLL — the user's existing
     /// <c>mono_*</c> Lua helper pattern, generated for them.
     /// Mono-only — gated on <see cref="IsMonoBackend"/>.
     /// </summary>

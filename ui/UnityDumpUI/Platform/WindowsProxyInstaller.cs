@@ -23,8 +23,8 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
     // they cannot be renamed.
     private const string VersionDll = "version.dll";
     private const string WinmmDll   = "winmm.dll";
-    private const string MonoDll    = "UnityDumper-Mono.dll";
-    private const string Il2cppDll  = "UnityDumper-IL2CPP.dll";
+    private const string MonoDll    = "Discrete-Mono.dll";
+    private const string Il2cppDll  = "Discrete-IL2CPP.dll";
 
     public Task<ProxyInstallStatus> DetectAsync(string gameExePath, CancellationToken ct = default)
     {
@@ -164,7 +164,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
 
         var st = DetectSync(gameExePath);
         return new ProxyOperationResult(true,
-            $"Installed {proxyName} + UnityDumper-{{Mono,IL2CPP}}.dll in {dstDir}", st);
+            $"Installed {proxyName} + Discrete-{{Mono,IL2CPP}}.dll in {dstDir}", st);
     }
 
     private static ProxyOperationResult UninstallSync(string gameExePath)

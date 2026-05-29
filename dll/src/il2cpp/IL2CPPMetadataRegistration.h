@@ -12,7 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace UnityCEDumper::IL2CPP::MetadataRegistration {
+namespace Discrete::IL2CPP::MetadataRegistration {
 
 // Lazy-init: first call AOB-scans GameAssembly.dll. Returns true once the
 // struct is located (cached for the lifetime of the DLL).
@@ -44,4 +44,4 @@ std::uint8_t GetTypeTag(std::int32_t typeIndex);
 const void* const* MetadataUsagesArray();
 std::size_t        MetadataUsagesCount();
 
-}  // namespace UnityCEDumper::IL2CPP::MetadataRegistration
+}  // namespace Discrete::IL2CPP::MetadataRegistration

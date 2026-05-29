@@ -18,7 +18,7 @@
 #include <mutex>
 #include <string>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -169,4 +169,4 @@ std::size_t GetStaticFieldsOffsetInClass() {
     return g_offset;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

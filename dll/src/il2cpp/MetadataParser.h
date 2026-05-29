@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP::Metadata {
+namespace Discrete::IL2CPP::Metadata {
 
 class Parser {
 public:
@@ -320,4 +320,4 @@ private:
     std::int32_t stringLiteralEntryStride_ = 8;
 };
 
-}  // namespace UnityCEDumper::IL2CPP::Metadata
+}  // namespace Discrete::IL2CPP::Metadata

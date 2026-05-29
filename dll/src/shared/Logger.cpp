@@ -14,7 +14,7 @@
 
 namespace fs = std::filesystem;
 
-namespace UnityCEDumper::Log {
+namespace Discrete::Log {
 
 namespace {
 
@@ -116,4 +116,4 @@ void Shutdown() {
     g_initialized = false;
 }
 
-}  // namespace UnityCEDumper::Log
+}  // namespace Discrete::Log

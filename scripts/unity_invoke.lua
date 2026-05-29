@@ -7,7 +7,7 @@
 -- invoke managed methods (Mono JIT or IL2CPP AOT) from CE Lua with
 -- marshaled args + typed return values + managed-exception capture.
 --
--- Wire spec: docs/lua-invoke.md. Same `\\.\pipe\UnityDumpBfx` protocol
+-- Wire spec: docs/lua-invoke.md. Same `\\.\pipe\DiscreteBfx` protocol
 -- as the sibling scripts; assumes the DLL is already injected (run
 -- `unity_dump.lua` first, or have DiscreteUI.exe / a deployed proxy
 -- inject it).
@@ -76,7 +76,7 @@
 -- GC-root caveat, and the marshaling convention shared with the UI /
 -- PowerShell smoke.
 
-local TAG = "[UnityCEDumper.invoke]"
+local TAG = "[Discrete.invoke]"
 local function log (fmt, ...) print(string.format(TAG .. " "       .. fmt, ...)) end
 local function warn(fmt, ...) print(string.format(TAG .. " WARN "  .. fmt, ...)) end
 local function err (fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
@@ -241,7 +241,7 @@ end
 -- ---------- Pipe RPC ----------------------------------------------------
 -- Same retry scaffolding + main-thread yield as the sibling scripts.
 
-local PIPE   = [[\\.\pipe\UnityDumpBfx]]
+local PIPE   = [[\\.\pipe\DiscreteBfx]]
 local nextId = 0
 
 local function rpc(cmd, args)

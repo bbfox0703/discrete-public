@@ -17,7 +17,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -671,4 +671,4 @@ CallMethodResult CallMethod(Il2CppClass* klass,
     return result;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

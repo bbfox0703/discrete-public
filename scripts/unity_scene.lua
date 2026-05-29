@@ -94,7 +94,7 @@
 -- docs/lua-invoke.md for `callMethod` marshaling rules. Verified against
 -- (Phase 20d): TBD on first live test pass.
 
-local TAG = "[UnityCEDumper.scene]"
+local TAG = "[Discrete.scene]"
 local function log (fmt, ...) print(string.format(TAG .. " "       .. fmt, ...)) end
 local function warn(fmt, ...) print(string.format(TAG .. " WARN "  .. fmt, ...)) end
 local function err (fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
@@ -240,7 +240,7 @@ end
 
 -- ---------- Pipe RPC ----------------------------------------------------
 
-local PIPE   = [[\\.\pipe\UnityDumpBfx]]
+local PIPE   = [[\\.\pipe\DiscreteBfx]]
 local nextId = 0
 
 local function rpc(cmd, args)

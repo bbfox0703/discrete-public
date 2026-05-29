@@ -33,7 +33,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace UnityCEDumper::Phase_D::Registration {
+namespace Discrete::Phase_D::Registration {
 
 namespace {
 
@@ -252,4 +252,4 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
     return std::nullopt;
 }
 
-}  // namespace UnityCEDumper::Phase_D::Registration
+}  // namespace Discrete::Phase_D::Registration

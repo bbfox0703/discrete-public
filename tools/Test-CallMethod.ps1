@@ -147,7 +147,7 @@ switch ($Scenario) {
     }
 }
 
-$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'UnityDumpBfx', 'InOut')
+$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'DiscreteBfx', 'InOut')
 try { $client.Connect($TimeoutMs) }
 catch { throw 'Pipe connect failed. Inject DLL first via Test-Handshake.ps1.' }
 

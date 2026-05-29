@@ -16,7 +16,7 @@
 #include <string_view>
 #include <unordered_map>
 
-namespace UnityCEDumper::PipeServer {
+namespace Discrete::PipeServer {
 
 using Handler = std::function<nlohmann::json(const nlohmann::json& args)>;
 
@@ -55,4 +55,4 @@ void Stop();
 // True if the server thread is currently running.
 bool IsRunning() noexcept;
 
-}  // namespace UnityCEDumper::PipeServer
+}  // namespace Discrete::PipeServer

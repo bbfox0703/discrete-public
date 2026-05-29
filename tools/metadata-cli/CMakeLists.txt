@@ -30,7 +30,7 @@ target_include_directories(metadata-cli PRIVATE
 # Logger emits Log::Write(...) calls but is a no-op until Log::Init() is
 # called; the CLI never inits, so the log dir under %LOCALAPPDATA% is not
 # touched. Keep the dependency anyway so the parser's existing
-# UnityCEDumper::Log::Write call sites link cleanly.
+# Discrete::Log::Write call sites link cleanly.
 
 set_target_properties(metadata-cli PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

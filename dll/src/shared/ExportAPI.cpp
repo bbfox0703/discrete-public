@@ -1,6 +1,6 @@
 // ExportAPI.cpp — implementation of the C ABI surface.
 
-#define UNITYCEDUMPER_BUILDING_DLL
+#define DISCRETE_BUILDING_DLL
 #include "ExportAPI.h"
 
 #include "AobPattern.h"
@@ -15,7 +15,7 @@
 #include "SnapshotSession.h"
 #include "ValueScanSession.h"
 
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
 #  include "../mono/MonoAddressFinder.h"
 #  include "../mono/MonoClassWalker.h"
 #  include "../mono/MonoDomain.h"
@@ -25,7 +25,7 @@
 #  include "../mono/MonoMethodInvoker.h"
 #  include "../mono/MonoResolver.h"
 #  include "../mono/MonoThreadAttach.h"
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
 #  include "../il2cpp/IL2CPPAddressFinder.h"
 #  include "../il2cpp/IL2CPPClassReferenceDiagnostic.h"
 #  include "../il2cpp/IL2CPPClassWalker.h"
@@ -120,13 +120,13 @@ constexpr double        kSnapshotAvailPhysFraction     = 0.60;
 // How often (in decoded instances) to re-sample process memory during decode.
 constexpr std::size_t   kSnapshotMemCheckInterval       = 2048;
 
-#if defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#if defined(DISCRETE_BACKEND_IL2CPP)
 // Namespace aliases so the decoder (defined here, before the handler-block
 // aliases at ~line 662) can use the short `Snapshot::` / `IL2CPP::` forms. Both
 // are re-aliased to the same target later — re-aliasing to an identical target
 // is well-formed, so this doesn't conflict.
-namespace Snapshot = ::UnityCEDumper::Snapshot;
-namespace IL2CPP   = ::UnityCEDumper::IL2CPP;
+namespace Snapshot = ::Discrete::Snapshot;
+namespace IL2CPP   = ::Discrete::IL2CPP;
 
 // Phase 30b — IL2CPP game-side streaming decoder. Owns the heap-walk result +
 // all the decode context snapshotBegin used to hold as locals, so snapshotChunk
@@ -238,7 +238,7 @@ public:
                 r.gc_collect(0);
                 auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - drainStart).count();
-                UnityCEDumper::Log::Write(UnityCEDumper::MagicStrings::LogCategoryScan,
+                Discrete::Log::Write(Discrete::MagicStrings::LogCategoryScan,
                     "snapshotChunk(IL2CPP) final-chunk drain " + std::to_string(drainMs) + " ms");
             }
             ::Sleep(500);
@@ -566,22 +566,22 @@ private:
     std::size_t   memCheckCounter_ = 0;
     bool          drained_         = false;
 };
-#endif  // UNITYCEDUMPER_BACKEND_IL2CPP
+#endif  // DISCRETE_BACKEND_IL2CPP
 
-constexpr UnityDumperBackend BackendOfBuild() {
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
-    return UnityDumperBackend_Mono;
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
-    return UnityDumperBackend_IL2CPP;
+constexpr DiscreteBackend BackendOfBuild() {
+#if defined(DISCRETE_BACKEND_MONO)
+    return DiscreteBackend_Mono;
+#elif defined(DISCRETE_BACKEND_IL2CPP)
+    return DiscreteBackend_IL2CPP;
 #else
-    return UnityDumperBackend_Unknown;
+    return DiscreteBackend_Unknown;
 #endif
 }
 
-constexpr const char* BackendName(UnityDumperBackend b) {
+constexpr const char* BackendName(DiscreteBackend b) {
     switch (b) {
-        case UnityDumperBackend_Mono:   return "Mono";
-        case UnityDumperBackend_IL2CPP: return "IL2CPP";
+        case DiscreteBackend_Mono:   return "Mono";
+        case DiscreteBackend_IL2CPP: return "IL2CPP";
         default: return "Unknown";
     }
 }
@@ -660,13 +660,13 @@ bool IsSystemOrEngineAssembly(const std::string& name) {
 }
 
 // Phase 27a — shared helpers for the scanFieldValue handler (both backends).
-// `Memory::` below resolves to UnityCEDumper::Memory:: via this using; the
+// `Memory::` below resolves to Discrete::Memory:: via this using; the
 // alternative is to fully qualify each occurrence, which makes the helper
 // signatures unreadable. Phase 27b adds the `ValueScan` alias for the
 // session container — same rationale.
-namespace Memory    = ::UnityCEDumper::Memory;
-namespace ValueScan = ::UnityCEDumper::ValueScan;
-namespace Snapshot  = ::UnityCEDumper::Snapshot;
+namespace Memory    = ::Discrete::Memory;
+namespace ValueScan = ::Discrete::ValueScan;
+namespace Snapshot  = ::Discrete::Snapshot;
 
 // Wire dataType string → ValueDataType enum. Returns false on unknown string.
 bool ParseValueDataType(std::string_view s, Memory::ValueDataType& out) {
@@ -1068,7 +1068,7 @@ std::string Utf8FromWide(const std::wstring& w) {
 }
 
 json BuildHandshakeJson() {
-    using namespace UnityCEDumper;
+    using namespace Discrete;
     auto d = BackendDetector::Detect();
 
     json j;
@@ -1080,28 +1080,28 @@ json BuildHandshakeJson() {
     j["metadata_version"] = d.metadataVersion ? json(*d.metadataVersion) : json(nullptr);
 
     std::uint32_t assembliesCount = 0;
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
     if (d.backend == BackendDetector::Backend::Mono && Mono::IsResolved()) {
         assembliesCount = static_cast<std::uint32_t>(Mono::EnumerateAssemblies().size());
     }
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
     if (d.backend == BackendDetector::Backend::IL2CPP && IL2CPP::IsResolved()) {
         assembliesCount = static_cast<std::uint32_t>(IL2CPP::EnumerateAssemblies().size());
     }
 #endif
     j["assemblies_count"] = assembliesCount;
-    j["build"]    = static_cast<std::uint32_t>(UNITYCEDUMPER_BUILD_NUMBER);
+    j["build"]    = static_cast<std::uint32_t>(DISCRETE_BUILD_NUMBER);
     j["protocol"] = 1;
     // Phase 29b — compute the same gameBuildId hash that snapshotBegin
     // emits so the UI can detect "we reconnected to a different game"
     // without taking a snapshot first. Same fingerprint scheme
     // (FNV-1a over module path + file size + last-write-time).
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
     j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
     if (j["game_build_id"].get<std::string>().empty()) {
         j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
     }
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
     j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
 #endif
     // Game-process memory + bitness so UI can auto-clamp snapshot caps
@@ -1132,18 +1132,18 @@ json BuildHandshakeJson() {
 // "main_thread" sub-object showing dispatcher state so the UI can surface
 // it (e.g. "queued: 0, last tick 8 ms ago, hook installed").
 void TryInstallMainThreadHookAndReport(json& j) {
-    using namespace UnityCEDumper;
-    using namespace UnityCEDumper::MainThreadDispatcher;
+    using namespace Discrete;
+    using namespace Discrete::MainThreadDispatcher;
 
     if (!IsInitialized()) {
         (void)Init();
     }
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
     if (IsInitialized() && Mono::IsResolved() && !Mono::MainThreadHook::IsInstalled()) {
         (void)Mono::MainThreadHook::Install();
     }
     const bool hookInstalled = Mono::MainThreadHook::IsInstalled();
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
     if (IsInitialized() && IL2CPP::IsResolved() && !IL2CPP::MainThreadHook::IsInstalled()) {
         (void)IL2CPP::MainThreadHook::Install();
     }
@@ -1166,7 +1166,7 @@ void TryInstallMainThreadHookAndReport(json& j) {
 }
 
 void RegisterCoreHandlers() {
-    using namespace UnityCEDumper;
+    using namespace Discrete;
     PipeServer::RegisterHandler("ping", [](const json&) -> json {
         return json{{"pong", true}};
     });
@@ -1182,9 +1182,9 @@ void RegisterCoreHandlers() {
     // Phase 17a follow-up: also drops the address-finder class-pointer cache so
     // newly-loaded assemblies get picked up by the next whatIsAt call.
     PipeServer::RegisterHandler(MagicStrings::CmdScan, [](const json&) -> json {
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
         Mono::InvalidateClassRangeCache();
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
         IL2CPP::InvalidateClassRangeCache();
 #endif
         json j = BuildHandshakeJson();
@@ -1196,11 +1196,11 @@ void RegisterCoreHandlers() {
     // internal counters. Useful for the stress smoke (`Test-MainThreadBurst.ps1`)
     // and for the UI to show whether the hook is wired + healthy.
     PipeServer::RegisterHandler(MagicStrings::CmdGetDispatcherStats, [](const json&) -> json {
-        using namespace UnityCEDumper::MainThreadDispatcher;
+        using namespace Discrete::MainThreadDispatcher;
         Stats s = GetStats();
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
         const bool hookInstalled = Mono::MainThreadHook::IsInstalled();
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
         const bool hookInstalled = IL2CPP::MainThreadHook::IsInstalled();
 #else
         const bool hookInstalled = false;
@@ -1312,7 +1312,7 @@ void RegisterCoreHandlers() {
                 "refineValueScan sess=%llu type=%s total=%zu removed=%zu",
                 static_cast<unsigned long long>(sessionId), stStr.c_str(),
                 totalCands, removed);
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
         return json{
@@ -1817,7 +1817,7 @@ void RegisterCoreHandlers() {
         std::string elemNs  = args.value("elementNamespace", std::string{});
         std::string elemNm  = args.value("elementName",      std::string{});
         if (!elemAsm.empty() && !elemNm.empty()) {
-#if defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#if defined(DISCRETE_BACKEND_IL2CPP)
             const auto& r = IL2CPP::GetResolver();
             if (r.resolved) {
                 const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(elemAsm);
@@ -1834,7 +1834,7 @@ void RegisterCoreHandlers() {
                     }
                 }
             }
-#elif defined(UNITYCEDUMPER_BACKEND_MONO)
+#elif defined(DISCRETE_BACKEND_MONO)
             const auto& r = Mono::GetResolver();
             if (r.resolved) {
                 // Phase 14d: Mono::Find* helpers do their own attach/detach,
@@ -2344,7 +2344,7 @@ void RegisterCoreHandlers() {
         };
     });
 
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
     // Phase 3 segment 1: list every Mono-loaded assembly.
     PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
         if (!Mono::IsResolved()) {
@@ -3234,7 +3234,7 @@ void RegisterCoreHandlers() {
         // game grew during capture (the 32-bit OOM danger metric).
         const ProcessMemorySnapshot memAfter = QueryProcessMemory();
 
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+        Discrete::Log::Write(MagicStrings::LogCategoryScan,
             "snapshotBegin(Mono) id=" + std::to_string(sid) +
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
@@ -3730,7 +3730,7 @@ void RegisterCoreHandlers() {
                 matches.size(), stats.regionsTotal, stats.regionsScanned,
                 stats.regionsSkipImage, stats.regionsSkipStack,
                 stats.bytesScanned, stats.threadStacks);
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
         return json{
             // `class_ptr` mirrors the IL2CPP findInstances shape so cross-backend
@@ -4175,7 +4175,7 @@ void RegisterCoreHandlers() {
                 "scanFieldValue(Mono) dt=%s raw=%zu rows=%zu dropped non=%zu noise=%zu div=%zu bytes=%zu",
                 dtStr.c_str(), candidates.size(), rows.size(),
                 droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
         return json{
@@ -4316,7 +4316,7 @@ void RegisterCoreHandlers() {
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
                 rawCandidates.size(), kept,
                 droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
         return json{
@@ -4842,7 +4842,7 @@ void RegisterCoreHandlers() {
         Mono::CallMethodResult cr;
         std::string dispatchPath = "worker_direct";
         if (mainThread) {
-            using namespace UnityCEDumper::MainThreadDispatcher;
+            using namespace Discrete::MainThreadDispatcher;
             if (!IsInitialized()) {
                 // Lazy install: handshake usually arms this, but if a Lua
                 // bridge or test hits callMethod first we kick it here.
@@ -4901,7 +4901,7 @@ void RegisterCoreHandlers() {
         }
         return result;
     });
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
 
@@ -6101,7 +6101,7 @@ void RegisterCoreHandlers() {
         // hasn't run yet — the post-stream growth shows up on the last chunk.)
         const ProcessMemorySnapshot memAfterIl = QueryProcessMemory();
 
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
+        Discrete::Log::Write(MagicStrings::LogCategoryScan,
             "snapshotBegin(IL2CPP) id=" + std::to_string(sid) +
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
@@ -6682,7 +6682,7 @@ void RegisterCoreHandlers() {
                 stats.regionsSkipImage, stats.regionsSkipMapped, stats.regionsSkipStack,
                 stats.bytesScanned, stats.threadStacks, stats.excludedMatches,
                 reinterpret_cast<const void*>(exLow), reinterpret_cast<const void*>(exHigh));
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
         return json{
             {"class_ptr", formatHex(reinterpret_cast<std::uintptr_t>(k))},
@@ -7103,7 +7103,7 @@ void RegisterCoreHandlers() {
                 dtStr.c_str(), candidates.size(), rows.size(),
                 droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned,
                 revIndexOk ? 1 : 0, revIndex.InstanceCount(), revIndex.HitCount(), revIndex.LocalityHits());
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
         return json{
@@ -7249,7 +7249,7 @@ void RegisterCoreHandlers() {
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
                 rawCandidates.size(), kept,
                 droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
         return json{
@@ -7762,7 +7762,7 @@ void RegisterCoreHandlers() {
         IL2CPP::CallMethodResult cr;
         std::string dispatchPath = "worker_direct";
         if (mainThread) {
-            using namespace UnityCEDumper::MainThreadDispatcher;
+            using namespace Discrete::MainThreadDispatcher;
             if (!IsInitialized()) {
                 (void)Init();
                 if (IL2CPP::IsResolved() && !IL2CPP::MainThreadHook::IsInstalled()) {
@@ -7831,11 +7831,11 @@ void RegisterCoreHandlers() {
 
 extern "C" {
 
-int UnityDumper_Init() {
+int Discrete_Init() {
     bool expected = false;
     if (!g_initialized.compare_exchange_strong(expected, true)) return 0;
-    UnityCEDumper::Log::Init();
-    UnityCEDumper::Log::Init("ExportAPI: UnityDumper_Init");
+    Discrete::Log::Init();
+    Discrete::Log::Init("ExportAPI: Discrete_Init");
     RegisterCoreHandlers();
 
     // Build #547 follow-up — disconnect-time GC drain.
@@ -7859,75 +7859,75 @@ int UnityDumper_Init() {
     // Bound under both compile branches — the resolver `gc_collect` slot
     // is optional, so a runtime that doesn't export `mono_gc_collect` /
     // `il2cpp_gc_collect` (legacy / stripped) silently no-ops.
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
-    UnityCEDumper::PipeServer::RegisterDisconnectHook([]() {
-        const auto& r = UnityCEDumper::Mono::GetResolver();
+#if defined(DISCRETE_BACKEND_MONO)
+    Discrete::PipeServer::RegisterDisconnectHook([]() {
+        const auto& r = Discrete::Mono::GetResolver();
         if (!r.resolved || r.gc_collect == nullptr) return;
-        UnityCEDumper::Mono::MonoDomain* domain =
-            UnityCEDumper::Mono::GetRootDomain();
+        Discrete::Mono::MonoDomain* domain =
+            Discrete::Mono::GetRootDomain();
         if (domain == nullptr) return;
         // -1 = full collection (max generation). Wrap in ThreadAttachGuard
         // for the same reason every other Mono runtime call does — pipe
         // worker isn't a Mono-known thread.
-        UnityCEDumper::Mono::ThreadAttachGuard guard(domain);
+        Discrete::Mono::ThreadAttachGuard guard(domain);
         if (!guard.Attached()) return;
         r.gc_collect(-1);
     });
-    UnityCEDumper::Log::Init(
+    Discrete::Log::Init(
         "ExportAPI: registered Mono GC-drain disconnect hook");
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
-    UnityCEDumper::PipeServer::RegisterDisconnectHook([]() {
-        const auto& r = UnityCEDumper::IL2CPP::GetResolver();
+#elif defined(DISCRETE_BACKEND_IL2CPP)
+    Discrete::PipeServer::RegisterDisconnectHook([]() {
+        const auto& r = Discrete::IL2CPP::GetResolver();
         if (!r.resolved || r.gc_collect == nullptr) return;
-        UnityCEDumper::IL2CPP::Il2CppDomain* domain =
-            UnityCEDumper::IL2CPP::GetDomain();
+        Discrete::IL2CPP::Il2CppDomain* domain =
+            Discrete::IL2CPP::GetDomain();
         if (domain == nullptr) return;
         // 0 = collect any generation (IL2CPP signature differs from Mono;
         // documented in il2cpp-api-types.h as "generation hint", 0 means
         // collect everything reachable).
-        UnityCEDumper::IL2CPP::ThreadAttachGuard guard(domain);
+        Discrete::IL2CPP::ThreadAttachGuard guard(domain);
         if (!guard.Attached()) return;
         r.gc_collect(0);
     });
-    UnityCEDumper::Log::Init(
+    Discrete::Log::Init(
         "ExportAPI: registered IL2CPP GC-drain disconnect hook");
 #endif
 
     return 0;
 }
 
-void UnityDumper_Shutdown() {
+void Discrete_Shutdown() {
     if (!g_initialized.exchange(false)) return;
-    UnityCEDumper::PipeServer::Stop();
+    Discrete::PipeServer::Stop();
     // Phase 20-MT: tear down the main-thread hook + dispatcher so we don't
     // leave the runtime_invoke detour pointing at our soon-to-be-unloaded
     // code. Safe to call when never installed (atomic-guarded no-op).
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
-    UnityCEDumper::Mono::MainThreadHook::Uninstall();
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
-    UnityCEDumper::IL2CPP::MainThreadHook::Uninstall();
+#if defined(DISCRETE_BACKEND_MONO)
+    Discrete::Mono::MainThreadHook::Uninstall();
+#elif defined(DISCRETE_BACKEND_IL2CPP)
+    Discrete::IL2CPP::MainThreadHook::Uninstall();
 #endif
-    UnityCEDumper::MainThreadDispatcher::Shutdown();
-    UnityCEDumper::Log::Init("ExportAPI: UnityDumper_Shutdown");
-    UnityCEDumper::Log::Shutdown();
+    Discrete::MainThreadDispatcher::Shutdown();
+    Discrete::Log::Init("ExportAPI: Discrete_Shutdown");
+    Discrete::Log::Shutdown();
 }
 
-int UnityDumper_StartPipe() {
-    if (!g_initialized.load()) UnityDumper_Init();
-    if (UnityCEDumper::PipeServer::IsRunning()) return 0;
-    return UnityCEDumper::PipeServer::Start() ? 0 : 1;
+int Discrete_StartPipe() {
+    if (!g_initialized.load()) Discrete_Init();
+    if (Discrete::PipeServer::IsRunning()) return 0;
+    return Discrete::PipeServer::Start() ? 0 : 1;
 }
 
-void UnityDumper_StopPipe() {
-    UnityCEDumper::PipeServer::Stop();
+void Discrete_StopPipe() {
+    Discrete::PipeServer::Stop();
 }
 
-UnityDumperBackend UnityDumper_GetBackendType() {
+DiscreteBackend Discrete_GetBackendType() {
     return BackendOfBuild();
 }
 
-std::uint32_t UnityDumper_GetBuildNumber() {
-    return static_cast<std::uint32_t>(UNITYCEDUMPER_BUILD_NUMBER);
+std::uint32_t Discrete_GetBuildNumber() {
+    return static_cast<std::uint32_t>(DISCRETE_BUILD_NUMBER);
 }
 
 }  // extern "C"

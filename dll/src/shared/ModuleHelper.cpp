@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <psapi.h>
 
-namespace UnityCEDumper::ModuleHelper {
+namespace Discrete::ModuleHelper {
 
 void* GetModuleBase(const wchar_t* moduleName) noexcept {
     return reinterpret_cast<void*>(::GetModuleHandleW(moduleName));
@@ -53,4 +53,4 @@ std::vector<ModuleInfo> EnumerateModules() {
     return result;
 }
 
-}  // namespace UnityCEDumper::ModuleHelper
+}  // namespace Discrete::ModuleHelper

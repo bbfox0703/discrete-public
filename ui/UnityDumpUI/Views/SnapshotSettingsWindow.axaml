@@ -18,7 +18,7 @@
             <!-- DB directory -->
             <StackPanel Spacing="2">
                 <TextBlock Text="Snapshot DB directory" FontWeight="SemiBold"/>
-                <TextBlock Text="Where per-game .db files live. Leave blank to use the default under %LOCALAPPDATA%\Discrete_UEDumper\snapshots\."
+                <TextBlock Text="Where per-game .db files live. Leave blank to use the default under %LOCALAPPDATA%\Discrete_Dumper\snapshots\."
                            TextWrapping="Wrap" Opacity="0.75" FontSize="11"/>
                 <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,4,0,0">
                     <TextBox Grid.Column="0" Name="DirectoryBox"

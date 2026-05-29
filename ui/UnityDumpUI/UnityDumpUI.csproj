@@ -57,12 +57,12 @@
     <AssemblyVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</AssemblyVersion>
     <FileVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</FileVersion>
     <InformationalVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</InformationalVersion>
-    <Product>UnityCEDumper</Product>
-    <Company>UnityCEDumper</Company>
+    <Product>Discrete</Product>
+    <Company>Discrete</Company>
     <Description>Unity Engine Dumper UI (Mono + IL2CPP backends, Cheat Engine bridge)</Description>
     <!-- AssemblyTitle drives the PE FileDescription field (Description column
          in File Explorer); defaults to AssemblyName otherwise. -->
-    <AssemblyTitle>UnityCEDumper UI (Mono + IL2CPP)</AssemblyTitle>
+    <AssemblyTitle>Discrete UI (Mono + IL2CPP)</AssemblyTitle>
   </PropertyGroup>
 
   <ItemGroup>

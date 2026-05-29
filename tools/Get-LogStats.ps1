@@ -1,4 +1,4 @@
-# Get-LogStats.ps1 — show per-PID log directory sizes for UnityCEDumper.
+# Get-LogStats.ps1 — show per-PID log directory sizes for Discrete.
 #
 # Phase 14e: visual verification that the 4-file × 8 MB rotation cap is
 # being honoured. Run after a heavy session to confirm:
@@ -7,7 +7,7 @@
 #   - per-category total <= ~32 MB
 #
 # Usage:
-#   .\tools\Get-LogStats.ps1                      # all PIDs under %LOCALAPPDATA%\Discrete_UEDumper\Logs
+#   .\tools\Get-LogStats.ps1                      # all PIDs under %LOCALAPPDATA%\Discrete_Dumper\Logs
 #   .\tools\Get-LogStats.ps1 -Pid 57040           # one PID
 
 [CmdletBinding()]
@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$root = Join-Path $env:LOCALAPPDATA 'Discrete_UEDumper\Logs'
+$root = Join-Path $env:LOCALAPPDATA 'Discrete_Dumper\Logs'
 if (-not (Test-Path $root)) {
     Write-Host "No log root: $root" -ForegroundColor Yellow
     exit 0

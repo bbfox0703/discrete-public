@@ -15,7 +15,7 @@
 #include <cstring>
 #include <string>
 
-namespace UnityCEDumper::Proxy {
+namespace Discrete::Proxy {
 
 namespace {
 
@@ -51,7 +51,7 @@ std::wstring DirOfSelf(HMODULE self) {
 }
 
 // Worker-thread payload: detects backend, then LoadLibrary's the matching
-// UnityDumper-{Backend}.dll from the proxy's directory. Run from a dedicated
+// Discrete-{Backend}.dll from the proxy's directory. Run from a dedicated
 // thread because DllMain holds the loader lock — calling LoadLibrary there
 // for a DLL with its own DllMain would deadlock.
 DWORD WINAPI BackendLoaderThread(LPVOID lpParam) {
@@ -78,8 +78,8 @@ DWORD WINAPI BackendLoaderThread(LPVOID lpParam) {
 
     std::wstring backendDll = proxyDir + L"\\";
     backendDll += (backend == BackendDetector::Backend::IL2CPP)
-        ? L"UnityDumper-IL2CPP.dll"
-        : L"UnityDumper-Mono.dll";
+        ? L"Discrete-IL2CPP.dll"
+        : L"Discrete-Mono.dll";
 
     HMODULE h = ::LoadLibraryW(backendDll.c_str());
     return (h != nullptr) ? 0 : 3;
@@ -139,4 +139,4 @@ void Proxy_StartBackendLoader(HMODULE proxySelf) noexcept {
     if (h != nullptr) ::CloseHandle(h);
 }
 
-}  // namespace UnityCEDumper::Proxy
+}  // namespace Discrete::Proxy

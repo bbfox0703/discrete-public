@@ -6,7 +6,7 @@
 -- Phase 11: replaces `Test-Handshake.ps1` for CE-driven workflows.
 --
 -- How to use:
---   1. Drop UnityDumper-Mono.dll + UnityDumper-IL2CPP.dll into
+--   1. Drop Discrete-Mono.dll + Discrete-IL2CPP.dll into
 --      <CE-install>/discrete/  (alongside CE.exe).
 --   2. In CE: File → Open Process → pick the Unity game.
 --   3. Table → Show Cheat Table Lua Script (or Ctrl+Alt+L) → paste the
@@ -14,8 +14,8 @@
 --   4. Launch DiscreteUI.exe → Connect.
 --
 -- Banner output appears in CE's Lua console:
---   [UnityCEDumper] Backend: IL2CPP — DLL injected (build 99)
---   [UnityCEDumper] Pipe ready: \\.\pipe\UnityDumpBfx
+--   [Discrete] Backend: IL2CPP — DLL injected (build 99)
+--   [Discrete] Pipe ready: \\.\pipe\DiscreteBfx
 
 -- Resolve sibling utils.lua. CE's package.path doesn't include the
 -- script directory by default, so we have to teach it. Try (in order):
@@ -54,9 +54,9 @@ end
 
 local ok, U = pcall(require, "utils")
 if not ok then
-    print("[UnityCEDumper] FATAL: utils.lua not found alongside this script")
-    print("[UnityCEDumper]   tried path: " .. tostring(thisDir) .. "utils.lua")
-    print("[UnityCEDumper]   require error: " .. tostring(U))
+    print("[Discrete] FATAL: utils.lua not found alongside this script")
+    print("[Discrete]   tried path: " .. tostring(thisDir) .. "utils.lua")
+    print("[Discrete]   require error: " .. tostring(U))
     return
 end
 
@@ -111,7 +111,7 @@ local function main()
         local ok = injectDLL(dll)
         if ok == nil then
             U.err("injectDLL returned nil — DLL not found or injection failed.")
-            U.err("Check %%LOCALAPPDATA%%\\Discrete_UEDumper\\Logs\\<pid>\\init\\current.log")
+            U.err("Check %%LOCALAPPDATA%%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
             return
         end
         injected = true
@@ -119,7 +119,7 @@ local function main()
         local handle = loadLibrary(dll)
         if handle == nil or handle == 0 then
             U.err("loadLibrary returned NULL — DLL not found or LoadLibraryW failed.")
-            U.err("Check %%LOCALAPPDATA%%\\Discrete_UEDumper\\Logs\\<pid>\\init\\current.log")
+            U.err("Check %%LOCALAPPDATA%%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
             return
         end
         injected = true
@@ -128,7 +128,7 @@ local function main()
         return
     end
 
-    -- DllMain auto-runs UnityDumper_Init + UnityDumper_StartPipe, so the
+    -- DllMain auto-runs Discrete_Init + Discrete_StartPipe, so the
     -- pipe is usually up by the time injectDLL returns. Give it a beat
     -- to settle and to flush the init log line.
     if sleep then sleep(300) end
@@ -146,9 +146,9 @@ local function main()
     --    we treat any failure (e.g. CE can't resolve the export) as a
     --    soft warn rather than aborting the script.
     local ok2, err = pcall(function()
-        local startRet = U.callDLL("UnityDumper_StartPipe", "int32")
+        local startRet = U.callDLL("Discrete_StartPipe", "int32")
         if startRet ~= nil and startRet ~= 0 then
-            U.warn("UnityDumper_StartPipe returned %d (non-zero); pipe may still be running from auto-start.", startRet)
+            U.warn("Discrete_StartPipe returned %d (non-zero); pipe may still be running from auto-start.", startRet)
         end
     end)
     if not ok2 then
@@ -157,18 +157,18 @@ local function main()
 
     -- 5. Report build number for cross-checking with the UI handshake.
     local buildOk, build = pcall(function()
-        return U.callDLL("UnityDumper_GetBuildNumber", "uint32")
+        return U.callDLL("Discrete_GetBuildNumber", "uint32")
     end)
     if buildOk and type(build) == "number" then
         U.log("Backend: %s — DLL injected (build %d)", backend, build)
     else
         U.log("Backend: %s — DLL injected (build unknown — symbol not yet resolvable)", backend)
     end
-    U.log("Pipe ready: \\\\.\\pipe\\UnityDumpBfx")
+    U.log("Pipe ready: \\\\.\\pipe\\DiscreteBfx")
     U.log("Launch DiscreteUI.exe and click Connect.")
 end
 
 local pcallOk, pcallErr = pcall(main)
 if not pcallOk then
-    print("[UnityCEDumper FATAL] " .. tostring(pcallErr))
+    print("[Discrete FATAL] " .. tostring(pcallErr))
 end

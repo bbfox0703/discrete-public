@@ -31,7 +31,7 @@
 param([int] $TimeoutMs = 3000)
 
 $ErrorActionPreference = 'Stop'
-$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'UnityDumpBfx', 'InOut')
+$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'DiscreteBfx', 'InOut')
 try { $client.Connect($TimeoutMs) }
 catch { throw 'Pipe connect failed. Inject the DLL first via Test-Handshake.ps1.' }
 $writer = New-Object System.IO.StreamWriter($client); $writer.AutoFlush = $true

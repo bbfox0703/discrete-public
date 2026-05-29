@@ -8,8 +8,8 @@
 
 #include <string>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 std::string TypeName(MonoType* type);
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

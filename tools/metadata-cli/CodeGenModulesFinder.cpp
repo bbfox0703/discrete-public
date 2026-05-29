@@ -21,7 +21,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace UnityCEDumper::Phase_D::CodeGenModules {
+namespace Discrete::Phase_D::CodeGenModules {
 
 namespace {
 
@@ -268,4 +268,4 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
     return best;
 }
 
-}  // namespace UnityCEDumper::Phase_D::CodeGenModules
+}  // namespace Discrete::Phase_D::CodeGenModules

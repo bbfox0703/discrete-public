@@ -3,7 +3,7 @@
 // + build_number.txt.
 //
 // Major/Minor/Patch/Build are kept in sync with the C++ side
-// (UNITYCEDUMPER_FILE_VERSION_STRING in dll/src/shared/BuildInfo.h.in)
+// (DISCRETE_FILE_VERSION_STRING in dll/src/shared/BuildInfo.h.in)
 // so a UI log entry's version string is directly comparable to the DLL
 // log entry's version string for the same session.
 //

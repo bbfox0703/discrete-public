@@ -45,7 +45,7 @@ if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
 
 $md = Get-Content -Raw -Path $InputPath
 $body = (ConvertFrom-Markdown -InputObject $md).Html
-$title = "UnityCEDumper — CE Lua Bridge"
+$title = "Discrete — CE Lua Bridge"
 
 # Light-theme CSS — mimics GitHub-flavored Markdown's stable look.
 # Inline so the .html is fully self-contained (no external requests,
@@ -165,7 +165,7 @@ $html = @"
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="UnityCEDumper build pipeline; source: scripts/README.md">
+<meta name="generator" content="Discrete build pipeline; source: scripts/README.md">
 <meta name="build-stamp" content="$buildStamp">
 <title>$title</title>
 <style>

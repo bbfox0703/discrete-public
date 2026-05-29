@@ -2,7 +2,7 @@
 
 > Side-by-side proxy DLLs that load the dumper backend automatically
 > when the game starts, without an external injector. Drop the proxy
-> next to the game's `.exe` and `UnityDumper-{Mono,IL2CPP}.dll` rides
+> next to the game's `.exe` and `Discrete-{Mono,IL2CPP}.dll` rides
 > along.
 
 ---
@@ -108,7 +108,7 @@ Unity-game.exe
    - Polls `BackendDetector::Detect()` for up to 5 seconds (Unity
      engine DLLs may not be loaded yet at our `DllMain` time).
    - Once Mono or IL2CPP is detected, `LoadLibraryW`s the matching
-     `UnityDumper-{Mono,IL2CPP}.dll` from the proxy's own directory.
+     `Discrete-{Mono,IL2CPP}.dll` from the proxy's own directory.
    - The backend DLL's `DllMain` runs `Init()` + `StartPipe()` as
      usual (same as direct injection).
    - On failure (Unknown backend after 5 s, sibling DLL missing,
@@ -198,14 +198,14 @@ to surface them. Bulk operations skip them.
 # Copy proxy + backend into the game directory:
 $game = 'C:\Path\To\Game-Folder'
 Copy-Item .\dist\version.dll                $game\
-Copy-Item .\dist\UnityDumper-IL2CPP.dll     $game\   # or -Mono.dll
+Copy-Item .\dist\Discrete-IL2CPP.dll     $game\   # or -Mono.dll
 ```
 
 The proxy auto-detects which backend to load — copying both DLLs is
 fine if you don't know yet (the proxy only loads the one matching the
 detected backend).
 
-To uninstall: delete `version.dll` + `UnityDumper-*.dll` from the
+To uninstall: delete `version.dll` + `Discrete-*.dll` from the
 game directory.
 
 ## Caveats

@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 // Which IL operations qualify as a "reference" for filtering purposes.
 enum class FieldRefKind : int {
@@ -62,4 +62,4 @@ FindFieldRefsResult FindFieldReferences(MonoImage*         image,
                                         FieldRefKind       kindFilter,
                                         std::size_t        limit);
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

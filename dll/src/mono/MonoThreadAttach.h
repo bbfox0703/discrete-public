@@ -28,7 +28,7 @@
 #include "MonoTypes.h"
 #include "../shared/MainThreadDispatcher.h"
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 class ThreadAttachGuard {
 public:
@@ -38,7 +38,7 @@ public:
         // there is at best a no-op, at worst (and observed live on
         // BongoCat 2026-05-20) a process-killer because the matching
         // detach unbinds Unity's own thread handle.
-        if (UnityCEDumper::MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()) {
+        if (Discrete::MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()) {
             mainThreadSkip_ = true;
             return;
         }
@@ -97,4 +97,4 @@ private:
     inline static thread_local int s_attach_depth = 0;
 };
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

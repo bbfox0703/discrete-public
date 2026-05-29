@@ -5,8 +5,8 @@
 
 #include <string>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 std::string TypeName(const Il2CppType* type);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

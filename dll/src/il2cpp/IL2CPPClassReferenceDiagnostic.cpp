@@ -14,7 +14,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -419,4 +419,4 @@ DiagnosticResult DiagnoseClassReferences(Il2CppClass*       klass,
     return out;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

@@ -15,7 +15,7 @@
 
 #include <cstring>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -217,7 +217,7 @@ std::vector<ClassEntry> EnumerateClasses(const Il2CppImage* image) {
         // see an empty list; class lookup via FindClass still works for
         // explicitly-named types since it goes straight through
         // il2cpp_class_from_name.
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit,
+        Discrete::Log::Write(MagicStrings::LogCategoryInit,
             "IL2CPPClassWalker: image_get_class_count missing AND "
             "global-metadata.dat unloaded — cannot enumerate classes");
         return out;
@@ -399,7 +399,7 @@ StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::stri
     std::uint32_t flags = (r.field_get_flags != nullptr)
                           ? static_cast<std::uint32_t>(r.field_get_flags(match)) : 0u;
     if ((flags & 0x10u) == 0) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::ResolveStaticFieldAddress: field is not static");
         return out;
     }
@@ -408,7 +408,7 @@ StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::stri
 
     void* base = SehStaticData(r.class_get_static_data, klass);
     if (base == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::ResolveStaticFieldAddress: class_get_static_field_data returned null");
         return out;
     }
@@ -520,4 +520,4 @@ std::vector<MethodSignatureEntry> EnumerateMethodSignatures(Il2CppClass* klass) 
     return out;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

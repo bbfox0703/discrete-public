@@ -47,7 +47,7 @@
 #include <mutex>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP::MetadataRegistration {
+namespace Discrete::IL2CPP::MetadataRegistration {
 
 namespace {
 
@@ -296,4 +296,4 @@ std::uint8_t GetTypeTag(std::int32_t typeIndex) {
     return tag;
 }
 
-}  // namespace UnityCEDumper::IL2CPP::MetadataRegistration
+}  // namespace Discrete::IL2CPP::MetadataRegistration

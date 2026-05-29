@@ -23,10 +23,10 @@
     <AssemblyVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</AssemblyVersion>
     <FileVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</FileVersion>
     <InformationalVersion>$(VerMajor).$(VerMinor).$(VerPatch).$(VerBuild)</InformationalVersion>
-    <Product>UnityCEDumper</Product>
-    <Company>UnityCEDumper</Company>
+    <Product>Discrete</Product>
+    <Company>Discrete</Company>
     <Description>Unity Engine Dumper UI core (engine-agnostic models, services, platform interfaces)</Description>
-    <AssemblyTitle>UnityCEDumper UI core</AssemblyTitle>
+    <AssemblyTitle>Discrete UI core</AssemblyTitle>
   </PropertyGroup>
 
   <ItemGroup>

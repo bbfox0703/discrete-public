@@ -42,7 +42,7 @@
 #include <cstring>
 #include <unordered_set>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -836,4 +836,4 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     return result;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

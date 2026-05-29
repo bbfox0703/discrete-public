@@ -11,7 +11,7 @@
 
 #include <windows.h>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -145,7 +145,7 @@ std::vector<ClassEntry> EnumerateClasses(MonoImage* image) {
 
     const MonoTableInfo* table = SehGetTable(r.image_get_table_info, image, MonoTableTypedef);
     if (table == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "EnumerateClasses: image_get_table_info returned null");
         return out;
     }
@@ -325,7 +325,7 @@ StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string
 
     std::uint32_t flags = (r.field_get_flags != nullptr) ? r.field_get_flags(match) : 0u;
     if ((flags & 0x10u) == 0) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "ResolveStaticFieldAddress: field is not static");
         return out;
     }
@@ -334,13 +334,13 @@ StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string
 
     MonoVTable* vt = SehVTable(r.class_vtable, domain, klass);
     if (vt == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "ResolveStaticFieldAddress: mono_class_vtable returned null");
         return out;
     }
     void* base = SehStaticData(r.vtable_get_static_data, vt);
     if (base == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "ResolveStaticFieldAddress: vtable_get_static_field_data returned null");
         return out;
     }
@@ -403,7 +403,7 @@ CompiledMethodAddress CompileMethodByName(MonoClass* klass, const std::string& m
     out.token = (r.method_get_token != nullptr) ? r.method_get_token(match) : 0u;
     void* p = SehCompile(r.compile_method, match);
     if (p == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "CompileMethodByName: mono_compile_method returned null / faulted");
         return out;
     }
@@ -453,4 +453,4 @@ std::vector<LiteralFieldEntry> EnumerateLiteralFields(MonoClass* klass) {
     return out;
 }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

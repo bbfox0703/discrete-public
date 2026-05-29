@@ -4,7 +4,7 @@
 --
 -- Pure-CE-Mono-API helpers. Lets users build cheat tables that
 -- registerSymbol() one or more Mono method overloads WITHOUT ever
--- injecting the UnityCEDumper DLL. Uses CE's built-in `mono_*` Lua
+-- injecting the Discrete DLL. Uses CE's built-in `mono_*` Lua
 -- API (provided by CE's MonoDataCollector) — works on any Mono
 -- target CE itself can talk to.
 --

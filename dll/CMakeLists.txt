@@ -1,4 +1,4 @@
-# UnityDumper DLL — builds Mono and/or IL2CPP variants + ProxyDLLs
+# Discrete DLL — builds Mono and/or IL2CPP variants + ProxyDLLs
 
 # ---------------------------------------------------------------------------
 # Phase 20-MT — MinHook for inline detouring mono_runtime_invoke /
@@ -6,7 +6,7 @@
 # tick to drain the main-thread work queue. Vendored at
 # dll/vendor/minihook/ with its own CMakeLists.txt — we just add_subdirectory
 # (with EXCLUDE_FROM_ALL so its install rules don't pollute our `dist/`).
-# Build cost: ~50 KB statically linked into each UnityDumper-{Backend}.dll.
+# Build cost: ~50 KB statically linked into each Discrete-{Backend}.dll.
 #
 # CMake 3.27+ deprecates `cmake_minimum_required(VERSION < 3.10)`. MinHook
 # 1.3.3 still ships with `VERSION 3.0...3.5`. Two-part shut-up:
@@ -35,7 +35,7 @@ set(CMAKE_WARN_DEPRECATED ON CACHE BOOL "Suppress deprecated CMake feature warni
 #           switch fall-through (the variable IS init in every path the
 #           runtime takes; MSVC's flow analysis is too conservative)
 # Apply via the `minhook` target so the suppressions don't bleed into
-# our own source — UnityDumper-* targets keep their warnings as-is.
+# our own source — Discrete-* targets keep their warnings as-is.
 if(MSVC)
     target_compile_options(minhook PRIVATE /wd4100 /wd4201 /wd4244 /wd4310 /wd4701)
 endif()
@@ -51,7 +51,7 @@ endif()
 # Config: STATIC, decoder-only (no formatter/encoder — we never print
 # disassembly, just decode + match). AVX-512 kept on so modern Burst SIMD
 # loops don't desync the scan. Build cost: ~250 KB statically linked into
-# UnityDumper-IL2CPP.dll (IL2CPP backend only; Mono backend doesn't need
+# Discrete-IL2CPP.dll (IL2CPP backend only; Mono backend doesn't need
 # it — IL bytecode walking is the Mono path).
 set(ZYDIS_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
 set(ZYDIS_BUILD_EXAMPLES   OFF CACHE BOOL "" FORCE)
@@ -95,7 +95,7 @@ function(add_versioned_rc TARGET_NAME INTERNAL_NAME ORIGINAL_FILENAME DESCRIPTIO
     set(RC_INTERNAL_NAME     "${INTERNAL_NAME}")
     set(RC_ORIGINAL_FILENAME "${ORIGINAL_FILENAME}")
     set(RC_DESCRIPTION       "${DESCRIPTION}")
-    set(RC_COMPANY           "UnityCEDumper")
+    set(RC_COMPANY           "Discrete")
     set(GEN_RC ${CMAKE_BINARY_DIR}/generated/${TARGET_NAME}_version.rc)
     configure_file(
         ${CMAKE_SOURCE_DIR}/dll/src/shared/version.rc.in
@@ -134,7 +134,7 @@ set(DLL_SHARED_SOURCES
     src/shared/SnapshotSession.h
 )
 
-# Mono-specific sources: only compiled into UnityDumper-Mono.dll.
+# Mono-specific sources: only compiled into Discrete-Mono.dll.
 set(DLL_MONO_SOURCES
     src/mono/MonoTypes.h
     src/mono/MonoResolver.cpp
@@ -158,7 +158,7 @@ set(DLL_MONO_SOURCES
     src/mono/MonoFieldXref.h
 )
 
-# IL2CPP-specific sources: only compiled into UnityDumper-IL2CPP.dll.
+# IL2CPP-specific sources: only compiled into Discrete-IL2CPP.dll.
 set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPTypes.h
     src/il2cpp/IL2CPPResolver.cpp
@@ -220,9 +220,9 @@ set(DLL_IL2CPP_SOURCES
 # ---------------------------------------------------------------------------
 function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
     set(SOURCES ${DLL_SHARED_SOURCES})
-    if(BACKEND_DEFINE STREQUAL "UNITYCEDUMPER_BACKEND_MONO")
+    if(BACKEND_DEFINE STREQUAL "DISCRETE_BACKEND_MONO")
         list(APPEND SOURCES ${DLL_MONO_SOURCES})
-    elseif(BACKEND_DEFINE STREQUAL "UNITYCEDUMPER_BACKEND_IL2CPP")
+    elseif(BACKEND_DEFINE STREQUAL "DISCRETE_BACKEND_IL2CPP")
         list(APPEND SOURCES ${DLL_IL2CPP_SOURCES})
     endif()
     add_library(${TARGET_NAME} SHARED ${SOURCES})
@@ -244,7 +244,7 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
     # Phase 28b-v2: link Zydis ONLY into IL2CPP backend — Mono path walks IL
     # bytecode directly (no native disassembly needed). Keeps Mono DLL size
     # unchanged. ~250 KB cost on the IL2CPP DLL.
-    if(BACKEND_DEFINE STREQUAL "UNITYCEDUMPER_BACKEND_IL2CPP")
+    if(BACKEND_DEFINE STREQUAL "DISCRETE_BACKEND_IL2CPP")
         target_link_libraries(${TARGET_NAME} PRIVATE Zydis)
         target_include_directories(${TARGET_NAME} PRIVATE
             vendor/zydis/include
@@ -260,25 +260,25 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
 endfunction()
 
 if(BACKEND STREQUAL "Mono" OR BACKEND STREQUAL "Both")
-    add_backend_dll(UnityDumper-Mono UNITYCEDUMPER_BACKEND_MONO)
-    add_versioned_rc(UnityDumper-Mono
-        "UnityDumper-Mono"
-        "UnityDumper-Mono.dll"
+    add_backend_dll(Discrete-Mono DISCRETE_BACKEND_MONO)
+    add_versioned_rc(Discrete-Mono
+        "Discrete-Mono"
+        "Discrete-Mono.dll"
         "Unity Mono Engine Dumper DLL")
 endif()
 
 if(BACKEND STREQUAL "IL2CPP" OR BACKEND STREQUAL "Both")
-    add_backend_dll(UnityDumper-IL2CPP UNITYCEDUMPER_BACKEND_IL2CPP)
-    add_versioned_rc(UnityDumper-IL2CPP
-        "UnityDumper-IL2CPP"
-        "UnityDumper-IL2CPP.dll"
+    add_backend_dll(Discrete-IL2CPP DISCRETE_BACKEND_IL2CPP)
+    add_versioned_rc(Discrete-IL2CPP
+        "Discrete-IL2CPP"
+        "Discrete-IL2CPP.dll"
         "Unity IL2CPP Engine Dumper DLL")
 endif()
 
 # ---------------------------------------------------------------------------
 # Proxy DLLs (Phase 12a — x64). The proxy gets implicitly loaded by the
 # host game (because the .exe statically imports version.dll / winmm.dll),
-# runs a tiny DllMain shim, then loads the matching UnityDumper-{Backend}.dll
+# runs a tiny DllMain shim, then loads the matching Discrete-{Backend}.dll
 # from the same directory on a worker thread (DllMain holds the loader
 # lock, so the actual LoadLibraryW happens off-thread).
 #
@@ -332,19 +332,19 @@ endfunction()
 
 option(BUILD_PROXIES "Build the version.dll / winmm.dll proxies (Phase 12a)" ON)
 if(BUILD_PROXIES)
-    add_proxy_dll(UnityDumperProxy-version version
+    add_proxy_dll(DiscreteProxy-version version
         src/proxy/version/version.cpp
         src/proxy/version/version.def)
-    add_versioned_rc(UnityDumperProxy-version
-        "UnityDumper-version-proxy"
+    add_versioned_rc(DiscreteProxy-version
+        "Discrete-version-proxy"
         "version.dll"
-        "UnityCEDumper version.dll proxy (auto-loads UnityDumper-{Backend}.dll)")
+        "Discrete version.dll proxy (auto-loads Discrete-{Backend}.dll)")
 
-    add_proxy_dll(UnityDumperProxy-winmm   winmm
+    add_proxy_dll(DiscreteProxy-winmm   winmm
         src/proxy/winmm/winmm.cpp
         src/proxy/winmm/winmm.def)
-    add_versioned_rc(UnityDumperProxy-winmm
-        "UnityDumper-winmm-proxy"
+    add_versioned_rc(DiscreteProxy-winmm
+        "Discrete-winmm-proxy"
         "winmm.dll"
-        "UnityCEDumper winmm.dll proxy (auto-loads UnityDumper-{Backend}.dll)")
+        "Discrete winmm.dll proxy (auto-loads Discrete-{Backend}.dll)")
 endif()

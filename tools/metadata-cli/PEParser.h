@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Phase_D::PE {
+namespace Discrete::Phase_D::PE {
 
 enum class Machine : std::uint16_t {
     Unknown = 0x0000,
@@ -91,4 +91,4 @@ std::optional<Image> ParseFile(const std::wstring&         path,
                                std::vector<std::uint8_t>*  bytesOut = nullptr,
                                std::string*                errOut   = nullptr);
 
-}  // namespace UnityCEDumper::Phase_D::PE
+}  // namespace Discrete::Phase_D::PE

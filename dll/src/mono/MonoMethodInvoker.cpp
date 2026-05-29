@@ -24,7 +24,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -656,4 +656,4 @@ CallMethodResult CallMethod(MonoClass* klass,
     return result;
 }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

@@ -1,4 +1,4 @@
-# UnityCEDumper pipe protocol
+# Discrete pipe protocol
 
 The injected DLL exposes a named-pipe JSON-RPC surface for inspecting the host
 Unity process. This document is the contract between the DLL and any UI /
@@ -8,17 +8,17 @@ script that talks to it.
 
 | Property | Value |
 | --- | --- |
-| Pipe name | `\\.\pipe\UnityDumpBfx` |
+| Pipe name | `\\.\pipe\DiscreteBfx` |
 | Direction | duplex (`InOut`) |
 | Framing | line-delimited UTF-8 JSON; each request and each response is one line terminated with `\n` |
 | Concurrency | one client at a time; the server queues additional connect attempts |
-| Lifetime | created by `UnityDumper_StartPipe` after `UnityDumper_Init`; torn down by `UnityDumper_StopPipe` or DLL unload |
+| Lifetime | created by `Discrete_StartPipe` after `Discrete_Init`; torn down by `Discrete_StopPipe` or DLL unload |
 
 Open from PowerShell:
 
 ```powershell
 $client = New-Object System.IO.Pipes.NamedPipeClientStream(
-    '.', 'UnityDumpBfx', 'InOut')
+    '.', 'DiscreteBfx', 'InOut')
 $client.Connect(5000)
 $writer = New-Object System.IO.StreamWriter($client); $writer.AutoFlush = $true
 $reader = New-Object System.IO.StreamReader($client)

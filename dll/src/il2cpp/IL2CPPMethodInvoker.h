@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 // Wire `type` tag for an argument or return value. Mirrors the JSON arg
 // schema in docs/lua-invoke.md exactly. ExportAPI.cpp parses the JSON and
@@ -87,4 +87,4 @@ CallMethodResult CallMethod(Il2CppClass* klass,
                             std::uintptr_t instance,
                             const std::vector<CallArg>& args);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

@@ -19,7 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 // Phase 17b — field-offset resolution result. One declared field that the
 // queried address falls inside (or the closest one below it for the
@@ -185,4 +185,4 @@ private:
     std::size_t    localityHits_ = 0;
 };
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

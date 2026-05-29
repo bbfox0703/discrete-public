@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace UnityCEDumper::Phase_D::PE {
+namespace Discrete::Phase_D::PE {
 
 namespace {
 
@@ -218,4 +218,4 @@ std::optional<Image> ParseFile(const std::wstring&         path,
     return img;
 }
 
-}  // namespace UnityCEDumper::Phase_D::PE
+}  // namespace Discrete::Phase_D::PE

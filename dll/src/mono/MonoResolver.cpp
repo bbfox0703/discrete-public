@@ -11,7 +11,7 @@
 #include <mutex>
 #include <string>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -35,7 +35,7 @@ bool Bind(const wchar_t* module, const char* exportName, Fn& slot) {
     if (p == nullptr) {
         std::string msg = "MonoResolver: missing export ";
         msg += exportName;
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit, msg);
+        Discrete::Log::Write(MagicStrings::LogCategoryInit, msg);
         return false;
     }
     return true;
@@ -44,7 +44,7 @@ bool Bind(const wchar_t* module, const char* exportName, Fn& slot) {
 void DoResolve() {
     const wchar_t* module = PickMonoModule();
     if (module == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit,
+        Discrete::Log::Write(MagicStrings::LogCategoryInit,
             "MonoResolver: no mono module loaded (mono-2.0-bdwgc.dll / mono.dll)");
         g_resolver.resolved = false;
         return;
@@ -177,7 +177,7 @@ void DoResolve() {
                       "MonoResolver: %s — bound %d/%d exports",
                       narrow.c_str(), ok, total);
     }
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryInit, line);
 }
 
 }  // namespace
@@ -189,4 +189,4 @@ const Resolver& GetResolver() {
 
 bool IsResolved() { return GetResolver().resolved; }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

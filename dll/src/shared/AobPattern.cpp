@@ -7,7 +7,7 @@
 
 #include <cstdio>
 
-namespace UnityCEDumper::Aob {
+namespace Discrete::Aob {
 
 namespace {
 
@@ -341,4 +341,4 @@ PatternResult BuildPattern(const std::uint8_t* bytes, std::size_t len) {
     return r;
 }
 
-}  // namespace UnityCEDumper::Aob
+}  // namespace Discrete::Aob

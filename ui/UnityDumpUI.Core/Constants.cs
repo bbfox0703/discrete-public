@@ -5,13 +5,13 @@ namespace UnityDumpUI.Core;
 /// </summary>
 public static class Constants
 {
-    public const string PipeName = @"UnityDumpBfx";
-    // Renamed 2026-05-20: UnityCEDumper → Discrete_UEDumper to match the
-    // repo name (`discrete`). The C++ DLL mirror is in
-    // `dll/src/shared/MagicStrings.h` (LogRootSubpath). Both sides share
+    public const string PipeName = @"DiscreteBfx";
+    // Log root: Discrete_Dumper\Logs — matches the repo name (`discrete`);
+    // the original working-title was `UnityCEDumper`. The C++ DLL mirror is
+    // in `dll/src/shared/MagicStrings.h` (LogRootSubpath). Both sides share
     // the same root; DLL writes to `<root>\<pid>\<category>\` and the UI
     // writes to `<root>\ui\<category>\`.
-    public const string LogRootSubpath = @"Discrete_UEDumper\Logs";
+    public const string LogRootSubpath = @"Discrete_Dumper\Logs";
 
     // UI log categories (3 per Architecture.md Rule "Log output").
     public const string LogCategoryInit = "init";
@@ -39,5 +39,5 @@ public static class Constants
     public const int LogKeepRecentPidDirs = 15;
 
     // Single-instance Mutex name.
-    public const string SingleInstanceMutexName = @"Global\Discrete_UEDumper.UI.SingleInstance";
+    public const string SingleInstanceMutexName = @"Global\Discrete_Dumper.UI.SingleInstance";
 }

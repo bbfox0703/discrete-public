@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::ModuleHelper {
+namespace Discrete::ModuleHelper {
 
 struct ModuleInfo {
     std::wstring name;          // Base name, e.g. L"GameAssembly.dll"
@@ -26,4 +26,4 @@ void* ResolveExport(const wchar_t* moduleName, const char* exportName) noexcept;
 // Enumerates all currently loaded modules in the host process.
 std::vector<ModuleInfo> EnumerateModules();
 
-}  // namespace UnityCEDumper::ModuleHelper
+}  // namespace Discrete::ModuleHelper

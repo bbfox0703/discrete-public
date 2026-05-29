@@ -1,7 +1,7 @@
 // IDllInjector.cs — platform abstraction for DLL injection.
 //
 // Mirror of tools/Inject-Dll.ps1 (CreateRemoteThread + LoadLibraryW). The UI
-// uses this to load UnityDumper-<Backend>.dll into a target Unity process so
+// uses this to load Discrete-<Backend>.dll into a target Unity process so
 // the user no longer needs to drop to PowerShell. Real impl lives under
 // UnityDumpUI/Platform; Core just declares the contract.
 

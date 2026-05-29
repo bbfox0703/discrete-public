@@ -1,7 +1,7 @@
 # DLL Spec — ABI, Module Map, Lifecycle
 
 > The C ABI surface, module-by-module map, and lifecycle of the
-> backend DLL (`UnityDumper-Mono.dll` / `UnityDumper-IL2CPP.dll`).
+> backend DLL (`Discrete-Mono.dll` / `Discrete-IL2CPP.dll`).
 >
 > Pairs with [pipe-protocol.md](pipe-protocol.md) (the JSON-over-pipe
 > wire layer) and [mono-internals.md](mono-internals.md) /
@@ -15,8 +15,8 @@ Every backend ships as one DLL with the same C ABI:
 
 | File | Backend | Compile-time macro |
 |---|---|---|
-| `UnityDumper-Mono.dll` | Mono (`mono-2.0-bdwgc.dll` / `mono.dll`) | `UNITYCEDUMPER_BACKEND_MONO` |
-| `UnityDumper-IL2CPP.dll` | IL2CPP (`GameAssembly.dll`) | `UNITYCEDUMPER_BACKEND_IL2CPP` |
+| `Discrete-Mono.dll` | Mono (`mono-2.0-bdwgc.dll` / `mono.dll`) | `DISCRETE_BACKEND_MONO` |
+| `Discrete-IL2CPP.dll` | IL2CPP (`GameAssembly.dll`) | `DISCRETE_BACKEND_IL2CPP` |
 
 **Rule of one backend**: each DLL is built with exactly one
 `-DBACKEND={Mono,IL2CPP}` flag — the matching backend's source
@@ -35,18 +35,18 @@ files (default for `.\build.cmd publish`).
 
 ```cpp
 extern "C" {
-    enum UnityDumperBackend : int32_t {
-        UnityDumperBackend_Unknown = 0,
-        UnityDumperBackend_Mono    = 1,
-        UnityDumperBackend_IL2CPP  = 2,
+    enum DiscreteBackend : int32_t {
+        DiscreteBackend_Unknown = 0,
+        DiscreteBackend_Mono    = 1,
+        DiscreteBackend_IL2CPP  = 2,
     };
 
-    int      UnityDumper_Init();          // idempotent; 0 = success
-    void     UnityDumper_Shutdown();      // idempotent
-    int      UnityDumper_StartPipe();     // 0 = success or already running
-    void     UnityDumper_StopPipe();
-    UnityDumperBackend UnityDumper_GetBackendType();
-    uint32_t UnityDumper_GetBuildNumber();
+    int      Discrete_Init();          // idempotent; 0 = success
+    void     Discrete_Shutdown();      // idempotent
+    int      Discrete_StartPipe();     // 0 = success or already running
+    void     Discrete_StopPipe();
+    DiscreteBackend Discrete_GetBackendType();
+    uint32_t Discrete_GetBuildNumber();
 }
 ```
 
@@ -55,7 +55,7 @@ goes through ABI review (PR comment will flag it).
 
 ### `Init` / `Shutdown` / `StartPipe` / `StopPipe`
 
-`DllMain` auto-runs `UnityDumper_Init()` + `UnityDumper_StartPipe()`
+`DllMain` auto-runs `Discrete_Init()` + `Discrete_StartPipe()`
 on `DLL_PROCESS_ATTACH`. The four exports exist for callers that
 want explicit control:
 
@@ -132,7 +132,7 @@ conditionally compiles the Mono or IL2CPP arm based on the
 
 [PipeServer.cpp](../dll/src/shared/PipeServer.cpp):
 
-- **Pipe name**: `\\.\pipe\UnityDumpBfx` (single instance per host
+- **Pipe name**: `\\.\pipe\DiscreteBfx` (single instance per host
   process — second connection from a second client is rejected with
   `ERROR_PIPE_BUSY`).
 - **IO model**: overlapped IO + dispatcher thread. Each connection
@@ -155,7 +155,7 @@ shape.
 [Logger.cpp](../dll/src/shared/Logger.cpp):
 
 - Five channels: `init`, `scan`, `metadata`, `pipe`, `walk`.
-- Per-PID subfolder under `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\<channel>\`.
+- Per-PID subfolder under `%LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\<channel>\`.
 - 8 MB rotation, 4-file ring per channel.
 - Lock-free writer (per-thread buffer + atomic enqueue).
 
@@ -219,13 +219,13 @@ DLL injected (via DiscreteUI Pick & Inject, proxy DLL, or Test-Handshake.ps1)
    │
    ▼
 DllMain (DLL_PROCESS_ATTACH):
-   1. Logger::EnsureRoot() — create %LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\
-   2. UnityDumper_Init() — initialize backend resolver singletons (lazy bind)
-   3. UnityDumper_StartPipe() — spawn pipe server thread
+   1. Logger::EnsureRoot() — create %LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\
+   2. Discrete_Init() — initialize backend resolver singletons (lazy bind)
+   3. Discrete_StartPipe() — spawn pipe server thread
    4. Return TRUE
    │
    ▼
-Pipe server accepts connections at \\.\pipe\UnityDumpBfx
+Pipe server accepts connections at \\.\pipe\DiscreteBfx
    │
    ▼
 Per-RPC dispatch:
@@ -241,8 +241,8 @@ Host process exits
    │
    ▼
 DllMain (DLL_PROCESS_DETACH):
-   1. UnityDumper_StopPipe() — break the pipe server's accept loop
-   2. UnityDumper_Shutdown() — flush logs, release caches
+   1. Discrete_StopPipe() — break the pipe server's accept loop
+   2. Discrete_Shutdown() — flush logs, release caches
    3. Return TRUE
 ```
 
@@ -258,12 +258,12 @@ first.
 [BuildInfo.h.in](../dll/src/shared/BuildInfo.h.in) is a CMake
 `configure_file` template that generates `BuildInfo.h` with:
 
-- `UNITYCEDUMPER_BUILD_NUMBER` — auto-incrementing integer from
+- `DISCRETE_BUILD_NUMBER` — auto-incrementing integer from
   `build_number.txt` (root of repo, bumped by `build.ps1` on every
   build).
 - Build date / commit hash / configuration (Debug / Release).
 
-The build number flows into `UnityDumper_GetBuildNumber()` and the
+The build number flows into `Discrete_GetBuildNumber()` and the
 `handshake` response, so the UI can display "Build #234" in its
 status bar.
 
@@ -273,7 +273,7 @@ status bar.
 
 | Layer | Stability |
 |---|---|
-| C ABI (`UnityDumper_*` exports) | **Stable** — additions are vetted, removals never |
+| C ABI (`Discrete_*` exports) | **Stable** — additions are vetted, removals never |
 | Pipe protocol (`cmd` names, request/response JSON shape) | **Versioned** via `protocol` field in `handshake`; current = `1` |
 | Wire `error` codes | **Documented** in [pipe-protocol.md](pipe-protocol.md); new error codes flow through PR |
 | Internal C++ APIs | **Unstable** — refactor freely |

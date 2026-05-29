@@ -37,7 +37,7 @@
 
 #include <cstdint>
 
-namespace UnityCEDumper::IL2CPP::Metadata {
+namespace Discrete::IL2CPP::Metadata {
 
 inline constexpr std::uint32_t Sanity = 0xFAB11BAFu;
 
@@ -616,4 +616,4 @@ static_assert(sizeof(Il2CppSectionMetadata)   == 12,  "Il2CppSectionMetadata mus
 static_assert(sizeof(HeaderV38)               == 8 + 31 * 12,
               "HeaderV38 must be 8 (sanity+version) + 31 * 12 (sections) = 380 bytes");
 
-}  // namespace UnityCEDumper::IL2CPP::Metadata
+}  // namespace Discrete::IL2CPP::Metadata

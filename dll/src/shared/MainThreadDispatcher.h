@@ -38,7 +38,7 @@
 #include <functional>
 #include <memory>
 
-namespace UnityCEDumper::MainThreadDispatcher {
+namespace Discrete::MainThreadDispatcher {
 
 // Maximum work items queued before SubmitAndWait fails fast with
 // `queue_full`. Set conservatively — sustained burst higher than this
@@ -147,4 +147,4 @@ struct Stats {
 };
 Stats GetStats();
 
-}  // namespace UnityCEDumper::MainThreadDispatcher
+}  // namespace Discrete::MainThreadDispatcher

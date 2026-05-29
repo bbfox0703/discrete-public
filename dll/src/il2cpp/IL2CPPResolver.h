@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <string>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 using fn_domain_get             = Il2CppDomain*   (*)();
 using fn_thread_attach          = Il2CppThread*   (*)(Il2CppDomain*);
@@ -133,4 +133,4 @@ struct Resolver {
 const Resolver& GetResolver();
 bool IsResolved();
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

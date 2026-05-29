@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 struct AssemblyEntry {
     std::string name;   // e.g. "Assembly-CSharp"
@@ -27,4 +27,4 @@ std::vector<AssemblyEntry> EnumerateAssemblies();
 // Returns nullptr if not loaded. Walks EnumerateAssemblies under the hood.
 MonoImage* FindImageByName(const std::string& assemblyName);
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

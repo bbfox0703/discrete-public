@@ -43,13 +43,13 @@
 -- Reuses the JSON parser from unity_dissect.lua via require if available;
 -- otherwise an inline copy keeps the file standalone.
 
-local TAG = "[UnityCEDumper.symbols]"
+local TAG = "[Discrete.symbols]"
 local function log(fmt, ...) print(string.format(TAG .. " " .. fmt, ...)) end
 local function warn(fmt, ...) print(string.format(TAG .. " WARN " .. fmt, ...)) end
 local function err(fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
 
 -- Minimal pipe RPC + JSON parser (duplicated to keep this script standalone).
-local PIPE   = [[\\.\pipe\UnityDumpBfx]]
+local PIPE   = [[\\.\pipe\DiscreteBfx]]
 local nextId = 0
 
 local function parseValue(s, i)

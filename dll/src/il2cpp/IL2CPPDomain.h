@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct AssemblyEntry {
     std::string         name;       // e.g. "Assembly-CSharp"
@@ -18,4 +18,4 @@ Il2CppDomain* GetDomain();
 std::vector<AssemblyEntry> EnumerateAssemblies();
 const Il2CppImage* FindImageByName(const std::string& assemblyName);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

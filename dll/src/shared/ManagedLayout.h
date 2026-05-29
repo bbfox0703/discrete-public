@@ -33,7 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace UnityCEDumper::ManagedLayout {
+namespace Discrete::ManagedLayout {
 
 inline constexpr std::size_t kPointerSize = sizeof(void*);
 
@@ -53,4 +53,4 @@ inline constexpr std::size_t kArrayDataOffset      = kObjectHeader + 2 * kPointe
 // reporting in Phase 19c's invoker). Skips _className.
 inline constexpr std::size_t kExceptionMessageOffset = kObjectHeader + kPointerSize;
 
-}  // namespace UnityCEDumper::ManagedLayout
+}  // namespace Discrete::ManagedLayout

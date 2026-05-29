@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Aob {
+namespace Discrete::Aob {
 
 struct PatternResult {
     std::string         pattern;        // "48 89 5C 24 ?? E8 ?? ?? ?? ??"
@@ -36,4 +36,4 @@ struct PatternResult {
 // Build an AOB pattern from `bytes[0..len)` using the minimal decoder.
 PatternResult BuildPattern(const std::uint8_t* bytes, std::size_t len);
 
-}  // namespace UnityCEDumper::Aob
+}  // namespace Discrete::Aob

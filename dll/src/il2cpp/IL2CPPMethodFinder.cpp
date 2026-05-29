@@ -15,7 +15,7 @@
 
 #include <cstring>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -196,4 +196,4 @@ FindMethodResult FindMethodInstances(Il2CppClass* klass,
     return result;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

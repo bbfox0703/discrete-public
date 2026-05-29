@@ -19,7 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 // Phase 17b — same shape as the IL2CPP `FieldHit`. Documented in detail in
 // il2cpp/IL2CPPAddressFinder.h.
@@ -95,4 +95,4 @@ struct BulkInstancesResult {
 };
 BulkInstancesResult FindAllInstances(std::size_t perClassCap);
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

@@ -11,7 +11,7 @@
 #include <mutex>
 #include <string>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -29,7 +29,7 @@ bool Bind(const wchar_t* module, const char* exportName, Fn& slot, Reqd r) {
             ? "IL2CPPResolver: missing REQUIRED export "
             : "IL2CPPResolver: missing optional export ";
         msg += exportName;
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit, msg);
+        Discrete::Log::Write(MagicStrings::LogCategoryInit, msg);
         return false;
     }
     return true;
@@ -37,7 +37,7 @@ bool Bind(const wchar_t* module, const char* exportName, Fn& slot, Reqd r) {
 
 void DoResolve() {
     if (ModuleHelper::GetModuleBase(MagicStrings::ModuleIL2CPP) == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit,
+        Discrete::Log::Write(MagicStrings::LogCategoryInit,
             "IL2CPPResolver: GameAssembly.dll not loaded");
         g_resolver.resolved = false;
         return;
@@ -130,7 +130,7 @@ void DoResolve() {
                   "IL2CPPResolver: GameAssembly.dll — required %d/%d, optional %d/%d (resolved=%s)",
                   okReq, totalReq, okOpt, totalOpt,
                   g_resolver.resolved ? "yes" : "no");
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryInit, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryInit, line);
 }
 
 }  // namespace
@@ -142,4 +142,4 @@ const Resolver& GetResolver() {
 
 bool IsResolved() { return GetResolver().resolved; }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

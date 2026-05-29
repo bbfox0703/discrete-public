@@ -41,7 +41,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct ClassPointerSlot {
     /// Absolute VA of the 8-byte slot holding the class pointer.
@@ -58,4 +58,4 @@ struct ClassPointerSlot {
 std::vector<ClassPointerSlot> EnumerateClassPointerSlots(
     Il2CppClass* targetClass);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

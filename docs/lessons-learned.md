@@ -225,9 +225,9 @@ through the same code path.
 **Symptom**: closing SaGa Frontier 2 Remastered (with our IL2CPP DLL
 injected) hung for ~10 seconds between the user clicking the window's
 close button and the process actually vanishing from Task Manager.
-The per-PID init log (`Discrete_UEDumper\Logs\<pid>\init\current.log`)
+The per-PID init log (`Discrete_Dumper\Logs\<pid>\init\current.log`)
 stopped at the post-init "hook armed on il2cpp_runtime_invoke" line
-with no shutdown banner — meaning `UnityDumper_Shutdown` either never
+with no shutdown banner — meaning `Discrete_Shutdown` either never
 ran or was blocked before reaching its log line.
 
 **Root cause**: classic Windows DllMain anti-pattern hit by two
@@ -1623,7 +1623,7 @@ without re-confirming it survives a backend switch.
 
 ### Game must be closed before rebuilding the DLL
 
-`UnityDumper-Mono.dll` / `UnityDumper-IL2CPP.dll` stay mapped in the
+`Discrete-Mono.dll` / `Discrete-IL2CPP.dll` stay mapped in the
 target process after injection. Trying to rebuild while the game is
 running fails with `LNK1104: cannot open file ...`. Close the game,
 then rebuild.
@@ -1636,7 +1636,7 @@ though the source code clearly contains the new branch.
 
 **Root cause**: `Inject-Dll.ps1` (called by `Test-Handshake.ps1` and
 DiscreteUI's "Pick & Inject" alike) reads the DLL from
-`build\dll-both-release\bin\UnityDumper-IL2CPP.dll` (or `…-Mono.dll`).
+`build\dll-both-release\bin\Discrete-IL2CPP.dll` (or `…-Mono.dll`).
 `dist/` is the *shippable* tree but is **not** the inject source —
 `dist/` only gets repopulated when `build.ps1` runs to completion.
 Locally-edited code that you forgot to rebuild stays out of `build/`,
@@ -1651,7 +1651,7 @@ unconditionally rebuild — even if `dist/` *looks* recent:
 
 ```powershell
 .\build.ps1 -Target DLL -Backend Both   # ~20 s warm
-Get-ChildItem build\dll-both-release\bin\UnityDumper-*.dll | Select Name,LastWriteTime
+Get-ChildItem build\dll-both-release\bin\Discrete-*.dll | Select Name,LastWriteTime
 ```
 
 The build_number bump in `build_number.txt` is the cheapest signal —
@@ -1674,8 +1674,8 @@ commits.
    ```
 2. After a build that touched the DLL, **also verify the binary actually changed** — compare the `.dll` LastWriteTime to "now", or grep for a string you know is new in this session:
    ```powershell
-   (Get-Item dist\UnityDumper-IL2CPP.dll).LastWriteTime
-   grep -c '<some-new-marker>' dist\UnityDumper-IL2CPP.dll
+   (Get-Item dist\Discrete-IL2CPP.dll).LastWriteTime
+   grep -c '<some-new-marker>' dist\Discrete-IL2CPP.dll
    ```
 3. **User runs from `dist/`, not from `build/dll-both-release-x64/bin/`.** Even though `Inject-Dll.ps1` reads from `build/.../bin/` (per the lesson above), DiscreteUI and the proxy DLLs that the user manually copies into game folders come from `dist/`. After any partial backend rebuild, ensure `dist/` got refreshed — `build.ps1` does this only when its install step succeeds.
 4. **Prefer `build.cmd` over `build.ps1`**: `build.cmd` is the canonical entry point and matches how the user invokes it manually. It also captures a transcript (`-LogFile`) which makes post-mortem diagnosis easier.
@@ -2214,7 +2214,7 @@ emptiness. See `AobAaScriptGenerator.cs` for the dispatcher.
 ### DLL pipe must support multiple concurrent clients in Phase 22
 
 **Symptom**: bridge `rpc()` from CE Lua AA script fails with
-`pipe open: \\.\pipe\UnityDumpBfx: Invalid argument` *while*
+`pipe open: \\.\pipe\DiscreteBfx: Invalid argument` *while*
 DiscreteUI is connected to the same DLL.
 
 **Root cause**: the DLL's `CreateNamedPipeW` was called with
@@ -2244,7 +2244,7 @@ handles the transient `ERROR_PIPE_BUSY` window.
 ### CE's `executeCodeEx` is unreliable for DLL function calls; prefer pipe RPC
 
 **Symptom**: CE Lua's
-`executeCodeEx(callConv, getAddress('UnityDumper_GetBuildNumber'))`
+`executeCodeEx(callConv, getAddress('Discrete_GetBuildNumber'))`
 returns `nil` even when the DLL is fully loaded, the export resolves
 (non-zero address from `getAddress`), and every pipe-based RPC to
 the same DLL works fine.
@@ -2360,7 +2360,7 @@ hints at bogus ranges from mis-sized reads.
 ### Bitness-mismatch inject can't `CreateRemoteThread` reliably
 
 **Symptom**: pre-Phase-12d, DiscreteUI x64 explicitly refused to
-inject into 32-bit targets with `"UnityCEDumper is x64-only."` —
+inject into 32-bit targets with `"Discrete is x64-only."` —
 not because it physically couldn't run `OpenProcess` + `VirtualAllocEx`
 + `CreateRemoteThread`, but because the WOW64 boundary makes the
 remote `LoadLibraryW` thunk fragile:
@@ -2513,7 +2513,7 @@ a single `Log::Write(LogCategoryWalk, ...)` call site. The `pipe\`
 log shows the connect succeeded; no other category gets data.
 
 **Diagnostic recipe** (30 seconds, no code changes needed):
-1. Grab `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\init\current.log`
+1. Grab `%LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\init\current.log`
 2. Look at the last 5 lines before `Init: main thread id = ...`
 3. If you see `required 0/16, optional 0/27 (resolved=no)` → symptom 1 confirmed
 4. `metadata\current.log` will show `magic mismatch` → symptom 2 confirmed

@@ -47,7 +47,7 @@ public class UserSettingsStoreTests : IDisposable
         // who open one folder find the other side-by-side.
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         Assert.StartsWith(local, p, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Discrete_UEDumper", p);
+        Assert.Contains("Discrete_Dumper", p);
         Assert.EndsWith("settings.json", p);
     }
 

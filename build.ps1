@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Unified build script for UnityCEDumper (DLL + UI + tests).
+    Unified build script for Discrete (DLL + UI + tests).
 
 .DESCRIPTION
     Builds the C++ injected DLL (Mono / IL2CPP / both), the Avalonia UI
@@ -101,7 +101,7 @@ $DIST_DIR  = Join-Path $RepoRoot 'dist'
 $UI_DIR    = Join-Path $RepoRoot 'ui'
 $UI_PROJ   = Join-Path $UI_DIR   'UnityDumpUI\UnityDumpUI.csproj'
 $TEST_PROJ = Join-Path $UI_DIR   'UnityDumpUI.Tests\UnityDumpUI.Tests.csproj'
-$SLN       = Join-Path $UI_DIR   'UnityCEDumper.sln'
+$SLN       = Join-Path $UI_DIR   'Discrete.sln'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -195,7 +195,7 @@ function Enter-VsDevEnvironment {
 # ---------------------------------------------------------------------------
 # Preamble
 # ---------------------------------------------------------------------------
-Write-Banner "UnityCEDumper Build  |  Mode: $Mode  |  Target: $Target  |  Backend: $Backend  |  Arch: $Arch"
+Write-Banner "Discrete Build  |  Mode: $Mode  |  Target: $Target  |  Backend: $Backend  |  Arch: $Arch"
 Write-Info "Root:   $RepoRoot"
 Write-Info "Clean:  $Clean"
 

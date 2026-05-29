@@ -10,7 +10,7 @@
 #include <ctime>
 #include <random>
 
-namespace UnityCEDumper::Snapshot {
+namespace Discrete::Snapshot {
 
 SessionManager& SessionManager::Instance() {
     // Heap-allocated, intentionally leaked singleton — same rationale as
@@ -147,4 +147,4 @@ std::string CapturedAtUtcNow() {
     return std::string(buf);
 }
 
-}  // namespace UnityCEDumper::Snapshot
+}  // namespace Discrete::Snapshot

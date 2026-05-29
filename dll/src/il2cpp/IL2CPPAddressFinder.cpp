@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -1049,4 +1049,4 @@ AddressLookup ReverseLookupIndex::Lookup(std::uintptr_t addr, std::size_t maxBac
     return out;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

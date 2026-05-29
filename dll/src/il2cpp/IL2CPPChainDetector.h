@@ -56,7 +56,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct ChainMatch {
     /// IP of the chain's hop-3 instruction (the actual field read or write).
@@ -100,4 +100,4 @@ std::vector<ChainMatch> DetectFieldAccessChains(
     std::size_t                          matchLimit,
     ChainScanStats*                      stats);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

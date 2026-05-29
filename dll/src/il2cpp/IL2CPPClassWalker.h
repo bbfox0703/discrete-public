@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct ClassEntry {
     std::string  ns;
@@ -109,4 +109,4 @@ struct MethodSignatureEntry {
 };
 std::vector<MethodSignatureEntry> EnumerateMethodSignatures(Il2CppClass* klass);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

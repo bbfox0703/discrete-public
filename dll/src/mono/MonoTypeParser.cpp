@@ -6,7 +6,7 @@
 
 #include <windows.h>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -36,4 +36,4 @@ std::string TypeName(MonoType* type) {
     return out;
 }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

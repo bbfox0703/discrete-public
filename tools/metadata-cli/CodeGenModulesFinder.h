@@ -43,7 +43,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Phase_D::CodeGenModules {
+namespace Discrete::Phase_D::CodeGenModules {
 
 struct Module {
     std::string   name;                    // "Assembly-CSharp.dll" etc.
@@ -77,4 +77,4 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
                                   std::size_t          maxModules = 1024,
                                   std::string*         errOut    = nullptr);
 
-}  // namespace UnityCEDumper::Phase_D::CodeGenModules
+}  // namespace Discrete::Phase_D::CodeGenModules

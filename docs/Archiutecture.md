@@ -113,7 +113,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 * **Single Instance**: UI app uses Mutex to ensure only one instance runs
 * **Async everywhere**: All I/O, pipe operations, and alert actions must be async
 * **Platform Abstraction**: Any system/OS-dependent call (P/Invoke, Registry, OS commands) MUST go through an interface in `Core` project. `Core` must NEVER contain direct platform-specific code
-* **Log output**: All logs go to `%LOCALAPPDATA%\Discrete_UEDumper\Logs`, split by category into per-process subfolders. DLL: 5 files (init, scan, metadata, pipe, walk) under `<pid>\<category>\`. UI: 3 files (init, pipe, view) under `ui\<category>\`. UI rotates 5 files on every UI startup; DLL rotates 4 files on 8 MB size threshold per category. Per-PID DLL directories older than 15 days are pruned at UI startup. Root `Logs/` has no loose files — only subfolders
+* **Log output**: All logs go to `%LOCALAPPDATA%\Discrete_Dumper\Logs`, split by category into per-process subfolders. DLL: 5 files (init, scan, metadata, pipe, walk) under `<pid>\<category>\`. UI: 3 files (init, pipe, view) under `ui\<category>\`. UI rotates 5 files on every UI startup; DLL rotates 4 files on 8 MB size threshold per category. Per-PID DLL directories older than 15 days are pruned at UI startup. Root `Logs/` has no loose files — only subfolders
 * **Magic words management**: All magic strings kept in one file per project with proper comments
 * **UI Strings**: English only. All UI strings in `Resources/Strings/en.axaml`, referenced via `StaticResource` bindings
 * **Unity offsets**: All internal struct offsets (MonoClass, Il2CppClass, etc.) must be dynamically verified via OffsetFinder or API probing, never hardcoded for a single Unity version
@@ -135,7 +135,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 |    unity_dissect.lua  <- CE Structure Dissect builder |
 |      |  loadLibrary / callFunction (C ABI exports)   |
 |      v                                               |
-|  UnityDumper.dll  [injected]                         |
+|  Discrete.dll  [injected]                         |
 |      +-- ExportAPI       <- C ABI for CE Lua         |
 |      +-- PipeServer      <- Named Pipe IPC (JSON-RPC)|
 |      +-- BackendDetector <- Mono vs IL2CPP auto-detect|
@@ -160,7 +160,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 |      |   +-- FieldExporter   <- CE symbol / XML / CSX|
 |      |                                               |
 +----------------------+-------------------------------+
-                       | Named Pipe: \\.\pipe\UnityDumpBfx
+                       | Named Pipe: \\.\pipe\DiscreteBfx
                        | JSON over pipe (newline-delimited)
 +----------------------v-------------------------------+
 |  UnityDumpUI (Avalonia + ReactiveUI, standalone exe) |
@@ -346,7 +346,7 @@ The metadata version (24, 27, 29, 31...) determines struct sizes.
 
 ## Pipe Protocol (JSON-RPC)
 
-Pipe name: `\\.\pipe\UnityDumpBfx`
+Pipe name: `\\.\pipe\DiscreteBfx`
 
 ### Handshake
 
@@ -560,7 +560,7 @@ struct PlayerController {
 ## Directory Structure
 
 ```
-UnityCEDumper/
+Discrete/
 ├── CLAUDE.md                    ← this file
 ├── CMakeLists.txt               ← C++ DLL build (Mono + IL2CPP targets)
 ├── build.ps1                    ← Unified build script

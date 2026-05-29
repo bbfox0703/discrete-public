@@ -63,7 +63,7 @@ Supported game runtimes:
 | File | Provides |
 |---|---|
 | **`DiscreteUI.exe`** | GUI for everything. Seven tabs: Fields, Inspector, Methods, Symbol Finder, Address Lookup, Scene, Value Search. |
-| **`UnityDumper-Mono.dll` / `UnityDumper-IL2CPP.dll`** | Injected backend. Speaks named-pipe JSON-RPC on `\\.\pipe\UnityDumpBfx`. |
+| **`Discrete-Mono.dll` / `Discrete-IL2CPP.dll`** | Injected backend. Speaks named-pipe JSON-RPC on `\\.\pipe\DiscreteBfx`. |
 | **`version.dll` / `winmm.dll`** *(proxy DLLs)* | Drop next to the game's `.exe` for pre-Unity-init injection. Auto-selects Mono vs IL2CPP backend. |
 | **`unity_dump.lua`** | One-shot injector from CE Lua. |
 | **`unity_dissect.lua`** | Populate CE's *Structure Dissect* directly from a managed class layout. |
@@ -72,7 +72,7 @@ Supported game runtimes:
 | **`unity_invoke.lua`** | Call any Mono / IL2CPP method from CE Lua with typed args + return value + managed exception capture. |
 | **`unity_scene.lua`** | Walk Unity's scene graph (GameObject hierarchy, components, transforms). |
 | **`mono_registersymbol_helpers.lua`** | DLL-free Mono symbol register helpers (for CT authors who prefer pure-Lua). |
-| **`inject-x86.exe`** + **`x86/`** subfolder | Cross-bitness inject helper. `DiscreteUI.exe` is x64-only, so when the target is a 32-bit Unity Mono game the UI shells out to `inject-x86.exe` (a tiny standalone 32-bit injector) to push the matching `x86/UnityDumper-Mono.dll` into the target. Ships next to `DiscreteUI.exe`; not run by the end user directly. |
+| **`inject-x86.exe`** + **`x86/`** subfolder | Cross-bitness inject helper. `DiscreteUI.exe` is x64-only, so when the target is a 32-bit Unity Mono game the UI shells out to `inject-x86.exe` (a tiny standalone 32-bit injector) to push the matching `x86/Discrete-Mono.dll` into the target. Ships next to `DiscreteUI.exe`; not run by the end user directly. |
 | **`metadata-cli.exe`** | Offline `global-metadata.dat` parser (works on a game folder without launching the game). |
 
 ### What the UI's tabs do
@@ -100,8 +100,8 @@ End user extracts the release zip into `<CE-install>/discrete/`.
 <CE-install>/
 ├── cheatengine-x86_64.exe
 └── discrete/
-    ├── UnityDumper-Mono.dll       ← required for Mono targets
-    ├── UnityDumper-IL2CPP.dll     ← required for IL2CPP targets
+    ├── Discrete-Mono.dll       ← required for Mono targets
+    ├── Discrete-IL2CPP.dll     ← required for IL2CPP targets
     ├── unity_dump.lua             ← required (injector)
     ├── utils.lua                  ← required
     ├── unity_dissect.lua          ← optional
@@ -111,7 +111,7 @@ End user extracts the release zip into `<CE-install>/discrete/`.
     ├── unity_addrfind.lua         ← optional
     ├── mono_registersymbol_helpers.lua  ← optional
     └── x86/
-        ├── UnityDumper-Mono.dll   ← required for 32-bit Mono games
+        ├── Discrete-Mono.dll   ← required for 32-bit Mono games
         └── version.dll / winmm.dll ← required if shipping Mode C for 32-bit games
 ```
 
@@ -137,7 +137,7 @@ Copy its `bootstrap()` function into your CT's autorun script, edit
 `bootstrap()` from your `[ENABLE]` block.
 
 Tip: embed only the files you actually use. A minimum-functional CT
-only needs `UnityDumper-{Mono,IL2CPP}.dll` + `utils.lua` +
+only needs `Discrete-{Mono,IL2CPP}.dll` + `utils.lua` +
 `unity_dump.lua`. Adding the optional scripts is a few extra KB each.
 
 **Pro**: end user does nothing — opens `.CT`, plays. No "download
@@ -155,7 +155,7 @@ loads it before Unity, and the proxy auto-loads the matching backend.
 | 64-bit Unity (most modern games) | `version.dll` / `winmm.dll` in the package root |
 | 32-bit Unity (older Mono games) | `x86/version.dll` / `x86/winmm.dll` |
 
-The matching backend (`UnityDumper-Mono.dll` or `UnityDumper-IL2CPP.dll`
+The matching backend (`Discrete-Mono.dll` or `Discrete-IL2CPP.dll`
 in the correct arch) must sit next to the proxy.
 
 **Don't mix arches**: a 64-bit proxy with a 32-bit backend DLL silently
@@ -190,8 +190,8 @@ After deploying (any mode above) and opening a Unity game in CE:
 -- Open CE's Lua console (View → Lua Engine, or Ctrl+Alt+L), then:
 dofile([[<CE>\discrete\unity_dump.lua]])
 -- Output:
---   [UnityCEDumper] Backend: IL2CPP — DLL injected (build N)
---   [UnityCEDumper] Pipe ready: \\.\pipe\UnityDumpBfx
+--   [Discrete] Backend: IL2CPP — DLL injected (build N)
+--   [Discrete] Pipe ready: \\.\pipe\DiscreteBfx
 
 -- Reverse address lookup — paste any CE-discovered address:
 dofile([[<CE>\discrete\unity_addrfind.lua]])
@@ -211,7 +211,7 @@ this automatically (Mode A/B/C above).
 
 ### Where logs live
 
-All logs go under `%LOCALAPPDATA%\Discrete_UEDumper\Logs\`.
+All logs go under `%LOCALAPPDATA%\Discrete_Dumper\Logs\`.
 
 | Path | What's logged |
 |---|---|
@@ -224,7 +224,7 @@ All logs go under `%LOCALAPPDATA%\Discrete_UEDumper\Logs\`.
 
 Open the folder quickly:
 ```powershell
-explorer "$env:LOCALAPPDATA\Discrete_UEDumper\Logs"
+explorer "$env:LOCALAPPDATA\Discrete_Dumper\Logs"
 ```
 
 Each log auto-rotates at 8 MB; older entries land under
@@ -254,7 +254,7 @@ RPCs so CE stays responsive even on a 300-method class.
 ### Running diagnostics from PowerShell
 
 The release package ships PowerShell smoke harnesses under `tools/`.
-They open `\\.\pipe\UnityDumpBfx` directly and send JSON-RPC frames.
+They open `\\.\pipe\DiscreteBfx` directly and send JSON-RPC frames.
 Useful for reproducing bugs without launching DiscreteUI or CE.
 
 ```powershell
@@ -278,7 +278,7 @@ output to a bug report:
 2. **Unity version** + **backend** (Mono / IL2CPP). The DLL prints
    both in `init\current.log` at the top:
    ```
-   UnityDumper DLL attached build=NNN backend=Mono pid=...
+   Discrete DLL attached build=NNN backend=Mono pid=...
    Detect: backend=Mono unity=2020.3.49f1 ...
    ```
 3. **DLL build number** (`NNN` above).

@@ -14,7 +14,7 @@
 #include <cstring>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -175,4 +175,4 @@ std::vector<ClassPointerSlot> EnumerateClassPointerSlots(
     return result;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP
