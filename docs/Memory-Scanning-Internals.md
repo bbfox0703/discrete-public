@@ -686,5 +686,8 @@ diff ≈ 3GB 可行**，解掉原本「snapshot 3 份吃不消」。
   （269K inst）即使做了仍 ~5GB/snap（值資料量本身），**budget 才是此遊戲的正確控制鈕**；
   在常用的 50000 budget 下 UI 已輕量。故 churn 高、ROI 低 → 除非要常態抓 full capture
   否則不值得。**Phase 30a 視為告一段落**（value compaction 為決定性勝著）。
-- **Mono emit dedup**（目前 Mono 仍送舊 inline 格式；UI re-expand 兩種都吃，故相容）。
+- ~~**Mono emit dedup**~~ ✅ **已實作（build #781）**：Mono `decodeOneClass` 同樣改成
+  schema-once + per-instance `v[]`（鏡像 IL2CPP）。兩個 backend 現在都送 deduped wire；
+  UI `NormalizeDeduped` + value compaction 一體適用。Mono 端 decode tree 同樣縮小。
+  （runtime 驗證待 Mono 目標，如 活俠傳 / BongoCat。）
 - **30b/30c streaming**（見 docs/snapshot-streaming-dedup.md）。
