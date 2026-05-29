@@ -13,6 +13,12 @@
   <sys:String x:Key="App.DevToolWarning">Dev tool · not for distribution</sys:String>
   <sys:String x:Key="App.DevToolWarningTooltip">DiscreteUI is a developer / power-user tool. For CE-table distribution to end users, embed the backend DLL inside the .CT file using the Mode-B bootstrap pattern — see scripts/ce_table_bootstrap.lua + scripts/README.md "Deployment for CE-table publishers".</sys:String>
 
+  <!-- Low-RAM advisory strip. Shown when total physical RAM is small; warns
+       that the memory-heavy tabs (Snapshot / SPC Query / Class Pivot) may
+       exhaust memory on this machine. Two tiers by total RAM. -->
+  <sys:String x:Key="App.MemoryWarningSevere">⚠ Low memory: this PC has ≤16 GB RAM — Snapshot / SPC Query / Class Pivot will likely exhaust memory and may crash. Narrow the assembly scope and lower the decode budget / instance cap before running them.</sys:String>
+  <sys:String x:Key="App.MemoryWarningCaution">Note: Snapshot / SPC Query / Class Pivot can be very memory-heavy on this PC (≤32 GB RAM). Lower the decode budget / narrow the scope if a wide capture runs short on memory.</sys:String>
+
   <!-- Phase 8 browser panels. -->
   <sys:String x:Key="Browser.AssembliesTitle">Assemblies</sys:String>
   <sys:String x:Key="Browser.ClassesTitle">Classes</sys:String>
