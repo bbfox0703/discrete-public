@@ -96,6 +96,16 @@ ClassRangeStats GetClassRangeStats();
 // implicitly on first use.
 AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan);
 
+// Phase 30 P2 — shared identity + field/array resolution, given a confirmed
+// managed instance (`instance` base + its validated Il2CppClass* `klassPtr`)
+// and the queried `addr`. Populates `out` exactly as WhatIsAt's tail does, so
+// the backward-scan path and the interval-tree reverse-lookup path return
+// identical results. PRECONDITION: caller holds a ThreadAttachGuard for the
+// IL2CPP domain (the SEH name/declaring/namespace/image probes need it). Leaves
+// scannedFrom/To/Steps untouched (backward-scan diagnostics).
+void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
+                           std::uintptr_t klassPtr, AddressLookup& out);
+
 // Phase 29 — wide-heap "all instances of all known classes" scan in one
 // pass. Walks committed RW non-image non-stack regions once; for every
 // 8-aligned qword, checks the existing class range cache (binary search
@@ -120,5 +130,59 @@ struct BulkInstancesResult {
     std::size_t                          bytesScanned       = 0;
 };
 BulkInstancesResult FindAllInstances(std::size_t perClassCap);
+
+// ---------------------------------------------------------------------------
+// Phase 30 P2 — batch reverse-lookup index (interval-tree + locality cache).
+// ---------------------------------------------------------------------------
+//
+// WhatIsAt() answers ONE address by walking backwards up to maxBackwardScan
+// bytes (~2048 8-byte probes worst case) hunting for a class pointer. A value
+// scan calls it once PER candidate, so a scan that returns thousands of hits
+// pays O(candidates × probes) — the dominant cost on a value scan (see
+// Memory-Scanning-Internals.md §16). This index flips that: ONE up-front heap
+// walk records every managed instance's base, sorted; then each candidate is an
+// O(log N) binary search for the nearest base ≤ addr (with an O(1) locality
+// fast-path for clustered candidates), reusing ResolveInstanceLookup so the
+// answer is byte-identical to WhatIsAt's.
+//
+// Lifetime: build once before a candidate loop, throw away after. NOT cached
+// across calls — a GC cycle would invalidate the bases and we get no GC
+// notification (same staleness rationale as WhatIsAt's per-call freshness).
+class ReverseLookupIndex {
+public:
+    // Build the index: one parallel heap walk (mirrors FindAllInstances'
+    // region filter + chunking) collecting a FLAT, uncapped (instanceBase,
+    // klassPtr) list, sorted by base. Returns false if the class cache is
+    // unavailable (caller should fall back to WhatIsAt). Does not need a
+    // ThreadAttachGuard (raw memory only — no runtime calls).
+    bool Build();
+
+    // Resolve `addr` to its managed instance + field, matching WhatIsAt's
+    // contract exactly. `maxBackwardScan` bounds how far below `addr` a base
+    // may sit to still count as containing it (same window WhatIsAt uses).
+    // PRECONDITION: caller holds a ThreadAttachGuard (ResolveInstanceLookup's
+    // SEH name probes need it). On a miss, returns AddressLookup{found=false}
+    // with reason "no_klass_in_range".
+    AddressLookup Lookup(std::uintptr_t addr, std::size_t maxBackwardScan);
+
+    std::size_t InstanceCount() const { return bases_.size(); }
+    std::size_t HitCount()      const { return hits_; }
+    std::size_t LocalityHits()  const { return localityHits_; }
+
+private:
+    struct Entry { std::uintptr_t base; std::uintptr_t klass; };
+    std::vector<Entry> bases_;           // sorted ascending by base
+    // Locality cache — adjacent value-scan candidates usually fall in the same
+    // instance. Remember the last hit's base AND the next base above it; a new
+    // addr whose 8-rounded `start` lies in [lastBase_, lastNextBase_) provably
+    // has lastBase_ as its nearest base ≤ start (no other base in between), so
+    // we can skip the binary search. Caching just [base, base+window) would be
+    // WRONG — a closer base could sit between lastBase_ and addr.
+    std::uintptr_t lastBase_     = 0;
+    std::uintptr_t lastKlass_    = 0;
+    std::uintptr_t lastNextBase_ = 0;    // base of the next instance above lastBase_
+    std::size_t    hits_         = 0;
+    std::size_t    localityHits_ = 0;
+};
 
 }  // namespace UnityCEDumper::IL2CPP

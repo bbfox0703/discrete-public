@@ -572,7 +572,8 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 
 ### 16.3 加速 roadmap（建議順序）
 
-> **狀態（2026-05-29, build #751）**：P1 兩項皆 **已實作** — 見 §16.5。P2/P3 仍 pending。
+> **狀態（2026-05-29）**：P1 兩項皆 **已實作**（build #751，§16.5）。**P2 interval-tree
+> 候選反查 — 已實作 IL2CPP（build #814，§16.5b）**；P2 SIMD 內層、P2 Mono port、P3 仍 pending。
 
 **P1 — 拿掉 value/string scan 的 per-chunk `IsReadable`（低風險、改動小）** ✅ 已實作
 相信 `EnumerateCommittedRegions` 的區段表，內層維持 `__try` SEH 保護；只在某 chunk AV 時才針對該區段降級細掃。直接省掉每 64KB 一次 VirtualQuery。CE 等價作法 = `VirtualQueryEx_StartCache` + working-set。
@@ -620,6 +621,39 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 **尚未做（follow-up）**：Mono `MonoAddressFinder.cpp::FindAllInstances`（用 `SehSweepRegionLoad` + slot 驗證，較複雜，且目前目標為 IL2CPP）仍單緒；value/string/pointer 因走共用 `Memory.cpp` 路徑，Mono 端已連帶平行化。P2（候選反查 interval-tree / locality cache）、P2 SIMD（string/pointer 內層）、P3（VQ 快取）仍 pending。
 
 **驗證重點**：correctness — 平行掃描的 match 集合須與舊序列版一致（位址升冪、同筆數，截斷時保留最低位址）；perf — 多 GB heap 的 value scan / find instances / snapshot wall-clock 應呈核心數倍率下降。
+
+### 16.5b P2 候選反查 interval-tree（2026-05-29, build #814，IL2CPP）
+
+**問題**：value/string scan 每筆候選呼叫一次 `IL2CPP::WhatIsAt(addr, maxBackwardScan)`，
+而 `WhatIsAt` 往回最多走 `maxBackwardScan/8`（~2048）個 8-byte 探測找最近的 class
+pointer。回傳上千筆的 scan → O(候選 × 探測)，是 value scan 的主成本（§16.3）。
+
+**修法**（`IL2CPPAddressFinder.{h,cpp}` + `ExportAPI.cpp` 三個 IL2CPP handler）：
+- **抽出共用 `ResolveInstanceLookup(addr, instanceBase, klassPtr, out)`**：`WhatIsAt`
+  尾段（步驟 5-8：宣告型別鏈 + array-element / 宣告欄位解析）抽成獨立函式,backward-scan
+  與 interval-tree 兩條路徑共用 → **答案逐 byte 相同**(correctness invariant)。
+- **`ReverseLookupIndex`**：一次平行 heap walk(沿用 `FindAllInstances` 的 region 過濾 +
+  1 MB chunk + N 執行緒,但收集 **扁平、不設上限** 的 `(instanceBase, klass)` list),依
+  base 升冪排序。每候選 `Build()` 一次、loop 內 `Lookup(addr, maxBackwardScan)`:
+  - **locality fast-path**:相鄰候選常落同一 instance。快取上次命中的 base 與其
+    **上一個 base**(`lastNextBase_`);新 `start ∈ [lastBase_, lastNextBase_)` 即可證明
+    `lastBase_` 就是 ≤ start 的最近 base(中間無其他 base)→ 免二分搜。**只快取
+    `[base, base+window)` 會錯**(中間可能有更近的 base)。
+  - **miss → `std::upper_bound`** 找 ≤ start 的最大 base + backward-window 檢查
+    (`base ≥ start-(maxSteps-1)*8`,與 `WhatIsAt` 視窗數學一致)。
+  - 找到 base 後呼叫共用的 `ResolveInstanceLookup`。
+- 三個呼叫點(`scanFieldValue` value + string、`beginValueScan`)改為先 `Build()`、loop 內
+  `Lookup`,build 失敗則 fallback 到 `WhatIsAt`。`refineValueScan` **不呼叫 WhatIsAt**
+  (它重讀快取候選的 bytes 再比較,metadata 在 begin 時已解析)→ 不受影響。
+- scan log 末尾加 `revIndex=1 idxInst=… idxHits=… idxLocal=…`。
+
+**不快取跨呼叫**:GC 一輪即失效且我們收不到 GC 通知(與 `WhatIsAt` 的每呼叫即時性同理)。
+**尚未做**:Mono port(`Mono::WhatIsAt` 同樣抽 `ResolveInstanceLookup` + 一個 Mono
+`ReverseLookupIndex`);Mono `FindAllInstances` 仍單緒。
+**驗證重點**:correctness — index `Lookup` 與 `WhatIsAt` 對同一 addr 須回傳相同
+instance/class/field(兩者共用 `ResolveInstanceLookup` → 結構保證);perf — 大型遊戲
+value scan wall-clock 應從「候選數 × 反掃」降到「一次 heap walk + 候選數 × log N」。
+**Live-smoke(使用者) 待辦**:Utawarerumono value scan 計時 + 答案比對。
 
 ### 16.6 Snapshot 記憶體 watchdog（2026-05-29, build #756）
 

@@ -424,6 +424,120 @@ ClassRangeStats GetClassRangeStats() {
     return s;
 }
 
+// Phase 30 P2 — shared field/identity resolution, factored out of WhatIsAt's
+// tail so the backward-scan path (WhatIsAt) and the interval-tree reverse-lookup
+// path produce IDENTICAL results. Given a confirmed managed instance — base
+// pointer `instance` + its validated Il2CppClass* `klassPtr` — and the queried
+// `addr`, populate `out`: found flag, instance/klassPtr/fieldOffset, the
+// declaring-type chain (className / ns / assembly), and the array-element or
+// declared-field resolution. Mirrors WhatIsAt steps 5-8 verbatim.
+//
+// PRECONDITION: the caller holds a ThreadAttachGuard for the IL2CPP domain —
+// the SEH-protected name/declaring/namespace/image probes call back into
+// managed-state code that expects an attached thread. Does NOT touch
+// scannedFrom/To/Steps (those are the backward-scan's diagnostics; the
+// interval-tree path leaves them at their defaults).
+void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
+                           std::uintptr_t klassPtr, AddressLookup& out) {
+    const auto& r = GetResolver();
+    Il2CppClass* k = reinterpret_cast<Il2CppClass*>(klassPtr);
+    std::uintptr_t p = instance;
+
+    out.found       = true;
+    out.instance    = p;
+    out.klassPtr    = klassPtr;
+    out.fieldOffset = static_cast<std::ptrdiff_t>(addr - p);
+
+    // Walk declaring-type chain so nested classes round-trip cleanly back
+    // through walkInstance / FindClass (same logic as
+    // IL2CPPClassWalker::DescribeClass).
+    const char* name = (r.class_get_name != nullptr)
+        ? SehClassNameProbe(r.class_get_name, k) : nullptr;
+    std::string leaf = (name != nullptr) ? name : "";
+    Il2CppClass* outer = k;
+    if (r.class_get_declaring != nullptr) {
+        Il2CppClass* cur = k;
+        for (int depth = 0; depth < 16; ++depth) {
+            Il2CppClass* d = SehClassDeclaringProbe(r.class_get_declaring, cur);
+            if (d == nullptr) break;
+            const char* dn = SehClassNameProbe(r.class_get_name, d);
+            if (dn != nullptr && *dn != '\0') {
+                leaf = std::string(dn) + "/" + leaf;
+            }
+            outer = d;
+            cur = d;
+        }
+    }
+    out.className = std::move(leaf);
+
+    // Namespace comes from the OUTER class (nested types have empty ns).
+    if (r.class_get_namespace != nullptr) {
+        const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, outer);
+        if (nsStr != nullptr) out.ns = nsStr;
+    }
+    if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
+        const Il2CppImage* img = SehClassImageProbe(r.class_get_image, k);
+        if (img != nullptr) {
+            const char* imgName = SehImageNameProbe(r.image_get_name, img);
+            if (imgName != nullptr) out.assembly = StripDllSuffix(imgName);
+        }
+    }
+
+    // Phase 27c — array element resolution. If klass is an array type, compute
+    // the element index from the queried offset and report it as an array-
+    // element instead of falling through to declared-field resolution.
+    bool resolvedAsArray = false;
+    if (r.class_get_element_class != nullptr) {
+        Il2CppClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
+        if (elemClass != nullptr) {
+            std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
+            if (out.fieldOffset >= dataOff) {
+                std::uintptr_t arrayLength = 0;
+                Memory::SafeReadBytes(
+                    reinterpret_cast<void*>(p + ManagedLayout::kArrayMaxLengthOffset),
+                    &arrayLength, sizeof(arrayLength));
+
+                std::size_t elemSize = ManagedLayout::kPointerSize;
+                bool elemIsValueType = false;
+                if (r.class_is_valuetype != nullptr) {
+                    elemIsValueType = SehIsValueTypeProbe(r.class_is_valuetype, elemClass) != 0;
+                }
+                if (elemIsValueType && r.class_value_size != nullptr) {
+                    int sz = SehValueSizeProbe(r.class_value_size, elemClass);
+                    if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                }
+
+                std::ptrdiff_t into     = out.fieldOffset - dataOff;
+                std::size_t    elemIdx  = static_cast<std::size_t>(into) / elemSize;
+                std::size_t    interior = static_cast<std::size_t>(into) % elemSize;
+
+                out.field.present    = true;
+                out.field.name       = "[" + std::to_string(elemIdx) + "]";
+                out.field.offset     = dataOff + elemIdx * elemSize;
+                out.field.size       = elemSize;
+                out.field.kind       = (interior == 0) ? "array-element" : "array-interior";
+                out.field.isValueType = elemIsValueType;
+                out.field.interiorOffset = static_cast<std::ptrdiff_t>(interior);
+                if (r.class_get_name != nullptr) {
+                    const char* enm = SehClassNameProbe(r.class_get_name, elemClass);
+                    if (enm != nullptr) out.field.typeName = enm;
+                }
+                char meta[64];
+                std::snprintf(meta, sizeof(meta), "len=%zu idx=%zu",
+                              static_cast<std::size_t>(arrayLength), elemIdx);
+                out.field.declaredIn = meta;
+                resolvedAsArray = true;
+            }
+        }
+    }
+
+    // Phase 17b — resolve which declared field contains the queried offset.
+    if (!resolvedAsArray) {
+        ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
+                       out.nearestFieldDelta);
+    }
+}
+
 AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     AddressLookup out;
     out.queriedAddr = addr;
@@ -514,105 +628,11 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
             ? SehClassNameProbe(r.class_get_name, k) : nullptr;
         if (name == nullptr || *name == '\0') continue;
 
-        // Got it. Populate the result.
-        out.found       = true;
-        out.instance    = p;
-        out.klassPtr    = klassCandidate;
-        out.fieldOffset = static_cast<std::ptrdiff_t>(addr - p);
-        // Phase 27d follow-up — walk declaring-type chain so nested
-        // classes round-trip cleanly back through walkInstance / FindClass.
-        // Without this, `PLY_WORK` (nested inside `MainGame`) was emitted
-        // as `className = "PLY_WORK"` + `ns = ""`, and the Inspect-this-
-        // instance handoff failed with `class not found: .PLY_WORK`.
-        // Same logic as IL2CPPClassWalker::DescribeClass.
-        std::string leaf = name;
-        Il2CppClass* outer = k;
-        if (r.class_get_declaring != nullptr) {
-            Il2CppClass* cur = k;
-            // depth (not `i`) — outer scan-step loop already uses `i`.
-            for (int depth = 0; depth < 16; ++depth) {
-                Il2CppClass* d = SehClassDeclaringProbe(r.class_get_declaring, cur);
-                if (d == nullptr) break;
-                const char* dn = SehClassNameProbe(r.class_get_name, d);
-                if (dn != nullptr && *dn != '\0') {
-                    leaf = std::string(dn) + "/" + leaf;
-                }
-                outer = d;
-                cur = d;
-            }
-        }
-        out.className = std::move(leaf);
-
-        // Namespace comes from the OUTER class (IL2CPP / Mono only attach
-        // namespaces to top-level types; nested types have empty ns).
-        if (r.class_get_namespace != nullptr) {
-            const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, outer);
-            if (nsStr != nullptr) out.ns = nsStr;
-        }
-        if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
-            const Il2CppImage* img = SehClassImageProbe(r.class_get_image, k);
-            if (img != nullptr) {
-                const char* imgName = SehImageNameProbe(r.image_get_name, img);
-                if (imgName != nullptr) out.assembly = StripDllSuffix(imgName);
-            }
-        }
-
-        // Phase 27c — array element resolution. If klass is an array
-        // type, compute the element index from the queried offset and
-        // report it as an array-element instead of falling through to
-        // declared-field resolution (arrays have no user-declared fields).
-        bool resolvedAsArray = false;
-        if (r.class_get_element_class != nullptr) {
-            Il2CppClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
-            if (elemClass != nullptr) {
-                std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
-                if (out.fieldOffset >= dataOff) {
-                    std::uintptr_t arrayLength = 0;
-                    Memory::SafeReadBytes(
-                        reinterpret_cast<void*>(p + ManagedLayout::kArrayMaxLengthOffset),
-                        &arrayLength, sizeof(arrayLength));
-
-                    std::size_t elemSize = ManagedLayout::kPointerSize;
-                    bool elemIsValueType = false;
-                    if (r.class_is_valuetype != nullptr) {
-                        elemIsValueType = SehIsValueTypeProbe(r.class_is_valuetype, elemClass) != 0;
-                    }
-                    if (elemIsValueType && r.class_value_size != nullptr) {
-                        int sz = SehValueSizeProbe(r.class_value_size, elemClass);
-                        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
-                    }
-
-                    std::ptrdiff_t into     = out.fieldOffset - dataOff;
-                    std::size_t    elemIdx  = static_cast<std::size_t>(into) / elemSize;
-                    std::size_t    interior = static_cast<std::size_t>(into) % elemSize;
-
-                    out.field.present    = true;
-                    out.field.name       = "[" + std::to_string(elemIdx) + "]";
-                    out.field.offset     = dataOff + elemIdx * elemSize;
-                    out.field.size       = elemSize;
-                    out.field.kind       = (interior == 0) ? "array-element" : "array-interior";
-                    out.field.isValueType = elemIsValueType;
-                    out.field.interiorOffset = static_cast<std::ptrdiff_t>(interior);
-                    if (r.class_get_name != nullptr) {
-                        const char* enm = SehClassNameProbe(r.class_get_name, elemClass);
-                        if (enm != nullptr) out.field.typeName = enm;
-                    }
-                    char meta[64];
-                    std::snprintf(meta, sizeof(meta), "len=%zu idx=%zu",
-                                  static_cast<std::size_t>(arrayLength), elemIdx);
-                    out.field.declaredIn = meta;
-                    resolvedAsArray = true;
-                }
-            }
-        }
-
-        // Phase 17b — resolve which declared field contains the queried
-        // offset. Reuses the same ThreadAttachGuard scope so the runtime
-        // calls inside EnumerateInstanceFields don't have to re-attach.
-        if (!resolvedAsArray) {
-            ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
-                           out.nearestFieldDelta);
-        }
+        // Got it — instance base `p` + validated klass `klassCandidate`.
+        // Identity + field/array resolution (steps 5-8) is shared with the
+        // Phase 30 P2 interval-tree path so both produce identical answers.
+        // We already hold the ThreadAttachGuard (the helper's precondition).
+        ResolveInstanceLookup(addr, p, klassCandidate, out);
         return out;
     }
 
@@ -690,6 +710,38 @@ void SehSweepRegion(
     }
 }
 
+// Phase 30 P2 — flat (uncapped) variant of SehSweepRegion for the reverse-
+// lookup index. Same membership test + 8-aligned instance filter, but records
+// every hit as a flat (instanceAddr, klass) pair instead of a per-class map —
+// the index needs ALL instances (no cap) to answer "nearest base ≤ addr".
+#pragma warning(push)
+#pragma warning(disable: 4509)
+void SehSweepRegionFlat(
+    const std::uint8_t* base, std::size_t size,
+    std::uintptr_t minKlass, std::uintptr_t maxKlass,
+    const std::vector<std::uintptr_t>& classSet,
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& out,
+    std::size_t& qwordsScanned) noexcept
+{
+    __try {
+        const std::size_t count = size / sizeof(std::uintptr_t);
+        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
+        for (std::size_t i = 0; i < count; ++i) {
+            ++qwordsScanned;
+            std::uintptr_t qw = arr[i];
+            if (qw == 0) continue;
+            if (qw < minKlass || qw > maxKlass) continue;
+            if ((qw & 7u) != 0) continue;
+            if (!std::binary_search(classSet.begin(), classSet.end(), qw)) continue;
+            const std::uintptr_t instAddr =
+                reinterpret_cast<std::uintptr_t>(base + i * sizeof(std::uintptr_t));
+            if ((instAddr & 7u) != 0) continue;
+            out.emplace_back(instAddr, qw);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Unreadable page partway through — keep what we have, move on.
+    }
+}
 #pragma warning(pop)
 
 }  // namespace
@@ -826,6 +878,174 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                " regionsScanned=" + std::to_string(out.regionsScanned) +
                " bytes=" + std::to_string(out.bytesScanned) +
                " threads=" + std::to_string(nthreads));
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 30 P2 — ReverseLookupIndex
+// ---------------------------------------------------------------------------
+
+bool ReverseLookupIndex::Build() {
+    bases_.clear();
+    lastBase_ = lastKlass_ = lastNextBase_ = 0;
+    hits_ = localityHits_ = 0;
+
+    if (!BuildClassRangeCache()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "ReverseLookupIndex: build aborted — class range cache unavailable");
+        return false;
+    }
+
+    std::vector<std::uintptr_t> classSet;
+    std::uintptr_t minKlass = 0, maxKlass = 0;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        classSet = cache().classSet;
+        minKlass = g_minKlass;
+        maxKlass = g_maxKlass;
+    }
+    if (classSet.empty()) return false;
+
+    constexpr DWORD kRW =
+        PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    // Same region filter as FindAllInstances (RW, non-image, non-mapped,
+    // non-stack) — the IL2CPP managed heap is VirtualAlloc'd MEM_PRIVATE.
+    auto regions = Memory::EnumerateCommittedRegions();
+    auto stacks  = Memory::CollectThreadStackRanges();
+    std::vector<std::pair<const std::uint8_t*, std::size_t>> accepted;
+    accepted.reserve(regions.size());
+    for (const auto& r : regions) {
+        if ((r.protect & kRW) == 0) continue;
+        if (r.type == MEM_IMAGE || r.type == MEM_MAPPED) continue;
+        const std::uint8_t* regionEnd = r.base + r.size;
+        bool onStack = false;
+        for (const auto& s : stacks) {
+            if (s.low >= regionEnd) break;
+            if (s.high > r.base && s.low < regionEnd) { onStack = true; break; }
+        }
+        if (onStack) continue;
+        accepted.emplace_back(r.base, r.size);
+    }
+
+    // 8-aligned 1 MB chunks (qword == 8 stride → no cross-chunk straddle).
+    struct Chunk { const std::uint8_t* base; std::size_t size; };
+    constexpr std::size_t kChunk = 1u * 1024u * 1024u;
+    std::vector<Chunk> chunks;
+    for (const auto& [rb, rs] : accepted) {
+        for (std::size_t off = 0; off < rs; off += kChunk) {
+            chunks.push_back(Chunk{rb + off, std::min(kChunk, rs - off)});
+        }
+    }
+
+    // Parallel sweep into per-thread flat lists, then concatenate + sort.
+    unsigned int nthreads = Memory::ScanThreadCount();
+    if (nthreads > chunks.size()) nthreads = static_cast<unsigned int>(chunks.size());
+    if (nthreads < 1) nthreads = 1;
+
+    std::vector<std::vector<std::pair<std::uintptr_t, std::uintptr_t>>> perThread(nthreads);
+    std::vector<std::size_t> qScanned(nthreads, 0);
+    std::atomic<std::size_t> nextChunk{0};
+    auto worker = [&](unsigned int tid) {
+        auto& vec = perThread[tid];
+        std::size_t qs = 0;
+        for (;;) {
+            std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= chunks.size()) break;
+            SehSweepRegionFlat(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
+                               classSet, vec, qs);
+        }
+        qScanned[tid] = qs;
+    };
+    if (nthreads <= 1) {
+        worker(0);
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(nthreads);
+        for (unsigned int t = 0; t < nthreads; ++t) pool.emplace_back(worker, t);
+        for (auto& th : pool) th.join();
+    }
+
+    std::size_t total = 0;
+    for (auto& v : perThread) total += v.size();
+    bases_.reserve(total);
+    for (auto& v : perThread) {
+        for (auto& pr : v) bases_.push_back(Entry{pr.first, pr.second});
+    }
+    // Sort ascending by base. Each chunk's hits are already ascending and
+    // chunks don't overlap, but per-thread interleaving across the worklist
+    // means the concatenation isn't globally sorted — sort once.
+    std::sort(bases_.begin(), bases_.end(),
+              [](const Entry& a, const Entry& b) { return a.base < b.base; });
+
+    std::size_t qtotal = 0;
+    for (std::size_t q : qScanned) qtotal += q;
+    Log::Write(MagicStrings::LogCategoryScan,
+               "ReverseLookupIndex(IL2CPP): instances=" + std::to_string(bases_.size()) +
+               " qwords=" + std::to_string(qtotal) +
+               " threads=" + std::to_string(nthreads));
+    return true;
+}
+
+AddressLookup ReverseLookupIndex::Lookup(std::uintptr_t addr, std::size_t maxBackwardScan) {
+    AddressLookup out;
+    out.queriedAddr = addr;
+
+    // Match WhatIsAt's window math: round addr down to 8, allow a base as far
+    // as (maxSteps-1)*8 below it. The nearest 8-aligned object base ≤ addr
+    // inside that window is the containing instance (identical to the
+    // backward scan's "first class pointer found" result).
+    if (maxBackwardScan == 0)        maxBackwardScan = 4096;
+    if (maxBackwardScan > 16 * 1024) maxBackwardScan = 16 * 1024;
+    constexpr std::size_t kStride = 8;
+    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
+    std::size_t maxSteps = maxBackwardScan / kStride;
+    if (maxSteps == 0) maxSteps = 1;
+    std::uintptr_t lowest = (start >= (maxSteps - 1) * kStride)
+        ? start - (maxSteps - 1) * kStride : 0;
+    out.scannedFrom = lowest;
+    out.scannedTo   = start + kStride;
+
+    // Locality fast-path: when `start` lies in [lastBase_, lastNextBase_),
+    // lastBase_ is PROVABLY the greatest base ≤ start (the next base up is
+    // lastNextBase_ > start), so we can skip the binary search. Still subject
+    // to the backward-window check (lastBase_ must be ≥ lowest).
+    if (lastBase_ != 0 && start >= lastBase_ &&
+        (lastNextBase_ == 0 || start < lastNextBase_)) {
+        if (lastBase_ < lowest) {
+            out.reason = "no_klass_in_range";
+            return out;
+        }
+        ++localityHits_;
+        ++hits_;
+        ResolveInstanceLookup(addr, lastBase_, lastKlass_, out);
+        return out;
+    }
+
+    // Binary search for the greatest base ≤ start.
+    Entry probe{start, 0};
+    auto it = std::upper_bound(bases_.begin(), bases_.end(), probe,
+        [](const Entry& a, const Entry& b) { return a.base < b.base; });
+    // `it` now points at the first base > start; the entry before it (if any)
+    // is the greatest base ≤ start, and `it` itself is the next base above it.
+    std::uintptr_t nextBase = (it != bases_.end()) ? it->base : 0;
+    if (it == bases_.begin()) {
+        out.reason = "no_klass_in_range";
+        return out;
+    }
+    --it;   // greatest base ≤ start
+    if (it->base < lowest) {
+        // Nearest base is outside the backward window → not contained.
+        out.reason = "no_klass_in_range";
+        return out;
+    }
+
+    lastBase_     = it->base;
+    lastKlass_    = it->klass;
+    lastNextBase_ = nextBase;
+    ++hits_;
+    ResolveInstanceLookup(addr, it->base, it->klass, out);
     return out;
 }
 
