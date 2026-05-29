@@ -1235,6 +1235,19 @@ public sealed class SnapshotChunkResult
     [JsonPropertyName("classes")]    public List<SnapshotClassEntry>   Classes    { get; set; } = new();
     [JsonPropertyName("error")]      public string?                    Error      { get; set; }
 
+    // Phase 30b — IL2CPP game-side streaming decode. With decode deferred from
+    // snapshotBegin into the chunks, the final decode stats + truncation + post-
+    // stream game memory aren't known until the LAST chunk, so the DLL attaches
+    // them to the done=true chunk response. These stay null/false on every
+    // non-final chunk and for a non-streaming (Mono / legacy) DLL — the UI then
+    // falls back to the snapshotBegin values, so older backends are unaffected.
+    [JsonPropertyName("decodeStats")]       public SnapshotDecodeStats? DecodeStats       { get; set; }
+    [JsonPropertyName("truncatedByMemory")] public bool                 TruncatedByMemory { get; set; }
+    [JsonPropertyName("truncatedByCount")]  public bool                 TruncatedByCount  { get; set; }
+    [JsonPropertyName("gameWorkingSet")]    public ulong?               GameWorkingSet    { get; set; }
+    [JsonPropertyName("gamePrivateUsage")]  public ulong?               GamePrivateUsage  { get; set; }
+    [JsonPropertyName("gamePointerSize")]   public int?                 GamePointerSize   { get; set; }
+
     /// <summary>Phase 30a — re-expand the deduped wire into the existing
     /// <see cref="SnapshotFieldEntry"/> model so every downstream consumer +
     /// SQLite stays unchanged. For each class with a non-null

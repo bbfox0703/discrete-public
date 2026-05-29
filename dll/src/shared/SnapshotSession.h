@@ -67,6 +67,43 @@ struct PlanAssemblyEntry {
 // chunk emit be a single move into the response array.
 using ClassPayload = nlohmann::json;
 
+// Phase 30b — game-side streaming decode. The decoder owns the heap-walk
+// result + all decode context that snapshotBegin used to hold as locals, so
+// snapshotChunk can decode plan rows ON DEMAND (and free each chunk's payload
+// after it ships) instead of pre-building the WHOLE snapshot into
+// `Session::classes`. That bounds the game-process transient peak to ~one
+// chunk + the plan + the ClassInfo cache, instead of the entire decoded tree
+// (the ~4.5 GB buffer on Utawarerumono).
+//
+// Type-erased so the shared layer stays backend-agnostic: the concrete
+// implementations live in the per-backend `#ifdef` branches of ExportAPI.cpp.
+// IL2CPP-only this phase — IL2CPP has no BDWGC finalizer-accumulation hazard,
+// so DecodeRange can open a fresh ThreadAttachGuard per call. Mono keeps
+// decode-in-Begin (the 活俠傳 freeze lives there) and gets a session-held-attach
+// follow-up.
+struct ISnapshotStreamDecoder {
+    virtual ~ISnapshotStreamDecoder() = default;
+
+    // Decode plan rows [cursor, cursor+limit); append each class's deduped-wire
+    // payload to `out` (which must be a json array). Updates internal
+    // watchdog/budget/stats. Returns the next cursor (== min(cursor+limit,
+    // PlanSize())). `out` holds at most one chunk's payloads — the chunk handler
+    // serializes then frees it, so the whole snapshot is never resident at once.
+    virtual std::size_t DecodeRange(std::size_t cursor, std::size_t limit,
+                                    nlohmann::json& out) = 0;
+
+    // Total plan rows (one per class). nextCursor >= PlanSize() ⇒ stream done.
+    virtual std::size_t PlanSize() const = 0;
+
+    // Accumulated decode stats (same shape as the old Begin `decodeStats`
+    // object) — final only once the whole stream has been decoded, so the
+    // chunk handler ships it on the done=true chunk.
+    virtual nlohmann::json DecodeStats() const = 0;
+    virtual bool          TruncatedByMemory() const = 0;
+    virtual bool          TruncatedByCount()  const = 0;
+    virtual std::uint64_t PeakPrivateUsage()  const = 0;
+};
+
 struct Session {
     std::uint64_t                          id              = 0;
     std::string                            capturedAt;     // ISO-8601 UTC
@@ -105,8 +142,17 @@ struct Session {
     // Phase 29a-v2 — pre-decoded per-class payload. One entry per plan
     // item, in plan order. Chunk emit slices [cursor, cursor+limit) and
     // copies into the response. Decoded once under a single outer
-    // ThreadAttachGuard at Begin time.
+    // ThreadAttachGuard at Begin time. Used by the decode-in-Begin path
+    // (Mono, and the IL2CPP fallback); EMPTY for a Phase 30b streaming
+    // session (see `streamDecoder`).
     std::vector<ClassPayload>              classes;
+
+    // Phase 30b — game-side streaming decode (IL2CPP). When set, snapshotChunk
+    // decodes plan rows on demand via this decoder instead of slicing the
+    // pre-built `classes`; `classes`/`plan` stay empty (the decoder owns the
+    // heap-walk data) to avoid duplicating the instance-address vectors. null
+    // ⇒ decode-in-Begin path (Mono / legacy).
+    std::unique_ptr<ISnapshotStreamDecoder> streamDecoder;
 
     std::chrono::steady_clock::time_point  lastUse;
 };
