@@ -858,11 +858,17 @@
                                           Width="Auto" MinWidth="160"
                                           Binding="{Binding Type}"
                                           SortMemberPath="Type" CanUserSort="True" />
-                      <!-- Value: star-fills when the pane is wide, but never
-                           shrinks below MinWidth — when the pane is too narrow
-                           for every column the grid shows a horizontal
-                           scrollbar instead of squeezing Value unreadable. -->
-                      <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*" MinWidth="320"
+                      <!-- Value: Auto-sizes to content (NOT star) so the grid's
+                           total column width can EXCEED the pane and a horizontal
+                           scrollbar appears, instead of a star column clamping
+                           the whole grid to the viewport and squeezing long
+                           values. MinWidth keeps a readable floor; MaxWidth caps
+                           a pathologically long string (~2× a typical pane) so
+                           one row can't blow the grid out unboundedly. Matches
+                           the auto-width pattern the Symbol Finder / Browser
+                           grids already use. -->
+                      <DataGridTextColumn Header="{StaticResource Inspector.ColValue}"
+                                          Width="Auto" MinWidth="320" MaxWidth="1200"
                                           Binding="{Binding DisplayValue}"
                                           SortMemberPath="DisplayValue" CanUserSort="True" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
@@ -2085,8 +2091,11 @@
                               IsReadOnly="True"
                               DoubleTapped="OnSnapshotFieldStatActivated">
                       <DataGrid.Columns>
+                        <!-- Auto (not star) so a long field name overflows +
+                             scrolls instead of clamping the grid to the pane. -->
                         <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
-                                             Width="*" MinWidth="220" SortMemberPath="FieldName" CanUserSort="True"/>
+                                             Width="Auto" MinWidth="220" MaxWidth="700"
+                                             SortMemberPath="FieldName" CanUserSort="True"/>
                         <DataGridTextColumn Header="#" Binding="{Binding Count}"
                                              Width="60" SortMemberPath="Count" CanUserSort="True"/>
                         <DataGridCheckBoxColumn Header="Excl." Binding="{Binding IsExcluded}"
@@ -2286,22 +2295,27 @@
                                     Click="OnSpcCopyValueSequenceClicked"/>
                         </ContextMenu>
                       </DataGrid.ContextMenu>
+                      <!-- Auto (not star) widths so the grid's total can exceed
+                           the pane and scroll horizontally; long class FQNs /
+                           the N-snapshot value sequence overflow instead of
+                           clamping every column to the viewport. MaxWidth caps
+                           each so one long row can't blow the grid out. -->
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Class"
                                             Binding="{Binding ClassFqn}"
-                                            Width="2*" MinWidth="240"/>
+                                            Width="Auto" MinWidth="240" MaxWidth="600"/>
                         <DataGridTextColumn Header="Field"
                                             Binding="{Binding FieldName}"
-                                            Width="*" MinWidth="160"/>
+                                            Width="Auto" MinWidth="160" MaxWidth="400"/>
                         <DataGridTextColumn Header="Type"
                                             Binding="{Binding FieldType}"
-                                            Width="*" MinWidth="160"/>
+                                            Width="Auto" MinWidth="160" MaxWidth="400"/>
                         <DataGridTextColumn Header="Instance"
                                             Binding="{Binding InstanceAddress}"
                                             Width="160"/>
                         <DataGridTextColumn Header="Values (per snap →)"
                                             Binding="{Binding ValueDisplays, Converter={x:Static converters:SpcValueSequenceConverter.Instance}}"
-                                            Width="3*"/>
+                                            Width="Auto" MinWidth="240" MaxWidth="1200"/>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>
