@@ -181,7 +181,7 @@
              range (clamps invalid input at the editor instead of post-Call);
              enum params render a ComboBox seeded by getEnumValues. Other
              params (string, hex, float, bool) stay on TextBox. -->
-        <DataGridTemplateColumn Header="{StaticResource MethodCall.ParamColValue}" Width="*"
+        <DataGridTemplateColumn Header="{StaticResource MethodCall.ParamColValue}" Width="*" MinWidth="220"
                                 CanUserSort="False">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate x:DataType="vm:MethodCallParamRow">

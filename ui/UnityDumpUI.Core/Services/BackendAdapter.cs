@@ -952,6 +952,10 @@ public sealed class BackendAdapter : ILiveExportSource
     /// 100; hard-cap 1024 server-side.</param>
     /// <param name="arrayCap">Max elements per <c>T[]</c> / <c>List&lt;T&gt;</c>
     /// field. Default 50; hard-cap 256 server-side.</param>
+    /// <param name="instanceDecodeBudget">Total decoded-instance budget across
+    /// all classes (0 = unlimited; server default 50000, hard-cap 2,000,000).
+    /// Bounds decode time + memory; the server decodes low-population classes
+    /// first so truncation drops high-population noise.</param>
     public async Task<SnapshotBeginResult> SnapshotBeginAsync(
         IReadOnlyList<string>? assemblies = null,
         int? instanceCap = null,
@@ -961,6 +965,7 @@ public sealed class BackendAdapter : ILiveExportSource
         int? elementFieldCap = null,
         IReadOnlyList<string>? arrayElementTargets = null,
         bool captureStaticValues = false,
+        int? instanceDecodeBudget = null,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>();
@@ -971,6 +976,10 @@ public sealed class BackendAdapter : ILiveExportSource
         }
         if (instanceCap.HasValue) args["instanceCap"] = Int(instanceCap.Value);
         if (arrayCap.HasValue)    args["arrayCap"]    = Int(arrayCap.Value);
+        // Phase 30a — total decoded-instance budget (0 = unlimited). Bounds
+        // decode time + memory; the DLL sorts the plan low-population-first so
+        // truncation drops high-population noise classes.
+        if (instanceDecodeBudget.HasValue) args["instanceDecodeBudget"] = Int(instanceDecodeBudget.Value);
         if (includeSystemAssemblies) args["includeSystemAssemblies"] = Bool(true);
         // Phase 29f (Layer B) — reference-array element inner-field capture.
         if (arrayElementFields) args["arrayElementFields"] = Bool(true);
@@ -1008,7 +1017,12 @@ public sealed class BackendAdapter : ILiveExportSource
             "snapshotChunk", args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotChunkResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
-        return env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
+        var result = env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
+        // Phase 30a — re-expand the deduped wire (schema-once + per-instance value
+        // arrays) back into the inline SnapshotFieldEntry model the rest of the UI
+        // + SQLite expect. No-op for old (non-deduped) chunks.
+        result.NormalizeDeduped();
+        return result;
     }
 
     /// <summary><c>snapshotEnd</c> — drop the server-side cached plan.</summary>

@@ -60,8 +60,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// <summary>Defaults for the non-32-bit case (modern x64 games).
     /// Kept as the "safe high water mark" so <see cref="OnGameConnected"/>
     /// can restore them when the user reconnects to an x64 game after
-    /// having been clamped on an earlier x86 connection.</summary>
-    private const int kDefaultInstanceCapX64 = 512;
+    /// having been clamped on an earlier x86 connection.
+    /// 2026-05-29: lowered 512 → 256 after the Utawarerumono live-smoke —
+    /// a 22K-class / 665K-instance game decoded 174K instances in ~11 min and
+    /// pushed the game to 10 GB + the UI to 14.7 GB. Per-class 256 trims the
+    /// high-population classes; the DLL-side instanceDecodeBudget (50K) is the
+    /// hard total bound, and the ascending-population plan sort keeps the
+    /// low-population game-state classes when truncation kicks in.</summary>
+    private const int kDefaultInstanceCapX64 = 256;
     private const int kDefaultArrayCapX64    = 256;
 
     /// <summary>Clamped defaults for 32-bit Mono games. Chosen 2026-05-27
@@ -526,6 +532,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// no reason to artificially under-cap.</summary>
     [ObservableProperty] private int _arrayCap    = 256;
 
+    /// <summary>Phase 30a — total decoded-instance budget across ALL classes
+    /// (0 = unlimited; server hard-cap 2,000,000). The dominant speed/memory
+    /// dial: decode time + memory scale with total decoded instances. The DLL
+    /// decodes low-population classes first, so when this budget truncates it
+    /// drops the high-population "noise" classes and keeps the low-population
+    /// game-state classes. Default 50000 (Utawarerumono live-smoke: ~65 s,
+    /// game +0.7 GB, UI ~3.3 GB). Raise toward a complete capture if you have
+    /// the RAM; lower for faster/leaner partial snapshots.</summary>
+    [ObservableProperty] private int _instanceDecodeBudget = 50000;
+
     /// <summary>When unchecked (default), the server skips
     /// mscorlib / System.* / Microsoft.* / netstandard / Mono.* /
     /// UnityEngine.* / Unity.* / Fungus assemblies on 全抓 mode.
@@ -916,6 +932,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
             int cap = InstanceCap > 0 ? InstanceCap : 512;
             int arr = ArrayCap    > 0 ? ArrayCap    : 256;
+            // 0 = unlimited (let the memory watchdog be the only backstop).
+            int instBudget = InstanceDecodeBudget >= 0 ? InstanceDecodeBudget : 50000;
 
             // Phase 29f (Layer B) — element inner-field capture opt-in.
             string[]? elemTargets = null;
@@ -932,6 +950,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 CaptureArrayElementFields ? ElementFieldCap : (int?)null,
                 elemTargets,
                 CaptureStaticFieldValues,
+                instBudget,
                 ct).ConfigureAwait(true);
 
             // The DLL echoes the EFFECTIVE capture state after its x86
@@ -1087,7 +1106,18 @@ public sealed partial class SnapshotViewModel : ObservableObject
             string gameMemNote = GameWorkingSet > 0
                 ? $", game {FormatMemory((long)GameWorkingSet)} ws / {FormatMemory((long)GamePrivateUsage)} committed"
                 : string.Empty;
-            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldValueCount:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).";
+            // Partial-capture warning. The DLL stops decoding when it hits the
+            // memory watchdog or the total-instance budget; with the ascending-
+            // population plan sort the dropped classes are the high-population
+            // ones (low-population game-state classes are kept).
+            string truncNote = string.Empty;
+            if (begin.TruncatedByMemory)
+                truncNote = "  ⚠ PARTIAL: memory budget hit — high-population classes dropped. " +
+                            "Narrow the assembly scope, or raise memHeadroomMB / restart the game for more.";
+            else if (begin.TruncatedByCount)
+                truncNote = "  ⚠ PARTIAL: instance budget reached — high-population classes dropped. " +
+                            "Narrow the assembly scope to capture specific classes fully.";
+            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldValueCount:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).{truncNote}";
             _logger.Write(Constants.LogCategoryView,
                 $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldValueCount} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
 
@@ -1974,11 +2004,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 hits++;
                 continue;
             }
-            if (f.Value.HasValue &&
-                (f.Value.Value.ValueKind == JsonValueKind.Number ||
-                 f.Value.Value.ValueKind == JsonValueKind.String))
+            // Phase 30a-2: grab the computed value once (parses ValueRaw).
+            if (f.Value is { } fv &&
+                (fv.ValueKind == JsonValueKind.Number ||
+                 fv.ValueKind == JsonValueKind.String))
             {
-                bits.Add($"{f.Name}={f.Value.Value.GetRawText().Trim('"')}");
+                bits.Add($"{f.Name}={fv.GetRawText().Trim('"')}");
                 hits++;
             }
         }
@@ -2544,16 +2575,16 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     private static string FormatArrayElement(SnapshotArrayElement el)
     {
         if (!string.IsNullOrEmpty(el.Error)) return $"(err: {el.Error})";
-        if (el.Value.HasValue && el.Value.Value.ValueKind != JsonValueKind.Null
-                              && el.Value.Value.ValueKind != JsonValueKind.Undefined)
+        if (el.Value is { } ev && ev.ValueKind != JsonValueKind.Null
+                              && ev.ValueKind != JsonValueKind.Undefined)
         {
-            return el.Value.Value.ValueKind switch
+            return ev.ValueKind switch
             {
-                JsonValueKind.String => el.Value.Value.GetString() ?? "(null)",
-                JsonValueKind.Number => el.Value.Value.GetRawText(),
+                JsonValueKind.String => ev.GetString() ?? "(null)",
+                JsonValueKind.Number => ev.GetRawText(),
                 JsonValueKind.True   => "true",
                 JsonValueKind.False  => "false",
-                _ => el.Value.Value.GetRawText(),
+                _ => ev.GetRawText(),
             };
         }
         if (!string.IsNullOrEmpty(el.String)) return $"\"{el.String}\"";
@@ -2614,16 +2645,16 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             if (f.Error == "static_value_not_captured") return "(static, value capture disabled)";
             return $"(err: {f.Error})";
         }
-        if (f.Value.HasValue && f.Value.Value.ValueKind != JsonValueKind.Null
-                              && f.Value.Value.ValueKind != JsonValueKind.Undefined)
+        if (f.Value is { } fev && fev.ValueKind != JsonValueKind.Null
+                              && fev.ValueKind != JsonValueKind.Undefined)
         {
-            return f.Value.Value.ValueKind switch
+            return fev.ValueKind switch
             {
-                JsonValueKind.String => f.Value.Value.GetString() ?? "(null)",
-                JsonValueKind.Number => f.Value.Value.GetRawText(),
+                JsonValueKind.String => fev.GetString() ?? "(null)",
+                JsonValueKind.Number => fev.GetRawText(),
                 JsonValueKind.True   => "true",
                 JsonValueKind.False  => "false",
-                _ => f.Value.Value.GetRawText(),
+                _ => fev.GetRawText(),
             };
         }
         if (!string.IsNullOrEmpty(f.StringValue))

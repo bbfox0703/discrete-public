@@ -1026,6 +1026,12 @@ public partial class MainWindow : Window
             fieldOffset: resolved.Offset);
         var win = new FieldAcrossInstancesWindow(fieldVm);
         await win.ShowDialog(this);
+
+        // Double-click / "Inspect this instance" in the modal sets InspectRequest
+        // then closes — route it back to the Inspector tab (same handoff the
+        // Address Lookup tab uses).
+        if (win.InspectRequest is { } req)
+            vm.InspectInstance(req);
     }
 
     /// <summary>

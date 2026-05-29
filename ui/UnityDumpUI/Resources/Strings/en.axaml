@@ -117,6 +117,7 @@
   <sys:String x:Key="FieldAcross.ColInstance">Instance</sys:String>
   <sys:String x:Key="FieldAcross.ColFieldAddress">Field address</sys:String>
   <sys:String x:Key="FieldAcross.ColValue">Value</sys:String>
+  <sys:String x:Key="FieldAcross.InspectInstanceMenu">Inspect this instance</sys:String>
   <sys:String x:Key="FieldAcross.CopyInstanceMenu">Copy instance address</sys:String>
   <sys:String x:Key="FieldAcross.CopyFieldAddressMenu">Copy field address</sys:String>
   <sys:String x:Key="FieldAcross.CopyValueMenu">Copy value</sys:String>

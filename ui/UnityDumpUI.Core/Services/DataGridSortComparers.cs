@@ -68,6 +68,18 @@ public static class DataGridSortComparers
         => new OrdinalStringComparer<TRow>(selector);
 
     /// <summary>
+    /// Smart comparer for a heterogeneous display column whose cells are
+    /// stringified values that may be numbers OR text. When BOTH cells parse
+    /// as a number (invariant culture, integer / decimal / exponent, incl.
+    /// leading sign), compares numerically; otherwise falls back to an ordinal
+    /// string compare. Lets a numeric field column (Int32 Hp, Single Avoid)
+    /// sort 9 &lt; 54 &lt; 520 instead of lexicographically "520" &lt; "54"
+    /// &lt; "9", while quoted strings / "true" / "null" still sort sanely.
+    /// </summary>
+    public static IComparer NumericOrString<TRow>(Func<TRow, string?> selector) where TRow : class
+        => new NumericOrStringComparer<TRow>(selector);
+
+    /// <summary>
     /// Numeric comparer for integer-typed properties (Int32 / UInt32 / etc.).
     /// </summary>
     public static IComparer Number<TRow>(Func<TRow, long> selector) where TRow : class
@@ -124,6 +136,31 @@ public static class DataGridSortComparers
             string a = (x is TRow ax ? _selector(ax) : null) ?? string.Empty;
             string b = (y is TRow by ? _selector(by) : null) ?? string.Empty;
             return string.Compare(a, b, StringComparison.Ordinal);
+        }
+    }
+
+    private sealed class NumericOrStringComparer<TRow> : IComparer where TRow : class
+    {
+        private readonly Func<TRow, string?> _selector;
+        public NumericOrStringComparer(Func<TRow, string?> selector) { _selector = selector; }
+        public int Compare(object? x, object? y)
+        {
+            string a = (x is TRow ax ? _selector(ax) : null) ?? string.Empty;
+            string b = (y is TRow by ? _selector(by) : null) ?? string.Empty;
+            if (TryParseNumber(a, out double da) && TryParseNumber(b, out double db))
+                return da.CompareTo(db);
+            return string.Compare(a, b, StringComparison.Ordinal);
+        }
+
+        private static bool TryParseNumber(string s, out double value)
+        {
+            value = 0d;
+            if (string.IsNullOrEmpty(s)) return false;
+            // NumberStyles.Float covers leading sign, decimal point, and
+            // exponent (e.g. "6.55e-38"). Invariant culture matches the
+            // DLL's JSON GetRawText() formatting.
+            return double.TryParse(s.AsSpan(), NumberStyles.Float,
+                                   CultureInfo.InvariantCulture, out value);
         }
     }
 

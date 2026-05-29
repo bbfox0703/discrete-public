@@ -15,8 +15,12 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace UnityCEDumper::IL2CPP {
@@ -723,65 +727,105 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         PAGE_READWRITE | PAGE_WRITECOPY |
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 
+    // --- Serial pass: filter regions + region-level stats + chunk worklist ---
     auto regions = Memory::EnumerateCommittedRegions();
     auto stacks  = Memory::CollectThreadStackRanges();
 
-    // Phase 29a-v4 — yield every N bytes (mirror of Mono path). IL2CPP
-    // doesn't have the Mono safepoint sensitivity, but the memory-
-    // bandwidth + CPU-cache pressure from a 1+ GB scan also affects
-    // IL2CPP targets. Keep symmetric.
-    constexpr std::size_t kYieldEveryBytes = 16ull * 1024ull * 1024ull;
-    std::size_t bytesSinceYield = 0;
-
+    std::vector<std::pair<const std::uint8_t*, std::size_t>> accepted;
+    accepted.reserve(regions.size());
     for (const auto& r : regions) {
         if ((r.protect & kRW) == 0) continue;
         out.regionsTotal++;
-
-        if (r.type == MEM_IMAGE) {
+        // Skip MEM_IMAGE (.data/.bss class tables) and MEM_MAPPED (file-backed
+        // game data holding stray Il2CppClass* values — noise). IL2CPP managed
+        // heap is VirtualAlloc'd → MEM_PRIVATE.
+        if (r.type == MEM_IMAGE || r.type == MEM_MAPPED) {
             out.regionsSkipImage++;
             continue;
         }
-        // 2026-05-28: skip MEM_MAPPED in lockstep with the Mono finder.
-        // IL2CPP managed heap (libil2cpp / libgc-derived) is allocated
-        // via VirtualAlloc → MEM_PRIVATE; file-backed mappings hold
-        // game data that happens to contain Il2CppClass* values and
-        // generates noise on the snapshot.
-        if (r.type == MEM_MAPPED) {
-            out.regionsSkipImage++;
-            continue;
-        }
-
         const std::uint8_t* regionEnd = r.base + r.size;
         bool onStack = false;
         for (const auto& s : stacks) {
             if (s.low >= regionEnd) break;
-            if (s.high > r.base && s.low < regionEnd) {
-                onStack = true;
-                break;
-            }
+            if (s.high > r.base && s.low < regionEnd) { onStack = true; break; }
         }
-        if (onStack) {
-            out.regionsSkipStack++;
-            continue;
-        }
-
+        if (onStack) { out.regionsSkipStack++; continue; }
         out.regionsScanned++;
         out.bytesScanned += r.size;
-        bytesSinceYield += r.size;
-        if (bytesSinceYield >= kYieldEveryBytes) {
-            ::Sleep(1);
-            bytesSinceYield = 0;
-        }
-        SehSweepRegion(r.base, r.size, minKlass, maxKlass, classSet,
-                       out.byClass, perClassCap,
-                       out.totalInstances, out.totalQwordsScanned);
+        accepted.emplace_back(r.base, r.size);
     }
+
+    // Class pointers sit at 8-aligned object headers; split accepted regions
+    // into 8-aligned 1 MB chunks. elemSize == stride == 8 so a qword never
+    // straddles a chunk seam — each owned by exactly one chunk (no overlap).
+    struct Chunk { const std::uint8_t* base; std::size_t size; };
+    constexpr std::size_t kChunk = 1u * 1024u * 1024u;   // multiple of 8
+    std::vector<Chunk> chunks;
+    for (const auto& [rb, rs] : accepted) {
+        for (std::size_t off = 0; off < rs; off += kChunk) {
+            chunks.push_back(Chunk{rb + off, std::min(kChunk, rs - off)});
+        }
+    }
+
+    // --- Phase P1: parallel sweep into per-thread maps (no lock on the hot
+    // path). Each thread caps its per-class list at perClassCap; the merge
+    // below sorts each class by address and truncates to perClassCap, so the
+    // captured subset is the deterministic lowest-address set regardless of
+    // thread timing — important for cross-snapshot diff stability. Worker
+    // threads only touch process memory + the (read-only) classSet snapshot;
+    // no Unity runtime calls happen here (name resolution is the caller's job,
+    // under ThreadAttachGuard), so no per-thread attach is needed. ---
+    unsigned int nthreads = Memory::ScanThreadCount();
+    if (nthreads > chunks.size()) nthreads = static_cast<unsigned int>(chunks.size());
+    if (nthreads < 1) nthreads = 1;
+
+    std::vector<std::unordered_map<Il2CppClass*, std::vector<std::uintptr_t>>> perThread(nthreads);
+    std::vector<std::size_t> qScanned(nthreads, 0);
+    std::atomic<std::size_t> nextChunk{0};
+
+    auto worker = [&](unsigned int tid) {
+        auto& map = perThread[tid];
+        std::size_t qs = 0;
+        std::size_t dummyInstances = 0;   // per-thread; real count recomputed at merge
+        for (;;) {
+            std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= chunks.size()) break;
+            SehSweepRegion(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
+                           classSet, map, perClassCap, dummyInstances, qs);
+        }
+        qScanned[tid] = qs;
+    };
+
+    if (nthreads <= 1) {
+        worker(0);
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(nthreads);
+        for (unsigned int t = 0; t < nthreads; ++t) pool.emplace_back(worker, t);
+        for (auto& th : pool) th.join();
+    }
+
+    // --- Merge per-thread maps → out.byClass; sort each class by address and
+    // cap to perClassCap (deterministic lowest-address subset). ---
+    for (auto& m : perThread) {
+        for (auto& kv : m) {
+            auto& dst = out.byClass[kv.first];
+            dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+        }
+    }
+    for (auto& kv : out.byClass) {
+        std::sort(kv.second.begin(), kv.second.end());
+        if (kv.second.size() > perClassCap) kv.second.resize(perClassCap);
+        out.totalInstances += kv.second.size();
+    }
+    for (std::size_t q : qScanned) out.totalQwordsScanned += q;
 
     Log::Write(MagicStrings::LogCategoryScan,
                "Snapshot: FindAllInstances(IL2CPP) classes=" + std::to_string(out.byClass.size()) +
                " instances=" + std::to_string(out.totalInstances) +
                " regionsScanned=" + std::to_string(out.regionsScanned) +
-               " bytes=" + std::to_string(out.bytesScanned));
+               " bytes=" + std::to_string(out.bytesScanned) +
+               " threads=" + std::to_string(nthreads));
     return out;
 }
 

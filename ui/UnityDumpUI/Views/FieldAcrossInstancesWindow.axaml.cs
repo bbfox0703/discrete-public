@@ -21,6 +21,14 @@ public partial class FieldAcrossInstancesWindow : Window
 {
     private FieldAcrossInstancesViewModel? _vm;
 
+    /// <summary>
+    /// Set when the user double-clicks (or picks "Inspect this instance") on a
+    /// row before the dialog closes. The owner reads it after
+    /// <c>ShowDialog</c> returns and hands off to the Inspector tab. Null when
+    /// the dialog was just closed without an inspect request.
+    /// </summary>
+    public InspectInstanceRequest? InspectRequest { get; private set; }
+
     public FieldAcrossInstancesWindow()
     {
         AvaloniaXamlLoader.Load(this);
@@ -32,6 +40,15 @@ public partial class FieldAcrossInstancesWindow : Window
         DataContext = vm;
         vm.CopyToClipboardAsync = CopyToClipboardAsync;
 
+        // Capture the inspect handoff and close so the owner (MainWindow) can
+        // route it to the Inspector tab after ShowDialog returns. Raised by
+        // both the double-tap handler and the context-menu command.
+        vm.InspectInstanceRequested += (_, req) =>
+        {
+            InspectRequest = req;
+            Close();
+        };
+
         // Loaded fires after the DataGrid materializes its column collection,
         // which is the safe time to assign CustomSortComparer per column.
         Loaded += OnLoaded;
@@ -40,6 +57,18 @@ public partial class FieldAcrossInstancesWindow : Window
             try { await vm.RefreshCommand.ExecuteAsync(null); }
             catch { /* surfaced via VM */ }
         };
+    }
+
+    /// <summary>
+    /// Double-click a row → jump back to the instance in the Inspector. The
+    /// grid's SelectedItem is already the row under the cursor (single-click
+    /// selects before the double-tap fires).
+    /// </summary>
+    private void OnRowDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        if (sender is not DataGrid grid) return;
+        if (grid.SelectedItem is not FieldAcrossInstanceRow row) return;
+        _vm?.InspectInstanceCommand.Execute(row);
     }
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
@@ -52,14 +81,16 @@ public partial class FieldAcrossInstancesWindow : Window
     /// AOT-safe sort wiring — keyed by each column's SortMemberPath. Hex
     /// columns use numeric compare (so 0x100000000 doesn't sort before
     /// 0x80000000); Value is a heterogeneous int / float / "true" /
-    /// quoted-string column so we keep it as an ordinal string compare.
+    /// quoted-string column, so it uses a numeric-or-string comparer that
+    /// sorts numerically when both cells parse as numbers (Int32/Single
+    /// fields) and ordinally otherwise (strings, bools).
     /// </summary>
     private static readonly IReadOnlyDictionary<string, IComparer> SortComparers =
         new Dictionary<string, IComparer>
         {
             ["Instance"]     = DataGridSortComparers.Hex<FieldAcrossInstanceRow>(r => r.Instance),
             ["FieldAddress"] = DataGridSortComparers.Hex<FieldAcrossInstanceRow>(r => r.FieldAddress),
-            ["Value"]        = DataGridSortComparers.Ordinal<FieldAcrossInstanceRow>(r => r.Value),
+            ["Value"]        = DataGridSortComparers.NumericOrString<FieldAcrossInstanceRow>(r => r.Value),
         };
 
     private async Task CopyToClipboardAsync(string text)

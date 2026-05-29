@@ -838,7 +838,11 @@
                                           Width="Auto" MinWidth="160"
                                           Binding="{Binding Type}"
                                           SortMemberPath="Type" CanUserSort="True" />
-                      <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
+                      <!-- Value: star-fills when the pane is wide, but never
+                           shrinks below MinWidth — when the pane is too narrow
+                           for every column the grid shows a horizontal
+                           scrollbar instead of squeezing Value unreadable. -->
+                      <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*" MinWidth="320"
                                           Binding="{Binding DisplayValue}"
                                           SortMemberPath="DisplayValue" CanUserSort="True" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
@@ -1575,7 +1579,7 @@
               <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
                       Background="#1F808080" CornerRadius="3">
                 <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                      RowDefinitions="Auto,Auto,Auto">
+                      RowDefinitions="Auto,Auto,Auto,Auto">
 
                   <!-- Row 0 — label + scope + caps + Take button -->
                   <TextBlock Grid.Row="0" Grid.Column="0" Text="Label:"
@@ -1663,6 +1667,22 @@
                              VerticalAlignment="Center"
                              PlaceholderText="(x64: blank = all ref arrays. x86: required, e.g. Mortal.Core.GameStat._statAdditionData)"
                              ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' (all its reference arrays) or 'Namespace.Class.fieldName', comma/semicolon separated. Required to enable Layer B capture on 32-bit targets; leave blank on 64-bit for blanket capture."/>
+                  </DockPanel>
+
+                  <!-- Row 3 — Phase 30a: total decoded-instance budget. The
+                       dominant speed/memory dial; the DLL decodes low-population
+                       classes first so truncation drops high-population noise. -->
+                  <DockPanel Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="9"
+                             Margin="0,6,0,0" LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Text="Decode budget:"
+                               VerticalAlignment="Center" Margin="0,0,6,0"
+                               ToolTip.Tip="Total decoded-instance budget across ALL classes (0 = unlimited; server hard-cap 2,000,000). The dominant speed/memory dial — decode time and game/UI memory scale with total decoded instances. The DLL decodes low-population classes FIRST, so when this budget is reached it truncates the high-population 'noise' classes (Node/Entry/containers) and keeps the low-population game-state classes. Default 50000 (live-smoke: ~65 s, game +0.7 GB, UI ~3.3 GB on a 22K-class IL2CPP game). Raise toward a complete capture if you have the RAM; lower for faster/leaner partial snapshots. A truncated capture shows a ⚠ PARTIAL note in the status line."/>
+                    <NumericUpDown DockPanel.Dock="Left"
+                                   Value="{Binding Snapshot.InstanceDecodeBudget, Mode=TwoWay}"
+                                   Minimum="0" Maximum="2000000" Increment="25000"
+                                   Width="180" Margin="0,0,16,0"/>
+                    <TextBlock VerticalAlignment="Center" Opacity="0.7" FontSize="11"
+                               Text="total instances across all classes (0 = unlimited; low-population classes captured first)"/>
                   </DockPanel>
                 </Grid>
               </Border>
@@ -2046,7 +2066,7 @@
                               DoubleTapped="OnSnapshotFieldStatActivated">
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
-                                             Width="*" SortMemberPath="FieldName" CanUserSort="True"/>
+                                             Width="*" MinWidth="220" SortMemberPath="FieldName" CanUserSort="True"/>
                         <DataGridTextColumn Header="#" Binding="{Binding Count}"
                                              Width="60" SortMemberPath="Count" CanUserSort="True"/>
                         <DataGridCheckBoxColumn Header="Excl." Binding="{Binding IsExcluded}"
@@ -2249,13 +2269,13 @@
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Class"
                                             Binding="{Binding ClassFqn}"
-                                            Width="2*"/>
+                                            Width="2*" MinWidth="240"/>
                         <DataGridTextColumn Header="Field"
                                             Binding="{Binding FieldName}"
-                                            Width="*"/>
+                                            Width="*" MinWidth="160"/>
                         <DataGridTextColumn Header="Type"
                                             Binding="{Binding FieldType}"
-                                            Width="*"/>
+                                            Width="*" MinWidth="160"/>
                         <DataGridTextColumn Header="Instance"
                                             Binding="{Binding InstanceAddress}"
                                             Width="160"/>
@@ -2570,7 +2590,7 @@
                         <DataGridTextColumn Header="Snapshot"
                                             Binding="{Binding DisplayLabel}"
                                             IsReadOnly="True"
-                                            Width="*"/>
+                                            Width="*" MinWidth="200"/>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>

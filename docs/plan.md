@@ -1041,6 +1041,99 @@ the DLL uses `/`; matching is already separator-insensitive UI-side as of
 
 ---
 
+## Phase 29h — findInstances metadata-arena false-positive fix 🔧 SHIPPED 2026-05-28 (build #739)
+
+**Symptom (SaGa F2R / Silksong-class target, IL2CPP):** `Entity_playerStatus2/Param`
+value-searched + Address-Lookup'd cleanly to a real instance `0x25809E1F510`
+(Lv=96/Hp=450…), but **find instances** (class pivot → Inspect) returned 128–1024
+matches starting at `0x2560032CD90`, all garbage field values, and **never
+surfaced the real instance**.
+
+**Root cause (confirmed from scan log + code):** `Memory::ScanForPointer`
+([Memory.cpp](../dll/src/shared/Memory.cpp)) walks committed regions **low→high**
+and **`break`s once `matches.size() >= limit`** — and reports *every* qword equal
+to the class pointer with no instance validation. The IL2CPP metadata arena
+(`0x2560_0xxxxxx–0x2560_3xxxxxx`) is dense with legitimate class-pointer values
+that are **not** heap objects: `Il2CppClass` self-refs (`element_class`/`castClass`
+point to self for non-generic types) and `FieldInfo[].parent` slots (28 fields ×
+0x20-strided). Those filled the entire `limit` quota in the first ~16 regions
+(`scanned=16 bytes=242MB matches==limit` every run in the scan log), so the walk
+**never reached the GC-heap region ~8 GB higher** where the real instance lived.
+Other classes with few real matches (e.g. `matches=33`) scanned the full
+947-region / 6.2 GB heap because they never hit the cap. (Address Lookup worked
+because `whatIsAt` is a *backward* scan validated against the class-range cache —
+a different path entirely.)
+
+**Fix:**
+* `Memory::ScanForPointer` gained an optional `[excludeLow, excludeHigh)`
+  address-exclusion range + a `skipMapped` flag (+ `ScanStats.excludedMatches` /
+  `regionsSkipMapped`). Matches whose **address** lands in the exclude range are
+  dropped **without counting toward `limit`**, so the early break now fires only
+  on *validated* matches and the walk continues to the GC heap. Default args
+  `(0,0,false)` keep every other caller (Mono, etc.) byte-identical.
+* IL2CPP `findInstances` + `listFieldValuesAcrossInstances`
+  ([ExportAPI.cpp](../dll/src/shared/ExportAPI.cpp)) compute the arena span from
+  the address-finder class-range cache (`[region-base(minKlass),
+  region-end(maxKlass)]` via `VirtualQuery`, widened to the committed regions so
+  FieldInfo/method arrays just past the class structs are covered) and pass it +
+  `skipMapped=true` (mirrors the Phase 29 `FindAllInstances` snapshot sweep, which
+  already skips `MEM_MAPPED`). A shared capture-less `computeArenaExclude` lambda
+  serves both handlers. New `excludeArena` / `skipMapped` request args (default
+  true) allow A/B against the legacy raw scan. Scan log + `scan_stats` now emit
+  `excluded=N` and `exRange=[lo,hi)` for live diagnosis.
+
+**Residual to watch (live-verify):** the exclude **lower** bound is
+`region-base(minKlass)`. If a stray match sits below the lowest class pointer's
+region it would slip through — the new `exRange` + `excluded` telemetry makes this
+visible; fallback is to exclude *all* regions overlapping any class pointer.
+
+- [ ] **29h live-smoke** — re-inject build #739, re-run find instances on
+  `Entity_playerStatus2/Param`: confirm `0x25809E1F510` appears, the
+  `0x2560xxxx` cluster is gone, and check `excluded=` / `exRange=` in the scan log.
+
+---
+
+## Phase 30 — Snapshot memory & speed ✅ 30a SHIPPED 2026-05-29 (both backends)
+
+Snapshot decode was the whole cost (find is 0.6s after P1c). On Utawarerumono
+(IL2CPP) it ran ~11 min, pushed the game to 10.8 GB + the UI to 14.7 GB. Root
+causes: (1a) `snapshotBegin` decoded the *entire* snapshot into one
+`std::vector<nlohmann::json>` before streaming; (1b) the field schema
+(name/type/offset/from) was repeated **per instance**; (1c) every value was a
+`JsonElement` → System.Text.Json backed each with its own `JsonDocument`
+(millions of them = the dominant UI cost). **Full design + Q&A in
+[docs/snapshot-streaming-dedup.md](snapshot-streaming-dedup.md); live-smoke
+numbers in the CE-Handwire `Memory-Scanning-Internals.md` §16.7–16.8 (backup at
+[docs/Memory-Scanning-Internals.md](Memory-Scanning-Internals.md)).**
+
+- [x] **Interim — reduce captured volume** (Phase 16.7): `instanceDecodeBudget`
+  (default 50000, UI control) + ascending-population plan sort (truncation drops
+  high-population noise, keeps low-population game-state classes) + lower default
+  `instanceCap` (512→256) + process-memory watchdog (stops decode before OOM,
+  reports `truncatedByMemory`/`truncatedByCount`).
+- [x] **30a-1 — deduped wire**: DLL emits field `schema` once per class +
+  per-instance value-only `v[]` (both IL2CPP + Mono). UI `NormalizeDeduped`
+  re-expands on receive → zero consumer/SQLite change. Shrinks the game-side
+  decode tree + wire.
+- [x] **30a-2 — value compaction**: values stored as raw JSON text
+  (`SnapshotFieldEntry.ValueRaw`) via `RawJsonStringConverter`; `Value`
+  (`JsonElement?`) is a computed accessor → drops the millions of JsonDocuments,
+  consumers unchanged. Interner dedups `ValueRaw`.
+  **Result (Utawarerumono, budget 50000): decode 660s→65s; game 10.8→6.9 GB; UI
+  14.7 GB → ~1 GB/snap steady (3 snaps ≈ 3 GB). 595 tests green.** 活俠傳 (Mono
+  x86) verified: 4 snaps, game ~1.1 GB, UI 805 MB incl. Diff+SPC.
+
+**Deferred (optional, none pressing — see internals doc §16.8):**
+- [ ] **schema-retention dedup** — fold per-field name/type/offset/from into a
+  shared `SnapshotFieldSchema` ref (~48 B/field). Judged **low-ROI**: value
+  compaction was the decisive win; budget is the right knob per game. Only worth
+  it for routinely capturing *full* snapshots.
+- [ ] **30b — game stream-decode** / **30c — UI stream-to-disk** — bound the
+  transient peak for full captures. Only needed if pushing the budget toward
+  complete captures of huge games.
+
+---
+
 ## Cross-PC Workflow
 
 每次切換 PC：

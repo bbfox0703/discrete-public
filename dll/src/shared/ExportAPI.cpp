@@ -99,6 +99,27 @@ ProcessMemorySnapshot QueryProcessMemory() noexcept {
 // build #646 hit on 活俠傳.
 constexpr std::uint64_t kX86PrivateUsageRefuseThreshold = 3ULL * 1024 * 1024 * 1024;
 
+// Phase P1-fix — available physical RAM right now. The snapshot decode builds
+// the ENTIRE snapshot in the game process before streaming, so a huge game
+// (e.g. 22K classes / 800K instances / 7 GB heap) can balloon the game's
+// private usage past the OS limit and CTD it. We bound the decode's added
+// memory using a budget clamped to a fraction of free RAM.
+std::uint64_t QueryAvailablePhysBytes() noexcept {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (::GlobalMemoryStatusEx(&ms)) return static_cast<std::uint64_t>(ms.ullAvailPhys);
+    return 0;
+}
+
+// Default extra memory the snapshot decode may consume on top of the game's
+// pre-snapshot private usage before it stops and reports truncation. Clamped
+// at runtime to a fraction of currently-available physical RAM so a memory-
+// constrained machine stops earlier. Overridable per-request via `memHeadroomMB`.
+constexpr std::uint64_t kSnapshotDefaultHeadroomBytes = 4ULL * 1024 * 1024 * 1024;  // 4 GB
+constexpr double        kSnapshotAvailPhysFraction     = 0.60;
+// How often (in decoded instances) to re-sample process memory during decode.
+constexpr std::size_t   kSnapshotMemCheckInterval       = 2048;
+
 constexpr UnityDumperBackend BackendOfBuild() {
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
     return UnityDumperBackend_Mono;
@@ -2136,6 +2157,12 @@ void RegisterCoreHandlers() {
 
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 4096)     arrayCap = 4096;
+        // Total decoded-instance budget (mirror of IL2CPP) — bounds decode
+        // time + memory; combined with the ascending-population plan sort it
+        // drops high-population noise classes first. 0 = unlimited.
+        std::size_t instanceDecodeBudget =
+            static_cast<std::size_t>(args.value("instanceDecodeBudget", 50000));
+        if (instanceDecodeBudget > 2000000) instanceDecodeBudget = 2000000;
 
         // Phase 29f (Layer B) — reference-array inner-field capture opt-in.
         // arrayElementFields turns it on; elementFieldCap bounds per-element
@@ -2178,6 +2205,18 @@ void RegisterCoreHandlers() {
                 {"gamePrivateUsage", memBefore.privateUsage},
             };
         }
+
+        // Snapshot memory budget (mirror of the IL2CPP handler) — stop the
+        // decode before the game OOMs. budget = pre-snapshot private usage +
+        // headroom, headroom clamped to a fraction of free RAM.
+        std::uint64_t memHeadroomMono =
+            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
+        if (memHeadroomMono == 0) memHeadroomMono = kSnapshotDefaultHeadroomBytes;
+        if (const std::uint64_t availMono = QueryAvailablePhysBytes(); availMono > 0) {
+            const auto cap = static_cast<std::uint64_t>(availMono * kSnapshotAvailPhysFraction);
+            if (memHeadroomMono > cap) memHeadroomMono = cap;
+        }
+        const std::uint64_t memBudgetBytesMono = memBefore.privateUsage + memHeadroomMono;
 
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
@@ -2297,6 +2336,14 @@ void RegisterCoreHandlers() {
             session->plan.push_back(std::move(item));
         }
 
+        // Decode low-population classes first (mirror of IL2CPP) so budget /
+        // memory truncation drops the high-population noise tail and keeps the
+        // low-population game-state classes.
+        std::stable_sort(session->plan.begin(), session->plan.end(),
+            [](const Snapshot::ClassPlanItem& a, const Snapshot::ClassPlanItem& b) {
+                return a.instances.size() < b.instances.size();
+            });
+
         // ---- Decode ALL classes under ONE outer attach guard --------------
         // Phase 29a-v2 fix: one outer ThreadAttachGuard for the whole
         // decode loop (was per-chunk in v1, accumulated BDWGC finalizers).
@@ -2325,6 +2372,17 @@ void RegisterCoreHandlers() {
         std::size_t decodedElementSets = 0;
         bool         elementBudgetHit  = false;
         std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> globalClassInfo;
+
+        // Phase P1-fix — process-memory watchdog (mirror of the IL2CPP path).
+        bool          memBudgetHitMono = false;
+        bool          countBudgetHitMono = false;
+        std::uint64_t peakPrivateMono  = memBefore.privateUsage;
+        std::size_t   memCheckCounterMono = 0;
+        auto checkMemBudgetMono = [&]() {
+            const std::uint64_t pu = QueryProcessMemory().privateUsage;
+            if (pu > peakPrivateMono) peakPrivateMono = pu;
+            if (pu >= memBudgetBytesMono) memBudgetHitMono = true;
+        };
 
         // Open-generic array detection: real array types are namespaced
         // ("System.Int32[]") or nested with slash ("MainGame/Foo[]"). Open
@@ -2442,6 +2500,17 @@ void RegisterCoreHandlers() {
                     });
                     return;
                 }
+                // Budget tripped (memory watchdog or total-instance budget) —
+                // emit class metadata only.
+                if (memBudgetHitMono || countBudgetHitMono) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"truncated", memBudgetHitMono ? "memory_budget" : "instance_budget"},
+                    });
+                    return;
+                }
 
                 Snapshot::ClassPayload classEntry = {
                     {"assembly",  item.assembly},
@@ -2505,82 +2574,124 @@ void RegisterCoreHandlers() {
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
+                // Phase 30a — build the instance field SCHEMA once per class
+                // (sorted by offset; mirror of the IL2CPP path), emit it once,
+                // then per instance emit only the value array aligned to it.
+                // Eliminates the per-instance repetition of name/type/offset/from
+                // that dominated the decode tree. Field metadata strings are
+                // referenced (not copied) from the cached ClassInfoResult, whose
+                // map nodes are stable for this decode.
+                struct FieldDesc {
+                    const std::string* name;
+                    const std::string* type;
+                    const std::string* from;
+                    const std::string* decodeType;
+                    std::size_t        offset;
+                    bool               isEnum;
+                    bool               isValueType;
+                    bool               isArrayShape;
+                };
+                std::vector<FieldDesc> fieldDescs;
+                for (std::size_t ci = chain.size(); ci > 0; --ci) {
+                    const auto& pr = *chainInfo[ci - 1];
+                    if (!pr.ok) continue;
+                    for (const auto& f : pr.info.fields) {
+                        if (f.flags & 0x10u) continue;   // skip statics
+                        if (fieldDescs.size() >= 4096) break;
+                        FieldDesc fd;
+                        fd.name        = &f.name;
+                        fd.type        = &f.typeName;
+                        fd.from        = &pr.info.self.name;
+                        fd.decodeType  = (f.isEnum && !f.underlyingTypeName.empty())
+                                            ? &f.underlyingTypeName : &f.typeName;
+                        fd.offset      = f.offset;
+                        fd.isEnum      = f.isEnum;
+                        fd.isValueType = f.isValueType;
+                        fd.isArrayShape = f.typeName.size() >= 2 &&
+                            f.typeName[f.typeName.size() - 1] == ']' &&
+                            f.typeName[f.typeName.size() - 2] == '[';
+                        fieldDescs.push_back(fd);
+                    }
+                    if (fieldDescs.size() >= 4096) break;
+                }
+                std::sort(fieldDescs.begin(), fieldDescs.end(),
+                    [](const FieldDesc& a, const FieldDesc& b) { return a.offset < b.offset; });
+
+                Snapshot::ClassPayload schemaArr = Snapshot::ClassPayload::array();
+                for (const auto& fd : fieldDescs) {
+                    Snapshot::ClassPayload s = {
+                        {"name",   *fd.name},
+                        {"type",   *fd.type},
+                        {"offset", fd.offset},
+                        {"from",   *fd.from},
+                    };
+                    if (fd.isEnum)      s["is_enum"]       = true;
+                    if (fd.isValueType) s["is_value_type"] = true;
+                    schemaArr.push_back(std::move(s));
+                }
+                if (!fieldDescs.empty() && !item.instances.empty())
+                    classEntry["schema"] = std::move(schemaArr);
+
+                const std::string classFqn =
+                    item.ns.empty() ? item.name : item.ns + "." + item.name;
+
                 // Instance walk with array element capture — uses cached
-                // chainInfo, no Mono calls inside the loop.
+                // chainInfo + fieldDescs, no Mono calls inside the loop.
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
-                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
-                    Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
-                    // Walk base→derived so field offsets come out in memory
-                    // order (chainInfo is k→base; reverse-iterate).
-                    for (std::size_t ci = chain.size(); ci > 0; --ci) {
-                        const auto& pr = *chainInfo[ci - 1];
-                        if (!pr.ok) continue;
-                        for (const auto& f : pr.info.fields) {
-                            if (f.flags & 0x10u) continue;
-                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
-                            Snapshot::ClassPayload entry = {
-                                {"name",   f.name},
-                                {"type",   f.typeName},
-                                {"offset", f.offset},
-                                {"from",   pr.info.self.name},
-                            };
-                            if (f.isEnum)      entry["is_enum"]       = true;
-                            if (f.isValueType) entry["is_value_type"] = true;
-                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
-                                ? f.underlyingTypeName : f.typeName;
-                            json d = decodeField(decodeType, fieldAddr);
-                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+                    // Total-instance budget + process-memory watchdog —
+                    // stop adding instances once either trips.
+                    if (instanceDecodeBudget > 0 && decodedInstances >= instanceDecodeBudget)
+                        countBudgetHitMono = true;
+                    if (++memCheckCounterMono >= kSnapshotMemCheckInterval) {
+                        memCheckCounterMono = 0;
+                        checkMemBudgetMono();
+                    }
+                    if (memBudgetHitMono || countBudgetHitMono) break;
 
-                            const bool isArrayShape =
-                                f.typeName.size() >= 2 &&
-                                f.typeName[f.typeName.size() - 1] == ']' &&
-                                f.typeName[f.typeName.size() - 2] == '[';
-                            if (isArrayShape) {
-                                if (!isCapturableArrayType(f.typeName)) {
-                                    ++skippedOpenGenericArrays;
-                                } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
-                                    std::uintptr_t arrPtr = 0;
-                                    const std::string& ps = entry["ptr"].get_ref<const std::string&>();
-                                    if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
-                                        arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
-                                    }
-                                    if (arrPtr != 0) {
-                                        const std::string classFqn =
-                                            item.ns.empty() ? item.name : item.ns + "." + item.name;
-                                        json elems = walkArrayElementsInline(
-                                            arrPtr, f.typeName, arrayCap,
-                                            shouldCaptureInner(classFqn, f.name)
-                                                ? captureMonoElementFields
-                                                : std::function<json(std::uintptr_t)>{});
-                                        // Only record successful captures
-                                        // as "arrayElements"; error-path
-                                        // responses (implausible_length /
-                                        // header_unreadable) get prefixed
-                                        // with arrayError so the UI can
-                                        // distinguish.
-                                        if (elems.contains("error")) {
-                                            entry["arrayError"] = elems.value("error", std::string{"unknown"});
-                                            if (elems.contains("length")) {
-                                                entry["arrayErrorLength"] = elems["length"];
-                                            }
-                                        } else {
-                                            entry["arrayElements"] = std::move(elems);
-                                            ++decodedArrays;
+                    // Value-only entries aligned to schema order (no per-field
+                    // name/type/offset/from — the UI re-expands from schema).
+                    Snapshot::ClassPayload values = Snapshot::ClassPayload::array();
+                    for (const auto& fd : fieldDescs) {
+                        std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(fd.offset);
+                        Snapshot::ClassPayload entry = Snapshot::ClassPayload::object();
+                        json d = decodeField(*fd.decodeType, fieldAddr);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                        if (fd.isArrayShape) {
+                            if (!isCapturableArrayType(*fd.type)) {
+                                ++skippedOpenGenericArrays;
+                            } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                                std::uintptr_t arrPtr = 0;
+                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                }
+                                if (arrPtr != 0) {
+                                    json elems = walkArrayElementsInline(
+                                        arrPtr, *fd.type, arrayCap,
+                                        shouldCaptureInner(classFqn, *fd.name)
+                                            ? captureMonoElementFields
+                                            : std::function<json(std::uintptr_t)>{});
+                                    // Only record successful captures as
+                                    // "arrayElements"; error-path responses get
+                                    // arrayError so the UI can distinguish.
+                                    if (elems.contains("error")) {
+                                        entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                        if (elems.contains("length")) {
+                                            entry["arrayErrorLength"] = elems["length"];
                                         }
+                                    } else {
+                                        entry["arrayElements"] = std::move(elems);
+                                        ++decodedArrays;
                                     }
                                 }
                             }
-                            fields.push_back(std::move(entry));
-                            if (fields.size() >= 4096) break;
                         }
-                        if (fields.size() >= 4096) break;
+                        values.push_back(std::move(entry));
                     }
-                    std::sort(fields.begin(), fields.end(),
-                        [](const json& a, const json& b) {
-                            return a.value("offset", 0) < b.value("offset", 0);
-                        });
-                    instEntry["fields"] = std::move(fields);
+                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
+                    instEntry["v"] = std::move(values);
                     instArr.push_back(std::move(instEntry));
                     ++decodedInstances;
                 }
@@ -2663,6 +2774,11 @@ void RegisterCoreHandlers() {
             {"classInfoCacheMisses",     classInfoCacheMisses},
             {"decodedElementSets",       decodedElementSets},
             {"elementBudgetHit",         elementBudgetHit},
+            {"truncatedByMemory",        memBudgetHitMono},
+            {"truncatedByCount",         countBudgetHitMono},
+            {"instanceDecodeBudget",     instanceDecodeBudget},
+            {"memBudgetBytes",           memBudgetBytesMono},
+            {"peakPrivateUsage",         peakPrivateMono},
         };
 
         // Post-decode memory snapshot for the response. UI surfaces this
@@ -2675,9 +2791,15 @@ void RegisterCoreHandlers() {
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
+            " decodedInst=" + std::to_string(decodedInstances) +
             " arrays=" + std::to_string(decodedArrays) +
             " elemSets=" + std::to_string(decodedElementSets) +
             (elementBudgetHit ? " elemBudgetHit=1" : "") +
+            (memBudgetHitMono ? " MEM_TRUNCATED=1" : "") +
+            (countBudgetHitMono ? " COUNT_TRUNCATED=1" : "") +
+            " instBudget=" + std::to_string(instanceDecodeBudget) +
+            " memBudget=" + std::to_string(memBudgetBytesMono) +
+            " peakPriv=" + std::to_string(peakPrivateMono) +
             " buildId=" + buildId +
             " gameWorkingSet=" + std::to_string(memAfter.workingSet) +
             " gamePrivateUsage=" + std::to_string(memAfter.privateUsage));
@@ -2699,6 +2821,8 @@ void RegisterCoreHandlers() {
             {"plan",                    std::move(planArr)},
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
+            {"truncatedByMemory",       memBudgetHitMono},
+            {"truncatedByCount",        countBudgetHitMono},
             {"gamePointerSize",         memAfter.pointerSize},
             {"gameWorkingSet",          memAfter.workingSet},
             {"gamePrivateUsage",        memAfter.privateUsage},
@@ -4333,6 +4457,36 @@ void RegisterCoreHandlers() {
     // Phase 4: IL2CPP API path. Same command names as the Mono variant.
     // (formatHex is the shared lambda declared in the backend-agnostic block above.)
 
+    // Phase 29h — shared helper for instance heap scans (findInstances and
+    // listFieldValuesAcrossInstances). Computes the Il2CppClass* metadata-arena
+    // address span so class self-references (element_class/castClass) and
+    // FieldInfo[].parent slots — which legitimately hold the class pointer but
+    // aren't heap objects — can be excluded from the scan. Without it the scan
+    // fills its `limit` quota with low-address arena residue and never reaches
+    // the GC heap regions where genuine objects live. The bound is widened to
+    // the committed regions holding minKlass/maxKlass because the metadata
+    // allocator places FieldInfo/method arrays just past the class structs.
+    // Capture-less so handlers can copy it by value safely. Yields [0,0) (no
+    // exclusion) when disabled or the cache is unavailable.
+    auto computeArenaExclude = [](bool excludeArena,
+                                  std::uintptr_t& exLow, std::uintptr_t& exHigh) {
+        exLow = 0; exHigh = 0;
+        if (!excludeArena || !IL2CPP::BuildClassRangeCache()) return;
+        auto crs = IL2CPP::GetClassRangeStats();
+        if (!(crs.built && crs.classCount > 0 && crs.maxKlass >= crs.minKlass)) return;
+        exLow  = crs.minKlass;
+        exHigh = crs.maxKlass;
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (::VirtualQuery(reinterpret_cast<const void*>(crs.maxKlass), &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            auto end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            if (end > exHigh) exHigh = end;
+        }
+        if (::VirtualQuery(reinterpret_cast<const void*>(crs.minKlass), &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            auto base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+            if (base < exLow) exLow = base;
+        }
+    };
+
     PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
         if (!IL2CPP::IsResolved()) {
             return json{
@@ -5270,6 +5424,14 @@ void RegisterCoreHandlers() {
         if (instanceCap > 8192)  instanceCap = 8192;
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 4096)     arrayCap = 4096;
+        // Total decoded-instance budget — bounds decode TIME + memory on big
+        // games regardless of free RAM. 0 = unlimited. Combined with the
+        // ascending-population plan sort below, truncation drops the
+        // high-population "noise" classes first and keeps the low-population
+        // game-state classes. Overridable via instanceDecodeBudget.
+        std::size_t instanceDecodeBudget =
+            static_cast<std::size_t>(args.value("instanceDecodeBudget", 50000));
+        if (instanceDecodeBudget > 2000000) instanceDecodeBudget = 2000000;
 
         // Phase 29f (Layer B) — reference-array inner-field capture opt-in
         // (mirror of the Mono handler).
@@ -5308,6 +5470,19 @@ void RegisterCoreHandlers() {
                 {"gamePrivateUsage", memBeforeIl.privateUsage},
             };
         }
+
+        // Snapshot memory budget — stop the decode before the game OOMs.
+        // budget = pre-snapshot private usage + headroom, headroom clamped to
+        // a fraction of free RAM. When the game's private usage crosses it the
+        // decode stops and the response reports truncatedByMemory.
+        std::uint64_t memHeadroomIl =
+            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
+        if (memHeadroomIl == 0) memHeadroomIl = kSnapshotDefaultHeadroomBytes;
+        if (const std::uint64_t availIl = QueryAvailablePhysBytes(); availIl > 0) {
+            const auto cap = static_cast<std::uint64_t>(availIl * kSnapshotAvailPhysFraction);
+            if (memHeadroomIl > cap) memHeadroomIl = cap;
+        }
+        const std::uint64_t memBudgetBytesIl = memBeforeIl.privateUsage + memHeadroomIl;
 
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
@@ -5404,6 +5579,16 @@ void RegisterCoreHandlers() {
             session->plan.push_back(std::move(item));
         }
 
+        // Decode low-population classes first. When the instance budget or the
+        // memory watchdog truncates, it drops the high-population tail (Node /
+        // Entry / small container types — usually noise) and preserves the
+        // low-population game-state classes the user actually monitors. Stable
+        // sort keeps enumeration order among equal-population classes.
+        std::stable_sort(session->plan.begin(), session->plan.end(),
+            [](const Snapshot::ClassPlanItem& a, const Snapshot::ClassPlanItem& b) {
+                return a.instances.size() < b.instances.size();
+            });
+
         // ---- Decode ALL classes under ONE outer attach guard --------------
         IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
         session->classes.reserve(session->plan.size());
@@ -5420,6 +5605,22 @@ void RegisterCoreHandlers() {
         std::size_t elementsProcessed = 0;
         std::size_t decodedElementSets = 0;
         bool         elementBudgetHit  = false;
+
+        // Phase P1-fix — process-memory watchdog. Once the game's private
+        // usage crosses memBudgetBytesIl the decode stops adding instances and
+        // the response reports truncatedByMemory, so a huge game can't grow
+        // the process to OOM (the 8 GB CTD on the 22K-class / 800K-instance
+        // game). Sampled every kSnapshotMemCheckInterval instances to keep the
+        // GetProcessMemoryInfo syscall off the hot path.
+        bool          memBudgetHitIl = false;
+        bool          countBudgetHitIl = false;
+        std::uint64_t peakPrivateIl  = memBeforeIl.privateUsage;
+        std::size_t   memCheckCounter = 0;
+        auto checkMemBudgetIl = [&]() {
+            const std::uint64_t pu = QueryProcessMemory().privateUsage;
+            if (pu > peakPrivateIl) peakPrivateIl = pu;
+            if (pu >= memBudgetBytesIl) memBudgetHitIl = true;
+        };
 
         auto isCapturableArrayType = [](const std::string& tn) -> bool {
             if (tn.size() < 4) return false;
@@ -5526,6 +5727,17 @@ void RegisterCoreHandlers() {
                     });
                     return;
                 }
+                // Budget tripped (memory watchdog or total-instance budget) —
+                // emit class metadata only so the snapshot still lists it.
+                if (memBudgetHitIl || countBudgetHitIl) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"truncated", memBudgetHitIl ? "memory_budget" : "instance_budget"},
+                    });
+                    return;
+                }
 
                 Snapshot::ClassPayload classEntry = {
                     {"assembly",  item.assembly},
@@ -5597,72 +5809,123 @@ void RegisterCoreHandlers() {
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
+                // Phase 30a — build the instance field SCHEMA once per class
+                // (sorted by offset), emit it once, then per instance emit only
+                // the value array aligned to this order. Eliminates the per-
+                // instance repetition of name/type/offset/from that dominated
+                // the decode tree (174K× for a 69-field class). Field metadata
+                // strings are referenced (not copied) from the cached
+                // ClassInfoResult, whose map nodes are stable for this decode.
+                struct FieldDesc {
+                    const std::string* name;
+                    const std::string* type;
+                    const std::string* from;
+                    const std::string* decodeType;
+                    std::size_t        offset;
+                    bool               isEnum;
+                    bool               isValueType;
+                    bool               isArrayShape;
+                };
+                std::vector<FieldDesc> fieldDescs;
+                for (std::size_t ci = chain.size(); ci > 0; --ci) {
+                    const auto& pr = *chainInfo[ci - 1];
+                    if (!pr.ok) continue;
+                    for (const auto& f : pr.info.fields) {
+                        if (f.flags & 0x10u) continue;   // skip statics
+                        if (fieldDescs.size() >= 4096) break;
+                        FieldDesc fd;
+                        fd.name        = &f.name;
+                        fd.type        = &f.typeName;
+                        fd.from        = &pr.info.self.name;
+                        fd.decodeType  = (f.isEnum && !f.underlyingTypeName.empty())
+                                            ? &f.underlyingTypeName : &f.typeName;
+                        fd.offset      = f.offset;
+                        fd.isEnum      = f.isEnum;
+                        fd.isValueType = f.isValueType;
+                        fd.isArrayShape = f.typeName.size() >= 2 &&
+                            f.typeName[f.typeName.size() - 1] == ']' &&
+                            f.typeName[f.typeName.size() - 2] == '[';
+                        fieldDescs.push_back(fd);
+                    }
+                    if (fieldDescs.size() >= 4096) break;
+                }
+                std::sort(fieldDescs.begin(), fieldDescs.end(),
+                    [](const FieldDesc& a, const FieldDesc& b) { return a.offset < b.offset; });
+
+                Snapshot::ClassPayload schemaArr = Snapshot::ClassPayload::array();
+                for (const auto& fd : fieldDescs) {
+                    Snapshot::ClassPayload s = {
+                        {"name",   *fd.name},
+                        {"type",   *fd.type},
+                        {"offset", fd.offset},
+                        {"from",   *fd.from},
+                    };
+                    if (fd.isEnum)      s["is_enum"]       = true;
+                    if (fd.isValueType) s["is_value_type"] = true;
+                    schemaArr.push_back(std::move(s));
+                }
+                // Only emit the schema when there are instances to align to it
+                // (a static-only class needs no instance schema — matches the
+                // old wire, which emitted no per-instance fields there).
+                if (!fieldDescs.empty() && !item.instances.empty())
+                    classEntry["schema"] = std::move(schemaArr);
+
+                const std::string classFqn =
+                    item.ns.empty() ? item.name : item.ns + "." + item.name;
+
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
-                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
-                    Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
-                    for (std::size_t ci = chain.size(); ci > 0; --ci) {
-                        const auto& pr = *chainInfo[ci - 1];
-                        if (!pr.ok) continue;
-                        for (const auto& f : pr.info.fields) {
-                            if (f.flags & 0x10u) continue;
-                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
-                            Snapshot::ClassPayload entry = {
-                                {"name",   f.name},
-                                {"type",   f.typeName},
-                                {"offset", f.offset},
-                                {"from",   pr.info.self.name},
-                            };
-                            if (f.isEnum)      entry["is_enum"]       = true;
-                            if (f.isValueType) entry["is_value_type"] = true;
-                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
-                                ? f.underlyingTypeName : f.typeName;
-                            json d = decodeField(decodeType, fieldAddr);
-                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+                    // Total-instance budget (cheap, per-instance) + process-
+                    // memory watchdog (throttled). Stop adding instances once
+                    // either trips; the class keeps whatever it decoded so far.
+                    if (instanceDecodeBudget > 0 && decodedInstances >= instanceDecodeBudget)
+                        countBudgetHitIl = true;
+                    if (++memCheckCounter >= kSnapshotMemCheckInterval) {
+                        memCheckCounter = 0;
+                        checkMemBudgetIl();
+                    }
+                    if (memBudgetHitIl || countBudgetHitIl) break;
 
-                            const bool isArrayShape =
-                                f.typeName.size() >= 2 &&
-                                f.typeName[f.typeName.size() - 1] == ']' &&
-                                f.typeName[f.typeName.size() - 2] == '[';
-                            if (isArrayShape) {
-                                if (!isCapturableArrayType(f.typeName)) {
-                                    ++skippedOpenGenericArrays;
-                                } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
-                                    std::uintptr_t arrPtr = 0;
-                                    const std::string& ps = entry["ptr"].get_ref<const std::string&>();
-                                    if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
-                                        arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
-                                    }
-                                    if (arrPtr != 0) {
-                                        const std::string classFqn =
-                                            item.ns.empty() ? item.name : item.ns + "." + item.name;
-                                        json elems = walkArrayElementsInline(
-                                            arrPtr, f.typeName, arrayCap,
-                                            shouldCaptureInner(classFqn, f.name)
-                                                ? captureIlElementFields
-                                                : std::function<json(std::uintptr_t)>{});
-                                        if (elems.contains("error")) {
-                                            entry["arrayError"] = elems.value("error", std::string{"unknown"});
-                                            if (elems.contains("length")) {
-                                                entry["arrayErrorLength"] = elems["length"];
-                                            }
-                                        } else {
-                                            entry["arrayElements"] = std::move(elems);
-                                            ++decodedArrays;
+                    // Value-only entries aligned to schema order (no per-field
+                    // name/type/offset/from — the UI re-expands from schema).
+                    Snapshot::ClassPayload values = Snapshot::ClassPayload::array();
+                    for (const auto& fd : fieldDescs) {
+                        std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(fd.offset);
+                        Snapshot::ClassPayload entry = Snapshot::ClassPayload::object();
+                        json d = decodeField(*fd.decodeType, fieldAddr);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                        if (fd.isArrayShape) {
+                            if (!isCapturableArrayType(*fd.type)) {
+                                ++skippedOpenGenericArrays;
+                            } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                                std::uintptr_t arrPtr = 0;
+                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                }
+                                if (arrPtr != 0) {
+                                    json elems = walkArrayElementsInline(
+                                        arrPtr, *fd.type, arrayCap,
+                                        shouldCaptureInner(classFqn, *fd.name)
+                                            ? captureIlElementFields
+                                            : std::function<json(std::uintptr_t)>{});
+                                    if (elems.contains("error")) {
+                                        entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                        if (elems.contains("length")) {
+                                            entry["arrayErrorLength"] = elems["length"];
                                         }
+                                    } else {
+                                        entry["arrayElements"] = std::move(elems);
+                                        ++decodedArrays;
                                     }
                                 }
                             }
-                            fields.push_back(std::move(entry));
-                            if (fields.size() >= 4096) break;
                         }
-                        if (fields.size() >= 4096) break;
+                        values.push_back(std::move(entry));
                     }
-                    std::sort(fields.begin(), fields.end(),
-                        [](const json& a, const json& b) {
-                            return a.value("offset", 0) < b.value("offset", 0);
-                        });
-                    instEntry["fields"] = std::move(fields);
+                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
+                    instEntry["v"] = std::move(values);
                     instArr.push_back(std::move(instEntry));
                     ++decodedInstances;
                 }
@@ -5746,6 +6009,11 @@ void RegisterCoreHandlers() {
             {"classInfoCacheMisses",     classInfoCacheMisses},
             {"decodedElementSets",       decodedElementSets},
             {"elementBudgetHit",         elementBudgetHit},
+            {"truncatedByMemory",        memBudgetHitIl},
+            {"truncatedByCount",         countBudgetHitIl},
+            {"instanceDecodeBudget",     instanceDecodeBudget},
+            {"memBudgetBytes",           memBudgetBytesIl},
+            {"peakPrivateUsage",         peakPrivateIl},
         };
 
         // Post-decode memory snapshot for the response — mirrors Mono.
@@ -5756,9 +6024,15 @@ void RegisterCoreHandlers() {
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
+            " decodedInst=" + std::to_string(decodedInstances) +
             " arrays=" + std::to_string(decodedArrays) +
             " elemSets=" + std::to_string(decodedElementSets) +
             (elementBudgetHit ? " elemBudgetHit=1" : "") +
+            (memBudgetHitIl ? " MEM_TRUNCATED=1" : "") +
+            (countBudgetHitIl ? " COUNT_TRUNCATED=1" : "") +
+            " instBudget=" + std::to_string(instanceDecodeBudget) +
+            " memBudget=" + std::to_string(memBudgetBytesIl) +
+            " peakPriv=" + std::to_string(peakPrivateIl) +
             " buildId=" + buildId +
             " gameWorkingSet=" + std::to_string(memAfterIl.workingSet) +
             " gamePrivateUsage=" + std::to_string(memAfterIl.privateUsage));
@@ -5780,6 +6054,8 @@ void RegisterCoreHandlers() {
             {"plan",                    std::move(planArr)},
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
+            {"truncatedByMemory",       memBudgetHitIl},
+            {"truncatedByCount",        countBudgetHitIl},
             {"gamePointerSize",         memAfterIl.pointerSize},
             {"gameWorkingSet",          memAfterIl.workingSet},
             {"gamePrivateUsage",        memAfterIl.privateUsage},
@@ -6248,7 +6524,7 @@ void RegisterCoreHandlers() {
     // Each Il2CppObject's first qword is its Il2CppClass*. Resolve the class
     // and scan committed RW pages for that pointer.
     PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
-        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, computeArenaExclude](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -6258,21 +6534,35 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
+
+        // Phase 29h — exclude the Il2CppClass* metadata arena (see
+        // computeArenaExclude above). Excluded hits don't count toward `limit`,
+        // so the walk continues past the low-address arena to the real
+        // instances. Both filters default on; `excludeArena` / `skipMapped`
+        // args let a caller A/B against the legacy raw scan.
+        const bool excludeArena = args.value("excludeArena", true);
+        const bool skipMapped   = args.value("skipMapped", true);
+        std::uintptr_t exLow = 0, exHigh = 0;
+        computeArenaExclude(excludeArena, exLow, exHigh);
+
         Memory::ScanStats stats{};
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit, &stats);
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
+                                              limit, &stats, exLow, exHigh, skipMapped);
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
         }
         {
-            char line[256];
+            char line[320];
             std::snprintf(line, sizeof(line),
                 "findInstances(IL2CPP) class=%p matches=%zu "
-                "regions total=%zu scanned=%zu skipImage=%zu skipStack=%zu bytes=%zu stacks=%zu",
+                "regions total=%zu scanned=%zu skipImage=%zu skipMapped=%zu skipStack=%zu "
+                "bytes=%zu stacks=%zu excluded=%zu exRange=[%p,%p)",
                 static_cast<const void*>(k), matches.size(),
                 stats.regionsTotal, stats.regionsScanned,
-                stats.regionsSkipImage, stats.regionsSkipStack,
-                stats.bytesScanned, stats.threadStacks);
+                stats.regionsSkipImage, stats.regionsSkipMapped, stats.regionsSkipStack,
+                stats.bytesScanned, stats.threadStacks, stats.excludedMatches,
+                reinterpret_cast<const void*>(exLow), reinterpret_cast<const void*>(exHigh));
             UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan, line);
         }
         return json{
@@ -6281,12 +6571,16 @@ void RegisterCoreHandlers() {
             {"limit",     limit},
             {"matches",   std::move(arr)},
             {"scan_stats", json{
-                {"regions_total",      stats.regionsTotal},
-                {"regions_scanned",    stats.regionsScanned},
-                {"regions_skip_image", stats.regionsSkipImage},
-                {"regions_skip_stack", stats.regionsSkipStack},
-                {"bytes_scanned",      stats.bytesScanned},
-                {"thread_stacks",      stats.threadStacks},
+                {"regions_total",       stats.regionsTotal},
+                {"regions_scanned",     stats.regionsScanned},
+                {"regions_skip_image",  stats.regionsSkipImage},
+                {"regions_skip_mapped", stats.regionsSkipMapped},
+                {"regions_skip_stack",  stats.regionsSkipStack},
+                {"bytes_scanned",       stats.bytesScanned},
+                {"excluded_matches",    stats.excludedMatches},
+                {"exclude_low",         formatHex(exLow)},
+                {"exclude_high",        formatHex(exHigh)},
+                {"thread_stacks",       stats.threadStacks},
             }},
         };
     });
@@ -6296,7 +6590,7 @@ void RegisterCoreHandlers() {
     //   * heap scan target is the Il2CppClass* (not a VTable).
     //   * `vtable` is not emitted (Mono-specific).
     PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
-        [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, decodeField, computeArenaExclude](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -6315,7 +6609,18 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k), limit, nullptr);
+
+        // Phase 29h — same metadata-arena exclusion as findInstances; this
+        // handler enumerates instances via the identical pointer scan, so it
+        // suffered the same arena-residue crowd-out.
+        const bool excludeArena = args.value("excludeArena", true);
+        const bool skipMapped   = args.value("skipMapped", true);
+        std::uintptr_t exLow = 0, exHigh = 0;
+        computeArenaExclude(excludeArena, exLow, exHigh);
+
+        Memory::ScanStats stats{};
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
+                                              limit, &stats, exLow, exHigh, skipMapped);
 
         json rows = json::array();
         for (const void* p : matches) {
@@ -6338,6 +6643,14 @@ void RegisterCoreHandlers() {
             {"fieldOffset", fieldOffset},
             {"fieldType",   fieldType},
             {"rows",        std::move(rows)},
+            {"scan_stats", json{
+                {"regions_scanned",     stats.regionsScanned},
+                {"regions_skip_mapped", stats.regionsSkipMapped},
+                {"bytes_scanned",       stats.bytesScanned},
+                {"excluded_matches",    stats.excludedMatches},
+                {"exclude_low",         formatHex(exLow)},
+                {"exclude_high",        formatHex(exHigh)},
+            }},
         };
     });
 

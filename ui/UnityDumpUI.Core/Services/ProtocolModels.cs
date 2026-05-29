@@ -1020,6 +1020,15 @@ public sealed class SnapshotBeginResult
     [JsonPropertyName("includeSystemAssemblies")]  public bool           IncludeSystemAssemblies  { get; set; }
     [JsonPropertyName("error")]           public string?                 Error       { get; set; }
 
+    /// <summary>Phase P1-fix — true when the decode stopped early because the
+    /// game's private usage crossed the memory budget (snapshot is partial).</summary>
+    [JsonPropertyName("truncatedByMemory")] public bool TruncatedByMemory { get; set; }
+
+    /// <summary>Phase P1-fix — true when the decode stopped early because the
+    /// total decoded-instance budget was reached. The ascending-population
+    /// plan sort means the dropped classes are the high-population ones.</summary>
+    [JsonPropertyName("truncatedByCount")]  public bool TruncatedByCount  { get; set; }
+
     /// <summary>Phase 29-polish — game-process pointer size echoed back
     /// from the DLL on every snapshotBegin. 4 = x86 (32-bit OOM risk),
     /// 8 = x64. Populated even when Error is set (the 32-bit OOM
@@ -1056,7 +1065,34 @@ public sealed class SnapshotFieldEntry
     [JsonPropertyName("is_enum")]           public bool?        IsEnum           { get; set; }
     [JsonPropertyName("is_value_type")]     public bool?        IsValueType      { get; set; }
     [JsonPropertyName("address")]           public string?      Address          { get; set; }
-    [JsonPropertyName("value")]             public JsonElement? Value            { get; set; }
+
+    /// <summary>Phase 30a-2 value compaction — the field's scalar value as raw
+    /// JSON text (e.g. <c>325</c>, <c>true</c>, <c>"hi"</c>). Stored as a small
+    /// string instead of a <see cref="JsonElement"/> so the model doesn't retain
+    /// a standalone <c>JsonDocument</c> per value. Serializes under the wire key
+    /// <c>"value"</c> via <see cref="RawJsonStringConverter"/> (lossless), so old
+    /// snapshots round-trip unchanged.</summary>
+    [JsonPropertyName("value")]
+    [JsonConverter(typeof(RawJsonStringConverter))]
+    public string? ValueRaw { get; set; }
+
+    /// <summary>Back-compat accessor: the value as a <see cref="JsonElement"/>.
+    /// GET parses <see cref="ValueRaw"/> on demand (transient document, GC'd);
+    /// SET stores the element's raw text. Not serialized (the wire/DB key is
+    /// <c>"value"</c> via <see cref="ValueRaw"/>). Hot paths should prefer
+    /// <see cref="ValueRaw"/> to avoid the per-access parse.</summary>
+    [JsonIgnore]
+    public JsonElement? Value
+    {
+        get
+        {
+            if (ValueRaw is null) return null;
+            try { return JsonDocument.Parse(ValueRaw).RootElement; }
+            catch (JsonException) { return null; }
+        }
+        set => ValueRaw = value is { } v ? v.GetRawText() : null;
+    }
+
     [JsonPropertyName("ptr")]               public string?      Ptr              { get; set; }
     [JsonPropertyName("string")]            public string?      StringValue      { get; set; }
     [JsonPropertyName("string_length")]     public int?         StringLength     { get; set; }
@@ -1071,10 +1107,47 @@ public sealed class SnapshotFieldEntry
     [JsonPropertyName("arrayErrorLength")]  public ulong?       ArrayErrorLength { get; set; }
 }
 
+/// <summary>Phase 30a — per-class field metadata, emitted ONCE per class on the
+/// wire (the dedup). A class's instances carry only a value array
+/// (<see cref="SnapshotInstanceEntry.V"/>) aligned to this schema order; the UI
+/// re-expands them into <see cref="SnapshotFieldEntry"/> on receive
+/// (<see cref="SnapshotChunkResult.NormalizeDeduped"/>) so every downstream
+/// consumer + SQLite stays on the existing model. Old (non-deduped) snapshots
+/// have <see cref="SnapshotClassEntry.Schema"/> null and keep inline fields.</summary>
+public sealed class SnapshotFieldSchema
+{
+    [JsonPropertyName("name")]          public string  Name        { get; set; } = string.Empty;
+    [JsonPropertyName("type")]          public string  Type        { get; set; } = string.Empty;
+    [JsonPropertyName("offset")]        public ulong   Offset      { get; set; }
+    [JsonPropertyName("from")]          public string? From        { get; set; }
+    [JsonPropertyName("is_enum")]       public bool?   IsEnum      { get; set; }
+    [JsonPropertyName("is_value_type")] public bool?   IsValueType { get; set; }
+}
+
 public sealed class SnapshotArrayElement
 {
     [JsonPropertyName("index")]   public int          Index   { get; set; }
-    [JsonPropertyName("value")]   public JsonElement? Value   { get; set; }
+
+    /// <summary>Phase 30a-2 value compaction — see
+    /// <see cref="SnapshotFieldEntry.ValueRaw"/>. Raw JSON text backing store.</summary>
+    [JsonPropertyName("value")]
+    [JsonConverter(typeof(RawJsonStringConverter))]
+    public string?      ValueRaw { get; set; }
+
+    /// <summary>Back-compat accessor (computed). See
+    /// <see cref="SnapshotFieldEntry.Value"/>.</summary>
+    [JsonIgnore]
+    public JsonElement? Value
+    {
+        get
+        {
+            if (ValueRaw is null) return null;
+            try { return JsonDocument.Parse(ValueRaw).RootElement; }
+            catch (JsonException) { return null; }
+        }
+        set => ValueRaw = value is { } v ? v.GetRawText() : null;
+    }
+
     [JsonPropertyName("ptr")]     public string?      Ptr     { get; set; }
     [JsonPropertyName("string")]  public string?      String  { get; set; }
     [JsonPropertyName("error")]   public string?      Error   { get; set; }
@@ -1118,6 +1191,14 @@ public sealed class SnapshotInstanceEntry
 {
     [JsonPropertyName("address")] public string                     Address { get; set; } = string.Empty;
     [JsonPropertyName("fields")]  public List<SnapshotFieldEntry>   Fields  { get; set; } = new();
+
+    /// <summary>Phase 30a deduped wire — value-only field objects aligned to the
+    /// owning class's <see cref="SnapshotClassEntry.Schema"/>. Each entry carries
+    /// only the value keys (address/value/ptr/string/arrayElements/…); the schema
+    /// keys (name/type/offset/from) are filled from the class schema by
+    /// <see cref="SnapshotChunkResult.NormalizeDeduped"/>, which then moves these
+    /// into <see cref="Fields"/> and clears this. Null for old snapshots.</summary>
+    [JsonPropertyName("v")]       public List<SnapshotFieldEntry>?  V       { get; set; }
 }
 
 public sealed class SnapshotClassParent
@@ -1135,6 +1216,13 @@ public sealed class SnapshotClassEntry
     [JsonPropertyName("statics")]   public List<SnapshotFieldEntry>?    Statics   { get; set; }
     [JsonPropertyName("instances")] public List<SnapshotInstanceEntry>? Instances { get; set; }
     [JsonPropertyName("error")]     public string?                      Error     { get; set; }
+
+    /// <summary>Phase 30a deduped wire — field metadata emitted once per class.
+    /// When non-null, each instance's <see cref="SnapshotInstanceEntry.V"/> is
+    /// re-expanded against this into <see cref="SnapshotInstanceEntry.Fields"/>
+    /// by <see cref="SnapshotChunkResult.NormalizeDeduped"/>. Null = old format
+    /// (instances already carry inline fields).</summary>
+    [JsonPropertyName("schema")]    public List<SnapshotFieldSchema>?   Schema    { get; set; }
 }
 
 public sealed class SnapshotChunkResult
@@ -1146,6 +1234,47 @@ public sealed class SnapshotChunkResult
     [JsonPropertyName("done")]       public bool                       Done       { get; set; }
     [JsonPropertyName("classes")]    public List<SnapshotClassEntry>   Classes    { get; set; } = new();
     [JsonPropertyName("error")]      public string?                    Error      { get; set; }
+
+    /// <summary>Phase 30a — re-expand the deduped wire into the existing
+    /// <see cref="SnapshotFieldEntry"/> model so every downstream consumer +
+    /// SQLite stays unchanged. For each class with a non-null
+    /// <see cref="SnapshotClassEntry.Schema"/>, fill each instance's value-only
+    /// <see cref="SnapshotInstanceEntry.V"/> entries with the schema metadata,
+    /// move them into <see cref="SnapshotInstanceEntry.Fields"/>, then drop the
+    /// transient schema/V so they don't double-retain. Idempotent + a no-op for
+    /// old (non-deduped) chunks. Call once immediately after deserialization.</summary>
+    public void NormalizeDeduped()
+    {
+        foreach (var c in Classes)
+        {
+            var schema = c.Schema;
+            if (schema is null) continue;       // old format — instances already inline
+            if (c.Instances is { } insts)
+            {
+                foreach (var inst in insts)
+                {
+                    if (inst.V is not { } values) continue;
+                    int n = values.Count < schema.Count ? values.Count : schema.Count;
+                    var fields = new List<SnapshotFieldEntry>(n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        var s = schema[i];
+                        var f = values[i];   // value-only; fill the schema keys
+                        f.Name        = s.Name;
+                        f.Type        = s.Type;
+                        f.Offset      = s.Offset;
+                        f.From        = s.From;
+                        f.IsEnum      = s.IsEnum;
+                        f.IsValueType = s.IsValueType;
+                        fields.Add(f);
+                    }
+                    inst.Fields = fields;
+                    inst.V = null;
+                }
+            }
+            c.Schema = null;
+        }
+    }
 }
 
 public sealed class SnapshotEndResult

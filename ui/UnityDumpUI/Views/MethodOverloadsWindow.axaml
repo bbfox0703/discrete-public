@@ -135,7 +135,7 @@
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
-        <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSignature}" Width="*"
+        <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSignature}" Width="*" MinWidth="280"
                             Binding="{Binding SignatureLabel}"
                             IsReadOnly="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
