@@ -157,6 +157,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             $"{VersionInfo.Banner} session start");
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, "MainWindowViewModel created");
 
+        // Low-RAM advisory for the memory-heavy tabs (snapshot/SPC/Pivot).
+        // Machine-static — evaluate once here, never reset.
+        EvaluateMemoryWarning();
+
         // One-shot housekeeping: each game injection creates a new
         // %LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\ tree. They
         // accumulate forever otherwise. Keep only the most-recent
@@ -479,6 +483,61 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private string? _metadataWarning;
 
     public bool HasStripWarning => !string.IsNullOrEmpty(MetadataWarning);
+
+    // -----------------------------------------------------------------------
+    // Low-RAM advisory banner. snapshot / SPC Query / Class Pivot are the
+    // memory-heavy operations (a wide capture re-expands into millions of
+    // field-value objects; SPC/Pivot build cross-snapshot indexes). On a
+    // machine with little physical RAM those can exhaust memory, so we warn
+    // the user up-front. Machine-static — computed once at construction from
+    // total physical RAM, never reset on connect/disconnect.
+    //
+    // Tiers (total RAM): ≤16 GB → severe ("likely to exhaust memory");
+    // ≤32 GB → caution ("can be very memory-heavy"); >32 GB → no banner.
+    // -----------------------------------------------------------------------
+
+    /// <summary>≤16 GB tier — the strong "likely to exhaust memory" warning.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasMemoryWarning))]
+    private bool _isMemoryWarningSevere;
+
+    /// <summary>≤32 GB tier — the softer "can be very memory-heavy" caution.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasMemoryWarning))]
+    private bool _isMemoryWarningCaution;
+
+    /// <summary>True when either RAM tier applies (drives the banner strip).</summary>
+    public bool HasMemoryWarning => IsMemoryWarningSevere || IsMemoryWarningCaution;
+
+    /// <summary>Total physical RAM thresholds for the low-RAM advisory.
+    /// Compared against GC.GetGCMemoryInfo().TotalAvailableMemoryBytes — the
+    /// process-available physical memory (honors container/job limits too),
+    /// which is the figure that actually bounds these operations.</summary>
+    private const long kMemWarnSevereBytes  = 16L * 1024 * 1024 * 1024;   // ≤16 GB
+    private const long kMemWarnCautionBytes  = 32L * 1024 * 1024 * 1024;  // ≤32 GB
+
+    /// <summary>Set the low-RAM advisory tier from total physical memory.
+    /// AOT-safe: GC.GetGCMemoryInfo is a BCL call, no reflection / P/Invoke.
+    /// Exceptions are swallowed (no banner) so a memory-probe failure can
+    /// never block startup.</summary>
+    private void EvaluateMemoryWarning()
+    {
+        long total;
+        try { total = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; }
+        catch { return; }
+        if (total <= 0) return;   // unknown — don't guess
+        if (total <= kMemWarnSevereBytes)
+        {
+            IsMemoryWarningSevere = true;
+        }
+        else if (total <= kMemWarnCautionBytes)
+        {
+            IsMemoryWarningCaution = true;
+        }
+        _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+            $"low-RAM advisory: totalAvailable={total / (1024.0 * 1024 * 1024):F1} GB " +
+            $"severe={IsMemoryWarningSevere} caution={IsMemoryWarningCaution}");
+    }
 
     [ObservableProperty] private string? _errorMessage;
 

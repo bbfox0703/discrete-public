@@ -170,6 +170,26 @@
                  FontWeight="SemiBold" />
     </Border>
 
+    <!-- Low-RAM advisory strip. Machine-static (total physical RAM tier),
+         set once at startup. Severe (≤16 GB) gets a red tint; caution
+         (≤32 GB) the standard yellow. Warns that Snapshot / SPC Query /
+         Class Pivot are the memory-heavy operations. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding HasMemoryWarning}"
+            Background="#332E9BD6" BorderBrush="#882E9BD6"
+            BorderThickness="0,0,0,1" Padding="12,6">
+      <Panel>
+        <TextBlock Text="{StaticResource App.MemoryWarningSevere}"
+                   IsVisible="{Binding IsMemoryWarningSevere}"
+                   Foreground="#FFE03C3C" TextWrapping="Wrap"
+                   FontWeight="SemiBold" />
+        <TextBlock Text="{StaticResource App.MemoryWarningCaution}"
+                   IsVisible="{Binding IsMemoryWarningCaution}"
+                   Foreground="#FFD4A017" TextWrapping="Wrap"
+                   FontWeight="SemiBold" />
+      </Panel>
+    </Border>
+
     <!-- Phase 20-MT v2: auto-prompt runInBackground banner. Surfaces after
          the connect-time dispatcher health probe (CheckDispatcherHealthAsync)
          sees hook_installed=true but is_healthy=false — i.e. the engine is
