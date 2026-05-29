@@ -1020,6 +1020,15 @@ public sealed class SnapshotBeginResult
     [JsonPropertyName("includeSystemAssemblies")]  public bool           IncludeSystemAssemblies  { get; set; }
     [JsonPropertyName("error")]           public string?                 Error       { get; set; }
 
+    /// <summary>Phase P1-fix — true when the decode stopped early because the
+    /// game's private usage crossed the memory budget (snapshot is partial).</summary>
+    [JsonPropertyName("truncatedByMemory")] public bool TruncatedByMemory { get; set; }
+
+    /// <summary>Phase P1-fix — true when the decode stopped early because the
+    /// total decoded-instance budget was reached. The ascending-population
+    /// plan sort means the dropped classes are the high-population ones.</summary>
+    [JsonPropertyName("truncatedByCount")]  public bool TruncatedByCount  { get; set; }
+
     /// <summary>Phase 29-polish — game-process pointer size echoed back
     /// from the DLL on every snapshotBegin. 4 = x86 (32-bit OOM risk),
     /// 8 = x64. Populated even when Error is set (the 32-bit OOM

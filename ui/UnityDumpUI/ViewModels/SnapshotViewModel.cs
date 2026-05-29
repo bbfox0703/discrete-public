@@ -60,8 +60,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// <summary>Defaults for the non-32-bit case (modern x64 games).
     /// Kept as the "safe high water mark" so <see cref="OnGameConnected"/>
     /// can restore them when the user reconnects to an x64 game after
-    /// having been clamped on an earlier x86 connection.</summary>
-    private const int kDefaultInstanceCapX64 = 512;
+    /// having been clamped on an earlier x86 connection.
+    /// 2026-05-29: lowered 512 → 256 after the Utawarerumono live-smoke —
+    /// a 22K-class / 665K-instance game decoded 174K instances in ~11 min and
+    /// pushed the game to 10 GB + the UI to 14.7 GB. Per-class 256 trims the
+    /// high-population classes; the DLL-side instanceDecodeBudget (50K) is the
+    /// hard total bound, and the ascending-population plan sort keeps the
+    /// low-population game-state classes when truncation kicks in.</summary>
+    private const int kDefaultInstanceCapX64 = 256;
     private const int kDefaultArrayCapX64    = 256;
 
     /// <summary>Clamped defaults for 32-bit Mono games. Chosen 2026-05-27
@@ -1087,7 +1093,18 @@ public sealed partial class SnapshotViewModel : ObservableObject
             string gameMemNote = GameWorkingSet > 0
                 ? $", game {FormatMemory((long)GameWorkingSet)} ws / {FormatMemory((long)GamePrivateUsage)} committed"
                 : string.Empty;
-            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldValueCount:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).";
+            // Partial-capture warning. The DLL stops decoding when it hits the
+            // memory watchdog or the total-instance budget; with the ascending-
+            // population plan sort the dropped classes are the high-population
+            // ones (low-population game-state classes are kept).
+            string truncNote = string.Empty;
+            if (begin.TruncatedByMemory)
+                truncNote = "  ⚠ PARTIAL: memory budget hit — high-population classes dropped. " +
+                            "Narrow the assembly scope, or raise memHeadroomMB / restart the game for more.";
+            else if (begin.TruncatedByCount)
+                truncNote = "  ⚠ PARTIAL: instance budget reached — high-population classes dropped. " +
+                            "Narrow the assembly scope to capture specific classes fully.";
+            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldValueCount:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).{truncNote}";
             _logger.Write(Constants.LogCategoryView,
                 $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldValueCount} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
 

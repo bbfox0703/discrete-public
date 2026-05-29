@@ -2157,6 +2157,12 @@ void RegisterCoreHandlers() {
 
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 4096)     arrayCap = 4096;
+        // Total decoded-instance budget (mirror of IL2CPP) — bounds decode
+        // time + memory; combined with the ascending-population plan sort it
+        // drops high-population noise classes first. 0 = unlimited.
+        std::size_t instanceDecodeBudget =
+            static_cast<std::size_t>(args.value("instanceDecodeBudget", 50000));
+        if (instanceDecodeBudget > 2000000) instanceDecodeBudget = 2000000;
 
         // Phase 29f (Layer B) — reference-array inner-field capture opt-in.
         // arrayElementFields turns it on; elementFieldCap bounds per-element
@@ -2330,6 +2336,14 @@ void RegisterCoreHandlers() {
             session->plan.push_back(std::move(item));
         }
 
+        // Decode low-population classes first (mirror of IL2CPP) so budget /
+        // memory truncation drops the high-population noise tail and keeps the
+        // low-population game-state classes.
+        std::stable_sort(session->plan.begin(), session->plan.end(),
+            [](const Snapshot::ClassPlanItem& a, const Snapshot::ClassPlanItem& b) {
+                return a.instances.size() < b.instances.size();
+            });
+
         // ---- Decode ALL classes under ONE outer attach guard --------------
         // Phase 29a-v2 fix: one outer ThreadAttachGuard for the whole
         // decode loop (was per-chunk in v1, accumulated BDWGC finalizers).
@@ -2361,6 +2375,7 @@ void RegisterCoreHandlers() {
 
         // Phase P1-fix — process-memory watchdog (mirror of the IL2CPP path).
         bool          memBudgetHitMono = false;
+        bool          countBudgetHitMono = false;
         std::uint64_t peakPrivateMono  = memBefore.privateUsage;
         std::size_t   memCheckCounterMono = 0;
         auto checkMemBudgetMono = [&]() {
@@ -2485,13 +2500,14 @@ void RegisterCoreHandlers() {
                     });
                     return;
                 }
-                // Memory watchdog tripped — emit class metadata only.
-                if (memBudgetHitMono) {
+                // Budget tripped (memory watchdog or total-instance budget) —
+                // emit class metadata only.
+                if (memBudgetHitMono || countBudgetHitMono) {
                     session->classes.push_back(Snapshot::ClassPayload{
                         {"assembly", item.assembly},
                         {"namespace", item.ns},
                         {"name", item.name},
-                        {"truncated", "memory_budget"},
+                        {"truncated", memBudgetHitMono ? "memory_budget" : "instance_budget"},
                     });
                     return;
                 }
@@ -2562,13 +2578,15 @@ void RegisterCoreHandlers() {
                 // chainInfo, no Mono calls inside the loop.
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
-                    // Process-memory watchdog (throttled) — stop adding
-                    // instances once the game's private usage crosses budget.
+                    // Total-instance budget + process-memory watchdog —
+                    // stop adding instances once either trips.
+                    if (instanceDecodeBudget > 0 && decodedInstances >= instanceDecodeBudget)
+                        countBudgetHitMono = true;
                     if (++memCheckCounterMono >= kSnapshotMemCheckInterval) {
                         memCheckCounterMono = 0;
                         checkMemBudgetMono();
                     }
-                    if (memBudgetHitMono) break;
+                    if (memBudgetHitMono || countBudgetHitMono) break;
                     Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
                     Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
                     // Walk base→derived so field offsets come out in memory
@@ -2724,6 +2742,8 @@ void RegisterCoreHandlers() {
             {"decodedElementSets",       decodedElementSets},
             {"elementBudgetHit",         elementBudgetHit},
             {"truncatedByMemory",        memBudgetHitMono},
+            {"truncatedByCount",         countBudgetHitMono},
+            {"instanceDecodeBudget",     instanceDecodeBudget},
             {"memBudgetBytes",           memBudgetBytesMono},
             {"peakPrivateUsage",         peakPrivateMono},
         };
@@ -2743,6 +2763,8 @@ void RegisterCoreHandlers() {
             " elemSets=" + std::to_string(decodedElementSets) +
             (elementBudgetHit ? " elemBudgetHit=1" : "") +
             (memBudgetHitMono ? " MEM_TRUNCATED=1" : "") +
+            (countBudgetHitMono ? " COUNT_TRUNCATED=1" : "") +
+            " instBudget=" + std::to_string(instanceDecodeBudget) +
             " memBudget=" + std::to_string(memBudgetBytesMono) +
             " peakPriv=" + std::to_string(peakPrivateMono) +
             " buildId=" + buildId +
@@ -2767,6 +2789,7 @@ void RegisterCoreHandlers() {
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
             {"truncatedByMemory",       memBudgetHitMono},
+            {"truncatedByCount",        countBudgetHitMono},
             {"gamePointerSize",         memAfter.pointerSize},
             {"gameWorkingSet",          memAfter.workingSet},
             {"gamePrivateUsage",        memAfter.privateUsage},
@@ -5368,6 +5391,14 @@ void RegisterCoreHandlers() {
         if (instanceCap > 8192)  instanceCap = 8192;
         std::size_t arrayCap = static_cast<std::size_t>(args.value("arrayCap", 50));
         if (arrayCap > 4096)     arrayCap = 4096;
+        // Total decoded-instance budget — bounds decode TIME + memory on big
+        // games regardless of free RAM. 0 = unlimited. Combined with the
+        // ascending-population plan sort below, truncation drops the
+        // high-population "noise" classes first and keeps the low-population
+        // game-state classes. Overridable via instanceDecodeBudget.
+        std::size_t instanceDecodeBudget =
+            static_cast<std::size_t>(args.value("instanceDecodeBudget", 50000));
+        if (instanceDecodeBudget > 2000000) instanceDecodeBudget = 2000000;
 
         // Phase 29f (Layer B) — reference-array inner-field capture opt-in
         // (mirror of the Mono handler).
@@ -5515,6 +5546,16 @@ void RegisterCoreHandlers() {
             session->plan.push_back(std::move(item));
         }
 
+        // Decode low-population classes first. When the instance budget or the
+        // memory watchdog truncates, it drops the high-population tail (Node /
+        // Entry / small container types — usually noise) and preserves the
+        // low-population game-state classes the user actually monitors. Stable
+        // sort keeps enumeration order among equal-population classes.
+        std::stable_sort(session->plan.begin(), session->plan.end(),
+            [](const Snapshot::ClassPlanItem& a, const Snapshot::ClassPlanItem& b) {
+                return a.instances.size() < b.instances.size();
+            });
+
         // ---- Decode ALL classes under ONE outer attach guard --------------
         IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
         session->classes.reserve(session->plan.size());
@@ -5539,6 +5580,7 @@ void RegisterCoreHandlers() {
         // game). Sampled every kSnapshotMemCheckInterval instances to keep the
         // GetProcessMemoryInfo syscall off the hot path.
         bool          memBudgetHitIl = false;
+        bool          countBudgetHitIl = false;
         std::uint64_t peakPrivateIl  = memBeforeIl.privateUsage;
         std::size_t   memCheckCounter = 0;
         auto checkMemBudgetIl = [&]() {
@@ -5652,14 +5694,14 @@ void RegisterCoreHandlers() {
                     });
                     return;
                 }
-                // Memory watchdog tripped — emit class metadata only, no
-                // instances/statics, so the snapshot still lists the class.
-                if (memBudgetHitIl) {
+                // Budget tripped (memory watchdog or total-instance budget) —
+                // emit class metadata only so the snapshot still lists it.
+                if (memBudgetHitIl || countBudgetHitIl) {
                     session->classes.push_back(Snapshot::ClassPayload{
                         {"assembly", item.assembly},
                         {"namespace", item.ns},
                         {"name", item.name},
-                        {"truncated", "memory_budget"},
+                        {"truncated", memBudgetHitIl ? "memory_budget" : "instance_budget"},
                     });
                     return;
                 }
@@ -5736,14 +5778,16 @@ void RegisterCoreHandlers() {
 
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
-                    // Process-memory watchdog (throttled). Stop adding
-                    // instances once the game's private usage crosses the
-                    // budget; the class keeps whatever it decoded so far.
+                    // Total-instance budget (cheap, per-instance) + process-
+                    // memory watchdog (throttled). Stop adding instances once
+                    // either trips; the class keeps whatever it decoded so far.
+                    if (instanceDecodeBudget > 0 && decodedInstances >= instanceDecodeBudget)
+                        countBudgetHitIl = true;
                     if (++memCheckCounter >= kSnapshotMemCheckInterval) {
                         memCheckCounter = 0;
                         checkMemBudgetIl();
                     }
-                    if (memBudgetHitIl) break;
+                    if (memBudgetHitIl || countBudgetHitIl) break;
                     Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
                     Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
                     for (std::size_t ci = chain.size(); ci > 0; --ci) {
@@ -5892,6 +5936,8 @@ void RegisterCoreHandlers() {
             {"decodedElementSets",       decodedElementSets},
             {"elementBudgetHit",         elementBudgetHit},
             {"truncatedByMemory",        memBudgetHitIl},
+            {"truncatedByCount",         countBudgetHitIl},
+            {"instanceDecodeBudget",     instanceDecodeBudget},
             {"memBudgetBytes",           memBudgetBytesIl},
             {"peakPrivateUsage",         peakPrivateIl},
         };
@@ -5909,6 +5955,8 @@ void RegisterCoreHandlers() {
             " elemSets=" + std::to_string(decodedElementSets) +
             (elementBudgetHit ? " elemBudgetHit=1" : "") +
             (memBudgetHitIl ? " MEM_TRUNCATED=1" : "") +
+            (countBudgetHitIl ? " COUNT_TRUNCATED=1" : "") +
+            " instBudget=" + std::to_string(instanceDecodeBudget) +
             " memBudget=" + std::to_string(memBudgetBytesIl) +
             " peakPriv=" + std::to_string(peakPrivateIl) +
             " buildId=" + buildId +
@@ -5933,6 +5981,7 @@ void RegisterCoreHandlers() {
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
             {"truncatedByMemory",       memBudgetHitIl},
+            {"truncatedByCount",        countBudgetHitIl},
             {"gamePointerSize",         memAfterIl.pointerSize},
             {"gameWorkingSet",          memAfterIl.workingSet},
             {"gamePrivateUsage",        memAfterIl.privateUsage},

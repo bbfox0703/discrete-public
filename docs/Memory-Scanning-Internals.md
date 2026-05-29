@@ -630,4 +630,16 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 - 每 `kSnapshotMemCheckInterval = 2048` 個 instance 取樣一次 `GetProcessMemoryInfo().PrivateUsage`（不放熱路徑）；超過預算就設 `memBudgetHit`，停止再加 instance，剩餘 class 只輸出 metadata（`"truncated":"memory_budget"`）。
 - response 加 `truncatedByMemory` + `decodeStats.{memBudgetBytes,peakPrivateUsage}`；log 末尾加 `MEM_TRUNCATED=1 memBudget=… peakPriv=…`。
 
-→ 大型遊戲不再無限長到 OOM，而是在預算處停下並回報截斷；UI 可據 `truncatedByMemory` 提示使用者「縮小 InstanceCap / 指定 assemblies / 重啟遊戲」。**後續**：UI 顯示截斷警告；snapshot 改 streaming-decode（邊 decode 邊送、不全握在記憶體）才是根治。
+→ 大型遊戲不再無限長到 OOM，而是在預算處停下並回報截斷；UI 可據 `truncatedByMemory` 提示使用者「縮小 InstanceCap / 指定 assemblies / 重啟遊戲」。**後續**：snapshot 改 streaming-decode（邊 decode 邊送、不全握在記憶體）才是根治。
+
+### 16.7 Snapshot「減少擷取量」(2026-05-29, build #761)
+
+**動機**：受讚頌者（IL2CPP）live-smoke — find phase 僅 0.6s（P1c 良好），但 **decode phase ~11 分鐘**：665059 找到 / 263700 in-scope / decode 174079 instances，遊戲漲到 10 GB、UI 收完漲到 14.7 GB。decode 是唯一瓶頸，且 600s 與記憶體成正比於 instance 數。使用者反饋「是否抓到非必要 garbage」。
+
+**修法**（`ExportAPI.cpp` 兩 backend）：
+- **`instanceDecodeBudget`**（預設 50000，0=無限，可覆寫）：decode 累計到上限即停，剩餘 class 只輸出 metadata（`"truncated":"instance_budget"`）。直接夾住 decode **時間 + 記憶體**，不依賴 free RAM（記憶體 watchdog 是另一道）。
+- **plan 依 instance 數升冪 `stable_sort`**：truncation（無論 budget 或記憶體）先砍**高 population 的雜訊 class**（Node / Entry / 小容器），保留**低 population 的遊戲狀態 class**（CharacterData / PlayerStatus…）。把「截斷」變成有意義的取捨。
+- response/log 加 `truncatedByCount` / `COUNT_TRUNCATED=1` / `instBudget=`。
+- UI `kDefaultInstanceCapX64` 512→256；snapshot 完成時若 `truncatedByMemory`/`truncatedByCount` 顯示 ⚠ PARTIAL 提示（縮小 assembly scope / 調 budget）。
+
+**效果預期**：50000 instance 上限 → decode 時間/記憶體約降到原本的 50000/174079 ≈ 29%，且保留的是低 population 的有用 class。要完整抓特定 class → 縮 assembly scope 或調高 budget。**仍是 workaround**；root fix = streaming-decode + decode 平行化（per-thread attach）。
