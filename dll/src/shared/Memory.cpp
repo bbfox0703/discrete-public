@@ -5,7 +5,10 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <thread>
+#include <utility>
 
 namespace UnityCEDumper::Memory {
 
@@ -305,92 +308,231 @@ bool RangesOverlap(const std::uint8_t* aLow, const std::uint8_t* aHigh,
     return aLow < bHigh && bLow < aHigh;
 }
 
+// ===================================================================
+// Phase P1 — parallel region scan infrastructure (shared by
+// ScanForPointer / ScanForValue / ScanForString).
+//
+// Design (see docs/Memory-Scanning-Internals.md §16):
+//   * Serial pass: enumerate + filter committed regions (RW, non-image,
+//     non-stack, optionally non-mapped) and accumulate region-level stats.
+//   * Split accepted regions into a worklist of fixed-size chunks. Chunk
+//     boundaries are aligned to the scan `stride` so the per-position grid
+//     stays continuous across chunk seams; each chunk's `scanSize` includes
+//     a tail overlap of `elemSize-1` bytes (clamped to region end) so an
+//     element straddling a chunk seam is still found exactly once — owned
+//     by the chunk that contains its START position.
+//   * N worker threads grab chunks via an atomic index (work-stealing — the
+//     dynamic grab balances tiny vs. huge regions). Each chunk writes its
+//     matches into its own slot (perChunk[idx]) so the final concatenation
+//     in index order yields address-ascending output with no sort. An
+//     atomic match counter early-stops once `limit` is reached (the grabbed
+//     set is always a contiguous low-index prefix → truncation keeps the
+//     lowest-address matches, matching the old serial contract).
+//
+// No per-chunk IsReadable/VirtualQuery: the region list already excludes
+// PAGE_GUARD/PAGE_NOACCESS, and the chunk scan runs inside __try so a rare
+// AC-stripped page only loses that one chunk (counted into readFailureBytes).
+// This removes one VirtualQuery syscall per 64 KB that the old serial path
+// paid.
+// ===================================================================
+
+// One unit of scan work. Owns the positions starting in [base, base+ownLen);
+// `scanSize` already folds in the tail overlap so the inner loop's
+// `i + elemSize <= scanSize` condition reports exactly the owned positions.
+struct ScanWorkItem {
+    const std::uint8_t* base;
+    std::size_t         scanSize;
+};
+
+// Target chunk size — balances work-stealing granularity (enough chunks to
+// keep all threads busy) against per-chunk overhead and AV blast radius.
+constexpr std::size_t kScanWorkChunk = 1u * 1024u * 1024u;   // 1 MB
+
+// Split filtered regions into a stride-aligned chunk worklist.
+//   elemSize = bytes read per candidate position (sizeof(T) / needle len / 8)
+//   stride   = position step (alignment); chunk boundaries are multiples of it
+std::vector<ScanWorkItem> BuildScanChunks(
+    const std::vector<std::pair<const std::uint8_t*, std::size_t>>& regions,
+    std::size_t elemSize, std::size_t stride) {
+    std::vector<ScanWorkItem> chunks;
+    if (elemSize == 0) return chunks;
+    if (stride == 0) stride = 1;
+    // Round the chunk granularity down to a multiple of stride so chunk start
+    // offsets stay on the global position grid (rbase + k*stride).
+    std::size_t C = (kScanWorkChunk / stride) * stride;
+    if (C < stride) C = stride;
+    for (const auto& [rbase, rsize] : regions) {
+        if (rsize < elemSize) continue;
+        for (std::size_t off = 0; off < rsize; off += C) {
+            const std::uint8_t* base   = rbase + off;
+            std::size_t         ownLen = std::min(C, rsize - off);
+            // Allow reading elemSize-1 bytes past the owned range so a
+            // straddling element is found, but never past the region end.
+            std::size_t scanSize = std::min(ownLen + (elemSize - 1), rsize - off);
+            if (scanSize < elemSize) continue;     // no full element fits
+            chunks.push_back(ScanWorkItem{base, scanSize});
+        }
+    }
+    return chunks;
+}
+
+// Generic parallel driver. `chunkScan(base, scanSize, localOut, cap)` runs the
+// caller's SEH-wrapped inner loop for one chunk, appending matches to
+// `localOut` (capped at `cap`), returning false if the chunk AV'd. Results
+// come back in address-ascending order, truncated to `limit`.
+template <typename ResultT, typename ChunkScanFn>
+std::vector<ResultT> RunParallelScan(
+    const std::vector<ScanWorkItem>& chunks,
+    std::size_t                      limit,
+    std::atomic<std::size_t>*        readFailureBytes,
+    ChunkScanFn                      chunkScan) {
+    std::vector<ResultT> out;
+    if (chunks.empty() || limit == 0) return out;
+
+    unsigned int nthreads = ScanThreadCount();
+    if (nthreads > chunks.size()) nthreads = static_cast<unsigned int>(chunks.size());
+    if (nthreads < 1) nthreads = 1;
+
+    std::vector<std::vector<ResultT>> perChunk(chunks.size());
+    std::atomic<std::size_t> nextChunk{0};
+    std::atomic<std::size_t> totalMatches{0};
+
+    auto worker = [&]() {
+        for (;;) {
+            if (totalMatches.load(std::memory_order_relaxed) >= limit) break;
+            std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= chunks.size()) break;
+            auto& local = perChunk[idx];
+            bool ok = chunkScan(chunks[idx].base, chunks[idx].scanSize, local, limit);
+            if (!ok && readFailureBytes)
+                readFailureBytes->fetch_add(chunks[idx].scanSize, std::memory_order_relaxed);
+            if (!local.empty())
+                totalMatches.fetch_add(local.size(), std::memory_order_relaxed);
+        }
+    };
+
+    if (nthreads <= 1) {
+        worker();
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(nthreads);
+        for (unsigned int t = 0; t < nthreads; ++t) pool.emplace_back(worker);
+        for (auto& th : pool) th.join();
+    }
+
+    out.reserve(std::min<std::size_t>(totalMatches.load(), limit));
+    for (auto& l : perChunk) {
+        for (auto& r : l) {
+            if (out.size() >= limit) return out;
+            out.push_back(r);
+        }
+    }
+    return out;
+}
+
+// Serial region filter shared by the three scanners. Builds the accepted
+// [base,size) region list and the region-level stat counters in one pass.
+struct AcceptedRegions {
+    std::vector<std::pair<const std::uint8_t*, std::size_t>> regions;
+    std::size_t regionsTotal   = 0;
+    std::size_t regionsScanned = 0;
+    std::size_t skipImage      = 0;
+    std::size_t skipMapped     = 0;
+    std::size_t skipStack      = 0;
+    std::size_t bytesScanned   = 0;
+    std::size_t threadStacks   = 0;
+};
+
+AcceptedRegions FilterScanRegions(bool skipMapped) {
+    AcceptedRegions a;
+    constexpr DWORD kRW =
+        PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    auto regions = EnumerateCommittedRegions();
+    auto stacks  = CollectThreadStackRanges();
+    a.threadStacks = stacks.size();
+    a.regions.reserve(regions.size());
+    for (const auto& r : regions) {
+        if ((r.protect & kRW) == 0) continue;
+        a.regionsTotal++;
+        if (r.type == MEM_IMAGE) { a.skipImage++; continue; }
+        if (skipMapped && r.type == MEM_MAPPED) { a.skipMapped++; continue; }
+        const std::uint8_t* regionEnd = r.base + r.size;
+        bool onStack = false;
+        for (const auto& s : stacks) {
+            if (s.low >= regionEnd) break;
+            if (RangesOverlap(r.base, regionEnd, s.low, s.high)) { onStack = true; break; }
+        }
+        if (onStack) { a.skipStack++; continue; }
+        a.regionsScanned++;
+        a.bytesScanned += r.size;
+        a.regions.emplace_back(r.base, r.size);
+    }
+    return a;
+}
+
 }  // namespace
+
+// Worker thread count: leave 2 cores for the game + our own pipe/UI threads,
+// clamp to a sane upper bound (memory-bandwidth-bound past ~8-16 threads).
+// Exported so the IL2CPP snapshot heap walk (FindAllInstances) reuses the
+// same policy.
+unsigned int ScanThreadCount() noexcept {
+    unsigned int hc = std::thread::hardware_concurrency();
+    if (hc == 0) hc = 4;
+    unsigned int t = (hc > 2) ? (hc - 2) : 1;
+    if (t > 16) t = 16;
+    return t;
+}
 
 std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit, ScanStats* stats,
                                         std::uintptr_t excludeLow, std::uintptr_t excludeHigh,
                                         bool skipMapped) {
-    std::vector<const void*> matches;
-    if (target == 0 || limit == 0) return matches;
+    if (target == 0 || limit == 0) return {};
 
-    constexpr DWORD kRW =
-        PAGE_READWRITE | PAGE_WRITECOPY |
-        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-
-    auto regions = EnumerateCommittedRegions();
-    auto stacks  = CollectThreadStackRanges();
-
-    std::size_t excludedMatches = 0;
+    // Filter 1: module sections (.data / .bss) hold class-pointer values
+    // (IL2CPP RGCTX cache, Mono class tables) → skipped. Filter 1b: file-backed
+    // mappings (opt-in). Filter 2: thread stacks (stale `T*` locals).
+    AcceptedRegions acc = FilterScanRegions(skipMapped);
     if (stats) {
-        stats->threadStacks = stacks.size();
+        stats->regionsTotal      = acc.regionsTotal;
+        stats->regionsScanned    = acc.regionsScanned;
+        stats->regionsSkipImage  = acc.skipImage;
+        stats->regionsSkipMapped = acc.skipMapped;
+        stats->regionsSkipStack  = acc.skipStack;
+        stats->bytesScanned      = acc.bytesScanned;
+        stats->threadStacks      = acc.threadStacks;
     }
 
-    for (const auto& r : regions) {
-        if (matches.size() >= limit) break;
-        // Heap allocations live in RW pages. Skip RO / X-only regions to cut
-        // noise (and avoid scanning module .text / .rdata sections).
-        if ((r.protect & kRW) == 0) continue;
+    // Object headers are 8-byte aligned; scan at qword stride.
+    auto chunks = BuildScanChunks(acc.regions, sizeof(std::uintptr_t), sizeof(std::uintptr_t));
 
-        if (stats) stats->regionsTotal++;
-
-        // Filter 1: module sections (.data / .bss / etc.). These legitimately
-        // store class-pointer values (IL2CPP RGCTX cache, Mono class tables)
-        // and would otherwise be reported as instance matches.
-        if (r.type == MEM_IMAGE) {
-            if (stats) stats->regionsSkipImage++;
-            continue;
-        }
-
-        // Filter 1b: file-backed mappings (opt-in). Holds game data that can
-        // contain class-pointer values. Mirrors the Phase 29 snapshot sweep.
-        if (skipMapped && r.type == MEM_MAPPED) {
-            if (stats) stats->regionsSkipMapped++;
-            continue;
-        }
-
-        // Filter 2: thread stacks. Stale `T*` locals from old frames pass the
-        // first-qword check until overwritten.
-        const std::uint8_t* regionEnd = r.base + r.size;
-        bool onStack = false;
-        for (const auto& s : stacks) {
-            if (s.low >= regionEnd) break;  // sorted — no further overlaps possible
-            if (RangesOverlap(r.base, regionEnd, s.low, s.high)) {
-                onStack = true;
-                break;
-            }
-        }
-        if (onStack) {
-            if (stats) stats->regionsSkipStack++;
-            continue;
-        }
-
-        if (stats) {
-            stats->regionsScanned++;
-            stats->bytesScanned += r.size;
-        }
-        SehScanRegion(r.base, r.size, target, matches, limit,
-                      excludeLow, excludeHigh, excludedMatches);
-    }
-    if (stats) stats->excludedMatches = excludedMatches;
+    std::atomic<std::size_t> excludedMatches{0};
+    auto matches = RunParallelScan<const void*>(
+        chunks, limit, /*readFailureBytes=*/nullptr,
+        [target, excludeLow, excludeHigh, &excludedMatches](
+            const std::uint8_t* base, std::size_t scanSize,
+            std::vector<const void*>& local, std::size_t cap) -> bool {
+            std::size_t exc = 0;   // per-call (per-thread) — no shared-state race
+            bool ok = SehScanRegion(base, scanSize, target, local, cap,
+                                    excludeLow, excludeHigh, exc);
+            if (exc) excludedMatches.fetch_add(exc, std::memory_order_relaxed);
+            return ok;
+        });
+    if (stats) stats->excludedMatches = excludedMatches.load();
     return matches;
 }
 
 // ---------- Phase 27a — Typed value scan -----------------------------------
 //
-// Single-threaded; reuses the same MEM_IMAGE + thread-stack filtering as
-// `ScanForPointer`. Each region is scanned by a typed inner loop dispatched
-// once on `req.dataType` so the per-byte hot path stays branch-free.
-//
-// Memory safety: instead of SEH-wrapping the whole inner loop, we walk the
-// region in `SafeReadBytes`-validated chunks (4 KB). Any chunk that AVs is
-// counted in `stats->readFailureBytes` and skipped. This is slightly slower
-// than a single __try over the whole region (one extra `VirtualQuery` per
-// chunk), but the chunked path lets a single bad page in the middle of a
-// 16 MB region only cost us 4 KB of scan budget instead of the whole region.
+// Reuses the same MEM_IMAGE + thread-stack filtering as `ScanForPointer`. Each
+// region is scanned by a typed inner loop dispatched once on `req.dataType` so
+// the per-byte hot path stays branch-free. Phase P1: the region walk runs
+// across N worker threads via `RunParallelScan` (see the parallel-scan infra
+// near the top of this file); each 1 MB chunk's typed loop is wrapped in __try
+// so an AC-stripped page only loses that chunk (counted in readFailureBytes).
 
 namespace {
-
-constexpr std::size_t kScanChunkBytes = 64 * 1024;   // 64 KB per SafeReadBytes probe
 
 // Read the lower N bytes of an 8-byte payload as type T.
 template <typename T>
@@ -543,81 +685,36 @@ bool SehDispatchScanChunk(const std::uint8_t* base,
 
 std::vector<ValueScanCandidate> ScanForValue(const ValueScanRequest& req,
                                               ValueScanStats*         stats) noexcept {
-    std::vector<ValueScanCandidate> matches;
-    if (req.limit == 0) return matches;
+    if (req.limit == 0) return {};
     const std::size_t typeSize = ValueDataTypeSize(req.dataType);
-    if (typeSize == 0) return matches;
-    matches.reserve(std::min<std::size_t>(req.limit, 4096));
+    if (typeSize == 0) return {};
 
-    constexpr DWORD kRW =
-        PAGE_READWRITE | PAGE_WRITECOPY |
-        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-
-    auto regions = EnumerateCommittedRegions();
-    auto stacks  = CollectThreadStackRanges();
-
-    if (stats) stats->threadStacks = stacks.size();
-
-    for (const auto& r : regions) {
-        if (matches.size() >= req.limit) break;
-        if ((r.protect & kRW) == 0) continue;
-
-        if (stats) stats->regionsTotal++;
-
-        if (r.type == MEM_IMAGE) {
-            if (stats) stats->regionsSkipImage++;
-            continue;
-        }
-
-        const std::uint8_t* regionEnd = r.base + r.size;
-        bool onStack = false;
-        for (const auto& s : stacks) {
-            if (s.low >= regionEnd) break;
-            if (RangesOverlap(r.base, regionEnd, s.low, s.high)) {
-                onStack = true;
-                break;
-            }
-        }
-        if (onStack) {
-            if (stats) stats->regionsSkipStack++;
-            continue;
-        }
-
-        if (stats) {
-            stats->regionsScanned++;
-            stats->bytesScanned += r.size;
-        }
-
-        // Walk the region in chunks so a single bad page doesn't poison the
-        // whole region's scan budget. The chunk size is also our SafeReadBytes
-        // probe granularity — IsReadable does one VirtualQuery per call so
-        // making chunks too small (4 KB) over-pays the syscall cost.
-        std::size_t offset = 0;
-        while (offset < r.size) {
-            std::size_t chunkSize = std::min<std::size_t>(kScanChunkBytes, r.size - offset);
-            const std::uint8_t* chunkBase = r.base + offset;
-
-            // SafeReadBytes does VirtualQuery + SEH read. We only need the
-            // VirtualQuery half — IsReadable — because we're scanning live
-            // memory in-place, not copying. But IsReadable doesn't SEH-cover
-            // the actual access pattern, so we still need __try around the
-            // dispatch. Cheaper: use IsReadable as the cheap filter; the
-            // typed inner loop runs without SEH (a SafeReadBytes copy would
-            // double memory traffic).
-            if (!IsReadable(chunkBase, chunkSize)) {
-                if (stats) stats->readFailureBytes += chunkSize;
-            } else {
-                // Dispatch wrapped in helper-frame SEH so a hooked page that
-                // passes IsReadable but AVs on access still doesn't kill us.
-                if (!SehDispatchScanChunk(chunkBase, chunkSize, req, matches, req.limit)) {
-                    if (stats) stats->readFailureBytes += chunkSize;
-                }
-            }
-
-            if (matches.size() >= req.limit) break;
-            offset += chunkSize;
-        }
+    // Value scan keeps MEM_MAPPED regions (game data the user may search) —
+    // only MEM_IMAGE + thread stacks are filtered.
+    AcceptedRegions acc = FilterScanRegions(/*skipMapped=*/false);
+    if (stats) {
+        stats->regionsTotal     = acc.regionsTotal;
+        stats->regionsScanned   = acc.regionsScanned;
+        stats->regionsSkipImage = acc.skipImage;
+        stats->regionsSkipStack = acc.skipStack;
+        stats->bytesScanned     = acc.bytesScanned;
+        stats->threadStacks     = acc.threadStacks;
     }
+
+    const std::size_t stride = req.alignment ? req.alignment : typeSize;
+    auto chunks = BuildScanChunks(acc.regions, typeSize, stride);
+
+    std::atomic<std::size_t> readFailureBytes{0};
+    auto matches = RunParallelScan<ValueScanCandidate>(
+        chunks, req.limit, &readFailureBytes,
+        [&req](const std::uint8_t* base, std::size_t scanSize,
+               std::vector<ValueScanCandidate>& local, std::size_t cap) -> bool {
+            // __try-wrapped typed inner loop; a rare AC-stripped page only
+            // loses this 1 MB chunk (no IsReadable pre-probe — the region list
+            // already excludes guard/no-access pages).
+            return SehDispatchScanChunk(base, scanSize, req, local, cap);
+        });
+    if (stats) stats->readFailureBytes = readFailureBytes.load();
     return matches;
 }
 
@@ -667,67 +764,39 @@ bool SehScanStringChunk(const std::uint8_t* base, std::size_t size,
 
 std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
                                                 ValueScanStats* stats) noexcept {
-    std::vector<StringScanCandidate> matches;
-    if (req.needle.empty() || req.limit == 0) return matches;
-    matches.reserve(std::min<std::size_t>(req.limit, 1024));
+    if (req.needle.empty() || req.limit == 0) return {};
 
     std::size_t stride = req.alignment;
     if (stride == 0) {
         stride = (req.encoding == StringEncoding::Utf16Le) ? 2u : 1u;
     }
 
-    constexpr DWORD kRW =
-        PAGE_READWRITE | PAGE_WRITECOPY |
-        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-
-    auto regions = EnumerateCommittedRegions();
-    auto stacks  = CollectThreadStackRanges();
-    if (stats) stats->threadStacks = stacks.size();
-
-    for (const auto& r : regions) {
-        if (matches.size() >= req.limit) break;
-        if ((r.protect & kRW) == 0) continue;
-        if (stats) stats->regionsTotal++;
-        if (r.type == MEM_IMAGE) { if (stats) stats->regionsSkipImage++; continue; }
-
-        const std::uint8_t* regionEnd = r.base + r.size;
-        bool onStack = false;
-        for (const auto& s : stacks) {
-            if (s.low >= regionEnd) break;
-            if (RangesOverlap(r.base, regionEnd, s.low, s.high)) { onStack = true; break; }
-        }
-        if (onStack) { if (stats) stats->regionsSkipStack++; continue; }
-
-        if (stats) {
-            stats->regionsScanned++;
-            stats->bytesScanned += r.size;
-        }
-
-        // 64 KB chunks like ScanForValue. Cross-chunk-boundary matches
-        // are missed (a needle that straddles two chunks won't match);
-        // for v1, accept this — strings are short (< 256 bytes), so
-        // bumping the chunk overlap by `needleSize-1` would prevent it.
-        // Add that overlap to be safe.
-        constexpr std::size_t kStringScanChunkBytes = 64 * 1024;
-        const std::size_t overlap = req.needle.size() - 1;
-        std::size_t offset = 0;
-        while (offset < r.size) {
-            std::size_t chunkSize = std::min<std::size_t>(kStringScanChunkBytes, r.size - offset);
-            const std::uint8_t* chunkBase = r.base + offset;
-            if (!IsReadable(chunkBase, chunkSize)) {
-                if (stats) stats->readFailureBytes += chunkSize;
-            } else {
-                if (!SehScanStringChunk(chunkBase, chunkSize,
-                                        req.needle.data(), req.needle.size(),
-                                        stride, matches, req.limit)) {
-                    if (stats) stats->readFailureBytes += chunkSize;
-                }
-            }
-            if (matches.size() >= req.limit) break;
-            if (chunkSize <= overlap) break;
-            offset += chunkSize - overlap;   // overlap to catch boundary-straddling matches
-        }
+    AcceptedRegions acc = FilterScanRegions(/*skipMapped=*/false);
+    if (stats) {
+        stats->regionsTotal     = acc.regionsTotal;
+        stats->regionsScanned   = acc.regionsScanned;
+        stats->regionsSkipImage = acc.skipImage;
+        stats->regionsSkipStack = acc.skipStack;
+        stats->bytesScanned     = acc.bytesScanned;
+        stats->threadStacks     = acc.threadStacks;
     }
+
+    // elemSize = needle length; BuildScanChunks' tail overlap (needleSize-1)
+    // catches needles straddling a chunk seam — reported once, owned by the
+    // chunk holding the needle's first byte.
+    auto chunks = BuildScanChunks(acc.regions, req.needle.size(), stride);
+
+    const std::uint8_t* needle     = req.needle.data();
+    const std::size_t   needleSize = req.needle.size();
+    std::atomic<std::size_t> readFailureBytes{0};
+    auto matches = RunParallelScan<StringScanCandidate>(
+        chunks, req.limit, &readFailureBytes,
+        [needle, needleSize, stride](
+            const std::uint8_t* base, std::size_t scanSize,
+            std::vector<StringScanCandidate>& local, std::size_t cap) -> bool {
+            return SehScanStringChunk(base, scanSize, needle, needleSize, stride, local, cap);
+        });
+    if (stats) stats->readFailureBytes = readFailureBytes.load();
     return matches;
 }
 

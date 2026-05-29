@@ -69,6 +69,12 @@ struct ThreadStackRange {
 // `GameObject*` locals in old frames happen to pass the first-qword check).
 std::vector<ThreadStackRange> CollectThreadStackRanges();
 
+// Phase P1 — worker thread count for parallel heap scans. Leaves headroom for
+// the game + our own threads and clamps to a memory-bandwidth-sane upper bound.
+// Shared by the in-process scanners (Memory.cpp) and the IL2CPP snapshot heap
+// walk (IL2CPPAddressFinder::FindAllInstances).
+unsigned int ScanThreadCount() noexcept;
+
 // Telemetry for one ScanForPointer invocation (helps debug "where did the false
 // positives go" without rebuilding with logging). Populated by ScanForPointer
 // when caller passes a non-null pointer.

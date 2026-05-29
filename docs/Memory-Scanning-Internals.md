@@ -572,10 +572,12 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 
 ### 16.3 加速 roadmap（建議順序）
 
-**P1 — 拿掉 value/string scan 的 per-chunk `IsReadable`（低風險、改動小）**
+> **狀態（2026-05-29, build #751）**：P1 兩項皆 **已實作** — 見 §16.5。P2/P3 仍 pending。
+
+**P1 — 拿掉 value/string scan 的 per-chunk `IsReadable`（低風險、改動小）** ✅ 已實作
 相信 `EnumerateCommittedRegions` 的區段表，內層維持 `__try` SEH 保護；只在某 chunk AV 時才針對該區段降級細掃。直接省掉每 64KB 一次 VirtualQuery。CE 等價作法 = `VirtualQueryEx_StartCache` + working-set。
 
-**P1 — 平行化區段走訪**（`ScanForValue` / `ScanForString` / `ScanForPointer` / `FindAllInstances`）
+**P1 — 平行化區段走訪**（`ScanForValue` / `ScanForString` / `ScanForPointer` / `FindAllInstances`）✅ 已實作
 固定大小 thread pool（建議 `min(cores-2, N)`，與專案 workflow 併發上限同哲學，避免和遊戲自身執行緒搶滿核心），per-thread 結果 buffer 最後合併，`limit` 改用 atomic counter + 提前停（對照 AOBMaker `Interlocked` + `loopState.Stop`）。**這是對多 GB heap 最大的 wall-clock 改善**。注意：in-process 掃描自己的 heap，平行讀是安全的（唯讀）；唯一要小心的是不要在 attach Unity domain 的執行緒外呼叫 runtime API（raw 掃描階段不碰 runtime，安全）。
 
 **P2 — value scan 候選反查改用「快取的 heap interval-tree」**（address-finder.md Strategy B，目前 deferred）
@@ -601,3 +603,20 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 | Unity-aware 反查 | N/A | N/A | **每候選 16KB 反掃** ❌ | P2 interval-tree / locality cache |
 
 **一句話結論**：我們的內層比 CE 還省（in-process 直讀），慢的根因是 **(a) 完全沒平行化**、**(b) value scan 對每筆候選做昂貴的 16KB Unity 反查**。先做 P1（平行化 + 拿掉 per-chunk VQ）拿到數倍 wall-clock，再做 P2（候選反查改 interval-tree / locality cache）解決 value-scan 的二次成本。
+
+### 16.5 P1 實作紀錄（2026-05-29, build #751）
+
+**`Memory.cpp` 新增平行掃描基礎建設**（anon namespace）：
+- `ScanThreadCount()`（已 export 到 `Memory.h`）= `clamp(hardware_concurrency - 2, 1, 16)`，留核心給遊戲 + pipe/UI 執行緒。
+- `ScanWorkItem{base, scanSize}` + `BuildScanChunks(regions, elemSize, stride)`：把已過濾區段切成 `kScanWorkChunk = 1 MB`、**stride 對齊**的 chunk worklist。每個 chunk `scanSize = min(ownLen + elemSize-1, rend-base)` 折入尾端 overlap，使跨 chunk 接縫的元素仍被「擁有其起始位置的那個 chunk」找到恰好一次（數學推導見原始碼註解；8/8 的 pointer/snapshot 情形 overlap 自然為 0）。
+- `RunParallelScan<ResultT>(chunks, limit, &readFailureBytes, chunkScanFn)`：N 執行緒以 `atomic nextChunk.fetch_add` work-steal，結果寫入 `perChunk[idx]` slot（依 index 串接 → **位址升冪、免排序**）；`atomic totalMatches` 達 `limit` 即提前停（grabbed 集合恆為低 index 連續前綴 → 截斷保留最低位址，符合舊序列語意）。`nthreads<=1` 走 inline 不開執行緒。
+- `FilterScanRegions(skipMapped)`：序列過濾 (RW / 非 image / 選擇性非 mapped / 非 stack)，一次填好 region-level 統計。
+- **拿掉 per-chunk `IsReadable`**：region 表已濾 guard/no-access，內層 `__try` 接住罕見 AC-stripped page（只損該 1 MB chunk，計入 `readFailureBytes`）。
+
+**三個掃描器改寫**：`ScanForPointer`（stride/elem=8，沿用 Phase 29h arena 排除，per-call local `exc` 計數→atomic 合併）、`ScanForValue`（stride=alignment 或 sizeof(T)）、`ScanForString`（elem=needle 長度，overlap 取代舊的手動 chunk overlap）皆改為 `FilterScanRegions → BuildScanChunks → RunParallelScan`。預設參數使 Mono 等其他呼叫者行為不變。
+
+**`IL2CPPAddressFinder.cpp::FindAllInstances`（snapshot）平行化**：序列過濾 → 8 對齊 1 MB chunk → N 執行緒各自 `SehSweepRegion` 進 **per-thread `byClass` map**（熱路徑無鎖）→ 合併時每個 class 依位址排序 + 截斷到 `perClassCap`。**保留「最低位址子集」決定性**（避免跨 snapshot diff 因執行緒時序而抖動）；代價是 per-thread map 暫態記憶體 ×nthreads（多數 class 遠低於 cap，僅少數熱門 class 達 cap，整體與單緒同數量級）。log 末尾加 `threads=N`。
+
+**尚未做（follow-up）**：Mono `MonoAddressFinder.cpp::FindAllInstances`（用 `SehSweepRegionLoad` + slot 驗證，較複雜，且目前目標為 IL2CPP）仍單緒；value/string/pointer 因走共用 `Memory.cpp` 路徑，Mono 端已連帶平行化。P2（候選反查 interval-tree / locality cache）、P2 SIMD（string/pointer 內層）、P3（VQ 快取）仍 pending。
+
+**驗證重點**：correctness — 平行掃描的 match 集合須與舊序列版一致（位址升冪、同筆數，截斷時保留最低位址）；perf — 多 GB heap 的 value scan / find instances / snapshot wall-clock 應呈核心數倍率下降。
