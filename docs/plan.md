@@ -1093,6 +1093,34 @@ visible; fallback is to exclude *all* regions overlapping any class pointer.
 
 ---
 
+## Phase 30 — Snapshot memory & speed (streaming-decode + schema/value dedup) 📝 PLANNED 2026-05-29
+
+Snapshot decode is the whole cost (find is 0.6s after P1c). On Utawarerumono
+(IL2CPP) it ran ~11 min, pushed the game to 10.8 GB + the UI to 14.7 GB. Root
+causes: (1a) `snapshotBegin` decodes the *entire* snapshot into one
+`std::vector<nlohmann::json>` before streaming; (1b) the field schema
+(name/type/offset/from) is repeated **per instance** (174K× for a 69-field class).
+
+Two orthogonal fixes — **full design + Q&A in [docs/snapshot-streaming-dedup.md](snapshot-streaming-dedup.md)**:
+- [ ] **30a — schema/value dedup** (highest ROI): emit field schema **once per
+  class**, values per instance; UI `SnapshotFieldSchema` + `SnapshotInstanceValues`
+  replace the 12 M `SnapshotFieldEntry`. ~3–5× smaller **everywhere** (game tree,
+  wire, SQLite, UI, diff-load). Touches diff / FieldIndex / Pivot / SPC / export +
+  SQLite back-compat.
+- [ ] **30c — UI stream-to-disk**: write chunks to SQLite incrementally, don't
+  retain the full envelope; bounds UI peak.
+- [ ] **30b — game stream-decode**: decode-on-demand in `snapshotChunk`, free per
+  chunk; bounds game peak. Gated on the Mono per-chunk-attach freeze (ship
+  IL2CPP-first; session-held attach or per-chunk gc drain for Mono).
+
+Interim shipped (Phase 16.7): `instanceDecodeBudget` + ascending-population sort +
+lower default `instanceCap` keep the current build usable until Phase 30 lands.
+
+**Streaming bounds the transient peak; dedup shrinks the actual snapshot — both are
+needed, dedup first.**
+
+---
+
 ## Cross-PC Workflow
 
 每次切換 PC：
