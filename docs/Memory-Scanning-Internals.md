@@ -674,10 +674,17 @@ round-trip 無損（converter `WriteRawValue`，舊快照相容）。`SnapshotIn
 `ValueRaw`（0/1/true/常見值大量重複）。3 個熱格式化點改成單次解析。595 測試綠（+4）。
 → 移除數百萬 JsonDocument，UI 隨 budget 線性且輕量。
 
-**尚未做**：
-- **schema-retention dedup**（combined 的另一半，次要）：把 `SnapshotFieldEntry` 的
-  name/type/offset/from 6 個欄位改為共用 `SnapshotFieldSchema` ref（每欄位省 ~48B；
-  full capture 12M 欄位 ≈ ~576MB）。churn 高（改 Fields 存取或加 Sch ref delegation +
-  舊格式合成 schema），**僅在 value compaction 後高 budget 仍嫌重時才做**。先實測再決定。
+**30a-2 實測（Utawarerumono, build #dea4a15, instBudget=50000）**：UI 1 snap **2.9GB**、
+**2 snaps 2.08GB（比 1 snap 更低 — capture 後 Aggressive GC 回收暫態 buffer，穩態
+retained ≈ 1GB/snap）**。遊戲 peak 6.79GB（+0.6）。全程比較：uncapped 14.7GB →
++reduce-volume+dedup-wire 3.3GB → +value compaction **穩態 ~1GB/snap**。**3 份快照
+diff ≈ 3GB 可行**，解掉原本「snapshot 3 份吃不消」。
+
+**尚未做（評估後判定低 ROI，暫不做）**：
+- **schema-retention dedup**：把 name/type/offset/from 改共用 `SnapshotFieldSchema`
+  ref（~48B/欄位；full 12M 欄位 ≈ ~576MB ≈ full-snap 的 ~10%）。但此遊戲 full capture
+  （269K inst）即使做了仍 ~5GB/snap（值資料量本身），**budget 才是此遊戲的正確控制鈕**；
+  在常用的 50000 budget 下 UI 已輕量。故 churn 高、ROI 低 → 除非要常態抓 full capture
+  否則不值得。**Phase 30a 視為告一段落**（value compaction 為決定性勝著）。
 - **Mono emit dedup**（目前 Mono 仍送舊 inline 格式；UI re-expand 兩種都吃，故相容）。
 - **30b/30c streaming**（見 docs/snapshot-streaming-dedup.md）。
