@@ -532,6 +532,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// no reason to artificially under-cap.</summary>
     [ObservableProperty] private int _arrayCap    = 256;
 
+    /// <summary>Phase 30a — total decoded-instance budget across ALL classes
+    /// (0 = unlimited; server hard-cap 2,000,000). The dominant speed/memory
+    /// dial: decode time + memory scale with total decoded instances. The DLL
+    /// decodes low-population classes first, so when this budget truncates it
+    /// drops the high-population "noise" classes and keeps the low-population
+    /// game-state classes. Default 50000 (Utawarerumono live-smoke: ~65 s,
+    /// game +0.7 GB, UI ~3.3 GB). Raise toward a complete capture if you have
+    /// the RAM; lower for faster/leaner partial snapshots.</summary>
+    [ObservableProperty] private int _instanceDecodeBudget = 50000;
+
     /// <summary>When unchecked (default), the server skips
     /// mscorlib / System.* / Microsoft.* / netstandard / Mono.* /
     /// UnityEngine.* / Unity.* / Fungus assemblies on 全抓 mode.
@@ -922,6 +932,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
             int cap = InstanceCap > 0 ? InstanceCap : 512;
             int arr = ArrayCap    > 0 ? ArrayCap    : 256;
+            // 0 = unlimited (let the memory watchdog be the only backstop).
+            int instBudget = InstanceDecodeBudget >= 0 ? InstanceDecodeBudget : 50000;
 
             // Phase 29f (Layer B) — element inner-field capture opt-in.
             string[]? elemTargets = null;
@@ -938,6 +950,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 CaptureArrayElementFields ? ElementFieldCap : (int?)null,
                 elemTargets,
                 CaptureStaticFieldValues,
+                instBudget,
                 ct).ConfigureAwait(true);
 
             // The DLL echoes the EFFECTIVE capture state after its x86
