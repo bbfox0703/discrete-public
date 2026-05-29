@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 
 :: ============================================================
-:: build.cmd -- UnityCEDumper build wrapper
+:: build.cmd -- Discrete build wrapper
 ::
 :: Mirrors UE5CEDumper's build.cmd. Friendly argument parsing,
 :: routes to build.ps1 with the resolved flags. All output lands
@@ -65,7 +65,7 @@ goto :usage_error
 set "LOG=%~dp0build_log.txt"
 
 echo.
-echo  UnityCEDumper Build
+echo  Discrete Build
 echo  Mode: %MODE%  Target: %TARGET%  Backend: %BACKEND%  Clean: %CLEAN%
 echo  Log:  %LOG%
 

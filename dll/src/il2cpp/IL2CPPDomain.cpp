@@ -11,7 +11,7 @@
 
 #include <mutex>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -39,14 +39,14 @@ std::vector<AssemblyEntry> EnumerateAssemblies() {
     std::vector<AssemblyEntry> out;
     const auto& r = GetResolver();
     if (!r.resolved || r.domain_get_assemblies == nullptr || r.assembly_get_image == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::EnumerateAssemblies: resolver not ready");
         return out;
     }
 
     Il2CppDomain* domain = GetDomain();
     if (domain == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::EnumerateAssemblies: no domain");
         return out;
     }
@@ -54,7 +54,7 @@ std::vector<AssemblyEntry> EnumerateAssemblies() {
     std::lock_guard<std::mutex> lock(g_enumMutex);
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::EnumerateAssemblies: il2cpp_thread_attach failed");
         return out;
     }
@@ -62,7 +62,7 @@ std::vector<AssemblyEntry> EnumerateAssemblies() {
     std::size_t count = 0;
     const Il2CppAssembly** arr = SehGetAssemblies(r.domain_get_assemblies, domain, &count);
     if (arr == nullptr || count == 0) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::EnumerateAssemblies: domain_get_assemblies returned empty");
         return out;
     }
@@ -91,7 +91,7 @@ std::vector<AssemblyEntry> EnumerateAssemblies() {
     char line[128];
     ::_snprintf_s(line, sizeof(line), _TRUNCATE,
                   "IL2CPP::EnumerateAssemblies: %zu assemblies", out.size());
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryWalk, line);
     return out;
 }
 
@@ -104,4 +104,4 @@ const Il2CppImage* FindImageByName(const std::string& assemblyName) {
     return nullptr;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

@@ -1,4 +1,4 @@
-# UnityCEDumper — Status (指標檔 / pointer)
+# Discrete — Status (指標檔 / pointer)
 
 > 這個檔已**瘦身成指標檔**。正典進度帳與**集中待辦清單 (Open Backlog / TODO)**
 > 都在 [plan.md](plan.md);完整的舊 session hand-off 詳細紀錄在

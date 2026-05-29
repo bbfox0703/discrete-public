@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::BackendDetector {
+namespace Discrete::BackendDetector {
 
 namespace {
 
@@ -154,7 +154,7 @@ std::optional<std::uint32_t> ReadMetadataVersion(const std::wstring& dataDir) {
     std::memcpy(&magic,   head.data(),     4);
     std::memcpy(&version, head.data() + 4, 4);
     if (magic != 0xFAB11BAFu) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "global-metadata.dat magic mismatch (corrupt or encrypted)");
         return std::nullopt;
     }
@@ -213,9 +213,9 @@ DetectionResult Detect() {
                   "Detect: backend=%s unity=%s metadata=%s dataDir=%s",
                   BackendName(r.backend), uv.c_str(), mv.c_str(),
                   r.gameDataDir.empty() ? "<none>" : "<set>");
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryMetadata, line);
 
     return r;
 }
 
-}  // namespace UnityCEDumper::BackendDetector
+}  // namespace Discrete::BackendDetector

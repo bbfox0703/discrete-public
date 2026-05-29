@@ -21,7 +21,7 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -577,4 +577,4 @@ Il2CppClass* ResolveTypeInfoSlotClass(const LazyInitSlot& slot) {
     return reinterpret_cast<Il2CppClass*>(curVal);
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

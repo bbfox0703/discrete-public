@@ -16,9 +16,9 @@
 namespace {
 
 constexpr const char* BackendName() {
-#if defined(UNITYCEDUMPER_BACKEND_MONO)
+#if defined(DISCRETE_BACKEND_MONO)
     return "Mono";
-#elif defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+#elif defined(DISCRETE_BACKEND_IL2CPP)
     return "IL2CPP";
 #else
     return "Unknown";
@@ -44,13 +44,13 @@ void LogLoadedModules() {
     for (DWORD i = 0; i < count; ++i) {
         wchar_t name[MAX_PATH];
         if (::GetModuleBaseNameW(proc, mods[i], name, MAX_PATH) > 0) {
-            UnityCEDumper::Log::Write(L"init", "  module: " + Utf8FromWide(name));
+            Discrete::Log::Write(L"init", "  module: " + Utf8FromWide(name));
         }
     }
 }
 
 // Phase 12b: per-process named mutex used as a "first injection wins"
-// gate. Both UnityDumper-Mono.dll and UnityDumper-IL2CPP.dll, plus the
+// gate. Both Discrete-Mono.dll and Discrete-IL2CPP.dll, plus the
 // proxy DLLs, all run this same OnAttach. Without the gate, two
 // concurrently-loaded backend DLLs would each try to bind the named pipe
 // and the second would fail noisily; or worse, the second copy of the
@@ -62,7 +62,7 @@ HANDLE g_initMutex = nullptr;
 bool TryClaimSingleInit() noexcept {
     wchar_t name[64];
     ::_snwprintf_s(name, _countof(name), _TRUNCATE,
-                   L"Global\\UnityCEDumper-Init-PID-%lu",
+                   L"Global\\Discrete-Init-PID-%lu",
                    ::GetCurrentProcessId());
     g_initMutex = ::CreateMutexW(nullptr, /*bInitialOwner*/ TRUE, name);
     if (g_initMutex == nullptr) return false;
@@ -77,15 +77,15 @@ bool TryClaimSingleInit() noexcept {
 }
 
 void OnAttach(HMODULE self) {
-    UnityCEDumper::Log::Init();
+    Discrete::Log::Init();
 
     if (!TryClaimSingleInit()) {
         std::ostringstream os;
-        os << "UnityDumper DLL skipping init: another backend already "
+        os << "Discrete DLL skipping init: another backend already "
               "claimed PID " << ::GetCurrentProcessId()
-           << " (this build=" UNITYCEDUMPER_BUILD_BANNER
+           << " (this build=" DISCRETE_BUILD_BANNER
            << ", backend=" << BackendName() << ")";
-        UnityCEDumper::Log::Init(os.str());
+        Discrete::Log::Init(os.str());
         ::DisableThreadLibraryCalls(self);
         return;
     }
@@ -95,31 +95,31 @@ void OnAttach(HMODULE self) {
     // it. The same string is embedded into the PE's VERSIONINFO resource via
     // dll/src/shared/version.rc.in.
     std::ostringstream os;
-    os << "UnityDumper DLL attached "
-       << UNITYCEDUMPER_BUILD_BANNER
+    os << "Discrete DLL attached "
+       << DISCRETE_BUILD_BANNER
        << " backend=" << BackendName()
        << " pid=" << ::GetCurrentProcessId();
-    UnityCEDumper::Log::Init(os.str());
+    Discrete::Log::Init(os.str());
 
-    UnityCEDumper::Log::Write(L"init", "Loaded modules:");
+    Discrete::Log::Write(L"init", "Loaded modules:");
     LogLoadedModules();
 
     // Suppress DLL_THREAD_ATTACH/DETACH for performance.
     ::DisableThreadLibraryCalls(self);
 
     // Auto-bring up the pipe server. Doing real work in DllMain is risky, so
-    // UnityDumper_StartPipe just spawns a worker thread — the actual pipe
+    // Discrete_StartPipe just spawns a worker thread — the actual pipe
     // creation happens off DllMain.
-    if (UnityDumper_Init() == 0 && UnityDumper_StartPipe() == 0) {
-        UnityCEDumper::Log::Init("Pipe server thread started");
+    if (Discrete_Init() == 0 && Discrete_StartPipe() == 0) {
+        Discrete::Log::Init("Pipe server thread started");
     } else {
-        UnityCEDumper::Log::Init("Pipe server failed to start");
+        Discrete::Log::Init("Pipe server failed to start");
     }
 }
 
 void OnDetach() {
-    UnityCEDumper::Log::Init("UnityDumper DLL detaching");
-    UnityDumper_Shutdown();
+    Discrete::Log::Init("Discrete DLL detaching");
+    Discrete_Shutdown();
     if (g_initMutex != nullptr) {
         ::ReleaseMutex(g_initMutex);
         ::CloseHandle(g_initMutex);

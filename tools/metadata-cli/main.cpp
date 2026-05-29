@@ -36,7 +36,7 @@
 #include <string>
 #include <string_view>
 
-using UnityCEDumper::IL2CPP::Metadata::Parser;
+using Discrete::IL2CPP::Metadata::Parser;
 
 namespace {
 
@@ -390,7 +390,7 @@ int CmdType(const std::wstring& path, const std::string& ns, const std::string& 
 // but useful on its own for sanity-checking that a file looks like an
 // IL2CPP binary before launching the full pipeline.
 int CmdPeInfo(const std::wstring& path) {
-    using namespace UnityCEDumper::Phase_D::PE;
+    using namespace Discrete::Phase_D::PE;
 
     std::vector<std::uint8_t> bytes;
     std::string err;
@@ -477,7 +477,7 @@ int CmdPeInfo(const std::wstring& path) {
 // absolute VAs assuming load at the PE's preferred imageBase, so we
 // translate VA → RVA → file-offset via the PE section table.
 int CmdRegistration(const std::wstring& path) {
-    using namespace UnityCEDumper::Phase_D;
+    using namespace Discrete::Phase_D;
 
     std::vector<std::uint8_t> bytes;
     std::string err;
@@ -529,7 +529,7 @@ int CmdRegistration(const std::wstring& path) {
 // RVA + count + a sample of the first 3 method RVAs. Foundation for the
 // final cross-link to metadata MethodDefinitions (Phase D-5).
 int CmdCodeModules(const std::wstring& path) {
-    using namespace UnityCEDumper::Phase_D;
+    using namespace Discrete::Phase_D;
 
     std::vector<std::uint8_t> bytes;
     std::string err;
@@ -637,7 +637,7 @@ int CmdSymbols(int argc, char** argv) {
     }
 
     std::string err;
-    auto r = UnityCEDumper::Phase_D::Symbols::ResolveSymbols(metadataPath, gaPath, &err);
+    auto r = Discrete::Phase_D::Symbols::ResolveSymbols(metadataPath, gaPath, &err);
     if (!r) {
         std::fprintf(stderr, "metadata-cli: symbols pipeline failed: %s\n",
                      err.empty() ? "unknown error" : err.c_str());
@@ -648,7 +648,7 @@ int CmdSymbols(int argc, char** argv) {
     // + IDA emit absolute, .dd64 stays module-relative). Re-parse the PE
     // header — cheap, just reads the DOS/NT bytes again.
     std::vector<std::uint8_t> peBytes;
-    auto peImg = UnityCEDumper::Phase_D::PE::ParseFile(gaPath, &peBytes, &err);
+    auto peImg = Discrete::Phase_D::PE::ParseFile(gaPath, &peBytes, &err);
     if (!peImg) {
         std::fprintf(stderr, "metadata-cli: re-parse for imageBase failed: %s\n", err.c_str());
         return 1;
@@ -669,9 +669,9 @@ int CmdSymbols(int argc, char** argv) {
         return f.good();
     };
 
-    std::string dd64   = UnityCEDumper::Phase_D::Symbols::RenderDd64(*r, "GameAssembly.dll", imageBase);
-    std::string ghidra = UnityCEDumper::Phase_D::Symbols::RenderGhidra(*r, imageBase);
-    std::string ida    = UnityCEDumper::Phase_D::Symbols::RenderIda(*r, imageBase);
+    std::string dd64   = Discrete::Phase_D::Symbols::RenderDd64(*r, "GameAssembly.dll", imageBase);
+    std::string ghidra = Discrete::Phase_D::Symbols::RenderGhidra(*r, imageBase);
+    std::string ida    = Discrete::Phase_D::Symbols::RenderIda(*r, imageBase);
 
     bool ok = writeFile(".dd64", dd64)
            && writeFile(".ghidra.txt", ghidra)

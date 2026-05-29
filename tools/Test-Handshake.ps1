@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Inject UnityDumper DLL into a target Unity process and run a handshake / scan
+    Inject Discrete DLL into a target Unity process and run a handshake / scan
     smoke test through the named pipe.
 
 .DESCRIPTION
@@ -8,7 +8,7 @@
         1. Validate the PID exists (and the user passed -Backend or -Auto)
         2. Auto-detect backend from loaded modules if -Auto is set (default)
         3. Call .\tools\Inject-Dll.ps1 with the chosen backend
-        4. Connect to \\.\pipe\UnityDumpBfx
+        4. Connect to \\.\pipe\DiscreteBfx
         5. Send: ping, handshake, scan
         6. Pretty-print each response
 
@@ -87,7 +87,7 @@ if ($Backend -eq 'Auto') {
 # --- Inject ------------------------------------------------------------------
 if (-not $SkipInject) {
     Write-Host ''
-    Write-Host "==[ Injecting UnityDumper-$Backend.dll into PID $ProcessId ]==" -ForegroundColor Green
+    Write-Host "==[ Injecting Discrete-$Backend.dll into PID $ProcessId ]==" -ForegroundColor Green
     & $injectScript -Target $ProcessId -Backend $Backend
     # Don't trust $LASTEXITCODE: it tracks native EXE exit codes, not .ps1
     # return values, so it can be stale from a previous command. The pipe
@@ -99,11 +99,11 @@ if (-not $SkipInject) {
 # --- Connect pipe ------------------------------------------------------------
 Write-Host ''
 Write-Host '==[ Pipe handshake ]==' -ForegroundColor Green
-$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'UnityDumpBfx', 'InOut')
+$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'DiscreteBfx', 'InOut')
 try {
     $client.Connect($PipeTimeoutMs)
 } catch {
-    throw "Pipe connect timed out after $PipeTimeoutMs ms. Is the DLL loaded? Check %LOCALAPPDATA%\Discrete_UEDumper\Logs\$ProcessId\init\current.log"
+    throw "Pipe connect timed out after $PipeTimeoutMs ms. Is the DLL loaded? Check %LOCALAPPDATA%\Discrete_Dumper\Logs\$ProcessId\init\current.log"
 }
 
 $writer = New-Object System.IO.StreamWriter($client)

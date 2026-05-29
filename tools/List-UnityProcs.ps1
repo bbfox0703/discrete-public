@@ -9,7 +9,7 @@
 
     The Arch column distinguishes 32-bit (x86, WOW64) from 64-bit (x64)
     targets — Test-Handshake.ps1 / Inject-Dll.ps1 auto-route 32-bit
-    targets through dist\x86\inject-x86.exe + dist\x86\UnityDumper-Mono.dll
+    targets through dist\x86\inject-x86.exe + dist\x86\Discrete-Mono.dll
     (Phase 12d-5), but you should still notice the column so you know
     which DLL is going to load.
 

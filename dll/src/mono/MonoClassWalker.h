@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 struct ClassEntry {
     std::string ns;     // namespace ("" for global)
@@ -128,4 +128,4 @@ struct LiteralFieldEntry {
 // unavailable, the class is null, or `mono_field_get_data` is unbound.
 std::vector<LiteralFieldEntry> EnumerateLiteralFields(MonoClass* klass);
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

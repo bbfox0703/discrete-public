@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(UnityCEDumper
+project(Discrete
     VERSION 0.1.0
     DESCRIPTION "Unity Engine Dumper (Mono + IL2CPP) for Cheat Engine"
     # Phase 28b-v2 needs C alongside CXX — Zydis is pure C. MinHook also C
@@ -23,15 +23,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # pointer width when struct layouts shift (Mono MonoObject prefix is
 # 0x10 on x64 but 0x08 on x86, for example).
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set(UNITYCEDUMPER_ARCH "x64")
-    add_compile_definitions(UNITYCEDUMPER_ARCH_X64=1)
+    set(DISCRETE_ARCH "x64")
+    add_compile_definitions(DISCRETE_ARCH_X64=1)
     message(STATUS "Architecture: x64 (pointer size 8)")
 elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
-    set(UNITYCEDUMPER_ARCH "x86")
-    add_compile_definitions(UNITYCEDUMPER_ARCH_X86=1)
+    set(DISCRETE_ARCH "x86")
+    add_compile_definitions(DISCRETE_ARCH_X86=1)
     message(STATUS "Architecture: x86 (pointer size 4)")
 else()
-    message(FATAL_ERROR "UnityCEDumper requires a 32-bit or 64-bit Windows toolchain.")
+    message(FATAL_ERROR "Discrete requires a 32-bit or 64-bit Windows toolchain.")
 endif()
 
 if(MSVC)
@@ -65,7 +65,7 @@ set_property(CACHE BACKEND PROPERTY STRINGS Mono IL2CPP Both)
 
 # Read build number
 file(STRINGS "${CMAKE_SOURCE_DIR}/build_number.txt" BUILD_NUMBER LIMIT_COUNT 1)
-add_compile_definitions(UNITYCEDUMPER_BUILD_NUMBER=${BUILD_NUMBER})
+add_compile_definitions(DISCRETE_BUILD_NUMBER=${BUILD_NUMBER})
 
 # ---------------------------------------------------------------------------
 # Version metadata — populates BuildInfo.h + every PE's VERSIONINFO resource.
@@ -153,6 +153,6 @@ endif()
 # Auto-included in the x86 build so users always have it alongside the
 # x86 backend DLL + proxies. Silently skipped under x64 (the in-process
 # .NET injector handles x64 targets directly).
-if(UNITYCEDUMPER_ARCH STREQUAL "x86")
+if(DISCRETE_ARCH STREQUAL "x86")
     add_subdirectory(tools/inject-x86)
 endif()

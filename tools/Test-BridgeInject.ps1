@@ -269,7 +269,7 @@ local files = { 'unity_dump.lua','unity_dissect.lua','unity_symbols.lua',
                 'unity_addrfind.lua','unity_invoke.lua','unity_scene.lua' }
 for _, n in ipairs(files) do loadEmbedded(n)() end
 local U = require('utils')
-local ok, build = pcall(function() return U.callDLL('UnityDumper_GetBuildNumber','uint32') end)
+local ok, build = pcall(function() return U.callDLL('Discrete_GetBuildNumber','uint32') end)
 if ok then print(string.format('[Discrete] Load Discrete Bridge: ready — DLL build %d', build)) end
 _G.discrete_bridgeLoaded = true
 

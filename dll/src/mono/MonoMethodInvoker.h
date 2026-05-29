@@ -8,7 +8,7 @@
 //
 // CallArg / CallReturn / CallMethodResult are intentionally namespace-local
 // (Mono::) duplicates of the IL2CPP::* types — both backends compile into
-// separate DLLs (UnityDumper-Mono.dll vs UnityDumper-IL2CPP.dll), so sharing
+// separate DLLs (Discrete-Mono.dll vs Discrete-IL2CPP.dll), so sharing
 // a single namespace would force one to depend on the other. The wire
 // shapes ExportAPI.cpp emits on each side are byte-identical.
 #pragma once
@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 enum class CallArgKind {
     Null,
@@ -87,4 +87,4 @@ CallMethodResult CallMethod(MonoClass* klass,
                             std::uintptr_t instance,
                             const std::vector<CallArg>& args);
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

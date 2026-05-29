@@ -7,7 +7,7 @@
 #include <optional>
 #include <string>
 
-namespace UnityCEDumper::BackendDetector {
+namespace Discrete::BackendDetector {
 
 enum class Backend : int {
     Unknown = 0,
@@ -29,4 +29,4 @@ DetectionResult Detect();
 
 const char* BackendName(Backend b) noexcept;
 
-}  // namespace UnityCEDumper::BackendDetector
+}  // namespace Discrete::BackendDetector

@@ -2,7 +2,7 @@
 
 #include "ValueScanSession.h"
 
-namespace UnityCEDumper::ValueScan {
+namespace Discrete::ValueScan {
 
 SessionManager& SessionManager::Instance() {
     // Heap-allocated, intentionally leaked singleton. The DLL holds up to
@@ -70,4 +70,4 @@ SessionManager::Stats SessionManager::GetStats() {
     return s;
 }
 
-}  // namespace UnityCEDumper::ValueScan
+}  // namespace Discrete::ValueScan

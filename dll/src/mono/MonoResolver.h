@@ -6,7 +6,7 @@
 
 #include <string>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 // Standard glib-style iterator callback used by Mono's *_foreach exports.
 using GFunc = void (*)(void* item, void* user_data);
@@ -207,4 +207,4 @@ const Resolver& GetResolver();
 // listed above are mandatory for assembly enumeration.
 bool IsResolved();
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

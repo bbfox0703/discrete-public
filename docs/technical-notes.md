@@ -13,8 +13,8 @@
 auto-increments on every `build.ps1` invocation. The number flows
 into:
 
-- `BuildInfo.h` (DLL) — `UNITYCEDUMPER_BUILD_NUMBER` macro,
-  exposed via `UnityDumper_GetBuildNumber()`.
+- `BuildInfo.h` (DLL) — `DISCRETE_BUILD_NUMBER` macro,
+  exposed via `Discrete_GetBuildNumber()`.
 - `VersionInfo.cs` (UI) — `BuildNumber` property, surfaced on the
   Connection bar / Handshake panel.
 - DLL `version.rc` Win32 file properties — visible in the file's
@@ -110,7 +110,7 @@ shows the multi-grid case (3 grids in one window).
 
 ## Logger channels
 
-DLL writes to `%LOCALAPPDATA%\Discrete_UEDumper\Logs\<host-pid>\<channel>\`
+DLL writes to `%LOCALAPPDATA%\Discrete_Dumper\Logs\<host-pid>\<channel>\`
 across five channels:
 
 | Channel | Used by | Volume (typical) |

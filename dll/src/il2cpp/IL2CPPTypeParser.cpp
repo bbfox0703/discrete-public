@@ -6,7 +6,7 @@
 
 #include <windows.h>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -33,4 +33,4 @@ std::string TypeName(const Il2CppType* type) {
     return out;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

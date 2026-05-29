@@ -37,7 +37,7 @@
 
 #include <cstddef>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 /// Returns the byte offset of `static_fields` within `Il2CppClass`.
 /// Returns 0 when discovery fails (resolver unbound, no class with
@@ -47,4 +47,4 @@ namespace UnityCEDumper::IL2CPP {
 /// fall back to the v1 advisory banner.
 std::size_t GetStaticFieldsOffsetInClass();
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

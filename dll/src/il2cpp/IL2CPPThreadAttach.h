@@ -13,12 +13,12 @@
 #include "IL2CPPTypes.h"
 #include "../shared/MainThreadDispatcher.h"
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 class ThreadAttachGuard {
 public:
     explicit ThreadAttachGuard(Il2CppDomain* domain) {
-        if (UnityCEDumper::MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()) {
+        if (Discrete::MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()) {
             mainThreadSkip_ = true;
             return;
         }
@@ -67,4 +67,4 @@ private:
     inline static thread_local int s_attach_depth = 0;
 };
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

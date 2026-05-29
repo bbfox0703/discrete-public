@@ -1,5 +1,5 @@
 // IProxyInstaller.cs — Phase 12c. UI-side service that copies the
-// version.dll / winmm.dll proxy + both UnityDumper-{Backend}.dll files
+// version.dll / winmm.dll proxy + both Discrete-{Backend}.dll files
 // next to the game .exe, so the next game launch auto-loads our pipe
 // server with no runtime injection needed.
 //
@@ -99,7 +99,7 @@ public interface IProxyInstaller
     Task<ProxyInstallStatus> DetectAsync(string gameExePath, CancellationToken ct = default);
 
     /// <summary>
-    /// Copy the chosen proxy DLL + both UnityDumper-{Backend}.dll files
+    /// Copy the chosen proxy DLL + both Discrete-{Backend}.dll files
     /// next to the game .exe. Removes the other proxy variant if present
     /// (mutex install). Source files come from the
     /// <c>dist/</c>-equivalent directory next to the running

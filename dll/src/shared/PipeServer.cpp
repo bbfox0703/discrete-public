@@ -16,7 +16,7 @@
 
 using nlohmann::json;
 
-namespace UnityCEDumper::PipeServer {
+namespace Discrete::PipeServer {
 
 namespace {
 
@@ -342,4 +342,4 @@ bool IsRunning() noexcept {
     return g_running.load();
 }
 
-}  // namespace UnityCEDumper::PipeServer
+}  // namespace Discrete::PipeServer

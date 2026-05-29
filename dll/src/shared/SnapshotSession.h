@@ -35,7 +35,7 @@
 #include <utility>
 #include <vector>
 
-namespace UnityCEDumper::Snapshot {
+namespace Discrete::Snapshot {
 
 // One class's contribution to a snapshot plan. The instance address list
 // is pre-populated at Begin time by the wide heap walk so chunk emit
@@ -219,4 +219,4 @@ std::string ComputeGameBuildId(const wchar_t* moduleName);
 // once per Begin. Format "YYYY-MM-DDTHH:MM:SSZ".
 std::string CapturedAtUtcNow();
 
-}  // namespace UnityCEDumper::Snapshot
+}  // namespace Discrete::Snapshot

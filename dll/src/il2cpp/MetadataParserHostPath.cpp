@@ -12,7 +12,7 @@
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 
-namespace UnityCEDumper::IL2CPP::Metadata {
+namespace Discrete::IL2CPP::Metadata {
 
 namespace {
 
@@ -36,11 +36,11 @@ const Parser& Parser::Get() {
 void Parser::Load() {
     std::wstring path = MetadataPathForCurrentProcess();
     if (path.empty()) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: no game data dir resolved");
         return;
     }
     (void)LoadFromPath(path);
 }
 
-}  // namespace UnityCEDumper::IL2CPP::Metadata
+}  // namespace Discrete::IL2CPP::Metadata

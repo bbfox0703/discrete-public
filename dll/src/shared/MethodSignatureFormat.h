@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Shared {
+namespace Discrete::Shared {
 
 // Human-friendly suffix piece for a single managed type. C# keyword for the
 // well-known primitives; otherwise the last segment after '.' or '/' with
@@ -93,4 +93,4 @@ inline std::string MakeSignatureString(const std::vector<std::string>& paramType
     return out;
 }
 
-}  // namespace UnityCEDumper::Shared
+}  // namespace Discrete::Shared

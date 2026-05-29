@@ -53,7 +53,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct LazyInitSlot {
     /// Absolute VA of the `.data` / `.bss` slot the lea instruction pointed to.
@@ -148,4 +148,4 @@ const std::vector<LazyInitSlot>& EnumerateLazyInitSlots();
 /// differ on whether `tokenIndex` needs `-1`).
 Il2CppClass* ResolveTypeInfoSlotClass(const LazyInitSlot& slot);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

@@ -33,7 +33,7 @@
 #include <cstdio>
 #include <string>
 
-namespace UnityCEDumper::Mono::MainThreadHook {
+namespace Discrete::Mono::MainThreadHook {
 
 namespace {
 
@@ -41,7 +41,7 @@ template <typename... Args>
 void LogF(const char* fmt, Args... args) {
     char buf[512];
     std::snprintf(buf, sizeof(buf), fmt, args...);
-    UnityCEDumper::Log::Write(UnityCEDumper::MagicStrings::LogCategoryInit, buf);
+    Discrete::Log::Write(Discrete::MagicStrings::LogCategoryInit, buf);
 }
 
 std::atomic<bool>  g_installed{false};
@@ -60,22 +60,22 @@ std::atomic<bool>  g_minhook_initialized{false};
 // WINAPI keyword on the hook function below so it stays cdecl across
 // both bitnesses. (Verified live 2026-05-20: LEAVES / Unity 5.4 x86
 // crashed after exactly one hook fire under the stdcall variant.)
-using fn_runtime_invoke_t = UnityCEDumper::Mono::MonoObject* (*)(
-    UnityCEDumper::Mono::MonoMethod*,
+using fn_runtime_invoke_t = Discrete::Mono::MonoObject* (*)(
+    Discrete::Mono::MonoMethod*,
     void*,
     void**,
-    UnityCEDumper::Mono::MonoObject**);
+    Discrete::Mono::MonoObject**);
 fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
 
 // Our detour. C-style function (no captures) so MinHook can route control
 // flow into it via a near-jump. NO `WINAPI` — see comment above.
-UnityCEDumper::Mono::MonoObject* HookedRuntimeInvoke(
-    UnityCEDumper::Mono::MonoMethod* method,
+Discrete::Mono::MonoObject* HookedRuntimeInvoke(
+    Discrete::Mono::MonoMethod* method,
     void* obj,
     void** params,
-    UnityCEDumper::Mono::MonoObject** exc)
+    Discrete::Mono::MonoObject** exc)
 {
-    using namespace UnityCEDumper::MainThreadDispatcher;
+    using namespace Discrete::MainThreadDispatcher;
     // Cheap thread-id check first — main thread id is a fixed std::atomic<uint32_t>.
     const DWORD tid = ::GetCurrentThreadId();
     if (tid == GetMainThreadId()) {
@@ -99,13 +99,13 @@ bool Install() {
         return true;  // already installed
     }
 
-    if (!UnityCEDumper::MainThreadDispatcher::IsInitialized()) {
+    if (!Discrete::MainThreadDispatcher::IsInitialized()) {
         LogF("[MonoMainThreadHook] Install: MainThreadDispatcher not initialized");
         g_installed.store(false);
         return false;
     }
 
-    const auto& resolver = UnityCEDumper::Mono::GetResolver();
+    const auto& resolver = Discrete::Mono::GetResolver();
     if (resolver.runtime_invoke == nullptr) {
         LogF("[MonoMainThreadHook] Install: mono_runtime_invoke not bound");
         g_installed.store(false);
@@ -147,13 +147,13 @@ bool Install() {
         return false;
     }
     LogF("[MonoMainThreadHook] Install: hook armed on mono_runtime_invoke @ %p (main_tid=%lu)",
-         target, UnityCEDumper::MainThreadDispatcher::GetMainThreadId());
+         target, Discrete::MainThreadDispatcher::GetMainThreadId());
     return true;
 }
 
 void Uninstall() {
     if (!g_installed.load()) return;
-    const auto& resolver = UnityCEDumper::Mono::GetResolver();
+    const auto& resolver = Discrete::Mono::GetResolver();
     if (resolver.runtime_invoke != nullptr) {
         void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
         ::MH_DisableHook(target);
@@ -168,4 +168,4 @@ bool IsInstalled() {
     return g_installed.load();
 }
 
-}  // namespace UnityCEDumper::Mono::MainThreadHook
+}  // namespace Discrete::Mono::MainThreadHook

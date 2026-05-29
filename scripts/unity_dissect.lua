@@ -21,7 +21,7 @@
 -- sequences beyond \" / \\). Good enough for the DLL's output; not a
 -- general-purpose JSON library.
 
-local TAG = "[UnityCEDumper.dissect]"
+local TAG = "[Discrete.dissect]"
 local function log(fmt, ...) print(string.format(TAG .. " " .. fmt, ...)) end
 local function err(fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
 
@@ -107,7 +107,7 @@ end
 
 -- ---------- Pipe RPC --------------------------------------------------
 
-local PIPE = [[\\.\pipe\UnityDumpBfx]]
+local PIPE = [[\\.\pipe\DiscreteBfx]]
 local nextId = 0
 
 local function rpc(cmd, args)

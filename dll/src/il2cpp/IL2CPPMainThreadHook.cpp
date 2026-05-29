@@ -19,7 +19,7 @@
 #include <cstdio>
 #include <string>
 
-namespace UnityCEDumper::IL2CPP::MainThreadHook {
+namespace Discrete::IL2CPP::MainThreadHook {
 
 namespace {
 
@@ -27,7 +27,7 @@ template <typename... Args>
 void LogF(const char* fmt, Args... args) {
     char buf[512];
     std::snprintf(buf, sizeof(buf), fmt, args...);
-    UnityCEDumper::Log::Write(UnityCEDumper::MagicStrings::LogCategoryInit, buf);
+    Discrete::Log::Write(Discrete::MagicStrings::LogCategoryInit, buf);
 }
 
 std::atomic<bool> g_installed{false};
@@ -39,20 +39,20 @@ std::atomic<bool> g_minhook_initialized{false};
 // keep the symmetry with MonoMainThreadHook so a future 32-bit revival
 // (or any niche x86 IL2CPP target that appears) doesn't trip the same
 // stack double-pop trap. See MonoMainThreadHook.cpp for the forensic.
-using fn_runtime_invoke_t = UnityCEDumper::IL2CPP::Il2CppObject* (*)(
-    const UnityCEDumper::IL2CPP::MethodInfo*,
+using fn_runtime_invoke_t = Discrete::IL2CPP::Il2CppObject* (*)(
+    const Discrete::IL2CPP::MethodInfo*,
     void*,
     void**,
-    UnityCEDumper::IL2CPP::Il2CppException**);
+    Discrete::IL2CPP::Il2CppException**);
 fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
 
-UnityCEDumper::IL2CPP::Il2CppObject* HookedRuntimeInvoke(
-    const UnityCEDumper::IL2CPP::MethodInfo* method,
+Discrete::IL2CPP::Il2CppObject* HookedRuntimeInvoke(
+    const Discrete::IL2CPP::MethodInfo* method,
     void* obj,
     void** params,
-    UnityCEDumper::IL2CPP::Il2CppException** exc)
+    Discrete::IL2CPP::Il2CppException** exc)
 {
-    using namespace UnityCEDumper::MainThreadDispatcher;
+    using namespace Discrete::MainThreadDispatcher;
     const DWORD tid = ::GetCurrentThreadId();
     if (tid == GetMainThreadId()) {
         NotifyMainThreadTick();
@@ -72,13 +72,13 @@ bool Install() {
         return true;
     }
 
-    if (!UnityCEDumper::MainThreadDispatcher::IsInitialized()) {
+    if (!Discrete::MainThreadDispatcher::IsInitialized()) {
         LogF("[IL2CPPMainThreadHook] Install: MainThreadDispatcher not initialized");
         g_installed.store(false);
         return false;
     }
 
-    const auto& resolver = UnityCEDumper::IL2CPP::GetResolver();
+    const auto& resolver = Discrete::IL2CPP::GetResolver();
     if (resolver.runtime_invoke == nullptr) {
         LogF("[IL2CPPMainThreadHook] Install: il2cpp_runtime_invoke not bound");
         g_installed.store(false);
@@ -118,13 +118,13 @@ bool Install() {
         return false;
     }
     LogF("[IL2CPPMainThreadHook] Install: hook armed on il2cpp_runtime_invoke @ %p (main_tid=%lu)",
-         target, UnityCEDumper::MainThreadDispatcher::GetMainThreadId());
+         target, Discrete::MainThreadDispatcher::GetMainThreadId());
     return true;
 }
 
 void Uninstall() {
     if (!g_installed.load()) return;
-    const auto& resolver = UnityCEDumper::IL2CPP::GetResolver();
+    const auto& resolver = Discrete::IL2CPP::GetResolver();
     if (resolver.runtime_invoke != nullptr) {
         void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
         ::MH_DisableHook(target);
@@ -139,4 +139,4 @@ bool IsInstalled() {
     return g_installed.load();
 }
 
-}  // namespace UnityCEDumper::IL2CPP::MainThreadHook
+}  // namespace Discrete::IL2CPP::MainThreadHook

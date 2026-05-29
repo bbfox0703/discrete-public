@@ -10,7 +10,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace UnityCEDumper::Memory {
+namespace Discrete::Memory {
 
 // Test whether [addr, addr+size) is fully readable (committed + non-PAGE_NOACCESS).
 bool IsReadable(const void* addr, std::size_t size) noexcept;
@@ -249,4 +249,4 @@ std::vector<const void*> ScanForPointer(std::uintptr_t target,
                                         std::uintptr_t excludeHigh = 0,
                                         bool           skipMapped  = false);
 
-}  // namespace UnityCEDumper::Memory
+}  // namespace Discrete::Memory

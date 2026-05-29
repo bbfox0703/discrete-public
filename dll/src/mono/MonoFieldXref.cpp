@@ -31,7 +31,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -400,4 +400,4 @@ FindFieldRefsResult FindFieldReferences(MonoImage*         image,
     return result;
 }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

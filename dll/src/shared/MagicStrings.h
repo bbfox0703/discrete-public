@@ -3,17 +3,17 @@
 // Keep every magic string here so the DLL and UI stay in sync (mirror in C# UI/Constants.cs).
 #pragma once
 
-namespace UnityCEDumper::MagicStrings {
+namespace Discrete::MagicStrings {
 
 // IPC ----------------------------------------------------------------------
-inline constexpr const wchar_t* PipeName = L"\\\\.\\pipe\\UnityDumpBfx";
+inline constexpr const wchar_t* PipeName = L"\\\\.\\pipe\\DiscreteBfx";
 
 // Logging ------------------------------------------------------------------
 inline constexpr const wchar_t* LogRootEnvVar = L"LOCALAPPDATA";
-// Renamed 2026-05-20: %LOCALAPPDATA%\UnityCEDumper\Logs\ → %LOCALAPPDATA%\Discrete_UEDumper\Logs\
-// to match the repo name (`discrete`) instead of the original working-title
-// `UnityCEDumper`. Mirror const in `ui/UnityDumpUI.Core/Constants.cs`.
-inline constexpr const wchar_t* LogRootSubpath = L"Discrete_UEDumper\\Logs";
+// Log root: %LOCALAPPDATA%\Discrete_Dumper\Logs\ — matches the repo name
+// (`discrete`); the original working-title was `UnityCEDumper`. Mirror const
+// in `ui/UnityDumpUI.Core/Constants.cs`.
+inline constexpr const wchar_t* LogRootSubpath = L"Discrete_Dumper\\Logs";
 
 // DLL log categories (one subfolder each, per Architecture.md)
 inline constexpr const wchar_t* LogCategoryInit     = L"init";
@@ -383,4 +383,4 @@ inline constexpr const char* CmdSnapshotBegin         = "snapshotBegin";
 inline constexpr const char* CmdSnapshotChunk         = "snapshotChunk";
 inline constexpr const char* CmdSnapshotEnd           = "snapshotEnd";
 
-}  // namespace UnityCEDumper::MagicStrings
+}  // namespace Discrete::MagicStrings

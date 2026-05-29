@@ -280,7 +280,7 @@ Three responsibilities layered on one tab:
    Cross-session diff auto-applies Statics-only mode with a
    blue banner; cross-build adds a yellow warning.
 3. **Persistence** (Phase 29c): per-game SQLite under
-   `%LOCALAPPDATA%\Discrete_UEDumper\snapshots\` (overridable in
+   `%LOCALAPPDATA%\Discrete_Dumper\snapshots\` (overridable in
    Settings). Filename `{exe_basename}_{build_id[0:8]}.db`. 💾 Save
    button per envelope; 🗑 Delete-from-DB removes both memory + disk.
    Auto-eviction after Diff drops every persisted envelope NOT
@@ -387,7 +387,7 @@ instance across all VMs.
 ### `FileLogger`
 
 Mirrors the DLL's per-PID rotated log layout, but for the UI:
-`%LOCALAPPDATA%\Discrete_UEDumper\Logs\<UI-pid>\view\`. Channels: `view`
+`%LOCALAPPDATA%\Discrete_Dumper\Logs\<UI-pid>\view\`. Channels: `view`
 (VM-side events). The DLL writes to `init` / `scan` / `metadata` /
 `pipe` / `walk` from inside the host process.
 

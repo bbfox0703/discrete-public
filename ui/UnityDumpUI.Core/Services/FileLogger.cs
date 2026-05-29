@@ -2,7 +2,7 @@
 //
 // Three categories per Architecture.md ("init" / "pipe" / "view") + 5-file
 // rotation. Logs land under
-// %LOCALAPPDATA%\Discrete_UEDumper\Logs\ui\<category>\current.log.
+// %LOCALAPPDATA%\Discrete_Dumper\Logs\ui\<category>\current.log.
 //
 // Rotation policy (2026-05-20):
 //   * UI side rotates on EVERY UI startup — `current.log` → `current.1.log`
@@ -126,7 +126,7 @@ public sealed class FileLogger : IDisposable
     private static string DefaultRoot()
     {
         string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        // Match the DLL: %LOCALAPPDATA%\Discrete_UEDumper\Logs\ui (Logs/<pid>/<cat> for the DLL,
+        // Match the DLL: %LOCALAPPDATA%\Discrete_Dumper\Logs\ui (Logs/<pid>/<cat> for the DLL,
         // Logs/ui/<cat> for the UI — disjoint trees by design).
         return Path.Combine(local, Constants.LogRootSubpath, "ui");
     }
@@ -135,7 +135,7 @@ public sealed class FileLogger : IDisposable
     /// Keep only the most-recent <paramref name="keepRecent"/> DLL-side
     /// per-PID log directories (by last-write time); delete the older ones.
     /// Each game injection (Pick &amp; inject or proxy auto-load) creates a new
-    /// PID folder under <c>%LOCALAPPDATA%\Discrete_UEDumper\Logs\&lt;pid&gt;\</c>;
+    /// PID folder under <c>%LOCALAPPDATA%\Discrete_Dumper\Logs\&lt;pid&gt;\</c>;
     /// without cleanup these accumulate to hundreds of dead folders. Run on UI
     /// startup.
     ///

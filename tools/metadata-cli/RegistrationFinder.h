@@ -39,7 +39,7 @@
 #include <optional>
 #include <string>
 
-namespace UnityCEDumper::Phase_D::Registration {
+namespace Discrete::Phase_D::Registration {
 
 struct Found {
     std::uint64_t   regRva           = 0;   // RVA of Il2CppMetadataRegistration in the PE
@@ -63,4 +63,4 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
                                   const PE::Image&     img,
                                   std::string*         errOut = nullptr);
 
-}  // namespace UnityCEDumper::Phase_D::Registration
+}  // namespace Discrete::Phase_D::Registration

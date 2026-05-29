@@ -25,12 +25,12 @@
 --   -- inputQuery if no memory view is open) and runs lookupAddress.
 --   bindAddrLookupHotkey({ VK_CONTROL, VK_F2 })
 --
--- The script speaks the same `\\.\pipe\UnityDumpBfx` protocol as
+-- The script speaks the same `\\.\pipe\DiscreteBfx` protocol as
 -- `unity_dissect.lua` and `unity_symbols.lua`. JSON parser + RPC
 -- helper are duplicated here (tiny, response-shape-specific) so this
 -- file stays drop-in standalone — no extra `require` needed.
 
-local TAG = "[UnityCEDumper.addrfind]"
+local TAG = "[Discrete.addrfind]"
 local function log (fmt, ...) print(string.format(TAG .. " "       .. fmt, ...)) end
 local function warn(fmt, ...) print(string.format(TAG .. " WARN "  .. fmt, ...)) end
 local function err (fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
@@ -108,7 +108,7 @@ end
 -- ---------- Pipe RPC ----------------------------------------------------
 -- Same retry loop + main-thread yield pattern as unity_dissect.lua.
 
-local PIPE   = [[\\.\pipe\UnityDumpBfx]]
+local PIPE   = [[\\.\pipe\DiscreteBfx]]
 local nextId = 0
 
 local function rpc(cmd, args)

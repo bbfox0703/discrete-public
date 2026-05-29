@@ -8,7 +8,7 @@ public class SmokeTests
     [Fact]
     public void Constants_PipeNameMatchesDllMagicString()
     {
-        Assert.Equal("UnityDumpBfx", Constants.PipeName);
+        Assert.Equal("DiscreteBfx", Constants.PipeName);
     }
 
     [Fact]
@@ -21,11 +21,11 @@ public class SmokeTests
     }
 
     [Fact]
-    public void Constants_LogRootSubpathPointsToDiscreteUEDumper()
+    public void Constants_LogRootSubpathPointsToDiscreteDumper()
     {
-        // Renamed 2026-05-20 from UnityCEDumper to Discrete_UEDumper to
-        // match the repo name. The C++ DLL mirror const is in
-        // MagicStrings.h and both sides must agree on the path.
-        Assert.Equal(@"Discrete_UEDumper\Logs", Constants.LogRootSubpath);
+        // Log root is %LOCALAPPDATA%\Discrete_Dumper\Logs — matches the repo
+        // name (`discrete`). The C++ DLL mirror const is in MagicStrings.h
+        // and both sides must agree on the path.
+        Assert.Equal(@"Discrete_Dumper\Logs", Constants.LogRootSubpath);
     }
 }

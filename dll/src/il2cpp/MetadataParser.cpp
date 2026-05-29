@@ -22,7 +22,7 @@
 #include <cstring>
 #include <mutex>
 
-namespace UnityCEDumper::IL2CPP::Metadata {
+namespace Discrete::IL2CPP::Metadata {
 
 namespace {
 
@@ -64,12 +64,12 @@ bool ReadEntireFile(const std::wstring& path, std::vector<std::uint8_t>& out) {
 
 bool Parser::LoadFromPath(const std::wstring& path) {
     if (path.empty()) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: empty path");
         return false;
     }
     if (!ReadEntireFile(path, data_)) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: failed to read global-metadata.dat");
         data_.clear();
         return false;
@@ -103,7 +103,7 @@ bool Parser::LoadFromPath(const std::wstring& path) {
         stringLiteralSize_, stringLiteralDataSize_, stringSize_,
         typeDefinitionsSize_, fieldsSize_, fieldDefaultsSize_,
         tablesLoaded_ ? "yes" : "no");
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryMetadata, line);
     return true;
 }
 
@@ -249,7 +249,7 @@ bool Parser::LoadTables() {
         // LoadHeader for the prefix strings; here we pull the table
         // sections we need for segment 2 plus compute IndexSizes.
         if (data_.size() < sizeof(HeaderV38)) {
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+            Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
                 "MetadataParser: file too small for v38+ section header");
             return false;
         }
@@ -303,14 +303,14 @@ bool Parser::LoadTables() {
             static_cast<unsigned long long>(h.parameters.count == 0 ? 0
                 : h.parameters.size / h.parameters.count),
             h.typeDefinitions.count, h.genericContainers.count, h.parameters.count);
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, ix);
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata, ix);
     } else {
         // v24-v37 share the flat HeaderV29 prefix for the tables we care
         // about (verified empirically against SaGa F1R / SaGa F2R / FFVI PR /
         // Farthest Frontier / Emberward, plus upstream's `[Version(Max=35)]`
         // attribute on every flat-header field).
         if (data_.size() < sizeof(HeaderV29)) {
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+            Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
                 "MetadataParser: file too small for flat header");
             return false;
         }
@@ -346,7 +346,7 @@ bool Parser::LoadTables() {
         !inBounds(fieldDefaultDataOffset_, fieldDefaultDataSize_) ||
         !inBounds(methodsOffset_,          methodsSize_)          ||
         !inBounds(parametersOffset_,       parametersSize_)) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: tables out of bounds");
         return false;
     }
@@ -420,7 +420,7 @@ void Parser::DetectV24Variant() {
     char line[200];
     ::_snprintf_s(line, sizeof(line), _TRUNCATE,
         "MetadataParser: DetectV24Variant — picked %s", picked);
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryMetadata, line);
 }
 
 std::string Parser::v24SubVersionLabel() const {
@@ -444,13 +444,13 @@ bool Parser::ValidateTypeTable() {
     // but token reads 0 and every subsequent row's namespace string
     // points into mid-word offsets in the string heap.
     if (TypeDefinitionCount() == 0) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: ValidateTypeTable — table is empty, nothing to validate");
         return false;
     }
     auto first = GetTypeDefinition(0);
     if (!first) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: ValidateTypeTable — could not read TypeDef[0]");
         return false;
     }
@@ -468,20 +468,20 @@ bool Parser::ValidateTypeTable() {
         version_,
         first->name.empty() ? "(empty)" : first->name.c_str(),
         first->token);
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryMetadata, line);
     return false;
 }
 
 bool Parser::LoadHeader() {
     if (data_.size() < sizeof(HeaderPrefix)) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: file too small for header prefix");
         return false;
     }
     HeaderPrefix h{};
     std::memcpy(&h, data_.data(), sizeof(h));
     if (static_cast<std::uint32_t>(h.sanity) != Sanity) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: sanity mismatch (encrypted or corrupt)");
         return false;
     }
@@ -503,7 +503,7 @@ bool Parser::LoadHeader() {
             "MetadataParser: unsupported metadata version %d (supported "
             "range is 16..39; see docs/il2cpp-metadata-crosscheck.md)",
             version_);
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata, line);
         return false;
     }
 
@@ -520,7 +520,7 @@ bool Parser::LoadHeader() {
     // (HeaderV38 with 30 Il2CppSectionMetadata triplets after sanity/version).
     if (version_ >= 38) {
         if (data_.size() < sizeof(HeaderV38)) {
-            UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+            Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
                 "MetadataParser: file too small for v38+ section header");
             return false;
         }
@@ -556,7 +556,7 @@ bool Parser::LoadHeader() {
             "Il2CppDumperV35plus — accepting with soft warning. Report any "
             "decode anomalies for cross-check.",
             version_);
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata, line);
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata, line);
     }
 
     auto inBounds = [&](std::int32_t off, std::int32_t sz) {
@@ -567,7 +567,7 @@ bool Parser::LoadHeader() {
     if (!inBounds(stringLiteralOffset_,     stringLiteralSize_)     ||
         !inBounds(stringLiteralDataOffset_, stringLiteralDataSize_) ||
         !inBounds(stringOffset_,            stringSize_)) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryMetadata,
+        Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: prefix tables out of bounds");
         return false;
     }
@@ -1398,4 +1398,4 @@ Parser::FindFieldDefault(std::int32_t globalFieldIndex) const {
     return std::nullopt;
 }
 
-}  // namespace UnityCEDumper::IL2CPP::Metadata
+}  // namespace Discrete::IL2CPP::Metadata

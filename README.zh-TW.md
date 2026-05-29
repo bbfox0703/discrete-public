@@ -39,7 +39,7 @@
   (Mono JIT 或 IL2CPP AOT entry),含 marshal 過的 primitive / string
   / null / address 參數 + typed return value + managed exception
   捕獲。三種使用面:
-  1. **DLL pipe RPC** — `\\.\pipe\UnityDumpBfx`,JSON over named pipe。
+  1. **DLL pipe RPC** — `\\.\pipe\DiscreteBfx`,JSON over named pipe。
   2. **UI Method Call dialog** — 在 Method Overloads 視窗右鍵任一
      overload row → "Call method…"。
   3. **CE Lua bridge** — `dofile [...]\discrete\unity_invoke.lua`
@@ -74,10 +74,10 @@
                   │  • Method Call dialog   │
                   │  • Proxy Deploy panel   │
                   └──────────┬──────────────┘
-                             │  \\.\pipe\UnityDumpBfx (JSON over pipe)
+                             │  \\.\pipe\DiscreteBfx (JSON over pipe)
                              ▼
                   ┌─────────────────────────┐
-                  │  UnityDumper-Mono.dll   │  ← 注入 Unity x64 遊戲
+                  │  Discrete-Mono.dll   │  ← 注入 Unity x64 遊戲
                   │  / -IL2CPP.dll          │
                   │                         │
                   │  • backend detector     │
@@ -98,7 +98,7 @@
 
 CE Lua bridge scripts (`unity_dump.lua`、`unity_dissect.lua`、
 `unity_symbols.lua`、`unity_addrfind.lua`、`unity_invoke.lua`) 直接從
-CE Lua console 對同一個 `\\.\pipe\UnityDumpBfx` 講話 — headless workflow
+CE Lua console 對同一個 `\\.\pipe\DiscreteBfx` 講話 — headless workflow
 完全不需要 UI。
 
 ## 快速開始
@@ -133,8 +133,8 @@ CE Lua console 對同一個 `\\.\pipe\UnityDumpBfx` 講話 — headless workflow
 
 ```
 DiscreteUI.exe                    38 MB (Native AOT, single-file)
-UnityDumper-Mono.dll              ~545 KB
-UnityDumper-IL2CPP.dll            ~570 KB
+Discrete-Mono.dll              ~545 KB
+Discrete-IL2CPP.dll            ~570 KB
 metadata-cli.exe                  ~70 KB
 version.dll / winmm.dll           ~130 KB each (proxy DLLs)
 unity_*.lua / utils.lua           CE Lua bridge scripts
@@ -166,7 +166,7 @@ libSkiaSharp.dll / ...            Avalonia native dependencies
 ```
 
 Bridge script 安裝:`.\build.cmd deploy` (publish 後),或手動把
-`dist\unity_*.lua` + `dist\UnityDumper-*.dll` 複製到
+`dist\unity_*.lua` + `dist\Discrete-*.dll` 複製到
 `<CE-install>\discrete\`。詳細 layout 看 [scripts/README.md](scripts/README.md)。
 
 ## 已驗證遊戲

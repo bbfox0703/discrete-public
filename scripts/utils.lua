@@ -1,5 +1,5 @@
 -- ============================================================
--- utils.lua — helper utilities for UnityCEDumper CE Lua scripts
+-- utils.lua — helper utilities for Discrete CE Lua scripts
 -- ============================================================
 --
 -- Loaded by `unity_dump.lua` etc. via `require 'utils'`. Mirrors the
@@ -10,7 +10,7 @@ local M = {}
 
 -- ---------- Logging ----------------------------------------------------
 
-local TAG = "[UnityCEDumper]"
+local TAG = "[Discrete]"
 
 function M.log(fmt, ...)
     print(string.format(TAG .. " " .. fmt, ...))
@@ -30,8 +30,8 @@ end
 
 -- ---------- DLL function calls (CE Lua executeCodeEx wrapper) ----------
 
---- Call an exported function in the injected UnityDumper DLL by name.
---- @param funcName string  Symbol exported from UnityDumper-{Backend}.dll
+--- Call an exported function in the injected Discrete DLL by name.
+--- @param funcName string  Symbol exported from Discrete-{Backend}.dll
 --- @param retType  string  "bool" | "int32" | "uint32" | "uint64" | "void"
 --- @param ...      any     Function arguments (CE handles primitive marshaling)
 --- @return         any     Return value
@@ -114,14 +114,14 @@ end
 
 -- ---------- DLL location ----------------------------------------------
 
---- Resolve the on-disk path to UnityDumper-{Backend}.dll.
+--- Resolve the on-disk path to Discrete-{Backend}.dll.
 --- Convention: scripts live alongside the DLLs in CE's `discrete/`
 --- subfolder. Falls back to the script's own directory if CE didn't
 --- expose its install dir (e.g. when running from a portable copy).
 function M.dllPath(backend)
-    local dllName = "UnityDumper-" .. backend .. ".dll"
+    local dllName = "Discrete-" .. backend .. ".dll"
 
-    -- Preferred: <CE-install>/discrete/UnityDumper-*.dll
+    -- Preferred: <CE-install>/discrete/Discrete-*.dll
     if getCheatEngineDir then
         local p = getCheatEngineDir() .. "discrete\\" .. dllName
         if fileExists and fileExists(p) then return p end

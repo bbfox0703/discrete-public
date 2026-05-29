@@ -365,7 +365,7 @@ These would slot in without breaking the v1 shape:
 
 Companion to `callUnityMethod`. Where Phase 19 lets you call a managed
 method, Phase 21b lets you write a primitive instance field's bytes
-through the same `\\.\pipe\UnityDumpBfx` channel — no method invocation
+through the same `\\.\pipe\DiscreteBfx` channel — no method invocation
 required, no managed code runs.
 
 Wire spec lives in [pipe-protocol.md §"setInstanceField"](pipe-protocol.md);

@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct MethodOverload {
     std::string   name;
@@ -42,4 +42,4 @@ FindMethodResult FindMethodInstances(Il2CppClass* klass,
                                      const std::string& methodName,
                                      const std::string& signatureMatch);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

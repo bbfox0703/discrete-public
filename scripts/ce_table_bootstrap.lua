@@ -15,7 +15,7 @@ How to embed files in your .CT
    dist/ folder of the discrete repo. Repeat for each file you need:
 
    Required:
-     UnityDumper-Mono.dll      OR  UnityDumper-IL2CPP.dll
+     Discrete-Mono.dll      OR  Discrete-IL2CPP.dll
      (whichever backend your target game uses; embed BOTH if your .CT
       targets a multi-backend game like Farthest Frontier)
 
@@ -23,9 +23,9 @@ How to embed files in your .CT
      unity_dump.lua            (provides `inject()` — the entry point)
 
    If targeting 32-bit games:
-     UnityDumper-Mono.dll      (x86 build from dist/x86/; embed under
+     Discrete-Mono.dll      (x86 build from dist/x86/; embed under
                                 a distinct table-file name like
-                                "UnityDumper-Mono-x86.dll" to avoid
+                                "Discrete-Mono-x86.dll" to avoid
                                 colliding with the x64 entry)
 
    Optional, based on which RPCs your table actually uses:
@@ -45,7 +45,7 @@ How to embed files in your .CT
 What this script does on table-activate
 ================================================================
 
-  1. Decide TEMP target dir = %TEMP%\Discrete_UEDumper\<table-id>\
+  1. Decide TEMP target dir = %TEMP%\Discrete_Dumper\<table-id>\
   2. Extract each embedded table file to that dir
   3. Detect the target process's backend (Mono / IL2CPP)
   4. Pick the matching backend DLL from the extracted files
@@ -73,9 +73,9 @@ local TABLE_ID = "default-table"
 --   kind = "lua-helper"     → Other optional bridges (unity_invoke / unity_scene / etc.)
 local FILES_TO_EXTRACT = {
     -- ----- Backend DLLs (embed only the ones your target needs) ----
-    -- ["UnityDumper-Mono.dll"]      = { kind = "dll-mono-x64"   },
-    -- ["UnityDumper-IL2CPP.dll"]    = { kind = "dll-il2cpp-x64" },
-    -- ["UnityDumper-Mono-x86.dll"]  = { kind = "dll-mono-x86"   },
+    -- ["Discrete-Mono.dll"]      = { kind = "dll-mono-x64"   },
+    -- ["Discrete-IL2CPP.dll"]    = { kind = "dll-il2cpp-x64" },
+    -- ["Discrete-Mono-x86.dll"]  = { kind = "dll-mono-x86"   },
 
     -- ----- Required Lua --------------------------------------------
     ["utils.lua"]      = { kind = "lua-utils" },
@@ -102,7 +102,7 @@ local function _extractDir()
     if not tempRoot or #tempRoot == 0 then
         error("[bootstrap] no TEMP / TMP / LOCALAPPDATA env var — can't pick extract dir")
     end
-    local dir = tempRoot .. "\\Discrete_UEDumper\\" .. TABLE_ID .. "\\"
+    local dir = tempRoot .. "\\Discrete_Dumper\\" .. TABLE_ID .. "\\"
     -- Make sure it exists. CE's Lua doesn't expose mkdir directly, so
     -- shell-out via os.execute. The /q flag silences "directory exists".
     os.execute('mkdir "' .. dir .. '" 2>nul')
@@ -199,18 +199,18 @@ function bootstrap()
     -- 3. Inject the backend DLL.
     if injectDLL ~= nil then
         if injectDLL(dllPath) == nil then
-            error("[bootstrap] injectDLL returned nil — check %LOCALAPPDATA%\\Discrete_UEDumper\\Logs\\<pid>\\init\\current.log")
+            error("[bootstrap] injectDLL returned nil — check %LOCALAPPDATA%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
         end
     elseif loadLibrary ~= nil then
         local h = loadLibrary(dllPath)
         if h == nil or h == 0 then
-            error("[bootstrap] loadLibrary returned NULL — check %LOCALAPPDATA%\\Discrete_UEDumper\\Logs\\<pid>\\init\\current.log")
+            error("[bootstrap] loadLibrary returned NULL — check %LOCALAPPDATA%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
         end
     else
         error("[bootstrap] neither injectDLL nor loadLibrary available in this CE build")
     end
     if sleep then sleep(300) end  -- pipe-server thread spin-up budget
-    _msg("DLL loaded; pipe should be live at \\\\.\\pipe\\UnityDumpBfx")
+    _msg("DLL loaded; pipe should be live at \\\\.\\pipe\\DiscreteBfx")
 
     -- 4. Make the Lua bridges available. utils MUST load first so the
     -- other bridges can `require 'utils'` (or read M.* globals).

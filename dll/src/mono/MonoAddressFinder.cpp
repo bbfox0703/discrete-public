@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -986,4 +986,4 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     return out;
 }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

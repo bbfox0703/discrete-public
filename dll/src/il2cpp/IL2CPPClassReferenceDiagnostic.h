@@ -36,7 +36,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct DiagnosticSection {
     std::string    name;
@@ -161,4 +161,4 @@ DiagnosticResult DiagnoseClassReferences(Il2CppClass*       klass,
                                           std::size_t        heapSlotLimitPerPointer = 64,
                                           std::size_t        heapMaxRegionSize       = 256u * 1024u * 1024u);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

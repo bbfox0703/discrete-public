@@ -1,7 +1,7 @@
 // IL2CPPTypes.h — opaque forward decls for IL2CPP runtime objects.
 #pragma once
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 struct Il2CppDomain;
 struct Il2CppThread;
@@ -18,4 +18,4 @@ struct Il2CppObject;
 struct Il2CppException;
 struct Il2CppString;
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

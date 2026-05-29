@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Inject UnityDumper DLL into a target process via CreateRemoteThread + LoadLibraryW.
+    Inject Discrete DLL into a target process via CreateRemoteThread + LoadLibraryW.
 
 .DESCRIPTION
     Phase 0 verification helper. Performs the classic Windows DLL injection:
@@ -47,7 +47,7 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Defin
 # Search order:
 #   1. -DllPath (explicit override)
 #   2. -BuildDir (explicit override)
-#   3. dist\UnityDumper-{Backend}.dll                    (canonical, post-12d)
+#   3. dist\Discrete-{Backend}.dll                    (canonical, post-12d)
 #   4. build\dll-{both,backend}-release-x64\bin\...      (arch-suffixed, post-12d)
 #   5. build\dll-{both,backend}-release\bin\...          (pre-12d legacy)
 # Putting dist\ first means whichever DLL was most recently produced (by
@@ -56,15 +56,15 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Defin
 if (-not $DllPath) {
     if (-not $BuildDir) {
         $candidates = @(
-            (Join-Path $RepoRoot                       "dist\UnityDumper-$Backend.dll"),
-            (Join-Path $RepoRoot                       "build\dll-both-release-x64\bin\UnityDumper-$Backend.dll"),
-            (Join-Path $RepoRoot "build\dll-$($Backend.ToLower())-release-x64\bin\UnityDumper-$Backend.dll"),
-            (Join-Path $RepoRoot                       "build\dll-both-release\bin\UnityDumper-$Backend.dll"),
-            (Join-Path $RepoRoot "build\dll-$($Backend.ToLower())-release\bin\UnityDumper-$Backend.dll")
+            (Join-Path $RepoRoot                       "dist\Discrete-$Backend.dll"),
+            (Join-Path $RepoRoot                       "build\dll-both-release-x64\bin\Discrete-$Backend.dll"),
+            (Join-Path $RepoRoot "build\dll-$($Backend.ToLower())-release-x64\bin\Discrete-$Backend.dll"),
+            (Join-Path $RepoRoot                       "build\dll-both-release\bin\Discrete-$Backend.dll"),
+            (Join-Path $RepoRoot "build\dll-$($Backend.ToLower())-release\bin\Discrete-$Backend.dll")
         )
         $DllPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     } else {
-        $DllPath = Join-Path $BuildDir "UnityDumper-$Backend.dll"
+        $DllPath = Join-Path $BuildDir "Discrete-$Backend.dll"
     }
 }
 if (-not (Test-Path $DllPath)) {
@@ -98,7 +98,7 @@ Write-Host "Proc: $($proc.ProcessName) (PID $($proc.Id))" -ForegroundColor Cyan
 # processes. Now we shell out to the bundled x86 inject helper instead,
 # matching DiscreteUI's WindowsDllInjector behaviour. If the caller
 # passed -DllPath explicitly we honour it; otherwise auto-route to
-# dist\x86\UnityDumper-Mono.dll alongside the helper.
+# dist\x86\Discrete-Mono.dll alongside the helper.
 # ---------------------------------------------------------------------------
 # Type guard — List-UnityProcs.ps1 defines the same probe type, and the
 # user may have already imported that script in this session. Add-Type
@@ -123,7 +123,7 @@ if ($wow) {
     # The current $DllPath came from the x64 search above, which would be wrong.
     if (-not $PSBoundParameters.ContainsKey('DllPath') -and
         $DllPath -notlike '*dist\x86\*') {
-        $x86Dll = Join-Path $RepoRoot 'dist\x86\UnityDumper-Mono.dll'
+        $x86Dll = Join-Path $RepoRoot 'dist\x86\Discrete-Mono.dll'
         if (-not (Test-Path $x86Dll)) {
             throw "x86 Mono DLL not found at $x86Dll. Build with .\build.ps1 -Target DLL -Arch x86 -Backend Mono"
         }
@@ -137,7 +137,7 @@ if ($wow) {
     }
 
     # Verify the per-PID log appeared (same shape as the x64 path's tail).
-    $logFile = Join-Path $env:LOCALAPPDATA "Discrete_UEDumper\Logs\$($proc.Id)\init\current.log"
+    $logFile = Join-Path $env:LOCALAPPDATA "Discrete_Dumper\Logs\$($proc.Id)\init\current.log"
     if (Test-Path $logFile) {
         Write-Host ''
         Write-Host "Log: $logFile" -ForegroundColor Green
@@ -226,7 +226,7 @@ try {
             # On x64 the thread exit code is the low 32 bits of LoadLibraryW's HMODULE.
             # Non-zero means the DLL loaded; zero means LoadLibrary returned NULL.
             if ($code -eq 0) {
-                throw "LoadLibraryW returned NULL — DLL failed to load. Check %LOCALAPPDATA%\Discrete_UEDumper\Logs."
+                throw "LoadLibraryW returned NULL — DLL failed to load. Check %LOCALAPPDATA%\Discrete_Dumper\Logs."
             }
             Write-Host "Injected. LoadLibraryW returned 0x$($code.ToString('X8')) (truncated to 32-bit)" -ForegroundColor Green
         } finally {
@@ -242,7 +242,7 @@ try {
 # ---------------------------------------------------------------------------
 # Verify log file appeared
 # ---------------------------------------------------------------------------
-$logFile = Join-Path $env:LOCALAPPDATA "Discrete_UEDumper\Logs\$($proc.Id)\init\current.log"
+$logFile = Join-Path $env:LOCALAPPDATA "Discrete_Dumper\Logs\$($proc.Id)\init\current.log"
 if (Test-Path $logFile) {
     Write-Host ""
     Write-Host "Log: $logFile" -ForegroundColor Green

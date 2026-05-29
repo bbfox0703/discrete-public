@@ -22,10 +22,10 @@
 //        job).
 //   3  — LoadLibraryW returned NULL — DLL exists but failed its DllMain
 //        (e.g. missing dep). Caller should check the per-PID log dir
-//        under %LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\init\current.log.
+//        under %LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\init\current.log.
 //
 // On a successful run, stdout looks like:
-//   inject-x86: pid=12345 wow64=true dll=C:\...\UnityDumper-Mono.dll
+//   inject-x86: pid=12345 wow64=true dll=C:\...\Discrete-Mono.dll
 //   inject-x86: remote_alloc=0x00ABC000 size=128
 //   inject-x86: LoadLibraryW=0x00DEF000 (thread exit code)
 //   inject-x86: OK
@@ -50,7 +50,7 @@ constexpr DWORD kRemoteThreadWaitMs = 10000;
 
 void Usage() {
     std::fputs(
-        "inject-x86 — UnityCEDumper DLL injector for 32-bit Windows processes\n\n"
+        "inject-x86 — Discrete DLL injector for 32-bit Windows processes\n\n"
         "USAGE:\n"
         "  inject-x86.exe <PID> <absolute-path-to-DLL>\n"
         "  inject-x86.exe --version\n\n"
@@ -59,18 +59,18 @@ void Usage() {
         "  1 = argument / OS / write failure (reason on stderr)\n"
         "  2 = target is x64 (use the x64 injector instead)\n"
         "  3 = LoadLibraryW returned NULL — DllMain failed (check the\n"
-        "      per-PID log dir under %LOCALAPPDATA%\\Discrete_UEDumper\\Logs)\n",
+        "      per-PID log dir under %LOCALAPPDATA%\\Discrete_Dumper\\Logs)\n",
         stderr);
 }
 
 // Stamp the build number into the binary so dist/x86/inject-x86.exe -V
 // matches the rest of the artifacts when diagnosing a stale-binary report.
-#ifndef UNITYCEDUMPER_BUILD_NUMBER
-#  define UNITYCEDUMPER_BUILD_NUMBER 0
+#ifndef DISCRETE_BUILD_NUMBER
+#  define DISCRETE_BUILD_NUMBER 0
 #endif
 
 int CmdVersion() {
-    std::printf("inject-x86 build %d (x86)\n", UNITYCEDUMPER_BUILD_NUMBER);
+    std::printf("inject-x86 build %d (x86)\n", DISCRETE_BUILD_NUMBER);
     return 0;
 }
 
@@ -243,7 +243,7 @@ int CmdInject(int pid, const std::wstring& dllPath) {
     if (exitCode == 0) {
         std::fprintf(stderr,
             "inject-x86: LoadLibraryW returned NULL — DLL failed to load. "
-            "Check %%LOCALAPPDATA%%\\Discrete_UEDumper\\Logs\\%d\\init\\current.log\n",
+            "Check %%LOCALAPPDATA%%\\Discrete_Dumper\\Logs\\%d\\init\\current.log\n",
             pid);
         return 3;
     }

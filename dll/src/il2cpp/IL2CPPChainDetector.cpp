@@ -40,7 +40,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 namespace {
 
@@ -607,4 +607,4 @@ std::vector<ChainMatch> DetectFieldAccessChains(
     return result;
 }
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

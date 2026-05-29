@@ -15,7 +15,7 @@
 
 #include <cstring>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -207,4 +207,4 @@ FindMethodResult FindMethodInstances(MonoClass* klass,
     return result;
 }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

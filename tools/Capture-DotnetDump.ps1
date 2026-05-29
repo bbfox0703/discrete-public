@@ -38,7 +38,7 @@ param(
     [string]$ProcessName = 'DiscreteUI',
     [int]$TargetPid = 0,
     [string]$Label = '',
-    [string]$OutDir = "$env:LOCALAPPDATA\Discrete_UEDumper\dotnet-dump",
+    [string]$OutDir = "$env:LOCALAPPDATA\Discrete_Dumper\dotnet-dump",
     [ValidateSet('Heap', 'Full', 'Mini', 'Triage')]
     [string]$Type = 'Heap',
     [int]$Top = 60,

@@ -162,7 +162,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         EvaluateMemoryWarning();
 
         // One-shot housekeeping: each game injection creates a new
-        // %LOCALAPPDATA%\Discrete_UEDumper\Logs\<pid>\ tree. They
+        // %LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\ tree. They
         // accumulate forever otherwise. Keep only the most-recent
         // Constants.LogKeepRecentPidDirs (15) PID directories by last-write
         // time; drop the rest. The `ui` directory is always preserved.
@@ -990,7 +990,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private bool CanDisconnect() => IsConnected;
 
     /// <summary>
-    /// Open the process picker, inject the matching <c>UnityDumper-&lt;Backend&gt;.dll</c>
+    /// Open the process picker, inject the matching <c>Discrete-&lt;Backend&gt;.dll</c>
     /// (looked up next to the running exe), then kick the existing Connect
     /// flow. One-click replacement for <c>tools\Test-Handshake.ps1</c>.
     /// </summary>
@@ -1031,8 +1031,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
         string dllName = row.Backend == UnityBackend.IL2CPP
-            ? "UnityDumper-IL2CPP.dll"
-            : "UnityDumper-Mono.dll";
+            ? "Discrete-IL2CPP.dll"
+            : "Discrete-Mono.dll";
         // Resolve next to the actual DiscreteUI.exe on disk, NOT
         // AppContext.BaseDirectory: for the self-extracting single-file
         // build mode (build.cmd ui) the latter points at a per-launch temp

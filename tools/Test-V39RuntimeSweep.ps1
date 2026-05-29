@@ -15,7 +15,7 @@
     Each step is independent — failures land as ERROR lines but the
     sweep continues so you see the full picture in one shot.
 
-    Pre-flight: inject UnityDumper-IL2CPP.dll into a v32+ target via
+    Pre-flight: inject Discrete-IL2CPP.dll into a v32+ target via
     Test-Handshake.ps1 first.
 
 .EXAMPLE
@@ -25,7 +25,7 @@
 param([int] $TimeoutMs = 5000)
 
 $ErrorActionPreference = 'Stop'
-$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'UnityDumpBfx', 'InOut')
+$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'DiscreteBfx', 'InOut')
 try { $client.Connect($TimeoutMs) }
 catch { throw 'Pipe connect failed. Inject the DLL first via Test-Handshake.ps1.' }
 $writer = New-Object System.IO.StreamWriter($client); $writer.AutoFlush = $true

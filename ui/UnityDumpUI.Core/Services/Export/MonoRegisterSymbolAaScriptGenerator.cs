@@ -2,7 +2,7 @@
 //
 // Produces an Auto-Assembler script that registers one or more Mono
 // method overloads as CE symbols WITHOUT ever injecting the
-// UnityCEDumper DLL. Uses CE's built-in MonoDataCollector Lua API
+// Discrete DLL. Uses CE's built-in MonoDataCollector Lua API
 // (mono_findClass / mono_class_enumMethods / mono_method_get_parameters
 // / mono_compile_method) via the helper layer shipped in
 // scripts/mono_registersymbol_helpers.lua.

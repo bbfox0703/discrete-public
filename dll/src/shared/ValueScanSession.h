@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace UnityCEDumper::ValueScan {
+namespace Discrete::ValueScan {
 
 // One scan candidate as remembered between RPCs. We cache the metadata
 // resolved by whatIsAt on the FIRST scan so refine rounds don't have to
@@ -124,4 +124,4 @@ private:
     std::uint64_t                                                    nextId_ = 1;
 };
 
-}  // namespace UnityCEDumper::ValueScan
+}  // namespace Discrete::ValueScan

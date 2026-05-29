@@ -5,7 +5,7 @@
     pipe is up.
 
 .DESCRIPTION
-    Connects to \\.\pipe\UnityDumpBfx and runs four queries, printing results.
+    Connects to \\.\pipe\DiscreteBfx and runs four queries, printing results.
     No injection — run .\tools\Test-Handshake.ps1 first to get the DLL into
     the target.
 
@@ -50,7 +50,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'UnityDumpBfx', 'InOut')
+$client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'DiscreteBfx', 'InOut')
 try { $client.Connect($TimeoutMs) }
 catch { throw "Pipe connect failed. Inject the DLL first via .\tools\Test-Handshake.ps1." }
 

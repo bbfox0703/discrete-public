@@ -7,7 +7,7 @@
 //      and caches the HMODULE so per-export thunks can GetProcAddress.
 //   2. Proxy_StartBackendLoader: spawns a worker thread (so we never do
 //      LoadLibrary inside DllMain → loader-lock deadlocks) that detects
-//      the Unity backend and loads the matching UnityDumper-{Mono|IL2CPP}.dll
+//      the Unity backend and loads the matching Discrete-{Mono|IL2CPP}.dll
 //      from the same directory as the proxy DLL.
 //
 // 32-bit support is NOT yet implemented (Phase 12d). The current build is
@@ -18,7 +18,7 @@
 
 #include <windows.h>
 
-namespace UnityCEDumper::Proxy {
+namespace Discrete::Proxy {
 
 /// <summary>
 /// Resolve the absolute path to the system copy of <paramref name="dllName"/>
@@ -42,8 +42,8 @@ FARPROC Proxy_GetRealExport(HMODULE realDll, const char* exportName) noexcept;
 /// DllMain — does not touch the loader lock from this thread.
 /// <paramref name="proxySelf"/> is the proxy's own HMODULE, used to resolve
 /// the proxy's on-disk directory (so we know where to find the sibling
-/// <c>UnityDumper-{Backend}.dll</c>).
+/// <c>Discrete-{Backend}.dll</c>).
 /// </summary>
 void Proxy_StartBackendLoader(HMODULE proxySelf) noexcept;
 
-}  // namespace UnityCEDumper::Proxy
+}  // namespace Discrete::Proxy

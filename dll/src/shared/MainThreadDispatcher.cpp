@@ -44,7 +44,7 @@
 #include <mutex>
 #include <string>
 
-namespace UnityCEDumper::MainThreadDispatcher {
+namespace Discrete::MainThreadDispatcher {
 
 // Local printf-style log helpers. We route everything into the "init"
 // category since main-thread plumbing landings + diagnostics belong
@@ -54,7 +54,7 @@ template <typename... Args>
 void LogF(const char* fmt, Args... args) {
     char buf[512];
     std::snprintf(buf, sizeof(buf), fmt, args...);
-    UnityCEDumper::Log::Write(UnityCEDumper::MagicStrings::LogCategoryInit, buf);
+    Discrete::Log::Write(Discrete::MagicStrings::LogCategoryInit, buf);
 }
 }  // namespace
 
@@ -358,4 +358,4 @@ Stats GetStats() {
     return s;
 }
 
-}  // namespace UnityCEDumper::MainThreadDispatcher
+}  // namespace Discrete::MainThreadDispatcher

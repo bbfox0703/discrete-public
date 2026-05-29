@@ -4,38 +4,38 @@
 
 #include <cstdint>
 
-#if defined(UNITYCEDUMPER_BUILDING_DLL)
-#  define UNITYCEDUMPER_API extern "C" __declspec(dllexport)
+#if defined(DISCRETE_BUILDING_DLL)
+#  define DISCRETE_API extern "C" __declspec(dllexport)
 #else
-#  define UNITYCEDUMPER_API extern "C" __declspec(dllimport)
+#  define DISCRETE_API extern "C" __declspec(dllimport)
 #endif
 
 extern "C" {
 
 // Backend identifier returned by GetBackendType().
 // Keep in sync with UI's BackendType enum.
-enum UnityDumperBackend : std::int32_t {
-    UnityDumperBackend_Unknown = 0,
-    UnityDumperBackend_Mono    = 1,
-    UnityDumperBackend_IL2CPP  = 2,
+enum DiscreteBackend : std::int32_t {
+    DiscreteBackend_Unknown = 0,
+    DiscreteBackend_Mono    = 1,
+    DiscreteBackend_IL2CPP  = 2,
 };
 
 // One-time initialization. Idempotent. Returns 0 on success, non-zero on failure.
-UNITYCEDUMPER_API int UnityDumper_Init();
+DISCRETE_API int Discrete_Init();
 
 // Tears everything down. Idempotent.
-UNITYCEDUMPER_API void UnityDumper_Shutdown();
+DISCRETE_API void Discrete_Shutdown();
 
 // Starts the named pipe server thread. Returns 0 on success or already running, non-zero on failure.
-UNITYCEDUMPER_API int UnityDumper_StartPipe();
+DISCRETE_API int Discrete_StartPipe();
 
 // Stops the named pipe server thread.
-UNITYCEDUMPER_API void UnityDumper_StopPipe();
+DISCRETE_API void Discrete_StopPipe();
 
 // Returns which backend variant is loaded.
-UNITYCEDUMPER_API UnityDumperBackend UnityDumper_GetBackendType();
+DISCRETE_API DiscreteBackend Discrete_GetBackendType();
 
-// Returns the embedded build number (UNITYCEDUMPER_BUILD_NUMBER).
-UNITYCEDUMPER_API std::uint32_t UnityDumper_GetBuildNumber();
+// Returns the embedded build number (DISCRETE_BUILD_NUMBER).
+DISCRETE_API std::uint32_t Discrete_GetBuildNumber();
 
 }  // extern "C"

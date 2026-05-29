@@ -8,10 +8,10 @@
 
 #pragma once
 
-namespace UnityCEDumper::IL2CPP::MainThreadHook {
+namespace Discrete::IL2CPP::MainThreadHook {
 
 bool Install();
 void Uninstall();
 bool IsInstalled();
 
-}  // namespace UnityCEDumper::IL2CPP::MainThreadHook
+}  // namespace Discrete::IL2CPP::MainThreadHook

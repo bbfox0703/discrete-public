@@ -24,7 +24,7 @@
 //      better than anything we'd write here.
 //   5. Loads the 5 standalone bridge modules (no inter-module
 //      dependencies — verified 2026-05-12 by repo-wide grep).
-//   6. Smoke-tests UnityDumper_GetBuildNumber — confirms the DLL is
+//   6. Smoke-tests Discrete_GetBuildNumber — confirms the DLL is
 //      actually injected and CE's symbolhandler has scanned it.
 //      Failure here is a soft warn (the bridge can still be useful
 //      for some operations even if symbolhandler is lagging).
@@ -175,7 +175,7 @@ end
 -- DLL was fully loaded + the pipe + every subsequent pipe-based RPC
 -- worked. Pipe handshake gives us the same info (build number +
 -- backend) via the path we know is good.
-local pipe = io.open([[\\.\pipe\UnityDumpBfx]], 'r+b')
+local pipe = io.open([[\\.\pipe\DiscreteBfx]], 'r+b')
 if pipe then
   -- One-shot handshake. Format mirrors unity_symbols.lua's rpc().
   pipe:write('{""id"":0,""cmd"":""handshake"",""args"":{}}\n'); pipe:flush()

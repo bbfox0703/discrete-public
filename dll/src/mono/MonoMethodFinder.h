@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 struct MethodOverload {
     std::string   name;
@@ -51,4 +51,4 @@ FindMethodResult FindMethodInstances(MonoClass* klass,
                                      const std::string& methodName,
                                      const std::string& signatureMatch);
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

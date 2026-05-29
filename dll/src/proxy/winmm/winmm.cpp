@@ -22,7 +22,7 @@ volatile LONG g_initOnce = 0;
 void EnsureReal() noexcept {
     if (g_real != nullptr) return;
     if (::InterlockedCompareExchange(&g_initOnce, 1, 0) == 0) {
-        g_real = UnityCEDumper::Proxy::Proxy_LoadRealDll(L"winmm.dll");
+        g_real = Discrete::Proxy::Proxy_LoadRealDll(L"winmm.dll");
     } else {
         for (int i = 0; i < 1000 && g_real == nullptr; ++i) ::Sleep(0);
     }
@@ -32,7 +32,7 @@ template <typename Fn>
 Fn ResolveExport(const char* name) noexcept {
     EnsureReal();
     return reinterpret_cast<Fn>(
-        UnityCEDumper::Proxy::Proxy_GetRealExport(g_real, name));
+        Discrete::Proxy::Proxy_GetRealExport(g_real, name));
 }
 
 // Pointer-width opaque handles. We never deref them; the values just need
@@ -130,7 +130,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID /*reserved*/) {
     if (reason == DLL_PROCESS_ATTACH) {
         ::DisableThreadLibraryCalls(self);
         EnsureReal();
-        UnityCEDumper::Proxy::Proxy_StartBackendLoader(self);
+        Discrete::Proxy::Proxy_StartBackendLoader(self);
     }
     return TRUE;
 }

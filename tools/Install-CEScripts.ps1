@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Deploy UnityCEDumper Lua scripts + DLLs into Cheat Engine's discrete folder.
+    Deploy Discrete Lua scripts + DLLs into Cheat Engine's discrete folder.
 
 .DESCRIPTION
     Copies every *.lua bridge script + the backend DLLs
-    (UnityDumper-Mono, UnityDumper-IL2CPP) into <CE-install>\discrete\ so
+    (Discrete-Mono, Discrete-IL2CPP) into <CE-install>\discrete\ so
     CE Lua's `dofile` can pick them up. Lua list is glob-driven, so new
     scripts ship automatically without editing this file.
 
@@ -102,7 +102,7 @@ Write-Info ("Source mode: {0}" -f $Mode)
 # ---------------------------------------------------------------------------
 $sourceFiles = New-Object System.Collections.Generic.List[string]
 
-$dllNames = @('UnityDumper-Mono.dll', 'UnityDumper-IL2CPP.dll')
+$dllNames = @('Discrete-Mono.dll', 'Discrete-IL2CPP.dll')
 
 function Add-LuaScriptsFromDir {
     param([string]$Dir, [System.Collections.Generic.List[string]]$Sink)

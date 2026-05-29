@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::IL2CPP {
+namespace Discrete::IL2CPP {
 
 enum class FieldRefKind : int {
     Any   = 0,   // any reference (mov + lea both count for v1)
@@ -88,4 +88,4 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                                               FieldRefKind       kindFilter,
                                               std::size_t        limit);
 
-}  // namespace UnityCEDumper::IL2CPP
+}  // namespace Discrete::IL2CPP

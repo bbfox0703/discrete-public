@@ -3,7 +3,7 @@
 // pointers declared in MonoResolver.
 #pragma once
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 struct MonoDomain;
 struct MonoThread;
@@ -27,4 +27,4 @@ struct MonoString;
 // byte pointer + size. Stays opaque — we only ever pass it back to Mono.
 struct MonoMethodHeader;
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

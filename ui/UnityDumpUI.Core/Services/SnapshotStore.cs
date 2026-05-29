@@ -49,7 +49,7 @@ public sealed class SnapshotStore : IAsyncDisposable
 
     /// <summary>Log category shared by every Phase 29c service so all
     /// snapshot-persistence activity ends up in one rotating log file
-    /// the user can inspect from %LOCALAPPDATA%\Discrete_UEDumper\Logs\ui\snapshot\.</summary>
+    /// the user can inspect from %LOCALAPPDATA%\Discrete_Dumper\Logs\ui\snapshot\.</summary>
     public const string LogCategory = "snapshot";
 
     private readonly SqliteConnection _connection;

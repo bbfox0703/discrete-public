@@ -125,7 +125,7 @@ public class BootstrapAaScriptGeneratorTests
     {
         // The smoke at the end of [ENABLE] catches "DLL not injected /
         // pipe not up" — the most common runtime failure on a fresh
-        // table. Originally used U.callDLL('UnityDumper_GetBuildNumber',
+        // table. Originally used U.callDLL('Discrete_GetBuildNumber',
         // 'uint32') (CE's executeCodeEx via remote thread in target).
         // That path is finicky on Windows x64 — returns nil even when
         // the DLL is fully loaded + every subsequent pipe-RPC works,
@@ -138,13 +138,13 @@ public class BootstrapAaScriptGeneratorTests
         // those work the smoke passes; if those don't work the smoke
         // fails honestly. No more false negatives.
         string script = BootstrapAaScriptGenerator.Build();
-        Assert.Contains("\\\\.\\pipe\\UnityDumpBfx",    script);
+        Assert.Contains("\\\\.\\pipe\\DiscreteBfx",    script);
         Assert.Contains("\"cmd\":\"handshake\"",        script);
         Assert.Contains("\"build\"",                    script);
         Assert.Contains("\"backend\"",                  script);
         // Old failure-mode strings MUST be gone — they were the source
         // of the false-negative noise.
-        Assert.DoesNotContain("UnityDumper_GetBuildNumber", script);
+        Assert.DoesNotContain("Discrete_GetBuildNumber", script);
         Assert.DoesNotContain("U.callDLL",                   script);
         Assert.DoesNotContain("executeCodeEx",               script);
     }

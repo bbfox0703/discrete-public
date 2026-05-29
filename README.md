@@ -39,7 +39,7 @@ Inject a single backend DLL into a running Unity game and get:
   JIT or IL2CPP AOT entry) with marshaled primitive / string / null /
   address args + typed return values + managed-exception capture.
   Available three ways:
-  1. **DLL pipe RPC** — `\\.\pipe\UnityDumpBfx`, JSON over named pipe.
+  1. **DLL pipe RPC** — `\\.\pipe\DiscreteBfx`, JSON over named pipe.
   2. **UI Method Call dialog** — right-click any overload row in the
      Method Overloads window → "Call method…".
   3. **CE Lua bridge** — `dofile [...]\discrete\unity_invoke.lua`
@@ -79,10 +79,10 @@ shipped phases.
                   │  • Method Call dialog   │
                   │  • Proxy Deploy panel   │
                   └──────────┬──────────────┘
-                             │  \\.\pipe\UnityDumpBfx (JSON over pipe)
+                             │  \\.\pipe\DiscreteBfx (JSON over pipe)
                              ▼
                   ┌─────────────────────────┐
-                  │  UnityDumper-Mono.dll   │  ← injected into Unity x64 game
+                  │  Discrete-Mono.dll   │  ← injected into Unity x64 game
                   │  / -IL2CPP.dll          │
                   │                         │
                   │  • backend detector     │
@@ -103,7 +103,7 @@ shipped phases.
 
 CE Lua bridge scripts (`unity_dump.lua`, `unity_dissect.lua`,
 `unity_symbols.lua`, `unity_addrfind.lua`, `unity_invoke.lua`) talk
-to the same `\\.\pipe\UnityDumpBfx` from CE's Lua console — no UI
+to the same `\\.\pipe\DiscreteBfx` from CE's Lua console — no UI
 required for headless workflows.
 
 ## Quick start
@@ -139,8 +139,8 @@ Outputs land in `dist/`:
 
 ```
 DiscreteUI.exe                    38 MB (Native AOT, single-file)
-UnityDumper-Mono.dll              ~545 KB
-UnityDumper-IL2CPP.dll            ~570 KB
+Discrete-Mono.dll              ~545 KB
+Discrete-IL2CPP.dll            ~570 KB
 metadata-cli.exe                  ~70 KB
 version.dll / winmm.dll           ~130 KB each (proxy DLLs)
 unity_*.lua / utils.lua           CE Lua bridge scripts
@@ -174,7 +174,7 @@ libSkiaSharp.dll / ...            Avalonia native dependencies
 ```
 
 Bridge script install: `.\build.cmd deploy` after a publish, or
-manually copy `dist\unity_*.lua` + `dist\UnityDumper-*.dll` to
+manually copy `dist\unity_*.lua` + `dist\Discrete-*.dll` to
 `<CE-install>\discrete\`. See [scripts/README.md](scripts/README.md)
 for layout details.
 

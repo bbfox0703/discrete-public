@@ -42,7 +42,7 @@
 #include <string>
 #include <vector>
 
-namespace UnityCEDumper::Phase_D::Symbols {
+namespace Discrete::Phase_D::Symbols {
 
 enum class Format { Dd64, Ghidra, Ida };
 
@@ -95,4 +95,4 @@ std::string RenderDd64    (const PipelineResult& r, const std::string& moduleNam
 std::string RenderGhidra  (const PipelineResult& r, std::uint64_t moduleBase);
 std::string RenderIda     (const PipelineResult& r, std::uint64_t moduleBase);
 
-}  // namespace UnityCEDumper::Phase_D::Symbols
+}  // namespace Discrete::Phase_D::Symbols

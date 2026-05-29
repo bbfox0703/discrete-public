@@ -11,7 +11,7 @@
 
 #include <mutex>
 
-namespace UnityCEDumper::Mono {
+namespace Discrete::Mono {
 
 namespace {
 
@@ -78,14 +78,14 @@ std::vector<AssemblyEntry> EnumerateAssemblies() {
 
     const auto& r = GetResolver();
     if (!r.resolved || r.assembly_foreach == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "EnumerateAssemblies: resolver not ready");
         return out;
     }
 
     MonoDomain* domain = GetRootDomain();
     if (domain == nullptr) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "EnumerateAssemblies: no root domain");
         return out;
     }
@@ -93,14 +93,14 @@ std::vector<AssemblyEntry> EnumerateAssemblies() {
     std::lock_guard<std::mutex> lock(g_enumMutex);
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "EnumerateAssemblies: mono_thread_attach failed");
         return out;
     }
 
     EnumCtx ctx{&out};
     if (!SehAssemblyForeach(r.assembly_foreach, &ctx)) {
-        UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk,
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "EnumerateAssemblies: SEH during mono_assembly_foreach");
         out.clear();
     }
@@ -108,7 +108,7 @@ std::vector<AssemblyEntry> EnumerateAssemblies() {
     char line[128];
     ::_snprintf_s(line, sizeof(line), _TRUNCATE,
                   "EnumerateAssemblies: %zu assemblies", out.size());
-    UnityCEDumper::Log::Write(MagicStrings::LogCategoryWalk, line);
+    Discrete::Log::Write(MagicStrings::LogCategoryWalk, line);
     return out;
 }
 
@@ -121,4 +121,4 @@ MonoImage* FindImageByName(const std::string& assemblyName) {
     return nullptr;
 }
 
-}  // namespace UnityCEDumper::Mono
+}  // namespace Discrete::Mono

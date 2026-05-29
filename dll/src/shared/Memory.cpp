@@ -10,7 +10,7 @@
 #include <thread>
 #include <utility>
 
-namespace UnityCEDumper::Memory {
+namespace Discrete::Memory {
 
 namespace {
 
@@ -800,4 +800,4 @@ std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
     return matches;
 }
 
-}  // namespace UnityCEDumper::Memory
+}  // namespace Discrete::Memory

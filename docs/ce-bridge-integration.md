@@ -18,7 +18,7 @@ table, click DiscreteUI buttons, save the table — done.
 | Cheat Engine 7.6+ | [cheatengine.org](https://www.cheatengine.org) | 7.5 also works for Phase 17/18/19; Phase 22 verified on 7.6. |
 | AOBMaker CE plugin | [github.com/.../AOBMaker](https://github.com/) — `plugins/CEPlugin/` | DLL must be in CE's `autorun/` or `plugin/` folder. Confirm "AOBMaker" appears in CE's plugin list. |
 | DiscreteUI | This repo, `dist/DiscreteUI.exe` | Single-file AOT build. |
-| `UnityDumper-{IL2CPP,Mono}.dll` | This repo, `dist/` | Inject into the target Unity game via DiscreteUI's **Pick & inject…** button. |
+| `Discrete-{IL2CPP,Mono}.dll` | This repo, `dist/` | Inject into the target Unity game via DiscreteUI's **Pick & inject…** button. |
 | A Unity game | Your choice | Mono or IL2CPP, x64. See [test-matrix.md](test-matrix.md) for verified targets. |
 
 The AOBMaker plugin opens a named pipe at `\\.\pipe\AOBMakerCEBridge`
@@ -186,7 +186,7 @@ dealloc(DiscreteAt_PLY_WORK_000002201761E3D0)
 
 - Open CE's Lua console (`Ctrl+Alt+L`) before flipping the checkbox.
   Errors print there, not in DiscreteUI.
-- Most common cause: the `UnityDumper-{Backend}.dll` files aren't in
+- Most common cause: the `Discrete-{Backend}.dll` files aren't in
   `<CE-install>/discrete/`. The bootstrap calls `unity_dump.lua` →
   `injectDLL(<that path>)`. Either:
   - Inject the DLL via DiscreteUI's *Pick & inject…* first (preferred —
@@ -197,7 +197,7 @@ dealloc(DiscreteAt_PLY_WORK_000002201761E3D0)
 
 ### `[Discrete] DLL build symbol not yet resolvable` after enable
 
-The bridge loaded but `UnityDumper_GetBuildNumber` couldn't resolve via
+The bridge loaded but `Discrete_GetBuildNumber` couldn't resolve via
 CE's symbolhandler. Either:
 - The DLL isn't injected (inject via DiscreteUI first); or
 - CE's symbolhandler hasn't finished scanning the freshly-injected DLL.
