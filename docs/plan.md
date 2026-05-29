@@ -1093,7 +1093,7 @@ visible; fallback is to exclude *all* regions overlapping any class pointer.
 
 ---
 
-## Phase 30 — Snapshot memory & speed ✅ 30a SHIPPED 2026-05-29 (both backends) · ✅ 30b game stream-decode SHIPPED 2026-05-29 (IL2CPP; Mono deferred)
+## Phase 30 — Snapshot memory & speed ✅ 30a SHIPPED 2026-05-29 (both backends) · ✅ 30b game stream-decode SHIPPED 2026-05-29 (IL2CPP; Mono deferred) · ✅ 30c UI stream-to-disk SHIPPED 2026-05-29
 
 Snapshot decode was the whole cost (find is 0.6s after P1c). On Utawarerumono
 (IL2CPP) it ran ~11 min, pushed the game to 10.8 GB + the UI to 14.7 GB. Root
@@ -1147,9 +1147,17 @@ numbers in the CE-Handwire `Memory-Scanning-Internals.md` §16.7–16.8 (backup 
   the whole stream on the stable ServeClient thread; detach on End / disconnect
   hook) to avoid the per-chunk BDWGC finalizer freeze (活俠傳). Deferred; Mono
   keeps decode-in-Begin until that's proven.
-- [ ] **30c — UI stream-to-disk** — bound the UI peak for full captures
-  (write each chunk to SQLite incrementally, don't retain the envelope). Only
-  needed if pushing the budget toward complete captures of huge games.
+- [x] **30c — UI stream-to-disk SHIPPED 2026-05-29** — when AutoSave is ON and a
+  snapshot store is open, the capture loop writes each chunk's classes straight to
+  SQLite (`BeginStreamingSaveAsync` → `AppendClassesAsync` per chunk →
+  `FinishStreamingSaveAsync`) and drops them instead of accumulating the whole
+  snapshot in memory; the metadata-only envelope hydrates on demand via
+  `EnsureLoadedAsync` for diff/pivot/SPC/export. UI peak now tracks ~one chunk + the
+  write buffer, not snapshot size. No schema change (the store was already one
+  gzipped row per class; `payload_bytes = -1` sentinel marks an in-progress row,
+  hidden from the list + swept on reopen for crash safety). AutoSave-OFF keeps the
+  in-memory + dirty + manual-💾 path unchanged. 603 UI tests green (incl. streamed-
+  vs-one-shot round-trip parity + sweep). Live-smoke (UI peak) still TODO.
 
 ---
 

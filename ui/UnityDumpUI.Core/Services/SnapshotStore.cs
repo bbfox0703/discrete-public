@@ -142,6 +142,11 @@ public sealed class SnapshotStore : IAsyncDisposable
 
         bool freshSchema = await MigrateAsync(conn, gameBuildId, targetProcess, ct).ConfigureAwait(false);
 
+        // Phase 30c — sweep any streaming capture (payload_bytes < 0 sentinel)
+        // that crashed/aborted before FinishStreamingSaveAsync ran. ON DELETE
+        // CASCADE drops its orphan class rows. No-op on a fresh DB.
+        await ExecuteAsync(conn, "DELETE FROM snapshots WHERE payload_bytes < 0;", ct).ConfigureAwait(false);
+
         var store = new SnapshotStore(conn, dbPath, gameBuildId, targetProcess, logger);
         store.Log(freshSchema
             ? $"opened (fresh schema v{CurrentSchemaVersion}) buildId={gameBuildId} target={targetProcess}"
@@ -266,6 +271,152 @@ public sealed class SnapshotStore : IAsyncDisposable
         }
     }
 
+    // ─── Phase 30c — streaming save ────────────────────────────────────
+    //
+    // The UI capture loop streams each snapshotChunk straight to disk instead
+    // of accumulating the whole snapshot in memory: Begin (insert the metadata
+    // row), Append per chunk (insert that chunk's class rows), Finish (stamp the
+    // real payload_bytes + field_value_count). The schema is untouched — class
+    // rows are the exact same shape as SaveSnapshotAsync writes, and each class
+    // belongs to exactly one chunk (one plan row per class) so there are no PK
+    // collisions across Append calls. An in-progress row carries
+    // payload_bytes = -1 (the sentinel) so ListSnapshotsAsync hides it and
+    // OpenAsync sweeps it if the capture crashed before Finish.
+
+    /// <summary>Begin a streaming save: insert the <c>snapshots</c> metadata row
+    /// with the incomplete sentinel (<c>payload_bytes = -1</c>) and return its
+    /// row id. Follow with one or more <see cref="AppendClassesAsync"/> then
+    /// <see cref="FinishStreamingSaveAsync"/>. On failure call the existing
+    /// <see cref="DeleteSnapshotAsync"/> to drop the partial row.</summary>
+    public async Task<long> BeginStreamingSaveAsync(
+        SnapshotStreamBeginRequest request, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO snapshots
+                    (label, captured_at_utc, game_build_id, game_session_id,
+                     target_process, backend, unity_version, ptr_size,
+                     total_classes, total_instances, field_value_count,
+                     instance_cap, array_cap, include_unchanged, asm_filter,
+                     payload_bytes)
+                VALUES
+                    ($label, $captured_at, $build_id, $session_id,
+                     $target_proc, $backend, $unity, $ptr_size,
+                     $total_classes, $total_instances, 0,
+                     $instance_cap, $array_cap, $include_unchanged, $asm_filter,
+                     -1);
+                SELECT last_insert_rowid();
+                """;
+            Bind(cmd, "$label",             request.Label);
+            Bind(cmd, "$captured_at",       request.CapturedAtUtc);
+            Bind(cmd, "$build_id",          request.GameBuildId);
+            Bind(cmd, "$session_id",        request.GameSessionId);
+            Bind(cmd, "$target_proc",       request.TargetProcess);
+            Bind(cmd, "$backend",           request.Backend);
+            Bind(cmd, "$unity",             request.UnityVersion);
+            Bind(cmd, "$ptr_size",          request.PointerSize);
+            Bind(cmd, "$total_classes",     request.TotalClasses);
+            Bind(cmd, "$total_instances",   request.TotalInstances);
+            Bind(cmd, "$instance_cap",      request.InstanceCap);
+            Bind(cmd, "$array_cap",         request.ArrayCap);
+            Bind(cmd, "$include_unchanged", request.IncludeUnchanged ? 1 : 0);
+            Bind(cmd, "$asm_filter",        request.AssemblyFilter);
+
+            var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            long id = Convert.ToInt64(result, CultureInfo.InvariantCulture);
+            Log($"streaming save begin id={id} label=\"{request.Label}\" sessionId={request.GameSessionId}");
+            return id;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>Append one capture chunk's classes to an in-progress streaming
+    /// save. Gzips + inserts each class row (same shape + index as
+    /// <see cref="SaveSnapshotAsync"/>); returns the total gzipped bytes added
+    /// so the caller can accumulate the final <c>payload_bytes</c>. One
+    /// transaction per call.</summary>
+    public async Task<long> AppendClassesAsync(
+        long snapshotId, IReadOnlyList<SnapshotClassEntry> classes, CancellationToken ct = default)
+    {
+        if (classes.Count == 0) return 0;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            using var tx = (SqliteTransaction)await _connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+            long bytes = 0;
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    INSERT INTO snapshot_classes
+                        (snapshot_id, assembly, class_fqn, instance_count, static_count, payload_gzip)
+                    VALUES
+                        ($snap, $asm, $fqn, $inst, $stat, $blob);
+                    """;
+                var pSnap = cmd.Parameters.Add("$snap", SqliteType.Integer);
+                var pAsm  = cmd.Parameters.Add("$asm",  SqliteType.Text);
+                var pFqn  = cmd.Parameters.Add("$fqn",  SqliteType.Text);
+                var pInst = cmd.Parameters.Add("$inst", SqliteType.Integer);
+                var pStat = cmd.Parameters.Add("$stat", SqliteType.Integer);
+                var pBlob = cmd.Parameters.Add("$blob", SqliteType.Blob);
+                pSnap.Value = snapshotId;
+                foreach (var c in classes)
+                {
+                    byte[] blob = SerializeAndGzip(c);
+                    bytes += blob.LongLength;
+                    pAsm.Value  = c.Assembly;
+                    pFqn.Value  = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
+                    pInst.Value = c.Instances?.Count ?? 0;
+                    pStat.Value = c.Statics?.Count ?? 0;
+                    pBlob.Value = blob;
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+            }
+            await tx.CommitAsync(ct).ConfigureAwait(false);
+            return bytes;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>Finish a streaming save: stamp the real <c>payload_bytes</c>
+    /// (clearing the -1 sentinel → row becomes visible/complete) and the
+    /// <c>field_value_count</c>.</summary>
+    public async Task FinishStreamingSaveAsync(
+        long snapshotId, long payloadBytes, int fieldValueCount, CancellationToken ct = default)
+    {
+        // A finished snapshot must not keep the sentinel; clamp a stray negative
+        // (e.g. zero classes appended) up to 0 so the row stays visible.
+        if (payloadBytes < 0) payloadBytes = 0;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                UPDATE snapshots
+                   SET payload_bytes = $pb, field_value_count = $fvc
+                 WHERE id = $id;
+                """;
+            Bind(cmd, "$pb",  payloadBytes);
+            Bind(cmd, "$fvc", fieldValueCount);
+            Bind(cmd, "$id",  snapshotId);
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            Log($"streaming save finish id={snapshotId} payload={payloadBytes:N0}B fvc={fieldValueCount:N0}");
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     /// <summary>List metadata for every snapshot in the DB, ordered
     /// newest-first. Cheap — no blobs read.</summary>
     public async Task<List<PersistedSnapshotMeta>> ListSnapshotsAsync(CancellationToken ct = default)
@@ -282,6 +433,7 @@ public sealed class SnapshotStore : IAsyncDisposable
                        instance_cap, array_cap, include_unchanged, asm_filter,
                        payload_bytes
                   FROM snapshots
+                 WHERE payload_bytes >= 0
                  ORDER BY captured_at_utc DESC, id DESC;
                 """;
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -760,6 +912,30 @@ public sealed class SnapshotPersistRequest
     public bool                      IncludeUnchanged { get; init; }
     public string?                   AssemblyFilter   { get; init; }
     public required List<SnapshotClassEntry> Classes  { get; init; }
+}
+
+/// <summary>Inputs for <see cref="SnapshotStore.BeginStreamingSaveAsync"/> —
+/// the metadata for a streaming capture, identical to
+/// <see cref="SnapshotPersistRequest"/> minus <c>Classes</c> (which arrive
+/// chunk-by-chunk via <see cref="SnapshotStore.AppendClassesAsync"/>). The
+/// final <c>payload_bytes</c> / <c>field_value_count</c> are stamped by
+/// <see cref="SnapshotStore.FinishStreamingSaveAsync"/>.</summary>
+public sealed class SnapshotStreamBeginRequest
+{
+    public string?         Label            { get; init; }
+    public required string CapturedAtUtc    { get; init; }
+    public required string GameBuildId      { get; init; }
+    public required string GameSessionId    { get; init; }
+    public required string TargetProcess    { get; init; }
+    public required string Backend          { get; init; }   // "mono" | "il2cpp"
+    public string?         UnityVersion     { get; init; }
+    public int?            PointerSize      { get; init; }
+    public required int    TotalClasses     { get; init; }
+    public required int    TotalInstances   { get; init; }
+    public int?            InstanceCap      { get; init; }
+    public int?            ArrayCap         { get; init; }
+    public bool            IncludeUnchanged { get; init; }
+    public string?         AssemblyFilter   { get; init; }
 }
 
 /// <summary>Outcome of <see cref="SnapshotStore.PruneAsync"/>. Surfaced

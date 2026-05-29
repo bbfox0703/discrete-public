@@ -173,6 +173,26 @@ Game decode tree ≈ 4.5 GB → **~1 GB**; UI ≈ 14.7 GB → **~3–4 GB** for 
      game that hurts), keep Mono on decode-in-Begin until (1)/(2) is proven.
 
 ### 30c — UI side: stream to disk, don't retain the envelope
+> **SHIPPED 2026-05-29.** When AutoSave is ON and a store is open, the capture loop
+> writes each chunk's classes straight to SQLite and drops them: `BeginStreamingSaveAsync`
+> (insert the `snapshots` row with `payload_bytes = -1` sentinel) →
+> `AppendClassesAsync(rowId, chunk.Classes)` per chunk (gzip + insert the same
+> per-class rows `SaveSnapshotAsync` writes — each class is in exactly one chunk, no
+> PK clash) → `FinishStreamingSaveAsync(rowId, payloadBytes, fieldValueCount)`
+> (stamps the real `payload_bytes`, clearing the sentinel). The capture builds a
+> **metadata-only** `SnapshotEnvelope` (`PersistedId` set, `Classes` empty,
+> `ClassesLoaded = false`) — diff/pivot/SPC/export hydrate it on demand via
+> `EnsureLoadedAsync` → `LoadClassesAsync`, exactly like a snapshot loaded from a
+> previous session. **No schema change** (the store was already one gzipped row per
+> class; `field_value_count` already existed). Crash safety: an in-progress row
+> (`payload_bytes < 0`) is hidden by `ListSnapshotsAsync` and swept by `OpenAsync` on
+> reopen; a mid-stream chunk error deletes the partial row. **Scope: AutoSave-ON
+> only** — that path already persisted every capture, so the only change is *how*
+> (incremental) + dropping the in-memory copy; AutoSave-OFF keeps the in-memory +
+> dirty + manual-💾 path byte-for-byte. UI peak now ~one chunk + write buffer instead
+> of the whole snapshot. 603 UI tests green (incl. streamed-vs-one-shot round-trip
+> parity + the sweep). Live-smoke (UI peak vs the 30b ~7.5 GB) still TODO.
+
 - Today the UI accumulates every chunk into `classes` + a `SnapshotEnvelope` held in
   memory ([SnapshotViewModel.cs:992](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)),
   *then* saves to SQLite — so UI peak = whole snapshot.
