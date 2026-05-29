@@ -1,12 +1,12 @@
 # UnityCEDumper — plan.md archive (Phases 17 through 28)
 
 > Detailed sub-phase write-ups for shipped phases 17–28. Carved out
-> of [plan.md](plan.md) on 2026-05-29 once Phase 29c+d shipped, so
+> of [plan.md](../plan.md) on 2026-05-29 once Phase 29c+d shipped, so
 > the active planning doc focuses on the current and pending work
 > (Phase 29 series + Phase 30 future).
 >
 > All phases below are ✅ SHIPPED. The canonical summary still lives
-> in the **Phase Overview** table at the top of [plan.md](plan.md);
+> in the **Phase Overview** table at the top of [plan.md](../plan.md);
 > this file holds the detailed plans / sub-phase ledgers / open
 > follow-ups that were too long to keep loaded in the active doc.
 >
@@ -18,7 +18,7 @@
 ## Hand-off notes (historical — for live state see STATUS.md)
 
 - Phase 17 sub-phase 17d green (build #198, 2026-05-07):
-  - New [scripts/unity_addrfind.lua](../scripts/unity_addrfind.lua) (13.6 KB) — closes out Phase 17's address-finder track on the CE side. Public API: `whatIsAt(addr, maxBackwardScan?)` (low-level, returns parsed table); `lookupAddress(addr)` (pretty-prints to console, mirrors `Test-WhatIsAt.ps1`'s output format); `getClassRangeStats(rebuild?)` (diagnostic / cache pre-warm); `lookupSelectedAddress()` (memview-or-prompt entry point); `bindAddrLookupHotkey(keys)` (optional global hotkey that fires `lookupSelectedAddress`).
+  - New [scripts/unity_addrfind.lua](../../scripts/unity_addrfind.lua) (13.6 KB) — closes out Phase 17's address-finder track on the CE side. Public API: `whatIsAt(addr, maxBackwardScan?)` (low-level, returns parsed table); `lookupAddress(addr)` (pretty-prints to console, mirrors `Test-WhatIsAt.ps1`'s output format); `getClassRangeStats(rebuild?)` (diagnostic / cache pre-warm); `lookupSelectedAddress()` (memview-or-prompt entry point); `bindAddrLookupHotkey(keys)` (optional global hotkey that fires `lookupSelectedAddress`).
   - Memory-view selection: tries `getMemoryViewForm().HexadecimalView.SelectionStart` first, falls back to `.TopAddress`, then `inputQuery` when neither is available — every accessor is `pcall`-wrapped so older CE builds (and weird forks) degrade gracefully.
   - JSON parser + RPC helper deliberately duplicated from `unity_dissect.lua` (instead of `require`-ing utils) so the file remains drop-in standalone — users who already pasted the dissect / symbols scripts only need to add this one. ~3 s pipe-open retry budget + per-RPC `processMessages()` / `sleep(1)` yield are identical to the sibling scripts.
   - `scripts/README.md` gains a Phase 17d step in the workflow + entry in the install layout block. Existing build script's `*.lua` glob in `Invoke-CompanionCopy` (`build.ps1:412`) means no build-script changes were needed.
@@ -26,7 +26,7 @@
   - **NuGet bumps landed in this session**: Avalonia 12.0.1 → 12.0.2 (UnityDumpUI.csproj inlined the version literal, removing the `$(AvaloniaVersion)` MSBuild property), `Tmds.DBus.Protocol` 0.92.0 → 0.93.0, `Microsoft.NET.Test.Sdk` 18.4.0 → 18.5.1. AOT publish stays clean (0 warnings under all four trim/AOT analyzers); `DiscreteUI.exe` actually shrank from 45.2 MB → 39.0 MB after the bumps, suggesting Avalonia 12.0.2 brought trim improvements.
 
 - Phase 17 sub-phase 17c green (build #197, 2026-05-06):
-  - New `AddressLookupViewModel` ([ui/UnityDumpUI/ViewModels/AddressLookupViewModel.cs](../ui/UnityDumpUI/ViewModels/AddressLookupViewModel.cs)) wraps the `whatIsAt` RPC with CommunityToolkit.Mvvm source-gen (no reflection) and exposes presentation-friendly labels (`InstanceLabel`, `ClassLabel`, `FieldOffsetLabel`, `FieldLabel`, `NearestFieldLabel`, `KindLabel`, `ScannedLabel`). Cancellation-safe — supersedes prior in-flight lookups so a fast-typing user doesn't get out-of-order results.
+  - New `AddressLookupViewModel` ([ui/UnityDumpUI/ViewModels/AddressLookupViewModel.cs](../../ui/UnityDumpUI/ViewModels/AddressLookupViewModel.cs)) wraps the `whatIsAt` RPC with CommunityToolkit.Mvvm source-gen (no reflection) and exposes presentation-friendly labels (`InstanceLabel`, `ClassLabel`, `FieldOffsetLabel`, `FieldLabel`, `NearestFieldLabel`, `KindLabel`, `ScannedLabel`). Cancellation-safe — supersedes prior in-flight lookups so a fast-typing user doesn't get out-of-order results.
   - New DTOs in `ProtocolModels.cs`: `WhatIsAtResult` / `WhatIsAtField` / `WhatIsAtScanRange` / `ClassRangeStatsResult`. Registered with the source-gen `ProtocolJsonContext` alongside the existing types so AOT publish stays at zero IL2026 / IL3050 warnings.
   - `BackendAdapter` gains `WhatIsAtAsync(address, maxBackwardScan)` and `GetClassRangeStatsAsync(rebuild)`. The `Boolean` JSON serializer is now registered too (used by `getClassRangeStats`'s optional `rebuild` arg).
   - New "Address Lookup" tab on `MainWindow` next to Fields / Inspector / Methods. Address textbox + Lookup / Clear buttons + a Backward-scan NumericUpDown (4096 default, capped at 16384 to match the DLL). Result block shows Instance / Class / Field offset / Field (or NearestField with delta) / Kind / Scanned-range, plus *Inspect this instance* and *Copy instance address* action buttons. The "no result" panel surfaces the raw `reason` from the wire (`no_klass_in_range`, `class_range_cache_unavailable`, `no_il2cpp_domain`, …) so users can tell apart "scan landed in unmanaged memory" from "DLL isn't loaded properly".
@@ -115,7 +115,7 @@ pointer-scan, identify which Unity managed instance, class, and field that
 address belongs to. Closes a structural gap between CE's address-centric
 workflow and our class-centric inspector.
 
-Spec: [docs/address-finder.md](address-finder.md).
+Spec: [docs/address-finder.md](../address-finder.md).
 
 - [x] **17a** DLL handler: `whatIsAt(address)` with Strategy A backward-scan from queried address, 8-byte stride, up to 4 KB (capped at 16 KB). Validates candidate `klass*` pointers via SEH-protected `*_class_get_name` calls + a class-pointer range cache built lazily on first use (and invalidated on `scan`). Mono-side cache also tracks the `MonoVTable*` set + a `vtable→klass` map since the object header points at a vtable, not the class. `getClassRangeStats` companion command exposes cache size for diagnostics. Smoke test: `tools/Test-WhatIsAt.ps1`.
 - [x] **17b** Field-offset resolution: parent-chain walk + per-field size lookup (via `class_value_size` for value types, primitive-name fallback table, 8 bytes for references). Resolves to either `field` (exact range hit, with kind classifier `leaf`/`value-struct`/`pointer`/`interior`) or `nearestField` (closest declared field below the offset, with `nearestFieldDelta`). Pointer-deref recursion (chase pointer-to-class targets, T[]/List<T> element resolution, string-buffer detection) deferred — Strategy A returns enough data for the UI / Lua bridge to chain follow-up RPCs.
@@ -123,7 +123,7 @@ Spec: [docs/address-finder.md](address-finder.md).
 - [x] **17d** CE Lua bridge: `scripts/unity_addrfind.lua` ships alongside the existing `unity_dissect` / `unity_symbols` scripts with the same `\\.\pipe\UnityDumpBfx` RPC + retry scaffolding. Public API: `whatIsAt(addr)` returns the parsed table, `lookupAddress(addr)` pretty-prints to CE's console, `getClassRangeStats(rebuild)` for diagnostics, plus optional `bindAddrLookupHotkey({VK_CONTROL, VK_F2})` that registers a CE hotkey firing `lookupSelectedAddress()` (reads CE memory view's `HexadecimalView.SelectionStart` / `TopAddress`, falls back to `inputQuery` when no memview is open). Build script's `*.lua` glob auto-includes the new script so `dist/` carries it.
 - [ ] **17e** Strategy B (cached heap walk + interval tree) — only if a user reports needing batch lookups against a CE pointer-scan result. v1 ships Strategy A only.
 
-**Acceptance** (full criteria in [address-finder.md](address-finder.md)):
+**Acceptance** (full criteria in [address-finder.md](../address-finder.md)):
 - Given the address of a known live `PLY_WORK.HP` field on SaGa F2R, `whatIsAt` returns instance + class + field name + offset matching DiscreteUI's `findInstances` + `walkInstance` output
 - Address `+8` bytes into a `Vector3` field's storage reports the field as `position` with the right `kind`
 - Parent-class field (e.g. `MonoBehaviour.useGUILayout`) reports the declaring class, not the most-derived one
@@ -167,7 +167,7 @@ and lets cheat-table authors call e.g. `Player.AddItem(99)` or
 `Vector3.ToString()` from a CE hotkey without hand-writing native-ABI
 Auto-Assembler.
 
-Spec: [docs/lua-invoke.md](lua-invoke.md) (TBD — write alongside 19a).
+Spec: [docs/lua-invoke.md](../lua-invoke.md) (TBD — write alongside 19a).
 
 ### Why now
 
@@ -200,7 +200,7 @@ solution** — useful for one-off prototyping when the user happens to
 have CE attached and doesn't need our pipe surface elsewhere. The
 recommended workflow stays our DLL + `callMethod`. Full
 side-by-side comparison: [docs/lua-invoke.md §"Why a custom RPC when CE
-has built-in support?"](lua-invoke.md#why-a-custom-rpc-when-ce-has-built-in-support).
+has built-in support?"](../lua-invoke.md#why-a-custom-rpc-when-ce-has-built-in-support).
 
 ### Scope (v1)
 
@@ -255,8 +255,8 @@ Out (v2 follow-ups, deliberately not started):
   float/double unboxed via `object_unbox`; reference types surface as the
   raw managed pointer (`returnValue: "0x..."`); `System.String` returns
   surface as Address in 19a (19c will decode to UTF-8). Spec doc:
-  [docs/lua-invoke.md](lua-invoke.md). Pipe-protocol entry:
-  [pipe-protocol.md#callmethod-il2cpp](pipe-protocol.md#callmethod-il2cpp).
+  [docs/lua-invoke.md](../lua-invoke.md). Pipe-protocol entry:
+  [pipe-protocol.md#callmethod-il2cpp](../pipe-protocol.md#callmethod-il2cpp).
   Smoke: `tools/Test-CallMethod.ps1` (positive / exception / overload-disambig
   scenarios). 19a explicitly rejects `instance != 0`
   (`instance_methods_not_supported_in_19a`), non-static methods
@@ -366,9 +366,9 @@ Out (v2 follow-ups, deliberately not started):
     scoped to the instance's class) deferred to 19d-2 — the dialog
     accepts an instance address typed manually for now, which covers the
     direct workflow.
-  * Files: new [`MethodCallWindow.axaml{,.cs}`](../ui/UnityDumpUI/Views/MethodCallWindow.axaml),
-    new [`MethodCallViewModel.cs`](../ui/UnityDumpUI/ViewModels/MethodCallViewModel.cs),
-    new [`CallArgFactory.cs`](../ui/UnityDumpUI.Core/Services/CallArgFactory.cs), DTOs
+  * Files: new [`MethodCallWindow.axaml{,.cs}`](../../ui/UnityDumpUI/Views/MethodCallWindow.axaml),
+    new [`MethodCallViewModel.cs`](../../ui/UnityDumpUI/ViewModels/MethodCallViewModel.cs),
+    new [`CallArgFactory.cs`](../../ui/UnityDumpUI.Core/Services/CallArgFactory.cs), DTOs
     in `ProtocolModels.cs` (`CallArgRequest` / `CallMethodResult` /
     `CallMethodMethodInfo`) + matching `ProtocolJsonContext` registrations.
 
@@ -406,15 +406,15 @@ Out (v2 follow-ups, deliberately not started):
     populates it from a real source.
   * AOT publish stays clean — 0/0 trim/AOT analyzer warnings;
     `DiscreteUI.exe` 38.3 MB.
-  * Files: [`MainWindow.axaml.cs`](../ui/UnityDumpUI/Views/MainWindow.axaml.cs)
+  * Files: [`MainWindow.axaml.cs`](../../ui/UnityDumpUI/Views/MainWindow.axaml.cs)
     (split handlers + helpers + Inspector instance handler),
-    [`MainWindow.axaml`](../ui/UnityDumpUI/Views/MainWindow.axaml)
+    [`MainWindow.axaml`](../../ui/UnityDumpUI/Views/MainWindow.axaml)
     (rewire menu Click + add Instances ListBox ContextMenu),
-    [`MethodOverloadsViewModel.cs`](../ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs)
+    [`MethodOverloadsViewModel.cs`](../../ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs)
     (new `DefaultInstanceAddress` property + ctor param),
-    [`MethodOverloadsWindow.axaml.cs`](../ui/UnityDumpUI/Views/MethodOverloadsWindow.axaml.cs)
+    [`MethodOverloadsWindow.axaml.cs`](../../ui/UnityDumpUI/Views/MethodOverloadsWindow.axaml.cs)
     (forward `DefaultInstanceAddress` into `MethodCallViewModel`),
-    [`Strings/en.axaml`](../ui/UnityDumpUI/Resources/Strings/en.axaml)
+    [`Strings/en.axaml`](../../ui/UnityDumpUI/Resources/Strings/en.axaml)
     (new `Inspector.CallMethodOnInstanceMenu` resource).
   * Deferred to 19d-3: smart-typed editors (NumericUpDown for sized ints,
     ComboBox for enums via `getEnumValues`).
@@ -452,20 +452,20 @@ Out (v2 follow-ups, deliberately not started):
     found, not an enum, Mono missing `mono_field_get_data`) silently
     leave the row on TextBox.
   * Files: new DTOs in
-    [`ProtocolModels.cs`](../ui/UnityDumpUI.Core/Services/ProtocolModels.cs)
+    [`ProtocolModels.cs`](../../ui/UnityDumpUI.Core/Services/ProtocolModels.cs)
     (`GetEnumValuesResult` / `EnumValueEntry`), registered in
-    [`ProtocolJson.cs`](../ui/UnityDumpUI.Core/Services/ProtocolJson.cs)
+    [`ProtocolJson.cs`](../../ui/UnityDumpUI.Core/Services/ProtocolJson.cs)
     so AOT publish stays clean; new `GetEnumValuesAsync` in
-    [`BackendAdapter.cs`](../ui/UnityDumpUI.Core/Services/BackendAdapter.cs);
+    [`BackendAdapter.cs`](../../ui/UnityDumpUI.Core/Services/BackendAdapter.cs);
     new `MethodCallEditorKind` enum + `MethodCallEnumChoice` plus
     extended `MethodCallParamRow` (numeric range / NumericValue setter /
     EnumChoices / SelectedEnumChoice / EnumUnderlyingType) and
     `InitializeAsync` + `ProbeEnumAsync` in
-    [`MethodCallViewModel.cs`](../ui/UnityDumpUI/ViewModels/MethodCallViewModel.cs);
+    [`MethodCallViewModel.cs`](../../ui/UnityDumpUI/ViewModels/MethodCallViewModel.cs);
     multi-editor `DataTemplate` in
-    [`MethodCallWindow.axaml`](../ui/UnityDumpUI/Views/MethodCallWindow.axaml);
+    [`MethodCallWindow.axaml`](../../ui/UnityDumpUI/Views/MethodCallWindow.axaml);
     `Opened` handler in
-    [`MethodCallWindow.axaml.cs`](../ui/UnityDumpUI/Views/MethodCallWindow.axaml.cs).
+    [`MethodCallWindow.axaml.cs`](../../ui/UnityDumpUI/Views/MethodCallWindow.axaml.cs).
   * Build clean (0 warnings); 163/163 tests pass; AOT publish 0/0 trim/AOT
     analyzer warnings; `DiscreteUI.exe` 38.7 MB.
   * **Live click-through smoke 2026-05-19 (user-confirmed, multi-target)**:
@@ -632,7 +632,7 @@ Estimated effort: ~3 days for v1 (19a + 19b in one day, 19c in one day,
 ## Phase 20 — Scene / GameObject explorer + Object.name search
 
 **Goal**: Reproduce the most useful concept from
-[`vendor/UnityExplorer/`](../vendor/UnityExplorer/) — its Scene Explorer
+[`vendor/UnityExplorer/`](../../vendor/UnityExplorer/) — its Scene Explorer
 tab — in our out-of-process architecture. UnityExplorer's full Scene
 Explorer needs in-process Unity engine API access (it's a BepInEx /
 MelonLoader plugin); we get an equivalent surface for free by composing
@@ -781,7 +781,7 @@ Out (v2 candidates):
   `ThreadAttachGuard` now consults
   `MainThreadDispatcher::IsCurrentlyDrainingOnMainThread()` and
   becomes a no-op on main thread. Two lessons recorded in
-  [lessons-learned.md](lessons-learned.md): nested-attach trap +
+  [lessons-learned.md](../lessons-learned.md): nested-attach trap +
   Unity 2018 focus-pause. Files: `dll/src/shared/MainThreadDispatcher.{h,cpp}`,
   `dll/src/mono/MonoMainThreadHook.{h,cpp}`,
   `dll/src/il2cpp/IL2CPPMainThreadHook.{h,cpp}`, `dll/vendor/minihook/`
@@ -847,7 +847,7 @@ commands.
   returned null. Probably mscorlib not loaded yet or Unity hasn't
   initialised its assemblies.`
   
-  **Root cause**: [`SceneEnumerator.cs`](../ui/UnityDumpUI.Core/Services/SceneEnumerator.cs)
+  **Root cause**: [`SceneEnumerator.cs`](../../ui/UnityDumpUI.Core/Services/SceneEnumerator.cs)
   hardcoded the post-Unity-5.4 module-split FQN
   `"UnityEngine.GameObject, UnityEngine.CoreModule"` AND every
   downstream `CallMethodAsync` (Object.FindObjects, Object.get_name,
@@ -926,11 +926,11 @@ Out (v2):
   + `written` + echoed `address` / `fieldOffset` / `fieldAddress` /
   `type` on success; soft `error` + `hint` on unwritable / out-of-range /
   unsupported-type. PowerShell smoke
-  [`tools/Test-SetInstanceField.ps1`](../tools/Test-SetInstanceField.ps1)
+  [`tools/Test-SetInstanceField.ps1`](../../tools/Test-SetInstanceField.ps1)
   saves bytes via `readMemory`, calls `setInstanceField`, reads back
   via `readMemory` to verify the new value, then restores the
   original bytes unless `-NoRestore`. Spec recorded in
-  [pipe-protocol.md §"setInstanceField"](pipe-protocol.md).
+  [pipe-protocol.md §"setInstanceField"](../pipe-protocol.md).
 - [x] **21b** UI Inspector field write modal (build #331, AOT clean).
   Right-click any Inspector row → "Write value…" context-menu item →
   opens new `FieldWriteWindow` modal. Per-row editor flavor picked by
@@ -952,7 +952,7 @@ Out (v2):
   31 `InspectorWriteTypeMap` classifier (theory rows) +
   unsupported-type guard. 238/238 pass.
 - [x] **21c** CE Lua bridge wrapper — extended
-  [`scripts/unity_invoke.lua`](../scripts/unity_invoke.lua) with
+  [`scripts/unity_invoke.lua`](../../scripts/unity_invoke.lua) with
   `setField(fieldAddr, wireType, value)` + `setInstanceField(
   instanceAddr, fieldOffset, wireType, value)` (1 KB code growth).
   Bridge-side type marshaling mirrors the DLL — accepts both
@@ -961,7 +961,7 @@ Out (v2):
   hex. Pipe-level errors throw (matching the rest of the script);
   soft errors land in `result.error` so consumers can branch on
   `result.ok`. Documented in
-  [lua-invoke.md §"Phase 21b — field write-back"](lua-invoke.md)
+  [lua-invoke.md §"Phase 21b — field write-back"](../lua-invoke.md)
   with worked examples.
 - [x] **21d** Live verification — **PASS 2026-05-19** on BongoCat
   Mono (right-click primitive Inspector row → Write value… modal →
@@ -1006,7 +1006,7 @@ mid-flight); Steps 9-11 verified in a follow-up session — user log
 captured `Mathf.Abs(-7) → 7` end-to-end through the
 DiscreteUI → AOBMaker → CT → bridge → `callUnityMethod` → `prettyPrint`
 chain on Mono build #304. 11-step checklist
-([`docs/ce-bridge-integration.md` § "Manual smoke checklist"](ce-bridge-integration.md))
+([`docs/ce-bridge-integration.md` § "Manual smoke checklist"](../ce-bridge-integration.md))
 is now reference material, not pending work.
 
 ### Why the pivot
@@ -1026,9 +1026,9 @@ mutate the currently-open CT in-process:
 | `CreateSymbolScript { name, aob, pos, aoblen, symbol, module }` | Plugin assembles the AA template internally. We already have our own `AobAaScriptGenerator`, so this is informational only. |
 
 UE5CEDumper has the canonical implementation of this pattern —
-[`Services/HelperLuaResource.cs`](../../UE5CEDumper/ui/UE5DumpUI/Services/HelperLuaResource.cs)
+[`Services/HelperLuaResource.cs`](../../../UE5CEDumper/ui/UE5DumpUI/Services/HelperLuaResource.cs)
 embeds one lua module via `<EmbeddedResource>` in csproj,
-[`Services/AobMakerBridgeService.cs`](../../UE5CEDumper/ui/UE5DumpUI/Services/AobMakerBridgeService.cs)
+[`Services/AobMakerBridgeService.cs`](../../../UE5CEDumper/ui/UE5DumpUI/Services/AobMakerBridgeService.cs)
 exposes `InjectTableFileAsync` + `CheckAvailabilityAsync` + `IsAvailable`,
 and `MainWindowViewModel.InjectCeHelperLuaAsync()` is a single Tools-menu
 RelayCommand. Phase 22 = scale that pattern from 1 module to 7 + add
@@ -1060,15 +1060,15 @@ Discrete-side architecture change.
   + handler implementations in `pipe_server.cpp` (lines 582 onwards
   cover `HandleCreateMemoryRecord` / `HandleCreateAAScript` /
   `HandleCreateAAScriptWithRecords` / `HandleInjectTableFile`).
-- Discrete's existing AOBMaker client (Phase 18c): [`AobMakerBridge.cs`](../ui/UnityDumpUI.Core/Services/AobMakerBridge.cs)
+- Discrete's existing AOBMaker client (Phase 18c): [`AobMakerBridge.cs`](../../ui/UnityDumpUI.Core/Services/AobMakerBridge.cs)
   — 3 commands wired (`NavigateHexView` / `NavigateDisassembler` /
   `CreateAAScript`). Phase 22a extends to all 5 we need.
 - UE5CEDumper reference implementation:
-  - [`ui/UE5DumpUI/Services/HelperLuaResource.cs`](../../UE5CEDumper/ui/UE5DumpUI/Services/HelperLuaResource.cs)
+  - [`ui/UE5DumpUI/Services/HelperLuaResource.cs`](../../../UE5CEDumper/ui/UE5DumpUI/Services/HelperLuaResource.cs)
     (embedded-resource pattern).
-  - [`ui/UE5DumpUI/Services/AobMakerBridgeService.cs:275-331`](../../UE5CEDumper/ui/UE5DumpUI/Services/AobMakerBridgeService.cs)
+  - [`ui/UE5DumpUI/Services/AobMakerBridgeService.cs:275-331`](../../../UE5CEDumper/ui/UE5DumpUI/Services/AobMakerBridgeService.cs)
     (`InjectTableFileAsync` + `CheckAvailabilityAsync` + `IsAvailable` observable).
-  - [`ui/UE5DumpUI/ViewModels/MainWindowViewModel.cs:828-876`](../../UE5CEDumper/ui/UE5DumpUI/ViewModels/MainWindowViewModel.cs)
+  - [`ui/UE5DumpUI/ViewModels/MainWindowViewModel.cs:828-876`](../../../UE5CEDumper/ui/UE5DumpUI/ViewModels/MainWindowViewModel.cs)
     (`InjectCeHelperLuaAsync` Tools-menu RelayCommand).
 - Original deferred design (reason it was scrapped): see this section's
   git history at commit `2143a77`.
@@ -1082,7 +1082,7 @@ Discrete-side architecture change.
 | **22c** | "Load Discrete Bridge" AA-script template | 3h | C# `const string` template + minimal substitution (no dynamic AA generation). `[ENABLE]` block iterates the 7 files via `findTableFile` + `Stream.copyFrom` + `load()`, guarded by `_G.discrete_bridgeLoaded`; runs `unity_handshake()` to assert `protocol_version` (warns but does not abort on mismatch); pings the DLL pipe (`\\.\pipe\UnityDumper-{Backend}`) and prints "Inject DLL via DiscreteUI first" if absent. `[DISABLE]` clears the globals. |
 | **22d** | Tools menu "Inject Discrete Bridge into CE Table" | 2h | New `MainWindowViewModel.InjectDiscreteBridgeAsync()` RelayCommand: `CheckAvailability` → 7× `InjectTableFile` with progress status ("Injecting 1/8…") → 1× `CreateAAScript` for bootstrap. Stops on first failure with the AOBMaker error message. Final status: "Bridge ready in CE — enable Load Discrete Bridge to activate". Menu item bound to `IsAvailable`; tooltip when disabled: "Open CE with AOBMaker plugin loaded". |
 | **22e** | Per-feature "Send to CE Table" entries | 4h | • **Methods grid context menu** → "Send AA script to CE Table" — calls existing `AobAaScriptGenerator.Build()` on the selected overload(s), pushes result via `CreateAAScript`. • **MethodCallWindow** "Send to CE Table" button — wraps `callUnityMethod(asm, ns, cls, method, args, opts)` in a `{$lua}` AA block + `CreateAAScript`. • **AddressLookup** result row → uses `CreateAAScriptWithRecords` to push instance pointer + each field as offset-children. • **Inspector** field row (gated on Phase 21) — "Send write-back to CE Table" → `CreateAAScript` wrapping `setInstanceField(...)`. Every generated `[ENABLE]` prepends `if not _G.discrete_bridgeLoaded then print('Enable Load Discrete Bridge first'); return end`. |
-| **22f** | E2E smoke + integration doc | 2h | New [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) describing the user journey (open CE → load CT → DiscreteUI Inject Bridge → use feature buttons → CE File→Save). Smoke: clean CE 7.6 → empty CT → bridge injection → Phase 18 AOB push + Phase 19 callMethod push + Phase 17 AddressLookup push → File→Save → re-open in fresh CE process → verify all 3 features still enable cleanly. |
+| **22f** | E2E smoke + integration doc | 2h | New [`docs/ce-bridge-integration.md`](../ce-bridge-integration.md) describing the user journey (open CE → load CT → DiscreteUI Inject Bridge → use feature buttons → CE File→Save). Smoke: clean CE 7.6 → empty CT → bridge injection → Phase 18 AOB push + Phase 19 callMethod push + Phase 17 AddressLookup push → File→Save → re-open in fresh CE process → verify all 3 features still enable cleanly. |
 
 ### Dependencies + parallelism
 
@@ -1365,7 +1365,7 @@ Unity-class-aware filtering that CE itself cannot do.
 (parallel chunked VirtualQueryEx walker with memory budget + cancellation).
 We do NOT reimplement that engine in C# — we reuse the existing DLL-side
 `Memory::EnumerateCommittedRegions` + `Memory::ScanForPointer` plumbing
-([dll/src/shared/Memory.h](../dll/src/shared/Memory.h)) which already has
+([dll/src/shared/Memory.h](../../dll/src/shared/Memory.h)) which already has
 Phase 23's MEM_IMAGE / stack-residue filtering hardened.
 
 ### Why two scan modes
@@ -1384,10 +1384,10 @@ cost there is tiny.
 
 | Existing | Reused for | Lives in |
 |---|---|---|
-| `Memory::EnumerateCommittedRegions()` | Region enumeration with VirtualQueryEx + protect filter | [dll/src/shared/Memory.h:55](../dll/src/shared/Memory.h) |
+| `Memory::EnumerateCommittedRegions()` | Region enumeration with VirtualQueryEx + protect filter | [dll/src/shared/Memory.h:55](../../dll/src/shared/Memory.h) |
 | `Memory::SafeReadBytes` + SEH-leaf primitives | Reading anti-cheat-stripped pages without crashing the scan | same |
 | `Memory::ScanForPointer` (Phase 23 hardened) | Template / pattern for the new `ScanForValue<T>` parallel scanner | same |
-| `whatIsAt(addr)` (Phase 17) — class-range cache + backward scan | Per-candidate Unity-managed filter | [MonoAddressFinder.cpp](../dll/src/mono/MonoAddressFinder.cpp) / [IL2CPPAddressFinder.cpp](../dll/src/il2cpp/IL2CPPAddressFinder.cpp) |
+| `whatIsAt(addr)` (Phase 17) — class-range cache + backward scan | Per-candidate Unity-managed filter | [MonoAddressFinder.cpp](../../dll/src/mono/MonoAddressFinder.cpp) / [IL2CPPAddressFinder.cpp](../../dll/src/il2cpp/IL2CPPAddressFinder.cpp) |
 | `listFieldValuesAcrossInstances` (Phase 21a) | Class-scoped mode core — already iterates instances + reads field values | ExportAPI handlers |
 | `findInstances` (Phase 6c) | Class-scoped mode instance enumeration | same |
 | AOBMaker `WindowsValueScanner.cs` `ValueScanRequest` / `ValueScanState` / `ValueScanType` shapes | UI-side reference for DataType / ScanType enums + Parallel.ForEach result-merge pattern | `D:\Github\AOBMaker\src\AOBMaker.Core\Models\` |
@@ -1401,7 +1401,7 @@ from crashing if a hooked region throws.
 
 ### Sub-phases
 
-- [x] **27a** DLL `scanFieldValue` RPC (First Scan). **SHIPPED + LIVE-SMOKED 2026-05-20** (build #423). Live-verified on SaGa F2R IL2CPP x64 (global Int32=100000 found `MainGame.PLY_WORK.purse` at +0x18), BongoCat Mono x64 (class-scoped), and 活俠傳 Mono x86 (Unity 2020.3.49f1 — global scan reliably found `Mortal.Core.GameStat._value`). One P0 hang fixed mid-smoke: `Mono::BuildClassRangeCache` rewritten to lazy vtable resolution so legacy 32-bit Mono no longer wedges when game's main thread is focus-paused. Lesson recorded in [lessons-learned.md](lessons-learned.md).
+- [x] **27a** DLL `scanFieldValue` RPC (First Scan). **SHIPPED + LIVE-SMOKED 2026-05-20** (build #423). Live-verified on SaGa F2R IL2CPP x64 (global Int32=100000 found `MainGame.PLY_WORK.purse` at +0x18), BongoCat Mono x64 (class-scoped), and 活俠傳 Mono x86 (Unity 2020.3.49f1 — global scan reliably found `Mortal.Core.GameStat._value`). One P0 hang fixed mid-smoke: `Mono::BuildClassRangeCache` rewritten to lazy vtable resolution so legacy 32-bit Mono no longer wedges when game's main thread is focus-paused. Lesson recorded in [lessons-learned.md](../lessons-learned.md).
   * New `Memory::ScanForValue<T>` helper paralleling `Memory::ScanForPointer`:
     chunked parallel walk over `EnumerateCommittedRegions()` output, skip
     MEM_IMAGE + thread-stack regions (already filtered today), exact /
@@ -1465,7 +1465,7 @@ from crashing if a hooked region throws.
   returns non-null. Compute element index from
   `(queriedAddr - elementsBase) / elementSize` where:
   * `elementsBase` = instance base + array-header size (Mono: 32 bytes
-    on x64, 16 on x86; IL2CPP: 32 bytes — see [ManagedLayout.h](../dll/src/shared/ManagedLayout.h)
+    on x64, 16 on x86; IL2CPP: 32 bytes — see [ManagedLayout.h](../../dll/src/shared/ManagedLayout.h)
     `kArrayDataOffset`).
   * `elementSize` from `*_class_value_size(element_class)` for value-typed
     arrays; pointer-size for reference arrays.
@@ -1673,7 +1673,7 @@ pending — see "Live verify TODO" below.
 
 ### What shipped (28a + 28b + 28d)
 
-**DLL Mono path** ([MonoFieldXref.cpp](../dll/src/mono/MonoFieldXref.cpp)):
+**DLL Mono path** ([MonoFieldXref.cpp](../../dll/src/mono/MonoFieldXref.cpp)):
 * New runtime exports bound (optional): `mono_method_get_header`,
   `mono_method_header_get_code`, `mono_metadata_free_mh`,
   `mono_class_get_field_token`.
@@ -1690,7 +1690,7 @@ pending — see "Live verify TODO" below.
 * One outer `ThreadAttachGuard` around the whole batch (reentrancy
   counter handles inner helpers — Phase 27 reentrant guard pattern).
 
-**DLL IL2CPP path** ([IL2CPPFieldXref.cpp](../dll/src/il2cpp/IL2CPPFieldXref.cpp)):
+**DLL IL2CPP path** ([IL2CPPFieldXref.cpp](../../dll/src/il2cpp/IL2CPPFieldXref.cpp)):
 * Resolves static address via `il2cpp_class_get_static_data(klass) + field.offset`.
 * PE walker reads `IMAGE_DOS_HEADER` + `IMAGE_NT_HEADERS64` from the
   loaded GameAssembly.dll image base via `SafeRead`, enumerates
@@ -1713,8 +1713,8 @@ pending — see "Live verify TODO" below.
   instance fields not supported on IL2CPP backend in v1"` so the UI
   surfaces the limitation cleanly.
 
-**UI** ([FieldReferencesWindow.axaml](../ui/UnityDumpUI/Views/FieldReferencesWindow.axaml) +
-[FieldReferencesViewModel.cs](../ui/UnityDumpUI/ViewModels/FieldReferencesViewModel.cs)):
+**UI** ([FieldReferencesWindow.axaml](../../ui/UnityDumpUI/Views/FieldReferencesWindow.axaml) +
+[FieldReferencesViewModel.cs](../../ui/UnityDumpUI/ViewModels/FieldReferencesViewModel.cs)):
 * New modal — DataGrid: Kind / Class / Method / Address / IL offset /
   Confidence; sortable per AOT trap rules (SortMemberPath + CanUserSort
   + per-column CustomSortComparer wired in code-behind).
@@ -1729,7 +1729,7 @@ pending — see "Live verify TODO" below.
   funnel through `MainWindow.OpenFieldReferencesAsync`.
 
 **Tests**: 4 new fake-pipe tests in
-[FindFieldReferencesTests.cs](../ui/UnityDumpUI.Tests/FindFieldReferencesTests.cs) —
+[FindFieldReferencesTests.cs](../../ui/UnityDumpUI.Tests/FindFieldReferencesTests.cs) —
 Mono shape (IL offset + null address), IL2CPP shape (staticAddress +
 hitAddress), kind-filter wire-arg pass-through, IL2CPP instance-field
 error surface. Total suite: 353 → **357 pass** (no regressions).
@@ -1759,7 +1759,7 @@ matches for ~every practical IL2CPP static field because
 SaGa F2R). No machine instruction can RIP-relative-address a runtime
 address. AOT code reaches static fields via a 2-hop class-pointer
 indirection. Full root-cause diagnosis:
-[lessons-learned.md §"Phase 28b IL2CPP — `static_fields` is runtime-heap-allocated"](lessons-learned.md#phase-28b-il2cpp--static_fields-is-runtime-heap-allocated-so-rip-scan-cannot-find-references).
+[lessons-learned.md §"Phase 28b IL2CPP — `static_fields` is runtime-heap-allocated"](../lessons-learned.md#phase-28b-il2cpp--static_fields-is-runtime-heap-allocated-so-rip-scan-cannot-find-references).
 
 **Live result (SaGa F2R, `SteamManager.s_instance`)**: 0 matches →
 **11 unique `chain-exact` matches** across 6 methods (`get_Instance`,
@@ -1782,7 +1782,7 @@ indirection. Full root-cause diagnosis:
   resolution via MSVC's external-include search interaction.
   Moved nlohmann + generated/ to per-target plumbing.
 
-- [x] **28b-v2-2** [`IL2CPPStaticFieldsOffset.{h,cpp}`](../dll/src/il2cpp/IL2CPPStaticFieldsOffset.cpp) —
+- [x] **28b-v2-2** [`IL2CPPStaticFieldsOffset.{h,cpp}`](../../dll/src/il2cpp/IL2CPPStaticFieldsOffset.cpp) —
   runtime-version-independent discovery of `offsetof(Il2CppClass,
   static_fields)`. Walks classes for one with non-null static
   storage, then linear-scans first 1024 bytes of its struct memory
@@ -1790,14 +1790,14 @@ indirection. Full root-cause diagnosis:
   F2R: discovered `0xB8` via `MainGame/HalfReader` (class 15 in
   scan).
 
-- [x] **28b-v2-3** [`IL2CPPClassPointerScanner.{h,cpp}`](../dll/src/il2cpp/IL2CPPClassPointerScanner.cpp) —
+- [x] **28b-v2-3** [`IL2CPPClassPointerScanner.{h,cpp}`](../../dll/src/il2cpp/IL2CPPClassPointerScanner.cpp) —
   inverse pointer scan of GameAssembly.dll's `.data` / `.rdata`
   sections for 8-byte slots holding the target `Il2CppClass*`.
   Mirrors AOBMaker's `Il2CppPeReader.FindPointerReferences`
   pattern. 1 MB chunks with `failedReads` counter for AC-stripped
   page tolerance.
 
-- [x] **28b-v2-4** [`IL2CPPChainDetector.{h,cpp}`](../dll/src/il2cpp/IL2CPPChainDetector.cpp) —
+- [x] **28b-v2-4** [`IL2CPPChainDetector.{h,cpp}`](../../dll/src/il2cpp/IL2CPPChainDetector.cpp) —
   Zydis forward-trace with multi-register tracking. Critical
   v2-of-v2 fixes after first cut returned 0 matches against real
   IL2CPP codegen:
@@ -1855,7 +1855,7 @@ when CALL drops the volatile destination register).
 **Original hypothesis was wrong.** Plan-doc speculated `<>c` classes
 went through `g_codegenModule->types[]`, but empirical investigation
 showed that field doesn't exist in `Il2CppCodeGenModule` (vendor/Il2CppDumper/Il2Cpp/Il2CppClass.cs:261).
-Built `diagnoseClassReferences` pipe RPC ([IL2CPPClassReferenceDiagnostic.cpp](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp))
+Built `diagnoseClassReferences` pipe RPC ([IL2CPPClassReferenceDiagnostic.cpp](../../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp))
 that dumps every storage slot in module + heap holding the class
 pointer + `static_fields` + `FieldInfo*`, with 128 B of surrounding
 context. Cross-verified by pulling raw `.text` bytes via Phase 18's
@@ -1889,7 +1889,7 @@ a given session.
 
 #### Sub-phases (v3.0 shipped, v3.1 deferred)
 
-- [x] **v3.0** [`IL2CPPLazyInitSlotScanner.cpp`](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) —
+- [x] **v3.0** [`IL2CPPLazyInitSlotScanner.cpp`](../../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) —
   one-time `.text` walk that recognises `lea reg, [rip+disp32]; call rel32`
   2-instruction sequences where the `lea` target lands in `.data`/`.bss`
   and the `call` target lands in an exec section of the same module.
@@ -1944,14 +1944,14 @@ a given session.
 
 #### Files
 
-* [dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.{h,cpp}](../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp) —
+* [dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.{h,cpp}](../../dll/src/il2cpp/IL2CPPClassReferenceDiagnostic.cpp) —
   diagnostic helper + pipe RPC `diagnoseClassReferences`. Survives as
   debugging aid for future codegen-pattern investigations.
-* [dll/src/il2cpp/IL2CPPLazyInitSlotScanner.{h,cpp}](../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) —
+* [dll/src/il2cpp/IL2CPPLazyInitSlotScanner.{h,cpp}](../../dll/src/il2cpp/IL2CPPLazyInitSlotScanner.cpp) —
   the v3.0 scanner itself.
-* [dll/src/il2cpp/IL2CPPFieldXref.cpp](../dll/src/il2cpp/IL2CPPFieldXref.cpp) —
+* [dll/src/il2cpp/IL2CPPFieldXref.cpp](../../dll/src/il2cpp/IL2CPPFieldXref.cpp) —
   v2 fallback now merges v3 lazy-init slots into the chain detector input.
-* [tools/Test-DiagnoseClassRefs.ps1](../tools/Test-DiagnoseClassRefs.ps1) —
+* [tools/Test-DiagnoseClassRefs.ps1](../../tools/Test-DiagnoseClassRefs.ps1) —
   test harness; auto-extracts navigation-candidate AOT addresses + calls
   `getMethodAobPattern` to pull raw `.text` bytes for offline disasm.
 
