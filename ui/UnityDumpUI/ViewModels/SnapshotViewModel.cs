@@ -390,11 +390,21 @@ public sealed partial class SnapshotViewModel : ObservableObject
     {
         if (env.ClassesLoaded) return;
         if (_store is null || env.PersistedId is not long id) return;
-        var classes = await _store.LoadClassesAsync(id, ct).ConfigureAwait(true);
-        env.Classes.AddRange(classes);
-        // Phase 29g-1: dedup metadata strings on the lazily-loaded tree too
-        // (each blob deserializes its own copies of "System.Int32" etc.).
-        SnapshotInterner.Intern(env.Classes);
+        // Decompress + deserialize + intern on a BACKGROUND thread: a streamed
+        // (Phase 30c) snapshot is metadata-only, so the first diff/pivot after
+        // capture reloads the whole ~280 MB blob set from disk — doing that
+        // inline froze the UI ~10 s (live-smoke obs). LoadClassesAsync + Intern
+        // are pure over their own data, so the worker fully builds the tree
+        // before we publish it onto the envelope on the UI thread.
+        var loaded = await Task.Run(async () =>
+        {
+            var classes = await _store.LoadClassesAsync(id, ct).ConfigureAwait(false);
+            // Phase 29g-1: dedup metadata strings on the lazily-loaded tree too
+            // (each blob deserializes its own copies of "System.Int32" etc.).
+            SnapshotInterner.Intern(classes);
+            return classes;
+        }, ct).ConfigureAwait(true);
+        env.Classes.AddRange(loaded);
         // Phase 29g-2: don't eager-build the FieldIndex on load — only Diff /
         // SPC / address-lookup need it, and they call EnsureFieldIndex on
         // demand. Pivot/ArrayPivot read Classes directly. Just refresh the
@@ -996,6 +1006,9 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // count by ~3x — on 活俠傳's 3.6K-class workload that's 37
             // round-trips instead of 114. Server caps at 200.
             const int kChunkSize = 100;
+            // Phase 30c — how often (in chunks) the streaming path forces a
+            // compacting gen2 collect to bound the transient peak (see the loop).
+            const int kStreamGcIntervalChunks = 8;
             int totalClasses = begin.TotalClasses;
             int expectedChunks = totalClasses > 0
                 ? (totalClasses + kChunkSize - 1) / kChunkSize
@@ -1065,10 +1078,43 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 }
                 if (stream)
                 {
-                    // Persist this chunk's classes, accumulate accounting, then
+                    // Persist this chunk's classes on a BACKGROUND thread, then
                     // let `chunk` go out of scope — nothing is retained.
-                    streamPayloadBytes += await _store!.AppendClassesAsync(streamRowId, chunk.Classes, ct).ConfigureAwait(true);
-                    streamFieldValues  += SnapshotEnvelope.CountFieldValues(chunk.Classes);
+                    // gzip (SmallestSize) + the per-field JSON re-serialize churn
+                    // + SQLite insert are CPU/IO-bound and Microsoft.Data.Sqlite's
+                    // async is sync under the hood, so doing this inline froze the
+                    // UI ~5-15 s/chunk AND starved the GC — live-smoke saw the UI
+                    // balloon to ~13 GB mid-stream (all collectable; the
+                    // post-capture GC reclaimed it). Off-thread (same pattern as
+                    // SaveSnapshotAsync) keeps the window responsive and lets the
+                    // GC reclaim each chunk's transients between chunks.
+                    var capturedClasses = chunk.Classes;
+                    var (chunkBytes, chunkFvc) = await Task.Run(async () =>
+                    {
+                        long b = await _store!.AppendClassesAsync(streamRowId, capturedClasses, ct).ConfigureAwait(false);
+                        int  f = SnapshotEnvelope.CountFieldValues(capturedClasses);
+                        return (b, f);
+                    }, ct).ConfigureAwait(true);
+                    streamPayloadBytes += chunkBytes;
+                    streamFieldValues  += chunkFvc;
+                    // Phase 30c — bound the transient peak. Each chunk's
+                    // re-expanded SnapshotFieldEntry tree + the SmallestSize gzip
+                    // buffers are large, short-lived LOH allocations; without an
+                    // explicit gen2 collect no natural GC fires during the tight
+                    // capture loop, so they accumulate (live-smoke: ~13 GB by the
+                    // last chunk, all reclaimed by the post-capture GC). A
+                    // periodic Aggressive collect every few chunks keeps the peak
+                    // near one chunk's worth — Aggressive (not just Forced) also
+                    // DECOMMITS segments back to the OS so the process's private
+                    // bytes actually fall, matching the post-capture collect.
+                    // Off-thread so it never hangs the UI; skip the final chunk
+                    // (the post-capture GC covers it).
+                    if (chunkCount % kStreamGcIntervalChunks == 0 && !chunk.Done)
+                    {
+                        await Task.Run(() =>
+                            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true),
+                            ct).ConfigureAwait(true);
+                    }
                 }
                 else
                 {

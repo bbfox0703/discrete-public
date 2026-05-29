@@ -191,7 +191,22 @@ Game decode tree ≈ 4.5 GB → **~1 GB**; UI ≈ 14.7 GB → **~3–4 GB** for 
 > (incremental) + dropping the in-memory copy; AutoSave-OFF keeps the in-memory +
 > dirty + manual-💾 path byte-for-byte. UI peak now ~one chunk + write buffer instead
 > of the whole snapshot. 603 UI tests green (incl. streamed-vs-one-shot round-trip
-> parity + the sweep). Live-smoke (UI peak vs the 30b ~7.5 GB) still TODO.
+> parity + the sweep).
+>
+> **Live-smoke 2026-05-29 (Utawarerumono, budget 100000, AutoSave ON):** end-state
+> UI **~2.4 GB** (vs ~4.3 GB pre-streaming — the snapshot lives on disk, not in the
+> retained envelope), **no per-chunk capture hang, Diff no longer freezes** the
+> window. The first cut regressed both (ran the per-chunk gzip + the
+> `EnsureLoadedAsync` blob reload *on the UI thread* → 5–15 s/chunk freeze + GC
+> starvation → ~13.9 GB transient); fixed by moving both off-thread (`Task.Run`,
+> same pattern `SaveSnapshotAsync` already used) + a periodic Aggressive GC every
+> 8 chunks. **Caveat — the transient mid-capture peak is still ~10 GB:** it's
+> bounded by the *largest single chunk's* `NormalizeDeduped` re-expansion (the
+> ascending-population sort places the biggest classes in the final chunks), which
+> GC frequency can't reduce — only a smaller streaming chunk size (100→25) would,
+> at the cost of ~4× more round-trips. The peak is fully collected post-capture and
+> didn't OOM, so it's accepted as intrinsic to per-chunk processing at this budget;
+> the chunk-size lever is deferred until a real need (full-game capture) surfaces.
 
 - Today the UI accumulates every chunk into `classes` + a `SnapshotEnvelope` held in
   memory ([SnapshotViewModel.cs:992](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)),
