@@ -12,8 +12,9 @@
 //     practical rotation is driven by the startup-time pass.
 //   * DLL per-PID side stays size-based (rare to fire — game session usually
 //     ends well under 8 MB per category). Implemented in C++ side.
-//   * Cleanup: DLL per-PID directories older than `Constants.LogPruneDaysToKeep`
-//     days are removed at UI startup via `PruneOldDllPidDirectories`.
+//   * Cleanup: only the most-recent `Constants.LogKeepRecentPidDirs` DLL
+//     per-PID directories are kept (count-based, not age-based); older ones
+//     are removed at UI startup via `PruneOldDllPidDirectories`.
 //
 // AOT-safe: no reflection, just FileStream + UTF-8 writes. Thread-safe by a
 // per-category lock so concurrent writers don't interleave lines.
@@ -131,36 +132,37 @@ public sealed class FileLogger : IDisposable
     }
 
     /// <summary>
-    /// Remove DLL-side per-PID log directories whose last-write time is
-    /// older than <paramref name="daysToKeep"/> days. Each game injection
-    /// (Pick &amp; inject or proxy auto-load) creates a new PID folder under
-    /// <c>%LOCALAPPDATA%\Discrete_UEDumper\Logs\&lt;pid&gt;\</c>; without
-    /// cleanup these accumulate to hundreds of dead folders. Run on UI
+    /// Keep only the most-recent <paramref name="keepRecent"/> DLL-side
+    /// per-PID log directories (by last-write time); delete the older ones.
+    /// Each game injection (Pick &amp; inject or proxy auto-load) creates a new
+    /// PID folder under <c>%LOCALAPPDATA%\Discrete_UEDumper\Logs\&lt;pid&gt;\</c>;
+    /// without cleanup these accumulate to hundreds of dead folders. Run on UI
     /// startup.
     ///
-    /// The <c>ui</c> directory is preserved (only numeric PID folders are
-    /// candidates). Anything that isn't a numeric PID folder is left
-    /// alone. Best-effort: failures (file locked by another running game,
-    /// permission denied) are swallowed so logging itself never faults
-    /// the UI start path.
+    /// Count-based, not age-based: only the last <paramref name="keepRecent"/>
+    /// PID directories are retained regardless of age — keeping more around
+    /// serves no purpose. The <c>ui</c> directory is preserved (only numeric
+    /// PID folders are candidates); anything that isn't a numeric PID folder is
+    /// left alone. Best-effort: failures (file locked by another running game,
+    /// permission denied) are swallowed so logging itself never faults the UI
+    /// start path — a folder that fails to delete simply isn't counted toward
+    /// the kept set and gets retried next launch.
     /// </summary>
     /// <returns>Number of PID directories successfully removed.</returns>
-    public static int PruneOldDllPidDirectories(int daysToKeep = Constants.LogPruneDaysToKeep,
+    public static int PruneOldDllPidDirectories(int keepRecent = Constants.LogKeepRecentPidDirs,
                                                 string? logRootOverride = null)
     {
-        if (daysToKeep < 0) daysToKeep = 0;
+        if (keepRecent < 0) keepRecent = 0;
         string root = logRootOverride ?? Path.GetDirectoryName(DefaultRoot()) ?? string.Empty;
         if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return 0;
 
-        DateTime cutoff = DateTime.UtcNow.AddDays(-daysToKeep);
-
-        List<DirectoryInfo> stalePidDirs;
+        List<DirectoryInfo> pidDirs;
         try
         {
-            stalePidDirs = Directory.EnumerateDirectories(root)
+            pidDirs = Directory.EnumerateDirectories(root)
                 .Select(p => new DirectoryInfo(p))
                 .Where(d => int.TryParse(d.Name, out _))   // numeric PID only — skips "ui"
-                .Where(d => d.LastWriteTimeUtc < cutoff)
+                .OrderByDescending(d => d.LastWriteTimeUtc) // newest first
                 .ToList();
         }
         catch (Exception)
@@ -168,8 +170,9 @@ public sealed class FileLogger : IDisposable
             return 0;
         }
 
+        // Keep the newest `keepRecent`; everything past that is stale.
         int deleted = 0;
-        foreach (DirectoryInfo d in stalePidDirs)
+        foreach (DirectoryInfo d in pidDirs.Skip(keepRecent))
         {
             try
             {

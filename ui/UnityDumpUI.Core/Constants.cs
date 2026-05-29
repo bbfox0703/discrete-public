@@ -28,12 +28,15 @@ public static class Constants
     public const int LogRotationFileCount = 5;
 
     /// <summary>
-    /// Per-PID DLL log directories older than this many days are removed
-    /// on UI startup (`FileLogger.PruneOldDllPidDirectories`). 15 days
-    /// gives the user plenty of time to dig back into a recent session
-    /// for forensics, while keeping the on-disk footprint bounded.
+    /// Keep only the most-recent this-many per-PID DLL log directories on UI
+    /// startup (`FileLogger.PruneOldDllPidDirectories`); older ones are removed.
+    /// Count-based, not age-based — an old-but-recent-enough PID still gets
+    /// dropped once 15 newer ones exist, since keeping them longer serves no
+    /// purpose. The most recent 15 sessions cover any realistic forensics need
+    /// while keeping the on-disk footprint bounded. The `ui` directory is
+    /// preserved separately and never counted here.
     /// </summary>
-    public const int LogPruneDaysToKeep = 15;
+    public const int LogKeepRecentPidDirs = 15;
 
     // Single-instance Mutex name.
     public const string SingleInstanceMutexName = @"Global\Discrete_UEDumper.UI.SingleInstance";
