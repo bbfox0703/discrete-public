@@ -1002,7 +1002,42 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 : 0;
             double beginElapsedSec = sw.Elapsed.TotalSeconds;
 
-            var classes = new List<SnapshotClassEntry>(totalClasses);
+            // Phase 30c — UI stream-to-disk. When AutoSave is ON and a store is
+            // open, write each chunk's classes straight to SQLite and DROP them
+            // (don't accumulate the whole snapshot in memory) — the UI peak then
+            // tracks one chunk, not the snapshot size. Diff/pivot/SPC/export
+            // lazy-load from disk via EnsureLoadedAsync. AutoSave-OFF (or no
+            // store) keeps the in-memory + dirty + manual-💾 path unchanged.
+            bool stream = _store is not null && _settings.AutoSaveSnapshots;
+            long streamRowId       = 0;
+            long streamPayloadBytes = 0;
+            int  streamFieldValues  = 0;
+            if (stream)
+            {
+                streamRowId = await _store!.BeginStreamingSaveAsync(new SnapshotStreamBeginRequest
+                {
+                    Label             = string.IsNullOrWhiteSpace(PendingLabel) ? null : PendingLabel.Trim(),
+                    CapturedAtUtc     = begin.CapturedAt,
+                    GameBuildId       = begin.GameBuildId,
+                    GameSessionId     = begin.GameSessionId,
+                    TargetProcess     = _currentGameModule ?? string.Empty,
+                    Backend           = GuessBackend(),
+                    UnityVersion      = null,
+                    PointerSize       = null,
+                    TotalClasses      = begin.TotalClasses,
+                    TotalInstances    = begin.TotalInstances,
+                    InstanceCap       = InstanceCap,
+                    ArrayCap          = ArrayCap,
+                    IncludeUnchanged  = IncludeUnchangedRows,
+                    AssemblyFilter    = string.IsNullOrWhiteSpace(ScopeAssembliesText) ? null : ScopeAssembliesText.Trim(),
+                }, ct).ConfigureAwait(true);
+            }
+
+            // Non-streaming path accumulates here; streaming leaves it empty
+            // (the on-disk rows are the snapshot, the envelope is metadata-only).
+            var classes = new List<SnapshotClassEntry>(stream ? 0 : totalClasses);
+            int classesDone = 0;   // running count for the progress line (both paths)
+            bool chunkError = false;
             int cursor = 0;
             int chunkCount = 0;
             // Phase 30b — IL2CPP streaming: decode now happens during the chunks,
@@ -1025,9 +1060,21 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 {
                     ErrorMessage  = chunk.Error;
                     StatusMessage = "snapshotChunk failed.";
+                    chunkError = true;
                     break;
                 }
-                classes.AddRange(chunk.Classes);
+                if (stream)
+                {
+                    // Persist this chunk's classes, accumulate accounting, then
+                    // let `chunk` go out of scope — nothing is retained.
+                    streamPayloadBytes += await _store!.AppendClassesAsync(streamRowId, chunk.Classes, ct).ConfigureAwait(true);
+                    streamFieldValues  += SnapshotEnvelope.CountFieldValues(chunk.Classes);
+                }
+                else
+                {
+                    classes.AddRange(chunk.Classes);
+                }
+                classesDone += chunk.Classes.Count;
                 chunkCount++;
                 // The DLL ships finalized stats on the last (done) chunk only.
                 if (chunk.DecodeStats is not null)
@@ -1049,7 +1096,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 StatusMessage = string.Format(CultureInfo.InvariantCulture,
                     "Streaming chunk {0}/{1} ({2:N0} of {3:N0} classes)… capture {4:F1}s + stream {5:F1}s — UI {6} (+{7}){8}",
                     chunkCount, expectedChunks,
-                    classes.Count, totalClasses,
+                    classesDone, totalClasses,
                     beginElapsedSec, chunkPhaseSw.Elapsed.TotalSeconds,
                     FormatMemory(wsNow), FormatMemory(wsNow - _captureStartWorkingSet),
                     gameMem);
@@ -1060,6 +1107,20 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // Always release the server-side session even if we errored mid-chunk.
             try { await _backend.SnapshotEndAsync(begin.SnapshotId, ct).ConfigureAwait(true); }
             catch { /* best effort */ }
+
+            // Phase 30c — a chunk error mid-stream leaves a partial on-disk row.
+            // Drop it (the sentinel would otherwise be swept next open, but
+            // delete now so the DB doesn't carry dead rows) and bail out of the
+            // capture; the error message is already set.
+            if (chunkError)
+            {
+                if (stream && streamRowId > 0)
+                {
+                    try { await _store!.DeleteSnapshotAsync(streamRowId, ct).ConfigureAwait(true); }
+                    catch { /* best effort */ }
+                }
+                return;
+            }
 
             // Phase 30b — refresh the game-memory banner from the LAST chunk
             // (streaming). For a streaming capture the post-decode growth only
@@ -1076,53 +1137,99 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 }
             }
 
-            // Phase 29g-1: dedup the millions of duplicated metadata strings
-            // (field Name/Type/From, class Assembly/Namespace/Name, ElementType)
-            // to one shared instance each before they're retained in the envelope.
-            SnapshotInterner.Intern(classes);
+            string envLabel = string.IsNullOrWhiteSpace(PendingLabel) ? string.Empty : PendingLabel.Trim();
+            SnapshotEnvelope env;
+            // Field-value count for the status line: streaming computed it per
+            // chunk (the metadata-only envelope itself keeps 0 — it holds no
+            // in-memory tree, same as a snapshot loaded lazily from disk).
+            int fieldValueCountForStatus;
 
-            // Build local envelope + flat lookup index for diff.
-            var env = new SnapshotEnvelope
+            if (stream)
             {
-                ServerId       = begin.SnapshotId,
-                Label          = string.IsNullOrWhiteSpace(PendingLabel)
-                                    ? string.Empty
-                                    : PendingLabel.Trim(),
-                CapturedAt     = DateTime.Now,
-                CapturedAtUtc  = begin.CapturedAt,
-                GameBuildId    = begin.GameBuildId,
-                GameSessionId  = begin.GameSessionId,
-                TotalClasses   = begin.TotalClasses,
-                TotalInstances = begin.TotalInstances,
-                Classes        = classes,
-            };
-            // Phase 29g-2: don't build the FieldIndex at capture — it was the
-            // #2 resident cost (12.2M SnapshotFieldValue + 432 MB dict arrays,
-            // all snapshots). Diff/SPC build it on demand via EnsureFieldIndex;
-            // here we only cache the cheap field-value count for the status
-            // line + memory estimate.
-            env.RecomputeFieldValueCount();
-
-            // Phase 29c-4: brand-new envelope is in-memory only until
-            // user clicks 💾 (or AutoSaveSnapshots is ON, below).
-            env.IsDirty       = true;
-            env.ClassesLoaded = true;
-            Snapshots.Add(env);
-            // Auto-pick: if this is the first snapshot, set A; if it's the
-            // second (and no B yet), set B; otherwise leave selections
-            // alone so the user keeps control.
-            if (SelectedSnapshotA is null)      SelectedSnapshotA = env;
-            else if (SelectedSnapshotB is null) SelectedSnapshotB = env;
-
-            // Phase 29c-4: auto-save on capture if the user opted in via
-            // Settings dialog. Failure is non-fatal — envelope stays dirty.
-            if (_settings.AutoSaveSnapshots && _store is not null)
-            {
-                try { await SaveSnapshotAsync(env).ConfigureAwait(true); }
-                catch (Exception saveEx)
+                // Phase 30c — finalize the on-disk row (clears the in-progress
+                // sentinel) and build a metadata-only envelope: classes live on
+                // disk, hydrated on demand by EnsureLoadedAsync. No Intern, no
+                // FieldIndex, no SaveSnapshotAsync — it's already persisted.
+                await _store!.FinishStreamingSaveAsync(streamRowId, streamPayloadBytes, streamFieldValues, ct)
+                    .ConfigureAwait(true);
+                fieldValueCountForStatus = streamFieldValues;
+                env = new SnapshotEnvelope
                 {
-                    _logger.Write(SnapshotStore.LogCategory,
-                        $"auto-save FAILED for fresh capture: {saveEx.GetType().Name}: {saveEx.Message}");
+                    ServerId       = begin.SnapshotId,
+                    Label          = envLabel,
+                    CapturedAt     = DateTime.Now,
+                    CapturedAtUtc  = begin.CapturedAt,
+                    GameBuildId    = begin.GameBuildId,
+                    GameSessionId  = begin.GameSessionId,
+                    TotalClasses   = begin.TotalClasses,
+                    TotalInstances = begin.TotalInstances,
+                    Classes        = new List<SnapshotClassEntry>(),  // lazy — on disk
+                    PersistedId    = streamRowId,
+                    PersistedBytes = streamPayloadBytes,
+                    IsDirty        = false,
+                    ClassesLoaded  = false,
+                };
+                Snapshots.Add(env);
+                if (SelectedSnapshotA is null)      SelectedSnapshotA = env;
+                else if (SelectedSnapshotB is null) SelectedSnapshotB = env;
+
+                // Mirror SaveSnapshotAsync's tail: enforce the size budget then
+                // refresh the DB status line.
+                await AutoPruneAndMaybeVacuumAsync(CancellationToken.None).ConfigureAwait(true);
+                await RefreshDbStatusAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                // Phase 29g-1: dedup the millions of duplicated metadata strings
+                // (field Name/Type/From, class Assembly/Namespace/Name, ElementType)
+                // to one shared instance each before they're retained in the envelope.
+                SnapshotInterner.Intern(classes);
+
+                // Build local envelope + flat lookup index for diff.
+                env = new SnapshotEnvelope
+                {
+                    ServerId       = begin.SnapshotId,
+                    Label          = envLabel,
+                    CapturedAt     = DateTime.Now,
+                    CapturedAtUtc  = begin.CapturedAt,
+                    GameBuildId    = begin.GameBuildId,
+                    GameSessionId  = begin.GameSessionId,
+                    TotalClasses   = begin.TotalClasses,
+                    TotalInstances = begin.TotalInstances,
+                    Classes        = classes,
+                };
+                // Phase 29g-2: don't build the FieldIndex at capture — it was the
+                // #2 resident cost (12.2M SnapshotFieldValue + 432 MB dict arrays,
+                // all snapshots). Diff/SPC build it on demand via EnsureFieldIndex;
+                // here we only cache the cheap field-value count for the status
+                // line + memory estimate.
+                env.RecomputeFieldValueCount();
+                fieldValueCountForStatus = env.FieldValueCount;
+
+                // Phase 29c-4: brand-new envelope is in-memory only until
+                // user clicks 💾 (or AutoSaveSnapshots is ON, below).
+                env.IsDirty       = true;
+                env.ClassesLoaded = true;
+                Snapshots.Add(env);
+                // Auto-pick: if this is the first snapshot, set A; if it's the
+                // second (and no B yet), set B; otherwise leave selections
+                // alone so the user keeps control.
+                if (SelectedSnapshotA is null)      SelectedSnapshotA = env;
+                else if (SelectedSnapshotB is null) SelectedSnapshotB = env;
+
+                // Phase 29c-4: auto-save on capture if the user opted in via
+                // Settings dialog. Reached only when streaming is OFF (no store
+                // OR AutoSave off → here AutoSave on + no store). Failure is
+                // non-fatal — envelope stays dirty. The AutoSave-on + store case
+                // is handled by the streaming path above.
+                if (_settings.AutoSaveSnapshots && _store is not null)
+                {
+                    try { await SaveSnapshotAsync(env).ConfigureAwait(true); }
+                    catch (Exception saveEx)
+                    {
+                        _logger.Write(SnapshotStore.LogCategory,
+                            $"auto-save FAILED for fresh capture: {saveEx.GetType().Name}: {saveEx.Message}");
+                    }
                 }
             }
 
@@ -1160,9 +1267,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
             else if (truncCount)
                 truncNote = "  ⚠ PARTIAL: instance budget reached — high-population classes dropped. " +
                             "Narrow the assembly scope to capture specific classes fully.";
-            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldValueCount:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).{truncNote}";
+            string streamNote = stream ? ", streamed to disk" : string.Empty;
+            StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {fieldValueCountForStatus:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}{streamNote}).{truncNote}";
             _logger.Write(Constants.LogCategoryView,
-                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={env.FieldValueCount} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
+                $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={fieldValueCountForStatus} streamed={stream} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
 
             // Phase 29g-2b: a capture churns large transient LOH buffers (the
             // per-chunk pipe-read JSON byte[]/char[]). 29g-2 cut the rest of
