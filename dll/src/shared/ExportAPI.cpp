@@ -5776,6 +5776,70 @@ void RegisterCoreHandlers() {
                 }
                 if (!statics.empty()) classEntry["statics"] = std::move(statics);
 
+                // Phase 30a — build the instance field SCHEMA once per class
+                // (sorted by offset), emit it once, then per instance emit only
+                // the value array aligned to this order. Eliminates the per-
+                // instance repetition of name/type/offset/from that dominated
+                // the decode tree (174K× for a 69-field class). Field metadata
+                // strings are referenced (not copied) from the cached
+                // ClassInfoResult, whose map nodes are stable for this decode.
+                struct FieldDesc {
+                    const std::string* name;
+                    const std::string* type;
+                    const std::string* from;
+                    const std::string* decodeType;
+                    std::size_t        offset;
+                    bool               isEnum;
+                    bool               isValueType;
+                    bool               isArrayShape;
+                };
+                std::vector<FieldDesc> fieldDescs;
+                for (std::size_t ci = chain.size(); ci > 0; --ci) {
+                    const auto& pr = *chainInfo[ci - 1];
+                    if (!pr.ok) continue;
+                    for (const auto& f : pr.info.fields) {
+                        if (f.flags & 0x10u) continue;   // skip statics
+                        if (fieldDescs.size() >= 4096) break;
+                        FieldDesc fd;
+                        fd.name        = &f.name;
+                        fd.type        = &f.typeName;
+                        fd.from        = &pr.info.self.name;
+                        fd.decodeType  = (f.isEnum && !f.underlyingTypeName.empty())
+                                            ? &f.underlyingTypeName : &f.typeName;
+                        fd.offset      = f.offset;
+                        fd.isEnum      = f.isEnum;
+                        fd.isValueType = f.isValueType;
+                        fd.isArrayShape = f.typeName.size() >= 2 &&
+                            f.typeName[f.typeName.size() - 1] == ']' &&
+                            f.typeName[f.typeName.size() - 2] == '[';
+                        fieldDescs.push_back(fd);
+                    }
+                    if (fieldDescs.size() >= 4096) break;
+                }
+                std::sort(fieldDescs.begin(), fieldDescs.end(),
+                    [](const FieldDesc& a, const FieldDesc& b) { return a.offset < b.offset; });
+
+                Snapshot::ClassPayload schemaArr = Snapshot::ClassPayload::array();
+                for (const auto& fd : fieldDescs) {
+                    Snapshot::ClassPayload s = {
+                        {"name",   *fd.name},
+                        {"type",   *fd.type},
+                        {"offset", fd.offset},
+                        {"from",   *fd.from},
+                    };
+                    if (fd.isEnum)      s["is_enum"]       = true;
+                    if (fd.isValueType) s["is_value_type"] = true;
+                    schemaArr.push_back(std::move(s));
+                }
+                // Only emit the schema when there are instances to align to it
+                // (a static-only class needs no instance schema — matches the
+                // old wire, which emitted no per-instance fields there).
+                if (!fieldDescs.empty() && !item.instances.empty())
+                    classEntry["schema"] = std::move(schemaArr);
+
+                const std::string classFqn =
+                    item.ns.empty() ? item.name : item.ns + "." + item.name;
+
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
                     // Total-instance budget (cheap, per-instance) + process-
@@ -5788,70 +5852,47 @@ void RegisterCoreHandlers() {
                         checkMemBudgetIl();
                     }
                     if (memBudgetHitIl || countBudgetHitIl) break;
-                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
-                    Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
-                    for (std::size_t ci = chain.size(); ci > 0; --ci) {
-                        const auto& pr = *chainInfo[ci - 1];
-                        if (!pr.ok) continue;
-                        for (const auto& f : pr.info.fields) {
-                            if (f.flags & 0x10u) continue;
-                            std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(f.offset);
-                            Snapshot::ClassPayload entry = {
-                                {"name",   f.name},
-                                {"type",   f.typeName},
-                                {"offset", f.offset},
-                                {"from",   pr.info.self.name},
-                            };
-                            if (f.isEnum)      entry["is_enum"]       = true;
-                            if (f.isValueType) entry["is_value_type"] = true;
-                            const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
-                                ? f.underlyingTypeName : f.typeName;
-                            json d = decodeField(decodeType, fieldAddr);
-                            for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
 
-                            const bool isArrayShape =
-                                f.typeName.size() >= 2 &&
-                                f.typeName[f.typeName.size() - 1] == ']' &&
-                                f.typeName[f.typeName.size() - 2] == '[';
-                            if (isArrayShape) {
-                                if (!isCapturableArrayType(f.typeName)) {
-                                    ++skippedOpenGenericArrays;
-                                } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
-                                    std::uintptr_t arrPtr = 0;
-                                    const std::string& ps = entry["ptr"].get_ref<const std::string&>();
-                                    if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
-                                        arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
-                                    }
-                                    if (arrPtr != 0) {
-                                        const std::string classFqn =
-                                            item.ns.empty() ? item.name : item.ns + "." + item.name;
-                                        json elems = walkArrayElementsInline(
-                                            arrPtr, f.typeName, arrayCap,
-                                            shouldCaptureInner(classFqn, f.name)
-                                                ? captureIlElementFields
-                                                : std::function<json(std::uintptr_t)>{});
-                                        if (elems.contains("error")) {
-                                            entry["arrayError"] = elems.value("error", std::string{"unknown"});
-                                            if (elems.contains("length")) {
-                                                entry["arrayErrorLength"] = elems["length"];
-                                            }
-                                        } else {
-                                            entry["arrayElements"] = std::move(elems);
-                                            ++decodedArrays;
+                    // Value-only entries aligned to schema order (no per-field
+                    // name/type/offset/from — the UI re-expands from schema).
+                    Snapshot::ClassPayload values = Snapshot::ClassPayload::array();
+                    for (const auto& fd : fieldDescs) {
+                        std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(fd.offset);
+                        Snapshot::ClassPayload entry = Snapshot::ClassPayload::object();
+                        json d = decodeField(*fd.decodeType, fieldAddr);
+                        for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                        if (fd.isArrayShape) {
+                            if (!isCapturableArrayType(*fd.type)) {
+                                ++skippedOpenGenericArrays;
+                            } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                                std::uintptr_t arrPtr = 0;
+                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                }
+                                if (arrPtr != 0) {
+                                    json elems = walkArrayElementsInline(
+                                        arrPtr, *fd.type, arrayCap,
+                                        shouldCaptureInner(classFqn, *fd.name)
+                                            ? captureIlElementFields
+                                            : std::function<json(std::uintptr_t)>{});
+                                    if (elems.contains("error")) {
+                                        entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                        if (elems.contains("length")) {
+                                            entry["arrayErrorLength"] = elems["length"];
                                         }
+                                    } else {
+                                        entry["arrayElements"] = std::move(elems);
+                                        ++decodedArrays;
                                     }
                                 }
                             }
-                            fields.push_back(std::move(entry));
-                            if (fields.size() >= 4096) break;
                         }
-                        if (fields.size() >= 4096) break;
+                        values.push_back(std::move(entry));
                     }
-                    std::sort(fields.begin(), fields.end(),
-                        [](const json& a, const json& b) {
-                            return a.value("offset", 0) < b.value("offset", 0);
-                        });
-                    instEntry["fields"] = std::move(fields);
+                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
+                    instEntry["v"] = std::move(values);
                     instArr.push_back(std::move(instEntry));
                     ++decodedInstances;
                 }

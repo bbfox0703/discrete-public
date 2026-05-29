@@ -643,3 +643,22 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 - UI `kDefaultInstanceCapX64` 512→256；snapshot 完成時若 `truncatedByMemory`/`truncatedByCount` 顯示 ⚠ PARTIAL 提示（縮小 assembly scope / 調 budget）。
 
 **效果預期**：50000 instance 上限 → decode 時間/記憶體約降到原本的 50000/174079 ≈ 29%，且保留的是低 population 的有用 class。要完整抓特定 class → 縮 assembly scope 或調高 budget。**仍是 workaround**；root fix = streaming-decode + decode 平行化（per-thread attach）。
+
+### 16.8 Phase 30a-1 — schema/value dedup wire（2026-05-29, build #766）
+
+**已實作（IL2CPP emit + UI re-expand）**：DLL `snapshotBegin` 改成每 class 只送一次
+`schema`（name/type/offset/from/is_enum/is_value_type，依 offset 排序），每 instance
+只送 `v[]`（value-only：address/value/ptr/string/arrayElements… 無 schema keys）。
+消除「174K× 重複 field metadata」→ **遊戲端 `session->classes` nlohmann tree 大幅縮小**
+（~4.5GB→~1GB 量級）+ wire bytes 變小。UI `SnapshotChunkResult.NormalizeDeduped()`
+在收 chunk 時把 `schema+v` 還原成原本的 `SnapshotFieldEntry`（填回 schema keys），所以
+diff/Pivot/SPC/export/SQLite/全部 consumer + 591 個測試 **零改動**。3 個新測試覆蓋
+re-expand。
+
+**尚未做**：
+- **30a-2（UI retention dedup）**：UI 改成保留 deduped 模型（`SnapshotFieldSchema` +
+  per-instance value 陣列），不再 re-expand 成 12M 個 `SnapshotFieldEntry` → 才會打到
+  UI 端 14.7GB。需改 diff/FieldIndex/Pivot/SPC/export/SnapshotStore + 向後相容讀舊
+  snapshot。**(broad refactor，gated)**
+- **Mono emit dedup**（目前 Mono 仍送舊 inline 格式；UI re-expand 兩種都吃，故相容）。
+- **30b/30c streaming**（見 docs/snapshot-streaming-dedup.md）。

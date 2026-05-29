@@ -1080,6 +1080,23 @@ public sealed class SnapshotFieldEntry
     [JsonPropertyName("arrayErrorLength")]  public ulong?       ArrayErrorLength { get; set; }
 }
 
+/// <summary>Phase 30a — per-class field metadata, emitted ONCE per class on the
+/// wire (the dedup). A class's instances carry only a value array
+/// (<see cref="SnapshotInstanceEntry.V"/>) aligned to this schema order; the UI
+/// re-expands them into <see cref="SnapshotFieldEntry"/> on receive
+/// (<see cref="SnapshotChunkResult.NormalizeDeduped"/>) so every downstream
+/// consumer + SQLite stays on the existing model. Old (non-deduped) snapshots
+/// have <see cref="SnapshotClassEntry.Schema"/> null and keep inline fields.</summary>
+public sealed class SnapshotFieldSchema
+{
+    [JsonPropertyName("name")]          public string  Name        { get; set; } = string.Empty;
+    [JsonPropertyName("type")]          public string  Type        { get; set; } = string.Empty;
+    [JsonPropertyName("offset")]        public ulong   Offset      { get; set; }
+    [JsonPropertyName("from")]          public string? From        { get; set; }
+    [JsonPropertyName("is_enum")]       public bool?   IsEnum      { get; set; }
+    [JsonPropertyName("is_value_type")] public bool?   IsValueType { get; set; }
+}
+
 public sealed class SnapshotArrayElement
 {
     [JsonPropertyName("index")]   public int          Index   { get; set; }
@@ -1127,6 +1144,14 @@ public sealed class SnapshotInstanceEntry
 {
     [JsonPropertyName("address")] public string                     Address { get; set; } = string.Empty;
     [JsonPropertyName("fields")]  public List<SnapshotFieldEntry>   Fields  { get; set; } = new();
+
+    /// <summary>Phase 30a deduped wire — value-only field objects aligned to the
+    /// owning class's <see cref="SnapshotClassEntry.Schema"/>. Each entry carries
+    /// only the value keys (address/value/ptr/string/arrayElements/…); the schema
+    /// keys (name/type/offset/from) are filled from the class schema by
+    /// <see cref="SnapshotChunkResult.NormalizeDeduped"/>, which then moves these
+    /// into <see cref="Fields"/> and clears this. Null for old snapshots.</summary>
+    [JsonPropertyName("v")]       public List<SnapshotFieldEntry>?  V       { get; set; }
 }
 
 public sealed class SnapshotClassParent
@@ -1144,6 +1169,13 @@ public sealed class SnapshotClassEntry
     [JsonPropertyName("statics")]   public List<SnapshotFieldEntry>?    Statics   { get; set; }
     [JsonPropertyName("instances")] public List<SnapshotInstanceEntry>? Instances { get; set; }
     [JsonPropertyName("error")]     public string?                      Error     { get; set; }
+
+    /// <summary>Phase 30a deduped wire — field metadata emitted once per class.
+    /// When non-null, each instance's <see cref="SnapshotInstanceEntry.V"/> is
+    /// re-expanded against this into <see cref="SnapshotInstanceEntry.Fields"/>
+    /// by <see cref="SnapshotChunkResult.NormalizeDeduped"/>. Null = old format
+    /// (instances already carry inline fields).</summary>
+    [JsonPropertyName("schema")]    public List<SnapshotFieldSchema>?   Schema    { get; set; }
 }
 
 public sealed class SnapshotChunkResult
@@ -1155,6 +1187,47 @@ public sealed class SnapshotChunkResult
     [JsonPropertyName("done")]       public bool                       Done       { get; set; }
     [JsonPropertyName("classes")]    public List<SnapshotClassEntry>   Classes    { get; set; } = new();
     [JsonPropertyName("error")]      public string?                    Error      { get; set; }
+
+    /// <summary>Phase 30a — re-expand the deduped wire into the existing
+    /// <see cref="SnapshotFieldEntry"/> model so every downstream consumer +
+    /// SQLite stays unchanged. For each class with a non-null
+    /// <see cref="SnapshotClassEntry.Schema"/>, fill each instance's value-only
+    /// <see cref="SnapshotInstanceEntry.V"/> entries with the schema metadata,
+    /// move them into <see cref="SnapshotInstanceEntry.Fields"/>, then drop the
+    /// transient schema/V so they don't double-retain. Idempotent + a no-op for
+    /// old (non-deduped) chunks. Call once immediately after deserialization.</summary>
+    public void NormalizeDeduped()
+    {
+        foreach (var c in Classes)
+        {
+            var schema = c.Schema;
+            if (schema is null) continue;       // old format — instances already inline
+            if (c.Instances is { } insts)
+            {
+                foreach (var inst in insts)
+                {
+                    if (inst.V is not { } values) continue;
+                    int n = values.Count < schema.Count ? values.Count : schema.Count;
+                    var fields = new List<SnapshotFieldEntry>(n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        var s = schema[i];
+                        var f = values[i];   // value-only; fill the schema keys
+                        f.Name        = s.Name;
+                        f.Type        = s.Type;
+                        f.Offset      = s.Offset;
+                        f.From        = s.From;
+                        f.IsEnum      = s.IsEnum;
+                        f.IsValueType = s.IsValueType;
+                        fields.Add(f);
+                    }
+                    inst.Fields = fields;
+                    inst.V = null;
+                }
+            }
+            c.Schema = null;
+        }
+    }
 }
 
 public sealed class SnapshotEndResult

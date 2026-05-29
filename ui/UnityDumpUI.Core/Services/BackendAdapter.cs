@@ -1008,7 +1008,12 @@ public sealed class BackendAdapter : ILiveExportSource
             "snapshotChunk", args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotChunkResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
-        return env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
+        var result = env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
+        // Phase 30a — re-expand the deduped wire (schema-once + per-instance value
+        // arrays) back into the inline SnapshotFieldEntry model the rest of the UI
+        // + SQLite expect. No-op for old (non-deduped) chunks.
+        result.NormalizeDeduped();
+        return result;
     }
 
     /// <summary><c>snapshotEnd</c> — drop the server-side cached plan.</summary>
