@@ -120,6 +120,454 @@ constexpr double        kSnapshotAvailPhysFraction     = 0.60;
 // How often (in decoded instances) to re-sample process memory during decode.
 constexpr std::size_t   kSnapshotMemCheckInterval       = 2048;
 
+#if defined(UNITYCEDUMPER_BACKEND_IL2CPP)
+// Namespace aliases so the decoder (defined here, before the handler-block
+// aliases at ~line 662) can use the short `Snapshot::` / `IL2CPP::` forms. Both
+// are re-aliased to the same target later — re-aliasing to an identical target
+// is well-formed, so this doesn't conflict.
+namespace Snapshot = ::UnityCEDumper::Snapshot;
+namespace IL2CPP   = ::UnityCEDumper::IL2CPP;
+
+// Phase 30b — IL2CPP game-side streaming decoder. Owns the heap-walk result +
+// all the decode context snapshotBegin used to hold as locals, so snapshotChunk
+// can decode plan rows ON DEMAND and free each chunk's payload after it ships —
+// bounding the game-process transient peak to ~one chunk + the plan + the
+// ClassInfo cache instead of the whole decoded snapshot (~4.5 GB on
+// Utawarerumono). The body of DecodeOneClass / element capture / static decode
+// is a faithful transplant of the old decode-in-Begin loop; the only behavioural
+// change is WHEN it runs (per chunk) and that each chunk opens its OWN
+// ThreadAttachGuard — safe on IL2CPP, which has no BDWGC finalizer-accumulation
+// hazard (that's why this is IL2CPP-only; Mono keeps decode-in-Begin).
+//
+// The shared json helpers (formatHex / decodeField / walkArrayElementsInline)
+// are function-local lambdas in RegisterCoreHandlers, so they're handed in as
+// std::function copies at construction.
+class Il2cppStreamDecoder final : public Snapshot::ISnapshotStreamDecoder {
+public:
+    using FormatHexFn  = std::function<std::string(std::uintptr_t)>;
+    using DecodeFieldFn = std::function<json(const std::string&, std::uintptr_t)>;
+    using WalkArrayFn  = std::function<json(std::uintptr_t, const std::string&, std::size_t,
+                                            const std::function<json(std::uintptr_t)>&)>;
+
+    Il2cppStreamDecoder(IL2CPP::Il2CppDomain* domain,
+                        std::vector<Snapshot::ClassPlanItem> plan,
+                        std::unordered_map<IL2CPP::Il2CppClass*, char> knownIlKlasses,
+                        std::size_t arrayCap,
+                        std::size_t instanceDecodeBudget,
+                        std::size_t elementFieldCap,
+                        std::size_t elementCaptureBudget,
+                        std::vector<std::string> arrayElementTargets,
+                        bool arrayElementFields,
+                        bool captureStaticValues,
+                        std::uint64_t memBudgetBytes,
+                        std::uint64_t initialPrivateUsage,
+                        FormatHexFn formatHex,
+                        DecodeFieldFn decodeField,
+                        WalkArrayFn walkArrayElementsInline)
+        : domain_(domain),
+          plan_(std::move(plan)),
+          knownIlKlasses_(std::move(knownIlKlasses)),
+          arrayCap_(arrayCap),
+          instanceDecodeBudget_(instanceDecodeBudget),
+          elementFieldCap_(elementFieldCap),
+          elementCaptureBudget_(elementCaptureBudget),
+          arrayElementTargets_(std::move(arrayElementTargets)),
+          arrayElementFields_(arrayElementFields),
+          captureStaticValues_(captureStaticValues),
+          memBudgetBytes_(memBudgetBytes),
+          peakPrivate_(initialPrivateUsage),
+          formatHex_(std::move(formatHex)),
+          decodeField_(std::move(decodeField)),
+          walkArrayElementsInline_(std::move(walkArrayElementsInline)) {}
+
+    std::size_t PlanSize() const override { return plan_.size(); }
+    bool TruncatedByMemory() const override { return memBudgetHit_; }
+    bool TruncatedByCount()  const override { return countBudgetHit_; }
+    std::uint64_t PeakPrivateUsage() const override { return peakPrivate_; }
+
+    json DecodeStats() const override {
+        return json{
+            {"decodedClasses",           decodedClasses_},
+            {"decodedInstances",         decodedInstances_},
+            {"decodedArrays",            decodedArrays_},
+            {"skippedOpenGenericArrays", skippedOpenGenericArrays_},
+            {"classInfoCacheHits",       classInfoCacheHits_},
+            {"classInfoCacheMisses",     classInfoCacheMisses_},
+            {"decodedElementSets",       decodedElementSets_},
+            {"elementBudgetHit",         elementBudgetHit_},
+            {"truncatedByMemory",        memBudgetHit_},
+            {"truncatedByCount",         countBudgetHit_},
+            {"instanceDecodeBudget",     instanceDecodeBudget_},
+            {"memBudgetBytes",           memBudgetBytes_},
+            {"peakPrivateUsage",         peakPrivate_},
+        };
+    }
+
+    std::size_t DecodeRange(std::size_t cursor, std::size_t limit, json& out) override {
+        if (cursor >= plan_.size()) return plan_.size();
+        const std::size_t end = (std::min)(plan_.size(), cursor + limit);
+
+        // One ThreadAttachGuard per chunk. Safe on IL2CPP (no BDWGC finalizer
+        // accumulation) — this is the trade that lets decode live in Chunk.
+        IL2CPP::ThreadAttachGuard guard(domain_);
+        if (!guard.Attached()) {
+            for (std::size_t i = cursor; i < end; ++i) {
+                out.push_back(Snapshot::ClassPayload{
+                    {"assembly", plan_[i].assembly},
+                    {"namespace", plan_[i].ns},
+                    {"name", plan_[i].name},
+                    {"error", "il2cpp_thread_attach failed"},
+                });
+            }
+            return end;
+        }
+
+        for (std::size_t i = cursor; i < end; ++i) {
+            out.push_back(DecodeOneClass(plan_[i]));
+        }
+
+        // Last chunk → post-decode GC drain (mirror of the old Begin tail).
+        // IL2CPP GC doesn't have Mono BDWGC's catch-up behaviour, but keep the
+        // architecture symmetric. The 500ms "breathe" the old Begin did after
+        // the WHOLE decode now lands once, on the final chunk.
+        if (end >= plan_.size() && !drained_) {
+            drained_ = true;
+            const auto& r = IL2CPP::GetResolver();
+            if (r.gc_collect != nullptr) {
+                auto drainStart = std::chrono::steady_clock::now();
+                r.gc_collect(0);
+                auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - drainStart).count();
+                UnityCEDumper::Log::Write(UnityCEDumper::MagicStrings::LogCategoryScan,
+                    "snapshotChunk(IL2CPP) final-chunk drain " + std::to_string(drainMs) + " ms");
+            }
+            ::Sleep(500);
+        }
+        return end;
+    }
+
+private:
+    const IL2CPP::ClassInfoResult& GetClassInfo(IL2CPP::Il2CppClass* c) {
+        auto it = globalClassInfo_.find(c);
+        if (it != globalClassInfo_.end()) {
+            ++classInfoCacheHits_;
+            return it->second;
+        }
+        ++classInfoCacheMisses_;
+        auto inserted = globalClassInfo_.emplace(c, IL2CPP::ReadClassInfo(c));
+        return inserted.first->second;
+    }
+
+    void CheckMemBudget() {
+        const std::uint64_t pu = QueryProcessMemory().privateUsage;
+        if (pu > peakPrivate_) peakPrivate_ = pu;
+        if (pu >= memBudgetBytes_) memBudgetHit_ = true;
+    }
+
+    static bool IsCapturableArrayType(const std::string& tn) {
+        if (tn.size() < 4) return false;
+        if (tn[tn.size() - 1] != ']' || tn[tn.size() - 2] != '[') return false;
+        return tn.find('.') != std::string::npos ||
+               tn.find('/') != std::string::npos;
+    }
+
+    bool ShouldCaptureInner(const std::string& fqn, const std::string& fieldName) {
+        if (!arrayElementFields_) return false;
+        if (arrayElementTargets_.empty()) return true;   // blanket (x64)
+        const std::string full = fqn + "." + fieldName;
+        for (const auto& t : arrayElementTargets_)
+            if (t == fqn || t == full) return true;
+        return false;
+    }
+
+    // Phase 29f (Layer B) — reference-array element inner-field capture.
+    // Returns {"fields":[…]} or {"element_class_error":"…"}. Budget caps
+    // ATTEMPTS (not just captures) — bounds JSON memory AND object_get_class
+    // volume on a large game.
+    json CaptureElementFields(std::uintptr_t elemPtr) {
+        if (elementsProcessed_ >= elementCaptureBudget_) {
+            elementBudgetHit_ = true;
+            return json::object();
+        }
+        ++elementsProcessed_;
+        IL2CPP::Il2CppClass* ec = IL2CPP::ClassOfObject(elemPtr);
+        if (ec == nullptr)
+            return json{{"element_class_error", "object_get_class_failed"}};
+        if (knownIlKlasses_.find(ec) == knownIlKlasses_.end())
+            return json{{"element_class_error", "class_out_of_scope"}};
+        const auto& r = IL2CPP::GetResolver();
+        std::vector<IL2CPP::Il2CppClass*> echain;
+        for (IL2CPP::Il2CppClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
+            echain.push_back(cur);
+            if (r.class_get_parent == nullptr) break;
+            cur = r.class_get_parent(cur);
+        }
+        json efields = json::array();
+        std::size_t produced = 0;
+        const std::size_t fcap = elementFieldCap_;
+        for (std::size_t ci = echain.size(); ci > 0 && produced < fcap; --ci) {
+            const auto& pr = GetClassInfo(echain[ci - 1]);
+            if (!pr.ok) continue;
+            for (const auto& f : pr.info.fields) {
+                if (produced >= fcap) break;
+                if (f.flags & 0x10u) continue;   // skip statics
+                std::uintptr_t fieldAddr = elemPtr + static_cast<std::uintptr_t>(f.offset);
+                json fe = {
+                    {"name",   f.name},
+                    {"type",   f.typeName},
+                    {"offset", f.offset},
+                    {"from",   pr.info.self.name},
+                };
+                if (f.isEnum)      fe["is_enum"]       = true;
+                if (f.isValueType) fe["is_value_type"] = true;
+                const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
+                    ? f.underlyingTypeName : f.typeName;
+                json d = decodeField_(decodeType, fieldAddr);
+                for (auto kv = d.begin(); kv != d.end(); ++kv) fe[kv.key()] = kv.value();
+                efields.push_back(std::move(fe));
+                ++produced;
+            }
+        }
+        ++decodedElementSets_;
+        return json{{"fields", std::move(efields)}};
+    }
+
+    Snapshot::ClassPayload DecodeOneClass(Snapshot::ClassPlanItem& item) {
+        IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(item.klass);
+        if (k == nullptr) {
+            return Snapshot::ClassPayload{
+                {"assembly", item.assembly},
+                {"namespace", item.ns},
+                {"name", item.name},
+                {"error", "klass null"},
+            };
+        }
+        // Budget tripped (memory watchdog or total-instance budget) — emit
+        // class metadata only so the snapshot still lists it.
+        if (memBudgetHit_ || countBudgetHit_) {
+            return Snapshot::ClassPayload{
+                {"assembly", item.assembly},
+                {"namespace", item.ns},
+                {"name", item.name},
+                {"truncated", memBudgetHit_ ? "memory_budget" : "instance_budget"},
+            };
+        }
+
+        const auto& r = IL2CPP::GetResolver();
+        Snapshot::ClassPayload classEntry = {
+            {"assembly",  item.assembly},
+            {"namespace", item.ns},
+            {"name",      item.name},
+        };
+
+        std::vector<IL2CPP::Il2CppClass*> chain;
+        for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+            chain.push_back(cur);
+            if (r.class_get_parent == nullptr) break;
+            cur = r.class_get_parent(cur);
+        }
+        std::vector<const IL2CPP::ClassInfoResult*> chainInfo;
+        chainInfo.reserve(chain.size());
+        for (auto* c : chain) chainInfo.push_back(&GetClassInfo(c));
+
+        const auto& res = *chainInfo[0];
+        if (!res.ok) {
+            classEntry["error"] = "ReadClassInfo failed";
+            return classEntry;
+        }
+        ++decodedClasses_;
+        if (!res.info.parent.name.empty()) {
+            classEntry["parent"] = Snapshot::ClassPayload{
+                {"namespace", res.info.parent.ns},
+                {"name",      res.info.parent.name},
+            };
+        }
+
+        // Static fields — ONE ResolveStaticBaseAddress call per class, then
+        // per-field is offset arithmetic. Static VALUE capture is opt-in.
+        Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
+        void* staticBase = nullptr;
+        bool staticBaseResolved = false;
+        for (const auto& f : res.info.fields) {
+            if ((f.flags & 0x10u) == 0u) continue;
+            Snapshot::ClassPayload srow = {
+                {"name",   f.name},
+                {"type",   f.typeName},
+                {"offset", f.offset},
+            };
+            if (!captureStaticValues_) {
+                srow["error"] = "static_value_not_captured";
+            } else {
+                if (!staticBaseResolved) {
+                    staticBase = IL2CPP::ResolveStaticBaseAddress(k);
+                    staticBaseResolved = true;
+                }
+                if (staticBase == nullptr) {
+                    srow["error"] = "static_unresolved";
+                } else {
+                    std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
+                                        + static_cast<std::uintptr_t>(f.offset);
+                    srow["address"] = formatHex_(fa);
+                    json d = decodeField_(f.typeName, fa);
+                    for (auto kv = d.begin(); kv != d.end(); ++kv) {
+                        srow[kv.key()] = kv.value();
+                    }
+                }
+            }
+            statics.push_back(std::move(srow));
+        }
+        if (!statics.empty()) classEntry["statics"] = std::move(statics);
+
+        // Phase 30a — build the instance field SCHEMA once per class (sorted
+        // by offset), emit it once, then per instance emit only the value
+        // array aligned to this order.
+        struct FieldDesc {
+            const std::string* name;
+            const std::string* type;
+            const std::string* from;
+            const std::string* decodeType;
+            std::size_t        offset;
+            bool               isEnum;
+            bool               isValueType;
+            bool               isArrayShape;
+        };
+        std::vector<FieldDesc> fieldDescs;
+        for (std::size_t ci = chain.size(); ci > 0; --ci) {
+            const auto& pr = *chainInfo[ci - 1];
+            if (!pr.ok) continue;
+            for (const auto& f : pr.info.fields) {
+                if (f.flags & 0x10u) continue;   // skip statics
+                if (fieldDescs.size() >= 4096) break;
+                FieldDesc fd;
+                fd.name        = &f.name;
+                fd.type        = &f.typeName;
+                fd.from        = &pr.info.self.name;
+                fd.decodeType  = (f.isEnum && !f.underlyingTypeName.empty())
+                                    ? &f.underlyingTypeName : &f.typeName;
+                fd.offset      = f.offset;
+                fd.isEnum      = f.isEnum;
+                fd.isValueType = f.isValueType;
+                fd.isArrayShape = f.typeName.size() >= 2 &&
+                    f.typeName[f.typeName.size() - 1] == ']' &&
+                    f.typeName[f.typeName.size() - 2] == '[';
+                fieldDescs.push_back(fd);
+            }
+            if (fieldDescs.size() >= 4096) break;
+        }
+        std::sort(fieldDescs.begin(), fieldDescs.end(),
+            [](const FieldDesc& a, const FieldDesc& b) { return a.offset < b.offset; });
+
+        Snapshot::ClassPayload schemaArr = Snapshot::ClassPayload::array();
+        for (const auto& fd : fieldDescs) {
+            Snapshot::ClassPayload s = {
+                {"name",   *fd.name},
+                {"type",   *fd.type},
+                {"offset", fd.offset},
+                {"from",   *fd.from},
+            };
+            if (fd.isEnum)      s["is_enum"]       = true;
+            if (fd.isValueType) s["is_value_type"] = true;
+            schemaArr.push_back(std::move(s));
+        }
+        if (!fieldDescs.empty() && !item.instances.empty())
+            classEntry["schema"] = std::move(schemaArr);
+
+        const std::string classFqn =
+            item.ns.empty() ? item.name : item.ns + "." + item.name;
+
+        Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
+        for (std::uintptr_t instAddr : item.instances) {
+            if (instanceDecodeBudget_ > 0 && decodedInstances_ >= instanceDecodeBudget_)
+                countBudgetHit_ = true;
+            if (++memCheckCounter_ >= kSnapshotMemCheckInterval) {
+                memCheckCounter_ = 0;
+                CheckMemBudget();
+            }
+            if (memBudgetHit_ || countBudgetHit_) break;
+
+            Snapshot::ClassPayload values = Snapshot::ClassPayload::array();
+            for (const auto& fd : fieldDescs) {
+                std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(fd.offset);
+                Snapshot::ClassPayload entry = Snapshot::ClassPayload::object();
+                json d = decodeField_(*fd.decodeType, fieldAddr);
+                for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
+
+                if (fd.isArrayShape) {
+                    if (!IsCapturableArrayType(*fd.type)) {
+                        ++skippedOpenGenericArrays_;
+                    } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
+                        std::uintptr_t arrPtr = 0;
+                        const std::string& ps = entry["ptr"].get_ref<const std::string&>();
+                        if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
+                            arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                        }
+                        if (arrPtr != 0) {
+                            json elems = walkArrayElementsInline_(
+                                arrPtr, *fd.type, arrayCap_,
+                                ShouldCaptureInner(classFqn, *fd.name)
+                                    ? std::function<json(std::uintptr_t)>(
+                                          [this](std::uintptr_t p) { return CaptureElementFields(p); })
+                                    : std::function<json(std::uintptr_t)>{});
+                            if (elems.contains("error")) {
+                                entry["arrayError"] = elems.value("error", std::string{"unknown"});
+                                if (elems.contains("length")) {
+                                    entry["arrayErrorLength"] = elems["length"];
+                                }
+                            } else {
+                                entry["arrayElements"] = std::move(elems);
+                                ++decodedArrays_;
+                            }
+                        }
+                    }
+                }
+                values.push_back(std::move(entry));
+            }
+            Snapshot::ClassPayload instEntry = { {"address", formatHex_(instAddr)} };
+            instEntry["v"] = std::move(values);
+            instArr.push_back(std::move(instEntry));
+            ++decodedInstances_;
+        }
+        if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
+
+        return classEntry;
+    }
+
+    IL2CPP::Il2CppDomain* domain_;
+    std::vector<Snapshot::ClassPlanItem> plan_;
+    std::unordered_map<IL2CPP::Il2CppClass*, char> knownIlKlasses_;
+    std::size_t arrayCap_;
+    std::size_t instanceDecodeBudget_;
+    std::size_t elementFieldCap_;
+    std::size_t elementCaptureBudget_;
+    std::vector<std::string> arrayElementTargets_;
+    bool arrayElementFields_;
+    bool captureStaticValues_;
+    std::uint64_t memBudgetBytes_;
+
+    FormatHexFn   formatHex_;
+    DecodeFieldFn decodeField_;
+    WalkArrayFn   walkArrayElementsInline_;
+
+    std::unordered_map<IL2CPP::Il2CppClass*, IL2CPP::ClassInfoResult> globalClassInfo_;
+
+    std::size_t decodedClasses_           = 0;
+    std::size_t decodedInstances_         = 0;
+    std::size_t decodedArrays_            = 0;
+    std::size_t skippedOpenGenericArrays_ = 0;
+    std::size_t classInfoCacheHits_       = 0;
+    std::size_t classInfoCacheMisses_     = 0;
+    std::size_t elementsProcessed_        = 0;
+    std::size_t decodedElementSets_       = 0;
+    bool        elementBudgetHit_         = false;
+
+    bool          memBudgetHit_    = false;
+    bool          countBudgetHit_  = false;
+    std::uint64_t peakPrivate_     = 0;
+    std::size_t   memCheckCounter_ = 0;
+    bool          drained_         = false;
+};
+#endif  // UNITYCEDUMPER_BACKEND_IL2CPP
+
 constexpr UnityDumperBackend BackendOfBuild() {
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
     return UnityDumperBackend_Mono;
@@ -5589,394 +6037,39 @@ void RegisterCoreHandlers() {
                 return a.instances.size() < b.instances.size();
             });
 
-        // ---- Decode ALL classes under ONE outer attach guard --------------
+        // ---- Phase 30b: build the streaming decoder; DO NOT decode here ----
+        // The decoder owns the plan (moved) + the heap-walk context. Decode
+        // happens on demand in snapshotChunk, which frees each chunk's payload
+        // after it ships — bounding the game-process transient peak to ~one
+        // chunk instead of the whole decoded snapshot (the ~4.5 GB buffer on
+        // Utawarerumono). decodeStats / truncation / post-stream game memory
+        // are finalized on the LAST chunk, not here (see snapshotChunk).
+        const std::size_t totalClasses = session->plan.size();
         IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
-        session->classes.reserve(session->plan.size());
-        std::size_t decodedClasses = 0;
-        std::size_t decodedInstances = 0;
-        std::size_t decodedArrays = 0;
-        std::size_t skippedOpenGenericArrays = 0;
-        std::size_t classInfoCacheHits = 0;
-        std::size_t classInfoCacheMisses = 0;
-        // Phase 29f (Layer B) — shared element-capture budget accounting.
-        // elementsProcessed bounds object_get_class volume (the budget caps
-        // ATTEMPTS, not just captures, so a blanket sweep over a 158K-instance
-        // game can't make hundreds of thousands of per-element runtime calls).
-        std::size_t elementsProcessed = 0;
-        std::size_t decodedElementSets = 0;
-        bool         elementBudgetHit  = false;
-
-        // Phase P1-fix — process-memory watchdog. Once the game's private
-        // usage crosses memBudgetBytesIl the decode stops adding instances and
-        // the response reports truncatedByMemory, so a huge game can't grow
-        // the process to OOM (the 8 GB CTD on the 22K-class / 800K-instance
-        // game). Sampled every kSnapshotMemCheckInterval instances to keep the
-        // GetProcessMemoryInfo syscall off the hot path.
-        bool          memBudgetHitIl = false;
-        bool          countBudgetHitIl = false;
-        std::uint64_t peakPrivateIl  = memBeforeIl.privateUsage;
-        std::size_t   memCheckCounter = 0;
-        auto checkMemBudgetIl = [&]() {
-            const std::uint64_t pu = QueryProcessMemory().privateUsage;
-            if (pu > peakPrivateIl) peakPrivateIl = pu;
-            if (pu >= memBudgetBytesIl) memBudgetHitIl = true;
-        };
-
-        auto isCapturableArrayType = [](const std::string& tn) -> bool {
-            if (tn.size() < 4) return false;
-            if (tn[tn.size() - 1] != ']' || tn[tn.size() - 2] != '[') return false;
-            return tn.find('.') != std::string::npos ||
-                   tn.find('/') != std::string::npos;
-        };
-
         if (domain != nullptr) {
-            // Phase 29a-v4 round 3 — one big attach (mirror of Mono).
-            // Global ClassInfo cache across the whole decode loop —
-            // mirror of the Mono path. System.Object shows up as the
-            // ancestor of every class; without this it would be re-read
-            // N-classes times.
-            std::unordered_map<IL2CPP::Il2CppClass*, IL2CPP::ClassInfoResult> globalClassInfoIl;
-            auto getClassInfoIl = [&](IL2CPP::Il2CppClass* c)
-                -> const IL2CPP::ClassInfoResult& {
-                auto it = globalClassInfoIl.find(c);
-                if (it != globalClassInfoIl.end()) {
-                    ++classInfoCacheHits;
-                    return it->second;
-                }
-                ++classInfoCacheMisses;
-                auto inserted = globalClassInfoIl.emplace(c, IL2CPP::ReadClassInfo(c));
-                return inserted.first->second;
-            };
-
-            const auto& rIl = IL2CPP::GetResolver();
-
-            // Phase 29f (Layer B) — reference-array element inner-field
-            // capture (mirror of the Mono path). Returns {"fields":[…]} or
-            // {"element_class_error":"…"}.
-            auto captureIlElementFields = [&](std::uintptr_t elemPtr) -> json {
-                // Budget caps ATTEMPTS (not just captures): once spent, leave
-                // remaining elements ptr-only. Bounds both the JSON memory AND
-                // the per-element object_get_class volume on a large game (the
-                // 158K-instance / 21K-array x64 IL2CPP CTD).
-                if (elementsProcessed >= session->elementCaptureBudget) {
-                    elementBudgetHit = true;
-                    return json::object();
-                }
-                ++elementsProcessed;
-                IL2CPP::Il2CppClass* ec = IL2CPP::ClassOfObject(elemPtr);
-                if (ec == nullptr)
-                    return json{{"element_class_error", "object_get_class_failed"}};
-                // Only walk classes we enumerated in-scope. object_get_class on
-                // a false-positive array slot can return a readable-but-garbage
-                // class that ProbeKlassValid (a name read) would wrongly accept;
-                // the known-class set is exact and needs no runtime call.
-                if (knownIlKlasses.find(ec) == knownIlKlasses.end())
-                    return json{{"element_class_error", "class_out_of_scope"}};
-                std::vector<IL2CPP::Il2CppClass*> echain;
-                for (IL2CPP::Il2CppClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
-                    echain.push_back(cur);
-                    if (rIl.class_get_parent == nullptr) break;
-                    cur = rIl.class_get_parent(cur);
-                }
-                json efields = json::array();
-                std::size_t produced = 0;
-                const std::size_t fcap = session->elementFieldCap;
-                for (std::size_t ci = echain.size(); ci > 0 && produced < fcap; --ci) {
-                    const auto& pr = getClassInfoIl(echain[ci - 1]);
-                    if (!pr.ok) continue;
-                    for (const auto& f : pr.info.fields) {
-                        if (produced >= fcap) break;
-                        if (f.flags & 0x10u) continue;   // skip statics
-                        std::uintptr_t fieldAddr = elemPtr + static_cast<std::uintptr_t>(f.offset);
-                        json fe = {
-                            {"name",   f.name},
-                            {"type",   f.typeName},
-                            {"offset", f.offset},
-                            {"from",   pr.info.self.name},
-                        };
-                        if (f.isEnum)      fe["is_enum"]       = true;
-                        if (f.isValueType) fe["is_value_type"] = true;
-                        const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
-                            ? f.underlyingTypeName : f.typeName;
-                        json d = decodeField(decodeType, fieldAddr);
-                        for (auto kv = d.begin(); kv != d.end(); ++kv) fe[kv.key()] = kv.value();
-                        efields.push_back(std::move(fe));
-                        ++produced;
-                    }
-                }
-                ++decodedElementSets;
-                return json{{"fields", std::move(efields)}};
-            };
-            auto shouldCaptureInner = [&](const std::string& fqn, const std::string& fieldName) -> bool {
-                if (!session->arrayElementFields) return false;
-                if (session->arrayElementTargets.empty()) return true;   // blanket (x64)
-                const std::string full = fqn + "." + fieldName;
-                for (const auto& t : session->arrayElementTargets)
-                    if (t == fqn || t == full) return true;
-                return false;
-            };
-
-            auto decodeOneClassIl = [&](Snapshot::ClassPlanItem& item) {
-                IL2CPP::Il2CppClass* k = static_cast<IL2CPP::Il2CppClass*>(item.klass);
-                if (k == nullptr) {
-                    session->classes.push_back(Snapshot::ClassPayload{
-                        {"assembly", item.assembly},
-                        {"namespace", item.ns},
-                        {"name", item.name},
-                        {"error", "klass null"},
-                    });
-                    return;
-                }
-                // Budget tripped (memory watchdog or total-instance budget) —
-                // emit class metadata only so the snapshot still lists it.
-                if (memBudgetHitIl || countBudgetHitIl) {
-                    session->classes.push_back(Snapshot::ClassPayload{
-                        {"assembly", item.assembly},
-                        {"namespace", item.ns},
-                        {"name", item.name},
-                        {"truncated", memBudgetHitIl ? "memory_budget" : "instance_budget"},
-                    });
-                    return;
-                }
-
-                Snapshot::ClassPayload classEntry = {
-                    {"assembly",  item.assembly},
-                    {"namespace", item.ns},
-                    {"name",      item.name},
-                };
-
-                // Build chain + cached ChainInfo first — chainInfo[0]
-                // doubles as k's own info (replaces the duplicate
-                // ReadClassInfo(k) outer call).
-                std::vector<IL2CPP::Il2CppClass*> chain;
-                for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
-                    chain.push_back(cur);
-                    if (rIl.class_get_parent == nullptr) break;
-                    cur = rIl.class_get_parent(cur);
-                }
-                std::vector<const IL2CPP::ClassInfoResult*> chainInfo;
-                chainInfo.reserve(chain.size());
-                for (auto* c : chain) chainInfo.push_back(&getClassInfoIl(c));
-
-                const auto& res = *chainInfo[0];
-                if (!res.ok) {
-                    classEntry["error"] = "ReadClassInfo failed";
-                    session->classes.push_back(std::move(classEntry));
-                    return;
-                }
-                ++decodedClasses;
-                if (!res.info.parent.name.empty()) {
-                    classEntry["parent"] = Snapshot::ClassPayload{
-                        {"namespace", res.info.parent.ns},
-                        {"name",      res.info.parent.name},
-                    };
-                }
-
-                // Static fields — ONE ResolveStaticBaseAddress call per
-                // class, then per-field is offset arithmetic.
-                Snapshot::ClassPayload statics = Snapshot::ClassPayload::array();
-                void* staticBase = nullptr;
-                bool staticBaseResolved = false;
-                for (const auto& f : res.info.fields) {
-                    if ((f.flags & 0x10u) == 0u) continue;
-                    Snapshot::ClassPayload srow = {
-                        {"name",   f.name},
-                        {"type",   f.typeName},
-                        {"offset", f.offset},
-                    };
-                    // Static VALUE capture is opt-in (default off) — metadata
-                    // only otherwise, keeping snapshots leaner + matching Mono.
-                    if (!session->captureStaticValues) {
-                        srow["error"] = "static_value_not_captured";
-                    } else {
-                        if (!staticBaseResolved) {
-                            staticBase = IL2CPP::ResolveStaticBaseAddress(k);
-                            staticBaseResolved = true;
-                        }
-                        if (staticBase == nullptr) {
-                            srow["error"] = "static_unresolved";
-                        } else {
-                            std::uintptr_t fa = reinterpret_cast<std::uintptr_t>(staticBase)
-                                                + static_cast<std::uintptr_t>(f.offset);
-                            srow["address"] = formatHex(fa);
-                            json d = decodeField(f.typeName, fa);
-                            for (auto kv = d.begin(); kv != d.end(); ++kv) {
-                                srow[kv.key()] = kv.value();
-                            }
-                        }
-                    }
-                    statics.push_back(std::move(srow));
-                }
-                if (!statics.empty()) classEntry["statics"] = std::move(statics);
-
-                // Phase 30a — build the instance field SCHEMA once per class
-                // (sorted by offset), emit it once, then per instance emit only
-                // the value array aligned to this order. Eliminates the per-
-                // instance repetition of name/type/offset/from that dominated
-                // the decode tree (174K× for a 69-field class). Field metadata
-                // strings are referenced (not copied) from the cached
-                // ClassInfoResult, whose map nodes are stable for this decode.
-                struct FieldDesc {
-                    const std::string* name;
-                    const std::string* type;
-                    const std::string* from;
-                    const std::string* decodeType;
-                    std::size_t        offset;
-                    bool               isEnum;
-                    bool               isValueType;
-                    bool               isArrayShape;
-                };
-                std::vector<FieldDesc> fieldDescs;
-                for (std::size_t ci = chain.size(); ci > 0; --ci) {
-                    const auto& pr = *chainInfo[ci - 1];
-                    if (!pr.ok) continue;
-                    for (const auto& f : pr.info.fields) {
-                        if (f.flags & 0x10u) continue;   // skip statics
-                        if (fieldDescs.size() >= 4096) break;
-                        FieldDesc fd;
-                        fd.name        = &f.name;
-                        fd.type        = &f.typeName;
-                        fd.from        = &pr.info.self.name;
-                        fd.decodeType  = (f.isEnum && !f.underlyingTypeName.empty())
-                                            ? &f.underlyingTypeName : &f.typeName;
-                        fd.offset      = f.offset;
-                        fd.isEnum      = f.isEnum;
-                        fd.isValueType = f.isValueType;
-                        fd.isArrayShape = f.typeName.size() >= 2 &&
-                            f.typeName[f.typeName.size() - 1] == ']' &&
-                            f.typeName[f.typeName.size() - 2] == '[';
-                        fieldDescs.push_back(fd);
-                    }
-                    if (fieldDescs.size() >= 4096) break;
-                }
-                std::sort(fieldDescs.begin(), fieldDescs.end(),
-                    [](const FieldDesc& a, const FieldDesc& b) { return a.offset < b.offset; });
-
-                Snapshot::ClassPayload schemaArr = Snapshot::ClassPayload::array();
-                for (const auto& fd : fieldDescs) {
-                    Snapshot::ClassPayload s = {
-                        {"name",   *fd.name},
-                        {"type",   *fd.type},
-                        {"offset", fd.offset},
-                        {"from",   *fd.from},
-                    };
-                    if (fd.isEnum)      s["is_enum"]       = true;
-                    if (fd.isValueType) s["is_value_type"] = true;
-                    schemaArr.push_back(std::move(s));
-                }
-                // Only emit the schema when there are instances to align to it
-                // (a static-only class needs no instance schema — matches the
-                // old wire, which emitted no per-instance fields there).
-                if (!fieldDescs.empty() && !item.instances.empty())
-                    classEntry["schema"] = std::move(schemaArr);
-
-                const std::string classFqn =
-                    item.ns.empty() ? item.name : item.ns + "." + item.name;
-
-                Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
-                for (std::uintptr_t instAddr : item.instances) {
-                    // Total-instance budget (cheap, per-instance) + process-
-                    // memory watchdog (throttled). Stop adding instances once
-                    // either trips; the class keeps whatever it decoded so far.
-                    if (instanceDecodeBudget > 0 && decodedInstances >= instanceDecodeBudget)
-                        countBudgetHitIl = true;
-                    if (++memCheckCounter >= kSnapshotMemCheckInterval) {
-                        memCheckCounter = 0;
-                        checkMemBudgetIl();
-                    }
-                    if (memBudgetHitIl || countBudgetHitIl) break;
-
-                    // Value-only entries aligned to schema order (no per-field
-                    // name/type/offset/from — the UI re-expands from schema).
-                    Snapshot::ClassPayload values = Snapshot::ClassPayload::array();
-                    for (const auto& fd : fieldDescs) {
-                        std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(fd.offset);
-                        Snapshot::ClassPayload entry = Snapshot::ClassPayload::object();
-                        json d = decodeField(*fd.decodeType, fieldAddr);
-                        for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
-
-                        if (fd.isArrayShape) {
-                            if (!isCapturableArrayType(*fd.type)) {
-                                ++skippedOpenGenericArrays;
-                            } else if (entry.contains("ptr") && entry["ptr"].is_string()) {
-                                std::uintptr_t arrPtr = 0;
-                                const std::string& ps = entry["ptr"].get_ref<const std::string&>();
-                                if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
-                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
-                                }
-                                if (arrPtr != 0) {
-                                    json elems = walkArrayElementsInline(
-                                        arrPtr, *fd.type, arrayCap,
-                                        shouldCaptureInner(classFqn, *fd.name)
-                                            ? captureIlElementFields
-                                            : std::function<json(std::uintptr_t)>{});
-                                    if (elems.contains("error")) {
-                                        entry["arrayError"] = elems.value("error", std::string{"unknown"});
-                                        if (elems.contains("length")) {
-                                            entry["arrayErrorLength"] = elems["length"];
-                                        }
-                                    } else {
-                                        entry["arrayElements"] = std::move(elems);
-                                        ++decodedArrays;
-                                    }
-                                }
-                            }
-                        }
-                        values.push_back(std::move(entry));
-                    }
-                    Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
-                    instEntry["v"] = std::move(values);
-                    instArr.push_back(std::move(instEntry));
-                    ++decodedInstances;
-                }
-                if (!instArr.empty()) classEntry["instances"] = std::move(instArr);
-
-                session->classes.push_back(std::move(classEntry));
-            };  // end decodeOneClassIl lambda
-
-            // Phase 29a-v4 round 3 — REVERTED to one outer attach
-            // (see Mono mirror above). IL2CPP doesn't have the same
-            // sensitivity, but uniform architecture across backends.
-            IL2CPP::ThreadAttachGuard guard(domain);
-            if (guard.Attached()) {
-                for (auto& item : session->plan) {
-                    decodeOneClassIl(item);
-                }
-            } else {
-                for (auto& item : session->plan) {
-                    session->classes.push_back(Snapshot::ClassPayload{
-                        {"assembly", item.assembly},
-                        {"namespace", item.ns},
-                        {"name", item.name},
-                        {"error", "il2cpp_thread_attach failed"},
-                    });
-                }
-            }
-
-            // Mirror of the Mono path's post-decode drain. IL2CPP GC
-            // doesn't have the same catch-up behaviour as Mono BDWGC,
-            // but keep the architecture symmetric.
-            {
-                const auto& rDrainIl = IL2CPP::GetResolver();
-                if (rDrainIl.gc_collect != nullptr) {
-                    IL2CPP::ThreadAttachGuard drainGuard(domain);
-                    if (drainGuard.Attached()) {
-                        auto drainStart = std::chrono::steady_clock::now();
-                        rDrainIl.gc_collect(0);
-                        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - drainStart).count();
-                        UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
-                            "snapshotBegin(IL2CPP) post-decode drain " + std::to_string(drainMs) + " ms");
-                    }
-                }
-            }
-            ::Sleep(500);
+            session->streamDecoder = std::make_unique<Il2cppStreamDecoder>(
+                domain,
+                std::move(session->plan),
+                std::move(knownIlKlasses),
+                arrayCap,
+                instanceDecodeBudget,
+                elementFieldCap,
+                elementCaptureBudget,
+                session->arrayElementTargets,
+                session->arrayElementFields,
+                session->captureStaticValues,
+                memBudgetBytesIl,
+                memBeforeIl.privateUsage,
+                formatHex,
+                decodeField,
+                walkArrayElementsInline);
         }
+        // session->plan is now empty (moved into the decoder); the captured
+        // totalClasses above is used for the response + plan summary below.
 
         for (const auto& asmName : requestedAssemblies) {
             session->planByAssembly.push_back(planByAsm[asmName]);
         }
-        const std::size_t totalClasses = session->plan.size();
         const std::size_t totalInst    = session->totalInstances;
         const std::string capturedAt   = session->capturedAt;
         const std::string buildId      = session->gameBuildId;
@@ -6000,39 +6093,21 @@ void RegisterCoreHandlers() {
             {"regionsSkipStack", bulk.regionsSkipStack},
             {"bytesScanned",     bulk.bytesScanned},
         };
-        json decodeStats = {
-            {"decodedClasses",           decodedClasses},
-            {"decodedInstances",         decodedInstances},
-            {"decodedArrays",            decodedArrays},
-            {"skippedOpenGenericArrays", skippedOpenGenericArrays},
-            {"classInfoCacheHits",       classInfoCacheHits},
-            {"classInfoCacheMisses",     classInfoCacheMisses},
-            {"decodedElementSets",       decodedElementSets},
-            {"elementBudgetHit",         elementBudgetHit},
-            {"truncatedByMemory",        memBudgetHitIl},
-            {"truncatedByCount",         countBudgetHitIl},
-            {"instanceDecodeBudget",     instanceDecodeBudget},
-            {"memBudgetBytes",           memBudgetBytesIl},
-            {"peakPrivateUsage",         peakPrivateIl},
-        };
+        // Phase 30b — no decodeStats here: decode happens during snapshotChunk,
+        // so decodedInstances / truncation / peakPrivateUsage are finalized on
+        // the last chunk's response (the UI reads them from there).
 
-        // Post-decode memory snapshot for the response — mirrors Mono.
+        // Pre-decode game-process memory snapshot for the Begin response. (Decode
+        // hasn't run yet — the post-stream growth shows up on the last chunk.)
         const ProcessMemorySnapshot memAfterIl = QueryProcessMemory();
 
         UnityCEDumper::Log::Write(MagicStrings::LogCategoryScan,
             "snapshotBegin(IL2CPP) id=" + std::to_string(sid) +
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
-            " decoded=" + std::to_string(decodedClasses) +
-            " decodedInst=" + std::to_string(decodedInstances) +
-            " arrays=" + std::to_string(decodedArrays) +
-            " elemSets=" + std::to_string(decodedElementSets) +
-            (elementBudgetHit ? " elemBudgetHit=1" : "") +
-            (memBudgetHitIl ? " MEM_TRUNCATED=1" : "") +
-            (countBudgetHitIl ? " COUNT_TRUNCATED=1" : "") +
+            " streaming=1 (decode deferred to snapshotChunk)" +
             " instBudget=" + std::to_string(instanceDecodeBudget) +
             " memBudget=" + std::to_string(memBudgetBytesIl) +
-            " peakPriv=" + std::to_string(peakPrivateIl) +
             " buildId=" + buildId +
             " gameWorkingSet=" + std::to_string(memAfterIl.workingSet) +
             " gamePrivateUsage=" + std::to_string(memAfterIl.privateUsage));
@@ -6053,9 +6128,8 @@ void RegisterCoreHandlers() {
             {"includeSystemAssemblies",  includeSystemAsm},
             {"plan",                    std::move(planArr)},
             {"scanStats",               std::move(scanStats)},
-            {"decodeStats",             std::move(decodeStats)},
-            {"truncatedByMemory",       memBudgetHitIl},
-            {"truncatedByCount",        countBudgetHitIl},
+            // Phase 30b — decodeStats + truncatedByMemory/Count omitted here;
+            // they're finalized on the last snapshotChunk (decode is deferred).
             {"gamePointerSize",         memAfterIl.pointerSize},
             {"gameWorkingSet",          memAfterIl.workingSet},
             {"gamePrivateUsage",        memAfterIl.privateUsage},
@@ -6064,7 +6138,12 @@ void RegisterCoreHandlers() {
 
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotChunk,
         [](const json& args) -> json {
-        // Phase 29a-v2: pure slicer (same as Mono mirror above).
+        // Phase 30b — IL2CPP streaming: decode plan rows ON DEMAND via the
+        // session's streamDecoder, then this chunk's payload is freed once the
+        // response is serialized (it's never retained in the session). That
+        // bounds the game-process peak to ~one chunk instead of the whole
+        // decoded snapshot. Falls back to the legacy pre-built `classes` slicer
+        // if a session has no decoder (shouldn't happen on IL2CPP post-30b).
         std::string sidStr = args.value("snapshotId", std::string{});
         if (sidStr.empty()) return json{{"error", "missing 'snapshotId'"}};
         std::uint64_t sid = 0;
@@ -6080,22 +6159,49 @@ void RegisterCoreHandlers() {
         json classes = json::array();
         std::size_t totalPlan   = 0;
         std::size_t startCursor = 0;
+        std::size_t nextCursor  = 0;
+        bool done = false;
+        // Final-chunk stats — only filled (on done) for a streaming session.
+        json decodeStats;
+        bool haveStats   = false;
+        bool truncByMem  = false;
+        bool truncByCount = false;
+        // NOTE: the decode runs INSIDE View, i.e. while the SessionManager mutex
+        // is held. That serializes concurrent snapshot RPCs (in practice the UI
+        // captures one snapshot at a time) but never deadlocks — DecodeRange
+        // touches only the IL2CPP runtime, never the SessionManager. Keeping the
+        // decoder owned by the (locked) session is what makes a concurrent
+        // snapshotEnd / expiry safe against a use-after-free on the decoder.
         bool found = Snapshot::SessionManager::Instance().View(sid,
             [&](Snapshot::Session& s) {
-                totalPlan = s.classes.size();
                 startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
-                if (startCursor > totalPlan) startCursor = totalPlan;
-                std::size_t end = std::min(totalPlan, startCursor + limit);
-                for (std::size_t i = startCursor; i < end; ++i) {
-                    classes.push_back(s.classes[i]);
+                if (s.streamDecoder) {
+                    totalPlan = s.streamDecoder->PlanSize();
+                    if (startCursor > totalPlan) startCursor = totalPlan;
+                    nextCursor = s.streamDecoder->DecodeRange(startCursor, limit, classes);
+                    done = (nextCursor >= totalPlan);
+                    if (done) {
+                        decodeStats  = s.streamDecoder->DecodeStats();
+                        truncByMem   = s.streamDecoder->TruncatedByMemory();
+                        truncByCount = s.streamDecoder->TruncatedByCount();
+                        haveStats    = true;
+                    }
+                } else {
+                    // Legacy decode-in-Begin slicer (pre-built payloads).
+                    totalPlan = s.classes.size();
+                    if (startCursor > totalPlan) startCursor = totalPlan;
+                    std::size_t end = std::min(totalPlan, startCursor + limit);
+                    for (std::size_t i = startCursor; i < end; ++i) {
+                        classes.push_back(s.classes[i]);
+                    }
+                    nextCursor = startCursor + static_cast<std::size_t>(classes.size());
+                    done = (nextCursor >= totalPlan);
                 }
             });
         if (!found) {
             return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
         }
-        std::size_t nextCursor = startCursor + static_cast<std::size_t>(classes.size());
-        bool done = (nextCursor >= totalPlan);
-        return json{
+        json resp = {
             {"ok",         true},
             {"snapshotId", sidStr},
             {"cursor",     startCursor},
@@ -6103,6 +6209,19 @@ void RegisterCoreHandlers() {
             {"done",       done},
             {"classes",    std::move(classes)},
         };
+        // Phase 30b — finalized decode stats + truncation + post-stream game
+        // memory ship on the LAST chunk (decode ran across the chunks, so these
+        // aren't known until now). The UI prefers these over the Begin values.
+        if (haveStats) {
+            resp["decodeStats"]       = std::move(decodeStats);
+            resp["truncatedByMemory"] = truncByMem;
+            resp["truncatedByCount"]  = truncByCount;
+            const ProcessMemorySnapshot memAfter = QueryProcessMemory();
+            resp["gameWorkingSet"]    = memAfter.workingSet;
+            resp["gamePrivateUsage"]  = memAfter.privateUsage;
+            resp["gamePointerSize"]   = memAfter.pointerSize;
+        }
+        return resp;
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotEnd,

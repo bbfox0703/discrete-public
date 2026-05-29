@@ -1005,6 +1005,17 @@ public sealed partial class SnapshotViewModel : ObservableObject
             var classes = new List<SnapshotClassEntry>(totalClasses);
             int cursor = 0;
             int chunkCount = 0;
+            // Phase 30b — IL2CPP streaming: decode now happens during the chunks,
+            // so the final decode stats / truncation / post-stream game memory
+            // arrive on the last chunk's response (null/false otherwise). We
+            // capture them here and prefer them over begin.* below; a non-
+            // streaming (Mono / legacy) DLL never sets them, so begin.* is used.
+            SnapshotDecodeStats? streamStats = null;
+            bool   streamTruncMem   = false;
+            bool   streamTruncCount = false;
+            ulong? streamGameWs     = null;
+            ulong? streamGamePu     = null;
+            int?   streamGamePs     = null;
             var chunkPhaseSw = Stopwatch.StartNew();
             while (true)
             {
@@ -1018,6 +1029,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 }
                 classes.AddRange(chunk.Classes);
                 chunkCount++;
+                // The DLL ships finalized stats on the last (done) chunk only.
+                if (chunk.DecodeStats is not null)
+                {
+                    streamStats      = chunk.DecodeStats;
+                    streamTruncMem   = chunk.TruncatedByMemory;
+                    streamTruncCount = chunk.TruncatedByCount;
+                    streamGameWs     = chunk.GameWorkingSet;
+                    streamGamePu     = chunk.GamePrivateUsage;
+                    streamGamePs     = chunk.GamePointerSize;
+                }
                 // Live progress for the streaming phase. Updates every
                 // chunk so the user sees the counter move — fixes the
                 // "looks frozen" perception when total snapshot is 100s+.
@@ -1039,6 +1060,21 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // Always release the server-side session even if we errored mid-chunk.
             try { await _backend.SnapshotEndAsync(begin.SnapshotId, ct).ConfigureAwait(true); }
             catch { /* best effort */ }
+
+            // Phase 30b — refresh the game-memory banner from the LAST chunk
+            // (streaming). For a streaming capture the post-decode growth only
+            // shows up after the chunks ran, so the Begin response (pre-decode)
+            // understated it. Non-streaming DLLs leave these null → no override.
+            if (streamGameWs is { } sws)
+            {
+                if (streamGamePs is int sps && sps > 0)
+                    OnGameConnected(sps, sws, streamGamePu ?? GamePrivateUsage);
+                else
+                {
+                    GameWorkingSet = sws;
+                    if (streamGamePu is { } spu) GamePrivateUsage = spu;
+                }
+            }
 
             // Phase 29g-1: dedup the millions of duplicated metadata strings
             // (field Name/Type/From, class Assembly/Namespace/Name, ElementType)
@@ -1096,7 +1132,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
             string excluded = begin.ExcludedSystemAssemblies > 0
                 ? $", excluded {begin.ExcludedSystemAssemblies} system asm"
                 : string.Empty;
-            string cacheNote = begin.DecodeStats is { } ds && (ds.ClassInfoCacheHits + ds.ClassInfoCacheMisses) > 0
+            // Phase 30b — prefer the streaming (last-chunk) stats; fall back to
+            // the Begin stats for a non-streaming (Mono / legacy) DLL.
+            SnapshotDecodeStats? effDecodeStats = streamStats ?? begin.DecodeStats;
+            string cacheNote = effDecodeStats is { } ds && (ds.ClassInfoCacheHits + ds.ClassInfoCacheMisses) > 0
                 ? $", ClassInfo cache {ds.ClassInfoCacheHits:N0}/{ds.ClassInfoCacheHits + ds.ClassInfoCacheMisses:N0}"
                 : string.Empty;
             long wsEnd = GetWorkingSet();
@@ -1110,11 +1149,15 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // memory watchdog or the total-instance budget; with the ascending-
             // population plan sort the dropped classes are the high-population
             // ones (low-population game-state classes are kept).
+            // Phase 30b — truncation may be reported by Begin (non-streaming) OR
+            // by the last chunk (streaming). OR them so either path surfaces it.
+            bool truncMem   = begin.TruncatedByMemory || streamTruncMem;
+            bool truncCount = begin.TruncatedByCount  || streamTruncCount;
             string truncNote = string.Empty;
-            if (begin.TruncatedByMemory)
+            if (truncMem)
                 truncNote = "  ⚠ PARTIAL: memory budget hit — high-population classes dropped. " +
                             "Narrow the assembly scope, or raise memHeadroomMB / restart the game for more.";
-            else if (begin.TruncatedByCount)
+            else if (truncCount)
                 truncNote = "  ⚠ PARTIAL: instance budget reached — high-population classes dropped. " +
                             "Narrow the assembly scope to capture specific classes fully.";
             StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {env.FieldValueCount:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}).{truncNote}";

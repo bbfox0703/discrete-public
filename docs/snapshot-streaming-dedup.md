@@ -1,6 +1,6 @@
 # Snapshot memory & speed — streaming-decode + schema/value dedup (design)
 
-> Status: **30a SHIPPED 2026-05-29 (both backends); 30b/30c + schema-retention deferred.**
+> Status: **30a SHIPPED 2026-05-29 (both backends); 30b game stream-decode SHIPPED 2026-05-29 (IL2CPP); 30b-Mono / 30c + schema-retention deferred.**
 > Motivated by the Utawarerumono (受讚頌者 循白之證, IL2CPP) live-smoke: snapshot took
 > ~11 min of decode, pushed the game to ~10.8 GB and the UI to ~14.7 GB. P1c made the
 > *find* phase 0.6 s; the *decode* phase was the entire cost.
@@ -135,6 +135,26 @@ Game decode tree ≈ 4.5 GB → **~1 GB**; UI ≈ 14.7 GB → **~3–4 GB** for 
 174 079 instances. SQLite + transfer shrink similarly.
 
 ## 4. Fix B — streaming decode (Phase 30b/c, bounds peak)
+
+> **30b game-side SHIPPED 2026-05-29 (IL2CPP).** `snapshotBegin` now builds an
+> `Il2cppStreamDecoder` (owns the moved plan + heap-walk context) and does **no**
+> decode; `snapshotChunk` calls `decoder->DecodeRange(cursor,limit,out)` under a
+> per-chunk `ThreadAttachGuard` (safe on IL2CPP), and each chunk's payload is
+> freed after the response ships — so `Session::classes` is never the whole
+> snapshot. Final `decodeStats` + `truncatedByMemory/Count` + post-stream
+> `gameWorkingSet/gamePrivateUsage` ride the `done=true` chunk; `SnapshotChunkResult`
+> gained those fields and `SnapshotViewModel` prefers them over the Begin values
+> (falls back to Begin for a non-streaming DLL). Interface
+> `ISnapshotStreamDecoder` lives in `SnapshotSession.h`; the concrete decoder is in
+> the IL2CPP `#ifdef` branch of `ExportAPI.cpp`. **Mono mitigation #3 chosen** —
+> Mono keeps decode-in-Begin (its standalone DLL build is untouched). DLL builds
+> clean both backends; 597 UI tests green. **Live-smoke verified 2026-05-29
+> (Utawarerumono): game stays ~6.4 GB private during AND after capture even at
+> budget 100000 (DOUBLE 30a's 50000) — vs 30a's 6.9 GB at budget 50000. The
+> ~4.5 GB transient decode buffer is gone and the game peak is decoupled from the
+> budget (raising it 2× cost the game nothing). No freeze — game CPU kept
+> advancing across both captures (969→1582→2237 s) with WS steady. The UI side is
+> now the peak (~7.5 GB private during the 100000 capture, settling to ~3.1 GB) → 30c.**
 
 ### 30b — game side: decode-on-demand in `snapshotChunk`
 - `snapshotBegin`: heap walk + plan + ascending-population sort **only** (plan is

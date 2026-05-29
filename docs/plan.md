@@ -1093,7 +1093,7 @@ visible; fallback is to exclude *all* regions overlapping any class pointer.
 
 ---
 
-## Phase 30 — Snapshot memory & speed ✅ 30a SHIPPED 2026-05-29 (both backends)
+## Phase 30 — Snapshot memory & speed ✅ 30a SHIPPED 2026-05-29 (both backends) · ✅ 30b game stream-decode SHIPPED 2026-05-29 (IL2CPP; Mono deferred)
 
 Snapshot decode was the whole cost (find is 0.6s after P1c). On Utawarerumono
 (IL2CPP) it ran ~11 min, pushed the game to 10.8 GB + the UI to 14.7 GB. Root
@@ -1128,9 +1128,28 @@ numbers in the CE-Handwire `Memory-Scanning-Internals.md` §16.7–16.8 (backup 
   shared `SnapshotFieldSchema` ref (~48 B/field). Judged **low-ROI**: value
   compaction was the decisive win; budget is the right knob per game. Only worth
   it for routinely capturing *full* snapshots.
-- [ ] **30b — game stream-decode** / **30c — UI stream-to-disk** — bound the
-  transient peak for full captures. Only needed if pushing the budget toward
-  complete captures of huge games.
+- [x] **30b — game stream-decode (IL2CPP) SHIPPED 2026-05-29** — snapshotBegin
+  now only heap-walks + plans + builds an `Il2cppStreamDecoder`; snapshotChunk
+  decodes plan rows on demand and frees each chunk's payload after it ships, so
+  the game-process peak is bounded to ~one chunk + plan + ClassInfo cache instead
+  of the whole decoded snapshot (the ~4.5 GB buffer). Decode stats / truncation /
+  post-stream game memory finalize on the last chunk; the UI prefers those over
+  the Begin values (falls back to Begin for non-streaming DLLs). DLL builds clean
+  (both backends), 597 UI tests green. Design: [docs/snapshot-streaming-dedup.md](snapshot-streaming-dedup.md) §4.
+  **Live-smoke verified 2026-05-29 (Utawarerumono): game stays ~6.4 GB
+  during AND after capture even at budget 100000 (DOUBLE 30a's 50000) — vs 30a's
+  6.9 GB at budget 50000. The ~4.5 GB transient decode buffer is gone; the game
+  peak is now decoupled from the budget (raising it 2× cost the game nothing). No
+  freeze — game CPU kept advancing across both captures (969→1582→2237 s) with WS
+  steady. UI is now the peak (~7.5 GB private during the 100000 capture, settling
+  to ~3.1 GB) → that's 30c (UI stream-to-disk).**
+- [ ] **30b — Mono** — needs the session-held-attach lifecycle (one attach across
+  the whole stream on the stable ServeClient thread; detach on End / disconnect
+  hook) to avoid the per-chunk BDWGC finalizer freeze (活俠傳). Deferred; Mono
+  keeps decode-in-Begin until that's proven.
+- [ ] **30c — UI stream-to-disk** — bound the UI peak for full captures
+  (write each chunk to SQLite incrementally, don't retain the envelope). Only
+  needed if pushing the budget toward complete captures of huge games.
 
 ---
 
