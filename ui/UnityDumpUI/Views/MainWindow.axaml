@@ -838,7 +838,11 @@
                                           Width="Auto" MinWidth="160"
                                           Binding="{Binding Type}"
                                           SortMemberPath="Type" CanUserSort="True" />
-                      <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*"
+                      <!-- Value: star-fills when the pane is wide, but never
+                           shrinks below MinWidth — when the pane is too narrow
+                           for every column the grid shows a horizontal
+                           scrollbar instead of squeezing Value unreadable. -->
+                      <DataGridTextColumn Header="{StaticResource Inspector.ColValue}" Width="*" MinWidth="320"
                                           Binding="{Binding DisplayValue}"
                                           SortMemberPath="DisplayValue" CanUserSort="True" />
                       <DataGridTextColumn Header="{StaticResource Browser.ColDeclaredIn}" Width="160"
@@ -2046,7 +2050,7 @@
                               DoubleTapped="OnSnapshotFieldStatActivated">
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
-                                             Width="*" SortMemberPath="FieldName" CanUserSort="True"/>
+                                             Width="*" MinWidth="220" SortMemberPath="FieldName" CanUserSort="True"/>
                         <DataGridTextColumn Header="#" Binding="{Binding Count}"
                                              Width="60" SortMemberPath="Count" CanUserSort="True"/>
                         <DataGridCheckBoxColumn Header="Excl." Binding="{Binding IsExcluded}"
@@ -2249,13 +2253,13 @@
                       <DataGrid.Columns>
                         <DataGridTextColumn Header="Class"
                                             Binding="{Binding ClassFqn}"
-                                            Width="2*"/>
+                                            Width="2*" MinWidth="240"/>
                         <DataGridTextColumn Header="Field"
                                             Binding="{Binding FieldName}"
-                                            Width="*"/>
+                                            Width="*" MinWidth="160"/>
                         <DataGridTextColumn Header="Type"
                                             Binding="{Binding FieldType}"
-                                            Width="*"/>
+                                            Width="*" MinWidth="160"/>
                         <DataGridTextColumn Header="Instance"
                                             Binding="{Binding InstanceAddress}"
                                             Width="160"/>
@@ -2570,7 +2574,7 @@
                         <DataGridTextColumn Header="Snapshot"
                                             Binding="{Binding DisplayLabel}"
                                             IsReadOnly="True"
-                                            Width="*"/>
+                                            Width="*" MinWidth="200"/>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>

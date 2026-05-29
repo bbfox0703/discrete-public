@@ -99,6 +99,27 @@ ProcessMemorySnapshot QueryProcessMemory() noexcept {
 // build #646 hit on 活俠傳.
 constexpr std::uint64_t kX86PrivateUsageRefuseThreshold = 3ULL * 1024 * 1024 * 1024;
 
+// Phase P1-fix — available physical RAM right now. The snapshot decode builds
+// the ENTIRE snapshot in the game process before streaming, so a huge game
+// (e.g. 22K classes / 800K instances / 7 GB heap) can balloon the game's
+// private usage past the OS limit and CTD it. We bound the decode's added
+// memory using a budget clamped to a fraction of free RAM.
+std::uint64_t QueryAvailablePhysBytes() noexcept {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (::GlobalMemoryStatusEx(&ms)) return static_cast<std::uint64_t>(ms.ullAvailPhys);
+    return 0;
+}
+
+// Default extra memory the snapshot decode may consume on top of the game's
+// pre-snapshot private usage before it stops and reports truncation. Clamped
+// at runtime to a fraction of currently-available physical RAM so a memory-
+// constrained machine stops earlier. Overridable per-request via `memHeadroomMB`.
+constexpr std::uint64_t kSnapshotDefaultHeadroomBytes = 4ULL * 1024 * 1024 * 1024;  // 4 GB
+constexpr double        kSnapshotAvailPhysFraction     = 0.60;
+// How often (in decoded instances) to re-sample process memory during decode.
+constexpr std::size_t   kSnapshotMemCheckInterval       = 2048;
+
 constexpr UnityDumperBackend BackendOfBuild() {
 #if defined(UNITYCEDUMPER_BACKEND_MONO)
     return UnityDumperBackend_Mono;
@@ -2179,6 +2200,18 @@ void RegisterCoreHandlers() {
             };
         }
 
+        // Snapshot memory budget (mirror of the IL2CPP handler) — stop the
+        // decode before the game OOMs. budget = pre-snapshot private usage +
+        // headroom, headroom clamped to a fraction of free RAM.
+        std::uint64_t memHeadroomMono =
+            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
+        if (memHeadroomMono == 0) memHeadroomMono = kSnapshotDefaultHeadroomBytes;
+        if (const std::uint64_t availMono = QueryAvailablePhysBytes(); availMono > 0) {
+            const auto cap = static_cast<std::uint64_t>(availMono * kSnapshotAvailPhysFraction);
+            if (memHeadroomMono > cap) memHeadroomMono = cap;
+        }
+        const std::uint64_t memBudgetBytesMono = memBefore.privateUsage + memHeadroomMono;
+
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
         bool explicitScope = false;
@@ -2326,6 +2359,16 @@ void RegisterCoreHandlers() {
         bool         elementBudgetHit  = false;
         std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> globalClassInfo;
 
+        // Phase P1-fix — process-memory watchdog (mirror of the IL2CPP path).
+        bool          memBudgetHitMono = false;
+        std::uint64_t peakPrivateMono  = memBefore.privateUsage;
+        std::size_t   memCheckCounterMono = 0;
+        auto checkMemBudgetMono = [&]() {
+            const std::uint64_t pu = QueryProcessMemory().privateUsage;
+            if (pu > peakPrivateMono) peakPrivateMono = pu;
+            if (pu >= memBudgetBytesMono) memBudgetHitMono = true;
+        };
+
         // Open-generic array detection: real array types are namespaced
         // ("System.Int32[]") or nested with slash ("MainGame/Foo[]"). Open
         // generic placeholders like "T[]" / "TKey[]" have neither separator
@@ -2442,6 +2485,16 @@ void RegisterCoreHandlers() {
                     });
                     return;
                 }
+                // Memory watchdog tripped — emit class metadata only.
+                if (memBudgetHitMono) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"truncated", "memory_budget"},
+                    });
+                    return;
+                }
 
                 Snapshot::ClassPayload classEntry = {
                     {"assembly",  item.assembly},
@@ -2509,6 +2562,13 @@ void RegisterCoreHandlers() {
                 // chainInfo, no Mono calls inside the loop.
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
+                    // Process-memory watchdog (throttled) — stop adding
+                    // instances once the game's private usage crosses budget.
+                    if (++memCheckCounterMono >= kSnapshotMemCheckInterval) {
+                        memCheckCounterMono = 0;
+                        checkMemBudgetMono();
+                    }
+                    if (memBudgetHitMono) break;
                     Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
                     Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
                     // Walk base→derived so field offsets come out in memory
@@ -2663,6 +2723,9 @@ void RegisterCoreHandlers() {
             {"classInfoCacheMisses",     classInfoCacheMisses},
             {"decodedElementSets",       decodedElementSets},
             {"elementBudgetHit",         elementBudgetHit},
+            {"truncatedByMemory",        memBudgetHitMono},
+            {"memBudgetBytes",           memBudgetBytesMono},
+            {"peakPrivateUsage",         peakPrivateMono},
         };
 
         // Post-decode memory snapshot for the response. UI surfaces this
@@ -2675,9 +2738,13 @@ void RegisterCoreHandlers() {
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
+            " decodedInst=" + std::to_string(decodedInstances) +
             " arrays=" + std::to_string(decodedArrays) +
             " elemSets=" + std::to_string(decodedElementSets) +
             (elementBudgetHit ? " elemBudgetHit=1" : "") +
+            (memBudgetHitMono ? " MEM_TRUNCATED=1" : "") +
+            " memBudget=" + std::to_string(memBudgetBytesMono) +
+            " peakPriv=" + std::to_string(peakPrivateMono) +
             " buildId=" + buildId +
             " gameWorkingSet=" + std::to_string(memAfter.workingSet) +
             " gamePrivateUsage=" + std::to_string(memAfter.privateUsage));
@@ -2699,6 +2766,7 @@ void RegisterCoreHandlers() {
             {"plan",                    std::move(planArr)},
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
+            {"truncatedByMemory",       memBudgetHitMono},
             {"gamePointerSize",         memAfter.pointerSize},
             {"gameWorkingSet",          memAfter.workingSet},
             {"gamePrivateUsage",        memAfter.privateUsage},
@@ -5339,6 +5407,19 @@ void RegisterCoreHandlers() {
             };
         }
 
+        // Snapshot memory budget — stop the decode before the game OOMs.
+        // budget = pre-snapshot private usage + headroom, headroom clamped to
+        // a fraction of free RAM. When the game's private usage crosses it the
+        // decode stops and the response reports truncatedByMemory.
+        std::uint64_t memHeadroomIl =
+            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
+        if (memHeadroomIl == 0) memHeadroomIl = kSnapshotDefaultHeadroomBytes;
+        if (const std::uint64_t availIl = QueryAvailablePhysBytes(); availIl > 0) {
+            const auto cap = static_cast<std::uint64_t>(availIl * kSnapshotAvailPhysFraction);
+            if (memHeadroomIl > cap) memHeadroomIl = cap;
+        }
+        const std::uint64_t memBudgetBytesIl = memBeforeIl.privateUsage + memHeadroomIl;
+
         bool includeSystemAsm = args.value("includeSystemAssemblies", false);
         std::vector<std::string> requestedAssemblies;
         bool explicitScope = false;
@@ -5451,6 +5532,21 @@ void RegisterCoreHandlers() {
         std::size_t decodedElementSets = 0;
         bool         elementBudgetHit  = false;
 
+        // Phase P1-fix — process-memory watchdog. Once the game's private
+        // usage crosses memBudgetBytesIl the decode stops adding instances and
+        // the response reports truncatedByMemory, so a huge game can't grow
+        // the process to OOM (the 8 GB CTD on the 22K-class / 800K-instance
+        // game). Sampled every kSnapshotMemCheckInterval instances to keep the
+        // GetProcessMemoryInfo syscall off the hot path.
+        bool          memBudgetHitIl = false;
+        std::uint64_t peakPrivateIl  = memBeforeIl.privateUsage;
+        std::size_t   memCheckCounter = 0;
+        auto checkMemBudgetIl = [&]() {
+            const std::uint64_t pu = QueryProcessMemory().privateUsage;
+            if (pu > peakPrivateIl) peakPrivateIl = pu;
+            if (pu >= memBudgetBytesIl) memBudgetHitIl = true;
+        };
+
         auto isCapturableArrayType = [](const std::string& tn) -> bool {
             if (tn.size() < 4) return false;
             if (tn[tn.size() - 1] != ']' || tn[tn.size() - 2] != '[') return false;
@@ -5556,6 +5652,17 @@ void RegisterCoreHandlers() {
                     });
                     return;
                 }
+                // Memory watchdog tripped — emit class metadata only, no
+                // instances/statics, so the snapshot still lists the class.
+                if (memBudgetHitIl) {
+                    session->classes.push_back(Snapshot::ClassPayload{
+                        {"assembly", item.assembly},
+                        {"namespace", item.ns},
+                        {"name", item.name},
+                        {"truncated", "memory_budget"},
+                    });
+                    return;
+                }
 
                 Snapshot::ClassPayload classEntry = {
                     {"assembly",  item.assembly},
@@ -5629,6 +5736,14 @@ void RegisterCoreHandlers() {
 
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
+                    // Process-memory watchdog (throttled). Stop adding
+                    // instances once the game's private usage crosses the
+                    // budget; the class keeps whatever it decoded so far.
+                    if (++memCheckCounter >= kSnapshotMemCheckInterval) {
+                        memCheckCounter = 0;
+                        checkMemBudgetIl();
+                    }
+                    if (memBudgetHitIl) break;
                     Snapshot::ClassPayload instEntry = { {"address", formatHex(instAddr)} };
                     Snapshot::ClassPayload fields = Snapshot::ClassPayload::array();
                     for (std::size_t ci = chain.size(); ci > 0; --ci) {
@@ -5776,6 +5891,9 @@ void RegisterCoreHandlers() {
             {"classInfoCacheMisses",     classInfoCacheMisses},
             {"decodedElementSets",       decodedElementSets},
             {"elementBudgetHit",         elementBudgetHit},
+            {"truncatedByMemory",        memBudgetHitIl},
+            {"memBudgetBytes",           memBudgetBytesIl},
+            {"peakPrivateUsage",         peakPrivateIl},
         };
 
         // Post-decode memory snapshot for the response — mirrors Mono.
@@ -5786,9 +5904,13 @@ void RegisterCoreHandlers() {
             " classes=" + std::to_string(totalClasses) +
             " instances=" + std::to_string(totalInst) +
             " decoded=" + std::to_string(decodedClasses) +
+            " decodedInst=" + std::to_string(decodedInstances) +
             " arrays=" + std::to_string(decodedArrays) +
             " elemSets=" + std::to_string(decodedElementSets) +
             (elementBudgetHit ? " elemBudgetHit=1" : "") +
+            (memBudgetHitIl ? " MEM_TRUNCATED=1" : "") +
+            " memBudget=" + std::to_string(memBudgetBytesIl) +
+            " peakPriv=" + std::to_string(peakPrivateIl) +
             " buildId=" + buildId +
             " gameWorkingSet=" + std::to_string(memAfterIl.workingSet) +
             " gamePrivateUsage=" + std::to_string(memAfterIl.privateUsage));
@@ -5810,6 +5932,7 @@ void RegisterCoreHandlers() {
             {"plan",                    std::move(planArr)},
             {"scanStats",               std::move(scanStats)},
             {"decodeStats",             std::move(decodeStats)},
+            {"truncatedByMemory",       memBudgetHitIl},
             {"gamePointerSize",         memAfterIl.pointerSize},
             {"gameWorkingSet",          memAfterIl.workingSet},
             {"gamePrivateUsage",        memAfterIl.privateUsage},

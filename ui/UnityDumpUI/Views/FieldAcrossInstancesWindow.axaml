@@ -124,7 +124,7 @@
                             SortMemberPath="FieldAddress"
                             CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
-        <DataGridTextColumn Header="{StaticResource FieldAcross.ColValue}" Width="*"
+        <DataGridTextColumn Header="{StaticResource FieldAcross.ColValue}" Width="*" MinWidth="220"
                             Binding="{Binding Value}"
                             SortMemberPath="Value"
                             CanUserSort="True"

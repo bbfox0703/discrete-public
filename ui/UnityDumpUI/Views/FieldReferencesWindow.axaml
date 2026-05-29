@@ -140,7 +140,7 @@
                             Binding="{Binding ClassQualified}"
                             SortMemberPath="ClassQualified" CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
-        <DataGridTextColumn Header="{StaticResource FieldRefs.ColMethod}" Width="*"
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColMethod}" Width="*" MinWidth="260"
                             Binding="{Binding Method}"
                             SortMemberPath="Method" CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />

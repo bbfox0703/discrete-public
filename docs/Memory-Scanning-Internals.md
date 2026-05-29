@@ -620,3 +620,14 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 **尚未做（follow-up）**：Mono `MonoAddressFinder.cpp::FindAllInstances`（用 `SehSweepRegionLoad` + slot 驗證，較複雜，且目前目標為 IL2CPP）仍單緒；value/string/pointer 因走共用 `Memory.cpp` 路徑，Mono 端已連帶平行化。P2（候選反查 interval-tree / locality cache）、P2 SIMD（string/pointer 內層）、P3（VQ 快取）仍 pending。
 
 **驗證重點**：correctness — 平行掃描的 match 集合須與舊序列版一致（位址升冪、同筆數，截斷時保留最低位址）；perf — 多 GB heap 的 value scan / find instances / snapshot wall-clock 應呈核心數倍率下降。
+
+### 16.6 Snapshot 記憶體 watchdog（2026-05-29, build #756）
+
+**問題**：snapshot capture 把**整個** decode 結果（每 class × 每 instance × 每 field，深度 4 + arrays）建在**遊戲行程**裡才透過 pipe 串流出去（注入式 DLL 的配置 = 遊戲行程記憶體）。大型遊戲（22157 classes / 799174 instances / 7.27 GB heap）一路長到 8 GB→ 玩家強制關閉。`FindAllInstances`（P1c 平行化）本身已完成並 log；爆掉的是**其後的 decode 階段**，且 decode 完全沒有總量上限。對照正常完成的 SaGa 2 FR：10001 classes/271998 instances→ 實際保留 2451 classes/118161 instances、~4.5 GB、~42s。
+
+**修法**（`ExportAPI.cpp` 兩個 backend 的 `snapshotBegin`）：decode loop 加 **process-memory watchdog**。
+- 預算 `budget = 開拍前 privateUsage + headroom`；`headroom` 預設 4 GB，並夾到 `0.6 × 可用實體記憶體`（`GlobalMemoryStatusEx`），可用 `memHeadroomMB` 參數覆寫。
+- 每 `kSnapshotMemCheckInterval = 2048` 個 instance 取樣一次 `GetProcessMemoryInfo().PrivateUsage`（不放熱路徑）；超過預算就設 `memBudgetHit`，停止再加 instance，剩餘 class 只輸出 metadata（`"truncated":"memory_budget"`）。
+- response 加 `truncatedByMemory` + `decodeStats.{memBudgetBytes,peakPrivateUsage}`；log 末尾加 `MEM_TRUNCATED=1 memBudget=… peakPriv=…`。
+
+→ 大型遊戲不再無限長到 OOM，而是在預算處停下並回報截斷；UI 可據 `truncatedByMemory` 提示使用者「縮小 InstanceCap / 指定 assemblies / 重啟遊戲」。**後續**：UI 顯示截斷警告；snapshot 改 streaming-decode（邊 decode 邊送、不全握在記憶體）才是根治。
