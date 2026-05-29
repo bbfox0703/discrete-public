@@ -1373,6 +1373,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <c>OnSelectedInstanceChanged</c> cascade.
     /// </summary>
     private void OnInspectInstanceRequested(object? sender, InspectInstanceRequest req)
+        => InspectInstance(req);
+
+    /// <summary>
+    /// Loads the requested instance into the Inspector tab and switches to it.
+    /// Shared by the Address Lookup tab's "Inspect this instance" event and
+    /// the Field-across-instances modal's double-click / context-menu handoff.
+    /// The walk fires asynchronously via the Inspector's existing
+    /// <c>OnSelectedInstanceChanged</c> cascade.
+    /// </summary>
+    public void InspectInstance(InspectInstanceRequest req)
     {
         try
         {
@@ -1384,7 +1394,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             ErrorMessage = $"Inspect handoff failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
-                $"OnInspectInstanceRequested: {ex.GetType().Name}: {ex.Message}");
+                $"InspectInstance: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

@@ -171,6 +171,23 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
             ? f(row.Value) : Task.CompletedTask;
 
     /// <summary>
+    /// Raised when the user double-clicks a row (or picks "Inspect this
+    /// instance"). Carries the modal's target class spec + the clicked row's
+    /// instance base so the owner can hand off to the Inspector tab — the
+    /// inverse of how this window was opened. Reuses the same
+    /// <see cref="InspectInstanceRequest"/> contract as the Address Lookup tab.
+    /// </summary>
+    public event EventHandler<InspectInstanceRequest>? InspectInstanceRequested;
+
+    [RelayCommand]
+    private void InspectInstance(FieldAcrossInstanceRow? row)
+    {
+        if (row is null || string.IsNullOrEmpty(row.Instance)) return;
+        InspectInstanceRequested?.Invoke(this, new InspectInstanceRequest(
+            TargetAssembly, TargetNamespace, TargetName, row.Instance));
+    }
+
+    /// <summary>
     /// Rebuild <see cref="FilteredRows"/> from <see cref="Rows"/> using the
     /// current <see cref="ValueFilter"/> as a case-insensitive substring
     /// match against each row's <see cref="FieldAcrossInstanceRow.Value"/>.

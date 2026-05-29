@@ -86,9 +86,14 @@
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
               CanUserSortColumns="True"
+              DoubleTapped="OnRowDoubleTapped"
               GridLinesVisibility="Horizontal">
       <DataGrid.ContextMenu>
         <ContextMenu>
+          <MenuItem Header="{StaticResource FieldAcross.InspectInstanceMenu}"
+                    Command="{Binding InspectInstanceCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <Separator />
           <MenuItem Header="{StaticResource FieldAcross.CopyInstanceMenu}"
                     Command="{Binding CopyInstanceCommand}"
                     CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
