@@ -50,10 +50,15 @@ public static partial class CeXmlExporter
         StringBuilder sb, string indent, IdGen ids,
         WalkedField f, string? assemblyName, ExportOptions options,
         ILiveExportSource live, HashSet<string> visited,
-        int currentDepth, CancellationToken ct)
+        int currentDepth, CancellationToken ct,
+        string? addrOverride = null)
     {
         string desc = $"{f.Name} : {f.Type ?? "?"}";
-        string rel  = RelAddr(f.Offset);
+        // Normally a field is addressed RELATIVE to its parent (+offset). When
+        // addrOverride is set (the "Copy CE field" standalone root), this node
+        // uses that ABSOLUTE address instead so the entry stands on its own;
+        // its drilldown children remain relative beneath it.
+        string rel  = addrOverride ?? RelAddr(f.Offset);
         bool isPointerValue = !string.IsNullOrEmpty(f.Ptr)
                               && f.Ptr != "0x0000000000000000"
                               && !f.Value.HasValue && f.String is null;
@@ -363,6 +368,47 @@ public static partial class CeXmlExporter
 
         if (innerGroup) CloseGroup(sb, indent + "  ");
         CloseGroup(sb, indent);
+    }
+
+    /// <summary>
+    /// "Copy CE field" — render one or more selected Inspector field nodes, each
+    /// as a STANDALONE subtree rooted at the field's own absolute storage
+    /// address, with the same value decode + relative drilldown the in-place
+    /// export uses (depth-bounded by <paramref name="options"/>). Multi-select
+    /// produces one top-level entry per node under a single CheatTable. Unlike
+    /// the old flat-leaf behaviour, a pointer / string / collection field
+    /// expands properly here too.
+    ///
+    /// Each tuple is (field, absoluteAddress): the reconstructed
+    /// <see cref="WalkedField"/> as the Inspector saw it, plus the absolute
+    /// address its top entry should carry (the field's own storage for scalars
+    /// / value structs / strings, or the deref'd object for array slots —
+    /// whatever the caller computed as the node's effective root).
+    /// </summary>
+    public static async Task<string> RenderFieldNodesLiveAsync(
+        IReadOnlyList<(WalkedField field, string absoluteAddress)> nodes,
+        string? assemblyName, ExportOptions options, ILiveExportSource live,
+        CancellationToken ct = default)
+    {
+        var sb = new StringBuilder(2048);
+        var ids = new IdGen();
+        var nameMap = new ExportNameMap();
+        sb.Append("<CheatTable>\n");
+        sb.Append("  <CheatEntries>\n");
+
+        foreach ((WalkedField field, string absoluteAddress) in nodes)
+        {
+            var visited = new HashSet<string>();
+            await EmitWalkedFieldLiveAsync(sb, "    ", ids, field, assemblyName,
+                                           options, live, visited,
+                                           currentDepth: 0, ct,
+                                           addrOverride: absoluteAddress)
+                .ConfigureAwait(false);
+        }
+
+        sb.Append("  </CheatEntries>\n");
+        sb.Append("</CheatTable>\n");
+        return BuildOutput(sb, nameMap);
     }
 
     // ---------- Relative-addressing helpers -------------------------------

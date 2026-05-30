@@ -84,7 +84,6 @@
   <sys:String x:Key="Inspector.ColAddress">Address</sys:String>
   <sys:String x:Key="Inspector.ColValue">Value</sys:String>
   <sys:String x:Key="Inspector.NoTarget">No target — pick a class and press "Inspect selected class".</sys:String>
-  <sys:String x:Key="Inspector.CopyCeXmlNode">Copy CE XML rooted here</sys:String>
   <sys:String x:Key="Inspector.CopyCeFieldNode">Copy CE field</sys:String>
   <sys:String x:Key="Inspector.ColActions">Actions</sys:String>
   <sys:String x:Key="Inspector.CopyAddrTooltip">Copy field address (e.g. 0x000001E5...)</sys:String>
