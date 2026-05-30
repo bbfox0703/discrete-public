@@ -601,6 +601,9 @@
                         Command="{Binding Inspector.RefreshWalkCommand}" />
                 <Button Content="{StaticResource Inspector.Clear}"
                         Command="{Binding Inspector.ClearCommand}" />
+                <Button Content="{StaticResource Inspector.SendToBrowser}"
+                        ToolTip.Tip="{StaticResource Inspector.SendToBrowserTooltip}"
+                        Command="{Binding Inspector.SendToBrowserCommand}" />
                 <TextBlock Text="{StaticResource Inspector.LimitLabel}"
                            VerticalAlignment="Center" Opacity="0.7" Margin="8,0,0,0" />
                 <NumericUpDown Value="{Binding Inspector.InstanceLimit, Mode=TwoWay}"
