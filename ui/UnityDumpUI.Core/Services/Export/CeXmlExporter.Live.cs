@@ -229,7 +229,10 @@ public static partial class CeXmlExporter
 
         int ptr = options.PointerSize == 4 ? 4 : 8;
         int itemsOff = 2 * ptr;        // List<T>._items managed-field offset
-        int dataOff  = 4 * ptr;        // SZARRAY data start (header + bounds + length)
+        int dataOff  = 4 * ptr;        // SZARRAY data start (overridden below
+                                       // from the walk's data_address when the
+                                       // DLL reports it — exact, immune to a
+                                       // mis-detected pointer size).
 
         bool isList = f.Type is { Length: > 0 } t
                       && InstanceFieldClassifier.TryParseCollectionType(t, out _, out bool il) && il;
@@ -272,6 +275,17 @@ public static partial class CeXmlExporter
                 elementName:      elemSpec?.name, ct).ConfigureAwait(false);
         }
         catch { /* tolerate */ }
+
+        // Prefer the DLL-reported data start (data_address − array object) for
+        // the element base offset — it's the exact SZARRAY vector offset for
+        // the target's arch, so x86 (data at +0x10) and x64 (+0x20) are both
+        // correct without relying on options.PointerSize being right.
+        if (walk?.DataAddress is { Length: > 0 } da
+            && TryParseHexAddress(da, out ulong dataAbs) && dataAbs > arrayAbs)
+        {
+            ulong delta = dataAbs - arrayAbs;
+            if (delta <= 0x40) dataOff = (int)delta;   // sanity-bound the header
+        }
 
         string headerLabel = walk is null
             ? $"{desc}  (walk failed)"
@@ -369,19 +383,27 @@ public static partial class CeXmlExporter
     /// Emit a managed-String value as a 2-level relative deref group, matching
     /// the canonical CE ".NET string dissect" shape:
     ///   group <Address>{rel}</Address> Offsets=[0]   (deref String object)
-    ///     _stringLength : 4 Bytes  @ +2*ptr
-    ///     _firstChar    : String   @ +2*ptr+4   (Unicode, zero-terminated)
+    ///     length (int32)  @ +2*ptr
+    ///     chars  (String) @ +2*ptr+4   (Unicode, zero-terminated)
     /// <paramref name="rel"/> is the relative address of the String reference
     /// within its parent. Pointer size selects the header width (x64 → chars at
     /// +0x14, x86 → +0xC).
+    ///
+    /// The two child rows use NEUTRAL labels ("length (int32)" / "chars
+    /// (UTF-16)") rather than concrete field names like <c>m_stringLength</c> /
+    /// <c>_firstChar</c>: those are read from the String class's metadata and
+    /// vary per game / runtime (m_length, m_firstChar, _stringLength, …). We
+    /// don't resolve them here, so emitting a specific name would imply a
+    /// metadata-sourced symbol we never read. The offsets are layout-fixed and
+    /// correct regardless of what the game calls the fields.
     /// </summary>
     private static void EmitStringDerefGroup(
         StringBuilder sb, string indent, IdGen ids,
         string description, string rel, int? charLength, int pointerSize)
     {
         int ptr = pointerSize == 4 ? 4 : 8;
-        int lenOff   = 2 * ptr;          // _stringLength
-        int charsOff = 2 * ptr + 4;      // _firstChar
+        int lenOff   = 2 * ptr;          // int32 length
+        int charsOff = 2 * ptr + 4;      // first UTF-16 char
         int len = charLength is int n && n >= 0 ? n : 64;
 
         OpenGroup(sb, indent, ids, description, rel,
@@ -389,16 +411,16 @@ public static partial class CeXmlExporter
                   varType: null, showAsHex: true);
 
         string childIndent = indent + "  ";
-        EmitLeaf(sb, childIndent, ids, "_stringLength",
+        EmitLeaf(sb, childIndent, ids, "length (int32)",
                  vartype: "4 Bytes", showAsHex: false, showAsSigned: false,
                  address: RelAddr(lenOff), offsets: null);
 
-        // _firstChar — CE String type. Length is in BYTES; UTF-16 → len*2,
-        // plus the trailing NUL pair. Zero-terminate so CE stops at the NUL
-        // even when the decoded length was unavailable (len fallback = 64).
+        // chars — CE String type. Length is in BYTES; UTF-16 → len*2, plus the
+        // trailing NUL pair. Zero-terminate so CE stops at the NUL even when
+        // the decoded length was unavailable (len fallback = 64).
         sb.Append(childIndent).Append("<CheatEntry>\n");
         sb.Append(childIndent).Append("  <ID>").Append(ids.Next()).Append("</ID>\n");
-        sb.Append(childIndent).Append("  <Description>\"_firstChar\"</Description>\n");
+        sb.Append(childIndent).Append("  <Description>\"chars (UTF-16)\"</Description>\n");
         sb.Append(childIndent).Append("  <ShowAsSigned>0</ShowAsSigned>\n");
         sb.Append(childIndent).Append("  <VariableType>String</VariableType>\n");
         sb.Append(childIndent).Append("  <Length>").Append(((len + 1) * 2).ToString(CultureInfo.InvariantCulture)).Append("</Length>\n");

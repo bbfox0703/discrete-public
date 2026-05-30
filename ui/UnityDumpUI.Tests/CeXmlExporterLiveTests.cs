@@ -166,15 +166,15 @@ public class CeXmlExporterLiveTests
         Assert.Contains("<Address>+20</Address>", xml);   // enum field offset 0x20
 
         // ---- String: 2-level deref group at +18 (charaName_ offset) → the
-        //      _stringLength / _firstChar pair. Decoded text in the label.
+        //      length/chars pair. Decoded text in the label.
         Assert.Contains("<VariableType>String</VariableType>", xml);
         Assert.Contains("charaName_", xml);
         Assert.Contains("Chara_00000", xml);
         Assert.Contains("<Address>+18</Address>", xml);   // charaName_ deref group
-        Assert.Contains("_stringLength", xml);
-        Assert.Contains("_firstChar", xml);
-        Assert.Contains("<Address>+10</Address>", xml);   // _stringLength (2*ptr)
-        Assert.Contains("<Address>+14</Address>", xml);   // _firstChar (2*ptr+4)
+        Assert.Contains("length (int32)", xml);
+        Assert.Contains("chars (UTF-16)", xml);
+        Assert.Contains("<Address>+10</Address>", xml);   // length child (2*ptr)
+        Assert.Contains("<Address>+14</Address>", xml);   // chars child (2*ptr+4)
 
         // ---- Nested class: pointer deref group at +130; drilled members at
         //      their relative offsets (GemCount at +18 within CharacterInfo).
@@ -214,8 +214,8 @@ public class CeXmlExporterLiveTests
             baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
             options, live, TestContext.Current.CancellationToken);
 
-        // x86: header = 2*4, so within the String object _stringLength is at
-        // +8 and _firstChar at +C. The field itself is a deref group at +8
+        // x86: header = 2*4, so within the String object the length child is at
+        // +8 and the chars child at +C. The field itself is a deref group at +8
         // (name_ offset). Relative addressing → only the root is absolute.
         Assert.Contains("<VariableType>String</VariableType>", xml);
         Assert.Contains("<Address>+8</Address>", xml);    // name_ deref group AND _stringLength (both +8)
