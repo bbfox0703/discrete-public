@@ -75,6 +75,19 @@ ClassRangeStats GetClassRangeStats();
 
 AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan);
 
+// Phase 30 P2 (Mono port) — shared identity + field/array resolution, given a
+// confirmed managed instance (`instance` base, its MonoVTable* `vtablePtr`, and
+// the resolved MonoClass* `klassPtr`) and the queried `addr`. Populates `out`
+// exactly as WhatIsAt's tail does, so the backward-scan path and the
+// interval-tree reverse-lookup path return identical results. PRECONDITION:
+// caller holds a ThreadAttachGuard for the Mono root domain (the SEH
+// name/namespace/image + field-walk probes need it). Leaves
+// scannedFrom/To/Steps untouched (backward-scan diagnostics). Mirror of
+// IL2CPP::ResolveInstanceLookup, but carries the Mono vtable pointer too.
+void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
+                           std::uintptr_t vtablePtr, std::uintptr_t klassPtr,
+                           AddressLookup& out);
+
 // Phase 29 — wide-heap "all instances of all known classes" scan. Mirror
 // of the IL2CPP function but with Mono's vtable indirection: the qword
 // at instance+0 is a MonoVTable*, not a MonoClass*, so per-qword we
@@ -94,5 +107,69 @@ struct BulkInstancesResult {
     std::size_t                          vtablesResolved    = 0;
 };
 BulkInstancesResult FindAllInstances(std::size_t perClassCap);
+
+// ---------------------------------------------------------------------------
+// Phase 30 P2 (Mono port) — batch reverse-lookup index (interval-tree +
+// locality cache). Mirror of IL2CPP::ReverseLookupIndex; see that header for
+// the full design rationale.
+// ---------------------------------------------------------------------------
+//
+// WhatIsAt() answers ONE address by walking backwards up to maxBackwardScan
+// bytes hunting for a vtable pointer whose klass is known. A value scan calls
+// it once PER candidate, so a scan returning thousands of hits pays
+// O(candidates × probes). This index flips that: ONE up-front heap walk records
+// every managed instance's base (vtable + resolved klass), sorted; then each
+// candidate is an O(log N) binary search for the nearest base ≤ addr (with an
+// O(1) locality fast-path for clustered candidates), reusing
+// ResolveInstanceLookup so the answer is byte-identical to WhatIsAt's.
+//
+// Mono difference vs IL2CPP: the walk can't binary-search the header qword
+// directly (it's a MonoVTable*, not a MonoClass*). Build() derefs each
+// candidate vtable to its klass + validates the MonoVTable::domain field
+// against the root domain (same structural check FindAllInstances uses) before
+// recording the instance. Build() is single-threaded by design — the Mono
+// heap walk carries the documented BDWGC-freeze risk on 活俠傳 (32-bit Mono),
+// so it reuses FindAllInstances' Sleep(1)-yield-every-16MB pacing rather than
+// the IL2CPP index's parallel sweep. (Mono FindAllInstances parallelization is
+// tracked as a separate backlog item.)
+//
+// Lifetime: build once before a candidate loop, throw away after. NOT cached
+// across calls — a GC cycle would invalidate the bases and we get no GC
+// notification (same staleness rationale as WhatIsAt's per-call freshness).
+class ReverseLookupIndex {
+public:
+    // Build the index: one single-threaded heap walk (mirrors FindAllInstances'
+    // region filter + vtable→klass deref + domain validation + Sleep(1) yield)
+    // collecting a FLAT, uncapped (instanceBase, vtable, klass) list, sorted by
+    // base. Returns false if the class cache is unavailable (caller should fall
+    // back to WhatIsAt). Does not need a ThreadAttachGuard (raw memory only —
+    // no runtime calls; vtable→klass is a SEH-protected SafeRead).
+    bool Build();
+
+    // Resolve `addr` to its managed instance + field, matching WhatIsAt's
+    // contract exactly. `maxBackwardScan` bounds how far below `addr` a base
+    // may sit to still count as containing it (same window WhatIsAt uses).
+    // PRECONDITION: caller holds a ThreadAttachGuard (ResolveInstanceLookup's
+    // SEH name probes need it). On a miss, returns AddressLookup{found=false}
+    // with reason "no_klass_in_range".
+    AddressLookup Lookup(std::uintptr_t addr, std::size_t maxBackwardScan);
+
+    std::size_t InstanceCount() const { return bases_.size(); }
+    std::size_t HitCount()      const { return hits_; }
+    std::size_t LocalityHits()  const { return localityHits_; }
+
+private:
+    struct Entry { std::uintptr_t base; std::uintptr_t vtable; std::uintptr_t klass; };
+    std::vector<Entry> bases_;           // sorted ascending by base
+    // Locality cache — see IL2CPP::ReverseLookupIndex for why caching
+    // [lastBase_, lastNextBase_) (not [base, base+window)) is the correct
+    // invariant for skipping the binary search.
+    std::uintptr_t lastBase_     = 0;
+    std::uintptr_t lastVtable_   = 0;
+    std::uintptr_t lastKlass_    = 0;
+    std::uintptr_t lastNextBase_ = 0;    // base of the next instance above lastBase_
+    std::size_t    hits_         = 0;
+    std::size_t    localityHits_ = 0;
+};
 
 }  // namespace Discrete::Mono

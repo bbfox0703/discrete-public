@@ -3873,6 +3873,12 @@ void RegisterCoreHandlers() {
             if (maxBackwardScan > 16384) maxBackwardScan = 16384;
             if (maxBackwardScan == 0)    maxBackwardScan = 4096;
 
+            // Phase 30 P2 (Mono port) — one outer attach for the whole batch
+            // (the index Lookup + BuildClassRangeCache we call). Mirrors the
+            // value scan handler; makes inner per-candidate guards no-ops and
+            // satisfies ResolveInstanceLookup's attach precondition.
+            Mono::ThreadAttachGuard scanGuard(Mono::GetRootDomain());
+
             if (!Mono::BuildClassRangeCache()) {
                 return json{{"error", "address-finder class cache build failed"}};
             }
@@ -3883,9 +3889,16 @@ void RegisterCoreHandlers() {
             json rows = json::array();
             std::size_t droppedNonManaged = 0;
             std::string matchedDisplay = DecodeMatchedNeedleToUtf8(sreq.needle, enc);
+
+            // Phase 30 P2 — reverse-lookup index for the string-scan candidate
+            // loop (build once, O(log N) per candidate, WhatIsAt fallback).
+            Mono::ReverseLookupIndex strIndex;
+            bool strIndexOk = strIndex.Build();
             for (const auto& c : candidates) {
                 std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
-                Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
+                Mono::AddressLookup lookup = strIndexOk
+                    ? strIndex.Lookup(addr, maxBackwardScan)
+                    : Mono::WhatIsAt(addr, maxBackwardScan);
                 if (!lookup.found) { droppedNonManaged++; continue; }
                 json row = {
                     {"addr",            formatHex(addr)},
@@ -4132,13 +4145,21 @@ void RegisterCoreHandlers() {
         // attach cycles left finalizable refs that BDWGC ran on exit.
         Mono::ThreadAttachGuard scanGuard(Mono::GetRootDomain());
 
+        // Phase 30 P2 (Mono port) — build the reverse-lookup index once, then
+        // resolve each candidate via O(log N) binary search instead of a
+        // per-candidate backward scan. Fall back to WhatIsAt if Build failed.
+        Mono::ReverseLookupIndex revIndex;
+        bool revIndexOk = revIndex.Build();
+
         json rows = json::array();
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
         std::unordered_map<std::uintptr_t, int> perInstanceCount;
         for (const auto& c : candidates) {
             if (rows.size() >= emitLimit) break;
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
-            Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
+            Mono::AddressLookup lookup = revIndexOk
+                ? revIndex.Lookup(addr, maxBackwardScan)
+                : Mono::WhatIsAt(addr, maxBackwardScan);
             if (!lookup.found) { droppedNonManaged++; continue; }
             if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
             if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
@@ -4170,11 +4191,13 @@ void RegisterCoreHandlers() {
         }
 
         {
-            char line[256];
+            char line[320];
             std::snprintf(line, sizeof(line),
-                "scanFieldValue(Mono) dt=%s raw=%zu rows=%zu dropped non=%zu noise=%zu div=%zu bytes=%zu",
+                "scanFieldValue(Mono) dt=%s raw=%zu rows=%zu dropped non=%zu noise=%zu div=%zu bytes=%zu "
+                "revIndex=%d idxInst=%zu idxHits=%zu idxLocal=%zu",
                 dtStr.c_str(), candidates.size(), rows.size(),
-                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
+                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned,
+                revIndexOk ? 1 : 0, revIndex.InstanceCount(), revIndex.HitCount(), revIndex.LocalityHits());
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
@@ -4260,6 +4283,11 @@ void RegisterCoreHandlers() {
         // batch. See scanFieldValue handler above for the rationale.
         Mono::ThreadAttachGuard scanGuard(Mono::GetRootDomain());
 
+        // Phase 30 P2 (Mono port) — reverse-lookup index, same as
+        // scanFieldValue. Build once, Lookup per candidate, WhatIsAt fallback.
+        Mono::ReverseLookupIndex revIndex;
+        bool revIndexOk = revIndex.Build();
+
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
@@ -4268,7 +4296,9 @@ void RegisterCoreHandlers() {
         for (const auto& c : rawCandidates) {
             if (sessionCands.size() >= emitLimit) break;
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
-            Mono::AddressLookup lookup = Mono::WhatIsAt(addr, maxBackwardScan);
+            Mono::AddressLookup lookup = revIndexOk
+                ? revIndex.Lookup(addr, maxBackwardScan)
+                : Mono::WhatIsAt(addr, maxBackwardScan);
             if (!lookup.found) { droppedNonManaged++; continue; }
             if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
             if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
@@ -4310,12 +4340,14 @@ void RegisterCoreHandlers() {
         });
 
         {
-            char line[256];
+            char line[320];
             std::snprintf(line, sizeof(line),
-                "beginValueScan(Mono) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu bytes=%zu",
+                "beginValueScan(Mono) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu bytes=%zu "
+                "revIndex=%d idxInst=%zu idxHits=%zu idxLocal=%zu",
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
                 rawCandidates.size(), kept,
-                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
+                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned,
+                revIndexOk ? 1 : 0, revIndex.InstanceCount(), revIndex.HitCount(), revIndex.LocalityHits());
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 

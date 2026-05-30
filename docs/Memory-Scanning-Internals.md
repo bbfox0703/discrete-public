@@ -572,8 +572,9 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 
 ### 16.3 加速 roadmap（建議順序）
 
-> **狀態（2026-05-29）**：P1 兩項皆 **已實作**（build #751，§16.5）。**P2 interval-tree
-> 候選反查 — 已實作 IL2CPP（build #814，§16.5b）**；P2 SIMD 內層、P2 Mono port、P3 仍 pending。
+> **狀態（2026-05-30）**：P1 兩項皆 **已實作**（build #751，§16.5）。**P2 interval-tree
+> 候選反查 — IL2CPP（build #814）+ Mono port（build #823）皆已實作（§16.5b）**；
+> P2 SIMD 內層、Mono `FindAllInstances` 平行化、P3 仍 pending。
 
 **P1 — 拿掉 value/string scan 的 per-chunk `IsReadable`（低風險、改動小）** ✅ 已實作
 相信 `EnumerateCommittedRegions` 的區段表，內層維持 `__try` SEH 保護；只在某 chunk AV 時才針對該區段降級細掃。直接省掉每 64KB 一次 VirtualQuery。CE 等價作法 = `VirtualQueryEx_StartCache` + working-set。
@@ -648,12 +649,32 @@ pointer。回傳上千筆的 scan → O(候選 × 探測)，是 value scan 的�
 - scan log 末尾加 `revIndex=1 idxInst=… idxHits=… idxLocal=…`。
 
 **不快取跨呼叫**:GC 一輪即失效且我們收不到 GC 通知(與 `WhatIsAt` 的每呼叫即時性同理)。
-**尚未做**:Mono port(`Mono::WhatIsAt` 同樣抽 `ResolveInstanceLookup` + 一個 Mono
-`ReverseLookupIndex`);Mono `FindAllInstances` 仍單緒。
 **驗證重點**:correctness — index `Lookup` 與 `WhatIsAt` 對同一 addr 須回傳相同
 instance/class/field(兩者共用 `ResolveInstanceLookup` → 結構保證);perf — 大型遊戲
 value scan wall-clock 應從「候選數 × 反掃」降到「一次 heap walk + 候選數 × log N」。
-**Live-smoke(使用者) 待辦**:Utawarerumono value scan 計時 + 答案比對。
+**Live-smoke(使用者) 待辦**:Utawarerumono(IL2CPP)+ 活俠傳(Mono x86)value scan 計時 + 答案比對。
+
+#### Mono port（2026-05-30, build #823）
+
+IL2CPP 同形修法套到 Mono(`MonoAddressFinder.{h,cpp}` + `ExportAPI.cpp` 3 個 Mono handler):
+- **抽出 `Mono::ResolveInstanceLookup(addr, instance, vtablePtr, klassPtr, out)`**:`WhatIsAt`
+  尾段(nesting 鏈 + namespace/image + array-element / 宣告欄位)抽成獨立函式,backward-scan
+  與 interval-tree 共用 → 答案逐 byte 相同。**Mono 多帶 `vtablePtr`**(IL2CPP 物件頭是
+  `Il2CppClass*`,Mono 是 `MonoVTable*`)。
+- **`Mono::ReverseLookupIndex`**:`Entry{base, vtable, klass}` 依 base 升冪。`Build()` 沿用
+  `FindAllInstances` 的安全單緒走訪(`SehSweepRegionLoad` 收 qword + `SehReadKlassAt` deref
+  vtable→klass + **MonoVTable::domain 結構驗證** + per-scan vtable→klass memo +
+  **`Sleep(1)` 每 16 MB 讓出**),收集扁平不設上限的 list。`Lookup()` 與 IL2CPP 完全相同
+  (locality fast-path → `upper_bound` → backward-window 檢查 → 共用 `ResolveInstanceLookup`)。
+- **單緒(刻意)**:Mono heap walk 有 **活俠傳(32-bit Mono)BDWGC freeze** 風險(§16.5b 起源、
+  29b/30b 反覆踩雷),故沿用 `FindAllInstances` 的 `Sleep(1)` pacing,**不**用 IL2CPP index
+  的平行 sweep。Mono `FindAllInstances` 平行化仍為獨立 backlog 項。
+- 3 個 Mono 呼叫點(`scanFieldValue` 數值 + 字串、`beginValueScan`)改為 `Build()` 一次、
+  loop 內 `Lookup`,build 失敗 fallback `WhatIsAt`;字串路徑補上 outer `ThreadAttachGuard`
+  以滿足 `ResolveInstanceLookup` 的 attach 前提。scan log 末尾同樣加
+  `revIndex=… idxInst=… idxHits=… idxLocal=…`。
+- 兩 backend DLL build clean、603 UI tests green。**Live-smoke 待辦**:活俠傳 value scan
+  計時 + Class Pivot / Address Lookup 答案比對。
 
 ### 16.6 Snapshot 記憶體 watchdog（2026-05-29, build #756）
 

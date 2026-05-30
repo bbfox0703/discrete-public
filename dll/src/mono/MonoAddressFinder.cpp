@@ -327,6 +327,111 @@ void ResolveFieldAt(MonoClass* klass, std::ptrdiff_t fieldOffset,
 
 }  // namespace
 
+// Phase 30 P2 (Mono port) — shared tail of WhatIsAt (steps 5-8: declaring/
+// nesting chain + namespace/image + array-element / declared-field resolution),
+// extracted so the backward-scan path and the interval-tree path produce
+// byte-identical answers. PRECONDITION: caller holds a ThreadAttachGuard.
+void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
+                           std::uintptr_t vtablePtr, std::uintptr_t klassPtr,
+                           AddressLookup& out) {
+    const auto& r = GetResolver();
+    MonoClass* k = reinterpret_cast<MonoClass*>(klassPtr);
+    std::uintptr_t p = instance;
+
+    out.found       = true;
+    out.instance    = p;
+    out.vtablePtr   = vtablePtr;
+    out.klassPtr    = klassPtr;
+    out.fieldOffset = static_cast<std::ptrdiff_t>(addr - p);
+
+    // Phase 27d follow-up — walk nesting chain so nested classes round-trip
+    // via walkInstance / FindClass. Mono uses `mono_class_get_nesting_type`
+    // (counterpart of IL2CPP's class_get_declaring).
+    const char* name = (r.class_get_name != nullptr)
+        ? SehClassNameProbe(r.class_get_name, k) : nullptr;
+    std::string leaf = (name != nullptr) ? name : "";
+    MonoClass* outer = k;
+    if (r.class_get_nesting_type != nullptr) {
+        MonoClass* cur = k;
+        for (int depth = 0; depth < 16; ++depth) {
+            MonoClass* d = SehNestingProbe(r.class_get_nesting_type, cur);
+            if (d == nullptr) break;
+            const char* dn = SehClassNameProbe(r.class_get_name, d);
+            if (dn != nullptr && *dn != '\0') {
+                leaf = std::string(dn) + "/" + leaf;
+            }
+            outer = d;
+            cur = d;
+        }
+    }
+    out.className = std::move(leaf);
+    if (r.class_get_namespace != nullptr) {
+        const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, outer);
+        if (nsStr != nullptr) out.ns = nsStr;
+    }
+    if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
+        MonoImage* img = SehClassImageProbe(r.class_get_image, k);
+        if (img != nullptr) {
+            const char* imgName = SehImageNameProbe(r.image_get_name, img);
+            if (imgName != nullptr) out.assembly = StripDllSuffix(imgName);
+        }
+    }
+
+    // Phase 27c — array element resolution. If klass is an array type (T[] /
+    // List<T>'s _items), compute element index from the offset instead of
+    // falling through to per-field resolution.
+    bool resolvedAsArray = false;
+    if (r.class_get_element_class != nullptr) {
+        MonoClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
+        if (elemClass != nullptr) {
+            std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
+            if (out.fieldOffset >= dataOff) {
+                std::uintptr_t arrayLength = 0;
+                Memory::SafeReadBytes(
+                    reinterpret_cast<void*>(p + ManagedLayout::kArrayMaxLengthOffset),
+                    &arrayLength, sizeof(arrayLength));
+
+                std::size_t elemSize = ManagedLayout::kPointerSize;
+                bool elemIsValueType = false;
+                if (r.class_is_valuetype != nullptr) {
+                    elemIsValueType = SehIsValueTypeProbe(r.class_is_valuetype, elemClass) != 0;
+                }
+                if (elemIsValueType && r.class_value_size != nullptr) {
+                    int sz = SehValueSizeProbe(r.class_value_size, elemClass);
+                    if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+                }
+
+                std::ptrdiff_t into       = out.fieldOffset - dataOff;
+                std::size_t    elemIdx    = static_cast<std::size_t>(into) / elemSize;
+                std::size_t    interior   = static_cast<std::size_t>(into) % elemSize;
+
+                out.field.present    = true;
+                out.field.name       = "[" + std::to_string(elemIdx) + "]";
+                out.field.offset     = dataOff + elemIdx * elemSize;
+                out.field.size       = elemSize;
+                out.field.kind       = (interior == 0) ? "array-element" : "array-interior";
+                out.field.isValueType = elemIsValueType;
+                out.field.interiorOffset = static_cast<std::ptrdiff_t>(interior);
+                if (r.class_get_name != nullptr) {
+                    const char* enm = SehClassNameProbe(r.class_get_name, elemClass);
+                    if (enm != nullptr) out.field.typeName = enm;
+                }
+                char meta[64];
+                std::snprintf(meta, sizeof(meta), "len=%zu idx=%zu",
+                              static_cast<std::size_t>(arrayLength), elemIdx);
+                out.field.declaredIn = meta;
+                resolvedAsArray = true;
+            }
+        }
+    }
+
+    // Phase 17b — resolve which declared field contains the queried offset.
+    if (!resolvedAsArray) {
+        ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
+                       out.nearestFieldDelta);
+    }
+}
+
 bool BuildClassRangeCache() {
     std::lock_guard<std::mutex> lk(cache().mu);
     if (g_built) return !cache().classSet.empty();
@@ -546,107 +651,11 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
             ? SehClassNameProbe(r.class_get_name, k) : nullptr;
         if (name == nullptr || *name == '\0') continue;
 
-        out.found       = true;
-        out.instance    = p;
-        out.vtablePtr   = vtCandidate;
-        out.klassPtr    = klassCandidate;
-        out.fieldOffset = static_cast<std::ptrdiff_t>(addr - p);
-        // Phase 27d follow-up — walk nesting chain so nested classes
-        // round-trip via walkInstance / FindClass. Mono uses
-        // `mono_class_get_nesting_type` (counterpart of IL2CPP's
-        // class_get_declaring). Same fix shape as IL2CPPAddressFinder.
-        std::string leaf = name;
-        MonoClass* outer = k;
-        if (r.class_get_nesting_type != nullptr) {
-            MonoClass* cur = k;
-            // depth (not `i`) — outer scan-step loop already uses `i`.
-            for (int depth = 0; depth < 16; ++depth) {
-                MonoClass* d = SehNestingProbe(r.class_get_nesting_type, cur);
-                if (d == nullptr) break;
-                const char* dn = SehClassNameProbe(r.class_get_name, d);
-                if (dn != nullptr && *dn != '\0') {
-                    leaf = std::string(dn) + "/" + leaf;
-                }
-                outer = d;
-                cur = d;
-            }
-        }
-        out.className = std::move(leaf);
-        if (r.class_get_namespace != nullptr) {
-            const char* nsStr = SehClassNamespaceProbe(r.class_get_namespace, outer);
-            if (nsStr != nullptr) out.ns = nsStr;
-        }
-        if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
-            MonoImage* img = SehClassImageProbe(r.class_get_image, k);
-            if (img != nullptr) {
-                const char* imgName = SehImageNameProbe(r.image_get_name, img);
-                if (imgName != nullptr) out.assembly = StripDllSuffix(imgName);
-            }
-        }
-
-        // Phase 27c — array element resolution. If klass is an array type
-        // (T[] / List<T>'s _items), compute element index from the offset
-        // instead of falling through to per-field resolution (arrays don't
-        // have declared fields in the usual sense — the "fields" are the
-        // bounds pointer + max_length + the slot vector).
-        bool resolvedAsArray = false;
-        if (r.class_get_element_class != nullptr) {
-            MonoClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
-            if (elemClass != nullptr) {
-                std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
-                if (out.fieldOffset >= dataOff) {
-                    // Read max_length so we can report total length.
-                    std::uintptr_t arrayLength = 0;
-                    Memory::SafeReadBytes(
-                        reinterpret_cast<void*>(p + ManagedLayout::kArrayMaxLengthOffset),
-                        &arrayLength, sizeof(arrayLength));
-
-                    // Determine element stride: value-type elements use
-                    // class_value_size; reference-type elements take one
-                    // pointer slot per array entry.
-                    std::size_t elemSize = ManagedLayout::kPointerSize;
-                    bool elemIsValueType = false;
-                    if (r.class_is_valuetype != nullptr) {
-                        elemIsValueType = SehIsValueTypeProbe(r.class_is_valuetype, elemClass) != 0;
-                    }
-                    if (elemIsValueType && r.class_value_size != nullptr) {
-                        int sz = SehValueSizeProbe(r.class_value_size, elemClass);
-                        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
-                    }
-
-                    std::ptrdiff_t into       = out.fieldOffset - dataOff;
-                    std::size_t    elemIdx    = static_cast<std::size_t>(into) / elemSize;
-                    std::size_t    interior   = static_cast<std::size_t>(into) % elemSize;
-
-                    out.field.present    = true;
-                    out.field.name       = "[" + std::to_string(elemIdx) + "]";
-                    out.field.offset     = dataOff + elemIdx * elemSize;
-                    out.field.size       = elemSize;
-                    out.field.kind       = (interior == 0) ? "array-element" : "array-interior";
-                    out.field.isValueType = elemIsValueType;
-                    out.field.interiorOffset = static_cast<std::ptrdiff_t>(interior);
-                    if (r.class_get_name != nullptr) {
-                        const char* enm = SehClassNameProbe(r.class_get_name, elemClass);
-                        if (enm != nullptr) out.field.typeName = enm;
-                    }
-                    // Surface array length + index in declaredIn slot so the
-                    // wire layer can extract them. Format: "len=N idx=M".
-                    char meta[64];
-                    std::snprintf(meta, sizeof(meta), "len=%zu idx=%zu",
-                                  static_cast<std::size_t>(arrayLength), elemIdx);
-                    out.field.declaredIn = meta;
-                    resolvedAsArray = true;
-                }
-            }
-        }
-
-        // Phase 17b — resolve which declared field contains the queried
-        // offset. Reuses the same outer ThreadAttachGuard scope. Skipped
-        // when array resolver already populated the field.
-        if (!resolvedAsArray) {
-            ResolveFieldAt(k, out.fieldOffset, out.field, out.nearestField,
-                           out.nearestFieldDelta);
-        }
+        // Got it — instance base `p`, vtable `vtCandidate`, validated klass
+        // `klassCandidate`. Identity + field/array resolution (steps 5-8) is
+        // shared with the Phase 30 P2 interval-tree path so both produce
+        // identical answers. We already hold the ThreadAttachGuard.
+        ResolveInstanceLookup(addr, p, vtCandidate, klassCandidate, out);
 
         // Merge newly-discovered (vtable, klass) pairs into the global
         // memo so subsequent calls hit the fast path.
@@ -983,6 +992,182 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                " vtablesResolved=" + std::to_string(out.vtablesResolved) +
                " regionsScanned=" + std::to_string(out.regionsScanned) +
                " bytes=" + std::to_string(out.bytesScanned));
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 30 P2 (Mono port) — ReverseLookupIndex
+// ---------------------------------------------------------------------------
+
+bool ReverseLookupIndex::Build() {
+    bases_.clear();
+    lastBase_ = lastVtable_ = lastKlass_ = lastNextBase_ = 0;
+    hits_ = localityHits_ = 0;
+
+    if (!BuildClassRangeCache()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "ReverseLookupIndex(Mono): build aborted — class range cache unavailable");
+        return false;
+    }
+
+    // Root domain pointer for the MonoVTable::domain structural check (same as
+    // FindAllInstances). A non-vtable structure whose first qword happens to be
+    // a class pointer almost never has the root domain at +2*ptr.
+    const std::uintptr_t rootDomainAddr =
+        reinterpret_cast<std::uintptr_t>(GetRootDomain());
+
+    std::vector<std::uintptr_t> classSet;
+    std::uintptr_t minKlass = 0, maxKlass = 0;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        classSet = cache().classSet;
+        minKlass = g_minKlass;
+        maxKlass = g_maxKlass;
+    }
+    if (classSet.empty()) return false;
+
+    constexpr DWORD kRW =
+        PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    auto regions = Memory::EnumerateCommittedRegions();
+    auto stacks  = Memory::CollectThreadStackRanges();
+
+    // Per-scan vtable→klass memo (a class with N instances pays ONE deref +
+    // domain check, then N-1 cache hits). Not merged into the global cache —
+    // this is a throwaway index.
+    std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
+
+    // Single-threaded by design (see header): the Mono heap walk carries the
+    // 活俠傳 BDWGC-freeze risk, so we reuse FindAllInstances' Sleep(1)-yield
+    // pacing rather than the IL2CPP index's parallel sweep.
+    constexpr std::size_t kYieldEveryBytes = 16ull * 1024ull * 1024ull;
+    std::size_t bytesSinceYield = 0;
+    std::size_t qtotal = 0;
+
+    std::vector<std::uintptr_t>      qwords;
+    std::vector<const std::uint8_t*> slots;
+    qwords.reserve(1024);
+    slots.reserve(1024);
+
+    for (const auto& r : regions) {
+        if ((r.protect & kRW) == 0) continue;
+        if (r.type == MEM_IMAGE || r.type == MEM_MAPPED) continue;
+        const std::uint8_t* regionEnd = r.base + r.size;
+        bool onStack = false;
+        for (const auto& s : stacks) {
+            if (s.low >= regionEnd) break;
+            if (s.high > r.base && s.low < regionEnd) { onStack = true; break; }
+        }
+        if (onStack) continue;
+
+        bytesSinceYield += r.size;
+        if (bytesSinceYield >= kYieldEveryBytes) {
+            ::Sleep(1);
+            bytesSinceYield = 0;
+        }
+
+        qwords.clear();
+        slots.clear();
+        SehSweepRegionLoad(r.base, r.size, qwords, slots);
+        qtotal += (r.size / sizeof(std::uintptr_t));
+
+        for (std::size_t i = 0; i < qwords.size(); ++i) {
+            std::uintptr_t qw = qwords[i];   // candidate MonoVTable*
+            std::uintptr_t klass = 0;
+
+            auto memoIt = vtMemo.find(qw);
+            if (memoIt != vtMemo.end()) {
+                klass = memoIt->second;
+                if (klass == 0) continue;   // memoised negative
+            } else {
+                std::uintptr_t derefed = 0;
+                if (!SehReadKlassAt(qw, derefed)) { vtMemo[qw] = 0; continue; }
+                if (derefed < minKlass || derefed > maxKlass) { vtMemo[qw] = 0; continue; }
+                if ((derefed & 7u) != 0) { vtMemo[qw] = 0; continue; }
+                if (!std::binary_search(classSet.begin(), classSet.end(), derefed)) {
+                    vtMemo[qw] = 0; continue;
+                }
+                // MonoVTable structural validation: +2*ptr is MonoDomain*.
+                std::uintptr_t domainAt = 0;
+                if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
+                    domainAt != rootDomainAddr) {
+                    vtMemo[qw] = 0; continue;
+                }
+                klass = derefed;
+                vtMemo[qw] = klass;
+            }
+
+            const std::uintptr_t instAddr = reinterpret_cast<std::uintptr_t>(slots[i]);
+            if ((instAddr & 7u) != 0) continue;   // real objects are 8-aligned
+            bases_.push_back(Entry{instAddr, qw, klass});
+        }
+    }
+
+    // Sort ascending by base for the binary-search lookup.
+    std::sort(bases_.begin(), bases_.end(),
+              [](const Entry& a, const Entry& b) { return a.base < b.base; });
+
+    Log::Write(MagicStrings::LogCategoryScan,
+               "ReverseLookupIndex(Mono): instances=" + std::to_string(bases_.size()) +
+               " qwords=" + std::to_string(qtotal));
+    return true;
+}
+
+AddressLookup ReverseLookupIndex::Lookup(std::uintptr_t addr, std::size_t maxBackwardScan) {
+    AddressLookup out;
+    out.queriedAddr = addr;
+
+    // Match WhatIsAt's window math: round addr down to 8, allow a base as far
+    // as (maxSteps-1)*8 below it.
+    if (maxBackwardScan == 0)        maxBackwardScan = 4096;
+    if (maxBackwardScan > 16 * 1024) maxBackwardScan = 16 * 1024;
+    constexpr std::size_t kStride = 8;
+    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
+    std::size_t maxSteps = maxBackwardScan / kStride;
+    if (maxSteps == 0) maxSteps = 1;
+    std::uintptr_t lowest = (start >= (maxSteps - 1) * kStride)
+        ? start - (maxSteps - 1) * kStride : 0;
+    out.scannedFrom = lowest;
+    out.scannedTo   = start + kStride;
+
+    // Locality fast-path: when `start` lies in [lastBase_, lastNextBase_),
+    // lastBase_ is PROVABLY the greatest base ≤ start (next base up is
+    // lastNextBase_ > start), so skip the binary search. Still subject to the
+    // backward-window check.
+    if (lastBase_ != 0 && start >= lastBase_ &&
+        (lastNextBase_ == 0 || start < lastNextBase_)) {
+        if (lastBase_ < lowest) {
+            out.reason = "no_klass_in_range";
+            return out;
+        }
+        ++localityHits_;
+        ++hits_;
+        ResolveInstanceLookup(addr, lastBase_, lastVtable_, lastKlass_, out);
+        return out;
+    }
+
+    // Binary search for the greatest base ≤ start.
+    Entry probe{start, 0, 0};
+    auto it = std::upper_bound(bases_.begin(), bases_.end(), probe,
+        [](const Entry& a, const Entry& b) { return a.base < b.base; });
+    std::uintptr_t nextBase = (it != bases_.end()) ? it->base : 0;
+    if (it == bases_.begin()) {
+        out.reason = "no_klass_in_range";
+        return out;
+    }
+    --it;   // greatest base ≤ start
+    if (it->base < lowest) {
+        out.reason = "no_klass_in_range";
+        return out;
+    }
+
+    lastBase_     = it->base;
+    lastVtable_   = it->vtable;
+    lastKlass_    = it->klass;
+    lastNextBase_ = nextBase;
+    ++hits_;
+    ResolveInstanceLookup(addr, it->base, it->vtable, it->klass, out);
     return out;
 }
 
