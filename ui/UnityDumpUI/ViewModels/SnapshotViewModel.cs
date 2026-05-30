@@ -1002,10 +1002,15 @@ public sealed partial class SnapshotViewModel : ObservableObject
             // Phase 2 — stream pre-built class payloads in chunks. Each
             // snapshotChunk RPC is a pure JSON slice server-side (Phase
             // 29a-v2 design), so latency is dominated by IPC throughput,
-            // not server work. Chunk size 100 (was 32) cuts round-trip
-            // count by ~3x — on 活俠傳's 3.6K-class workload that's 37
-            // round-trips instead of 114. Server caps at 200.
-            const int kChunkSize = 100;
+            // not server work. Server caps at 200.
+            // Phase 30c — chunk size 25 (was 100). The transient mid-capture
+            // peak is bounded by the LARGEST single chunk's NormalizeDeduped
+            // re-expansion, not by GC frequency (the ascending-population sort
+            // places the biggest classes in the final chunks). A smaller chunk
+            // shrinks that worst-case re-expansion ~4x — the lever for the
+            // ~10 GB full-game-capture peak — at the cost of ~4x more
+            // round-trips (cheap: each Chunk is a server-side JSON slice).
+            const int kChunkSize = 25;
             // Phase 30c — how often (in chunks) the streaming path forces a
             // compacting gen2 collect to bound the transient peak (see the loop).
             const int kStreamGcIntervalChunks = 8;
