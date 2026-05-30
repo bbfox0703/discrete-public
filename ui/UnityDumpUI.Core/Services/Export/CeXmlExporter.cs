@@ -46,7 +46,7 @@ using UnityDumpUI.Core.Services;
 
 namespace UnityDumpUI.Core.Services.Export;
 
-public static class CeXmlExporter
+public static partial class CeXmlExporter
 {
     /// <summary>
     /// Render a CE table around <paramref name="self"/> rooted at
@@ -155,302 +155,34 @@ public static class CeXmlExporter
                   offsets: null, collapsed: options.CollapsePointerNodes,
                   varType: "8 Bytes", showAsHex: true);
 
-        if (ancestors is { Count: > 0 })
+        // walkInstance walks the FULL inheritance chain and returns
+        // pre-classified, pre-decoded fields (enum / string / value-type flags
+        // + real addresses), so `ancestors` is unused in live mode — the named
+        // root walk already includes inherited members. This is the same path
+        // the Inspector grid uses, so the CE table matches what the user sees.
+        WalkInstanceResult root;
+        try
         {
-            foreach (GetClassInfoResult anc in ancestors)
-                await EmitFieldsLiveAsync(sb, "      ", idGen, anc, baseAbs,
-                                          isInherited: true, assemblyName, options,
-                                          live, visited, currentDepth: 0, ct)
-                    .ConfigureAwait(false);
+            root = await live.WalkInstanceAsync(
+                $"0x{baseAbs:X16}", assemblyName ?? string.Empty,
+                self.Namespace, self.Name ?? string.Empty, ct).ConfigureAwait(false);
         }
-        await EmitFieldsLiveAsync(sb, "      ", idGen, self, baseAbs,
-                                  isInherited: false, assemblyName, options,
-                                  live, visited, currentDepth: 0, ct)
-            .ConfigureAwait(false);
+        catch
+        {
+            root = new WalkInstanceResult();
+        }
+        if (root.Fields is { Count: > 0 } rootFields)
+        {
+            foreach (WalkedField wf in rootFields)
+                await EmitWalkedFieldLiveAsync(sb, "      ", idGen, wf, assemblyName,
+                                               options, live, visited,
+                                               currentDepth: 0, ct).ConfigureAwait(false);
+        }
 
         CloseGroup(sb, "    ");
         sb.Append("  </CheatEntries>\n");
         sb.Append("</CheatTable>\n");
         return BuildOutput(sb, nameMap);
-    }
-
-    private static async Task EmitFieldsLiveAsync(
-        StringBuilder sb, string indent, IdGen ids,
-        GetClassInfoResult info, ulong parentAbs,
-        bool isInherited, string? assemblyName, ExportOptions options,
-        ILiveExportSource live, HashSet<string> visited,
-        int currentDepth, CancellationToken ct)
-    {
-        if (info.Fields is not { Count: > 0 } fields) return;
-        foreach (FieldEntry f in fields.Where(x => !x.Static))
-        {
-            await EmitOneFieldLiveAsync(sb, indent, ids, f, parentAbs,
-                                        isInherited, assemblyName, options,
-                                        live, visited, currentDepth, ct)
-                .ConfigureAwait(false);
-        }
-    }
-
-    private static async Task EmitOneFieldLiveAsync(
-        StringBuilder sb, string indent, IdGen ids,
-        FieldEntry f, ulong parentAbs,
-        bool isInherited, string? assemblyName, ExportOptions options,
-        ILiveExportSource live, HashSet<string> visited,
-        int currentDepth, CancellationToken ct)
-    {
-        ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
-        ulong fieldAbs = parentAbs + (ulong)(uint)f.Offset;
-        string fieldAddr = $"0x{fieldAbs:X16}";
-        string desc = isInherited
-            ? $"{f.Name} : {f.Type ?? "?"}  (inherited)"
-            : $"{f.Name} : {f.Type ?? "?"}";
-
-        // Scalar leaf — emit at absolute address, no chain.
-        if (!shape.IsPointer)
-        {
-            (bool hex, bool signed) = UnityTypeMap.CeDisplay(f.Type);
-            EmitLeaf(sb, indent, ids, desc,
-                     vartype: shape.CeTypeKeyword,
-                     showAsHex: hex, showAsSigned: signed,
-                     address: fieldAddr, offsets: null);
-            return;
-        }
-
-        // Pointer field — read the qword to get the deref'd value.
-        ReadMemoryResult mem;
-        try
-        {
-            mem = await live.ReadMemoryAsync(fieldAddr, 8, ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            // Pipe error — fall back to template-style group with deref offsets.
-            OpenGroup(sb, indent, ids, desc + "  (read failed)", fieldAddr,
-                      offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
-                      varType: null, showAsHex: true);
-            CloseGroup(sb, indent);
-            return;
-        }
-        if (!string.IsNullOrEmpty(mem.Error) || string.IsNullOrEmpty(mem.Hex))
-        {
-            EmitLeaf(sb, indent, ids, desc + "  <unreadable>",
-                     vartype: "8 Bytes", showAsHex: true,
-                     address: fieldAddr, offsets: null);
-            return;
-        }
-        ulong derefAbs = ParseLeQword(mem.Hex!);
-        if (derefAbs == 0)
-        {
-            EmitLeaf(sb, indent, ids, desc + "  <null>",
-                     vartype: "8 Bytes", showAsHex: true,
-                     address: fieldAddr, offsets: null);
-            return;
-        }
-
-        bool isCollection = UnityTypeMap.IsCollectionType(f.Type);
-        bool canDrill = currentDepth < options.DrilldownDepth;
-
-        // Collection field: walkArray and emit per-slot entries with real
-        // absolute addresses. List<T> needs an extra +0x10 dereference to
-        // reach the inner T[] header.
-        if (isCollection && canDrill && options.ArrayLimit > 0)
-        {
-            ulong arrayAbs = derefAbs;
-            bool isList = f.Type is { Length: > 0 } t
-                          && TryStripListGeneric(t, out _);
-            if (isList)
-            {
-                try
-                {
-                    ReadMemoryResult itemsMem = await live.ReadMemoryAsync(
-                        $"0x{(derefAbs + 0x10):X16}", 8, ct).ConfigureAwait(false);
-                    if (string.IsNullOrEmpty(itemsMem.Error) && !string.IsNullOrEmpty(itemsMem.Hex))
-                        arrayAbs = ParseLeQword(itemsMem.Hex!);
-                    else
-                        arrayAbs = 0;
-                }
-                catch { arrayAbs = 0; }
-            }
-
-            if (arrayAbs == 0)
-            {
-                EmitLeaf(sb, indent, ids, desc + "  <empty>",
-                         vartype: "8 Bytes", showAsHex: true,
-                         address: fieldAddr, offsets: null);
-                return;
-            }
-
-            // Resolve element class hint from the field type.
-            // SplitElementClass returns null for primitive (System.*) element
-            // types because the DLL primitive table covers them — but we
-            // still need the bare element name (e.g. "System.Byte" for
-            // System.Byte[]) to feed into PrimitiveVartype below. Compute
-            // both: a runtime-class spec (may be null) and a type-string
-            // hint that's always the unwrapped element type.
-            (string ns, string name)? elemSpec = SplitElementClass(f.Type);
-            string elemType = StripCollectionSuffix(f.Type)
-                              ?? (elemSpec is { } es
-                                  ? (string.IsNullOrEmpty(es.ns) ? es.name : $"{es.ns}.{es.name}")
-                                  : (f.Type ?? string.Empty));
-
-            WalkArrayResult? walk = null;
-            try
-            {
-                walk = await live.WalkArrayAsync(
-                    $"0x{arrayAbs:X16}",
-                    elementType:      elemType,
-                    limit:            options.ArrayLimit,
-                    elementSize:      null,
-                    elementAssembly:  elemSpec is null ? null : (assemblyName ?? string.Empty),
-                    elementNamespace: elemSpec?.ns,
-                    elementName:      elemSpec?.name,
-                    ct).ConfigureAwait(false);
-            }
-            catch { /* tolerate */ }
-
-            string headerLabel = walk is null
-                ? $"{desc}  (walk failed)"
-                : $"{desc}  [{walk.Length} of {(walk.ElementClassName ?? elemType)}, showing {walk.Count}]";
-            OpenGroup(sb, indent, ids, headerLabel, $"0x{arrayAbs:X16}",
-                      offsets: null, collapsed: options.CollapsePointerNodes,
-                      varType: null, showAsHex: true);
-
-            if (walk?.Elements is { } elems)
-            {
-                // For ref-type slots, recurse into each pointed-to object.
-                // For value-type slots, lay out the element class fields at
-                // slot.Address. Cycle-detect on element class name so an
-                // array of self doesn't unroll forever.
-                GetClassInfoResult? elemClass = null;
-                string? cycleKey = null;
-                if (canDrill && elemSpec is { } e0)
-                {
-                    cycleKey = $"{assemblyName ?? "?"}!{e0.ns}.{e0.name}";
-                    if (visited.Add(cycleKey))
-                    {
-                        try
-                        {
-                            elemClass = await live.GetClassInfoAsync(
-                                assemblyName ?? string.Empty, e0.ns, e0.name, ct)
-                                .ConfigureAwait(false);
-                        }
-                        catch { /* tolerate */ }
-                    }
-                    else
-                    {
-                        cycleKey = null;
-                    }
-                }
-
-                foreach (WalkedArrayElement elem in elems)
-                {
-                    if (walk.IsPointer)
-                    {
-                        ulong slotPtr = ParseHexLoose(elem.Ptr ?? "0");
-                        if (slotPtr == 0 || elemClass is null)
-                        {
-                            EmitLeaf(sb, indent + "  ", ids,
-                                     $"[{elem.Index}]",
-                                     vartype: "8 Bytes", showAsHex: true,
-                                     address: elem.Address ?? "?", offsets: null);
-                            continue;
-                        }
-                        OpenGroup(sb, indent + "  ", ids,
-                                  $"[{elem.Index}] @ {elem.Ptr}",
-                                  $"0x{slotPtr:X16}",
-                                  offsets: null,
-                                  collapsed: options.CollapsePointerNodes,
-                                  varType: null, showAsHex: true);
-                        await EmitFieldsLiveAsync(sb, indent + "    ", ids,
-                                                  elemClass, slotPtr,
-                                                  isInherited: false, assemblyName,
-                                                  options, live, visited,
-                                                  currentDepth + 1, ct)
-                            .ConfigureAwait(false);
-                        CloseGroup(sb, indent + "  ");
-                    }
-                    else
-                    {
-                        ulong slotAbs = ParseHexLoose(elem.Address ?? "0");
-                        if (elemClass is null || slotAbs == 0)
-                        {
-                            (bool h, bool s) = UnityTypeMap.CeDisplay(elemType);
-                            EmitLeaf(sb, indent + "  ", ids,
-                                     $"[{elem.Index}]",
-                                     vartype: PrimitiveVartype(elemType),
-                                     showAsHex: h, showAsSigned: s,
-                                     address: elem.Address ?? "?", offsets: null);
-                            continue;
-                        }
-                        OpenGroup(sb, indent + "  ", ids,
-                                  $"[{elem.Index}]",
-                                  $"0x{slotAbs:X16}",
-                                  offsets: null,
-                                  collapsed: options.CollapsePointerNodes,
-                                  varType: null, showAsHex: true);
-                        await EmitFieldsLiveAsync(sb, indent + "    ", ids,
-                                                  elemClass, slotAbs,
-                                                  isInherited: false, assemblyName,
-                                                  options, live, visited,
-                                                  currentDepth + 1, ct)
-                            .ConfigureAwait(false);
-                        CloseGroup(sb, indent + "  ");
-                    }
-                }
-
-                if (cycleKey is not null) visited.Remove(cycleKey);
-            }
-            CloseGroup(sb, indent);
-            return;
-        }
-
-        // Plain reference field — drill into the pointed-to object if the
-        // class resolves and we still have depth budget.
-        (string ns, string name)? target = canDrill
-            ? UnityTypeMap.ExtractElementClass(f.Type)
-            : null;
-
-        GetClassInfoResult? child = null;
-        string? cycleKey2 = null;
-        if (target is not null)
-        {
-            cycleKey2 = $"{assemblyName ?? "?"}!{target.Value.ns}.{target.Value.name}";
-            if (visited.Add(cycleKey2))
-            {
-                try
-                {
-                    child = await live.GetClassInfoAsync(
-                        assemblyName ?? string.Empty,
-                        target.Value.ns, target.Value.name, ct)
-                        .ConfigureAwait(false);
-                }
-                catch { /* tolerate */ }
-                if (child is null || !string.IsNullOrEmpty(child.Error))
-                {
-                    visited.Remove(cycleKey2);
-                    child = null;
-                }
-            }
-            else
-            {
-                cycleKey2 = null;
-            }
-        }
-
-        OpenGroup(sb, indent, ids, $"{desc}  -> 0x{derefAbs:X16}",
-                  $"0x{derefAbs:X16}",
-                  offsets: null,
-                  collapsed: options.CollapsePointerNodes,
-                  varType: null, showAsHex: true);
-        if (child is not null)
-        {
-            await EmitFieldsLiveAsync(sb, indent + "  ", ids, child, derefAbs,
-                                      isInherited: false, assemblyName,
-                                      options, live, visited,
-                                      currentDepth + 1, ct).ConfigureAwait(false);
-        }
-        CloseGroup(sb, indent);
-        if (cycleKey2 is not null) visited.Remove(cycleKey2);
     }
 
     // ---------- Hex / type helpers ---------------------------------------

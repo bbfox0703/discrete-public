@@ -11,7 +11,11 @@ public sealed record ExportOptions(
     int  DrilldownDepth        = 1,
     int  ArrayLimit            = 16,
     bool CollapsePointerNodes  = true,
-    bool LiveData              = false)
+    bool LiveData              = false,
+    // Game-process pointer size (8 = x64, 4 = x86/WOW64). Only consulted by
+    // the live-data export for the managed-String inline char buffer offset
+    // (header is 2*ptr, chars follow the int32 length → x64 +0x14, x86 +0xC).
+    int  PointerSize           = 8)
 {
     public static ExportOptions Defaults { get; } = new();
 }

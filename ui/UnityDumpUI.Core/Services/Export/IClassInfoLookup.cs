@@ -39,4 +39,25 @@ public interface ILiveExportSource : IClassInfoLookup
         string? elementNamespace,
         string? elementName,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// <c>walkInstance</c> — runtime field decode for the class spec at
+    /// <paramref name="address"/>. The decoded fields carry enum / string /
+    /// nested-class classification the static <see cref="IClassInfoLookup"/>
+    /// path lacks, so the CE XML live export uses this (mirroring the
+    /// Inspector) to emit enums as int leaves, strings as CE String entries,
+    /// and to drill nested value-type structs.
+    /// </summary>
+    Task<WalkInstanceResult> WalkInstanceAsync(
+        string address, string assembly, string? @namespace, string name,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// <c>walkInstance</c> header-resolved variant — reads the runtime class
+    /// pointer from the object header at <paramref name="address"/> and walks
+    /// against that exact class. Resolves nested + generic instantiations
+    /// (e.g. <c>List&lt;T&gt;</c> element classes) that name lookup can't find.
+    /// </summary>
+    Task<WalkInstanceResult> WalkInstanceFromHeaderAsync(
+        string address, CancellationToken ct = default);
 }
