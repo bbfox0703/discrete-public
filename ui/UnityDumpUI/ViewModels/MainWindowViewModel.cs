@@ -116,6 +116,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // it; new code paths should use vm.AobMaker directly.
         _aobMaker = new AobMakerBridge(_logger);
         Inspector.AobMaker     = _aobMaker;
+        // Inspector's instance / node "Copy CE XML" honours the same
+        // Export-options drilldown depth + array limit the user set on the
+        // Browser tab (instead of the old hardcoded depth 1).
+        Inspector.ExportDepthProvider = () => (Browser.DrilldownDepth, Browser.ArrayLimit);
         AddressLookup.AobMaker = _aobMaker;  // Phase 22e Send-to-CE button
         _aobMaker.AvailabilityChanged += OnAobMakerAvailabilityChanged;
         // Opportunistic startup probe so the connection-bar status text

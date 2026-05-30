@@ -150,6 +150,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// </summary>
     [ObservableProperty] private int _gamePointerSize;
 
+    /// <summary>
+    /// Supplies the live-export drilldown depth + array limit for the
+    /// instance / node "Copy CE XML" commands. Wired by MainWindowViewModel to
+    /// read the Browser's Export-options sliders so the Inspector honours the
+    /// same DrilldownDepth the user set there (previously these commands
+    /// hardcoded depth 1, ignoring the slider). Null ⇒ fall back to (1, 16).
+    /// </summary>
+    public Func<(int Depth, int ArrayLimit)>? ExportDepthProvider { get; set; }
+
+    private (int Depth, int ArrayLimit) ResolveExportDepth()
+        => ExportDepthProvider?.Invoke() ?? (1, 16);
+
     // ---------- Target ----------------------------------------------------
 
     [ObservableProperty]
@@ -1034,11 +1046,13 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
                 return;
             }
+            (int depth, int arrayLimit) = ResolveExportDepth();
             ExportOptions options = new(
-                DrilldownDepth: 1,
-                ArrayLimit:     16,
+                DrilldownDepth: depth,
+                ArrayLimit:     arrayLimit,
                 CollapsePointerNodes: true,
-                LiveData: true);
+                LiveData: true,
+                PointerSize: GamePointerSize == 4 ? 4 : 8);
             string xml = await CeXmlExporter.RenderAsync(
                 SelectedInstance.Address, info, ancestors: null,
                 usedAssembly, options, _backend, default)
@@ -1090,11 +1104,13 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
                 return;
             }
+            (int depth, int arrayLimit) = ResolveExportDepth();
             ExportOptions options = new(
-                DrilldownDepth: 1,
-                ArrayLimit:     16,
+                DrilldownDepth: depth,
+                ArrayLimit:     arrayLimit,
                 CollapsePointerNodes: true,
-                LiveData: true);
+                LiveData: true,
+                PointerSize: GamePointerSize == 4 ? 4 : 8);
             string xml = await CeXmlExporter.RenderAsync(
                 SelectedNode.EffectiveAddress!, info, ancestors: null,
                 usedAssembly, options, _backend, default)
