@@ -4,6 +4,8 @@
 
 #include <windows.h>
 #include <tlhelp32.h>
+#include <immintrin.h>   // AVX2 scan inner loops (Phase 30 P2 SIMD)
+#include <intrin.h>      // __cpuid / __cpuidex / _xgetbv / _BitScanForward
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -13,6 +15,30 @@
 namespace Discrete::Memory {
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Phase 30 P2 SIMD — AVX2 runtime detection. The scan inner loops below have an
+// AVX2 fast-path (32-byte-at-a-time anchor / qword compare) that produces
+// byte-identical results to the scalar path; this gate decides at runtime
+// whether the host CPU + OS can run the YMM instructions. Cached once. MSVC
+// permits the AVX2 intrinsics regardless of /arch, so the fast-path only ever
+// executes when this is true; everything else falls through to scalar.
+// ---------------------------------------------------------------------------
+bool DetectAvx2() noexcept {
+    int info[4] = {0, 0, 0, 0};
+    __cpuid(info, 0);
+    if (info[0] < 7) return false;                 // max leaf < 7 → no AVX2 leaf
+    __cpuidex(info, 1, 0);
+    const bool osxsave = (info[2] & (1 << 27)) != 0;
+    const bool avx     = (info[2] & (1 << 28)) != 0;
+    if (!osxsave || !avx) return false;
+    // OS must have enabled XMM (bit 1) + YMM (bit 2) state saving.
+    const unsigned long long xcr0 = _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
+    if ((xcr0 & 0x6) != 0x6) return false;
+    __cpuidex(info, 7, 0);
+    return (info[1] & (1 << 5)) != 0;              // EBX bit 5 = AVX2
+}
+const bool g_useAvx2 = DetectAvx2();
 
 bool RegionHasProtect(const void* addr, std::size_t size, DWORD requiredAny, DWORD forbiddenAny) noexcept {
     const std::uint8_t* p = static_cast<const std::uint8_t*>(addr);
@@ -166,7 +192,37 @@ bool SehScanRegion(const std::uint8_t* base, std::size_t size,
         const bool hasExclude = excludeHigh > excludeLow;
         const std::size_t count = size / sizeof(std::uintptr_t);
         const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
-        for (std::size_t i = 0; i < count; ++i) {
+        std::size_t i = 0;
+#if defined(_M_X64)
+        // Phase 30 P2 SIMD — AVX2 4-qword (32-byte) compare. _mm256_cmpeq_epi64
+        // is exact equality, so hits match the scalar loop below byte-for-byte;
+        // this only finds them faster. Runtime-gated (g_useAvx2); pre-AVX2 CPUs
+        // fall straight through to scalar. The scalar loop handles the final
+        // < 4-qword tail. x64-only: on x86 a "pointer" is a 4-byte dword
+        // (different lane width) — the rare 32-bit path stays scalar.
+        if (g_useAvx2) {
+            const __m256i needle = _mm256_set1_epi64x(static_cast<long long>(target));
+            for (; i + 4 <= count; i += 4) {
+                __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(arr + i));
+                int mask = _mm256_movemask_pd(
+                    _mm256_castsi256_pd(_mm256_cmpeq_epi64(v, needle)));  // 4 bits, 1/qword
+                while (mask) {
+                    unsigned long lane;
+                    _BitScanForward(&lane, static_cast<unsigned long>(mask));
+                    auto addr = reinterpret_cast<std::uintptr_t>(
+                        base + (i + lane) * sizeof(std::uintptr_t));
+                    if (hasExclude && addr >= excludeLow && addr < excludeHigh) {
+                        ++excludedMatches;
+                    } else {
+                        matches.push_back(reinterpret_cast<const void*>(addr));
+                        if (matches.size() >= limit) return true;
+                    }
+                    mask &= mask - 1;   // clear lowest set bit
+                }
+            }
+        }
+#endif
+        for (; i < count; ++i) {
             if (arr[i] == target) {
                 auto addr = reinterpret_cast<std::uintptr_t>(base + i * sizeof(std::uintptr_t));
                 if (hasExclude && addr >= excludeLow && addr < excludeHigh) {
@@ -733,7 +789,41 @@ bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
                     std::size_t limit) {
     if (size < needleSize) return true;
     const std::size_t end = size - needleSize;
-    for (std::size_t i = 0; i <= end; i += stride) {
+    std::size_t i = 0;
+#if defined(_M_X64) || defined(_M_IX86)
+    // Phase 30 P2 SIMD — AVX2 anchor scan. Broadcast needle[0], test 32 bytes
+    // per step with cmpeq_epi8, then verify each candidate with the SAME memcmp
+    // the scalar path uses → hits are byte-identical. Only stride-aligned
+    // candidate starts are accepted (matching the scalar `i += stride` grid: 1
+    // for ASCII/UTF-8, 2 for UTF-16), so the SIMD finds exactly the scalar's
+    // match set. Runtime-gated; the scalar loop handles the final < 32-byte
+    // tail. Works on x64 + x86 (byte logic is bitness-agnostic; a 32-bit AVX2
+    // CPU still has YMM) — relevant for the 活俠傳 x86 Mono target.
+    if (g_useAvx2) {
+        const __m256i first = _mm256_set1_epi8(static_cast<char>(needle[0]));
+        for (; i + 32 <= size; i += 32) {
+            __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(base + i));
+            unsigned int mask = static_cast<unsigned int>(
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, first)));
+            while (mask) {
+                unsigned long lane;
+                _BitScanForward(&lane, mask);
+                const std::size_t cand = i + lane;
+                // cand <= end ⇒ cand + needleSize <= size (end = size - needleSize).
+                if (cand % stride == 0 && cand <= end &&
+                    std::memcmp(base + cand, needle, needleSize) == 0) {
+                    StringScanCandidate c{};
+                    c.addr   = base + cand;
+                    c.length = needleSize;
+                    matches.push_back(c);
+                    if (matches.size() >= limit) return true;
+                }
+                mask &= mask - 1;   // clear lowest set bit
+            }
+        }
+    }
+#endif
+    for (; i <= end; i += stride) {
         if (std::memcmp(base + i, needle, needleSize) == 0) {
             StringScanCandidate c{};
             c.addr   = base + i;
