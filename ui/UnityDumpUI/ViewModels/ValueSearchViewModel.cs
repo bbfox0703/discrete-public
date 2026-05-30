@@ -13,6 +13,7 @@
 // AOT-safe: CommunityToolkit.Mvvm source-gen + zero reflection.
 
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -47,11 +48,43 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         SelectedMatchMode = "contains";
     }
 
+    // Aggregate "don't make me guess the width" pseudo-types. Selecting one
+    // runs a First Scan across every concrete numeric width and merges the
+    // results, so the user doesn't have to know whether the game stores a
+    // stat as int32 / float / double. They are one-shot (no server session),
+    // so Next Scan is unavailable until the user re-picks a single concrete
+    // type — refining a union of widths in place isn't well-defined.
+    public const string AggregateNoByte = "numeric (no 1-byte)";
+    public const string AggregateAll    = "numeric (all widths)";
+
     public string[] DataTypes { get; } = new[]
     {
         "int8", "uint8", "int16", "uint16", "int32", "uint32",
         "int64", "uint64", "float", "double", "string",
+        AggregateNoByte, AggregateAll,
     };
+
+    // Concrete widths each aggregate expands into. "no 1-byte" drops int8 /
+    // uint8 because single-byte matches are overwhelmingly false positives
+    // on a value like 100; "all widths" includes them for completeness.
+    private static readonly string[] AggregateNoByteTypes =
+    {
+        "int16", "uint16", "int32", "uint32", "int64", "uint64", "float", "double",
+    };
+    private static readonly string[] AggregateAllTypes =
+    {
+        "int8", "uint8", "int16", "uint16", "int32", "uint32",
+        "int64", "uint64", "float", "double",
+    };
+
+    public bool IsAggregateMode =>
+        string.Equals(SelectedDataType, AggregateNoByte, StringComparison.Ordinal) ||
+        string.Equals(SelectedDataType, AggregateAll,    StringComparison.Ordinal);
+
+    private string[] CurrentAggregateTypes =>
+        string.Equals(SelectedDataType, AggregateAll, StringComparison.Ordinal)
+            ? AggregateAllTypes
+            : AggregateNoByteTypes;
 
     public string[] ScanTypes { get; } = new[] { "exact", "range" };
 
@@ -64,12 +97,82 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     public string[] Encodings  { get; } = new[] { "utf16", "utf8", "ascii" };
     public string[] MatchModes { get; } = new[] { "contains", "exact" };
 
+    /// <summary>Raw scan hits (every candidate the backend returned). The grid
+    /// binds to <see cref="FilteredResults"/>; this stays the unfiltered store
+    /// so toggling the filters re-derives the view without re-scanning.</summary>
     public ObservableCollection<ValueSearchRow> Results { get; } = new();
+
+    /// <summary>View over <see cref="Results"/> after applying
+    /// <see cref="IgnoreSystemAssemblies"/> + <see cref="ResultFilter"/>. This
+    /// is what the results DataGrid binds to.</summary>
+    public ObservableCollection<ValueSearchRow> FilteredResults { get; } = new();
+
+    /// <summary>When true, hide hits in engine / framework assemblies
+    /// (Unity*, System*, Cinemachine*, …) so the grid shows game-code hits
+    /// only. Defaults on — a value like 65 otherwise matches thousands of
+    /// engine objects (see the Cinemachine.* noise). Toggling re-filters the
+    /// existing results in place.</summary>
+    [ObservableProperty] private bool _ignoreSystemAssemblies = true;
+    partial void OnIgnoreSystemAssembliesChanged(bool value) => RefreshResultView();
+
+    /// <summary>Case-insensitive substring filter over the results grid —
+    /// matches Class / Field / Type / Instance / Address. Empty shows all
+    /// (subject to <see cref="IgnoreSystemAssemblies"/>).</summary>
+    [ObservableProperty] private string _resultFilter = string.Empty;
+    partial void OnResultFilterChanged(string value) => RefreshResultView();
+
+    // Engine / framework assembly + namespace prefixes hidden when
+    // IgnoreSystemAssemblies is on. Matched against the row's Assembly,
+    // Namespace AND ClassDisplay (so namespaced engine types like
+    // "Cinemachine.CinemachineBrain" are caught even when the Assembly field
+    // is blank). Game code (Assembly-CSharp, bare-namespace types like
+    // CharacterData) is left visible.
+    private static readonly string[] SystemPrefixes =
+    {
+        "Unity", "System", "Mono", "Microsoft", "mscorlib", "netstandard",
+        "Cinemachine", "Newtonsoft", "TMPro", "DG.Tweening", "Spine",
+    };
+
+    public static bool IsSystemName(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        foreach (string p in SystemPrefixes)
+            if (name.StartsWith(p, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    public static bool IsSystemRow(ValueSearchRow r)
+        => IsSystemName(r.Assembly) || IsSystemName(r.Namespace) || IsSystemName(r.ClassDisplay);
+
+    /// <summary>Rebuild <see cref="FilteredResults"/> from <see cref="Results"/>
+    /// applying the assembly toggle + substring filter. Cheap O(n) rebuild —
+    /// result sets are capped at <see cref="Limit"/>.</summary>
+    private void RefreshResultView()
+    {
+        FilteredResults.Clear();
+        string filter = ResultFilter ?? string.Empty;
+        bool hasFilter = filter.Length > 0;
+        bool hideSys   = IgnoreSystemAssemblies;
+        foreach (ValueSearchRow r in Results)
+        {
+            if (hideSys && IsSystemRow(r)) continue;
+            if (hasFilter && !RowMatchesFilter(r, filter)) continue;
+            FilteredResults.Add(r);
+        }
+    }
+
+    private static bool RowMatchesFilter(ValueSearchRow r, string filter)
+        => r.ClassDisplay.Contains(filter, StringComparison.OrdinalIgnoreCase)
+        || r.Field.Contains(filter, StringComparison.OrdinalIgnoreCase)
+        || r.FieldType.Contains(filter, StringComparison.OrdinalIgnoreCase)
+        || r.InstanceAddr.Contains(filter, StringComparison.OrdinalIgnoreCase)
+        || r.Address.Contains(filter, StringComparison.OrdinalIgnoreCase);
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(FirstScanCommand))]
     [NotifyPropertyChangedFor(nameof(IsStringMode))]
     [NotifyPropertyChangedFor(nameof(IsNumericMode))]
+    [NotifyPropertyChangedFor(nameof(IsAggregateMode))]
     private string _selectedDataType = "int32";
 
     public bool IsStringMode  => string.Equals(SelectedDataType, "string", StringComparison.Ordinal);
@@ -96,7 +199,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     // every CT author actually wants. Set to 0 for exact-binary match
     // (rarely useful — IEEE-754 floats accumulate FP drift).
     [ObservableProperty] private string _toleranceText = "0.5";
-    [ObservableProperty] private int    _limit          = 500;
+    [ObservableProperty] private int    _limit          = 10000;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(NextScanCommand))]
@@ -132,6 +235,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
 
         IsBusy = true; ErrorMessage = null;
         Results.Clear();
+        FilteredResults.Clear();
         StartElapsedTimer("Scanning");
 
         // If a previous session is alive, free it before opening a new one.
@@ -174,9 +278,22 @@ public sealed partial class ValueSearchViewModel : ObservableObject
                 double? tol = null;
                 if (double.TryParse(ToleranceText, NumberStyles.Float, CultureInfo.InvariantCulture, out double t))
                     tol = t;
+
+                // Aggregate "any numeric width" mode: the DLL only scans one
+                // width per session, so we fan out — one beginValueScan per
+                // concrete type — and merge the unique addresses. Each scan
+                // opens its own session; we close them all and present the
+                // union as a one-shot result (SessionId stays null, so
+                // Next Scan is disabled until the user picks a single type).
+                if (IsAggregateMode)
+                {
+                    await RunAggregateFirstScanAsync(val, valTo, tol, sw, ct).ConfigureAwait(true);
+                    return;
+                }
+
                 result = await _backend.BeginValueScanAsync(
                     SelectedDataType, SelectedScanType, val,
-                    valTo, Limit, tol, ct).ConfigureAwait(true);
+                    valTo, Limit, tol, ct: ct).ConfigureAwait(true);
             }
 
             if (!string.IsNullOrEmpty(result.Error))
@@ -189,12 +306,15 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             SessionId = string.IsNullOrEmpty(result.SessionId) ? null : result.SessionId;
             foreach (var c in result.Candidates)
                 Results.Add(new ValueSearchRow(c));
+            RefreshResultView();
 
             sw.Stop();
             string sessionNote = HasSession ? $", session={SessionId}" : " (one-shot, no session)";
+            string shownNote = FilteredResults.Count != Results.Count
+                ? $" (showing {FilteredResults.Count} after filters)" : string.Empty;
             StatusMessage = result.Truncated
-                ? $"{Results.Count} hit(s) (truncated at limit={Limit}); dropped {result.DroppedNonManaged} non-managed; scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}."
-                : $"{Results.Count} hit(s); dropped {result.DroppedNonManaged} non-managed; scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}.";
+                ? $"{Results.Count} hit(s){shownNote} (truncated at limit={Limit}); dropped {result.DroppedNonManaged} non-managed; scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}."
+                : $"{Results.Count} hit(s){shownNote}; dropped {result.DroppedNonManaged} non-managed; scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}.";
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
@@ -208,6 +328,101 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             StopElapsedTimer();
             IsBusy = false;
         }
+    }
+
+    /// <summary>
+    /// Fan-out First Scan for the aggregate "any numeric width" modes. Runs
+    /// one <c>beginValueScan</c> per concrete width, merges the unique hit
+    /// addresses into <see cref="Results"/> (capped at <see cref="Limit"/>),
+    /// and closes every transient session. Presents a one-shot result —
+    /// <see cref="SessionId"/> stays null so Next Scan stays disabled.
+    /// Caller has already validated the value/range/tolerance args.
+    /// </summary>
+    private async Task RunAggregateFirstScanAsync(
+        double val, double? valTo, double? tol, Stopwatch sw, CancellationToken ct)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long totalScannedBytes = 0;
+        long totalDropped = 0;
+        int  typesScanned = 0;
+        bool truncated = false;
+        string? firstError = null;
+
+        // Reuse window for the DLL-side reverse-lookup index. Every width in
+        // this fan-out scans the same heap, so the instance-base index is
+        // identical — building it once (~48s on a large 32-bit Mono heap) and
+        // reusing it for the remaining widths turns an N×48s wait into one.
+        // The window must comfortably exceed the whole sweep's wall time; the
+        // per-width scan itself is bounded, so 5 min is safe. The first width's
+        // call still pays the full build (cache empty / stale), the rest copy.
+        const int kReuseIndexMs = 5 * 60 * 1000;
+
+        foreach (string type in CurrentAggregateTypes)
+        {
+            if (ct.IsCancellationRequested) return;
+
+            BeginValueScanResult r;
+            try
+            {
+                r = await _backend.BeginValueScanAsync(
+                    type, SelectedScanType, val, valTo, Limit, tol,
+                    reuseIndexMs: kReuseIndexMs, ct: ct)
+                    .ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex)
+            {
+                firstError ??= $"{type}: {ex.Message}";
+                continue;
+            }
+
+            // Close this width's transient session immediately — aggregate
+            // mode never refines, so holding it would leak server memory.
+            if (!string.IsNullOrEmpty(r.SessionId))
+            {
+                try { await _backend.EndValueScanAsync(r.SessionId!, ct).ConfigureAwait(true); }
+                catch { /* best-effort cleanup */ }
+            }
+
+            if (!string.IsNullOrEmpty(r.Error))
+            {
+                firstError ??= $"{type}: {r.Error}";
+                continue;
+            }
+
+            typesScanned++;
+            totalScannedBytes = Math.Max(totalScannedBytes, r.ScannedBytes);
+            totalDropped += r.DroppedNonManaged;
+
+            foreach (ValueScanCandidate c in r.Candidates)
+            {
+                if (Results.Count >= Limit) { truncated = true; break; }
+                if (seen.Add(c.Address))
+                    Results.Add(new ValueSearchRow(c));
+            }
+            if (Results.Count >= Limit) { truncated = true; break; }
+        }
+
+        SessionId = null;
+        RefreshResultView();
+        sw.Stop();
+
+        if (Results.Count == 0 && firstError is not null)
+        {
+            ErrorMessage  = firstError;
+            StatusMessage = "First Scan failed.";
+            return;
+        }
+        if (firstError is not null)
+            ErrorMessage = $"some widths errored (first: {firstError})";
+
+        string trunc = truncated ? $" (truncated at limit={Limit})" : string.Empty;
+        string shownNote = FilteredResults.Count != Results.Count
+            ? $" (showing {FilteredResults.Count} after filters)" : string.Empty;
+        StatusMessage =
+            $"{Results.Count} unique hit(s){shownNote} across {typesScanned} numeric width(s){trunc}; "
+            + $"dropped {totalDropped} non-managed; scanned {totalScannedBytes / (1024 * 1024)} MB "
+            + $"in {sw.ElapsedMilliseconds} ms (one-shot — pick a single type to enable Next Scan).";
     }
 
     [RelayCommand(CanExecute = nameof(CanNextScan))]
@@ -259,9 +474,12 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             Results.Clear();
             foreach (var c in result.Candidates)
                 Results.Add(new ValueSearchRow(c));
+            RefreshResultView();
 
             sw.Stop();
-            StatusMessage = $"refined '{SelectedRefineType}' — {result.TotalCandidates} remaining, removed {result.Removed} this round ({sw.ElapsedMilliseconds} ms).";
+            string shownNote = FilteredResults.Count != Results.Count
+                ? $" (showing {FilteredResults.Count} after filters)" : string.Empty;
+            StatusMessage = $"refined '{SelectedRefineType}' — {result.TotalCandidates} remaining{shownNote}, removed {result.Removed} this round ({sw.ElapsedMilliseconds} ms).";
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
@@ -321,6 +539,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         catch { /* best effort */ }
         SessionId = null;
         Results.Clear();
+        FilteredResults.Clear();
         StatusMessage = "Session ended.";
         ErrorMessage  = null;
     }

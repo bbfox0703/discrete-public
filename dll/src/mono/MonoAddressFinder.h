@@ -144,7 +144,15 @@ public:
     // base. Returns false if the class cache is unavailable (caller should fall
     // back to WhatIsAt). Does not need a ThreadAttachGuard (raw memory only —
     // no runtime calls; vtable→klass is a SEH-protected SafeRead).
-    bool Build();
+    //
+    // reuseWindowMs > 0 opts into a process-wide cache of the sorted base list:
+    // if a previous Build() ran within the window, its bases are copied instead
+    // of re-walking the heap (ms vs ~48s on a 2 GB heap). Used by the aggregate
+    // "any numeric width" value scan, which fans out N back-to-back scans whose
+    // instance-base lists are identical. 0 (default) = always a fresh walk —
+    // single / refine scans must stay fresh because a GC cycle between calls
+    // would invalidate stale bases (same freshness rationale as WhatIsAt).
+    bool Build(std::uint32_t reuseWindowMs = 0);
 
     // Resolve `addr` to its managed instance + field, matching WhatIsAt's
     // contract exactly. `maxBackwardScan` bounds how far below `addr` a base
@@ -158,8 +166,11 @@ public:
     std::size_t HitCount()      const { return hits_; }
     std::size_t LocalityHits()  const { return localityHits_; }
 
-private:
+    // One sorted (base, vtable, klass) instance record. Public so the
+    // process-wide reuse cache (see Build's reuseWindowMs) can store/copy it.
     struct Entry { std::uintptr_t base; std::uintptr_t vtable; std::uintptr_t klass; };
+
+private:
     std::vector<Entry> bases_;           // sorted ascending by base
     // Locality cache — see IL2CPP::ReverseLookupIndex for why caching
     // [lastBase_, lastNextBase_) (not [base, base+window)) is the correct

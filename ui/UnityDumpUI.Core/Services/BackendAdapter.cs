@@ -851,6 +851,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<BeginValueScanResult> BeginValueScanAsync(
         string dataType, string scanType, double value,
         double? valueTo = null, int? limit = null, double? tolerance = null,
+        int? reuseIndexMs = null,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
@@ -862,6 +863,10 @@ public sealed class BackendAdapter : ILiveExportSource
         if (valueTo.HasValue)   args["valueTo"]   = Dbl(valueTo.Value);
         if (limit.HasValue)     args["limit"]     = Int(limit.Value);
         if (tolerance.HasValue) args["tolerance"] = Dbl(tolerance.Value);
+        // Opt the DLL into reusing a recently-built reverse-lookup index across
+        // back-to-back scans (the aggregate "any numeric width" fan-out). 0 /
+        // null = always a fresh heap walk.
+        if (reuseIndexMs.HasValue) args["reuseIndexMs"] = Int(reuseIndexMs.Value);
 
         var env = await _pipe.SendAsync(
             "beginValueScan", args,

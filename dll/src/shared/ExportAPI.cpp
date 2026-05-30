@@ -4299,8 +4299,13 @@ void RegisterCoreHandlers() {
         // Phase 30 P2 (Mono port) — reverse-lookup index, same as
         // scanFieldValue. Build once, Lookup per candidate, WhatIsAt fallback.
         // Gated on candidate count (begin uses rawCandidates).
+        // reuseIndexMs > 0 lets the aggregate "any numeric width" fan-out share
+        // one index build across its N back-to-back scans (the ~48s heap walk
+        // is identical per width). Single scans omit it → always a fresh walk.
+        std::uint32_t reuseIndexMs =
+            static_cast<std::uint32_t>(args.value("reuseIndexMs", 0));
         Mono::ReverseLookupIndex revIndex;
-        bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build();
+        bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build(reuseIndexMs);
 
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
@@ -7239,8 +7244,12 @@ void RegisterCoreHandlers() {
 
         // Phase 30 P2 — reverse-lookup index (see scanFieldValue above).
         // Gated on candidate count (begin uses rawCandidates).
+        // reuseIndexMs > 0 lets the aggregate "any numeric width" fan-out share
+        // one index build across its N back-to-back scans. Single scans omit it.
+        std::uint32_t reuseIndexMs =
+            static_cast<std::uint32_t>(args.value("reuseIndexMs", 0));
         IL2CPP::ReverseLookupIndex revIndex;
-        bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build();
+        bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build(reuseIndexMs);
 
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));

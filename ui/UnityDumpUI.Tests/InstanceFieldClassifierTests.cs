@@ -121,6 +121,20 @@ public class InstanceFieldClassifierTests
     }
 
     [Fact]
+    public void Classify_NonNullDemangledListPointer_IsCollection()
+    {
+        // Live-runtime wire form for List<T> — the `1 arity marker is
+        // stripped. Regression for the bug where enchantList_ /
+        // passiveSkillList_ / hasSkill_ etc. showed no expand chevron.
+        WalkedField f = Field(
+            type:    "System.Collections.Generic.List<CharacterData.EnchantData>",
+            address: "0x2000",
+            ptr:     "0x0000023ABE054B10");
+
+        Assert.Equal(WalkedFieldKind.Collection, InstanceFieldClassifier.Classify(f, isPointerValue: true));
+    }
+
+    [Fact]
     public void Classify_NullArrayPointer_DegradesToLeaf()
     {
         // Empty array → no expansion; row is a leaf (no chevron).
@@ -349,6 +363,11 @@ public class InstanceFieldClassifierTests
     [InlineData("MainGame.CARRYITEM[]",              "MainGame.CARRYITEM",          false)]
     [InlineData("System.Collections.Generic.List`1<MainGame.CARRYITEM>", "MainGame.CARRYITEM", true)]
     [InlineData("System.Collections.Generic.List`1<System.Int32>",       "System.Int32",       true)]
+    // Demangled form (no `1 arity marker) — what the live runtime resolver
+    // actually hands us for List<T> fields. Must classify the same as the
+    // IL-form above, otherwise the Inspector shows no expand chevron.
+    [InlineData("System.Collections.Generic.List<CharacterData.EnchantData>", "CharacterData.EnchantData", true)]
+    [InlineData("System.Collections.Generic.List<System.String>",            "System.String",             true)]
     public void TryParseCollectionType_Recognised(string typeName, string expectedElement, bool expectedIsList)
     {
         bool ok = InstanceFieldClassifier.TryParseCollectionType(typeName, out string elementType, out bool isList);

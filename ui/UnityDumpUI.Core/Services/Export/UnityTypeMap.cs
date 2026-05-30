@@ -194,12 +194,31 @@ public static class UnityTypeMap
         if (unityType.EndsWith("[]", System.StringComparison.Ordinal)) return true;
         int lt = unityType.IndexOf('<');
         if (lt < 0) return false;
-        string outer = unityType.Substring(0, lt);
-        return outer.EndsWith("List`1",            System.StringComparison.Ordinal)
-            || outer.EndsWith("IList`1",           System.StringComparison.Ordinal)
-            || outer.EndsWith("IEnumerable`1",     System.StringComparison.Ordinal)
-            || outer.EndsWith("HashSet`1",         System.StringComparison.Ordinal)
-            || outer.EndsWith("IReadOnlyList`1",   System.StringComparison.Ordinal)
-            || outer.EndsWith("ClassAry",          System.StringComparison.Ordinal);
+        // Strip the CLR arity marker so the IL-form "List`1" and the
+        // demangled "List" (what the live runtime resolver hands us) both
+        // match — otherwise live List<T> fields skip the array-walk branch
+        // and get mis-exported as a pointer-to-element.
+        string outer = StripArity(unityType.Substring(0, lt));
+        return outer.EndsWith("List",          System.StringComparison.Ordinal)
+            || outer.EndsWith("IList",         System.StringComparison.Ordinal)
+            || outer.EndsWith("IEnumerable",   System.StringComparison.Ordinal)
+            || outer.EndsWith("HashSet",       System.StringComparison.Ordinal)
+            || outer.EndsWith("IReadOnlyList", System.StringComparison.Ordinal)
+            || outer.EndsWith("ClassAry",      System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Strip a trailing CLR generic-arity marker (<c>`1</c>, <c>`2</c>, …) so
+    /// the IL-form (<c>List`1</c>) and the demangled form (<c>List</c>)
+    /// compare equal. Returns the input unchanged when there's no marker (or
+    /// the backtick isn't followed only by digits).
+    /// </summary>
+    internal static string StripArity(string name)
+    {
+        int tick = name.LastIndexOf('`');
+        if (tick < 0 || tick == name.Length - 1) return name;
+        for (int i = tick + 1; i < name.Length; ++i)
+            if (!char.IsDigit(name[i])) return name;
+        return name.Substring(0, tick);
     }
 }

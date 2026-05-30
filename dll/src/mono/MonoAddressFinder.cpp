@@ -999,10 +999,43 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
 // Phase 30 P2 (Mono port) — ReverseLookupIndex
 // ---------------------------------------------------------------------------
 
-bool ReverseLookupIndex::Build() {
+// Process-wide reuse cache for the sorted base list. The aggregate "any
+// numeric width" value scan fans out N back-to-back beginValueScan calls whose
+// instance-base lists are identical (the heap doesn't change between them), so
+// rebuilding the ~48s index per width is pure waste. When a caller opts in via
+// reuseWindowMs > 0 and a prior Build() finished within that window, we copy
+// the cached bases instead of re-walking. Single / refine scans pass 0 and
+// always rebuild — a GC cycle between independent user actions could otherwise
+// hand back stale bases. Heap-leaked (matches the class-cache pattern) so
+// process exit doesn't run the vector destructor.
+struct RevIndexCache {
+    std::mutex                 mu;
+    std::vector<ReverseLookupIndex::Entry> bases;
+    DWORD                      builtAtTick = 0;   // GetTickCount() at last build
+    bool                       valid       = false;
+};
+RevIndexCache& revIndexCache() {
+    static RevIndexCache* p = new RevIndexCache();   // intentional leak
+    return *p;
+}
+
+bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
     bases_.clear();
     lastBase_ = lastVtable_ = lastKlass_ = lastNextBase_ = 0;
     hits_ = localityHits_ = 0;
+
+    // Reuse fast-path: copy a recent build's bases if still inside the window.
+    if (reuseWindowMs > 0) {
+        std::lock_guard<std::mutex> lk(revIndexCache().mu);
+        auto& c = revIndexCache();
+        if (c.valid && (GetTickCount() - c.builtAtTick) <= reuseWindowMs) {
+            bases_ = c.bases;
+            Log::Write(MagicStrings::LogCategoryScan,
+                       "ReverseLookupIndex(Mono): reused cached index instances=" +
+                       std::to_string(bases_.size()));
+            return true;
+        }
+    }
 
     if (!BuildClassRangeCache()) {
         Log::Write(MagicStrings::LogCategoryScan,
@@ -1111,6 +1144,17 @@ bool ReverseLookupIndex::Build() {
     Log::Write(MagicStrings::LogCategoryScan,
                "ReverseLookupIndex(Mono): instances=" + std::to_string(bases_.size()) +
                " qwords=" + std::to_string(qtotal));
+
+    // Publish to the reuse cache so a back-to-back aggregate fan-out can copy
+    // these bases instead of re-walking. Stamped even when reuseWindowMs was 0
+    // for this call — a later opt-in call within the window still benefits.
+    {
+        std::lock_guard<std::mutex> lk(revIndexCache().mu);
+        auto& c = revIndexCache();
+        c.bases       = bases_;
+        c.builtAtTick = GetTickCount();
+        c.valid       = true;
+    }
     return true;
 }
 
