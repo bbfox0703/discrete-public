@@ -66,6 +66,8 @@
   <sys:String x:Key="Inspector.Find">Find instances</sys:String>
   <sys:String x:Key="Inspector.RefreshWalk">Re-walk</sys:String>
   <sys:String x:Key="Inspector.Clear">Clear</sys:String>
+  <sys:String x:Key="Inspector.SendToBrowser">→ Browser</sys:String>
+  <sys:String x:Key="Inspector.SendToBrowserTooltip">Fill the left-pane Assemblies + Classes filters with this class (assembly + class name) and switch to the Fields tab</sys:String>
   <sys:String x:Key="Inspector.LimitLabel">Limit</sys:String>
   <sys:String x:Key="Inspector.AutoRefreshLabel">Auto refresh</sys:String>
   <sys:String x:Key="Inspector.AutoRefreshOff">Off</sys:String>

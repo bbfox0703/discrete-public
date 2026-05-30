@@ -1016,6 +1016,17 @@ bool CompareCandidateForRefine(Memory::ValueDataType dt,
 // `droppedNonManaged`. Diversity drops counted separately.
 constexpr int kPerInstanceCap = 3;
 
+// Phase 30 P2 perf-gate — only build the reverse-lookup interval-tree when the
+// raw candidate count is large enough to amortize the one-shot heap walk. The
+// index trades a fixed full-heap walk for O(log N) per-candidate lookups; for a
+// scan that returns FEW candidates (e.g. a specific value like 10160 → ~150
+// hits) the per-candidate backward scan (WhatIsAt) is far cheaper than the
+// build. This matters most on Mono, whose index build is single-threaded by
+// design (the parallel walk risks the 活俠傳 BDWGC freeze) — measured ~48s to
+// walk a ~2 GB heap, which dwarfed a 152-candidate scan (the 51s regression).
+// Below the threshold both backends fall back to per-candidate WhatIsAt.
+constexpr std::size_t kRevIndexMinCandidates = 5000;
+
 bool IsCompilerGeneratedClassName(std::string_view name) noexcept {
     if (name.empty()) return false;
     if (name.front() == '<') return true;
@@ -3892,8 +3903,9 @@ void RegisterCoreHandlers() {
 
             // Phase 30 P2 — reverse-lookup index for the string-scan candidate
             // loop (build once, O(log N) per candidate, WhatIsAt fallback).
+            // Perf-gate: only worth the heap walk when candidates are plentiful.
             Mono::ReverseLookupIndex strIndex;
-            bool strIndexOk = strIndex.Build();
+            bool strIndexOk = candidates.size() >= kRevIndexMinCandidates && strIndex.Build();
             for (const auto& c : candidates) {
                 std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
                 Mono::AddressLookup lookup = strIndexOk
@@ -4147,9 +4159,10 @@ void RegisterCoreHandlers() {
 
         // Phase 30 P2 (Mono port) — build the reverse-lookup index once, then
         // resolve each candidate via O(log N) binary search instead of a
-        // per-candidate backward scan. Fall back to WhatIsAt if Build failed.
+        // per-candidate backward scan. Fall back to WhatIsAt if Build failed
+        // or the candidate count is below the amortization threshold.
         Mono::ReverseLookupIndex revIndex;
-        bool revIndexOk = revIndex.Build();
+        bool revIndexOk = candidates.size() >= kRevIndexMinCandidates && revIndex.Build();
 
         json rows = json::array();
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
@@ -4285,8 +4298,9 @@ void RegisterCoreHandlers() {
 
         // Phase 30 P2 (Mono port) — reverse-lookup index, same as
         // scanFieldValue. Build once, Lookup per candidate, WhatIsAt fallback.
+        // Gated on candidate count (begin uses rawCandidates).
         Mono::ReverseLookupIndex revIndex;
-        bool revIndexOk = revIndex.Build();
+        bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build();
 
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
@@ -6858,7 +6872,7 @@ void RegisterCoreHandlers() {
             // it); fall back to WhatIsAt if the index couldn't build.
             IL2CPP::ThreadAttachGuard strGuard(IL2CPP::GetDomain());
             IL2CPP::ReverseLookupIndex strIndex;
-            bool strIndexOk = strIndex.Build();
+            bool strIndexOk = candidates.size() >= kRevIndexMinCandidates && strIndex.Build();
 
             json rows = json::array();
             std::size_t droppedNonManaged = 0;
@@ -7084,9 +7098,10 @@ void RegisterCoreHandlers() {
 
         // Phase 30 P2 — build the reverse-lookup index once, then resolve each
         // candidate via O(log N) binary search instead of a per-candidate
-        // backward scan. Fall back to WhatIsAt if the index couldn't build.
+        // backward scan. Fall back to WhatIsAt if the index couldn't build or
+        // the candidate count is below the amortization threshold.
         IL2CPP::ReverseLookupIndex revIndex;
-        bool revIndexOk = revIndex.Build();
+        bool revIndexOk = candidates.size() >= kRevIndexMinCandidates && revIndex.Build();
 
         json rows = json::array();
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
@@ -7223,8 +7238,9 @@ void RegisterCoreHandlers() {
         IL2CPP::ThreadAttachGuard scanGuard(IL2CPP::GetDomain());
 
         // Phase 30 P2 — reverse-lookup index (see scanFieldValue above).
+        // Gated on candidate count (begin uses rawCandidates).
         IL2CPP::ReverseLookupIndex revIndex;
-        bool revIndexOk = revIndex.Build();
+        bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build();
 
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
