@@ -1887,12 +1887,17 @@ void RegisterCoreHandlers() {
         }
 
         // If element-class lookup didn't fire / failed, fall back to the
-        // primitive table + caller hints / pointer default.
+        // primitive table + caller hints / pointer default. A reference-type
+        // (pointer) slot is sizeof(void*) — 4 on x86 / WOW64, 8 on x64 — NOT a
+        // hardcoded 8, otherwise x86 arrays step by 8 and every slot past [0]
+        // reads the wrong address (observed on 活俠傳 Mono x86: String[] slots
+        // landed mid-pointer). ManagedLayout::kPointerSize is sizeof(void*) of
+        // this DLL build, which matches the target arch (x86 DLL ↔ x86 game).
         if (elemSize == 0) {
             if (args.contains("elementSize") && args["elementSize"].is_number_unsigned()) {
                 elemSize = args["elementSize"].get<std::size_t>();
             } else {
-                elemSize = 8;
+                elemSize = ManagedLayout::kPointerSize;
                 isPointer = true;
             }
         }
