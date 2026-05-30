@@ -10,7 +10,7 @@
 | **Current build** | #839 |
 | **Current phase** | ✅ Phase 30 + scan P1/P2 全 SHIPPED & merged to `main` |
 | **Branches** | `dev == main == origin` |
-| **Tests** | 640 UI tests green;兩個 DLL(x64+x86)build clean |
+| **Tests** | 642 UI tests green;兩個 DLL(x64+x86)build clean |
 | **Mid-flight** | 無(nothing in flight) |
 
 **UI 修正批次(2026-05-30,Inspector + Value Search)**:
@@ -20,6 +20,7 @@
 - **String drilldown 修正** — List<String> slot DLL 回傳裸 pointer;UI 端 fallback 用 `readMemory` 解 managed String,header offset 隨 bitness(x64 +0x10/+0x14、x86 +0x8/+0xC,`StringFieldOffsets`)。**Mono 32-bit live-verified(道德 / karma01 正確)**。
 - **Inspector Limit 欄位加大**(`MinWidth=150 Width=160`)。
 - **Value Search**:Limit 預設 10000;新增 `numeric (no 1-byte)` / `numeric (all widths)` 聚合型別(fan-out 多寬度去重,one-shot);`Ignore system assemblies` 勾選 + results filter 欄位(client-side,不重掃)。
+- **Copy CE XML live-export 重寫** — 改用 `walkInstance`/`walkInstanceFromHeader`(與 Inspector 同路徑)取代舊的 static name-lookup + UnityTypeMap decode。修正:nested class(`charaInfo`)現在會展開、`enchantList_` 等 List 元素逐 slot drill、enum(`charaKind_`)輸出成 signed int leaf(不再是 `0x65` 假指標 group)、String(`charaName_`/`hasSkill_[i]`)輸出成 CE `<VariableType>String</VariableType>` 指向 inline UTF-16 buffer(x64 strObj+0x14、x86 +0xC,`ExportOptions.PointerSize`,由 `Inspector.GamePointerSize` 帶入)。`ILiveExportSource` 加 walkInstance 兩個方法;新 emit 在 `CeXmlExporter.Live.cs`(cycle-detect on concrete addr、depth-bounded)。新增 `CeXmlExporterLiveTests`(fake live source:enum/string/nested/List<String> + x86 offset)。
 - **聚合 scan ReverseLookupIndex 重建修正** — 聚合 fan-out 原本每個寬度都重建 ~48s reverse-lookup index(32-bit Mono 8 寬度 → 6+ 分鐘 hang)。新增 process-wide TTL 重用 cache:`ReverseLookupIndex::Build(reuseWindowMs)`(Mono+IL2CPP),`beginValueScan` 收 `reuseIndexMs` arg;聚合首寬度建一次,其餘 7 個複製 sorted bases(ms vs 48s)。單次 / refine scan 不帶 arg → 永遠 fresh(避 GC 失效)。**Mono 32-bit live-verified(log 59260:1 次 build `instances=1268731` + 5× `reused cached index`,float/double <5000 走 WhatIsAt fallback;整批 8 寬度 ~2.6s,前為 6+ 分鐘)**。
 - **Dictionary 展開** — 暫不處理(`buffAttrRes_`/`buffSickRes_`),需 live `_entries`/`Entry<K,V>` layout 調查。
 
