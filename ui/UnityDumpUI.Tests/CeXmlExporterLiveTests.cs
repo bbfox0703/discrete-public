@@ -155,32 +155,43 @@ public class CeXmlExporterLiveTests
             baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
             options, live, TestContext.Current.CancellationToken);
 
-        // ---- Enum: signed int leaf at the FIELD address, not a pointer group
-        //      whose "address" is the enum value (the old 0x65 bug).
-        Assert.Contains("charaKind_ : CharacterData.CharaKind", xml);
-        Assert.Contains("<Address>0x000000000000B920</Address>", xml);
-        Assert.DoesNotContain("<Address>0x0000000000000065</Address>", xml);
-        Assert.DoesNotContain("<Address>0x0000000000000101</Address>", xml);
+        // ---- Relative addressing: the ONLY absolute address is the root.
+        Assert.Contains($"<Address>{baseAddr}</Address>", xml);
+        // No other field carries an absolute (0x…) address — everything below
+        // the root is +offset. (Count the 0x-prefixed <Address> entries: 1.)
+        Assert.Equal(1, CountOccurrences(xml, "<Address>0x"));
 
-        // ---- String: CE String entry at the inline buffer (strObj + 0x14 on
-        //      x64), NOT the String object pointer as an 8-byte group.
+        // ---- Enum: signed int leaf at +offset (was the bogus 0x65 deref group).
+        Assert.Contains("charaKind_ : CharacterData.CharaKind", xml);
+        Assert.Contains("<Address>+20</Address>", xml);   // enum field offset 0x20
+
+        // ---- String: 2-level deref group at +18 (charaName_ offset) → the
+        //      _stringLength / _firstChar pair. Decoded text in the label.
         Assert.Contains("<VariableType>String</VariableType>", xml);
         Assert.Contains("charaName_", xml);
-        Assert.Contains("Chara_00000", xml);             // decoded text in the label
-        ulong charaBuf = 0x0000000000097C440UL + 0x14;
-        Assert.Contains($"<Address>0x{charaBuf:X16}</Address>", xml);
+        Assert.Contains("Chara_00000", xml);
+        Assert.Contains("<Address>+18</Address>", xml);   // charaName_ deref group
+        Assert.Contains("_stringLength", xml);
+        Assert.Contains("_firstChar", xml);
+        Assert.Contains("<Address>+10</Address>", xml);   // _stringLength (2*ptr)
+        Assert.Contains("<Address>+14</Address>", xml);   // _firstChar (2*ptr+4)
 
-        // ---- Nested class: drilled members appear (charaInfo expanded).
+        // ---- Nested class: pointer deref group at +130; drilled members at
+        //      their relative offsets (GemCount at +18 within CharacterInfo).
         Assert.Contains("charaInfo : CharacterData.CharacterInfo", xml);
+        Assert.Contains("<Address>+130</Address>", xml);  // charaInfo deref group
         Assert.Contains("EnableWP", xml);
         Assert.Contains("GemCount", xml);
-        Assert.Contains("<Address>0x00000000000660D8</Address>", xml);
 
-        // ---- List<String>: per-slot String entry with decoded text.
+        // ---- List<String>: outer deref group at +1C0, inner _items group,
+        //      per-slot String deref group. Decoded text present.
         Assert.Contains("hasSkill_", xml);
         Assert.Contains("PlayerAttack_0000", xml);
-        ulong slotBuf = 0x00000000000A0000UL + 0x14;
-        Assert.Contains($"<Address>0x{slotBuf:X16}</Address>", xml);
+        Assert.Contains("<Address>+1C0</Address>", xml);  // hasSkill_ outer deref
+        Assert.Contains("_items", xml);
+
+        // ---- Pointer groups carry the Offsets=[0] dereference.
+        Assert.Contains("<Offset>0</Offset>", xml);
     }
 
     [Fact]
@@ -203,10 +214,13 @@ public class CeXmlExporterLiveTests
             baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
             options, live, TestContext.Current.CancellationToken);
 
-        // x86: header = 2*4, chars at strObj + 0x8 + 4 = strObj + 0xC.
-        ulong buf = 0x20000000UL + 0xC;
+        // x86: header = 2*4, so within the String object _stringLength is at
+        // +8 and _firstChar at +C. The field itself is a deref group at +8
+        // (name_ offset). Relative addressing → only the root is absolute.
         Assert.Contains("<VariableType>String</VariableType>", xml);
-        Assert.Contains($"<Address>0x{buf:X16}</Address>", xml);
+        Assert.Contains("<Address>+8</Address>", xml);    // name_ deref group AND _stringLength (both +8)
+        Assert.Contains("<Address>+C</Address>", xml);    // _firstChar (2*4 + 4)
+        Assert.Equal(1, CountOccurrences(xml, "<Address>0x"));   // only the root is absolute
     }
 
     // Mirror of LiveInspectionViewModel.HexAdd / little-endian formatting so the
@@ -225,5 +239,16 @@ public class CeXmlExporterLiveTests
         var sb = new System.Text.StringBuilder(16);
         for (int i = 0; i < 8; ++i) { sb.Append((v & 0xFF).ToString("X2")); v >>= 8; }
         return sb.ToString();
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0, idx = 0;
+        while ((idx = haystack.IndexOf(needle, idx, System.StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += needle.Length;
+        }
+        return count;
     }
 }
