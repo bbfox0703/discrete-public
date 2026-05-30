@@ -772,8 +772,6 @@
                             GridLinesVisibility="Horizontal">
                     <DataGrid.ContextMenu>
                       <ContextMenu>
-                        <MenuItem Header="{StaticResource Inspector.CopyCeXmlNode}"
-                                  Command="{Binding Inspector.CopyCeXmlNodeCommand}" />
                         <MenuItem Header="{StaticResource Inspector.CopyCeFieldNode}"
                                   Command="{Binding Inspector.CopyCeFieldNodeCommand}" />
                         <Separator />

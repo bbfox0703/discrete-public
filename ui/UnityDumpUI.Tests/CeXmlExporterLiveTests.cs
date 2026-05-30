@@ -223,6 +223,66 @@ public class CeXmlExporterLiveTests
         Assert.Equal(1, CountOccurrences(xml, "<Address>0x"));   // only the root is absolute
     }
 
+    [Fact]
+    public async Task RenderFieldNodes_StandaloneSubtree_StringExpandsNotFlatLeaf()
+    {
+        // "Copy CE field" on a String field/slot must emit a STANDALONE subtree
+        // rooted at the field's absolute address with the length/chars deref
+        // children — NOT a single flat pointer leaf (the old WrapLeavesXml bug
+        // where [0] came out as "<VariableType>Pointer</VariableType>").
+        const string fieldAddr = "0x0000000027BDD1C0";   // the String slot's storage
+        var live = new FakeLive();
+        var field = new WalkedField
+        {
+            Name = "[0]", Type = "System.String", Offset = 0x10,
+            Address = fieldAddr, Ptr = "0x000000000A0B0C00",
+            String = "karma01", StringLength = 7,
+        };
+
+        var options = new ExportOptions(
+            DrilldownDepth: 2, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 8);
+
+        string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
+            new[] { (field, fieldAddr) }, "Assembly-CSharp", options, live,
+            TestContext.Current.CancellationToken);
+
+        // Root entry carries the field's ABSOLUTE address (not +offset) and
+        // is a deref GROUP, not a flat pointer leaf.
+        Assert.Contains($"<Address>{fieldAddr}</Address>", xml);
+        Assert.Contains("<GroupHeader>1</GroupHeader>", xml);
+        Assert.Contains("<Offset>0</Offset>", xml);             // deref the String object
+        Assert.Contains("length (int32)", xml);
+        Assert.Contains("chars (UTF-16)", xml);
+        Assert.Contains("karma01", xml);                        // decoded text in label
+        Assert.DoesNotContain("<VariableType>Pointer</VariableType>", xml);  // the old bug
+    }
+
+    [Fact]
+    public async Task RenderFieldNodes_MultiSelect_OneRootPerNode()
+    {
+        var live = new FakeLive();
+        var a = new WalkedField { Name = "_value", Type = "System.Int32", Offset = 0x28,
+                                  Address = "0x1000", Value = Json("58") };
+        var b = new WalkedField { Name = "_max", Type = "System.Int32", Offset = 0x30,
+                                  Address = "0x1008", Value = Json("100") };
+
+        var options = new ExportOptions(
+            DrilldownDepth: 1, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 8);
+
+        string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
+            new[] { (a, "0x1000"), (b, "0x1008") }, "Assembly-CSharp", options, live,
+            TestContext.Current.CancellationToken);
+
+        // Two standalone scalar leaves, each at its own absolute address.
+        Assert.Contains("_value : System.Int32", xml);
+        Assert.Contains("_max : System.Int32", xml);
+        Assert.Contains("<Address>0x1000</Address>", xml);
+        Assert.Contains("<Address>0x1008</Address>", xml);
+        Assert.Equal(2, CountOccurrences(xml, "<CheatEntry>"));
+    }
+
     // Mirror of LiveInspectionViewModel.HexAdd / little-endian formatting so the
     // fake's memory map keys match what the exporter computes.
     private static string HexAdd(string hexAddr, long delta)

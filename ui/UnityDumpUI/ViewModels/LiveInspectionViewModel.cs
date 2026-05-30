@@ -323,7 +323,6 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     [ObservableProperty] private string _walkSummary = string.Empty;
 
     [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(CopyCeXmlNodeCommand))]
     [NotifyCanExecuteChangedFor(nameof(CopyCeFieldNodeCommand))]
     private WalkedFieldNode? _selectedNode;
 
@@ -1072,38 +1071,23 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private bool CanCopyInstance() => SelectedInstance is not null && HasTarget;
 
     [RelayCommand(CanExecute = nameof(CanCopyNode))]
-    private async Task CopyCeXmlNodeAsync()
+    private async Task CopyCeFieldNodeAsync()
     {
-        if (CopyToClipboardAsync is null || SelectedNode is null) return;
-        if (string.IsNullOrEmpty(SelectedNode.EffectiveAddress)) return;
-        if (!InstanceFieldClassifier.TryParseClassName(SelectedNode.Type, out string ns, out string name))
-        {
-            // Not a class-rooted node — fall back to a single leaf entry.
-            string xml = WrapLeavesXml(new[] { SelectedNode });
-            await CopyToClipboardAsync(xml).ConfigureAwait(true);
-            return;
-        }
+        if (CopyToClipboardAsync is null) return;
+
+        // Multi-select preferred — falls back to the singular SelectedNode
+        // when the View hasn't wired the accessor (tests) or only one row
+        // is highlighted. Each node becomes a STANDALONE subtree rooted at its
+        // own absolute storage address, with the same value decode + relative
+        // drilldown the in-place export uses (depth-aware). A pointer / string /
+        // collection field expands properly; a scalar is a single leaf.
+        IReadOnlyList<WalkedFieldNode> nodes = GetSelectedNodes?.Invoke() ?? Array.Empty<WalkedFieldNode>();
+        if (nodes.Count == 0 && SelectedNode is not null)
+            nodes = new[] { SelectedNode };
+        if (nodes.Count == 0) return;
 
         try
         {
-            // Same assembly-resolution fallback as the inspector's expansion
-            // path: try the parent's assembly first, then well-known
-            // fallbacks. Critical for value-type substructs whose type
-            // (UnityEngine.Vector3 etc.) lives in a different assembly.
-            string[] candidates = BuildAssemblyCandidates(TargetAssembly, ns);
-            GetClassInfoResult? info = null;
-            string usedAssembly = TargetAssembly ?? "Assembly";
-            foreach (string asm in candidates)
-            {
-                GetClassInfoResult attempt = await _backend
-                    .GetClassInfoAsync(asm, ns, name, default).ConfigureAwait(true);
-                if (string.IsNullOrEmpty(attempt.Error)) { info = attempt; usedAssembly = asm; break; }
-            }
-            if (info is null)
-            {
-                ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
-                return;
-            }
             (int depth, int arrayLimit) = ResolveExportDepth();
             ExportOptions options = new(
                 DrilldownDepth: depth,
@@ -1111,50 +1095,30 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 CollapsePointerNodes: true,
                 LiveData: true,
                 PointerSize: GamePointerSize == 4 ? 4 : 8);
-            string xml = await CeXmlExporter.RenderAsync(
-                SelectedNode.EffectiveAddress!, info, ancestors: null,
-                usedAssembly, options, _backend, default)
-                .ConfigureAwait(true);
+
+            var built = new List<(WalkedField field, string absoluteAddress)>(nodes.Count);
+            foreach (WalkedFieldNode n in nodes)
+            {
+                string? rootAddr = NodeRootAddress(n);
+                if (string.IsNullOrEmpty(rootAddr)) continue;
+                built.Add((n.ToWalkedField(), rootAddr!));
+            }
+            if (built.Count == 0) return;
+
+            string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
+                built, TargetAssembly, options, _backend, default).ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            string summary = built.Count == 1
+                ? $"{nodes[0].Name} @ {built[0].absoluteAddress}"
+                : $"{built.Count} nodes";
             _logger.Write(Constants.LogCategoryView,
-                $"copy CE XML node {SelectedNode.Name} @ {SelectedNode.EffectiveAddress} ({xml.Length} bytes)");
-        }
-        catch (Exception ex)
-        {
-            ErrorMessage = $"copy CE XML failed: {ex.Message}";
-            _logger.Write(Constants.LogCategoryView,
-                $"copy CE XML node failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    [RelayCommand(CanExecute = nameof(CanCopyNode))]
-    private async Task CopyCeFieldNodeAsync()
-    {
-        if (CopyToClipboardAsync is null) return;
-
-        // Multi-select preferred — falls back to the singular SelectedNode
-        // when the View hasn't wired the accessor (tests) or only one row
-        // is highlighted. Each node contributes one leaf <CheatEntry> at
-        // its absolute address — works uniformly across heterogeneous
-        // selections (mixing top-level fields with expanded sub-tree rows).
-        IReadOnlyList<WalkedFieldNode> nodes = GetSelectedNodes?.Invoke() ?? Array.Empty<WalkedFieldNode>();
-        if (nodes.Count == 0 && SelectedNode is not null)
-            nodes = new[] { SelectedNode };
-        if (nodes.Count == 0) return;
-
-        string xml = WrapLeavesXml(nodes);
-        try
-        {
-            await CopyToClipboardAsync(xml).ConfigureAwait(true);
-            string summary = nodes.Count == 1
-                ? $"{nodes[0].Name} @ {nodes[0].EffectiveAddress ?? "?"}"
-                : $"{nodes.Count} nodes";
-            _logger.Write(Constants.LogCategoryView,
-                $"copy CE field node {summary} ({xml.Length} bytes)");
+                $"copy CE field node {summary} ({xml.Length} bytes, depth={depth})");
         }
         catch (Exception ex)
         {
             ErrorMessage = $"copy CE field failed: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"copy CE field node failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -1162,44 +1126,16 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         => SelectedNode is not null && !string.IsNullOrEmpty(SelectedNode.EffectiveAddress);
 
     /// <summary>
-    /// Multi-entry CE table covering every supplied node. Each node contributes
-    /// one leaf <c>&lt;CheatEntry&gt;</c> at its absolute address — keeps the
-    /// output uniform across heterogeneous selections (primitives mixed with
-    /// pointer leaves, top-level fields mixed with expanded children). Used
-    /// for both single-select and multi-select Inspector "Copy CE field"
-    /// flows — a one-element list produces the same single-entry shape the
-    /// original WrapLeafXml emitted.
+    /// Absolute address the node's standalone "Copy CE field" entry roots at.
+    /// For value-type structs + scalars it's the field's own storage
+    /// (<see cref="WalkedFieldNode.Address"/>); for pointer / string /
+    /// collection rows the relative-deref emitter expects the FIELD storage
+    /// (it derefs +0 itself), so prefer Address and fall back to the
+    /// effective (deref'd) address only when Address is missing (synthetic
+    /// array slots whose storage isn't tracked).
     /// </summary>
-    private static string WrapLeavesXml(IReadOnlyList<WalkedFieldNode> nodes)
-    {
-        var sb = new System.Text.StringBuilder(512 * Math.Max(1, nodes.Count));
-        sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
-        sb.Append("<CheatTable>\n  <CheatEntries>\n");
-        int id = 0;
-        foreach (WalkedFieldNode node in nodes)
-        {
-            string addr = node.EffectiveAddress ?? "0x0";
-            string desc = $"{node.Name} : {node.Type ?? "?"}";
-            // Pick the right CE VariableType + display flags from the managed
-            // type — without this every leaf got "4 Bytes" + hex, which is wrong
-            // for signed integers (Int32 → CE shows the signed value with
-            // ShowAsSigned=1, no hex) and floats (Float type).
-            ManagedTypeShape shape = UnityTypeMap.Resolve(node.Type);
-            (bool hex, bool signed) = UnityTypeMap.CeDisplay(node.Type);
-            string vartype = shape.CeTypeKeyword;
-            sb.Append("    <CheatEntry>\n");
-            sb.Append("      <ID>").Append(id++).Append("</ID>\n");
-            sb.Append("      <Description>\"").Append(System.Net.WebUtility.HtmlEncode(desc)).Append("\"</Description>\n");
-            if (hex)
-                sb.Append("      <ShowAsHex>1</ShowAsHex>\n");
-            sb.Append("      <ShowAsSigned>").Append(signed ? '1' : '0').Append("</ShowAsSigned>\n");
-            sb.Append("      <VariableType>").Append(vartype).Append("</VariableType>\n");
-            sb.Append("      <Address>").Append(addr).Append("</Address>\n");
-            sb.Append("    </CheatEntry>\n");
-        }
-        sb.Append("  </CheatEntries>\n</CheatTable>\n");
-        return sb.ToString();
-    }
+    private static string? NodeRootAddress(WalkedFieldNode n)
+        => !string.IsNullOrEmpty(n.Address) ? n.Address : n.EffectiveAddress;
 
     // ---------- Static-field bridge --------------------------------------
 
@@ -1471,7 +1407,8 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
                             string? address, string displayValue, string? ptr,
                             int indentLevel, WalkedFieldKind kind,
                             string? effectiveAddress,
-                            WalkedFieldActions? actions)
+                            WalkedFieldActions? actions,
+                            WalkedField? source = null)
     {
         Name             = name;
         Type             = type;
@@ -1484,9 +1421,36 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
         Kind             = kind;
         EffectiveAddress = effectiveAddress;
         _actions         = actions;
+        _source          = source;
     }
 
     private readonly WalkedFieldActions? _actions;
+
+    /// <summary>
+    /// The wire <see cref="WalkedField"/> this node was built from (instance
+    /// fields) or a synthesized equivalent (array slots). Carries the
+    /// classification signals (IsEnum / IsValueType / Value / String /
+    /// StringLength) that the plain node properties drop, so "Copy CE field"
+    /// can re-render the node through the live exporter and get the SAME shape
+    /// the in-place export produces. Null only for hand-built test nodes.
+    /// </summary>
+    private readonly WalkedField? _source;
+
+    /// <summary>
+    /// Reconstruct a <see cref="WalkedField"/> for the live CE exporter. Uses
+    /// the stashed wire source when present (faithful enum/string/struct
+    /// classification); otherwise best-effort from the node's own properties.
+    /// </summary>
+    public WalkedField ToWalkedField()
+        => _source ?? new WalkedField
+        {
+            Name    = Name,
+            Type    = Type,
+            Offset  = Offset < 0 ? 0 : Offset,
+            From    = DeclaredIn,
+            Address = Address,
+            Ptr     = Ptr,
+        };
 
     public string  Name         { get; }
     public string  Type         { get; }
@@ -1618,7 +1582,8 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
             indent,
             kind,
             effective,
-            actions);
+            actions,
+            source: f);
     }
 
     public static WalkedFieldNode FromArrayElement(
@@ -1646,6 +1611,21 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
             effective = e.Address;
         }
 
+        // Synthesize a WalkedField equivalent so "Copy CE field" on an array
+        // slot re-renders through the live exporter with the same decode (a
+        // String slot expands to its length/chars pair, a ref slot drills).
+        var slotSource = new WalkedField
+        {
+            Name         = $"[{e.Index}]",
+            Type         = elementType,
+            Offset       = 0,
+            Address      = e.Address,
+            Ptr          = e.Ptr,
+            String       = e.String,
+            StringLength = e.StringLength,
+            Value        = e.Value,
+        };
+
         return new WalkedFieldNode(
             name:        $"[{e.Index}]",
             type:        elementType,
@@ -1657,7 +1637,8 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
             indentLevel: indent,
             kind:        kind,
             effectiveAddress: effective,
-            actions:     actions);
+            actions:     actions,
+            source:      slotSource);
     }
 
     // ClassifyInstanceField moved to UnityDumpUI.Core.Services.InstanceFieldClassifier.Classify
