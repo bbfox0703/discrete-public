@@ -27,8 +27,7 @@
 - **P2 Mono port**(#823)/ **候選數 gate**(#824)/ **P2 SIMD 內層**(#839)/ **Inspector「→ Browser」按鈕**。
 
 **⚠ 待 live-smoke(需 inject 實機)**:
-- **聚合 scan index 重用** — 32-bit Mono `numeric (no 1-byte)`:scan 日誌應出現 1 次 `ReverseLookupIndex(Mono): instances=…` 接著多次 `reused cached index`,總時間 ≈ 單次 build(~1 分內)而非 6+ 分鐘;結果筆數與逐寬度個別 scan 一致。
-- List<T> 展開 + Copy CE XML 內容、Value Search 聚合去重結果(原生 scan / walkArray 無自動測試覆蓋)。
+- List<T> 展開 + Copy CE XML 內容、Value Search 聚合去重結果(原生 scan / walkArray 無自動測試覆蓋;聚合 index 重用本身已 live-verified,log 59260)。
 - 候選數 gate / P2 SIMD:Utawarerumono(x64)+ 活俠傳(x86)計時 + 結果筆數與舊版一致。
 
 ➡ **下一步 / open backlog**:見 [plan.md → Open Backlog / TODO](plan.md#open-backlog--todo)。
