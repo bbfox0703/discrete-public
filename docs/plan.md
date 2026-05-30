@@ -6,7 +6,7 @@
 > 本檔只保留 Phase Overview 摘要 + 仍 open 的 backlog。
 
 **Last updated**: 2026-05-30
-**Current state**: ✅ **Phase 30 (snapshot memory & speed) + scan P1/P2 全部 SHIPPED 並 merged to `main`**(build **#820**);**scan P2 Mono port shipped build #823**(reverse-lookup interval-tree 移植到 Mono value/string scan)。
+**Current state**: ✅ **Phase 30 + scan P1/P2 全部 SHIPPED 並 merged to `main`**。最新:**P2 Mono port (build #823)** reverse-lookup interval-tree 移植到 Mono value/string scan;**候選數 gate (build #824)** 修掉 index 無條件建立的退步(<5000 候選走每候選 WhatIsAt);**P2 SIMD 內層 (build #839)** AVX2 `ScanForString`/`ScanForPointer`,runtime-gated + scalar fallback。Inspector「→ Browser」按鈕也已加。
 30a/30b/30c headline 完成且 live-verified;scan **P1**(平行化)+ **P2**(IL2CPP value-scan reverse-lookup interval-tree)完成;外加 low-RAM advisory banner、per-PID log count-based 保留、DataGrid 橫向捲動修正。
 `dev == main == origin`,**603 UI tests green**,兩個 DLL 都 build clean。
 **Nothing mid-flight** — 下方 Open Backlog 全是 deferred-by-design 的選配後續,none blocking。
