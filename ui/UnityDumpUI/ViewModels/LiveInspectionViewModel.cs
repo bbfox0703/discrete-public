@@ -39,6 +39,26 @@ using UnityDumpUI.Core.Services.Export;
 
 namespace UnityDumpUI.ViewModels;
 
+/// <summary>
+/// Args for <see cref="LiveInspectionViewModel.SendToBrowserRequested"/> — the
+/// "→ Browser" handoff. Carries the Inspector's current class identity so
+/// MainWindow can fill the Assembly Browser's Assemblies + Classes filter
+/// inputs. <see cref="Class"/> keeps the slash form for nested types
+/// (e.g. <c>MainGame/PLY_WORK</c>), matching how the Browser presents them.
+/// </summary>
+public sealed class InspectorBrowseRequest : EventArgs
+{
+    public InspectorBrowseRequest(string assembly, string @namespace, string className)
+    {
+        Assembly  = assembly;
+        Namespace = @namespace;
+        Class     = className;
+    }
+    public string Assembly  { get; }
+    public string Namespace { get; }
+    public string Class     { get; }
+}
+
 public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDisposable
 {
     private readonly BackendAdapter _backend;
@@ -161,6 +181,30 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         Fields.Clear();
         ErrorMessage = null;
         WalkSummary  = string.Empty;
+    }
+
+    /// <summary>
+    /// Cross-tab handoff to the Assembly Browser. Raised by
+    /// <see cref="SendToBrowserCommand"/>; MainWindow routes it to fill the
+    /// Browser's Assemblies + Classes filter inputs with the current target's
+    /// identity (and best-effort selects the assembly so the class list loads)
+    /// then switches to the Fields tab.
+    /// </summary>
+    public event EventHandler<InspectorBrowseRequest>? SendToBrowserRequested;
+
+    /// <summary>
+    /// "→ Browser" toolbar button. Hands the current target's assembly + class
+    /// to the Assembly Browser's filter inputs. No-op without a target (same
+    /// always-enabled convention as Find instances).
+    /// </summary>
+    [RelayCommand]
+    private void SendToBrowser()
+    {
+        if (!HasTarget) return;
+        SendToBrowserRequested?.Invoke(this, new InspectorBrowseRequest(
+            assembly:   TargetAssembly  ?? string.Empty,
+            @namespace: TargetNamespace ?? string.Empty,
+            className:  TargetName      ?? string.Empty));
     }
 
     /// <summary>

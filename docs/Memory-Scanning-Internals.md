@@ -676,6 +676,28 @@ IL2CPP 同形修法套到 Mono(`MonoAddressFinder.{h,cpp}` + `ExportAPI.cpp` 3 �
 - 兩 backend DLL build clean、603 UI tests green。**Live-smoke 待辦**:活俠傳 value scan
   計時 + Class Pivot / Address Lookup 答案比對。
 
+##### 候選數 gate（2026-05-30 修正,build #824)— index 不再無條件建立
+
+**回報的退步**:活俠傳(Mono x86)value search `10160`(int32)花 **51 秒**。log
+(`Discrete_Dumper\Logs\54040\scan`)顯示 `ReverseLookupIndex(Mono):
+instances=1271384 qwords=258519040` + `beginValueScan(Mono) … raw=152 … revIndex=1`。
+**根因**:該 scan 只有 **152 筆候選**,但 index 卻 **無條件**走訪整個 ~2 GB heap
+(258M qwords,單緒)→ ~48 s 全花在 build。舊的「每候選 WhatIsAt」對 152 筆只需
+~1-2 s。index 的固定 build 成本只在**候選數夠多**時才回本。(IL2CPP 沒踩到是因為 build
+走 16 緒平行,固定成本低很多。)
+
+**修法**(`ExportAPI.cpp`,兩 backend 共 6 個 scan handler):加
+`constexpr kRevIndexMinCandidates = 5000` gate →
+`xIndexOk = candidates.size() >= kRevIndexMinCandidates && xIndex.Build()`。候選 < 5000 →
+跳過 build、走每候選 `WhatIsAt`(快);≥ 5000 → 建 index(此時每候選 WhatIsAt 的
+O(候選 × 反掃)才是主成本,index 回本)。crossover 推估:Mono build ≈ 數十秒、每候選
+≈ 32-bit Mono ~數 ms → ~5000;IL2CPP 平行 build 便宜很多、x64 每候選 ~1 ms,共用同一
+gate 只是讓小 scan 走更快的每候選路徑,無害。begin handler gate 用 `rawCandidates.size()`
+(其 loop 變數),其餘用 `candidates.size()`。
+**效果**:`10160`(152 候選)→ 走 WhatIsAt → 回到 ~1-2 s;廣域 scan(>5000 候選)仍走
+index。**Live-smoke 待辦**:活俠傳重測 `10160` 計時應 << 51 s;廣域 int32 scan(>5000
+候選)確認 `revIndex=1` 且比舊每候選路徑快。
+
 ### 16.6 Snapshot 記憶體 watchdog（2026-05-29, build #756）
 
 **問題**：snapshot capture 把**整個** decode 結果（每 class × 每 instance × 每 field，深度 4 + arrays）建在**遊戲行程**裡才透過 pipe 串流出去（注入式 DLL 的配置 = 遊戲行程記憶體）。大型遊戲（22157 classes / 799174 instances / 7.27 GB heap）一路長到 8 GB→ 玩家強制關閉。`FindAllInstances`（P1c 平行化）本身已完成並 log；爆掉的是**其後的 decode 階段**，且 decode 完全沒有總量上限。對照正常完成的 SaGa 2 FR：10001 classes/271998 instances→ 實際保留 2451 classes/118161 instances、~4.5 GB、~42s。

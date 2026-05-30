@@ -132,6 +132,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // into LiveInspectionViewModel. Done here (instead of in the
         // view) so unit tests can drive it without an Avalonia loop.
         AddressLookup.InspectInstanceRequested += OnInspectInstanceRequested;
+        Inspector.SendToBrowserRequested += OnInspectorSendToBrowser;
 
         // Bridge: when the user picks a live instance in the Inspector tab,
         // mirror its address into the export base so the next "Export .CT"
@@ -1454,6 +1455,40 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             ErrorMessage = $"Inspect handoff failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"InspectInstance: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Inspector "→ Browser" handoff. Fills the Assembly Browser's Assemblies +
+    /// Classes filter inputs with the Inspector's current target identity, then
+    /// best-effort selects the matching assembly (which loads the class list,
+    /// pre-filtered to the class name) and switches to the Fields tab. The
+    /// class name keeps its slash form for nested types (e.g. MainGame/PLY_WORK).
+    /// </summary>
+    private void OnInspectorSendToBrowser(object? sender, InspectorBrowseRequest req)
+    {
+        try
+        {
+            // User-facing ask: drop assembly + class into the left-pane filter
+            // inputs. Always works regardless of whether the assembly's class
+            // list is loaded yet.
+            Browser.AssemblyFilter = req.Assembly;
+            Browser.ClassFilter    = req.Class;
+
+            // Best-effort: select the matching assembly so its class list loads
+            // (the ClassFilter above then narrows it to the target class).
+            var asm = Browser.Assemblies.FirstOrDefault(
+                a => string.Equals(a.Name, req.Assembly, System.StringComparison.Ordinal));
+            if (asm is not null && !ReferenceEquals(Browser.SelectedAssembly, asm))
+                Browser.SelectedAssembly = asm;
+
+            SelectedDetailTabIndex = TabIndexFields;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Send to Browser failed: {ex.Message}";
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"OnInspectorSendToBrowser: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
