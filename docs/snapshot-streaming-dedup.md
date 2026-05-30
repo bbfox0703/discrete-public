@@ -200,13 +200,21 @@ Game decode tree ≈ 4.5 GB → **~1 GB**; UI ≈ 14.7 GB → **~3–4 GB** for 
 > `EnsureLoadedAsync` blob reload *on the UI thread* → 5–15 s/chunk freeze + GC
 > starvation → ~13.9 GB transient); fixed by moving both off-thread (`Task.Run`,
 > same pattern `SaveSnapshotAsync` already used) + a periodic Aggressive GC every
-> 8 chunks. **Caveat — the transient mid-capture peak is still ~10 GB:** it's
-> bounded by the *largest single chunk's* `NormalizeDeduped` re-expansion (the
-> ascending-population sort places the biggest classes in the final chunks), which
-> GC frequency can't reduce — only a smaller streaming chunk size (100→25) would,
-> at the cost of ~4× more round-trips. The peak is fully collected post-capture and
-> didn't OOM, so it's accepted as intrinsic to per-chunk processing at this budget;
-> the chunk-size lever is deferred until a real need (full-game capture) surfaces.
+> 8 chunks. **Transient mid-capture peak** is bounded by the *largest single
+> chunk's* `NormalizeDeduped` re-expansion (the ascending-population sort places
+> the biggest classes in the final chunks), which GC frequency can't reduce —
+> only a smaller streaming chunk size does. **2026-05-30: the chunk-size lever
+> was pulled — `kChunkSize` 100→25** ([SnapshotViewModel.cs](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)),
+> shrinking the worst-case single-chunk re-expansion ~4× (the prior ~10 GB
+> peak → ~1/4) at the cost of ~4× more round-trips (each Chunk is a cheap
+> server-side JSON slice, so wall-clock impact is small). The original ~10 GB
+> peak was fully collected post-capture and never OOM'd, so this is a
+> headroom/full-game-capture improvement, not a correctness fix. **Live-verified
+> 2026-05-30 (Utawarerumono, 193 chunks):** mid-capture DiscreteUI peak only
+> ~4.4 GB private / ~3.5 GB WS (chunk 144/152) — vs the ~10 GB transient peak at
+> 30c-ship — while the game held ~6.7 GB private throughout (30b unchanged); the
+> UI settled to ~2.9 GB private / ~2.4 GB WS post-capture. The ~4× chunk-count
+> rise cost no meaningful wall-clock (each Chunk is a server-side JSON slice).
 
 - Today the UI accumulates every chunk into `classes` + a `SnapshotEnvelope` held in
   memory ([SnapshotViewModel.cs:992](../ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs)),
