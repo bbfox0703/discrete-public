@@ -20,7 +20,7 @@
 
 ### 🔍 Scan line — 詳見 [Memory-Scanning-Internals.md](Memory-Scanning-Internals.md) §16.3 / §16.5b
 - [x] **P2 Mono port** — ✅ build #823(2026-05-30):`Mono::ResolveInstanceLookup` + `Mono::ReverseLookupIndex`(單緒安全走訪 + `Sleep(1)` pacing,避開 BDWGC freeze),3 個 Mono value/string scan handler 改用 index。兩 DLL build clean、603 tests green。**Live-smoke(活俠傳 value scan 計時 + 答案比對)待辦**。
-- [ ] **P2 SIMD inner loop** — `Vector256` anchor for `ScanForString`,4-qword compare for `ScanForPointer`。
+- [x] **P2 SIMD inner loop** — ✅ build #839(2026-05-30):AVX2 runtime-gated fast-path — `ScanForString` anchor scan(`cmpeq_epi8`,x64+x86)+ `ScanForPointer` 4-qword `cmpeq_epi64`(x64)。SIMD 當候選 finder + 原純量精確驗證 → 結果逐 byte 相同;非 AVX2 CPU 走 scalar fallback。兩 DLL build clean、603 tests green。**Live-smoke 待辦**(原生 scan 無自動測試覆蓋)。
 - [ ] **Mono `FindAllInstances` 平行化** — P1 follow-up;Mono 端仍單執行緒(IL2CPP 已平行)。
 - [ ] **P3 VirtualQuery cache** — 低優先,P1 已大幅降低需求。
 

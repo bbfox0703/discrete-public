@@ -574,7 +574,7 @@ ConcurrentBag<ulong> results;                                   // 115 — lock-
 
 > **狀態（2026-05-30）**：P1 兩項皆 **已實作**（build #751，§16.5）。**P2 interval-tree
 > 候選反查 — IL2CPP（build #814）+ Mono port（build #823）皆已實作（§16.5b）**；
-> P2 SIMD 內層、Mono `FindAllInstances` 平行化、P3 仍 pending。
+> **P2 SIMD 內層 — 已實作（build #839，§16.5c）**；Mono `FindAllInstances` 平行化、P3 仍 pending。
 
 **P1 — 拿掉 value/string scan 的 per-chunk `IsReadable`（低風險、改動小）** ✅ 已實作
 相信 `EnumerateCommittedRegions` 的區段表，內層維持 `__try` SEH 保護；只在某 chunk AV 時才針對該區段降級細掃。直接省掉每 64KB 一次 VirtualQuery。CE 等價作法 = `VirtualQueryEx_StartCache` + working-set。
@@ -698,6 +698,33 @@ gate 只是讓小 scan 走更快的每候選路徑,無害。begin handler gate �
 index。**Live-smoke 待辦**:活俠傳重測 `10160` 計時應 << 51 s;廣域 int32 scan(>5000
 候選)確認 `revIndex=1` 且比舊每候選路徑快。
 
+### 16.5c P2 SIMD 內層（2026-05-30, build #839）
+
+**動機**：value scan 候選反查已由 interval-tree（§16.5b）+ 候選數 gate 解掉二次成本;
+剩下的 raw scan 內層仍是純量。`ScanForString` / `ScanForPointer` 的內層各自逐位置比對,
+雖然已 P1 平行化(memory-bandwidth bound),但在 sparse-match 的常見情況下,SIMD 一次掃
+32 bytes 可大幅減少指令數。doc §12.2 / §15.2(AOBMaker)早已點名此作法。
+
+**修法**(`Memory.cpp`,兩 scanner 內層 + runtime gate):
+- **`DetectAvx2()` + `g_useAvx2`**:CPUID(leaf 1 OSXSAVE+AVX、leaf 7 EBX bit5 AVX2)
+  + `_xgetbv` 確認 OS 有開 XMM/YMM state,快取一次。MSVC 允許在不開 `/arch:AVX2` 下用
+  AVX2 intrinsics → fast-path 只在 gate 為真時執行,其餘 CPU 走純量。
+- **`ScanForPointer`(x64-only)**:`_mm256_cmpeq_epi64` 一次比 4 個 qword(32 bytes),
+  `movemask_pd` 取 4-bit mask、`_BitScanForward` 逐 lane → `b+off+lane*8`。`cmpeq_epi64`
+  是**精確相等**,結果與純量逐一相同;32 是 8 的倍數,對齊不變;尾段 < 32 bytes 落回
+  純量迴圈。x86 的「指標」是 4-byte dword(lane 寬不同),罕用,維持純量。
+- **`ScanForString`(x64 + x86)**:broadcast needle[0],`_mm256_cmpeq_epi8` 一次掃 32 bytes
+  找 anchor 候選,逐候選用**與純量相同的 `memcmp`** 驗證整個 needle → hits 逐 byte 相同。
+  byte 邏輯與位元數無關、32-bit AVX2 CPU 仍有 YMM,故 x86 也啟用(活俠傳 x86 Mono 受益)。
+- 兩個 fast-path 都共用同一條 `matchCount` early-exit;達 limit 設 `stop` 並 `continue`
+  到 chunk loop top(matchCount>=limit 再 break)。
+
+**正確性保證**:SIMD **只當候選 finder**,確認一律走原本的純量比對(`cmpeq_epi64` 本身就是
+精確相等;字串用同一個 `memcmp`)→ 結果**逐 byte 等同純量**,by-construction。runtime gate
++ scalar fallback 確保非 AVX2 CPU 與 x86 指標掃描照舊。
+**測試覆蓋空白(誠實交代)**:603 個是 C# UI 測試,**不**碰原生 scan;SIMD 正確性靠
+by-construction + 須 live-smoke。**Live-smoke 待辦**:Utawarerumono(x64)+ 活俠傳(x86)
+string scan / find instances 計時 + 結果數與舊版比對應完全一致。
 ### 16.6 Snapshot 記憶體 watchdog（2026-05-29, build #756）
 
 **問題**：snapshot capture 把**整個** decode 結果（每 class × 每 instance × 每 field，深度 4 + arrays）建在**遊戲行程**裡才透過 pipe 串流出去（注入式 DLL 的配置 = 遊戲行程記憶體）。大型遊戲（22157 classes / 799174 instances / 7.27 GB heap）一路長到 8 GB→ 玩家強制關閉。`FindAllInstances`（P1c 平行化）本身已完成並 log；爆掉的是**其後的 decode 階段**，且 decode 完全沒有總量上限。對照正常完成的 SaGa 2 FR：10001 classes/271998 instances→ 實際保留 2451 classes/118161 instances、~4.5 GB、~42s。
