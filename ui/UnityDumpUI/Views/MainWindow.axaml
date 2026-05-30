@@ -604,11 +604,14 @@
                 <Button Content="{StaticResource Inspector.SendToBrowser}"
                         ToolTip.Tip="{StaticResource Inspector.SendToBrowserTooltip}"
                         Command="{Binding Inspector.SendToBrowserCommand}" />
+                <Button Content="{StaticResource Inspector.CopyCeXmlInstance}"
+                        ToolTip.Tip="{StaticResource Inspector.CopyCeXmlInstanceTooltip}"
+                        Command="{Binding Inspector.CopyCeXmlInstanceCommand}" />
                 <TextBlock Text="{StaticResource Inspector.LimitLabel}"
                            VerticalAlignment="Center" Opacity="0.7" Margin="8,0,0,0" />
                 <NumericUpDown Value="{Binding Inspector.InstanceLimit, Mode=TwoWay}"
                                Minimum="1" Maximum="4096" Increment="64"
-                               Width="110" />
+                               MinWidth="150" Width="160" />
                 <ProgressBar IsIndeterminate="True"
                              IsVisible="{Binding Inspector.IsLoadingInstances}"
                              Width="80" Height="4" VerticalAlignment="Center" />
@@ -1551,8 +1554,22 @@
                            Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
               </Border>
 
+              <!-- Results filter bar: hide engine/framework hits + substring
+                   filter. Both re-derive the grid view from the unfiltered
+                   scan results client-side (no re-scan). -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="8" Margin="0,0,0,6">
+                <CheckBox Content="Ignore system assemblies (Unity*/System*/…)"
+                          IsChecked="{Binding ValueSearch.IgnoreSystemAssemblies, Mode=TwoWay}"
+                          VerticalAlignment="Center"/>
+                <TextBox Width="300"
+                         Text="{Binding ValueSearch.ResultFilter, Mode=TwoWay}"
+                         VerticalAlignment="Center"
+                         PlaceholderText="filter results (class / field / type / address)…"/>
+              </StackPanel>
+
               <!-- Results grid -->
-              <DataGrid ItemsSource="{Binding ValueSearch.Results}"
+              <DataGrid ItemsSource="{Binding ValueSearch.FilteredResults}"
                         SelectedItem="{Binding ValueSearch.SelectedRow, Mode=TwoWay}"
                         AutoGenerateColumns="False" CanUserReorderColumns="True"
                         CanUserResizeColumns="True" GridLinesVisibility="Horizontal"

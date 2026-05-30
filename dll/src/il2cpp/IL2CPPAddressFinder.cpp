@@ -885,10 +885,39 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
 // Phase 30 P2 — ReverseLookupIndex
 // ---------------------------------------------------------------------------
 
-bool ReverseLookupIndex::Build() {
+// Process-wide reuse cache for the sorted base list — see the Mono port for
+// the full rationale. The aggregate "any numeric width" value scan fans out N
+// back-to-back beginValueScan calls whose instance-base lists are identical;
+// reuseWindowMs > 0 copies a recent build instead of re-walking. Heap-leaked
+// (matches the class-cache pattern) so process exit skips the destructor.
+struct RevIndexCache {
+    std::mutex                 mu;
+    std::vector<ReverseLookupIndex::Entry> bases;
+    DWORD                      builtAtTick = 0;
+    bool                       valid       = false;
+};
+RevIndexCache& revIndexCache() {
+    static RevIndexCache* p = new RevIndexCache();   // intentional leak
+    return *p;
+}
+
+bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
     bases_.clear();
     lastBase_ = lastKlass_ = lastNextBase_ = 0;
     hits_ = localityHits_ = 0;
+
+    // Reuse fast-path: copy a recent build's bases if still inside the window.
+    if (reuseWindowMs > 0) {
+        std::lock_guard<std::mutex> lk(revIndexCache().mu);
+        auto& c = revIndexCache();
+        if (c.valid && (GetTickCount() - c.builtAtTick) <= reuseWindowMs) {
+            bases_ = c.bases;
+            Log::Write(MagicStrings::LogCategoryScan,
+                       "ReverseLookupIndex(IL2CPP): reused cached index instances=" +
+                       std::to_string(bases_.size()));
+            return true;
+        }
+    }
 
     if (!BuildClassRangeCache()) {
         Log::Write(MagicStrings::LogCategoryScan,
@@ -985,6 +1014,15 @@ bool ReverseLookupIndex::Build() {
                "ReverseLookupIndex(IL2CPP): instances=" + std::to_string(bases_.size()) +
                " qwords=" + std::to_string(qtotal) +
                " threads=" + std::to_string(nthreads));
+
+    // Publish to the reuse cache for a back-to-back aggregate fan-out.
+    {
+        std::lock_guard<std::mutex> lk(revIndexCache().mu);
+        auto& c = revIndexCache();
+        c.bases       = bases_;
+        c.builtAtTick = GetTickCount();
+        c.valid       = true;
+    }
     return true;
 }
 

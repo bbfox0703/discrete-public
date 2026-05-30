@@ -163,9 +163,21 @@ public static class InstanceFieldClassifier
             elementType = typeName.Substring(0, typeName.Length - 2);
             return true;
         }
-        const string listPrefix = "System.Collections.Generic.List`1<";
-        if (typeName.StartsWith(listPrefix, StringComparison.Ordinal)
-            && typeName.EndsWith(">", StringComparison.Ordinal))
+        // List<T> reaches us in two wire forms: the IL-form
+        // "...List`1<T>" (backtick arity, what the runtime class registry
+        // keeps) and the demangled "...List<T>" (il2cpp_type_get_name /
+        // mono pretty-print drop the `1). Accept both so the Inspector shows
+        // an expand chevron regardless of which the DLL emitted — the live
+        // games we see hand us the demangled form, so the backtick-only
+        // check silently degraded every List<T> field to a non-expandable
+        // Leaf.
+        const string listPrefixIl    = "System.Collections.Generic.List`1<";
+        const string listPrefixPlain = "System.Collections.Generic.List<";
+        string? listPrefix =
+            typeName.StartsWith(listPrefixIl,    StringComparison.Ordinal) ? listPrefixIl    :
+            typeName.StartsWith(listPrefixPlain, StringComparison.Ordinal) ? listPrefixPlain :
+            null;
+        if (listPrefix is not null && typeName.EndsWith(">", StringComparison.Ordinal))
         {
             elementType = typeName.Substring(listPrefix.Length, typeName.Length - listPrefix.Length - 1).Trim();
             isList = true;

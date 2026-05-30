@@ -257,7 +257,7 @@ public static class CeXmlExporter
         {
             ulong arrayAbs = derefAbs;
             bool isList = f.Type is { Length: > 0 } t
-                          && t.StartsWith("System.Collections.Generic.List`1<", StringComparison.Ordinal);
+                          && TryStripListGeneric(t, out _);
             if (isList)
             {
                 try
@@ -501,6 +501,26 @@ public static class CeXmlExporter
     /// <c>System.Byte</c>). Returns null when the input isn't recognisably
     /// a collection so callers can short-circuit.
     /// </summary>
+    // List<T> reaches the exporter in two wire forms: the IL-form
+    // "System.Collections.Generic.List`1<T>" (offline metadata) and the
+    // demangled "System.Collections.Generic.List<T>" (live runtime
+    // resolver). Strip whichever is present and return the inner element
+    // type so live List<T> fields drill per-slot instead of being mistaken
+    // for a pointer-to-element.
+    private static bool TryStripListGeneric(string t, out string inner)
+    {
+        inner = string.Empty;
+        if (!t.EndsWith(">", StringComparison.Ordinal)) return false;
+        int lt = t.IndexOf('<');
+        if (lt <= 0) return false;
+        string outer = t.Substring(0, lt);
+        if (outer != "System.Collections.Generic.List`1" &&
+            outer != "System.Collections.Generic.List")
+            return false;
+        inner = t.Substring(lt + 1, t.Length - lt - 2).Trim();
+        return true;
+    }
+
     private static string? StripCollectionSuffix(string? type)
     {
         if (string.IsNullOrEmpty(type)) return null;
@@ -511,10 +531,9 @@ public static class CeXmlExporter
             t = t.Substring(0, t.Length - 2);
             changed = true;
         }
-        const string listPrefix = "System.Collections.Generic.List`1<";
-        if (t.StartsWith(listPrefix, StringComparison.Ordinal) && t.EndsWith(">", StringComparison.Ordinal))
+        if (TryStripListGeneric(t, out string inner))
         {
-            t = t.Substring(listPrefix.Length, t.Length - listPrefix.Length - 1).Trim();
+            t = inner;
             changed = true;
         }
         return changed ? t : null;
@@ -526,9 +545,8 @@ public static class CeXmlExporter
         string t = type;
         while (t.EndsWith("[]", StringComparison.Ordinal))
             t = t.Substring(0, t.Length - 2);
-        const string listPrefix = "System.Collections.Generic.List`1<";
-        if (t.StartsWith(listPrefix, StringComparison.Ordinal) && t.EndsWith(">", StringComparison.Ordinal))
-            t = t.Substring(listPrefix.Length, t.Length - listPrefix.Length - 1).Trim();
+        if (TryStripListGeneric(t, out string inner))
+            t = inner;
         if (t.StartsWith("System.", StringComparison.Ordinal)) return null; // primitives — let DLL table handle
         if (t.IndexOf('.') < 0) return (string.Empty, t);
         int dot = t.LastIndexOf('.');

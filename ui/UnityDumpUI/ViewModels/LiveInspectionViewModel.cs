@@ -139,6 +139,17 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// </summary>
     public IAobMakerBridge? AobMaker { get; set; }
 
+    /// <summary>
+    /// Game-process pointer size (4 on x86 / WOW64, 8 on x64), from the
+    /// handshake. Drives the managed-String header offsets in the
+    /// drilldown decode fallback — the object header is <c>2 × pointerSize</c>,
+    /// so the int32 length sits at +0x10 / chars at +0x14 on x64, but at
+    /// +0x8 / +0xC on x86. 0 = not yet connected; treated as 8 (x64) so the
+    /// common case keeps working before the first handshake. Wired by
+    /// <c>MainWindowViewModel.OnGameConnected</c>, mirroring the Snapshot VM.
+    /// </summary>
+    [ObservableProperty] private int _gamePointerSize;
+
     // ---------- Target ----------------------------------------------------
 
     [ObservableProperty]
@@ -247,6 +258,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSelectedInstance))]
+    [NotifyCanExecuteChangedFor(nameof(CopyCeXmlInstanceCommand))]
     private InstanceItem? _selectedInstance;
 
     public bool HasSelectedInstance => SelectedInstance is not null;
@@ -770,6 +782,34 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         node.LoadHint = $"[{result.Length} of {elemLabel}, showing {result.Count}]";
 
         if (result.Elements is null) return;
+
+        // String-element fallback. The DLL's array-element path
+        // (walkArrayElementsInline / CmdWalkArray) treats System.String as a
+        // generic reference slot — it returns each slot's raw pointer without
+        // the decoded `str` payload (the slot shows "0x…" instead of the
+        // text), unlike walkInstance's decodeField which decodes strings
+        // inline. When the element type is System.String, decode any slot that
+        // came back with a non-null pointer but no string by reading the
+        // managed String object directly — same layout the DLL uses for
+        // walkInstance (length @ +0x10, UTF-16 payload @ +0x14; 64-bit object
+        // header). No-op when the slot already has a decoded string, so a
+        // future DLL fix costs nothing here.
+        if (string.Equals(elementType, "System.String", StringComparison.Ordinal))
+        {
+            foreach (WalkedArrayElement e in result.Elements)
+            {
+                if (e.String is not null || !string.IsNullOrEmpty(e.StringError)) continue;
+                if (string.IsNullOrEmpty(e.Ptr) || e.Ptr == "0x0000000000000000") continue;
+                (string text, int len)? decoded =
+                    await ReadManagedStringAsync(e.Ptr!, ct).ConfigureAwait(true);
+                if (decoded is { } d)
+                {
+                    e.String       = d.text;
+                    e.StringLength = d.len;
+                }
+            }
+        }
+
         foreach (WalkedArrayElement e in result.Elements)
         {
             WalkedFieldNode child = WalkedFieldNode.FromArrayElement(
@@ -778,6 +818,94 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             child.Parent = node;
             node.Children.Add(child);
         }
+    }
+
+    /// <summary>
+    /// Read + decode a managed <c>System.String</c> object at
+    /// <paramref name="strObjPtr"/> via two <c>readMemory</c> RPCs. Mirrors the
+    /// DLL's string decode: the object header is <c>2 × pointerSize</c> bytes,
+    /// then an int32 length, then <c>length</c> UTF-16 code units. So on x64
+    /// length sits at +0x10 / chars at +0x14, and on x86 at +0x8 / +0xC.
+    /// Returns null on any read failure / implausible length so the caller
+    /// falls back to showing the pointer.
+    /// </summary>
+    private async Task<(string text, int len)?> ReadManagedStringAsync(
+        string strObjPtr, CancellationToken ct)
+    {
+        // 0 (not yet connected) → assume x64, the common case.
+        int ptrSize = GamePointerSize == 4 ? 4 : 8;
+        (int lenOff, int charsOff) = StringFieldOffsets(ptrSize);
+        try
+        {
+            ReadMemoryResult lenMem = await _backend
+                .ReadMemoryAsync(HexAdd(strObjPtr, lenOff), 4, ct).ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(lenMem.Error) || string.IsNullOrEmpty(lenMem.Hex))
+                return null;
+            if (!TryParseLeInt32(lenMem.Hex!, out int len)) return null;
+            if (len < 0 || len > 0x100000) return null;     // implausible — bail
+            if (len == 0) return (string.Empty, 0);
+
+            ReadMemoryResult chMem = await _backend
+                .ReadMemoryAsync(HexAdd(strObjPtr, charsOff), len * 2, ct).ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(chMem.Error) || string.IsNullOrEmpty(chMem.Hex))
+                return null;
+            string? text = DecodeUtf16LeHex(chMem.Hex!, len);
+            return text is null ? null : (text, len);
+        }
+        catch (OperationCanceledException) { return null; }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Managed <c>System.String</c> field offsets for a given pointer size:
+    /// header is <c>2 × pointerSize</c>, then int32 length, then UTF-16 chars.
+    /// x64 (8) → (0x10, 0x14); x86 (4) → (0x8, 0xC). Pure — unit-tested.
+    /// </summary>
+    public static (int lengthOffset, int charsOffset) StringFieldOffsets(int pointerSize)
+    {
+        int header = 2 * (pointerSize == 4 ? 4 : 8);
+        return (header, header + 4);
+    }
+
+    /// <summary>
+    /// Parse the first 4 bytes of a contiguous little-endian hex blob (2 hex
+    /// chars per byte, as <c>readMemory</c> returns) into an int32. Returns
+    /// false when the blob is too short or contains non-hex.
+    /// </summary>
+    public static bool TryParseLeInt32(string hex, out int value)
+    {
+        value = 0;
+        if (hex is null || hex.Length < 8) return false;
+        if (!byte.TryParse(hex.AsSpan(0, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte b0) ||
+            !byte.TryParse(hex.AsSpan(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte b1) ||
+            !byte.TryParse(hex.AsSpan(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte b2) ||
+            !byte.TryParse(hex.AsSpan(6, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte b3))
+            return false;
+        value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        return true;
+    }
+
+    /// <summary>
+    /// Decode <paramref name="charCount"/> UTF-16 code units from a contiguous
+    /// little-endian hex blob (2 hex chars per byte, 4 per code unit). Returns
+    /// null when the blob is shorter than <c>charCount*4</c> hex chars or has
+    /// non-hex content.
+    /// </summary>
+    public static string? DecodeUtf16LeHex(string hex, int charCount)
+    {
+        if (charCount < 0) return null;
+        if (charCount == 0) return string.Empty;
+        if (hex is null || hex.Length < charCount * 4) return null;
+        var sb = new System.Text.StringBuilder(charCount);
+        for (int i = 0; i < charCount; ++i)
+        {
+            int off = i * 4;
+            if (!byte.TryParse(hex.AsSpan(off, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte lo) ||
+                !byte.TryParse(hex.AsSpan(off + 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte hi))
+                return null;
+            sb.Append((char)(lo | (hi << 8)));
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -790,6 +918,21 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         int parentIdx = Fields.IndexOf(node);
         if (parentIdx < 0) return;
+        // When no filter is active FilteredFields mirrors Fields 1:1, so we
+        // splice the new child rows straight in next to the parent rather
+        // than clearing + rebuilding the whole bound collection. The rebuild
+        // (RefilterFields → FilteredFields.Clear) reset the DataGrid's scroll
+        // offset to the top on every expand — the "expanding charaInfo jumps
+        // to page top" bug. An in-place Insert leaves the viewport untouched.
+        // bulk = an outer caller (walk repopulate / expansion replay) holds
+        // the suppression lock and will refilter once at the end; don't touch
+        // FilteredFields here in that case (it's stale mid-rebuild). A
+        // non-empty filter falls back to the full RefilterFields pass since
+        // the visible set genuinely changes.
+        bool bulk   = _refilterSuppressionDepth > 0;
+        bool mirror = !bulk && (Filter ?? string.Empty).Length == 0;
+        int  filteredAt = mirror ? FilteredFields.IndexOf(node) + 1 : 0;
+        bool spliced = mirror && filteredAt > 0;
         _refilterSuppressionDepth++;
         try
         {
@@ -797,13 +940,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             foreach (WalkedFieldNode c in node.Children)
             {
                 Fields.Insert(insertAt++, c);
+                if (spliced) FilteredFields.Insert(filteredAt++, c);
             }
         }
         finally
         {
             _refilterSuppressionDepth--;
         }
-        RefilterFields();
+        if (bulk) return;            // outer bulk caller refilters once at the end
+        if (!spliced) RefilterFields();
     }
 
     /// <summary>
@@ -815,23 +960,31 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         int parentIdx = Fields.IndexOf(node);
         if (parentIdx < 0) return;
+        // Mirror the removals straight into FilteredFields when unfiltered so
+        // the DataGrid keeps its scroll offset, same rationale as
+        // InsertChildrenIntoFields.
+        bool bulk   = _refilterSuppressionDepth > 0;
+        bool mirror = !bulk && (Filter ?? string.Empty).Length == 0;
         _refilterSuppressionDepth++;
         try
         {
             int i = parentIdx + 1;
             while (i < Fields.Count && IsDescendant(Fields[i], node))
             {
+                WalkedFieldNode removed = Fields[i];
                 // Mark the row collapsed too so nested expand state doesn't
                 // leak when re-expanding the ancestor.
-                Fields[i].IsExpanded = false;
+                removed.IsExpanded = false;
                 Fields.RemoveAt(i);
+                if (mirror) FilteredFields.Remove(removed);
             }
         }
         finally
         {
             _refilterSuppressionDepth--;
         }
-        RefilterFields();
+        if (bulk) return;
+        if (!mirror) RefilterFields();
     }
 
     private static bool IsDescendant(WalkedFieldNode candidate, WalkedFieldNode ancestor)
@@ -844,6 +997,65 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     }
 
     // ---------- Copy CE XML / CE field on a tree node --------------------
+
+    /// <summary>
+    /// Instance-level "Copy CE XML" — copies a CE table for the whole
+    /// currently-selected instance rooted at its address. Mirrors the
+    /// Assembly Browser's class-level Copy CE XML, but works wherever the
+    /// Inspector was reached from: Find instances, or a cross-tab handoff
+    /// (Value Search / Address Lookup / Scene / Snapshot) where there's no
+    /// Browser selection to anchor the export. No field row needs to be
+    /// selected — that's the gap this fills vs. the per-row "Copy CE XML
+    /// rooted here" context-menu item.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanCopyInstance))]
+    private async Task CopyCeXmlInstanceAsync()
+    {
+        if (CopyToClipboardAsync is null || SelectedInstance is null || !HasTarget) return;
+
+        string ns   = TargetNamespace ?? string.Empty;
+        string name = TargetName!;
+        try
+        {
+            // Same assembly-resolution fallback as the expansion / node-copy
+            // paths — the class may live in a different image than the
+            // target assembly name suggests (Unity primitives, etc.).
+            string[] candidates = BuildAssemblyCandidates(TargetAssembly, ns);
+            GetClassInfoResult? info = null;
+            string usedAssembly = TargetAssembly ?? "Assembly";
+            foreach (string asm in candidates)
+            {
+                GetClassInfoResult attempt = await _backend
+                    .GetClassInfoAsync(asm, ns, name, default).ConfigureAwait(true);
+                if (string.IsNullOrEmpty(attempt.Error)) { info = attempt; usedAssembly = asm; break; }
+            }
+            if (info is null)
+            {
+                ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
+                return;
+            }
+            ExportOptions options = new(
+                DrilldownDepth: 1,
+                ArrayLimit:     16,
+                CollapsePointerNodes: true,
+                LiveData: true);
+            string xml = await CeXmlExporter.RenderAsync(
+                SelectedInstance.Address, info, ancestors: null,
+                usedAssembly, options, _backend, default)
+                .ConfigureAwait(true);
+            await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            _logger.Write(Constants.LogCategoryView,
+                $"copy CE XML instance {TargetLabel} @ {SelectedInstance.Address} ({xml.Length} bytes)");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"copy CE XML failed: {ex.Message}";
+            _logger.Write(Constants.LogCategoryView,
+                $"copy CE XML instance failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private bool CanCopyInstance() => SelectedInstance is not null && HasTarget;
 
     [RelayCommand(CanExecute = nameof(CanCopyNode))]
     private async Task CopyCeXmlNodeAsync()
