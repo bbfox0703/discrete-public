@@ -5,8 +5,8 @@
 > `[x]` 並 commit。已完成 phase 的長篇寫作搬到 [archive/](archive/);
 > 本檔只保留 Phase Overview 摘要 + 仍 open 的 backlog。
 
-**Last updated**: 2026-05-29
-**Current state**: ✅ **Phase 30 (snapshot memory & speed) + scan P1/P2 全部 SHIPPED 並 merged to `main`**(build **#820**)。
+**Last updated**: 2026-05-30
+**Current state**: ✅ **Phase 30 (snapshot memory & speed) + scan P1/P2 全部 SHIPPED 並 merged to `main`**(build **#820**);**scan P2 Mono port shipped build #823**(reverse-lookup interval-tree 移植到 Mono value/string scan)。
 30a/30b/30c headline 完成且 live-verified;scan **P1**(平行化)+ **P2**(IL2CPP value-scan reverse-lookup interval-tree)完成;外加 low-RAM advisory banner、per-PID log count-based 保留、DataGrid 橫向捲動修正。
 `dev == main == origin`,**603 UI tests green**,兩個 DLL 都 build clean。
 **Nothing mid-flight** — 下方 Open Backlog 全是 deferred-by-design 的選配後續,none blocking。
@@ -19,7 +19,7 @@
 > 這是**唯一**的待辦清單。所有 open 項目集中於此;Phase Overview 表只記 ship 狀態,不重複放 todo。
 
 ### 🔍 Scan line — 詳見 [Memory-Scanning-Internals.md](Memory-Scanning-Internals.md) §16.3 / §16.5b
-- [ ] **P2 Mono port** — 把 §16.5b interval-tree 移植到 `Mono::WhatIsAt`(抽出 Mono `ResolveInstanceLookup` + `ReverseLookupIndex`,對應 IL2CPP 已做的 [IL2CPPAddressFinder.cpp](../dll/src/il2cpp/IL2CPPAddressFinder.cpp))。IL2CPP shipped #814;活俠傳 value scans 受益。
+- [x] **P2 Mono port** — ✅ build #823(2026-05-30):`Mono::ResolveInstanceLookup` + `Mono::ReverseLookupIndex`(單緒安全走訪 + `Sleep(1)` pacing,避開 BDWGC freeze),3 個 Mono value/string scan handler 改用 index。兩 DLL build clean、603 tests green。**Live-smoke(活俠傳 value scan 計時 + 答案比對)待辦**。
 - [ ] **P2 SIMD inner loop** — `Vector256` anchor for `ScanForString`,4-qword compare for `ScanForPointer`。
 - [ ] **Mono `FindAllInstances` 平行化** — P1 follow-up;Mono 端仍單執行緒(IL2CPP 已平行)。
 - [ ] **P3 VirtualQuery cache** — 低優先,P1 已大幅降低需求。
