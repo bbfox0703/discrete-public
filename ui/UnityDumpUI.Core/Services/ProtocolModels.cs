@@ -190,6 +190,11 @@ public sealed class WalkInstanceResult
     [JsonPropertyName("count")]     public int                   Count     { get; set; }
     [JsonPropertyName("fields")]    public List<WalkedField>?    Fields    { get; set; }
     [JsonPropertyName("error")]     public string?               Error     { get; set; }
+    /// <summary>Authoritative game-process pointer size (4 = x86/WOW64, 8 =
+    /// x64) reported by the DLL walk. 0 when absent (older DLL). The live
+    /// CE-XML exporter prefers this over the handshake-cached value for
+    /// String header offsets + List&lt;T&gt;._items deref.</summary>
+    [JsonPropertyName("pointer_size")] public int                PointerSize { get; set; }
 }
 
 /// <summary>

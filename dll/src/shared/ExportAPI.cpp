@@ -4491,12 +4491,18 @@ void RegisterCoreHandlers() {
                   });
 
         return json{
-            {"address",   formatHex(addr)},
-            {"namespace", selfNs},
-            {"name",      selfName},
-            {"depth",     chain.size()},
-            {"count",     fields.size()},
-            {"fields",    std::move(fields)},
+            {"address",      formatHex(addr)},
+            {"namespace",    selfNs},
+            {"name",         selfName},
+            {"depth",        chain.size()},
+            {"count",        fields.size()},
+            // Authoritative game-process pointer size (4 = x86/WOW64, 8 = x64).
+            // The live CE-XML exporter uses this for managed-String header
+            // offsets + List<T>._items deref instead of relying on the UI's
+            // handshake-cached GamePointerSize (which can be stale / 0 at
+            // export time → wrong x64 offsets on a 32-bit target).
+            {"pointer_size", static_cast<int>(Discrete::ManagedLayout::kPointerSize)},
+            {"fields",       std::move(fields)},
         };
     });
 
@@ -7454,12 +7460,16 @@ void RegisterCoreHandlers() {
                   });
 
         return json{
-            {"address",   formatHex(addr)},
-            {"namespace", selfNs},
-            {"name",      selfName},
-            {"depth",     chain.size()},
-            {"count",     fields.size()},
-            {"fields",    std::move(fields)},
+            {"address",      formatHex(addr)},
+            {"namespace",    selfNs},
+            {"name",         selfName},
+            {"depth",        chain.size()},
+            {"count",        fields.size()},
+            // Authoritative game pointer size (IL2CPP is x64-only today, so
+            // this is 8 — but emit it for symmetry with the Mono handler so
+            // the exporter has a single source of truth).
+            {"pointer_size", static_cast<int>(Discrete::ManagedLayout::kPointerSize)},
+            {"fields",       std::move(fields)},
         };
     });
 

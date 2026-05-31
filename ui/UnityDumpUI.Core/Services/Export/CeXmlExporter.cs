@@ -150,16 +150,13 @@ public static partial class CeXmlExporter
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
-        string rootName  = $"{StructLabel(self, assemblyName, nameMap)} @ 0x{baseAbs:X16}";
-        OpenGroup(sb, "    ", idGen, rootName, $"0x{baseAbs:X16}",
-                  offsets: null, collapsed: options.CollapsePointerNodes,
-                  varType: "8 Bytes", showAsHex: true);
-
         // walkInstance walks the FULL inheritance chain and returns
         // pre-classified, pre-decoded fields (enum / string / value-type flags
         // + real addresses), so `ancestors` is unused in live mode — the named
         // root walk already includes inherited members. This is the same path
         // the Inspector grid uses, so the CE table matches what the user sees.
+        // Done BEFORE OpenGroup so the DLL-reported pointer size can correct
+        // `options` for the whole emit (see below).
         WalkInstanceResult root;
         try
         {
@@ -171,6 +168,19 @@ public static partial class CeXmlExporter
         {
             root = new WalkInstanceResult();
         }
+
+        // Prefer the DLL's authoritative pointer size over the caller-supplied
+        // one (the UI's handshake-cached GamePointerSize can be 0/stale at
+        // export time → x64 String offsets + a broken List._items deref on a
+        // 32-bit target). 4 or 8 only; ignore 0 / garbage.
+        if (root.PointerSize == 4 || root.PointerSize == 8)
+            options = options with { PointerSize = root.PointerSize };
+
+        string rootName  = $"{StructLabel(self, assemblyName, nameMap)} @ 0x{baseAbs:X16}";
+        OpenGroup(sb, "    ", idGen, rootName, $"0x{baseAbs:X16}",
+                  offsets: null, collapsed: options.CollapsePointerNodes,
+                  varType: PointerVartype(options), showAsHex: true);
+
         if (root.Fields is { Count: > 0 } rootFields)
         {
             foreach (WalkedField wf in rootFields)
@@ -290,6 +300,13 @@ public static partial class CeXmlExporter
         ManagedTypeShape s = UnityTypeMap.Resolve(type);
         return s.CeTypeKeyword;
     }
+
+    /// <summary>CE VariableType for a raw pointer-sized slot (IntPtr / object
+    /// reference / List/array handle): "4 Bytes" on x86, "8 Bytes" on x64.
+    /// A managed reference is sizeof(void*), so a 32-bit target MUST emit
+    /// "4 Bytes" or CE reads 8 and the next field overlaps.</summary>
+    private static string PointerVartype(ExportOptions options)
+        => options.PointerSize == 4 ? "4 Bytes" : "8 Bytes";
 
     /// <summary>
     /// Single-field "pointer chain" export with optional drilldown — emits a

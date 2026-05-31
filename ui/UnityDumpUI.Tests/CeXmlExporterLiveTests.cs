@@ -311,4 +311,61 @@ public class CeXmlExporterLiveTests
         }
         return count;
     }
+
+    // ---- DLL-reported pointer size overrides the caller's value -----------
+
+    /// <summary>A fake whose walks report pointer_size=4 (x86/WOW64). The
+    /// live export must adopt it over a caller-supplied PointerSize:8, so an
+    /// IntPtr field emits "4 Bytes" and the managed-String length sits at the
+    /// x86 header offset (+0x8) instead of x64 (+0x10). Regression for the
+    /// 活俠傳 Copy CE XML bug where a stale GamePointerSize=0→8 produced x64
+    /// offsets + "8 Bytes" on a 32-bit target.</summary>
+    private sealed class FakeLiveX86 : ILiveExportSource
+    {
+        private readonly List<WalkedField> _rootFields;
+        public FakeLiveX86(List<WalkedField> rootFields) { _rootFields = rootFields; }
+
+        public Task<GetClassInfoResult?> GetClassInfoAsync(string a, string n, string m, CancellationToken ct = default)
+            => Task.FromResult<GetClassInfoResult?>(null);
+        public Task<ReadMemoryResult> ReadMemoryAsync(string address, int size, CancellationToken ct = default)
+            => Task.FromResult(new ReadMemoryResult { Address = address, Size = size, Error = "unmapped" });
+        public Task<WalkArrayResult> WalkArrayAsync(string a, string? et, int? l, int? es,
+            string? ea, string? en, string? em, CancellationToken ct = default)
+            => Task.FromResult(new WalkArrayResult { Error = "no array" });
+        public Task<WalkInstanceResult> WalkInstanceAsync(string a, string asm, string? ns, string n, CancellationToken ct = default)
+            => Task.FromResult(new WalkInstanceResult { Fields = _rootFields, PointerSize = 4 });
+        public Task<WalkInstanceResult> WalkInstanceFromHeaderAsync(string a, CancellationToken ct = default)
+            => Task.FromResult(new WalkInstanceResult { Fields = _rootFields, PointerSize = 4 });
+    }
+
+    [Fact]
+    public async Task RenderLive_DllReportsX86_OverridesCallerPointerSize()
+    {
+        const string baseAddr = "0x0000000027313000";
+        var live = new FakeLiveX86(new List<WalkedField>
+        {
+            new() { Name = "m_CachedPtr", Type = "System.IntPtr", Offset = 0x8,
+                    Address = "0x0000000027313008", Ptr = "0x00000000093DBEA0" },
+            new() { Name = "_name", Type = "System.String", Offset = 0x10,
+                    Address = "0x0000000027313010", Ptr = "0x000000002731FD68",
+                    String = "學問", StringLength = 2 },
+        });
+
+        // Caller passes the WRONG (x64) pointer size — the DLL's pointer_size=4
+        // must win.
+        var options = ExportOptions.Defaults with { LiveData = true, PointerSize = 8, DrilldownDepth = 2 };
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", options, live,
+            TestContext.Current.CancellationToken)
+            .ConfigureAwait(true);
+
+        // IntPtr leaf is pointer-sized → "4 Bytes" on x86 (NOT "8 Bytes").
+        Assert.Contains("<VariableType>4 Bytes</VariableType>", xml);
+        Assert.DoesNotContain("<VariableType>8 Bytes</VariableType>", xml);
+        // String length child sits at the x86 header offset +0x8 (2*ptr),
+        // chars at +0xC — not the x64 +0x10/+0x14.
+        Assert.Contains("<Address>+8</Address>", xml);
+        Assert.Contains("<Address>+C</Address>", xml);
+        Assert.DoesNotContain("<Address>+14</Address>", xml);
+    }
 }

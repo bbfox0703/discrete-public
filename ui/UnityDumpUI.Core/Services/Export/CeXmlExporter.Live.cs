@@ -76,7 +76,7 @@ public static partial class CeXmlExporter
                 // Null string handle — emit a plain pointer leaf so the slot is
                 // still watchable, but no deref (would read garbage).
                 EmitLeaf(sb, indent, ids, slabel + "  <null>",
-                         vartype: "8 Bytes", showAsHex: true, address: rel, offsets: null);
+                         vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                 return;
             }
             EmitStringDerefGroup(sb, indent, ids, slabel, rel, f.StringLength, options.PointerSize);
@@ -89,7 +89,14 @@ public static partial class CeXmlExporter
             case WalkedFieldKind.Leaf:
             {
                 (bool hex, bool signed) = UnityTypeMap.CeDisplay(f.Type);
-                string vartype = f.IsEnum ? "4 Bytes" : UnityTypeMap.Resolve(f.Type).CeTypeKeyword;
+                // IntPtr / UIntPtr are pointer-sized: UnityTypeMap hardcodes
+                // them to "8 Bytes", but on x86 they're 4. Emit the arch-correct
+                // width so m_CachedPtr et al. don't overlap the next field.
+                bool isNativeInt = string.Equals(f.Type, "System.IntPtr", StringComparison.Ordinal)
+                                || string.Equals(f.Type, "System.UIntPtr", StringComparison.Ordinal);
+                string vartype = f.IsEnum     ? "4 Bytes"
+                               : isNativeInt  ? PointerVartype(options)
+                               :                UnityTypeMap.Resolve(f.Type).CeTypeKeyword;
                 EmitLeaf(sb, indent, ids, desc,
                          vartype: vartype,
                          showAsHex: f.IsEnum ? false : hex,
@@ -104,14 +111,14 @@ public static partial class CeXmlExporter
             {
                 if (!canDrill || string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
                 {
-                    EmitLeaf(sb, indent, ids, desc, vartype: "8 Bytes",
+                    EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
                              showAsHex: true, address: rel, offsets: null);
                     return;
                 }
                 if (!visited.Add(f.Ptr!))
                 {
                     EmitLeaf(sb, indent, ids, desc + "  (cycle elided)",
-                             vartype: "8 Bytes", showAsHex: true, address: rel, offsets: null);
+                             vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                     return;
                 }
                 OpenGroup(sb, indent, ids, desc, rel,
@@ -134,7 +141,7 @@ public static partial class CeXmlExporter
             {
                 if (!canDrill || string.IsNullOrEmpty(f.Address))
                 {
-                    EmitLeaf(sb, indent, ids, desc, vartype: "8 Bytes",
+                    EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
                              showAsHex: true, address: rel, offsets: null);
                     return;
                 }
@@ -166,7 +173,7 @@ public static partial class CeXmlExporter
 
             default:
                 EmitLeaf(sb, indent, ids, desc,
-                         vartype: "8 Bytes", showAsHex: true, address: rel, offsets: null);
+                         vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                 return;
         }
     }
@@ -290,7 +297,7 @@ public static partial class CeXmlExporter
         if (!canDrill || options.ArrayLimit <= 0
             || string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
         {
-            EmitLeaf(sb, indent, ids, desc, vartype: "8 Bytes", showAsHex: true,
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options), showAsHex: true,
                      address: rel, offsets: null);
             return;
         }
@@ -322,7 +329,7 @@ public static partial class CeXmlExporter
         }
         if (arrayAbs == 0)
         {
-            EmitLeaf(sb, indent, ids, desc + "  <empty>", vartype: "8 Bytes",
+            EmitLeaf(sb, indent, ids, desc + "  <empty>", vartype: PointerVartype(options),
                      showAsHex: true, address: rel, offsets: null);
             return;
         }
@@ -392,7 +399,7 @@ public static partial class CeXmlExporter
                     if (string.IsNullOrEmpty(elem.Ptr) || elem.Ptr == "0x0000000000000000")
                     {
                         EmitLeaf(sb, elemIndent, ids, slotLabel + "  <null>",
-                                 vartype: "8 Bytes", showAsHex: true, address: slotRel, offsets: null);
+                                 vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null);
                     }
                     else
                     {
@@ -406,7 +413,7 @@ public static partial class CeXmlExporter
                     if (slotPtr == 0 || !slotDrill || !visited.Add(elem.Ptr!))
                     {
                         EmitLeaf(sb, elemIndent, ids, slotLabel,
-                                 vartype: "8 Bytes", showAsHex: true, address: slotRel, offsets: null);
+                                 vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null);
                         continue;
                     }
                     OpenGroup(sb, elemIndent, ids, slotLabel, slotRel,
@@ -459,6 +466,23 @@ public static partial class CeXmlExporter
         var nameMap = new ExportNameMap();
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
+
+        // Correct the pointer size from the DLL if we can cheaply probe it —
+        // a header walk of the first node's address reports the authoritative
+        // game pointer size, so "Copy CE field" gets the right x86/x64 String
+        // offsets + List._items deref even when the caller's cached value is
+        // stale (same robustness as the full RenderLiveAsync path).
+        if (nodes.Count > 0 && !string.IsNullOrEmpty(nodes[0].absoluteAddress))
+        {
+            try
+            {
+                WalkInstanceResult probe = await live
+                    .WalkInstanceFromHeaderAsync(nodes[0].absoluteAddress, ct).ConfigureAwait(false);
+                if (probe.PointerSize == 4 || probe.PointerSize == 8)
+                    options = options with { PointerSize = probe.PointerSize };
+            }
+            catch { /* keep caller-supplied PointerSize */ }
+        }
 
         foreach ((WalkedField field, string absoluteAddress) in nodes)
         {
