@@ -712,6 +712,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                          + (lastErr ?? "class not resolved");
             return;
         }
+        // Diagnostic — when a drilldown returns suspiciously few fields (e.g.
+        // only an inherited m_CachedPtr while the real class has many), this
+        // line pinpoints whether the DLL resolved the WRONG class (res.Name !=
+        // node.Type's simple name) or the right class with truncated metadata
+        // (res.Name matches but Count is low). Helps diagnose the 活俠傳
+        // StatConvertData "only m_CachedPtr" report without a DLL rebuild.
+        _logger.Write(Constants.LogCategoryView,
+            $"[Inspector] expand {node.Name} type={node.Type} addr={node.EffectiveAddress} " +
+            $"-> resolved {res.Namespace}.{res.Name} depth={res.Depth} fields={res.Fields.Count}");
         foreach (WalkedField f in res.Fields)
         {
             WalkedFieldNode child = WalkedFieldNode.FromInstanceField(

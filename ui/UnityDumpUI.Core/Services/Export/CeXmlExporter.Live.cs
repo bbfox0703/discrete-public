@@ -119,7 +119,8 @@ public static partial class CeXmlExporter
                           varType: null, showAsHex: true);
                 await EmitChildFieldsByHeaderAsync(sb, indent + "  ", ids, f.Ptr!,
                                                    assemblyName, options, live,
-                                                   visited, currentDepth + 1, ct)
+                                                   visited, currentDepth + 1, ct,
+                                                   fallbackType: f.Type)
                     .ConfigureAwait(false);
                 CloseGroup(sb, indent);
                 visited.Remove(f.Ptr!);
@@ -172,20 +173,82 @@ public static partial class CeXmlExporter
 
     /// <summary>walkInstance via the object header (resolves nested + generic
     /// classes from the runtime class pointer) and emit its fields. Each child
-    /// is addressed relative to this object via its own <c>Offset</c>.</summary>
+    /// is addressed relative to this object via its own <c>Offset</c>.
+    ///
+    /// The header path is IL2CPP-only — the Mono backend's walkInstance handler
+    /// requires assembly+name and ignores the header address. So when the
+    /// header walk yields nothing AND the caller knows the declared type
+    /// (<paramref name="fallbackType"/>), retry with the name-based walk
+    /// (mirrors the live Inspector's LoadPointerChildrenAsync fallback).
+    /// Without this, pointer-to-class / array-element drilldown on Mono
+    /// exported an empty group (活俠傳 StatConvertCollectionData[0] had no
+    /// children).</summary>
     private static async Task EmitChildFieldsByHeaderAsync(
         StringBuilder sb, string indent, IdGen ids, string objAddr,
         string? assemblyName, ExportOptions options, ILiveExportSource live,
-        HashSet<string> visited, int currentDepth, CancellationToken ct)
+        HashSet<string> visited, int currentDepth, CancellationToken ct,
+        string? fallbackType = null)
     {
-        WalkInstanceResult res;
-        try { res = await live.WalkInstanceFromHeaderAsync(objAddr, ct).ConfigureAwait(false); }
-        catch { return; }
-        if (res.Fields is not { Count: > 0 } fields) return;
-        foreach (WalkedField cf in fields)
+        WalkInstanceResult? res = null;
+        try
+        {
+            WalkInstanceResult attempt =
+                await live.WalkInstanceFromHeaderAsync(objAddr, ct).ConfigureAwait(false);
+            if (string.IsNullOrEmpty(attempt.Error) && attempt.Fields is { Count: > 0 })
+                res = attempt;
+        }
+        catch { /* fall through to name path */ }
+
+        // Mono (or header-resolve miss): retry by declared type name across the
+        // parent assembly + well-known fallbacks, same as the Inspector.
+        if (res is null && InstanceFieldClassifier.TryParseClassName(fallbackType, out string ns, out string name))
+        {
+            bool isGeneric = fallbackType is { Length: > 0 } t && t.IndexOf('<') > 0;
+            var nameVariants = new List<string> { name };
+            if (isGeneric) { nameVariants.Add(name + "`1"); nameVariants.Add(name + "`2"); nameVariants.Add(name + "`3"); }
+            foreach (string asm in BuildExportAssemblyCandidates(assemblyName, ns))
+            {
+                foreach (string nv in nameVariants)
+                {
+                    try
+                    {
+                        WalkInstanceResult attempt = await live
+                            .WalkInstanceAsync(objAddr, asm, ns, nv, ct).ConfigureAwait(false);
+                        if (string.IsNullOrEmpty(attempt.Error) && attempt.Fields is { Count: > 0 })
+                        { res = attempt; break; }
+                    }
+                    catch { /* try next */ }
+                }
+                if (res is not null) break;
+            }
+        }
+
+        if (res?.Fields is not { Count: > 0 } resolved) return;
+        foreach (WalkedField cf in resolved)
             await EmitWalkedFieldLiveAsync(sb, indent, ids, cf, assemblyName,
                                            options, live, visited, currentDepth, ct)
                 .ConfigureAwait(false);
+    }
+
+    /// <summary>Assembly search order for the name-based walk fallback —
+    /// mirrors LiveInspectionViewModel.BuildAssemblyCandidates: the owning
+    /// assembly first, then well-known Unity / System images by namespace.</summary>
+    private static string[] BuildExportAssemblyCandidates(string? primaryAssembly, string ns)
+    {
+        var list = new List<string>(4);
+        if (!string.IsNullOrEmpty(primaryAssembly)) list.Add(primaryAssembly!);
+        if (ns.StartsWith("UnityEngine", StringComparison.Ordinal))
+        {
+            if (!list.Contains("UnityEngine.CoreModule")) list.Add("UnityEngine.CoreModule");
+            if (!list.Contains("UnityEngine"))            list.Add("UnityEngine");
+        }
+        else if (ns.StartsWith("System", StringComparison.Ordinal))
+        {
+            if (!list.Contains("mscorlib"))       list.Add("mscorlib");
+            if (!list.Contains("System.Runtime")) list.Add("System.Runtime");
+        }
+        if (list.Count == 0) list.Add(string.Empty);
+        return list.ToArray();
     }
 
     /// <summary>walkInstance via an explicit class name at <paramref name="addr"/>
@@ -351,7 +414,8 @@ public static partial class CeXmlExporter
                               varType: null, showAsHex: true);
                     await EmitChildFieldsByHeaderAsync(sb, elemIndent + "  ", ids, elem.Ptr!,
                                                        assemblyName, options, live,
-                                                       visited, currentDepth + 2, ct)
+                                                       visited, currentDepth + 2, ct,
+                                                       fallbackType: elementType)
                         .ConfigureAwait(false);
                     CloseGroup(sb, elemIndent);
                     visited.Remove(elem.Ptr!);

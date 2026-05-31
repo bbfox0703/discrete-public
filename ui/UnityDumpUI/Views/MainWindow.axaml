@@ -443,7 +443,7 @@
                                VerticalAlignment="Center" Opacity="0.8" />
                     <NumericUpDown Grid.Row="0" Grid.Column="1"
                                    Value="{Binding Browser.DrilldownDepth, Mode=TwoWay}"
-                                   Minimum="0" Maximum="5" Increment="1" />
+                                   Minimum="0" Maximum="6" Increment="1" />
 
                     <TextBlock Grid.Row="1" Grid.Column="0"
                                Text="{StaticResource Browser.OptArrayLimit}"
