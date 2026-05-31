@@ -1431,6 +1431,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             Browser.SelectedAssembly.Name,
             Browser.SelectedClass.Namespace,
             Browser.SelectedClass.Name);
+        // Switch the right pane to the Inspector tab so the "Inspect (find
+        // instances)…" context-menu / button result is visible immediately —
+        // otherwise the user stays on the Fields tab and sees nothing happen
+        // (matches the InspectInstance / Address-Lookup handoff behaviour).
+        SelectedDetailTabIndex = TabIndexInspector;
         await Inspector.FindInstancesCommand.ExecuteAsync(null).ConfigureAwait(true);
     }
 
