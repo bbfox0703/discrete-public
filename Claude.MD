@@ -31,6 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Single Instance**: UI app uses Mutex to ensure only one instance runs
 - **Async everywhere**: All I/O, pipe operations, and alert actions must be async
 - **AOT compatible**: All C# code must be Native AOT / trimming compatible. No reflection-based APIs — use source generators instead (e.g. `[JsonSerializable]` context for `System.Text.Json`, `[ObservableProperty]` for MVVM)
+- **DataGrid columns never star-sized**: Read-only result/data grids MUST size columns with `Width="Auto"` (or fixed) + `MinWidth`, NEVER `Width="*"`/`"2*"`. Star columns force the total to fit the window, so widening one column shrinks the others — the user must NOT have to resize neighbours first. Auto + MinWidth lets total width exceed the window and the grid scrolls horizontally (Avalonia default). Star-fill is allowed ONLY in small editable input forms (e.g. MethodCallWindow). See [docs/ui-spec.md](docs/ui-spec.md).
 
 -----
 

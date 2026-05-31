@@ -147,7 +147,7 @@
         <DataGridTextColumn Header="{StaticResource Deploy.ColLastMessage}" Width="240"
                             Binding="{Binding LastOperationMessage}"
                             SortMemberPath="LastOperationMessage" CanUserSort="True" />
-        <DataGridTextColumn Header="{StaticResource Deploy.ColPath}"     Width="*" MinWidth="260"
+        <DataGridTextColumn Header="{StaticResource Deploy.ColPath}"     Width="Auto" MinWidth="260"
                             Binding="{Binding ExePath}"
                             SortMemberPath="ExePath" CanUserSort="True" />
       </DataGrid.Columns>

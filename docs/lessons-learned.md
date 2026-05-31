@@ -772,6 +772,44 @@ fires as fallback before the advisory note is set; only fields the
 v2 chain detector ALSO can't find still trigger the banner (e.g.
 the deferred Phase 28b-v3 `<>c` lambda-cache codegen pattern).
 
+### Phase 28b IL2CPP instance fields — displacement-scan heuristic (no `this` taint)
+
+**Context**: Instance fields have no single storage address (per-object on the
+GC heap), so the static-field RIP/chain scanners don't apply. The codegen for
+`this.field` is `mov reg, [base + fieldOffset]` where `base` derives from the
+instance pointer — the only stable signal is the **displacement == the field's
+offset within `Il2CppObject`** (`il2cpp_field_get_offset`, which already
+includes the 0x10 header for reference types).
+
+**Approach (v1, 2026-05-31)**: `FindInstanceFieldReferences` Zydis-decodes the
+**declaring class's own methods only** (filter `BuildMethodIndex` by ns+class;
+method end = next-greater address in the full sorted index, clamped to
+`start+8KB` and the section end; stop at `int3` padding) and emits every
+`[gpReg + fieldOffset]` access (base ≠ `rip`/`rsp`/`rbp`, `index==NONE`,
+`disp.size!=0`) as `confidence="heuristic"`, classified read/write via the
+memory operand's `ZYDIS_OPERAND_ACTION_MASK_*` (`lea` → read). The ExportAPI
+handler resolves the field's `isStatic` up front and dispatches static →
+`FindStaticFieldReferences`, instance → `FindInstanceFieldReferences`.
+
+**Why heuristic / why no taint**: `[reg+offset]` is ubiquitous; declaring-class
+scoping makes `disp==fieldOffset` *plausible* but not certain (the same method
+may touch another object at the same offset). A light rcx-derivation taint was
+considered (reusing ChainDetector's `ChainState` propagation) but deliberately
+**dropped for v1** — the simplest shippable version owns the FP risk via the
+`heuristic` tag + UI advisory instead of code. Revisit taint only if field
+testing shows the FP rate is unusable.
+
+**Known recall gaps (documented, accepted)**: external classes accessing a
+public field are missed (declaring-class scope only); accessors **inlined** into
+other-class callers are missed (inherent vs Mono's pre-JIT IL walk — Mono sees
+`ldfld` regardless of inlining). `this` spilled to the stack and reloaded is
+still matched (we key on the displacement, not the base's provenance), so that
+path keeps recall.
+
+**Rule**: for exact instance-field x-ref prefer the Mono backend; IL2CPP
+instance results are a best-effort heuristic. See
+[`IL2CPPFieldXref.cpp::FindInstanceFieldReferences`](../dll/src/il2cpp/IL2CPPFieldXref.cpp).
+
 ### Phase 28b-v2 chain detector — single-register tracking misses real IL2CPP codegen
 
 **Symptom**: First-cut Phase 28b-v2 chain detector returned 0 chain

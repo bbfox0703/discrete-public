@@ -36,6 +36,8 @@
 
 #include <windows.h>
 
+#include <Zydis/Zydis.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -81,6 +83,19 @@ inline std::int32_t ReadInt32LE(const std::uint8_t* p) noexcept {
         | (static_cast<std::uint32_t>(p[2]) << 16)
         | (static_cast<std::uint32_t>(p[3]) << 24);
     return static_cast<std::int32_t>(v);
+}
+
+// Canonicalise a register to its 64-bit enclosing form so rax / eax /
+// ax / al all compare equal. ZYDIS_REGISTER_NONE stays NONE. Duplicated
+// from IL2CPPChainDetector.cpp's anon namespace (same "duplicate the tiny
+// helper until a 3rd consumer appears" convention used there for
+// EnumerateExecutableSections) — promote to a shared header if a 3rd
+// consumer lands.
+inline ZydisRegister Canonical(ZydisRegister r) {
+    if (r == ZYDIS_REGISTER_NONE) return r;
+    ZydisRegister canon = ZydisRegisterGetLargestEnclosing(
+        ZYDIS_MACHINE_MODE_LONG_64, r);
+    return canon != ZYDIS_REGISTER_NONE ? canon : r;
 }
 
 // One entry in the per-image method-pointer index. Sorted by `address` so
@@ -304,6 +319,74 @@ ResolvedStaticField ResolveStaticField(const Il2CppImage* image,
         return out;
     }
     out.address = static_cast<std::uint8_t*>(staticBase) + out.offset;
+    return out;
+}
+
+// Phase 28b instance path — resolve an INSTANCE field's class + offset.
+// Mirrors ResolveStaticField's field-iteration prefix but does NOT touch
+// static storage (no class_get_static_data) and rejects STATIC fields
+// (the caller routes those to ResolveStaticField). `out.offset` is the
+// field's offset within the Il2CppObject INCLUDING the object header — the
+// exact value the AOT codegen encodes as the disp in `mov reg, [base+disp]`,
+// so it can be compared directly against a decoded memory operand's
+// displacement. `out.address` stays null (no single storage address for an
+// instance field — it lives per-object on the GC heap).
+ResolvedStaticField ResolveInstanceField(const Il2CppImage* image,
+                                         const std::string& ns,
+                                         const std::string& className,
+                                         const std::string& fieldName) {
+    ResolvedStaticField out;
+
+    out.klass = FindClass(image, ns, className);
+    if (out.klass == nullptr) {
+        out.error = "class not found: " + (ns.empty() ? className : ns + "." + className);
+        return out;
+    }
+
+    const auto& r = GetResolver();
+    if (r.class_get_fields == nullptr || r.field_get_name == nullptr) {
+        out.error = "il2cpp runtime missing field iteration exports";
+        return out;
+    }
+
+    void* iter = nullptr;
+    FieldInfo* targetField = nullptr;
+    for (;;) {
+        FieldInfo* f = SehNextField(r.class_get_fields, out.klass, &iter);
+        if (f == nullptr) break;
+        const char* name = r.field_get_name(f);
+        if (name == nullptr) continue;
+        if (fieldName == name) {
+            targetField = f;
+            if (r.field_get_offset != nullptr) out.offset = r.field_get_offset(f);
+            if (r.field_get_flags  != nullptr) out.flags  = r.field_get_flags(f);
+            out.isStatic = (out.flags & 0x10u) != 0;  // FieldAttributes::Static
+            if (r.field_get_type != nullptr && r.type_get_name != nullptr) {
+                if (const Il2CppType* ft = r.field_get_type(f)) {
+                    if (char* tn = r.type_get_name(ft)) {
+                        out.typeName = tn;
+                        if (r.free != nullptr) r.free(tn);
+                    }
+                }
+            }
+            break;
+        }
+    }
+    if (targetField == nullptr) {
+        out.error = "field not found: " + fieldName;
+        return out;
+    }
+    if (out.isStatic) {
+        // Caller should have routed this to ResolveStaticField. Defensive.
+        out.error = "internal: static field routed to instance resolver";
+        return out;
+    }
+    // Literal (0x40) instance fields don't exist in C# (const implies static),
+    // but be defensive — an inlined-constant offset is meaningless to scan for.
+    if ((out.flags & 0x40u) != 0) {
+        out.error = "literal field has no instance storage to scan for";
+        return out;
+    }
     return out;
 }
 
@@ -831,6 +914,228 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                 "correctly via IL walking.";
         }
     }
+
+    result.ok = true;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 28b instance path — INSTANCE-field reverse lookup.
+//
+// Static fields have a single RIP-addressable (or chain-reachable) storage
+// address, so the static scanner can match the WHOLE .text. Instance fields
+// live per-object on the GC heap — there is no single address to match. The
+// codegen for `this.field` is `mov reg, [base + fieldOffset]` where `base`
+// derives from the instance pointer; the only stable signal is the
+// displacement == the field's offset within Il2CppObject.
+//
+// `[reg + disp]` is ubiquitous, so to keep false positives sane we scope the
+// scan to the DECLARING CLASS'S OWN METHODS only (where `this` is an instance
+// of the target type, making disp==fieldOffset a plausible field access).
+// Within those methods every `[gpReg + fieldOffset]` access (base != RIP /
+// RSP / RBP, no index) is emitted as a HEURISTIC match — we do NOT taint-track
+// `this` in v1, so offset collisions with other objects touched in the same
+// method are possible. The UI surfaces confidence="heuristic" + an advisory.
+//
+// Known v1 recall gaps (documented, accepted): external classes accessing a
+// public field are missed (out of scope); cross-method inlining of accessors
+// is missed (inherent vs Mono's pre-JIT IL walk); rbp-spilled `this` reloads
+// are still matched (we match the displacement, not the base provenance).
+FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
+                                                const std::string& ns,
+                                                const std::string& className,
+                                                const std::string& fieldName,
+                                                FieldRefKind       kindFilter,
+                                                std::size_t        limit) {
+    FindFieldRefsResult result;
+    if (image == nullptr) { result.error = "image is null"; return result; }
+
+    const auto& r = GetResolver();
+    if (!r.resolved) { result.error = "il2cpp runtime not resolved"; return result; }
+
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) { result.error = "il2cpp domain unavailable"; return result; }
+
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) { result.error = "il2cpp thread attach failed"; return result; }
+
+    ResolvedStaticField target = ResolveInstanceField(image, ns, className, fieldName);
+    if (!target.error.empty()) { result.error = std::move(target.error); return result; }
+    result.staticAddress = nullptr;  // instance fields have no single storage addr
+
+    const std::size_t fieldOffset = target.offset;
+    if (fieldOffset == 0 || fieldOffset > 0x10000u) {
+        // Offset 0 (no real instance slot) / implausibly large (generic /
+        // thread-static sentinel). Proceed but log — a disp==0 match would be
+        // dominated by `[reg]`-with-no-disp noise (we require disp.size!=0 so
+        // disp==0 can't actually fire, but the log helps diagnose 0-match).
+        Log::Write(MagicStrings::LogCategoryWalk,
+                   "FieldXref(instance): suspicious fieldOffset=" +
+                   std::to_string(fieldOffset) + " for " +
+                   (ns.empty() ? className : ns + "." + className) + "." + fieldName);
+    }
+
+    void* gaBase = ModuleHelper::GetModuleBase(MagicStrings::ModuleIL2CPP);
+    if (gaBase == nullptr) {
+        result.error = "GameAssembly.dll not loaded — cannot run instance scan";
+        return result;
+    }
+    auto sections = EnumerateExecutableSections(gaBase);
+    if (sections.empty()) {
+        result.error = "no executable sections in GameAssembly.dll";
+        return result;
+    }
+    // Section-end lookup: clamp a method's decode range to the section it
+    // starts in so we never read past .text into the next section.
+    auto sectionEndFor = [&sections](std::uintptr_t ip) -> std::uintptr_t {
+        for (const auto& s : sections) {
+            if (ip >= s.va && ip < s.va + s.size) return s.va + s.size;
+        }
+        return 0;  // not in any executable section
+    };
+
+    // Full sorted method index (drives method-end via next-greater address
+    // and the scanned-method count).
+    std::vector<MethodIndexEntry> methodIndex = BuildMethodIndex(image,
+                                                                 &result.scannedMethods);
+
+    Log::Write(MagicStrings::LogCategoryWalk,
+               "FieldXref(instance): target " +
+               (ns.empty() ? className : ns + "." + className) + "." + fieldName +
+               " offset=" + std::to_string(fieldOffset) +
+               " type=" + target.typeName +
+               " methodIndex=" + std::to_string(methodIndex.size()));
+
+    ZydisDecoder decoder;
+    ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+
+    // Per-method decode range cap. Real Unity AOT methods are almost always
+    // < 8 KB; huge switch/Burst methods are rare and clamping them only loses
+    // a few far-out hits, which is the right trade for a heuristic.
+    constexpr std::size_t kMaxMethodBytes = 8u * 1024u;
+    std::vector<std::uint8_t> buf(kMaxMethodBytes);
+
+    std::size_t scannedDeclMethods = 0;
+    std::size_t candidateHits      = 0;
+    std::size_t droppedKindFilter  = 0;
+
+    for (std::size_t mi = 0; mi < methodIndex.size() && !result.truncated; ++mi) {
+        const MethodIndexEntry& m = methodIndex[mi];
+        if (m.ns != ns || m.className != className) continue;
+        ++scannedDeclMethods;
+
+        const std::uintptr_t methodStart = m.address;
+        // end = next-greater address in the FULL sorted index (the next
+        // method's entry), clamped to start+cap and the section end.
+        std::uintptr_t methodEnd = methodStart + kMaxMethodBytes;
+        if (mi + 1 < methodIndex.size()) {
+            const std::uintptr_t next = methodIndex[mi + 1].address;
+            if (next > methodStart && next < methodEnd) methodEnd = next;
+        }
+        const std::uintptr_t secEnd = sectionEndFor(methodStart);
+        if (secEnd == 0) continue;  // method entry not in an exec section
+        if (methodEnd > secEnd) methodEnd = secEnd;
+
+        std::size_t rangeLen = static_cast<std::size_t>(methodEnd - methodStart);
+        if (rangeLen == 0) continue;
+        if (rangeLen > kMaxMethodBytes) rangeLen = kMaxMethodBytes;
+
+        if (!Memory::SafeReadBytes(reinterpret_cast<const void*>(methodStart),
+                                   buf.data(), rangeLen)) {
+            // AC-stripped page or unreadable — skip this method.
+            continue;
+        }
+
+        // Linear-decode the method body. Stop at the first int3 (0xCC)
+        // padding run or a decode failure (clamped tail) — both signal we've
+        // run off the end of the real method, which kills cross-method FPs.
+        std::size_t consumed = 0;
+        while (consumed < rangeLen && !result.truncated) {
+            if (buf[consumed] == 0xCC) break;  // int3 padding → end of method
+            ZydisDecodedInstruction instr;
+            ZydisDecodedOperand     operands[ZYDIS_MAX_OPERAND_COUNT];
+            ZyanStatus status = ZydisDecoderDecodeFull(
+                &decoder, buf.data() + consumed, rangeLen - consumed,
+                &instr, operands);
+            if (!ZYAN_SUCCESS(status)) break;  // clamped tail / bad bytes
+
+            const std::uintptr_t insnIP = methodStart + consumed;
+
+            for (std::uint8_t oi = 0; oi < instr.operand_count_visible; ++oi) {
+                const ZydisDecodedOperand& op = operands[oi];
+                if (op.type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
+                if (op.mem.disp.size == 0) continue;                 // no disp
+                if (op.mem.index != ZYDIS_REGISTER_NONE) continue;   // [base+index*s]
+                if (static_cast<std::size_t>(op.mem.disp.value) != fieldOffset) continue;
+                const ZydisRegister base = Canonical(op.mem.base);
+                if (base == ZYDIS_REGISTER_NONE) continue;           // [disp] absolute
+                if (base == ZYDIS_REGISTER_RIP)  continue;           // static path
+                if (base == ZYDIS_REGISTER_RSP)  continue;           // stack frame
+                if (base == ZYDIS_REGISTER_RBP)  continue;           // frame local
+
+                // Classify read vs write from the memory operand's action.
+                // lea computes an address (AGEN, no read/write action) — treat
+                // as a read, matching the static path's LEA → "read".
+                const char* k;
+                if (instr.mnemonic == ZYDIS_MNEMONIC_LEA) {
+                    k = "read";
+                } else if (op.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) {
+                    k = "write";
+                } else if (op.actions & ZYDIS_OPERAND_ACTION_MASK_READ) {
+                    k = "read";
+                } else {
+                    continue;  // memory operand neither read nor written — skip
+                }
+
+                ++candidateHits;
+                if (kindFilter == FieldRefKind::Read  && std::strcmp(k, "read")  != 0) {
+                    ++droppedKindFilter; continue;
+                }
+                if (kindFilter == FieldRefKind::Write && std::strcmp(k, "write") != 0) {
+                    ++droppedKindFilter; continue;
+                }
+
+                FieldRefMatch hit;
+                hit.ns             = m.ns;
+                hit.className      = m.className;
+                hit.methodName     = m.methodName;
+                hit.methodToken    = m.methodToken;
+                hit.methodFlags    = m.methodFlags;
+                hit.isMethodStatic = m.isMethodStatic;
+                hit.methodAddress  = reinterpret_cast<void*>(methodStart);
+                hit.hitAddress     = reinterpret_cast<void*>(insnIP);
+                hit.isStatic       = false;
+                hit.refKind        = k;
+                hit.confidence     = "heuristic";
+                result.matches.push_back(std::move(hit));
+                if (result.matches.size() >= limit) { result.truncated = true; break; }
+            }
+
+            consumed += instr.length;
+        }
+    }
+
+    // Dedup by hitAddress (one instruction can in principle be emitted once
+    // per matching memory operand; collapse to one row per IP). Matches the
+    // chain detector's sort+unique-by-hitIP house style.
+    std::sort(result.matches.begin(), result.matches.end(),
+              [](const FieldRefMatch& a, const FieldRefMatch& b) {
+                  return a.hitAddress < b.hitAddress;
+              });
+    result.matches.erase(
+        std::unique(result.matches.begin(), result.matches.end(),
+                    [](const FieldRefMatch& a, const FieldRefMatch& b) {
+                        return a.hitAddress == b.hitAddress;
+                    }),
+        result.matches.end());
+
+    Log::Write(MagicStrings::LogCategoryWalk,
+               "FieldXref(instance): scan complete — declMethods=" +
+               std::to_string(scannedDeclMethods) +
+               " candidateHits=" + std::to_string(candidateHits) +
+               " emitted=" + std::to_string(result.matches.size()) +
+               " droppedKindFilter=" + std::to_string(droppedKindFilter) +
+               " truncated=" + (result.truncated ? "1" : "0"));
 
     result.ok = true;
     return result;

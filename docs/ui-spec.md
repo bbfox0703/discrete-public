@@ -250,6 +250,37 @@ Avalonia context.
 
 ---
 
+## DataGrid column widths (recurring trap — see CLAUDE.md rule)
+
+Read-only **result / data** grids must size columns with `Width="Auto"`
+(or a fixed px width) plus a `MinWidth`, and **never** `Width="*"` / `"2*"`.
+
+Why: a star column makes the DataGrid redistribute the *fixed window width*
+across its columns, so the total can never exceed the window — to widen one
+column the user must first shrink its neighbours (exactly the friction
+reported repeatedly). With `Auto` + `MinWidth`, each column sizes to its
+content (or its floor), the row's total may exceed the window, and the grid
+shows a horizontal scrollbar (Avalonia default). Widening any column then
+just widens the row; nothing else moves.
+
+- ✅ `Width="Auto" MinWidth="200"` / `Width="120"` — independent resize, scrolls.
+- ❌ `Width="*"` / `Width="2*"` — forces fit-to-window, couples columns.
+- **Exception**: small editable input / selection forms with a fixed handful
+  of columns (`MethodCallWindow` param-value cell; the SPC-Query snapshot
+  picker) may star-fill — there's no overflow to solve there.
+
+Fixed by build #864 across the result grids: FieldReferencesWindow,
+FieldAcrossInstancesWindow, MethodOverloadsWindow, ProcessPickerWindow,
+ProxyDeployWindow. The Browser Fields/Methods grids already followed this.
+
+Also keep `MinWidth` itself modest — it's a floor, not a target. With
+`Width="Auto"` the column already grows to content, so an oversized `MinWidth`
+just forces dead whitespace (and pushes later columns off-screen needlessly).
+The Inspector grid's Name/Type/Value floors were trimmed (220/160/320 →
+120/110/140) for this reason (build #864).
+
+---
+
 ## Windows
 
 | Window | Modal? | Purpose |

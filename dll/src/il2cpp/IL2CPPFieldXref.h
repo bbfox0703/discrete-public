@@ -8,14 +8,15 @@
 // via binary search against a sorted method-pointer index built from
 // every class in the searched assemblies' image.
 //
-// Instance fields are NOT supported in v1 — they'd need heuristic
-// `mov reg, [rcx+offset]` AOB scans whose false-positive rate is too
-// high to ship with confidence. The pipe handler returns a clean
-// "not supported in v1" error so the UI can surface the limitation
-// gracefully.
+// Instance fields use a separate scanner — FindInstanceFieldReferences —
+// which Zydis-decodes the DECLARING CLASS's own methods looking for
+// `[gpReg + fieldOffset]` accesses (base != rip/rsp/rbp). These are emitted
+// with confidence="heuristic" because the displacement alone (no taint of
+// `this`) can collide with unrelated objects touched in the same method.
 //
-// Confidence: "exact" — RIP-relative encoding is unambiguous, the
-// disp32 + IP arithmetic recovers a single absolute target.
+// Confidence: static path = "exact" (RIP-relative encoding is unambiguous,
+// disp32 + IP arithmetic recovers a single absolute target); instance path =
+// "heuristic" (displacement match within declaring-class scope, no taint).
 #pragma once
 
 #include "IL2CPPTypes.h"
@@ -87,5 +88,20 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                                               const std::string& fieldName,
                                               FieldRefKind       kindFilter,
                                               std::size_t        limit);
+
+// Phase 28b instance path — scans the declaring class's own AOT methods for
+// `[gpReg + fieldOffset]` accesses (base != rip/rsp/rbp, no index), emitting
+// each as a confidence="heuristic" match classified read/write by the memory
+// operand's action. See the .cpp header comment for the v1 recall gaps
+// (external-class access / cross-method inlining missed; rbp-spilled `this`
+// still matched by displacement). Returns ok=false + `error` when the field
+// isn't found, is static (route to FindStaticFieldReferences), or the runtime
+// isn't resolved.
+FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
+                                                const std::string& ns,
+                                                const std::string& className,
+                                                const std::string& fieldName,
+                                                FieldRefKind       kindFilter,
+                                                std::size_t        limit);
 
 }  // namespace Discrete::IL2CPP

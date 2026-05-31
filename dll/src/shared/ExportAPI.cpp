@@ -5275,14 +5275,17 @@ void RegisterCoreHandlers() {
         return response;
     });
 
-    // Phase 28b — findFieldReferences (IL2CPP). Static fields only in v1.
-    // Resolves the field's static-storage address via
-    // il2cpp_class_get_static_data + offset, then scans GameAssembly.dll's
-    // .text for `mov reg, [rip+disp32]` / `lea reg, [rip+disp32]` /
-    // `mov [rip+disp32], reg` whose absolute target hits the field. Each
-    // hit is attributed to its enclosing method via binary search against
-    // a sorted method-pointer index built from the target image. Instance
-    // fields return a clean error so the UI can surface the v1 limitation.
+    // Phase 28b — findFieldReferences (IL2CPP). Dispatches on static vs
+    // instance:
+    //   * STATIC → FindStaticFieldReferences: resolve static-storage address
+    //     via il2cpp_class_get_static_data + offset, scan GameAssembly.dll's
+    //     .text for `mov/lea reg, [rip+disp32]` (+ chain/lazy-init fallbacks)
+    //     whose absolute target hits the field. confidence="exact".
+    //   * INSTANCE → FindInstanceFieldReferences: Zydis-decode the declaring
+    //     class's own methods for `[gpReg + fieldOffset]` accesses (base !=
+    //     rip/rsp/rbp). confidence="heuristic" (displacement match, no taint).
+    // Each hit is attributed to its enclosing method via the sorted method-
+    // pointer index built from the target image.
     PipeServer::RegisterHandler(MagicStrings::CmdFindFieldReferences,
         [formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
@@ -5309,24 +5312,58 @@ void RegisterCoreHandlers() {
         const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assembly);
         if (img == nullptr) return json{{"error", "assembly not found: " + assembly}};
 
-        auto fr = IL2CPP::FindStaticFieldReferences(img, ns, klassNm, fieldNm, kind,
-                                                    static_cast<std::size_t>(limit));
+        // Phase 28b — resolve the field's static-vs-instance flag up front so
+        // we dispatch to the right scanner. Static fields → RIP/chain scan
+        // (exact); instance fields → declaring-class AOB scan (heuristic).
+        IL2CPP::Il2CppClass* targetClassForFlags = IL2CPP::FindClass(img, ns, klassNm);
+        if (targetClassForFlags == nullptr) {
+            return json{{"error", "class not found: " +
+                         (ns.empty() ? klassNm : ns + "." + klassNm)}};
+        }
+        bool fieldIsStatic = false;
+        bool fieldFound     = false;
+        {
+            auto info = IL2CPP::ReadClassInfo(targetClassForFlags);
+            if (info.ok) {
+                for (const auto& f : info.info.fields) {
+                    if (f.name == fieldNm) {
+                        fieldIsStatic = (f.flags & 0x10u) != 0;
+                        fieldFound    = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!fieldFound) {
+            return json{{"error", "field not found: " + fieldNm}};
+        }
+
+        auto fr = fieldIsStatic
+            ? IL2CPP::FindStaticFieldReferences(img, ns, klassNm, fieldNm, kind,
+                                                static_cast<std::size_t>(limit))
+            : IL2CPP::FindInstanceFieldReferences(img, ns, klassNm, fieldNm, kind,
+                                                  static_cast<std::size_t>(limit));
         if (!fr.ok && !fr.error.empty()) {
             return json{{"error", fr.error}};
         }
 
         // Resolve field metadata for the response header.
         json fieldInfo = json::object();
-        fieldInfo["name"]          = fieldNm;
-        fieldInfo["staticAddress"] = formatHex(reinterpret_cast<std::uintptr_t>(fr.staticAddress));
-        if (IL2CPP::Il2CppClass* targetK = IL2CPP::FindClass(img, ns, klassNm)) {
-            auto info = IL2CPP::ReadClassInfo(targetK);
+        fieldInfo["name"]     = fieldNm;
+        fieldInfo["isStatic"] = fieldIsStatic;
+        // staticAddress is meaningful only for the static path — instance
+        // fields have no single storage address (per-object on the GC heap).
+        if (fieldIsStatic) {
+            fieldInfo["staticAddress"] =
+                formatHex(reinterpret_cast<std::uintptr_t>(fr.staticAddress));
+        }
+        {
+            auto info = IL2CPP::ReadClassInfo(targetClassForFlags);
             if (info.ok) {
                 for (const auto& f : info.info.fields) {
                     if (f.name == fieldNm) {
                         fieldInfo["offset"]   = f.offset;
                         fieldInfo["type"]     = f.typeName;
-                        fieldInfo["isStatic"] = (f.flags & 0x10u) != 0;
                         break;
                     }
                 }

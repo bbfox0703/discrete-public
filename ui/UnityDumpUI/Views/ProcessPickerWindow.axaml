@@ -70,7 +70,7 @@
         <DataGridTextColumn Header="{StaticResource Picker.ColBackend}" Width="90"
                             Binding="{Binding BackendLabel}"
                             SortMemberPath="BackendLabel" CanUserSort="True" />
-        <DataGridTextColumn Header="{StaticResource Picker.ColPath}"    Width="*" MinWidth="260"
+        <DataGridTextColumn Header="{StaticResource Picker.ColPath}"    Width="Auto" MinWidth="260"
                             Binding="{Binding Path}"
                             SortMemberPath="Path" CanUserSort="True" />
       </DataGrid.Columns>

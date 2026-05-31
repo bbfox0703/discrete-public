@@ -645,19 +645,28 @@ single Unity field, returns every method that reads or writes it.
   matching `ldfld`(0x7B) / `ldflda`(0x7C) / `stfld`(0x7D) / `ldsfld`(0x7E)
   / `ldsflda`(0x7F) / `stsfld`(0x80) operand tokens against the target
   field's `mono_class_get_field_token`. Exact, no false positives.
-* **IL2CPP** static fields ONLY in v1. Resolves the field's static-storage
-  absolute address via `il2cpp_class_get_static_data(klass) + field.offset`,
-  scans `GameAssembly.dll`'s `.text` for `mov reg, [rip+disp32]` /
+* **IL2CPP static** fields: resolve the field's static-storage absolute
+  address via `il2cpp_class_get_static_data(klass) + field.offset`, scan
+  `GameAssembly.dll`'s `.text` for `mov reg, [rip+disp32]` /
   `lea reg, [rip+disp32]` / `mov [rip+disp32], reg` instructions whose
-  absolute target matches, then attributes each hit to its enclosing
-  method via binary search against a sorted method-pointer index built
-  from the target image's classes. Instance fields return
-  `error: "field references for instance fields not supported on IL2CPP
-  backend in v1"` — surface this in the UI cleanly.
+  absolute target matches (+ a class-pointer chain detector + lazy-init slot
+  scanner fallback for runtime-heap `static_fields`), then attribute each hit
+  to its enclosing method via binary search against a sorted method-pointer
+  index. `confidence: "exact"`.
+* **IL2CPP instance** fields: Zydis-decode the **declaring class's own
+  methods** for `[gpReg + fieldOffset]` accesses (base ≠ `rip`/`rsp`/`rbp`,
+  no index, `disp == field.offset`), classified read/write by the memory
+  operand's action (`lea` → read). `confidence: "heuristic"` — the
+  displacement match is not taint-checked against `this`, and the field
+  header carries **no** `staticAddress` (instance fields have no single
+  storage address). Method end is the next method's AOT entry, clamped to
+  start+8 KB / the section end, terminated at `int3` padding.
 
 **Scope (v1)**: same-assembly references only — cross-assembly access
 uses MemberRef tokens (Mono) / methods in other images (IL2CPP), both
-deferred to v2 if a consumer asks.
+deferred to v2 if a consumer asks. IL2CPP instance scan is additionally
+scoped to the **declaring class** (references from other classes / inlined
+accessors are missed; prefer Mono for exactness).
 
 | Arg | Type | Notes |
 | --- | --- | --- |
@@ -734,24 +743,63 @@ deferred to v2 if a consumer asks.
 // }
 ```
 
+```jsonc
+// IL2CPP response shape (INSTANCE field Game.Player.currentHp)
+// → {
+//   "ok": true,
+//   "field": {
+//     "name":     "currentHp",
+//     "type":     "System.Int32",
+//     "offset":   24,            // offset within Il2CppObject (incl. header)
+//     "isStatic": false
+//     // NO staticAddress — instance fields have no single storage address
+//   },
+//   "references": [
+//     {
+//       "assembly":      "Assembly-CSharp",
+//       "namespace":     "Game",
+//       "class":         "Player",       // declaring-class scope only
+//       "method":        "TakeDamage",
+//       "methodToken":   100663700,
+//       "methodFlags":   134,
+//       "isMethodStatic": false,
+//       "isStatic":      false,
+//       "kind":          "read",         // "read" / "write" (mem operand action)
+//       "confidence":    "heuristic",    // displacement match, no `this` taint
+//       "address":       "0x00007FF876123450", // enclosing method's AOT entry
+//       "hitAddress":    "0x00007FF876123461"  // exact IP of the matching insn
+//     }
+//   ],
+//   "scanned_methods": 87,
+//   "truncated":       false
+// }
+```
+
 **Backend shape diffs (small)**:
 
 | Field on row | Mono | IL2CPP |
 |---|---|---|
 | `address`    | always `null` | enclosing method's AOT entry |
 | `hitAddress` | absent | exact IP of the matching insn |
-| `ilOffset`   | byte offset of the IL op | absent (RIP scan is native, no IL boundary) |
+| `ilOffset`   | byte offset of the IL op | absent (native scan, no IL boundary) |
+| `confidence` | `"exact"` | `"exact"` (static) / `"heuristic"` (instance) |
 
 | Field on header | Mono | IL2CPP |
 |---|---|---|
 | `token`         | target field's metadata token | absent |
-| `staticAddress` | absent | resolved static-storage absolute address |
+| `staticAddress` | absent | static fields only (absent for instance fields) |
 
 **Caveats**:
 
-- IL2CPP **instance fields** return an error, not an empty result — by
-  design, so the UI can show "not supported in v1" instead of misleading
-  the user into thinking the field genuinely has zero references.
+- IL2CPP **instance fields** use a heuristic, declaring-class-scoped scan
+  (`confidence: "heuristic"`). Known recall gaps: references from **other
+  classes** to a public field are missed (scope is the declaring class);
+  accessors **inlined** into other-class callers are missed (inherent vs
+  Mono's pre-JIT IL walk). `this` spilled to the stack and reloaded is still
+  matched (the scan keys on the displacement, not the base's provenance), so
+  that path keeps recall. False positives are possible (offset collisions
+  with other objects touched in the same method) — prefer the Mono backend
+  when exactness matters. Static fields work on both backends.
 - IL2CPP **opcode coverage** is `0x8B` (MOV load) / `0x8D` (LEA) / `0x89`
   (MOV store) at both 6-byte (no REX) and 7-byte (REX prefix) forms.
   `MOV r/m, imm32` (0xC7) and SIMD `movss` / `movsd` (0xF3/0xF2 0x0F 0x10)

@@ -7,11 +7,11 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #839 |
-| **Current phase** | ✅ Phase 30 + scan P1/P2 全 SHIPPED & merged to `main` |
-| **Branches** | `dev == main == origin` |
-| **Tests** | 642 UI tests green;兩個 DLL(x64+x86)build clean |
-| **Mid-flight** | 無(nothing in flight) |
+| **Current build** | #863 |
+| **Current phase** | ✅ Phase 28b IL2CPP instance-field xref SHIPPED(待 live-smoke);Phase 30 + scan P1/P2 已 merged |
+| **Branches** | `dev == main == origin`(28b-instance 尚未 commit)|
+| **Tests** | 644 UI tests green;兩個 DLL(x64+x86)build clean |
+| **Mid-flight** | Phase 28b IL2CPP instance-field xref — code+build+tests done,**待實機 live-smoke**(IL2CPP 64-bit instance field → heuristic matches)|
 
 **UI 修正批次(2026-05-30,Inspector + Value Search)**:
 - **List<T> 可展開** — `InstanceFieldClassifier`/`UnityTypeMap`/`CeXmlExporter` 同時接受 IL-form `List`1<>` 與 live demangled `List<>`;`enchantList_`/`hasSkill_` 等現有展開箭頭 + Copy CE XML 正確 per-slot。

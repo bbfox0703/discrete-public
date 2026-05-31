@@ -228,45 +228,68 @@ public class FindFieldReferencesTests
     }
 
     [Fact]
-    public async Task FindFieldReferences_InstanceFieldOnIL2CPP_SurfacesV1NotSupportedError()
+    public async Task FindFieldReferences_IL2CPPInstanceShape_DecodesHeuristicConfidence()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        // IL2CPP v1 returns a clean error string for instance-field
-        // queries — the UI surfaces this in the modal's error banner
-        // instead of crashing. We inject the error at the envelope level
-        // (not inside `result`) so the adapter's `ThrowIfError` trips.
-        string pipeName = $"DiscreteUITest_FFR_E_{Guid.NewGuid():N}";
-        var server = new NamedPipeServerStream(
-            pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-        var client = new PipeClient(pipeName);
+        // Phase 28b instance path: the DLL now Zydis-decodes the declaring
+        // class's own methods for `[reg+fieldOffset]` accesses and returns
+        // confidence="heuristic" rows (instead of the old v1 error). The
+        // field header carries isStatic=false and NO staticAddress (instance
+        // fields have no single storage address); rows carry address (method
+        // AOT entry) + hitAddress (exact insn IP) but NO ilOffset (native
+        // scan). This verifies the deserializer round-trips that shape.
+        string response = """
+        {
+          "ok": true,
+          "field": {
+            "name":     "currentHp",
+            "type":     "System.Int32",
+            "offset":   24,
+            "isStatic": false
+          },
+          "references": [
+            { "assembly": "Assembly-CSharp", "namespace": "Game",
+              "class": "Player", "method": "TakeDamage",
+              "methodToken": 100663700, "methodFlags": 134, "isMethodStatic": false,
+              "isStatic": false, "kind": "read", "confidence": "heuristic",
+              "address": "0x00007FF876123450", "hitAddress": "0x00007FF876123461" },
+            { "assembly": "Assembly-CSharp", "namespace": "Game",
+              "class": "Player", "method": "TakeDamage",
+              "methodToken": 100663700, "methodFlags": 134, "isMethodStatic": false,
+              "isStatic": false, "kind": "write", "confidence": "heuristic",
+              "address": "0x00007FF876123450", "hitAddress": "0x00007FF876123468" }
+          ],
+          "scanned_methods": 87,
+          "truncated": false
+        }
+        """;
+        var (adapter, serverTask, server, client) = await StartPairAsync(response, ct);
         try
         {
-            Task waitConn = server.WaitForConnectionAsync(ct);
-            await client.ConnectAsync(timeoutMs: 2000, ct).ConfigureAwait(true);
-            await waitConn.ConfigureAwait(true);
-
-            // Hand-rolled envelope — wraps the error at the envelope level
-            // (not inside the result). Adapter's ThrowIfError must trip.
-            Task serverTask = Task.Run(async () =>
-            {
-                using var reader = new StreamReader(server, Encoding.UTF8, false, 4096, leaveOpen: true);
-                using var writer = new StreamWriter(server, new UTF8Encoding(false), 4096, leaveOpen: true)
-                { NewLine = "\n", AutoFlush = true };
-                string requestLine = (await reader.ReadLineAsync(ct).ConfigureAwait(false))!;
-                using var reqDoc = JsonDocument.Parse(requestLine);
-                int id = reqDoc.RootElement.GetProperty("id").GetInt32();
-                string envelope = $"{{\"id\":{id},\"error\":{{\"message\":\"field references for instance fields not supported on IL2CPP backend in v1\"}}}}";
-                await writer.WriteLineAsync(envelope).ConfigureAwait(false);
-            }, ct);
-
-            var adapter = new BackendAdapter(client);
-            var ex = await Assert.ThrowsAsync<PipeProtocolException>(async () =>
-                await adapter.FindFieldReferencesAsync(
-                    "Assembly-CSharp", "Game", "Player", "instanceHp",
-                    kind: "any", limit: 200, ct).ConfigureAwait(true));
-            Assert.Contains("instance fields", ex.Message);
+            FindFieldReferencesResult result = await adapter.FindFieldReferencesAsync(
+                "Assembly-CSharp", "Game", "Player", "currentHp",
+                kind: "any", limit: 200, ct)
+                .ConfigureAwait(true);
 
             await serverTask.ConfigureAwait(true);
+
+            Assert.True(result.Ok);
+            Assert.NotNull(result.Field);
+            Assert.False(result.Field!.IsStatic);          // instance field
+            Assert.Null(result.Field.StaticAddress);       // no single storage addr
+            Assert.Null(result.Field.Token);               // IL2CPP shape (no Mono token)
+            Assert.Equal(24, result.Field.Offset);
+
+            Assert.Equal(2, result.References.Count);
+            var read = result.References[0];
+            Assert.Equal("read",      read.Kind);
+            Assert.Equal("heuristic", read.Confidence);    // <- the key assertion
+            Assert.False(read.IsStatic);
+            Assert.Equal("0x00007FF876123461", read.HitAddress);
+            Assert.Equal("0x00007FF876123450", read.Address);
+            Assert.Null(read.IlOffset);                    // native scan, no IL offset
+            Assert.Equal("write",     result.References[1].Kind);
+            Assert.Equal("heuristic", result.References[1].Confidence);
         }
         finally
         {
