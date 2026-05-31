@@ -59,43 +59,134 @@ public partial class MainWindow : Window
         Loaded += (_, _) => WireSortComparersForAllGrids();
 
         // Avalonia 12 dual-monitor restore quirk: when the window goes
-        // Normal → Maximized, Avalonia auto-saves the pre-maximize
-        // bounds; but on dual-monitor setups with mismatched DPI scales
-        // the restore math sometimes lands the window straddling the
-        // monitor boundary instead of returning to its original
-        // position. Track the bounds ourselves on Normal → Maximized
-        // and force-restore them on Maximized → Normal.
+        // Normal → Maximized → Normal, Avalonia's auto-restore math can
+        // land the window straddling the monitor boundary instead of
+        // returning to its original position/size (worst on dual-monitor
+        // setups with mismatched DPI scales). We snapshot the last known
+        // Normal bounds ourselves and force-restore them on the way back.
+        //
+        // The catch: on Windows the property-change ORDER during a
+        // maximize is (Width/Height first, WindowState second). Capturing
+        // bounds synchronously inside the WindowState handler therefore
+        // reads the ALREADY-maximized dimensions. Instead we keep the
+        // snapshot continuously fresh while the window is Normal, via the
+        // Width/Height/Position change handlers, with a deferred commit
+        // (see ScheduleSnapshotCommit) that re-checks WindowState so a
+        // concurrent maximize in the same Win32 message doesn't poison it.
+        PositionChanged += OnWindowPositionChanged;
         PropertyChanged += OnWindowPropertyChanged;
+        // Seed the snapshot with the XAML-declared defaults so the very
+        // first restore (without a prior maximize) still has sane values.
+        _normalWidth     = Width;
+        _normalHeight    = Height;
+        _pendingWidth    = Width;
+        _pendingHeight   = Height;
+        _pendingPosition = Position;
     }
 
-    private PixelPoint? _preMaximizePosition;
-    private double      _preMaximizeWidth;
-    private double      _preMaximizeHeight;
+    /// <summary>
+    /// Position + size of the window the last time it was confirmed to be
+    /// in <see cref="WindowState.Normal"/>. Re-applied when the window
+    /// returns to Normal so a Maximized → Normal restore lands back on the
+    /// monitor it started from at its original size.
+    /// </summary>
+    private PixelPoint? _normalPosition;
+    private double      _normalWidth;
+    private double      _normalHeight;
+    private WindowState _previousWindowState = WindowState.Normal;
+
+    // Deferred-commit snapshot state. On Windows + Avalonia 12 the
+    // property-change order during a maximize is (Width/Height first,
+    // WindowState second), so reading WindowState inside the Width/Height
+    // handler still sees Normal when the values are already the maximized
+    // dimensions. Committing synchronously at that point poisons the
+    // snapshot — the next restore then lands at near-maximized size. We
+    // stash into _pending* and commit one dispatcher tick later at
+    // Background priority; the commit re-checks WindowState and abandons
+    // when it has flipped to non-Normal.
+    private double      _pendingWidth;
+    private double      _pendingHeight;
+    private PixelPoint  _pendingPosition;
+    private bool        _snapshotCommitScheduled;
+
+    private void OnWindowPositionChanged(object? sender, PixelPointEventArgs e)
+    {
+        if (WindowState == WindowState.Normal)
+        {
+            _pendingPosition = Position;
+            ScheduleSnapshotCommit();
+        }
+    }
 
     private void OnWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
     {
-        if (e.Property != WindowStateProperty) return;
-        var oldState = (WindowState)e.OldValue!;
-        var newState = (WindowState)e.NewValue!;
-
-        if (oldState == WindowState.Normal && newState == WindowState.Maximized)
+        if (e.Property == WindowStateProperty)
         {
-            // Save where we WERE before maximizing.
-            _preMaximizePosition = Position;
-            _preMaximizeWidth    = Width;
-            _preMaximizeHeight   = Height;
+            var newState = (WindowState)e.NewValue!;
+            HandleWindowStateTransition(_previousWindowState, newState);
+            _previousWindowState = newState;
         }
-        else if (oldState == WindowState.Maximized && newState == WindowState.Normal
-                 && _preMaximizePosition is { } savedPos)
+        else if (e.Property == WidthProperty || e.Property == HeightProperty)
         {
-            // Avalonia has already restored the window to *some* bounds
-            // by the time this fires; override with the bounds we
-            // captured pre-maximize. PixelPoint is screen-coordinates
-            // so this snaps the window back onto the exact monitor it
-            // started on.
-            Position = savedPos;
-            if (_preMaximizeWidth  > 0) Width  = _preMaximizeWidth;
-            if (_preMaximizeHeight > 0) Height = _preMaximizeHeight;
+            // Stash, but commit later (see the field comments). Reading
+            // WindowState here is unreliable on the to-maximized
+            // transition.
+            if (WindowState == WindowState.Normal)
+            {
+                _pendingWidth  = Width;
+                _pendingHeight = Height;
+                ScheduleSnapshotCommit();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Queue a deferred snapshot commit on the dispatcher at Background
+    /// priority. Coalesced: scheduling while a commit is already pending
+    /// is a no-op.
+    /// </summary>
+    private void ScheduleSnapshotCommit()
+    {
+        if (_snapshotCommitScheduled) return;
+        _snapshotCommitScheduled = true;
+        Avalonia.Threading.Dispatcher.UIThread.Post(
+            CommitSnapshot,
+            Avalonia.Threading.DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// Apply the pending snapshot — but only if the window is still in
+    /// <see cref="WindowState.Normal"/> at commit time. If a WindowState
+    /// change snuck in during the same dispatcher tick (the bug we're
+    /// guarding against), the state will have flipped by now and the
+    /// pending values are the maximized dimensions we don't want.
+    /// </summary>
+    private void CommitSnapshot()
+    {
+        _snapshotCommitScheduled = false;
+        if (WindowState != WindowState.Normal) return;
+        if (_pendingWidth  > 0) _normalWidth  = _pendingWidth;
+        if (_pendingHeight > 0) _normalHeight = _pendingHeight;
+        _normalPosition = _pendingPosition;
+    }
+
+    private void HandleWindowStateTransition(WindowState oldState, WindowState newState)
+    {
+        // Leaving Normal: the snapshot was already kept fresh by the
+        // property-change handlers above. Nothing to do here.
+        if (oldState == WindowState.Normal && newState != WindowState.Normal)
+        {
+            return;
+        }
+        // Returning to Normal: re-apply the snapshot. Without this,
+        // restoring from Maximized on a multi-monitor setup can land the
+        // window straddling both screens. PixelPoint is screen-coordinates
+        // so this snaps it back onto the exact monitor it started on.
+        if (newState == WindowState.Normal && oldState != WindowState.Normal)
+        {
+            if (_normalPosition is { } pos) Position = pos;
+            if (_normalWidth  > 0) Width  = _normalWidth;
+            if (_normalHeight > 0) Height = _normalHeight;
         }
     }
 
