@@ -1677,7 +1677,7 @@
                               Text="{Binding Snapshot.ScopeAssemblyQuery, Mode=TwoWay}"
                               FilterMode="Contains"
                               MinimumPrefixLength="0"
-                              Watermark="＋ add assembly… (type to filter)"
+                              PlaceholderText="＋ add assembly… (type to filter)"
                               ToolTip.Tip="Pick a game assembly to append to the Scope filter. Populated on connect; type to filter the list by substring; selecting one adds it to the box on the left (deduped)."/>
                     <TextBox Text="{Binding Snapshot.ScopeAssembliesText, Mode=TwoWay}"
                              VerticalAlignment="Center"
