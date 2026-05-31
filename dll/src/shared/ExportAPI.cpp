@@ -2405,7 +2405,23 @@ void RegisterCoreHandlers() {
         };
     });
 
-    auto resolveClassFromArgs = [](const json& args, std::string& errOut) -> Mono::MonoClass* {
+    auto resolveClassFromArgs = [parseAddr](const json& args, std::string& errOut) -> Mono::MonoClass* {
+        // Header path (Inspector drilldown): resolve the LIVE runtime class from
+        // the object's own vtable via mono_object_get_class. That class is
+        // always field-set-up because a real object of it exists — unlike a
+        // metadata class returned by mono_class_from_name for a type only ever
+        // reached via a field-type reference (e.g. Mortal.Core.StatConvertData
+        // drilled through StatConvertCollectionData._list), whose field table is
+        // empty so the walk returned only the inherited m_CachedPtr. Mirrors the
+        // IL2CPP klass_from_header path + how Cheat Engine resolves drilldown
+        // classes. Falls through to name resolution when no header address is
+        // supplied or the read faults.
+        std::uintptr_t hdrAddr = 0;
+        if (args.contains("klass_from_header_addr") &&
+            parseAddr(args["klass_from_header_addr"], hdrAddr) && hdrAddr != 0) {
+            if (Mono::MonoClass* hk = Mono::ClassOfObject(hdrAddr)) return hk;
+            // object_get_class unbound / read faulted → try name below.
+        }
         std::string assemblyName = args.value("assembly", std::string{});
         std::string ns           = args.value("namespace", std::string{});
         std::string name         = args.value("name", std::string{});
