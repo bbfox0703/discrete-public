@@ -7,17 +7,22 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #864 |
-| **Current phase** | ✅ Phase 28(Field→Methods)全收尾;IL2CPP instance-field xref + Snapshot UI/UX 批次 SHIPPED & merged |
-| **Branches** | `dev == main == origin` @ `6e0fea5` |
-| **Tests** | 644 UI tests green;兩個 DLL(x64+x86)build clean、UI 0/0 |
+| **Current build** | #887 |
+| **Current phase** | ✅ Phase 28 全收尾 + Inspector/Copy-CE-XML Mono nested-class & x86 pointer-size 批次 SHIPPED & merged |
+| **Branches** | `dev == main == origin` @ `ed3c215` |
+| **Tests** | 645 UI tests green;兩個 DLL(x64+x86)build clean、UI 0/0 |
 | **Mid-flight** | 無(nothing in flight)|
 
-**最新批次(2026-05-31,Phase 28b instance + Snapshot UI/UX)**:
+**最新批次(2026-05-31 後段,Inspector nested-class drilldown + Copy CE XML x86)**:
+- **Mono nested-class drilldown 修正** — Inspector 展開只經 field-type reference 抵達的 ref-type(如 `StatConvertData` 經 `StatConvertCollectionData._list`)原本只顯示繼承的 `m_CachedPtr`:Mono `walkInstance` 用 `mono_class_from_name` 解到的 metadata class field table 是空的。修法:Mono 端比照 IL2CPP 接受 `klass_from_header_addr`,用 `mono_object_get_class`(`Mono::ClassOfObject`)從物件 vtable 取**活的 runtime class**(必 field-set-up)。Exporter 也加 name-based fallback(`EmitChildFieldsByHeaderAsync`)。**Live-verified(活俠傳:`_list[0]` 完整展開 `_curve`/`_book`/`_devNote`/`_id`…)**。
+- **Copy CE XML 32-bit pointer-size 修正** — (a)IntPtr/reference/List-handle 葉節點輸出 `8 Bytes`(x86 應 4)→ overlap 下一欄;(b)String header offset + `List._items` deref 用了 stale `GamePointerSize`(export 時 0→8)→ x64 offsets + `_list <empty>`。修法:DLL `walkInstance`(Mono+IL2CPP)回應加權威 `pointer_size`;`WalkInstanceResult.PointerSize` + exporter 採用之覆蓋 caller 值;新 `PointerVartype(options)` 取代 9 處寫死 `8 Bytes`,IntPtr scalar leaf 同步。**Live-verified(活俠傳:m_CachedPtr=4 Bytes、String length @+8、`_list` 15 元素)**。
+- **SS5** — class-list「Inspect (find instances)…」補上切到 Inspector tab。
+- **Export-options drilldown depth 上限 5→6**。
+
+**先前批次(2026-05-31 前段,Phase 28b instance + Snapshot UI/UX)**:
 - **Phase 28b — IL2CPP instance-field xref** — 不再回 v1 error;Zydis 掃宣告類自己的 methods 找 `[gpReg+fieldOffset]`(base≠rip/rsp/rbp),`confidence="heuristic"`,read/write 由 operand action 分類;method 範圍 = 下個 method entry,clamp 8KB + section end + `int3` 停;dedup by hitAddress。**Live-verified(活俠傳 IL2CPP x64:`CharacterData.life_` @0x40 → 126 matches)**。Phase 28b-v3.2(`<>c` lambda-cache xref)正式 **WON'T DO**(命名易識別、非 gameplay state、無 C/P 值)。
 - **DataGrid 欄寬 rule(寫進 CLAUDE.md + ui-spec.md)** — result grid 禁用 `Width="*"`(逼 fit-to-window → 拉一欄縮別欄);改 `Width="Auto"+MinWidth` → 可橫向捲動。修了 5 個 result grid + Inspector Name/Type/Value MinWidth(220/160/320→120/110/140)。例外:MethodCall 參數格 / SPC picker。
 - **Snapshot UI/UX(SS1-4)** —(SS1)scope `+add assembly` 改 **AutoCompleteBox** 可打字過濾;`Include system assemblies` 在 Scope 有指定 assemblies 時 disable(僅全抓適用)。(SS2)`Game: 32-bit Mono…` banner 併入 Decode budget 列(MaxLines=2);budget 說明改 hover tooltip。(SS3)`FormatMemory` MB/GB 一律 2 位小數(`0.04 MB` 不再顯示 `0 MB`)。(SS4)**FIX 真 x86 bug**:`List<T>._items` 從寫死 +0x10 改 `2*ptrSize`(x86=+0x8)+ `ParseLittleEndianHexQword` 依長度 byte-swap → 32-bit Mono nested List 不再 "header unreadable"。**Live-verified(活俠傳:`StatConvertData._list` 15 元素位址與 CE 逐 byte 一致)**。
-- **SS5** — class-list「Inspect (find instances)…」補上切到 Inspector tab(原本只 set target + find,沒切 tab)。
 - **SS6/SS7 查證為正常(非 bug)** — `_name <string_error: implausible length>` 是 string 守衛正確拒絕 heap-walk false-positive instance 的 garbage pointer;`_statAdditionData` drilldown 位址與 CE 逐 byte 一致(List 折疊成元素是刻意表示法)。
 
 **先前 UI 批次(2026-05-30,Inspector + Value Search)**:
