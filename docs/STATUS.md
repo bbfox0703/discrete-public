@@ -7,13 +7,20 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #863 |
-| **Current phase** | ✅ Phase 28b IL2CPP instance-field xref SHIPPED(待 live-smoke);Phase 30 + scan P1/P2 已 merged |
-| **Branches** | `dev == main == origin`(28b-instance 尚未 commit)|
-| **Tests** | 644 UI tests green;兩個 DLL(x64+x86)build clean |
-| **Mid-flight** | Phase 28b IL2CPP instance-field xref — code+build+tests done,**待實機 live-smoke**(IL2CPP 64-bit instance field → heuristic matches)|
+| **Current build** | #864 |
+| **Current phase** | ✅ Phase 28(Field→Methods)全收尾;IL2CPP instance-field xref + Snapshot UI/UX 批次 SHIPPED & merged |
+| **Branches** | `dev == main == origin` @ `6e0fea5` |
+| **Tests** | 644 UI tests green;兩個 DLL(x64+x86)build clean、UI 0/0 |
+| **Mid-flight** | 無(nothing in flight)|
 
-**UI 修正批次(2026-05-30,Inspector + Value Search)**:
+**最新批次(2026-05-31,Phase 28b instance + Snapshot UI/UX)**:
+- **Phase 28b — IL2CPP instance-field xref** — 不再回 v1 error;Zydis 掃宣告類自己的 methods 找 `[gpReg+fieldOffset]`(base≠rip/rsp/rbp),`confidence="heuristic"`,read/write 由 operand action 分類;method 範圍 = 下個 method entry,clamp 8KB + section end + `int3` 停;dedup by hitAddress。**Live-verified(活俠傳 IL2CPP x64:`CharacterData.life_` @0x40 → 126 matches)**。Phase 28b-v3.2(`<>c` lambda-cache xref)正式 **WON'T DO**(命名易識別、非 gameplay state、無 C/P 值)。
+- **DataGrid 欄寬 rule(寫進 CLAUDE.md + ui-spec.md)** — result grid 禁用 `Width="*"`(逼 fit-to-window → 拉一欄縮別欄);改 `Width="Auto"+MinWidth` → 可橫向捲動。修了 5 個 result grid + Inspector Name/Type/Value MinWidth(220/160/320→120/110/140)。例外:MethodCall 參數格 / SPC picker。
+- **Snapshot UI/UX(SS1-4)** —(SS1)scope `+add assembly` 改 **AutoCompleteBox** 可打字過濾;`Include system assemblies` 在 Scope 有指定 assemblies 時 disable(僅全抓適用)。(SS2)`Game: 32-bit Mono…` banner 併入 Decode budget 列(MaxLines=2);budget 說明改 hover tooltip。(SS3)`FormatMemory` MB/GB 一律 2 位小數(`0.04 MB` 不再顯示 `0 MB`)。(SS4)**FIX 真 x86 bug**:`List<T>._items` 從寫死 +0x10 改 `2*ptrSize`(x86=+0x8)+ `ParseLittleEndianHexQword` 依長度 byte-swap → 32-bit Mono nested List 不再 "header unreadable"。**Live-verified(活俠傳:`StatConvertData._list` 15 元素位址與 CE 逐 byte 一致)**。
+- **SS5** — class-list「Inspect (find instances)…」補上切到 Inspector tab(原本只 set target + find,沒切 tab)。
+- **SS6/SS7 查證為正常(非 bug)** — `_name <string_error: implausible length>` 是 string 守衛正確拒絕 heap-walk false-positive instance 的 garbage pointer;`_statAdditionData` drilldown 位址與 CE 逐 byte 一致(List 折疊成元素是刻意表示法)。
+
+**先前 UI 批次(2026-05-30,Inspector + Value Search)**:
 - **List<T> 可展開** — `InstanceFieldClassifier`/`UnityTypeMap`/`CeXmlExporter` 同時接受 IL-form `List`1<>` 與 live demangled `List<>`;`enchantList_`/`hasSkill_` 等現有展開箭頭 + Copy CE XML 正確 per-slot。
 - **Inspector instance 級 Copy CE XML 按鈕** — 跨 tab(Value Search / Address Lookup / Scene / Snapshot)inspect 後可用,不需選欄位/不依賴 Browser。**(已 live-verified)**
 - **展開不再跳頂端** — `InsertChildrenIntoFields`/`CollapseSubtree` 無 filter 時直接 splice `FilteredFields`,保留捲動位置。
@@ -34,5 +41,6 @@
 **⚠ 待 live-smoke(需 inject 實機)**:
 - Value Search 聚合去重結果(原生 scan 無自動測試覆蓋;聚合 index 重用本身已 live-verified,log 59260)。Copy CE XML / Copy CE field 內容已 live-verified(受讚頌者 x64 + 活俠傳 Mono x86)。
 - 候選數 gate / P2 SIMD:Utawarerumono(x64)+ 活俠傳(x86)計時 + 結果筆數與舊版一致。
+- SS1/SS2 picker/layout 觀感(純 UI,build 已驗);28b-instance 已 live-verified(活俠傳),x64 game(受讚頌者)instance xref 可選 re-smoke。
 
 ➡ **下一步 / open backlog**:見 [plan.md → Open Backlog / TODO](plan.md#open-backlog--todo)。
