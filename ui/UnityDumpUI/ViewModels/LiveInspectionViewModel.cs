@@ -756,14 +756,25 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         string arrayAddr = node.EffectiveAddress!;
         if (isList)
         {
-            // List<T>._items at +0x10.
+            // List<T>._items is the FIRST instance field, so it sits right
+            // after the object header (2 * pointerSize): +0x10 on x64, +0x8
+            // on x86. The pointer it holds is pointer-sized too — read 8
+            // bytes on x64 / 4 on x86. Hardcoding +0x10 / 8-byte read picked
+            // up _version (an int) on 32-bit Mono and walkArray'd the garbage,
+            // surfacing the bogus "header unreadable" (活俠傳 Mono x86,
+            // StatConvertCollectionData._list). Mirror the StringFieldOffsets
+            // bitness handling already used for managed-string decode.
+            int ptrSize  = GamePointerSize == 4 ? 4 : 8;
+            int itemsOff = 2 * ptrSize;
             ReadMemoryResult mem = await _backend.ReadMemoryAsync(
-                HexAdd(arrayAddr, 0x10), 8, ct).ConfigureAwait(true);
+                HexAdd(arrayAddr, itemsOff), ptrSize, ct).ConfigureAwait(true);
             if (!string.IsNullOrEmpty(mem.Error) || string.IsNullOrEmpty(mem.Hex))
             {
                 node.LoadHint = $"List._items unreadable: {mem.Error ?? "no hex"}";
                 return;
             }
+            // ParseLittleEndianHexQword byte-swaps whatever byte count it's
+            // given, so the x86 4-byte blob parses to the right address.
             arrayAddr = "0x" + ParseLittleEndianHexQword(mem.Hex!);
         }
 
@@ -1348,12 +1359,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         return "0x" + (v + (ulong)delta).ToString("X16", CultureInfo.InvariantCulture);
     }
 
-    /// <summary>LE hex blob → host-order qword as uppercase hex (no "0x").</summary>
+    /// <summary>LE hex blob → host-order value as uppercase hex (no "0x").
+    /// Byte-swaps however many whole bytes are present (capped at 8), so it
+    /// handles BOTH an 8-byte x64 pointer (16 hex chars) AND a 4-byte x86
+    /// pointer (8 hex chars). The old <c>length &lt; 16 → return unchanged</c>
+    /// guard silently returned the un-swapped little-endian string for x86
+    /// reads, producing a wrong address (the List._items x86 drilldown bug).</summary>
     internal static string ParseLittleEndianHexQword(string leHex)
     {
-        if (leHex.Length < 16) return leHex;
-        var sb = new System.Text.StringBuilder(16);
-        for (int i = 14; i >= 0; i -= 2)
+        if (leHex.Length < 2 || (leHex.Length % 2) != 0) return leHex;
+        int useChars = leHex.Length < 16 ? leHex.Length : 16;  // cap at 8 bytes
+        var sb = new System.Text.StringBuilder(useChars);
+        for (int i = useChars - 2; i >= 0; i -= 2)
             sb.Append(leHex, i, 2);
         return sb.ToString();
     }

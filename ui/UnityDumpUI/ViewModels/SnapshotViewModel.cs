@@ -471,16 +471,31 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// shouldn't have to know where data lives). On connect, defaults to
     /// "Assembly-CSharp" when that assembly exists (the usual gameplay
     /// assembly) so the common case doesn't capture the whole heap.</summary>
-    [ObservableProperty] private string _scopeAssembliesText = string.Empty;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IncludeSystemToggleEnabled))]
+    private string _scopeAssembliesText = string.Empty;
 
     /// <summary>Assembly names reported by the game — drives the Scope
-    /// picker so the user can append an assembly without typing it.</summary>
+    /// picker so the user can append an assembly without typing it. The
+    /// picker is an AutoCompleteBox so a long list (50+ assemblies on a
+    /// big game) is filterable by substring instead of scrolled.</summary>
     public ObservableCollection<string> KnownScopeAssemblies { get; } = new();
 
     /// <summary>Picker selection — appending a chosen assembly to
     /// <see cref="ScopeAssembliesText"/> (comma-separated, deduped), then
     /// resetting so the same item can be re-picked.</summary>
     [ObservableProperty] private string? _selectedScopeAssembly;
+
+    /// <summary>AutoCompleteBox edit text — bound so we can clear the typed
+    /// filter after a pick (otherwise the chosen name lingers in the box).</summary>
+    [ObservableProperty] private string _scopeAssemblyQuery = string.Empty;
+
+    /// <summary>The "Include system assemblies" toggle only has meaning in
+    /// full-capture (全抓) mode — when the scope is empty. Once the user has
+    /// named specific assemblies, the capture is already an explicit allow-
+    /// list, so mixing in system assemblies would be contradictory. The UI
+    /// disables the checkbox in that case (see the binding + tooltip).</summary>
+    public bool IncludeSystemToggleEnabled => string.IsNullOrWhiteSpace(ScopeAssembliesText);
 
     partial void OnSelectedScopeAssemblyChanged(string? value)
     {
@@ -494,6 +509,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
             ScopeAssembliesText = string.Join(", ", parts);
         }
         SelectedScopeAssembly = null;   // reset for re-pick
+        ScopeAssemblyQuery    = string.Empty;  // clear the typed filter
     }
 
     /// <summary>Fetch the game's assemblies (post-connect) to populate the
@@ -2384,11 +2400,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
 
     /// <summary>Human-friendly bytes formatter. Switches to GB at 1 GB
     /// so the snapshot status doesn't read "1843 MB" once we're past
-    /// the gigabyte threshold. Signed input handled — negative deltas
-    /// (memory dropped after GC) show as e.g. "-120 MB".</summary>
+    /// the gigabyte threshold. Both MB and GB always show 2 decimals so a
+    /// small DB (e.g. a tiny 活俠傳 snapshot, a few tens of KB) reads
+    /// "0.04 MB" instead of rounding to a misleading "0 MB". Signed input
+    /// handled — negative deltas (memory dropped after GC) show as e.g.
+    /// "-0.12 GB".</summary>
     private static string FormatMemory(long bytes)
     {
-        if (bytes == 0) return "0 MB";
+        if (bytes == 0) return "0.00 MB";
         long abs = Math.Abs(bytes);
         string sign = bytes < 0 ? "-" : string.Empty;
         if (abs >= 1024L * 1024 * 1024)
@@ -2397,7 +2416,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
             return $"{sign}{gb.ToString("0.00", CultureInfo.InvariantCulture)} GB";
         }
         double mb = abs / (1024.0 * 1024.0);
-        return $"{sign}{mb.ToString("0", CultureInfo.InvariantCulture)} MB";
+        return $"{sign}{mb.ToString("0.00", CultureInfo.InvariantCulture)} MB";
     }
 }
 
