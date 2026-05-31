@@ -221,7 +221,17 @@ ClassInfoResult ReadClassInfo(MonoClass* klass) {
         }
     }
 
-    if (r.class_get_fields != nullptr) {
+    // Collect this class's OWN fields. Wrapped in a lambda so it can run a
+    // second time after a forced class setup (below). `mono_class_get_fields`
+    // returns NOTHING for a class whose metadata hasn't been set up yet — a
+    // class only ever reached via a field-type reference / Inspector drilldown
+    // (never JIT-touched). The find-instances path implicitly sets up its
+    // target through `mono_class_vtable`, which is why a top-level inspected
+    // class shows every field but a nested element class (e.g. 活俠傳
+    // Mortal.Core.StatConvertData reached through StatConvertCollectionData.
+    // _list) came back with only the inherited m_CachedPtr.
+    auto collectFields = [&]() {
+        if (r.class_get_fields == nullptr) return;
         void* iter = nullptr;
         for (;;) {
             MonoClassField* f = SehNextField(r.class_get_fields, klass, &iter);
@@ -254,6 +264,19 @@ ClassInfoResult ReadClassInfo(MonoClass* klass) {
                 }
             }
             result.info.fields.push_back(std::move(fe));
+        }
+    };
+    collectFields();
+
+    // One-shot force-setup: if the class reported NO own fields, resolve it via
+    // a SINGLE mono_class_vtable(rootDomain, klass) — the same safe per-class
+    // call find-instances already makes (ExportAPI CmdFindInstances), NOT the
+    // batched 17K-call form that wedged BDWGC on the reverse-lookup path. This
+    // sets up the field table so the retry sees the real fields. Only fires on
+    // the rare empty-field case, so already-set-up classes pay nothing.
+    if (result.info.fields.empty() && r.class_vtable != nullptr) {
+        if (SehVTable(r.class_vtable, domain, klass) != nullptr) {
+            collectFields();
         }
     }
 
