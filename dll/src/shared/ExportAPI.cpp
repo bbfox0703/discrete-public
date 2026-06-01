@@ -60,6 +60,24 @@
 
 using nlohmann::json;
 
+// SEH-guarded class_get_parent for the inheritance-chain walks below.
+// When the inspector drills into a field that LOOKS like an object pointer
+// but isn't a real managed object (a value-type field misread as a
+// reference, or a stale pointer), the runtime's class_get_parent
+// dereferences garbage and access-violates — which crashes the *game* (the
+// read runs on our pipe worker thread; an unhandled AV takes the process
+// down). Catch it so the inheritance walk just stops. File-scope so every
+// handler below (across both backends' anonymous namespaces) can see it;
+// generic over IL2CPP::Il2CppClass* / Mono::MonoClass* — K is deduced.
+#pragma warning(push)
+#pragma warning(disable: 4509)  // SEH in a function (no C++ unwinding here)
+template <typename Fn, typename K>
+static K SehGetParent(Fn fn, K cur) {
+    __try { return fn(cur); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+#pragma warning(pop)
+
 namespace {
 
 std::atomic<bool> g_initialized{false};
@@ -300,7 +318,7 @@ private:
         for (IL2CPP::Il2CppClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
             echain.push_back(cur);
             if (r.class_get_parent == nullptr) break;
-            cur = r.class_get_parent(cur);
+            cur = SehGetParent(r.class_get_parent, cur);
         }
         json efields = json::array();
         std::size_t produced = 0;
@@ -364,7 +382,7 @@ private:
         for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
             chain.push_back(cur);
             if (r.class_get_parent == nullptr) break;
-            cur = r.class_get_parent(cur);
+            cur = SehGetParent(r.class_get_parent, cur);
         }
         std::vector<const IL2CPP::ClassInfoResult*> chainInfo;
         chainInfo.reserve(chain.size());
@@ -2923,7 +2941,7 @@ void RegisterCoreHandlers() {
                 for (Mono::MonoClass* cur = ec; cur != nullptr && echain.size() < 16; ) {
                     echain.push_back(cur);
                     if (Mono::GetResolver().class_get_parent == nullptr) break;
-                    cur = Mono::GetResolver().class_get_parent(cur);
+                    cur = SehGetParent(Mono::GetResolver().class_get_parent, cur);
                 }
                 json efields = json::array();
                 std::size_t produced = 0;
@@ -3005,7 +3023,7 @@ void RegisterCoreHandlers() {
                 for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
                     chain.push_back(cur);
                     if (Mono::GetResolver().class_get_parent == nullptr) break;
-                    cur = Mono::GetResolver().class_get_parent(cur);
+                    cur = SehGetParent(Mono::GetResolver().class_get_parent, cur);
                 }
                 std::vector<const Mono::ClassInfoResult*> chainInfo;
                 chainInfo.reserve(chain.size());
@@ -4438,7 +4456,7 @@ void RegisterCoreHandlers() {
             for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
                 chain.push_back(cur);
                 if (r.class_get_parent == nullptr) break;
-                cur = r.class_get_parent(cur);
+                cur = SehGetParent(r.class_get_parent, cur);
             }
         }
 
@@ -7416,7 +7434,7 @@ void RegisterCoreHandlers() {
             for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
                 chain.push_back(cur);
                 if (r.class_get_parent == nullptr) break;
-                cur = r.class_get_parent(cur);
+                cur = SehGetParent(r.class_get_parent, cur);
             }
         }
 
