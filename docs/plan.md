@@ -43,6 +43,7 @@
 ### 💤 未啟動 / deferred 設計
 - [~] **Phase 28b-v3.2** — ❌ **WON'T DO**(2026-05-31 決議)。IL2CPP never-populated static slot → class 的 token decode(v29 `metadataUsages` 移除 → layout dead-end)。針對的唯一 case 是**從未執行過的編譯器生成 `<>c.<>9__0_X` lambda-cache 類別**的 static xref —(a)這類類別命名規律、一眼可識別,使用者不會誤判成漏掉;(b)非 gameplay state、CT maker 不需要;(c)2-4 天工 + v29 未公開 layout 高逆向風險 → **沒 C/P 值**。v3.0 banner 已說明限制。cookbook + 診斷基礎建設仍保留在 [lessons-learned.md](lessons-learned.md),萬一未來真有人需要可直接執行。
 - [ ] **Phase 29e/29f deferred** — Layer B reference-array inner-pivot anomaly auto-surface、field-name autocomplete pre-hydrate(見 [class-pivot.md](class-pivot.md))。
+- [ ] **Phase 31 — Inline value-type struct support(Vector3/4, Quaternion, 自訂 struct)**(spec 2026-06-01,見 [value-type-structs.md](value-type-structs.md))。**需動 DLL**(Mono+IL2CPP)+ protocol + snapshot/SPC/diff/pivot/value-search。根因:`decodeField` 對 value-type struct 只讀一個 pointer-word → UI `(no value)`,四個功能全無法處理 Vec3/4。決議:Phase A(named Unity math structs)+ Phase B(泛型 value-type 遞迴);snapshot 表示=component fan-out + summary tuple;value search=單 component scan + reverse-lookup 命名 component。5 波:31-1 DLL Phase A + protocol `Fields` + tuple render;31-3 SPC/diff `ExpandStructMembers` fan-out;31-4 pivot per-component;31-2 DLL Phase B(SEH 硬化);31-5 reverse-lookup component 命名。每 DLL 波需實機 live-smoke。
 - [x] **Phase 29i — Pivot usability & value-driven discovery** — ✅ 實作完成於 `dev`(2026-06-01,UI/engine-only,無 DLL;673 UI tests green、0 warnings)。四波(spec 見 [class-pivot.md → Phase 29i](class-pivot.md#phase-29i--pivot-usability--value-driven-discovery)):**29i-1** class 結構瀏覽(`ClassShortlistEngine` 留 field 名稱 + preview 欄 + detail panel);**29i-2** array inner-field 評分 picker(`KeyDiscoveryEngine` element 模式);**29i-4 ★** `SnapshotValueLocatorEngine` 值/delta 反查 → (class, field) + handoff + 「Suggest key & run」(跨 session 可用);**29i-3** `ClassInterestEngine` 無監督排序(value-volatility `interestingness`)+ preview。**待 live-smoke**(實機跑 Find-by-value / element picker / interest 排序);尚未 merge 到 `main`。
 
 ---
@@ -59,7 +60,7 @@
 | [archive/status-history.md](archive/status-history.md) | 舊 session hand-offs |
 | [archive/STATUS-archive-2026-05-29.md](archive/STATUS-archive-2026-05-29.md) | 2026-05-29 瘦身前的完整 STATUS hand-off 快照 |
 
-設計 / 參考文件:[Archiutecture.md](Archiutecture.md) · [pipe-protocol.md](pipe-protocol.md) · [Memory-Scanning-Internals.md](Memory-Scanning-Internals.md) · [snapshot-streaming-dedup.md](snapshot-streaming-dedup.md) · [class-pivot.md](class-pivot.md) · [lessons-learned.md](lessons-learned.md) · [aot-pitfalls.md](aot-pitfalls.md);完整文件對照表見 [README.md](../README.md)。
+設計 / 參考文件:[Archiutecture.md](Archiutecture.md) · [pipe-protocol.md](pipe-protocol.md) · [Memory-Scanning-Internals.md](Memory-Scanning-Internals.md) · [snapshot-streaming-dedup.md](snapshot-streaming-dedup.md) · [class-pivot.md](class-pivot.md) · [value-type-structs.md](value-type-structs.md) · [lessons-learned.md](lessons-learned.md) · [aot-pitfalls.md](aot-pitfalls.md);完整文件對照表見 [README.md](../README.md)。
 
 ---
 
