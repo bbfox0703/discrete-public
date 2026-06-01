@@ -517,8 +517,20 @@ public sealed partial class SnapshotViewModel : ObservableObject
             parts.Add(value);
             ScopeAssembliesText = string.Join(", ", parts);
         }
-        SelectedScopeAssembly = null;   // reset for re-pick
-        ScopeAssemblyQuery    = string.Empty;  // clear the typed filter
+        // Reset SelectedItem + filter text so the same assembly can be re-picked
+        // and the chosen name doesn't linger in the box. CRITICAL: defer this off
+        // the selection-changed callback. Mutating the AutoCompleteBox's bound
+        // SelectedItem / Text synchronously here re-enters its SelectionModel
+        // while it is still committing the pick (pointer-release → set_SelectedIndex),
+        // and re-filtering the ItemsSource mid-commit throws
+        // ArgumentOutOfRangeException in SelectingItemsControl.OnSelectionModelSelectionChanged
+        // (GetAt on a now-shorter list) → process CTD. Posting to the dispatcher
+        // lets the pick finish first. (Avalonia AutoCompleteBox re-entrancy.)
+        Dispatcher.UIThread.Post(() =>
+        {
+            SelectedScopeAssembly = null;
+            ScopeAssemblyQuery    = string.Empty;
+        });
     }
 
     /// <summary>Fetch the game's assemblies (post-connect) to populate the
