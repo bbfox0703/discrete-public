@@ -195,6 +195,51 @@ public class CeXmlExporterLiveTests
     }
 
     [Fact]
+    public async Task RenderLive_EngineInternalTypes_NotRecursed()
+    {
+        // Phase 31-6 — a deep Copy-CE-XML walk must NOT recurse into Unity DOTS
+        // / native / pointer types (the recursion that exploded into the ECS
+        // graph and CTD'd Core Keeper). They appear as watchable pointer leaves
+        // but their children are never walked. Gameplay fields still recurse.
+        const string baseAddr = "0x000000000000C000";
+        const string sysObj   = "0x00000000000D0000";   // an ECS system object
+
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            // Real gameplay field — must still be emitted.
+            new() { Name = "_hp", Type = "System.Int32", Offset = 0x10,
+                    Address = "0x000000000000C010", Value = Json("100") },
+            // Unity DOTS system pointer — engine-internal, must NOT recurse.
+            new() { Name = "ecbSystem",
+                    Type = "Unity.Entities.BeginSimulationEntityCommandBufferSystem",
+                    Offset = 0x18, Address = "0x000000000000C018", Ptr = sysObj },
+            // Native pointer type (ends with '*') — must NOT recurse.
+            new() { Name = "m_StatePtr", Type = "Unity.Entities.SystemState*",
+                    Offset = 0x20, Address = "0x000000000000C020", Ptr = sysObj },
+        });
+        // The ECS object's fields — reachable only if the gate fails.
+        live.AddInstance(sysObj, new List<WalkedField>
+        {
+            new() { Name = "SECRET_ECS_FIELD", Type = "System.Int32", Offset = 0x10,
+                    Address = "0x00000000000D0010", Value = Json("999") },
+        });
+
+        var options = new ExportOptions(
+            DrilldownDepth: 5, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 8);
+
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            options, live, TestContext.Current.CancellationToken);
+
+        Assert.Contains("_hp", xml);                    // gameplay field kept
+        Assert.Contains("ecbSystem", xml);              // pointer leaf still listed
+        Assert.Contains("m_StatePtr", xml);
+        Assert.DoesNotContain("SECRET_ECS_FIELD", xml); // but NOT recursed into
+    }
+
+    [Fact]
     public async Task RenderLive_X86_StringBufferOffsetIsPlus0xC()
     {
         const string baseAddr = "0x10000000";

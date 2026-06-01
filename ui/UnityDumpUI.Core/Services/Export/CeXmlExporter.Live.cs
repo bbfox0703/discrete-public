@@ -64,6 +64,15 @@ public static partial class CeXmlExporter
                               && !f.Value.HasValue && f.String is null;
         WalkedFieldKind kind = InstanceFieldClassifier.Classify(f, isPointerValue);
         bool canDrill = currentDepth < options.DrilldownDepth;
+        // Never recurse into Unity DOTS / native-backed / pointer types. They
+        // are native-memory internals (SystemState*, UnsafeList<T>*,
+        // NativeQueue<T>, EntityQuery, BlobAssetReference, JobHandle …), not
+        // gameplay state. Recursing fans the walk out across the entire ECS
+        // system graph — a storm of walkInstance + native-pointer derefs on the
+        // Mono worker thread that CTDs the game (Core Keeper) — and produces
+        // useless CE XML. Emit them as a watchable pointer leaf instead. Has no
+        // effect on non-DOTS games (no such types).
+        bool engineInternal = IsEngineInternalType(f.Type);
 
         // ---- String — always deref to the inline UTF-16 buffer (terminal, so
         //      not gated by depth). Emits the canonical _stringLength/_firstChar
@@ -109,7 +118,7 @@ public static partial class CeXmlExporter
             //      the deref'd object via its header.
             case WalkedFieldKind.PointerToClass:
             {
-                if (!canDrill || string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
+                if (!canDrill || engineInternal || string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
                 {
                     EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
                              showAsHex: true, address: rel, offsets: null);
@@ -139,7 +148,7 @@ public static partial class CeXmlExporter
             //      absolute storage address; children offset from the struct base.
             case WalkedFieldKind.ValueStruct:
             {
-                if (!canDrill || string.IsNullOrEmpty(f.Address))
+                if (!canDrill || engineInternal || string.IsNullOrEmpty(f.Address))
                 {
                     EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
                              showAsHex: true, address: rel, offsets: null);
@@ -176,6 +185,25 @@ public static partial class CeXmlExporter
                          vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                 return;
         }
+    }
+
+    /// <summary>True for Unity DOTS / native-backed / pointer types we must
+    /// NOT recurse into during live export — they're native-memory internals,
+    /// not gameplay state, and walking them explodes the walk across the ECS
+    /// graph (CTD risk on the Mono worker thread) for no useful output.
+    /// Covers pointer types (e.g. <c>SystemState*</c>, <c>UnsafeList&lt;T&gt;*</c>)
+    /// and the Unity.Entities / Unity.Collections / Unity.Jobs / Unity.Burst
+    /// namespaces (Entity, EntityQuery, EntityArchetype, BlobAssetReference,
+    /// NativeQueue, AllocatorHelper, JobHandle, …). Leaves UnityEngine /
+    /// Unity.Mathematics math structs (Vector3, float3, Quaternion) walkable.</summary>
+    private static bool IsEngineInternalType(string? type)
+    {
+        if (string.IsNullOrEmpty(type)) return false;
+        if (type.EndsWith("*", StringComparison.Ordinal)) return true;   // unmanaged pointer
+        return type.StartsWith("Unity.Entities.", StringComparison.Ordinal)
+            || type.StartsWith("Unity.Collections.", StringComparison.Ordinal)
+            || type.StartsWith("Unity.Jobs.", StringComparison.Ordinal)
+            || type.StartsWith("Unity.Burst.", StringComparison.Ordinal);
     }
 
     /// <summary>walkInstance via the object header (resolves nested + generic
