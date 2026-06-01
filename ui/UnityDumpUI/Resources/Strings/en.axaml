@@ -236,7 +236,7 @@
 
   <!-- Phase 22d: Tools menu — AOBMaker-backed CT mutation entries. -->
   <sys:String x:Key="Tools.InjectDiscreteBridge">Inject Discrete Bridge into CE Table…</sys:String>
-  <sys:String x:Key="Tools.InjectDiscreteBridgeTooltip">Push the 7 bridge lua modules + a "Load Discrete Bridge" AA-script entry into the currently-open CE table via the AOBMaker plugin pipe. Cheat Engine must be running with the AOBMaker plugin loaded; you can have an empty table.</sys:String>
+  <sys:String x:Key="Tools.InjectDiscreteBridgeTooltip">Pick which bridge lua tools to embed, then push them + a "Load Discrete Bridge" AA-script entry into the currently-open CE table via the AOBMaker plugin pipe. Core (inject DLL + pipe) is always included. Cheat Engine must be running with the AOBMaker plugin loaded; you can have an empty table. Ship the backend DLLs (Discrete-Mono.dll / Discrete-IL2CPP.dll / Discrete-Mono-x86.dll) next to your .CT.</sys:String>
   <sys:String x:Key="Tools.AobMakerStatusLabel">AOBMaker:</sys:String>
   <sys:String x:Key="Tools.AobMakerConnected">connected</sys:String>
   <sys:String x:Key="Tools.AobMakerNotConnected">not connected</sys:String>

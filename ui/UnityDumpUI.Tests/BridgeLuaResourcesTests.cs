@@ -180,4 +180,84 @@ public class BridgeLuaResourcesTests
         Assert.Throws<ArgumentException>(
             () => BridgeLuaResources.Read("UNITY_DUMP.LUA"));
     }
+
+    // ---------- ResolveFiles (feature-picker selection) -----------------
+
+    [Fact]
+    public void ResolveFiles_NoFeatures_ReturnsCoreOnly()
+    {
+        // Core is mandatory: an empty selection still injects the DLL +
+        // pipe entry point. Nothing else.
+        var files = BridgeLuaResources.ResolveFiles(
+            Array.Empty<BridgeLuaResources.BridgeFeature>());
+        Assert.Equal(new[] { "utils.lua", "unity_dump.lua" }, files);
+    }
+
+    [Fact]
+    public void ResolveFiles_AlwaysIncludesCore_LeadingAndInOrder()
+    {
+        // Regardless of selection, utils.lua then unity_dump.lua lead.
+        var files = BridgeLuaResources.ResolveFiles(
+            new[] { BridgeLuaResources.BridgeFeature.Scene });
+        Assert.Equal("utils.lua",      files[0]);
+        Assert.Equal("unity_dump.lua", files[1]);
+        Assert.Contains("unity_scene.lua", files);
+        // Unrelated helpers are excluded.
+        Assert.DoesNotContain("unity_invoke.lua", files);
+        Assert.DoesNotContain("unity_dissect.lua", files);
+    }
+
+    [Fact]
+    public void ResolveFiles_Symbols_PullsBothSymbolFiles()
+    {
+        // Symbols maps to unity_symbols.lua AND the DLL-free Mono helper.
+        var files = BridgeLuaResources.ResolveFiles(
+            new[] { BridgeLuaResources.BridgeFeature.Symbols });
+        Assert.Contains("unity_symbols.lua",                 files);
+        Assert.Contains("mono_registersymbol_helpers.lua",   files);
+    }
+
+    [Fact]
+    public void ResolveFiles_OutputIsSubsequenceOfLoadOrder()
+    {
+        // ResolveFiles projects onto LoadOrder, so the result must be a
+        // subsequence (same relative order) of it for ANY selection.
+        var files = BridgeLuaResources.ResolveFiles(new[]
+        {
+            BridgeLuaResources.BridgeFeature.Scene,
+            BridgeLuaResources.BridgeFeature.Dissect,   // deliberately out of LoadOrder order
+        });
+        int last = -1;
+        foreach (var f in files)
+        {
+            int idx = BridgeLuaResources.LoadOrder.ToList().IndexOf(f);
+            Assert.True(idx > last, $"{f} out of LoadOrder order");
+            last = idx;
+        }
+    }
+
+    [Fact]
+    public void ResolveFiles_AllFeatures_EqualsFullLoadOrder_NoDuplicates()
+    {
+        // Selecting every feature must reconstruct the full LoadOrder
+        // exactly — same files, same order, no dup from Symbols' two-file
+        // mapping overlapping anything.
+        var all = new[]
+        {
+            BridgeLuaResources.BridgeFeature.Dissect,
+            BridgeLuaResources.BridgeFeature.Symbols,
+            BridgeLuaResources.BridgeFeature.AddressFinder,
+            BridgeLuaResources.BridgeFeature.Invoke,
+            BridgeLuaResources.BridgeFeature.Scene,
+        };
+        var files = BridgeLuaResources.ResolveFiles(all);
+        Assert.Equal(BridgeLuaResources.LoadOrder, files);
+    }
+
+    [Fact]
+    public void ResolveFiles_NullSelection_TreatedAsEmpty()
+    {
+        var files = BridgeLuaResources.ResolveFiles(null!);
+        Assert.Equal(new[] { "utils.lua", "unity_dump.lua" }, files);
+    }
 }

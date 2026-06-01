@@ -41,11 +41,11 @@ public class BridgeInjectorTests
         Assert.Null(result.FailedStepDescription);
         Assert.Null(result.ErrorMessage);
 
-        // Call sequence: 1× CheckAvailability, 7× InjectTableFile (in
-        // LoadOrder), 1× CreateAAScript. Nothing else.
+        // Call sequence: 1× CheckAvailability, N× InjectTableFile (in
+        // LoadOrder), 2× CreateAAScript (bootstrap + unload). Nothing else.
         Assert.Equal(1, bridge.CheckAvailabilityCount);
         Assert.Equal(BridgeLuaResources.LoadOrder.Count, bridge.InjectTableFileCalls.Count);
-        Assert.Single(bridge.CreateAAScriptCalls);
+        Assert.Equal(2, bridge.CreateAAScriptCalls.Count);
 
         // File order matches LoadOrder.
         for (int i = 0; i < BridgeLuaResources.LoadOrder.Count; ++i)
@@ -57,14 +57,57 @@ public class BridgeInjectorTests
             Assert.StartsWith("-- =", bridge.InjectTableFileCalls[i].Content);
         }
 
-        // Bootstrap AA: description + first/last lines of the script.
+        // Bootstrap AA (first): description + ENABLE/DISABLE blocks. Its
+        // [DISABLE] performs the Tier-1 dormant teardown.
         var (aaDesc, aaScript, aaAuto) = bridge.CreateAAScriptCalls[0];
         Assert.Equal(BootstrapAaScriptGenerator.EntryDescription, aaDesc);
         Assert.Contains("[ENABLE]", aaScript);
         Assert.Contains("[DISABLE]", aaScript);
+        Assert.Contains("discreteShutdown", aaScript);
         // autoActivate=false so the user sees the new CE entry first
         // and can verify game/DLL state before flipping the checkbox.
         Assert.False(aaAuto);
+
+        // Unload AA (second): Tier-2 full FreeLibrary entry.
+        var (unDesc, unScript, unAuto) = bridge.CreateAAScriptCalls[1];
+        Assert.Equal(BootstrapAaScriptGenerator.UnloadEntryDescription, unDesc);
+        Assert.Contains("discreteUnload", unScript);
+        Assert.False(unAuto);
+    }
+
+    [Fact]
+    public async Task InjectAsync_Subset_InjectsOnlySelectedFiles_AndAaLoadsOnlyThose()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var bridge = new FakeBridge();
+
+        // Core + Invoke only — the feature-picker's smallest useful pick
+        // beyond core.
+        var subset = BridgeLuaResources.ResolveFiles(
+            new[] { BridgeLuaResources.BridgeFeature.Invoke });
+
+        var result = await BridgeInjector.InjectAsync(bridge, subset, progress: null, ct: ct);
+
+        Assert.True(result.Ok);
+        Assert.Equal(subset.Count, result.FilesInjected);
+
+        // Only the subset files were injected, in order.
+        Assert.Equal(subset.Count, bridge.InjectTableFileCalls.Count);
+        for (int i = 0; i < subset.Count; ++i)
+            Assert.Equal(subset[i], bridge.InjectTableFileCalls[i].FileName);
+
+        // Helpers NOT picked must be absent from the CT.
+        Assert.DoesNotContain(bridge.InjectTableFileCalls,
+            c => c.FileName == "unity_scene.lua");
+        Assert.DoesNotContain(bridge.InjectTableFileCalls,
+            c => c.FileName == "unity_dissect.lua");
+
+        // The bootstrap AA's load list must match the injected subset —
+        // never reference a file the CT doesn't carry.
+        var (_, aaScript, _) = bridge.CreateAAScriptCalls[0];
+        Assert.Contains("'unity_invoke.lua'", aaScript);
+        Assert.DoesNotContain("'unity_scene.lua'",   aaScript);
+        Assert.DoesNotContain("'unity_dissect.lua'", aaScript);
     }
 
     [Fact]
@@ -75,8 +118,9 @@ public class BridgeInjectorTests
         var report = new SyncProgress<BridgeInjectProgress>();
         await BridgeInjector.InjectAsync(bridge, report, ct);
 
-        // Total = 1 check + N files + 1 AA. Indices are 1-based.
-        int expected = 1 + BridgeLuaResources.LoadOrder.Count + 1;
+        // Total = 1 check + N files + 2 AA (bootstrap + unload). 1-based.
+        int n        = BridgeLuaResources.LoadOrder.Count;
+        int expected = 1 + n + 2;
         Assert.Equal(expected, report.Reports.Count);
         for (int i = 0; i < report.Reports.Count; ++i)
         {
@@ -85,15 +129,14 @@ public class BridgeInjectorTests
         }
 
         Assert.StartsWith("Checking", report.Reports[0].Description);
-        // Last file in LoadOrder — derived from the source-of-truth list
-        // rather than hard-coded so adding a file to LoadOrder doesn't
-        // require touching this assertion. The progress label is
-        // "Injecting <fileName>" per BridgeInjector's step formatter.
-        string lastFile = BridgeLuaResources.LoadOrder[BridgeLuaResources.LoadOrder.Count - 1];
+        // Indices (0-based): 0 check, 1..n files, n+1 bootstrap, n+2 unload.
+        string lastFile = BridgeLuaResources.LoadOrder[n - 1];
         Assert.StartsWith("Injecting " + lastFile,
-            report.Reports[expected - 2].Description); // last file step
+            report.Reports[n].Description); // last file step
         Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.EntryDescription,
-            report.Reports[expected - 1].Description);
+            report.Reports[n + 1].Description);
+        Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.UnloadEntryDescription,
+            report.Reports[n + 2].Description);
     }
 
     [Fact]

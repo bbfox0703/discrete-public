@@ -1148,17 +1148,23 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// still used by the connection bar's status indicator.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanInjectDiscreteBridge))]
-    private async Task InjectDiscreteBridgeAsync()
+    private async Task InjectDiscreteBridgeAsync(
+        IReadOnlyList<BridgeLuaResources.BridgeFeature> features)
     {
         IsBusy = true;
         BridgeInjectStatus = "Starting…";
         try
         {
+            // Core (utils.lua + unity_dump.lua) is always injected; the
+            // dialog's ticked features add their helper files on top.
+            IReadOnlyList<string> files = BridgeLuaResources.ResolveFiles(
+                features ?? System.Array.Empty<BridgeLuaResources.BridgeFeature>());
+
             var progress = new Progress<BridgeInjectProgress>(p =>
                 BridgeInjectStatus = $"({p.Index}/{p.Total}) {p.Description}…");
 
             BridgeInjectResult result = await BridgeInjector
-                .InjectAsync(_aobMaker, progress).ConfigureAwait(true);
+                .InjectAsync(_aobMaker, files, progress).ConfigureAwait(true);
 
             if (result.Ok)
             {

@@ -665,6 +665,22 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Tools → "Inject Discrete Bridge into CE Table". Opens the
+    /// feature picker so the user chooses which optional lua tools to embed
+    /// (Core is always included), then runs the injector over just that
+    /// subset — so the CT carries, and the AA script loads, only the picked
+    /// files. Cancel returns null and does nothing.</summary>
+    private async void OnInjectDiscreteBridgeClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var dialog   = new BridgeInjectWindow();
+        var features = await dialog.ShowDialog<
+            System.Collections.Generic.IReadOnlyList<
+                UnityDumpUI.Core.Services.BridgeLuaResources.BridgeFeature>?>(this);
+        if (features is null) return;  // cancelled
+        await vm.InjectDiscreteBridgeCommand.ExecuteAsync(features).ConfigureAwait(true);
+    }
+
     private async Task<ProcessRow?> ShowPickerDialogAsync()
     {
         if (DataContext is not MainWindowViewModel vm) return null;

@@ -114,32 +114,93 @@ end
 
 -- ---------- DLL location ----------------------------------------------
 
---- Resolve the on-disk path to Discrete-{Backend}.dll.
---- Convention: scripts live alongside the DLLs in CE's `discrete/`
---- subfolder. Falls back to the script's own directory if CE didn't
---- expose its install dir (e.g. when running from a portable copy).
-function M.dllPath(backend)
-    local dllName = "Discrete-" .. backend .. ".dll"
-
-    -- Preferred: <CE-install>/discrete/Discrete-*.dll
-    if getCheatEngineDir then
-        local p = getCheatEngineDir() .. "discrete\\" .. dllName
-        if fileExists and fileExists(p) then return p end
-        -- Even when fileExists isn't available (older CE), try this path
-        -- first and fall through to the alt only if it resolves to nil
-        -- on loadLibrary.
-        if not fileExists then return p end
+--- Pick the on-disk DLL *file name* for a backend + the target's bitness.
+--- The x86 Mono build ships as Discrete-Mono-x86.dll (renamed from the
+--- x64 build's Discrete-Mono.dll) so both can sit in one folder beside the
+--- .CT without colliding. IL2CPP has no 32-bit build, so it's always x64.
+local function _dllName(backend)
+    if backend == "IL2CPP" then
+        return "Discrete-IL2CPP.dll"  -- x64 only — no shipping 32-bit IL2CPP
     end
+    local x86 = (is32bitProcess and is32bitProcess()) or false
+    if backend == "Mono" and x86 then
+        return "Discrete-Mono-x86.dll"
+    end
+    return "Discrete-" .. backend .. ".dll"  -- Discrete-Mono.dll (x64)
+end
 
-    -- Fallback: the directory this .lua sits in.
-    if getMainForm and getMainForm() and getMainForm().SaveDialog1 then
-        local scriptPath = getMainForm().SaveDialog1.FileName
-        if scriptPath and #scriptPath > 0 then
-            local dir = scriptPath:match("(.*[\\/])") or ""
-            return dir .. dllName
+--- Directory of a file path (keeps the trailing slash), or nil.
+local function _dirOf(path)
+    if not path or #path == 0 then return nil end
+    return path:match("(.*[\\/])")
+end
+
+--- Candidate directories to search for the backend DLL, in priority order.
+--- Per the "DLL beside the .CT" distribution model, the table's own folder
+--- comes FIRST. CE doesn't expose the loaded table path directly, so we
+--- approximate it from the Open/Save dialog file names + TrainerOrigin
+--- (these hold the last .CT path), then fall back to CE-install locations.
+--- We verify each with fileExists rather than trusting any single one —
+--- CE dialog paths can be stale (cached from a previous session).
+local function _dllCandidateDirs()
+    local dirs = {}
+    local seen = {}
+    local function add(d)
+        if d and #d > 0 and not seen[d] then
+            seen[d] = true
+            dirs[#dirs + 1] = d
         end
     end
-    return dllName  -- last resort — relies on PATH / cwd
+
+    -- 1. The .CT's folder (best guess at "beside the table"): CE dialog
+    --    FileNames + trainer origin. Order: Save, Open, Trainer.
+    if getMainForm and getMainForm() then
+        local mf = getMainForm()
+        if mf.SaveDialog1 then add(_dirOf(mf.SaveDialog1.FileName)) end
+        if mf.OpenDialog1 then add(_dirOf(mf.OpenDialog1.FileName)) end
+    end
+    if TrainerOrigin and #TrainerOrigin > 0 then
+        add(_dirOf(TrainerOrigin))
+    end
+
+    -- 2. CE install dir + its discrete\ subfolder (legacy convention).
+    if getCheatEngineDir then
+        local ce = getCheatEngineDir()
+        add(ce .. "discrete\\")
+        add(ce)
+    end
+
+    -- 3. Known app-data drop location.
+    local appData = os.getenv("LOCALAPPDATA")
+    if appData and #appData > 0 then
+        add(appData .. "\\Discrete_Dumper\\")
+    end
+
+    return dirs
+end
+
+--- Resolve the on-disk path to the backend DLL for the current target.
+--- Searches the .CT folder first (then CE-install / app-data), picking the
+--- first directory that actually contains the right-bitness DLL. Falls back
+--- to the bare file name (PATH / cwd) when nothing resolves.
+function M.dllPath(backend)
+    local dllName = _dllName(backend)
+    local dirs    = _dllCandidateDirs()
+
+    for _, dir in ipairs(dirs) do
+        local p = dir .. dllName
+        if fileExists and fileExists(p) then
+            return p
+        end
+    end
+
+    -- Nothing matched (or fileExists unavailable on an old CE build).
+    -- Prefer the highest-priority candidate dir so the .CT folder still
+    -- wins; otherwise relies on PATH / cwd.
+    if #dirs > 0 then
+        return dirs[1] .. dllName
+    end
+    return dllName
 end
 
 -- ---------- File existence (CE doesn't always expose this) ------------

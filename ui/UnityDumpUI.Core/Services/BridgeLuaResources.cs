@@ -65,6 +65,86 @@ public static class BridgeLuaResources
     };
 
     /// <summary>
+    /// Core lua files that EVERY bridge install needs, regardless of which
+    /// optional features the user picked. <c>utils.lua</c> is required by the
+    /// bootstrap's <c>package.preload['utils']</c> trick; <c>unity_dump.lua</c>
+    /// is the entry point that actually injects the backend DLL + starts the
+    /// pipe. Without these two the bridge does nothing, so they are never
+    /// optional. Listed in LoadOrder order (utils before unity_dump).
+    /// </summary>
+    public static IReadOnlyList<string> CoreFiles { get; } = new[]
+    {
+        "utils.lua",
+        "unity_dump.lua",
+    };
+
+    /// <summary>
+    /// Optional capability buckets the user ticks in the feature-picker
+    /// dialog. Each maps to one or more lua bridge files (see
+    /// <see cref="FeatureFiles"/>). The core (<see cref="CoreFiles"/>) is
+    /// always injected and is NOT represented here.
+    /// <para>
+    /// Selective loading is safe because every helper bridge is fully
+    /// standalone — only <c>unity_dump.lua</c> <c>require</c>s
+    /// <c>utils.lua</c>, and both live in the always-on core. Each helper
+    /// ships its own JSON parser + pipe RPC, so any subset loads without
+    /// missing a dependency (verified 2026-05-12 via grep of all
+    /// <c>require</c>/<c>dofile</c> sites).
+    /// </para>
+    /// </summary>
+    public enum BridgeFeature
+    {
+        /// <summary>Structure Dissect generator — <c>unity_dissect.lua</c>.</summary>
+        Dissect,
+        /// <summary>CE symbol registration (incl. DLL-free Mono path) —
+        /// <c>unity_symbols.lua</c> + <c>mono_registersymbol_helpers.lua</c>.</summary>
+        Symbols,
+        /// <summary>Reverse address lookup — <c>unity_addrfind.lua</c>.</summary>
+        AddressFinder,
+        /// <summary>Call managed Unity methods — <c>unity_invoke.lua</c>.</summary>
+        Invoke,
+        /// <summary>Scene / GameObject explorer — <c>unity_scene.lua</c>.</summary>
+        Scene,
+    }
+
+    /// <summary>
+    /// Feature → lua files it pulls in. Files are listed in the order they
+    /// should load; <see cref="ResolveFiles"/> re-sorts the final union by
+    /// <see cref="LoadOrder"/> anyway so callers don't depend on this order.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<BridgeFeature, string[]> FeatureFiles =
+        new Dictionary<BridgeFeature, string[]>
+        {
+            [BridgeFeature.Dissect]       = new[] { "unity_dissect.lua" },
+            [BridgeFeature.Symbols]       = new[] { "unity_symbols.lua", "mono_registersymbol_helpers.lua" },
+            [BridgeFeature.AddressFinder] = new[] { "unity_addrfind.lua" },
+            [BridgeFeature.Invoke]        = new[] { "unity_invoke.lua" },
+            [BridgeFeature.Scene]         = new[] { "unity_scene.lua" },
+        };
+
+    /// <summary>
+    /// Resolve the final ordered file list for a set of selected features.
+    /// Always starts with <see cref="CoreFiles"/>, adds the files for each
+    /// selected feature, de-duplicates, and returns them sorted by
+    /// <see cref="LoadOrder"/> so utils.lua leads and unity_dump.lua runs
+    /// before any helper. Passing no features yields just the core.
+    /// </summary>
+    public static IReadOnlyList<string> ResolveFiles(IEnumerable<BridgeFeature> features)
+    {
+        var wanted = new HashSet<string>(CoreFiles, StringComparer.Ordinal);
+        if (features is not null)
+        {
+            foreach (BridgeFeature f in features)
+                if (FeatureFiles.TryGetValue(f, out string[]? files))
+                    foreach (string file in files)
+                        wanted.Add(file);
+        }
+        // Project onto LoadOrder so ordering invariants (utils first,
+        // unity_dump before helpers) hold no matter the selection order.
+        return LoadOrder.Where(wanted.Contains).ToArray();
+    }
+
+    /// <summary>
     /// Read one bridge lua file by filename (case-sensitive — the
     /// LogicalName entries in csproj are case-sensitive too).
     /// </summary>
@@ -103,9 +183,20 @@ public static class BridgeLuaResources
     /// <c>findTableFile(name)</c> calls), NOT the LogicalName.
     /// </summary>
     public static IReadOnlyList<(string FileName, string Content)> ReadAll()
+        => ReadAll(LoadOrder);
+
+    /// <summary>
+    /// Read a specific subset of bridge lua files (e.g. the output of
+    /// <see cref="ResolveFiles"/>) as <c>(fileName, content)</c> pairs, in
+    /// the order given. Each name must be a known bridge file.
+    /// </summary>
+    /// <exception cref="ArgumentException">A name is not a known bridge file.</exception>
+    public static IReadOnlyList<(string FileName, string Content)> ReadAll(
+        IReadOnlyList<string> fileNames)
     {
-        var list = new List<(string, string)>(LoadOrder.Count);
-        foreach (string fileName in LoadOrder)
+        if (fileNames is null) throw new ArgumentNullException(nameof(fileNames));
+        var list = new List<(string, string)>(fileNames.Count);
+        foreach (string fileName in fileNames)
             list.Add((fileName, Read(fileName)));
         return list;
     }

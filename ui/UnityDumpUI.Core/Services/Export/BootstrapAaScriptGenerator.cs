@@ -30,11 +30,13 @@
 //      for some operations even if symbolhandler is lagging).
 //   7. Sets _G.discrete_bridgeLoaded so re-enabling the entry no-ops.
 //
-// The generated [DISABLE] block clears the global flag. CE doesn't
-// expose unload primitives for arbitrary lua chunks, so we can't
-// truly tear down the bridge — clearing the flag at least makes the
-// next [ENABLE] re-run, which picks up any updated file content the
-// user has re-injected since.
+// The generated [DISABLE] block performs a Tier-1 teardown: it calls
+// discreteShutdown() (defined by unity_dump.lua) to stop the DLL's pipe
+// server + remove its runtime_invoke hook, leaving the DLL dormant but
+// still mapped, then clears the global flag so the next [ENABLE] re-runs
+// (which restarts the pipe without re-injecting). A separate
+// BuildUnloadEntry() emits an "Unload Discrete DLL" entry whose [ENABLE]
+// calls discreteUnload() for a full FreeLibrary unmap.
 //
 // Why a const string template:
 //   * The lua body is essentially fixed. Only the file list (LoadOrder)
@@ -68,11 +70,13 @@ public static class BootstrapAaScriptGenerator
     public static string Build() => Build(BridgeLuaResources.LoadOrder);
 
     /// <summary>
-    /// Test-only overload: build with a caller-supplied file list. Lets
-    /// the test rig verify substitution without depending on the
-    /// production LoadOrder shape.
+    /// Build with a caller-supplied file list — used by the feature-picker
+    /// flow to emit a bootstrap that loads only the selected subset (the
+    /// output of <see cref="BridgeLuaResources.ResolveFiles"/>). The list
+    /// MUST contain <c>utils.lua</c> (the preload trick depends on it);
+    /// <see cref="BridgeLuaResources.CoreFiles"/> guarantees this.
     /// </summary>
-    internal static string Build(IReadOnlyList<string> fileNames)
+    public static string Build(IReadOnlyList<string> fileNames)
     {
         if (fileNames is null || fileNames.Count == 0)
             throw new ArgumentException("fileNames must contain at least one file", nameof(fileNames));
@@ -126,8 +130,10 @@ end
 local BRIDGE_FILES = __BRIDGE_FILES_LIST__
 
 -- Read one CT-embedded file as a string, return a parsed-but-not-yet-
--- executed chunk. Errors are fatal — the bridge is useless without all
--- 7 files, so any missing one bails the whole [ENABLE].
+-- executed chunk. Errors are fatal — BRIDGE_FILES only lists files the
+-- installer actually embedded (the feature-picker subset), so any name
+-- here that findTableFile can't resolve means the CT is corrupt/stale;
+-- bail the whole [ENABLE].
 local function loadEmbeddedChunk(name)
   local f = findTableFile(name)
   if not f then
@@ -203,12 +209,59 @@ _G.discrete_bridgeLoaded = true
 [DISABLE]
 {$lua}
 if syntaxcheck then return end
--- CE doesn't expose unload primitives for lua chunks, so we can't
--- truly tear the bridge down. Clearing the flag is enough to let the
--- next [ENABLE] re-run; the second run will redefine the same globals
--- on top of the existing ones, which is fine for the function-table
--- pattern every bridge file uses.
+-- Tier-1 teardown: stop the DLL's pipe server + remove its
+-- runtime_invoke hook so it goes dormant. The DLL stays MAPPED — this
+-- is intentional. Re-enabling re-runs the loader; unity_dump.lua's
+-- main() sees the module already mapped, skips re-injection, and just
+-- restarts the pipe. For a full unmap (FreeLibrary) use the separate
+-- 'Unload Discrete DLL' entry. discreteShutdown() is defined by
+-- unity_dump.lua (core), so it's present whenever the bridge loaded.
+if type(discreteShutdown) == 'function' then
+  pcall(discreteShutdown)
+else
+  print('[Discrete] __ENTRY_DESCRIPTION__: discreteShutdown() unavailable — DLL left running')
+end
 _G.discrete_bridgeLoaded = nil
-print('[Discrete] __ENTRY_DESCRIPTION__: teardown — globals cleared, ready for reload')
+print('[Discrete] __ENTRY_DESCRIPTION__: teardown — pipe stopped, ready for reload')
+";
+
+    /// <summary>
+    /// CE memory-record description for the Tier-2 full-unload entry.
+    /// Separate from <see cref="EntryDescription"/> so users get an
+    /// explicit "fully remove the DLL" action distinct from the dormant
+    /// Tier-1 teardown the bootstrap's [DISABLE] performs.
+    /// </summary>
+    public const string UnloadEntryDescription = "Unload Discrete DLL";
+
+    /// <summary>
+    /// Build the standalone "Unload Discrete DLL" AA entry. Its [ENABLE]
+    /// calls <c>discreteUnload()</c> (defined by unity_dump.lua / core):
+    /// shut the DLL down, then FreeLibrary it out of the target so the
+    /// address space is reclaimed. Requires the bridge to have been loaded
+    /// at least once (so the global exists); otherwise it prints a hint.
+    /// [DISABLE] is a no-op — the unload already happened on enable.
+    /// </summary>
+    public static string BuildUnloadEntry() => UnloadTemplate
+        .Replace("__UNLOAD_DESCRIPTION__", UnloadEntryDescription);
+
+    private const string UnloadTemplate = @"[ENABLE]
+{$lua}
+if syntaxcheck then return end
+
+-- Full unload: shut the DLL down then FreeLibrary it from the target.
+-- discreteUnload() lives in unity_dump.lua (core), so the bridge must
+-- have been loaded at least once for this to resolve.
+if type(discreteUnload) ~= 'function' then
+  print('[Discrete] __UNLOAD_DESCRIPTION__: bridge not loaded — enable ""Load Discrete Bridge"" first.')
+  return
+end
+discreteUnload()
+-- Let the next ""Load Discrete Bridge"" [ENABLE] re-inject cleanly.
+_G.discrete_bridgeLoaded = nil
+
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+-- No-op: the unload happened on [ENABLE]; nothing to undo.
 ";
 }

@@ -39,10 +39,14 @@ or failed bridge call (no polling).
    9.5). Wait for `Connected — build N`.
 4. *(Optional but useful)*: browse to a class / call a method / run an
    address lookup so you have something to push to CE.
-5. **Tools → "Inject Discrete Bridge into CE Table…"**. Status banner
-   walks through 9 steps in ~1 s; ends with
-   `Bridge ready (7 files + bootstrap AA) — enable "Load Discrete
-   Bridge" in CE to activate`.
+5. **Tools → "Inject Discrete Bridge into CE Table…"**. A picker opens —
+   tick which optional tools to embed (Structure Dissect / Symbols /
+   Address Finder / Invoke / Scene). **Core** (DLL inject + pipe:
+   `utils.lua` + `unity_dump.lua`) is always included. Click **Inject**;
+   the status banner walks the steps in ~1 s and ends with
+   `Bridge ready (N files + bootstrap AA) — enable "Load Discrete
+   Bridge" in CE to activate` (N = core + your ticks). Only the picked
+   files are embedded, and the bootstrap AA loads exactly that subset.
 6. **Switch to CE**, find the new **Load Discrete Bridge** entry in
    the address list, **toggle its checkbox**. Lua console prints
    `[Discrete] Load Discrete Bridge: ready — DLL build N`.
@@ -68,27 +72,102 @@ That's the whole flow. Everything below is reference material.
 
 ## What lands in the CT
 
-After step 5, `Table → Show table files` lists 7 entries:
+After step 5, `Table → Show table files` lists the **core + picked**
+files. With every feature ticked you get all of them (`mono_registersymbol_helpers.lua`
+rides along with the Symbols feature):
 
 ```
-utils.lua             (~6 KB)
-unity_dump.lua        (~7 KB)
-unity_dissect.lua     (~9 KB)
-unity_symbols.lua     (~15 KB)
-unity_addrfind.lua    (~14 KB)
-unity_invoke.lua      (~18 KB)
-unity_scene.lua       (~36 KB)
+utils.lua             (~6 KB)   ← core (always)
+unity_dump.lua        (~7 KB)   ← core (always)
+unity_dissect.lua     (~9 KB)   ← Structure Dissect
+unity_symbols.lua     (~15 KB)  ← Symbols
+unity_addrfind.lua    (~14 KB)  ← Address Finder
+unity_invoke.lua      (~18 KB)  ← Invoke
+unity_scene.lua       (~36 KB)  ← Scene
 ```
 
-…and the address list gains one Auto-Assembler entry:
+Untick a feature and its file(s) are simply absent — the bootstrap AA's
+`BRIDGE_FILES` list is generated over the same subset, so it never asks
+`findTableFile` for something the CT doesn't carry.
+
+### Backend DLLs go *beside the .CT*, not inside it
+
+The DLLs are **not** embedded — ship them next to the distributed `.CT`
+so they can be updated independently and stay off AV radar. Place all
+three (the bridge picks the right one at runtime by backend + bitness via
+`utils.lua`'s `M.dllPath`):
+
+```
+Discrete-Mono.dll        ← Mono, 64-bit
+Discrete-IL2CPP.dll      ← IL2CPP, 64-bit (no 32-bit build exists)
+Discrete-Mono-x86.dll    ← Mono, 32-bit (renamed from dist/x86/Discrete-Mono.dll
+                            so it doesn't collide with the x64 name)
+```
+
+`M.dllPath` searches the `.CT`'s own folder first (then the CE-install
+`discrete\` subfolder and `%LOCALAPPDATA%\Discrete_Dumper\`), checking
+file existence at each, so a stale CE dialog path can't send it to the
+wrong copy.
+
+**Packaging helper.** `tools\Package-CTDist.ps1` assembles the
+distribution folder for you — it copies the three DLLs out of `dist\`,
+renaming `dist\x86\Discrete-Mono.dll` → `Discrete-Mono-x86.dll`, and can
+drop your `.CT` in alongside:
+
+```powershell
+# Build all three first:
+.\build.ps1 -Target DLL -Backend Both -Arch Both
+# Then assemble a ready-to-zip folder:
+.\tools\Package-CTDist.ps1 -Destination .\release\MyTrainer -CtFile .\MyTrainer.CT
+```
+
+A missing build (e.g. you only built Mono, or skipped `-Arch Both`) is
+reported and skipped, not fatal — so a Mono-only or IL2CPP-only
+distribution is one command too.
+
+…and the address list gains two Auto-Assembler entries:
 
 ```
 Load Discrete Bridge       [ ]
+Unload Discrete DLL        [ ]
 ```
 
 Each subsequent *Send to CE Table…* click adds one more entry. They all
 prepend the bridge-loaded guard so toggling them before *Load Discrete
 Bridge* prints a clear hint instead of silently failing.
+
+### Load / unload lifecycle
+
+There are two teardown tiers, so distributing a `.CT` that can cleanly
+remove the DLL is built-in:
+
+- **Disable `Load Discrete Bridge` → Tier-1 (dormant).** The `[DISABLE]`
+  block calls `discreteShutdown()`, which invokes the DLL's
+  `Discrete_Shutdown` export: the pipe server thread is stopped + joined
+  and the `runtime_invoke` MinHook detour is removed. The DLL stays
+  **mapped**. Re-enabling is cheap — `unity_dump.lua`'s `main()` sees the
+  module already mapped, skips re-injection, and just restarts the pipe.
+  No refcount growth across toggles.
+- **Enable `Unload Discrete DLL` → Tier-2 (full unmap).** Calls
+  `discreteUnload()`: `Discrete_Shutdown` first (so the `FreeLibrary`
+  path's `DllMain` detach join is a no-op and the hook is already gone),
+  then `FreeLibrary` on the module base via a remote thread, looped until
+  the module disappears from `enumModules` (handles refcount > 1). After
+  this the address space is reclaimed; the next *Load Discrete Bridge*
+  enable does a fresh re-inject. Requires the bridge to have been loaded
+  at least once (the `discreteUnload` global lives in `unity_dump.lua`,
+  which is always in the core).
+
+**Proxy-DLL deployments.** If the backend DLL was loaded by a proxy
+(`version.dll` / `winmm.dll` next to the game .exe) rather than injected,
+Tier-2 unload still works and is safe — the proxy is fire-and-forget (it
+never stores the HMODULE, never calls into the backend, and never
+reloads). But the single refcount is the proxy's, so `FreeLibrary`
+removes what the proxy deployed, and the proxy will **not** reload it this
+session; re-enable *Load Discrete Bridge* to re-inject. `discreteUnload()`
+detects the proxy and prints this note. For proxy setups that just want to
+pause Discrete, prefer Tier-1 (disable *Load Discrete Bridge*) — it leaves
+the proxy's DLL mapped and dormant.
 
 ---
 
@@ -226,8 +305,11 @@ text matches verbatim.
 ### Re-enabling `Load Discrete Bridge` is a silent no-op
 
 By design — `_G.discrete_bridgeLoaded` is set after the first run.
-Disable + re-enable to pick up updated lua content. (Toggling [DISABLE]
-clears the flag.)
+Disable + re-enable to pick up updated lua content. Toggling `[DISABLE]`
+now also runs the Tier-1 `discreteShutdown()` (stops the pipe + removes
+the hook, DLL stays mapped) before clearing the flag, so re-enable
+restarts the pipe without re-injecting. For a full unmap, enable the
+separate `Unload Discrete DLL` entry.
 
 ---
 
@@ -241,12 +323,15 @@ Run after any Phase 22 code change:
    files).
 3. Launch the freshly-built `dist/DiscreteUI.exe`. Wait ~1 s. Verify
    the connection bar shows `AOBMaker: connected` (green).
-4. *Tools → Inject Discrete Bridge into CE Table*. Status banner walks
-   through `(1/9) Checking AOBMaker plugin availability…` →
-   `(9/9) Creating Load Discrete Bridge AA entry…` →
-   `Bridge ready (7 files + bootstrap AA) …`. Total ≤ 2 s.
-5. CE → `Table → Show table files`. Verify all 7 `unity_*.lua` files
-   present, sizes match the dist files (`Get-ChildItem dist\*.lua`).
+4. *Tools → Inject Discrete Bridge into CE Table*. In the picker, leave
+   **all features ticked** for this full smoke. Click *Inject*. Status
+   banner walks `(1/10) Checking AOBMaker plugin availability…` →
+   `(10/10) Creating Load Discrete Bridge AA entry…` →
+   `Bridge ready (8 files + bootstrap AA) …`. Total ≤ 2 s. (Tick fewer
+   features and the step/file count drops accordingly.)
+5. CE → `Table → Show table files`. Verify the `*.lua` files for the
+   ticked features are present, sizes match the dist files
+   (`Get-ChildItem dist\*.lua`).
 6. CE address list shows `Load Discrete Bridge` entry. Enable it. Lua
    console prints `[Discrete] Load Discrete Bridge: ready — DLL build N`.
 7. Inject the DLL via DiscreteUI's *Pick & inject…* (or skip if step 6
@@ -284,7 +369,7 @@ update or a Discrete wire-format change in isolation.
 ```
 
 After the script reports OK, switch to CE: `Table → Show table files`
-should list `_discrete_smoke.lua` (or all 7 in `-Full` mode); the
+should list `_discrete_smoke.lua` (or all 8 bridge files in `-Full` mode); the
 address list should gain `Discrete: smoke probe` (or `Load Discrete
 Bridge` in `-Full` mode).
 
