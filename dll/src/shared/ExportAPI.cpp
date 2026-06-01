@@ -4488,6 +4488,10 @@ void RegisterCoreHandlers() {
                 // wasn't detected (older runtimes without class_enum_basetype).
                 const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
                     ? f.underlyingTypeName : f.typeName;
+                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                    "walkInstance:   decode '" + f.name + "' off=" +
+                    formatHex(static_cast<std::uintptr_t>(f.offset)) +
+                    " type=" + decodeType + " addr=" + formatHex(fieldAddr));
                 json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
@@ -7423,6 +7427,12 @@ void RegisterCoreHandlers() {
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
         if (k == nullptr) return json{{"error", err}};
 
+        // Step trace (each Write flushes — survives a CTD) so a crash while
+        // drilling into a nested field pinpoints the exact step / field.
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+            "walkInstance(IL2CPP): addr=" + formatHex(addr) +
+            " header-klass=" + formatHex(reinterpret_cast<std::uintptr_t>(k)));
+
         const auto& r = IL2CPP::GetResolver();
         IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
         if (domain == nullptr) return json{{"error", "no il2cpp domain"}};
@@ -7437,11 +7447,20 @@ void RegisterCoreHandlers() {
                 cur = SehGetParent(r.class_get_parent, cur);
             }
         }
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+            "walkInstance: chain depth=" + std::to_string(chain.size()));
 
         json fields = json::array();
         std::string selfNs, selfName;
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                "walkInstance:  ReadClassInfo class=" +
+                formatHex(reinterpret_cast<std::uintptr_t>(*it)));
             auto res = IL2CPP::ReadClassInfo(*it);
+            Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                "walkInstance:  ReadClassInfo done ok=" + std::to_string(res.ok ? 1 : 0) +
+                " fields=" + std::to_string(res.ok ? res.info.fields.size() : std::size_t(0)) +
+                " name=" + (res.ok ? res.info.self.name : std::string("?")));
             if (!res.ok) continue;
             const bool isSelf = (*it == k);
             if (isSelf) { selfNs = res.info.self.ns; selfName = res.info.self.name; }
@@ -7461,6 +7480,10 @@ void RegisterCoreHandlers() {
                     entry["underlying_type"] = f.underlyingTypeName;
                 const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
                     ? f.underlyingTypeName : f.typeName;
+                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                    "walkInstance:   decode '" + f.name + "' off=" +
+                    formatHex(static_cast<std::uintptr_t>(f.offset)) +
+                    " type=" + decodeType + " addr=" + formatHex(fieldAddr));
                 json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
@@ -7470,6 +7493,9 @@ void RegisterCoreHandlers() {
             }
             if (fields.size() >= 4096) break;
         }
+
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+            "walkInstance: all fields decoded, count=" + std::to_string(fields.size()));
 
         // Sort by offset — see Mono walkInstance for rationale.
         std::sort(fields.begin(), fields.end(),
