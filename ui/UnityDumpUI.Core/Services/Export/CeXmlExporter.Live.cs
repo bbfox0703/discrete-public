@@ -118,7 +118,16 @@ public static partial class CeXmlExporter
             //      the deref'd object via its header.
             case WalkedFieldKind.PointerToClass:
             {
-                if (!canDrill || engineInternal || string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
+                // Don't recurse into engine / framework REFERENCE objects
+                // (UnityEngine.Transform → scene graph, GameObject → components,
+                // UnityEvent → invocation lists, BCL internals). They explode
+                // the export into hundreds of thousands of irrelevant rows and
+                // aren't gameplay state — emit a watchable pointer leaf instead.
+                // Game-namespace types (Assembly-CSharp / Pug.* / …) still
+                // recurse; value structs (UnityEngine.Vector3) are unaffected
+                // (different case → still expand to x/y/z).
+                if (!canDrill || engineInternal || IsFrameworkReferenceType(f.Type)
+                    || string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
                 {
                     EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
                              showAsHex: true, address: rel, offsets: null);
@@ -204,6 +213,28 @@ public static partial class CeXmlExporter
             || type.StartsWith("Unity.Collections.", StringComparison.Ordinal)
             || type.StartsWith("Unity.Jobs.", StringComparison.Ordinal)
             || type.StartsWith("Unity.Burst.", StringComparison.Ordinal);
+    }
+
+    /// <summary>True for engine / framework REFERENCE types — emitted as a
+    /// pointer leaf instead of recursed, to keep live export to gameplay data.
+    /// Recursing into UnityEngine objects (Transform / GameObject / Component /
+    /// MonoBehaviour / UnityEvent / Material …) walks the whole scene + engine
+    /// graph; BCL reference internals (System.* dictionaries, delegates) are
+    /// equally useless. Applied ONLY on the pointer-to-class path, so value
+    /// structs (UnityEngine.Vector3, Unity.Mathematics.float3) still expand.
+    /// Game types (no framework namespace prefix) are still recursed. The list
+    /// is conservative-broad on purpose — a cheat table wants game state, not
+    /// engine objects; a specific engine field can still be drilled manually
+    /// from its emitted pointer address.</summary>
+    private static bool IsFrameworkReferenceType(string? type)
+    {
+        if (string.IsNullOrEmpty(type)) return false;
+        return type.StartsWith("UnityEngine.", StringComparison.Ordinal)
+            || type.StartsWith("Unity.", StringComparison.Ordinal)
+            || type.StartsWith("System.", StringComparison.Ordinal)
+            || type.StartsWith("TMPro.", StringComparison.Ordinal)
+            || type.StartsWith("Mono.", StringComparison.Ordinal)
+            || type.StartsWith("Microsoft.", StringComparison.Ordinal);
     }
 
     /// <summary>walkInstance via the object header (resolves nested + generic

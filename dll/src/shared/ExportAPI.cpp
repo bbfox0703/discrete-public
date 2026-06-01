@@ -4615,11 +4615,6 @@ void RegisterCoreHandlers() {
                 // Struct-relative offset for value-type walks (Phase 31-6 a).
                 const long relOffset = static_cast<long>(f.offset) - structHeaderAdjust;
                 std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(relOffset);
-                // Phase 31-6 diag — per-field flush trace (last line = the
-                // field whose decodeField crashed, if it does).
-                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-                    "walkInstance:   field name=" + f.name + " type=" + f.typeName +
-                    " addr=" + formatHex(fieldAddr) + (structHeaderAdjust != 0 ? " [vt]" : ""));
                 json entry = {
                     {"name",    f.name},
                     {"type",    f.typeName},

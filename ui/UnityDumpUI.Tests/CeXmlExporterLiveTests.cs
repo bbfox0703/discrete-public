@@ -217,6 +217,12 @@ public class CeXmlExporterLiveTests
             // Native pointer type (ends with '*') — must NOT recurse.
             new() { Name = "m_StatePtr", Type = "Unity.Entities.SystemState*",
                     Offset = 0x20, Address = "0x000000000000C020", Ptr = sysObj },
+            // UnityEngine reference objects — must NOT recurse (scene graph /
+            // invocation list explosion). Emitted as pointer leaves.
+            new() { Name = "optionalTransformToFollow", Type = "UnityEngine.Transform",
+                    Offset = 0x28, Address = "0x000000000000C028", Ptr = sysObj },
+            new() { Name = "onDeath", Type = "UnityEngine.Events.UnityEvent",
+                    Offset = 0x30, Address = "0x000000000000C030", Ptr = sysObj },
         });
         // The ECS object's fields — reachable only if the gate fails.
         live.AddInstance(sysObj, new List<WalkedField>
@@ -236,6 +242,8 @@ public class CeXmlExporterLiveTests
         Assert.Contains("_hp", xml);                    // gameplay field kept
         Assert.Contains("ecbSystem", xml);              // pointer leaf still listed
         Assert.Contains("m_StatePtr", xml);
+        Assert.Contains("optionalTransformToFollow", xml);  // UnityEngine ref → leaf
+        Assert.Contains("onDeath", xml);                    // UnityEvent → leaf
         Assert.DoesNotContain("SECRET_ECS_FIELD", xml); // but NOT recursed into
     }
 
