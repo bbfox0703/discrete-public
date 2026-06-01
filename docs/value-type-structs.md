@@ -125,13 +125,15 @@ near-zero CTD risk.
 
 ### 3.2 Phase B — generic value-type recursion  ✅ offset RESOLVED (live-smoke 2026-06-01)
 
-> **The offset question is settled.** Live-smoke on Core Keeper (IL2CPP x64)
+> **The offset question is settled.** Live-smoke on Core Keeper (**Mono x64**)
 > proved the convention via hex (see STATUS.md "Phase 31 live-smoke"):
 > `PlayerController.srOffSetPos` (Vector3 @ field-offset 0xA34) is truly
 > `(0,0,0)` in memory, but the existing live Inspector drill displayed
 > `(0.6875,-0.0585,0)` — it read from `structBase + 0x10`, i.e. it used
-> `il2cpp_field_get_offset(Vector3.x) = 0x10` (header-inclusive) without
-> stripping the header on an inline (header-less) struct.
+> `mono_field_get_offset(Vector3.x) = 0x10` (header-inclusive) without
+> stripping the header on an inline (header-less) struct. (Mono and IL2CPP
+> share the convention: a `MonoObject`/`Il2CppObject` header = 2 pointers,
+> so the over-read is **0x10 on x64, 0x08 on x86** — i.e. `2*ptrSize`.)
 >
 > **Locked formula**: inline value-type member read =
 > **`fieldAddr + member.offset − 2*ptrSize`** (subtract the
