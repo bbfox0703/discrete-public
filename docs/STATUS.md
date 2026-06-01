@@ -8,10 +8,17 @@
 | 項目 | 值 |
 |---|---|
 | **Current build** | #928 |
-| **Current phase** | ✅ **Phase 29i Pivot usability & value-driven discovery**(4 波)實作完成於 `dev`(UI/engine-only,無 DLL);先前 Phase 22 action-driven CE bridge 等已 merged to `main` |
-| **Branches** | `dev` 領先 `main` @ `3b0bc18`(Phase 29i,4 commit + spec);`main` 仍在 `315bcc4` |
-| **Tests** | 673 UI tests green(+23 vs 650);兩個 DLL(IL2CPP+Mono)build clean、UI 0/0 warnings |
-| **Mid-flight** | 無;Phase 29i 待 **live-smoke**(實機跑 Find-by-value / element picker / interest 排序)|
+| **Current phase** | ✅ **Phase 31 inline value-type struct(Vec3/4)** 31-1/31-3/31-4 SHIPPED 於 `dev`(31-2/31-5 deferred);先前 Phase 29i 4 波亦在 `dev` |
+| **Branches** | `dev` 領先 `main`(Phase 29i + Phase 31 partial,多 commit);`main` 仍在 `315bcc4` |
+| **Tests** | 684 UI tests green;UI 0/0 warnings。**注意:Phase 31-1 改了 DLL(`ExportAPI.cpp`)尚未 build/驗證** |
+| **Mid-flight** | Phase 31-2(DLL Phase B 泛型 struct,卡 offset 問題)+ 31-5(value-search 命名)**deferred 待 live build**;Phase 31-1 DLL 待實機 build + live-smoke;Phase 29i 待 live-smoke |
+
+**最新批次(2026-06-01,Phase 31 — inline value-type struct,部分 SHIPPED)** — spec [value-type-structs.md](value-type-structs.md):
+- **根因**:`decodeField`([ExportAPI.cpp](../dll/src/shared/ExportAPI.cpp))對 value-type struct(Vector3=3 floats 等)只讀一個 pointer-word → snapshot/SPC/diff/pivot/value-search 全顯示 `(no value)`、無法處理 Vec3/4。
+- **31-1 SHIPPED**(DLL Phase A + UI)— `decodeField` catch-all 加 named Unity math struct 表(Vector2/3/4、Quaternion、Color(32)、Vector2/3Int、Rect:依固定 offset 讀 float/byte/int32 emit `fields` 成員;instance 欄位 + array 元素共用,純 offset 讀取零 CTD 風險)。protocol `SnapshotFieldEntry.Fields`(隨 30a dedup `V` + `payload_gzip`,舊 .db 相容);`FormatFieldValue` 渲染 `(x,y,z)`。**DLL 未 build/驗證 — 待實機。**
+- **31-3 SHIPPED**(UI)— `BuildFieldIndex` 加 `ExpandStructMembers`:struct 成員 fan-out 成 pseudo-row(`_position.x/.y/.z`,絕對 field offset、遞迴 nested)+ 保留 summary tuple row → diff/SPC 可逐軸定位。`CountFieldValues` 同步計數。
+- **31-4 SHIPPED**(UI)— `SnapshotEnvelope.EnumerateFlatFields`/`ResolveDottedFieldValue`;PivotEngine/KeyDiscovery 支援 dotted component path(`_position.x`),欄位 picker 列出 component。struct value 欄位自動顯示 `(x,y,z)` 軌跡。
+- **31-2 / 31-5 DEFERRED** — 31-2(泛型 value-type 遞迴)卡在 inline struct member offset 是否扣 header(`member.offset` vs `-2*ptrSize`,§3.2,只能實機對 CE 驗證);31-5(value-search reverse-lookup 命名 component)是 DLL address-finder 改動、riding on 31-2(單 component float scan 今天已可用)。兩者待 live build session。
 
 **最新批次(2026-06-01,Phase 29i — Pivot usability & value-driven discovery,UI/engine-only)** — spec 見 [class-pivot.md → Phase 29i](class-pivot.md#phase-29i--pivot-usability--value-driven-discovery):
 - **29i-1 class 結構瀏覽** — `ClassShortlistEngine` 改為**保留** field 名稱/型別(原本掃完只留 count);shortlist grid 加 `Fields (preview)` 欄(前 10 + `+N more`)+ 下方 detail panel(完整 field 清單,double-tap→Key / 右鍵→Value)。

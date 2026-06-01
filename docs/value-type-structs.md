@@ -123,7 +123,29 @@ new member list). No class-layout resolution needed — pure offset reads
 via `Memory::SafeReadBytes`. This covers the vec3/vec4 headline case with
 near-zero CTD risk.
 
-### 3.2 Phase B — generic value-type recursion
+### 3.2 Phase B — generic value-type recursion  ⚠ DEFERRED (open offset question)
+
+> **Status: deferred pending a single live build.** Phase A ships now; Phase B
+> is blocked on one offset-convention question that can only be resolved by
+> running on a real game (cannot be unit-tested, cannot be reasoned to
+> certainty from the source alone):
+>
+> **The question**: Mono `mono_field_get_offset` / IL2CPP field offsets for a
+> value-type's *instance* fields are **header-inclusive** (measured from the
+> boxed object start, after the 2-pointer `MonoObject`/`Il2CppObject` header).
+> But an **inline** struct field has *no* header — its storage IS the value.
+> So the correct member read address is either:
+> - `fieldAddr + member.offset`            (if `ReadClassInfo` already strips the header for value types), **or**
+> - `fieldAddr + member.offset - 2*ptrSize` (the standard unbox adjustment).
+>
+> Shipping the wrong one yields silently-wrong x/y/z for custom structs —
+> worse than the current ptr-word. **Resolution**: capture one custom struct
+> on a real game, compare a member read against CE byte-for-byte, lock the
+> formula, then implement. The named-struct Phase A has no such risk (its
+> offsets are hardcoded struct-relative), so it covers Vector3/4/Quaternion/
+> Color/Rect/Vector2-3Int — including the character-coordinate case — today.
+>
+> **Implementation sketch once the formula is locked** (5 sites):
 
 For a field with `is_value_type && !is_enum && !primitive && !namedStruct`:
 - resolve the struct's field layout via the existing class-info path
@@ -241,19 +263,22 @@ story:
 
 ## 6. Wave delivery
 
-| Wave | Scope | Ships alone? | Verifiable |
+| Wave | Scope | Status (2026-06-01) | Verification |
 |---|---|---|---|
-| **31-1** | DLL Phase A (named structs) + protocol `Fields` + FormatFieldValue tuple + Inspector shows members | yes | DLL build + **live-smoke** (vec3 in real game) + UI unit tests for tuple render |
-| **31-2** | DLL Phase B (generic value-type recursion + SEH hardening + caps) | yes | DLL build + **live-smoke** (custom int/double struct) |
-| **31-3** | SPC/diff `ExpandStructMembers` fan-out + summary + count parity | yes (UI-only on captured data) | UI unit tests (fan-out rows, nested) |
-| **31-4** | Pivot/KeyDiscovery struct guards + per-component pickers + shortlist/interest parity | yes (UI-only) | UI unit tests |
-| **31-5** | Value Search reverse-lookup component naming | yes | UI unit tests + live-smoke |
+| **31-1** | DLL Phase A (named structs) + protocol `Fields` + FormatFieldValue tuple | ✅ **SHIPPED** (dev) | DLL **needs build + live-smoke** (vec3 x/y/z vs CE); UI unit-tested |
+| **31-3** | SPC/diff `ExpandStructMembers` fan-out + summary + count parity | ✅ **SHIPPED** (dev) | UI unit tests green |
+| **31-4** | Pivot/KeyDiscovery per-component (dotted paths) + pickers | ✅ **SHIPPED** (dev) | UI unit tests green |
+| **31-2** | DLL Phase B (generic value-type recursion) | ⚠ **DEFERRED** — open offset question (§3.2) | needs one live build to lock `member.offset` vs `-2*ptrSize` |
+| **31-5** | Value Search reverse-lookup names the component | ⚠ **DEFERRED** — DLL address-finder change | single-component float scan already works; naming is polish |
 
-Suggested order: **31-1 → 31-3 → 31-4 → 31-2 → 31-5** — get the named-vector
-capture + the UI consumers working end-to-end on the common case first
-(31-1/3/4), then the generic struct path (31-2), then the value-search
-polish (31-5). Each UI wave ends green on the unit suite; each DLL wave
-needs a real-game live-smoke (can't be unit-tested) — flag it in STATUS.
+**Shipped 2026-06-01**: 31-1 (Phase A) + 31-3 + 31-4 — covers snapshot / SPC /
+diff / pivot for all named Unity math structs (incl. character coordinates).
+**Deferred**: 31-2 is blocked on the §3.2 inline-value-type offset convention
+(can only be settled by a real-game read vs CE — shipping the wrong formula
+gives silently-wrong members, worse than the ptr word). 31-5's practical path
+(scan one component float) already works today; naming the component in the
+reverse lookup is a DLL address-finder change that rides on 31-2's resolution.
+Both deferred waves wait for a live build session.
 
 ---
 
