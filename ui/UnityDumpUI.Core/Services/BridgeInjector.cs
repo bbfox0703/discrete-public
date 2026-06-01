@@ -3,8 +3,8 @@
 //
 // Wraps the sequential AOBMaker pipe calls the bridge install consists
 // of: 1 CheckAvailability + N InjectTableFile (N = the picked file
-// subset) + 2 CreateAAScript (the "Load Discrete Bridge" bootstrap and
-// the "Unload Discrete DLL" Tier-2 entry). Lives in Core so the test
+// subset) + 1 CreateAAScript (the "Load Discrete Bridge" bootstrap; its
+// [DISABLE] does the dormant teardown). Lives in Core so the test
 // rig can drive it with a mock IAobMakerBridge — the
 // MainWindowViewModel is too entangled with PipeClient + FileLogger
 // to test through.
@@ -101,7 +101,7 @@ public static class BridgeInjector
 
         IReadOnlyList<string> selected = fileNames ?? BridgeLuaResources.LoadOrder;
         IReadOnlyList<(string FileName, string Content)> files = BridgeLuaResources.ReadAll(selected);
-        int totalSteps = 1 /* check */ + files.Count + 2 /* bootstrap + unload AA */;
+        int totalSteps = 1 /* check */ + files.Count + 1 /* bootstrap AA */;
 
         // Step 1: availability probe. CheckAvailabilityAsync flips
         // IsAvailable + fires AvailabilityChanged, so the menu's
@@ -143,13 +143,13 @@ public static class BridgeInjector
             ++injected;
         }
 
-        // Step N+2: bootstrap AA script. autoActivate=false so the
+        // Final step: bootstrap AA script. autoActivate=false so the
         // user sees the new entry in CE's address list and can read
         // its description before flipping the checkbox — they
         // probably want to verify the game is attached + DiscreteUI's
         // DLL is injected before letting the bootstrap run.
         const string finalDesc = "Creating " + BootstrapAaScriptGenerator.EntryDescription + " AA entry";
-        progress?.Report(new BridgeInjectProgress(finalDesc, totalSteps - 1, totalSteps));
+        progress?.Report(new BridgeInjectProgress(finalDesc, totalSteps, totalSteps));
         ct.ThrowIfCancellationRequested();
 
         bool aaOk = await bridge.CreateAAScriptAsync(
@@ -166,28 +166,6 @@ public static class BridgeInjector
                 Ok: false, FilesInjected: injected, AaScriptCreated: false,
                 FailedStepDescription: finalDesc,
                 ErrorMessage: "AOBMaker CreateAAScript failed (see %LOCALAPPDATA%\\Discrete_Dumper\\Logs\\ui\\current.log for plugin-side detail)");
-        }
-
-        // Step N+3: the standalone "Unload Discrete DLL" AA entry (Tier-2
-        // full FreeLibrary). autoActivate=false — it's a deliberate action
-        // the user enables only when they want the DLL gone. Its [ENABLE]
-        // calls discreteUnload() (from unity_dump.lua, always in the core),
-        // so it works regardless of which optional features were picked.
-        const string unloadDesc = "Creating " + BootstrapAaScriptGenerator.UnloadEntryDescription + " AA entry";
-        progress?.Report(new BridgeInjectProgress(unloadDesc, totalSteps, totalSteps));
-        ct.ThrowIfCancellationRequested();
-
-        bool unloadOk = await bridge.CreateAAScriptAsync(
-            description: BootstrapAaScriptGenerator.UnloadEntryDescription,
-            script:      BootstrapAaScriptGenerator.BuildUnloadEntry(),
-            autoActivate: false,
-            ct:          ct).ConfigureAwait(false);
-        if (!unloadOk)
-        {
-            return new BridgeInjectResult(
-                Ok: false, FilesInjected: injected, AaScriptCreated: true,
-                FailedStepDescription: unloadDesc,
-                ErrorMessage: "AOBMaker CreateAAScript failed for the Unload entry (the Load Discrete Bridge entry was created; see %LOCALAPPDATA%\\Discrete_Dumper\\Logs\\ui\\current.log).");
         }
 
         return new BridgeInjectResult(

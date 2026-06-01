@@ -42,10 +42,10 @@ public class BridgeInjectorTests
         Assert.Null(result.ErrorMessage);
 
         // Call sequence: 1× CheckAvailability, N× InjectTableFile (in
-        // LoadOrder), 2× CreateAAScript (bootstrap + unload). Nothing else.
+        // LoadOrder), 1× CreateAAScript (bootstrap). Nothing else.
         Assert.Equal(1, bridge.CheckAvailabilityCount);
         Assert.Equal(BridgeLuaResources.LoadOrder.Count, bridge.InjectTableFileCalls.Count);
-        Assert.Equal(2, bridge.CreateAAScriptCalls.Count);
+        Assert.Single(bridge.CreateAAScriptCalls);
 
         // File order matches LoadOrder.
         for (int i = 0; i < BridgeLuaResources.LoadOrder.Count; ++i)
@@ -57,8 +57,8 @@ public class BridgeInjectorTests
             Assert.StartsWith("-- =", bridge.InjectTableFileCalls[i].Content);
         }
 
-        // Bootstrap AA (first): description + ENABLE/DISABLE blocks. Its
-        // [DISABLE] performs the Tier-1 dormant teardown.
+        // Bootstrap AA: description + ENABLE/DISABLE blocks. Its [DISABLE]
+        // performs the dormant teardown via discreteShutdown().
         var (aaDesc, aaScript, aaAuto) = bridge.CreateAAScriptCalls[0];
         Assert.Equal(BootstrapAaScriptGenerator.EntryDescription, aaDesc);
         Assert.Contains("[ENABLE]", aaScript);
@@ -67,12 +67,6 @@ public class BridgeInjectorTests
         // autoActivate=false so the user sees the new CE entry first
         // and can verify game/DLL state before flipping the checkbox.
         Assert.False(aaAuto);
-
-        // Unload AA (second): Tier-2 full FreeLibrary entry.
-        var (unDesc, unScript, unAuto) = bridge.CreateAAScriptCalls[1];
-        Assert.Equal(BootstrapAaScriptGenerator.UnloadEntryDescription, unDesc);
-        Assert.Contains("discreteUnload", unScript);
-        Assert.False(unAuto);
     }
 
     [Fact]
@@ -118,9 +112,9 @@ public class BridgeInjectorTests
         var report = new SyncProgress<BridgeInjectProgress>();
         await BridgeInjector.InjectAsync(bridge, report, ct);
 
-        // Total = 1 check + N files + 2 AA (bootstrap + unload). 1-based.
+        // Total = 1 check + N files + 1 AA (bootstrap). 1-based.
         int n        = BridgeLuaResources.LoadOrder.Count;
-        int expected = 1 + n + 2;
+        int expected = 1 + n + 1;
         Assert.Equal(expected, report.Reports.Count);
         for (int i = 0; i < report.Reports.Count; ++i)
         {
@@ -129,14 +123,12 @@ public class BridgeInjectorTests
         }
 
         Assert.StartsWith("Checking", report.Reports[0].Description);
-        // Indices (0-based): 0 check, 1..n files, n+1 bootstrap, n+2 unload.
+        // Indices (0-based): 0 check, 1..n files, n+1 bootstrap.
         string lastFile = BridgeLuaResources.LoadOrder[n - 1];
         Assert.StartsWith("Injecting " + lastFile,
             report.Reports[n].Description); // last file step
         Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.EntryDescription,
             report.Reports[n + 1].Description);
-        Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.UnloadEntryDescription,
-            report.Reports[n + 2].Description);
     }
 
     [Fact]

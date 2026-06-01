@@ -81,39 +81,12 @@ local function findDiscreteModule()
     return nil
 end
 
---- Detect a Discrete *proxy* DLL deployed next to the game .exe (version.dll
---- / winmm.dll / dxgi.dll loaded from somewhere OTHER than System32 /
---- SysWOW64 — the genuine Windows copies live there). When present, the
---- backend DLL was LoadLibrary'd by the proxy's fire-and-forget loader
---- thread, so a Tier-2 FreeLibrary decrements the proxy's reference and the
---- proxy will NOT reload it this session. Returns name, path — or nil.
-local function findProxyModule()
-    if enumModules == nil then return nil end
-    local mods = enumModules()
-    if not mods then return nil end
-    local PROXY_NAMES = {
-        ["version.dll"] = true,
-        ["winmm.dll"]   = true,
-        ["dxgi.dll"]    = true,
-    }
-    for _, m in ipairs(mods) do
-        local raw  = m.Name or m.name or ""
-        local name = (raw:match("([^\\/]+)$") or raw):lower()
-        if PROXY_NAMES[name] then
-            local path = (m.PathToFile or m.pathToFile or ""):lower()
-            -- Skip the real Windows copies under System32 / SysWOW64.
-            if path == "" or (not path:find("\\system32\\", 1, true)
-                          and not path:find("\\syswow64\\", 1, true)) then
-                return raw, (m.PathToFile or m.pathToFile)
-            end
-        end
-    end
-    return nil
-end
-
---- Tier 1 — stop the DLL's pipe server + remove its runtime_invoke hook so
---- the DLL goes dormant. It STAYS mapped; re-enabling the bridge restarts
---- the pipe (main() detects the mapped module and just calls StartPipe).
+--- Stop the DLL's pipe server + remove its runtime_invoke hook so the DLL
+--- goes dormant. It STAYS mapped; re-enabling the bridge restarts the pipe
+--- (main() detects the mapped module and just calls StartPipe). This is the
+--- ONLY teardown we expose: a full FreeLibrary unload of a DLL that hooks
+--- the per-frame runtime_invoke can't be made crash-safe (the game main
+--- thread is almost always inside the detour at unmap time), so we don't.
 --- Discrete_Shutdown internally stops + joins the pipe thread and removes
 --- the MinHook detour, so one call is the whole teardown. Idempotent.
 function discreteShutdown()
@@ -125,70 +98,6 @@ function discreteShutdown()
         return true
     end
     U.warn("discreteShutdown failed: %s", tostring(err))
-    return false
-end
-
---- Tier 2 — full unload. Shut down FIRST (outside the loader lock, so the
---- FreeLibrary path's DllMain DETACH join is a no-op and the hook is gone
---- before the DLL is unmapped), then FreeLibrary the module in the target
---- via a remote thread. Loops until the module disappears so a refcount > 1
---- (e.g. DiscreteUI also injected, or many enable/disable cycles) still
---- fully unmaps. After this, re-enabling the bridge does a fresh re-inject.
-function discreteUnload()
-    -- 1. Clean dormant state first.
-    discreteShutdown()
-
-    -- 1a. Settle window before FreeLibrary. Discrete_Shutdown already joins
-    --     the pipe acceptor + waits for in-flight client threads + removes
-    --     the runtime_invoke hook, but give the game's main thread a beat to
-    --     drain any call that was *inside* the (now-removed) detour, and let
-    --     detached worker thread tails fully leave DLL code. Unmapping the
-    --     module while any thread is still executing it is an instant CTD.
-    if sleep then sleep(250) end
-
-    -- 1b. Heads-up if a proxy deployed the DLL: Tier-2 removes what the
-    --     proxy put there, and the proxy won't reload it this session.
-    --     We still proceed — the user explicitly asked to fully unload —
-    --     but the note explains why it won't auto-come-back, and points
-    --     at the cleaner option for proxy setups.
-    local proxyName, proxyPath = findProxyModule()
-    if proxyName ~= nil then
-        U.warn("Proxy deployment detected (%s%s).", proxyName,
-               proxyPath and (" @ " .. proxyPath) or "")
-        U.warn("  Tier-2 unload removes the proxy-loaded DLL; the proxy will")
-        U.warn("  NOT reload it this session. Re-enable 'Load Discrete Bridge'")
-        U.warn("  to re-inject. To just pause, prefer Disable (Tier-1 dormant).")
-    end
-
-    -- 2. Resolve FreeLibrary (kernel32). Try the qualified name first.
-    local ok, freeLib = pcall(getAddress, "kernel32.FreeLibrary")
-    if not ok or freeLib == nil or freeLib == 0 then
-        ok, freeLib = pcall(getAddress, "FreeLibrary")
-    end
-    if not ok or freeLib == nil or freeLib == 0 then
-        U.err("Cannot resolve FreeLibrary — DLL left shut down but still mapped.")
-        return false
-    end
-
-    -- 3. FreeLibrary(base) via remote thread until the module is gone.
-    --    Re-enumerate each pass so we always pass a live HMODULE and stop
-    --    as soon as the unmap takes effect.
-    local MAX = 16
-    for _ = 1, MAX do
-        local base = findDiscreteModule()
-        if base == nil then
-            U.log("DLL fully unloaded.")
-            return true
-        end
-        pcall(function() executeCodeEx(0, freeLib, base) end)
-        if sleep then sleep(80) end
-    end
-
-    if findDiscreteModule() == nil then
-        U.log("DLL fully unloaded.")
-        return true
-    end
-    U.warn("DLL still mapped after %d FreeLibrary attempts (high refcount?).", MAX)
     return false
 end
 
@@ -306,10 +215,9 @@ local function main()
     U.log("Launch DiscreteUI.exe and click Connect.")
 end
 
--- Surface the unload verbs in CE's Lua editor highlighter (best-effort).
+-- Surface the teardown verb in CE's Lua editor highlighter (best-effort).
 if registerLuaFunctionHighlight ~= nil then
     pcall(registerLuaFunctionHighlight, "discreteShutdown")
-    pcall(registerLuaFunctionHighlight, "discreteUnload")
 end
 
 local pcallOk, pcallErr = pcall(main)

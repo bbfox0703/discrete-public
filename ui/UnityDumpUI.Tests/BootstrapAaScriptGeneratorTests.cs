@@ -192,47 +192,17 @@ public class BootstrapAaScriptGeneratorTests
     }
 
     [Fact]
-    public void Build_Disable_CallsDiscreteShutdown_ForTier1Teardown()
+    public void Build_Disable_CallsDiscreteShutdown_ForDormantTeardown()
     {
-        // The [DISABLE] block must trigger the Tier-1 dormant teardown
-        // (stop pipe + remove hooks) via discreteShutdown(), not just
-        // clear the flag. Guarded so an old CT without the global doesn't
-        // error.
+        // The [DISABLE] block must trigger the dormant teardown (stop pipe +
+        // remove hooks) via discreteShutdown(), not just clear the flag.
+        // Guarded so an old CT without the global doesn't error.
         string script = BootstrapAaScriptGenerator.Build();
         int disableIdx = script.IndexOf("[DISABLE]", StringComparison.Ordinal);
         Assert.True(disableIdx > 0);
         string disableBlock = script.Substring(disableIdx);
         Assert.Contains("discreteShutdown", disableBlock);
         Assert.Contains("_G.discrete_bridgeLoaded = nil", disableBlock);
-    }
-
-    [Fact]
-    public void BuildUnloadEntry_HasEnableDisable_AndCallsDiscreteUnload()
-    {
-        string script = BootstrapAaScriptGenerator.BuildUnloadEntry();
-        Assert.Contains("[ENABLE]", script);
-        Assert.Contains("[DISABLE]", script);
-        Assert.True(script.IndexOf("[ENABLE]", StringComparison.Ordinal)
-                  < script.IndexOf("[DISABLE]", StringComparison.Ordinal));
-        // The action: full unload via discreteUnload(), guarded on the
-        // global being present (bridge must have loaded first).
-        Assert.Contains("discreteUnload", script);
-        Assert.Contains("if type(discreteUnload) ~= 'function' then", script);
-        // No leftover placeholder.
-        Assert.DoesNotContain("__UNLOAD_DESCRIPTION__", script);
-        Assert.Contains(BootstrapAaScriptGenerator.UnloadEntryDescription, script);
-    }
-
-    [Fact]
-    public void BuildUnloadEntry_HasNo_AdjacentSingleQuotes_LuaSyntaxTrap()
-    {
-        Assert.DoesNotMatch(@"\w''\w", BootstrapAaScriptGenerator.BuildUnloadEntry());
-    }
-
-    [Fact]
-    public void UnloadEntryDescription_IsStable()
-    {
-        Assert.Equal("Unload Discrete DLL", BootstrapAaScriptGenerator.UnloadEntryDescription);
     }
 
     [Fact]

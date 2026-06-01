@@ -30,13 +30,14 @@
 //      for some operations even if symbolhandler is lagging).
 //   7. Sets _G.discrete_bridgeLoaded so re-enabling the entry no-ops.
 //
-// The generated [DISABLE] block performs a Tier-1 teardown: it calls
+// The generated [DISABLE] block performs a dormant teardown: it calls
 // discreteShutdown() (defined by unity_dump.lua) to stop the DLL's pipe
 // server + remove its runtime_invoke hook, leaving the DLL dormant but
 // still mapped, then clears the global flag so the next [ENABLE] re-runs
-// (which restarts the pipe without re-injecting). A separate
-// BuildUnloadEntry() emits an "Unload Discrete DLL" entry whose [ENABLE]
-// calls discreteUnload() for a full FreeLibrary unmap.
+// (which restarts the pipe without re-injecting). There is intentionally
+// NO full-FreeLibrary "unload" entry: unmapping a DLL that hooks the
+// per-frame runtime_invoke can't be made crash-safe, so dormant is the
+// only teardown we expose.
 //
 // Why a const string template:
 //   * The lua body is essentially fixed. Only the file list (LoadOrder)
@@ -209,13 +210,14 @@ _G.discrete_bridgeLoaded = true
 [DISABLE]
 {$lua}
 if syntaxcheck then return end
--- Tier-1 teardown: stop the DLL's pipe server + remove its
--- runtime_invoke hook so it goes dormant. The DLL stays MAPPED — this
--- is intentional. Re-enabling re-runs the loader; unity_dump.lua's
--- main() sees the module already mapped, skips re-injection, and just
--- restarts the pipe. For a full unmap (FreeLibrary) use the separate
--- 'Unload Discrete DLL' entry. discreteShutdown() is defined by
--- unity_dump.lua (core), so it's present whenever the bridge loaded.
+-- Teardown: stop the DLL's pipe server + remove its runtime_invoke hook
+-- so it goes dormant. The DLL stays MAPPED — this is intentional, and the
+-- only teardown we offer: a full FreeLibrary unload of a DLL that hooks
+-- the per-frame runtime_invoke can't be made crash-safe, so we don't.
+-- Re-enabling re-runs the loader; unity_dump.lua's main() sees the module
+-- already mapped, skips re-injection, and just restarts the pipe.
+-- discreteShutdown() is defined by unity_dump.lua (core), so it's present
+-- whenever the bridge loaded.
 if type(discreteShutdown) == 'function' then
   pcall(discreteShutdown)
 else
@@ -223,45 +225,5 @@ else
 end
 _G.discrete_bridgeLoaded = nil
 print('[Discrete] __ENTRY_DESCRIPTION__: teardown — pipe stopped, ready for reload')
-";
-
-    /// <summary>
-    /// CE memory-record description for the Tier-2 full-unload entry.
-    /// Separate from <see cref="EntryDescription"/> so users get an
-    /// explicit "fully remove the DLL" action distinct from the dormant
-    /// Tier-1 teardown the bootstrap's [DISABLE] performs.
-    /// </summary>
-    public const string UnloadEntryDescription = "Unload Discrete DLL";
-
-    /// <summary>
-    /// Build the standalone "Unload Discrete DLL" AA entry. Its [ENABLE]
-    /// calls <c>discreteUnload()</c> (defined by unity_dump.lua / core):
-    /// shut the DLL down, then FreeLibrary it out of the target so the
-    /// address space is reclaimed. Requires the bridge to have been loaded
-    /// at least once (so the global exists); otherwise it prints a hint.
-    /// [DISABLE] is a no-op — the unload already happened on enable.
-    /// </summary>
-    public static string BuildUnloadEntry() => UnloadTemplate
-        .Replace("__UNLOAD_DESCRIPTION__", UnloadEntryDescription);
-
-    private const string UnloadTemplate = @"[ENABLE]
-{$lua}
-if syntaxcheck then return end
-
--- Full unload: shut the DLL down then FreeLibrary it from the target.
--- discreteUnload() lives in unity_dump.lua (core), so the bridge must
--- have been loaded at least once for this to resolve.
-if type(discreteUnload) ~= 'function' then
-  print('[Discrete] __UNLOAD_DESCRIPTION__: bridge not loaded — enable ""Load Discrete Bridge"" first.')
-  return
-end
-discreteUnload()
--- Let the next ""Load Discrete Bridge"" [ENABLE] re-inject cleanly.
-_G.discrete_bridgeLoaded = nil
-
-[DISABLE]
-{$lua}
-if syntaxcheck then return end
--- No-op: the unload happened on [ENABLE]; nothing to undo.
 ";
 }

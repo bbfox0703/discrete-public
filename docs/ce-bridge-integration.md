@@ -125,49 +125,33 @@ A missing build (e.g. you only built Mono, or skipped `-Arch Both`) is
 reported and skipped, not fatal — so a Mono-only or IL2CPP-only
 distribution is one command too.
 
-…and the address list gains two Auto-Assembler entries:
+…and the address list gains one Auto-Assembler entry:
 
 ```
 Load Discrete Bridge       [ ]
-Unload Discrete DLL        [ ]
 ```
 
 Each subsequent *Send to CE Table…* click adds one more entry. They all
 prepend the bridge-loaded guard so toggling them before *Load Discrete
 Bridge* prints a clear hint instead of silently failing.
 
-### Load / unload lifecycle
+### Teardown lifecycle (dormant only — no FreeLibrary)
 
-There are two teardown tiers, so distributing a `.CT` that can cleanly
-remove the DLL is built-in:
+**Disable `Load Discrete Bridge` → dormant.** The `[DISABLE]` block calls
+`discreteShutdown()`, which invokes the DLL's `Discrete_Shutdown` export:
+the pipe server thread is stopped + joined and the `runtime_invoke` MinHook
+detour is removed. The DLL stays **mapped** — re-enabling is cheap, since
+`unity_dump.lua`'s `main()` sees the module already mapped, skips
+re-injection, and just restarts the pipe (no refcount growth across
+toggles).
 
-- **Disable `Load Discrete Bridge` → Tier-1 (dormant).** The `[DISABLE]`
-  block calls `discreteShutdown()`, which invokes the DLL's
-  `Discrete_Shutdown` export: the pipe server thread is stopped + joined
-  and the `runtime_invoke` MinHook detour is removed. The DLL stays
-  **mapped**. Re-enabling is cheap — `unity_dump.lua`'s `main()` sees the
-  module already mapped, skips re-injection, and just restarts the pipe.
-  No refcount growth across toggles.
-- **Enable `Unload Discrete DLL` → Tier-2 (full unmap).** Calls
-  `discreteUnload()`: `Discrete_Shutdown` first (so the `FreeLibrary`
-  path's `DllMain` detach join is a no-op and the hook is already gone),
-  then `FreeLibrary` on the module base via a remote thread, looped until
-  the module disappears from `enumModules` (handles refcount > 1). After
-  this the address space is reclaimed; the next *Load Discrete Bridge*
-  enable does a fresh re-inject. Requires the bridge to have been loaded
-  at least once (the `discreteUnload` global lives in `unity_dump.lua`,
-  which is always in the core).
-
-**Proxy-DLL deployments.** If the backend DLL was loaded by a proxy
-(`version.dll` / `winmm.dll` next to the game .exe) rather than injected,
-Tier-2 unload still works and is safe — the proxy is fire-and-forget (it
-never stores the HMODULE, never calls into the backend, and never
-reloads). But the single refcount is the proxy's, so `FreeLibrary`
-removes what the proxy deployed, and the proxy will **not** reload it this
-session; re-enable *Load Discrete Bridge* to re-inject. `discreteUnload()`
-detects the proxy and prints this note. For proxy setups that just want to
-pause Discrete, prefer Tier-1 (disable *Load Discrete Bridge*) — it leaves
-the proxy's DLL mapped and dormant.
+There is intentionally **no full-unload (FreeLibrary) entry.** Unmapping a
+DLL that hooks the per-frame `runtime_invoke` can't be made crash-safe: for
+an IL2CPP game the main thread is almost always inside the detour at the
+moment of unmap, so `FreeLibrary` reliably CTDs the game. Dormant teardown
+(hook removed, pipe stopped, ~1 MB of address space left mapped) is the
+only teardown we expose — and it's sufficient for distribution: re-enable
+to resume, or just close the game to fully reclaim everything.
 
 ---
 
@@ -306,10 +290,10 @@ text matches verbatim.
 
 By design — `_G.discrete_bridgeLoaded` is set after the first run.
 Disable + re-enable to pick up updated lua content. Toggling `[DISABLE]`
-now also runs the Tier-1 `discreteShutdown()` (stops the pipe + removes
-the hook, DLL stays mapped) before clearing the flag, so re-enable
-restarts the pipe without re-injecting. For a full unmap, enable the
-separate `Unload Discrete DLL` entry.
+runs `discreteShutdown()` (stops the pipe + removes the hook, DLL stays
+mapped) before clearing the flag, so re-enable restarts the pipe without
+re-injecting. The DLL stays mapped for the process lifetime — see
+*Teardown lifecycle* above for why there's no FreeLibrary unload.
 
 ---
 
