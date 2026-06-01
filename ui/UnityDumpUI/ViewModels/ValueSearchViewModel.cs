@@ -35,10 +35,23 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     private DispatcherTimer? _elapsedTimer;
     private Stopwatch?       _elapsedStopwatch;
 
-    public ValueSearchViewModel(BackendAdapter backend, FileLogger logger)
+    // Cross-VM bulk lane: value-scan is a long session op, mutually
+    // exclusive with snapshot capture. Null in tests / single-VM use.
+    private readonly BulkOperationGate? _bulkGate;
+    private IDisposable? _bulkLease;
+
+    public ValueSearchViewModel(BackendAdapter backend, FileLogger logger,
+                                BulkOperationGate? bulkGate = null)
     {
         _backend = backend;
         _logger  = logger;
+        _bulkGate = bulkGate;
+        if (_bulkGate is not null)
+            _bulkGate.PropertyChanged += (_, _) =>
+            {
+                FirstScanCommand.NotifyCanExecuteChanged();
+                NextScanCommand.NotifyCanExecuteChanged();
+            };
 
         // Default dataType / scanType picks
         SelectedDataType  = "int32";
@@ -234,6 +247,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         var ct = _cts.Token;
 
         IsBusy = true; ErrorMessage = null;
+        _bulkLease = _bulkGate?.TryEnter("Value search");
         Results.Clear();
         FilteredResults.Clear();
         StartElapsedTimer("Scanning");
@@ -327,6 +341,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         {
             StopElapsedTimer();
             IsBusy = false;
+            _bulkLease?.Dispose(); _bulkLease = null;
         }
     }
 
@@ -434,6 +449,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         var ct = _cts.Token;
 
         IsBusy = true; ErrorMessage = null;
+        _bulkLease = _bulkGate?.TryEnter("Value search");
         StartElapsedTimer("Refining");
         var sw = Stopwatch.StartNew();
         try
@@ -491,6 +507,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         {
             StopElapsedTimer();
             IsBusy = false;
+            _bulkLease?.Dispose(); _bulkLease = null;
         }
     }
 
@@ -547,8 +564,12 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     public void Activate(ValueSearchRow row) => NavigateToInspectorRequested?.Invoke(row);
     public void RequestWriteValue(ValueSearchRow row) => WriteValueRequested?.Invoke(row);
 
-    private bool CanFirstScan() => !IsBusy && !string.IsNullOrWhiteSpace(ValueText);
-    private bool CanNextScan()  => !IsBusy && HasSession;
+    private bool CanFirstScan() => !IsBusy && !BulkBusyElsewhere && !string.IsNullOrWhiteSpace(ValueText);
+    private bool CanNextScan()  => !IsBusy && !BulkBusyElsewhere && HasSession;
+
+    /// <summary>True when ANOTHER bulk op (e.g. snapshot) holds the lane.
+    /// Our own scan sets IsBusy, so this only greys us out for others'.</summary>
+    private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
     private bool CanEndSession() => !IsBusy && HasSession;
 }
 

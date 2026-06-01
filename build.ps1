@@ -281,7 +281,10 @@ function Build-DllForArch {
     # .exe added Phase 12d-5 — inject-x86.exe is bundled into the x86
     # build so DiscreteUI can shell out to it for Pick & Inject on
     # 32-bit targets. Always-empty list under x64.
-    Get-ChildItem $outDir -File | Where-Object { $_.Extension -in '.dll', '.pdb', '.exe' } | ForEach-Object {
+    # .pdb only ships in Debug — Release/Publish dist stays pdb-free
+    # (matches the distribution build; debug symbols aren't redistributed).
+    $distExts = if ($Mode -eq 'Debug') { @('.dll', '.pdb', '.exe') } else { @('.dll', '.exe') }
+    Get-ChildItem $outDir -File | Where-Object { $_.Extension -in $distExts } | ForEach-Object {
         Copy-Item $_.FullName -Destination $archDistDir -Force
         if ($_.Extension -eq '.dll' -or $_.Extension -eq '.exe') {
             $sz = Get-FileSize (Join-Path $archDistDir $_.Name)
@@ -382,9 +385,10 @@ function Build-Ui {
 
     if ($Mode -eq 'Publish') {
         # AOT publish drops a few native side-DLLs (Skia/HarfBuzz/ANGLE) — copy
-        # everything that isn't a build artifact reference.
+        # everything that isn't a build artifact reference. No .pdb: debug
+        # symbols are not part of the redistributable.
         Get-ChildItem -Path $publishDir -File |
-            Where-Object { $_.Extension -in '.exe', '.dll', '.pdb' } |
+            Where-Object { $_.Extension -in '.exe', '.dll' } |
             ForEach-Object { Copy-Item $_.FullName -Destination $DIST_DIR -Force }
     }
     else {
@@ -588,6 +592,14 @@ $statusColor = if ($exitCode -eq 0) { 'Green' } else { 'Red' }
 $statusText  = if ($exitCode -eq 0) { 'SUCCESS' } else { 'FAILED' }
 Write-Host "  Status:  $statusText" -ForegroundColor $statusColor
 Write-Host ''
+
+# Prune stray .pdb from dist for distribution builds (Release / Publish).
+# Debug builds keep symbols for local debugging. Catches both freshly-copied
+# and stale .pdb left from a prior Debug build under dist\ and dist\x86\.
+if ($Mode -ne 'Debug' -and (Test-Path $DIST_DIR)) {
+    Get-ChildItem $DIST_DIR -Recurse -File -Filter '*.pdb' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 if (Test-Path $DIST_DIR) {
     Write-Host "  Output: $DIST_DIR" -ForegroundColor White

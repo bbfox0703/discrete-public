@@ -1130,7 +1130,8 @@ public partial class MainWindow : Window
             inspector.TargetName!,
             fieldName:   node.Name,
             fieldType:   node.Type ?? "System.Object",
-            fieldOffset: resolved.Offset);
+            fieldOffset: resolved.Offset,
+            bulkGate:    vm.BulkGate);
         var win = new FieldAcrossInstancesWindow(fieldVm);
         await win.ShowDialog(this);
 
@@ -1225,7 +1226,8 @@ public partial class MainWindow : Window
         }
         var refsVm = new FieldReferencesViewModel(
             vm.BackendAdapter, vm.Logger,
-            assembly, ns, className, fieldName, fieldType, isStatic);
+            assembly, ns, className, fieldName, fieldType, isStatic,
+            bulkGate: vm.BulkGate);
         var win = new FieldReferencesWindow(refsVm);
         await win.ShowDialog(this);
     }

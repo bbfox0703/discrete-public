@@ -98,16 +98,25 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// reaches disk + downstream consumers atomically.</summary>
     public UserSettings Settings => _settings;
 
+    // Cross-VM bulk lane: snapshot capture is a long session op, mutually
+    // exclusive with value-scan. Null in tests / single-VM use.
+    private readonly BulkOperationGate? _bulkGate;
+    private IDisposable? _bulkLease;
+
     public SnapshotViewModel(
         BackendAdapter backend,
         FileLogger logger,
         UserSettingsStore? settingsStore = null,
-        UserSettings? initialSettings = null)
+        UserSettings? initialSettings = null,
+        BulkOperationGate? bulkGate = null)
     {
         _backend       = backend;
         _logger        = logger;
         _settingsStore = settingsStore;
         _settings      = initialSettings ?? new UserSettings();
+        _bulkGate      = bulkGate;
+        if (_bulkGate is not null)
+            _bulkGate.PropertyChanged += (_, _) => TakeSnapshotCommand.NotifyCanExecuteChanged();
         // Re-fire the rollup banner whenever the list mutates (Take /
         // Drop / ClearAll). DisplayName for each envelope is per-row
         // and doesn't need this — only the cumulative count + memory
@@ -933,6 +942,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
         var ct = _cts.Token;
 
         IsBusy = true; ErrorMessage = null;
+        _bulkLease = _bulkGate?.TryEnter("Snapshot");
         _captureStartWorkingSet = GetWorkingSet();
         // Phase 1 — heap walk + per-class decode + GC drain on the
         // server side. The elapsed-time DispatcherTimer updates the
@@ -1372,6 +1382,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
         {
             StopElapsedTimer();
             IsBusy = false;
+            _bulkLease?.Dispose(); _bulkLease = null;
         }
     }
 
@@ -2339,7 +2350,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
         }
     }
 
-    private bool CanTakeSnapshot()    => !IsBusy;
+    private bool CanTakeSnapshot()    => !IsBusy && !BulkBusyElsewhere;
+
+    /// <summary>True when ANOTHER bulk op (e.g. value-scan) holds the lane.</summary>
+    private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
     private bool CanDiff()            => !IsBusy && SelectedSnapshotA is not null && SelectedSnapshotB is not null;
     private bool CanDropSnapshotA()   => !IsBusy && SelectedSnapshotA is not null;
     private bool CanDropSnapshotB()   => !IsBusy && SelectedSnapshotB is not null;

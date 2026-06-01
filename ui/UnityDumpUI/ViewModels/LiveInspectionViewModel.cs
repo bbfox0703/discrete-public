@@ -69,10 +69,23 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private CancellationTokenSource? _autoRefreshCts;
     private Task?                    _autoRefreshLoop;
 
-    public LiveInspectionViewModel(BackendAdapter backend, FileLogger logger)
+    // Cross-VM bulk lane: findInstances is a heap-scan bulk op. Null in
+    // tests / single-VM use.
+    private readonly BulkOperationGate? _bulkGate;
+    private IDisposable? _bulkLease;
+
+    /// <summary>True when ANOTHER bulk op (snapshot / value-scan) holds the
+    /// lane — greys out Find Instances. Our own scan holds _bulkLease.</summary>
+    private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
+
+    public LiveInspectionViewModel(BackendAdapter backend, FileLogger logger,
+                                   BulkOperationGate? bulkGate = null)
     {
         _backend = backend;
         _logger  = logger;
+        _bulkGate = bulkGate;
+        if (_bulkGate is not null)
+            _bulkGate.PropertyChanged += (_, _) => FindInstancesCommand.NotifyCanExecuteChanged();
         // Per-row action callbacks. Built once and reused by every
         // WalkedFieldNode the VM creates so the row-action buttons
         // (addr / ptr / name / HEX) reach the right helpers without each
@@ -343,10 +356,16 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     // ---------- Commands --------------------------------------------------
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanFindInstances))]
     private async Task FindInstancesAsync()
     {
         if (!HasTarget) return;
+
+        // Bulk lane: skip if a snapshot / value-scan holds it (also covers
+        // the auto-refresh timer path, which calls ExecuteAsync directly and
+        // bypasses CanExecute).
+        _bulkLease = _bulkGate?.TryEnter("Find instances");
+        if (_bulkGate is not null && _bulkLease is null) return;
 
         _findCts?.Cancel();
         _findCts = new CancellationTokenSource();
@@ -387,8 +406,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         finally
         {
             IsLoadingInstances = false;
+            _bulkLease?.Dispose(); _bulkLease = null;
         }
     }
+
+    // Only the bulk lane gates the button — the HasTarget precondition is
+    // enforced inside the method (early return), matching the prior
+    // always-enabled behaviour so we don't need to thread HasTarget change
+    // notifications into this command.
+    private bool CanFindInstances() => !BulkBusyElsewhere;
 
     [RelayCommand]
     private Task RefreshWalkAsync()

@@ -15,9 +15,12 @@
 // no LINQ-to-Reflection, no INotifyDataErrorInfo derivatives that would pull
 // in System.Reflection.
 //
-// Backend calls happen on a background thread via Task.Run because the pipe
-// IO is sync-over-async at the OS layer; the UI thread stays free during
-// large class-list fetches.
+// Backend calls are awaited directly (no Task.Run): the pipe is opened with
+// PipeOptions.Asynchronous so ReadAsync/WriteAsync are truly async and never
+// block the UI thread while a request is in flight. These browse RPCs ride
+// the INTERACTIVE pipe connection (see BackendAdapter), so they run in
+// parallel with any heavy op (snapshot / value-scan) on the bulk connection
+// instead of queueing behind it.
 
 using System;
 using System.Collections.Generic;

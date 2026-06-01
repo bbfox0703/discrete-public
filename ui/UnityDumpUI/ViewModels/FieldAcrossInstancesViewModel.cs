@@ -31,10 +31,16 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
     private readonly FileLogger     _logger;
     private CancellationTokenSource? _cts;
 
+    // Bulk lane: this heap-scan field walk is a bulk op. Null = ungated.
+    private readonly BulkOperationGate? _bulkGate;
+    private IDisposable? _bulkLease;
+    private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
+
     public FieldAcrossInstancesViewModel(
         BackendAdapter backend, FileLogger logger,
         string targetAssembly, string? targetNamespace, string targetName,
-        string fieldName, string fieldType, long fieldOffset)
+        string fieldName, string fieldType, long fieldOffset,
+        BulkOperationGate? bulkGate = null)
     {
         _backend         = backend;
         _logger          = logger;
@@ -44,6 +50,9 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
         FieldName        = fieldName;
         FieldType        = fieldType;
         FieldOffset      = fieldOffset;
+        _bulkGate        = bulkGate;
+        if (_bulkGate is not null)
+            _bulkGate.PropertyChanged += (_, _) => RefreshCommand.NotifyCanExecuteChanged();
     }
 
     public string TargetAssembly  { get; }
@@ -107,6 +116,7 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
         CancellationToken ct = _cts.Token;
 
         IsBusy = true;
+        _bulkLease = _bulkGate?.TryEnter("Field across instances");
         ErrorMessage = null;
         try
         {
@@ -150,10 +160,11 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+            _bulkLease?.Dispose(); _bulkLease = null;
         }
     }
 
-    private bool CanRefresh() => !IsBusy;
+    private bool CanRefresh() => !IsBusy && !BulkBusyElsewhere;
 
     [RelayCommand]
     private Task CopyInstanceAsync(FieldAcrossInstanceRow? row) =>

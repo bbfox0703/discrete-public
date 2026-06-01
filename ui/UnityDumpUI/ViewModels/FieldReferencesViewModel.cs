@@ -33,10 +33,16 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
     private readonly FileLogger     _logger;
     private CancellationTokenSource? _cts;
 
+    // Bulk lane: the findFieldReferences IL walk is a bulk op. Null = ungated.
+    private readonly BulkOperationGate? _bulkGate;
+    private IDisposable? _bulkLease;
+    private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
+
     public FieldReferencesViewModel(
         BackendAdapter backend, FileLogger logger,
         string targetAssembly, string? targetNamespace, string targetName,
-        string fieldName, string? fieldType, bool isStatic)
+        string fieldName, string? fieldType, bool isStatic,
+        BulkOperationGate? bulkGate = null)
     {
         _backend         = backend;
         _logger          = logger;
@@ -46,6 +52,9 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
         FieldName        = fieldName;
         FieldType        = fieldType ?? string.Empty;
         IsFieldStatic    = isStatic;
+        _bulkGate        = bulkGate;
+        if (_bulkGate is not null)
+            _bulkGate.PropertyChanged += (_, _) => RefreshCommand.NotifyCanExecuteChanged();
     }
 
     public string TargetAssembly  { get; }
@@ -103,6 +112,7 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
         CancellationToken ct = _cts.Token;
 
         IsBusy = true;
+        _bulkLease = _bulkGate?.TryEnter("Field references");
         ErrorMessage = null;
         AdvisoryMessage = null;
         try
@@ -175,10 +185,11 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+            _bulkLease?.Dispose(); _bulkLease = null;
         }
     }
 
-    private bool CanRefresh() => !IsBusy;
+    private bool CanRefresh() => !IsBusy && !BulkBusyElsewhere;
 
     [RelayCommand]
     private Task CopyClassAsync(FieldReferenceRowVm? row) =>

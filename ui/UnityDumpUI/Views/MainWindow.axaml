@@ -159,6 +159,17 @@
                  Foreground="#FF35A744" TextWrapping="Wrap" FontFamily="Consolas,Menlo,monospace" />
     </Border>
 
+    <!-- Bulk-lane busy hint. Shown while a long bulk op (snapshot /
+         value-scan) runs; the other bulk start-buttons grey out via their
+         CanExecute. Light browse stays usable on the interactive pipe. -->
+    <Border DockPanel.Dock="Top"
+            IsVisible="{Binding BulkBusyHint, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+            Background="#11D9A406" BorderBrush="#55D9A406"
+            BorderThickness="0,0,0,1" Padding="12,4">
+      <TextBlock Text="{Binding BulkBusyHint}"
+                 Foreground="#FFD9A406" TextWrapping="Wrap" FontFamily="Consolas,Menlo,monospace" />
+    </Border>
+
     <!-- Phase 14b: stripped/obfuscated metadata warning. Yellow strip
          appears below the connection bar when getMetadataStats reports
          partial_strip / heavy_strip; cleared on disconnect. -->

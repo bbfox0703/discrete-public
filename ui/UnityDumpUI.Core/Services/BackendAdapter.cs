@@ -22,29 +22,89 @@ namespace UnityDumpUI.Core.Services;
 /// </summary>
 public sealed class BackendAdapter : ILiveExportSource
 {
-    private PipeClient _pipe;
-
-    public BackendAdapter(PipeClient pipe)
-    {
-        _pipe = pipe;
-    }
-
-    public bool IsConnected => _pipe.IsConnected;
-
-    public Task ConnectAsync(int timeoutMs, CancellationToken ct = default)
-        => _pipe.ConnectAsync(timeoutMs, ct);
+    // Two connections to the SAME \\.\pipe\DiscreteBfx server (which serves
+    // up to kMaxPipeInstances=4 clients on independent threads). Heavy,
+    // long-running commands (snapshot / value-scan / heap walks / bulk
+    // dumps) ride the BULK pipe; lightweight read-only browse commands
+    // (getClasses / getClassInfo / inspect reads) ride the INTERACTIVE
+    // pipe. This lets the user keep browsing the tree + Inspector while a
+    // snapshot/value-scan streams hundreds of RPCs — the interactive
+    // requests no longer queue behind the bulk RPCs on a single wire.
+    //
+    // The DLL handlers are read-mostly and lock-free across connections
+    // (only the handler-map lookup takes a brief lock; handlers run
+    // outside it), so getClasses on the interactive pipe runs truly in
+    // parallel with snapshotChunk on the bulk pipe. Verified safe — see
+    // docs/ce-bridge-integration.md / the pipe-server concurrency notes.
+    private PipeClient _pipe;   // interactive (default for all light cmds)
+    private PipeClient _bulk;   // heavy / long-running cmds
 
     /// <summary>
-    /// Swap the underlying <see cref="PipeClient"/>. Caller is responsible
-    /// for disposing the previous one. Used by <c>MainWindowViewModel</c>
-    /// after an involuntary disconnect so the next Connect attempt runs
-    /// against fresh .NET pipe state — empirically the only thing that
-    /// reliably clears whatever .NET / kernel cache is preferring the
-    /// dead instance over the live one in the same UI process.
+    /// Commands routed to the BULK connection. Everything not listed here
+    /// (metadata reads, single-instance walks, address lookups, method
+    /// calls) goes on the interactive connection. Kept here as the single
+    /// source of truth for the routing split.
     /// </summary>
-    public void ReplacePipe(PipeClient newPipe)
+    private static readonly HashSet<string> BulkCommands = new(System.StringComparer.Ordinal)
+    {
+        "snapshotBegin", "snapshotChunk", "snapshotEnd",
+        "beginValueScan", "refineValueScan", "endValueScan", "scanFieldValue",
+        "findInstances", "listFieldValuesAcrossInstances",
+        "dumpIl2cppSymbols", "dumpClassInfo", "findFieldReferences",
+    };
+
+    /// <param name="pipe">Interactive connection (light browse RPCs).</param>
+    /// <param name="bulkPipe">Heavy-op connection. When null, the adapter
+    /// runs single-connection (everything on <paramref name="pipe"/>) — the
+    /// back-compat path used by unit tests and any caller that doesn't need
+    /// the split.</param>
+    public BackendAdapter(PipeClient pipe, PipeClient? bulkPipe = null)
+    {
+        _pipe = pipe;
+        _bulk = bulkPipe ?? pipe;
+    }
+
+    /// <summary>Pick the connection for a command by its cmd string.</summary>
+    private PipeClient PipeFor(string cmd)
+        => BulkCommands.Contains(cmd) ? _bulk : _pipe;
+
+    /// <summary>
+    /// Route + send. Drop-in for the old <c>_pipe.SendAsync(cmd, …)</c>:
+    /// the cmd (first arg) selects the bulk vs interactive connection.
+    /// </summary>
+    private Task<RpcEnvelope<TResult>> Send<TResult>(
+        string cmd,
+        Dictionary<string, JsonElement>? args,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<RpcEnvelope<TResult>> envelopeType,
+        CancellationToken ct = default)
+        where TResult : class
+        => PipeFor(cmd).SendAsync(cmd, args, envelopeType, ct);
+
+    /// <summary>Connected only when BOTH connections are up (a half-open
+    /// state can't serve the full command surface).</summary>
+    public bool IsConnected
+        => _pipe.IsConnected && (ReferenceEquals(_bulk, _pipe) || _bulk.IsConnected);
+
+    public async Task ConnectAsync(int timeoutMs, CancellationToken ct = default)
+    {
+        await _pipe.ConnectAsync(timeoutMs, ct).ConfigureAwait(false);
+        if (!ReferenceEquals(_bulk, _pipe))
+            await _bulk.ConnectAsync(timeoutMs, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Swap the underlying <see cref="PipeClient"/>(s). Caller disposes the
+    /// previous ones. Used by <c>MainWindowViewModel</c> after an
+    /// involuntary disconnect so the next Connect attempt runs against fresh
+    /// .NET pipe state — empirically the only thing that reliably clears
+    /// whatever .NET / kernel cache is preferring the dead instance over the
+    /// live one in the same UI process. Pass <paramref name="bulkPipe"/>
+    /// null to stay single-connection.
+    /// </summary>
+    public void ReplacePipe(PipeClient newPipe, PipeClient? bulkPipe = null)
     {
         _pipe = newPipe;
+        _bulk = bulkPipe ?? newPipe;
     }
 
     /// <summary>
@@ -52,7 +112,7 @@ public sealed class BackendAdapter : ILiveExportSource
     /// </summary>
     public async Task<bool> PingAsync(CancellationToken ct = default)
     {
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "ping", args: null,
             ProtocolJsonContext.Default.RpcEnvelopePingResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -64,7 +124,7 @@ public sealed class BackendAdapter : ILiveExportSource
     /// </summary>
     public async Task<HandshakeResult> HandshakeAsync(CancellationToken ct = default)
     {
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "handshake", args: null,
             ProtocolJsonContext.Default.RpcEnvelopeHandshakeResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -81,7 +141,7 @@ public sealed class BackendAdapter : ILiveExportSource
     {
         try
         {
-            var env = await _pipe.SendAsync(
+            var env = await Send(
                 "getMetadataStats", args: null,
                 ProtocolJsonContext.Default.RpcEnvelopeMetadataStatsResult, ct)
                 .ConfigureAwait(false);
@@ -99,7 +159,7 @@ public sealed class BackendAdapter : ILiveExportSource
     /// </summary>
     public async Task<GetAssembliesResult> GetAssembliesAsync(CancellationToken ct = default)
     {
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getAssemblies", args: null,
             ProtocolJsonContext.Default.RpcEnvelopeGetAssembliesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -115,7 +175,7 @@ public sealed class BackendAdapter : ILiveExportSource
         {
             ["assembly"] = Str(assembly),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getClasses", args,
             ProtocolJsonContext.Default.RpcEnvelopeGetClassesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -153,7 +213,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["namespace"] = Str(@namespace ?? string.Empty),
             ["name"]      = Str(name),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getClassInfo", args,
             ProtocolJsonContext.Default.RpcEnvelopeGetClassInfoResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -232,7 +292,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit.HasValue) args["limit"] = Int(limit.Value);
         if (staticOnly)     args["staticOnly"] = Bool(true);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "searchSymbols", args,
             ProtocolJsonContext.Default.RpcEnvelopeSearchSymbolsResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -249,7 +309,7 @@ public sealed class BackendAdapter : ILiveExportSource
     /// </summary>
     public async Task<DispatcherStatsResult> GetDispatcherStatsAsync(CancellationToken ct = default)
     {
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getDispatcherStats", new Dictionary<string, JsonElement>(),
             ProtocolJsonContext.Default.RpcEnvelopeDispatcherStatsResult, ct)
             .ConfigureAwait(false);
@@ -298,7 +358,7 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "findFieldReferences", args,
             ProtocolJsonContext.Default.RpcEnvelopeFindFieldReferencesResult, ct)
             .ConfigureAwait(false);
@@ -367,7 +427,7 @@ public sealed class BackendAdapter : ILiveExportSource
         args["computeHumanSuffix"] = Bool(computeHumanSuffix);
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "dumpIl2cppSymbols", args,
             ProtocolJsonContext.Default.RpcEnvelopeDumpIl2cppSymbolsResult, ct)
             .ConfigureAwait(false);
@@ -407,7 +467,7 @@ public sealed class BackendAdapter : ILiveExportSource
         }
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "dumpClassInfo", args,
             ProtocolJsonContext.Default.RpcEnvelopeDumpClassInfoResult, ct)
             .ConfigureAwait(false);
@@ -437,7 +497,7 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (limit is int l) args["limit"] = Int(l);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "findInstances", args,
             ProtocolJsonContext.Default.RpcEnvelopeFindInstancesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -461,7 +521,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["namespace"] = Str(@namespace ?? string.Empty),
             ["name"]      = Str(name),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "walkInstance", args,
             ProtocolJsonContext.Default.RpcEnvelopeWalkInstanceResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -487,7 +547,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["address"]                = Str(address),
             ["klass_from_header_addr"] = Str(address),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "walkInstance", args,
             ProtocolJsonContext.Default.RpcEnvelopeWalkInstanceResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -509,7 +569,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["name"]      = Str(name),
             ["field"]     = Str(field),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getStaticFieldData", args,
             ProtocolJsonContext.Default.RpcEnvelopeGetStaticFieldDataResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -542,7 +602,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (elementNamespace is not null)            args["elementNamespace"] = Str(elementNamespace);
         if (!string.IsNullOrEmpty(elementName))      args["elementName"]      = Str(elementName);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "walkArray", args,
             ProtocolJsonContext.Default.RpcEnvelopeWalkArrayResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -568,7 +628,7 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (maxBackwardScan is int n) args["maxBackwardScan"] = Int(n);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "whatIsAt", args,
             ProtocolJsonContext.Default.RpcEnvelopeWhatIsAtResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -590,7 +650,7 @@ public sealed class BackendAdapter : ILiveExportSource
                   ["rebuild"] = JsonSerializer.SerializeToElement(true, ProtocolJsonContext.Default.Boolean),
               }
             : null;
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getClassRangeStats", args,
             ProtocolJsonContext.Default.RpcEnvelopeClassRangeStatsResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -617,7 +677,7 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (!string.IsNullOrEmpty(signatureMatch))
             args["signatureMatch"] = Str(signatureMatch);
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "findMethodInstances", args,
             ProtocolJsonContext.Default.RpcEnvelopeFindMethodInstancesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -640,7 +700,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["address"] = Str(address),
             ["length"]  = Int(length),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getMethodAobPattern", args,
             ProtocolJsonContext.Default.RpcEnvelopeGetMethodAobPatternResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -675,7 +735,7 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (limit is int l) args["limit"] = Int(l);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "listFieldValuesAcrossInstances", args,
             ProtocolJsonContext.Default.RpcEnvelopeListFieldValuesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -704,7 +764,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["type"]        = Str(type),
             ["value"]       = value,
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "setInstanceField", args,
             ProtocolJsonContext.Default.RpcEnvelopeSetInstanceFieldResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -723,7 +783,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["address"] = Str(address),
             ["size"]    = Int(size),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "readMemory", args,
             ProtocolJsonContext.Default.RpcEnvelopeReadMemoryResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -785,7 +845,7 @@ public sealed class BackendAdapter : ILiveExportSource
                 d["main_thread_timeout_ms"] = Int(mainThreadTimeoutMs.Value);
             }
         }
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "callMethod", d,
             ProtocolJsonContext.Default.RpcEnvelopeCallMethodResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -810,7 +870,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["namespace"] = Str(@namespace ?? string.Empty),
             ["name"]      = Str(className),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "getEnumValues", d,
             ProtocolJsonContext.Default.RpcEnvelopeGetEnumValuesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -868,7 +928,7 @@ public sealed class BackendAdapter : ILiveExportSource
         // null = always a fresh heap walk.
         if (reuseIndexMs.HasValue) args["reuseIndexMs"] = Int(reuseIndexMs.Value);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "beginValueScan", args,
             ProtocolJsonContext.Default.RpcEnvelopeBeginValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -896,7 +956,7 @@ public sealed class BackendAdapter : ILiveExportSource
         // beginValueScan (minus sessionId), so it deserializes cleanly
         // into BeginValueScanResult — the SessionId field stays empty
         // for string scans.
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "scanFieldValue", args,
             ProtocolJsonContext.Default.RpcEnvelopeBeginValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -922,7 +982,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (valueTo.HasValue) args["valueTo"] = Dbl(valueTo.Value);
         if (limit.HasValue)   args["limit"]   = Int(limit.Value);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "refineValueScan", args,
             ProtocolJsonContext.Default.RpcEnvelopeRefineValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -934,7 +994,7 @@ public sealed class BackendAdapter : ILiveExportSource
         string sessionId, CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement> { ["sessionId"] = Str(sessionId) };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "endValueScan", args,
             ProtocolJsonContext.Default.RpcEnvelopeEndValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -996,7 +1056,7 @@ public sealed class BackendAdapter : ILiveExportSource
         }
         if (captureStaticValues) args["captureStaticValues"] = Bool(true);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "snapshotBegin", args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotBeginResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -1018,7 +1078,7 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "snapshotChunk", args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotChunkResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -1038,7 +1098,7 @@ public sealed class BackendAdapter : ILiveExportSource
         {
             ["snapshotId"] = Str(snapshotId),
         };
-        var env = await _pipe.SendAsync(
+        var env = await Send(
             "snapshotEnd", args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotEndResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);

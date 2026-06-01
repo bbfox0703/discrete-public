@@ -26,9 +26,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     // routing the client to a residual ghost instance from the dying
     // game until enough wall-clock has passed for cleanup. A brand-new
     // PipeClient (which is what "restart the UI" effectively gives you)
-    // bypasses this. _backend is stable; we swap its inner pipe via
+    // bypasses this. _backend is stable; we swap its inner pipes via
     // ReplacePipe so Browser/Inspector references stay valid.
+    //
+    // Two connections to the same DLL pipe server: _pipe carries light
+    // interactive browse RPCs, _bulkPipe carries heavy long-running ops
+    // (snapshot / value-scan / heap walks). This keeps tree/Inspector
+    // browsing responsive while a snapshot streams hundreds of chunk RPCs.
+    // The DLL serves up to kMaxPipeInstances (4) clients; the UI uses 2,
+    // leaving >=2 free for CLI / probe scripts.
     private PipeClient                  _pipe;
+    private PipeClient                  _bulkPipe;
     private readonly BackendAdapter     _backend;
     private readonly FileLogger         _logger;
     private readonly IProcessEnumerator _processes;
@@ -62,18 +70,32 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                                 IUnityGameScanner? gameScanner)
     {
         _pipe           = new PipeClient();
-        _backend        = new BackendAdapter(_pipe);
+        _bulkPipe       = new PipeClient();
+        _backend        = new BackendAdapter(_pipe, _bulkPipe);
         _logger         = new FileLogger();
         _processes      = processes;
         _injector       = injector;
         _proxyInstaller = proxyInstaller;
         _gameScanner    = gameScanner ?? new UnityDumpUI.Platform.SteamGameScanner(proxyInstaller);
+        // Shared bulk lane: only one heavy bulk op (snapshot / value-scan /
+        // find-instances / symbol export) runs at a time. They route to the
+        // bulk pipe connection; the gate greys out the others' start buttons
+        // + drives the busy hint. Created before the VMs that take it.
+        BulkGate        = new BulkOperationGate();
+        BulkGate.PropertyChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(BulkBusyHint));
+            ExportSymbolsX64dbgCommand.NotifyCanExecuteChanged();
+            ExportSymbolsGhidraCommand.NotifyCanExecuteChanged();
+            ExportSymbolsIdaCommand.NotifyCanExecuteChanged();
+            ExportIl2cppHeaderCommand.NotifyCanExecuteChanged();
+        };
         Browser         = new AssemblyBrowserViewModel(_backend, _logger);
-        Inspector       = new LiveInspectionViewModel(_backend, _logger);
+        Inspector       = new LiveInspectionViewModel(_backend, _logger, BulkGate);
         AddressLookup   = new AddressLookupViewModel(_backend, _logger);
         SymbolFinder    = new SymbolFinderViewModel(_backend, _logger, Browser.Assemblies);
         SymbolFinder.NavigateRequested += OnSymbolFinderNavigateRequested;
-        ValueSearch     = new ValueSearchViewModel(_backend, _logger);
+        ValueSearch     = new ValueSearchViewModel(_backend, _logger, BulkGate);
         ValueSearch.NavigateToInspectorRequested += OnValueSearchNavigateToInspector;
         // Phase 29b — Snapshot tab. Wraps snapshotBegin/Chunk/End RPCs,
         // builds local in-memory envelope per capture, diffs two
@@ -86,7 +108,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // returns, Snapshot uses the defaults baked into UserSettings.
         SettingsStore   = new UserSettingsStore(logger: _logger);
         _settings       = new UserSettings();
-        Snapshot        = new SnapshotViewModel(_backend, _logger, SettingsStore, _settings);
+        Snapshot        = new SnapshotViewModel(_backend, _logger, SettingsStore, _settings, BulkGate);
         _ = LoadUserSettingsAsync();
         Snapshot.NavigateToInspectorRequested     += OnSnapshotNavigateToInspector;
         Snapshot.NavigateToAddressLookupRequested += OnSnapshotNavigateToAddressLookup;
@@ -154,7 +176,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // Phase 14a: react to involuntary pipe teardown (target game exited,
         // pipe closed). Marshals onto the UI thread because the event fires
         // from whichever pool thread happened to be doing the failing read.
+        // Both connections subscribe — if EITHER drops we tear down once
+        // (HandleInvoluntaryDisconnect is guarded by IsConnected).
         _pipe.Disconnected += OnPipeDisconnected;
+        _bulkPipe.Disconnected += OnPipeDisconnected;
 
         // Banner first so each ui/init/current.log clearly identifies the
         // build that wrote it. Same scheme as the C++ DLL's main.cpp.
@@ -299,6 +324,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// no class hint required.
     /// </summary>
     public ValueSearchViewModel ValueSearch { get; }
+
+    /// <summary>Shared mutual-exclusion lane for long bulk ops (snapshot /
+    /// value-scan). Heavy VMs key their start-command CanExecute on it.</summary>
+    public BulkOperationGate BulkGate { get; }
+
+    /// <summary>Non-empty while a bulk op runs — e.g. "Snapshot in progress…".
+    /// Bind a status line to this; empty means idle.</summary>
+    public string BulkBusyHint =>
+        BulkGate.CurrentOperation is { } op ? $"{op} in progress…" : string.Empty;
 
     /// <summary>
     /// Phase 29b — Snapshot &amp; Diff tab. Captures the running game's
@@ -817,18 +851,23 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     private void ReplacePipeForFreshConnect()
     {
-        PipeClient old = _pipe;
-        old.Disconnected -= OnPipeDisconnected;
+        PipeClient old     = _pipe;
+        PipeClient oldBulk = _bulkPipe;
+        old.Disconnected     -= OnPipeDisconnected;
+        oldBulk.Disconnected -= OnPipeDisconnected;
         // Fire-and-forget dispose. Holding it on the UI thread would block
         // for the gate semaphore; the old streams are already torn down by
         // whatever event got us here, so dispose is just bookkeeping.
         _ = old.DisposeAsync();
+        _ = oldBulk.DisposeAsync();
 
-        _pipe = new PipeClient();
-        _pipe.Disconnected += OnPipeDisconnected;
-        _backend.ReplacePipe(_pipe);
+        _pipe     = new PipeClient();
+        _bulkPipe = new PipeClient();
+        _pipe.Disconnected     += OnPipeDisconnected;
+        _bulkPipe.Disconnected += OnPipeDisconnected;
+        _backend.ReplacePipe(_pipe, _bulkPipe);
         _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
-            "PipeClient recreated for next Connect");
+            "PipeClients recreated for next Connect");
     }
 
     /// <summary>
@@ -955,7 +994,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // Use DisconnectAsync rather than DisposeAsync so the gate
             // semaphore stays alive for a future Connect. DisposeAsync is
             // reserved for app shutdown (see Dispose() at the bottom).
+            // Both connections come down together.
             await _pipe.DisconnectAsync().ConfigureAwait(true);
+            await _bulkPipe.DisconnectAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -1245,9 +1286,14 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// addresses for managed methods (JIT pages, not GameAssembly.dll),
     /// so the export menu greys out.
     /// </summary>
+    // Holds the bulk lane while a symbol export / il2cpp.h dump runs, so a
+    // concurrent snapshot / value-scan greys out (and vice versa).
+    private System.IDisposable? _exportLease;
+
     private bool CanExportSymbols() =>
         !IsBusy && IsConnected && SaveFileAsync is not null &&
-        string.Equals(Backend2, "IL2CPP", StringComparison.OrdinalIgnoreCase);
+        string.Equals(Backend2, "IL2CPP", StringComparison.OrdinalIgnoreCase) &&
+        !BulkGate.IsBusy;
 
     private async Task ExportSymbolsAsync(
         string filterDescription,
@@ -1270,6 +1316,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         if (path is null) return;
 
         IsBusy = true;
+        _exportLease = BulkGate.TryEnter("Export symbols");
         try
         {
             // Source the assembly list straight from the DLL — Browser's
@@ -1327,6 +1374,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         finally
         {
             IsBusy = false;
+            _exportLease?.Dispose(); _exportLease = null;
         }
     }
 
@@ -1353,6 +1401,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         if (path is null) return;
 
         IsBusy = true;
+        _exportLease = BulkGate.TryEnter("Export il2cpp.h");
         try
         {
             GetAssembliesResult asmResult = await _backend
@@ -1421,6 +1470,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         finally
         {
             IsBusy = false;
+            _exportLease?.Dispose(); _exportLease = null;
         }
     }
 
@@ -1735,6 +1785,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _connectCts?.Dispose();
         _ = Inspector.DisposeAsync();
         _ = _pipe.DisposeAsync();
+        _ = _bulkPipe.DisposeAsync();
         _logger.Dispose();
     }
 }
