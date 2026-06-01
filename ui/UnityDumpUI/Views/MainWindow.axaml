@@ -2627,6 +2627,67 @@
                 </Border>
               </Expander>
 
+              <!-- 29i-3: unsupervised "likely game-state" ranking. Stage 0
+                   tells you which classes are stable; this tells you which
+                   stable classes have a DRIFTING value (money / HP / exp),
+                   with an inline preview. Most heuristic of the waves —
+                   precise alternative is Find by value above. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="False" Header="🏅 Likely game-state (rank stable-key + drifting-value classes)">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="8" Margin="0,0,0,6">
+                      <Button Content="🏅 Rank likely game-state"
+                              Command="{Binding ClassPivot.RankLikelyGameStateCommand}"
+                              Padding="10,4"/>
+                      <TextBlock Text="Top-N classes:" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                      <NumericUpDown Value="{Binding ClassPivot.InterestTopN, Mode=TwoWay}"
+                                     Minimum="1" Maximum="500" Increment="10"
+                                     FormatString="0" Width="120" VerticalAlignment="Center"
+                                     ToolTip.Tip="How many Stage-0 candidates the (more expensive) volatility pass scores. Higher = broader but slower."/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.InterestStatus}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <DataGrid Name="PivotInterestGrid"
+                              DockPanel.Dock="Top"
+                              ItemsSource="{Binding ClassPivot.InterestRows}"
+                              SelectedItem="{Binding ClassPivot.SelectedInterestRow, Mode=TwoWay}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              MaxHeight="260"
+                              DoubleTapped="OnPivotInterestDoubleTapped">
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
+                                            Width="Auto" MinWidth="220" SortMemberPath="ClassFqn" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
+                                            Width="Auto" MinWidth="120" SortMemberPath="Assembly" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Interest" Binding="{Binding InterestDisplay}" Width="75"
+                                            SortMemberPath="InterestScore" CanUserSort="True"/>
+                        <DataGridTextColumn Header="KeyScore" Binding="{Binding KeyScoreDisplay}" Width="75"
+                                            SortMemberPath="BestKeyScore" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Vol" Binding="{Binding VolDisplay}" Width="60"
+                                            SortMemberPath="MaxVolatility" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Key" Binding="{Binding KeyDisplay}"
+                                            Width="Auto" MinWidth="140"/>
+                        <DataGridTextColumn Header="Top values" Binding="{Binding ValuesDisplay}"
+                                            Width="Auto" MinWidth="160"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock DockPanel.Dock="Top" Margin="0,6,0,2"
+                               FontWeight="SemiBold" FontSize="11" Opacity="0.8"
+                               Text="Preview — best key : value trajectory (select a row above; double-tap loads it)"/>
+                    <ListBox ItemsSource="{Binding ClassPivot.InterestPreview}"
+                             MaxHeight="120" FontFamily="Cascadia Mono,Consolas,monospace"
+                             FontSize="11"/>
+                  </DockPanel>
+                </Border>
+              </Expander>
+
               <!-- Stage 1 (Phase 29e-4): field key auto-discovery.
                    Scores each field of the chosen class on key
                    suitability (stability / cardinality / type / name)

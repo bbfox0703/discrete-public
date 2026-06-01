@@ -55,6 +55,7 @@ public sealed partial class PivotViewModel : ObservableObject
             ScoreElementFieldsCommand.NotifyCanExecuteChanged();
             FindByValueCommand.NotifyCanExecuteChanged();
             SuggestKeyAndRunCommand.NotifyCanExecuteChanged();
+            RankLikelyGameStateCommand.NotifyCanExecuteChanged();
         };
         SyncSelectionRows();
         RunCommand.NotifyCanExecuteChanged();
@@ -63,6 +64,7 @@ public sealed partial class PivotViewModel : ObservableObject
         ScoreElementFieldsCommand.NotifyCanExecuteChanged();
         FindByValueCommand.NotifyCanExecuteChanged();
         SuggestKeyAndRunCommand.NotifyCanExecuteChanged();
+        RankLikelyGameStateCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>Class FQNs seen across currently-hydrated snapshots.
@@ -588,6 +590,145 @@ public sealed partial class PivotViewModel : ObservableObject
             return;
         }
         await RunAsync().ConfigureAwait(true);
+    }
+
+    // ── 29i-3: unsupervised "likely game-state" ranking + preview ──────
+
+    /// <summary>Ranked candidate classes (stable key + drifting value).</summary>
+    public ObservableCollection<ClassInterestRow> InterestRows { get; } = new();
+
+    /// <summary>How many Stage-0 candidates Pass B scores. Cost gate.</summary>
+    [ObservableProperty] private int _interestTopN = 40;
+
+    [ObservableProperty] private string _interestStatus =
+        "Rank the most likely game-state classes (stable identity + drifting value) and preview them. Most heuristic — when you know the value, use Find by value instead.";
+
+    [ObservableProperty] private ClassInterestRow? _selectedInterestRow;
+
+    /// <summary>Sample trajectory lines of <see cref="SelectedInterestRow"/>
+    /// — pre-built during ranking, shown in the preview panel.</summary>
+    public ObservableCollection<string> InterestPreview { get; } = new();
+
+    partial void OnSelectedInterestRowChanged(ClassInterestRow? value)
+    {
+        InterestPreview.Clear();
+        if (value is null) return;
+        foreach (var line in value.Preview) InterestPreview.Add(line);
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRun))]
+    public async Task RankLikelyGameStateAsync()
+    {
+        ErrorMessage = string.Empty;
+        var selected = SelectedRows();
+        if (selected.Count == 0)
+        {
+            ErrorMessage = "Pick at least 1 snapshot.";
+            return;
+        }
+
+        try
+        {
+            IsRunning = true;
+            InterestStatus = $"Hydrating {selected.Count:N0} snapshot(s)…";
+
+            var preloaded = new HashSet<SnapshotEnvelope>();
+            foreach (var r in selected)
+                if (r.Snapshot.ClassesLoaded) preloaded.Add(r.Snapshot);
+            foreach (var r in selected)
+                await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
+
+            RefreshKnownClassesAndFields();
+
+            var snaps = selected.Select(r => r.Snapshot).ToList();
+            var sw = Stopwatch.StartNew();
+
+            // Pass A — Stage 0 shortlist → top-N clean candidates.
+            var shortlist = ClassShortlistEngine.Run(new ClassShortlistQuery
+            {
+                Snapshots      = snaps,
+                AssemblyFilter = string.IsNullOrWhiteSpace(AssemblyFilter) ? null : AssemblyFilter.Trim(),
+            });
+            var candidates = shortlist
+                .Where(c => !c.IsSynthetic && c.Presence == c.SnapCount && c.FieldCount >= 2)
+                .Take(Math.Max(1, InterestTopN))
+                .Select(c => new ClassInterestCandidate { Assembly = c.Assembly, ClassFqn = c.ClassFqn })
+                .ToList();
+
+            // Pass B — interestingness scoring.
+            var rows = ClassInterestEngine.Run(new ClassInterestQuery
+            {
+                Snapshots = snaps, Candidates = candidates,
+            });
+
+            // Eager preview (while hydrated): top value field + key → 3 rows.
+            foreach (var row in rows)
+            {
+                row.Preview.Clear();
+                if (row.KeyFields.Count == 0 || row.TopValueFieldsList.Count == 0) continue;
+                try
+                {
+                    var pr = PivotEngine.Run(new PivotQuery
+                    {
+                        Snapshots   = snaps,
+                        Assembly    = row.Assembly,
+                        ClassFqn    = row.ClassFqn,
+                        KeyFields   = row.KeyFields.ToList(),
+                        ValueFields = new List<string> { row.TopValueFieldsList[0] },
+                    });
+                    foreach (var m in pr.Take(3))
+                    {
+                        string traj = string.Join(" → ", m.Values[0].Select(s => s ?? "—"));
+                        row.Preview.Add($"{string.Join(", ", m.KeyTuple)} : {traj}");
+                    }
+                }
+                catch { /* preview is best-effort */ }
+            }
+            sw.Stop();
+
+            InterestRows.Clear();
+            foreach (var row in rows) InterestRows.Add(row);
+
+            int evicted = 0;
+            foreach (var r in selected)
+            {
+                if (preloaded.Contains(r.Snapshot)) continue;
+                if (!r.Snapshot.ClassesLoaded) continue;
+                if (r.Snapshot.PersistedId is null) continue;
+                r.Snapshot.Unload();
+                evicted++;
+            }
+
+            InterestStatus =
+                $"Ranked {rows.Count:N0} candidate class(es) in {sw.ElapsedMilliseconds} ms (from {candidates.Count:N0} Stage-0 picks). " +
+                "Double-tap a row to load key+value; select a row to preview.";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"PivotInterest: asm='{AssemblyFilter}' topN={InterestTopN} candidates={candidates.Count} → {rows.Count} ranked in {sw.ElapsedMilliseconds}ms evicted={evicted}");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(SnapshotStore.LogCategory, $"PivotInterest FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsRunning = false;
+        }
+    }
+
+    /// <summary>Handoff: load a ranked row's class + suggested key + top
+    /// value field into the pivot query.</summary>
+    public void UseInterestRow(ClassInterestRow row)
+    {
+        if (row is null) return;
+        ClassFqn       = row.ClassFqn;
+        AssemblyFilter = row.Assembly;
+        RefreshKnownFieldNamesForClass();
+        if (row.KeyFields.Count > 0)
+            KeyFieldsText = string.Join(", ", row.KeyFields);
+        if (row.TopValueFieldsList.Count > 0)
+            ValueFieldsText = AppendField(ValueFieldsText, row.TopValueFieldsList[0]);
+        StatusMessage = $"Loaded {row.ClassFqn}: key {row.KeyDisplay}, value {(row.TopValueFieldsList.Count > 0 ? row.TopValueFieldsList[0] : "—")}. Run to confirm.";
     }
 
     /// <summary>NavigateToInspector handoff — wired by MainWindow to

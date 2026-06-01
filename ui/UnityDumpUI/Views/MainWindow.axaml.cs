@@ -228,6 +228,8 @@ public partial class MainWindow : Window
             .WireSortComparers(PivotResultsSortComparers);
         this.FindControl<DataGrid>("PivotLocatorGrid")?
             .WireSortComparers(PivotLocatorSortComparers);
+        this.FindControl<DataGrid>("PivotInterestGrid")?
+            .WireSortComparers(PivotInterestSortComparers);
     }
 
     private static readonly IReadOnlyDictionary<string, IComparer> BrowserFieldsSortComparers =
@@ -333,6 +335,16 @@ public partial class MainWindow : Window
             ["SCardinality"] = DataGridSortComparers.Double <FieldScore>(r => r.SCardinality),
             ["TypePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.TypePrior),
             ["NamePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.NamePrior),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> PivotInterestSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["ClassFqn"]      = DataGridSortComparers.Ordinal<ClassInterestRow>(r => r.ClassFqn),
+            ["Assembly"]      = DataGridSortComparers.Ordinal<ClassInterestRow>(r => r.Assembly),
+            ["InterestScore"] = DataGridSortComparers.Double <ClassInterestRow>(r => r.InterestScore),
+            ["BestKeyScore"]  = DataGridSortComparers.Double <ClassInterestRow>(r => r.BestKeyScore),
+            ["MaxVolatility"] = DataGridSortComparers.Double <ClassInterestRow>(r => r.MaxVolatility),
         };
 
     private static readonly IReadOnlyDictionary<string, IComparer> PivotLocatorSortComparers =
@@ -700,6 +712,16 @@ public partial class MainWindow : Window
         var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotLocatorGrid");
         if (grid?.SelectedItem is not UnityDumpUI.ViewModels.ValueLocatorHit hit) return;
         vm.ClassPivot.UseLocatorHit(hit);
+    }
+
+    // ── Phase 29i-3 likely game-state ranking ───────────────────────────
+
+    private void OnPivotInterestDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ClassInterestRow row) return;
+        vm.ClassPivot.UseInterestRow(row);
     }
 
     // ── Phase 29e-8/9: Inspector tree-aware sort ────────────────────────
