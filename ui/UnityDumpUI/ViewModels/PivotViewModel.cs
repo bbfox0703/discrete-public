@@ -52,6 +52,7 @@ public sealed partial class PivotViewModel : ObservableObject
             RunCommand.NotifyCanExecuteChanged();
             AnalyzeClassesCommand.NotifyCanExecuteChanged();
             ScoreFieldsCommand.NotifyCanExecuteChanged();
+            ScoreElementFieldsCommand.NotifyCanExecuteChanged();
         };
         SyncSelectionRows();
         RunCommand.NotifyCanExecuteChanged();
@@ -233,6 +234,156 @@ public sealed partial class PivotViewModel : ObservableObject
     public ObservableCollection<string> KnownElementFieldNames { get; } = new();
 
     partial void OnArrayFieldNameChanged(string value) => RefreshKnownElementFieldNames();
+
+    // ── 29i-2: array element-field scored picker ───────────────────────
+
+    /// <summary>Filtered scored-field list for the array element fields —
+    /// Stage 1 ranking applied to the inner fields of <see cref="ArrayFieldName"/>'s
+    /// captured elements (Layer B). Drives the element-field picker grid.</summary>
+    public ObservableCollection<FieldScore> ElementFieldScores { get; } = new();
+
+    private List<FieldScore> _allElementFieldScores = new();
+
+    [ObservableProperty] private string _elementFieldScoreFilter = string.Empty;
+
+    /// <summary>Greedy compound-key proposal for the INNER element key,
+    /// e.g. "(_propertyID)". Empty until Score element fields runs.</summary>
+    [ObservableProperty] private string _suggestedInnerKeyDisplay = string.Empty;
+    [ObservableProperty] private string _suggestedInnerKeyReason  = string.Empty;
+
+    [ObservableProperty] private string _elementFieldScoreStatus =
+        "Set a Class FQN + Array field, then Score element fields to rank inner key candidates.";
+
+    private IReadOnlyList<string> _suggestedInnerKey = System.Array.Empty<string>();
+
+    partial void OnElementFieldScoreFilterChanged(string value) => RebuildElementFieldScoresView();
+
+    [RelayCommand(CanExecute = nameof(CanRun))]
+    public async Task ScoreElementFieldsAsync()
+    {
+        ErrorMessage = string.Empty;
+        var selected = SelectedRows();
+        if (selected.Count == 0)
+        {
+            ErrorMessage = "Pick at least 1 snapshot.";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ClassFqn))
+        {
+            ErrorMessage = "Set a Class FQN first (type one or pick it from the Stage 0 shortlist).";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ArrayFieldName))
+        {
+            ErrorMessage = "Set an Array field first (the reference array whose elements to score, e.g. '_statAdditionData').";
+            return;
+        }
+
+        try
+        {
+            IsRunning = true;
+            ElementFieldScoreStatus = $"Hydrating {selected.Count:N0} snapshot(s)…";
+
+            var preloaded = new HashSet<SnapshotEnvelope>();
+            foreach (var r in selected)
+                if (r.Snapshot.ClassesLoaded) preloaded.Add(r.Snapshot);
+
+            foreach (var r in selected)
+                await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
+
+            RefreshKnownClassesAndFields();
+
+            string? assembly = string.IsNullOrWhiteSpace(AssemblyFilter)
+                ? selected.Select(r => ResolveAssemblyForClass(r.Snapshot, ClassFqn.Trim()))
+                          .FirstOrDefault(a => !string.IsNullOrEmpty(a))
+                : AssemblyFilter.Trim();
+            if (string.IsNullOrEmpty(assembly))
+            {
+                ErrorMessage = $"Class '{ClassFqn}' not found in any selected snapshot. Check the FQN (case-sensitive, must include the namespace).";
+                return;
+            }
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var result = KeyDiscoveryEngine.Run(new KeyDiscoveryQuery
+            {
+                Snapshots  = selected.Select(r => r.Snapshot).ToList(),
+                Assembly   = assembly!,
+                ClassFqn   = ClassFqn.Trim(),
+                ArrayField = ArrayFieldName.Trim(),
+            });
+            sw.Stop();
+
+            _allElementFieldScores = result.Fields.ToList();
+            RebuildElementFieldScoresView();
+
+            _suggestedInnerKey       = result.SuggestedKey;
+            SuggestedInnerKeyDisplay = result.SuggestedKey.Count > 0
+                ? "(" + string.Join(", ", result.SuggestedKey) + ")"
+                : "(none)";
+            SuggestedInnerKeyReason  = result.SuggestedKeyReason;
+
+            int evicted = 0;
+            foreach (var r in selected)
+            {
+                if (preloaded.Contains(r.Snapshot)) continue;
+                if (!r.Snapshot.ClassesLoaded) continue;
+                if (r.Snapshot.PersistedId is null) continue;
+                r.Snapshot.Unload();
+                evicted++;
+            }
+
+            ElementFieldScoreStatus = _allElementFieldScores.Count == 0
+                ? "No element fields scored — the array has no captured inner fields. Re-take the snapshot with \"Capture array element fields\" (Layer B) enabled on the Snapshot tab."
+                : $"Scored {_allElementFieldScores.Count:N0} element field(s) in {sw.ElapsedMilliseconds} ms. " +
+                  $"Double-click → inner key; right-click → inner value. Suggested inner key: {SuggestedInnerKeyDisplay}.";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"PivotElementKeyDiscovery: class={ClassFqn} array={ArrayFieldName} fields={_allElementFieldScores.Count} suggested=[{string.Join(',', result.SuggestedKey)}] in {sw.ElapsedMilliseconds}ms evicted={evicted}");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(SnapshotStore.LogCategory, $"PivotElementKeyDiscovery FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsRunning = false;
+        }
+    }
+
+    private void RebuildElementFieldScoresView()
+    {
+        string? filter = string.IsNullOrWhiteSpace(ElementFieldScoreFilter) ? null : ElementFieldScoreFilter.Trim();
+        ElementFieldScores.Clear();
+        foreach (var f in _allElementFieldScores)
+        {
+            if (filter is not null &&
+                f.FieldName.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            ElementFieldScores.Add(f);
+        }
+    }
+
+    [RelayCommand]
+    public void ApplySuggestedInnerKey()
+    {
+        if (_suggestedInnerKey.Count == 0) return;
+        InnerKeyFieldsText = string.Join(", ", _suggestedInnerKey);
+        StatusMessage = $"Inner key fields set to {string.Join(", ", _suggestedInnerKey)}.";
+    }
+
+    public void AddElementFieldToInnerKeys(FieldScore field)
+    {
+        if (field is null) return;
+        InnerKeyFieldsText = AppendField(InnerKeyFieldsText, field.FieldName);
+        StatusMessage = $"Added '{field.FieldName}' to inner key fields.";
+    }
+
+    public void AddElementFieldToInnerValues(FieldScore field)
+    {
+        if (field is null) return;
+        InnerValueFieldsText = AppendField(InnerValueFieldsText, field.FieldName);
+        StatusMessage = $"Added '{field.FieldName}' to inner value fields.";
+    }
 
     /// <summary>NavigateToInspector handoff — wired by MainWindow to
     /// the cross-tab navigation handler that switches to Inspector

@@ -85,6 +85,35 @@ public class KeyDiscoveryEngineTests
             Snapshots = snaps, Assembly = "asm", ClassFqn = "Game.Stat",
         });
 
+    // 29i-2: a reference-array field whose elements carry inner Fields
+    // (Layer B capture). Each element is one SnapshotFieldEntry[].
+    private static SnapshotFieldEntry RefArrayF(string name, params SnapshotFieldEntry[][] elements)
+    {
+        var fe = new SnapshotFieldEntry
+        {
+            Name = name, Type = "Game.Elem[]",
+            ArrayElements = new SnapshotArrayElements
+            {
+                Length = (ulong)elements.Length, Count = elements.Length,
+                IsPointer = true, ElementType = "Game.Elem",
+                Elements = new List<SnapshotArrayElement>(),
+            },
+        };
+        for (int i = 0; i < elements.Length; i++)
+            fe.ArrayElements.Elements.Add(new SnapshotArrayElement
+            {
+                Index = i, Fields = elements[i].ToList(),
+            });
+        return fe;
+    }
+
+    private static KeyDiscoveryResult RunElementOn(string arrayField, params SnapshotEnvelope[] snaps)
+        => KeyDiscoveryEngine.Run(new KeyDiscoveryQuery
+        {
+            Snapshots = snaps, Assembly = "asm", ClassFqn = "Game.Stat",
+            ArrayField = arrayField,
+        });
+
     private static FieldScore ScoreOf(KeyDiscoveryResult r, string field)
         => r.Fields.Single(f => f.FieldName == field);
 
@@ -278,5 +307,74 @@ public class KeyDiscoveryEngineTests
             Inst("0x2", IntF("a", 1), IntF("b", 2))));
         var r = RunOn(snap);
         Assert.Contains("still share a key", r.SuggestedKeyReason);
+    }
+
+    // ─── 29i-2: element mode (array inner-field scoring) ────────────────
+
+    [Fact]
+    public void ElementMode_ScoresInnerFields_NotInstanceOrArrayField()
+    {
+        var snap = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x1", IntF("_ownerId", 1),
+                RefArrayF("_arr",
+                    new[] { IntF("_propertyID", 101), IntF("_amount", 5) },
+                    new[] { IntF("_propertyID", 102), IntF("_amount", 7) }))));
+        var r = RunElementOn("_arr", snap);
+
+        Assert.Contains(r.Fields, f => f.FieldName == "_propertyID");
+        Assert.Contains(r.Fields, f => f.FieldName == "_amount");
+        // The owning instance's own field and the array field itself are
+        // NOT element fields — element mode must not surface them.
+        Assert.DoesNotContain(r.Fields, f => f.FieldName == "_ownerId");
+        Assert.DoesNotContain(r.Fields, f => f.FieldName == "_arr");
+    }
+
+    [Fact]
+    public void ElementMode_StableUniqueInnerKey_TopsAndIsSuggested()
+    {
+        // _propertyID = {101,102} every snap (stable + unique within the
+        // 2-element set); _amount drifts. Element key should win.
+        var s1 = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x1", RefArrayF("_arr",
+                new[] { IntF("_propertyID", 101), IntF("_amount", 5) },
+                new[] { IntF("_propertyID", 102), IntF("_amount", 7) }))));
+        var s2 = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x9", RefArrayF("_arr",
+                new[] { IntF("_propertyID", 101), IntF("_amount", 50) },
+                new[] { IntF("_propertyID", 102), IntF("_amount", 70) }))));
+        var r = RunElementOn("_arr", s1, s2);
+
+        Assert.Equal("_propertyID", r.Fields[0].FieldName);
+        Assert.Equal(1.0, ScoreOf(r, "_propertyID").SStable, 3);
+        Assert.Equal(1.0, ScoreOf(r, "_propertyID").SCardinality, 3);
+        Assert.Equal(new[] { "_propertyID" }, r.SuggestedKey.ToArray());
+    }
+
+    [Fact]
+    public void ElementMode_NoCapturedInnerFields_YieldsNoScores()
+    {
+        // Array present but elements have no inner Fields (Layer A only /
+        // Layer B not enabled) → nothing to score.
+        var snap = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x1", RefArrayF("_arr",
+                System.Array.Empty<SnapshotFieldEntry>(),
+                System.Array.Empty<SnapshotFieldEntry>()))));
+        var r = RunElementOn("_arr", snap);
+        Assert.Empty(r.Fields);
+    }
+
+    [Fact]
+    public void InstanceMode_Unchanged_WhenArrayFieldNull()
+    {
+        // Regression: with ArrayField null the engine scores instance
+        // fields exactly as before (the array field collapses to a single
+        // reference field, not its elements).
+        var snap = MakeEnv(MakeClass("Game.Stat",
+            Inst("0x1", IntF("_ownerId", 1),
+                RefArrayF("_arr", new[] { IntF("_propertyID", 101) }))));
+        var r = RunOn(snap);
+        Assert.Contains(r.Fields, f => f.FieldName == "_ownerId");
+        Assert.Contains(r.Fields, f => f.FieldName == "_arr");
+        Assert.DoesNotContain(r.Fields, f => f.FieldName == "_propertyID");
     }
 }

@@ -60,6 +60,15 @@ public sealed class KeyDiscoveryQuery
     /// <summary>Cap on the greedy compound-key length. Default 3 — more
     /// than that and the "key" is really a fingerprint, not a key.</summary>
     public int MaxCompoundKey { get; init; } = 3;
+
+    /// <summary>29i-2 element mode. Null (default) = score the class's own
+    /// top-level instance fields. When set to a reference-array field name
+    /// on the class (e.g. <c>_statAdditionData</c>), the engine instead
+    /// scores the fields INSIDE each captured array element (Layer B), so
+    /// the inner-pivot key/value pickers get the same ranking as Stage 1.
+    /// Every sub-score works on a flat field-set, so the scoring machinery
+    /// is unchanged — only the iteration source differs.</summary>
+    public string? ArrayField { get; init; }
 }
 
 public sealed class FieldScore
@@ -116,10 +125,10 @@ public static class KeyDiscoveryEngine
 
         for (int s = 0; s < snapCount; s++)
         {
-            foreach (var inst in InstancesOf(query.Snapshots[s], query.Assembly, query.ClassFqn))
+            foreach (var fields in FieldSetsOf(query, query.Snapshots[s]))
             {
                 instanceCount[s]++;
-                foreach (var f in inst.Fields)
+                foreach (var f in fields)
                 {
                     if (!valueSets.TryGetValue(f.Name, out var perSnap))
                     {
@@ -238,20 +247,20 @@ public static class KeyDiscoveryEngine
         {
             int instCount = 0;
             var distinct = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var inst in InstancesOf(snap, query.Assembly, query.ClassFqn))
+            foreach (var fields in FieldSetsOf(query, snap))
             {
                 instCount++;
-                distinct.Add(BuildKeyTuple(inst, keyFields));
+                distinct.Add(BuildKeyTuple(fields, keyFields));
             }
             collisions += instCount - distinct.Count;
         }
         return collisions;
     }
 
-    private static string BuildKeyTuple(SnapshotInstanceEntry inst, List<string> keyFields)
+    private static string BuildKeyTuple(IReadOnlyList<SnapshotFieldEntry> fields, List<string> keyFields)
     {
-        var fieldMap = new Dictionary<string, SnapshotFieldEntry>(inst.Fields.Count, StringComparer.Ordinal);
-        foreach (var f in inst.Fields) fieldMap.TryAdd(f.Name, f);
+        var fieldMap = new Dictionary<string, SnapshotFieldEntry>(fields.Count, StringComparer.Ordinal);
+        foreach (var f in fields) fieldMap.TryAdd(f.Name, f);
 
         var parts = new string[keyFields.Count];
         for (int i = 0; i < keyFields.Count; i++)
@@ -259,6 +268,32 @@ public static class KeyDiscoveryEngine
                 ? SnapshotEnvelope.FormatFieldValue(f)
                 : "(missing)";
         return string.Join('\x1F', parts);
+    }
+
+    /// <summary>The unit of scoring: a flat field set per "logical row".
+    /// Instance mode (query.ArrayField null) yields each instance's Fields;
+    /// element mode yields the inner Fields of each captured element of the
+    /// named reference array (Layer B). Everything downstream is identical.</summary>
+    private static IEnumerable<IReadOnlyList<SnapshotFieldEntry>> FieldSetsOf(
+        KeyDiscoveryQuery query, SnapshotEnvelope snap)
+    {
+        foreach (var inst in InstancesOf(snap, query.Assembly, query.ClassFqn))
+        {
+            if (string.IsNullOrEmpty(query.ArrayField))
+            {
+                yield return inst.Fields;
+                continue;
+            }
+            foreach (var f in inst.Fields)
+            {
+                if (!string.Equals(f.Name, query.ArrayField, StringComparison.Ordinal)) continue;
+                var els = f.ArrayElements?.Elements;
+                if (els is null) continue;
+                foreach (var el in els)
+                    if (el.Fields is { Count: > 0 } inner)
+                        yield return inner;
+            }
+        }
     }
 
     private static IEnumerable<SnapshotInstanceEntry> InstancesOf(

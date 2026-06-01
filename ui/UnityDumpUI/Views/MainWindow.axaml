@@ -2651,7 +2651,7 @@
                             Content="Enable — pivot a reference array's elements by an inner field"
                             IsChecked="{Binding ClassPivot.ArrayPivotMode, Mode=TwoWay}"
                             ToolTip.Tip="Instead of pivoting whole instances, pivot the ELEMENTS of a reference-type array field on the class (e.g. StatConvertCollectionData[]) by a field INSIDE each element. The 'Key fields' box above becomes the outer owner-instance key (may be empty); the fields here key/value the element. Needs snapshots captured with Layer B (Snapshot tab → 'Capture array element fields')."/>
-                  <Grid Margin="0,6,0,0"
+                  <Grid DockPanel.Dock="Top" Margin="0,6,0,0"
                         ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto"
                         ColumnSpacing="6"
                         IsVisible="{Binding ClassPivot.ArrayPivotMode}">
@@ -2680,6 +2680,66 @@
                                      FilterMode="ContainsOrdinal"
                                      ToolTip.Tip="Comma-separated field name(s) INSIDE each array element whose trajectory to track across snapshots (e.g. _amount)."/>
                   </Grid>
+                  <!-- 29i-2: scored picker for the array element's inner
+                       fields — Stage 1 ranking applied to element fields so
+                       the user doesn't have to remember inner field names.
+                       Double-tap → inner key; right-click → inner value. -->
+                  <DockPanel IsVisible="{Binding ClassPivot.ArrayPivotMode}">
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="8" Margin="0,8,0,4">
+                      <Button Content="⟳ Score element fields"
+                              Command="{Binding ClassPivot.ScoreElementFieldsCommand}"
+                              Padding="10,4"/>
+                      <TextBlock Text="Filter:" VerticalAlignment="Center"/>
+                      <TextBox Text="{Binding ClassPivot.ElementFieldScoreFilter, Mode=TwoWay}"
+                               PlaceholderText="field name" Width="140" VerticalAlignment="Center"/>
+                      <TextBlock Text="Suggested inner key:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                      <TextBlock Text="{Binding ClassPivot.SuggestedInnerKeyDisplay}"
+                                 VerticalAlignment="Center" FontWeight="SemiBold"/>
+                      <Button Content="Apply suggested inner key"
+                              Command="{Binding ClassPivot.ApplySuggestedInnerKeyCommand}"
+                              Padding="8,3"/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.SuggestedInnerKeyReason}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ElementFieldScoreStatus}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <DataGrid Name="PivotElementFieldScoreGrid"
+                              ItemsSource="{Binding ClassPivot.ElementFieldScores}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              MaxHeight="260"
+                              DoubleTapped="OnPivotElementFieldScoreDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Add to Inner key fields"
+                                    Click="OnPivotElementFieldAddToInnerKeysClicked"/>
+                          <MenuItem Header="Add to Inner value fields"
+                                    Click="OnPivotElementFieldAddToInnerValuesClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
+                                            Width="Auto" MinWidth="200" SortMemberPath="FieldName" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
+                                            Width="Auto" MinWidth="160" SortMemberPath="FieldType" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70"
+                                            SortMemberPath="Score" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70"
+                                            SortMemberPath="SStable" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Card" Binding="{Binding CardPctDisplay}" Width="70"
+                                            SortMemberPath="SCardinality" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Type pr." Binding="{Binding TypePriorDisplay}" Width="70"
+                                            SortMemberPath="TypePrior" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Name pr." Binding="{Binding NamePriorDisplay}" Width="70"
+                                            SortMemberPath="NamePrior" CanUserSort="True"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
                 </DockPanel>
               </Border>
               </Expander>

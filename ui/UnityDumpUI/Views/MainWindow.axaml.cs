@@ -220,6 +220,10 @@ public partial class MainWindow : Window
             .WireSortComparers(PivotShortlistSortComparers);
         this.FindControl<DataGrid>("PivotFieldScoreGrid")?
             .WireSortComparers(PivotFieldScoreSortComparers);
+        // 29i-2 element-field picker — same FieldScore row type, so it
+        // reuses the Stage 1 comparers.
+        this.FindControl<DataGrid>("PivotElementFieldScoreGrid")?
+            .WireSortComparers(PivotFieldScoreSortComparers);
         this.FindControl<DataGrid>("PivotResultsGrid")?
             .WireSortComparers(PivotResultsSortComparers);
     }
@@ -630,6 +634,40 @@ public partial class MainWindow : Window
         var f = GetSelectedShortlistField();
         if (f is null) return;
         vm.ClassPivot.AddFieldNameToValues(f.Name);
+    }
+
+    // ── Phase 29i-2 array element-field scored picker ───────────────────
+
+    private UnityDumpUI.ViewModels.FieldScore? GetSelectedElementFieldScore()
+    {
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotElementFieldScoreGrid");
+        return grid?.SelectedItem as UnityDumpUI.ViewModels.FieldScore;
+    }
+
+    /// <summary>Double-tap a scored element field → add it to the Inner key
+    /// fields (most common); right-click offers inner value.</summary>
+    private void OnPivotElementFieldScoreDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.FieldScore row) return;
+        vm.ClassPivot.AddElementFieldToInnerKeys(row);
+    }
+
+    private void OnPivotElementFieldAddToInnerKeysClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedElementFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddElementFieldToInnerKeys(f);
+    }
+
+    private void OnPivotElementFieldAddToInnerValuesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedElementFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddElementFieldToInnerValues(f);
     }
 
     // ── Phase 29e-8/9: Inspector tree-aware sort ────────────────────────
