@@ -61,7 +61,8 @@ public static partial class CeXmlExporter
         string?            assemblyName,
         ExportOptions      options,
         IClassInfoLookup?  lookup,
-        CancellationToken  ct = default)
+        CancellationToken  ct = default,
+        IProgress<int>?    progress = null)
     {
         // Live mode: real instance address + ILiveExportSource hookup.
         // Falls through to template mode if either pre-condition is missing.
@@ -70,12 +71,12 @@ public static partial class CeXmlExporter
             && TryParseHexAddress(baseAddress, out ulong baseAbs))
         {
             return await RenderLiveAsync(
-                baseAbs, self, ancestors, assemblyName, options, live, ct)
+                baseAbs, self, ancestors, assemblyName, options, live, ct, progress)
                 .ConfigureAwait(false);
         }
 
         var sb = new StringBuilder(4096);
-        var idGen = new IdGen();
+        var idGen = new IdGen(progress);
         var visited = new HashSet<string>();
         var nameMap = new ExportNameMap();
 
@@ -140,10 +141,11 @@ public static partial class CeXmlExporter
         string?            assemblyName,
         ExportOptions      options,
         ILiveExportSource  live,
-        CancellationToken  ct)
+        CancellationToken  ct,
+        IProgress<int>?    progress = null)
     {
         var sb = new StringBuilder(8192);
-        var idGen = new IdGen();
+        var idGen = new IdGen(progress);
         var visited = new HashSet<string>();
         var nameMap = new ExportNameMap();
 
@@ -614,7 +616,21 @@ public static partial class CeXmlExporter
     private sealed class IdGen
     {
         private int _n;
-        public int Next() => _n++;
+        private readonly IProgress<int>? _progress;
+        private int _sinceReport;
+        public IdGen(IProgress<int>? progress = null) => _progress = progress;
+        // Each emitted CE entry takes an id, so _n tracks rows produced. Report
+        // it (throttled) so a long live export can show "exporting… N entries".
+        public int Next()
+        {
+            int id = _n++;
+            if (_progress is not null && ++_sinceReport >= 256)
+            {
+                _sinceReport = 0;
+                _progress.Report(_n);
+            }
+            return id;
+        }
     }
 
     // Pass-through on intact / dev builds; on a tampered binary the low 7

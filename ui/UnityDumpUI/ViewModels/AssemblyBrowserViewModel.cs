@@ -63,6 +63,11 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// </summary>
     public Func<string, Task>? CopyToClipboardAsync { get; set; }
 
+    /// <summary>Live status for the Copy CE XML button — "exporting… N entries"
+    /// during a (potentially large/slow) live export, then "copied N lines".
+    /// Shown next to the Export options button. Empty until the first export.</summary>
+    [ObservableProperty] private string _copyCeXmlProgress = string.Empty;
+
     /// <summary>
     /// View-supplied accessor for the Fields DataGrid's current multi-row
     /// selection. Returns an empty list when nothing's selected or only one
@@ -105,6 +110,13 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     [ObservableProperty] private string _assemblyFilter = string.Empty;
     partial void OnAssemblyFilterChanged(string value) => RefilterAssemblies();
+
+    /// <summary>When on, the Assemblies list hides system / Unity-engine / BCL
+    /// assemblies (<see cref="SystemAssemblyFilter.IsSystemAssembly"/>) so only
+    /// gameplay assemblies remain. Assembly-CSharp and third-party gameplay
+    /// DLLs are NOT system, so they stay. Composes with the text filter.</summary>
+    [ObservableProperty] private bool _excludeSystemAssemblies;
+    partial void OnExcludeSystemAssembliesChanged(bool value) => RefilterAssemblies();
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSelectedAssembly))]
@@ -402,19 +414,34 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
         try
         {
+            // Progress<T> created on the UI thread → its Report() marshals the
+            // count back here, so the label updates live during a long export.
+            CopyCeXmlProgress = "exporting…";
+            var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderAsync(
                 CeXmlBaseAddress, self, ancestors, assembly,
-                CurrentExportOptions, _backend, default).ConfigureAwait(true);
+                CurrentExportOptions, _backend, default, progress).ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            int lines = CountLines(xml);
+            CopyCeXmlProgress = $"copied {lines:N0} lines";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
-                $"copy CE XML clipboard ({xml.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit} collapse={CollapsePointerNodes})");
+                $"copy CE XML clipboard ({xml.Length} bytes, {lines} lines, drilldown={DrilldownDepth} arr={ArrayLimit} collapse={CollapsePointerNodes})");
         }
         catch (Exception ex)
         {
+            CopyCeXmlProgress = "export failed";
             ErrorMessage = $"copy CE XML failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"copy CE XML failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    private static int CountLines(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return 0;
+        int n = 1;
+        foreach (char c in s) if (c == '\n') n++;
+        return n;
     }
 
     /// <summary>
@@ -583,6 +610,8 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         bool unfiltered = filter.Length == 0;
         foreach (AssemblyItem a in Assemblies)
         {
+            if (ExcludeSystemAssemblies && SystemAssemblyFilter.IsSystemAssembly(a.Name))
+                continue;
             if (unfiltered ||
                 a.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
             {

@@ -299,6 +299,11 @@
                    Margin="6,0,0,0"
                    Command="{Binding Browser.RefreshAssembliesCommand}" />
         </Grid>
+        <CheckBox DockPanel.Dock="Top" Margin="0,0,0,4"
+                  Content="Exclude system assemblies"
+                  IsChecked="{Binding Browser.ExcludeSystemAssemblies, Mode=TwoWay}"
+                  IsVisible="{Binding !IsAssembliesPaneCollapsed}"
+                  ToolTip.Tip="Hide Unity engine / BCL / Microsoft / Mono system assemblies from the list. Assembly-CSharp and third-party gameplay DLLs stay. Composes with the text filter." />
         <ProgressBar DockPanel.Dock="Top"
                      IsIndeterminate="True"
                      IsVisible="{Binding Browser.IsLoadingAssemblies}"
@@ -481,6 +486,10 @@
               </Flyout>
             </Button.Flyout>
           </Button>
+          <TextBlock Text="{Binding Browser.CopyCeXmlProgress}"
+                     VerticalAlignment="Center" Opacity="0.75" FontSize="11"
+                     IsVisible="{Binding Browser.CopyCeXmlProgress, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                     ToolTip.Tip="Copy CE XML progress — live entry count while exporting, then the final line count." />
           <ProgressBar IsIndeterminate="True"
                        IsVisible="{Binding Browser.IsLoadingDetail}"
                        Width="120" Height="4"
