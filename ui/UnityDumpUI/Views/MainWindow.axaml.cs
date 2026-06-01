@@ -226,6 +226,8 @@ public partial class MainWindow : Window
             .WireSortComparers(PivotFieldScoreSortComparers);
         this.FindControl<DataGrid>("PivotResultsGrid")?
             .WireSortComparers(PivotResultsSortComparers);
+        this.FindControl<DataGrid>("PivotLocatorGrid")?
+            .WireSortComparers(PivotLocatorSortComparers);
     }
 
     private static readonly IReadOnlyDictionary<string, IComparer> BrowserFieldsSortComparers =
@@ -331,6 +333,18 @@ public partial class MainWindow : Window
             ["SCardinality"] = DataGridSortComparers.Double <FieldScore>(r => r.SCardinality),
             ["TypePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.TypePrior),
             ["NamePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.NamePrior),
+        };
+
+    private static readonly IReadOnlyDictionary<string, IComparer> PivotLocatorSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["ClassFqn"]       = DataGridSortComparers.Ordinal<ValueLocatorHit>(r => r.ClassFqn),
+            ["Assembly"]       = DataGridSortComparers.Ordinal<ValueLocatorHit>(r => r.Assembly),
+            ["FieldName"]      = DataGridSortComparers.Ordinal<ValueLocatorHit>(r => r.FieldName),
+            ["InArrayElement"] = DataGridSortComparers.Bool   <ValueLocatorHit>(r => r.InArrayElement),
+            ["SnapHitCount"]   = DataGridSortComparers.Number <ValueLocatorHit>(r => r.SnapHitCount),
+            ["MatchRarity"]    = DataGridSortComparers.Double <ValueLocatorHit>(r => r.MatchRarity),
+            ["Score"]          = DataGridSortComparers.Double <ValueLocatorHit>(r => r.Score),
         };
 
     private static readonly IReadOnlyDictionary<string, IComparer> PivotResultsSortComparers =
@@ -668,6 +682,24 @@ public partial class MainWindow : Window
         var f = GetSelectedElementFieldScore();
         if (f is null) return;
         vm.ClassPivot.AddElementFieldToInnerValues(f);
+    }
+
+    // ── Phase 29i-4 value locator (Find by value) ───────────────────────
+
+    private void OnPivotLocatorDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ValueLocatorHit hit) return;
+        vm.ClassPivot.UseLocatorHit(hit);
+    }
+
+    private void OnPivotLocatorUseClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotLocatorGrid");
+        if (grid?.SelectedItem is not UnityDumpUI.ViewModels.ValueLocatorHit hit) return;
+        vm.ClassPivot.UseLocatorHit(hit);
     }
 
     // ── Phase 29e-8/9: Inspector tree-aware sort ────────────────────────

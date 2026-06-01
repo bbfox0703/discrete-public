@@ -2392,6 +2392,113 @@
                            TextWrapping="Wrap" FontSize="11"/>
               </Border>
 
+              <!-- 29i-4: value-driven class location. The inverse of the
+                   funnel — the user knows the VALUE (money = 9410, or it
+                   dropped by 750) but not the class. Sweeps the blob and
+                   returns (class, field) candidates; double-tap loads one
+                   into the query. Cross-session capable (reads stored
+                   values, not live memory). -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        IsExpanded="False" Header="🎯 Find by value (locate the class holding a known value / delta)">
+                <Border Padding="6" Background="#1F808080" CornerRadius="3">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="8" Margin="0,0,0,6">
+                      <CheckBox Content="Delta mode"
+                                IsChecked="{Binding ClassPivot.LocatorDeltaMode, Mode=TwoWay}"
+                                VerticalAlignment="Center"
+                                ToolTip.Tip="Off: find a field carrying a value (exact). On: find a field whose value universe MOVED by Δ between two snapshots (e.g. money 10160 → 9410 = Δ -750)."/>
+                      <!-- Exact-mode inputs -->
+                      <TextBlock Text="Value:" VerticalAlignment="Center"
+                                 IsVisible="{Binding !ClassPivot.LocatorDeltaMode}"/>
+                      <TextBox Text="{Binding ClassPivot.LocatorValue, Mode=TwoWay}"
+                               Width="140" VerticalAlignment="Center"
+                               PlaceholderText="9410 or Money"
+                               IsVisible="{Binding !ClassPivot.LocatorDeltaMode}"
+                               ToolTip.Tip="The value you can see in-game. Matched against both rendered ('9410', '&quot;Money&quot;') and raw (9410, Money) forms."/>
+                      <!-- Delta-mode inputs -->
+                      <TextBlock Text="Δ:" VerticalAlignment="Center"
+                                 IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+                      <TextBox Text="{Binding ClassPivot.LocatorDelta, Mode=TwoWay}"
+                               Width="90" VerticalAlignment="Center"
+                               PlaceholderText="-750"
+                               IsVisible="{Binding ClassPivot.LocatorDeltaMode}"
+                               ToolTip.Tip="The cross-snap change to find (snap A value + Δ = snap B value). Numeric only."/>
+                      <TextBlock Text="A:" VerticalAlignment="Center"
+                                 IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+                      <ComboBox ItemsSource="{Binding ClassPivot.LocatorSnapChoices}"
+                                SelectedIndex="{Binding ClassPivot.LocatorSnapAIndex, Mode=TwoWay}"
+                                MinWidth="120" VerticalAlignment="Center"
+                                IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+                      <TextBlock Text="B:" VerticalAlignment="Center"
+                                 IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+                      <ComboBox ItemsSource="{Binding ClassPivot.LocatorSnapChoices}"
+                                SelectedIndex="{Binding ClassPivot.LocatorSnapBIndex, Mode=TwoWay}"
+                                MinWidth="120" VerticalAlignment="Center"
+                                IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+                      <TextBlock Text="±" VerticalAlignment="Center"/>
+                      <TextBox Text="{Binding ClassPivot.LocatorTolerance, Mode=TwoWay}"
+                               Width="60" VerticalAlignment="Center"
+                               PlaceholderText="0"
+                               ToolTip.Tip="Optional numeric tolerance for float jitter / off-by-one."/>
+                      <Button Content="🎯 Find"
+                              Command="{Binding ClassPivot.FindByValueCommand}"
+                              Padding="10,4"/>
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                                Spacing="12" Margin="0,0,0,6">
+                      <CheckBox Content="Include array elements"
+                                IsChecked="{Binding ClassPivot.LocatorIncludeArrays, Mode=TwoWay}"
+                                ToolTip.Tip="Also sweep Layer A primitive array element values and Layer B inner element fields (shown as arrayField[].inner)."/>
+                      <CheckBox Content="Numeric only"
+                                IsChecked="{Binding ClassPivot.LocatorNumericOnly, Mode=TwoWay}"
+                                ToolTip.Tip="Skip string / pointer fields (always on in delta mode)."/>
+                      <CheckBox Content="Include synthetic classes"
+                                IsChecked="{Binding ClassPivot.LocatorIncludeSynthetic, Mode=TwoWay}"
+                                ToolTip.Tip="Include compiler-generated &lt;…&gt; classes (rarely hold the value you're hunting)."/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.LocatorStatus}"
+                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <DataGrid Name="PivotLocatorGrid"
+                              ItemsSource="{Binding ClassPivot.LocatorHits}"
+                              SelectedItem="{Binding ClassPivot.SelectedLocatorHit, Mode=TwoWay}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              MaxHeight="280"
+                              DoubleTapped="OnPivotLocatorDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Load into pivot query"
+                                    Click="OnPivotLocatorUseClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
+                                            Width="Auto" MinWidth="220" SortMemberPath="ClassFqn" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
+                                            Width="Auto" MinWidth="120" SortMemberPath="Assembly" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
+                                            Width="Auto" MinWidth="180" SortMemberPath="FieldName" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Arr?" Binding="{Binding ArrayDisplay}" Width="55"
+                                            SortMemberPath="InArrayElement" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Snaps" Binding="{Binding SnapHitDisplay}" Width="60"
+                                            SortMemberPath="SnapHitCount" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Match%" Binding="{Binding RarityDisplay}" Width="70"
+                                            SortMemberPath="MatchRarity" CanUserSort="True"/>
+                        <DataGridTextColumn Header="Sample" Binding="{Binding SampleValue}"
+                                            Width="Auto" MinWidth="120"/>
+                        <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="65"
+                                            SortMemberPath="Score" CanUserSort="True"/>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </DockPanel>
+                </Border>
+              </Expander>
+
               <!-- Stage 0 (Phase 29e-3): class shortlist. Score every
                    class by stability (instance-count CV), field-type
                    ratios, null ratio so the user can pick a good pivot
@@ -2628,10 +2735,16 @@
                            PlaceholderText="optional substring"
                            ToolTip.Tip="Case-insensitive substring filter applied to the rendered key tuple. Useful when a class has thousands of instances and you want to focus on one group."/>
 
-                  <Button Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="6"
-                          Content="▶ Run Pivot"
-                          Command="{Binding ClassPivot.RunCommand}"
-                          HorizontalAlignment="Left" MinWidth="180" Padding="10,4"/>
+                  <StackPanel Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="6"
+                              Orientation="Horizontal" Spacing="8" HorizontalAlignment="Left">
+                    <Button Content="▶ Run Pivot"
+                            Command="{Binding ClassPivot.RunCommand}"
+                            MinWidth="180" Padding="10,4"/>
+                    <Button Content="🔑▶ Suggest key &amp; run"
+                            Command="{Binding ClassPivot.SuggestKeyAndRunCommand}"
+                            Padding="10,4"
+                            ToolTip.Tip="Instance pivots only: score fields, apply the suggested key, and run — the one-click close-the-loop after loading a 'Find by value' hit."/>
+                  </StackPanel>
                 </Grid>
               </Border>
               </Expander>

@@ -53,11 +53,16 @@ public sealed partial class PivotViewModel : ObservableObject
             AnalyzeClassesCommand.NotifyCanExecuteChanged();
             ScoreFieldsCommand.NotifyCanExecuteChanged();
             ScoreElementFieldsCommand.NotifyCanExecuteChanged();
+            FindByValueCommand.NotifyCanExecuteChanged();
+            SuggestKeyAndRunCommand.NotifyCanExecuteChanged();
         };
         SyncSelectionRows();
         RunCommand.NotifyCanExecuteChanged();
         AnalyzeClassesCommand.NotifyCanExecuteChanged();
         ScoreFieldsCommand.NotifyCanExecuteChanged();
+        ScoreElementFieldsCommand.NotifyCanExecuteChanged();
+        FindByValueCommand.NotifyCanExecuteChanged();
+        SuggestKeyAndRunCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>Class FQNs seen across currently-hydrated snapshots.
@@ -385,6 +390,206 @@ public sealed partial class PivotViewModel : ObservableObject
         StatusMessage = $"Added '{field.FieldName}' to inner value fields.";
     }
 
+    // ── 29i-4: value-driven class location (Find by value) ─────────────
+
+    /// <summary>Delta mode (find a field whose value universe MOVED by a
+    /// cross-snap delta) vs exact mode (find a field carrying a value).</summary>
+    [ObservableProperty] private bool _locatorDeltaMode;
+
+    /// <summary>The value to find in exact mode (as typed; matched against
+    /// rendered + raw forms).</summary>
+    [ObservableProperty] private string _locatorValue = string.Empty;
+
+    /// <summary>Optional ± numeric tolerance (handles float jitter).</summary>
+    [ObservableProperty] private string _locatorTolerance = string.Empty;
+
+    /// <summary>Cross-snap change to find in delta mode, e.g. -750.</summary>
+    [ObservableProperty] private string _locatorDelta = string.Empty;
+
+    [ObservableProperty] private int _locatorSnapAIndex = -1;
+    [ObservableProperty] private int _locatorSnapBIndex = -1;
+
+    [ObservableProperty] private bool _locatorIncludeArrays;
+    [ObservableProperty] private bool _locatorNumericOnly;
+    [ObservableProperty] private bool _locatorIncludeSynthetic;
+
+    [ObservableProperty] private string _locatorStatus =
+        "Type a value you can see in-game (exact), or switch to Delta to find a field that moved by Δ across two snaps. Then Find.";
+
+    /// <summary>Ranked (class, field) candidates from the last Find.</summary>
+    public ObservableCollection<ValueLocatorHit> LocatorHits { get; } = new();
+
+    /// <summary>Snapshot labels (capture order) for the delta-mode A/B
+    /// ComboBoxes. Rebuilt by <see cref="SyncSelectionRows"/>.</summary>
+    public ObservableCollection<string> LocatorSnapChoices { get; } = new();
+
+    [ObservableProperty] private ValueLocatorHit? _selectedLocatorHit;
+
+    private void RebuildLocatorSnapChoices()
+    {
+        LocatorSnapChoices.Clear();
+        foreach (var r in SelectionRows) LocatorSnapChoices.Add(r.DisplayLabel);
+        if (LocatorSnapAIndex >= LocatorSnapChoices.Count) LocatorSnapAIndex = -1;
+        if (LocatorSnapBIndex >= LocatorSnapChoices.Count) LocatorSnapBIndex = -1;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRun))]
+    public async Task FindByValueAsync()
+    {
+        ErrorMessage = string.Empty;
+        LocatorHits.Clear();
+
+        bool delta = LocatorDeltaMode;
+        List<PivotSnapshotRow> rowsForHydrate;
+        List<SnapshotEnvelope>  snaps;
+        int snapA = -1, snapB = -1;
+        double deltaVal = 0;
+
+        if (delta)
+        {
+            var all = SelectionRows.ToList();   // capture order; delta picks 2 explicitly
+            if (all.Count < 2) { ErrorMessage = "Delta mode needs at least 2 snapshots loaded."; return; }
+            snapA = LocatorSnapAIndex; snapB = LocatorSnapBIndex;
+            if (snapA < 0 || snapB < 0 || snapA >= all.Count || snapB >= all.Count)
+            { ErrorMessage = "Pick snapshot A and snapshot B for delta mode."; return; }
+            if (snapA == snapB) { ErrorMessage = "Snapshot A and B must differ."; return; }
+            if (!double.TryParse(LocatorDelta, NumberStyles.Any, CultureInfo.InvariantCulture, out deltaVal))
+            { ErrorMessage = "Enter a numeric Delta (e.g. -750)."; return; }
+            rowsForHydrate = new List<PivotSnapshotRow> { all[snapA], all[snapB] };
+            snaps = all.Select(r => r.Snapshot).ToList();
+        }
+        else
+        {
+            var selected = SelectedRows();
+            if (selected.Count == 0) { ErrorMessage = "Pick at least 1 snapshot."; return; }
+            if (string.IsNullOrWhiteSpace(LocatorValue)) { ErrorMessage = "Enter a value to find."; return; }
+            rowsForHydrate = selected;
+            snaps = selected.Select(r => r.Snapshot).ToList();
+        }
+
+        try
+        {
+            IsRunning = true;
+            LocatorStatus = "Hydrating…";
+
+            var preloaded = new HashSet<SnapshotEnvelope>();
+            foreach (var r in rowsForHydrate)
+                if (r.Snapshot.ClassesLoaded) preloaded.Add(r.Snapshot);
+            foreach (var r in rowsForHydrate)
+                await _snapshot.EnsureLoadedAsync(r.Snapshot).ConfigureAwait(true);
+
+            RefreshKnownClassesAndFields();
+
+            double? tol = double.TryParse(LocatorTolerance, NumberStyles.Any, CultureInfo.InvariantCulture, out var tv)
+                ? tv : (double?)null;
+
+            var sw = Stopwatch.StartNew();
+            var result = SnapshotValueLocatorEngine.Run(new ValueLocatorQuery
+            {
+                Snapshots            = snaps,
+                AssemblyFilter       = string.IsNullOrWhiteSpace(AssemblyFilter) ? null : AssemblyFilter.Trim(),
+                ExactValue           = delta ? null : LocatorValue.Trim(),
+                NumericTolerance     = tol,
+                SnapA                = delta ? snapA : (int?)null,
+                SnapB                = delta ? snapB : (int?)null,
+                Delta                = delta ? deltaVal : (double?)null,
+                IncludeArrayElements = LocatorIncludeArrays,
+                NumericOnly          = LocatorNumericOnly,
+                IncludeSynthetic     = LocatorIncludeSynthetic,
+            });
+            sw.Stop();
+
+            foreach (var h in result.Hits) LocatorHits.Add(h);
+
+            int evicted = 0;
+            foreach (var r in rowsForHydrate)
+            {
+                if (preloaded.Contains(r.Snapshot)) continue;
+                if (!r.Snapshot.ClassesLoaded) continue;
+                if (r.Snapshot.PersistedId is null) continue;
+                r.Snapshot.Unload();
+                evicted++;
+            }
+            string evictionNote = evicted > 0 ? $" — evicted {evicted:N0} hydrated-for-query envelope(s)" : string.Empty;
+
+            LocatorStatus = $"{result.Summary} {sw.ElapsedMilliseconds} ms{evictionNote}. Double-tap a hit to load it into the pivot query.";
+            _logger.Write(SnapshotStore.LogCategory,
+                $"PivotLocator: mode={(delta ? "delta" : "exact")} asm='{AssemblyFilter}' hits={result.Hits.Count} in {sw.ElapsedMilliseconds}ms evicted={evicted}");
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.Write(SnapshotStore.LogCategory, $"PivotLocator FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsRunning = false;
+        }
+    }
+
+    /// <summary>Handoff: load a locator hit into the pivot query. Instance
+    /// hits fill ClassFqn + the value field; Layer B array-element hits
+    /// (<c>arr[].inner</c>) switch to array mode + fill the inner value.</summary>
+    public void UseLocatorHit(ValueLocatorHit hit)
+    {
+        if (hit is null) return;
+        ClassFqn       = hit.ClassFqn;
+        AssemblyFilter = hit.Assembly;
+        RefreshKnownFieldNamesForClass();
+
+        string field = hit.FieldName;
+        if (hit.InArrayElement)
+        {
+            int sep = field.IndexOf("[].", StringComparison.Ordinal);
+            if (sep >= 0)
+            {
+                ArrayPivotMode       = true;
+                ArrayFieldName       = field.Substring(0, sep);
+                InnerValueFieldsText = AppendField(InnerValueFieldsText, field.Substring(sep + 3));
+                StatusMessage = $"Loaded array hit {hit.ClassFqn}.{field}. Score element fields for an inner key, then Run.";
+                return;
+            }
+            // Layer A primitive element (arr[]) — no inner-field pivot path.
+            StatusMessage = $"Loaded {hit.ClassFqn}.{field} (primitive array element). Class set; pick key/value manually.";
+            return;
+        }
+        ValueFieldsText = AppendField(ValueFieldsText, field);
+        StatusMessage = $"Loaded {hit.ClassFqn}.{field} as a value field. Use 'Suggest key & run' or pick a key.";
+    }
+
+    /// <summary>One-click close-the-loop for an instance hit: score fields,
+    /// apply the suggested key, run the pivot.</summary>
+    [RelayCommand(CanExecute = nameof(CanRun))]
+    public async Task SuggestKeyAndRunAsync()
+    {
+        ErrorMessage = string.Empty;
+        if (ArrayPivotMode)
+        {
+            ErrorMessage = "Suggest-key-and-run is for instance pivots; for array hits use 'Score element fields' + Run.";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ClassFqn))
+        {
+            ErrorMessage = "Set a Class FQN first (load a locator hit, or pick one from the shortlist).";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ValueFieldsText))
+        {
+            ErrorMessage = "Set at least one value field first (load a locator hit).";
+            return;
+        }
+
+        await ScoreFieldsAsync().ConfigureAwait(true);
+        if (!string.IsNullOrEmpty(ErrorMessage)) return;
+        ApplySuggestedKey();
+        if (string.IsNullOrWhiteSpace(KeyFieldsText))
+        {
+            ErrorMessage = "No key could be suggested — pick a key field manually, then Run.";
+            return;
+        }
+        await RunAsync().ConfigureAwait(true);
+    }
+
     /// <summary>NavigateToInspector handoff — wired by MainWindow to
     /// the cross-tab navigation handler that switches to Inspector
     /// and seeds the address. Mirrors SpcQuery + Snapshot tab.</summary>
@@ -488,6 +693,7 @@ public sealed partial class PivotViewModel : ObservableObject
                 });
             }
         }
+        RebuildLocatorSnapChoices();
     }
 
     private const int kLargeNAdvisory = 5;
