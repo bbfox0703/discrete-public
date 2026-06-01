@@ -44,8 +44,7 @@
           <Button.Flyout>
             <MenuFlyout>
               <MenuItem Header="{StaticResource Tools.InjectDiscreteBridge}"
-                        Click="OnInjectDiscreteBridgeClicked"
-                        IsEnabled="{Binding !IsBusy}"
+                        Command="{Binding InjectDiscreteBridgeCommand}"
                         ToolTip.Tip="{StaticResource Tools.InjectDiscreteBridgeTooltip}" />
               <Separator/>
               <MenuItem Header="{StaticResource Tools.ExportSymbolsX64dbg}"

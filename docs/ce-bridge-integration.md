@@ -39,14 +39,13 @@ or failed bridge call (no polling).
    9.5). Wait for `Connected — build N`.
 4. *(Optional but useful)*: browse to a class / call a method / run an
    address lookup so you have something to push to CE.
-5. **Tools → "Inject Discrete Bridge into CE Table…"**. A picker opens —
-   tick which optional tools to embed (Structure Dissect / Symbols /
-   Address Finder / Invoke / Scene). **Core** (DLL inject + pipe:
-   `utils.lua` + `unity_dump.lua`) is always included. Click **Inject**;
-   the status banner walks the steps in ~1 s and ends with
-   `Bridge ready (N files + bootstrap AA) — enable "Load Discrete
-   Bridge" in CE to activate` (N = core + your ticks). Only the picked
-   files are embedded, and the bootstrap AA loads exactly that subset.
+5. **Tools → "Inject Discrete Bridge into CE Table…"**. Embeds the **core**
+   only — `utils.lua` + `unity_dump.lua` (inject the backend DLL + start the
+   pipe) — plus the `Load Discrete Bridge` AA entry. The status banner ends
+   with `Bridge ready (2 files + bootstrap AA) — enable "Load Discrete
+   Bridge" in CE to activate`. Every other lua helper is embedded
+   automatically by the action that needs it (see step 7) — you don't pick
+   anything here.
 6. **Switch to CE**, find the new **Load Discrete Bridge** entry in
    the address list, **toggle its checkbox**. Lua console prints
    `[Discrete] Load Discrete Bridge: ready — DLL build N`.
@@ -70,25 +69,30 @@ That's the whole flow. Everything below is reference material.
 
 ---
 
-## What lands in the CT
+## What lands in the CT (action-driven)
 
-After step 5, `Table → Show table files` lists the **core + picked**
-files. With every feature ticked you get all of them (`mono_registersymbol_helpers.lua`
-rides along with the Symbols feature):
+After step 5, `Table → Show table files` lists just the **core**:
 
 ```
-utils.lua             (~6 KB)   ← core (always)
-unity_dump.lua        (~7 KB)   ← core (always)
-unity_dissect.lua     (~9 KB)   ← Structure Dissect
-unity_symbols.lua     (~15 KB)  ← Symbols
-unity_addrfind.lua    (~14 KB)  ← Address Finder
-unity_invoke.lua      (~18 KB)  ← Invoke
-unity_scene.lua       (~36 KB)  ← Scene
+utils.lua             (~6 KB)   ← core (bootstrap loads it)
+unity_dump.lua        (~7 KB)   ← core (inject DLL + start pipe)
 ```
 
-Untick a feature and its file(s) are simply absent — the bootstrap AA's
-`BRIDGE_FILES` list is generated over the same subset, so it never asks
-`findTableFile` for something the CT doesn't carry.
+Each **Send to CE Table / Create AA** action then embeds the one lua helper
+*its* generated AA self-loads, on demand — so the CT only ever carries the
+lua its own entries actually use:
+
+| Action | Embeds | The generated AA self-loads via `findTableFile` |
+|---|---|---|
+| MethodCall → *Send to CE Table* | `unity_invoke.lua`            | `callUnityMethod` |
+| Methods → *Create AA in CE* (Mono JIT) | `unity_symbols.lua`     | `registerMethodSymbol` |
+| Methods → *Create Mono Symbol* (DLL-free) | `mono_registersymbol_helpers.lua` | `discrete_mono_registerSymbolEx` |
+| Address Lookup → *Send to CE Table* | *(none — pure asm symbol)* | — |
+
+The UI-only tools (Structure Dissect, Scene explorer, reverse address
+lookup) are **not** part of the bridge — DiscreteUI drives those over the
+pipe in C#; an end-user with only a `.CT` never invokes their lua, so they're
+never embedded.
 
 ### Backend DLLs go *beside the .CT*, not inside it
 
@@ -307,15 +311,12 @@ Run after any Phase 22 code change:
    files).
 3. Launch the freshly-built `dist/DiscreteUI.exe`. Wait ~1 s. Verify
    the connection bar shows `AOBMaker: connected` (green).
-4. *Tools → Inject Discrete Bridge into CE Table*. In the picker, leave
-   **all features ticked** for this full smoke. Click *Inject*. Status
-   banner walks `(1/10) Checking AOBMaker plugin availability…` →
-   `(10/10) Creating Load Discrete Bridge AA entry…` →
-   `Bridge ready (8 files + bootstrap AA) …`. Total ≤ 2 s. (Tick fewer
-   features and the step/file count drops accordingly.)
-5. CE → `Table → Show table files`. Verify the `*.lua` files for the
-   ticked features are present, sizes match the dist files
-   (`Get-ChildItem dist\*.lua`).
+4. *Tools → Inject Discrete Bridge into CE Table*. Status banner walks
+   `(1/4) Checking AOBMaker plugin availability…` →
+   `(4/4) Creating Load Discrete Bridge AA entry…` →
+   `Bridge ready (2 files + bootstrap AA) …`. Total ≤ 2 s.
+5. CE → `Table → Show table files`. Verify `utils.lua` + `unity_dump.lua`
+   are present (the action helpers get embedded later, in steps 8–9).
 6. CE address list shows `Load Discrete Bridge` entry. Enable it. Lua
    console prints `[Discrete] Load Discrete Bridge: ready — DLL build N`.
 7. Inject the DLL via DiscreteUI's *Pick & inject…* (or skip if step 6
@@ -353,9 +354,11 @@ update or a Discrete wire-format change in isolation.
 ```
 
 After the script reports OK, switch to CE: `Table → Show table files`
-should list `_discrete_smoke.lua` (or all 8 bridge files in `-Full` mode); the
-address list should gain `Discrete: smoke probe` (or `Load Discrete
-Bridge` in `-Full` mode).
+should list `_discrete_smoke.lua` (or the bridge files it pushed in `-Full`
+mode); the address list should gain `Discrete: smoke probe` (or `Load
+Discrete Bridge` in `-Full` mode). (Note: the production bridge now embeds
+core only — the helper lua is added per action — so `-Full` is a wire smoke,
+not an exact replica of the current inject set.)
 
 ---
 

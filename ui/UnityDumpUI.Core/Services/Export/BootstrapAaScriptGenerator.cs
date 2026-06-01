@@ -68,7 +68,7 @@ public static class BootstrapAaScriptGenerator
     /// Build the AA script using <see cref="BridgeLuaResources.LoadOrder"/>
     /// as the file list. This is the production overload Phase 22d calls.
     /// </summary>
-    public static string Build() => Build(BridgeLuaResources.LoadOrder);
+    public static string Build() => Build(BridgeLuaResources.CoreFiles);
 
     /// <summary>
     /// Build with a caller-supplied file list — used by the feature-picker

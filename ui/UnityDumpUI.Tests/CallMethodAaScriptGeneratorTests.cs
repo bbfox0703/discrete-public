@@ -41,6 +41,12 @@ public class CallMethodAaScriptGeneratorTests
         // — no backslash escape needed in the rendered output.
         Assert.Contains("Enable \"Load Discrete Bridge\" first", s);
         Assert.Contains("return", s);
+
+        // Action-driven: the AA self-loads its lua dependency from the CT
+        // (the Send-to-CE-Table action embedded unity_invoke.lua), guarded on
+        // the callUnityMethod global so it loads once per table.
+        Assert.Contains("if _G.callUnityMethod == nil then", s);
+        Assert.Contains("findTableFile('unity_invoke.lua')", s);
     }
 
     [Fact]

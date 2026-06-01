@@ -452,6 +452,19 @@ public sealed partial class MethodCallViewModel : ObservableObject
             string desc = CallMethodAaScriptGenerator.SuggestDescription(
                 ClassName, MethodName, sigMatch);
 
+            // Embed the lua the generated AA self-loads, so the CT carries
+            // its own dependency (action-driven — no global bridge inject of
+            // every helper needed). Idempotent on the plugin side.
+            var (luaOk, luaErr) = await _aobMaker.InjectTableFileAsync(
+                "unity_invoke.lua",
+                UnityDumpUI.Core.Services.BridgeLuaResources.Read("unity_invoke.lua"))
+                .ConfigureAwait(true);
+            if (!luaOk)
+            {
+                StatusMessage = $"Couldn't embed unity_invoke.lua: {luaErr ?? "AOBMaker pipe unavailable"}";
+                return;
+            }
+
             bool ok = await _aobMaker.CreateAAScriptAsync(desc, script,
                                                           autoActivate: false)
                                      .ConfigureAwait(true);

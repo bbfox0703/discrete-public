@@ -1189,23 +1189,21 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// still used by the connection bar's status indicator.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanInjectDiscreteBridge))]
-    private async Task InjectDiscreteBridgeAsync(
-        IReadOnlyList<BridgeLuaResources.BridgeFeature> features)
+    private async Task InjectDiscreteBridgeAsync()
     {
         IsBusy = true;
         BridgeInjectStatus = "Starting…";
         try
         {
-            // Core (utils.lua + unity_dump.lua) is always injected; the
-            // dialog's ticked features add their helper files on top.
-            IReadOnlyList<string> files = BridgeLuaResources.ResolveFiles(
-                features ?? System.Array.Empty<BridgeLuaResources.BridgeFeature>());
-
+            // Embeds the core only (utils + unity_dump → inject DLL + pipe) +
+            // the "Load Discrete Bridge" AA. Every other lua helper is
+            // embedded on demand by the Send-to-CE-Table / Create-AA action
+            // that needs it (action-driven), so there's nothing to pick here.
             var progress = new Progress<BridgeInjectProgress>(p =>
                 BridgeInjectStatus = $"({p.Index}/{p.Total}) {p.Description}…");
 
             BridgeInjectResult result = await BridgeInjector
-                .InjectAsync(_aobMaker, files, progress).ConfigureAwait(true);
+                .InjectAsync(_aobMaker, progress).ConfigureAwait(true);
 
             if (result.Ok)
             {

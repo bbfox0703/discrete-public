@@ -84,19 +84,15 @@ public class BootstrapAaScriptGeneratorTests
     }
 
     [Fact]
-    public void Build_FileListMatchesBridgeLuaResourcesLoadOrder()
+    public void Build_FileListMatchesBridgeLuaResourcesCoreFiles()
     {
-        // The lua-side BRIDGE_FILES literal must contain exactly the
-        // 7 filenames BridgeLuaResources.LoadOrder advertises. Catches
-        // "added a file to LoadOrder but the bootstrap won't load it"
-        // (and vice versa).
+        // The production bootstrap loads ONLY the core (utils + unity_dump =
+        // inject DLL + pipe). Action helpers are embedded + self-loaded by
+        // their own generated AAs, not the bootstrap.
         string script = BootstrapAaScriptGenerator.Build();
-        foreach (var name in BridgeLuaResources.LoadOrder)
+        foreach (var name in BridgeLuaResources.CoreFiles)
             Assert.Contains($"'{name}'", script);
 
-        // No surprise extras — the literal should be exactly the LoadOrder.
-        // Crude but effective check: count single-quoted *.lua tokens
-        // inside the BRIDGE_FILES line.
         int listStart = script.IndexOf("local BRIDGE_FILES = {", StringComparison.Ordinal);
         Assert.True(listStart > 0);
         int listEnd = script.IndexOf('}', listStart);
@@ -105,7 +101,7 @@ public class BootstrapAaScriptGeneratorTests
 
         int luaTokens = System.Text.RegularExpressions.Regex
             .Matches(listLiteral, @"'[^']+\.lua'").Count;
-        Assert.Equal(BridgeLuaResources.LoadOrder.Count, luaTokens);
+        Assert.Equal(BridgeLuaResources.CoreFiles.Count, luaTokens);
     }
 
     [Fact]

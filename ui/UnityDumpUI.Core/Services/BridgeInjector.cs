@@ -81,25 +81,15 @@ public static class BridgeInjector
         IAobMakerBridge                 bridge,
         IProgress<BridgeInjectProgress>? progress = null,
         CancellationToken               ct        = default)
-        => await InjectAsync(bridge, fileNames: null, progress, ct).ConfigureAwait(false);
-
-    /// <summary>
-    /// Selective overload: inject only <paramref name="fileNames"/> (e.g.
-    /// the output of <see cref="BridgeLuaResources.ResolveFiles"/>) instead
-    /// of the full <see cref="BridgeLuaResources.LoadOrder"/>. The same
-    /// subset drives both the InjectTableFile loop AND the bootstrap AA
-    /// script's load list, so the CT only carries — and the AA only loads —
-    /// the lua the user actually picked. Pass <c>null</c> for the full set.
-    /// </summary>
-    public static async Task<BridgeInjectResult> InjectAsync(
-        IAobMakerBridge                 bridge,
-        IReadOnlyList<string>?          fileNames,
-        IProgress<BridgeInjectProgress>? progress = null,
-        CancellationToken               ct        = default)
     {
         if (bridge is null) throw new ArgumentNullException(nameof(bridge));
 
-        IReadOnlyList<string> selected = fileNames ?? BridgeLuaResources.LoadOrder;
+        // The bridge embeds ONLY the core (utils + unity_dump → inject the
+        // backend DLL + start the pipe). Every other lua helper is embedded
+        // on demand by the Send-to-CE-Table / Create-AA action whose
+        // generated AA self-loads it (action-driven model) — so the CT only
+        // ever carries the lua its own entries actually use.
+        IReadOnlyList<string> selected = BridgeLuaResources.CoreFiles;
         IReadOnlyList<(string FileName, string Content)> files = BridgeLuaResources.ReadAll(selected);
         int totalSteps = 1 /* check */ + files.Count + 1 /* bootstrap AA */;
 

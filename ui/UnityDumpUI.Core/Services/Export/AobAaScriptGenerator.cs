@@ -200,6 +200,9 @@ public static class AobAaScriptGenerator
             sb.AppendLine("  print('[Discrete] Enable \"Load Discrete Bridge\" first (Mono JIT methods resolve via the bridge)')");
             sb.AppendLine("  return");
             sb.AppendLine("end");
+            // Self-load registerMethodSymbol from the CT (the Create-AA action
+            // embedded unity_symbols.lua alongside this entry).
+            AaLuaLoader.AppendSelfLoad(sb, "unity_symbols.lua", "registerMethodSymbol");
             for (int i = 0; i < overloads.Count; ++i)
             {
                 var ov = overloads[i];

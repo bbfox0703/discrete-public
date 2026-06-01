@@ -82,7 +82,11 @@ public static class CallMethodAaScriptGenerator
         sb.AppendLine("[ENABLE]");
         sb.AppendLine("{$lua}");
         sb.AppendLine("if syntaxcheck then return end");
+        // DLL / pipe must be up (Load Discrete Bridge enabled)…
         AppendBridgeGuard(sb);
+        // …then self-load our lua dependency from the CT (the Send-to-CE-Table
+        // action embedded unity_invoke.lua alongside this entry).
+        AaLuaLoader.AppendSelfLoad(sb, "unity_invoke.lua", "callUnityMethod");
         sb.AppendLine();
 
         // Args list. Empty list → `local args = {}` so the call site

@@ -65,20 +65,11 @@
     <EmbeddedResource Include="..\..\scripts\unity_dump.lua">
       <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_dump.lua</LogicalName>
     </EmbeddedResource>
-    <EmbeddedResource Include="..\..\scripts\unity_dissect.lua">
-      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_dissect.lua</LogicalName>
-    </EmbeddedResource>
     <EmbeddedResource Include="..\..\scripts\unity_symbols.lua">
       <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_symbols.lua</LogicalName>
     </EmbeddedResource>
-    <EmbeddedResource Include="..\..\scripts\unity_addrfind.lua">
-      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_addrfind.lua</LogicalName>
-    </EmbeddedResource>
     <EmbeddedResource Include="..\..\scripts\unity_invoke.lua">
       <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_invoke.lua</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="..\..\scripts\unity_scene.lua">
-      <LogicalName>UnityDumpUI.Core.Resources.Bridge.unity_scene.lua</LogicalName>
     </EmbeddedResource>
     <!-- DLL-free Mono symbol register helpers. Used by the
          Methods-tab overload picker's "Copy mono_register* AA script"

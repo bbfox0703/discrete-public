@@ -383,6 +383,13 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                 ? $"{ClassName}.{MethodName} {bag[0].HumanSuffix}"
                 : $"{ClassName}.{MethodName}  ({picks.Count} overloads)";
 
+            // Mono-JIT overloads resolve via registerMethodSymbol (the AA
+            // self-loads unity_symbols.lua); embed it only when the script
+            // actually uses it (IL2CPP AOB scripts need no lua).
+            if (script.Contains("registerMethodSymbol", StringComparison.Ordinal)
+                && !await EmbedBridgeLuaAsync("unity_symbols.lua").ConfigureAwait(true))
+                return;
+
             bool ok = await _aobMaker.CreateAAScriptAsync(description, script,
                                                           autoActivate: AutoActivateInCe)
                                      .ConfigureAwait(true);
@@ -400,6 +407,26 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    /// <summary>
+    /// Embed a bridge lua file into the open CE table (idempotent on the
+    /// plugin side) so a generated AA that self-loads it finds it. Returns
+    /// false + sets StatusMessage on failure (e.g. AOBMaker pipe down).
+    /// </summary>
+    private async Task<bool> EmbedBridgeLuaAsync(string fileName)
+    {
+        if (_aobMaker is null)
+        {
+            StatusMessage = "AOBMaker pipe unavailable — open CE with the AOBMaker plugin loaded.";
+            return false;
+        }
+        var (ok, err) = await _aobMaker.InjectTableFileAsync(
+            fileName, UnityDumpUI.Core.Services.BridgeLuaResources.Read(fileName))
+            .ConfigureAwait(true);
+        if (!ok)
+            StatusMessage = $"Couldn't embed {fileName}: {err ?? "AOBMaker pipe unavailable"}";
+        return ok;
     }
 
     /// <summary>If true, the CE-side memory record's checkbox is flipped on
@@ -555,6 +582,10 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
             string description = picks.Count == 1
                 ? $"{ClassName}.{MethodName} {bag[0].HumanSuffix} (DLL-free)"
                 : $"{ClassName}.{MethodName}  ({picks.Count} overloads, DLL-free)";
+
+            // The AA self-loads mono_registersymbol_helpers.lua — embed it.
+            if (!await EmbedBridgeLuaAsync("mono_registersymbol_helpers.lua").ConfigureAwait(true))
+                return;
 
             bool ok = await _aobMaker.CreateAAScriptAsync(description, script,
                                                           autoActivate: AutoActivateInCe)

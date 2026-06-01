@@ -104,6 +104,12 @@ public class AobAaScriptGeneratorTests
             "registerMethodSymbol('Mathf_Abs_int32', 'UnityEngine.CoreModule', 'UnityEngine', 'Mathf', 'Abs', '(System.Int32)')",
             s);
 
+        // Action-driven: the Mono-JIT AA self-loads unity_symbols.lua from the
+        // CT (guarded on registerMethodSymbol) instead of relying on the
+        // bootstrap to pre-load it.
+        Assert.Contains("if _G.registerMethodSymbol == nil then", s);
+        Assert.Contains("findTableFile('unity_symbols.lua')", s);
+
         // Bridge-loaded guard required — without the bridge,
         // registerMethodSymbol is undefined and the entry would
         // silently no-op (worse: misleading "OK" status from CE).

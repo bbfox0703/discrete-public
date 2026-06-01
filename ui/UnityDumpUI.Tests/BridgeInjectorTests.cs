@@ -37,23 +37,23 @@ public class BridgeInjectorTests
 
         Assert.True(result.Ok);
         Assert.True(result.AaScriptCreated);
-        Assert.Equal(BridgeLuaResources.LoadOrder.Count, result.FilesInjected);
+        // The bridge embeds CORE ONLY (utils + unity_dump); action helpers
+        // are embedded on demand by the Send-to-CE-Table / Create-AA actions.
+        Assert.Equal(BridgeLuaResources.CoreFiles.Count, result.FilesInjected);
         Assert.Null(result.FailedStepDescription);
         Assert.Null(result.ErrorMessage);
 
-        // Call sequence: 1× CheckAvailability, N× InjectTableFile (in
-        // LoadOrder), 1× CreateAAScript (bootstrap). Nothing else.
+        // Call sequence: 1× CheckAvailability, 2× InjectTableFile (core),
+        // 1× CreateAAScript (bootstrap). Nothing else.
         Assert.Equal(1, bridge.CheckAvailabilityCount);
-        Assert.Equal(BridgeLuaResources.LoadOrder.Count, bridge.InjectTableFileCalls.Count);
+        Assert.Equal(BridgeLuaResources.CoreFiles.Count, bridge.InjectTableFileCalls.Count);
         Assert.Single(bridge.CreateAAScriptCalls);
 
-        // File order matches LoadOrder.
-        for (int i = 0; i < BridgeLuaResources.LoadOrder.Count; ++i)
+        // File order matches CoreFiles.
+        for (int i = 0; i < BridgeLuaResources.CoreFiles.Count; ++i)
         {
-            Assert.Equal(BridgeLuaResources.LoadOrder[i],
+            Assert.Equal(BridgeLuaResources.CoreFiles[i],
                          bridge.InjectTableFileCalls[i].FileName);
-            // Content sanity: every embedded bridge file starts with a
-            // lua banner; passing it through verbatim should preserve that.
             Assert.StartsWith("-- =", bridge.InjectTableFileCalls[i].Content);
         }
 
@@ -64,44 +64,7 @@ public class BridgeInjectorTests
         Assert.Contains("[ENABLE]", aaScript);
         Assert.Contains("[DISABLE]", aaScript);
         Assert.Contains("discreteShutdown", aaScript);
-        // autoActivate=false so the user sees the new CE entry first
-        // and can verify game/DLL state before flipping the checkbox.
         Assert.False(aaAuto);
-    }
-
-    [Fact]
-    public async Task InjectAsync_Subset_InjectsOnlySelectedFiles_AndAaLoadsOnlyThose()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        var bridge = new FakeBridge();
-
-        // Core + Invoke only — the feature-picker's smallest useful pick
-        // beyond core.
-        var subset = BridgeLuaResources.ResolveFiles(
-            new[] { BridgeLuaResources.BridgeFeature.Invoke });
-
-        var result = await BridgeInjector.InjectAsync(bridge, subset, progress: null, ct: ct);
-
-        Assert.True(result.Ok);
-        Assert.Equal(subset.Count, result.FilesInjected);
-
-        // Only the subset files were injected, in order.
-        Assert.Equal(subset.Count, bridge.InjectTableFileCalls.Count);
-        for (int i = 0; i < subset.Count; ++i)
-            Assert.Equal(subset[i], bridge.InjectTableFileCalls[i].FileName);
-
-        // Helpers NOT picked must be absent from the CT.
-        Assert.DoesNotContain(bridge.InjectTableFileCalls,
-            c => c.FileName == "unity_scene.lua");
-        Assert.DoesNotContain(bridge.InjectTableFileCalls,
-            c => c.FileName == "unity_dissect.lua");
-
-        // The bootstrap AA's load list must match the injected subset —
-        // never reference a file the CT doesn't carry.
-        var (_, aaScript, _) = bridge.CreateAAScriptCalls[0];
-        Assert.Contains("'unity_invoke.lua'", aaScript);
-        Assert.DoesNotContain("'unity_scene.lua'",   aaScript);
-        Assert.DoesNotContain("'unity_dissect.lua'", aaScript);
     }
 
     [Fact]
@@ -112,8 +75,8 @@ public class BridgeInjectorTests
         var report = new SyncProgress<BridgeInjectProgress>();
         await BridgeInjector.InjectAsync(bridge, report, ct);
 
-        // Total = 1 check + N files + 1 AA (bootstrap). 1-based.
-        int n        = BridgeLuaResources.LoadOrder.Count;
+        // Total = 1 check + core files + 1 AA (bootstrap). 1-based.
+        int n        = BridgeLuaResources.CoreFiles.Count;
         int expected = 1 + n + 1;
         Assert.Equal(expected, report.Reports.Count);
         for (int i = 0; i < report.Reports.Count; ++i)
@@ -124,7 +87,7 @@ public class BridgeInjectorTests
 
         Assert.StartsWith("Checking", report.Reports[0].Description);
         // Indices (0-based): 0 check, 1..n files, n+1 bootstrap.
-        string lastFile = BridgeLuaResources.LoadOrder[n - 1];
+        string lastFile = BridgeLuaResources.CoreFiles[n - 1];
         Assert.StartsWith("Injecting " + lastFile,
             report.Reports[n].Description); // last file step
         Assert.StartsWith("Creating " + BootstrapAaScriptGenerator.EntryDescription,
@@ -152,24 +115,24 @@ public class BridgeInjectorTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         var bridge = new FakeBridge();
-        // Fail on the third file (index 2 = unity_dissect.lua per LoadOrder).
+        // Fail on the second core file (index 1 = unity_dump.lua).
         // Surfaces a plugin-side message so we can also pin that we forward it.
-        bridge.InjectTableFileFailureFor[BridgeLuaResources.LoadOrder[2]] =
+        bridge.InjectTableFileFailureFor[BridgeLuaResources.CoreFiles[1]] =
             "Stream size mismatch: wrote 9456, stream has 0";
 
         var result = await BridgeInjector.InjectAsync(bridge, progress: null, ct: ct);
 
         Assert.False(result.Ok);
-        Assert.Equal(2, result.FilesInjected);    // first 2 succeeded
+        Assert.Equal(1, result.FilesInjected);    // first 1 succeeded
         Assert.False(result.AaScriptCreated);
         Assert.Equal("Stream size mismatch: wrote 9456, stream has 0",
                      result.ErrorMessage);
-        Assert.Contains(BridgeLuaResources.LoadOrder[2],
+        Assert.Contains(BridgeLuaResources.CoreFiles[1],
                         result.FailedStepDescription!);
 
         // Confirm we stopped IMMEDIATELY at the failed file — no
         // subsequent injects, no AA script attempt.
-        Assert.Equal(3, bridge.InjectTableFileCalls.Count);
+        Assert.Equal(2, bridge.InjectTableFileCalls.Count);
         Assert.Empty(bridge.CreateAAScriptCalls);
     }
 
@@ -181,7 +144,7 @@ public class BridgeInjectorTests
         var result = await BridgeInjector.InjectAsync(bridge, progress: null, ct: ct);
 
         Assert.False(result.Ok);
-        Assert.Equal(BridgeLuaResources.LoadOrder.Count, result.FilesInjected);
+        Assert.Equal(BridgeLuaResources.CoreFiles.Count, result.FilesInjected);
         Assert.False(result.AaScriptCreated);
         Assert.Contains("CreateAAScript", result.ErrorMessage!);
         Assert.Contains(BootstrapAaScriptGenerator.EntryDescription,
