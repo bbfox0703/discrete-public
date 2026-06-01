@@ -7,13 +7,21 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #887 |
-| **Current phase** | ✅ Phase 28 全收尾 + Inspector/Copy-CE-XML Mono nested-class & x86 pointer-size 批次 SHIPPED & merged |
-| **Branches** | `dev == main == origin` @ `ed3c215` |
-| **Tests** | 645 UI tests green;兩個 DLL(x64+x86)build clean、UI 0/0 |
+| **Current build** | #928 |
+| **Current phase** | ✅ Phase 22 重構為 **action-driven CE bridge** + CT 分發/打包 + 雙 pipe 連線 + walk drill-down CTD 全修 SHIPPED & merged |
+| **Branches** | `dev == main == origin` @ `315bcc4` |
+| **Tests** | 650 UI tests green;兩個 DLL(IL2CPP+Mono)build clean、UI 0/0 warnings |
 | **Mid-flight** | 無(nothing in flight)|
 
-**最新批次(2026-05-31 後段,Inspector nested-class drilldown + Copy CE XML x86)**:
+**最新批次(2026-06-01,CT 分發 + pipe 並發 + walk 硬化)** — live-verified(Utawarerumono IL2CPP):
+- **CT bridge 改 action-driven** — 砍掉 feature-picker 對話框與「預挑 lua」模型。`Inject Discrete Bridge` 只塞 core(`utils`+`unity_dump` = inject DLL + pipe)+ `Load Discrete Bridge` AA。其餘 lua helper 由各「Send to CE Table / Create AA」動作**按需自帶**(`InjectTableFile` + 生成的 AA 用 `findTableFile` 自我載入,見新 `AaLuaLoader`)。`unity_dissect`/`unity_scene`/`unity_addrfind` 從 bridge 移除(純 UI,走 pipe;檔案留作 Mode-A 獨立腳本)。
+- **CT 分發** — DLL 不內嵌、與 .CT 同資料夾(`Discrete-Mono.dll` / `Discrete-IL2CPP.dll` / `Discrete-Mono-x86.dll`);`utils.lua` `M.dllPath` 改 table-folder 優先多候選搜尋 + `is32bitProcess()` 挑 x86。新 `tools/Package-CTDist.ps1` 一鍵打包(自動改名 x86)。
+- **DLL 卸載** — Tier-2 FreeLibrary **移除**(對每幀 hook runtime_invoke 的 DLL 無法安全 unmap → CTD);只留 dormant teardown(`[DISABLE]` → `discreteShutdown()`:停 pipe + 卸 hook、DLL 留映射、可 re-enable)。
+- **Pipe 並發** — `BackendAdapter` 開**兩條**連線(interactive + bulk),依 cmd 路由;snapshot/value-scan/find/export 走 bulk,瀏覽走 interactive → snapshot 時 Inspector/Classes 不再卡。`BulkOperationGate` 跨 VM 互斥重操作(按鈕變灰 + busy 提示)。AOBMaker 不在時所有插入動作都訊息 + 取消;Inspector HEX 導覽也補訊息。UI 用 2 條連線(`kMaxPipeInstances=4` 留 ≥2 給 CLI)。
+- **build** — Release/Publish 的 dist 不再留 `*.pdb`(只 Debug 留 + 結尾 prune)。
+- **walk drill-down CTD 全修(IL2CPP)** — (1)繼承走訪 `class_get_parent` 全走 SEH(`SehGetParent`);(2)`ReadClassInfo`/`DescribeClass` 的逐項 accessor(`field_get_*`/`method_get_*`/`class_get_name/namespace`)全包進泛型 `SehCall`;(3)繼承鏈 runaway(衝到 16 = 垃圾 class)直接 bail,不 ReadClassInfo;(4)String 欄位指向非字串物件時偵測嵌入 NUL / 高控制字元比例 → `<string_error: not text>` 而非整片亂碼。`walkInstance` 加逐步 walk log(每行 flush,可定位崩潰步驟)。
+
+**先前批次(2026-05-31 後段,Inspector nested-class drilldown + Copy CE XML x86)**:
 - **Mono nested-class drilldown 修正** — Inspector 展開只經 field-type reference 抵達的 ref-type(如 `StatConvertData` 經 `StatConvertCollectionData._list`)原本只顯示繼承的 `m_CachedPtr`:Mono `walkInstance` 用 `mono_class_from_name` 解到的 metadata class field table 是空的。修法:Mono 端比照 IL2CPP 接受 `klass_from_header_addr`,用 `mono_object_get_class`(`Mono::ClassOfObject`)從物件 vtable 取**活的 runtime class**(必 field-set-up)。Exporter 也加 name-based fallback(`EmitChildFieldsByHeaderAsync`)。**Live-verified(活俠傳:`_list[0]` 完整展開 `_curve`/`_book`/`_devNote`/`_id`…)**。
 - **Copy CE XML 32-bit pointer-size 修正** — (a)IntPtr/reference/List-handle 葉節點輸出 `8 Bytes`(x86 應 4)→ overlap 下一欄;(b)String header offset + `List._items` deref 用了 stale `GamePointerSize`(export 時 0→8)→ x64 offsets + `_list <empty>`。修法:DLL `walkInstance`(Mono+IL2CPP)回應加權威 `pointer_size`;`WalkInstanceResult.PointerSize` + exporter 採用之覆蓋 caller 值;新 `PointerVartype(options)` 取代 9 處寫死 `8 Bytes`,IntPtr scalar leaf 同步。**Live-verified(活俠傳:m_CachedPtr=4 Bytes、String length @+8、`_list` 15 元素)**。
 - **SS5** — class-list「Inspect (find instances)…」補上切到 Inspector tab。
