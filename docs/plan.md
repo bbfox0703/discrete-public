@@ -37,7 +37,7 @@
 - [ ] **String non-text 偵測殘留邊角** — `decodeField` 用「嵌入 NUL / ≥25% 控制字元」heuristic 擋掉非字串指標(CJK 安全)。若某非字串指標剛好指向「全 ≥0x20 可印碼位、零 NUL」區域仍可能漏判(極少見)。**定論修法**:讀 String 物件 header 的 class 指標、驗證為 `System.String`(需在共用 `decodeField` 分 backend,較重)。目前 heuristic 已涵蓋實測 case。
 - [ ] **`NavigateDisassembler` 未接線** — bridge 方法存在但 UI 沒有觸發入口(只有 HEX 導覽接了 + 已補失敗訊息)。若之後接上,套同一 pattern(回傳 false → 設 ErrorMessage)。
 - [ ] **walkInstance runaway-chain bail 用 depth≥16 heuristic** — 偵測垃圾 class(真 class 含泛型實例鏈都很短)。零誤判前提是無真實 class 繼承深度 ≥16;若未來遇到極深合法階層需放寬。
-- [ ] **Mono walkInstance 未加 runaway-bail** — 只有 IL2CPP handler 加了 cap-bail;Mono 同結構但本批次崩潰是 IL2CPP。Mono 的繼承走訪已走 `SehGetParent`(不會崩),但缺 bail(垃圾 class 會 ReadClassInfo 出 garbage 而非乾淨錯誤)。需要時比照補上。
+- [x] **Mono walkInstance 未加 runaway-bail** — ✅ 補上(build #940,2026-06-01)。Mono `CmdWalkInstance` 加 (1)`ProbeKlassValid(k)` 早退(header path 從 stale pointer 解出垃圾 class 時)+ (2)runaway chain ≥16 bail(比照 IL2CPP)。觸發點:Phase 31 讓 Copy CE XML(depth 5)會遞迴進 value-struct 成員 → 跟到真實 pointer chain 更深 → 踩到 Mono 未硬化路徑 → Game CTD(Core Keeper Mono x64)。**待 live verify**。
 - [ ] **per-field walk log 已移除**(IO 太重);保留 entry/chain/per-class ReadClassInfo/runaway/done。若要 debug `decodeField` 崩潰可暫時加回。
 
 ### 💤 未啟動 / deferred 設計

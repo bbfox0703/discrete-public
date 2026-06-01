@@ -4504,6 +4504,17 @@ void RegisterCoreHandlers() {
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
         if (k == nullptr) return json{{"error", err}};
 
+        // Phase 31-6 — reject a garbage class early. The header path
+        // (klass_from_header_addr → ClassOfObject) can hand back a bogus class
+        // when a deep Copy-CE-XML drilldown dereferences a stale / mis-typed
+        // pointer (now reachable because Phase 31 walks value-struct members).
+        // ProbeKlassValid is SEH-guarded (mono_class_get_name must yield a
+        // sane name); a garbage class fails it → clean error instead of an AV
+        // in the unguarded field-offset/name reads below. By-name walks (real
+        // FindClass result, incl. value structs) pass trivially.
+        if (!Mono::ProbeKlassValid(k))
+            return json{{"error", "address does not resolve to a valid managed class"}};
+
         const auto& r = Mono::GetResolver();
         Mono::MonoDomain* domain = Mono::GetRootDomain();
         if (domain == nullptr) return json{{"error", "no mono root domain"}};
@@ -4533,6 +4544,23 @@ void RegisterCoreHandlers() {
                 if (r.class_get_parent == nullptr) break;
                 cur = SehGetParent(r.class_get_parent, cur);
             }
+        }
+
+        // Phase 31-6 — runaway-chain bail (mirror the IL2CPP handler). A real
+        // managed class's inheritance chain terminates at System.Object within
+        // a handful of levels. Hitting the 16-cap means class_get_parent kept
+        // returning non-null GARBAGE — the address wasn't a real class (a stale
+        // pointer deref'd during a deep Copy-CE-XML drilldown, or a value-type
+        // field misread as a reference). Do NOT ReadClassInfo those garbage
+        // class pointers: mono_class_get_fields then hands back garbage
+        // MonoClassField*s whose (non-SEH) field_get_offset/name reads AV the
+        // game. Bail with a clean error instead. (Previously Mono lacked this
+        // bail — see plan.md backlog; deeper struct-member recursion enabled by
+        // Phase 31 made it reachable.)
+        if (chain.size() >= 16) {
+            return json{{"error",
+                "address does not resolve to a managed object "
+                "(runaway class chain — likely a value-type field or stale pointer)"}};
         }
 
         // Walk base-class first so derived fields appear last (typical layout).
