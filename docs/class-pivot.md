@@ -566,3 +566,320 @@ trajectory. Findings + resolutions:
   (Stage 1). Instead of typing field names, the user sees ranked
   key candidates (S_stable / S_cardinality / TypePrior / NamePrior)
   + a greedy compound-key suggestion, in a filterable picker.
+
+---
+
+# Phase 29i — Pivot usability & value-driven discovery
+
+**Status**: design (2026-06-01). Owner: dev branch. Pure-UI / engine work —
+no DLL change (29i-1..-4 all read the existing gzipped snapshot blob).
+
+## 29i.0 — Motivation
+
+29e shipped the three-stage funnel, but live use exposed that the funnel
+still assumes the user can **name** things:
+
+1. To read a class's fields you must type its FQN, hydrate, and read the
+   `KnownFieldNames` autocomplete — one class at a time. No way to *browse*
+   an assembly's classes and see their shape side-by-side.
+2. The Layer B array inner-pivot fields (`ArrayFieldName` / inner key /
+   inner value) are free-text `AutoCompleteBox`es with **no scoring** —
+   the user is back to "remember the field name", the exact problem
+   Stage 1 solved for top-level instance fields.
+3. Stage 0 ranks by **stability** (CV), but "stable" ≠ "holds the data I
+   care about". A constant class and a noise class both score poorly/
+   well for the wrong reasons. There is no signal for "this class has a
+   stable identity whose *value* drifts across snaps" — which is exactly
+   what gameplay state (money / HP / exp) looks like.
+4. The fundamental asymmetry: **the user already knows the VALUE** (money
+   reads 9410 in-game; it dropped from 10160). Today they must guess the
+   class to find that value. The inverse — *value → (class, field, key)* —
+   is the highest-utility operation and is missing.
+
+The four waves below each close one gap. They share engines and **feed
+each other**: 29i-1's field index powers 29i-2/-3's pickers; 29i-4's hit
+hands off into Stage 1 + Stage 2 to confirm the trajectory.
+
+```
+29i-4 value/delta  ─► (class, field) candidate
+                          │ auto-fill ClassFqn + value field
+                          ▼
+29i-1 class browser ─► pick/confirm class, see full field shape
+                          │
+                          ▼
+29i-3 unsupervised  ─► (when no known value) rank classes by
+   ranking + preview      identity-stable / value-volatile, preview rows
+                          │
+                          ▼
+29i-2 element picker ─► scored inner key/value for array pivot
+                          │
+                          ▼
+        Stage 1 (KeyDiscoveryEngine) ─► Stage 2 (PivotEngine) trajectory
+```
+
+---
+
+## 29i-1 — Class structure browser (Direction 3)
+
+**Goal**: from a single assembly, see every class's field shape at a
+glance — no per-class FQN round-trip.
+
+### Engine change — `ClassShortlistEngine`
+
+Today `Accumulator` keeps `FieldNames : HashSet<string>` only to count
+`FieldCount`; the names are discarded. Change it to **retain** an ordered
+field summary:
+
+```csharp
+// new on Accumulator
+public Dictionary<string,(string Type, bool IsEnum, bool IsArray)> Fields = new(Ordinal);
+// preserve first-seen order so the preview is deterministic
+public List<string> FieldOrder = new();
+```
+
+`ClassShortlistRow` gains:
+
+```csharp
+public required IReadOnlyList<ClassFieldInfo> Fields { get; init; } // full list
+public string FieldPreviewDisplay { get; }   // first 10 names, ", "-joined, "+N more"
+```
+
+`ClassFieldInfo = { Name, Type (demangled), IsEnum, IsArray }`. Cost is
+~free: Stage 0 already visits every field; we keep the name+type instead
+of throwing them away. Memory: ~one small list per class (~3,600 classes ×
+~20 fields × 2 refs ≈ negligible vs the hydrated blob).
+
+### UI
+
+- **Shortlist grid**: add a `Fields (preview)` column bound to
+  `FieldPreviewDisplay` (`Width="Auto" MinWidth="280"`, per the no-star
+  rule). Wrapping `TextBlock` + `ToolTip` shows the full list on hover.
+- **Detail panel** below the grid (or a flyout): when a shortlist row is
+  selected, a read-only sub-grid lists `Name | Type | Enum? | Array?` for
+  the full field set. This is the "see the structure without switching
+  class" view.
+- **Goto class**: reuse the existing `OnPivotShortlistDoubleTapped` →
+  `UseShortlistRow` (already fills `ClassFqn` + `AssemblyFilter`). Add a
+  per-field context menu in the detail panel: **Add to Key fields** /
+  **Add to Value fields** (reuse `AddFieldToKeys` / `AddFieldToValues`),
+  so the browser doubles as a picker.
+
+### Tests
+- `FieldPreviewDisplay` truncates at 10 + "+N more".
+- `Fields` retains type + enum/array flags; ordering deterministic.
+- existing `ClassShortlistEngine` ratio tests stay green.
+
+---
+
+## 29i-2 — Array inner-field scored picker (Direction 2)
+
+**Goal**: bring Stage 1-style scoring to the Layer B inner key/value
+fields, replacing the free-text boxes.
+
+### Technique — reuse `KeyDiscoveryEngine`, element mode
+
+The element fields live in
+`SnapshotFieldEntry.ArrayElements.Elements[].Fields[]` (Layer B capture).
+Treat each captured element as a **pseudo-instance** and feed the same
+four sub-score machine. Refactor `KeyDiscoveryEngine.Run` so the
+instance source is pluggable:
+
+```csharp
+// today: InstancesOf(snap, asm, fqn) yields SnapshotInstanceEntry
+// add:   an element source that yields each element's Fields[] as the
+//        field set, scoped to (class, arrayField).
+public sealed class KeyDiscoveryQuery {
+    ...
+    // null = top-level instance mode (today). Set = element mode.
+    public string? ArrayField { get; init; }
+}
+```
+
+Internally, when `ArrayField` is set, the per-snap value-set pass iterates
+elements instead of instances; everything downstream (S_stable,
+S_cardinality, TypePrior, NamePrior, greedy compound key, IsAddressLike
+penalty) is **unchanged** — it operates on a flat `IEnumerable<Fields>`.
+
+### UI
+
+A new collapsible **"Score element fields"** sub-section inside the
+Layer B expander, mirroring the Stage 1 grid:
+- `Score element fields` button → runs `KeyDiscoveryEngine` in element
+  mode for the typed `ArrayFieldName`.
+- grid identical to `PivotFieldScoreGrid` (Field / Type / Score / Stable /
+  Card / Type pr. / Name pr.), bound to a new `ElementFieldScores`
+  collection.
+- double-tap → `InnerKeyFieldsText`; context menu "Add to inner value" →
+  `InnerValueFieldsText`. Suggested-key Apply fills `InnerKeyFieldsText`.
+
+The existing `KnownArrayFields` autocomplete for picking *which* array
+stays (it's the one free-text that's genuinely a short list); but the
+**Array field** box also gets a tiny "⋯" affordance listing reference
+arrays of the class with their element-count, so the user doesn't type.
+
+### Tests
+- element-mode `KeyDiscoveryEngine`: hand-crafted Layer B snapshot where
+  element `_propertyID` has S_stable=1/S_card=1 → tops the chart.
+- top-level mode unchanged (regression).
+- empty / no-Layer-B class → 0 element scores, friendly status.
+
+---
+
+## 29i-3 — Unsupervised class ranking + preview (Direction 1-A)
+
+**Goal**: when the user has *no* known value, surface "which classes look
+like they hold trackable gameplay state" with an inline preview.
+
+### Technique — add a **value-volatility** signal + gated lazy preview
+
+Stage 0's CV measures *population* stability. The missing signal is
+**field-value drift under a stable key**:
+
+> A class is *interesting* ⇔ it has a stable identity (good key) **and**
+> a numeric value field whose per-key value **changes** across snaps but
+> is **not** pure noise.
+
+Two-pass funnel (cost-gated — never run the expensive pass on 3,600
+classes):
+
+1. **Pass A (cheap, all classes)** — existing `ClassShortlistEngine`.
+   Take the top `N≈40` by the current funnel order, narrowed to the
+   chosen assembly + `Presence==N` + `FieldCount≥2`.
+2. **Pass B (expensive, top-N only)** — per candidate class:
+   - run a **lightweight** `KeyDiscoveryEngine` (compute the four
+     sub-scores; pick the best single/greedy key — but cap the greedy
+     `CountCollisions` re-walks, or skip greedy and take the top-scored
+     field, to keep Pass B affordable);
+   - for each numeric non-key field F, compute a **volatility score**:
+     ```
+     vol(F) = (# keys whose F value differs across ≥1 snap pair)
+              / (# keys present in ≥2 snaps)
+         gated by:  distinctValues(F) ≤ instanceCount   (drop noise)
+                    AND distinctValues(F) ≥ 2            (drop constants)
+     ```
+   - `interestingness(C) = bestKeyScore(C) · max_F vol(F)`.
+
+Sort the shortlist by `interestingness` (new optional sort column /
+toggle "rank by likely game-state").
+
+### Preview (lazy, per row)
+
+Expanding a ranked row shows, computed on demand:
+- **Top-3 key combos**: the greedy suggestion + the next two
+  highest-scoring single keys.
+- **Top-3 value fields**: by `vol(F)` descending.
+- **3 sample trajectory rows**: run `PivotEngine.Run` with bestKey +
+  bestValue, take the first 3 `PivotRow`s, render like the Stage 2
+  grid (`v0 → v1 → …`).
+
+Preview is cheap (one `PivotEngine` pass on one class) and **only fires on
+expand**, so the assembly-wide ranking stays responsive.
+
+### Cost
+Pass A unchanged (~200 ms). Pass B = N×(one value-set pass + bounded
+greedy) ≈ N×Stage-1 cost; with N≈40 on 活俠傳 that's a few hundred ms.
+Preview is per-row on demand. All well within "click → table".
+
+### Tests
+- `vol(F)` = 1.0 for a field that changes every snap under a stable key;
+  0.0 for a constant; gated to 0 for a field with distinct==instanceCount
+  (noise).
+- `interestingness` ranks a money-like synthetic class above a constant
+  class and a noise class.
+- preview returns ≤3 rows and never throws on a class with no numeric
+  value field.
+
+---
+
+## 29i-4 — Value-driven class location (Direction 1-B)  ★ highest utility
+
+**Goal**: user types a value they can see in-game (or a cross-snap delta);
+the tool finds the `(class, field[, array element])` that holds it —
+**cross-session capable** because it reads the stored blob, not live
+memory (unlike Value Search).
+
+### Engine — new `SnapshotValueLocatorEngine`
+
+```csharp
+public sealed class ValueLocatorQuery {
+    public required IReadOnlyList<SnapshotEnvelope> Snapshots { get; init; }
+    public string?  AssemblyFilter { get; init; }     // scope
+    public string?  ExactValue     { get; init; }     // "9410" / "Money" — FormatFieldValue match
+    public double?  NumericTolerance { get; init; }    // optional ± for floats
+    // delta mode (across exactly two chosen snaps):
+    public int?     SnapA { get; init; }
+    public int?     SnapB { get; init; }
+    public double?  Delta { get; init; }              // e.g. -750 (10160 → 9410)
+    public bool     IncludeArrayElements { get; init; }
+    public bool     NumericOnly { get; init; }
+}
+
+public sealed class ValueLocatorHit {
+    public required string Assembly, ClassFqn, FieldName;
+    public required bool   InArrayElement;            // field is inside an array element
+    public required int    SnapHitCount;              // snaps where the value appears
+    public required string SampleValue;               // matched rendered value
+    public required string? SampleAddress;            // an instance address for handoff
+    public double Score => /* SnapHitCount + delta-match bonus + cardinality penalty */;
+}
+```
+
+### Algorithm — **set-membership, not instance-matching** (dodges the
+key chicken-and-egg)
+
+- **Exact mode**: for each `(class, field)` collect the rendered-value
+  multiset per snap (reuse `SnapshotEnvelope.FormatFieldValue`; numeric
+  parse for tolerance). A `(class, field)` is a hit if `ExactValue` ∈ the
+  set in ≥1 snap. Rank by `SnapHitCount` then by *lower* field cardinality
+  (a field where the value is rare is a stronger signal than one where
+  every instance is 9410).
+- **Delta mode**: a `(class, field)` is a hit if **∃ Va ∈ set(SnapA) and
+  Vb ∈ set(SnapB) with Vb − Va == Delta** (within tolerance). This finds
+  "a field whose value universe moved by Δ" without needing to align
+  individual instances across snaps — the alignment is what Stage 1 + the
+  Pivot do *next*, on the confirmed field.
+- Array elements (`IncludeArrayElements`): same, but iterate
+  `ArrayElements.Elements[].{Value,String}` (Layer A) and, if present,
+  `.Fields[]` (Layer B).
+
+### UI — new top "🎯 Find by value" expander on the Pivot tab
+
+- inputs: Assembly (reuse `KnownAssemblies`), Value, optional tolerance,
+  mode toggle (Exact / Delta), Delta + SnapA/SnapB pickers, "include
+  array elements", "numeric only".
+- result grid: `Class FQN | Field | In array? | Snaps hit | Sample | Score`.
+- double-tap a hit → **auto-handoff**: fills `ClassFqn` + `AssemblyFilter`
+  + the matched field into `ValueFieldsText`, then offers a one-click
+  "Suggest key & run" that chains Stage 1 (`ScoreFieldsAsync` → apply
+  suggested key) → Stage 2 (`RunAsync`). This closes the loop: value →
+  class → key → trajectory, no manual typing.
+
+### Cost
+One linear pass over the hydrated blob per query (same budget as Stage 0;
+no Jaccard). Delta mode is two set builds + a membership test per field.
+
+### Tests
+- exact match finds the right `(class, field)`; ranks rarer-value field
+  above a field where everything equals the target.
+- delta mode finds a field whose value set moved by Δ across the two
+  snaps; ignores fields that didn't.
+- array-element hit (Layer A primitive + Layer B inner field).
+- numeric tolerance: float `9410.0` matches `"9410"` within ±0.5.
+- cross-session snaps (mixed session_id) — engine is address-agnostic, so
+  the hit is found regardless; the handoff address is the live-snap one.
+
+---
+
+## 29i — wave delivery
+
+| Wave    | Scope                                                  | Ships alone? |
+|---------|--------------------------------------------------------|---|
+| **29i-1** | Class structure browser (retain field names in Stage 0 + preview column + detail panel + per-field add-to-key/value) | yes |
+| **29i-2** | Array inner-field scored picker (`KeyDiscoveryEngine` element mode + grid) | yes |
+| **29i-3** | Unsupervised ranking (`interestingness` + value-volatility) + lazy per-row preview | yes |
+| **29i-4** | `SnapshotValueLocatorEngine` + "Find by value" expander + auto-handoff to Stage 1/2 | yes (★ build first if optimizing for utility) |
+
+Each wave ends green on the full UI test suite and writes a STATUS.md
+TL;DR. Suggested order: **29i-1 → 29i-2 → 29i-4 → 29i-3** (1 unblocks the
+pickers and is lowest-risk; 4 is the highest-utility payoff; 3 is the
+"no known value" fallback and the most heuristic, so last).

@@ -43,6 +43,7 @@
 ### 💤 未啟動 / deferred 設計
 - [~] **Phase 28b-v3.2** — ❌ **WON'T DO**(2026-05-31 決議)。IL2CPP never-populated static slot → class 的 token decode(v29 `metadataUsages` 移除 → layout dead-end)。針對的唯一 case 是**從未執行過的編譯器生成 `<>c.<>9__0_X` lambda-cache 類別**的 static xref —(a)這類類別命名規律、一眼可識別,使用者不會誤判成漏掉;(b)非 gameplay state、CT maker 不需要;(c)2-4 天工 + v29 未公開 layout 高逆向風險 → **沒 C/P 值**。v3.0 banner 已說明限制。cookbook + 診斷基礎建設仍保留在 [lessons-learned.md](lessons-learned.md),萬一未來真有人需要可直接執行。
 - [ ] **Phase 29e/29f deferred** — Layer B reference-array inner-pivot anomaly auto-surface、field-name autocomplete pre-hydrate(見 [class-pivot.md](class-pivot.md))。
+- [ ] **Phase 29i — Pivot usability & value-driven discovery**(spec 2026-06-01,見 [class-pivot.md → Phase 29i](class-pivot.md#phase-29i--pivot-usability--value-driven-discovery))。四波,純 UI/engine 無 DLL:**29i-1** class 結構瀏覽(Stage 0 留 field 名稱 + preview 欄 + detail panel);**29i-2** array inner-field 評分 picker(`KeyDiscoveryEngine` element 模式);**29i-3** 無監督排序(value-volatility `interestingness`)+ 懶載 preview;**29i-4 ★** `SnapshotValueLocatorEngine` 值/delta 反查 → (class, field) + auto-handoff Stage 1/2(跨 session 可用,最高實用性)。建議序 29i-1 → 29i-2 → 29i-4 → 29i-3。
 
 ---
 
