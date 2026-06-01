@@ -128,16 +128,18 @@ public static class KeyDiscoveryEngine
             foreach (var fields in FieldSetsOf(query, query.Snapshots[s]))
             {
                 instanceCount[s]++;
-                foreach (var f in fields)
+                // Phase 31 — flatten so inline value-type struct components
+                // (e.g. _position.x) are scored as key candidates too.
+                foreach (var (name, leaf) in SnapshotEnvelope.EnumerateFlatFields(fields))
                 {
-                    if (!valueSets.TryGetValue(f.Name, out var perSnap))
+                    if (!valueSets.TryGetValue(name, out var perSnap))
                     {
                         perSnap = new List<HashSet<string>>(snapCount);
                         for (int k = 0; k < snapCount; k++) perSnap.Add(new HashSet<string>(StringComparer.Ordinal));
-                        valueSets[f.Name] = perSnap;
-                        fieldMeta[f.Name] = (f.Type, f.IsEnum == true);
+                        valueSets[name] = perSnap;
+                        fieldMeta[name] = (leaf.Type, leaf.IsEnum == true);
                     }
-                    perSnap[s].Add(SnapshotEnvelope.FormatFieldValue(f));
+                    perSnap[s].Add(SnapshotEnvelope.FormatFieldValue(leaf));
                 }
             }
         }
@@ -259,14 +261,11 @@ public static class KeyDiscoveryEngine
 
     private static string BuildKeyTuple(IReadOnlyList<SnapshotFieldEntry> fields, List<string> keyFields)
     {
-        var fieldMap = new Dictionary<string, SnapshotFieldEntry>(fields.Count, StringComparer.Ordinal);
-        foreach (var f in fields) fieldMap.TryAdd(f.Name, f);
-
+        // ResolveDottedFieldValue handles both plain names and dotted struct
+        // component paths (_position.x), descending into Fields as needed.
         var parts = new string[keyFields.Count];
         for (int i = 0; i < keyFields.Count; i++)
-            parts[i] = fieldMap.TryGetValue(keyFields[i], out var f)
-                ? SnapshotEnvelope.FormatFieldValue(f)
-                : "(missing)";
+            parts[i] = SnapshotEnvelope.ResolveDottedFieldValue(fields, keyFields[i]) ?? "(missing)";
         return string.Join('\x1F', parts);
     }
 

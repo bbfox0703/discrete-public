@@ -188,9 +188,8 @@ public static class PivotEngine
                     var keyParts = new string[keyCount];
                     for (int k = 0; k < keyCount; k++)
                     {
-                        keyParts[k] = fieldMap.TryGetValue(query.KeyFields[k], out var kf)
-                            ? SnapshotEnvelope.FormatFieldValue(kf)
-                            : "(missing)";
+                        keyParts[k] = RenderField(query.KeyFields[k], fieldMap, inst.Fields)
+                                      ?? "(missing)";
                     }
                     string keyTupleStr = string.Join(KeyDelim, keyParts);
 
@@ -200,9 +199,7 @@ public static class PivotEngine
                     var valParts = new string?[valueCount];
                     for (int v = 0; v < valueCount; v++)
                     {
-                        valParts[v] = fieldMap.TryGetValue(query.ValueFields[v], out var vf)
-                            ? SnapshotEnvelope.FormatFieldValue(vf)
-                            : null;
+                        valParts[v] = RenderField(query.ValueFields[v], fieldMap, inst.Fields);
                     }
 
                     if (!dict.TryGetValue(keyTupleStr, out var list))
@@ -280,6 +277,20 @@ public static class PivotEngine
         }
 
         return results;
+    }
+
+    /// <summary>Phase 31 — render a key/value field name, supporting dotted
+    /// struct-component paths (<c>_position.x</c>). Plain names use the fast
+    /// per-instance top-level map; dotted names descend into struct members.
+    /// Returns null when the field / member is absent.</summary>
+    private static string? RenderField(
+        string name,
+        Dictionary<string, SnapshotFieldEntry> topMap,
+        IReadOnlyList<SnapshotFieldEntry> fields)
+    {
+        if (name.IndexOf('.') >= 0)
+            return SnapshotEnvelope.ResolveDottedFieldValue(fields, name);
+        return topMap.TryGetValue(name, out var f) ? SnapshotEnvelope.FormatFieldValue(f) : null;
     }
 
     /// <summary>Max distinct values shown inside a collision cell before

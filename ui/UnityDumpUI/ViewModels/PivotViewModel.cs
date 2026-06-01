@@ -1388,9 +1388,11 @@ public sealed partial class PivotViewModel : ObservableObject
                     if (!SnapshotEnvelope.ClassFqnEquals(fqn, ClassFqn)) continue;
                     if (c.Instances is not null)
                     {
+                        // Phase 31 — EnumerateFlatFields also surfaces inline
+                        // struct components (_position.x) as pickable fields.
                         foreach (var inst in c.Instances)
-                            foreach (var f in inst.Fields)
-                                if (!string.IsNullOrEmpty(f.Name)) nameSet.Add(f.Name);
+                            foreach (var (name, _) in SnapshotEnvelope.EnumerateFlatFields(inst.Fields))
+                                if (!string.IsNullOrEmpty(name)) nameSet.Add(name);
                     }
                 }
             }

@@ -2867,6 +2867,65 @@ public sealed partial class SnapshotEnvelope : ObservableObject
         }
     }
 
+    /// <summary>Phase 31 — flatten a field list to (dotted-name, leaf) pairs:
+    /// every top-level field plus, recursively, each inline value-type struct
+    /// member as <c>parent.member</c>. Lets the pivot / key-discovery engines
+    /// score + select struct components (e.g. <c>_position.x</c>) the same way
+    /// as top-level fields. The struct summary field is yielded too (its
+    /// FormatFieldValue is the "(x, y, z)" tuple).</summary>
+    internal static IEnumerable<(string Name, SnapshotFieldEntry Field)> EnumerateFlatFields(
+        IReadOnlyList<SnapshotFieldEntry> fields)
+    {
+        foreach (var f in fields)
+        {
+            yield return (f.Name, f);
+            if (f.Fields is { Count: > 0 } members)
+                foreach (var sub in EnumerateFlatMembers(f.Name, members, 0))
+                    yield return sub;
+        }
+    }
+
+    private static IEnumerable<(string Name, SnapshotFieldEntry Field)> EnumerateFlatMembers(
+        string prefix, List<SnapshotFieldEntry> members, int depth)
+    {
+        if (depth > 3) yield break;   // bound nested-struct chains
+        foreach (var m in members)
+        {
+            string name = $"{prefix}.{m.Name}";
+            yield return (name, m);
+            if (m.Fields is { Count: > 0 } nested)
+                foreach (var sub in EnumerateFlatMembers(name, nested, depth + 1))
+                    yield return sub;
+        }
+    }
+
+    /// <summary>Phase 31 — resolve a possibly-dotted field path
+    /// (<c>_position.x</c>) against a field list, descending into inline
+    /// value-type struct members. Returns the rendered value, or null if any
+    /// path segment is missing. A plain name resolves the top field.</summary>
+    internal static string? ResolveDottedFieldValue(IReadOnlyList<SnapshotFieldEntry> fields, string path)
+    {
+        int dot = path.IndexOf('.');
+        string head = dot < 0 ? path : path.Substring(0, dot);
+        SnapshotFieldEntry? cur = null;
+        foreach (var f in fields)
+            if (string.Equals(f.Name, head, StringComparison.Ordinal)) { cur = f; break; }
+        if (cur is null) return null;
+        while (dot >= 0)
+        {
+            int next = path.IndexOf('.', dot + 1);
+            string seg = next < 0 ? path.Substring(dot + 1) : path.Substring(dot + 1, next - dot - 1);
+            if (cur.Fields is null) return null;
+            SnapshotFieldEntry? child = null;
+            foreach (var m in cur.Fields)
+                if (string.Equals(m.Name, seg, StringComparison.Ordinal)) { child = m; break; }
+            if (child is null) return null;
+            cur = child;
+            dot = next;
+        }
+        return FormatFieldValue(cur);
+    }
+
     /// <summary>Render one captured array element. Mirrors
     /// <see cref="FormatFieldValue"/>'s ladder for the element-level
     /// surface area: Value JsonElement → primitives, String → quoted,
