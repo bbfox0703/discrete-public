@@ -98,8 +98,21 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             Toggle      = ToggleExpandAsync,
             CopyText    = s => CopyToClipboardAsync?.Invoke(s ?? string.Empty)
                                     ?? Task.CompletedTask,
-            NavigateHex = (addr, ct) => AobMaker?.NavigateHexViewAsync(addr, ct)
-                                    ?? Task.FromResult(false),
+            // Surface a message when CE / the AOBMaker plugin isn't there,
+            // instead of a silent no-op. Covers both the row HEX buttons and
+            // the inspector's HEX command (which calls this same Func).
+            NavigateHex = async (addr, ct) =>
+            {
+                if (AobMaker is null)
+                {
+                    ErrorMessage = "AOBMaker pipe unavailable — open CE with the AOBMaker plugin loaded.";
+                    return false;
+                }
+                bool ok = await AobMaker.NavigateHexViewAsync(addr, ct).ConfigureAwait(true);
+                if (!ok)
+                    ErrorMessage = "Couldn't reach CE's Memory View — open CE with the AOBMaker plugin loaded, then retry.";
+                return ok;
+            },
         };
         // Keep FilteredFields in lockstep with Fields. Every singleton
         // mutation funnels through this; bulk paths (walk repopulate,
