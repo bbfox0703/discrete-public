@@ -1509,7 +1509,15 @@ void RegisterCoreHandlers() {
                 out["string_error"] = "chars unreadable";
                 return out;
             }
-            // UTF-16 → UTF-8 with U+FFFD on lone surrogates.
+            // UTF-16 → UTF-8 with U+FFFD on lone surrogates. Track "not text"
+            // signals along the way: an embedded NUL, C0 control chars, or
+            // lone surrogates. A real managed string used as a game field
+            // (name / version / path) has none of these; when a "String"
+            // field's pointer actually points at a non-string object (a
+            // mis-typed/stale reference), the bytes decode to exactly that
+            // noise — so we flag it instead of dumping a wall of mojibake.
+            // CJK-safe: ordinary CJK code points are >= 0x20 and not surrogates.
+            std::size_t nulCount = 0, ctrlCount = 0, replCount = 0;
             std::string utf8;
             utf8.reserve(static_cast<std::size_t>(len));
             auto pushCp = [&utf8](std::uint32_t cp) {
@@ -1529,19 +1537,31 @@ void RegisterCoreHandlers() {
                 }
             };
             for (std::size_t i = 0; i < chars.size(); ++i) {
-                std::uint32_t cp = chars[i];
+                std::uint16_t raw = chars[i];
+                if (raw == 0) ++nulCount;
+                else if (raw < 0x20u && raw != 0x09u && raw != 0x0Au && raw != 0x0Du) ++ctrlCount;
+                std::uint32_t cp = raw;
                 if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < chars.size()) {
                     std::uint32_t lo = chars[i + 1];
                     if (lo >= 0xDC00u && lo <= 0xDFFFu) {
                         cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
                         ++i;
                     } else {
-                        cp = 0xFFFDu;
+                        cp = 0xFFFDu; ++replCount;
                     }
                 } else if (cp >= 0xDC00u && cp <= 0xDFFFu) {
-                    cp = 0xFFFDu;
+                    cp = 0xFFFDu; ++replCount;
                 }
                 pushCp(cp);
+            }
+            // "Not text" guard — see the comment above. Embedded NUL is a hard
+            // signal; otherwise require >= 25% control/lone-surrogate chars on
+            // a string long enough to judge.
+            std::size_t suspicious = ctrlCount + replCount;
+            if (len >= 2 && (nulCount > 0 || suspicious * 4 >= static_cast<std::size_t>(len))) {
+                out["string_error"]  = "not text (pointer is not a real string)";
+                out["string_length"] = len;
+                return out;
             }
             out["string"] = std::move(utf8);
             out["string_length"] = len;
