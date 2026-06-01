@@ -7,11 +7,18 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #928 |
-| **Current phase** | ✅ **Phase 31 inline value-type struct(Vec3/4)** 31-1/31-3/31-4 SHIPPED 於 `dev`(31-2/31-5 deferred);先前 Phase 29i 4 波亦在 `dev` |
-| **Branches** | `dev` 領先 `main`(Phase 29i + Phase 31 partial,多 commit);`main` 仍在 `315bcc4` |
-| **Tests** | 684 UI tests green;UI 0/0 warnings。**注意:Phase 31-1 改了 DLL(`ExportAPI.cpp`)尚未 build/驗證** |
-| **Mid-flight** | Phase 31-2(DLL Phase B 泛型 struct,卡 offset 問題)+ 31-5(value-search 命名)**deferred 待 live build**;Phase 31-1 DLL 待實機 build + live-smoke;Phase 29i 待 live-smoke |
+| **Current build** | #957(DLL Mono+IL2CPP + UI,build clean)|
+| **Current phase** | ✅ **Phase 31 inline value-type struct(Vec3/4)** 31-1/31-3/31-4/31-6 SHIPPED & **live-verified**(Core Keeper, Mono x64);Phase 29i(pivot)4 波亦完成。31-2/31-5 deferred → 下個 session |
+| **Branches** | merge `dev` → `main` 進行中(本批次);merge 後 `dev == main` |
+| **Tests** | 685 UI tests green;DLL(IL2CPP+Mono)build clean、UI 0/0 warnings |
+| **Mid-flight** | 無。**下個 session**:Phase 31-2(DLL Phase B 泛型自訂 struct,offset 公式已鎖定 `member.offset − 2*ptrSize`)+ 31-5(value-search reverse-lookup 命名 component)|
+
+**Phase 31 收尾(2026-06-01,Core Keeper Mono x64 live-verified)**:
+- **31-1/31-3/31-4 ✅ verified** — snapshot Vector3 顯示 `(x,y,z)`、SPC 逐軸(`<WorldPosition>.x/.y/.z`)+ delta 正確;pivot per-component OK。
+- **31-6 ✅ verified** — live Inspector value-struct 展開修正(扣 header 0x10、巢狀型別 `FindClass` fallback)。
+- **深層 Copy CE XML Game CTD ✅ 修復** — 真因:depth-5 export 遞迴炸進整個 Unity ECS/DOTS + 引擎物件圖(walkInstance/native-pointer/EnumerateAssemblies 風暴 → Mono worker thread BDWGC crash)。**真正修法**:`CeXmlExporter.Live` 加 `IsEngineInternalType`(指標 + Unity.Entities/Collections/Jobs/Burst,兩 case)+ `IsFrameworkReferenceType`(pointer-to-class path 不遞迴 `UnityEngine.*`/`Unity.*`/`System.*`/`TMPro.*`/`Mono.*`/`Microsoft.*` reference 型別,value struct 不受影響)。輔以 DLL 硬化:Mono `walkInstance` 加 `ProbeKlassValid` + runaway-bail、walk-path ClassInfo 快取(降 BDWGC 壓力)。輸出從 ~768K 行縮到只剩遊戲資料(進一步過濾後續處理)。
+- **AutoCompleteBox CTD 修復** — snapshot scope「＋ add assembly」picker 選取時 re-entrancy(`ArgumentOutOfRangeException`)→ `OnSelectedScopeAssemblyChanged` 的 reset 改 `Dispatcher.UIThread.Post` 延後。
+- **2 個 UI/UX** — Assemblies pane「Exclude system assemblies」勾選(留 Assembly-CSharp);Copy CE XML 進度 label(`exporting… N entries` → `copied N lines`)。
 
 **Phase 31 live-smoke 發現(2026-06-01,Core Keeper/Pug **Mono x64**;log `…\Discrete_Dumper\Logs\44332`)** — 兩個**既有 live Inspector value-struct 功能**的真實 bug,且決定性解開 Phase B 的 offset 疑問:
 1. **value-struct 展開多加 0x10(header double-count)** — `PlayerController.srOffSetPos` (Vector3@0xA34) 經 hex 驗證真值是 **(0,0,0)**,但 Inspector 顯示 (0.6875,-0.0585,0) — 它從 `structBase + 0x10` 開始讀(`mono_field_get_offset(Vector3.x)` 回 header-inclusive 的 0x10;Mono/IL2CPP 皆然,header=2 pointers),讀到隔壁 `defaultSROffSetPos` 的 y/z。**定論:inline value-type 成員正確讀法 = `fieldAddr + member.offset − 2*ptrSize`(x64 扣 0x10、x86 扣 0x08)。** ✅ **已修(31-6a,build #936,待 live verify)**:兩個 backend 的 `walkInstance` 在 walked class 是 value type 時扣 `kObjectHeader`,offset/address 都改 struct-relative(gate `class_is_valuetype`,reference-type 走訪不受影響)。 → 這正是 §3.2 Phase B 卡住的問題,現在已確定要扣 header。**已 ship 的 31-1 Phase A 不受影響**(寫死 struct-relative 0/4/8 offset,反而比現有 live drill 正確)。**待修**:既有 live Inspector ValueStruct drill 的 +0x10 bug(`WalkedFieldKind.ValueStruct` → walkInstance-by-name 路徑)。
