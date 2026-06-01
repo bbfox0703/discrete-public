@@ -29,6 +29,12 @@ std::vector<DisconnectHook> g_disconnectHooks;
 std::thread g_worker;
 std::atomic<bool> g_running{false};
 HANDLE g_stopEvent = nullptr;
+// In-flight per-client ServeClient threads. The acceptor increments this
+// synchronously BEFORE detaching each worker, and the worker decrements it
+// at exit. Stop() waits for it to reach zero so a subsequent FreeLibrary
+// (the "Unload Discrete DLL" path) can't unmap the module while a client
+// thread is still running its code — that race was the unload-time CTD.
+std::atomic<int> g_activeClients{0};
 
 constexpr DWORD kPipeBufferSize = 64 * 1024;
 
@@ -270,6 +276,11 @@ void WorkerThread() {
             // in the main loop. Hooks run on the per-client worker
             // thread which is about to exit anyway, so no extra
             // thread cost.
+            // Count this worker BEFORE detaching (synchronously, on the
+            // acceptor thread) so that once Stop() has joined the acceptor,
+            // g_activeClients reflects every live worker — no spawn can slip
+            // in after Stop() starts waiting.
+            g_activeClients.fetch_add(1, std::memory_order_relaxed);
             std::thread([pipe]() {
                 ServeClient(pipe);
                 ::DisconnectNamedPipe(pipe);
@@ -293,6 +304,8 @@ void WorkerThread() {
                         LogPipe("disconnect hook threw non-std exception");
                     }
                 }
+                // Last thing the worker does: it's now leaving DLL-owned work.
+                g_activeClients.fetch_sub(1, std::memory_order_relaxed);
             }).detach();
         } else {
             ::DisconnectNamedPipe(pipe);
@@ -332,6 +345,18 @@ void Stop() {
     if (!g_running.exchange(false)) return;
     if (g_stopEvent) ::SetEvent(g_stopEvent);
     if (g_worker.joinable()) g_worker.join();
+
+    // The acceptor has stopped — no new client threads will be created, so
+    // g_activeClients can now only decrease. Wait for in-flight ServeClient
+    // workers to finish running DLL code before returning. Without this, the
+    // "Unload Discrete DLL" path's FreeLibrary could unmap the module while a
+    // detached worker is still executing it → CTD. The g_stopEvent we just
+    // signalled breaks any worker blocked in ReadLine, so they exit promptly;
+    // the cap is a safety bound, not the expected wait.
+    for (int i = 0; i < 400 && g_activeClients.load(std::memory_order_relaxed) > 0; ++i) {
+        ::Sleep(5); // up to ~2 s worst case
+    }
+
     if (g_stopEvent) {
         ::CloseHandle(g_stopEvent);
         g_stopEvent = nullptr;

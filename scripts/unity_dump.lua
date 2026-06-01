@@ -138,6 +138,14 @@ function discreteUnload()
     -- 1. Clean dormant state first.
     discreteShutdown()
 
+    -- 1a. Settle window before FreeLibrary. Discrete_Shutdown already joins
+    --     the pipe acceptor + waits for in-flight client threads + removes
+    --     the runtime_invoke hook, but give the game's main thread a beat to
+    --     drain any call that was *inside* the (now-removed) detour, and let
+    --     detached worker thread tails fully leave DLL code. Unmapping the
+    --     module while any thread is still executing it is an instant CTD.
+    if sleep then sleep(250) end
+
     -- 1b. Heads-up if a proxy deployed the DLL: Tier-2 removes what the
     --     proxy put there, and the proxy won't reload it this session.
     --     We still proceed — the user explicitly asked to fully unload —
