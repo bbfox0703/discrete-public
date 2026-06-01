@@ -286,22 +286,32 @@ void WorkerThread() {
                 ::DisconnectNamedPipe(pipe);
                 ::CloseHandle(pipe);
 
-                // Snapshot the hook list under the mutex so a concurrent
-                // RegisterDisconnectHook (unlikely after init but cheap to
-                // be safe) doesn't race with iteration.
-                std::vector<DisconnectHook> hooks;
-                {
-                    std::lock_guard lock(g_mutex);
-                    hooks = g_disconnectHooks;
-                }
-                for (const auto& h : hooks) {
-                    if (!h) continue;
-                    try {
-                        h();
-                    } catch (const std::exception& ex) {
-                        LogPipe(std::string("disconnect hook threw: ") + ex.what());
-                    } catch (...) {
-                        LogPipe("disconnect hook threw non-std exception");
+                // Run disconnect hooks ONLY for a genuine mid-session client
+                // disconnect — NOT during shutdown / unload. The hooks do
+                // real runtime work (the IL2CPP one calls gc_collect on this
+                // worker thread); running that while the DLL is being torn
+                // down + unloaded, with the game main thread still mutating
+                // the heap, crashes the game. When g_running is already false
+                // the server is stopping, so skip them entirely (the whole
+                // DLL is about to go away — any cleanup they'd do is moot).
+                if (g_running.load()) {
+                    // Snapshot the hook list under the mutex so a concurrent
+                    // RegisterDisconnectHook (unlikely after init but cheap to
+                    // be safe) doesn't race with iteration.
+                    std::vector<DisconnectHook> hooks;
+                    {
+                        std::lock_guard lock(g_mutex);
+                        hooks = g_disconnectHooks;
+                    }
+                    for (const auto& h : hooks) {
+                        if (!h) continue;
+                        try {
+                            h();
+                        } catch (const std::exception& ex) {
+                            LogPipe(std::string("disconnect hook threw: ") + ex.what());
+                        } catch (...) {
+                            LogPipe("disconnect hook threw non-std exception");
+                        }
                     }
                 }
                 // Last thing the worker does: it's now leaving DLL-owned work.

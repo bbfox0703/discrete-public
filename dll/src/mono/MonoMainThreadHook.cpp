@@ -67,6 +67,12 @@ using fn_runtime_invoke_t = Discrete::Mono::MonoObject* (*)(
     Discrete::Mono::MonoObject**);
 fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
 
+// Threads currently executing inside HookedRuntimeInvoke. Uninstall() drains
+// this to zero (after MH_DisableHook stops new entries) BEFORE MH_RemoveHook
+// frees the trampoline and before the DLL can be unloaded — otherwise a
+// thread inside the detour at unload time would run/return into unmapped code.
+std::atomic<int> g_inDetour{0};
+
 // Our detour. C-style function (no captures) so MinHook can route control
 // flow into it via a near-jump. NO `WINAPI` — see comment above.
 Discrete::Mono::MonoObject* HookedRuntimeInvoke(
@@ -76,19 +82,25 @@ Discrete::Mono::MonoObject* HookedRuntimeInvoke(
     Discrete::Mono::MonoObject** exc)
 {
     using namespace Discrete::MainThreadDispatcher;
+    // Mark presence FIRST so Uninstall's drain can't miss us. After
+    // MH_DisableHook no new caller reaches here, so the count only falls.
+    g_inDetour.fetch_add(1, std::memory_order_acquire);
     // Cheap thread-id check first — main thread id is a fixed std::atomic<uint32_t>.
     const DWORD tid = ::GetCurrentThreadId();
     if (tid == GetMainThreadId()) {
         NotifyMainThreadTick();  // also calls Drain() under the recursion guard
     }
-    if (g_orig_runtime_invoke == nullptr) {
+    Discrete::Mono::MonoObject* ret = nullptr;
+    if (g_orig_runtime_invoke != nullptr) {
+        ret = g_orig_runtime_invoke(method, obj, params, exc);
+    } else if (exc) {
         // Defensive: if somehow the trampoline got cleared (Uninstall race),
         // we have nothing to delegate to. Returning NULL would corrupt
         // managed callers — better to bail with no exception sentinel.
-        if (exc) *exc = nullptr;
-        return nullptr;
+        *exc = nullptr;
     }
-    return g_orig_runtime_invoke(method, obj, params, exc);
+    g_inDetour.fetch_sub(1, std::memory_order_release);
+    return ret;
 }
 
 }  // namespace
@@ -156,7 +168,15 @@ void Uninstall() {
     const auto& resolver = Discrete::Mono::GetResolver();
     if (resolver.runtime_invoke != nullptr) {
         void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
+        // 1. Stop NEW calls reaching the detour (restores original bytes).
         ::MH_DisableHook(target);
+        // 2. Drain threads still INSIDE HookedRuntimeInvoke before we free the
+        //    trampoline / let the DLL be unmapped. New callers bypass the
+        //    detour now, so g_inDetour only decreases. Cap is a safety bound.
+        for (int i = 0; i < 2000 && g_inDetour.load(std::memory_order_acquire) > 0; ++i) {
+            ::Sleep(1);
+        }
+        // 3. Now safe to free the trampoline.
         ::MH_RemoveHook(target);
     }
     g_orig_runtime_invoke = nullptr;

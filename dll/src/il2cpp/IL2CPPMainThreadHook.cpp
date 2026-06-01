@@ -46,6 +46,13 @@ using fn_runtime_invoke_t = Discrete::IL2CPP::Il2CppObject* (*)(
     Discrete::IL2CPP::Il2CppException**);
 fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
 
+// Threads currently executing inside HookedRuntimeInvoke. Uninstall() drains
+// this to zero (after MH_DisableHook stops new entries) BEFORE MH_RemoveHook
+// frees the trampoline and before the DLL can be unloaded — otherwise the
+// game main thread (which calls il2cpp_runtime_invoke every frame) is almost
+// always inside the detour at unload time, and unmapping it crashes the game.
+std::atomic<int> g_inDetour{0};
+
 Discrete::IL2CPP::Il2CppObject* HookedRuntimeInvoke(
     const Discrete::IL2CPP::MethodInfo* method,
     void* obj,
@@ -53,15 +60,21 @@ Discrete::IL2CPP::Il2CppObject* HookedRuntimeInvoke(
     Discrete::IL2CPP::Il2CppException** exc)
 {
     using namespace Discrete::MainThreadDispatcher;
+    // Mark presence FIRST so Uninstall's drain can't miss us. After
+    // MH_DisableHook no new caller reaches here, so the count only falls.
+    g_inDetour.fetch_add(1, std::memory_order_acquire);
     const DWORD tid = ::GetCurrentThreadId();
     if (tid == GetMainThreadId()) {
         NotifyMainThreadTick();
     }
-    if (g_orig_runtime_invoke == nullptr) {
-        if (exc) *exc = nullptr;
-        return nullptr;
+    Discrete::IL2CPP::Il2CppObject* ret = nullptr;
+    if (g_orig_runtime_invoke != nullptr) {
+        ret = g_orig_runtime_invoke(method, obj, params, exc);
+    } else if (exc) {
+        *exc = nullptr;
     }
-    return g_orig_runtime_invoke(method, obj, params, exc);
+    g_inDetour.fetch_sub(1, std::memory_order_release);
+    return ret;
 }
 
 }  // namespace
@@ -127,7 +140,17 @@ void Uninstall() {
     const auto& resolver = Discrete::IL2CPP::GetResolver();
     if (resolver.runtime_invoke != nullptr) {
         void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
+        // 1. Stop NEW calls reaching the detour (restores original bytes).
         ::MH_DisableHook(target);
+        // 2. Drain threads still INSIDE HookedRuntimeInvoke before we free
+        //    the trampoline / let the DLL be unmapped. New callers bypass the
+        //    detour now, so g_inDetour only decreases. Cap is a safety bound
+        //    (a single in-flight managed invoke that runs long); the common
+        //    per-frame case drains in well under a frame.
+        for (int i = 0; i < 2000 && g_inDetour.load(std::memory_order_acquire) > 0; ++i) {
+            ::Sleep(1);
+        }
+        // 3. Now safe to free the trampoline.
         ::MH_RemoveHook(target);
     }
     g_orig_runtime_invoke = nullptr;
