@@ -8,10 +8,17 @@
 | 項目 | 值 |
 |---|---|
 | **Current build** | #928 |
-| **Current phase** | ✅ Phase 22 重構為 **action-driven CE bridge** + CT 分發/打包 + 雙 pipe 連線 + walk drill-down CTD 全修 SHIPPED & merged |
-| **Branches** | `dev == main == origin` @ `315bcc4` |
-| **Tests** | 650 UI tests green;兩個 DLL(IL2CPP+Mono)build clean、UI 0/0 warnings |
-| **Mid-flight** | 無(nothing in flight)|
+| **Current phase** | ✅ **Phase 29i Pivot usability & value-driven discovery**(4 波)實作完成於 `dev`(UI/engine-only,無 DLL);先前 Phase 22 action-driven CE bridge 等已 merged to `main` |
+| **Branches** | `dev` 領先 `main` @ `3b0bc18`(Phase 29i,4 commit + spec);`main` 仍在 `315bcc4` |
+| **Tests** | 673 UI tests green(+23 vs 650);兩個 DLL(IL2CPP+Mono)build clean、UI 0/0 warnings |
+| **Mid-flight** | 無;Phase 29i 待 **live-smoke**(實機跑 Find-by-value / element picker / interest 排序)|
+
+**最新批次(2026-06-01,Phase 29i — Pivot usability & value-driven discovery,UI/engine-only)** — spec 見 [class-pivot.md → Phase 29i](class-pivot.md#phase-29i--pivot-usability--value-driven-discovery):
+- **29i-1 class 結構瀏覽** — `ClassShortlistEngine` 改為**保留** field 名稱/型別(原本掃完只留 count);shortlist grid 加 `Fields (preview)` 欄(前 10 + `+N more`)+ 下方 detail panel(完整 field 清單,double-tap→Key / 右鍵→Value)。
+- **29i-2 array inner-field 評分 picker** — `KeyDiscoveryEngine` 加 `ArrayField` element 模式(把 Layer B 元素 `Fields[]` 當 pseudo-instance 餵同一套評分,`FieldSetsOf` 共用來源);Layer B expander 加「Score element fields」grid(同 Stage 1 形狀)。
+- **29i-4 ★ 值驅動定位** — 新 `SnapshotValueLocatorEngine`:exact(欄位帶某值,依命中快照數 + match rarity 排序)/ delta(欄位值域跨兩快照位移 Δ,用 set-membership 免逐 instance 對齊)反查 → ranked `(class, field)`,含 Layer A/B array element;跨 session 可用(讀 blob 非 live mem)。UI「Find by value」expander + double-tap handoff + 「Suggest key & run」一鍵收尾。
+- **29i-3 無監督排序 + preview** — 新 `ClassInterestEngine`:Pass A Stage-0 top-N(成本閘)→ Pass B per-class KeyDiscovery + numeric 欄位 volatility(同 key 跨快照變化比例,constant-gated);`interestingness = bestKeyScore × maxVolatility`。「Likely game-state」expander + 懶建 3 筆 trajectory preview。**最 heuristic**(noise 未完全濾掉,靠 preview 辨識;精確版用 29i-4)。
+- 序:29i-1 → 29i-2 → 29i-4 → 29i-3(1A 最後)。每波各自 commit/push 到 `dev`、build clean、tests green。
 
 **最新批次(2026-06-01,CT 分發 + pipe 並發 + walk 硬化)** — live-verified(Utawarerumono IL2CPP):
 - **CT bridge 改 action-driven** — 砍掉 feature-picker 對話框與「預挑 lua」模型。`Inject Discrete Bridge` 只塞 core(`utils`+`unity_dump` = inject DLL + pipe)+ `Load Discrete Bridge` AA。其餘 lua helper 由各「Send to CE Table / Create AA」動作**按需自帶**(`InjectTableFile` + 生成的 AA 用 `findTableFile` 自我載入,見新 `AaLuaLoader`)。`unity_dissect`/`unity_scene`/`unity_addrfind` 從 bridge 移除(純 UI,走 pipe;檔案留作 Mode-A 獨立腳本)。
