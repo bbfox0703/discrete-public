@@ -21,6 +21,23 @@ namespace {
 
 const char* SafeStr(const char* s) { return s ? s : ""; }
 
+// Generic SEH guard for a one-arg IL2CPP runtime accessor. The field/method
+// iterators (SehNextField/SehNextMethod) catch AVs while ADVANCING the
+// iterator, but the per-item accessors (field_get_name/offset/flags/type,
+// method_get_name/token, class_get_name/namespace) were called RAW — and on
+// a garbage class pointer (one that fooled ProbeKlassValid) those dereference
+// bad memory and AV, crashing the GAME from our pipe worker thread. Route
+// them through this so a bad read returns a default (nullptr / 0) instead.
+#pragma warning(push)
+#pragma warning(disable: 4509)  // SEH in a function (no C++ unwinding here)
+template <typename Fn, typename Arg>
+auto SehCall(Fn fn, Arg a) -> decltype(fn(a)) {
+    using R = decltype(fn(a));
+    __try { return fn(a); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return R{}; }
+}
+#pragma warning(pop)
+
 #pragma warning(push)
 #pragma warning(disable: 4509)
 Il2CppClass* SehDeclaring(fn_class_get_declaring fn, Il2CppClass* k) {
@@ -41,7 +58,7 @@ bool DescribeClass(Il2CppClass* klass, ClassEntry& out) {
     out.klass = klass;
     if (r.class_get_name == nullptr) return true;
 
-    std::string leaf = SafeStr(r.class_get_name(klass));
+    std::string leaf = SafeStr(SehCall(r.class_get_name, klass));
 
     // Walk declaring chain (depth cap 16 — same as walkInstance).
     Il2CppClass* cur = klass;
@@ -50,14 +67,14 @@ bool DescribeClass(Il2CppClass* klass, ClassEntry& out) {
         for (int i = 0; i < 16; ++i) {
             Il2CppClass* d = SehDeclaring(r.class_get_declaring, cur);
             if (d == nullptr) break;
-            std::string n = (r.class_get_name != nullptr) ? SafeStr(r.class_get_name(d)) : std::string{};
+            std::string n = (r.class_get_name != nullptr) ? SafeStr(SehCall(r.class_get_name, d)) : std::string{};
             if (!n.empty()) leaf = n + "/" + leaf;
             outer = d;
             cur = d;
         }
     }
     out.name = std::move(leaf);
-    if (r.class_get_namespace != nullptr) out.ns = SafeStr(r.class_get_namespace(outer));
+    if (r.class_get_namespace != nullptr) out.ns = SafeStr(SehCall(r.class_get_namespace, outer));
     return true;
 }
 
@@ -297,10 +314,10 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
             FieldInfo* f = SehNextField(r.class_get_fields, klass, &iter);
             if (f == nullptr) break;
             FieldEntry fe;
-            if (r.field_get_name != nullptr)   fe.name   = SafeStr(r.field_get_name(f));
-            if (r.field_get_offset != nullptr) fe.offset = r.field_get_offset(f);
-            if (r.field_get_flags != nullptr)  fe.flags  = static_cast<std::uint32_t>(r.field_get_flags(f));
-            const Il2CppType* ft = (r.field_get_type != nullptr) ? r.field_get_type(f) : nullptr;
+            if (r.field_get_name != nullptr)   fe.name   = SafeStr(SehCall(r.field_get_name, f));
+            if (r.field_get_offset != nullptr) fe.offset = SehCall(r.field_get_offset, f);
+            if (r.field_get_flags != nullptr)  fe.flags  = static_cast<std::uint32_t>(SehCall(r.field_get_flags, f));
+            const Il2CppType* ft = (r.field_get_type != nullptr) ? SehCall(r.field_get_type, f) : nullptr;
             if (ft != nullptr) fe.typeName = TypeName(ft);
             // Field-class introspection — IL2CPP doesn't export `class_is_enum`,
             // so we detect enums by checking the field class's parent (every
@@ -326,10 +343,10 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
                                         FieldInfo* uf = SehNextField(r.class_get_fields, fc, &fit);
                                         if (uf == nullptr) break;
                                         const char* un = (r.field_get_name != nullptr)
-                                            ? r.field_get_name(uf) : nullptr;
+                                            ? SehCall(r.field_get_name, uf) : nullptr;
                                         if (un != nullptr && std::strcmp(un, "value__") == 0) {
                                             const Il2CppType* ut = (r.field_get_type != nullptr)
-                                                ? r.field_get_type(uf) : nullptr;
+                                                ? SehCall(r.field_get_type, uf) : nullptr;
                                             if (ut != nullptr) fe.underlyingTypeName = TypeName(ut);
                                             break;
                                         }
@@ -350,8 +367,8 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
             const MethodInfo* m = SehNextMethod(r.class_get_methods, klass, &iter);
             if (m == nullptr) break;
             MethodEntry me;
-            if (r.method_get_name != nullptr)    me.name = SafeStr(r.method_get_name(m));
-            if (r.method_get_token != nullptr)   me.token = r.method_get_token(m);
+            if (r.method_get_name != nullptr)    me.name = SafeStr(SehCall(r.method_get_name, m));
+            if (r.method_get_token != nullptr)   me.token = SehCall(r.method_get_token, m);
             if (r.method_get_flags != nullptr) {
                 std::uint32_t iflags = 0;
                 me.flags = r.method_get_flags(m, &iflags);

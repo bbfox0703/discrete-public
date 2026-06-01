@@ -4488,10 +4488,6 @@ void RegisterCoreHandlers() {
                 // wasn't detected (older runtimes without class_enum_basetype).
                 const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
                     ? f.underlyingTypeName : f.typeName;
-                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-                    "walkInstance:   decode '" + f.name + "' off=" +
-                    formatHex(static_cast<std::uintptr_t>(f.offset)) +
-                    " type=" + decodeType + " addr=" + formatHex(fieldAddr));
                 json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
@@ -7450,6 +7446,21 @@ void RegisterCoreHandlers() {
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "walkInstance: chain depth=" + std::to_string(chain.size()));
 
+        // A real managed class's inheritance chain terminates at System.Object
+        // within a handful of levels (true even for generic instantiations).
+        // Hitting the 16-level cap means class_get_parent kept returning
+        // non-null GARBAGE — i.e. the header didn't point to a real class (a
+        // value-type field misread as a reference, or a stale pointer). Don't
+        // ReadClassInfo those garbage class pointers: even with the per-field
+        // SEH guards that's reading nonsense, and it's never useful. Bail.
+        if (chain.size() >= 16) {
+            Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                "walkInstance: runaway inheritance chain (>=16) — not a managed object, bailing");
+            return json{{"error",
+                "address does not resolve to a managed object "
+                "(runaway class chain — likely a value-type field or stale pointer)"}};
+        }
+
         json fields = json::array();
         std::string selfNs, selfName;
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
@@ -7480,10 +7491,6 @@ void RegisterCoreHandlers() {
                     entry["underlying_type"] = f.underlyingTypeName;
                 const std::string& decodeType = (f.isEnum && !f.underlyingTypeName.empty())
                     ? f.underlyingTypeName : f.typeName;
-                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-                    "walkInstance:   decode '" + f.name + "' off=" +
-                    formatHex(static_cast<std::uintptr_t>(f.offset)) +
-                    " type=" + decodeType + " addr=" + formatHex(fieldAddr));
                 json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
