@@ -1566,10 +1566,50 @@ void RegisterCoreHandlers() {
             out["string"] = std::move(utf8);
             out["string_length"] = len;
         } else {
-            // Reference / unknown value type: report the raw pointer-sized word.
-            // Caller can resolvePointer or walkInstance again on it.
-            std::uintptr_t v = 0;
-            if (rd(addr, &v, sizeof(std::uintptr_t))) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
+            // Phase 31-1 (Phase A) — known Unity math value-structs are plain
+            // N-float / N-byte blobs stored inline (the field storage IS the
+            // value; no header, no deref). Emit their members as a `fields`
+            // sub-list so snapshot / SPC / pivot can see x/y/z instead of a
+            // meaningless pointer word. Pure offset reads → zero CTD risk.
+            // Custom structs (int/double members) are handled generically in
+            // walkInstance (Phase 31-2 / Phase B); they fall through here.
+            struct VsMember { const char* name; const char* type; int offset; int width; };
+            static const std::unordered_map<std::string, std::vector<VsMember>> kVs = {
+                {"UnityEngine.Vector2",    {{"x","System.Single",0,4},{"y","System.Single",4,4}}},
+                {"UnityEngine.Vector3",    {{"x","System.Single",0,4},{"y","System.Single",4,4},{"z","System.Single",8,4}}},
+                {"UnityEngine.Vector4",    {{"x","System.Single",0,4},{"y","System.Single",4,4},{"z","System.Single",8,4},{"w","System.Single",12,4}}},
+                {"UnityEngine.Quaternion", {{"x","System.Single",0,4},{"y","System.Single",4,4},{"z","System.Single",8,4},{"w","System.Single",12,4}}},
+                {"UnityEngine.Color",      {{"r","System.Single",0,4},{"g","System.Single",4,4},{"b","System.Single",8,4},{"a","System.Single",12,4}}},
+                {"UnityEngine.Color32",    {{"r","System.Byte",0,1},{"g","System.Byte",1,1},{"b","System.Byte",2,1},{"a","System.Byte",3,1}}},
+                {"UnityEngine.Vector2Int", {{"x","System.Int32",0,40},{"y","System.Int32",4,40}}},
+                {"UnityEngine.Vector3Int", {{"x","System.Int32",0,40},{"y","System.Int32",4,40},{"z","System.Int32",8,40}}},
+                {"UnityEngine.Rect",       {{"x","System.Single",0,4},{"y","System.Single",4,4},{"width","System.Single",8,4},{"height","System.Single",12,4}}},
+            };
+            auto vit = kVs.find(typeName);
+            if (vit != kVs.end()) {
+                json members = json::array();
+                for (const auto& m : vit->second) {
+                    json mf = { {"name", m.name}, {"type", m.type}, {"offset", m.offset} };
+                    std::uintptr_t maddr = addr + static_cast<std::uintptr_t>(m.offset);
+                    if (m.width == 4) {            // float
+                        float v = 0.f;
+                        if (rd(maddr, &v, 4)) mf["value"] = v; else mf["error"] = "unreadable";
+                    } else if (m.width == 40) {    // int32 (Vector2Int/Vector3Int)
+                        std::int32_t v = 0;
+                        if (rd(maddr, &v, 4)) mf["value"] = v; else mf["error"] = "unreadable";
+                    } else {                        // byte (Color32)
+                        std::uint8_t v = 0;
+                        if (rd(maddr, &v, 1)) mf["value"] = static_cast<unsigned>(v); else mf["error"] = "unreadable";
+                    }
+                    members.push_back(std::move(mf));
+                }
+                out["fields"] = std::move(members);
+            } else {
+                // Reference / unknown value type: report the raw pointer-sized word.
+                // Caller can resolvePointer or walkInstance again on it.
+                std::uintptr_t v = 0;
+                if (rd(addr, &v, sizeof(std::uintptr_t))) out["ptr"] = formatHex(v); else out["error"] = "unreadable";
+            }
         }
         (void)bytesToHex;  // reserved for future raw-bytes inclusion
         return out;

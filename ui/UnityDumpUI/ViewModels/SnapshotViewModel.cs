@@ -2696,6 +2696,8 @@ public sealed partial class SnapshotEnvelope : ObservableObject
                     };
                     ExpandArrayElements(map, c.Assembly, fqn, c.Name, c.Namespace,
                                         instanceAddress: string.Empty, isStatic: true, f, synthetic);
+                    ExpandStructMembers(map, c.Assembly, fqn, c.Name, c.Namespace,
+                                        instanceAddress: string.Empty, isStatic: true, f, synthetic);
                 }
             }
 
@@ -2723,6 +2725,8 @@ public sealed partial class SnapshotEnvelope : ObservableObject
                         };
                         ExpandArrayElements(map, c.Assembly, fqn, c.Name, c.Namespace,
                                             instanceAddress: inst.Address, isStatic: false, f, synthetic);
+                        ExpandStructMembers(map, c.Assembly, fqn, c.Name, c.Namespace,
+                                            instanceAddress: inst.Address, isStatic: false, f, synthetic);
                     }
                 }
             }
@@ -2749,15 +2753,25 @@ public sealed partial class SnapshotEnvelope : ObservableObject
         foreach (var c in classes)
         {
             if (c.Statics is { Count: > 0 } statics)
-                foreach (var f in statics) n += 1 + ArrayElemCount(f);
+                foreach (var f in statics) n += 1 + ArrayElemCount(f) + StructMemberCount(f);
             if (c.Instances is { Count: > 0 } insts)
                 foreach (var inst in insts)
-                    foreach (var f in inst.Fields) n += 1 + ArrayElemCount(f);
+                    foreach (var f in inst.Fields) n += 1 + ArrayElemCount(f) + StructMemberCount(f);
         }
         return n;
 
         static int ArrayElemCount(SnapshotFieldEntry f)
             => f.ArrayElements is { Count: > 0 } arr ? arr.Elements.Count : 0;
+
+        // Phase 31 — count inline value-type struct member pseudo-rows
+        // (recursively for nested structs), matching ExpandStructMembers.
+        static int StructMemberCount(SnapshotFieldEntry f)
+        {
+            if (f.Fields is not { Count: > 0 } members) return 0;
+            int total = 0;
+            foreach (var m in members) total += 1 + StructMemberCount(m);
+            return total;
+        }
     }
 
     /// <summary>Phase 29e-1b — fan out captured array elements as
@@ -2797,6 +2811,59 @@ public sealed partial class SnapshotEnvelope : ObservableObject
                 ValueDisplay   = FormatArrayElement(el),
                 IsSynthetic    = synthetic,
             };
+        }
+    }
+
+    /// <summary>Phase 31 — fan out captured inline value-type struct members
+    /// (Vector3 x/y/z, custom struct fields) as pseudo-rows keyed by
+    /// <c>"{fieldName}.{memberName}"</c>, mirroring <see cref="ExpandArrayElements"/>.
+    /// FieldOffset is the ABSOLUTE field offset (parent + member struct-relative
+    /// offset) so a downstream address mapping resolves the right component.
+    /// The parent summary row (e.g. <c>_position = (1, 2, 3)</c>) is emitted
+    /// separately by the caller, so SPC/diff get both "did the vector change"
+    /// and "which axis changed". Recurses one level for nested structs.</summary>
+    private static void ExpandStructMembers(
+        Dictionary<string, SnapshotFieldValue> map,
+        string assembly, string fqn, string className, string ns,
+        string instanceAddress, bool isStatic,
+        SnapshotFieldEntry f, bool synthetic)
+    {
+        if (f.Fields is not { Count: > 0 }) return;
+        string instanceKey = isStatic ? "static" : instanceAddress;
+        EmitStructMembers(map, assembly, fqn, className, ns, instanceAddress, instanceKey,
+                          isStatic, f.Name, f.Offset, f.Fields, synthetic, depth: 0);
+    }
+
+    private static void EmitStructMembers(
+        Dictionary<string, SnapshotFieldValue> map,
+        string assembly, string fqn, string className, string ns,
+        string instanceAddress, string instanceKey, bool isStatic,
+        string parentName, ulong parentOffset,
+        List<SnapshotFieldEntry> members, bool synthetic, int depth)
+    {
+        if (depth > 3) return;   // bound pathological nested-struct chains
+        foreach (var m in members)
+        {
+            string memberName   = $"{parentName}.{m.Name}";
+            ulong  memberOffset = parentOffset + m.Offset;
+            string key = $"{assembly}|{fqn}|{instanceKey}|{memberOffset}|{memberName}";
+            map[key] = new SnapshotFieldValue
+            {
+                Assembly        = assembly,
+                ClassFqn        = fqn,
+                ClassName       = className,
+                Namespace       = ns,
+                InstanceAddress = isStatic ? string.Empty : instanceAddress,
+                IsStatic        = isStatic,
+                FieldName       = memberName,
+                FieldType       = m.Type,
+                FieldOffset     = memberOffset,
+                ValueDisplay    = FormatFieldValue(m),
+                IsSynthetic     = synthetic,
+            };
+            if (m.Fields is { Count: > 0 } nested)
+                EmitStructMembers(map, assembly, fqn, className, ns, instanceAddress, instanceKey,
+                                  isStatic, memberName, memberOffset, nested, synthetic, depth + 1);
         }
     }
 
@@ -2896,6 +2963,12 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             return $"\"{f.StringValue}\"";
         if (!string.IsNullOrEmpty(f.Ptr))
             return $"ptr={f.Ptr}";
+        // Phase 31 — inline value-type struct (Vector3 etc.): render its
+        // captured members as a tuple "(x, y, z)" so SPC / pivot / diff get a
+        // meaningful comparable value instead of "(no value)". Checked before
+        // the array branches (a struct field has Fields, never ArrayElements).
+        if (f.Fields is { Count: > 0 } members)
+            return "(" + string.Join(", ", members.Select(FormatFieldValue)) + ")";
         if (!string.IsNullOrEmpty(f.ArrayError))
         {
             string len = f.ArrayErrorLength.HasValue

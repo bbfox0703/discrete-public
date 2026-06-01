@@ -1104,6 +1104,17 @@ public sealed class SnapshotFieldEntry
     [JsonPropertyName("string_error")]      public string?      StringError      { get; set; }
     [JsonPropertyName("error")]             public string?      Error            { get; set; }
     [JsonPropertyName("arrayElements")]     public SnapshotArrayElements? ArrayElements    { get; set; }
+
+    /// <summary>Phase 31 — inline value-type struct members (Vector3 x/y/z,
+    /// Quaternion x/y/z/w, custom struct fields), one level deep, captured at
+    /// snapshot time by the DLL's value-struct decode. Each member is itself a
+    /// <see cref="SnapshotFieldEntry"/> (name/type/offset + a scalar value).
+    /// Null on primitives, references, arrays, and pre-Phase-31 captures.
+    /// Mirrors <see cref="SnapshotArrayElement.Fields"/>; rides through the
+    /// Phase 30a deduped <c>V</c> path + <c>payload_gzip</c> as a value key, so
+    /// old <c>.db</c> files stay compatible (no members ⇒ shown as before).</summary>
+    [JsonPropertyName("fields")]            public List<SnapshotFieldEntry>? Fields { get; set; }
+
     [JsonPropertyName("arrayError")]        public string?      ArrayError       { get; set; }
     // ulong? not long?: C++ writes std::uintptr_t which on x64 is uint64.
     // False-positive instances can have garbage values > Int64.MaxValue
