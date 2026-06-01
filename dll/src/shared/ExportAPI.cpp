@@ -4563,11 +4563,38 @@ void RegisterCoreHandlers() {
                 "(runaway class chain — likely a value-type field or stale pointer)"}};
         }
 
+        // Phase 31-6 — process-lifetime ClassInfo cache for the walk path.
+        // Inspector / Copy-CE-XML drilldown re-walks the same classes over and
+        // over (a depth-5 export touches recurring types — many Vector3s,
+        // shared component types). Without a cache, each node re-ran
+        // ReadClassInfo = mono_class_get_fields + get_methods iteration (+ a
+        // possible one-shot mono_class_vtable force-setup) from the pipe worker
+        // thread — wasteful and steady BDWGC pressure that can wedge/crash the
+        // game (Mono). Field/method layout is stable for the session, so
+        // memoize by MonoClass*; the dangerous vtable force-setup now happens at
+        // most once per class ever. Mutex: the interactive (browse) and bulk
+        // (snapshot) pipes can call concurrently. Mirrors the snapshot path's
+        // globalClassInfo cache.
+        static std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> s_walkClassCache;
+        static std::mutex s_walkClassCacheMtx;
+
         // Walk base-class first so derived fields appear last (typical layout).
         json fields = json::array();
         std::string selfNs, selfName;
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-            auto res = Mono::ReadClassInfo(*it);
+            Mono::ClassInfoResult res;
+            {
+                std::lock_guard<std::mutex> lk(s_walkClassCacheMtx);
+                auto cit = s_walkClassCache.find(*it);
+                if (cit != s_walkClassCache.end()) res = cit->second;
+            }
+            if (!res.ok) {
+                res = Mono::ReadClassInfo(*it);
+                if (res.ok) {
+                    std::lock_guard<std::mutex> lk(s_walkClassCacheMtx);
+                    s_walkClassCache.emplace(*it, res);
+                }
+            }
             if (!res.ok) continue;
             const bool isSelf = (*it == k);
             if (isSelf) { selfNs = res.info.self.ns; selfName = res.info.self.name; }
@@ -7577,17 +7604,37 @@ void RegisterCoreHandlers() {
                 "(runaway class chain — likely a value-type field or stale pointer)"}};
         }
 
+        // Phase 31-6 — process-lifetime ClassInfo cache for the walk path
+        // (see the Mono handler for the rationale: avoids re-running
+        // ReadClassInfo's field/method enumeration for recurring classes during
+        // deep drilldown). Mutex for concurrent interactive/bulk pipes.
+        static std::unordered_map<IL2CPP::Il2CppClass*, IL2CPP::ClassInfoResult> s_walkClassCache;
+        static std::mutex s_walkClassCacheMtx;
+
         json fields = json::array();
         std::string selfNs, selfName;
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-            Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-                "walkInstance:  ReadClassInfo class=" +
-                formatHex(reinterpret_cast<std::uintptr_t>(*it)));
-            auto res = IL2CPP::ReadClassInfo(*it);
-            Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-                "walkInstance:  ReadClassInfo done ok=" + std::to_string(res.ok ? 1 : 0) +
-                " fields=" + std::to_string(res.ok ? res.info.fields.size() : std::size_t(0)) +
-                " name=" + (res.ok ? res.info.self.name : std::string("?")));
+            IL2CPP::ClassInfoResult res;
+            bool cached = false;
+            {
+                std::lock_guard<std::mutex> lk(s_walkClassCacheMtx);
+                auto cit = s_walkClassCache.find(*it);
+                if (cit != s_walkClassCache.end()) { res = cit->second; cached = true; }
+            }
+            if (!cached) {
+                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                    "walkInstance:  ReadClassInfo class=" +
+                    formatHex(reinterpret_cast<std::uintptr_t>(*it)));
+                res = IL2CPP::ReadClassInfo(*it);
+                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                    "walkInstance:  ReadClassInfo done ok=" + std::to_string(res.ok ? 1 : 0) +
+                    " fields=" + std::to_string(res.ok ? res.info.fields.size() : std::size_t(0)) +
+                    " name=" + (res.ok ? res.info.self.name : std::string("?")));
+                if (res.ok) {
+                    std::lock_guard<std::mutex> lk(s_walkClassCacheMtx);
+                    s_walkClassCache.emplace(*it, res);
+                }
+            }
             if (!res.ok) continue;
             const bool isSelf = (*it == k);
             if (isSelf) { selfNs = res.info.self.ns; selfName = res.info.self.name; }
