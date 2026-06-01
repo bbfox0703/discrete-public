@@ -633,6 +633,7 @@ public class PivotViewModelTests : IDisposable
             AvgInstances = 100.75, StdDevInstances = 0.8, Cv = 0.008,
             FieldCount = 13, PrimitiveFieldRatio = 0.8, StringFieldRatio = 0.1,
             ArrayFieldRatio = 0.05, NullFieldRatio = 0.02, IsSynthetic = false,
+            Fields = System.Array.Empty<ClassFieldInfo>(),
         };
 
         pivot.UseShortlistRow(row);

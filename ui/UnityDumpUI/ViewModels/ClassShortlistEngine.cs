@@ -50,6 +50,23 @@ public sealed class ClassShortlistQuery
     public string? AssemblyFilter { get; init; }
 }
 
+/// <summary>One field of a shortlisted class — name + type + kind flags.
+/// Retained by Stage 0 (29i-1) so the class-structure browser can show a
+/// class's full field shape without a per-class FQN round-trip + hydrate.
+/// First-seen type wins (instances of one class share a layout; chunked
+/// entries just re-confirm it).</summary>
+public sealed class ClassFieldInfo
+{
+    public required string Name    { get; init; }
+    public required string Type    { get; init; }
+    public required bool   IsEnum  { get; init; }
+    public required bool   IsArray { get; init; }
+
+    // Display helpers (AOT-safe; no converters).
+    public string TypeDisplay  => Type;
+    public string FlagsDisplay => IsArray ? "array" : (IsEnum ? "enum" : string.Empty);
+}
+
 public sealed class ClassShortlistRow
 {
     public required string Assembly { get; init; }
@@ -75,8 +92,27 @@ public sealed class ClassShortlistRow
 
     public required bool IsSynthetic { get; init; }
 
+    /// <summary>Full field shape (first-seen order). Drives the 29i-1
+    /// class-structure browser's preview column + detail panel.</summary>
+    public required IReadOnlyList<ClassFieldInfo> Fields { get; init; }
+
     // ── Display helpers (AOT-safe; no converters) ──────────────────────
     public string PresenceDisplay  => $"{Presence}/{SnapCount}";
+
+    /// <summary>First 10 field names, comma-joined, with a "+N more" tail.
+    /// Bound by the shortlist grid's "Fields (preview)" column; full set is
+    /// in <see cref="Fields"/> (detail panel + ToolTip).</summary>
+    public string FieldPreviewDisplay
+    {
+        get
+        {
+            if (Fields.Count == 0) return string.Empty;
+            const int kPreview = 10;
+            string s = string.Join(", ", Fields.Take(kPreview).Select(f => f.Name));
+            if (Fields.Count > kPreview) s += $"  +{Fields.Count - kPreview} more";
+            return s;
+        }
+    }
     public string InstancesDisplay => $"{AvgInstances:0} ± {StdDevInstances:0.0}";
     public string CvDisplay        => Cv.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
     public string PrimitivePctDisplay => Pct(PrimitiveFieldRatio);
@@ -106,7 +142,10 @@ public static class ClassShortlistEngine
         public required string ClassFqn;
         public required bool   IsSynthetic;
         public int[]               PerSnap     = Array.Empty<int>();
-        public HashSet<string>     FieldNames  = new(StringComparer.Ordinal);
+        // First-seen field shape, ordered. Replaces the old name-only
+        // HashSet (29i-1) so the structure browser can render type + kind.
+        public Dictionary<string, ClassFieldInfo> Fields = new(StringComparer.Ordinal);
+        public List<string>        FieldOrder  = new();
         public long TotalFieldObs, NullObs, PrimitiveObs, StringObs, ArrayObs;
     }
 
@@ -153,7 +192,17 @@ public static class ClassShortlistEngine
                 {
                     foreach (var f in inst.Fields)
                     {
-                        acc.FieldNames.Add(f.Name);
+                        if (!acc.Fields.ContainsKey(f.Name))
+                        {
+                            acc.Fields[f.Name] = new ClassFieldInfo
+                            {
+                                Name    = f.Name,
+                                Type    = f.Type,
+                                IsEnum  = f.IsEnum == true,
+                                IsArray = IsArray(f),
+                            };
+                            acc.FieldOrder.Add(f.Name);
+                        }
                         acc.TotalFieldObs++;
                         if (IsNullish(f)) acc.NullObs++;
 
@@ -188,7 +237,8 @@ public static class ClassShortlistEngine
                 AvgInstances        = avg,
                 StdDevInstances     = stddev,
                 Cv                  = cv,
-                FieldCount          = acc.FieldNames.Count,
+                FieldCount          = acc.Fields.Count,
+                Fields              = acc.FieldOrder.Select(n => acc.Fields[n]).ToList(),
                 PrimitiveFieldRatio = acc.PrimitiveObs / total,
                 StringFieldRatio    = acc.StringObs    / total,
                 ArrayFieldRatio     = acc.ArrayObs     / total,

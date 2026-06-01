@@ -93,6 +93,24 @@ public sealed partial class PivotViewModel : ObservableObject
 
     private List<ClassShortlistRow> _allShortlistRows = new();
 
+    /// <summary>Currently-selected shortlist row — drives the 29i-1
+    /// class-structure detail panel. Selecting a row repopulates
+    /// <see cref="ShortlistFields"/> so the user reads the class's full
+    /// field shape without switching <see cref="ClassFqn"/> + re-hydrating.</summary>
+    [ObservableProperty] private ClassShortlistRow? _selectedShortlistRow;
+
+    /// <summary>Full field list (name/type/kind) of
+    /// <see cref="SelectedShortlistRow"/> — bound by the structure-browser
+    /// detail grid. Empty when no row is selected.</summary>
+    public ObservableCollection<ClassFieldInfo> ShortlistFields { get; } = new();
+
+    partial void OnSelectedShortlistRowChanged(ClassShortlistRow? value)
+    {
+        ShortlistFields.Clear();
+        if (value is null) return;
+        foreach (var f in value.Fields) ShortlistFields.Add(f);
+    }
+
     /// <summary>Distinct classes pulled from the per-game DB metadata
     /// (no blob hydrate) — seeds the class / assembly autocomplete
     /// before any Analyze/Score/Run. Unioned with hydrated-snap classes
@@ -547,16 +565,28 @@ public sealed partial class PivotViewModel : ObservableObject
     /// menu.</summary>
     public void AddFieldToKeys(FieldScore field)
     {
-        if (field is null) return;
-        KeyFieldsText = AppendField(KeyFieldsText, field.FieldName);
-        StatusMessage = $"Added '{field.FieldName}' to key fields.";
+        if (field is not null) AddFieldNameToKeys(field.FieldName);
     }
 
     public void AddFieldToValues(FieldScore field)
     {
-        if (field is null) return;
-        ValueFieldsText = AppendField(ValueFieldsText, field.FieldName);
-        StatusMessage = $"Added '{field.FieldName}' to value fields.";
+        if (field is not null) AddFieldNameToValues(field.FieldName);
+    }
+
+    /// <summary>29i-1: add a field (by name — from the structure-browser
+    /// detail panel's context menu) to the Key fields list.</summary>
+    public void AddFieldNameToKeys(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return;
+        KeyFieldsText = AppendField(KeyFieldsText, name);
+        StatusMessage = $"Added '{name}' to key fields.";
+    }
+
+    public void AddFieldNameToValues(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return;
+        ValueFieldsText = AppendField(ValueFieldsText, name);
+        StatusMessage = $"Added '{name}' to value fields.";
     }
 
     private static string AppendField(string existing, string name)

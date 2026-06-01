@@ -297,4 +297,72 @@ public class ClassShortlistEngineTests
         Assert.True(iStable < iVolatile, "stable (CV 0) should rank above volatile");
         Assert.True(iVolatile < iPartial, "full-presence should rank above partial-presence");
     }
+
+    // ─── 29i-1: field-shape retention + preview ─────────────────────────
+
+    [Fact]
+    public void Run_RetainsFieldShape_NameTypeAndKindFlags()
+    {
+        var enumF = new SnapshotFieldEntry
+        {
+            Name = "_type", Type = "Mortal.Core.GameStatType", IsEnum = true,
+            Value = JsonDocument.Parse("3").RootElement.Clone(),
+        };
+        var s1 = MakeEnv(MakeClass("Game.Shape", "asm",
+            Inst("0x1",
+                IntF("_value", 5),
+                StrF("_name", "hi"),
+                ArrF("_arr", "System.Int32", 1, 2, 3),
+                enumF)));
+
+        var row = RowFor(ClassShortlistEngine.Run(
+            new ClassShortlistQuery { Snapshots = new[] { s1 } }), "Game.Shape");
+
+        Assert.Equal(4, row.Fields.Count);
+        Assert.Equal(row.FieldCount, row.Fields.Count);
+        // First-seen order preserved.
+        Assert.Equal(new[] { "_value", "_name", "_arr", "_type" },
+                     row.Fields.Select(f => f.Name).ToArray());
+
+        var arr = row.Fields.Single(f => f.Name == "_arr");
+        Assert.True(arr.IsArray);
+        Assert.Equal("array", arr.FlagsDisplay);
+
+        var en = row.Fields.Single(f => f.Name == "_type");
+        Assert.True(en.IsEnum);
+        Assert.False(en.IsArray);
+        Assert.Equal("enum", en.FlagsDisplay);
+
+        var val = row.Fields.Single(f => f.Name == "_value");
+        Assert.Equal("System.Int32", val.TypeDisplay);
+        Assert.Equal(string.Empty, val.FlagsDisplay);
+    }
+
+    [Fact]
+    public void FieldPreviewDisplay_TruncatesAtTenWithMoreTail()
+    {
+        // 13 fields → preview lists 10 names + "+3 more".
+        var fields = Enumerable.Range(0, 13).Select(i => IntF($"f{i:00}", i)).ToArray();
+        var s1 = MakeEnv(MakeClass("Game.Wide", "asm", Inst("0x1", fields)));
+        var row = RowFor(ClassShortlistEngine.Run(
+            new ClassShortlistQuery { Snapshots = new[] { s1 } }), "Game.Wide");
+
+        Assert.Equal(13, row.Fields.Count);
+        Assert.Contains("+3 more", row.FieldPreviewDisplay);
+        Assert.Contains("f00", row.FieldPreviewDisplay);
+        Assert.Contains("f09", row.FieldPreviewDisplay);
+        Assert.DoesNotContain("f10", row.FieldPreviewDisplay);   // 11th name dropped
+    }
+
+    [Fact]
+    public void FieldPreviewDisplay_NoTailWhenTenOrFewer()
+    {
+        var fields = Enumerable.Range(0, 3).Select(i => IntF($"f{i}", i)).ToArray();
+        var s1 = MakeEnv(MakeClass("Game.Narrow", "asm", Inst("0x1", fields)));
+        var row = RowFor(ClassShortlistEngine.Run(
+            new ClassShortlistQuery { Snapshots = new[] { s1 } }), "Game.Narrow");
+
+        Assert.DoesNotContain("more", row.FieldPreviewDisplay);
+        Assert.Equal("f0, f1, f2", row.FieldPreviewDisplay);
+    }
 }

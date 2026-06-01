@@ -598,6 +598,40 @@ public partial class MainWindow : Window
         vm.ClassPivot.AddFieldToValues(f);
     }
 
+    // ── Phase 29i-1 class-structure detail panel ────────────────────────
+
+    private UnityDumpUI.ViewModels.ClassFieldInfo? GetSelectedShortlistField()
+    {
+        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotShortlistFieldGrid");
+        return grid?.SelectedItem as UnityDumpUI.ViewModels.ClassFieldInfo;
+    }
+
+    /// <summary>Double-tap a field in the structure detail panel → add it
+    /// to Key fields (most common); right-click offers value.</summary>
+    private void OnPivotShortlistFieldDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not Avalonia.Controls.DataGrid grid) return;
+        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ClassFieldInfo f) return;
+        vm.ClassPivot.AddFieldNameToKeys(f.Name);
+    }
+
+    private void OnPivotShortlistFieldAddToKeysClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedShortlistField();
+        if (f is null) return;
+        vm.ClassPivot.AddFieldNameToKeys(f.Name);
+    }
+
+    private void OnPivotShortlistFieldAddToValuesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedShortlistField();
+        if (f is null) return;
+        vm.ClassPivot.AddFieldNameToValues(f.Name);
+    }
+
     // ── Phase 29e-8/9: Inspector tree-aware sort ────────────────────────
     //
     // Every flat grid uses the established CustomSortComparer mechanism

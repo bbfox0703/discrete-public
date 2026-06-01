@@ -2435,7 +2435,9 @@
                          reflection on SortMemberPath, which no-ops under
                          Native AOT). -->
                     <DataGrid Name="PivotShortlistGrid"
+                              DockPanel.Dock="Top"
                               ItemsSource="{Binding ClassPivot.ClassShortlist}"
+                              SelectedItem="{Binding ClassPivot.SelectedShortlistRow, Mode=TwoWay}"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               HeadersVisibility="Column"
@@ -2465,6 +2467,53 @@
                                             SortMemberPath="StringFieldRatio" CanUserSort="True"/>
                         <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65"
                                             SortMemberPath="ArrayFieldRatio" CanUserSort="True"/>
+                        <!-- 29i-1: field-shape preview (first 10 names, "+N more"
+                             on hover). Last column + Auto width so it can't
+                             squeeze the metric columns (no-star rule). -->
+                        <DataGridTemplateColumn Header="Fields (preview)" Width="Auto" MinWidth="300" CanUserSort="False">
+                          <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                              <TextBlock Text="{Binding FieldPreviewDisplay}"
+                                         VerticalAlignment="Center" Margin="4,0"
+                                         TextTrimming="CharacterEllipsis"
+                                         ToolTip.Tip="{Binding FieldPreviewDisplay}"/>
+                            </DataTemplate>
+                          </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                      </DataGrid.Columns>
+                    </DataGrid>
+                    <!-- 29i-1: structure detail panel — full field shape of
+                         the selected class, so the user reads it without
+                         switching ClassFqn + re-hydrating. Double-tap or
+                         right-click a field to add it as key/value. -->
+                    <TextBlock DockPanel.Dock="Top" Margin="0,6,0,2"
+                               FontWeight="SemiBold" FontSize="11"
+                               Text="Field structure of selected class — double-tap a field → Key, right-click → Value"
+                               Opacity="0.8"/>
+                    <DataGrid Name="PivotShortlistFieldGrid"
+                              ItemsSource="{Binding ClassPivot.ShortlistFields}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              MaxHeight="240"
+                              DoubleTapped="OnPivotShortlistFieldDoubleTapped">
+                      <DataGrid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Add to Key fields"
+                                    Click="OnPivotShortlistFieldAddToKeysClicked"/>
+                          <MenuItem Header="Add to Value fields"
+                                    Click="OnPivotShortlistFieldAddToValuesClicked"/>
+                        </ContextMenu>
+                      </DataGrid.ContextMenu>
+                      <DataGrid.Columns>
+                        <DataGridTextColumn Header="Field" Binding="{Binding Name}"
+                                            Width="Auto" MinWidth="200"/>
+                        <DataGridTextColumn Header="Type" Binding="{Binding TypeDisplay}"
+                                            Width="Auto" MinWidth="200"/>
+                        <DataGridTextColumn Header="Kind" Binding="{Binding FlagsDisplay}"
+                                            Width="80"/>
                       </DataGrid.Columns>
                     </DataGrid>
                   </DockPanel>
