@@ -123,29 +123,36 @@ new member list). No class-layout resolution needed — pure offset reads
 via `Memory::SafeReadBytes`. This covers the vec3/vec4 headline case with
 near-zero CTD risk.
 
-### 3.2 Phase B — generic value-type recursion  ⚠ DEFERRED (open offset question)
+### 3.2 Phase B — generic value-type recursion  ✅ offset RESOLVED (live-smoke 2026-06-01)
 
-> **Status: deferred pending a single live build.** Phase A ships now; Phase B
-> is blocked on one offset-convention question that can only be resolved by
-> running on a real game (cannot be unit-tested, cannot be reasoned to
-> certainty from the source alone):
+> **The offset question is settled.** Live-smoke on Core Keeper (IL2CPP x64)
+> proved the convention via hex (see STATUS.md "Phase 31 live-smoke"):
+> `PlayerController.srOffSetPos` (Vector3 @ field-offset 0xA34) is truly
+> `(0,0,0)` in memory, but the existing live Inspector drill displayed
+> `(0.6875,-0.0585,0)` — it read from `structBase + 0x10`, i.e. it used
+> `il2cpp_field_get_offset(Vector3.x) = 0x10` (header-inclusive) without
+> stripping the header on an inline (header-less) struct.
 >
-> **The question**: Mono `mono_field_get_offset` / IL2CPP field offsets for a
-> value-type's *instance* fields are **header-inclusive** (measured from the
-> boxed object start, after the 2-pointer `MonoObject`/`Il2CppObject` header).
-> But an **inline** struct field has *no* header — its storage IS the value.
-> So the correct member read address is either:
-> - `fieldAddr + member.offset`            (if `ReadClassInfo` already strips the header for value types), **or**
-> - `fieldAddr + member.offset - 2*ptrSize` (the standard unbox adjustment).
+> **Locked formula**: inline value-type member read =
+> **`fieldAddr + member.offset − 2*ptrSize`** (subtract the
+> `Il2CppObject`/`MonoObject` header). Scalars are unaffected (their parent
+> field offset already lands correctly because `instanceBase` IS the object
+> base). Phase A is correct as shipped (it hardcodes struct-relative 0/4/8
+> offsets, never touching `il2cpp_field_get_offset`), so it is in fact MORE
+> correct than the current live drill.
 >
-> Shipping the wrong one yields silently-wrong x/y/z for custom structs —
-> worse than the current ptr-word. **Resolution**: capture one custom struct
-> on a real game, compare a member read against CE byte-for-byte, lock the
-> formula, then implement. The named-struct Phase A has no such risk (its
-> offsets are hardcoded struct-relative), so it covers Vector3/4/Quaternion/
-> Color/Rect/Vector2-3Int — including the character-coordinate case — today.
+> **Two real bugs this surfaced in the EXISTING live Inspector ValueStruct
+> drill** (separate from the snapshot path; both need fixing):
+> - **+0x10 header double-count** — the `WalkedFieldKind.ValueStruct` →
+>   walkInstance-by-name path reads members at `structBase + headerInclusiveOffset`.
+>   Fix: subtract `2*ptrSize` for value-type member addresses (or have the
+>   struct walk emit struct-relative offsets).
+> - **Nested-type name resolution** — `CharacterData.NonSerialized` (a nested
+>   type) fails `class not found` because by-name lookup uses the `.` form;
+>   nested types need the `/` (or `+`) separator. CE resolves it fine. This
+>   also blocks Phase B for nested structs.
 >
-> **Implementation sketch once the formula is locked** (5 sites):
+> **Implementation sketch (formula now locked — `member.offset − 2*ptrSize`)**, 5 sites:
 
 For a field with `is_value_type && !is_enum && !primitive && !namedStruct`:
 - resolve the struct's field layout via the existing class-info path
@@ -268,17 +275,19 @@ story:
 | **31-1** | DLL Phase A (named structs) + protocol `Fields` + FormatFieldValue tuple | ✅ **SHIPPED** (dev) | DLL **needs build + live-smoke** (vec3 x/y/z vs CE); UI unit-tested |
 | **31-3** | SPC/diff `ExpandStructMembers` fan-out + summary + count parity | ✅ **SHIPPED** (dev) | UI unit tests green |
 | **31-4** | Pivot/KeyDiscovery per-component (dotted paths) + pickers | ✅ **SHIPPED** (dev) | UI unit tests green |
-| **31-2** | DLL Phase B (generic value-type recursion) | ⚠ **DEFERRED** — open offset question (§3.2) | needs one live build to lock `member.offset` vs `-2*ptrSize` |
-| **31-5** | Value Search reverse-lookup names the component | ⚠ **DEFERRED** — DLL address-finder change | single-component float scan already works; naming is polish |
+| **31-2** | DLL Phase B (generic value-type recursion) | 🔓 **UNBLOCKED** — offset formula locked (§3.2), pending DLL build | `member.offset − 2*ptrSize` + nested-type fix |
+| **31-5** | Value Search reverse-lookup names the component | ⚠ DEFERRED — DLL address-finder, rides on 31-2 | single-component float scan already works |
+| **31-6** | Fix EXISTING live Inspector ValueStruct drill | 🐞 **NEW** (found in 31 live-smoke) | (a) +0x10 header double-count; (b) nested-type name |
 
 **Shipped 2026-06-01**: 31-1 (Phase A) + 31-3 + 31-4 — covers snapshot / SPC /
-diff / pivot for all named Unity math structs (incl. character coordinates).
-**Deferred**: 31-2 is blocked on the §3.2 inline-value-type offset convention
-(can only be settled by a real-game read vs CE — shipping the wrong formula
-gives silently-wrong members, worse than the ptr word). 31-5's practical path
-(scan one component float) already works today; naming the component in the
-reverse lookup is a DLL address-finder change that rides on 31-2's resolution.
-Both deferred waves wait for a live build session.
+diff / pivot for all named Unity math structs (incl. character coordinates),
+and is MORE correct than the current live drill.
+**Unblocked**: 31-2's offset formula is now locked (`member.offset − 2*ptrSize`,
+proven by live-smoke); still needs a DLL build + the nested-type fix.
+**New 31-6**: the live-smoke exposed two pre-existing bugs in the live
+Inspector's ValueStruct expansion — (a) +0x10 header double-count (shows the
+wrong/shifted members), (b) nested-type (`Outer.Inner`) name resolution
+failing — both independent of the snapshot path; fix alongside 31-2.
 
 ---
 
