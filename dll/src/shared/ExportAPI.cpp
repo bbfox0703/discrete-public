@@ -4515,6 +4515,14 @@ void RegisterCoreHandlers() {
         if (!Mono::ProbeKlassValid(k))
             return json{{"error", "address does not resolve to a valid managed class"}};
 
+        // Phase 31-6 diag — per-step flush trace (mirrors IL2CPP). Each Write
+        // flushes, so the LAST line in the walk log pinpoints the class/field
+        // being processed when a CTD hits. Localizes the deep Copy-CE-XML
+        // drilldown crash that leaves no WER dump (Mono BDWGC hang/AV).
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+            "walkInstance(Mono): addr=" + formatHex(addr) +
+            " klass=" + formatHex(reinterpret_cast<std::uintptr_t>(k)));
+
         const auto& r = Mono::GetResolver();
         Mono::MonoDomain* domain = Mono::GetRootDomain();
         if (domain == nullptr) return json{{"error", "no mono root domain"}};
@@ -4583,11 +4591,15 @@ void RegisterCoreHandlers() {
         std::string selfNs, selfName;
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
             Mono::ClassInfoResult res;
+            bool cacheHit = false;
             {
                 std::lock_guard<std::mutex> lk(s_walkClassCacheMtx);
                 auto cit = s_walkClassCache.find(*it);
-                if (cit != s_walkClassCache.end()) res = cit->second;
+                if (cit != s_walkClassCache.end()) { res = cit->second; cacheHit = true; }
             }
+            Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                "walkInstance: class=" + formatHex(reinterpret_cast<std::uintptr_t>(*it)) +
+                (cacheHit ? " (cache)" : " ReadClassInfo"));
             if (!res.ok) {
                 res = Mono::ReadClassInfo(*it);
                 if (res.ok) {
@@ -4603,6 +4615,11 @@ void RegisterCoreHandlers() {
                 // Struct-relative offset for value-type walks (Phase 31-6 a).
                 const long relOffset = static_cast<long>(f.offset) - structHeaderAdjust;
                 std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(relOffset);
+                // Phase 31-6 diag — per-field flush trace (last line = the
+                // field whose decodeField crashed, if it does).
+                Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+                    "walkInstance:   field name=" + f.name + " type=" + f.typeName +
+                    " addr=" + formatHex(fieldAddr) + (structHeaderAdjust != 0 ? " [vt]" : ""));
                 json entry = {
                     {"name",    f.name},
                     {"type",    f.typeName},
@@ -4629,6 +4646,8 @@ void RegisterCoreHandlers() {
             }
             if (fields.size() >= 4096) break;
         }
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+            "walkInstance: done count=" + std::to_string(fields.size()));
 
         // Sort by offset so the inspector grid displays fields in memory
         // order regardless of metadata declaration order or parent-chain
