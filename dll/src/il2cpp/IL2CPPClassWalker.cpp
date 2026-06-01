@@ -268,7 +268,25 @@ Il2CppClass* FindClass(const Il2CppImage* image,
     // Fast path: simple top-level type.
     std::size_t slash = name.find('/');
     if (slash == std::string::npos) {
-        return SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+        Il2CppClass* k = SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+        if (k != nullptr) return k;
+
+        // Phase 31-6 (b) — nested-type fallback (see Mono FindClass). A nested
+        // type's FQN arrives with a '.' separator and gets split as
+        // ns="Outer", name="Inner", but "Outer" is the enclosing type, not a
+        // namespace. Retry: last dot-segment of `ns` = outer type, then find
+        // nested `name`. Failure-only; one level deep.
+        if (!ns.empty() && r.class_get_nested_types != nullptr) {
+            std::size_t dot = ns.rfind('.');
+            std::string nsHead    = (dot == std::string::npos) ? std::string() : ns.substr(0, dot);
+            std::string outerName = (dot == std::string::npos) ? ns : ns.substr(dot + 1);
+            Il2CppClass* outer = SehClassFromName(r.class_from_name, image, nsHead.c_str(), outerName.c_str());
+            if (outer != nullptr) {
+                Il2CppClass* nested = FindNestedByName(outer, name);
+                if (nested != nullptr) return nested;
+            }
+        }
+        return nullptr;
     }
 
     // Nested form: walk Outer/Mid/Inner via class_get_nested_types.

@@ -179,7 +179,29 @@ MonoClass* FindClass(MonoImage* image, const std::string& ns, const std::string&
     // Fast path: simple top-level type.
     std::size_t slash = name.find('/');
     if (slash == std::string::npos) {
-        return SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+        MonoClass* k = SehClassFromName(r.class_from_name, image, ns.c_str(), name.c_str());
+        if (k != nullptr) return k;
+
+        // Phase 31-6 (b) — nested-type fallback. A nested type's FQN comes
+        // across with a '.' separator (e.g. "CharacterData.NonSerialized"),
+        // which callers split as ns="CharacterData", name="NonSerialized".
+        // But "CharacterData" is the ENCLOSING TYPE, not a namespace, so the
+        // direct lookup fails. Retry: treat the last dot-segment of `ns` as
+        // the outer type (its own namespace = the remaining head), resolve it,
+        // then find the nested `name` via mono_class_get_nested_types. Handles
+        // one level of nesting — the common case (CE expands these; we should
+        // too). Failure-only, so top-level lookups are unaffected.
+        if (!ns.empty() && r.class_get_nested_types != nullptr) {
+            std::size_t dot = ns.rfind('.');
+            std::string nsHead   = (dot == std::string::npos) ? std::string() : ns.substr(0, dot);
+            std::string outerName = (dot == std::string::npos) ? ns : ns.substr(dot + 1);
+            MonoClass* outer = SehClassFromName(r.class_from_name, image, nsHead.c_str(), outerName.c_str());
+            if (outer != nullptr) {
+                MonoClass* nested = FindNestedByName(outer, name);
+                if (nested != nullptr) return nested;
+            }
+        }
+        return nullptr;
     }
 
     // Nested form: walk Outer/Mid/Inner via mono_class_get_nested_types.

@@ -4508,6 +4508,21 @@ void RegisterCoreHandlers() {
         Mono::MonoDomain* domain = Mono::GetRootDomain();
         if (domain == nullptr) return json{{"error", "no mono root domain"}};
 
+        // Phase 31-6 (a) — value-type struct walk (the Inspector "expand"
+        // drill on an inline Vector3 / Quaternion / custom struct). The field
+        // storage IS the value, so there is NO object header at `addr`. But
+        // mono_field_get_offset reports a value type's instance-field offsets
+        // header-INCLUSIVE (boxed convention: Vector3.x = 0x10, not 0x00).
+        // Reading at addr+0x10 lands one header past the struct → the wrong
+        // (shifted) members — confirmed by live-smoke (Core Keeper: srOffSetPos
+        // shown as defaultSROffSetPos's bytes). Subtract the header for value
+        // types so member addresses + reported offsets are struct-relative.
+        // Reference-type walks: `addr` is the object base (incl header) and
+        // offsets are header-inclusive, so addr+offset is already correct → 0.
+        const long structHeaderAdjust =
+            (r.class_is_valuetype != nullptr && r.class_is_valuetype(k) != 0)
+                ? static_cast<long>(ManagedLayout::kObjectHeader) : 0;
+
         // Walk parent chain (cap at 16 levels — defends against pathological loops).
         std::vector<Mono::MonoClass*> chain;
         {
@@ -4530,11 +4545,13 @@ void RegisterCoreHandlers() {
             if (isSelf) { selfNs = res.info.self.ns; selfName = res.info.self.name; }
             for (const auto& f : res.info.fields) {
                 if (f.flags & 0x10u) continue;  // skip static
-                std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(f.offset);
+                // Struct-relative offset for value-type walks (Phase 31-6 a).
+                const long relOffset = static_cast<long>(f.offset) - structHeaderAdjust;
+                std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(relOffset);
                 json entry = {
                     {"name",    f.name},
                     {"type",    f.typeName},
-                    {"offset",  f.offset},
+                    {"offset",  relOffset},
                     {"from",    res.info.self.name},
                     {"address", formatHex(fieldAddr)},
                 };
@@ -7493,6 +7510,17 @@ void RegisterCoreHandlers() {
         IL2CPP::Il2CppDomain* domain = IL2CPP::GetDomain();
         if (domain == nullptr) return json{{"error", "no il2cpp domain"}};
 
+        // Phase 31-6 (a) — value-type struct walk: subtract the object header
+        // for inline structs (member offsets are header-inclusive, but there's
+        // no header at `addr`). Same convention as Mono (confirmed there via
+        // live-smoke); IL2CPP field offsets are likewise object-relative incl.
+        // the Il2CppObject header. Reference-type walks: no adjustment.
+        // (IL2CPP path still wants its own live-smoke to confirm — gated on
+        // class_is_valuetype so reference walks are never affected.)
+        const long structHeaderAdjust =
+            (r.class_is_valuetype != nullptr && r.class_is_valuetype(k) != 0)
+                ? static_cast<long>(ManagedLayout::kObjectHeader) : 0;
+
         std::vector<IL2CPP::Il2CppClass*> chain;
         {
             IL2CPP::ThreadAttachGuard guard(domain);
@@ -7537,11 +7565,13 @@ void RegisterCoreHandlers() {
             if (isSelf) { selfNs = res.info.self.ns; selfName = res.info.self.name; }
             for (const auto& f : res.info.fields) {
                 if (f.flags & 0x10u) continue;
-                std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(f.offset);
+                // Struct-relative offset for value-type walks (Phase 31-6 a).
+                const long relOffset = static_cast<long>(f.offset) - structHeaderAdjust;
+                std::uintptr_t fieldAddr = addr + static_cast<std::uintptr_t>(relOffset);
                 json entry = {
                     {"name",    f.name},
                     {"type",    f.typeName},
-                    {"offset",  f.offset},
+                    {"offset",  relOffset},
                     {"from",    res.info.self.name},
                     {"address", formatHex(fieldAddr)},
                 };
