@@ -139,9 +139,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _aobMaker = new AobMakerBridge(_logger);
         Inspector.AobMaker     = _aobMaker;
         // Inspector's instance / node "Copy CE XML" honours the same
-        // Export-options drilldown depth + array limit the user set on the
-        // Browser tab (instead of the old hardcoded depth 1).
-        Inspector.ExportDepthProvider = () => (Browser.DrilldownDepth, Browser.ArrayLimit);
+        // Export-options drilldown depth + array limit + description verbosity
+        // the user set on the Browser tab (instead of the old hardcoded depth 1).
+        Inspector.ExportDepthProvider = () => (Browser.DrilldownDepth, Browser.ArrayLimit, Browser.VerboseCeXmlDescription);
         AddressLookup.AobMaker = _aobMaker;  // Phase 22e Send-to-CE button
         _aobMaker.AvailabilityChanged += OnAobMakerAvailabilityChanged;
         // Opportunistic startup probe so the connection-bar status text
@@ -446,6 +446,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// already-visible experimental tab never has to be torn down / re-selected.
     /// </summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasMemoryWarning))]
     private bool _experimentalEnabled;
 
     [ObservableProperty]
@@ -558,8 +559,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(HasMemoryWarning))]
     private bool _isMemoryWarningCaution;
 
-    /// <summary>True when either RAM tier applies (drives the banner strip).</summary>
-    public bool HasMemoryWarning => IsMemoryWarningSevere || IsMemoryWarningCaution;
+    /// <summary>Drives the low-RAM banner strip. True only when a RAM tier
+    /// applies AND experimental features are enabled — the banner exclusively
+    /// warns about the memory-heavy experimental tabs (Snapshot / SPC Query /
+    /// Class Pivot), so it stays hidden while those tabs are hidden.</summary>
+    public bool HasMemoryWarning =>
+        (IsMemoryWarningSevere || IsMemoryWarningCaution) && ExperimentalEnabled;
 
     /// <summary>Total physical RAM thresholds for the low-RAM advisory.
     /// Compared against GC.GetGCMemoryInfo().TotalAvailableMemoryBytes — the

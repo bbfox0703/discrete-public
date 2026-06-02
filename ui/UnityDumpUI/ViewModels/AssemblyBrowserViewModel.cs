@@ -90,12 +90,18 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// instance address from <c>findInstances</c>; defaults to a placeholder
     /// the user can find/replace in CE.</summary>
     [ObservableProperty] private string _ceXmlBaseAddress = "INSTANCE_ADDRESS";
+    /// <summary>When set, CE XML descriptions carry the full
+    /// <c>"name : Type [= value]"</c> form. Off by default → bare field name
+    /// only, for a terser CE address list. Honoured by the class export here
+    /// and (via <c>ExportDepthProvider</c>) the Inspector's instance export.</summary>
+    [ObservableProperty] private bool _verboseCeXmlDescription = false;
 
     private ExportOptions CurrentExportOptions => new(
         DrilldownDepth: Math.Max(0, DrilldownDepth),
         ArrayLimit:     Math.Max(0, ArrayLimit),
         CollapsePointerNodes: CollapsePointerNodes,
-        LiveData: UseLiveData);
+        LiveData: UseLiveData,
+        VerboseDescription: VerboseCeXmlDescription);
 
     public AssemblyBrowserViewModel(BackendAdapter backend, FileLogger logger)
     {

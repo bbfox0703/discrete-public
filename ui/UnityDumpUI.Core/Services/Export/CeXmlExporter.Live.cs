@@ -53,7 +53,7 @@ public static partial class CeXmlExporter
         int currentDepth, CancellationToken ct,
         string? addrOverride = null)
     {
-        string desc = $"{f.Name} : {f.Type ?? "?"}";
+        string desc = FieldDesc(f.Name, f.Type, options);
         // Normally a field is addressed RELATIVE to its parent (+offset). When
         // addrOverride is set (the "Copy CE field" standalone root), this node
         // uses that ABSOLUTE address instead so the entry stands on its own;
@@ -79,12 +79,13 @@ public static partial class CeXmlExporter
         //      pair so CE shows both the length and the text.
         if (kind == WalkedFieldKind.Leaf && IsManagedString(f.Type))
         {
-            string slabel = f.String is not null ? $"{desc} = \"{f.String}\"" : desc;
+            string slabel = options.VerboseDescription && f.String is not null
+                ? $"{desc} = \"{f.String}\"" : desc;
             if (string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
             {
                 // Null string handle — emit a plain pointer leaf so the slot is
                 // still watchable, but no deref (would read garbage).
-                EmitLeaf(sb, indent, ids, slabel + "  <null>",
+                EmitLeaf(sb, indent, ids, options.VerboseDescription ? slabel + "  <null>" : slabel,
                          vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                 return;
             }
@@ -135,7 +136,7 @@ public static partial class CeXmlExporter
                 }
                 if (!visited.Add(f.Ptr!))
                 {
-                    EmitLeaf(sb, indent, ids, desc + "  (cycle elided)",
+                    EmitLeaf(sb, indent, ids, options.VerboseDescription ? desc + "  (cycle elided)" : desc,
                              vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                     return;
                 }
@@ -418,8 +419,8 @@ public static partial class CeXmlExporter
         }
         if (arrayAbs == 0)
         {
-            EmitLeaf(sb, indent, ids, desc + "  <empty>", vartype: PointerVartype(options),
-                     showAsHex: true, address: rel, offsets: null);
+            EmitLeaf(sb, indent, ids, options.VerboseDescription ? desc + "  <empty>" : desc,
+                     vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
             return;
         }
 
@@ -451,9 +452,11 @@ public static partial class CeXmlExporter
             if (delta <= 0x40) dataOff = (int)delta;   // sanity-bound the header
         }
 
-        string headerLabel = walk is null
-            ? $"{desc}  (walk failed)"
-            : $"{desc}  [{walk.Length} of {(walk.ElementClassName ?? elementType)}, showing {walk.Count}]";
+        string headerLabel = !options.VerboseDescription
+            ? desc
+            : walk is null
+                ? $"{desc}  (walk failed)"
+                : $"{desc}  [{walk.Length} of {(walk.ElementClassName ?? elementType)}, showing {walk.Count}]";
 
         // Outer group: deref the field pointer (List object or array object).
         OpenGroup(sb, indent, ids, headerLabel, rel,
@@ -467,7 +470,7 @@ public static partial class CeXmlExporter
         bool innerGroup = isList;
         if (innerGroup)
         {
-            OpenGroup(sb, elemIndent, ids, $"_items : {elementType}[]", RelAddr(itemsOff),
+            OpenGroup(sb, elemIndent, ids, FieldDesc("_items", elementType + "[]", options), RelAddr(itemsOff),
                       offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
                       varType: null, showAsHex: true);
             elemIndent += "  ";
@@ -497,12 +500,13 @@ public static partial class CeXmlExporter
                 {
                     if (string.IsNullOrEmpty(elem.Ptr) || elem.Ptr == "0x0000000000000000")
                     {
-                        EmitLeaf(sb, elemIndent, ids, slotLabel + "  <null>",
+                        EmitLeaf(sb, elemIndent, ids, options.VerboseDescription ? slotLabel + "  <null>" : slotLabel,
                                  vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null);
                     }
                     else
                     {
-                        string lbl = elem.String is not null ? $"{slotLabel} = \"{elem.String}\"" : slotLabel;
+                        string lbl = options.VerboseDescription && elem.String is not null
+                            ? $"{slotLabel} = \"{elem.String}\"" : slotLabel;
                         EmitStringDerefGroup(sb, elemIndent, ids, lbl, slotRel, elem.StringLength, ptr);
                     }
                 }
