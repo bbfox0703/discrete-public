@@ -13,16 +13,18 @@
     </StackPanel>
     <TextBlock DockPanel.Dock="Top" Margin="0,0,0,6" FontSize="11" Opacity="0.8"
                TextWrapping="Wrap"
-               Text="Tick the captures to include in the pivot (capture-order). The pivot keys by field value, so cross-session captures line up too."/>
+               Text="Tick the captures to include in the pivot. Listed in capture-time order by default; click the Captured header to re-sort. The pivot keys by field value, so cross-session captures line up too."/>
     <Border Padding="0" Background="#1F808080" CornerRadius="3">
-      <DataGrid ItemsSource="{Binding ClassPivot.SelectionRows}"
+      <DataGrid Name="PivotSnapshotsGrid"
+                ItemsSource="{Binding ClassPivot.SelectionRows}"
                 AutoGenerateColumns="False"
                 HeadersVisibility="Column"
                 IsReadOnly="False"
                 GridLinesVisibility="Horizontal"
-                CanUserResizeColumns="True">
+                CanUserResizeColumns="True"
+                CanUserSortColumns="True">
         <DataGrid.Columns>
-          <DataGridTemplateColumn Header="Use" Width="50">
+          <DataGridTemplateColumn Header="Use" Width="50" CanUserSort="False">
             <DataGridTemplateColumn.CellTemplate>
               <DataTemplate>
                 <CheckBox IsChecked="{Binding Include, Mode=TwoWay}"
@@ -30,8 +32,9 @@
               </DataTemplate>
             </DataGridTemplateColumn.CellTemplate>
           </DataGridTemplateColumn>
-          <DataGridTextColumn Header="Snapshot" Binding="{Binding DisplayLabel}"
-                              IsReadOnly="True" Width="*" MinWidth="200"/>
+          <DataGridTextColumn Header="Captured (time order)" Binding="{Binding DisplayLabel}"
+                              IsReadOnly="True" Width="*" MinWidth="200"
+                              SortMemberPath="CapturedAt" CanUserSort="True"/>
         </DataGrid.Columns>
       </DataGrid>
     </Border>
