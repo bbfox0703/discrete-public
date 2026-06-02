@@ -314,6 +314,10 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     // "op":"==","value":1}] to isolate one logical instance). Empty = no filter.
     [ObservableProperty] private bool _aliveOnly;
 
+    // Sane: drop stale/torn objects whose managed reference fields hold garbage
+    // (non-null but unreadable pointers). Generic, no per-class config.
+    [ObservableProperty] private bool _sane;
+
     [ObservableProperty] private string _fieldFilterJson = string.Empty;
 
     [ObservableProperty] private string? _classPointer;
@@ -418,7 +422,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 .FindInstancesAsync(TargetAssembly!, TargetNamespace, TargetName!,
                                     InstanceLimit, AliveOnly,
                                     string.IsNullOrWhiteSpace(FieldFilterJson) ? null : FieldFilterJson,
-                                    ct)
+                                    Sane, ct)
                 .ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
             if (!string.IsNullOrEmpty(result.Error))

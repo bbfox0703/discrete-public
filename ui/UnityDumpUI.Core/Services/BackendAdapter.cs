@@ -488,7 +488,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<FindInstancesResult> FindInstancesAsync(
         string assembly, string? @namespace, string name,
         int? limit = null, bool aliveOnly = false, string? fieldFilterJson = null,
-        CancellationToken ct = default)
+        bool sane = false, CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
         {
@@ -498,10 +498,12 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (limit is int l) args["limit"] = Int(l);
         // Phase 32 — generic false-positive reduction. aliveOnly drops destroyed
-        // Unity shells (m_CachedPtr == 0); fieldFilter is the per-class predicate
-        // engine (a JSON array of {offset,type,op,value}). Parsing the array is
-        // AOT-safe (JsonDocument.Parse, no reflection).
+        // Unity shells (m_CachedPtr == 0); sane drops stale/torn objects (any
+        // managed reference field holding garbage); fieldFilter is the per-class
+        // predicate engine (a JSON array of {offset,type,op,value}). Parsing the
+        // array is AOT-safe (JsonDocument.Parse, no reflection).
         if (aliveOnly) args["aliveOnly"] = Bool(true);
+        if (sane)      args["sane"]      = Bool(true);
         if (!string.IsNullOrWhiteSpace(fieldFilterJson))
         {
             JsonDocument? ffDoc = null;

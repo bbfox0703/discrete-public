@@ -359,6 +359,7 @@ that's the `Il2CppClass*` (the first qword of every object); in Mono it's the
 | `validate` | bool | optional, **default true**. Re-read the candidate's first qword; keep only if it still equals the class header (`MonoVTable*` / `Il2CppClass*`). Drops transient stack/register-spill slots. |
 | `aliveOnly` | bool | optional, default false. For `UnityEngine.Object`-derived classes: require `m_CachedPtr` (at `+cachedPtrOffset`) `!= 0`. Drops destroyed Unity shells. |
 | `cachedPtrOffset` | uint | optional, default = object header size (`0x10` on x64, `0x8` on x86). The `m_CachedPtr` offset used by `aliveOnly`. |
+| `sane` | bool | optional, default false. Read this class's **managed reference fields** (non-static, non-value-type — from class metadata) and require each to be null OR point to readable committed memory. Drops stale/freed/torn slots that hold garbage (e.g. `0x8800D300C75AB77B`) in a reference field. Generic, no per-class config. Response reports `filter.sane_dropped` + `filter.sane_ref_fields` (0 ⇒ metadata unavailable, sane skipped). Value types and `IntPtr` (native pointers like `m_CachedPtr`) are NOT checked. |
 | `fieldFilter` | array | optional. AND-combined predicates `{offset,type,op,value}` evaluated per candidate (see below). The **generic targeting engine** — the caller supplies the per-class predicate; nothing is class- or game-specific. |
 | `liveOnly` | bool | optional, default false. **Mono only.** Enumerate via `mono_gc_walk_heap` (live objects only) instead of the raw scan. ⚠️ **`mono_gc_walk_heap` is a no-op stub on Unity's bdwgc/Boehm builds** (verified on Core Keeper: 0 objects) — the functional bdwgc path is the unity-liveness API (deferred). When the walk yields nothing, `liveOnly` falls back to the raw scan and sets `filter.live_walk_unsupported`; `filter.live_walk` reports whether the walk actually drove the result. |
 
@@ -393,6 +394,7 @@ that's the `Il2CppClass*` (the first qword of every object); in Mono it's the
 > 1. *Transient stack/register slots* → `validate` (on by default).
 > 2. *Destroyed Unity shells* → `aliveOnly` (m_CachedPtr); or Mono `liveOnly`.
 > 3. *Dead/uncollected objects + runtime bookkeeping* → Mono `liveOnly` (`mono_gc_walk_heap`); IL2CPP `excludeArena` (default on).
+> 3b. *Stale / freed / torn slots* (valid header, but reference fields hold garbage) → `sane` (reference-field pointer validation). Generic, both backends.
 > 4. *Live but semantically-uninteresting siblings* (pooled / template / prefab instances of the same class — e.g. Core Keeper's ~80 PlayerControllers) → **only `fieldFilter`** can separate these, because they are genuinely live, valid objects. Liveness/arena filters do not remove them.
 
 **Both backends now return `class_ptr`** so cross-backend consumers can

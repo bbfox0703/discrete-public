@@ -2734,11 +2734,16 @@ void RegisterCoreHandlers() {
         return d != 0.0;  // nonzero / default
     };
 
+    // `refOffsets` = byte offsets of this class's MANAGED reference-typed
+    // instance fields (non-static, non-value-type), built by the caller from
+    // class metadata. Used only by the `sane` layer.
     auto filterMatches = [evalPredicate](std::vector<const void*>& matches,
                                          std::uintptr_t expectedHeader,
-                                         const json& args) -> json {
+                                         const json& args,
+                                         const std::vector<std::uint64_t>& refOffsets) -> json {
         const bool validate  = args.value("validate", true);
         const bool aliveOnly = args.value("aliveOnly", false);
+        const bool sane      = args.value("sane", false) && !refOffsets.empty();
         const std::uint64_t cachedOff = args.value("cachedPtrOffset",
             static_cast<std::uint64_t>(ManagedLayout::kObjectHeader));
 
@@ -2746,10 +2751,10 @@ void RegisterCoreHandlers() {
         if (args.contains("fieldFilter") && args["fieldFilter"].is_array()) {
             filters = args["fieldFilter"];
         }
-        const bool active = validate || aliveOnly || !filters.empty();
+        const bool active = validate || aliveOnly || sane || !filters.empty();
 
         const std::size_t raw = matches.size();
-        std::size_t dropValidate = 0, dropAlive = 0, dropField = 0;
+        std::size_t dropValidate = 0, dropAlive = 0, dropField = 0, dropSane = 0;
         if (active) {
             std::vector<const void*> kept;
             kept.reserve(matches.size());
@@ -2763,6 +2768,22 @@ void RegisterCoreHandlers() {
                     std::uintptr_t cp = 0;
                     if (!Memory::SafeReadBytes(reinterpret_cast<void*>(b + cachedOff), &cp, sizeof(cp)) || cp == 0) { ++dropAlive; continue; }
                 }
+                // sane: every managed reference field must be null OR point to
+                // readable committed memory. A live object satisfies this; a
+                // stale/freed/torn slot has garbage (e.g. 0x8800D300C75AB77B) in
+                // some reference field. Generic — needs no per-class predicate.
+                if (sane) {
+                    bool ok = true;
+                    for (std::uint64_t off : refOffsets) {
+                        std::uintptr_t v = 0;
+                        if (!Memory::SafeReadBytes(reinterpret_cast<void*>(b + off), &v, sizeof(v))) { ok = false; break; }
+                        if (v == 0) continue;                       // null reference is fine
+                        if (v < 0x10000) { ok = false; break; }     // null-page region → garbage
+                        std::uintptr_t probe = 0;                   // must be a readable object
+                        if (!Memory::SafeReadBytes(reinterpret_cast<void*>(v), &probe, sizeof(probe))) { ok = false; break; }
+                    }
+                    if (!ok) { ++dropSane; continue; }
+                }
                 bool pass = true;
                 for (const auto& pred : filters) { if (!evalPredicate(b, pred)) { pass = false; break; } }
                 if (!pass) { ++dropField; continue; }
@@ -2770,7 +2791,7 @@ void RegisterCoreHandlers() {
             }
             matches.swap(kept);
         }
-        return json{
+        json out{
             {"applied",          active},
             {"raw_count",        raw},
             {"validate_dropped", dropValidate},
@@ -2778,6 +2799,11 @@ void RegisterCoreHandlers() {
             {"field_dropped",    dropField},
             {"kept",             matches.size()},
         };
+        if (args.value("sane", false)) {
+            out["sane_dropped"] = dropSane;
+            out["sane_ref_fields"] = refOffsets.size();   // 0 ⇒ sane skipped (no metadata)
+        }
+        return out;
     };
 
 #if defined(DISCRETE_BACKEND_MONO)
@@ -4246,9 +4272,37 @@ void RegisterCoreHandlers() {
         if (!usedLiveWalk) {
             matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, &stats);
         }
-        // Phase 32 — generic post-scan filter (validate / aliveOnly / fieldFilter).
+        // Phase 32 — `sane` layer needs this class's managed reference-field
+        // offsets (non-static, non-value-type). Built from class metadata only
+        // when requested. Mirrors walkInstance's chain walk + ReadClassInfo.
+        std::vector<std::uint64_t> refOffsets;
+        if (args.value("sane", false)) {
+            std::vector<Mono::MonoClass*> chain;
+            {
+                Mono::ThreadAttachGuard guard(domain);
+                if (guard.Attached()) {
+                    for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (r.class_get_parent == nullptr) break;
+                        cur = SehGetParent(r.class_get_parent, cur);
+                    }
+                }
+            }
+            if (!chain.empty() && chain.size() < 16) {
+                for (auto* c : chain) {
+                    Mono::ClassInfoResult res = Mono::ReadClassInfo(c);
+                    if (!res.ok) continue;
+                    for (const auto& f : res.info.fields) {
+                        if (f.flags & 0x10u) continue;   // static
+                        if (f.isValueType) continue;     // value type (incl IntPtr / struct / enum)
+                        refOffsets.push_back(static_cast<std::uint64_t>(f.offset));
+                    }
+                }
+            }
+        }
+        // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
         // expectedHeader = MonoVTable* (the first qword of a real Mono object).
-        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(vtable), args);
+        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(vtable), args, refOffsets);
         filterStats["live_walk"] = usedLiveWalk;
         if (liveOnly && liveWalkEmpty)        filterStats["live_walk_unsupported"] = true;
         else if (liveOnly && !usedLiveWalk)   filterStats["live_walk_unavailable"] = true;
@@ -7398,9 +7452,38 @@ void RegisterCoreHandlers() {
         Memory::ScanStats stats{};
         auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
                                               limit, &stats, exLow, exHigh, skipMapped);
-        // Phase 32 — generic post-scan filter (validate / aliveOnly / fieldFilter).
+        // Phase 32 — `sane` layer needs this class's managed reference-field
+        // offsets (non-static, non-value-type). Mirrors walkInstance's chain walk.
+        std::vector<std::uint64_t> refOffsets;
+        if (args.value("sane", false)) {
+            const auto& rr = IL2CPP::GetResolver();
+            IL2CPP::Il2CppDomain* dom = IL2CPP::GetDomain();
+            std::vector<IL2CPP::Il2CppClass*> chain;
+            if (dom != nullptr) {
+                IL2CPP::ThreadAttachGuard guard(dom);
+                if (guard.Attached()) {
+                    for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (rr.class_get_parent == nullptr) break;
+                        cur = SehGetParent(rr.class_get_parent, cur);
+                    }
+                }
+            }
+            if (!chain.empty() && chain.size() < 16) {
+                for (auto* c : chain) {
+                    IL2CPP::ClassInfoResult res = IL2CPP::ReadClassInfo(c);
+                    if (!res.ok) continue;
+                    for (const auto& f : res.info.fields) {
+                        if (f.flags & 0x10u) continue;   // static
+                        if (f.isValueType) continue;     // value type (incl IntPtr / struct / enum)
+                        refOffsets.push_back(static_cast<std::uint64_t>(f.offset));
+                    }
+                }
+            }
+        }
+        // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
         // expectedHeader = Il2CppClass* (the first qword of a real IL2CPP object).
-        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args);
+        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, refOffsets);
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));

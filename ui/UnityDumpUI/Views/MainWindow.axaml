@@ -641,6 +641,10 @@
                           IsChecked="{Binding Inspector.AliveOnly, Mode=TwoWay}"
                           VerticalAlignment="Center"
                           ToolTip.Tip="Drop destroyed Unity shells (m_CachedPtr == 0). Applies on the next Find." />
+                <CheckBox Content="Sane"
+                          IsChecked="{Binding Inspector.Sane, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          ToolTip.Tip="Drop stale/torn objects: any managed reference field holding a non-null but unreadable pointer (garbage). Generic, no per-class config. Applies on the next Find." />
                 <ProgressBar IsIndeterminate="True"
                              IsVisible="{Binding Inspector.IsLoadingInstances}"
                              Width="80" Height="4" VerticalAlignment="Center" />

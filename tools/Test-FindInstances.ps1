@@ -44,6 +44,7 @@ param(
     [int]    $Limit           = 100,
     [bool]   $Validate        = $true,
     [switch] $AliveOnly,
+    [switch] $Sane,
     [switch] $LiveOnly,
     [int]    $CachedPtrOffset = 0,        # 0 = use server default (object header size)
     [string] $FieldFilter     = '',       # raw JSON array of predicates
@@ -79,6 +80,7 @@ try {
         ('"validate":'  + $Validate.ToString().ToLowerInvariant())
     )
     if ($AliveOnly)            { $argParts += '"aliveOnly":true' }
+    if ($Sane)                 { $argParts += '"sane":true' }
     if ($LiveOnly)             { $argParts += '"liveOnly":true' }
     if ($CachedPtrOffset -gt 0){ $argParts += ('"cachedPtrOffset":' + $CachedPtrOffset) }
     if ($FieldFilter)          { $argParts += ('"fieldFilter":' + $FieldFilter) }
@@ -103,8 +105,9 @@ try {
     if ($r.filter) {
         $f = $r.filter
         $lw = if ($null -ne $f.live_walk) { "  liveWalk=$($f.live_walk)" } else { '' }
-        Write-Host ('filter      : raw={0} kept={1}  dropped[validate={2} alive={3} field={4}]{5}' -f `
-            $f.raw_count, $f.kept, $f.validate_dropped, $f.alive_dropped, $f.field_dropped, $lw) -ForegroundColor Magenta
+        $sn = if ($null -ne $f.sane_dropped) { " sane=$($f.sane_dropped)(refFields=$($f.sane_ref_fields))" } else { '' }
+        Write-Host ('filter      : raw={0} kept={1}  dropped[validate={2} alive={3}{4} field={5}]{6}' -f `
+            $f.raw_count, $f.kept, $f.validate_dropped, $f.alive_dropped, $sn, $f.field_dropped, $lw) -ForegroundColor Magenta
         if ($f.live_walk_unavailable) {
             Write-Host '              (liveOnly requested but mono_gc_walk_heap not exported — fell back to raw scan)' -ForegroundColor Yellow
         }
