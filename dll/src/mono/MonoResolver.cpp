@@ -163,6 +163,12 @@ void DoResolve() {
     // Mono build (Unity 5+) under the canonical name.
     optBind("mono_gc_collect",                  g_resolver.gc_collect);
 
+    // Phase 32 — live-object enumeration for findInstances liveOnly. Exported
+    // by Unity's mono-2.0-bdwgc.dll; legacy/embedded Mono may lack them, in
+    // which case liveOnly falls back to the raw pointer scan.
+    optBind("mono_gc_walk_heap",                g_resolver.gc_walk_heap);
+    optBind("mono_object_get_size",             g_resolver.object_get_size);
+
     g_resolver.resolved = (ok == total);
 
     char line[256];

@@ -355,23 +355,47 @@ that's the `Il2CppClass*` (the first qword of every object); in Mono it's the
 | Arg | Type | Notes |
 | --- | --- | --- |
 | `assembly`, `namespace`, `name` | class spec | required |
-| `limit` | uint | optional, default 256, capped at 4096 |
+| `limit` | uint | optional, default 256, capped at 4096. **Bounds the RAW scan** — filtering (below) happens after, so a filtered query can return far fewer. Raise `limit` if the target may sit past the first `limit` raw hits. |
+| `validate` | bool | optional, **default true**. Re-read the candidate's first qword; keep only if it still equals the class header (`MonoVTable*` / `Il2CppClass*`). Drops transient stack/register-spill slots. |
+| `aliveOnly` | bool | optional, default false. For `UnityEngine.Object`-derived classes: require `m_CachedPtr` (at `+cachedPtrOffset`) `!= 0`. Drops destroyed Unity shells. |
+| `cachedPtrOffset` | uint | optional, default = object header size (`0x10` on x64, `0x8` on x86). The `m_CachedPtr` offset used by `aliveOnly`. |
+| `sane` | bool | optional, default false. Read this class's **managed reference fields** (non-static, non-value-type — from class metadata) and require each to be null OR point to readable committed memory. Drops stale/freed/torn slots that hold garbage (e.g. `0x8800D300C75AB77B`) in a reference field. Generic, no per-class config. Response reports `filter.sane_dropped` + `filter.sane_ref_fields` (0 ⇒ metadata unavailable, sane skipped). Value types and `IntPtr` (native pointers like `m_CachedPtr`) are NOT checked. |
+| `fieldFilter` | array | optional. AND-combined predicates `{offset,type,op,value}` evaluated per candidate (see below). The **generic targeting engine** — the caller supplies the per-class predicate; nothing is class- or game-specific. |
+| `liveOnly` | bool | optional, default false. **Mono only.** Enumerate via `mono_gc_walk_heap` (live objects only) instead of the raw scan. ⚠️ **`mono_gc_walk_heap` is a no-op stub on Unity's bdwgc/Boehm builds** (verified on Core Keeper: 0 objects) — the functional bdwgc path is the unity-liveness API (deferred). When the walk yields nothing, `liveOnly` falls back to the raw scan and sets `filter.live_walk_unsupported`; `filter.live_walk` reports whether the walk actually drove the result. |
+
+**`fieldFilter` predicate** — each entry: `{ "offset": <uint>, "type": <managed type>, "op": <op>, "value": <operand> }`
+- `type`: numeric (`System.Int32`/`UInt32`/`Int64`/`UInt64`/`Int16`/`UInt16`/`Byte`/`SByte`/`Single`/`Double`/`Boolean`/`Char`), pointer (`ptr`/`System.IntPtr`/`System.UIntPtr`/`ref`/`object`), or `string`/`System.String`.
+- `op`: numeric → `==`,`!=`,`<`,`<=`,`>`,`>=`,`nonzero`(default),`zero`; pointer → `nonnull`(default),`null`,`==`,`!=`; string → `nonempty`,`empty`,`==`,`!=`,`contains`.
+- `value`: numeric/bool for numeric ops; hex string or number for pointer `==`/`!=`; string for string ops. Omit for `nonzero`/`nonnull`/`zero`/`null`/`empty`/`nonempty`.
+- Example — isolate Core Keeper's local player: `"fieldFilter":[{"offset":1532,"type":"System.Int32","op":"==","value":1}]` (`playerIndex==1`, offset `0x5FC`). The same engine works for any game by supplying a different predicate.
 
 ```jsonc
 // IL2CPP result:
 {
   "class_ptr": "0x...",         // Il2CppClass* — and also the searched-for first-qword pointer
   "count": 100, "limit": 256,
-  "matches": ["0x...", "0x...", ...]
+  "matches": ["0x...", "0x...", ...],
+  "filter": { "applied": true, "raw_count": 100, "validate_dropped": 2,
+              "alive_dropped": 0, "field_dropped": 0, "kept": 98 }
 }
 // Mono result:
 {
   "class_ptr": "0x...",         // MonoClass* — class identity (added 2026-05-08 for cross-backend uniformity)
   "vtable": "0x...",            // MonoVTable* — the first-qword pointer the heap scan matched on
   "count": 100, "limit": 256,
-  "matches": ["0x...", "0x...", ...]
+  "matches": ["0x...", "0x...", ...],
+  "filter": { "applied": true, "raw_count": 100, "validate_dropped": 0,
+              "alive_dropped": 5, "field_dropped": 76, "kept": 1,
+              "live_walk": false }   // live_walk=true when mono_gc_walk_heap was used
 }
 ```
+
+> **Reducing false positives — which lever?** Three fake profiles, three tools:
+> 1. *Transient stack/register slots* → `validate` (on by default).
+> 2. *Destroyed Unity shells* → `aliveOnly` (m_CachedPtr); or Mono `liveOnly`.
+> 3. *Dead/uncollected objects + runtime bookkeeping* → Mono `liveOnly` (`mono_gc_walk_heap`); IL2CPP `excludeArena` (default on).
+> 3b. *Stale / freed / torn slots* (valid header, but reference fields hold garbage) → `sane` (reference-field pointer validation). Generic, both backends.
+> 4. *Live but semantically-uninteresting siblings* (pooled / template / prefab instances of the same class — e.g. Core Keeper's ~80 PlayerControllers) → **only `fieldFilter`** can separate these, because they are genuinely live, valid objects. Liveness/arena filters do not remove them.
 
 **Both backends now return `class_ptr`** so cross-backend consumers can
 read one canonical field. **Mono's heap scan target is `vtable`** (the

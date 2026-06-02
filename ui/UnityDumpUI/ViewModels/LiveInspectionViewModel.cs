@@ -307,6 +307,19 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     [ObservableProperty] private int _instanceLimit = 256;
 
+    // Phase 32 — false-positive reduction for findInstances.
+    // AliveOnly drops destroyed Unity shells (m_CachedPtr == 0). FieldFilterJson
+    // is the generic per-class predicate engine: a JSON array of
+    // {offset,type,op,value} (e.g. [{"offset":1532,"type":"System.Int32",
+    // "op":"==","value":1}] to isolate one logical instance). Empty = no filter.
+    [ObservableProperty] private bool _aliveOnly;
+
+    // Sane: drop stale/torn objects whose managed reference fields hold garbage
+    // (non-null but unreadable pointers). Generic, no per-class config.
+    [ObservableProperty] private bool _sane;
+
+    [ObservableProperty] private string _fieldFilterJson = string.Empty;
+
     [ObservableProperty] private string? _classPointer;
 
     [ObservableProperty]
@@ -407,7 +420,9 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         {
             FindInstancesResult result = await _backend
                 .FindInstancesAsync(TargetAssembly!, TargetNamespace, TargetName!,
-                                    InstanceLimit, ct)
+                                    InstanceLimit, AliveOnly,
+                                    string.IsNullOrWhiteSpace(FieldFilterJson) ? null : FieldFilterJson,
+                                    Sane, ct)
                 .ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
             if (!string.IsNullOrEmpty(result.Error))

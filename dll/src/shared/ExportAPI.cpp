@@ -2619,6 +2619,193 @@ void RegisterCoreHandlers() {
         };
     });
 
+    // ---- Phase 32 — generic post-scan instance filter (backend-agnostic) -----
+    // findInstances is a raw "first qword == class header" heap scan, so its
+    // matches mix real instances with noise (transient stack slots, runtime
+    // bookkeeping) AND with semantically-uninteresting live siblings (pooled /
+    // template / prefab instances of the same class). This filter trims both,
+    // and needs no Mono/IL2CPP types — pure SEH-guarded memory reads — so one
+    // implementation serves all three backends (Mono x86/x64, IL2CPP x64).
+    //
+    // Layers (all opt-in except `validate`):
+    //   validate (default true): re-read qword @ +0; require == expectedHeader
+    //       (MonoVTable* on Mono, Il2CppClass* on IL2CPP). Drops a slot whose
+    //       value changed since the scan (transient stack/register spill).
+    //   aliveOnly (default false): for UnityEngine.Object-derived classes,
+    //       require m_CachedPtr (@ +cachedPtrOffset, default = object header
+    //       size: 0x10 on x64 / 0x8 on x86) != 0. Drops destroyed Unity shells.
+    //   fieldFilter (default none): array of {offset,type,op,value} predicates,
+    //       AND-combined. GENERIC engine — the caller supplies the per-class
+    //       predicate (e.g. {offset:0x5FC,type:"System.Int32",op:"==",value:1}).
+    //       Nothing here is class- or game-specific.
+    //
+    // NB: `limit` bounds the RAW scan; filtering happens after, so a heavily
+    // filtered query may return far fewer than `limit`. Raise `limit` if the
+    // target can sit past the first `limit` raw hits.
+    auto evalPredicate = [](std::uintptr_t base, const json& p) -> bool {
+        if (!p.is_object() || !p.contains("offset") || !p["offset"].is_number()) {
+            return true;  // malformed predicate → don't drop the candidate
+        }
+        std::uint64_t off = p["offset"].get<std::uint64_t>();
+        if (off > (1u << 24)) return false;  // implausible offset
+        std::uintptr_t addr = base + static_cast<std::uintptr_t>(off);
+        const std::string type = p.value("type", std::string{"System.Int32"});
+        const std::string op   = p.value("op",   std::string{"nonzero"});
+        const bool hasVal = p.contains("value");
+
+        auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
+            return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+        };
+
+        // --- managed string: ==, !=, contains, nonempty/empty ---------------
+        if (type == "string" || type == "System.String") {
+            std::uintptr_t sptr = 0;
+            if (!rd(addr, &sptr, sizeof(sptr))) return false;
+            std::string s; bool decoded = false;
+            if (sptr != 0) {
+                std::int32_t len = 0;
+                if (rd(sptr + ManagedLayout::kStringLengthOffset, &len, 4) && len >= 0 && len <= 65536) {
+                    std::vector<std::uint16_t> chars(static_cast<std::size_t>(len));
+                    if (len == 0 || rd(sptr + ManagedLayout::kStringCharsOffset, chars.data(),
+                                       static_cast<std::size_t>(len) * 2u)) {
+                        decoded = true;
+                        for (std::uint16_t c : chars) s.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+                    }
+                }
+            }
+            const std::string want = hasVal && p["value"].is_string() ? p["value"].get<std::string>() : std::string{};
+            if (op == "nonempty" || op == "nonnull") return !s.empty();
+            if (op == "empty"    || op == "null")    return s.empty();
+            if (op == "==")       return s == want;
+            if (op == "!=")       return s != want;
+            if (op == "contains") return s.find(want) != std::string::npos;
+            return decoded;  // unknown op → presence test
+        }
+
+        // --- pointer / reference: nonnull/null, ==, != ----------------------
+        if (type == "ptr" || type == "ref" || type == "object" ||
+            type == "System.IntPtr" || type == "System.UIntPtr") {
+            std::uintptr_t v = 0;
+            if (!rd(addr, &v, sizeof(v))) return false;
+            std::uint64_t want = 0;
+            if (hasVal) {
+                if (p["value"].is_string()) {
+                    std::string hv = p["value"].get<std::string>();
+                    std::size_t pos = hv.rfind("0x");
+                    try { want = std::stoull(pos != std::string::npos ? hv.substr(pos + 2) : hv, nullptr, 16); }
+                    catch (...) { want = 0; }
+                } else if (p["value"].is_number()) {
+                    want = p["value"].get<std::uint64_t>();
+                }
+            }
+            if (op == "==")  return v == want;
+            if (op == "!=")  return v != want;
+            if (op == "null" || op == "zero")     return v == 0;
+            return v != 0;  // nonnull / nonzero / default
+        }
+
+        // --- numeric: read as declared type into a double -------------------
+        double d = 0.0; bool ok = false;
+        if      (type == "System.Boolean" || type == "System.Byte") { std::uint8_t  v = 0; ok = rd(addr, &v, 1); d = v; }
+        else if (type == "System.SByte")                            { std::int8_t   v = 0; ok = rd(addr, &v, 1); d = v; }
+        else if (type == "System.Int16")                            { std::int16_t  v = 0; ok = rd(addr, &v, 2); d = v; }
+        else if (type == "System.UInt16" || type == "System.Char")  { std::uint16_t v = 0; ok = rd(addr, &v, 2); d = v; }
+        else if (type == "System.Int32")                            { std::int32_t  v = 0; ok = rd(addr, &v, 4); d = v; }
+        else if (type == "System.UInt32")                           { std::uint32_t v = 0; ok = rd(addr, &v, 4); d = static_cast<double>(v); }
+        else if (type == "System.Int64")                            { std::int64_t  v = 0; ok = rd(addr, &v, 8); d = static_cast<double>(v); }
+        else if (type == "System.UInt64")                           { std::uint64_t v = 0; ok = rd(addr, &v, 8); d = static_cast<double>(v); }
+        else if (type == "System.Single")                           { float         v = 0; ok = rd(addr, &v, 4); d = v; }
+        else if (type == "System.Double")                           { double        v = 0; ok = rd(addr, &v, 8); d = v; }
+        else { return true; }  // unknown type → don't drop
+        if (!ok) return false;
+
+        double want = 0.0;
+        if (hasVal) {
+            if      (p["value"].is_boolean()) want = p["value"].get<bool>() ? 1.0 : 0.0;
+            else if (p["value"].is_number())  want = p["value"].get<double>();
+        }
+        if (op == "==")      return d == want;
+        if (op == "!=")      return d != want;
+        if (op == "<")       return d <  want;
+        if (op == "<=")      return d <= want;
+        if (op == ">")       return d >  want;
+        if (op == ">=")      return d >= want;
+        if (op == "zero")    return d == 0.0;
+        return d != 0.0;  // nonzero / default
+    };
+
+    // `refOffsets` = byte offsets of this class's MANAGED reference-typed
+    // instance fields (non-static, non-value-type), built by the caller from
+    // class metadata. Used only by the `sane` layer.
+    auto filterMatches = [evalPredicate](std::vector<const void*>& matches,
+                                         std::uintptr_t expectedHeader,
+                                         const json& args,
+                                         const std::vector<std::uint64_t>& refOffsets) -> json {
+        const bool validate  = args.value("validate", true);
+        const bool aliveOnly = args.value("aliveOnly", false);
+        const bool sane      = args.value("sane", false) && !refOffsets.empty();
+        const std::uint64_t cachedOff = args.value("cachedPtrOffset",
+            static_cast<std::uint64_t>(ManagedLayout::kObjectHeader));
+
+        json filters = json::array();
+        if (args.contains("fieldFilter") && args["fieldFilter"].is_array()) {
+            filters = args["fieldFilter"];
+        }
+        const bool active = validate || aliveOnly || sane || !filters.empty();
+
+        const std::size_t raw = matches.size();
+        std::size_t dropValidate = 0, dropAlive = 0, dropField = 0, dropSane = 0;
+        if (active) {
+            std::vector<const void*> kept;
+            kept.reserve(matches.size());
+            for (const void* p : matches) {
+                const std::uintptr_t b = reinterpret_cast<std::uintptr_t>(p);
+                if (validate) {
+                    std::uintptr_t hv = 0;
+                    if (!Memory::SafeReadBytes(p, &hv, sizeof(hv)) || hv != expectedHeader) { ++dropValidate; continue; }
+                }
+                if (aliveOnly) {
+                    std::uintptr_t cp = 0;
+                    if (!Memory::SafeReadBytes(reinterpret_cast<void*>(b + cachedOff), &cp, sizeof(cp)) || cp == 0) { ++dropAlive; continue; }
+                }
+                // sane: every managed reference field must be null OR point to
+                // readable committed memory. A live object satisfies this; a
+                // stale/freed/torn slot has garbage (e.g. 0x8800D300C75AB77B) in
+                // some reference field. Generic — needs no per-class predicate.
+                if (sane) {
+                    bool ok = true;
+                    for (std::uint64_t off : refOffsets) {
+                        std::uintptr_t v = 0;
+                        if (!Memory::SafeReadBytes(reinterpret_cast<void*>(b + off), &v, sizeof(v))) { ok = false; break; }
+                        if (v == 0) continue;                       // null reference is fine
+                        if (v < 0x10000) { ok = false; break; }     // null-page region → garbage
+                        std::uintptr_t probe = 0;                   // must be a readable object
+                        if (!Memory::SafeReadBytes(reinterpret_cast<void*>(v), &probe, sizeof(probe))) { ok = false; break; }
+                    }
+                    if (!ok) { ++dropSane; continue; }
+                }
+                bool pass = true;
+                for (const auto& pred : filters) { if (!evalPredicate(b, pred)) { pass = false; break; } }
+                if (!pass) { ++dropField; continue; }
+                kept.push_back(p);
+            }
+            matches.swap(kept);
+        }
+        json out{
+            {"applied",          active},
+            {"raw_count",        raw},
+            {"validate_dropped", dropValidate},
+            {"alive_dropped",    dropAlive},
+            {"field_dropped",    dropField},
+            {"kept",             matches.size()},
+        };
+        if (args.value("sane", false)) {
+            out["sane_dropped"] = dropSane;
+            out["sane_ref_fields"] = refOffsets.size();   // 0 ⇒ sane skipped (no metadata)
+        }
+        return out;
+    };
+
 #if defined(DISCRETE_BACKEND_MONO)
     // Phase 3 segment 1: list every Mono-loaded assembly.
     PipeServer::RegisterHandler(MagicStrings::CmdGetAssemblies, [](const json&) -> json {
@@ -4023,7 +4210,7 @@ void RegisterCoreHandlers() {
     // Each MonoObject's first qword is its MonoVTable*. We resolve the class's
     // VTable for the root domain and scan committed RW pages for that pointer.
     PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
-        [resolveClassFromArgs, formatHex](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, filterMatches](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
         std::string err;
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
@@ -4047,8 +4234,78 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
+        // Phase 32 — opt-in `liveOnly`: enumerate ONLY live managed objects via
+        // mono_gc_walk_heap (stops the world, visits each live object + its
+        // MonoClass*). This skips dead/uncollected shells and runtime-bookkeeping
+        // false positives that the raw pointer scan picks up. Falls back to the
+        // raw scan when the export is missing (non-Unity / legacy Mono).
+        const bool liveOnly = args.value("liveOnly", false);
         Memory::ScanStats stats{};
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, &stats);
+        std::vector<const void*> matches;
+        bool usedLiveWalk = false;
+        if (liveOnly && r.gc_walk_heap != nullptr) {
+            struct WalkCtx { Mono::MonoClass* target; std::vector<const void*>* out; std::size_t limit; };
+            WalkCtx ctx{ k, &matches, limit };
+            Mono::fn_gc_references_cb cb =
+                [](Mono::MonoObject* obj, Mono::MonoClass* klass, std::uintptr_t, std::uintptr_t,
+                   Mono::MonoObject**, std::uintptr_t*, void* data) -> int {
+                    auto* c = static_cast<WalkCtx*>(data);
+                    if (klass == c->target && c->out->size() < c->limit) {
+                        c->out->push_back(reinterpret_cast<const void*>(obj));
+                    }
+                    return c->out->size() >= c->limit ? 1 : 0;  // stop the walk once full
+                };
+            Mono::ThreadAttachGuard guard(domain);
+            if (guard.Attached()) {
+                r.gc_walk_heap(0, cb, &ctx);
+                usedLiveWalk = true;
+            }
+        }
+        // mono_gc_walk_heap is a no-op STUB on Unity's bdwgc (Boehm) builds —
+        // the export exists but visits nothing (verified on Core Keeper: 0
+        // objects, 7ms). The functional live-enumeration path on bdwgc is the
+        // unity-liveness API (deferred — version-sensitive struct ABI). Treat an
+        // empty walk as "unsupported" and fall back to the raw scan so liveOnly
+        // is never WORSE than the default, instead of returning a misleading 0.
+        bool liveWalkEmpty = false;
+        if (usedLiveWalk && matches.empty()) { usedLiveWalk = false; liveWalkEmpty = true; }
+        if (!usedLiveWalk) {
+            matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, &stats);
+        }
+        // Phase 32 — `sane` layer needs this class's managed reference-field
+        // offsets (non-static, non-value-type). Built from class metadata only
+        // when requested. Mirrors walkInstance's chain walk + ReadClassInfo.
+        std::vector<std::uint64_t> refOffsets;
+        if (args.value("sane", false)) {
+            std::vector<Mono::MonoClass*> chain;
+            {
+                Mono::ThreadAttachGuard guard(domain);
+                if (guard.Attached()) {
+                    for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (r.class_get_parent == nullptr) break;
+                        cur = SehGetParent(r.class_get_parent, cur);
+                    }
+                }
+            }
+            if (!chain.empty() && chain.size() < 16) {
+                for (auto* c : chain) {
+                    Mono::ClassInfoResult res = Mono::ReadClassInfo(c);
+                    if (!res.ok) continue;
+                    for (const auto& f : res.info.fields) {
+                        if (f.flags & 0x10u) continue;   // static
+                        if (f.isValueType) continue;     // value type (incl IntPtr / struct / enum)
+                        refOffsets.push_back(static_cast<std::uint64_t>(f.offset));
+                    }
+                }
+            }
+        }
+        // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
+        // expectedHeader = MonoVTable* (the first qword of a real Mono object).
+        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(vtable), args, refOffsets);
+        filterStats["live_walk"] = usedLiveWalk;
+        if (liveOnly && liveWalkEmpty)        filterStats["live_walk_unsupported"] = true;
+        else if (liveOnly && !usedLiveWalk)   filterStats["live_walk_unavailable"] = true;
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
@@ -4076,6 +4333,7 @@ void RegisterCoreHandlers() {
             {"count",    arr.size()},
             {"limit",    limit},
             {"matches",  std::move(arr)},
+            {"filter",   std::move(filterStats)},
             {"scan_stats", json{
                 {"regions_total",      stats.regionsTotal},
                 {"regions_scanned",    stats.regionsScanned},
@@ -7170,7 +7428,7 @@ void RegisterCoreHandlers() {
     // Each Il2CppObject's first qword is its Il2CppClass*. Resolve the class
     // and scan committed RW pages for that pointer.
     PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
-        [resolveClassFromArgs, formatHex, computeArenaExclude](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, computeArenaExclude, filterMatches](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -7194,6 +7452,38 @@ void RegisterCoreHandlers() {
         Memory::ScanStats stats{};
         auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
                                               limit, &stats, exLow, exHigh, skipMapped);
+        // Phase 32 — `sane` layer needs this class's managed reference-field
+        // offsets (non-static, non-value-type). Mirrors walkInstance's chain walk.
+        std::vector<std::uint64_t> refOffsets;
+        if (args.value("sane", false)) {
+            const auto& rr = IL2CPP::GetResolver();
+            IL2CPP::Il2CppDomain* dom = IL2CPP::GetDomain();
+            std::vector<IL2CPP::Il2CppClass*> chain;
+            if (dom != nullptr) {
+                IL2CPP::ThreadAttachGuard guard(dom);
+                if (guard.Attached()) {
+                    for (IL2CPP::Il2CppClass* cur = k; cur != nullptr && chain.size() < 16; ) {
+                        chain.push_back(cur);
+                        if (rr.class_get_parent == nullptr) break;
+                        cur = SehGetParent(rr.class_get_parent, cur);
+                    }
+                }
+            }
+            if (!chain.empty() && chain.size() < 16) {
+                for (auto* c : chain) {
+                    IL2CPP::ClassInfoResult res = IL2CPP::ReadClassInfo(c);
+                    if (!res.ok) continue;
+                    for (const auto& f : res.info.fields) {
+                        if (f.flags & 0x10u) continue;   // static
+                        if (f.isValueType) continue;     // value type (incl IntPtr / struct / enum)
+                        refOffsets.push_back(static_cast<std::uint64_t>(f.offset));
+                    }
+                }
+            }
+        }
+        // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
+        // expectedHeader = Il2CppClass* (the first qword of a real IL2CPP object).
+        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, refOffsets);
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
@@ -7216,6 +7506,7 @@ void RegisterCoreHandlers() {
             {"count",     arr.size()},
             {"limit",     limit},
             {"matches",   std::move(arr)},
+            {"filter",    std::move(filterStats)},
             {"scan_stats", json{
                 {"regions_total",       stats.regionsTotal},
                 {"regions_scanned",     stats.regionsScanned},

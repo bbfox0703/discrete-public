@@ -487,7 +487,8 @@ public sealed class BackendAdapter : ILiveExportSource
     /// </summary>
     public async Task<FindInstancesResult> FindInstancesAsync(
         string assembly, string? @namespace, string name,
-        int? limit = null, CancellationToken ct = default)
+        int? limit = null, bool aliveOnly = false, string? fieldFilterJson = null,
+        bool sane = false, CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
         {
@@ -496,6 +497,28 @@ public sealed class BackendAdapter : ILiveExportSource
             ["name"]      = Str(name),
         };
         if (limit is int l) args["limit"] = Int(l);
+        // Phase 32 — generic false-positive reduction. aliveOnly drops destroyed
+        // Unity shells (m_CachedPtr == 0); sane drops stale/torn objects (any
+        // managed reference field holding garbage); fieldFilter is the per-class
+        // predicate engine (a JSON array of {offset,type,op,value}). Parsing the
+        // array is AOT-safe (JsonDocument.Parse, no reflection).
+        if (aliveOnly) args["aliveOnly"] = Bool(true);
+        if (sane)      args["sane"]      = Bool(true);
+        if (!string.IsNullOrWhiteSpace(fieldFilterJson))
+        {
+            JsonDocument? ffDoc = null;
+            try { ffDoc = JsonDocument.Parse(fieldFilterJson); }
+            catch (JsonException jx)
+            {
+                throw new PipeProtocolException("fieldFilter is not valid JSON: " + jx.Message);
+            }
+            using (ffDoc)
+            {
+                if (ffDoc.RootElement.ValueKind != JsonValueKind.Array)
+                    throw new PipeProtocolException("fieldFilter must be a JSON array of predicate objects");
+                args["fieldFilter"] = ffDoc.RootElement.Clone();
+            }
+        }
 
         var env = await Send(
             "findInstances", args,
