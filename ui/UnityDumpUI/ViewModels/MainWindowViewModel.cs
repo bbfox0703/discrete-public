@@ -95,6 +95,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         AddressLookup   = new AddressLookupViewModel(_backend, _logger);
         SymbolFinder    = new SymbolFinderViewModel(_backend, _logger, Browser.Assemblies);
         SymbolFinder.NavigateRequested += OnSymbolFinderNavigateRequested;
+        // "Send class to Browser" on a Symbol Finder row reuses the Inspector's
+        // → Browser handler (same InspectorBrowseRequest contract).
+        SymbolFinder.SendToBrowserRequested += OnInspectorSendToBrowser;
         ValueSearch     = new ValueSearchViewModel(_backend, _logger, BulkGate);
         ValueSearch.NavigateToInspectorRequested += OnValueSearchNavigateToInspector;
         // Phase 29b — Snapshot tab. Wraps snapshotBegin/Chunk/End RPCs,

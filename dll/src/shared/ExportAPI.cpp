@@ -2737,13 +2737,19 @@ void RegisterCoreHandlers() {
     // `refOffsets` = byte offsets of this class's MANAGED reference-typed
     // instance fields (non-static, non-value-type), built by the caller from
     // class metadata. Used only by the `sane` layer.
+    // `boolOffsets` = byte offsets of this class's System.Boolean instance
+    // fields. A live object stores a managed bool as exactly 0 or 1; any other
+    // byte value means the slot is stale / torn / not really an instance of
+    // this class. Cheap 1-byte probe, complements the reference-field check.
     auto filterMatches = [evalPredicate](std::vector<const void*>& matches,
                                          std::uintptr_t expectedHeader,
                                          const json& args,
-                                         const std::vector<std::uint64_t>& refOffsets) -> json {
+                                         const std::vector<std::uint64_t>& refOffsets,
+                                         const std::vector<std::uint64_t>& boolOffsets) -> json {
         const bool validate  = args.value("validate", true);
         const bool aliveOnly = args.value("aliveOnly", false);
-        const bool sane      = args.value("sane", false) && !refOffsets.empty();
+        const bool sane      = args.value("sane", false)
+                               && (!refOffsets.empty() || !boolOffsets.empty());
         const std::uint64_t cachedOff = args.value("cachedPtrOffset",
             static_cast<std::uint64_t>(ManagedLayout::kObjectHeader));
 
@@ -2782,6 +2788,15 @@ void RegisterCoreHandlers() {
                         std::uintptr_t probe = 0;                   // must be a readable object
                         if (!Memory::SafeReadBytes(reinterpret_cast<void*>(v), &probe, sizeof(probe))) { ok = false; break; }
                     }
+                    // System.Boolean fields must hold exactly 0 or 1. A torn /
+                    // mis-typed slot puts arbitrary bytes here.
+                    if (ok) {
+                        for (std::uint64_t off : boolOffsets) {
+                            std::uint8_t bv = 0;
+                            if (!Memory::SafeReadBytes(reinterpret_cast<void*>(b + off), &bv, sizeof(bv))) { ok = false; break; }
+                            if (bv > 1) { ok = false; break; }
+                        }
+                    }
                     if (!ok) { ++dropSane; continue; }
                 }
                 bool pass = true;
@@ -2801,7 +2816,8 @@ void RegisterCoreHandlers() {
         };
         if (args.value("sane", false)) {
             out["sane_dropped"] = dropSane;
-            out["sane_ref_fields"] = refOffsets.size();   // 0 ⇒ sane skipped (no metadata)
+            out["sane_ref_fields"]  = refOffsets.size();   // 0 + 0 bool ⇒ sane skipped (no metadata)
+            out["sane_bool_fields"] = boolOffsets.size();
         }
         return out;
     };
@@ -4276,6 +4292,7 @@ void RegisterCoreHandlers() {
         // offsets (non-static, non-value-type). Built from class metadata only
         // when requested. Mirrors walkInstance's chain walk + ReadClassInfo.
         std::vector<std::uint64_t> refOffsets;
+        std::vector<std::uint64_t> boolOffsets;
         if (args.value("sane", false)) {
             std::vector<Mono::MonoClass*> chain;
             {
@@ -4294,6 +4311,9 @@ void RegisterCoreHandlers() {
                     if (!res.ok) continue;
                     for (const auto& f : res.info.fields) {
                         if (f.flags & 0x10u) continue;   // static
+                        // System.Boolean is a value type — capture its offset for
+                        // the 0/1 sanity probe BEFORE the value-type skip below.
+                        if (f.typeName == "System.Boolean") { boolOffsets.push_back(static_cast<std::uint64_t>(f.offset)); continue; }
                         if (f.isValueType) continue;     // value type (incl IntPtr / struct / enum)
                         refOffsets.push_back(static_cast<std::uint64_t>(f.offset));
                     }
@@ -4302,7 +4322,7 @@ void RegisterCoreHandlers() {
         }
         // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
         // expectedHeader = MonoVTable* (the first qword of a real Mono object).
-        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(vtable), args, refOffsets);
+        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(vtable), args, refOffsets, boolOffsets);
         filterStats["live_walk"] = usedLiveWalk;
         if (liveOnly && liveWalkEmpty)        filterStats["live_walk_unsupported"] = true;
         else if (liveOnly && !usedLiveWalk)   filterStats["live_walk_unavailable"] = true;
@@ -7455,6 +7475,7 @@ void RegisterCoreHandlers() {
         // Phase 32 — `sane` layer needs this class's managed reference-field
         // offsets (non-static, non-value-type). Mirrors walkInstance's chain walk.
         std::vector<std::uint64_t> refOffsets;
+        std::vector<std::uint64_t> boolOffsets;
         if (args.value("sane", false)) {
             const auto& rr = IL2CPP::GetResolver();
             IL2CPP::Il2CppDomain* dom = IL2CPP::GetDomain();
@@ -7475,6 +7496,9 @@ void RegisterCoreHandlers() {
                     if (!res.ok) continue;
                     for (const auto& f : res.info.fields) {
                         if (f.flags & 0x10u) continue;   // static
+                        // System.Boolean is a value type — capture its offset for
+                        // the 0/1 sanity probe BEFORE the value-type skip below.
+                        if (f.typeName == "System.Boolean") { boolOffsets.push_back(static_cast<std::uint64_t>(f.offset)); continue; }
                         if (f.isValueType) continue;     // value type (incl IntPtr / struct / enum)
                         refOffsets.push_back(static_cast<std::uint64_t>(f.offset));
                     }
@@ -7483,7 +7507,7 @@ void RegisterCoreHandlers() {
         }
         // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
         // expectedHeader = Il2CppClass* (the first qword of a real IL2CPP object).
-        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, refOffsets);
+        json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, refOffsets, boolOffsets);
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));

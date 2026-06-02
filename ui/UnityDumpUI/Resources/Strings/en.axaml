@@ -155,6 +155,7 @@
   <sys:String x:Key="FieldRefs.CopyMethodMenu">Copy method name</sys:String>
   <sys:String x:Key="FieldRefs.CopyAddressMenu">Copy method address</sys:String>
   <sys:String x:Key="FieldRefs.CopyHitAddressMenu">Copy hit address</sys:String>
+  <sys:String x:Key="FieldRefs.DisassembleMenu">Open in CE disassembler (AOBMaker)</sys:String>
   <!-- Right-click entry shared by Inspector grid, Symbol Finder result row,
        and Browser Fields tab. -->
   <sys:String x:Key="FieldRefs.FindMethodsMenu">Find methods that touch this field…</sys:String>

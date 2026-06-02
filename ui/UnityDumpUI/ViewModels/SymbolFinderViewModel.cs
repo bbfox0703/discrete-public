@@ -54,7 +54,24 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
     /// </summary>
     public ObservableCollection<AssemblyItem> Assemblies { get; }
 
+    /// <summary>Full result set from the last search (what the RPC returned).</summary>
     public ObservableCollection<SymbolFinderRow> Matches { get; } = new();
+
+    /// <summary>Post-search, client-side view of <see cref="Matches"/> narrowed
+    /// by <see cref="ResultFilter"/> + <see cref="NumericTypesOnly"/>. The grid
+    /// binds to this, so re-filtering never re-runs the search RPC.</summary>
+    public ObservableCollection<SymbolFinderRow> FilteredMatches { get; } = new();
+
+    /// <summary>Substring filter over the loaded results — matches Member /
+    /// Class / Type, case-insensitive. Empty = show all.</summary>
+    [ObservableProperty] private string _resultFilter = string.Empty;
+    partial void OnResultFilterChanged(string value) => RefilterMatches();
+
+    /// <summary>When set, keep only rows whose Type is a numeric / bool
+    /// primitive (the directly-editable scalars — Boolean, Byte … Int64,
+    /// Single, Double, …). Filters out strings, classes, arrays, enums.</summary>
+    [ObservableProperty] private bool _numericTypesOnly;
+    partial void OnNumericTypesOnlyChanged(bool value) => RefilterMatches();
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
@@ -139,6 +156,7 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
         ErrorMessage  = null;
         StatusMessage = "Searching…";
         Matches.Clear();
+        FilteredMatches.Clear();
 
         var pat = (Pattern ?? string.Empty).Trim();
         var kinds = new List<string>();
@@ -185,6 +203,7 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
 
             foreach (var m in result.Matches)
                 Matches.Add(new SymbolFinderRow(m));
+            RefilterMatches();
 
             sw.Stop();
             string missingNote = result.MissingAssemblies is { Count: > 0 }
@@ -230,6 +249,57 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
 
     /// <summary>Wired from the view's DataGrid double-click / Enter handlers.</summary>
     public void Activate(SymbolFinderRow row) => NavigateRequested?.Invoke(row);
+
+    /// <summary>
+    /// Raised when the user picks "Send class to Browser" on a result row.
+    /// Handled by MainWindowViewModel via the SAME handler the Inspector's
+    /// "→ Browser" button uses — drops assembly + class into the Browser's
+    /// filter inputs and flips to the Fields tab.
+    /// </summary>
+    public event EventHandler<InspectorBrowseRequest>? SendToBrowserRequested;
+
+    /// <summary>Wired from the view's context-menu Click handler.</summary>
+    public void SendToBrowser(SymbolFinderRow row)
+        => SendToBrowserRequested?.Invoke(this,
+            new InspectorBrowseRequest(row.Assembly, row.Namespace, row.Class));
+
+    // ---------- Client-side result filtering -----------------------------
+
+    /// <summary>System.* primitive type names treated as "numeric" by the
+    /// numeric-only toggle. Boolean is included per the user-facing label
+    /// ("bool, byte, int32 … single, double"); strings / enums / classes are
+    /// intentionally excluded.</summary>
+    private static readonly HashSet<string> s_numericTypes = new(StringComparer.Ordinal)
+    {
+        "System.Boolean", "System.Byte",   "System.SByte",
+        "System.Int16",   "System.UInt16", "System.Int32", "System.UInt32",
+        "System.Int64",   "System.UInt64", "System.IntPtr", "System.UIntPtr",
+        "System.Single",  "System.Double", "System.Decimal", "System.Char",
+    };
+
+    private static bool IsNumericType(string? type)
+        => !string.IsNullOrEmpty(type) && s_numericTypes.Contains(type);
+
+    private static bool RowMatchesFilter(SymbolFinderRow r, string filter)
+        => r.Member.Contains(filter, StringComparison.OrdinalIgnoreCase)
+        || r.ClassDisplay.Contains(filter, StringComparison.OrdinalIgnoreCase)
+        || r.Type.Contains(filter, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Rebuild <see cref="FilteredMatches"/> from <see cref="Matches"/>
+    /// applying the result-filter substring + numeric-only toggle.</summary>
+    private void RefilterMatches()
+    {
+        FilteredMatches.Clear();
+        string filter = ResultFilter ?? string.Empty;
+        bool hasFilter   = filter.Length > 0;
+        bool numericOnly = NumericTypesOnly;
+        foreach (SymbolFinderRow r in Matches)
+        {
+            if (numericOnly && !IsNumericType(r.Type)) continue;
+            if (hasFilter && !RowMatchesFilter(r, filter)) continue;
+            FilteredMatches.Add(r);
+        }
+    }
 
     // Pull SelectedAssembly to match Browser's selection so the user
     // doesn't have to re-pick when crossing in from another tab.

@@ -31,6 +31,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core;
@@ -517,9 +518,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// are re-walked transparently so auto-refresh doesn't collapse the
     /// user's drilldown view on every tick.
     /// </summary>
-    private async Task WalkInstanceAsync(string address)
+    /// <summary>
+    /// Walk the instance and repopulate the field grid. Returns false only on a
+    /// genuine walk failure (DLL error or thrown exception) — the auto-refresh
+    /// loop uses this to stop itself instead of re-hitting the same error every
+    /// tick. Cancellation / no-target return true (not an error).
+    /// </summary>
+    private async Task<bool> WalkInstanceAsync(string address)
     {
-        if (!HasTarget) return;
+        if (!HasTarget) return true;
 
         _walkCts?.Cancel();
         _walkCts = new CancellationTokenSource();
@@ -547,11 +554,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             WalkInstanceResult result = await _backend
                 .WalkInstanceAsync(address, TargetAssembly!, TargetNamespace, TargetName!, ct)
                 .ConfigureAwait(true);
-            if (ct.IsCancellationRequested) return;
+            if (ct.IsCancellationRequested) return true;
             if (!string.IsNullOrEmpty(result.Error))
             {
                 ErrorMessage = $"walkInstance: {result.Error}";
-                return;
+                return false;
             }
             // Bulk repopulate: suppress the per-Add CollectionChanged
             // refilter so a 1350-field PlayerData walk doesn't trigger
@@ -618,13 +625,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
             _logger.Write(Constants.LogCategoryView,
                 $"walkInstance {address} {TargetLabel} {WalkSummary}");
+            return true;
         }
-        catch (OperationCanceledException) { /* superseded */ }
+        catch (OperationCanceledException) { return true; /* superseded */ }
         catch (Exception ex)
         {
             ErrorMessage = ex.Message;
             _logger.Write(Constants.LogCategoryView,
                 $"walkInstance({address}) failed: {ex.GetType().Name}: {ex.Message}");
+            return false;
         }
         finally
         {
@@ -1289,7 +1298,24 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(true))
             {
                 if (SelectedInstance is null || IsLoadingWalk) continue;
-                await WalkInstanceAsync(SelectedInstance.Address).ConfigureAwait(true);
+                // The walk mutates the UI-bound Fields collection, so it MUST run
+                // on the UI thread — the PeriodicTimer continuation is on a pool
+                // thread, which previously tripped Avalonia's cross-thread guard
+                // ("calling thread cannot access this object…") every tick.
+                string addr = SelectedInstance.Address;
+                bool ok = await Dispatcher.UIThread
+                    .InvokeAsync(() => WalkInstanceAsync(addr))
+                    .ConfigureAwait(true);
+                if (ct.IsCancellationRequested) break;
+                // A genuine walk failure (e.g. the instance was freed, or a
+                // thread-affinity error from the game) would otherwise repeat the
+                // same error every tick. Stop auto-refresh and leave the error
+                // visible; the user can re-arm it once the cause is resolved.
+                if (!ok)
+                {
+                    await Dispatcher.UIThread.InvokeAsync(() => { AutoRefreshIntervalMs = 0; });
+                    break;
+                }
             }
         }, ct);
     }
@@ -1700,10 +1726,22 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
                           : WalkedFieldKind.ArraySlotLeaf;
             effective = e.Ptr;
         }
+        else if (InstanceFieldClassifier.TryParseClassName(elementType, out _, out _)
+                 && !string.IsNullOrEmpty(e.Address))
+        {
+            // Inline value-type struct slot (e.g. PlayerData[], Vector3[]) — the
+            // struct data lives at e.Address with no object header. Expand it
+            // exactly like a ValueStruct field: a name-based walkInstance at that
+            // address iterates the struct's fields by offset. (Primitive / enum
+            // element types fail TryParseClassName and stay leaves below.)
+            kind      = WalkedFieldKind.ValueStruct;
+            effective = e.Address;
+            display   = "(struct — expand)";
+        }
         else
         {
-            // Value-type slot — element data lives at e.Address; primitive
-            // leaf for now (no inline struct expansion in this revision).
+            // Primitive / enum-as-int value slot — element data lives at
+            // e.Address; primitive leaf (no walkable managed fields).
             kind      = WalkedFieldKind.ArraySlotLeaf;
             effective = e.Address;
         }

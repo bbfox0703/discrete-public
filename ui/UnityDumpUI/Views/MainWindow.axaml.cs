@@ -1208,7 +1208,8 @@ public partial class MainWindow : Window
         var refsVm = new FieldReferencesViewModel(
             vm.BackendAdapter, vm.Logger,
             assembly, ns, className, fieldName, fieldType, isStatic,
-            bulkGate: vm.BulkGate);
+            bulkGate: vm.BulkGate,
+            aobMaker: vm.AobMaker);
         var win = new FieldReferencesWindow(refsVm);
         await win.ShowDialog(this);
     }
@@ -1366,6 +1367,14 @@ public partial class MainWindow : Window
         var grid = this.FindControl<DataGrid>("SymbolFinderResultsGrid");
         if (grid?.SelectedItem is SymbolFinderRow row)
             vm.SymbolFinder.Activate(row);
+    }
+
+    private void OnSymbolFinderSendToBrowserMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("SymbolFinderResultsGrid");
+        if (grid?.SelectedItem is SymbolFinderRow row)
+            vm.SymbolFinder.SendToBrowser(row);
     }
 
     // -----------------------------------------------------------------------
