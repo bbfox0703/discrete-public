@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace UnityDumpUI.Core.Services;
 
 /// <summary>
@@ -20,7 +22,14 @@ public static class TokenAggregator
     /// <summary>
     /// Combined factor across all wired token readers. 0 = everything clean,
     /// non-zero = at least one slot is bad.
+    /// <para>
+    /// Aggressively inlined so there is no single <c>Combined</c> function body
+    /// to NOP / patch-to-<c>return 0</c> — the OR-of-readers is emitted at each
+    /// call site instead. Consumers additionally OR in a reader of their own
+    /// (see the perturb helpers) so zeroing this path alone doesn't disarm them.
+    /// </para>
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int Combined()
         => BuildArtifactToken.Read()
          | Export.ExportFormatToken.Read()

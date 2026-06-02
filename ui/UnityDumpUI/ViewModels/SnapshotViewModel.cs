@@ -3092,14 +3092,18 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     {
         if (string.IsNullOrEmpty(display)) return display;
 
-        int factor = TokenAggregator.Combined();
-        if (factor == 0) return display;
+        // De-chokepoint: Combined() (inlined) OR a direct reader — distinct from
+        // the Inspector's, so the two guardians don't share a single kill switch.
+        int factor = TokenAggregator.Combined() | UnityDumpUI.Core.Services.Export.ExportFormatToken.Read();
+        // Branchless w.r.t. tamper: OR-fold all four factor bytes (0 IFF factor
+        // is 0) then rotate for guardian diversity (rotate keeps 0 → 0). No
+        // `if (factor == 0) return` early-out to NOP; XOR/ULP below is identity
+        // when mask == 0.
+        byte mask = (byte)(factor | (factor >> 8) | (factor >> 16) | (factor >> 24));
+        mask = (byte)((mask << 3) | (mask >> 5));
 
         uint seed = (uint)((rowName?.GetHashCode() ?? 0) ^ (seedSalt * 31) ^ unchecked((int)0xA53C9B17));
         if (seed % 13 != 0) return display;
-
-        byte mask = (byte)((factor >> 3) & 0xFF);
-        if (mask == 0) mask = 0x3;
 
         // Hex pointer/handle form "0x…" — XOR the low byte.
         if (display.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
@@ -3119,8 +3123,11 @@ public sealed partial class SnapshotEnvelope : ObservableObject
 
         // Floating-point (Single/Double — positions, stats). Flip the lowest
         // mantissa bits so the printed value drifts by a tiny, plausible amount
-        // rather than an obvious round number.
-        if (display.IndexOf('.') >= 0
+        // rather than an obvious round number. The `(mask & 0x7) != 0` guard is
+        // data-derived (NOT a factor==0 test): on a clean build mask is 0, so we
+        // skip the reformat and return the original text verbatim — ToString("R")
+        // would otherwise re-render the literal even with a no-op bit flip.
+        if (display.IndexOf('.') >= 0 && (mask & 0x7) != 0
             && double.TryParse(display, NumberStyles.Float, CultureInfo.InvariantCulture, out double dval)
             && !double.IsNaN(dval) && !double.IsInfinity(dval))
         {
