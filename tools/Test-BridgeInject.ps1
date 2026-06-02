@@ -210,11 +210,9 @@ if ($Full) {
     $loadOrder = @(
         'utils.lua',
         'unity_dump.lua',
-        'unity_dissect.lua',
-        'unity_symbols.lua',
-        'unity_addrfind.lua',
         'unity_invoke.lua',
-        'unity_scene.lua'
+        'unity_symbols.lua',
+        'mono_registersymbol_helpers.lua'
     )
 
     Write-Host "-Full mode: replaying production InjectDiscreteBridge pipeline" -ForegroundColor Cyan
@@ -227,13 +225,13 @@ if ($Full) {
         $stepIdx++
         $path = Join-Path $scriptsDir $name
         if (-not (Test-Path $path)) {
-            Write-Host ("  step $stepIdx/8: $name — file not found at $path") -ForegroundColor Red
+            Write-Host ("  step $stepIdx/$($loadOrder.Count + 1): $name — file not found at $path") -ForegroundColor Red
             continue
         }
         $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
         $payload = New-InjectTableFilePayload -FileName $name -Content $content
         $label   = "InjectTableFile $name ($($content.Length) chars)"
-        Write-Host ("Step $stepIdx/8: $label…") -ForegroundColor Gray
+        Write-Host ("Step $stepIdx/$($loadOrder.Count + 1): $label…") -ForegroundColor Gray
         if (Invoke-AobMakerCommand -PipeName $PipeName -JsonPayload $payload -TimeoutMs $InjectTimeoutMs -Label $label) {
             $okCount++
         }
@@ -265,8 +263,8 @@ local function loadEmbedded(name)
   return fn
 end
 package.preload['utils'] = loadEmbedded('utils.lua')
-local files = { 'unity_dump.lua','unity_dissect.lua','unity_symbols.lua',
-                'unity_addrfind.lua','unity_invoke.lua','unity_scene.lua' }
+local files = { 'unity_dump.lua','unity_invoke.lua','unity_symbols.lua',
+                'mono_registersymbol_helpers.lua' }
 for _, n in ipairs(files) do loadEmbedded(n)() end
 local U = require('utils')
 local ok, build = pcall(function() return U.callDLL('Discrete_GetBuildNumber','uint32') end)
@@ -278,24 +276,25 @@ _G.discrete_bridgeLoaded = true
 _G.discrete_bridgeLoaded = nil
 '@
     $stepIdx++
+    $totalSteps = $loadOrder.Count + 1
     $label = "CreateAAScript Load Discrete Bridge"
-    Write-Host ("Step $stepIdx/8: $label…") -ForegroundColor Gray
+    Write-Host ("Step $stepIdx/$totalSteps: $label…") -ForegroundColor Gray
     $payload = New-CreateAAScriptPayload -Description 'Load Discrete Bridge' -Script $bootstrap -AutoActivate $false
     if (Invoke-AobMakerCommand -PipeName $PipeName -JsonPayload $payload -TimeoutMs $TimeoutMs -Label $label) {
         $okCount++
     }
 
     Write-Host ''
-    if ($okCount -eq 8) {
-        Write-Host "Done — 8/8 steps OK." -ForegroundColor Green
-        Write-Host "Switch to CE: Table -> Show table files should list 7 unity_*.lua files;" -ForegroundColor Gray
+    if ($okCount -eq $totalSteps) {
+        Write-Host ("Done — {0}/{0} steps OK." -f $totalSteps) -ForegroundColor Green
+        Write-Host ("Switch to CE: Table -> Show table files should list {0} bridge lua files;" -f $loadOrder.Count) -ForegroundColor Gray
         Write-Host "  the address list should have a 'Load Discrete Bridge' entry. Enable it to" -ForegroundColor Gray
         Write-Host "  load the bridge into the CE Lua state." -ForegroundColor Gray
     }
     else {
-        Write-Host ("Done — {0}/8 steps OK ({1} failure(s))." -f $okCount, (8 - $okCount)) -ForegroundColor Yellow
+        Write-Host ("Done — {0}/{1} steps OK ({2} failure(s))." -f $okCount, $totalSteps, ($totalSteps - $okCount)) -ForegroundColor Yellow
     }
-    exit ([int](-not ($okCount -eq 8)))
+    exit ([int](-not ($okCount -eq $totalSteps)))
 }
 
 # Default (minimal) mode: 1 stub file + 1 stub AA.

@@ -66,11 +66,8 @@ Supported game runtimes:
 | **`Discrete-Mono.dll` / `Discrete-IL2CPP.dll`** | Injected backend. Speaks named-pipe JSON-RPC on `\\.\pipe\DiscreteBfx`. |
 | **`version.dll` / `winmm.dll`** *(proxy DLLs)* | Drop next to the game's `.exe` for pre-Unity-init injection. Auto-selects Mono vs IL2CPP backend. |
 | **`unity_dump.lua`** | One-shot injector from CE Lua. |
-| **`unity_dissect.lua`** | Populate CE's *Structure Dissect* directly from a managed class layout. |
 | **`unity_symbols.lua`** | Register static fields + method addresses as CE symbols so CT memory records can reference them by name. |
-| **`unity_addrfind.lua`** | Reverse lookup: any address → managed instance + class + field. |
 | **`unity_invoke.lua`** | Call any Mono / IL2CPP method from CE Lua with typed args + return value + managed exception capture. |
-| **`unity_scene.lua`** | Walk Unity's scene graph (GameObject hierarchy, components, transforms). |
 | **`mono_registersymbol_helpers.lua`** | DLL-free Mono symbol register helpers (for CT authors who prefer pure-Lua). |
 | **`inject-x86.exe`** + **`x86/`** subfolder | Cross-bitness inject helper. `DiscreteUI.exe` is x64-only, so when the target is a 32-bit Unity Mono game the UI shells out to `inject-x86.exe` (a tiny standalone 32-bit injector) to push the matching `x86/Discrete-Mono.dll` into the target. Ships next to `DiscreteUI.exe`; not run by the end user directly. |
 | **`metadata-cli.exe`** | Offline `global-metadata.dat` parser (works on a game folder without launching the game). |
@@ -104,11 +101,8 @@ End user extracts the release zip into `<CE-install>/discrete/`.
     ├── Discrete-IL2CPP.dll     ← required for IL2CPP targets
     ├── unity_dump.lua             ← required (injector)
     ├── utils.lua                  ← required
-    ├── unity_dissect.lua          ← optional
     ├── unity_symbols.lua          ← optional
     ├── unity_invoke.lua           ← optional
-    ├── unity_scene.lua            ← optional
-    ├── unity_addrfind.lua         ← optional
     ├── mono_registersymbol_helpers.lua  ← optional
     └── x86/
         ├── Discrete-Mono.dll   ← required for 32-bit Mono games
@@ -193,13 +187,8 @@ dofile([[<CE>\discrete\unity_dump.lua]])
 --   [Discrete] Backend: IL2CPP — DLL injected (build N)
 --   [Discrete] Pipe ready: \\.\pipe\DiscreteBfx
 
--- Reverse address lookup — paste any CE-discovered address:
-dofile([[<CE>\discrete\unity_addrfind.lua]])
-lookupAddress(0x000001E55B2518F0)
---   → instance=0x...  class=MainGame.PLY_WORK  field=chrNo
---     (System.Byte @ +0x10)
-
--- Or launch DiscreteUI.exe for the GUI.
+-- Or launch DiscreteUI.exe for the GUI (Address Lookup, Inspector,
+-- Scene, Value Search and the rest live there).
 ```
 
 For end users of a published `.CT`, the activate-script handles all of

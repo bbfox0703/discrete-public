@@ -4323,7 +4323,7 @@ void RegisterCoreHandlers() {
         }
         return json{
             // `class_ptr` mirrors the IL2CPP findInstances shape so cross-backend
-            // consumers (e.g. unity_scene.lua's first-qword validator) can read
+            // consumers (e.g. a first-qword instance validator) can read
             // the same field name. On Mono the FIRST qword of a real instance
             // is actually MonoVTable* (not MonoClass*), so for validators that
             // compare against the instance's first qword, use `vtable`.

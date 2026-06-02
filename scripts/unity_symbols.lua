@@ -40,8 +40,8 @@
 --           Override via opts.compileMethods=false to register only the
 --           statics + already-JIT'd methods (m.address already populated).
 --
--- Reuses the JSON parser from unity_dissect.lua via require if available;
--- otherwise an inline copy keeps the file standalone.
+-- Ships its own inline pipe RPC + JSON parser (below) so the file
+-- stays drop-in standalone — no extra require needed.
 
 local TAG = "[Discrete.symbols]"
 local function log(fmt, ...) print(string.format(TAG .. " " .. fmt, ...)) end

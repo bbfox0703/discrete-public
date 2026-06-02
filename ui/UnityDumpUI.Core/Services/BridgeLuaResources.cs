@@ -1,4 +1,4 @@
-// BridgeLuaResources.cs — Phase 22b accessor for the 7 CE Lua bridge
+// BridgeLuaResources.cs — Phase 22b accessor for the 5 CE Lua bridge
 // scripts embedded in UnityDumpUI.Core.dll's manifest.
 //
 // Each script is shipped as an <EmbeddedResource> in the project file
@@ -18,7 +18,7 @@
 //   * Pure data access: no Avalonia / UI dependencies, no Native AOT
 //     analyzer concerns. GetManifestResourceStream is AOT-safe.
 //   * Mirrors UE5CEDumper's HelperLuaResource.cs layout, scaled from 1
-//     to 7 files.
+//     to 5 files.
 
 using System;
 using System.Collections.Generic;
@@ -109,7 +109,7 @@ public static class BridgeLuaResources
     }
 
     /// <summary>
-    /// Enumerate all 7 bridge lua files in <see cref="LoadOrder"/>,
+    /// Enumerate all 5 bridge lua files in <see cref="LoadOrder"/>,
     /// yielding <c>(fileName, content)</c> pairs. The fileName is the
     /// CE-table-side identifier (passed to
     /// <c>IAobMakerBridge.InjectTableFileAsync</c>'s <c>fileName</c>

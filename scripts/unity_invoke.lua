@@ -2,8 +2,8 @@
 -- unity_invoke.lua — call managed Unity methods via the DLL pipe.
 -- ============================================================
 --
--- Phase 19e. Sibling of `unity_dissect.lua`, `unity_symbols.lua`,
--- `unity_addrfind.lua`. Closes the long-standing CLAUDE.md goal:
+-- Phase 19e. Sibling of `unity_symbols.lua`. Closes the long-standing
+-- CLAUDE.md goal:
 -- invoke managed methods (Mono JIT or IL2CPP AOT) from CE Lua with
 -- marshaled args + typed return values + managed-exception capture.
 --
@@ -82,7 +82,8 @@ local function warn(fmt, ...) print(string.format(TAG .. " WARN "  .. fmt, ...))
 local function err (fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
 
 -- ---------- Tiny JSON parser (response-shape-specific) ------------------
--- Same shape as unity_addrfind.lua's parser. Handles the response shapes
+-- Minimal standalone parser (kept inline so this file stays drop-in).
+-- Handles the response shapes
 -- callMethod / findMethodInstances emit: top-level objects with string
 -- keys, primitive / nested object / array values, basic escapes.
 

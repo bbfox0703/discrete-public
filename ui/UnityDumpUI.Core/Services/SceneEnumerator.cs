@@ -1,8 +1,9 @@
 // SceneEnumerator.cs — Phase 20b helper for Scene Explorer UI.
 //
-// Ports the recipe from scripts/unity_scene.lua into C# so DiscreteUI's
-// Scene tab can drive the same enumeration without going through a CE
-// Lua shell. Pure composition over BackendAdapter.CallMethodAsync +
+// Ports the scene-walk recipe into C# so DiscreteUI's Scene tab can
+// drive the enumeration directly (the CE Lua prototype this grew from,
+// scripts/unity_scene.lua, has since been retired as UI-only).
+// Pure composition over BackendAdapter.CallMethodAsync +
 // WalkArrayAsync; no DLL changes needed — the heavy lifting lives in
 // the existing Phase 19 callMethod RPC.
 //

@@ -123,10 +123,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         ClassPivot = new PivotViewModel(Snapshot, _logger);
         ClassPivot.NavigateToInspectorRequested += OnSpcNavigateToInspector;
         // Phase 20b: Scene Explorer tab. SceneEnumerator wraps the
-        // UnityEngine.Object.FindObjects* + Transform-walk recipe from
-        // unity_scene.lua; Phase 20-MT keeps main-thread routing on
-        // every icall so the game stays responsive under sustained
-        // burst.
+        // UnityEngine.Object.FindObjects* + Transform-walk recipe (first
+        // prototyped in the now-retired unity_scene.lua); Phase 20-MT
+        // keeps main-thread routing on every icall so the game stays
+        // responsive under sustained burst.
         Scene = new SceneExplorerViewModel(new SceneEnumerator(_backend, _logger), _logger);
         Scene.NavigateToInspectorRequested += OnSceneNavigateToInspector;
         // Phase 22a/d: hoisted from Inspector to a top-level VM property.
