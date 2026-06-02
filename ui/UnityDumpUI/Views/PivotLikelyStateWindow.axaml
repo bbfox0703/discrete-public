@@ -21,6 +21,10 @@
                          Minimum="1" Maximum="500" Increment="10"
                          FormatString="0" Width="120" VerticalAlignment="Center"
                          ToolTip.Tip="How many candidates the (slower) volatility pass scores. Higher = broader but slower."/>
+          <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+          <TextBox Text="{Binding ClassPivot.InterestFilter, Mode=TwoWay}"
+                   PlaceholderText="class name substring" Width="180" VerticalAlignment="Center"
+                   ToolTip.Tip="Case-insensitive substring filter on the ranked class FQN."/>
         </StackPanel>
         <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.InterestStatus}"
                    Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>

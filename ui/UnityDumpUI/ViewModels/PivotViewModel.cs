@@ -112,11 +112,33 @@ public sealed partial class PivotViewModel : ObservableObject
     /// detail grid. Empty when no row is selected.</summary>
     public ObservableCollection<ClassFieldInfo> ShortlistFields { get; } = new();
 
+    /// <summary>Unfiltered field list of the selected shortlist row; the
+    /// filtered view (<see cref="ShortlistFields"/>) is rebuilt from this.</summary>
+    private List<ClassFieldInfo> _allShortlistFields = new();
+
+    /// <summary>Case-insensitive substring filter on the field-structure
+    /// detail grid (field name). Lets a wide class be narrowed quickly.</summary>
+    [ObservableProperty] private string _shortlistFieldFilter = string.Empty;
+
     partial void OnSelectedShortlistRowChanged(ClassShortlistRow? value)
     {
+        _allShortlistFields = value?.Fields?.ToList() ?? new List<ClassFieldInfo>();
+        RebuildShortlistFieldsView();
+    }
+
+    partial void OnShortlistFieldFilterChanged(string value) => RebuildShortlistFieldsView();
+
+    private void RebuildShortlistFieldsView()
+    {
+        string? filter = string.IsNullOrWhiteSpace(ShortlistFieldFilter) ? null : ShortlistFieldFilter.Trim();
         ShortlistFields.Clear();
-        if (value is null) return;
-        foreach (var f in value.Fields) ShortlistFields.Add(f);
+        foreach (var f in _allShortlistFields)
+        {
+            if (filter is not null &&
+                f.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            ShortlistFields.Add(f);
+        }
     }
 
     /// <summary>Distinct classes pulled from the per-game DB metadata
@@ -611,8 +633,30 @@ public sealed partial class PivotViewModel : ObservableObject
 
     // ── 29i-3: unsupervised "likely game-state" ranking + preview ──────
 
-    /// <summary>Ranked candidate classes (stable key + drifting value).</summary>
+    /// <summary>Ranked candidate classes (stable key + drifting value) —
+    /// the filtered view. Unfiltered set in <see cref="_allInterestRows"/>.</summary>
     public ObservableCollection<ClassInterestRow> InterestRows { get; } = new();
+
+    private List<ClassInterestRow> _allInterestRows = new();
+
+    /// <summary>Case-insensitive substring filter on the ranked list
+    /// (class FQN). Empty = show all.</summary>
+    [ObservableProperty] private string _interestFilter = string.Empty;
+
+    partial void OnInterestFilterChanged(string value) => RebuildInterestView();
+
+    private void RebuildInterestView()
+    {
+        string? filter = string.IsNullOrWhiteSpace(InterestFilter) ? null : InterestFilter.Trim();
+        InterestRows.Clear();
+        foreach (var r in _allInterestRows)
+        {
+            if (filter is not null &&
+                r.ClassFqn.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            InterestRows.Add(r);
+        }
+    }
 
     /// <summary>How many Stage-0 candidates Pass B scores. Cost gate.</summary>
     [ObservableProperty] private int _interestTopN = 40;
@@ -714,8 +758,8 @@ public sealed partial class PivotViewModel : ObservableObject
             }).ConfigureAwait(true);
             sw.Stop();
 
-            InterestRows.Clear();
-            foreach (var row in rows) InterestRows.Add(row);
+            _allInterestRows = rows.ToList();
+            RebuildInterestView();
 
             int evicted = 0;
             foreach (var r in selected)

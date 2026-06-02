@@ -1,8 +1,11 @@
 // PivotPickFieldsWindow.axaml.cs — Class Pivot UI/UX overhaul Wave B.
+using System.Collections;
+using System.Collections.Generic;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using UnityDumpUI.Core.Services;
 using UnityDumpUI.ViewModels;
 
 namespace UnityDumpUI.Views;
@@ -17,7 +20,21 @@ public partial class PivotPickFieldsWindow : Window
     public PivotPickFieldsWindow(MainWindowViewModel vm) : this()
     {
         DataContext = vm;
+        Loaded += (_, _) =>
+            this.FindControl<DataGrid>("PivotFieldScoreGrid")?.WireSortComparers(SortComparers);
     }
+
+    private static readonly IReadOnlyDictionary<string, IComparer> SortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["FieldName"]    = DataGridSortComparers.Ordinal<FieldScore>(r => r.FieldName),
+            ["FieldType"]    = DataGridSortComparers.Ordinal<FieldScore>(r => r.FieldType),
+            ["Score"]        = DataGridSortComparers.Double <FieldScore>(r => r.Score),
+            ["SStable"]      = DataGridSortComparers.Double <FieldScore>(r => r.SStable),
+            ["SCardinality"] = DataGridSortComparers.Double <FieldScore>(r => r.SCardinality),
+            ["TypePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.TypePrior),
+            ["NamePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.NamePrior),
+        };
 
     private FieldScore? GetSelectedFieldScore()
     {
