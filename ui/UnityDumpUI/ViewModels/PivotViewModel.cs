@@ -226,7 +226,14 @@ public sealed partial class PivotViewModel : ObservableObject
 
     /// <summary>FQN of the class whose instances to pivot — typed by
     /// the user, suggestions from <see cref="KnownClasses"/>.</summary>
-    [ObservableProperty] private string _classFqn = string.Empty;
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ScoreFieldsCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ScoreElementFieldsCommand))]
+    private string _classFqn = string.Empty;
+
+    /// <summary>True when a class FQN is set — drives the "pick a class first"
+    /// dependency hints + the Score-fields button enable state (Wave C).</summary>
+    public bool HasClassFqn => !string.IsNullOrWhiteSpace(ClassFqn);
 
     /// <summary>Comma-separated key field names. Empty → preflight
     /// error. Compound key = multiple names.</summary>
@@ -240,7 +247,15 @@ public sealed partial class PivotViewModel : ObservableObject
     /// (parts joined with ", "). Case-insensitive.</summary>
     [ObservableProperty] private string _keyFilter = string.Empty;
 
-    partial void OnClassFqnChanged(string value) => RefreshKnownFieldNamesForClass();
+    partial void OnClassFqnChanged(string value)
+    {
+        RefreshKnownFieldNamesForClass();
+        OnPropertyChanged(nameof(HasClassFqn));
+    }
+
+    /// <summary>Score-fields needs a class chosen first (Wave C dependency
+    /// gate). Combined with the snapshot/busy gate.</summary>
+    private bool CanScoreFields() => CanRun() && HasClassFqn;
 
     // ── Layer B: array inner-pivot (29f-4) ─────────────────────────────
 
@@ -299,7 +314,7 @@ public sealed partial class PivotViewModel : ObservableObject
 
     partial void OnElementFieldScoreFilterChanged(string value) => RebuildElementFieldScoresView();
 
-    [RelayCommand(CanExecute = nameof(CanRun))]
+    [RelayCommand(CanExecute = nameof(CanScoreFields))]
     public async Task ScoreElementFieldsAsync()
     {
         ErrorMessage = string.Empty;
@@ -311,7 +326,7 @@ public sealed partial class PivotViewModel : ObservableObject
         }
         if (string.IsNullOrWhiteSpace(ClassFqn))
         {
-            ErrorMessage = "Set a Class FQN first (type one or pick it from the Stage 0 shortlist).";
+            ErrorMessage = "Set a Class FQN first (type one, or pick it in “Browse classes…”).";
             return;
         }
         if (string.IsNullOrWhiteSpace(ArrayFieldName))
@@ -377,7 +392,7 @@ public sealed partial class PivotViewModel : ObservableObject
             }
 
             ElementFieldScoreStatus = _allElementFieldScores.Count == 0
-                ? "No element fields scored — the array has no captured inner fields. Re-take the snapshot with \"Capture array element fields\" (Layer B) enabled on the Snapshot tab."
+                ? "No element fields scored — the array has no captured inner fields. Re-take the snapshot with \"Capture array element fields\" enabled on the Snapshot tab."
                 : $"Scored {_allElementFieldScores.Count:N0} element field(s) in {sw.ElapsedMilliseconds} ms. " +
                   $"Double-click → inner key; right-click → inner value. Suggested inner key: {SuggestedInnerKeyDisplay}.";
             _logger.Write(SnapshotStore.LogCategory,
@@ -772,7 +787,7 @@ public sealed partial class PivotViewModel : ObservableObject
             }
 
             InterestStatus =
-                $"Ranked {rows.Count:N0} candidate class(es) in {sw.ElapsedMilliseconds} ms (from {candidateCount:N0} Stage-0 picks). " +
+                $"Ranked {rows.Count:N0} candidate class(es) in {sw.ElapsedMilliseconds} ms (from {candidateCount:N0} candidate classes). " +
                 "Double-tap a row to load key+value; select a row to preview.";
             _logger.Write(SnapshotStore.LogCategory,
                 $"PivotInterest: asm='{AssemblyFilter}' topN={InterestTopN} candidates={candidateCount} → {rows.Count} ranked in {sw.ElapsedMilliseconds}ms evicted={evicted}");
@@ -1019,7 +1034,7 @@ public sealed partial class PivotViewModel : ObservableObject
 
     // ── Stage 1: Score fields ──────────────────────────────────────────
 
-    [RelayCommand(CanExecute = nameof(CanRun))]
+    [RelayCommand(CanExecute = nameof(CanScoreFields))]
     public async Task ScoreFieldsAsync()
     {
         ErrorMessage = string.Empty;
@@ -1031,7 +1046,7 @@ public sealed partial class PivotViewModel : ObservableObject
         }
         if (string.IsNullOrWhiteSpace(ClassFqn))
         {
-            ErrorMessage = "Set a Class FQN first (type one or pick it from the Stage 0 shortlist).";
+            ErrorMessage = "Set a Class FQN first (type one, or pick it in “Browse classes…”).";
             return;
         }
 
@@ -1361,7 +1376,7 @@ public sealed partial class PivotViewModel : ObservableObject
             int collisionCount = matches.Count(m => m.HasCollision);
             string collisionNote = collisionCount > 0 ? $", {collisionCount} with collisions" : string.Empty;
             string layerBHint = (ArrayPivotMode && matches.Count == 0)
-                ? " — no captured element fields. Re-take the snapshot with \"Capture array element fields\" enabled on the Snapshot tab (Layer B)."
+                ? " — no captured element fields. Re-take the snapshot with \"Capture array element fields\" enabled on the Snapshot tab."
                 : string.Empty;
             StatusMessage = $"Pivot: {matches.Count:N0} row(s){collisionNote} across {snapCount:N0} snapshot(s) in {sw.ElapsedMilliseconds} ms{evictionNote}.{layerBHint}";
             _logger.Write(SnapshotStore.LogCategory,

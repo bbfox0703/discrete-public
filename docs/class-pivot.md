@@ -952,7 +952,7 @@ engines stay.
 |---|---|---|
 | **A** | Responsiveness (#5): move every engine `.Run()` off the UI thread (`Task.Run`) + indeterminate busy bar bound to `IsRunning` + disable Run buttons while busy (`[NotifyCanExecuteChangedFor]`). Pivot **and** SPC Query tabs. | ✅ **DONE** (dev, 685 tests green) — needs user visual verify |
 | **B** | Layout (#1): replace the 7 stacked panels with a single toolbar of buttons; each opens a dialog bound to the SHARED VM; Results grid + busy bar fill the tab body. No engine/command behaviour change. | ✅ **DONE** (dev, 685 tests green) — **needs user runtime verify** |
-| **C** | Jargon (#3) + keyword filters (#2): rename Stage 0/Stage 1/Layer B to plain labels; explicit ordered dependencies (disable until prereq met + hints); a keyword filter on every list. | ⏳ |
+| **C** | Jargon (#3) + keyword filters (#2): rename Stage 0/Stage 1/Layer B to plain labels; explicit ordered dependencies (disable until prereq met + hints); a keyword filter on every list. | ✅ **DONE** (dev, 685 tests green) |
 | **D** | Pickers + handoff (#4, #6): array-pivot params → schema-populated pickers; Inspector/Browser/Snapshot right-click → "Pivot this class/field here". | ⏳ |
 
 **Wave A notes (2026-06-02)**: `PivotViewModel` — all 6 engine call sites
@@ -985,3 +985,23 @@ Follow-ups for Wave C: (a) the old per-panel handlers in `MainWindow.axaml.cs`
 are now dead (their panels moved) — harmless but should be pruned; (b) the
 Results-grid context-menu handlers + `OnPivotResultDoubleTapped` stay in
 `MainWindow.axaml.cs` (the grid stayed).
+
+**Wave B fixups + Wave C notes (2026-06-02)**:
+- **Sort regression fixed** — moving grids to dialogs orphaned MainWindow's
+  `WireSortComparers` (FindControl returned null). Each dialog now wires its own
+  comparers in `Loaded` (FieldAcrossInstancesWindow precedent). The dead
+  MainWindow wirings + 4 now-unused comparer dicts + 16 moved handler methods
+  (~142 lines) were pruned; only the Results-grid comparers/handlers remain.
+- **Filters added** — Likely-game-state grid (`InterestFilter` + `_allInterestRows`
+  / `RebuildInterestView`) and the Browse-classes field-structure grid
+  (`ShortlistFieldFilter` + `_allShortlistFields` / `RebuildShortlistFieldsView`);
+  the field-structure grid is now sortable too. Snapshots picker grid is
+  header-sortable by capture time (already built in time order).
+- **Jargon dropped** (user-facing only; internal comments keep Stage/Layer
+  names) — "Stage 0 shortlist" → "Browse classes…", "Stage-0 picks" → "candidate
+  classes", "(Layer B)" removed from the Snapshot-tab capture checkbox + tooltips
+  + the Find-by-value tooltip.
+- **Dependency gating** — "Score fields" / "Score element fields" now require a
+  class (`CanScoreFields` = snapshot+busy gate AND `HasClassFqn`); the buttons
+  grey out and the Pick-key/value + Array dialogs show a "① Pick a class first…"
+  hint banner until a Class FQN is set.

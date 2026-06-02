@@ -216,20 +216,12 @@ public partial class MainWindow : Window
             .WireSortComparers(SymbolFinderSortComparers);
         this.FindControl<DataGrid>("SnapshotFieldStatsGrid")?
             .WireSortComparers(SnapshotFieldStatsSortComparers);
-        this.FindControl<DataGrid>("PivotShortlistGrid")?
-            .WireSortComparers(PivotShortlistSortComparers);
-        this.FindControl<DataGrid>("PivotFieldScoreGrid")?
-            .WireSortComparers(PivotFieldScoreSortComparers);
-        // 29i-2 element-field picker — same FieldScore row type, so it
-        // reuses the Stage 1 comparers.
-        this.FindControl<DataGrid>("PivotElementFieldScoreGrid")?
-            .WireSortComparers(PivotFieldScoreSortComparers);
+        // The Pivot shortlist / field-score / element-field / locator / interest
+        // grids moved into their own dialogs (Class Pivot overhaul Wave B); each
+        // dialog wires its own comparers in its Loaded handler. Only the Results
+        // grid stays on the tab here.
         this.FindControl<DataGrid>("PivotResultsGrid")?
             .WireSortComparers(PivotResultsSortComparers);
-        this.FindControl<DataGrid>("PivotLocatorGrid")?
-            .WireSortComparers(PivotLocatorSortComparers);
-        this.FindControl<DataGrid>("PivotInterestGrid")?
-            .WireSortComparers(PivotInterestSortComparers);
     }
 
     private static readonly IReadOnlyDictionary<string, IComparer> BrowserFieldsSortComparers =
@@ -310,55 +302,9 @@ public partial class MainWindow : Window
             ["Count"]     = DataGridSortComparers.Number <FieldNameStat>(r => r.Count),
         };
 
-    private static readonly IReadOnlyDictionary<string, IComparer> PivotShortlistSortComparers =
-        new Dictionary<string, IComparer>
-        {
-            ["ClassFqn"]            = DataGridSortComparers.Ordinal<ClassShortlistRow>(r => r.ClassFqn),
-            ["Assembly"]            = DataGridSortComparers.Ordinal<ClassShortlistRow>(r => r.Assembly),
-            ["Presence"]            = DataGridSortComparers.Number <ClassShortlistRow>(r => r.Presence),
-            ["AvgInstances"]        = DataGridSortComparers.Double <ClassShortlistRow>(r => r.AvgInstances),
-            ["Cv"]                  = DataGridSortComparers.Double <ClassShortlistRow>(r => r.Cv),
-            ["FieldCount"]          = DataGridSortComparers.Number <ClassShortlistRow>(r => r.FieldCount),
-            ["PrimitiveFieldRatio"] = DataGridSortComparers.Double <ClassShortlistRow>(r => r.PrimitiveFieldRatio),
-            ["NullFieldRatio"]      = DataGridSortComparers.Double <ClassShortlistRow>(r => r.NullFieldRatio),
-            ["StringFieldRatio"]    = DataGridSortComparers.Double <ClassShortlistRow>(r => r.StringFieldRatio),
-            ["ArrayFieldRatio"]     = DataGridSortComparers.Double <ClassShortlistRow>(r => r.ArrayFieldRatio),
-        };
-
-    private static readonly IReadOnlyDictionary<string, IComparer> PivotFieldScoreSortComparers =
-        new Dictionary<string, IComparer>
-        {
-            ["FieldName"]    = DataGridSortComparers.Ordinal<FieldScore>(r => r.FieldName),
-            ["FieldType"]    = DataGridSortComparers.Ordinal<FieldScore>(r => r.FieldType),
-            ["Score"]        = DataGridSortComparers.Double <FieldScore>(r => r.Score),
-            ["SStable"]      = DataGridSortComparers.Double <FieldScore>(r => r.SStable),
-            ["SCardinality"] = DataGridSortComparers.Double <FieldScore>(r => r.SCardinality),
-            ["TypePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.TypePrior),
-            ["NamePrior"]    = DataGridSortComparers.Double <FieldScore>(r => r.NamePrior),
-        };
-
-    private static readonly IReadOnlyDictionary<string, IComparer> PivotInterestSortComparers =
-        new Dictionary<string, IComparer>
-        {
-            ["ClassFqn"]      = DataGridSortComparers.Ordinal<ClassInterestRow>(r => r.ClassFqn),
-            ["Assembly"]      = DataGridSortComparers.Ordinal<ClassInterestRow>(r => r.Assembly),
-            ["InterestScore"] = DataGridSortComparers.Double <ClassInterestRow>(r => r.InterestScore),
-            ["BestKeyScore"]  = DataGridSortComparers.Double <ClassInterestRow>(r => r.BestKeyScore),
-            ["MaxVolatility"] = DataGridSortComparers.Double <ClassInterestRow>(r => r.MaxVolatility),
-        };
-
-    private static readonly IReadOnlyDictionary<string, IComparer> PivotLocatorSortComparers =
-        new Dictionary<string, IComparer>
-        {
-            ["ClassFqn"]       = DataGridSortComparers.Ordinal<ValueLocatorHit>(r => r.ClassFqn),
-            ["Assembly"]       = DataGridSortComparers.Ordinal<ValueLocatorHit>(r => r.Assembly),
-            ["FieldName"]      = DataGridSortComparers.Ordinal<ValueLocatorHit>(r => r.FieldName),
-            ["InArrayElement"] = DataGridSortComparers.Bool   <ValueLocatorHit>(r => r.InArrayElement),
-            ["SnapHitCount"]   = DataGridSortComparers.Number <ValueLocatorHit>(r => r.SnapHitCount),
-            ["MatchRarity"]    = DataGridSortComparers.Double <ValueLocatorHit>(r => r.MatchRarity),
-            ["Score"]          = DataGridSortComparers.Double <ValueLocatorHit>(r => r.Score),
-        };
-
+    // Wave B: the shortlist / field-score / interest / locator comparers moved
+    // to their dialogs (each wires its own). Only the Results-grid comparers
+    // remain on the tab.
     private static readonly IReadOnlyDictionary<string, IComparer> PivotResultsSortComparers =
         new Dictionary<string, IComparer>
         {
@@ -581,147 +527,6 @@ public partial class MainWindow : Window
         var row = GetSelectedPivotRow();
         if (row is null) return;
         await vm.ClassPivot.CopyAddressLatestAsync(row).ConfigureAwait(true);
-    }
-
-    /// <summary>Phase 29e-3: double-clicking a Stage-0 shortlist row
-    /// fills the Class FQN box (+ scopes the assembly filter) so the
-    /// user flows straight into picking key/value fields.</summary>
-    private void OnPivotShortlistDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        if (sender is not Avalonia.Controls.DataGrid grid) return;
-        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ClassShortlistRow row) return;
-        vm.ClassPivot.UseShortlistRow(row);
-    }
-
-    // ── Phase 29e-4 Stage 1 field-score grid ────────────────────────────
-
-    private UnityDumpUI.ViewModels.FieldScore? GetSelectedFieldScore()
-    {
-        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotFieldScoreGrid");
-        return grid?.SelectedItem as UnityDumpUI.ViewModels.FieldScore;
-    }
-
-    /// <summary>Double-tap a scored field → add it to Key fields (the
-    /// most common action). Right-click offers value instead.</summary>
-    private void OnPivotFieldScoreDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        if (sender is not Avalonia.Controls.DataGrid grid) return;
-        if (grid.SelectedItem is not UnityDumpUI.ViewModels.FieldScore row) return;
-        vm.ClassPivot.AddFieldToKeys(row);
-    }
-
-    private void OnPivotFieldAddToKeysClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        var f = GetSelectedFieldScore();
-        if (f is null) return;
-        vm.ClassPivot.AddFieldToKeys(f);
-    }
-
-    private void OnPivotFieldAddToValuesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        var f = GetSelectedFieldScore();
-        if (f is null) return;
-        vm.ClassPivot.AddFieldToValues(f);
-    }
-
-    // ── Phase 29i-1 class-structure detail panel ────────────────────────
-
-    private UnityDumpUI.ViewModels.ClassFieldInfo? GetSelectedShortlistField()
-    {
-        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotShortlistFieldGrid");
-        return grid?.SelectedItem as UnityDumpUI.ViewModels.ClassFieldInfo;
-    }
-
-    /// <summary>Double-tap a field in the structure detail panel → add it
-    /// to Key fields (most common); right-click offers value.</summary>
-    private void OnPivotShortlistFieldDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        if (sender is not Avalonia.Controls.DataGrid grid) return;
-        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ClassFieldInfo f) return;
-        vm.ClassPivot.AddFieldNameToKeys(f.Name);
-    }
-
-    private void OnPivotShortlistFieldAddToKeysClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        var f = GetSelectedShortlistField();
-        if (f is null) return;
-        vm.ClassPivot.AddFieldNameToKeys(f.Name);
-    }
-
-    private void OnPivotShortlistFieldAddToValuesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        var f = GetSelectedShortlistField();
-        if (f is null) return;
-        vm.ClassPivot.AddFieldNameToValues(f.Name);
-    }
-
-    // ── Phase 29i-2 array element-field scored picker ───────────────────
-
-    private UnityDumpUI.ViewModels.FieldScore? GetSelectedElementFieldScore()
-    {
-        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotElementFieldScoreGrid");
-        return grid?.SelectedItem as UnityDumpUI.ViewModels.FieldScore;
-    }
-
-    /// <summary>Double-tap a scored element field → add it to the Inner key
-    /// fields (most common); right-click offers inner value.</summary>
-    private void OnPivotElementFieldScoreDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        if (sender is not Avalonia.Controls.DataGrid grid) return;
-        if (grid.SelectedItem is not UnityDumpUI.ViewModels.FieldScore row) return;
-        vm.ClassPivot.AddElementFieldToInnerKeys(row);
-    }
-
-    private void OnPivotElementFieldAddToInnerKeysClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        var f = GetSelectedElementFieldScore();
-        if (f is null) return;
-        vm.ClassPivot.AddElementFieldToInnerKeys(f);
-    }
-
-    private void OnPivotElementFieldAddToInnerValuesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        var f = GetSelectedElementFieldScore();
-        if (f is null) return;
-        vm.ClassPivot.AddElementFieldToInnerValues(f);
-    }
-
-    // ── Phase 29i-4 value locator (Find by value) ───────────────────────
-
-    private void OnPivotLocatorDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        if (sender is not Avalonia.Controls.DataGrid grid) return;
-        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ValueLocatorHit hit) return;
-        vm.ClassPivot.UseLocatorHit(hit);
-    }
-
-    private void OnPivotLocatorUseClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        var grid = this.FindControl<Avalonia.Controls.DataGrid>("PivotLocatorGrid");
-        if (grid?.SelectedItem is not UnityDumpUI.ViewModels.ValueLocatorHit hit) return;
-        vm.ClassPivot.UseLocatorHit(hit);
-    }
-
-    // ── Phase 29i-3 likely game-state ranking ───────────────────────────
-
-    private void OnPivotInterestDoubleTapped(object? sender, Avalonia.Input.TappedEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) return;
-        if (sender is not Avalonia.Controls.DataGrid grid) return;
-        if (grid.SelectedItem is not UnityDumpUI.ViewModels.ClassInterestRow row) return;
-        vm.ClassPivot.UseInterestRow(row);
     }
 
     // ── Class Pivot UI/UX overhaul Wave B — open each mode as a dialog ──

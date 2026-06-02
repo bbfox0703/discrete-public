@@ -1718,7 +1718,7 @@
                   <DockPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="9"
                              Margin="0,6,0,0" LastChildFill="True">
                     <CheckBox DockPanel.Dock="Left"
-                              Content="Capture array element fields (Layer B)"
+                              Content="Capture array element fields"
                               VerticalAlignment="Center" Margin="0,0,16,0"
                               IsChecked="{Binding Snapshot.CaptureArrayElementFields, Mode=TwoWay}"
                               ToolTip.Tip="Capture each reference-type array element's own fields one level deep, so the Class Pivot tab can pivot array elements by an inner field (e.g. StatConvertCollectionData[] keyed by _propertyID). OFF by default — it multiplies capture size. On 64-bit this captures every reference array (blanket); on 32-bit it is disabled unless you name targets below (OOM safety)."/>
@@ -1739,7 +1739,7 @@
                     <TextBox Text="{Binding Snapshot.ArrayElementTargetsText, Mode=TwoWay}"
                              VerticalAlignment="Center"
                              PlaceholderText="(x64: blank = all ref arrays. x86: required, e.g. Mortal.Core.GameStat._statAdditionData)"
-                             ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' (all its reference arrays) or 'Namespace.Class.fieldName', comma/semicolon separated. Required to enable Layer B capture on 32-bit targets; leave blank on 64-bit for blanket capture."/>
+                             ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' (all its reference arrays) or 'Namespace.Class.fieldName', comma/semicolon separated. Required to enable array-element capture on 32-bit targets; leave blank on 64-bit for blanket capture."/>
                   </DockPanel>
 
                   <!-- Row 3 — Phase 30a decode budget + the game-memory banner
