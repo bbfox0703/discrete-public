@@ -256,6 +256,21 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             className:  TargetName      ?? string.Empty));
     }
 
+    /// <summary>Class Pivot overhaul Wave D — "→ Pivot" handoff. Lands the
+    /// current target class into the Class Pivot tab (same request shape as
+    /// SendToBrowser; MainWindow builds the FQN + switches tabs).</summary>
+    public event EventHandler<InspectorBrowseRequest>? SendToPivotRequested;
+
+    [RelayCommand]
+    private void SendToPivot()
+    {
+        if (!HasTarget) return;
+        SendToPivotRequested?.Invoke(this, new InspectorBrowseRequest(
+            assembly:   TargetAssembly  ?? string.Empty,
+            @namespace: TargetNamespace ?? string.Empty,
+            className:  TargetName      ?? string.Empty));
+    }
+
     /// <summary>
     /// Phase 17c — cross-tab handoff entry point. Pushes
     /// <paramref name="address"/> into the Instances list (head) and

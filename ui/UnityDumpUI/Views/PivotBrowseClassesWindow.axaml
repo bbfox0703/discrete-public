@@ -34,66 +34,75 @@
         </StackPanel>
         <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ShortlistStatus}"
                    Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
-        <!-- Field-structure detail panel of the selected class (bottom). -->
-        <DockPanel DockPanel.Dock="Bottom" MaxHeight="280">
-          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,6,0,2">
-            <TextBlock Text="Field structure — double-tap → Key, right-click → Value"
-                       FontWeight="SemiBold" FontSize="11" Opacity="0.8" VerticalAlignment="Center"/>
-            <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="12,0,0,0"/>
-            <TextBox Text="{Binding ClassPivot.ShortlistFieldFilter, Mode=TwoWay}"
-                     PlaceholderText="field name" Width="160" VerticalAlignment="Center"
-                     ToolTip.Tip="Case-insensitive substring filter on the field name."/>
-          </StackPanel>
-          <DataGrid Name="PivotShortlistFieldGrid"
-                    ItemsSource="{Binding ClassPivot.ShortlistFields}"
+        <!-- Top: class shortlist · splitter · bottom: field structure of the
+             selected class. A Grid (not DockPanel) so BOTH grids stay height-
+             bounded — each scrolls internally — and the splitter lets the user
+             rebalance them. (A DockPanel let the top grid grow to its row count
+             after a sort and shove the field grid off the bottom.) -->
+        <Grid RowDefinitions="*,6,*">
+          <DataGrid Grid.Row="0" Name="PivotShortlistGrid"
+                    ItemsSource="{Binding ClassPivot.ClassShortlist}"
+                    SelectedItem="{Binding ClassPivot.SelectedShortlistRow, Mode=TwoWay}"
                     AutoGenerateColumns="False" IsReadOnly="True"
                     HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                     CanUserResizeColumns="True" CanUserSortColumns="True"
-                    DoubleTapped="OnPivotShortlistFieldDoubleTapped">
-            <DataGrid.ContextMenu>
-              <ContextMenu>
-                <MenuItem Header="Add to Key fields" Click="OnPivotShortlistFieldAddToKeysClicked"/>
-                <MenuItem Header="Add to Value fields" Click="OnPivotShortlistFieldAddToValuesClicked"/>
-              </ContextMenu>
-            </DataGrid.ContextMenu>
+                    DoubleTapped="OnPivotShortlistDoubleTapped">
             <DataGrid.Columns>
-              <DataGridTextColumn Header="Field" Binding="{Binding Name}" Width="Auto" MinWidth="200"
-                                  SortMemberPath="Name" CanUserSort="True"/>
-              <DataGridTextColumn Header="Type" Binding="{Binding TypeDisplay}" Width="Auto" MinWidth="200"
-                                  SortMemberPath="TypeDisplay" CanUserSort="True"/>
-              <DataGridTextColumn Header="Kind" Binding="{Binding FlagsDisplay}" Width="80"
-                                  SortMemberPath="FlagsDisplay" CanUserSort="True"/>
+              <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}" Width="Auto" MinWidth="240" SortMemberPath="ClassFqn" CanUserSort="True"/>
+              <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}" Width="Auto" MinWidth="140" SortMemberPath="Assembly" CanUserSort="True"/>
+              <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80" SortMemberPath="Presence" CanUserSort="True"/>
+              <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120" SortMemberPath="AvgInstances" CanUserSort="True"/>
+              <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70" SortMemberPath="Cv" CanUserSort="True"/>
+              <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55" SortMemberPath="FieldCount" CanUserSort="True"/>
+              <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65" SortMemberPath="PrimitiveFieldRatio" CanUserSort="True"/>
+              <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65" SortMemberPath="NullFieldRatio" CanUserSort="True"/>
+              <DataGridTextColumn Header="Str%" Binding="{Binding StringPctDisplay}" Width="65" SortMemberPath="StringFieldRatio" CanUserSort="True"/>
+              <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65" SortMemberPath="ArrayFieldRatio" CanUserSort="True"/>
+              <DataGridTemplateColumn Header="Fields (preview)" Width="Auto" MinWidth="300" CanUserSort="False">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding FieldPreviewDisplay}" VerticalAlignment="Center" Margin="4,0"
+                               TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding FieldPreviewDisplay}"/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
             </DataGrid.Columns>
           </DataGrid>
-        </DockPanel>
-        <DataGrid Name="PivotShortlistGrid"
-                  ItemsSource="{Binding ClassPivot.ClassShortlist}"
-                  SelectedItem="{Binding ClassPivot.SelectedShortlistRow, Mode=TwoWay}"
-                  AutoGenerateColumns="False" IsReadOnly="True"
-                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                  CanUserResizeColumns="True" CanUserSortColumns="True"
-                  DoubleTapped="OnPivotShortlistDoubleTapped">
-          <DataGrid.Columns>
-            <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}" Width="Auto" MinWidth="240" SortMemberPath="ClassFqn" CanUserSort="True"/>
-            <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}" Width="Auto" MinWidth="140" SortMemberPath="Assembly" CanUserSort="True"/>
-            <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80" SortMemberPath="Presence" CanUserSort="True"/>
-            <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120" SortMemberPath="AvgInstances" CanUserSort="True"/>
-            <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70" SortMemberPath="Cv" CanUserSort="True"/>
-            <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55" SortMemberPath="FieldCount" CanUserSort="True"/>
-            <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65" SortMemberPath="PrimitiveFieldRatio" CanUserSort="True"/>
-            <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65" SortMemberPath="NullFieldRatio" CanUserSort="True"/>
-            <DataGridTextColumn Header="Str%" Binding="{Binding StringPctDisplay}" Width="65" SortMemberPath="StringFieldRatio" CanUserSort="True"/>
-            <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65" SortMemberPath="ArrayFieldRatio" CanUserSort="True"/>
-            <DataGridTemplateColumn Header="Fields (preview)" Width="Auto" MinWidth="300" CanUserSort="False">
-              <DataGridTemplateColumn.CellTemplate>
-                <DataTemplate>
-                  <TextBlock Text="{Binding FieldPreviewDisplay}" VerticalAlignment="Center" Margin="4,0"
-                             TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding FieldPreviewDisplay}"/>
-                </DataTemplate>
-              </DataGridTemplateColumn.CellTemplate>
-            </DataGridTemplateColumn>
-          </DataGrid.Columns>
-        </DataGrid>
+
+          <GridSplitter Grid.Row="1" ResizeDirection="Rows" Height="6" Background="#33808080"/>
+
+          <DockPanel Grid.Row="2">
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,4,0,2">
+              <TextBlock Text="Field structure — double-tap → Key, right-click → Value"
+                         FontWeight="SemiBold" FontSize="11" Opacity="0.8" VerticalAlignment="Center"/>
+              <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+              <TextBox Text="{Binding ClassPivot.ShortlistFieldFilter, Mode=TwoWay}"
+                       PlaceholderText="field name" Width="160" VerticalAlignment="Center"
+                       ToolTip.Tip="Case-insensitive substring filter on the field name."/>
+            </StackPanel>
+            <DataGrid Name="PivotShortlistFieldGrid"
+                      ItemsSource="{Binding ClassPivot.ShortlistFields}"
+                      AutoGenerateColumns="False" IsReadOnly="True"
+                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                      CanUserResizeColumns="True" CanUserSortColumns="True"
+                      DoubleTapped="OnPivotShortlistFieldDoubleTapped">
+              <DataGrid.ContextMenu>
+                <ContextMenu>
+                  <MenuItem Header="Add to Key fields" Click="OnPivotShortlistFieldAddToKeysClicked"/>
+                  <MenuItem Header="Add to Value fields" Click="OnPivotShortlistFieldAddToValuesClicked"/>
+                </ContextMenu>
+              </DataGrid.ContextMenu>
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Field" Binding="{Binding Name}" Width="Auto" MinWidth="200"
+                                    SortMemberPath="Name" CanUserSort="True"/>
+                <DataGridTextColumn Header="Type" Binding="{Binding TypeDisplay}" Width="Auto" MinWidth="200"
+                                    SortMemberPath="TypeDisplay" CanUserSort="True"/>
+                <DataGridTextColumn Header="Kind" Binding="{Binding FlagsDisplay}" Width="80"
+                                    SortMemberPath="FlagsDisplay" CanUserSort="True"/>
+              </DataGrid.Columns>
+            </DataGrid>
+          </DockPanel>
+        </Grid>
       </DockPanel>
     </Border>
   </DockPanel>

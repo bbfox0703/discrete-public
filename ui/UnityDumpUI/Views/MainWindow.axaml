@@ -373,6 +373,8 @@
             <ContextMenu>
               <MenuItem Header="{StaticResource Browser.InspectMenuItem}"
                         Command="{Binding InspectSelectedClassCommand}" />
+              <MenuItem Header="Pivot this class…"
+                        Click="OnPivotThisClassFromBrowserClicked" />
               <MenuItem Header="{StaticResource Browser.CopyClassNameMenu}"
                         Click="OnCopyClassNameClicked" />
             </ContextMenu>
@@ -624,6 +626,9 @@
                 <Button Content="{StaticResource Inspector.SendToBrowser}"
                         ToolTip.Tip="{StaticResource Inspector.SendToBrowserTooltip}"
                         Command="{Binding Inspector.SendToBrowserCommand}" />
+                <Button Content="→ Pivot"
+                        ToolTip.Tip="Send this class to the Class Pivot tab (fills the Class FQN; pick snapshots + key/value there)."
+                        Command="{Binding Inspector.SendToPivotCommand}" />
                 <Button Content="{StaticResource Inspector.CopyCeXmlInstance}"
                         ToolTip.Tip="{StaticResource Inspector.CopyCeXmlInstanceTooltip}"
                         Command="{Binding Inspector.CopyCeXmlInstanceCommand}" />
@@ -2097,6 +2102,8 @@
                                 Click="OnSnapshotInspectInstance"/>
                       <MenuItem Header="Find what's at this address (Address Lookup)"
                                 Click="OnSnapshotAddressLookup"/>
+                      <MenuItem Header="Pivot this class…"
+                                Click="OnSnapshotPivotClassClicked"/>
                       <Separator/>
                       <MenuItem Header="Exclude this field name from results"
                                 Click="OnSnapshotExcludeFieldName"/>

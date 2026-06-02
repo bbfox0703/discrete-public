@@ -159,6 +159,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // view) so unit tests can drive it without an Avalonia loop.
         AddressLookup.InspectInstanceRequested += OnInspectInstanceRequested;
         Inspector.SendToBrowserRequested += OnInspectorSendToBrowser;
+        Inspector.SendToPivotRequested   += OnInspectorSendToPivot;
 
         // Bridge: when the user picks a live instance in the Inspector tab,
         // mirror its address into the export base so the next "Export .CT"
@@ -1558,6 +1559,28 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"OnInspectorSendToBrowser: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Class Pivot overhaul Wave D — cross-tab handoff. A "Pivot this class"
+    /// right-click in Browser / Inspector / Snapshot lands the class (+ its
+    /// assembly) into the Class Pivot tab and switches to it, so the user
+    /// doesn't copy the FQN and paste it back. Assembly may be null/empty —
+    /// the pivot resolves it from the snapshot at Run time.
+    /// </summary>
+    public void PivotForClass(string? assembly, string? classFqn)
+    {
+        if (string.IsNullOrWhiteSpace(classFqn)) return;
+        ClassPivot.ReceiveClassHandoff(assembly, classFqn);
+        SelectedDetailTabIndex = TabIndexClassPivot;
+    }
+
+    /// <summary>Inspector "→ Pivot" handoff — build the FQN from the target's
+    /// namespace + name and route to the Class Pivot tab.</summary>
+    private void OnInspectorSendToPivot(object? sender, InspectorBrowseRequest req)
+    {
+        string fqn = string.IsNullOrEmpty(req.Namespace) ? req.Class : $"{req.Namespace}.{req.Class}";
+        PivotForClass(req.Assembly, fqn);
     }
 
     /// <summary>
