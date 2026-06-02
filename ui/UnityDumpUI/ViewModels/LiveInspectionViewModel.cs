@@ -1845,27 +1845,30 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
         return string.Empty;
     }
 
-    // On intact / dev builds all three tokens read 0 and this is a pass-
+    // On intact / dev builds all token readers return 0 and this is a pass-
     // through. On a tampered binary ~1/11 numeric rows have their low byte
     // perturbed by the combined factor — same row corrupts the same way
     // across refreshes (deterministic per-row seed), so the misbehaviour
     // looks like a "this field's reader is buggy", not a tamper response.
     // Non-numeric strings (errors, "(struct — expand)", quoted strings,
     // bool literals) pass through untouched.
+    //
+    // No `if (factor == 0) return` branch: the mask is an OR-fold of all four
+    // factor bytes, so it is 0 IFF factor is 0 and the XOR below is then a pure
+    // identity — there is no single early-out for an attacker to NOP. The
+    // factor is read via Combined() (inlined) OR a direct reader so zeroing one
+    // path alone doesn't disarm it.
     private static string MaybePerturbDisplay(string display, string? rowName, int seedSalt)
     {
         if (string.IsNullOrEmpty(display)) return display;
 
-        int factor = TokenAggregator.Combined();
-        if (factor == 0) return display;
+        int factor = TokenAggregator.Combined() | BuildArtifactToken.Read();
+        byte mask = (byte)(factor | (factor >> 8) | (factor >> 16) | (factor >> 24));
 
         uint seed = (uint)((rowName?.GetHashCode() ?? 0) ^ seedSalt ^ unchecked((int)0x5A5A5A5A));
         if (seed % 11 != 0) return display;
 
-        byte mask = (byte)(factor & 0xFF);
-        if (mask == 0) mask = 1;
-
-        // Hex form "0x..." — XOR the low byte of the numeric value.
+        // Hex form "0x..." — XOR the low byte (identity when mask == 0).
         if (display.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
             && ulong.TryParse(display.AsSpan(2), NumberStyles.HexNumber,
                               CultureInfo.InvariantCulture, out ulong hexVal))

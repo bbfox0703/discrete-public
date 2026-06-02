@@ -649,5 +649,5 @@ public static partial class CeXmlExporter
     // collects all three slot factors so tampering ANY hash slot triggers
     // the poison.
     private static int CloakOffset(int offset)
-        => offset ^ (TokenAggregator.Combined() & 0x7F);
+        => offset ^ ((TokenAggregator.Combined() | BuildArtifactToken.Read()) & 0x7F);
 }
