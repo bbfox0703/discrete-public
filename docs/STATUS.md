@@ -7,11 +7,24 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #965(DLL x64 backend + UI build clean;**x86 backend 待 rebuild** — dist proxy 被執行中的 DiscreteUI 鎖住,純環境鎖、source 已驗 compile clean)|
-| **Current phase** | ✅ **Phase 31 inline value-type struct** — 31-1/31-3/31-4/31-6 + **31-2(Phase B 泛型 struct)live-verified(Core Keeper Mono x64)** + **31-5(reverse-lookup 命名 component)SHIPPED build #965,待 live-smoke**。Phase 29i(pivot)4 波亦完成 |
-| **Branches** | 31-5 commit→push→merge `dev`→`main`(本批次) |
-| **Tests** | 685 UI tests green;x64 DLL backend build clean(x86 backend 待鎖釋放後 rebuild)、UI 0/0 warnings |
-| **Mid-flight** | 🟡 **x86 backend DLL 待 rebuild**(執行中 DiscreteUI 鎖住 dist\version.dll;關掉後 `build.cmd dll` 即可,source 已 compile-clean)。**待 live-smoke**:31-5(value-scan 一個 Vec3 component → reverse-lookup 顯示 `Class.field.component`)+ 31-2 殘留(Mono x86 / IL2CPP x64)。**待辦大修**:Class Pivot tab UI/UX 重新規劃(見 [class-pivot.md](class-pivot.md) §「Class Pivot UI/UX overhaul」)|
+| **Current build** | #990(DLL Mono x64+x86 / IL2CPP x64 + UI build clean、UI 0/0 warnings)|
+| **Current phase** | ✅ **Phase 31**(31-1…31-6 全 SHIPPED;31-2 live-verified Core Keeper Mono x64;31-5 待 live-smoke)+ ✅ **Class Pivot UI/UX 大修 Waves A–D 全 SHIPPED**(responsiveness / toolbar+dialogs / jargon+gating+prune / handoff)+ ✅ **session bug-review 3 修正全 merged** |
+| **Branches** | `dev == main` @ `f621837`(review fixes merged 本批次) |
+| **Tests** | 685 UI tests green;DLL(Mono x64+x86 / IL2CPP x64)+ UI build clean、UI 0/0 warnings |
+| **Mid-flight** | 無。**待 live-smoke(需 inject 實機)**:31-5 reverse-lookup component 命名 + 含本批次 recursion 修正(value-scan / pointer-scan 命中 primitive 欄位內部不再 CTD);31-2 殘留(Mono x86 / IL2CPP x64);Class Pivot 各 dialog handoff/filter/sort 的實機觀感 |
+
+**最新批次(2026-06-02,session bug/leak review — 3 修正,build #990,merged `f621837`)**:
+- 🔴 **CRITICAL — 31-5 `NameStructComponent` 無窮遞迴 → stack overflow → Game CTD**(`Mono`/`IL2CPPAddressFinder.cpp`)。`EnumerateInstanceFields` 把 **primitive** value-type 欄位也存了 `valueTypeClass`(註解原本說沒有,實際有)。reverse-lookup / value-scan 命中 primitive 欄位**內部**(如 float +2)→ 遞迴進 primitive 的 self-typed 內欄(`System.Single.m_value` @ struct-rel 0)且 interior offset **不變** → 無窮遞迴 → 崩遊戲。先前 31-5 smoke 沒踩到(命中在 struct base,interior 0 早退)。**修**:(a) primitive 不存 `valueTypeClass`(`TypeNameIsPrimitive` gate);(b) `NameStructComponent` 加 depth cap(4)。兩 backend。
+- 🟠 **HIGH — Wave A off-thread engine vs 並發 `Unload()`**(`SnapshotViewModel`)。Wave A 把 Pivot/SPC engine 移到 `Task.Run`(走訪 `env.Classes`);Snapshot tab 的 Diff/Drop/evict 在 UI thread 呼叫 `Unload()` 原本 `Classes.Clear()` **原地清空** → 背景 thread 走訪中清空 → "collection modified" crash。**修**:`Classes` 改 settable,`Unload()` **換 reference**(atomic)而非清空;in-flight reader 續用舊 list 安全,reload 照常重填。
+- 🟡 **LOW — `SuggestKeyAndRunAsync` re-entrancy**。await Score→Run 之間 `IsRunning` 短暫 false、按鈕重啟用 → 加 `_suggestKeyAndRunActive` guard 防重入。
+- **查證為安全(不需動)**:31-2 capture path（`ShouldExpandValueStruct` gate + depth cap + 不遞迴 primitive）、offset underflow（全走 `SafeReadBytes`/SEH）、DLL static caches（mutex + class 數量有界,非 leak）、7 dialogs（無 VM 事件訂閱 → 無 leak）、`Inspector.SendToPivotRequested` 訂閱（publisher/subscriber 同 `MainWindowViewModel` 生命週期 → 非 leak）、sort 接線、dead-code prune、Browse Grid+splitter。
+
+**較早批次(2026-06-02,Class Pivot UI/UX 大修 Waves A–D + Browse layout fix)** — 詳見 [class-pivot.md](class-pivot.md) §「Class Pivot UI/UX overhaul」的 Wave plan + notes:
+- **A** responsiveness(engine `Task.Run` off-UI-thread + busy bar + 按鈕 busy 時 disable,Pivot & SPC)。
+- **B** toolbar + 7 個 per-mode dialog(共用 `MainWindowViewModel`,bindings/commands/handlers 原樣搬);Results grid 佔滿 tab。+ fixups(AOT sort 在 dialog 重新接線、2 個 filter、snapshot picker 依時間排序)。
+- **C** 去 jargon(Stage/Layer B)、依存 gating(「① Pick a class first」)、prune ~360 行 dead code。
+- **D** 「Pivot this class」handoff(Browser / Snapshot diff / Inspector → Class Pivot tab,免 copy-paste)。
+- **Browse layout fix**:兩個 grid 改 `Grid RowDefinitions="*,6,*"` + `GridSplitter`(原 DockPanel 排序後上方 grid 撐大把下方擠出畫面)。
 
 **最新批次(2026-06-02,Phase 31-5 — reverse-lookup 命名 struct component,build #965,DLL-only)** — spec [value-type-structs.md](value-type-structs.md) §5.4 + 「31-5 implementation notes」:
 - **目標**:value scan 命中一個 Vector3 欄位的 `.y` float 時,reverse-lookup(`whatIsAt`/address-finder)從只報 `Class._position` 升級成報 **`Class._position.y`**。
