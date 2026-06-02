@@ -1,9 +1,9 @@
 # discrete — Unity Cheat Engine Dumper
 
-[![Phase 30](https://img.shields.io/badge/phase-30_(snapshot_memory_%26_speed)_shipped-success)](docs/plan.md)
+[![Phase 30](https://img.shields.io/badge/phase-30_(memory_%26_speed)_shipped-success)](docs/plan.md)
 [![Backends](https://img.shields.io/badge/backends-Mono_x64_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
 [![AOT](https://img.shields.io/badge/UI-Avalonia_12_AOT_(0%2F0_warnings)-purple)]()
-[![License](https://img.shields.io/badge/license-TBD-lightgrey)]()
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
 > Live Unity dumper + cheat-table generator + Lua-callable managed methods.
 > C++ DLL backend + Avalonia 12 AOT UI + Cheat Engine Lua bridge.
@@ -211,7 +211,8 @@ SaGa F2R (IL2CPP v29), BongoCat (Mono bdwgc), Farthest Frontier
 
 ## License
 
-TBD — choose before first public release.
+Licensed under the **GNU General Public License v3.0** (GPL-3.0).
+See [LICENSE](LICENSE) for the full text.
 
 ## Acknowledgements
 

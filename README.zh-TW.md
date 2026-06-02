@@ -1,9 +1,9 @@
 # discrete — Unity Cheat Engine Dumper
 
-[![Phase 30](https://img.shields.io/badge/phase-30_(snapshot_memory_%26_speed)_shipped-success)](docs/plan.md)
+[![Phase 30](https://img.shields.io/badge/phase-30_(memory_%26_speed)_shipped-success)](docs/plan.md)
 [![Backends](https://img.shields.io/badge/backends-Mono_x64_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
 [![AOT](https://img.shields.io/badge/UI-Avalonia_12_AOT_(0%2F0_warnings)-purple)]()
-[![License](https://img.shields.io/badge/license-TBD-lightgrey)]()
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
 > 即時 Unity dumper + cheat-table 產生器 + 可從 Lua 呼叫 managed methods。
 > C++ DLL backend + Avalonia 12 AOT UI + Cheat Engine Lua bridge。
@@ -202,7 +202,8 @@ Silksong (IL2CPP v31) 等。
 
 ## 授權
 
-待定 — 首次公開 release 前決定。
+採用 **GNU General Public License v3.0**（GPL-3.0）授權。
+完整條款請見 [LICENSE](LICENSE)。
 
 ## 致謝
 
