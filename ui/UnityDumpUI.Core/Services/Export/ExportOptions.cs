@@ -15,7 +15,12 @@ public sealed record ExportOptions(
     // Game-process pointer size (8 = x64, 4 = x86/WOW64). Only consulted by
     // the live-data export for the managed-String inline char buffer offset
     // (header is 2*ptr, chars follow the int32 length → x64 +0x14, x86 +0xC).
-    int  PointerSize           = 8)
+    int  PointerSize           = 8,
+    // CE <Description> verbosity. true (default): "name : Type [= value]" —
+    // the full self-documenting form. false: bare field name only, for a
+    // compact CE table. Only affects the description text, never the
+    // addresses / offsets / variable types emitted into the entry.
+    bool VerboseDescription    = true)
 {
     public static ExportOptions Defaults { get; } = new();
 }

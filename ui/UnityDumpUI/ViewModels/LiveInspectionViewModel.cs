@@ -183,10 +183,10 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// same DrilldownDepth the user set there (previously these commands
     /// hardcoded depth 1, ignoring the slider). Null ⇒ fall back to (1, 16).
     /// </summary>
-    public Func<(int Depth, int ArrayLimit)>? ExportDepthProvider { get; set; }
+    public Func<(int Depth, int ArrayLimit, bool Verbose)>? ExportDepthProvider { get; set; }
 
-    private (int Depth, int ArrayLimit) ResolveExportDepth()
-        => ExportDepthProvider?.Invoke() ?? (1, 16);
+    private (int Depth, int ArrayLimit, bool Verbose) ResolveExportDepth()
+        => ExportDepthProvider?.Invoke() ?? (1, 16, false);
 
     // ---------- Target ----------------------------------------------------
 
@@ -1134,13 +1134,14 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
                 return;
             }
-            (int depth, int arrayLimit) = ResolveExportDepth();
+            (int depth, int arrayLimit, bool verbose) = ResolveExportDepth();
             ExportOptions options = new(
                 DrilldownDepth: depth,
                 ArrayLimit:     arrayLimit,
                 CollapsePointerNodes: true,
                 LiveData: true,
-                PointerSize: GamePointerSize == 4 ? 4 : 8);
+                PointerSize: GamePointerSize == 4 ? 4 : 8,
+                VerboseDescription: verbose);
             string xml = await CeXmlExporter.RenderAsync(
                 SelectedInstance.Address, info, ancestors: null,
                 usedAssembly, options, _backend, default)
@@ -1177,13 +1178,14 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
         try
         {
-            (int depth, int arrayLimit) = ResolveExportDepth();
+            (int depth, int arrayLimit, bool verbose) = ResolveExportDepth();
             ExportOptions options = new(
                 DrilldownDepth: depth,
                 ArrayLimit:     arrayLimit,
                 CollapsePointerNodes: true,
                 LiveData: true,
-                PointerSize: GamePointerSize == 4 ? 4 : 8);
+                PointerSize: GamePointerSize == 4 ? 4 : 8,
+                VerboseDescription: verbose);
 
             var built = new List<(WalkedField field, string absoluteAddress)>(nodes.Count);
             foreach (WalkedFieldNode n in nodes)

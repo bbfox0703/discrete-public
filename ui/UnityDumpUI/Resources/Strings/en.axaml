@@ -58,6 +58,7 @@
   <sys:String x:Key="Browser.OptArrayLimit">Array element limit</sys:String>
   <sys:String x:Key="Browser.OptCollapse">Collapse pointer/array nodes (CE XML)</sys:String>
   <sys:String x:Key="Browser.OptUseLiveData">Use live data in CE XML (real addresses, walks array elements)</sys:String>
+  <sys:String x:Key="Browser.OptVerboseDesc">Verbose CE XML descriptions (name : type = value)</sys:String>
   <sys:String x:Key="Browser.OptCeXmlBase">CE XML base address</sys:String>
 
   <!-- Phase 9 inspector panels. -->

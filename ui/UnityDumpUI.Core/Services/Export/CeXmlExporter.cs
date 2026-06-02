@@ -416,9 +416,8 @@ public static partial class CeXmlExporter
         int currentDepth, CancellationToken ct)
     {
         ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
-        string desc = isInherited
-            ? $"{f.Name} : {f.Type ?? "?"}  (inherited)"
-            : $"{f.Name} : {f.Type ?? "?"}";
+        string desc = FieldDesc(f.Name, f.Type, options);
+        if (isInherited && options.VerboseDescription) desc += "  (inherited)";
         string addr = $"+{CloakOffset(f.Offset):X}";
 
         if (!shape.IsPointer)
@@ -594,6 +593,16 @@ public static partial class CeXmlExporter
         string full = string.IsNullOrEmpty(ns) ? friendly : $"{ns}.{friendly}";
         return string.IsNullOrEmpty(assemblyName) ? full : $"{assemblyName}!{full}";
     }
+
+    /// <summary>
+    /// CE <c>&lt;Description&gt;</c> label for a single field. Verbose mode
+    /// (default) yields the self-documenting <c>"name : Type"</c>; compact mode
+    /// (<see cref="ExportOptions.VerboseDescription"/> = false) yields the bare
+    /// field <c>name</c> so the CE table stays terse. Callers append value /
+    /// state suffixes (= "...", &lt;null&gt;, [N of T]) only in verbose mode.
+    /// </summary>
+    private static string FieldDesc(string name, string? type, ExportOptions options)
+        => options.VerboseDescription ? $"{name} : {type ?? "?"}" : name;
 
     private static string XmlEscape(string s)
     {

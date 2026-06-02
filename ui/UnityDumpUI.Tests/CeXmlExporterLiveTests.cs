@@ -195,6 +195,50 @@ public class CeXmlExporterLiveTests
     }
 
     [Fact]
+    public async Task RenderLive_CompactDescriptions_EmitBareFieldName()
+    {
+        // VerboseDescription:false → every entry's <Description> is the bare
+        // field name. The " : Type" suffix, the string " = \"value\"" decode,
+        // and the collection "[N of T]" header text are all dropped — while the
+        // addresses, offsets, deref structure and variable types are unchanged,
+        // so the CE table still resolves.
+        const string baseAddr = "0x000000000000B900";
+        const string strObj   = "0x0000000000097C440";
+
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "charaName_", Type = "System.String", Offset = 0x18,
+                    Address = "0x000000000000B918", Ptr = strObj,
+                    String = "Chara_00000", StringLength = 11 },
+            new() { Name = "charaKind_", Type = "CharacterData.CharaKind", Offset = 0x20,
+                    Address = "0x000000000000B920", Value = Json("101"), IsEnum = true },
+        });
+
+        var options = new ExportOptions(
+            DrilldownDepth: 1, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 8, VerboseDescription: false);
+
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            options, live, TestContext.Current.CancellationToken);
+
+        // Bare field-name descriptions only — no type, no decoded value.
+        Assert.Contains("<Description>\"charaName_\"</Description>", xml);
+        Assert.Contains("<Description>\"charaKind_\"</Description>", xml);
+        Assert.DoesNotContain("charaName_ : System.String", xml);
+        Assert.DoesNotContain("charaKind_ : CharacterData.CharaKind", xml);
+        Assert.DoesNotContain("Chara_00000", xml);
+
+        // Structure intact: the String stays a 2-level deref group (typed child
+        // rows present) and the enum stays an int leaf at its offset.
+        Assert.Contains("<VariableType>String</VariableType>", xml);
+        Assert.Contains("length (int32)", xml);
+        Assert.Contains("<Address>+18</Address>", xml);   // charaName_ deref group
+        Assert.Contains("<Address>+20</Address>", xml);   // charaKind_ enum leaf
+    }
+
+    [Fact]
     public async Task RenderLive_EngineInternalTypes_NotRecursed()
     {
         // Phase 31-6 — a deep Copy-CE-XML walk must NOT recurse into Unity DOTS
