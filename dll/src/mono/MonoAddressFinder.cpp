@@ -254,10 +254,14 @@ std::vector<ResolvedField> EnumerateInstanceFields(MonoClass* klass) {
                         if (s > 0) sz = static_cast<std::size_t>(s);
                     }
                     // Phase 31-5 — remember the struct class for value-type
-                    // (non-enum) fields so an interior hit can be named to its
-                    // component. Primitives keep it null (their interior is the
-                    // value itself, nothing to fan out).
-                    if (rf.isValueType && !rf.isEnum) rf.valueTypeClass = fc;
+                    // (non-enum, NON-primitive) fields so an interior hit can be
+                    // named to its component. Primitives MUST stay null: their
+                    // single internal field (e.g. System.Single.m_value) is of
+                    // their own type, so storing the class would make
+                    // NameStructComponent recurse into a self-referential field
+                    // with an unchanged interior offset → infinite recursion.
+                    if (rf.isValueType && !rf.isEnum && !TypeNameIsPrimitive(rf.typeName))
+                        rf.valueTypeClass = fc;
                 }
             }
             if (sz == 0) sz = SizeOfPrimitive(rf.typeName);
@@ -291,10 +295,12 @@ std::string ClassifyKind(const ResolvedField& rf, std::ptrdiff_t fieldOffset) {
 // header-inclusive (boxed convention — Vector3.x = 0x10), so the struct-relative
 // offset is `member.offset - kObjectHeader`, which matches the queried interior
 // offset. Rewrites `fh` in place (name → parent.member, type/offset/size → the
-// member). Recurses once for a nested struct member (Bounds.center.y).
-// Caller holds the ThreadAttachGuard (EnumerateInstanceFields needs it).
+// member). Recurses for nested struct members (Bounds.center.y), depth-capped
+// as a belt-and-suspenders guard against any repeating-class / zero-progress
+// chain. Caller holds the ThreadAttachGuard (EnumerateInstanceFields needs it).
 void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset,
-                         FieldHit& fh) {
+                         FieldHit& fh, int depthLeft = 4) {
+    if (depthLeft <= 0) return;
     if (!parent.isValueType || parent.isEnum || parent.valueTypeClass == nullptr) return;
     const std::ptrdiff_t interior = fieldOffset - static_cast<std::ptrdiff_t>(parent.offset);
     if (interior <= 0) return;   // hit at the struct base → keep value-struct kind
@@ -318,12 +324,14 @@ void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset
             : "interior";
         fh.interiorOffset = memberInterior;
         // Nested struct member (e.g. Bounds.center.y) → recurse one more level.
+        // valueTypeClass is null for primitives (set above), so a primitive
+        // member never recurses; the depth cap bounds any other chain.
         if (memberInterior > 0 && m.isValueType && !m.isEnum &&
             m.valueTypeClass != nullptr) {
             ResolvedField nested = m;
             nested.name   = fh.name;                       // already parent.member
             nested.offset = static_cast<std::size_t>(absOffset);
-            NameStructComponent(nested, fieldOffset, fh);
+            NameStructComponent(nested, fieldOffset, fh, depthLeft - 1);
         }
         return;
     }

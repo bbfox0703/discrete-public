@@ -2460,7 +2460,13 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     public string   GameSessionId  { get; init; } = string.Empty;
     public int      TotalClasses   { get; init; }
     public int      TotalInstances { get; init; }
-    public List<SnapshotClassEntry> Classes { get; init; } = new();
+    // Settable (not init-only) so Unload() can REPLACE the reference instead of
+    // clearing in place. Wave A runs the Pivot/SPC engines off the UI thread,
+    // iterating this list; if Unload cleared it mid-enumeration (another tab's
+    // Diff/Drop/evict on the UI thread) the background foreach would throw
+    // "collection modified". Swapping the reference is atomic, so an in-flight
+    // reader keeps safely enumerating its old list.
+    public List<SnapshotClassEntry> Classes { get; set; } = new();
 
     // ── Phase 29c persistence flags ────────────────────────────────────
 
@@ -2595,7 +2601,11 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     {
         if (!ClassesLoaded) return;
         if (PersistedId is null) return;  // can't reload — refuse
-        Classes.Clear();
+        // REPLACE the reference (don't Clear in place) — an off-thread engine
+        // (Wave A) may be mid-enumeration of the old list; swapping is atomic
+        // and leaves its enumeration intact. EnsureLoadedAsync AddRanges into
+        // whatever list is current, so a later reload repopulates correctly.
+        Classes = new List<SnapshotClassEntry>();
         _fieldIndex   = null;
         ClassesLoaded = false;
         OnPropertyChanged(nameof(PersistenceStatus));
