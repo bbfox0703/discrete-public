@@ -1154,9 +1154,21 @@
                          Foreground="#FF7B7B7B"
                          Margin="0,4,0,0" />
 
+              <!-- Post-search client-side filter: substring + numeric-only.
+                   Narrows the already-loaded results without re-running the RPC. -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="8" Margin="0,0,0,6">
+                <TextBox Width="320" VerticalAlignment="Center"
+                         Text="{Binding SymbolFinder.ResultFilter, Mode=TwoWay}"
+                         PlaceholderText="filter results (member / class / type)…" />
+                <CheckBox Content="Numeric types only (bool / byte / int / single / double / …)"
+                          IsChecked="{Binding SymbolFinder.NumericTypesOnly, Mode=TwoWay}"
+                          VerticalAlignment="Center" />
+              </StackPanel>
+
               <!-- Results — double-click navigates back to the Browser. -->
               <DataGrid x:Name="SymbolFinderResultsGrid"
-                        ItemsSource="{Binding SymbolFinder.Matches}"
+                        ItemsSource="{Binding SymbolFinder.FilteredMatches}"
                         IsReadOnly="True"
                         AutoGenerateColumns="False"
                         CanUserResizeColumns="True"
@@ -1168,6 +1180,8 @@
                   <ContextMenu>
                     <MenuItem Header="{StaticResource SymbolFinder.NavigateMenu}"
                               Click="OnSymbolFinderNavigateMenu" />
+                    <MenuItem Header="Send class to Browser"
+                              Click="OnSymbolFinderSendToBrowserMenu" />
                     <!-- Phase 28 — Field → Methods cross-reference. Same modal
                          as the Inspector + Browser Fields tab path. Menu item
                          shows for any row but the handler short-circuits with

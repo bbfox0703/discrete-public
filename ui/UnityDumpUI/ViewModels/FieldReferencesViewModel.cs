@@ -38,11 +38,16 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
     private IDisposable? _bulkLease;
     private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
 
+    // AOBMaker CE bridge (optional). Lets the user jump from a hit row straight
+    // into CE's disassembler. Null when the bridge wasn't wired (tests).
+    private readonly IAobMakerBridge? _aobMaker;
+
     public FieldReferencesViewModel(
         BackendAdapter backend, FileLogger logger,
         string targetAssembly, string? targetNamespace, string targetName,
         string fieldName, string? fieldType, bool isStatic,
-        BulkOperationGate? bulkGate = null)
+        BulkOperationGate? bulkGate = null,
+        IAobMakerBridge? aobMaker = null)
     {
         _backend         = backend;
         _logger          = logger;
@@ -53,9 +58,14 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
         FieldType        = fieldType ?? string.Empty;
         IsFieldStatic    = isStatic;
         _bulkGate        = bulkGate;
+        _aobMaker        = aobMaker;
         if (_bulkGate is not null)
             _bulkGate.PropertyChanged += (_, _) => RefreshCommand.NotifyCanExecuteChanged();
     }
+
+    /// <summary>True when an AOBMaker bridge was supplied — gates the
+    /// "Open in CE disassembler" context-menu item's visibility.</summary>
+    public bool HasAobMakerBridge => _aobMaker is not null;
 
     public string TargetAssembly  { get; }
     public string TargetNamespace { get; }
@@ -210,6 +220,36 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
     private Task CopyHitAddressAsync(FieldReferenceRowVm? row) =>
         (CopyToClipboardAsync is { } f && row is not null && !string.IsNullOrEmpty(row.HitAddress))
             ? f(row.HitAddress) : Task.CompletedTask;
+
+    /// <summary>
+    /// Hand the row's hit (or, failing that, method-entry) address to CE's
+    /// disassembler via the AOBMaker bridge. IL2CPP only in practice — Mono
+    /// rows carry an IL offset, not a native address, so there's nothing to
+    /// disassemble.
+    /// </summary>
+    [RelayCommand]
+    private async Task DisassembleInCeAsync(FieldReferenceRowVm? row)
+    {
+        if (row is null) return;
+        string addr = !string.IsNullOrEmpty(row.HitAddress) ? row.HitAddress : row.Address;
+        if (string.IsNullOrEmpty(addr))
+        {
+            ErrorMessage = "No native address for this row — Mono reports IL offsets only; "
+                         + "this works on IL2CPP targets.";
+            return;
+        }
+        if (_aobMaker is null || !_aobMaker.IsAvailable)
+        {
+            ErrorMessage = "AOBMaker pipe unavailable — open CE with the AOBMaker plugin loaded, then retry.";
+            return;
+        }
+        bool ok = await _aobMaker.NavigateDisassemblerAsync(addr, default).ConfigureAwait(true);
+        if (!ok)
+            ErrorMessage = "Couldn't reach CE's disassembler — open CE with the AOBMaker plugin loaded, then retry.";
+        else
+            _logger.Write(Constants.LogCategoryView,
+                $"disassemble in CE: {row.ClassQualified}::{row.Method} @ {addr}");
+    }
 }
 
 /// <summary>One row of the references grid. Wire shape flattened into
