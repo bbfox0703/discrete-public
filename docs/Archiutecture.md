@@ -132,7 +132,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 |                                                      |
 |  CE Lua                                              |
 |    unity_dump.lua     <- DLL inject + pipe start     |
-|    unity_dissect.lua  <- CE Structure Dissect builder |
+|    unity_invoke.lua   <- call managed methods        |
 |      |  loadLibrary / callFunction (C ABI exports)   |
 |      v                                               |
 |  Discrete.dll  [injected]                         |
@@ -607,7 +607,7 @@ Discrete/
 │
 ├── scripts/                     ← CE Lua scripts
 │   ├── unity_dump.lua           ← DLL inject + pipe start
-│   ├── unity_dissect.lua        ← CE Structure Dissect builder
+│   ├── unity_invoke.lua         ← Call managed methods
 │   └── unity_symbols.lua        ← Batch symbol registration
 │
 ├── ui/                          ← C# Avalonia UI

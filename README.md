@@ -101,10 +101,9 @@ shipped phases.
                   └─────────────────────────┘
 ```
 
-CE Lua bridge scripts (`unity_dump.lua`, `unity_dissect.lua`,
-`unity_symbols.lua`, `unity_addrfind.lua`, `unity_invoke.lua`) talk
-to the same `\\.\pipe\DiscreteBfx` from CE's Lua console — no UI
-required for headless workflows.
+CE Lua bridge scripts (`unity_dump.lua`, `unity_symbols.lua`,
+`unity_invoke.lua`) talk to the same `\\.\pipe\DiscreteBfx` from CE's
+Lua console — no UI required for headless workflows.
 
 ## Quick start
 

@@ -66,7 +66,7 @@
 - 序:29i-1 → 29i-2 → 29i-4 → 29i-3(1A 最後)。每波各自 commit/push 到 `dev`、build clean、tests green。
 
 **最新批次(2026-06-01,CT 分發 + pipe 並發 + walk 硬化)** — live-verified(Utawarerumono IL2CPP):
-- **CT bridge 改 action-driven** — 砍掉 feature-picker 對話框與「預挑 lua」模型。`Inject Discrete Bridge` 只塞 core(`utils`+`unity_dump` = inject DLL + pipe)+ `Load Discrete Bridge` AA。其餘 lua helper 由各「Send to CE Table / Create AA」動作**按需自帶**(`InjectTableFile` + 生成的 AA 用 `findTableFile` 自我載入,見新 `AaLuaLoader`)。`unity_dissect`/`unity_scene`/`unity_addrfind` 從 bridge 移除(純 UI,走 pipe;檔案留作 Mode-A 獨立腳本)。
+- **CT bridge 改 action-driven** — 砍掉 feature-picker 對話框與「預挑 lua」模型。`Inject Discrete Bridge` 只塞 core(`utils`+`unity_dump` = inject DLL + pipe)+ `Load Discrete Bridge` AA。其餘 lua helper 由各「Send to CE Table / Create AA」動作**按需自帶**(`InjectTableFile` + 生成的 AA 用 `findTableFile` 自我載入,見新 `AaLuaLoader`)。`unity_dissect`/`unity_scene`/`unity_addrfind` 從 bridge 移除(純 UI,走 pipe);這三個檔案於 2026-06-02 自 `scripts/` 一併刪除(功能已由 UI 的 Address Lookup / Scene / CSX 匯出涵蓋)。
 - **CT 分發** — DLL 不內嵌、與 .CT 同資料夾(`Discrete-Mono.dll` / `Discrete-IL2CPP.dll` / `Discrete-Mono-x86.dll`);`utils.lua` `M.dllPath` 改 table-folder 優先多候選搜尋 + `is32bitProcess()` 挑 x86。新 `tools/Package-CTDist.ps1` 一鍵打包(自動改名 x86)。
 - **DLL 卸載** — Tier-2 FreeLibrary **移除**(對每幀 hook runtime_invoke 的 DLL 無法安全 unmap → CTD);只留 dormant teardown(`[DISABLE]` → `discreteShutdown()`:停 pipe + 卸 hook、DLL 留映射、可 re-enable)。
 - **Pipe 並發** — `BackendAdapter` 開**兩條**連線(interactive + bulk),依 cmd 路由;snapshot/value-scan/find/export 走 bulk,瀏覽走 interactive → snapshot 時 Inspector/Classes 不再卡。`BulkOperationGate` 跨 VM 互斥重操作(按鈕變灰 + busy 提示)。AOBMaker 不在時所有插入動作都訊息 + 取消;Inspector HEX 導覽也補訊息。UI 用 2 條連線(`kMaxPipeInstances=4` 留 ≥2 給 CLI)。

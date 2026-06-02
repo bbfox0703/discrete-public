@@ -65,12 +65,6 @@ doesn't tell you which managed field it is.
 4. Click **Inspect this instance** to cross-tab into the Inspector
    and see live values.
 
-Or do the same from CE Lua:
-```lua
-dofile([[<CE>\discrete\unity_addrfind.lua]])
-lookupAddress(0x000001E55B2518F0)
-```
-
 ---
 
 ## Recipe 4 — Call a Unity method from your CT
@@ -161,13 +155,6 @@ From the UI:
 1. Pick the class in the Browser.
 2. **Export options ▾** → **Export .CSX** (Structure Dissect format).
 3. In CE: *Memory Browser → Tools → Dissect data → Open file*.
-
-From CE Lua (live, no file roundtrip):
-```lua
-dofile(getCheatEngineDir() .. 'discrete\\unity_dissect.lua')
-dissectClass('Assembly-CSharp', 'MainGame', 'PLY_WORK')
--- Appears under Memory View → Ctrl+D → Structures.
-```
 
 ---
 

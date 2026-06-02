@@ -96,10 +96,9 @@
                   └─────────────────────────┘
 ```
 
-CE Lua bridge scripts (`unity_dump.lua`、`unity_dissect.lua`、
-`unity_symbols.lua`、`unity_addrfind.lua`、`unity_invoke.lua`) 直接從
-CE Lua console 對同一個 `\\.\pipe\DiscreteBfx` 講話 — headless workflow
-完全不需要 UI。
+CE Lua bridge scripts (`unity_dump.lua`、`unity_symbols.lua`、
+`unity_invoke.lua`) 直接從 CE Lua console 對同一個
+`\\.\pipe\DiscreteBfx` 講話 — headless workflow 完全不需要 UI。
 
 ## 快速開始
 

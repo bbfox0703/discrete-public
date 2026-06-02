@@ -29,11 +29,8 @@ How to embed files in your .CT
                                 colliding with the x64 entry)
 
    Optional, based on which RPCs your table actually uses:
-     unity_dissect.lua         (Structure Dissect generator)
      unity_symbols.lua         (registersymbol bulk loader)
      unity_invoke.lua          (callMethod from Lua)
-     unity_scene.lua           (Scene graph walker)
-     unity_addrfind.lua        (whatIsAt reverse lookup)
      mono_registersymbol_helpers.lua  (DLL-free Mono register path)
 
 2. Copy this file's `bootstrap()` function into your .CT's autorun
@@ -70,7 +67,7 @@ local TABLE_ID = "default-table"
 --   kind = "dll-il2cpp-x64" → 64-bit IL2CPP backend
 --   kind = "lua-main"       → Lua bridge with `inject()` (must be unity_dump.lua)
 --   kind = "lua-utils"      → Shared utilities (utils.lua) — needed by every bridge
---   kind = "lua-helper"     → Other optional bridges (unity_invoke / unity_scene / etc.)
+--   kind = "lua-helper"     → Other optional bridges (unity_invoke / unity_symbols / etc.)
 local FILES_TO_EXTRACT = {
     -- ----- Backend DLLs (embed only the ones your target needs) ----
     -- ["Discrete-Mono.dll"]      = { kind = "dll-mono-x64"   },
@@ -83,10 +80,7 @@ local FILES_TO_EXTRACT = {
 
     -- ----- Optional Lua (uncomment as needed) ----------------------
     -- ["unity_invoke.lua"]               = { kind = "lua-helper" },
-    -- ["unity_scene.lua"]                = { kind = "lua-helper" },
-    -- ["unity_dissect.lua"]              = { kind = "lua-helper" },
     -- ["unity_symbols.lua"]              = { kind = "lua-helper" },
-    -- ["unity_addrfind.lua"]             = { kind = "lua-helper" },
     -- ["mono_registersymbol_helpers.lua"] = { kind = "lua-helper" },
 }
 
