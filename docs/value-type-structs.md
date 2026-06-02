@@ -255,6 +255,30 @@ must count members too (memory estimate parity).
   drifts (position.x) now contributes to volatility — automatic once
   fan-out lands.
 
+### 31-5 implementation notes (build #965, 2026-06-02)
+
+Done entirely in the DLL address-finder — **no ExportAPI / protocol / UI change**
+(the existing `field.name` / `fieldType` / `fieldKind` wire keys carry the
+component name automatically; the UI renders it as-is).
+
+- `MonoAddressFinder.cpp` + `IL2CPPAddressFinder.cpp`: `ResolvedField` gained
+  `valueTypeClass` (populated in `EnumerateInstanceFields` from the field's
+  resolved struct class `fc`, when `isValueType && !isEnum`).
+- New `NameStructComponent(parent, fieldOffset, fh)` called from `MakeFieldHit`
+  when the containing field is an **exact** value-struct match and the hit is
+  **interior** (`fieldOffset > field.offset`). It walks the struct class's own
+  members; member offsets are header-inclusive, so struct-relative =
+  `member.offset − kObjectHeader` matches the interior offset. On a member hit
+  it rewrites the `FieldHit`: `name → parent.member` (e.g. `_position.y`),
+  `typeName`/`offset`/`size`/`kind` → the member (a float component reports
+  `kind="leaf"`). Recurses one more level for a nested struct member
+  (`Bounds.center.y`). Caller already holds the `ThreadAttachGuard`.
+- A hit exactly at the struct base keeps the whole-struct `value-struct` kind
+  (interior == 0 → no-op). Primitives / pointers / enums are untouched.
+
+So a value scan hitting the `.y` float of a Vector3 field now reverse-resolves
+to `Class._position.y` instead of `Class._position` (or "interior").
+
 ### 5.4 Value Search — single component + reverse-lookup
 
 Value Search stays a **live scalar scan** (unchanged scan path). The Vec3
@@ -278,7 +302,7 @@ story:
 | **31-3** | SPC/diff `ExpandStructMembers` fan-out + summary + count parity | ✅ **SHIPPED** (dev) | UI unit tests green |
 | **31-4** | Pivot/KeyDiscovery per-component (dotted paths) + pickers | ✅ **SHIPPED** (dev) | UI unit tests green |
 | **31-2** | DLL Phase B (generic value-type recursion) | ✅ **SHIPPED & live-verified (Mono x64, build #960)** | `member.offset − 2*ptrSize`; class captured during ReadClassInfo (nested-type-safe) |
-| **31-5** | Value Search reverse-lookup names the component | ⚠ DEFERRED — DLL address-finder, rides on 31-2 | single-component float scan already works |
+| **31-5** | Value Search reverse-lookup names the component | ✅ **SHIPPED** (dev, build #965) — needs live-smoke | DLL address-finder names `_position.y` on an interior value-struct hit |
 | **31-6** | Fix EXISTING live Inspector ValueStruct drill | ✅ SHIPPED (build #936) + live-verified | (a) +0x10 header double-count; (b) nested-type name |
 
 ### 31-2 implementation notes (build #960, 2026-06-02)
@@ -327,8 +351,11 @@ and is MORE correct than the current live drill.
 **Shipped 2026-06-02 (build #960)**: 31-2 (Phase B generic value-type recursion)
 + 31-6 — generic custom structs (int/double/… members) now fan out their members
 in walkInstance + snapshot on both backends. **Live-verified Mono x64** (Core
-Keeper `<WorldPosition>k__BackingField` .x/.y/.z in diff/SPC/pivot). 31-5
-(Value-Search reverse-lookup naming the component) **now in development**.
+Keeper `<WorldPosition>k__BackingField` .x/.y/.z in diff/SPC/pivot).
+**Shipped 2026-06-02 (build #965)**: 31-5 — the reverse-lookup / address-finder
+now names the struct component (`_position.y`) on an interior value-struct hit
+(DLL-only, both backends). **Pending live-smoke** (value-scan a Vec3 component →
+reverse-lookup shows `Class.field.component`).
 **New 31-6**: the live-smoke exposed two pre-existing bugs in the live
 Inspector's ValueStruct expansion — (a) +0x10 header double-count (shows the
 wrong/shifted members), (b) nested-type (`Outer.Inner`) name resolution

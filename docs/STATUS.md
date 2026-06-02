@@ -7,11 +7,16 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #960(DLL Mono x64+x86 / IL2CPP x64 + UI,build clean)|
-| **Current phase** | ✅ **Phase 31 inline value-type struct** — 31-1/31-3/31-4/31-6 + **31-2(DLL Phase B 泛型自訂 struct,build #960)SHIPPED & live-verified(Core Keeper Mono x64)**。🚧 **31-5 開發中**(value-search reverse-lookup 命名 component)。Phase 29i(pivot)4 波亦完成 |
-| **Branches** | 31-2 commit→push→merge `dev`→`main`(本批次);merge 後 `dev == main` |
-| **Tests** | 685 UI tests green;DLL(Mono x64+x86 / IL2CPP x64)build clean、UI 0/0 warnings |
-| **Mid-flight** | 🚧 **31-5**(value-search reverse-lookup 命名 struct component)。剩餘 31-2 live-smoke(Mono x86 / IL2CPP x64,non-blocking)。**待辦大修**:Class Pivot tab UI/UX 重新規劃(見 [class-pivot.md](class-pivot.md) §「Class Pivot UI/UX overhaul」+ plan.md backlog)— 31-5 完成後做 |
+| **Current build** | #965(DLL x64 backend + UI build clean;**x86 backend 待 rebuild** — dist proxy 被執行中的 DiscreteUI 鎖住,純環境鎖、source 已驗 compile clean)|
+| **Current phase** | ✅ **Phase 31 inline value-type struct** — 31-1/31-3/31-4/31-6 + **31-2(Phase B 泛型 struct)live-verified(Core Keeper Mono x64)** + **31-5(reverse-lookup 命名 component)SHIPPED build #965,待 live-smoke**。Phase 29i(pivot)4 波亦完成 |
+| **Branches** | 31-5 commit→push→merge `dev`→`main`(本批次) |
+| **Tests** | 685 UI tests green;x64 DLL backend build clean(x86 backend 待鎖釋放後 rebuild)、UI 0/0 warnings |
+| **Mid-flight** | 🟡 **x86 backend DLL 待 rebuild**(執行中 DiscreteUI 鎖住 dist\version.dll;關掉後 `build.cmd dll` 即可,source 已 compile-clean)。**待 live-smoke**:31-5(value-scan 一個 Vec3 component → reverse-lookup 顯示 `Class.field.component`)+ 31-2 殘留(Mono x86 / IL2CPP x64)。**待辦大修**:Class Pivot tab UI/UX 重新規劃(見 [class-pivot.md](class-pivot.md) §「Class Pivot UI/UX overhaul」)|
+
+**最新批次(2026-06-02,Phase 31-5 — reverse-lookup 命名 struct component,build #965,DLL-only)** — spec [value-type-structs.md](value-type-structs.md) §5.4 + 「31-5 implementation notes」:
+- **目標**:value scan 命中一個 Vector3 欄位的 `.y` float 時,reverse-lookup(`whatIsAt`/address-finder)從只報 `Class._position` 升級成報 **`Class._position.y`**。
+- **作法**(兩 backend `MonoAddressFinder.cpp` / `IL2CPPAddressFinder.cpp`,**ExportAPI/protocol/UI 全不動** — `field.name` wire key 直接帶 component 名):`ResolvedField` 加 `valueTypeClass`(`EnumerateInstanceFields` 從 field 的 struct class `fc` 存,`isValueType && !isEnum`);新 `NameStructComponent` 在 `MakeFieldHit` 的 exact value-struct interior 命中時走訪 struct 成員(struct-relative = `member.offset − kObjectHeader` 對上 interior offset),改寫 `FieldHit`:`name→parent.member`、type/offset/size/kind→成員(float component → `kind="leaf"`);巢狀成員(`Bounds.center.y`)再遞迴一層。命中 struct base(interior==0)維持整體 `value-struct` kind。
+- **build #965**:x64 backend build clean;685 UI tests green。**x86 backend 待 rebuild**(環境鎖,非 code 問題)。
 
 **最新批次(2026-06-02,Phase 31-2 — DLL Phase B 泛型 value-type 遞迴,build #960)** — spec [value-type-structs.md](value-type-structs.md) §3.2 + 「31-2 implementation notes」:
 - **根因延續**:Phase A(`decodeField` named math struct 表)只認 Vector3/4 等;自訂 struct(int/double 成員)仍只讀一個 ptr-word。Phase B 補上**任意 value-type struct** 的成員遞迴。

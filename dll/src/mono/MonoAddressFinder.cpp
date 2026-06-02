@@ -165,6 +165,10 @@ struct ResolvedField {
     bool          isEnum      = false;
     std::string   underlyingTypeName;
     std::string   declaredIn;
+    // Phase 31-5 — for an inline value-type STRUCT field (isValueType &&
+    // !isEnum, not a primitive), the field's struct class, so a hit landing
+    // INSIDE the struct can be named to the specific component (`_position.y`).
+    MonoClass*    valueTypeClass = nullptr;
 };
 
 std::size_t SizeOfPrimitive(const std::string& t) {
@@ -249,6 +253,11 @@ std::vector<ResolvedField> EnumerateInstanceFields(MonoClass* klass) {
                         int s = SehValueSizeProbe(r.class_value_size, fc);
                         if (s > 0) sz = static_cast<std::size_t>(s);
                     }
+                    // Phase 31-5 — remember the struct class for value-type
+                    // (non-enum) fields so an interior hit can be named to its
+                    // component. Primitives keep it null (their interior is the
+                    // value itself, nothing to fan out).
+                    if (rf.isValueType && !rf.isEnum) rf.valueTypeClass = fc;
                 }
             }
             if (sz == 0) sz = SizeOfPrimitive(rf.typeName);
@@ -275,6 +284,51 @@ std::string ClassifyKind(const ResolvedField& rf, std::ptrdiff_t fieldOffset) {
     return "pointer";
 }
 
+// Phase 31-5 — when the queried offset lands INSIDE an inline value-type struct
+// field (e.g. a Vector3 `_position` at +0x14C, hit at +0x150 = the `.y` float),
+// name the specific component (`_position.y`) instead of reporting a generic
+// "interior" hit on the whole struct. The struct's own member offsets are
+// header-inclusive (boxed convention — Vector3.x = 0x10), so the struct-relative
+// offset is `member.offset - kObjectHeader`, which matches the queried interior
+// offset. Rewrites `fh` in place (name → parent.member, type/offset/size → the
+// member). Recurses once for a nested struct member (Bounds.center.y).
+// Caller holds the ThreadAttachGuard (EnumerateInstanceFields needs it).
+void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset,
+                         FieldHit& fh) {
+    if (!parent.isValueType || parent.isEnum || parent.valueTypeClass == nullptr) return;
+    const std::ptrdiff_t interior = fieldOffset - static_cast<std::ptrdiff_t>(parent.offset);
+    if (interior <= 0) return;   // hit at the struct base → keep value-struct kind
+    const long hdr = static_cast<long>(ManagedLayout::kObjectHeader);
+    auto members = EnumerateInstanceFields(parent.valueTypeClass);
+    for (const auto& m : members) {
+        const std::ptrdiff_t rel = static_cast<std::ptrdiff_t>(m.offset) - hdr;
+        if (rel < 0) continue;
+        if (interior < rel || interior >= rel + static_cast<std::ptrdiff_t>(m.size)) continue;
+        const std::ptrdiff_t absOffset = static_cast<std::ptrdiff_t>(parent.offset) + rel;
+        fh.name        = parent.name + "." + m.name;
+        fh.typeName    = m.typeName;
+        fh.offset      = static_cast<std::size_t>(absOffset);
+        fh.size        = m.size;
+        fh.isValueType = m.isValueType;
+        fh.isEnum      = m.isEnum;
+        fh.underlyingTypeName = m.underlyingTypeName;
+        const std::ptrdiff_t memberInterior = interior - rel;
+        fh.kind = (memberInterior == 0)
+            ? ClassifyKind(m, static_cast<std::ptrdiff_t>(m.offset))  // member-exact
+            : "interior";
+        fh.interiorOffset = memberInterior;
+        // Nested struct member (e.g. Bounds.center.y) → recurse one more level.
+        if (memberInterior > 0 && m.isValueType && !m.isEnum &&
+            m.valueTypeClass != nullptr) {
+            ResolvedField nested = m;
+            nested.name   = fh.name;                       // already parent.member
+            nested.offset = static_cast<std::size_t>(absOffset);
+            NameStructComponent(nested, fieldOffset, fh);
+        }
+        return;
+    }
+}
+
 FieldHit MakeFieldHit(const ResolvedField& rf, std::ptrdiff_t fieldOffset, bool exact) {
     FieldHit fh;
     fh.present     = true;
@@ -292,6 +346,10 @@ FieldHit MakeFieldHit(const ResolvedField& rf, std::ptrdiff_t fieldOffset, bool 
     fh.interiorOffset = (fh.kind == "interior")
         ? (fieldOffset - static_cast<std::ptrdiff_t>(rf.offset))
         : 0;
+    // Phase 31-5 — promote an interior hit on a value-type struct to the
+    // specific component (`_position.y`). No-op for primitives / pointers /
+    // base-of-struct hits.
+    if (exact) NameStructComponent(rf, fieldOffset, fh);
     return fh;
 }
 
