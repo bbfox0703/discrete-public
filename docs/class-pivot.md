@@ -945,3 +945,25 @@ engines stay.
 - Keep all existing engines + handoff entry points working; this is a
   presentation + threading refactor, not a behaviour change.
 - Sequence AFTER Phase 31-5 (per user).
+
+### Wave plan + progress
+
+| Wave | Scope (maps to problem #) | Status |
+|---|---|---|
+| **A** | Responsiveness (#5): move every engine `.Run()` off the UI thread (`Task.Run`) + indeterminate busy bar bound to `IsRunning` + disable Run buttons while busy (`[NotifyCanExecuteChangedFor]`). Pivot **and** SPC Query tabs. | ✅ **DONE** (dev, 685 tests green) — needs user visual verify |
+| **B** | Layout (#1): replace the 7 stacked panels with a single toolbar of buttons; each opens a dialog bound to the SHARED `PivotViewModel`; Results grid + busy bar fill the tab body. No engine/command behaviour change. | ⏳ next — **check in on arrangement** |
+| **C** | Jargon (#3) + keyword filters (#2): rename Stage 0/Stage 1/Layer B to plain labels; explicit ordered dependencies (disable until prereq met + hints); a keyword filter on every list. | ⏳ |
+| **D** | Pickers + handoff (#4, #6): array-pivot params → schema-populated pickers; Inspector/Browser/Snapshot right-click → "Pivot this class/field here". | ⏳ |
+
+**Wave A notes (2026-06-02)**: `PivotViewModel` — all 6 engine call sites
+(`ClassShortlistEngine`, `KeyDiscoveryEngine` ×2, `SnapshotValueLocatorEngine`,
+`ClassInterestEngine`+`PivotEngine` preview block, `PivotEngine`/`ArrayPivotEngine`)
+now `await Task.Run(() => Engine.Run(query))`; the query objects are built on the
+UI thread first, the compute runs on the pool, results marshal back. Indeterminate
+`ProgressBar` busy bars added to the Class Pivot + SPC Query tabs (bound to
+`IsRunning`); without the off-threading the bar couldn't even animate (it lives on
+the UI thread). `_isRunning` gained `[NotifyCanExecuteChangedFor]` for every gated
+command on both VMs so the buttons grey out during a run — important now that the
+UI stays live and a second click could start a racing concurrent run.
+Snapshot-tab diff/hydrate audit still pending (its capture path already uses the
+bulk pipe + `BulkOperationGate`; the diff compute is the remaining candidate).

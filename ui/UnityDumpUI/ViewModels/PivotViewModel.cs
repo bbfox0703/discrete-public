@@ -188,7 +188,19 @@ public sealed partial class PivotViewModel : ObservableObject
         "Type a class FQN, list key + value field name(s), pick 1+ snapshots, press Run.";
     [ObservableProperty] private string _errorMessage = string.Empty;
     [ObservableProperty] private string _modeBanner   = string.Empty;
-    [ObservableProperty] private bool   _isRunning;
+    // Wave A — now that the engine compute runs off the UI thread (Task.Run),
+    // the UI stays responsive DURING a run, so a second click could start a
+    // concurrent run that races on Results. Notify every gated command's
+    // CanExecute when IsRunning flips so the buttons grey out while busy.
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(RunCommand))]
+    [NotifyCanExecuteChangedFor(nameof(AnalyzeClassesCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ScoreFieldsCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ScoreElementFieldsCommand))]
+    [NotifyCanExecuteChangedFor(nameof(FindByValueCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RankLikelyGameStateCommand))]
+    [NotifyCanExecuteChangedFor(nameof(SuggestKeyAndRunCommand))]
+    private bool   _isRunning;
 
     /// <summary>FQN of the class whose instances to pivot — typed by
     /// the user, suggestions from <see cref="KnownClasses"/>.</summary>
@@ -311,13 +323,16 @@ public sealed partial class PivotViewModel : ObservableObject
             }
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var result = KeyDiscoveryEngine.Run(new KeyDiscoveryQuery
+            // Compute off the UI thread (the engine iterates every instance —
+            // synchronous on the UI thread froze the app on large snapshots).
+            var elemQuery = new KeyDiscoveryQuery
             {
                 Snapshots  = selected.Select(r => r.Snapshot).ToList(),
                 Assembly   = assembly!,
                 ClassFqn   = ClassFqn.Trim(),
                 ArrayField = ArrayFieldName.Trim(),
-            });
+            };
+            var result = await Task.Run(() => KeyDiscoveryEngine.Run(elemQuery)).ConfigureAwait(true);
             sw.Stop();
 
             _allElementFieldScores = result.Fields.ToList();
@@ -486,7 +501,7 @@ public sealed partial class PivotViewModel : ObservableObject
                 ? tv : (double?)null;
 
             var sw = Stopwatch.StartNew();
-            var result = SnapshotValueLocatorEngine.Run(new ValueLocatorQuery
+            var locQuery = new ValueLocatorQuery
             {
                 Snapshots            = snaps,
                 AssemblyFilter       = string.IsNullOrWhiteSpace(AssemblyFilter) ? null : AssemblyFilter.Trim(),
@@ -498,7 +513,9 @@ public sealed partial class PivotViewModel : ObservableObject
                 IncludeArrayElements = LocatorIncludeArrays,
                 NumericOnly          = LocatorNumericOnly,
                 IncludeSynthetic     = LocatorIncludeSynthetic,
-            });
+            };
+            // Off-thread compute (scans every field of every instance).
+            var result = await Task.Run(() => SnapshotValueLocatorEngine.Run(locQuery)).ConfigureAwait(true);
             sw.Stop();
 
             foreach (var h in result.Hits) LocatorHits.Add(h);
@@ -643,47 +660,58 @@ public sealed partial class PivotViewModel : ObservableObject
             var snaps = selected.Select(r => r.Snapshot).ToList();
             var sw = Stopwatch.StartNew();
 
-            // Pass A — Stage 0 shortlist → top-N clean candidates.
-            var shortlist = ClassShortlistEngine.Run(new ClassShortlistQuery
+            // Pass A + B + preview all iterate every instance — run the whole
+            // compute off the UI thread so the busy spinner can animate and the
+            // app stays responsive on large snapshots.
+            string? interestAsmFilter = string.IsNullOrWhiteSpace(AssemblyFilter) ? null : AssemblyFilter.Trim();
+            int interestTopN = Math.Max(1, InterestTopN);
+            int candidateCount = 0;   // captured out of the lambda for the status line
+            var rows = await Task.Run(() =>
             {
-                Snapshots      = snaps,
-                AssemblyFilter = string.IsNullOrWhiteSpace(AssemblyFilter) ? null : AssemblyFilter.Trim(),
-            });
-            var candidates = shortlist
-                .Where(c => !c.IsSynthetic && c.Presence == c.SnapCount && c.FieldCount >= 2)
-                .Take(Math.Max(1, InterestTopN))
-                .Select(c => new ClassInterestCandidate { Assembly = c.Assembly, ClassFqn = c.ClassFqn })
-                .ToList();
-
-            // Pass B — interestingness scoring.
-            var rows = ClassInterestEngine.Run(new ClassInterestQuery
-            {
-                Snapshots = snaps, Candidates = candidates,
-            });
-
-            // Eager preview (while hydrated): top value field + key → 3 rows.
-            foreach (var row in rows)
-            {
-                row.Preview.Clear();
-                if (row.KeyFields.Count == 0 || row.TopValueFieldsList.Count == 0) continue;
-                try
+                // Pass A — shortlist → top-N clean candidates.
+                var shortlist = ClassShortlistEngine.Run(new ClassShortlistQuery
                 {
-                    var pr = PivotEngine.Run(new PivotQuery
+                    Snapshots      = snaps,
+                    AssemblyFilter = interestAsmFilter,
+                });
+                var candidates = shortlist
+                    .Where(c => !c.IsSynthetic && c.Presence == c.SnapCount && c.FieldCount >= 2)
+                    .Take(interestTopN)
+                    .Select(c => new ClassInterestCandidate { Assembly = c.Assembly, ClassFqn = c.ClassFqn })
+                    .ToList();
+                candidateCount = candidates.Count;
+
+                // Pass B — interestingness scoring.
+                var scored = ClassInterestEngine.Run(new ClassInterestQuery
+                {
+                    Snapshots = snaps, Candidates = candidates,
+                });
+
+                // Eager preview (while hydrated): top value field + key → 3 rows.
+                foreach (var row in scored)
+                {
+                    row.Preview.Clear();
+                    if (row.KeyFields.Count == 0 || row.TopValueFieldsList.Count == 0) continue;
+                    try
                     {
-                        Snapshots   = snaps,
-                        Assembly    = row.Assembly,
-                        ClassFqn    = row.ClassFqn,
-                        KeyFields   = row.KeyFields.ToList(),
-                        ValueFields = new List<string> { row.TopValueFieldsList[0] },
-                    });
-                    foreach (var m in pr.Take(3))
-                    {
-                        string traj = string.Join(" → ", m.Values[0].Select(s => s ?? "—"));
-                        row.Preview.Add($"{string.Join(", ", m.KeyTuple)} : {traj}");
+                        var pr = PivotEngine.Run(new PivotQuery
+                        {
+                            Snapshots   = snaps,
+                            Assembly    = row.Assembly,
+                            ClassFqn    = row.ClassFqn,
+                            KeyFields   = row.KeyFields.ToList(),
+                            ValueFields = new List<string> { row.TopValueFieldsList[0] },
+                        });
+                        foreach (var m in pr.Take(3))
+                        {
+                            string traj = string.Join(" → ", m.Values[0].Select(s => s ?? "—"));
+                            row.Preview.Add($"{string.Join(", ", m.KeyTuple)} : {traj}");
+                        }
                     }
+                    catch { /* preview is best-effort */ }
                 }
-                catch { /* preview is best-effort */ }
-            }
+                return scored;
+            }).ConfigureAwait(true);
             sw.Stop();
 
             InterestRows.Clear();
@@ -700,10 +728,10 @@ public sealed partial class PivotViewModel : ObservableObject
             }
 
             InterestStatus =
-                $"Ranked {rows.Count:N0} candidate class(es) in {sw.ElapsedMilliseconds} ms (from {candidates.Count:N0} Stage-0 picks). " +
+                $"Ranked {rows.Count:N0} candidate class(es) in {sw.ElapsedMilliseconds} ms (from {candidateCount:N0} Stage-0 picks). " +
                 "Double-tap a row to load key+value; select a row to preview.";
             _logger.Write(SnapshotStore.LogCategory,
-                $"PivotInterest: asm='{AssemblyFilter}' topN={InterestTopN} candidates={candidates.Count} → {rows.Count} ranked in {sw.ElapsedMilliseconds}ms evicted={evicted}");
+                $"PivotInterest: asm='{AssemblyFilter}' topN={InterestTopN} candidates={candidateCount} → {rows.Count} ranked in {sw.ElapsedMilliseconds}ms evicted={evicted}");
         }
         catch (Exception ex)
         {
@@ -867,11 +895,13 @@ public sealed partial class PivotViewModel : ObservableObject
             RefreshKnownClassesAndFields();
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            _allShortlistRows = ClassShortlistEngine.Run(new ClassShortlistQuery
+            var shortlistQuery = new ClassShortlistQuery
             {
                 Snapshots      = selected.Select(r => r.Snapshot).ToList(),
                 AssemblyFilter = string.IsNullOrWhiteSpace(AssemblyFilter) ? null : AssemblyFilter.Trim(),
-            });
+            };
+            // Off-thread compute (iterates every class × instance).
+            _allShortlistRows = await Task.Run(() => ClassShortlistEngine.Run(shortlistQuery)).ConfigureAwait(true);
             sw.Stop();
 
             RebuildShortlistView();
@@ -986,12 +1016,14 @@ public sealed partial class PivotViewModel : ObservableObject
             }
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var result = KeyDiscoveryEngine.Run(new KeyDiscoveryQuery
+            var fieldQuery = new KeyDiscoveryQuery
             {
                 Snapshots = selected.Select(r => r.Snapshot).ToList(),
                 Assembly  = assembly!,
                 ClassFqn  = ClassFqn.Trim(),
-            });
+            };
+            // Off-thread compute (scores every field across all instances).
+            var result = await Task.Run(() => KeyDiscoveryEngine.Run(fieldQuery)).ConfigureAwait(true);
             sw.Stop();
 
             _allFieldScores = result.Fields.ToList();
@@ -1199,32 +1231,36 @@ public sealed partial class PivotViewModel : ObservableObject
             string? keyFilterArg = string.IsNullOrWhiteSpace(KeyFilter) ? null : KeyFilter.Trim();
 
             var sw = Stopwatch.StartNew();
+            string classFqnArg = ClassFqn.Trim();
+            // Off-thread compute (groups every instance across all snapshots).
             List<PivotRow> matches;
             if (ArrayPivotMode)
             {
-                matches = ArrayPivotEngine.Run(new ArrayPivotQuery
+                var apQuery = new ArrayPivotQuery
                 {
                     Snapshots      = snaps,
                     Assembly       = assembly!,
-                    ClassFqn       = ClassFqn.Trim(),
+                    ClassFqn       = classFqnArg,
                     ArrayField     = ArrayFieldName.Trim(),
                     OuterKeyFields = keyFields,        // KeyFieldsText = outer key (may be empty)
                     InnerKeyFields = innerKeyFields,
                     ValueFields    = valueFields,
                     KeyFilter      = keyFilterArg,
-                });
+                };
+                matches = await Task.Run(() => ArrayPivotEngine.Run(apQuery)).ConfigureAwait(true);
             }
             else
             {
-                matches = PivotEngine.Run(new PivotQuery
+                var pQuery = new PivotQuery
                 {
                     Snapshots   = snaps,
                     Assembly    = assembly!,
-                    ClassFqn    = ClassFqn.Trim(),
+                    ClassFqn    = classFqnArg,
                     KeyFields   = keyFields,
                     ValueFields = valueFields,
                     KeyFilter   = keyFilterArg,
-                });
+                };
+                matches = await Task.Run(() => PivotEngine.Run(pQuery)).ConfigureAwait(true);
             }
             sw.Stop();
 

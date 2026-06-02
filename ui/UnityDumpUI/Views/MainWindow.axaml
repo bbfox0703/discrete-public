@@ -2165,6 +2165,16 @@
                noise is in the heap). -->
           <TabItem Header="SPC Query">
             <DockPanel Margin="6">
+              <!-- Wave A — busy indicator (engine compute runs off the UI thread). -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                      Background="#264080FF" CornerRadius="3"
+                      IsVisible="{Binding SpcQuery.IsRunning}">
+                <StackPanel Orientation="Vertical" Spacing="3">
+                  <TextBlock Text="Working… computing in the background — the UI stays responsive."
+                             FontSize="11" FontWeight="SemiBold"/>
+                  <ProgressBar IsIndeterminate="True" Height="4" Minimum="0" Maximum="100"/>
+                </StackPanel>
+              </Border>
               <!-- Status + error + mode banner -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1F808080" CornerRadius="3">
@@ -2383,6 +2393,19 @@
                address (which drifts on every game launch). -->
           <TabItem Header="Class Pivot">
             <DockPanel Margin="6">
+              <!-- Wave A — busy indicator. Engine compute now runs off the UI
+                   thread (Task.Run), so this indeterminate bar actually animates
+                   and the rest of the app stays responsive while a snapshot
+                   query is running. Visible only while IsRunning. -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                      Background="#264080FF" CornerRadius="3"
+                      IsVisible="{Binding ClassPivot.IsRunning}">
+                <StackPanel Orientation="Vertical" Spacing="3">
+                  <TextBlock Text="Working… computing in the background — the UI stays responsive."
+                             FontSize="11" FontWeight="SemiBold"/>
+                  <ProgressBar IsIndeterminate="True" Height="4" Minimum="0" Maximum="100"/>
+                </StackPanel>
+              </Border>
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1F808080" CornerRadius="3">
                 <TextBlock Text="{Binding ClassPivot.StatusMessage}"
