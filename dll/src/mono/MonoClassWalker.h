@@ -30,6 +30,13 @@ struct FieldEntry {
     // For enum fields: the underlying integer type name (e.g.
     // "System.Int32"). Empty when isEnum=false or detection failed.
     std::string   underlyingTypeName;
+    // Phase 31-2 (Phase B) — for an inline value-type STRUCT field (isValueType
+    // && !isEnum, not a primitive), the field's runtime class, captured here
+    // during ReadClassInfo so the snapshot / walkInstance decode can recurse
+    // into its members WITHOUT re-resolving the type by name (which is
+    // ambiguous for nested types). nullptr otherwise. Raw pointer to an
+    // incomplete type — never owned, valid for the session.
+    MonoClass*    valueTypeClass     = nullptr;
 };
 
 struct MethodEntry {

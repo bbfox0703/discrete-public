@@ -138,6 +138,103 @@ constexpr double        kSnapshotAvailPhysFraction     = 0.60;
 // How often (in decoded instances) to re-sample process memory during decode.
 constexpr std::size_t   kSnapshotMemCheckInterval       = 2048;
 
+// ---------------------------------------------------------------------------
+// Phase 31-2 (Phase B) — generic value-type struct member capture.
+//
+// Phase A (decodeField, named Unity math structs) emits x/y/z for Vector3 &
+// friends by hard-coded offsets. Phase B extends this to ARBITRARY value-type
+// structs (custom int/double/… structs): given the struct's runtime class +
+// the inline struct base address, ReadClassInfo the class and decode each
+// instance member.
+//
+// Offset: mono_field_get_offset / il2cpp_field_get_offset report a value
+// type's member offsets HEADER-INCLUSIVE (boxed convention: e.g. Vector3.x =
+// 0x10, not 0x00). An inline struct stored in a field has NO object header, so
+// the member's real address is `structBase + member.offset - kObjectHeader`
+// (the §3.2 / STATUS.md live-smoke formula: -0x10 on x64, -0x08 on x86).
+//
+// Safety: ReadClassInfo already wraps every runtime accessor in SEH and
+// Memory::SafeReadBytes guards every read, so a garbage class / offset yields a
+// clean error, not an AV. ProbeKlassValid rejects a junk class up front; the
+// member cap + depth cap bound runaway recursion (C# forbids value-type cycles,
+// so depth is naturally shallow, but cap anyway). A process-lifetime cache of
+// ReadClassInfo results keeps repeated struct decode (a snapshot touches the
+// same Vector3 class thousands of times) off the runtime — important for Mono
+// BDWGC pressure.
+using StructDecodeFieldFn = std::function<json(const std::string&, std::uintptr_t)>;
+
+constexpr int         kStructMaxDepth         = 4;   // generic-struct nesting cap
+constexpr std::size_t kStructDefaultMemberCap = 64;  // walkInstance per-struct cap
+
+// Shared decode-site gate: should this field's decoded `entry` be expanded as a
+// generic value-type struct? True only for a non-enum value type whose runtime
+// class is known and whose decodeField result was a bare pointer word — i.e.
+// NOT a primitive (`value`), NOT a named math struct already fanned out
+// (`fields`), NOT a String, and NOT IntPtr/UIntPtr (value types that legitimately
+// ARE a pointer). `typeName` is the field's declared type; `vtc` its captured
+// runtime class.
+template <typename ClassPtr>
+bool ShouldExpandValueStruct(bool isValueType, bool isEnum, ClassPtr vtc,
+                             const std::string& typeName, const json& entry) {
+    return isValueType && !isEnum && vtc != nullptr &&
+           typeName != "System.IntPtr" && typeName != "System.UIntPtr" &&
+           entry.contains("ptr") && !entry.contains("fields") && !entry.contains("value");
+}
+
+#if defined(DISCRETE_BACKEND_MONO)
+json CaptureMonoStructFields(const StructDecodeFieldFn& decodeField,
+                             ::Discrete::Mono::MonoClass* sc, std::uintptr_t structBase,
+                             int depthLeft, std::size_t memberCap) {
+    namespace Mono = ::Discrete::Mono;
+    if (sc == nullptr || depthLeft <= 0) return json::object();
+    if (!Mono::ProbeKlassValid(sc)) return json{{"struct_error", "invalid struct class"}};
+
+    // Process-lifetime cache (struct field/offset layout is stable). Mutex:
+    // the interactive (browse) and bulk (snapshot) pipes can both reach here.
+    static std::unordered_map<Mono::MonoClass*, Mono::ClassInfoResult> s_cache;
+    static std::mutex s_mtx;
+    Mono::ClassInfoResult res;
+    {
+        std::lock_guard<std::mutex> lk(s_mtx);
+        auto it = s_cache.find(sc);
+        if (it != s_cache.end()) res = it->second;
+    }
+    if (!res.ok) {
+        res = Mono::ReadClassInfo(sc);
+        if (res.ok) { std::lock_guard<std::mutex> lk(s_mtx); s_cache.emplace(sc, res); }
+    }
+    if (!res.ok) return json{{"struct_error", "ReadClassInfo failed"}};
+
+    const long hdr = static_cast<long>(::Discrete::ManagedLayout::kObjectHeader);
+    json members = json::array();
+    std::size_t produced = 0;
+    for (const auto& f : res.info.fields) {
+        if (f.flags & 0x10u) continue;          // skip statics
+        if (produced >= memberCap) break;
+        const long relOff = static_cast<long>(f.offset) - hdr;
+        std::uintptr_t memberAddr = structBase + static_cast<std::uintptr_t>(relOff);
+        const std::string& decType = (f.isEnum && !f.underlyingTypeName.empty())
+            ? f.underlyingTypeName : f.typeName;
+        json mf = { {"name", f.name}, {"type", f.typeName}, {"offset", relOff} };
+        if (f.isEnum)      mf["is_enum"]       = true;
+        if (f.isValueType) mf["is_value_type"] = true;
+        json d = decodeField(decType, memberAddr);
+        for (auto kv = d.begin(); kv != d.end(); ++kv) mf[kv.key()] = kv.value();
+        // Nested generic struct member → recurse one more level. Named math
+        // structs were already fanned out by decodeField (Phase A) above, so
+        // this only fires for a struct-in-struct of custom type.
+        if (ShouldExpandValueStruct(f.isValueType, f.isEnum, f.valueTypeClass, f.typeName, mf)) {
+            json sub = CaptureMonoStructFields(decodeField, f.valueTypeClass,
+                                               memberAddr, depthLeft - 1, memberCap);
+            if (sub.contains("fields")) { mf.erase("ptr"); mf["fields"] = std::move(sub["fields"]); }
+        }
+        members.push_back(std::move(mf));
+        ++produced;
+    }
+    return json{{"fields", std::move(members)}};
+}
+#endif  // DISCRETE_BACKEND_MONO
+
 #if defined(DISCRETE_BACKEND_IL2CPP)
 // Namespace aliases so the decoder (defined here, before the handler-block
 // aliases at ~line 662) can use the short `Snapshot::` / `IL2CPP::` forms. Both
@@ -145,6 +242,59 @@ constexpr std::size_t   kSnapshotMemCheckInterval       = 2048;
 // is well-formed, so this doesn't conflict.
 namespace Snapshot = ::Discrete::Snapshot;
 namespace IL2CPP   = ::Discrete::IL2CPP;
+
+// Phase 31-2 (Phase B) — IL2CPP twin of CaptureMonoStructFields (see the Mono
+// definition above for the full rationale + offset formula). Same header-strip
+// (`offset - kObjectHeader`), same caps + SEH safety via ReadClassInfo /
+// ProbeKlassValid / Memory::SafeReadBytes. NOTE: the -header convention is
+// live-proven on Mono; IL2CPP applies the same convention (its walkInstance
+// value-type drill, Phase 31-6a, already does) but still wants its own
+// live-smoke to confirm byte-for-byte.
+json CaptureIl2cppStructFields(const StructDecodeFieldFn& decodeField,
+                               IL2CPP::Il2CppClass* sc, std::uintptr_t structBase,
+                               int depthLeft, std::size_t memberCap) {
+    if (sc == nullptr || depthLeft <= 0) return json::object();
+    if (!IL2CPP::ProbeKlassValid(sc)) return json{{"struct_error", "invalid struct class"}};
+
+    static std::unordered_map<IL2CPP::Il2CppClass*, IL2CPP::ClassInfoResult> s_cache;
+    static std::mutex s_mtx;
+    IL2CPP::ClassInfoResult res;
+    {
+        std::lock_guard<std::mutex> lk(s_mtx);
+        auto it = s_cache.find(sc);
+        if (it != s_cache.end()) res = it->second;
+    }
+    if (!res.ok) {
+        res = IL2CPP::ReadClassInfo(sc);
+        if (res.ok) { std::lock_guard<std::mutex> lk(s_mtx); s_cache.emplace(sc, res); }
+    }
+    if (!res.ok) return json{{"struct_error", "ReadClassInfo failed"}};
+
+    const long hdr = static_cast<long>(::Discrete::ManagedLayout::kObjectHeader);
+    json members = json::array();
+    std::size_t produced = 0;
+    for (const auto& f : res.info.fields) {
+        if (f.flags & 0x10u) continue;          // skip statics
+        if (produced >= memberCap) break;
+        const long relOff = static_cast<long>(f.offset) - hdr;
+        std::uintptr_t memberAddr = structBase + static_cast<std::uintptr_t>(relOff);
+        const std::string& decType = (f.isEnum && !f.underlyingTypeName.empty())
+            ? f.underlyingTypeName : f.typeName;
+        json mf = { {"name", f.name}, {"type", f.typeName}, {"offset", relOff} };
+        if (f.isEnum)      mf["is_enum"]       = true;
+        if (f.isValueType) mf["is_value_type"] = true;
+        json d = decodeField(decType, memberAddr);
+        for (auto kv = d.begin(); kv != d.end(); ++kv) mf[kv.key()] = kv.value();
+        if (ShouldExpandValueStruct(f.isValueType, f.isEnum, f.valueTypeClass, f.typeName, mf)) {
+            json sub = CaptureIl2cppStructFields(decodeField, f.valueTypeClass,
+                                                 memberAddr, depthLeft - 1, memberCap);
+            if (sub.contains("fields")) { mf.erase("ptr"); mf["fields"] = std::move(sub["fields"]); }
+        }
+        members.push_back(std::move(mf));
+        ++produced;
+    }
+    return json{{"fields", std::move(members)}};
+}
 
 // Phase 30b — IL2CPP game-side streaming decoder. Owns the heap-walk result +
 // all the decode context snapshotBegin used to hold as locals, so snapshotChunk
@@ -177,6 +327,8 @@ public:
                         std::vector<std::string> arrayElementTargets,
                         bool arrayElementFields,
                         bool captureStaticValues,
+                        bool valueStructFields,
+                        std::size_t structMemberCap,
                         std::uint64_t memBudgetBytes,
                         std::uint64_t initialPrivateUsage,
                         FormatHexFn formatHex,
@@ -192,6 +344,8 @@ public:
           arrayElementTargets_(std::move(arrayElementTargets)),
           arrayElementFields_(arrayElementFields),
           captureStaticValues_(captureStaticValues),
+          valueStructFields_(valueStructFields),
+          structMemberCap_(structMemberCap),
           memBudgetBytes_(memBudgetBytes),
           peakPrivate_(initialPrivateUsage),
           formatHex_(std::move(formatHex)),
@@ -342,6 +496,18 @@ private:
                     ? f.underlyingTypeName : f.typeName;
                 json d = decodeField_(decodeType, fieldAddr);
                 for (auto kv = d.begin(); kv != d.end(); ++kv) fe[kv.key()] = kv.value();
+                // Phase 31-2 (Phase B) — value-type struct field on an array
+                // element fans out (one extra level). See the Mono twin.
+                if (valueStructFields_ &&
+                    ShouldExpandValueStruct(f.isValueType, f.isEnum,
+                        f.valueTypeClass, f.typeName, fe)) {
+                    json sub = CaptureIl2cppStructFields(decodeField_,
+                        f.valueTypeClass, fieldAddr, 2, structMemberCap_);
+                    if (sub.contains("fields")) {
+                        fe.erase("ptr");
+                        fe["fields"] = std::move(sub["fields"]);
+                    }
+                }
                 efields.push_back(std::move(fe));
                 ++produced;
             }
@@ -440,14 +606,15 @@ private:
         // by offset), emit it once, then per instance emit only the value
         // array aligned to this order.
         struct FieldDesc {
-            const std::string* name;
-            const std::string* type;
-            const std::string* from;
-            const std::string* decodeType;
-            std::size_t        offset;
-            bool               isEnum;
-            bool               isValueType;
-            bool               isArrayShape;
+            const std::string*   name;
+            const std::string*   type;
+            const std::string*   from;
+            const std::string*   decodeType;
+            std::size_t          offset;
+            bool                 isEnum;
+            bool                 isValueType;
+            bool                 isArrayShape;
+            IL2CPP::Il2CppClass* valueTypeClass;  // Phase 31-2 (Phase B)
         };
         std::vector<FieldDesc> fieldDescs;
         for (std::size_t ci = chain.size(); ci > 0; --ci) {
@@ -468,6 +635,7 @@ private:
                 fd.isArrayShape = f.typeName.size() >= 2 &&
                     f.typeName[f.typeName.size() - 1] == ']' &&
                     f.typeName[f.typeName.size() - 2] == '[';
+                fd.valueTypeClass = f.valueTypeClass;
                 fieldDescs.push_back(fd);
             }
             if (fieldDescs.size() >= 4096) break;
@@ -537,6 +705,17 @@ private:
                             }
                         }
                     }
+                } else if (valueStructFields_ &&
+                           ShouldExpandValueStruct(fd.isValueType, fd.isEnum,
+                               fd.valueTypeClass, *fd.type, entry)) {
+                    // Phase 31-2 (Phase B) — generic value-type struct member
+                    // fan-out (gated). Named math structs already done in decodeField.
+                    json sub = CaptureIl2cppStructFields(decodeField_,
+                        fd.valueTypeClass, fieldAddr, kStructMaxDepth, structMemberCap_);
+                    if (sub.contains("fields")) {
+                        entry.erase("ptr");
+                        entry["fields"] = std::move(sub["fields"]);
+                    }
                 }
                 values.push_back(std::move(entry));
             }
@@ -560,6 +739,8 @@ private:
     std::vector<std::string> arrayElementTargets_;
     bool arrayElementFields_;
     bool captureStaticValues_;
+    bool valueStructFields_;
+    std::size_t structMemberCap_;
     std::uint64_t memBudgetBytes_;
 
     FormatHexFn   formatHex_;
@@ -2865,6 +3046,16 @@ void RegisterCoreHandlers() {
         // Effective state echoed in the Begin response so the UI knows when
         // the x86 blanket gate silently disabled a requested capture.
         const bool effArrayElementFields = session->arrayElementFields;
+        // Phase 31-2 (Phase B) — generic value-type struct fan-out. Default on;
+        // off restores the pre-31-2 single-ptr-word behaviour. memberCap mirrors
+        // elementFieldCap as a per-struct bound. Captured into locals because the
+        // session is std::move'd into the SessionManager before the Begin
+        // response is built (echoing session->… there would be use-after-move).
+        const bool        effValueStructFields = args.value("valueStructFields", true);
+        const std::size_t effStructMemberCap   = args.value("structMemberCap",
+                                                            static_cast<std::size_t>(32));
+        session->valueStructFields = effValueStructFields;
+        session->structMemberCap   = effStructMemberCap;
         session->plan.reserve(descs.size());
 
         std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
@@ -3025,6 +3216,20 @@ void RegisterCoreHandlers() {
                             ? f.underlyingTypeName : f.typeName;
                         json d = decodeField(decodeType, fieldAddr);
                         for (auto kv = d.begin(); kv != d.end(); ++kv) fe[kv.key()] = kv.value();
+                        // Phase 31-2 (Phase B) — a value-type struct field on an
+                        // array element fans out too (one extra level), so e.g.
+                        // an array of objects each carrying a custom struct shows
+                        // its members. Gated by valueStructFields; capped shallow.
+                        if (session->valueStructFields &&
+                            ShouldExpandValueStruct(f.isValueType, f.isEnum,
+                                f.valueTypeClass, f.typeName, fe)) {
+                            json sub = CaptureMonoStructFields(decodeField,
+                                f.valueTypeClass, fieldAddr, 2, session->structMemberCap);
+                            if (sub.contains("fields")) {
+                                fe.erase("ptr");
+                                fe["fields"] = std::move(sub["fields"]);
+                            }
+                        }
                         // Layer B is one level deep — nested arrays inside the
                         // element stay as their decodeField ptr, not walked.
                         efields.push_back(std::move(fe));
@@ -3148,6 +3353,7 @@ void RegisterCoreHandlers() {
                     bool               isEnum;
                     bool               isValueType;
                     bool               isArrayShape;
+                    Mono::MonoClass*   valueTypeClass;  // Phase 31-2 (Phase B)
                 };
                 std::vector<FieldDesc> fieldDescs;
                 for (std::size_t ci = chain.size(); ci > 0; --ci) {
@@ -3168,6 +3374,7 @@ void RegisterCoreHandlers() {
                         fd.isArrayShape = f.typeName.size() >= 2 &&
                             f.typeName[f.typeName.size() - 1] == ']' &&
                             f.typeName[f.typeName.size() - 2] == '[';
+                        fd.valueTypeClass = f.valueTypeClass;
                         fieldDescs.push_back(fd);
                     }
                     if (fieldDescs.size() >= 4096) break;
@@ -3244,6 +3451,19 @@ void RegisterCoreHandlers() {
                                         ++decodedArrays;
                                     }
                                 }
+                            }
+                        } else if (session->valueStructFields &&
+                                   ShouldExpandValueStruct(fd.isValueType, fd.isEnum,
+                                       fd.valueTypeClass, *fd.type, entry)) {
+                            // Phase 31-2 (Phase B) — generic value-type struct
+                            // member fan-out (gated by valueStructFields). Named
+                            // math structs already fanned out inside decodeField.
+                            json sub = CaptureMonoStructFields(decodeField,
+                                fd.valueTypeClass, fieldAddr, kStructMaxDepth,
+                                session->structMemberCap);
+                            if (sub.contains("fields")) {
+                                entry.erase("ptr");
+                                entry["fields"] = std::move(sub["fields"]);
                             }
                         }
                         values.push_back(std::move(entry));
@@ -3371,6 +3591,8 @@ void RegisterCoreHandlers() {
             {"instanceCap",             instanceCap},
             {"arrayCap",                arrayCap},
             {"arrayElementFields",      effArrayElementFields},
+            {"valueStructFields",       effValueStructFields},
+            {"structMemberCap",         effStructMemberCap},
             {"elementFieldCap",         elementFieldCap},
             {"totalClasses",            totalClasses},
             {"totalInstances",          totalInst},
@@ -4635,6 +4857,21 @@ void RegisterCoreHandlers() {
                 json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
+                }
+                // Phase 31-2 (Phase B) — inline generic value-type struct: fan
+                // out its members (custom int/double structs etc). Always-on in
+                // the interactive walk (single, on-demand; named math structs
+                // were already handled inside decodeField).
+                if (ShouldExpandValueStruct(f.isValueType, f.isEnum,
+                                            f.valueTypeClass, f.typeName, entry)) {
+                    json sub = CaptureMonoStructFields(decodeField, f.valueTypeClass,
+                        fieldAddr, kStructMaxDepth, kStructDefaultMemberCap);
+                    if (sub.contains("fields")) {
+                        entry.erase("ptr");
+                        entry["fields"] = std::move(sub["fields"]);
+                    } else if (sub.contains("struct_error")) {
+                        entry["struct_error"] = sub["struct_error"];
+                    }
                 }
                 fields.push_back(std::move(entry));
                 if (fields.size() >= 4096) break;
@@ -6282,6 +6519,13 @@ void RegisterCoreHandlers() {
         session->arrayElementFields  = reqArrayElementFields &&
             !(memBeforeIl.pointerSize == 4 && session->arrayElementTargets.empty());
         const bool effArrayElementFields = session->arrayElementFields;
+        // Phase 31-2 (Phase B) — generic value-type struct fan-out (see Mono path).
+        // Locals because session is moved before the Begin response is built.
+        const bool        effValueStructFields = args.value("valueStructFields", true);
+        const std::size_t effStructMemberCap   = args.value("structMemberCap",
+                                                            static_cast<std::size_t>(32));
+        session->valueStructFields = effValueStructFields;
+        session->structMemberCap   = effStructMemberCap;
         session->plan.reserve(descs.size());
 
         std::unordered_map<std::string, Snapshot::PlanAssemblyEntry> planByAsm;
@@ -6337,6 +6581,8 @@ void RegisterCoreHandlers() {
                 session->arrayElementTargets,
                 session->arrayElementFields,
                 session->captureStaticValues,
+                effValueStructFields,
+                effStructMemberCap,
                 memBudgetBytesIl,
                 memBeforeIl.privateUsage,
                 formatHex,
@@ -6400,6 +6646,8 @@ void RegisterCoreHandlers() {
             {"instanceCap",             instanceCap},
             {"arrayCap",                arrayCap},
             {"arrayElementFields",      effArrayElementFields},
+            {"valueStructFields",       effValueStructFields},
+            {"structMemberCap",         effStructMemberCap},
             {"elementFieldCap",         elementFieldCap},
             {"totalClasses",            totalClasses},
             {"totalInstances",          totalInst},
@@ -7673,6 +7921,19 @@ void RegisterCoreHandlers() {
                 json decoded = decodeField(decodeType, fieldAddr);
                 for (auto kv = decoded.begin(); kv != decoded.end(); ++kv) {
                     entry[kv.key()] = kv.value();
+                }
+                // Phase 31-2 (Phase B) — inline generic value-type struct fan-out
+                // (see the Mono walkInstance handler). Always-on interactive walk.
+                if (ShouldExpandValueStruct(f.isValueType, f.isEnum,
+                                            f.valueTypeClass, f.typeName, entry)) {
+                    json sub = CaptureIl2cppStructFields(decodeField, f.valueTypeClass,
+                        fieldAddr, kStructMaxDepth, kStructDefaultMemberCap);
+                    if (sub.contains("fields")) {
+                        entry.erase("ptr");
+                        entry["fields"] = std::move(sub["fields"]);
+                    } else if (sub.contains("struct_error")) {
+                        entry["struct_error"] = sub["struct_error"];
+                    }
                 }
                 fields.push_back(std::move(entry));
                 if (fields.size() >= 4096) break;

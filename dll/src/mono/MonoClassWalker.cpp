@@ -283,6 +283,13 @@ ClassInfoResult ReadClassInfo(MonoClass* klass) {
                         MonoType* base = SehEnumBasetype(r.class_enum_basetype, fc);
                         if (base != nullptr) fe.underlyingTypeName = TypeName(base);
                     }
+                    // Phase 31-2 (Phase B) — remember the field's runtime class
+                    // for inline value-type STRUCT fields (not enums) so the
+                    // decode paths can recurse into the struct's members by
+                    // class pointer (exact, nested-type-safe). Primitives also
+                    // match isValueType but the decode-site gate excludes them
+                    // (they decode to a scalar value, never a bare pointer).
+                    if (fe.isValueType && !fe.isEnum) fe.valueTypeClass = fc;
                 }
             }
             result.info.fields.push_back(std::move(fe));

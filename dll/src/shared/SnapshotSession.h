@@ -130,6 +130,17 @@ struct Session {
     // remaining elements stay ptr-only. Targeted captures rarely approach it.
     std::size_t                            elementCaptureBudget = 20000;
 
+    // Phase 31-2 (Phase B) — generic value-type struct member fan-out. When on
+    // (default), snapshot decode recurses into custom value-type struct fields
+    // (int/double/… members, not just named Vector3) and emits their members as
+    // `fields` (same wire shape as the Phase A named structs), so SPC / diff /
+    // pivot can see per-member values. Off restores the pre-31-2 single
+    // pointer-word behaviour for unknown structs. structMemberCap bounds the
+    // per-struct member count (and the array-element inner struct), mirroring
+    // elementFieldCap; named math structs are unaffected (decoded in decodeField).
+    bool                                   valueStructFields = true;
+    std::size_t                            structMemberCap   = 32;
+
     // Capture static-field VALUES (IL2CPP). Default off: static metadata
     // (name/type/offset) is always emitted, but the value decode is skipped
     // unless the user opts in — keeps snapshots leaner + matches the Mono

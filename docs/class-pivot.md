@@ -883,3 +883,65 @@ Each wave ends green on the full UI test suite and writes a STATUS.md
 TL;DR. Suggested order: **29i-1 → 29i-2 → 29i-4 → 29i-3** (1 unblocks the
 pickers and is lowest-risk; 4 is the highest-utility payoff; 3 is the
 "no known value" fallback and the most heuristic, so last).
+
+---
+
+## Class Pivot UI/UX overhaul (TODO — 大修, after Phase 31-5)
+
+**Status**: design backlog (2026-06-02). User feedback from live use on Core
+Keeper (Mono x64). The Class Pivot tab's ENGINE is solid (29i-1..4 all work +
+31-2 value-struct components now show as `.x/.y/.z` in pivot trajectories), but
+the **layout/interaction is poor** — every analysis mode is a stacked
+collapsible panel at the top, so by the time the parameter forms are visible the
+results DataGrid is squeezed to near-nothing. This is a UI-only re-plan; the
+engines stay.
+
+### Problems (verbatim user report)
+
+1. **Stacked-panel layout eats all vertical space.** The top has many parameter
+   panels (Find by value / Class shortlist / Likely game-state / Suggest
+   key-value / Pivot query / Array inner-pivot / Snapshots). With them expanded
+   there is essentially no room for the results DataGrid at the bottom; even
+   collapsed they dominate. → **Re-plan**: collapse all modes into a SINGLE
+   toolbar/bar of buttons; clicking a mode opens it in a **separate window
+   (dialog)**; the dialog does its work and **returns the result back** into the
+   main tab's results grid. The tab body is then mostly the results grid.
+
+2. **Missing keyword filters.** Some panels have a class/field substring filter,
+   others don't. → **Every** mode's pickers/lists must have a keyword filter
+   (consistent with Symbol Finder / Snapshot filters).
+
+3. **Undefined "Stage 0 / Stage 1" jargon leaks to the user.** "Pivot query
+   depends on the Stage 0 selection" — but the user has no idea what "Stage 0"
+   is (it's an internal dev-pipeline name). Likewise the dependency itself is
+   implicit. → Rename to user-facing terms ("Pick a class" / "Pick key & value
+   fields"), and make the **dependency explicit + ordered**: a dependent step is
+   disabled/greyed until its prerequisite is satisfied, with a hint ("pick a
+   class first").
+
+4. **"Layer B" jargon + all-manual params in Array inner-pivot.** "Array
+   inner-pivot (Layer B)" — user doesn't know what "Layer B" means; rename to
+   plain language ("Pivot array elements by an inner field"). Worse, every param
+   (class FQN, key field, value field) is a manual text box, so the user has to
+   go Inspector → Copy name → switch back to this tab → paste, repeatedly. →
+   Provide **pickers populated from the loaded snapshot schema** (dropdown /
+   autocomplete of classes + their fields), and accept a **handoff from
+   Inspector/Browser/Snapshot** (right-click → "Pivot this class/field here") so
+   no copy-paste round-trip is needed.
+
+5. **UI freezes during long compute (Snapshot / SPC / Pivot) + DB I/O.** These
+   operations block the UI thread for a noticeable spell with no feedback —
+   looks hung. Part of it is likely the **SQLite hydrate / DB round-trip** done
+   synchronously. → Run the compute + DB work **off the UI thread** (async, as
+   per CLAUDE.md "Async everywhere"), show a **busy/status indicator** (spinner +
+   "querying… / hydrating N envelopes…"), and keep the window responsive (the
+   existing `BulkOperationGate` busy pattern is a precedent). Audit Snapshot, SPC
+   Query, and Class Pivot tabs for synchronous DB/compute calls on the UI thread.
+
+### Scope notes
+- UI/engine only (no DLL). Touches `ClassPivotView` + VM, possibly shared
+  busy-indicator infra, and the SPC/Snapshot tabs for the async/responsiveness
+  fix (#5 spans all three).
+- Keep all existing engines + handoff entry points working; this is a
+  presentation + threading refactor, not a behaviour change.
+- Sequence AFTER Phase 31-5 (per user).

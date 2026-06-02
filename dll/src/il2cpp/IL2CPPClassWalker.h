@@ -29,6 +29,12 @@ struct FieldEntry {
     bool          isEnum             = false;
     bool          isValueType        = false;
     std::string   underlyingTypeName;
+    // Phase 31-2 (Phase B) — runtime class of an inline value-type STRUCT field
+    // (isValueType && !isEnum, not a primitive), captured during ReadClassInfo
+    // so the decode paths recurse into struct members by class pointer instead
+    // of re-resolving by name. nullptr otherwise. Never owned. See the Mono
+    // walker for the full rationale.
+    Il2CppClass*  valueTypeClass     = nullptr;
 };
 
 struct MethodEntry {
