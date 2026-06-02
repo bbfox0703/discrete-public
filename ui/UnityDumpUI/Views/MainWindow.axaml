@@ -248,7 +248,7 @@
                   Opacity="0.2"
                   IsChecked="{Binding ExperimentalEnabled, Mode=TwoWay}"
                   IsEnabled="{Binding !ExperimentalEnabled}"
-                  ToolTip.Tip="開啟實驗性功能" />
+                  ToolTip.Tip="Enable experimental features" />
         <TextBlock Text="{Binding CopyrightText}"
                    VerticalAlignment="Center"
                    Opacity="0.55"
