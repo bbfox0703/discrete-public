@@ -51,7 +51,7 @@
         <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="12" Margin="0,0,0,6">
           <CheckBox Content="Include array elements"
                     IsChecked="{Binding ClassPivot.LocatorIncludeArrays, Mode=TwoWay}"
-                    ToolTip.Tip="Also sweep array element values (Layer A) and inner element fields (Layer B)."/>
+                    ToolTip.Tip="Also sweep array element values and the fields inside array elements."/>
           <CheckBox Content="Numeric only"
                     IsChecked="{Binding ClassPivot.LocatorNumericOnly, Mode=TwoWay}"
                     ToolTip.Tip="Skip string / pointer fields (always on in delta mode)."/>

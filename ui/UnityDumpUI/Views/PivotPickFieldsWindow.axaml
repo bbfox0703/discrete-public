@@ -13,6 +13,12 @@
     </StackPanel>
     <Border Padding="6" Background="#1F808080" CornerRadius="3">
       <DockPanel>
+        <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                Background="#26FFA640" CornerRadius="3"
+                IsVisible="{Binding !ClassPivot.HasClassFqn}">
+          <TextBlock Text="① Pick a class first — set a Class FQN in “Pivot query…”, or double-tap one in “Browse classes…”. Then Score fields here."
+                     TextWrapping="Wrap" FontSize="11"/>
+        </Border>
         <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
           <Button Content="⟳ Score fields" Command="{Binding ClassPivot.ScoreFieldsCommand}" Padding="10,4"/>
           <TextBlock Text="Filter:" VerticalAlignment="Center"/>

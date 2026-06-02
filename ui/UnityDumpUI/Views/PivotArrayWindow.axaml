@@ -13,6 +13,12 @@
     </StackPanel>
     <Border Padding="6" Background="#1F808080" CornerRadius="3">
       <DockPanel>
+        <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                Background="#26FFA640" CornerRadius="3"
+                IsVisible="{Binding !ClassPivot.HasClassFqn}">
+          <TextBlock Text="① Pick a class first — set a Class FQN in “Pivot query…”, or double-tap one in “Browse classes…”. Then enable + score element fields here."
+                     TextWrapping="Wrap" FontSize="11"/>
+        </Border>
         <CheckBox DockPanel.Dock="Top"
                   Content="Enable — pivot a reference array's elements by an inner field"
                   IsChecked="{Binding ClassPivot.ArrayPivotMode, Mode=TwoWay}"
