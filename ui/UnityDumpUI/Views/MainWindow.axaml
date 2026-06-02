@@ -637,9 +637,23 @@
                 <NumericUpDown Value="{Binding Inspector.InstanceLimit, Mode=TwoWay}"
                                Minimum="1" Maximum="4096" Increment="64"
                                MinWidth="150" Width="160" />
+                <CheckBox Content="Alive only"
+                          IsChecked="{Binding Inspector.AliveOnly, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          ToolTip.Tip="Drop destroyed Unity shells (m_CachedPtr == 0). Applies on the next Find." />
                 <ProgressBar IsIndeterminate="True"
                              IsVisible="{Binding Inspector.IsLoadingInstances}"
                              Width="80" Height="4" VerticalAlignment="Center" />
+              </StackPanel>
+
+              <!-- Phase 32 — field-filter row (generic per-class predicate). -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="6" Margin="0,0,0,6">
+                <TextBlock Text="Field filter" VerticalAlignment="Center" Opacity="0.7" />
+                <TextBox Text="{Binding Inspector.FieldFilterJson, Mode=TwoWay}"
+                         Width="560" MinWidth="320"
+                         PlaceholderText="JSON predicate array, e.g. [{&quot;offset&quot;:1532,&quot;type&quot;:&quot;System.Int32&quot;,&quot;op&quot;:&quot;==&quot;,&quot;value&quot;:1}]"
+                         ToolTip.Tip="AND-combined predicates evaluated per instance. Empty = no filter. type: numeric / ptr / string. op: ==,!=,&lt;,&lt;=,&gt;,&gt;=,nonzero,zero (numeric); nonnull,null,==,!= (ptr); nonempty,empty,==,!=,contains (string). Applies on the next Find." />
               </StackPanel>
 
               <!-- Auto-refresh row -->
