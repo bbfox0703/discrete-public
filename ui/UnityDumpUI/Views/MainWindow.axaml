@@ -235,10 +235,22 @@
     <Border DockPanel.Dock="Bottom"
             BorderBrush="#22000000" BorderThickness="0,1,0,0"
             Padding="12,4">
-      <TextBlock Text="{Binding CopyrightText}"
-                 HorizontalAlignment="Center"
-                 Opacity="0.55"
-                 FontSize="11" />
+      <Grid>
+        <!-- Faint, label-less opt-in for the experimental tabs (Snapshot /
+             SPC Query / Class Pivot), which are hidden by default. Disables
+             itself once checked → ON-only for the session, so a visible
+             experimental tab never needs tearing down. Hint only via tooltip. -->
+        <CheckBox HorizontalAlignment="Left" VerticalAlignment="Center"
+                  MinWidth="0" Padding="0"
+                  Opacity="0.2"
+                  IsChecked="{Binding ExperimentalEnabled, Mode=TwoWay}"
+                  IsEnabled="{Binding !ExperimentalEnabled}"
+                  ToolTip.Tip="開啟實驗性功能" />
+        <TextBlock Text="{Binding CopyrightText}"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Opacity="0.55"
+                   FontSize="11" />
+      </Grid>
     </Border>
 
     <!-- Body -->
@@ -1659,7 +1671,7 @@
                scope (every assembly the runtime reports) + diff between
                any two snapshots in memory. UI strategy C: synthetic-type
                filtering is local (checkbox), not DLL-side. -->
-          <TabItem Header="Snapshot">
+          <TabItem Header="Snapshot" IsVisible="{Binding ExperimentalEnabled}">
             <DockPanel Margin="6">
 
               <!-- Top: capture controls -->
@@ -2188,7 +2200,7 @@
                → 9410 across 4 sessions uniquely locates the 銀兩
                GameStat by its spending pattern, no matter how much
                noise is in the heap). -->
-          <TabItem Header="SPC Query">
+          <TabItem Header="SPC Query" IsVisible="{Binding ExperimentalEnabled}">
             <DockPanel Margin="6">
               <!-- Wave A — busy indicator (engine compute runs off the UI thread). -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
@@ -2416,7 +2428,7 @@
                key tuple". Works cross-session because keying is by
                field VALUE inside the instance, not by managed
                address (which drifts on every game launch). -->
-          <TabItem Header="Class Pivot">
+          <TabItem Header="Class Pivot" IsVisible="{Binding ExperimentalEnabled}">
             <DockPanel Margin="6">
               <!-- Wave B — every mode lives behind a toolbar button that opens
                    a dialog (bound to the shared PivotViewModel). The tab body is

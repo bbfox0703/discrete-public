@@ -436,6 +436,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexSpcQuery      = 8;
     public const int TabIndexClassPivot    = 9;
 
+    /// <summary>
+    /// Gates the experimental tabs (Snapshot / SPC Query / Class Pivot), which
+    /// are hidden by default. Flipped on by the faint, label-less footer
+    /// checkbox — or implicitly by a cross-tab handoff that lands on one of them
+    /// (e.g. "Pivot this class"). Latching by design: the checkbox disables
+    /// itself once checked (IsEnabled="!ExperimentalEnabled" in XAML), so within
+    /// a UI session it can be turned ON but never OFF. That means an
+    /// already-visible experimental tab never has to be torn down / re-selected.
+    /// </summary>
+    [ObservableProperty]
+    private bool _experimentalEnabled;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(DisconnectCommand))]
@@ -1571,6 +1583,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public void PivotForClass(string? assembly, string? classFqn)
     {
         if (string.IsNullOrWhiteSpace(classFqn)) return;
+        // The Class Pivot tab is experimental (hidden until opted in). Landing a
+        // handoff on it must reveal it, else we'd select an invisible tab.
+        ExperimentalEnabled = true;
         ClassPivot.ReceiveClassHandoff(assembly, classFqn);
         SelectedDetailTabIndex = TabIndexClassPivot;
     }
