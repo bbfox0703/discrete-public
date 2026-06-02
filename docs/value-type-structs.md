@@ -277,15 +277,58 @@ story:
 | **31-1** | DLL Phase A (named structs) + protocol `Fields` + FormatFieldValue tuple | ✅ **SHIPPED** (dev) | DLL **needs build + live-smoke** (vec3 x/y/z vs CE); UI unit-tested |
 | **31-3** | SPC/diff `ExpandStructMembers` fan-out + summary + count parity | ✅ **SHIPPED** (dev) | UI unit tests green |
 | **31-4** | Pivot/KeyDiscovery per-component (dotted paths) + pickers | ✅ **SHIPPED** (dev) | UI unit tests green |
-| **31-2** | DLL Phase B (generic value-type recursion) | 🔓 **UNBLOCKED** — offset formula locked (§3.2), pending DLL build | `member.offset − 2*ptrSize` + nested-type fix |
+| **31-2** | DLL Phase B (generic value-type recursion) | ✅ **SHIPPED & live-verified (Mono x64, build #960)** | `member.offset − 2*ptrSize`; class captured during ReadClassInfo (nested-type-safe) |
 | **31-5** | Value Search reverse-lookup names the component | ⚠ DEFERRED — DLL address-finder, rides on 31-2 | single-component float scan already works |
-| **31-6** | Fix EXISTING live Inspector ValueStruct drill | 🐞 **NEW** (found in 31 live-smoke) | (a) +0x10 header double-count; (b) nested-type name |
+| **31-6** | Fix EXISTING live Inspector ValueStruct drill | ✅ SHIPPED (build #936) + live-verified | (a) +0x10 header double-count; (b) nested-type name |
+
+### 31-2 implementation notes (build #960, 2026-06-02)
+
+- **Class resolution**: instead of re-parsing the field's type name (ambiguous
+  for nested types), the value-type field's runtime class is captured into
+  `FieldEntry.valueTypeClass` during `ReadClassInfo` (both backends — set when
+  `isValueType && !isEnum`). Recursion uses that exact class pointer, so nested
+  structs resolve for free.
+- **Helpers**: `CaptureMonoStructFields` / `CaptureIl2cppStructFields`
+  (`ExportAPI.cpp`, anon namespace, backend-#ifdef'd). Each `ReadClassInfo`s the
+  struct class, then for every instance member emits
+  `decodeField(memberType, structBase + member.offset − kObjectHeader)`. Named
+  math structs / primitives are still handled inside `decodeField` (Phase A), so
+  the helper only fans out genuinely-custom structs; a nested generic-struct
+  member recurses one more level (depth-capped). SEH safety inherited from
+  `ReadClassInfo` (all accessors SEH-wrapped) + `Memory::SafeReadBytes` +
+  `ProbeKlassValid` up-front + member/depth caps. A process-lifetime
+  `ReadClassInfo` cache keeps repeated struct decode off the runtime (Mono BDWGC
+  pressure).
+- **Gate** (`ShouldExpandValueStruct`): `isValueType && !isEnum && valueTypeClass
+  != null && entry has bare "ptr" (no "value"/"fields") && type ∉
+  {System.IntPtr, System.UIntPtr}`. Excludes primitives, named structs, strings,
+  and the IntPtr value types that legitimately ARE a pointer.
+- **Wired into 6 sites**: Mono + IL2CPP `walkInstance` (always-on, interactive),
+  Mono `decodeOneClass` + `captureMonoElementFields`, IL2CPP
+  `Il2cppStreamDecoder::DecodeOneClass` + `CaptureElementFields` (the last four
+  gated by the new `valueStructFields` session flag).
+- **Flags** (`Snapshot::Session`): `valueStructFields` (default **true**) +
+  `structMemberCap` (default **32**); parsed in both `snapshotBegin` handlers,
+  echoed in the Begin response. Default-on means **no UI plumbing needed** (the
+  UI already consumes `SnapshotFieldEntry.Fields` from 31-1/31-3); a flaky title
+  can disable via the flag. walkInstance uses a fixed cap (64) + depth 4.
+- **Live-verified (Core Keeper, Mono x64, 2026-06-02)**: `PlayerController.
+  <WorldPosition>k__BackingField` (a Vector3-shaped backing field) fans out to
+  `.x` / `.y` / `.z` component pseudo-rows in the diff grid, the SPC Query
+  results, AND the Class Pivot trajectory — values match the parent summary
+  tuple `(x, 0, z)` and move per-axis across snapshots. So the generic recursion
+  + `member.offset − 2*ptrSize` formula are confirmed on Mono x64.
+- **Still wants live-smoke** for completeness: Mono **x86** (4-byte header strip)
+  and **IL2CPP x64** (same convention, not yet byte-verified on IL2CPP).
 
 **Shipped 2026-06-01**: 31-1 (Phase A) + 31-3 + 31-4 — covers snapshot / SPC /
 diff / pivot for all named Unity math structs (incl. character coordinates),
 and is MORE correct than the current live drill.
-**Unblocked**: 31-2's offset formula is now locked (`member.offset − 2*ptrSize`,
-proven by live-smoke); still needs a DLL build + the nested-type fix.
+**Shipped 2026-06-02 (build #960)**: 31-2 (Phase B generic value-type recursion)
++ 31-6 — generic custom structs (int/double/… members) now fan out their members
+in walkInstance + snapshot on both backends. **Live-verified Mono x64** (Core
+Keeper `<WorldPosition>k__BackingField` .x/.y/.z in diff/SPC/pivot). 31-5
+(Value-Search reverse-lookup naming the component) **now in development**.
 **New 31-6**: the live-smoke exposed two pre-existing bugs in the live
 Inspector's ValueStruct expansion — (a) +0x10 header double-count (shows the
 wrong/shifted members), (b) nested-type (`Outer.Inner`) name resolution

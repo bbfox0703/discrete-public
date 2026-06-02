@@ -7,11 +7,20 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #957(DLL Mono+IL2CPP + UI,build clean)|
-| **Current phase** | ✅ **Phase 31 inline value-type struct(Vec3/4)** 31-1/31-3/31-4/31-6 SHIPPED & **live-verified**(Core Keeper, Mono x64);Phase 29i(pivot)4 波亦完成。31-2/31-5 deferred → 下個 session |
-| **Branches** | merge `dev` → `main` 進行中(本批次);merge 後 `dev == main` |
-| **Tests** | 685 UI tests green;DLL(IL2CPP+Mono)build clean、UI 0/0 warnings |
-| **Mid-flight** | 無。**下個 session**:Phase 31-2(DLL Phase B 泛型自訂 struct,offset 公式已鎖定 `member.offset − 2*ptrSize`)+ 31-5(value-search reverse-lookup 命名 component)|
+| **Current build** | #960(DLL Mono x64+x86 / IL2CPP x64 + UI,build clean)|
+| **Current phase** | ✅ **Phase 31 inline value-type struct** — 31-1/31-3/31-4/31-6 + **31-2(DLL Phase B 泛型自訂 struct,build #960)SHIPPED & live-verified(Core Keeper Mono x64)**。🚧 **31-5 開發中**(value-search reverse-lookup 命名 component)。Phase 29i(pivot)4 波亦完成 |
+| **Branches** | 31-2 commit→push→merge `dev`→`main`(本批次);merge 後 `dev == main` |
+| **Tests** | 685 UI tests green;DLL(Mono x64+x86 / IL2CPP x64)build clean、UI 0/0 warnings |
+| **Mid-flight** | 🚧 **31-5**(value-search reverse-lookup 命名 struct component)。剩餘 31-2 live-smoke(Mono x86 / IL2CPP x64,non-blocking)。**待辦大修**:Class Pivot tab UI/UX 重新規劃(見 [class-pivot.md](class-pivot.md) §「Class Pivot UI/UX overhaul」+ plan.md backlog)— 31-5 完成後做 |
+
+**最新批次(2026-06-02,Phase 31-2 — DLL Phase B 泛型 value-type 遞迴,build #960)** — spec [value-type-structs.md](value-type-structs.md) §3.2 + 「31-2 implementation notes」:
+- **根因延續**:Phase A(`decodeField` named math struct 表)只認 Vector3/4 等;自訂 struct(int/double 成員)仍只讀一個 ptr-word。Phase B 補上**任意 value-type struct** 的成員遞迴。
+- **class 解析**:value-type 欄位的 runtime class 在 `ReadClassInfo` 時就存進 `FieldEntry.valueTypeClass`(兩 backend,`isValueType && !isEnum` 時設)→ 遞迴直接用 class 指標,**巢狀型別自動 OK**(免 by-name 重解)。
+- **helper**:`CaptureMonoStructFields` / `CaptureIl2cppStructFields`(`ExportAPI.cpp` anon ns,backend-#ifdef)。`ReadClassInfo` struct class → 逐成員 `decodeField(memberType, structBase + member.offset − kObjectHeader)`(§3.2 公式,x64 扣 0x10 / x86 扣 0x08)。named struct/primitive 仍由 `decodeField` Phase A 處理;巢狀泛型 struct 再遞迴一層(depth 上限 4)。**SEH 安全**沿用 `ReadClassInfo`(全 accessor 已 SEH)+ `Memory::SafeReadBytes` + `ProbeKlassValid` 前置 + member/depth cap;process-lifetime `ReadClassInfo` 快取降 BDWGC 壓力。
+- **gate** `ShouldExpandValueStruct`:`isValueType && !isEnum && valueTypeClass!=null && entry 只有裸 "ptr"(無 "value"/"fields")&& type ∉ {IntPtr,UIntPtr}`。
+- **6 個接線點**:Mono+IL2CPP `walkInstance`(always-on 互動)、Mono `decodeOneClass`+`captureMonoElementFields`、IL2CPP `Il2cppStreamDecoder::DecodeOneClass`+`CaptureElementFields`(後四個由新 session flag `valueStructFields` 控,預設 on)。
+- **flags**:`Snapshot::Session.valueStructFields`(預設 **true**)+ `structMemberCap`(預設 **32**),兩個 `snapshotBegin` 都 parse + 回應 echo。**預設開啟 → UI 完全不需改**(UI 早已消費 `SnapshotFieldEntry.Fields`,31-1/31-3);flaky 遊戲可由 flag 關閉。
+- **build #960**:Mono x64+x86 + IL2CPP x64 build clean;685 UI tests green。**未 merge `dev`→`main`(待 live-smoke 後再合)**。
 
 **Phase 31 收尾(2026-06-01,Core Keeper Mono x64 live-verified)**:
 - **31-1/31-3/31-4 ✅ verified** — snapshot Vector3 顯示 `(x,y,z)`、SPC 逐軸(`<WorldPosition>.x/.y/.z`)+ delta 正確;pivot per-component OK。

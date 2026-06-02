@@ -373,6 +373,11 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
                             }
                         }
                     }
+                    // Phase 31-2 (Phase B) — remember the field's runtime class
+                    // for inline value-type STRUCT fields (not enums) so the
+                    // decode paths recurse into members by exact class pointer.
+                    // Set after enum detection so enums don't keep a class.
+                    if (fe.isValueType && !fe.isEnum) fe.valueTypeClass = fc;
                 }
             }
             result.info.fields.push_back(std::move(fe));
