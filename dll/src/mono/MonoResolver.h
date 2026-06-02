@@ -118,6 +118,23 @@ using fn_class_get_field_token  = std::uint32_t  (*)(MonoClassField*);
 // hook silently no-ops when unbound.
 using fn_gc_collect             = void           (*)(int /*generation, -1 = full*/);
 
+// --- Phase 32 — live-object enumeration (Unity Mono / bdwgc) ----------------
+// `mono_gc_walk_heap(flags, callback, data)` is a public MONO_API profiler
+// entry: it stops the world, walks every LIVE managed object, and invokes the
+// callback once per object with the object pointer + its MonoClass*. We use it
+// for findInstances' opt-in `liveOnly` mode — it returns ONLY live objects, so
+// it skips the dead/uncollected shells and runtime-bookkeeping false positives
+// that the raw pointer scan picks up. Optional binding: non-Unity / older Mono
+// builds may not export it, in which case liveOnly silently falls back to the
+// raw scan. `mono_object_get_size` returns an object's allocated size (bound
+// for future object-extent validation; not required by liveOnly).
+using fn_gc_references_cb       = int            (*)(MonoObject* /*obj*/, MonoClass* /*klass*/,
+                                                     std::uintptr_t /*size*/, std::uintptr_t /*num*/,
+                                                     MonoObject** /*refs*/, std::uintptr_t* /*offsets*/,
+                                                     void* /*data*/);
+using fn_gc_walk_heap           = void           (*)(int /*flags*/, fn_gc_references_cb /*cb*/, void* /*data*/);
+using fn_object_get_size        = std::uint32_t  (*)(MonoObject*);
+
 // MONO_TABLE_TYPEDEF row index in a MonoImage; pass to image_get_table_info.
 inline constexpr int          MonoTableTypedef = 2;
 // CLI metadata token base for TypeDef rows.
@@ -197,6 +214,10 @@ struct Resolver {
 
     // Disconnect-time GC drain — see header comment on fn_gc_collect.
     fn_gc_collect             gc_collect             = nullptr;
+
+    // Phase 32 — live-object enumeration (findInstances liveOnly mode).
+    fn_gc_walk_heap           gc_walk_heap           = nullptr;
+    fn_object_get_size        object_get_size        = nullptr;
 };
 
 // Singleton accessor. First call probes the loaded mono module and binds every

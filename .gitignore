@@ -450,3 +450,6 @@ FodyWeavers.xsd
 *.msp
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+# Phase 32 findInstances diagnostic dumps (large, game-specific)
+tools/diag/*.json
