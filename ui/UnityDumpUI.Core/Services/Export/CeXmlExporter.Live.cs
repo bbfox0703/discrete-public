@@ -157,7 +157,14 @@ public static partial class CeXmlExporter
             //      absolute storage address; children offset from the struct base.
             case WalkedFieldKind.ValueStruct:
             {
-                if (!canDrill || engineInternal || string.IsNullOrEmpty(f.Address))
+                // A framework value struct that ISN'T a small math/geometry/color
+                // keeper (e.g. AsyncOperationHandle<T>, native handles) is opaque
+                // engine bookkeeping — emit a leaf instead of fanning out its
+                // internals (analysis: AsyncOperationHandle<Texture2D> alone was
+                // ~20k rows / 1972 nodes). Game value structs + Vector3/Color/…
+                // still expand.
+                if (!canDrill || engineInternal || IsOpaqueFrameworkValueStruct(f.Type)
+                    || string.IsNullOrEmpty(f.Address))
                 {
                     EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
                              showAsHex: true, address: rel, offsets: null);
@@ -236,6 +243,29 @@ public static partial class CeXmlExporter
             || type.StartsWith("Mono.", StringComparison.Ordinal)
             || type.StartsWith("Microsoft.", StringComparison.Ordinal);
     }
+
+    /// <summary>Framework VALUE structs we still expand — small math / geometry /
+    /// color data a cheat table actually wants (x/y/z, rgba, …). Any OTHER
+    /// framework value struct is opaque engine bookkeeping (e.g.
+    /// <c>AsyncOperationHandle&lt;T&gt;</c>, native handles) and is leaf'd.</summary>
+    private static readonly HashSet<string> s_expandableFrameworkValueStructs = new(StringComparer.Ordinal)
+    {
+        "UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4",
+        "UnityEngine.Vector2Int", "UnityEngine.Vector3Int",
+        "UnityEngine.Quaternion", "UnityEngine.Color", "UnityEngine.Color32",
+        "UnityEngine.Rect", "UnityEngine.RectInt", "UnityEngine.Bounds", "UnityEngine.BoundsInt",
+        "UnityEngine.Matrix4x4", "UnityEngine.Ray", "UnityEngine.Ray2D", "UnityEngine.Plane",
+        "Unity.Mathematics.float2", "Unity.Mathematics.float3", "Unity.Mathematics.float4",
+        "Unity.Mathematics.int2", "Unity.Mathematics.int3", "Unity.Mathematics.int4",
+        "Unity.Mathematics.quaternion",
+        "Unity.Mathematics.float2x2", "Unity.Mathematics.float3x3", "Unity.Mathematics.float4x4",
+    };
+
+    /// <summary>True for a framework value struct we should NOT expand (leaf it).
+    /// Game value structs (no framework prefix) always expand; the keep-set is
+    /// the allowlist for framework ones.</summary>
+    private static bool IsOpaqueFrameworkValueStruct(string? type)
+        => IsFrameworkReferenceType(type) && !s_expandableFrameworkValueStructs.Contains(type!);
 
     /// <summary>walkInstance via the object header (resolves nested + generic
     /// classes from the runtime class pointer) and emit its fields. Each child
@@ -448,6 +478,16 @@ public static partial class CeXmlExporter
             int stride = walk.ElementSize > 0 ? walk.ElementSize : ptr;
             bool elemIsString = IsManagedString(elementType);
             bool slotDrill = (currentDepth + 1) < options.DrilldownDepth;
+            // Element type is an engine/framework REFERENCE (UnityEngine.*,
+            // Unity.* DOTS, System.* internals): do NOT recurse into each
+            // element object — emit a watchable pointer leaf per slot instead.
+            // This is the dominant Copy-CE-XML bloat source: List<SpriteRenderer>,
+            // SpriteRenderer[], List<Texture2D/GameObject/Renderer/Transform> …
+            // each fanned out full component subtrees per element (~100k+ rows in
+            // the 706k-line sample). Collections of GAME types (List<EquipmentSlot>)
+            // and value-struct elements (Color[], Vector3[]) are unaffected.
+            bool elemIsFrameworkRef = IsEngineInternalType(elementType)
+                                      || IsFrameworkReferenceType(elementType);
             foreach (WalkedArrayElement elem in elems)
             {
                 string slotLabel = $"[{elem.Index}]";
@@ -469,7 +509,7 @@ public static partial class CeXmlExporter
                 else if (walk.IsPointer)
                 {
                     ulong slotPtr = ParseHexLoose(elem.Ptr ?? "0");
-                    if (slotPtr == 0 || !slotDrill || !visited.Add(elem.Ptr!))
+                    if (slotPtr == 0 || !slotDrill || elemIsFrameworkRef || !visited.Add(elem.Ptr!))
                     {
                         EmitLeaf(sb, elemIndent, ids, slotLabel,
                                  vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null);
