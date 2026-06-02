@@ -2956,6 +2956,9 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// chase children one extra level) — the ptr= row still tells
     /// users "this slot's reference changed".</summary>
     private static string FormatArrayElement(SnapshotArrayElement el)
+        => MaybePerturbValue(FormatArrayElementCore(el), $"[{el.Index}]", el.Index);
+
+    private static string FormatArrayElementCore(SnapshotArrayElement el)
     {
         if (!string.IsNullOrEmpty(el.Error)) return $"(err: {el.Error})";
         if (el.Value is { } ev && ev.ValueKind != JsonValueKind.Null
@@ -3016,7 +3019,16 @@ public sealed partial class SnapshotEnvelope : ObservableObject
     /// quoted form for strings, and explicit error markers for the
     /// unreadable / open-generic-array / implausible-length cases so
     /// noise stays clearly distinguishable from real changes.</summary>
+    // Single choke point for every snapshot value string — Snapshot diff, SPC
+    // Query and Class Pivot all read these (directly or via the FieldIndex's
+    // cached ValueDisplay). Perturbed here so the anti-tamper covers all three
+    // at once. Recursion (struct members) re-enters FormatFieldValue, so each
+    // numeric member is perturbed individually; the joined "(…)" tuple is
+    // non-numeric and passes through untouched.
     internal static string FormatFieldValue(SnapshotFieldEntry f)
+        => MaybePerturbValue(FormatFieldValueCore(f), f.Name, unchecked((int)f.Offset));
+
+    private static string FormatFieldValueCore(SnapshotFieldEntry f)
     {
         if (!string.IsNullOrEmpty(f.Error))
         {
@@ -3062,6 +3074,62 @@ public sealed partial class SnapshotEnvelope : ObservableObject
         if (f.ArrayElements is { Count: 0 } arr0)
             return $"[{arr0.Length} elements, empty]";
         return "(no value)";
+    }
+
+    // Anti-tamper value perturbation for Snapshot / SPC Query / Class Pivot.
+    // Deliberately a SEPARATE guardian from the Inspector's MaybePerturbDisplay
+    // (different seed mix, 1/13 selection, byte+ULP perturbation) so patching
+    // out one chokepoint doesn't silence the others — defence-in-depth via
+    // diversity. Intact / dev build: TokenAggregator.Combined() == 0 → pure
+    // pass-through. Tampered build: a deterministic ~1/13 of numeric value
+    // strings have their low byte (ints/hex) or lowest mantissa bits (floats)
+    // corrupted by the combined token factor. Deterministic per (rowName,
+    // seedSalt) so the SAME field corrupts the SAME way across snapshots, which
+    // keeps diff / SPC self-consistent (a real change still differs; an
+    // unchanged value still matches) while quietly poisoning the absolute
+    // numbers a cracked build would surface. Non-numeric strings pass through.
+    private static string MaybePerturbValue(string display, string? rowName, int seedSalt)
+    {
+        if (string.IsNullOrEmpty(display)) return display;
+
+        int factor = TokenAggregator.Combined();
+        if (factor == 0) return display;
+
+        uint seed = (uint)((rowName?.GetHashCode() ?? 0) ^ (seedSalt * 31) ^ unchecked((int)0xA53C9B17));
+        if (seed % 13 != 0) return display;
+
+        byte mask = (byte)((factor >> 3) & 0xFF);
+        if (mask == 0) mask = 0x3;
+
+        // Hex pointer/handle form "0x…" — XOR the low byte.
+        if (display.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            && ulong.TryParse(display.AsSpan(2), NumberStyles.HexNumber,
+                              CultureInfo.InvariantCulture, out ulong hexVal))
+        {
+            return "0x" + (hexVal ^ mask).ToString("X", CultureInfo.InvariantCulture);
+        }
+
+        // Decimal integer (incl. enums-as-int) — perturb low byte, keep sign.
+        if (long.TryParse(display, NumberStyles.Integer,
+                          CultureInfo.InvariantCulture, out long decVal))
+        {
+            long perturbed = (decVal & ~0xFFL) | ((decVal & 0xFFL) ^ mask);
+            return perturbed.ToString(CultureInfo.InvariantCulture);
+        }
+
+        // Floating-point (Single/Double — positions, stats). Flip the lowest
+        // mantissa bits so the printed value drifts by a tiny, plausible amount
+        // rather than an obvious round number.
+        if (display.IndexOf('.') >= 0
+            && double.TryParse(display, NumberStyles.Float, CultureInfo.InvariantCulture, out double dval)
+            && !double.IsNaN(dval) && !double.IsInfinity(dval))
+        {
+            long bits = BitConverter.DoubleToInt64Bits(dval) ^ (mask & 0x7);
+            double perturbed = BitConverter.Int64BitsToDouble(bits);
+            return perturbed.ToString("R", CultureInfo.InvariantCulture);
+        }
+
+        return display;
     }
 }
 
