@@ -724,6 +724,52 @@ public partial class MainWindow : Window
         vm.ClassPivot.UseInterestRow(row);
     }
 
+    // ── Class Pivot UI/UX overhaul Wave B — open each mode as a dialog ──
+    // Every dialog binds to the SHARED MainWindowViewModel, so the work it does
+    // (populating ClassPivot.Results, filling ClassFqn/key/value, etc.) is
+    // reflected in the tab's Results grid when the dialog closes.
+    private async void OnPivotOpenSnapshotsClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        await new PivotSnapshotsWindow(vm).ShowDialog(this);
+    }
+
+    private async void OnPivotOpenQueryClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        await new PivotQueryWindow(vm).ShowDialog(this);
+    }
+
+    private async void OnPivotOpenFindByValueClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        await new PivotFindByValueWindow(vm).ShowDialog(this);
+    }
+
+    private async void OnPivotOpenBrowseClassesClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        await new PivotBrowseClassesWindow(vm).ShowDialog(this);
+    }
+
+    private async void OnPivotOpenLikelyStateClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        await new PivotLikelyStateWindow(vm).ShowDialog(this);
+    }
+
+    private async void OnPivotOpenPickFieldsClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        await new PivotPickFieldsWindow(vm).ShowDialog(this);
+    }
+
+    private async void OnPivotOpenArrayClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        await new PivotArrayWindow(vm).ShowDialog(this);
+    }
+
     // ── Phase 29e-8/9: Inspector tree-aware sort ────────────────────────
     //
     // Every flat grid uses the established CustomSortComparer mechanism

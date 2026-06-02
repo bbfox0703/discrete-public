@@ -2165,6 +2165,16 @@
                noise is in the heap). -->
           <TabItem Header="SPC Query">
             <DockPanel Margin="6">
+              <!-- Wave A — busy indicator (engine compute runs off the UI thread). -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                      Background="#264080FF" CornerRadius="3"
+                      IsVisible="{Binding SpcQuery.IsRunning}">
+                <StackPanel Orientation="Vertical" Spacing="3">
+                  <TextBlock Text="Working… computing in the background — the UI stays responsive."
+                             FontSize="11" FontWeight="SemiBold"/>
+                  <ProgressBar IsIndeterminate="True" Height="4" Minimum="0" Maximum="100"/>
+                </StackPanel>
+              </Border>
               <!-- Status + error + mode banner -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1F808080" CornerRadius="3">
@@ -2383,6 +2393,50 @@
                address (which drifts on every game launch). -->
           <TabItem Header="Class Pivot">
             <DockPanel Margin="6">
+              <!-- Wave B — every mode lives behind a toolbar button that opens
+                   a dialog (bound to the shared PivotViewModel). The tab body is
+                   the busy bar + status banners + the Results grid, so results
+                   get the whole height instead of being squeezed under stacked
+                   panels. -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                      Background="#1F808080" CornerRadius="3">
+                <WrapPanel Orientation="Horizontal">
+                  <Button Content="🗂 Snapshots…" Click="OnPivotOpenSnapshotsClicked"
+                          Margin="0,2,6,2" Padding="10,4"
+                          ToolTip.Tip="Pick which captures to include in the pivot."/>
+                  <Button Content="⚙ Pivot query…" Click="OnPivotOpenQueryClicked"
+                          Margin="0,2,6,2" Padding="10,4"
+                          ToolTip.Tip="The main action: class + key + value fields → Run. Results land in the grid below."/>
+                  <Button Content="🎯 Find by value…" Click="OnPivotOpenFindByValueClicked"
+                          Margin="0,2,6,2" Padding="10,4"
+                          ToolTip.Tip="Know the value (money = 9410, or it dropped 750) but not the class? Locate the (class, field)."/>
+                  <Button Content="🔎 Browse classes…" Click="OnPivotOpenBrowseClassesClicked"
+                          Margin="0,2,6,2" Padding="10,4"
+                          ToolTip.Tip="Score classes by stability and inspect their field shape to pick a pivot target."/>
+                  <Button Content="🏅 Likely game-state…" Click="OnPivotOpenLikelyStateClicked"
+                          Margin="0,2,6,2" Padding="10,4"
+                          ToolTip.Tip="Rank classes that have a stable key + a drifting value (money / HP / exp)."/>
+                  <Button Content="🔑 Pick key/value…" Click="OnPivotOpenPickFieldsClicked"
+                          Margin="0,2,6,2" Padding="10,4"
+                          ToolTip.Tip="Rank a class's fields by key suitability and add them to the query."/>
+                  <Button Content="🧬 Array-element pivot…" Click="OnPivotOpenArrayClicked"
+                          Margin="0,2,6,2" Padding="10,4"
+                          ToolTip.Tip="Pivot the elements of a reference array by a field inside each element."/>
+                </WrapPanel>
+              </Border>
+              <!-- Wave A — busy indicator. Engine compute now runs off the UI
+                   thread (Task.Run), so this indeterminate bar actually animates
+                   and the rest of the app stays responsive while a snapshot
+                   query is running. Visible only while IsRunning. -->
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                      Background="#264080FF" CornerRadius="3"
+                      IsVisible="{Binding ClassPivot.IsRunning}">
+                <StackPanel Orientation="Vertical" Spacing="3">
+                  <TextBlock Text="Working… computing in the background — the UI stays responsive."
+                             FontSize="11" FontWeight="SemiBold"/>
+                  <ProgressBar IsIndeterminate="True" Height="4" Minimum="0" Maximum="100"/>
+                </StackPanel>
+              </Border>
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1F808080" CornerRadius="3">
                 <TextBlock Text="{Binding ClassPivot.StatusMessage}"
@@ -2401,575 +2455,13 @@
                            TextWrapping="Wrap" FontSize="11"/>
               </Border>
 
-              <!-- 29i-4: value-driven class location. The inverse of the
-                   funnel — the user knows the VALUE (money = 9410, or it
-                   dropped by 750) but not the class. Sweeps the blob and
-                   returns (class, field) candidates; double-tap loads one
-                   into the query. Cross-session capable (reads stored
-                   values, not live memory). -->
-              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
-                        IsExpanded="False" Header="🎯 Find by value (locate the class holding a known value / delta)">
-                <Border Padding="6" Background="#1F808080" CornerRadius="3">
-                  <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                                Spacing="8" Margin="0,0,0,6">
-                      <CheckBox Content="Delta mode"
-                                IsChecked="{Binding ClassPivot.LocatorDeltaMode, Mode=TwoWay}"
-                                VerticalAlignment="Center"
-                                ToolTip.Tip="Off: find a field carrying a value (exact). On: find a field whose value universe MOVED by Δ between two snapshots (e.g. money 10160 → 9410 = Δ -750)."/>
-                      <!-- Exact-mode inputs -->
-                      <TextBlock Text="Value:" VerticalAlignment="Center"
-                                 IsVisible="{Binding !ClassPivot.LocatorDeltaMode}"/>
-                      <TextBox Text="{Binding ClassPivot.LocatorValue, Mode=TwoWay}"
-                               Width="140" VerticalAlignment="Center"
-                               PlaceholderText="9410 or Money"
-                               IsVisible="{Binding !ClassPivot.LocatorDeltaMode}"
-                               ToolTip.Tip="The value you can see in-game. Matched against both rendered ('9410', '&quot;Money&quot;') and raw (9410, Money) forms."/>
-                      <!-- Delta-mode inputs -->
-                      <TextBlock Text="Δ:" VerticalAlignment="Center"
-                                 IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
-                      <TextBox Text="{Binding ClassPivot.LocatorDelta, Mode=TwoWay}"
-                               Width="90" VerticalAlignment="Center"
-                               PlaceholderText="-750"
-                               IsVisible="{Binding ClassPivot.LocatorDeltaMode}"
-                               ToolTip.Tip="The cross-snap change to find (snap A value + Δ = snap B value). Numeric only."/>
-                      <TextBlock Text="A:" VerticalAlignment="Center"
-                                 IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
-                      <ComboBox ItemsSource="{Binding ClassPivot.LocatorSnapChoices}"
-                                SelectedIndex="{Binding ClassPivot.LocatorSnapAIndex, Mode=TwoWay}"
-                                MinWidth="120" VerticalAlignment="Center"
-                                IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
-                      <TextBlock Text="B:" VerticalAlignment="Center"
-                                 IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
-                      <ComboBox ItemsSource="{Binding ClassPivot.LocatorSnapChoices}"
-                                SelectedIndex="{Binding ClassPivot.LocatorSnapBIndex, Mode=TwoWay}"
-                                MinWidth="120" VerticalAlignment="Center"
-                                IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
-                      <TextBlock Text="±" VerticalAlignment="Center"/>
-                      <TextBox Text="{Binding ClassPivot.LocatorTolerance, Mode=TwoWay}"
-                               Width="60" VerticalAlignment="Center"
-                               PlaceholderText="0"
-                               ToolTip.Tip="Optional numeric tolerance for float jitter / off-by-one."/>
-                      <Button Content="🎯 Find"
-                              Command="{Binding ClassPivot.FindByValueCommand}"
-                              Padding="10,4"/>
-                    </StackPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                                Spacing="12" Margin="0,0,0,6">
-                      <CheckBox Content="Include array elements"
-                                IsChecked="{Binding ClassPivot.LocatorIncludeArrays, Mode=TwoWay}"
-                                ToolTip.Tip="Also sweep Layer A primitive array element values and Layer B inner element fields (shown as arrayField[].inner)."/>
-                      <CheckBox Content="Numeric only"
-                                IsChecked="{Binding ClassPivot.LocatorNumericOnly, Mode=TwoWay}"
-                                ToolTip.Tip="Skip string / pointer fields (always on in delta mode)."/>
-                      <CheckBox Content="Include synthetic classes"
-                                IsChecked="{Binding ClassPivot.LocatorIncludeSynthetic, Mode=TwoWay}"
-                                ToolTip.Tip="Include compiler-generated &lt;…&gt; classes (rarely hold the value you're hunting)."/>
-                    </StackPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.LocatorStatus}"
-                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
-                    <DataGrid Name="PivotLocatorGrid"
-                              ItemsSource="{Binding ClassPivot.LocatorHits}"
-                              SelectedItem="{Binding ClassPivot.SelectedLocatorHit, Mode=TwoWay}"
-                              AutoGenerateColumns="False"
-                              IsReadOnly="True"
-                              HeadersVisibility="Column"
-                              GridLinesVisibility="Horizontal"
-                              CanUserResizeColumns="True"
-                              CanUserSortColumns="True"
-                              MaxHeight="280"
-                              DoubleTapped="OnPivotLocatorDoubleTapped">
-                      <DataGrid.ContextMenu>
-                        <ContextMenu>
-                          <MenuItem Header="Load into pivot query"
-                                    Click="OnPivotLocatorUseClicked"/>
-                        </ContextMenu>
-                      </DataGrid.ContextMenu>
-                      <DataGrid.Columns>
-                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
-                                            Width="Auto" MinWidth="220" SortMemberPath="ClassFqn" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
-                                            Width="Auto" MinWidth="120" SortMemberPath="Assembly" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
-                                            Width="Auto" MinWidth="180" SortMemberPath="FieldName" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Arr?" Binding="{Binding ArrayDisplay}" Width="55"
-                                            SortMemberPath="InArrayElement" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Snaps" Binding="{Binding SnapHitDisplay}" Width="60"
-                                            SortMemberPath="SnapHitCount" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Match%" Binding="{Binding RarityDisplay}" Width="70"
-                                            SortMemberPath="MatchRarity" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Sample" Binding="{Binding SampleValue}"
-                                            Width="Auto" MinWidth="120"/>
-                        <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="65"
-                                            SortMemberPath="Score" CanUserSort="True"/>
-                      </DataGrid.Columns>
-                    </DataGrid>
-                  </DockPanel>
-                </Border>
-              </Expander>
-
-              <!-- Stage 0 (Phase 29e-3): class shortlist. Score every
-                   class by stability (instance-count CV), field-type
-                   ratios, null ratio so the user can pick a good pivot
-                   target without knowing the FQN up front. Collapsed by
-                   default — power users who already know the class skip
-                   straight to the pickers below. -->
-              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
-                        IsExpanded="False" Header="🔎 Class shortlist (Stage 0 — score classes by stability)">
-                <Border Padding="6" Background="#1F808080" CornerRadius="3">
-                  <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                                Spacing="8" Margin="0,0,0,6">
-                      <TextBlock Text="Assembly:" VerticalAlignment="Center"/>
-                      <AutoCompleteBox Text="{Binding ClassPivot.AssemblyFilter, Mode=TwoWay}"
-                                       ItemsSource="{Binding ClassPivot.KnownAssemblies}"
-                                       PlaceholderText="all assemblies"
-                                       MinimumPrefixLength="0"
-                                       FilterMode="ContainsOrdinal"
-                                       Width="220" VerticalAlignment="Center"
-                                       ToolTip.Tip="Scope the analysis to one assembly (e.g. Assembly-CSharp). Leave blank to score every class. Suggestions appear after the first Analyze hydrates a snapshot."/>
-                      <CheckBox Content="Show synthetic"
-                                IsChecked="{Binding ClassPivot.ShortlistShowSynthetic, Mode=TwoWay}"
-                                ToolTip.Tip="Include compiler-generated &lt;…&gt; classes (rarely pivot targets)."/>
-                      <CheckBox Content="Show partial-presence"
-                                IsChecked="{Binding ClassPivot.ShortlistShowPartial, Mode=TwoWay}"
-                                ToolTip.Tip="Include classes not present in every selected snapshot. Partial presence means instances appear/vanish between snaps, so the pivot can't line them all up."/>
-                      <TextBlock Text="Class:" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                      <TextBox Text="{Binding ClassPivot.ClassNameFilter, Mode=TwoWay}"
-                               PlaceholderText="name substring" Width="180" VerticalAlignment="Center"
-                               ToolTip.Tip="Case-insensitive substring filter on the class FQN — narrow 500+ classes to the one you half-remember."/>
-                      <Button Content="⟳ Analyze classes"
-                              Command="{Binding ClassPivot.AnalyzeClassesCommand}"
-                              Padding="10,4"/>
-                    </StackPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ShortlistStatus}"
-                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
-                    <!-- Columns are Auto/fixed (not star) so the grid can
-                         exceed the pane width → horizontal scrollbar +
-                         no truncation. Header clicks route to a manual
-                         AOT-safe sort (Avalonia's built-in sort uses
-                         reflection on SortMemberPath, which no-ops under
-                         Native AOT). -->
-                    <DataGrid Name="PivotShortlistGrid"
-                              DockPanel.Dock="Top"
-                              ItemsSource="{Binding ClassPivot.ClassShortlist}"
-                              SelectedItem="{Binding ClassPivot.SelectedShortlistRow, Mode=TwoWay}"
-                              AutoGenerateColumns="False"
-                              IsReadOnly="True"
-                              HeadersVisibility="Column"
-                              GridLinesVisibility="Horizontal"
-                              CanUserResizeColumns="True"
-                              CanUserSortColumns="True"
-                              MaxHeight="300"
-                              DoubleTapped="OnPivotShortlistDoubleTapped">
-                      <DataGrid.Columns>
-                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
-                                            Width="Auto" MinWidth="240" SortMemberPath="ClassFqn" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
-                                            Width="Auto" MinWidth="140" SortMemberPath="Assembly" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80"
-                                            SortMemberPath="Presence" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120"
-                                            SortMemberPath="AvgInstances" CanUserSort="True"/>
-                        <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70"
-                                            SortMemberPath="Cv" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55"
-                                            SortMemberPath="FieldCount" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65"
-                                            SortMemberPath="PrimitiveFieldRatio" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65"
-                                            SortMemberPath="NullFieldRatio" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Str%" Binding="{Binding StringPctDisplay}" Width="65"
-                                            SortMemberPath="StringFieldRatio" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65"
-                                            SortMemberPath="ArrayFieldRatio" CanUserSort="True"/>
-                        <!-- 29i-1: field-shape preview (first 10 names, "+N more"
-                             on hover). Last column + Auto width so it can't
-                             squeeze the metric columns (no-star rule). -->
-                        <DataGridTemplateColumn Header="Fields (preview)" Width="Auto" MinWidth="300" CanUserSort="False">
-                          <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                              <TextBlock Text="{Binding FieldPreviewDisplay}"
-                                         VerticalAlignment="Center" Margin="4,0"
-                                         TextTrimming="CharacterEllipsis"
-                                         ToolTip.Tip="{Binding FieldPreviewDisplay}"/>
-                            </DataTemplate>
-                          </DataGridTemplateColumn.CellTemplate>
-                        </DataGridTemplateColumn>
-                      </DataGrid.Columns>
-                    </DataGrid>
-                    <!-- 29i-1: structure detail panel — full field shape of
-                         the selected class, so the user reads it without
-                         switching ClassFqn + re-hydrating. Double-tap or
-                         right-click a field to add it as key/value. -->
-                    <TextBlock DockPanel.Dock="Top" Margin="0,6,0,2"
-                               FontWeight="SemiBold" FontSize="11"
-                               Text="Field structure of selected class — double-tap a field → Key, right-click → Value"
-                               Opacity="0.8"/>
-                    <DataGrid Name="PivotShortlistFieldGrid"
-                              ItemsSource="{Binding ClassPivot.ShortlistFields}"
-                              AutoGenerateColumns="False"
-                              IsReadOnly="True"
-                              HeadersVisibility="Column"
-                              GridLinesVisibility="Horizontal"
-                              CanUserResizeColumns="True"
-                              MaxHeight="240"
-                              DoubleTapped="OnPivotShortlistFieldDoubleTapped">
-                      <DataGrid.ContextMenu>
-                        <ContextMenu>
-                          <MenuItem Header="Add to Key fields"
-                                    Click="OnPivotShortlistFieldAddToKeysClicked"/>
-                          <MenuItem Header="Add to Value fields"
-                                    Click="OnPivotShortlistFieldAddToValuesClicked"/>
-                        </ContextMenu>
-                      </DataGrid.ContextMenu>
-                      <DataGrid.Columns>
-                        <DataGridTextColumn Header="Field" Binding="{Binding Name}"
-                                            Width="Auto" MinWidth="200"/>
-                        <DataGridTextColumn Header="Type" Binding="{Binding TypeDisplay}"
-                                            Width="Auto" MinWidth="200"/>
-                        <DataGridTextColumn Header="Kind" Binding="{Binding FlagsDisplay}"
-                                            Width="80"/>
-                      </DataGrid.Columns>
-                    </DataGrid>
-                  </DockPanel>
-                </Border>
-              </Expander>
-
-              <!-- 29i-3: unsupervised "likely game-state" ranking. Stage 0
-                   tells you which classes are stable; this tells you which
-                   stable classes have a DRIFTING value (money / HP / exp),
-                   with an inline preview. Most heuristic of the waves —
-                   precise alternative is Find by value above. -->
-              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
-                        IsExpanded="False" Header="🏅 Likely game-state (rank stable-key + drifting-value classes)">
-                <Border Padding="6" Background="#1F808080" CornerRadius="3">
-                  <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                                Spacing="8" Margin="0,0,0,6">
-                      <Button Content="🏅 Rank likely game-state"
-                              Command="{Binding ClassPivot.RankLikelyGameStateCommand}"
-                              Padding="10,4"/>
-                      <TextBlock Text="Top-N classes:" VerticalAlignment="Center" Margin="8,0,0,0"/>
-                      <NumericUpDown Value="{Binding ClassPivot.InterestTopN, Mode=TwoWay}"
-                                     Minimum="1" Maximum="500" Increment="10"
-                                     FormatString="0" Width="120" VerticalAlignment="Center"
-                                     ToolTip.Tip="How many Stage-0 candidates the (more expensive) volatility pass scores. Higher = broader but slower."/>
-                    </StackPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.InterestStatus}"
-                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
-                    <DataGrid Name="PivotInterestGrid"
-                              DockPanel.Dock="Top"
-                              ItemsSource="{Binding ClassPivot.InterestRows}"
-                              SelectedItem="{Binding ClassPivot.SelectedInterestRow, Mode=TwoWay}"
-                              AutoGenerateColumns="False"
-                              IsReadOnly="True"
-                              HeadersVisibility="Column"
-                              GridLinesVisibility="Horizontal"
-                              CanUserResizeColumns="True"
-                              CanUserSortColumns="True"
-                              MaxHeight="260"
-                              DoubleTapped="OnPivotInterestDoubleTapped">
-                      <DataGrid.Columns>
-                        <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}"
-                                            Width="Auto" MinWidth="220" SortMemberPath="ClassFqn" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}"
-                                            Width="Auto" MinWidth="120" SortMemberPath="Assembly" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Interest" Binding="{Binding InterestDisplay}" Width="75"
-                                            SortMemberPath="InterestScore" CanUserSort="True"/>
-                        <DataGridTextColumn Header="KeyScore" Binding="{Binding KeyScoreDisplay}" Width="75"
-                                            SortMemberPath="BestKeyScore" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Vol" Binding="{Binding VolDisplay}" Width="60"
-                                            SortMemberPath="MaxVolatility" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Key" Binding="{Binding KeyDisplay}"
-                                            Width="Auto" MinWidth="140"/>
-                        <DataGridTextColumn Header="Top values" Binding="{Binding ValuesDisplay}"
-                                            Width="Auto" MinWidth="160"/>
-                      </DataGrid.Columns>
-                    </DataGrid>
-                    <TextBlock DockPanel.Dock="Top" Margin="0,6,0,2"
-                               FontWeight="SemiBold" FontSize="11" Opacity="0.8"
-                               Text="Preview — best key : value trajectory (select a row above; double-tap loads it)"/>
-                    <ListBox ItemsSource="{Binding ClassPivot.InterestPreview}"
-                             MaxHeight="120" FontFamily="Cascadia Mono,Consolas,monospace"
-                             FontSize="11"/>
-                  </DockPanel>
-                </Border>
-              </Expander>
-
-              <!-- Stage 1 (Phase 29e-4): field key auto-discovery.
-                   Scores each field of the chosen class on key
-                   suitability (stability / cardinality / type / name)
-                   and proposes a greedy compound key. The popup-picker
-                   the user asked for — double-click adds a field as a
-                   key, right-click for value. -->
-              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
-                        IsExpanded="False" Header="🔑 Suggest key/value fields (Stage 1 — rank fields by key suitability)">
-                <Border Padding="6" Background="#1F808080" CornerRadius="3">
-                  <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                                Spacing="8" Margin="0,0,0,6">
-                      <Button Content="⟳ Score fields"
-                              Command="{Binding ClassPivot.ScoreFieldsCommand}"
-                              Padding="10,4"/>
-                      <TextBlock Text="Filter:" VerticalAlignment="Center"/>
-                      <TextBox Text="{Binding ClassPivot.FieldScoreFilter, Mode=TwoWay}"
-                               PlaceholderText="field name" Width="160" VerticalAlignment="Center"/>
-                      <TextBlock Text="Suggested key:" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                      <TextBlock Text="{Binding ClassPivot.SuggestedKeyDisplay}"
-                                 VerticalAlignment="Center" FontWeight="SemiBold"/>
-                      <Button Content="Apply suggested key"
-                              Command="{Binding ClassPivot.ApplySuggestedKeyCommand}"
-                              Padding="8,3"/>
-                    </StackPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.SuggestedKeyReason}"
-                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,2"/>
-                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.FieldScoreStatus}"
-                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
-                    <DataGrid Name="PivotFieldScoreGrid"
-                              ItemsSource="{Binding ClassPivot.FieldScores}"
-                              AutoGenerateColumns="False"
-                              IsReadOnly="True"
-                              HeadersVisibility="Column"
-                              GridLinesVisibility="Horizontal"
-                              CanUserResizeColumns="True"
-                              CanUserSortColumns="True"
-                              MaxHeight="300"
-                              DoubleTapped="OnPivotFieldScoreDoubleTapped">
-                      <DataGrid.ContextMenu>
-                        <ContextMenu>
-                          <MenuItem Header="Add to Key fields"
-                                    Click="OnPivotFieldAddToKeysClicked"/>
-                          <MenuItem Header="Add to Value fields"
-                                    Click="OnPivotFieldAddToValuesClicked"/>
-                        </ContextMenu>
-                      </DataGrid.ContextMenu>
-                      <DataGrid.Columns>
-                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
-                                            Width="Auto" MinWidth="200" SortMemberPath="FieldName" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
-                                            Width="Auto" MinWidth="160" SortMemberPath="FieldType" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70"
-                                            SortMemberPath="Score" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70"
-                                            SortMemberPath="SStable" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Card" Binding="{Binding CardPctDisplay}" Width="70"
-                                            SortMemberPath="SCardinality" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Type pr." Binding="{Binding TypePriorDisplay}" Width="70"
-                                            SortMemberPath="TypePrior" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Name pr." Binding="{Binding NamePriorDisplay}" Width="70"
-                                            SortMemberPath="NamePrior" CanUserSort="True"/>
-                      </DataGrid.Columns>
-                    </DataGrid>
-                  </DockPanel>
-                </Border>
-              </Expander>
-
-              <!-- Class + key + value pickers row — collapsible (29f-4 polish)
-                   so the user can reclaim vertical height for results once the
-                   query is configured. -->
-              <Expander DockPanel.Dock="Top" Margin="0,0,0,6" IsExpanded="True"
-                        Header="⚙ Pivot query — class · key fields · value fields">
-              <Border Padding="6"
-                      Background="#1F808080" CornerRadius="3">
-                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,4,Auto,4,Auto"
-                      RowSpacing="0" ColumnSpacing="6">
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Class FQN:" VerticalAlignment="Center"/>
-                  <AutoCompleteBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="5"
-                                   Text="{Binding ClassPivot.ClassFqn, Mode=TwoWay}"
-                                   ItemsSource="{Binding ClassPivot.KnownClasses}"
-                                   PlaceholderText="e.g. Mortal.Core.GameStat"
-                                   MinimumPrefixLength="0"
-                                   FilterMode="ContainsOrdinal"
-                                   ToolTip.Tip="Fully-qualified class name (Namespace.Name). Suggestions come from snapshots already loaded into memory; the list is empty until the first Run hydrates a snapshot (a dedicated assembly → class picker with stability scoring lands in Phase 29e-3)."/>
-
-                  <TextBlock Grid.Row="2" Grid.Column="0" Text="Key fields:" VerticalAlignment="Center"/>
-                  <AutoCompleteBox Grid.Row="2" Grid.Column="1"
-                                   Text="{Binding ClassPivot.KeyFieldsText, Mode=TwoWay}"
-                                   ItemsSource="{Binding ClassPivot.KnownFieldNames}"
-                                   PlaceholderText="_propertyID  (or '_itemGroup, _propertyID')"
-                                   MinimumPrefixLength="0"
-                                   FilterMode="ContainsOrdinal"
-                                   ToolTip.Tip="Comma-separated field names whose values jointly identify a logical instance across snapshots. Click to browse all field names of the typed class (populated after a class is chosen + snapshots hydrated). Compound key (multiple names) helps when a single field has collisions, e.g. (_itemGroup, _propertyID)."/>
-                  <TextBlock Grid.Row="2" Grid.Column="2" Text="Value fields:" VerticalAlignment="Center"/>
-                  <AutoCompleteBox Grid.Row="2" Grid.Column="3"
-                                   Text="{Binding ClassPivot.ValueFieldsText, Mode=TwoWay}"
-                                   ItemsSource="{Binding ClassPivot.KnownFieldNames}"
-                                   PlaceholderText="_value  (or '_hp, _mp')"
-                                   MinimumPrefixLength="0"
-                                   FilterMode="ContainsOrdinal"
-                                   ToolTip.Tip="Comma-separated field names whose trajectory across snapshots you want to see. Click to browse all field names of the typed class. Multiple value fields stack as 'fieldName: v0 → v1 → …' lines in the Trajectory column."/>
-                  <TextBlock Grid.Row="2" Grid.Column="4" Text="Key filter:" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="2" Grid.Column="5"
-                           Text="{Binding ClassPivot.KeyFilter, Mode=TwoWay}"
-                           PlaceholderText="optional substring"
-                           ToolTip.Tip="Case-insensitive substring filter applied to the rendered key tuple. Useful when a class has thousands of instances and you want to focus on one group."/>
-
-                  <StackPanel Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="6"
-                              Orientation="Horizontal" Spacing="8" HorizontalAlignment="Left">
-                    <Button Content="▶ Run Pivot"
-                            Command="{Binding ClassPivot.RunCommand}"
-                            MinWidth="180" Padding="10,4"/>
-                    <Button Content="🔑▶ Suggest key &amp; run"
-                            Command="{Binding ClassPivot.SuggestKeyAndRunCommand}"
-                            Padding="10,4"
-                            ToolTip.Tip="Instance pivots only: score fields, apply the suggested key, and run — the one-click close-the-loop after loading a 'Find by value' hit."/>
-                  </StackPanel>
-                </Grid>
-              </Border>
-              </Expander>
-
-              <!-- Phase 29f Layer B: reference-array element inner-pivot.
-                   Collapsible (default collapsed — advanced/optional). When the
-                   checkbox is on, "Key fields" above acts as the OUTER (owner-
-                   instance) key and these three fields target the array
-                   element. Requires snapshots captured with "Capture array
-                   element fields" (Snapshot tab). -->
-              <Expander DockPanel.Dock="Top" Margin="0,0,0,6" IsExpanded="False"
-                        Header="🧬 Array inner-pivot (Layer B)">
-              <Border Padding="6"
-                      Background="#1F808080" CornerRadius="3">
-                <DockPanel>
-                  <CheckBox DockPanel.Dock="Top"
-                            Content="Enable — pivot a reference array's elements by an inner field"
-                            IsChecked="{Binding ClassPivot.ArrayPivotMode, Mode=TwoWay}"
-                            ToolTip.Tip="Instead of pivoting whole instances, pivot the ELEMENTS of a reference-type array field on the class (e.g. StatConvertCollectionData[]) by a field INSIDE each element. The 'Key fields' box above becomes the outer owner-instance key (may be empty); the fields here key/value the element. Needs snapshots captured with Layer B (Snapshot tab → 'Capture array element fields')."/>
-                  <Grid DockPanel.Dock="Top" Margin="0,6,0,0"
-                        ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto"
-                        ColumnSpacing="6"
-                        IsVisible="{Binding ClassPivot.ArrayPivotMode}">
-                    <TextBlock Grid.Column="0" Text="Array field:" VerticalAlignment="Center"/>
-                    <AutoCompleteBox Grid.Column="1"
-                                     Text="{Binding ClassPivot.ArrayFieldName, Mode=TwoWay}"
-                                     ItemsSource="{Binding ClassPivot.KnownArrayFields}"
-                                     PlaceholderText="_statAdditionData"
-                                     MinimumPrefixLength="0"
-                                     FilterMode="ContainsOrdinal"
-                                     ToolTip.Tip="Reference-type array field on the class whose elements to pivot. Suggestions are the reference arrays observed on the typed class (populated after a Layer-B snapshot hydrates)."/>
-                    <TextBlock Grid.Column="2" Text="Inner key:" VerticalAlignment="Center"/>
-                    <AutoCompleteBox Grid.Column="3"
-                                     Text="{Binding ClassPivot.InnerKeyFieldsText, Mode=TwoWay}"
-                                     ItemsSource="{Binding ClassPivot.KnownElementFieldNames}"
-                                     PlaceholderText="_propertyID"
-                                     MinimumPrefixLength="0"
-                                     FilterMode="ContainsOrdinal"
-                                     ToolTip.Tip="Comma-separated field name(s) INSIDE each array element that identify it (e.g. _propertyID). Suggestions are the element's captured inner fields."/>
-                    <TextBlock Grid.Column="4" Text="Inner value:" VerticalAlignment="Center"/>
-                    <AutoCompleteBox Grid.Column="5"
-                                     Text="{Binding ClassPivot.InnerValueFieldsText, Mode=TwoWay}"
-                                     ItemsSource="{Binding ClassPivot.KnownElementFieldNames}"
-                                     PlaceholderText="_amount"
-                                     MinimumPrefixLength="0"
-                                     FilterMode="ContainsOrdinal"
-                                     ToolTip.Tip="Comma-separated field name(s) INSIDE each array element whose trajectory to track across snapshots (e.g. _amount)."/>
-                  </Grid>
-                  <!-- 29i-2: scored picker for the array element's inner
-                       fields — Stage 1 ranking applied to element fields so
-                       the user doesn't have to remember inner field names.
-                       Double-tap → inner key; right-click → inner value. -->
-                  <DockPanel IsVisible="{Binding ClassPivot.ArrayPivotMode}">
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                                Spacing="8" Margin="0,8,0,4">
-                      <Button Content="⟳ Score element fields"
-                              Command="{Binding ClassPivot.ScoreElementFieldsCommand}"
-                              Padding="10,4"/>
-                      <TextBlock Text="Filter:" VerticalAlignment="Center"/>
-                      <TextBox Text="{Binding ClassPivot.ElementFieldScoreFilter, Mode=TwoWay}"
-                               PlaceholderText="field name" Width="140" VerticalAlignment="Center"/>
-                      <TextBlock Text="Suggested inner key:" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                      <TextBlock Text="{Binding ClassPivot.SuggestedInnerKeyDisplay}"
-                                 VerticalAlignment="Center" FontWeight="SemiBold"/>
-                      <Button Content="Apply suggested inner key"
-                              Command="{Binding ClassPivot.ApplySuggestedInnerKeyCommand}"
-                              Padding="8,3"/>
-                    </StackPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.SuggestedInnerKeyReason}"
-                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,2"/>
-                    <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ElementFieldScoreStatus}"
-                               Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
-                    <DataGrid Name="PivotElementFieldScoreGrid"
-                              ItemsSource="{Binding ClassPivot.ElementFieldScores}"
-                              AutoGenerateColumns="False"
-                              IsReadOnly="True"
-                              HeadersVisibility="Column"
-                              GridLinesVisibility="Horizontal"
-                              CanUserResizeColumns="True"
-                              CanUserSortColumns="True"
-                              MaxHeight="260"
-                              DoubleTapped="OnPivotElementFieldScoreDoubleTapped">
-                      <DataGrid.ContextMenu>
-                        <ContextMenu>
-                          <MenuItem Header="Add to Inner key fields"
-                                    Click="OnPivotElementFieldAddToInnerKeysClicked"/>
-                          <MenuItem Header="Add to Inner value fields"
-                                    Click="OnPivotElementFieldAddToInnerValuesClicked"/>
-                        </ContextMenu>
-                      </DataGrid.ContextMenu>
-                      <DataGrid.Columns>
-                        <DataGridTextColumn Header="Field" Binding="{Binding FieldName}"
-                                            Width="Auto" MinWidth="200" SortMemberPath="FieldName" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Type" Binding="{Binding FieldType}"
-                                            Width="Auto" MinWidth="160" SortMemberPath="FieldType" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70"
-                                            SortMemberPath="Score" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70"
-                                            SortMemberPath="SStable" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Card" Binding="{Binding CardPctDisplay}" Width="70"
-                                            SortMemberPath="SCardinality" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Type pr." Binding="{Binding TypePriorDisplay}" Width="70"
-                                            SortMemberPath="TypePrior" CanUserSort="True"/>
-                        <DataGridTextColumn Header="Name pr." Binding="{Binding NamePriorDisplay}" Width="70"
-                                            SortMemberPath="NamePrior" CanUserSort="True"/>
-                      </DataGrid.Columns>
-                    </DataGrid>
-                  </DockPanel>
-                </DockPanel>
-              </Border>
-              </Expander>
-
-              <!-- Snapshot picker (top half) + Results (bottom half).
-                   The snapshot picker is collapsible (default expanded) so it
-                   can be tucked away once the snapshots are selected, handing
-                   its space to the results grid. -->
-              <Grid RowDefinitions="Auto,6,*">
-                <Expander Grid.Row="0" IsExpanded="True" MaxHeight="240"
-                          Header="Snapshots (capture-order)">
+              <!-- Wave B — the Results grid is now the whole tab body (the
+                   snapshot picker + all config panels moved into toolbar
+                   dialogs above). -->
                 <Border Padding="0"
                         Background="#1F808080" CornerRadius="3">
                   <DockPanel>
-                    <DataGrid ItemsSource="{Binding ClassPivot.SelectionRows}"
-                              AutoGenerateColumns="False"
-                              HeadersVisibility="Column"
-                              IsReadOnly="False"
-                              GridLinesVisibility="Horizontal"
-                              CanUserResizeColumns="True">
-                      <DataGrid.Columns>
-                        <DataGridTemplateColumn Header="Use" Width="50">
-                          <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                              <CheckBox IsChecked="{Binding Include, Mode=TwoWay}"
-                                        HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"/>
-                            </DataTemplate>
-                          </DataGridTemplateColumn.CellTemplate>
-                        </DataGridTemplateColumn>
-                        <DataGridTextColumn Header="Snapshot"
-                                            Binding="{Binding DisplayLabel}"
-                                            IsReadOnly="True"
-                                            Width="*" MinWidth="200"/>
-                      </DataGrid.Columns>
-                    </DataGrid>
-                  </DockPanel>
-                </Border>
-                </Expander>
-
-                <GridSplitter Grid.Row="1" ResizeDirection="Rows"
-                              Height="6" Background="#33808080"/>
-
-                <Border Grid.Row="2" Padding="0"
-                        Background="#1F808080" CornerRadius="3">
-                  <DockPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="Pivot results"
+                    <TextBlock DockPanel.Dock="Top" Text="Pivot results — configure via the toolbar above, then Run from “Pivot query…”"
                                FontWeight="SemiBold" Margin="6,4,6,4"/>
                     <!-- Collision + key columns are sortable via the
                          manual AOT-safe handler. Trajectory wraps + has a
@@ -3029,7 +2521,6 @@
                     </DataGrid>
                   </DockPanel>
                 </Border>
-              </Grid>
             </DockPanel>
           </TabItem>
         </TabControl>

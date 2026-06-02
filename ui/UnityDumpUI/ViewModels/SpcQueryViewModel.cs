@@ -161,7 +161,12 @@ public sealed partial class SpcQueryViewModel : ObservableObject
     [ObservableProperty] private string _classFilter = string.Empty;
     [ObservableProperty] private string _typeFilter  = string.Empty;
 
-    [ObservableProperty] private bool _isRunning;
+    // Wave A — engine compute now runs off the UI thread (Task.Run), so disable
+    // the Run button while a query is in flight to avoid a concurrent re-entry
+    // that would race on Results.
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(RunCommand))]
+    private bool _isRunning;
 
     /// <summary>Cross-tab handoff hook — wired by MainWindow code-behind
     /// the same way SnapshotViewModel.NavigateToInspectorRequested is.</summary>
@@ -369,8 +374,11 @@ public sealed partial class SpcQueryViewModel : ObservableObject
                 TypeFilter       = string.IsNullOrWhiteSpace(TypeFilter)  ? null : TypeFilter.Trim(),
             };
 
+            // Off the UI thread — the engine scans every field of every
+            // instance across all selected snapshots; synchronous on the UI
+            // thread froze the app on large captures (Pivot Wave A parity).
             var sw = Stopwatch.StartNew();
-            var matches = SpcQueryEngine.Run(query);
+            var matches = await Task.Run(() => SpcQueryEngine.Run(query)).ConfigureAwait(true);
             sw.Stop();
 
             Results.Clear();

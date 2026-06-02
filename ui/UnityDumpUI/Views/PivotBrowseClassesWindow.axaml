@@ -1,0 +1,100 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.PivotBrowseClassesWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="980" Height="640"
+        WindowStartupLocation="CenterOwner"
+        Title="Browse classes — score by stability, inspect field shape">
+  <DockPanel Margin="10">
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                HorizontalAlignment="Right" Spacing="8" Margin="0,10,0,0">
+      <Button Content="Close" Click="OnCloseClicked" Padding="14,4"/>
+    </StackPanel>
+    <Border Padding="6" Background="#1F808080" CornerRadius="3">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
+          <TextBlock Text="Assembly:" VerticalAlignment="Center"/>
+          <AutoCompleteBox Text="{Binding ClassPivot.AssemblyFilter, Mode=TwoWay}"
+                           ItemsSource="{Binding ClassPivot.KnownAssemblies}"
+                           PlaceholderText="all assemblies" MinimumPrefixLength="0"
+                           FilterMode="ContainsOrdinal" Width="220" VerticalAlignment="Center"
+                           ToolTip.Tip="Scope the analysis to one assembly. Leave blank to score every class."/>
+          <CheckBox Content="Show synthetic"
+                    IsChecked="{Binding ClassPivot.ShortlistShowSynthetic, Mode=TwoWay}"
+                    ToolTip.Tip="Include compiler-generated classes (rarely pivot targets)."/>
+          <CheckBox Content="Show partial-presence"
+                    IsChecked="{Binding ClassPivot.ShortlistShowPartial, Mode=TwoWay}"
+                    ToolTip.Tip="Include classes not present in every selected snapshot."/>
+          <TextBlock Text="Class:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+          <TextBox Text="{Binding ClassPivot.ClassNameFilter, Mode=TwoWay}"
+                   PlaceholderText="name substring" Width="180" VerticalAlignment="Center"
+                   ToolTip.Tip="Case-insensitive substring filter on the class FQN."/>
+          <Button Content="⟳ Analyze classes" Command="{Binding ClassPivot.AnalyzeClassesCommand}" Padding="10,4"/>
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.ShortlistStatus}"
+                   Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+        <!-- Field-structure detail panel of the selected class (bottom). -->
+        <DockPanel DockPanel.Dock="Bottom" MaxHeight="280">
+          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,6,0,2">
+            <TextBlock Text="Field structure — double-tap → Key, right-click → Value"
+                       FontWeight="SemiBold" FontSize="11" Opacity="0.8" VerticalAlignment="Center"/>
+            <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+            <TextBox Text="{Binding ClassPivot.ShortlistFieldFilter, Mode=TwoWay}"
+                     PlaceholderText="field name" Width="160" VerticalAlignment="Center"
+                     ToolTip.Tip="Case-insensitive substring filter on the field name."/>
+          </StackPanel>
+          <DataGrid Name="PivotShortlistFieldGrid"
+                    ItemsSource="{Binding ClassPivot.ShortlistFields}"
+                    AutoGenerateColumns="False" IsReadOnly="True"
+                    HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                    CanUserResizeColumns="True" CanUserSortColumns="True"
+                    DoubleTapped="OnPivotShortlistFieldDoubleTapped">
+            <DataGrid.ContextMenu>
+              <ContextMenu>
+                <MenuItem Header="Add to Key fields" Click="OnPivotShortlistFieldAddToKeysClicked"/>
+                <MenuItem Header="Add to Value fields" Click="OnPivotShortlistFieldAddToValuesClicked"/>
+              </ContextMenu>
+            </DataGrid.ContextMenu>
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Field" Binding="{Binding Name}" Width="Auto" MinWidth="200"
+                                  SortMemberPath="Name" CanUserSort="True"/>
+              <DataGridTextColumn Header="Type" Binding="{Binding TypeDisplay}" Width="Auto" MinWidth="200"
+                                  SortMemberPath="TypeDisplay" CanUserSort="True"/>
+              <DataGridTextColumn Header="Kind" Binding="{Binding FlagsDisplay}" Width="80"
+                                  SortMemberPath="FlagsDisplay" CanUserSort="True"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </DockPanel>
+        <DataGrid Name="PivotShortlistGrid"
+                  ItemsSource="{Binding ClassPivot.ClassShortlist}"
+                  SelectedItem="{Binding ClassPivot.SelectedShortlistRow, Mode=TwoWay}"
+                  AutoGenerateColumns="False" IsReadOnly="True"
+                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                  CanUserResizeColumns="True" CanUserSortColumns="True"
+                  DoubleTapped="OnPivotShortlistDoubleTapped">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}" Width="Auto" MinWidth="240" SortMemberPath="ClassFqn" CanUserSort="True"/>
+            <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}" Width="Auto" MinWidth="140" SortMemberPath="Assembly" CanUserSort="True"/>
+            <DataGridTextColumn Header="Presence" Binding="{Binding PresenceDisplay}" Width="80" SortMemberPath="Presence" CanUserSort="True"/>
+            <DataGridTextColumn Header="Inst (avg±sd)" Binding="{Binding InstancesDisplay}" Width="120" SortMemberPath="AvgInstances" CanUserSort="True"/>
+            <DataGridTextColumn Header="CV" Binding="{Binding CvDisplay}" Width="70" SortMemberPath="Cv" CanUserSort="True"/>
+            <DataGridTextColumn Header="Fld" Binding="{Binding FieldCount}" Width="55" SortMemberPath="FieldCount" CanUserSort="True"/>
+            <DataGridTextColumn Header="Prim%" Binding="{Binding PrimitivePctDisplay}" Width="65" SortMemberPath="PrimitiveFieldRatio" CanUserSort="True"/>
+            <DataGridTextColumn Header="Null%" Binding="{Binding NullPctDisplay}" Width="65" SortMemberPath="NullFieldRatio" CanUserSort="True"/>
+            <DataGridTextColumn Header="Str%" Binding="{Binding StringPctDisplay}" Width="65" SortMemberPath="StringFieldRatio" CanUserSort="True"/>
+            <DataGridTextColumn Header="Arr%" Binding="{Binding ArrayPctDisplay}" Width="65" SortMemberPath="ArrayFieldRatio" CanUserSort="True"/>
+            <DataGridTemplateColumn Header="Fields (preview)" Width="Auto" MinWidth="300" CanUserSort="False">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding FieldPreviewDisplay}" VerticalAlignment="Center" Margin="4,0"
+                             TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding FieldPreviewDisplay}"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+          </DataGrid.Columns>
+        </DataGrid>
+      </DockPanel>
+    </Border>
+  </DockPanel>
+</Window>

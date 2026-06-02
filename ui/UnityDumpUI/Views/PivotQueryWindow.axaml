@@ -1,0 +1,66 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.PivotQueryWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="760" Height="280"
+        WindowStartupLocation="CenterOwner"
+        Title="Pivot query — class · key · value">
+  <!-- Class Pivot UI/UX overhaul Wave B: the core pivot query, extracted
+       from the Class Pivot tab into a dialog. DataContext = MainWindowViewModel
+       (set in code-behind) so the existing {Binding ClassPivot.*} bindings move
+       here verbatim; Run/SuggestKeyAndRun populate ClassPivot.Results, which the
+       tab's results grid (bound to the same VM) reflects when the dialog closes. -->
+  <DockPanel Margin="10">
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                HorizontalAlignment="Right" Spacing="8" Margin="0,10,0,0">
+      <Button Content="Close" Click="OnCloseClicked" Padding="14,4"/>
+    </StackPanel>
+    <Border Padding="6" Background="#1F808080" CornerRadius="3">
+      <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,4,Auto,4,Auto"
+            RowSpacing="0" ColumnSpacing="6">
+        <TextBlock Grid.Row="0" Grid.Column="0" Text="Class FQN:" VerticalAlignment="Center"/>
+        <AutoCompleteBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="5"
+                         Text="{Binding ClassPivot.ClassFqn, Mode=TwoWay}"
+                         ItemsSource="{Binding ClassPivot.KnownClasses}"
+                         PlaceholderText="e.g. Mortal.Core.GameStat"
+                         MinimumPrefixLength="0"
+                         FilterMode="ContainsOrdinal"
+                         ToolTip.Tip="Fully-qualified class name (Namespace.Name). Suggestions come from snapshots already loaded into memory."/>
+
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Key fields:" VerticalAlignment="Center"/>
+        <AutoCompleteBox Grid.Row="2" Grid.Column="1"
+                         Text="{Binding ClassPivot.KeyFieldsText, Mode=TwoWay}"
+                         ItemsSource="{Binding ClassPivot.KnownFieldNames}"
+                         PlaceholderText="_propertyID  (or '_itemGroup, _propertyID')"
+                         MinimumPrefixLength="0"
+                         FilterMode="ContainsOrdinal"
+                         ToolTip.Tip="Comma-separated field names whose values jointly identify a logical instance across snapshots."/>
+        <TextBlock Grid.Row="2" Grid.Column="2" Text="Value fields:" VerticalAlignment="Center"/>
+        <AutoCompleteBox Grid.Row="2" Grid.Column="3"
+                         Text="{Binding ClassPivot.ValueFieldsText, Mode=TwoWay}"
+                         ItemsSource="{Binding ClassPivot.KnownFieldNames}"
+                         PlaceholderText="_value  (or '_hp, _mp')"
+                         MinimumPrefixLength="0"
+                         FilterMode="ContainsOrdinal"
+                         ToolTip.Tip="Comma-separated field names whose trajectory across snapshots you want to see."/>
+        <TextBlock Grid.Row="2" Grid.Column="4" Text="Key filter:" VerticalAlignment="Center"/>
+        <TextBox Grid.Row="2" Grid.Column="5"
+                 Text="{Binding ClassPivot.KeyFilter, Mode=TwoWay}"
+                 PlaceholderText="optional substring"
+                 ToolTip.Tip="Case-insensitive substring filter applied to the rendered key tuple."/>
+
+        <StackPanel Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="6"
+                    Orientation="Horizontal" Spacing="8" HorizontalAlignment="Left">
+          <Button Content="▶ Run Pivot"
+                  Command="{Binding ClassPivot.RunCommand}"
+                  MinWidth="180" Padding="10,4"/>
+          <Button Content="🔑▶ Suggest key &amp; run"
+                  Command="{Binding ClassPivot.SuggestKeyAndRunCommand}"
+                  Padding="10,4"
+                  ToolTip.Tip="Instance pivots only: score fields, apply the suggested key, and run."/>
+        </StackPanel>
+      </Grid>
+    </Border>
+  </DockPanel>
+</Window>
