@@ -943,6 +943,26 @@ public partial class MainWindow : Window
         }
     }
 
+    // Class Pivot overhaul Wave D — "Pivot this class…" from the Browser class
+    // list. Lands the class FQN (+ its assembly) into the Class Pivot tab and
+    // switches to it, so the user doesn't copy/paste the name.
+    private void OnPivotThisClassFromBrowserClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var browser = vm.Browser;
+        ClassItem? target = null;
+        if (sender is Avalonia.Controls.MenuItem mi &&
+            mi.Parent is Avalonia.Controls.ContextMenu cm &&
+            cm.PlacementTarget is Avalonia.Controls.ListBox placedList &&
+            placedList.SelectedItem is ClassItem sel)
+        {
+            target = sel;
+        }
+        target ??= browser.SelectedClass;
+        if (target is null) return;
+        vm.PivotForClass(browser.SelectedAssembly?.Name, target.DisplayName);
+    }
+
     /// <summary>
     /// Resolve the right-clicked row of a DataGrid hosting <typeparamref name="T"/>
     /// rows. Prefers the menu's PlacementTarget (the row beneath the pointer when
@@ -1412,6 +1432,15 @@ public partial class MainWindow : Window
         if (DataContext is not MainWindowViewModel vm) return;
         var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
         if (row is not null) vm.Snapshot.NavigateToAddressLookup(row);
+    }
+
+    // Class Pivot overhaul Wave D — "Pivot this class…" from a Snapshot diff row.
+    // ClassDisplay is the FQN; the pivot resolves the assembly at Run time.
+    private void OnSnapshotPivotClassClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<SnapshotDiffRow>(sender, this.FindControl<DataGrid>("SnapshotDiffGrid"));
+        if (row is not null) vm.PivotForClass(null, row.ClassDisplay);
     }
 
     private async void OnSnapshotCopyInstanceAddr(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

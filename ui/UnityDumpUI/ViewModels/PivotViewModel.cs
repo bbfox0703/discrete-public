@@ -257,6 +257,20 @@ public sealed partial class PivotViewModel : ObservableObject
     /// gate). Combined with the snapshot/busy gate.</summary>
     private bool CanScoreFields() => CanRun() && HasClassFqn;
 
+    /// <summary>Wave D — cross-tab handoff. Inspector / Browser / Snapshot
+    /// right-click "Pivot this class" lands the class (+ assembly) here so the
+    /// user never copies the FQN and pastes it back. Fills the query inputs;
+    /// the user still picks snapshots + key/value (or opens "Pick key/value…").</summary>
+    public void ReceiveClassHandoff(string? assembly, string? classFqn)
+    {
+        if (!string.IsNullOrWhiteSpace(assembly)) AssemblyFilter = assembly.Trim();
+        if (!string.IsNullOrWhiteSpace(classFqn)) ClassFqn       = classFqn.Trim();
+        ErrorMessage  = string.Empty;
+        if (!string.IsNullOrWhiteSpace(ClassFqn))
+            StatusMessage = $"Class set to '{ClassFqn}'. Pick snapshots + key/value in “Pivot query…”, " +
+                            "or open “Pick key/value…” to rank fields.";
+    }
+
     // ── Layer B: array inner-pivot (29f-4) ─────────────────────────────
 
     /// <summary>When on, Run pivots the ELEMENTS of <see cref="ArrayFieldName"/>

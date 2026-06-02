@@ -953,7 +953,7 @@ engines stay.
 | **A** | Responsiveness (#5): move every engine `.Run()` off the UI thread (`Task.Run`) + indeterminate busy bar bound to `IsRunning` + disable Run buttons while busy (`[NotifyCanExecuteChangedFor]`). Pivot **and** SPC Query tabs. | ✅ **DONE** (dev, 685 tests green) — needs user visual verify |
 | **B** | Layout (#1): replace the 7 stacked panels with a single toolbar of buttons; each opens a dialog bound to the SHARED VM; Results grid + busy bar fill the tab body. No engine/command behaviour change. | ✅ **DONE** (dev, 685 tests green) — **needs user runtime verify** |
 | **C** | Jargon (#3) + keyword filters (#2): rename Stage 0/Stage 1/Layer B to plain labels; explicit ordered dependencies (disable until prereq met + hints); a keyword filter on every list. | ✅ **DONE** (dev, 685 tests green) |
-| **D** | Pickers + handoff (#4, #6): array-pivot params → schema-populated pickers; Inspector/Browser/Snapshot right-click → "Pivot this class/field here". | ⏳ |
+| **D** | Pickers + handoff (#4, #6): array-pivot params → schema-populated pickers; Inspector/Browser/Snapshot right-click → "Pivot this class/field here". | ✅ **DONE** (dev, 685 tests green) |
 
 **Wave A notes (2026-06-02)**: `PivotViewModel` — all 6 engine call sites
 (`ClassShortlistEngine`, `KeyDiscoveryEngine` ×2, `SnapshotValueLocatorEngine`,
@@ -1005,3 +1005,22 @@ Results-grid context-menu handlers + `OnPivotResultDoubleTapped` stay in
   class (`CanScoreFields` = snapshot+busy gate AND `HasClassFqn`); the buttons
   grey out and the Pick-key/value + Array dialogs show a "① Pick a class first…"
   hint banner until a Class FQN is set.
+
+**Wave D notes (2026-06-02)**:
+- **Cross-tab handoff "Pivot this class…"** kills the copy-paste loop (#6):
+  `MainWindowViewModel.PivotForClass(asm, fqn)` → `PivotViewModel.ReceiveClassHandoff`
+  (fills `AssemblyFilter` + `ClassFqn`) → switch to `TabIndexClassPivot`. Wired
+  from three sources: the **Browser** class-list context menu
+  (`OnPivotThisClassFromBrowserClicked`, FQN from `ClassItem.DisplayName` +
+  `SelectedAssembly`), the **Snapshot diff** grid context menu
+  (`OnSnapshotPivotClassClicked`, FQN from `SnapshotDiffRow.ClassDisplay`, assembly
+  resolved at Run), and the **Inspector** toolbar "→ Pivot" button
+  (`LiveInspectionViewModel.SendToPivotCommand` → `SendToPivotRequested` →
+  `OnInspectorSendToPivot`, FQN = `TargetNamespace.TargetName`).
+- **Array-pivot pickers (#4)** — the array-field / inner-key / inner-value inputs
+  are already `AutoCompleteBox`es bound to `KnownArrayFields` /
+  `KnownElementFieldNames` (snapshot schema), and `ClassFqn` to `KnownClasses`;
+  combined with the handoff filling the class, no copy-paste round-trip is needed.
+
+**Phase 31 Class-Pivot overhaul COMPLETE** (Waves A–D, dev) — pending a final
+user runtime pass; merge each wave to main as verified (A+B+C already on main).
