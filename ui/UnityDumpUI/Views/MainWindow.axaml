@@ -235,22 +235,25 @@
     <Border DockPanel.Dock="Bottom"
             BorderBrush="#22000000" BorderThickness="0,1,0,0"
             Padding="12,4">
-      <Grid>
-        <!-- Faint, label-less opt-in for the experimental tabs (Snapshot /
-             SPC Query / Class Pivot), which are hidden by default. Disables
-             itself once checked → ON-only for the session, so a visible
-             experimental tab never needs tearing down. Hint only via tooltip. -->
-        <CheckBox HorizontalAlignment="Left" VerticalAlignment="Center"
+      <!-- Centered group: faint, label-less opt-in for the experimental tabs
+           (Snapshot / SPC Query / Class Pivot, hidden by default) sits directly
+           to the LEFT of the copyright line. Disables itself once checked →
+           ON-only for the session, so a visible experimental tab never needs
+           tearing down. Hint only via tooltip. -->
+      <StackPanel Orientation="Horizontal"
+                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Spacing="6">
+        <CheckBox VerticalAlignment="Center"
                   MinWidth="0" Padding="0"
                   Opacity="0.2"
                   IsChecked="{Binding ExperimentalEnabled, Mode=TwoWay}"
                   IsEnabled="{Binding !ExperimentalEnabled}"
                   ToolTip.Tip="開啟實驗性功能" />
         <TextBlock Text="{Binding CopyrightText}"
-                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   VerticalAlignment="Center"
                    Opacity="0.55"
                    FontSize="11" />
-      </Grid>
+      </StackPanel>
     </Border>
 
     <!-- Body -->
