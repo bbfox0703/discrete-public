@@ -264,8 +264,12 @@ std::vector<ResolvedField> EnumerateInstanceFields(Il2CppClass* klass) {
                         if (s > 0) sz = static_cast<std::size_t>(s);
                     }
                     // Phase 31-5 — remember the struct class for value-type
-                    // (non-enum) fields so an interior hit names its component.
-                    if (rf.isValueType && !rf.isEnum) rf.valueTypeClass = fc;
+                    // (non-enum, NON-primitive) fields so an interior hit names
+                    // its component. Primitives MUST stay null: their internal
+                    // self-typed field would make NameStructComponent recurse
+                    // forever on an unchanged interior offset (see Mono twin).
+                    if (rf.isValueType && !rf.isEnum && !TypeNameIsPrimitive(rf.typeName))
+                        rf.valueTypeClass = fc;
                 }
             }
             if (sz == 0) {
@@ -309,9 +313,11 @@ std::string ClassifyKind(const ResolvedField& rf, std::ptrdiff_t fieldOffset) {
 // the specific component (`_position.y`). Mirror of the Mono twin: struct member
 // offsets are header-inclusive, so struct-relative = member.offset −
 // kObjectHeader matches the queried interior offset. Rewrites `fh` in place;
-// recurses once for a nested struct member. Caller holds the ThreadAttachGuard.
+// recurses for nested struct members, depth-capped against any repeating-class
+// chain. Caller holds the ThreadAttachGuard.
 void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset,
-                         FieldHit& fh) {
+                         FieldHit& fh, int depthLeft = 4) {
+    if (depthLeft <= 0) return;
     if (!parent.isValueType || parent.isEnum || parent.valueTypeClass == nullptr) return;
     const std::ptrdiff_t interior = fieldOffset - static_cast<std::ptrdiff_t>(parent.offset);
     if (interior <= 0) return;   // hit at the struct base → keep value-struct kind
@@ -339,7 +345,7 @@ void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset
             ResolvedField nested = m;
             nested.name   = fh.name;
             nested.offset = static_cast<std::size_t>(absOffset);
-            NameStructComponent(nested, fieldOffset, fh);
+            NameStructComponent(nested, fieldOffset, fh, depthLeft - 1);
         }
         return;
     }

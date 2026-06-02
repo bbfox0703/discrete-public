@@ -629,9 +629,19 @@ public sealed partial class PivotViewModel : ObservableObject
 
     /// <summary>One-click close-the-loop for an instance hit: score fields,
     /// apply the suggested key, run the pivot.</summary>
+    // Re-entrancy guard: this command awaits ScoreFieldsAsync then RunAsync,
+    // each of which toggles IsRunning false in its finally — so between the two
+    // awaits IsRunning is briefly false and the gated buttons re-enable. Without
+    // this flag a second click could interleave a duplicate run.
+    private bool _suggestKeyAndRunActive;
+
     [RelayCommand(CanExecute = nameof(CanRun))]
     public async Task SuggestKeyAndRunAsync()
     {
+        if (_suggestKeyAndRunActive) return;
+        _suggestKeyAndRunActive = true;
+        try
+        {
         ErrorMessage = string.Empty;
         if (ArrayPivotMode)
         {
@@ -658,6 +668,8 @@ public sealed partial class PivotViewModel : ObservableObject
             return;
         }
         await RunAsync().ConfigureAwait(true);
+        }
+        finally { _suggestKeyAndRunActive = false; }
     }
 
     // ── 29i-3: unsupervised "likely game-state" ranking + preview ──────
