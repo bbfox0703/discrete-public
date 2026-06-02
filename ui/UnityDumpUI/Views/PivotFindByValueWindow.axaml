@@ -1,0 +1,90 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.PivotFindByValueWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="900" Height="560"
+        WindowStartupLocation="CenterOwner"
+        Title="Find by value — locate the class holding a known value / delta">
+  <DockPanel Margin="10">
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                HorizontalAlignment="Right" Spacing="8" Margin="0,10,0,0">
+      <Button Content="Close" Click="OnCloseClicked" Padding="14,4"/>
+    </StackPanel>
+    <Border Padding="6" Background="#1F808080" CornerRadius="3">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
+          <CheckBox Content="Delta mode"
+                    IsChecked="{Binding ClassPivot.LocatorDeltaMode, Mode=TwoWay}"
+                    VerticalAlignment="Center"
+                    ToolTip.Tip="Off: find a field carrying a value (exact). On: find a field whose value universe MOVED by Δ between two snapshots."/>
+          <TextBlock Text="Value:" VerticalAlignment="Center"
+                     IsVisible="{Binding !ClassPivot.LocatorDeltaMode}"/>
+          <TextBox Text="{Binding ClassPivot.LocatorValue, Mode=TwoWay}"
+                   Width="140" VerticalAlignment="Center" PlaceholderText="9410 or Money"
+                   IsVisible="{Binding !ClassPivot.LocatorDeltaMode}"
+                   ToolTip.Tip="The value you can see in-game. Matched against both rendered and raw forms."/>
+          <TextBlock Text="Δ:" VerticalAlignment="Center"
+                     IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+          <TextBox Text="{Binding ClassPivot.LocatorDelta, Mode=TwoWay}"
+                   Width="90" VerticalAlignment="Center" PlaceholderText="-750"
+                   IsVisible="{Binding ClassPivot.LocatorDeltaMode}"
+                   ToolTip.Tip="The cross-snap change to find (snap A value + Δ = snap B value)."/>
+          <TextBlock Text="A:" VerticalAlignment="Center"
+                     IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+          <ComboBox ItemsSource="{Binding ClassPivot.LocatorSnapChoices}"
+                    SelectedIndex="{Binding ClassPivot.LocatorSnapAIndex, Mode=TwoWay}"
+                    MinWidth="120" VerticalAlignment="Center"
+                    IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+          <TextBlock Text="B:" VerticalAlignment="Center"
+                     IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+          <ComboBox ItemsSource="{Binding ClassPivot.LocatorSnapChoices}"
+                    SelectedIndex="{Binding ClassPivot.LocatorSnapBIndex, Mode=TwoWay}"
+                    MinWidth="120" VerticalAlignment="Center"
+                    IsVisible="{Binding ClassPivot.LocatorDeltaMode}"/>
+          <TextBlock Text="±" VerticalAlignment="Center"/>
+          <TextBox Text="{Binding ClassPivot.LocatorTolerance, Mode=TwoWay}"
+                   Width="60" VerticalAlignment="Center" PlaceholderText="0"
+                   ToolTip.Tip="Optional numeric tolerance for float jitter / off-by-one."/>
+          <Button Content="🎯 Find" Command="{Binding ClassPivot.FindByValueCommand}" Padding="10,4"/>
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="12" Margin="0,0,0,6">
+          <CheckBox Content="Include array elements"
+                    IsChecked="{Binding ClassPivot.LocatorIncludeArrays, Mode=TwoWay}"
+                    ToolTip.Tip="Also sweep array element values (Layer A) and inner element fields (Layer B)."/>
+          <CheckBox Content="Numeric only"
+                    IsChecked="{Binding ClassPivot.LocatorNumericOnly, Mode=TwoWay}"
+                    ToolTip.Tip="Skip string / pointer fields (always on in delta mode)."/>
+          <CheckBox Content="Include synthetic classes"
+                    IsChecked="{Binding ClassPivot.LocatorIncludeSynthetic, Mode=TwoWay}"
+                    ToolTip.Tip="Include compiler-generated classes (rarely hold the value you're hunting)."/>
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.LocatorStatus}"
+                   Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+        <DataGrid Name="PivotLocatorGrid"
+                  ItemsSource="{Binding ClassPivot.LocatorHits}"
+                  SelectedItem="{Binding ClassPivot.SelectedLocatorHit, Mode=TwoWay}"
+                  AutoGenerateColumns="False" IsReadOnly="True"
+                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                  CanUserResizeColumns="True" CanUserSortColumns="True"
+                  DoubleTapped="OnPivotLocatorDoubleTapped">
+          <DataGrid.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="Load into pivot query" Click="OnPivotLocatorUseClicked"/>
+            </ContextMenu>
+          </DataGrid.ContextMenu>
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Class FQN" Binding="{Binding ClassFqn}" Width="Auto" MinWidth="220" SortMemberPath="ClassFqn" CanUserSort="True"/>
+            <DataGridTextColumn Header="Assembly" Binding="{Binding Assembly}" Width="Auto" MinWidth="120" SortMemberPath="Assembly" CanUserSort="True"/>
+            <DataGridTextColumn Header="Field" Binding="{Binding FieldName}" Width="Auto" MinWidth="180" SortMemberPath="FieldName" CanUserSort="True"/>
+            <DataGridTextColumn Header="Arr?" Binding="{Binding ArrayDisplay}" Width="55" SortMemberPath="InArrayElement" CanUserSort="True"/>
+            <DataGridTextColumn Header="Snaps" Binding="{Binding SnapHitDisplay}" Width="60" SortMemberPath="SnapHitCount" CanUserSort="True"/>
+            <DataGridTextColumn Header="Match%" Binding="{Binding RarityDisplay}" Width="70" SortMemberPath="MatchRarity" CanUserSort="True"/>
+            <DataGridTextColumn Header="Sample" Binding="{Binding SampleValue}" Width="Auto" MinWidth="120"/>
+            <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="65" SortMemberPath="Score" CanUserSort="True"/>
+          </DataGrid.Columns>
+        </DataGrid>
+      </DockPanel>
+    </Border>
+  </DockPanel>
+</Window>

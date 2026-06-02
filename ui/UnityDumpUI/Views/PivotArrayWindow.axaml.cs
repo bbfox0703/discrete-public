@@ -1,0 +1,53 @@
+// PivotArrayWindow.axaml.cs — Class Pivot UI/UX overhaul Wave B.
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Markup.Xaml;
+using UnityDumpUI.ViewModels;
+
+namespace UnityDumpUI.Views;
+
+public partial class PivotArrayWindow : Window
+{
+    public PivotArrayWindow()
+    {
+        AvaloniaXamlLoader.Load(this);
+    }
+
+    public PivotArrayWindow(MainWindowViewModel vm) : this()
+    {
+        DataContext = vm;
+    }
+
+    private FieldScore? GetSelectedElementFieldScore()
+    {
+        var grid = this.FindControl<DataGrid>("PivotElementFieldScoreGrid");
+        return grid?.SelectedItem as FieldScore;
+    }
+
+    private void OnPivotElementFieldScoreDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (sender is not DataGrid grid) return;
+        if (grid.SelectedItem is not FieldScore row) return;
+        vm.ClassPivot.AddElementFieldToInnerKeys(row);
+    }
+
+    private void OnPivotElementFieldAddToInnerKeysClicked(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedElementFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddElementFieldToInnerKeys(f);
+    }
+
+    private void OnPivotElementFieldAddToInnerValuesClicked(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var f = GetSelectedElementFieldScore();
+        if (f is null) return;
+        vm.ClassPivot.AddElementFieldToInnerValues(f);
+    }
+
+    private void OnCloseClicked(object? sender, RoutedEventArgs e) => Close();
+}

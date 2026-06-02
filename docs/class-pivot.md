@@ -951,7 +951,7 @@ engines stay.
 | Wave | Scope (maps to problem #) | Status |
 |---|---|---|
 | **A** | Responsiveness (#5): move every engine `.Run()` off the UI thread (`Task.Run`) + indeterminate busy bar bound to `IsRunning` + disable Run buttons while busy (`[NotifyCanExecuteChangedFor]`). Pivot **and** SPC Query tabs. | ✅ **DONE** (dev, 685 tests green) — needs user visual verify |
-| **B** | Layout (#1): replace the 7 stacked panels with a single toolbar of buttons; each opens a dialog bound to the SHARED `PivotViewModel`; Results grid + busy bar fill the tab body. No engine/command behaviour change. | ⏳ next — **check in on arrangement** |
+| **B** | Layout (#1): replace the 7 stacked panels with a single toolbar of buttons; each opens a dialog bound to the SHARED VM; Results grid + busy bar fill the tab body. No engine/command behaviour change. | ✅ **DONE** (dev, 685 tests green) — **needs user runtime verify** |
 | **C** | Jargon (#3) + keyword filters (#2): rename Stage 0/Stage 1/Layer B to plain labels; explicit ordered dependencies (disable until prereq met + hints); a keyword filter on every list. | ⏳ |
 | **D** | Pickers + handoff (#4, #6): array-pivot params → schema-populated pickers; Inspector/Browser/Snapshot right-click → "Pivot this class/field here". | ⏳ |
 
@@ -967,3 +967,21 @@ command on both VMs so the buttons grey out during a run — important now that 
 UI stays live and a second click could start a racing concurrent run.
 Snapshot-tab diff/hydrate audit still pending (its capture path already uses the
 bulk pipe + `BulkOperationGate`; the diff compute is the remaining candidate).
+
+**Wave B notes (2026-06-02)**: the Class Pivot tab body is now a **toolbar of 7
+buttons** (Snapshots / Pivot query / Find by value / Browse classes / Likely
+game-state / Pick key·value / Array-element pivot) + the busy bar + status
+banners + the **Results grid filling the rest**. Each button opens a `Window`
+(`PivotQueryWindow`, `PivotSnapshotsWindow`, `PivotFindByValueWindow`,
+`PivotBrowseClassesWindow`, `PivotLikelyStateWindow`, `PivotPickFieldsWindow`,
+`PivotArrayWindow`) whose **DataContext is the shared MainWindowViewModel**, so
+the existing `{Binding ClassPivot.*}` bindings + RelayCommands + the per-grid
+DoubleTapped/context-menu handlers move **verbatim** (handlers relocated into
+each dialog's code-behind). No engine/command/VM behaviour change. When a dialog
+runs (e.g. Pivot query → Run, or Find-by-value → load + Suggest-key-and-run) it
+populates `ClassPivot.Results`, which the tab grid reflects on close. **Builds +
+685 tests green; runtime (dialog open / grid populate) NOT yet user-verified.**
+Follow-ups for Wave C: (a) the old per-panel handlers in `MainWindow.axaml.cs`
+are now dead (their panels moved) — harmless but should be pruned; (b) the
+Results-grid context-menu handlers + `OnPivotResultDoubleTapped` stay in
+`MainWindow.axaml.cs` (the grid stayed).

@@ -1,0 +1,54 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.PivotPickFieldsWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="820" Height="540"
+        WindowStartupLocation="CenterOwner"
+        Title="Pick key / value fields — ranked by key suitability">
+  <DockPanel Margin="10">
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                HorizontalAlignment="Right" Spacing="8" Margin="0,10,0,0">
+      <Button Content="Close" Click="OnCloseClicked" Padding="14,4"/>
+    </StackPanel>
+    <Border Padding="6" Background="#1F808080" CornerRadius="3">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
+          <Button Content="⟳ Score fields" Command="{Binding ClassPivot.ScoreFieldsCommand}" Padding="10,4"/>
+          <TextBlock Text="Filter:" VerticalAlignment="Center"/>
+          <TextBox Text="{Binding ClassPivot.FieldScoreFilter, Mode=TwoWay}"
+                   PlaceholderText="field name" Width="160" VerticalAlignment="Center"/>
+          <TextBlock Text="Suggested key:" VerticalAlignment="Center" Margin="12,0,0,0"/>
+          <TextBlock Text="{Binding ClassPivot.SuggestedKeyDisplay}" VerticalAlignment="Center" FontWeight="SemiBold"/>
+          <Button Content="Apply suggested key" Command="{Binding ClassPivot.ApplySuggestedKeyCommand}" Padding="8,3"/>
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.SuggestedKeyReason}"
+                   Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,2"/>
+        <TextBlock DockPanel.Dock="Top" Text="{Binding ClassPivot.FieldScoreStatus}"
+                   Opacity="0.75" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+        <DataGrid Name="PivotFieldScoreGrid"
+                  ItemsSource="{Binding ClassPivot.FieldScores}"
+                  AutoGenerateColumns="False" IsReadOnly="True"
+                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                  CanUserResizeColumns="True" CanUserSortColumns="True"
+                  DoubleTapped="OnPivotFieldScoreDoubleTapped">
+          <DataGrid.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="Add to Key fields" Click="OnPivotFieldAddToKeysClicked"/>
+              <MenuItem Header="Add to Value fields" Click="OnPivotFieldAddToValuesClicked"/>
+            </ContextMenu>
+          </DataGrid.ContextMenu>
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Field" Binding="{Binding FieldName}" Width="Auto" MinWidth="200" SortMemberPath="FieldName" CanUserSort="True"/>
+            <DataGridTextColumn Header="Type" Binding="{Binding FieldType}" Width="Auto" MinWidth="160" SortMemberPath="FieldType" CanUserSort="True"/>
+            <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="70" SortMemberPath="Score" CanUserSort="True"/>
+            <DataGridTextColumn Header="Stable" Binding="{Binding StablePctDisplay}" Width="70" SortMemberPath="SStable" CanUserSort="True"/>
+            <DataGridTextColumn Header="Card" Binding="{Binding CardPctDisplay}" Width="70" SortMemberPath="SCardinality" CanUserSort="True"/>
+            <DataGridTextColumn Header="Type pr." Binding="{Binding TypePriorDisplay}" Width="70" SortMemberPath="TypePrior" CanUserSort="True"/>
+            <DataGridTextColumn Header="Name pr." Binding="{Binding NamePriorDisplay}" Width="70" SortMemberPath="NamePrior" CanUserSort="True"/>
+          </DataGrid.Columns>
+        </DataGrid>
+      </DockPanel>
+    </Border>
+  </DockPanel>
+</Window>
