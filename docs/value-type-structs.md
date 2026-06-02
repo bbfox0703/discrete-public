@@ -279,6 +279,19 @@ component name automatically; the UI renders it as-is).
 So a value scan hitting the `.y` float of a Vector3 field now reverse-resolves
 to `Class._position.y` instead of `Class._position` (or "interior").
 
+**Recursion-crash fix (build #990, session bug review)** — the first cut stored
+`valueTypeClass` for PRIMITIVE value-type fields too, and `NameStructComponent`
+had no depth cap. A reverse-lookup / value-scan hit landing INSIDE a primitive
+field (e.g. +2 into a `float`) recursed into the primitive's self-typed internal
+field (`System.Single.m_value` at struct-rel 0) with an unchanged interior
+offset → unbounded recursion → stack overflow → **game CTD**. (The original 31-5
+smoke missed it: that hit was at the struct base, interior 0, which early-
+returns.) Fixed in both finders: (a) don't store `valueTypeClass` for primitives
+(`TypeNameIsPrimitive` guard) so a primitive member never recurses; (b) a depth
+cap of 4 on `NameStructComponent` as belt-and-suspenders. The 31-2 capture path
+was already safe (its `ShouldExpandValueStruct` gate never recurses into
+primitives, which decode to `value` not a bare `ptr`).
+
 ### 5.4 Value Search — single component + reverse-lookup
 
 Value Search stays a **live scalar scan** (unchanged scan path). The Vec3
@@ -302,7 +315,7 @@ story:
 | **31-3** | SPC/diff `ExpandStructMembers` fan-out + summary + count parity | ✅ **SHIPPED** (dev) | UI unit tests green |
 | **31-4** | Pivot/KeyDiscovery per-component (dotted paths) + pickers | ✅ **SHIPPED** (dev) | UI unit tests green |
 | **31-2** | DLL Phase B (generic value-type recursion) | ✅ **SHIPPED & live-verified (Mono x64, build #960)** | `member.offset − 2*ptrSize`; class captured during ReadClassInfo (nested-type-safe) |
-| **31-5** | Value Search reverse-lookup names the component | ✅ **SHIPPED** (dev, build #965) — needs live-smoke | DLL address-finder names `_position.y` on an interior value-struct hit |
+| **31-5** | Value Search reverse-lookup names the component | ✅ **SHIPPED** (build #990) — needs live-smoke | DLL address-finder names `_position.y` on an interior value-struct hit; **recursion-crash fixed (build #990)** |
 | **31-6** | Fix EXISTING live Inspector ValueStruct drill | ✅ SHIPPED (build #936) + live-verified | (a) +0x10 header double-count; (b) nested-type name |
 
 ### 31-2 implementation notes (build #960, 2026-06-02)

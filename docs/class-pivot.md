@@ -1022,5 +1022,16 @@ Results-grid context-menu handlers + `OnPivotResultDoubleTapped` stay in
   `KnownElementFieldNames` (snapshot schema), and `ClassFqn` to `KnownClasses`;
   combined with the handoff filling the class, no copy-paste round-trip is needed.
 
-**Phase 31 Class-Pivot overhaul COMPLETE** (Waves A–D, dev) — pending a final
-user runtime pass; merge each wave to main as verified (A+B+C already on main).
+**Phase 31 Class-Pivot overhaul COMPLETE** (Waves A–D) — all merged to main.
+
+**Post-overhaul bug review (build #990, merged `f621837`)** — a leak/bug pass
+over the overhaul found one HIGH issue here: Wave A moved the Pivot/SPC engines
+to `Task.Run`, and `SnapshotEnvelope.Unload()` (Snapshot-tab Diff/Drop/evict on
+the UI thread) cleared `env.Classes` IN PLACE — clearing the list mid-`foreach`
+on the background thread throws "collection modified". Fixed by making `Classes`
+settable and having `Unload()` REPLACE the reference (atomic) instead of clearing,
+so an in-flight reader keeps enumerating its old list. Also a LOW re-entrancy
+guard on `SuggestKeyAndRunAsync`. Everything else in the overhaul (dialog leaks,
+the `SendToPivotRequested` subscription, sort wiring, dead-code prune, the
+Grid+splitter layout) was verified clean. (The review's CRITICAL finding was in
+the unrelated 31-5 address-finder — see value-type-structs.md.)
