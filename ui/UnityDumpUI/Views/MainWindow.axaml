@@ -675,6 +675,42 @@
                              Width="80" Height="4" VerticalAlignment="Center" />
               </StackPanel>
 
+              <!-- Field-filter builder: compose numeric predicates without
+                   hand-writing JSON. Pick a numeric field → operator → value;
+                   "between" reveals a second box for a closed range. Each Add
+                   appends to the JSON row below; the next Find applies them
+                   AND-combined. Options populate after the first walk. -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="6" Margin="0,0,0,6">
+                <TextBlock Text="Filter builder" VerticalAlignment="Center" Opacity="0.7" />
+                <ComboBox MinWidth="190"
+                          ItemsSource="{Binding Inspector.FilterFieldOptions}"
+                          SelectedItem="{Binding Inspector.SelectedFilterField, Mode=TwoWay}"
+                          PlaceholderText="numeric field…">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:FilterFieldOption">
+                      <TextBlock Text="{Binding Display}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+                <ComboBox Width="92"
+                          ItemsSource="{Binding Inspector.FilterOps}"
+                          SelectedItem="{Binding Inspector.FilterOp, Mode=TwoWay}" />
+                <TextBox Width="84" VerticalAlignment="Center"
+                         Text="{Binding Inspector.FilterValue1, Mode=TwoWay}"
+                         PlaceholderText="value" />
+                <TextBox Width="84" VerticalAlignment="Center"
+                         Text="{Binding Inspector.FilterValue2, Mode=TwoWay}"
+                         PlaceholderText="high"
+                         IsVisible="{Binding Inspector.IsRangeOp}" />
+                <Button Content="Add"
+                        Command="{Binding Inspector.AddFilterPredicateCommand}"
+                        ToolTip.Tip="Append this predicate to the field filter below. The next Find applies them." />
+                <Button Content="Clear"
+                        Command="{Binding Inspector.ClearFieldFilterCommand}"
+                        ToolTip.Tip="Remove all field-filter predicates." />
+              </StackPanel>
+
               <!-- Phase 32 — field-filter row (generic per-class predicate). -->
               <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
                           Spacing="6" Margin="0,0,0,6">
