@@ -51,8 +51,15 @@ function Sync-One {
         Write-Host "[更新] $path" -ForegroundColor Cyan
         Push-Location $path
         try {
-            git pull --ff-only
-            if ($Recursive) { git submodule update --init --recursive --depth 1 }
+            # `git pull --ff-only` can't advance a `--depth 1` shallow clone
+            # (there's no shared merge base to fast-forward against), so deps —
+            # Zydis included — silently stayed frozen at their first-clone
+            # snapshot. Fetch the current upstream tip shallowly and hard-reset
+            # the working tree to it, so the sync actually moves forward; then
+            # re-sync submodules (Zydis carries Zycore as a submodule).
+            git fetch --depth 1 origin
+            git reset --hard FETCH_HEAD
+            if ($Recursive) { git submodule update --init --recursive --depth 1 --force }
         } finally { Pop-Location }
     } else {
         Write-Host "[下載] $path" -ForegroundColor Green

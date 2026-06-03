@@ -1189,6 +1189,18 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         });
     }
 
+    /// <summary>Re-probe the AOBMaker pipe on demand (titlebar ↻ button) so the
+    /// status updates immediately after the user loads the plugin in CE,
+    /// instead of waiting for the next AOBMaker request. AvailabilityChanged
+    /// fires only on a transition, so refresh the property here too in case the
+    /// state is unchanged but the user expects visible feedback.</summary>
+    [RelayCommand]
+    private async Task RefreshAobMakerAsync()
+    {
+        bool ok = await _aobMaker.CheckAvailabilityAsync().ConfigureAwait(true);
+        IsAobMakerAvailable = ok;
+    }
+
     /// <summary>
     /// Phase 22d — Tools menu "Inject Discrete Bridge into CE Table".
     /// Embeds the 7 bridge lua files into the currently-open CE table
