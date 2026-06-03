@@ -44,6 +44,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IProxyInstaller    _proxyInstaller;
     private readonly IUnityGameScanner  _gameScanner;
     private readonly AobMakerBridge     _aobMaker;
+    private readonly AobMakerAppClient  _aobMakerApp;
     private CancellationTokenSource?    _connectCts;
 
     /// <summary>
@@ -153,6 +154,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // (IsAobMakerAvailable stays false, which is the correct initial
         // state).
         _ = _aobMaker.CheckAvailabilityAsync();
+
+        // AOBMaker standalone-app pipe (\\.\pipe\AOBMaker → GenerateAob). Same
+        // shape as the CE-plugin bridge above but a separate process / pipe:
+        // when it's up, "Copy: aobscan" / "Push aobscan to CE" ask it for a
+        // UNIQUE AOB instead of the DLL method-prologue pattern. Opportunistic
+        // startup probe so the indicator reflects reality without a click.
+        _aobMakerApp = new AobMakerAppClient(_logger);
+        _aobMakerApp.AvailabilityChanged += OnAobMakerAppAvailabilityChanged;
+        _ = _aobMakerApp.CheckAvailabilityAsync();
 
         // Phase 17c — handoff from the Address Lookup tab back to the
         // Inspector tab. The VM raises this when the user clicks
@@ -402,6 +412,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public IAobMakerBridge AobMaker => _aobMaker;
 
     /// <summary>
+    /// Session-wide AOBMaker standalone-app client. Threaded into
+    /// MethodOverloads so its "Copy:/Push: aobscan" actions can request a
+    /// unique AOB (GenerateAob) when this pipe is up.
+    /// </summary>
+    public IAobMakerAppClient AobMakerApp => _aobMakerApp;
+
+    /// <summary>
     /// Footer credit line, decoded from the XOR-shielded blob in
     /// <see cref="LocalizedText"/>. Built once at VM construction so the
     /// plaintext never appears as a literal in the assembly.
@@ -487,6 +504,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// Bridge will actually reach a CE instance.
     /// </summary>
     [ObservableProperty] private bool _isAobMakerAvailable;
+
+    /// <summary>
+    /// Mirrors <see cref="IAobMakerAppClient.IsAvailable"/> for the connection
+    /// bar's "AOBMaker App: connected/disconnected" indicator. When true, the
+    /// MethodOverloads aobscan actions ask the app for a unique AOB.
+    /// </summary>
+    [ObservableProperty] private bool _isAobMakerAppAvailable;
 
     /// <summary>
     /// Phase 22d — status line for the bridge-inject pipeline. Updated
@@ -1201,6 +1225,27 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         IsAobMakerAvailable = ok;
     }
 
+    /// <summary>Reacts to AOBMaker standalone-app pipe availability transitions.
+    /// UI-thread marshalled, same as <see cref="OnAobMakerAvailabilityChanged"/>.</summary>
+    private void OnAobMakerAppAvailabilityChanged(object? sender, bool isAvailable)
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            IsAobMakerAppAvailable = isAvailable;
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"AOBMaker app: {(isAvailable ? "available" : "unavailable")}");
+        });
+    }
+
+    /// <summary>Re-probe the AOBMaker standalone-app pipe on demand (titlebar ↻)
+    /// after the user starts AOBMaker.exe, mirroring <see cref="RefreshAobMakerAsync"/>.</summary>
+    [RelayCommand]
+    private async Task RefreshAobMakerAppAsync()
+    {
+        bool ok = await _aobMakerApp.CheckAvailabilityAsync().ConfigureAwait(true);
+        IsAobMakerAppAvailable = ok;
+    }
+
     /// <summary>
     /// Phase 22d — Tools menu "Inject Discrete Bridge into CE Table".
     /// Embeds the 7 bridge lua files into the currently-open CE table
@@ -1842,6 +1887,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _ = Inspector.DisposeAsync();
         _ = _pipe.DisposeAsync();
         _ = _bulkPipe.DisposeAsync();
+        _aobMakerApp.AvailabilityChanged -= OnAobMakerAppAvailabilityChanged;
+        _aobMakerApp.Dispose();
         _logger.Dispose();
     }
 }

@@ -950,6 +950,17 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             // the common splits without enumerating every UnityEngine.*.dll.
             if (!list.Contains("UnityEngine.CoreModule")) list.Add("UnityEngine.CoreModule");
             if (!list.Contains("UnityEngine"))            list.Add("UnityEngine");
+            // uGUI types (UnityEngine.UI.Text / Image / Button …) live in the
+            // UnityEngine.UI assembly, NOT CoreModule — without these the
+            // name-based fallback can never resolve a uGUI field's class
+            // ("class not found: UnityEngine.UI.Text"). TextRenderingModule
+            // covers UnityEngine.UI.* legacy text rendering helpers.
+            if (@namespace.StartsWith("UnityEngine.UI", StringComparison.Ordinal))
+            {
+                if (!list.Contains("UnityEngine.UI"))                  list.Add("UnityEngine.UI");
+                if (!list.Contains("UnityEngine.UIModule"))            list.Add("UnityEngine.UIModule");
+                if (!list.Contains("UnityEngine.TextRenderingModule")) list.Add("UnityEngine.TextRenderingModule");
+            }
         }
         else if (@namespace.StartsWith("System", StringComparison.Ordinal))
         {

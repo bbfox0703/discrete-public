@@ -18,7 +18,25 @@
     <Border DockPanel.Dock="Top"
             BorderBrush="#22000000" BorderThickness="0,0,0,1"
             Padding="12,8">
-      <StackPanel Orientation="Horizontal" Spacing="12">
+    <!-- Single-cell overlay. The dev-tool reminder is declared FIRST (lowest
+         Z-order) and right-aligned; the functional controls StackPanel is
+         declared AFTER (higher Z-order), so when the window is too narrow to
+         show both the controls draw on top of — i.e. cover — the reminder
+         rather than pushing it off-screen. -->
+    <Grid>
+      <!-- Dev-tool reminder. DiscreteUI is for developers + power users;
+           CE-table publishers should embed the backend DLL + scripts inside
+           their .CT (see scripts/ce_table_bootstrap.lua) instead of
+           distributing DiscreteUI.exe to end users. Subtle, never dismissable,
+           lowest Z-order so functional controls win the space when it's tight. -->
+      <TextBlock Text="{StaticResource App.DevToolWarning}"
+                 ToolTip.Tip="{StaticResource App.DevToolWarningTooltip}"
+                 VerticalAlignment="Center"
+                 HorizontalAlignment="Right"
+                 ZIndex="0"
+                 Opacity="0.55"
+                 Foreground="#FFE0A02C" />
+      <StackPanel Orientation="Horizontal" Spacing="12" ZIndex="1">
         <Button Content="{StaticResource Conn.Inject}"
                 Command="{Binding InjectAndConnectCommand}" />
         <Button Content="{StaticResource Conn.Connect}"
@@ -126,27 +144,35 @@
           <TextBlock Text="{StaticResource Tools.AobMakerNotConnected}"
                      Opacity="0.55"
                      IsVisible="{Binding !IsAobMakerAvailable}" />
-          <!-- Re-probe the AOBMaker pipe on demand (e.g. after loading the
-               plugin in CE) instead of waiting for the next request. -->
+          <!-- Re-probe the AOBMaker CE-plugin pipe on demand (e.g. after loading
+               the plugin in CE) instead of waiting for the next request. -->
           <Button Content="↻" FontSize="11" Padding="5,0" MinHeight="18"
                   Command="{Binding RefreshAobMakerCommand}"
                   ToolTip.Tip="{StaticResource Tools.AobMakerRefreshTooltip}" />
         </StackPanel>
 
-        <!-- Dev-tool reminder. DiscreteUI is for developers + power
-             users; CE-table publishers should embed the backend DLL +
-             scripts inside their .CT (see scripts/ce_table_bootstrap.lua)
-             instead of distributing DiscreteUI.exe to end users.
-             Subtle text, never dismissable — always visible so a fresh
-             dev knows the right deployment shape. -->
-        <TextBlock Text="{StaticResource App.DevToolWarning}"
-                   ToolTip.Tip="{StaticResource App.DevToolWarningTooltip}"
-                   VerticalAlignment="Center"
-                   HorizontalAlignment="Right"
-                   Opacity="0.55"
-                   Foreground="#FFE0A02C"
-                   Margin="24,0,0,0" />
+        <!-- AOBMaker standalone-app pipe availability (\\.\pipe\AOBMaker →
+             GenerateAob). Separate from the CE-plugin DLL indicator above:
+             when this is connected, "Copy: aobscan" / "Push aobscan to CE"
+             ask the app for a UNIQUE AOB (Mode D) instead of the DLL's
+             method-prologue pattern. Same subtle dot + label + ↻ shape. -->
+        <StackPanel Orientation="Horizontal" Spacing="4"
+                    VerticalAlignment="Center" Margin="16,0,0,0">
+          <TextBlock Text="{StaticResource Tools.AobMakerAppStatusLabel}"
+                     Opacity="0.7" />
+          <TextBlock Text="{StaticResource Tools.AobMakerAppConnected}"
+                     Foreground="#FF35A744"
+                     FontWeight="SemiBold"
+                     IsVisible="{Binding IsAobMakerAppAvailable}" />
+          <TextBlock Text="{StaticResource Tools.AobMakerAppNotConnected}"
+                     Opacity="0.55"
+                     IsVisible="{Binding !IsAobMakerAppAvailable}" />
+          <Button Content="↻" FontSize="11" Padding="5,0" MinHeight="18"
+                  Command="{Binding RefreshAobMakerAppCommand}"
+                  ToolTip.Tip="{StaticResource Tools.AobMakerAppRefreshTooltip}" />
+        </StackPanel>
       </StackPanel>
+    </Grid>
     </Border>
 
     <!-- Phase 22d: bridge inject status line. Appears only after the

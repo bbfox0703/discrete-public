@@ -190,4 +190,80 @@ public class AobAaScriptGeneratorTests
             Assert.Contains("_G.discrete_logScan(\"Mathf_Abs_int32\")", script);
         }
     }
+
+    // ---- AOBMaker-app unique-AOB integration (front warning + offset) -------
+
+    private static AaScriptOverload UniqueIl2cppOverload(int injectionOffset = 0) => new()
+    {
+        MethodName         = "Abs",
+        ClassName          = "Mathf",
+        Namespace          = "UnityEngine",
+        HumanSuffix        = "int32",
+        Signature          = "(System.Int32)",
+        Pattern            = "48 89 5C 24 08 57 48 83 EC 20 48 8B 05 ?? ?? ?? ??",
+        ModuleName         = "GameAssembly.dll",
+        Address            = "0x00007FF876123450",
+        ModuleOffset       = "0x00000000B23450",
+        ReturnType         = "System.Int32",
+        AobIsUnique        = true,
+        AobInjectionOffset = injectionOffset,
+    };
+
+    [Fact]
+    public void Build_NonUniqueIl2cpp_EmitsFrontWarning()
+    {
+        // Default Il2cppOverload carries the DLL method-prologue pattern
+        // (AobIsUnique=false) → the script must warn loudly, right after the
+        // syntaxcheck guard, that the AOB may not be unique.
+        string s = AobAaScriptGenerator.Build(new[] { Il2cppOverload() });
+
+        Assert.Contains("WARNING:", s);
+        Assert.Contains("NOT guaranteed unique", s);
+        Assert.DoesNotContain("verified unique", s);
+        // The warning sits immediately after the guard (before the helper comment).
+        int guard   = s.IndexOf("if syntaxcheck then return end", StringComparison.Ordinal);
+        int warning = s.IndexOf("WARNING:", StringComparison.Ordinal);
+        int helper  = s.IndexOf("discrete: AA helper", StringComparison.Ordinal);
+        Assert.True(guard < warning && warning < helper);
+    }
+
+    [Fact]
+    public void Build_UniqueIl2cpp_EmitsUniqueNote_NoWarning()
+    {
+        // App-generated unique AOB → confirmation note, no scary warning.
+        string s = AobAaScriptGenerator.Build(new[] { UniqueIl2cppOverload() });
+
+        Assert.Contains("verified unique", s);
+        Assert.DoesNotContain("WARNING:", s);
+        // Offset 0 → match start IS the entry: simple aobscanmodule + registersymbol.
+        Assert.Contains("aobscanmodule(Mathf_Abs_int32, GameAssembly.dll,", s);
+        Assert.Contains("registersymbol(Mathf_Abs_int32)", s);
+        Assert.DoesNotContain("Mathf_Abs_int32_aob", s);
+    }
+
+    [Fact]
+    public void Build_UniqueWithInjectionOffset_RegistersEntryAtAnchorPlusOffset()
+    {
+        // Mode D extended the pattern backwards (offset 5): aobscan into an
+        // anchor, then register the method-entry symbol at anchor+5 in {$lua}.
+        string s = AobAaScriptGenerator.Build(new[] { UniqueIl2cppOverload(injectionOffset: 5) });
+
+        Assert.Contains("aobscanmodule(Mathf_Abs_int32_aob, GameAssembly.dll,", s);
+        Assert.Contains("registersymbol(Mathf_Abs_int32_aob)", s);
+        Assert.Contains("getAddressSafe(\"Mathf_Abs_int32_aob\")", s);
+        Assert.Contains("registerSymbol(\"Mathf_Abs_int32\", b + 5)", s);
+        // DISABLE tears down both the anchor (asm) and the entry symbol (lua).
+        Assert.Contains("unregistersymbol(Mathf_Abs_int32_aob)", s);
+        Assert.Contains("pcall(unregisterSymbol, 'Mathf_Abs_int32')", s);
+    }
+
+    [Fact]
+    public void Build_MonoJitOnly_EmitsNeitherWarningNorUniqueNote()
+    {
+        // No aobscan at all (bridge-resolve) → no AOB-quality banner.
+        string s = AobAaScriptGenerator.Build(new[] { MonoJitOverload() });
+
+        Assert.DoesNotContain("WARNING:", s);
+        Assert.DoesNotContain("verified unique", s);
+    }
 }
