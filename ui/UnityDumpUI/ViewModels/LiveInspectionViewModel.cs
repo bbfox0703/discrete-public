@@ -282,9 +282,31 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// existing convention (auto-refresh and FindInstances both behave the
     /// same way).
     /// </summary>
-    public void FocusOnInstance(string address)
+    /// <summary>
+    /// Absolute address of a field to auto-focus once the walk that the
+    /// <see cref="SelectedInstance"/> change kicks off finishes. Set by
+    /// <see cref="FocusOnInstance(string,string?)"/> for the Value-Search →
+    /// Inspector handoff so a deeply-nested match (e.g. team.gold inside a
+    /// value struct) is expanded-to + selected, not left at the top level.
+    /// One-shot: cleared by the walk after it consumes it.
+    /// </summary>
+    private string? _pendingFocusFieldAddr;
+
+    public void FocusOnInstance(string address) => FocusOnInstance(address, null);
+
+    /// <summary>
+    /// Focus an instance and, optionally, drill the walked tree down to the
+    /// field at <paramref name="focusFieldAddress"/> (its absolute storage
+    /// address) and select it. The drilldown runs after the walk completes —
+    /// see <see cref="FocusFieldByAddressAsync"/>.
+    /// </summary>
+    public void FocusOnInstance(string address, string? focusFieldAddress)
     {
         if (!HasTarget || string.IsNullOrWhiteSpace(address)) return;
+        // Stash BEFORE the SelectedInstance assignment below — that setter fires
+        // WalkInstanceAsync, which consumes the pending address on completion.
+        _pendingFocusFieldAddr =
+            string.IsNullOrWhiteSpace(focusFieldAddress) ? null : focusFieldAddress;
         InstanceItem? existing = null;
         foreach (var i in Instances)
         {
@@ -299,7 +321,13 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             existing = new InstanceItem(Instances.Count, address);
             Instances.Insert(0, existing);
         }
-        SelectedInstance = existing;  // setter fires WalkInstanceAsync
+        bool alreadySelected = ReferenceEquals(SelectedInstance, existing);
+        SelectedInstance = existing;  // setter fires WalkInstanceAsync (on change)
+        // If it was already the selected instance the setter is a no-op, so no
+        // walk runs to consume _pendingFocusFieldAddr — re-walk explicitly so
+        // the focus still lands (e.g. navigating to two fields of one instance).
+        if (alreadySelected && _pendingFocusFieldAddr is not null)
+            _ = WalkInstanceAsync(existing.Address);
     }
 
     // ---------- Instances -------------------------------------------------
@@ -588,7 +616,22 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private Task RefreshWalkAsync()
     {
         if (SelectedInstance is null) return Task.CompletedTask;
-        return WalkInstanceAsync(SelectedInstance.Address);
+        // Deep replay so nested array sizes (e.g. Team→Item after buying items)
+        // are re-read, not just the top-level fields.
+        return WalkInstanceAsync(SelectedInstance.Address, deepReplay: true);
+    }
+
+    /// <summary>Slash-joined path of field names / array-index labels from the
+    /// root to <paramref name="n"/> — a stable identity for replaying which
+    /// nodes were expanded across a re-walk (field names are unique per class;
+    /// array slots are unique by index label).</summary>
+    private static string NodePath(WalkedFieldNode n)
+    {
+        var segs = new List<string>(4);
+        for (WalkedFieldNode? cur = n; cur is not null; cur = cur.Parent)
+            segs.Add(cur.Name);
+        segs.Reverse();
+        return string.Join('/', segs);
     }
 
     [RelayCommand] private void AutoRefreshOff()  => AutoRefreshIntervalMs = 0;
@@ -648,7 +691,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// loop uses this to stop itself instead of re-hitting the same error every
     /// tick. Cancellation / no-target return true (not an error).
     /// </summary>
-    private async Task<bool> WalkInstanceAsync(string address)
+    private async Task<bool> WalkInstanceAsync(string address, bool deepReplay = false)
     {
         if (!HasTarget) return true;
 
@@ -660,12 +703,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         IsLoadingWalk = true;
         try
         {
-            // Snapshot which root-level nodes were expanded so we can replay.
+            // Snapshot which nodes were expanded so we can replay. Auto-refresh /
+            // instance-switch replay only the ROOT level (bounded cost). A manual
+            // Re-walk does a DEEP replay (every expanded node, by path) so nested
+            // array sizes are re-read — e.g. Team→Item growing 4→8 after an
+            // in-game purchase shows the new slots.
             HashSet<string> expandedRoots = new(StringComparer.Ordinal);
+            HashSet<string> expandedPaths = new(StringComparer.Ordinal);
             foreach (WalkedFieldNode n in Fields)
             {
-                if (n.IndentLevel == 0 && n.IsExpanded)
-                    expandedRoots.Add(n.Name);
+                if (!n.IsExpanded) continue;
+                if (n.IndentLevel == 0) expandedRoots.Add(n.Name);
+                if (deepReplay) expandedPaths.Add(NodePath(n));
             }
             // Snapshot the currently-selected field's identity so we can
             // restore selection (and scroll position) after the rebuild.
@@ -704,10 +753,33 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 }
                 WalkSummary = $"depth={result.Depth} count={result.Count}";
 
+                if (deepReplay)
+                {
+                    // Deep replay: re-expand every node whose path was expanded
+                    // before, at all depths, re-reading nested array sizes along
+                    // the way. Each ToggleExpandAsync mutates Fields, so re-scan
+                    // after every expansion; the path set + IsExpanded guard make
+                    // it converge, and the counter backstops a pathological loop.
+                    int guard = 0;
+                    bool progressed = true;
+                    while (progressed && guard++ < 20000)
+                    {
+                        progressed = false;
+                        foreach (WalkedFieldNode n in Fields.ToArray())
+                        {
+                            if (n.CanExpand && !n.IsExpanded && expandedPaths.Contains(NodePath(n)))
+                            {
+                                await ToggleExpandAsync(n).ConfigureAwait(true);
+                                progressed = true;
+                                break;   // Fields changed — restart the scan
+                            }
+                        }
+                    }
+                }
                 // Replay top-level expansions only. Deeper-than-one expansions
                 // come back collapsed — keeping the auto-refresh cost bounded
                 // (one extra pipe RPC per expanded root, not the whole tree).
-                if (expandedRoots.Count > 0)
+                else if (expandedRoots.Count > 0)
                 {
                     foreach (WalkedFieldNode n in Fields.ToArray())
                     {
@@ -748,6 +820,16 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 }
             }
 
+            // Value-Search → Inspector handoff: drill the tree down to the
+            // matched field and select it. Runs AFTER the name-based restore so
+            // an explicit navigation target wins over the carried-over selection.
+            // One-shot — clear it whether or not the field was reachable.
+            if (_pendingFocusFieldAddr is { } focusAddr)
+            {
+                _pendingFocusFieldAddr = null;
+                await FocusFieldByAddressAsync(focusAddr, ct).ConfigureAwait(true);
+            }
+
             _logger.Write(Constants.LogCategoryView,
                 $"walkInstance {address} {TargetLabel} {WalkSummary}");
             return true;
@@ -764,6 +846,97 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         {
             IsLoadingWalk = false;
         }
+    }
+
+    /// <summary>
+    /// Drill the walked tree down to the field whose absolute storage address is
+    /// <paramref name="targetHex"/> and select + scroll to it. Used by the
+    /// Value-Search → Inspector handoff so a nested match (a value inside a value
+    /// struct, e.g. team.gold) is revealed, not left at the instance top level.
+    ///
+    /// Strategy: look for an exact address match among the currently-materialised
+    /// rows; if absent, find the expandable VALUE-STRUCT ancestor whose contiguous
+    /// span contains the target, expand it (one walkInstance RPC), and retry.
+    /// Bounded so a missed target can't loop. Matches that live in deref'd memory
+    /// outside the instance's contiguous range (behind a pointer / collection)
+    /// aren't auto-reached — the instance stays selected (no worse than before).
+    /// </summary>
+    private async Task FocusFieldByAddressAsync(string targetHex, CancellationToken ct)
+    {
+        if (!TryParseHexAddr(targetHex, out ulong target) || target == 0) return;
+
+        for (int iter = 0; iter < 16; ++iter)
+        {
+            if (ct.IsCancellationRequested) return;
+
+            // 1) Exact hit among materialised rows → select it.
+            WalkedFieldNode? hit = null;
+            foreach (WalkedFieldNode n in Fields)
+            {
+                if (AddrEquals(n.Address, target) || AddrEquals(n.EffectiveAddress, target))
+                { hit = n; break; }
+            }
+            if (hit is not null)
+            {
+                SelectedNode = hit;
+                ScrollFieldIntoView?.Invoke(hit);
+                return;
+            }
+
+            // 2) No exact row yet — expand the collapsed value-struct whose
+            //    contiguous span covers the target, then retry. Re-derived each
+            //    pass (row indices shift as children materialise).
+            WalkedFieldNode? container = FindStructContainerCovering(target);
+            if (container is null) return;            // can't pinpoint — leave as-is
+
+            await ToggleExpandAsync(container).ConfigureAwait(true);
+            if (!container.IsExpanded) return;        // expansion failed — stop
+        }
+    }
+
+    /// <summary>
+    /// Find the collapsed, expandable VALUE-STRUCT row whose inline storage span
+    /// contains <paramref name="target"/>. A value struct lives contiguously at
+    /// its own address, so its members fall in [node.Address, nextRowAtSameOr
+    /// ShallowerIndent). Reference / collection nodes are skipped — their data
+    /// lives in deref'd memory, not in this contiguous range.
+    /// </summary>
+    private WalkedFieldNode? FindStructContainerCovering(ulong target)
+    {
+        var rows = Fields;
+        for (int i = 0; i < rows.Count; ++i)
+        {
+            WalkedFieldNode n = rows[i];
+            if (n.Kind != WalkedFieldKind.ValueStruct || n.IsExpanded || !n.CanExpand) continue;
+            if (!TryParseHexAddr(n.Address, out ulong start) || target < start) continue;
+
+            // Upper bound = the next row at the same-or-shallower indent (where
+            // n's subtree ends); infinity if n is the last such row.
+            ulong end = ulong.MaxValue;
+            for (int j = i + 1; j < rows.Count; ++j)
+            {
+                if (rows[j].IndentLevel <= n.IndentLevel)
+                {
+                    if (TryParseHexAddr(rows[j].Address, out ulong nextStart) && nextStart > start)
+                        end = nextStart;
+                    break;
+                }
+            }
+            if (target < end) return n;
+        }
+        return null;
+    }
+
+    private static bool AddrEquals(string? hex, ulong target)
+        => TryParseHexAddr(hex, out ulong v) && v == target;
+
+    private static bool TryParseHexAddr(string? hex, out ulong value)
+    {
+        value = 0;
+        if (string.IsNullOrWhiteSpace(hex)) return false;
+        ReadOnlySpan<char> s = hex.AsSpan().Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
+        return ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
     }
 
     // ---------- Hierarchical expand / collapse ---------------------------
@@ -1243,6 +1416,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     // ---------- Copy CE XML / CE field on a tree node --------------------
 
+    /// <summary>Live progress for the Inspector's Copy CE XML / Copy CE field —
+    /// entry count while exporting, then the final line count. A deep walk can
+    /// emit tens of thousands of rows and take a few seconds; this is the same
+    /// feedback the (removed) class-level Copy CE XML used to show.</summary>
+    [ObservableProperty] private string? _copyCeXmlProgress;
+
+    private static int CountLines(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return 0;
+        int n = 1;
+        foreach (char c in s) if (c == '\n') n++;
+        return n;
+    }
+
     /// <summary>
     /// Instance-level "Copy CE XML" — copies a CE table for the whole
     /// currently-selected instance rooted at its address. Mirrors the
@@ -1287,16 +1474,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 LiveData: true,
                 PointerSize: GamePointerSize == 4 ? 4 : 8,
                 VerboseDescription: verbose);
+            CopyCeXmlProgress = "exporting…";
+            var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderAsync(
                 SelectedInstance.Address, info, ancestors: null,
-                usedAssembly, options, _backend, default)
+                usedAssembly, options, _backend, default, progress)
                 .ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE XML instance {TargetLabel} @ {SelectedInstance.Address} ({xml.Length} bytes)");
         }
         catch (Exception ex)
         {
+            CopyCeXmlProgress = "export failed";
             ErrorMessage = $"copy CE XML failed: {ex.Message}";
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE XML instance failed: {ex.GetType().Name}: {ex.Message}");
@@ -1341,9 +1532,12 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             }
             if (built.Count == 0) return;
 
+            CopyCeXmlProgress = "exporting…";
+            var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
-                built, TargetAssembly, options, _backend, default).ConfigureAwait(true);
+                built, TargetAssembly, options, _backend, default, progress).ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
             string summary = built.Count == 1
                 ? $"{nodes[0].Name} @ {built[0].absoluteAddress}"
                 : $"{built.Count} nodes";
@@ -1352,6 +1546,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         }
         catch (Exception ex)
         {
+            CopyCeXmlProgress = "export failed";
             ErrorMessage = $"copy CE field failed: {ex.Message}";
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE field node failed: {ex.GetType().Name}: {ex.Message}");
@@ -1782,10 +1977,13 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
     public bool CanCopyPtr =>
         !string.IsNullOrEmpty(Ptr) && Ptr != "0x0000000000000000";
 
-    /// <summary>True when there's a row-rooted address worth handing to CE
-    /// (Address for ordinary fields, dereferenced pointer for
-    /// PointerToClass / Collection rows). Drives the HEX button.</summary>
-    public bool CanNavigateHex => !string.IsNullOrEmpty(EffectiveAddress);
+    /// <summary>True when there's a row-rooted address worth handing to CE.
+    /// HEX targets the field's OWN storage (the Address column) — what the user
+    /// sees on the row — falling back to the deref'd address only for synthetic
+    /// slots with no tracked storage. The deref'd target is the "→ptr" button.
+    /// Drives the HEX button.</summary>
+    public bool CanNavigateHex =>
+        !string.IsNullOrEmpty(Address) || !string.IsNullOrEmpty(EffectiveAddress);
 
     [RelayCommand]
     private Task CopyAddrAsync() =>
@@ -1806,10 +2004,18 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
             : Task.CompletedTask;
 
     [RelayCommand]
-    private Task NavigateHexAsync() =>
-        (_actions?.NavigateHex is { } f && !string.IsNullOrEmpty(EffectiveAddress))
-            ? f(EffectiveAddress!, default)
+    private Task NavigateHexAsync()
+    {
+        // The field's OWN storage address (the Address column the user clicked
+        // on the row) — NOT the deref'd pointer. For a List / array / pointer
+        // field that means the slot holding the pointer, not the object it
+        // points at (that's the "→ptr" button). Fall back to EffectiveAddress
+        // only for synthetic slots whose storage isn't tracked.
+        string? target = !string.IsNullOrEmpty(Address) ? Address : EffectiveAddress;
+        return (_actions?.NavigateHex is { } f && !string.IsNullOrEmpty(target))
+            ? f(target!, default)
             : Task.FromResult(false);
+    }
 
     /// <summary>True when the row carries a non-null managed pointer value worth
     /// browsing in CE — drives the "→ptr" AOBMaker button.</summary>

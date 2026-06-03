@@ -495,8 +495,12 @@
                   Command="{Binding Browser.ExportCsxCommand}" />
           <Button Content="{StaticResource Browser.ExportCeXml}"
                   Command="{Binding Browser.ExportCeXmlCommand}" />
-          <Button Content="{StaticResource Browser.CopyCeXml}"
-                  Command="{Binding Browser.CopyCeXmlCommand}" />
+          <!-- Class-level "Copy CE XML" removed: it used the template exporter
+               (instance-agnostic), so a concrete Vector3 / nested struct never
+               expanded and it was disabled when the Inspector was reached via
+               navigation. The single Copy CE XML now lives in the Inspector
+               toolbar (live-instance exporter — expands value structs and
+               matches the walked grid). Class-level CE table → "Export .CT". -->
           <Button Content="{StaticResource Browser.ExportOptions}">
             <Button.Flyout>
               <Flyout Placement="BottomEdgeAlignedLeft">
@@ -683,6 +687,10 @@
                 <Button Content="{StaticResource Inspector.CopyCeXmlInstance}"
                         ToolTip.Tip="{StaticResource Inspector.CopyCeXmlInstanceTooltip}"
                         Command="{Binding Inspector.CopyCeXmlInstanceCommand}" />
+                <TextBlock Text="{Binding Inspector.CopyCeXmlProgress}"
+                           VerticalAlignment="Center" Opacity="0.75" FontSize="11"
+                           IsVisible="{Binding Inspector.CopyCeXmlProgress, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                           ToolTip.Tip="Copy CE XML / field progress — live entry count while exporting, then the final line count." />
                 <TextBlock Text="{StaticResource Inspector.LimitLabel}"
                            VerticalAlignment="Center" Opacity="0.7" Margin="8,0,0,0" />
                 <NumericUpDown Value="{Binding Inspector.InstanceLimit, Mode=TwoWay}"
@@ -1619,7 +1627,9 @@
                 <NumericUpDown Grid.Row="0" Grid.Column="5"
                                Value="{Binding ValueSearch.Limit, Mode=TwoWay}"
                                Minimum="10" Maximum="50000" Increment="50"
-                               HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+                               ClipValueToMinMax="True"
+                               HorizontalAlignment="Stretch" Margin="0,0,12,0"
+                               ToolTip.Tip="Max result rows. The raw memory scan is capped at 50,000 matches server-side, so 50,000 is the ceiling — typing more clamps to 50,000 (no out-of-memory). For a common value (e.g. 90) that appears in many arrays, narrow with a single type + Next Scan rather than chasing a bigger list. (A streaming redesign to lift this cap is on the backlog.)"/>
 
                 <StackPanel Grid.Row="0" Grid.Column="6" Orientation="Horizontal" Spacing="6">
                   <Button Content="First Scan"

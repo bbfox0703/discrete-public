@@ -191,6 +191,50 @@ public class AobAaScriptGeneratorTests
         }
     }
 
+    [Fact]
+    public void Build_LogScan_DeferredAfterAsmPass()
+    {
+        // Regression: CE runs {$lua} blocks during the assemble phase, BEFORE
+        // the {$asm} aobscanmodule/registersymbol directives execute, so an
+        // inline `discrete_logScan` could not see the freshly-registered symbol
+        // and printed "NOT FOUND (AOB scan failed)" even though the scan worked.
+        // The confirmation must run inside a deferred one-shot timer.
+        string s = AobAaScriptGenerator.Build(new[] { UniqueIl2cppOverload() });
+
+        // The deferral helper is defined idempotently.
+        Assert.Contains("if _G.discrete_runAfterAsm == nil then", s);
+        Assert.Contains("createTimer(nil)", s);
+
+        // The logScan call is wrapped in the deferred callback, not emitted
+        // inline at the top level of the post-asm {$lua} block.
+        Assert.Contains("_G.discrete_runAfterAsm(function()", s);
+        int deferIdx = s.IndexOf("_G.discrete_runAfterAsm(function()", StringComparison.Ordinal);
+        int logIdx   = s.IndexOf("_G.discrete_logScan(\"Mathf_Abs_int32\")", StringComparison.Ordinal);
+        Assert.True(deferIdx >= 0 && logIdx > deferIdx,
+            "logScan must appear inside the deferred runAfterAsm callback");
+
+        // The post-asm {$lua} block guards against the syntax-check pass so the
+        // timer is never scheduled during a syntax check. (Two guards total now:
+        // the helper block + this one.)
+        int firstAsm = s.IndexOf("{$asm}", StringComparison.Ordinal);
+        string afterAsm = s.Substring(firstAsm);
+        Assert.Contains("if syntaxcheck then return end", afterAsm);
+    }
+
+    [Fact]
+    public void Build_OffsetRegister_DeferredAfterAsmPass()
+    {
+        // The offset method-entry registration depends on the aobscanmodule
+        // anchor, which the asm pass registers — so it must ALSO run in the
+        // deferred callback, not inline (where the anchor isn't resolvable yet).
+        string s = AobAaScriptGenerator.Build(new[] { UniqueIl2cppOverload(injectionOffset: 5) });
+
+        int deferIdx  = s.IndexOf("_G.discrete_runAfterAsm(function()", StringComparison.Ordinal);
+        int regIdx    = s.IndexOf("registerSymbol(\"Mathf_Abs_int32\", b + 5)", StringComparison.Ordinal);
+        Assert.True(deferIdx >= 0 && regIdx > deferIdx,
+            "offset registerSymbol must appear inside the deferred runAfterAsm callback");
+    }
+
     // ---- AOBMaker-app unique-AOB integration (front warning + offset) -------
 
     private static AaScriptOverload UniqueIl2cppOverload(int injectionOffset = 0) => new()

@@ -123,7 +123,54 @@ void* SehStaticData(fn_vtable_get_static_data fn, MonoVTable* v) {
 void* SehCompile(fn_compile_method fn, MonoMethod* m) {
     __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+MonoImage* SehClassImageProbe(fn_class_get_image fn, MonoClass* k) {
+    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+const char* SehImageNameProbe(fn_image_get_name fn, MonoImage* img) {
+    __try { return fn(img); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+// A real managed type / image name is a short printable-ASCII string. The
+// runtime accessors only SEH-guard the FIELD read that fetches the name pointer
+// — they hand back whatever pointer sits in that slot. For a garbage class (a
+// managed-object pointer misread as a MonoClass*) that slot holds an arbitrary
+// value, and building a std::string from it runs an UNBOUNDED strlen that AVs
+// off the end of mapped memory (the Copy-CE-field CTD). Validate the returned
+// pointer here, reading each byte under SEH so the validation can't fault.
+bool SehNameLooksSane(const char* s) {
+    if (s == nullptr) return false;
+    __try {
+        std::size_t i = 0;
+        for (; i < 512; ++i) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            if (c == 0) return i > 0;                 // non-empty, NUL within bound
+            if (c < 0x20 || c > 0x7E) return false;   // non-printable → garbage
+        }
+        return false;                                 // no NUL in 512 bytes → garbage
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 #pragma warning(pop)
+
+// Shared validity gate, assuming the Mono thread is ALREADY attached (caller
+// holds a ThreadAttachGuard) so it never nests attach/detach. A genuine
+// MonoClass has a sane type name AND belongs to an image whose own name is sane.
+// A managed-heap object misread as a class derefs klass->image to garbage, which
+// has no sane image name — the image round-trip is the discriminator the
+// original name-only check lacked. Image accessors absent (older runtime) →
+// name-sanity stands alone.
+bool KlassLooksValid_Attached(MonoClass* klass) {
+    const auto& r = GetResolver();
+    if (klass == nullptr || r.class_get_name == nullptr) return false;
+    if (!SehNameLooksSane(SehClassNameProbe(r.class_get_name, klass))) return false;
+    if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
+        MonoImage* img = SehClassImageProbe(r.class_get_image, klass);
+        if (img == nullptr) return false;
+        if (!SehNameLooksSane(SehImageNameProbe(r.image_get_name, img))) return false;
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -235,6 +282,13 @@ ClassInfoResult ReadClassInfo(MonoClass* klass) {
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return result;
 
+    // Defence-in-depth: never decode a pointer that doesn't look like a real
+    // MonoClass. A garbage class (a managed-object pointer pulled from a field
+    // slot, or a stale parent from class_get_parent) survives the per-accessor
+    // SEH guards but AVs in the unbounded strlen that builds the name string
+    // (DescribeClass below calls class_get_name RAW). Reuse the held guard.
+    if (!KlassLooksValid_Attached(klass)) return result;
+
     DescribeClass(klass, 0, result.info.self);
 
     if (r.class_get_parent != nullptr) {
@@ -344,8 +398,7 @@ bool ProbeKlassValid(MonoClass* klass) {
     if (domain == nullptr) return false;
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return false;
-    const char* nm = SehClassNameProbe(r.class_get_name, klass);
-    return nm != nullptr && *nm != '\0';
+    return KlassLooksValid_Attached(klass);
 }
 
 StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string& fieldName) {

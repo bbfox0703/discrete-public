@@ -220,7 +220,47 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(HasSession))]
     private string? _sessionId;
 
-    public bool HasSession => !string.IsNullOrEmpty(SessionId);
+    /// <summary>
+    /// Aggregate ("numeric ...") mode keeps ONE live refine session per concrete
+    /// width (the DLL's SessionManager already holds many sessions concurrently),
+    /// so Next Scan can refine every width and merge — instead of the old
+    /// fan-out-then-close one-shot. Empty in single-type mode (that uses
+    /// <see cref="SessionId"/>). Each entry is (sessionId, dataType).
+    /// </summary>
+    private readonly List<(string id, string type)> _multiSessions = new();
+
+    public bool HasSession => !string.IsNullOrEmpty(SessionId) || _multiSessions.Count > 0;
+
+    /// <summary>Raise the session-derived gates after the multi-session list
+    /// changes (it isn't an observable property, so notify by hand).</summary>
+    private void NotifyMultiSessionChanged()
+    {
+        OnPropertyChanged(nameof(HasSession));
+        NextScanCommand.NotifyCanExecuteChanged();
+        EndSessionCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>Close every live session (single + per-width) and clear state.
+    /// Best-effort — a failed End is non-fatal (server expiry reaps it).</summary>
+    private async Task CloseAllSessionsAsync(CancellationToken ct = default)
+    {
+        if (!string.IsNullOrEmpty(SessionId))
+        {
+            try { await _backend.EndValueScanAsync(SessionId!, ct).ConfigureAwait(true); }
+            catch { /* best-effort */ }
+            SessionId = null;
+        }
+        if (_multiSessions.Count > 0)
+        {
+            foreach ((string id, _) in _multiSessions.ToArray())
+            {
+                try { await _backend.EndValueScanAsync(id, ct).ConfigureAwait(true); }
+                catch { /* best-effort */ }
+            }
+            _multiSessions.Clear();
+            NotifyMultiSessionChanged();
+        }
+    }
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(FirstScanCommand))]
@@ -252,13 +292,10 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         FilteredResults.Clear();
         StartElapsedTimer("Scanning");
 
-        // If a previous session is alive, free it before opening a new one.
+        // If any previous session is alive (single OR per-width aggregate), free
+        // it before opening a new one.
         if (HasSession)
-        {
-            try { await _backend.EndValueScanAsync(SessionId!, ct).ConfigureAwait(true); }
-            catch { /* best-effort */ }
-            SessionId = null;
-        }
+            await CloseAllSessionsAsync(ct).ConfigureAwait(true);
 
         var sw = Stopwatch.StartNew();
         try
@@ -349,14 +386,16 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     /// Fan-out First Scan for the aggregate "any numeric width" modes. Runs
     /// one <c>beginValueScan</c> per concrete width, merges the unique hit
     /// addresses into <see cref="Results"/> (capped at <see cref="Limit"/>),
-    /// and closes every transient session. Presents a one-shot result —
-    /// <see cref="SessionId"/> stays null so Next Scan stays disabled.
-    /// Caller has already validated the value/range/tolerance args.
+    /// and RETAINS each width's session in <see cref="_multiSessions"/> so
+    /// Next Scan can refine every width and re-merge (the DLL's SessionManager
+    /// holds them all concurrently). Caller has already validated the
+    /// value/range/tolerance args.
     /// </summary>
     private async Task RunAggregateFirstScanAsync(
         double val, double? valTo, double? tol, Stopwatch sw, CancellationToken ct)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var newSessions = new List<(string id, string type)>();
         long totalScannedBytes = 0;
         long totalDropped = 0;
         int  typesScanned = 0;
@@ -391,19 +430,21 @@ public sealed partial class ValueSearchViewModel : ObservableObject
                 continue;
             }
 
-            // Close this width's transient session immediately — aggregate
-            // mode never refines, so holding it would leak server memory.
-            if (!string.IsNullOrEmpty(r.SessionId))
-            {
-                try { await _backend.EndValueScanAsync(r.SessionId!, ct).ConfigureAwait(true); }
-                catch { /* best-effort cleanup */ }
-            }
-
             if (!string.IsNullOrEmpty(r.Error))
             {
+                // Failed width — close its session if one was opened, then skip.
+                if (!string.IsNullOrEmpty(r.SessionId))
+                {
+                    try { await _backend.EndValueScanAsync(r.SessionId!, ct).ConfigureAwait(true); }
+                    catch { /* best-effort */ }
+                }
                 firstError ??= $"{type}: {r.Error}";
                 continue;
             }
+
+            // Retain this width's session so Next Scan can refine it.
+            if (!string.IsNullOrEmpty(r.SessionId))
+                newSessions.Add((r.SessionId!, type));
 
             typesScanned++;
             totalScannedBytes = Math.Max(totalScannedBytes, r.ScannedBytes);
@@ -419,25 +460,37 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         }
 
         SessionId = null;
-        RefreshResultView();
-        sw.Stop();
-
-        if (Results.Count == 0 && firstError is not null)
+        // If a value/error left us with NO usable sessions, don't pretend we have
+        // one; otherwise retain them so Next Scan refines every width.
+        if (Results.Count == 0 && firstError is not null && newSessions.Count == 0)
         {
+            _multiSessions.Clear();
+            NotifyMultiSessionChanged();
+            RefreshResultView();
+            sw.Stop();
             ErrorMessage  = firstError;
             StatusMessage = "First Scan failed.";
             return;
         }
+        _multiSessions.Clear();
+        _multiSessions.AddRange(newSessions);
+        NotifyMultiSessionChanged();
+        RefreshResultView();
+        sw.Stop();
+
         if (firstError is not null)
             ErrorMessage = $"some widths errored (first: {firstError})";
 
         string trunc = truncated ? $" (truncated at limit={Limit})" : string.Empty;
         string shownNote = FilteredResults.Count != Results.Count
             ? $" (showing {FilteredResults.Count} after filters)" : string.Empty;
+        string refineNote = _multiSessions.Count > 0
+            ? $" (Next Scan refines all {_multiSessions.Count} width(s))"
+            : " (one-shot)";
         StatusMessage =
             $"{Results.Count} unique hit(s){shownNote} across {typesScanned} numeric width(s){trunc}; "
             + $"dropped {totalDropped} non-managed; scanned {totalScannedBytes / (1024 * 1024)} MB "
-            + $"in {sw.ElapsedMilliseconds} ms (one-shot — pick a single type to enable Next Scan).";
+            + $"in {sw.ElapsedMilliseconds} ms{refineNote}.";
     }
 
     [RelayCommand(CanExecute = nameof(CanNextScan))]
@@ -477,6 +530,13 @@ public sealed partial class ValueSearchViewModel : ObservableObject
                 }
             }
 
+            // Aggregate mode: refine every per-width session and re-merge.
+            if (_multiSessions.Count > 0)
+            {
+                await NextScanMultiAsync(val, valTo, sw, ct).ConfigureAwait(true);
+                return;
+            }
+
             RefineValueScanResult result = await _backend.RefineValueScanAsync(
                 SessionId!, SelectedRefineType, val, valTo, 500, ct).ConfigureAwait(true);
 
@@ -509,6 +569,75 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             IsBusy = false;
             _bulkLease?.Dispose(); _bulkLease = null;
         }
+    }
+
+    /// <summary>
+    /// Next Scan for aggregate mode: refine each retained per-width session with
+    /// the same comparator + value, merge the surviving unique addresses, and
+    /// report aggregate remaining/removed counts. A width whose session has
+    /// expired (server-side 5-min reap) is dropped from the set; other errors
+    /// keep the session and are surfaced. Caller owns the elapsed timer + IsBusy.
+    /// </summary>
+    private async Task NextScanMultiAsync(double? val, double? valTo, Stopwatch sw, CancellationToken ct)
+    {
+        var seen      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var survivors = new List<(string id, string type)>();
+        long totalRemaining = 0, totalRemoved = 0;
+        int  widthsRefined  = 0;
+        string? firstError  = null;
+
+        Results.Clear();
+        foreach ((string id, string type) in _multiSessions.ToArray())
+        {
+            if (ct.IsCancellationRequested) return;
+
+            RefineValueScanResult r;
+            try
+            {
+                r = await _backend.RefineValueScanAsync(id, SelectedRefineType, val, valTo, 500, ct)
+                    .ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex)
+            {
+                firstError ??= $"{type}: {ex.Message}";
+                survivors.Add((id, type));   // keep — transient failure
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(r.Error))
+            {
+                // A reaped session is gone for good — drop it. Anything else is
+                // (probably) recoverable, so keep it and note the first error.
+                if (r.Error.Contains("session_not_found", StringComparison.OrdinalIgnoreCase) ||
+                    r.Error.Contains("not_found", StringComparison.OrdinalIgnoreCase))
+                    firstError ??= $"{type}: session expired";
+                else { firstError ??= $"{type}: {r.Error}"; survivors.Add((id, type)); }
+                continue;
+            }
+
+            widthsRefined++;
+            totalRemaining += r.TotalCandidates;
+            totalRemoved   += r.Removed;
+            survivors.Add((id, type));
+            foreach (ValueScanCandidate c in r.Candidates)
+                if (seen.Add(c.Address)) Results.Add(new ValueSearchRow(c));
+        }
+
+        _multiSessions.Clear();
+        _multiSessions.AddRange(survivors);
+        NotifyMultiSessionChanged();
+        RefreshResultView();
+        sw.Stop();
+
+        if (firstError is not null)
+            ErrorMessage = $"some widths errored (first: {firstError})";
+        string shownNote = FilteredResults.Count != Results.Count
+            ? $" (showing {FilteredResults.Count} after filters)" : string.Empty;
+        StatusMessage =
+            $"refined '{SelectedRefineType}' across {widthsRefined} width(s) — "
+            + $"{totalRemaining} remaining{shownNote}, removed {totalRemoved} this round "
+            + $"({sw.ElapsedMilliseconds} ms).";
     }
 
     // Live elapsed-time display while a scan is in flight. Real per-step
@@ -549,12 +678,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     public async Task EndSessionAsync()
     {
         if (!HasSession) return;
-        try
-        {
-            await _backend.EndValueScanAsync(SessionId!).ConfigureAwait(true);
-        }
-        catch { /* best effort */ }
-        SessionId = null;
+        await CloseAllSessionsAsync().ConfigureAwait(true);
         Results.Clear();
         FilteredResults.Clear();
         StatusMessage = "Session ended.";

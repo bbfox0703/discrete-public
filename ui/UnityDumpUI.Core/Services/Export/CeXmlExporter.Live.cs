@@ -349,21 +349,43 @@ public static partial class CeXmlExporter
     }
 
     /// <summary>walkInstance via an explicit class name at <paramref name="addr"/>
-    /// (for inline value-type structs, which have no header to read).</summary>
+    /// (for inline value-type structs, which have no header to read).
+    ///
+    /// walkInstance searches ONLY the named image, so a struct that lives in a
+    /// DIFFERENT assembly than its containing class — most importantly
+    /// UnityEngine.Vector3 / Quaternion / Color (in UnityEngine.CoreModule) used
+    /// as fields of an Assembly-CSharp class — won't resolve under the parent's
+    /// assembly. Mirror the live Inspector's LoadPointerChildrenAsync: try the
+    /// parent assembly first, then well-known fallbacks by namespace, and the
+    /// generic-arity name variants. Without this `now_position` (a Vector3 field)
+    /// exported as an empty group — i.e. didn't expand to x/y/z.</summary>
     private static async Task EmitChildFieldsByNameAsync(
         StringBuilder sb, string indent, IdGen ids, string addr,
         string? assemblyName, string ns, string name, ExportOptions options,
         ILiveExportSource live, HashSet<string> visited, int currentDepth,
         CancellationToken ct)
     {
-        WalkInstanceResult res;
-        try
+        bool isGeneric = name.IndexOf('`') >= 0 || name.IndexOf('<') >= 0;
+        var nameVariants = new List<string> { name };
+        if (isGeneric) { nameVariants.Add(name + "`1"); nameVariants.Add(name + "`2"); nameVariants.Add(name + "`3"); }
+
+        WalkInstanceResult? res = null;
+        foreach (string asm in BuildExportAssemblyCandidates(assemblyName, ns))
         {
-            res = await live.WalkInstanceAsync(addr, assemblyName ?? string.Empty,
-                                               ns, name, ct).ConfigureAwait(false);
+            foreach (string nv in nameVariants)
+            {
+                try
+                {
+                    WalkInstanceResult attempt = await live
+                        .WalkInstanceAsync(addr, asm, ns, nv, ct).ConfigureAwait(false);
+                    if (string.IsNullOrEmpty(attempt.Error) && attempt.Fields is { Count: > 0 })
+                    { res = attempt; break; }
+                }
+                catch { /* try next */ }
+            }
+            if (res is not null) break;
         }
-        catch { return; }
-        if (res.Fields is not { Count: > 0 } fields) return;
+        if (res?.Fields is not { Count: > 0 } fields) return;
         foreach (WalkedField cf in fields)
             await EmitWalkedFieldLiveAsync(sb, indent, ids, cf, assemblyName,
                                            options, live, visited, currentDepth, ct)
@@ -530,6 +552,38 @@ public static partial class CeXmlExporter
                     CloseGroup(sb, elemIndent);
                     visited.Remove(elem.Ptr!);
                 }
+                else if (slotDrill && !string.IsNullOrEmpty(elem.Address)
+                         && !IsEngineInternalType(elementType)
+                         && !IsOpaqueFrameworkValueStruct(elementType)
+                         && InstanceFieldClassifier.TryParseClassName(elementType, out string ens, out string ename))
+                {
+                    // Value-type STRUCT element (PlayerData[], Vector3[], a custom
+                    // struct[]) — expand its members like an inline ValueStruct
+                    // field, walked by name at the slot's absolute address.
+                    // Primitive / enum elements fail TryParseClassName and fall
+                    // through to the typed leaf below. (Without this, party
+                    // (PlayerData[]) exported [0],[1],… with no fields.)
+                    string ecycle = $"{elem.Address}!{ens}.{ename}";
+                    if (visited.Add(ecycle))
+                    {
+                        OpenGroup(sb, elemIndent, ids, slotLabel, slotRel,
+                                  offsets: null, collapsed: options.CollapsePointerNodes,
+                                  varType: null, showAsHex: true);
+                        await EmitChildFieldsByNameAsync(sb, elemIndent + "  ", ids, elem.Address!,
+                                                         assemblyName, ens, ename, options, live,
+                                                         visited, currentDepth + 2, ct)
+                            .ConfigureAwait(false);
+                        CloseGroup(sb, elemIndent);
+                        visited.Remove(ecycle);
+                    }
+                    else
+                    {
+                        (bool h, bool s) = UnityTypeMap.CeDisplay(elementType);
+                        EmitLeaf(sb, elemIndent, ids, slotLabel,
+                                 vartype: PrimitiveVartype(elementType),
+                                 showAsHex: h, showAsSigned: s, address: slotRel, offsets: null);
+                    }
+                }
                 else
                 {
                     (bool h, bool s) = UnityTypeMap.CeDisplay(elementType);
@@ -562,30 +616,23 @@ public static partial class CeXmlExporter
     public static async Task<string> RenderFieldNodesLiveAsync(
         IReadOnlyList<(WalkedField field, string absoluteAddress)> nodes,
         string? assemblyName, ExportOptions options, ILiveExportSource live,
-        CancellationToken ct = default)
+        CancellationToken ct = default, IProgress<int>? progress = null)
     {
         var sb = new StringBuilder(2048);
-        var ids = new IdGen();
+        var ids = new IdGen(progress);
         var nameMap = new ExportNameMap();
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
-        // Correct the pointer size from the DLL if we can cheaply probe it —
-        // a header walk of the first node's address reports the authoritative
-        // game pointer size, so "Copy CE field" gets the right x86/x64 String
-        // offsets + List._items deref even when the caller's cached value is
-        // stale (same robustness as the full RenderLiveAsync path).
-        if (nodes.Count > 0 && !string.IsNullOrEmpty(nodes[0].absoluteAddress))
-        {
-            try
-            {
-                WalkInstanceResult probe = await live
-                    .WalkInstanceFromHeaderAsync(nodes[0].absoluteAddress, ct).ConfigureAwait(false);
-                if (probe.PointerSize == 4 || probe.PointerSize == 8)
-                    options = options with { PointerSize = probe.PointerSize };
-            }
-            catch { /* keep caller-supplied PointerSize */ }
-        }
+        // NOTE: do NOT probe pointer size by header-walking a node's root here.
+        // Unlike the full RenderLiveAsync path (whose root IS an object header),
+        // a "Copy CE field" root is the field's own STORAGE address — for a
+        // pointer / List / array field that storage holds an object pointer, so
+        // WalkInstanceFromHeader read it AS a klass and the DLL dereferenced a
+        // managed-object pointer as a class → CTD (the haluCircuitList crash).
+        // The caller's options.PointerSize already comes from the authoritative
+        // per-process backend detection (GamePointerSize), so there is nothing to
+        // correct — use it directly.
 
         foreach ((WalkedField field, string absoluteAddress) in nodes)
         {
