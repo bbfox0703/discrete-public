@@ -41,7 +41,13 @@ patterns survive most updates.
 1. **Methods** tab → right-click an overload → **Find overloads…**.
 2. In the modal, tick the row(s) you want patterns for.
 3. Click **Push aobscan to CE** (requires the AOBMaker CE plugin
-   loaded — see README *System requirements*).
+   loaded — see README *System requirements*). *Tip:* if the AOBMaker
+   **standalone app** is also running (status bar `AOBMaker App:
+   connected`), this — and **Copy: aobscan** — ask it for a **unique**
+   AOB (a few seconds per overload) instead of the method-prologue
+   pattern, which can otherwise match the wrong site. When the app
+   isn't running it falls back to the prologue pattern and the script
+   carries a "verify/adjust — not unique" warning at the top.
 4. Your CT's address list now contains a ready-to-activate AA
    script with the AOB pattern + `registersymbol` lines pre-filled.
    The symbol becomes available in CE under
@@ -163,8 +169,8 @@ From the UI:
 Mode B from the README. The shortcut from inside DiscreteUI:
 
 1. Open your `.CT` in CE.
-2. Make sure AOBMaker plugin is loaded (status bar shows *AOBMaker:
-   connected*).
+2. Make sure AOBMaker plugin is loaded (status bar shows *AOBMaker DLL
+   plugin: connected*).
 3. DiscreteUI's **Tools** menu → **Inject Discrete Bridge into CE
    Table**.
 4. The wizard drops the backend DLL + needed Lua scripts into the

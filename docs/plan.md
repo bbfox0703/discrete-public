@@ -5,17 +5,21 @@
 > `[x]` 並 commit。已完成 phase 的長篇寫作搬到 [archive/](archive/);
 > 本檔只保留 Phase Overview 摘要 + 仍 open 的 backlog。
 
-**Last updated**: 2026-06-02
-**Current state**: ✅ **Phase 31(inline value-type struct,31-1…31-6)+ Class Pivot UI/UX 大修(Waves A–D)+ session bug review(3 修正)全 SHIPPED 並 merged `main` @ `f621837`(build #990)**。摘要見 [STATUS.md](STATUS.md) 最新批次。重點:31-2 泛型 value-type 遞迴(live-verified Core Keeper Mono x64)+ 31-5 reverse-lookup 命名 component;Class Pivot tab 重構為 toolbar + 7 個 per-mode dialog(共用 VM)、engine 移出 UI thread + busy bar、去 jargon + 依存 gating、「Pivot this class」跨 tab handoff;review 修了一個 CRITICAL（31-5 命中 primitive 內部無窮遞迴 → Game CTD）+ HIGH（Wave A off-thread vs `Unload()` race）+ LOW（re-entrancy）。
-先前:Phase 22 action-driven CE bridge + CT 分發 + 雙 pipe 連線 + walk CTD 全修(build #928);Phase 30 + scan P1/P2(見 [archive/plan-archive-phases-29-30.md](archive/plan-archive-phases-29-30.md))。
-`dev == main == origin` @ `f621837`,**685 UI tests green**,DLL(Mono x64+x86 / IL2CPP x64)build clean、UI 0/0 warnings。
-**Nothing mid-flight** — 待辦只剩 31-2/31-5 的實機 live-smoke + 下方 deferred-by-design Open Backlog,none blocking。
+**Last updated**: 2026-06-03
+**Current state**: ✅ **AOBMaker app 唯一-AOB 整合 + Method Overloads/Inspector UI fixes 全 SHIPPED 並 merged `main` @ `c108ed4`(build #1059,UI/Core-only)**。新 `AobMakerAppClient`(`\\.\pipe\AOBMaker` → `GenerateAob`)讓 `Copy:`/`Push: aobscan` 在 app 連線時產**唯一 AOB**(否則 fallback DLL prologue + 警語);連線列加「AOBMaker App」chip+↻、既有 chip 改名「AOBMaker DLL plugin:」;`AobAaScriptGenerator` 前置 AOB-品質橫幅 + injectionOffset 偏移符號;`Copy: registersymbol` 單行 break 警語;`Copy: register (sig-match)` 改實驗模式 gating;Inspector `BuildAssemblyCandidates` 補 `UnityEngine.UI*`;dev-tool 提示靠右+最低 Z-order。詳見 [STATUS.md](STATUS.md) 最新批次 + [ce-bridge-integration.md](ce-bridge-integration.md#aobmaker-app-integration--unique-aob-via-generateaob)。**待 live-smoke**(需遊戲 + `AOBMaker.exe`)。
+先前:✅ **Phase 31(inline value-type struct,31-1…31-6)+ Class Pivot UI/UX 大修(Waves A–D)+ session bug review(3 修正)全 SHIPPED 並 merged `main` @ `f621837`(build #990)**。摘要見 [STATUS.md](STATUS.md)。重點:31-2 泛型 value-type 遞迴(live-verified Core Keeper Mono x64)+ 31-5 reverse-lookup 命名 component;Class Pivot tab 重構為 toolbar + 7 個 per-mode dialog(共用 VM);review 修了一個 CRITICAL（31-5 命中 primitive 內部無窮遞迴 → Game CTD）+ HIGH（Wave A off-thread vs `Unload()` race）+ LOW（re-entrancy）。
+更早:Phase 22 action-driven CE bridge + CT 分發 + 雙 pipe 連線 + walk CTD 全修(build #928);Phase 30 + scan P1/P2(見 [archive/plan-archive-phases-29-30.md](archive/plan-archive-phases-29-30.md))。
+`dev == main == origin` @ `c108ed4`,**691 UI tests green**(本批次 +4 generator 測試),UI/Core build clean、UI 0/0 warnings(本批次 UI/Core-only,DLL 未動)。
+**Nothing mid-flight** — 待辦只剩本批次 AOBMaker-app route + 31-2/31-5 的實機 live-smoke + 下方 deferred-by-design Open Backlog,none blocking。
 
 ---
 
 ## Open Backlog / TODO
 
 > 這是**唯一**的待辦清單。所有 open 項目集中於此;Phase Overview 表只記 ship 狀態,不重複放 todo。
+
+### 🔌 CE bridge / AOBMaker line — 詳見 [ce-bridge-integration.md](ce-bridge-integration.md)
+- [x] **AOBMaker app 唯一-AOB 整合**(2026-06-03,build #1059,merged `c108ed4`)— `AobMakerAppClient`(`\\.\pipe\AOBMaker` → `GenerateAob`)讓 `Copy:`/`Push: aobscan` 在 app 連線時產唯一 AOB(否則 fallback DLL prologue + 警語);連線列「AOBMaker App」chip+↻、既有 chip 改名「AOBMaker DLL plugin:」;generator 前置 AOB-品質橫幅 + injectionOffset 偏移符號;`Copy: registersymbol` 單行警語;`Copy: register (sig-match)` 改實驗模式 gating;Inspector `BuildAssemblyCandidates` 補 `UnityEngine.UI*`;dev-tool 靠右+最低 Z-order。**待 live-smoke**:需連遊戲 + 開 `AOBMaker.exe`,確認 App chip 翻 connected、`Copy: aobscan` 數秒後產唯一 AOB(含 injectionOffset>0 的 `<sym>_aob` anchor + `{$lua}` offset 符號正確)、app 沒開時 fallback 正常。
 
 ### 🔍 Scan line — 詳見 [Memory-Scanning-Internals.md](Memory-Scanning-Internals.md) §16.3 / §16.5b
 - [x] **P2 Mono port** — ✅ build #823(2026-05-30):`Mono::ResolveInstanceLookup` + `Mono::ReverseLookupIndex`(單緒安全走訪 + `Sleep(1)` pacing,避開 BDWGC freeze),3 個 Mono value/string scan handler 改用 index。兩 DLL build clean、603 tests green。**Live-smoke(活俠傳 value scan 計時 + 答案比對)待辦**。
