@@ -1675,6 +1675,23 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
             ? f(EffectiveAddress!, default)
             : Task.FromResult(false);
 
+    /// <summary>True when the row carries a non-null managed pointer value worth
+    /// browsing in CE — drives the "→ptr" AOBMaker button.</summary>
+    public bool CanNavigatePtrHex => CanCopyPtr;
+
+    /// <summary>
+    /// Hand the row's POINTER VALUE (the address it points AT — string object,
+    /// reference target, IntPtr handle) to CE's Memory View via AOBMaker, as
+    /// opposed to <see cref="NavigateHexAsync"/> which browses the field's own
+    /// storage / deref'd group address. Lets the user inspect where a ptr leads
+    /// even when the field decode failed (e.g. an unreadable String header).
+    /// </summary>
+    [RelayCommand]
+    private Task NavigatePtrHexAsync() =>
+        (_actions?.NavigateHex is { } f && CanCopyPtr)
+            ? f(Ptr!, default)
+            : Task.FromResult(false);
+
     // ---------- Constructors from wire payloads --------------------------
 
     public static WalkedFieldNode FromInstanceField(

@@ -126,6 +126,11 @@
           <TextBlock Text="{StaticResource Tools.AobMakerNotConnected}"
                      Opacity="0.55"
                      IsVisible="{Binding !IsAobMakerAvailable}" />
+          <!-- Re-probe the AOBMaker pipe on demand (e.g. after loading the
+               plugin in CE) instead of waiting for the next request. -->
+          <Button Content="↻" FontSize="11" Padding="5,0" MinHeight="18"
+                  Command="{Binding RefreshAobMakerCommand}"
+                  ToolTip.Tip="{StaticResource Tools.AobMakerRefreshTooltip}" />
         </StackPanel>
 
         <!-- Dev-tool reminder. DiscreteUI is for developers + power
@@ -952,7 +957,7 @@
                            buttons that have no payload (e.g. ptr is
                            disabled for primitive rows whose Ptr is empty). -->
                       <DataGridTemplateColumn Header="{StaticResource Inspector.ColActions}"
-                                              Width="155" CanUserSort="False">
+                                              Width="200" CanUserSort="False">
                         <DataGridTemplateColumn.CellTemplate>
                           <DataTemplate x:DataType="vm:WalkedFieldNode">
                             <StackPanel Orientation="Horizontal" Spacing="2"
@@ -972,6 +977,10 @@
                                       Command="{Binding NavigateHexCommand}"
                                       IsEnabled="{Binding CanNavigateHex}"
                                       ToolTip.Tip="{StaticResource Inspector.NavigateHexTooltip}" />
+                              <Button Content="→ptr" FontSize="10" Padding="4,0" MinHeight="20"
+                                      Command="{Binding NavigatePtrHexCommand}"
+                                      IsEnabled="{Binding CanNavigatePtrHex}"
+                                      ToolTip.Tip="{StaticResource Inspector.NavigatePtrHexTooltip}" />
                             </StackPanel>
                           </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
@@ -1031,7 +1040,7 @@
                 </DataGrid.ContextMenu>
                 <DataGrid.Columns>
                   <DataGridTemplateColumn Header="{StaticResource Browser.ColName}"
-                                          Width="Auto" MinWidth="220" SortMemberPath="Name" CanUserSort="True">
+                                          Width="Auto" MinWidth="140" SortMemberPath="Name" CanUserSort="True">
                     <DataGridTemplateColumn.CellTemplate>
                       <DataTemplate x:DataType="vm:MethodRow">
                         <controls:HighlightedTextBlock SourceText="{Binding FriendlyName}"

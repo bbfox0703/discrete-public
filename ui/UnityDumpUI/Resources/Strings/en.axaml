@@ -91,6 +91,7 @@
   <sys:String x:Key="Inspector.CopyPtrTooltip">Copy pointer value (only meaningful for pointer-typed rows)</sys:String>
   <sys:String x:Key="Inspector.CopyNameTooltip">Copy field name</sys:String>
   <sys:String x:Key="Inspector.NavigateHexTooltip">Open Cheat Engine's Memory View at this address (requires AOBMaker plugin)</sys:String>
+  <sys:String x:Key="Inspector.NavigatePtrHexTooltip">Open Cheat Engine's Memory View at the address this pointer points to (requires AOBMaker plugin)</sys:String>
   <sys:String x:Key="Inspector.LookupAddressMenu">Find what's at this address…</sys:String>
   <!-- Phase 21a — reverse-property lookup. Right-click any value-typed
        Inspector row to list this field's address + value across every live
@@ -242,6 +243,7 @@
   <sys:String x:Key="Tools.AobMakerStatusLabel">AOBMaker:</sys:String>
   <sys:String x:Key="Tools.AobMakerConnected">connected</sys:String>
   <sys:String x:Key="Tools.AobMakerNotConnected">not connected</sys:String>
+  <sys:String x:Key="Tools.AobMakerRefreshTooltip">Re-check the AOBMaker pipe now (after loading the plugin in CE)</sys:String>
   <!-- Debugger symbol export — IL2CPP only, gated on backend == IL2CPP. -->
   <sys:String x:Key="Tools.ExportSymbolsX64dbg">Export Symbols → x64dbg (.dd64)…</sys:String>
   <sys:String x:Key="Tools.ExportSymbolsGhidra">Export Symbols → Ghidra (.txt)…</sys:String>

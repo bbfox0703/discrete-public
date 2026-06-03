@@ -176,16 +176,23 @@ if _G.mono_registerSymbolEx == nil then
 
     for _, m in ipairs(methods) do
       if m.name == methodname then
-        local p = mono_method_get_parameters(m.method)
-        local matched = true
+        -- mono_method_get_parameters can throw (generic / uncompiled methods)
+        -- and an entry's `.typename` can be nil on some CE/Mono builds — both
+        -- previously crashed string.find with "bad argument #1 (got nil)".
+        local ok, p = pcall(mono_method_get_parameters, m.method)
+        local matched = ok and type(p) == "table" and type(p.parameters) == "table"
 
-        if #p.parameters ~= #paramTypes then
-          matched = false
-        else
-          for i = 1, #paramTypes do
-            if not string.find(p.parameters[i].typename, paramTypes[i], 1, true) then
-              matched = false
-              break
+        if matched then
+          if #p.parameters ~= #paramTypes then
+            matched = false
+          else
+            for i = 1, #paramTypes do
+              local tn = p.parameters[i] and p.parameters[i].typename
+              if type(tn) ~= "string" or type(paramTypes[i]) ~= "string"
+                  or not string.find(tn, paramTypes[i], 1, true) then
+                matched = false
+                break
+              end
             end
           end
         end
