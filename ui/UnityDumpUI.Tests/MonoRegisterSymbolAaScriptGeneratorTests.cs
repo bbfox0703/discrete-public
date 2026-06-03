@@ -243,12 +243,13 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
     }
 
     [Fact]
-    public void Build_Il2cppOverload_Throws()
+    public void Build_Il2cppOverload_StillEmitsSignatureMatch()
     {
-        // ModuleName populated = IL2CPP method. This generator path is
-        // Mono-only by definition (no mono_compile_method for AOT code).
-        // The UI gates this for us, but the runtime guard catches
-        // programmer error loudly.
+        // ModuleName populated = IL2CPP method. CE's Active Mono features drives
+        // the mono_* API on IL2CPP too, so signature-match registration works
+        // here — the generator must NOT throw (it used to assert Mono-only) and
+        // must emit the same discrete_mono_registerSymbolBySignatureMatch call,
+        // ignoring the GameAssembly.dll module name.
         var il2cpp = new AaScriptOverload
         {
             MethodName    = "Abs",
@@ -265,10 +266,10 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
             DecoderBailed = false,
             ParamTypes    = new[] { "System.Int32" },
         };
-        var ex = Assert.Throws<ArgumentException>(
-            () => MonoRegisterSymbolAaScriptGenerator.Build(new[] { il2cpp }));
-        Assert.Contains("DLL-free Mono register only", ex.Message);
-        Assert.Contains("GameAssembly.dll", ex.Message);
+        string s = MonoRegisterSymbolAaScriptGenerator.Build(new[] { il2cpp });
+        Assert.Contains(
+            "_G.discrete_mono_registerSymbolBySignatureMatch('Mathf_Abs_int32', 'UnityEngine', 'Mathf', 'Abs', { 'System.Int32' }, {})",
+            s);
     }
 
     [Fact]

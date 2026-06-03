@@ -193,29 +193,14 @@ public static class AobAaScriptGenerator
             {
                 sb.AppendLine("//   ⚠ x64 decoder bailed mid-stream — pattern's tail is literal bytes (less version-stable).");
             }
-            // Bound the scan to the method's OWN bytes via its known module
-            // offset (ASLR-stable) so the prologue pattern — which is shared by
-            // hundreds of methods and matched all over the module under
-            // aobscanmodule — matches exactly once, at the right place. Falls
-            // back to aobscanmodule only if we somehow lack the offset.
-            string off = StripHexOffset(ov.ModuleOffset);
-            if (off != "0")
-            {
-                string start = ov.ModuleName + "+" + off;
-                int patBytes = CountPatternBytes(ov.Pattern);
-                sb.Append("aobscanregion(")
-                  .Append(symbols[i]).Append(", ")
-                  .Append(start).Append(", ")
-                  .Append(start).Append('+').Append(patBytes.ToString("X", CultureInfo.InvariantCulture)).Append(", ")
-                  .Append(ov.Pattern).AppendLine(")");
-            }
-            else
-            {
-                sb.Append("aobscanmodule(")
-                  .Append(symbols[i]).Append(", ")
-                  .Append(ov.ModuleName).Append(", ")
-                  .Append(ov.Pattern).AppendLine(")");
-            }
+            // NOTE: a method prologue AOB is often non-unique across the module.
+            // The relaunch+update-safe path is "Copy: register (sig-match)"
+            // (CE Active Mono features — works on IL2CPP too); this AOB form is a
+            // DLL-free fallback for when that isn't available.
+            sb.Append("aobscanmodule(")
+              .Append(symbols[i]).Append(", ")
+              .Append(ov.ModuleName).Append(", ")
+              .Append(ov.Pattern).AppendLine(")");
             sb.Append("registersymbol(").Append(symbols[i]).AppendLine(")");
             sb.AppendLine();
         }
@@ -341,28 +326,6 @@ public static class AobAaScriptGenerator
         // runtime metadata 1:1.
         string friendly = CompilerNameDemangler.DemangleClassPath(ov.ClassName);
         return string.IsNullOrEmpty(ov.Namespace) ? friendly : $"{ov.Namespace}.{friendly}";
-    }
-
-    /// <summary>Normalise a module-offset hex string ("0x0000000000B21AB0") to
-    /// the bare form ("B21AB0") for a CE <c>Module+offset</c> expression.
-    /// Empty / "0x0" → "0" (callers treat that as "no usable offset").</summary>
-    private static string StripHexOffset(string? s)
-    {
-        s = (s ?? string.Empty).Trim();
-        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
-        s = s.TrimStart('0');
-        return s.Length == 0 ? "0" : s;
-    }
-
-    /// <summary>Count the bytes (incl. <c>??</c> wildcards) in an AOB pattern
-    /// string like <c>"48 89 ?? ?? E8"</c> — used to bound an aobscanregion to
-    /// exactly the matched span.</summary>
-    private static int CountPatternBytes(string? pattern)
-    {
-        if (string.IsNullOrWhiteSpace(pattern)) return 0;
-        int n = 0;
-        foreach (var tok in pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries)) { _ = tok; n++; }
-        return n;
     }
 
     /// <summary>Replace any non-[A-Za-z0-9_] with '_'. Empty input → "T".</summary>

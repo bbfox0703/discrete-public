@@ -42,7 +42,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                                     string methodName,
                                     IAobMakerBridge? aobMaker = null,
                                     string? defaultInstanceAddress = null,
-                                    bool   isMonoBackend = false)
+                                    bool   supportsSignatureMatch = false)
     {
         _backend     = backend;
         _logger      = logger;
@@ -52,7 +52,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         ClassName    = className;
         MethodName   = methodName;
         DefaultInstanceAddress = defaultInstanceAddress;
-        IsMonoBackend = isMonoBackend;
+        SupportsSignatureMatch = supportsSignatureMatch;
 
         TitleLabel = string.IsNullOrEmpty(@namespace)
             ? $"{className}.{methodName}"
@@ -73,22 +73,22 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     public bool   HasAobMakerBridge { get; }
 
     /// <summary>
-    /// True when the live target's backend is Mono. Gates the DLL-free
-    /// <c>mono_registerSymbolEx</c> AA-script action (and its
-    /// AOBMaker-push sibling) — IL2CPP overloads have AOT addresses
-    /// in <c>GameAssembly.dll</c>, so the <c>mono_*</c> CE Lua API path
-    /// doesn't apply. Wired from <c>MainWindowViewModel.Backend2</c>
-    /// at VM construction; stays false on disconnect / unknown backend.
+    /// True for any connected Unity target (Mono OR IL2CPP). Gates the
+    /// signature-match register action (and its AOBMaker-push sibling). CE's
+    /// "Active Mono features" dissector drives the <c>mono_*</c> Lua API on BOTH
+    /// backends, so signature-match registration is universal — it is NOT
+    /// Mono-only. Wired from <c>MainWindowViewModel.Backend2</c> at VM
+    /// construction; stays false on disconnect / unknown backend.
     /// </summary>
-    public bool   IsMonoBackend     { get; }
+    public bool   SupportsSignatureMatch { get; }
 
     /// <summary>
-    /// True when both the AOBMaker bridge is wired AND the target is Mono.
-    /// Used by the DLL-free "Create in CE" button — needs both to make
-    /// sense (push the script to CE via AOBMaker, register Mono symbol on
+    /// True when both the AOBMaker bridge is wired AND the target is a Unity
+    /// game. Used by the signature-match "Create in CE" button — needs both to
+    /// make sense (push the script to CE via AOBMaker, register by signature on
     /// enable).
     /// </summary>
-    public bool   ShowMonoCreateInCe => IsMonoBackend && HasAobMakerBridge;
+    public bool   ShowSignatureCreateInCe => SupportsSignatureMatch && HasAobMakerBridge;
 
     /// <summary>
     /// Phase 22e — exposed so the spawning window (MethodOverloadsWindow)
@@ -473,68 +473,48 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         }
         if (CopyToClipboardAsync is null) return;
 
-        IsBusy = true;
-        ErrorMessage = null;
-        StatusMessage = $"Resolving module offsets for {picks.Count} overload(s)…";
+        var sb = new StringBuilder(512);
+        sb.AppendLine("[ENABLE]");
+        sb.AppendLine("{$lua}");
+        sb.AppendLine("if syntaxcheck then return end");
+        sb.AppendLine("-- discrete: hardcoded address — quick-and-dirty, BREAKS after a game");
+        sb.AppendLine("-- relaunch (the address changes). For a relaunch+update-safe symbol use");
+        sb.AppendLine("-- \"Copy: register (sig-match)\" (CE Active Mono features — Mono + IL2CPP).");
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var symbols = new List<string>();
+        foreach (var row in picks)
+        {
+            var ov = new AaScriptOverload
+            {
+                MethodName    = MethodName,
+                ClassName     = ClassName,
+                Namespace     = Namespace,
+                HumanSuffix   = row.HumanSuffix ?? "T",
+                Signature     = row.SignatureLabel,
+                Pattern       = string.Empty,
+                ModuleName    = string.Empty,
+                Address       = row.Address!,
+                ModuleOffset  = string.Empty,
+                ReturnType    = row.ReturnType,
+                DecoderBailed = false,
+            };
+            string sym = AobAaScriptGenerator.MakeSymbolName(ov, taken);
+            taken.Add(sym);
+            symbols.Add(sym);
+            sb.Append("registerSymbol(\"").Append(sym).Append("\", 0x")
+              .Append(ParseAddrAsHex(row.Address)).Append(")  -- ")
+              .Append(ClassName).Append('.').Append(MethodName).AppendLine(row.SignatureLabel);
+        }
+        sb.AppendLine();
+        sb.AppendLine("[DISABLE]");
+        sb.AppendLine("{$lua}");
+        foreach (var sym in symbols)
+        {
+            sb.Append("unregisterSymbol(\"").Append(sym).AppendLine("\")");
+        }
+
         try
         {
-            // Need ModuleName + ModuleOffset per overload — the same bag the AOB
-            // path builds. For IL2CPP these come back populated (the method
-            // lives in GameAssembly.dll); for Mono JIT they're empty.
-            var bag = await BuildScriptBagAsync(picks, AobLength).ConfigureAwait(true);
-            if (bag is null) return;
-
-            var sb = new StringBuilder(512);
-            sb.AppendLine("[ENABLE]");
-            sb.AppendLine("{$lua}");
-            sb.AppendLine("if syntaxcheck then return end");
-            sb.AppendLine("-- discrete: module-relative symbol registration. getAddressSafe");
-            sb.AppendLine("-- re-resolves \"Module\"+offset (offset is ASLR-stable) on each enable,");
-            sb.AppendLine("-- so the symbol points at the right address after a game relaunch —");
-            sb.AppendLine("-- no hardcoded (ASLR-doomed) absolute address.");
-            sb.AppendLine("if _G.discrete_regModule == nil then");
-            sb.AppendLine("  _G.discrete_regModule = function(sym, expr)");
-            sb.AppendLine("    local a = getAddressSafe(expr)");
-            sb.AppendLine("    if a and a ~= 0 then");
-            sb.AppendLine("      registerSymbol(sym, a)");
-            sb.AppendLine("      print(string.format('[discrete] %s = %X  (%s)', sym, a, expr))");
-            sb.AppendLine("    else");
-            sb.AppendLine("      print(string.format('[discrete] %s NOT FOUND (%s)', sym, expr))");
-            sb.AppendLine("    end");
-            sb.AppendLine("  end");
-            sb.AppendLine("end");
-            var symbols = new List<string>();
-            var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var ov in bag)
-            {
-                string sym = AobAaScriptGenerator.MakeSymbolName(ov, taken);
-                taken.Add(sym);
-                symbols.Add(sym);
-                if (!string.IsNullOrEmpty(ov.ModuleName))
-                {
-                    // IL2CPP / module-resident: "Module"+offset is ASLR-stable —
-                    // the offset within GameAssembly.dll is fixed across relaunch.
-                    sb.Append("_G.discrete_regModule(\"").Append(sym).Append("\", \"")
-                      .Append(ov.ModuleName).Append('+').Append(StripHexOffset(ov.ModuleOffset))
-                      .Append("\")  -- ").Append(ClassName).Append('.').Append(MethodName).AppendLine(ov.Signature);
-                }
-                else
-                {
-                    // Mono JIT — no module; the address is re-JITted to a new
-                    // page each run, so a hardcoded value breaks on relaunch.
-                    // Use "Copy: mono_register" for a relaunch-safe Mono symbol.
-                    sb.Append("registerSymbol(\"").Append(sym).Append("\", 0x")
-                      .Append(ParseAddrAsHex(ov.Address)).Append(")  -- ")
-                      .Append(ClassName).Append('.').Append(MethodName).Append(ov.Signature)
-                      .AppendLine("  -- ⚠ Mono JIT: breaks on relaunch — prefer Copy: mono_register");
-                }
-            }
-            sb.AppendLine();
-            sb.AppendLine("[DISABLE]");
-            sb.AppendLine("{$lua}");
-            foreach (var sym in symbols)
-                sb.Append("unregisterSymbol(\"").Append(sym).AppendLine("\")");
-
             await CopyToClipboardAsync(sb.ToString()).ConfigureAwait(true);
             StatusMessage = $"Copied registerSymbol script for {symbols.Count} overload(s) to clipboard.";
         }
@@ -542,20 +522,6 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         {
             ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
         }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
-
-    /// <summary>Normalise a module-offset hex string ("0x000000000B21AB0") to
-    /// the bare CE expression form ("B21AB0") used in <c>Module+offset</c>.</summary>
-    private static string StripHexOffset(string? s)
-    {
-        s = (s ?? string.Empty).Trim();
-        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
-        s = s.TrimStart('0');
-        return s.Length == 0 ? "0" : s;
     }
 
     /// <summary>
@@ -564,7 +530,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// (lazy-loaded out of the CT on enable). Works without ever
     /// injecting the Discrete DLL — the user's existing
     /// <c>mono_*</c> Lua helper pattern, generated for them.
-    /// Mono-only — gated on <see cref="IsMonoBackend"/>.
+    /// Universal across Mono + IL2CPP (CE Active Mono features) — gated on
+    /// <see cref="SupportsSignatureMatch"/>.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanRunMonoSelectionCmd))]
     public async Task CopyMonoSymbolScriptAsync()
@@ -609,8 +576,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// list via the AOBMaker bridge — same UE5CEDumper-style flow as
     /// <see cref="CreateAaScriptInCeAsync"/>, but using the
     /// <c>mono_registerSymbolEx</c> generator instead of the AOB one.
-    /// Needs Mono target AND AOBMaker bridge — gated on
-    /// <see cref="ShowMonoCreateInCe"/>.
+    /// Needs a Unity target AND AOBMaker bridge — gated on
+    /// <see cref="ShowSignatureCreateInCe"/>.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanRunMonoCreateInCe))]
     public async Task CreateMonoSymbolInCeAsync()
@@ -658,11 +625,11 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     }
 
     private bool CanRunMonoSelectionCmd() =>
-        !IsBusy && IsMonoBackend && CopyToClipboardAsync is not null
+        !IsBusy && SupportsSignatureMatch && CopyToClipboardAsync is not null
         && Overloads.Any(r => r.IsSelected);
 
     private bool CanRunMonoCreateInCe() =>
-        !IsBusy && IsMonoBackend && _aobMaker is not null
+        !IsBusy && SupportsSignatureMatch && _aobMaker is not null
         && Overloads.Any(r => r.IsSelected);
 
     /// <summary>

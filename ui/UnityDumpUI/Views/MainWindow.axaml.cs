@@ -838,13 +838,13 @@ public partial class MainWindow : Window
             // when its target class matches the browser's selected class.
             // Pre-fills the Instance address textbox in MethodCallWindow.
             defaultInstanceAddress: GetDefaultMethodCallInstance(vm, asm, ns, cls),
-            // Backend gate for the DLL-free Mono register actions — the
-            // mono_* CE API is meaningless on IL2CPP. Match on a "Mono" PREFIX
-            // (StartsWith, not Equals): the handshake backend string can carry
-            // a suffix ("Mono x64", "Mono (bdwgc)", …), and an exact-"Mono"
-            // test then hid the Mono register buttons on real Mono targets.
-            isMonoBackend: (vm.Backend2 ?? string.Empty)
-                .StartsWith("Mono", StringComparison.OrdinalIgnoreCase));
+            // Signature-match register actions work on ANY connected Unity
+            // target — CE's "Active Mono features" dissector drives the mono_*
+            // Lua API on BOTH Mono AND IL2CPP, so this is NOT Mono-only. Enable
+            // whenever the backend is a recognised Unity runtime.
+            supportsSignatureMatch:
+                (vm.Backend2 ?? string.Empty).StartsWith("Mono",   StringComparison.OrdinalIgnoreCase) ||
+                (vm.Backend2 ?? string.Empty).StartsWith("IL2CPP", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
