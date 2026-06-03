@@ -321,6 +321,129 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     [ObservableProperty] private string _fieldFilterJson = string.Empty;
 
+    // ---- Field-filter builder (friendly UI over FieldFilterJson) ----------
+    // Lets the user compose numeric predicates (level_ > 0, level_ <= 99,
+    // level_ == 1, …) without hand-writing the JSON. Each "Add" appends a
+    // predicate to FieldFilterJson; the existing Find applies the AND-combined
+    // set. Top-level numeric fields only this round (strings / nested deref
+    // chains are a follow-up). Populated from the walked top-level fields.
+    public ObservableCollection<FilterFieldOption> FilterFieldOptions { get; } = new();
+
+    /// <summary>Operators offered by the builder. "between" expands to a
+    /// `&gt;=` + `&lt;=` pair so a single Add covers a closed range.</summary>
+    public IReadOnlyList<string> FilterOps { get; } =
+        new[] { "==", "!=", ">", ">=", "<", "<=", "between" };
+
+    [ObservableProperty] private FilterFieldOption? _selectedFilterField;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsRangeOp))]
+    private string _filterOp = "==";
+
+    [ObservableProperty] private string _filterValue1 = string.Empty;
+    [ObservableProperty] private string _filterValue2 = string.Empty;
+
+    /// <summary>True when the "between" operator is selected — reveals the
+    /// second value box.</summary>
+    public bool IsRangeOp => string.Equals(FilterOp, "between", StringComparison.Ordinal);
+
+    /// <summary>Managed primitive types the builder treats as filterable
+    /// numerics (matches the DLL's <c>evalPredicate</c> numeric switch).</summary>
+    private static readonly HashSet<string> s_filterNumericTypes = new(StringComparer.Ordinal)
+    {
+        "System.Boolean", "System.Byte",  "System.SByte",
+        "System.Int16",   "System.UInt16","System.Char",
+        "System.Int32",   "System.UInt32","System.Int64", "System.UInt64",
+        "System.Single",  "System.Double",
+    };
+
+    /// <summary>Refresh <see cref="FilterFieldOptions"/> from the current
+    /// top-level walked fields (numeric only). Called after each walk so the
+    /// picker reflects the inspected class's schema.</summary>
+    private void RebuildFilterFieldOptions()
+    {
+        var prev = SelectedFilterField?.Name;
+        FilterFieldOptions.Clear();
+        foreach (WalkedFieldNode n in Fields)
+        {
+            if (n.IndentLevel != 0) continue;
+            if (n.Offset < 0) continue;
+            if (!string.IsNullOrEmpty(n.Type) && s_filterNumericTypes.Contains(n.Type))
+                FilterFieldOptions.Add(new FilterFieldOption(n.Name, n.Offset, n.Type));
+        }
+        if (prev is not null)
+            SelectedFilterField = FilterFieldOptions.FirstOrDefault(o => o.Name == prev);
+    }
+
+    /// <summary>Append the composed predicate(s) to <see cref="FieldFilterJson"/>.
+    /// "between" emits two predicates (`&gt;=` lo, `&lt;=` hi); everything else
+    /// one. The next Find applies them AND-combined. Built as plain JSON text
+    /// (no DOM) so it stays Native-AOT / trim-safe.</summary>
+    [RelayCommand]
+    private void AddFilterPredicate()
+    {
+        FilterFieldOption? f = SelectedFilterField;
+        if (f is null) { ErrorMessage = "Pick a field to filter on first."; return; }
+
+        // Bail if the existing box holds something that isn't a JSON array — we
+        // won't silently discard a hand-edited filter.
+        string cur = (FieldFilterJson ?? string.Empty).Trim();
+        if (cur.Length != 0 && !(cur.StartsWith('[') && cur.EndsWith(']')))
+        { ErrorMessage = "The current field filter isn't a JSON array — clear it before using the builder."; return; }
+
+        bool isFloat = f.Type is "System.Single" or "System.Double";
+        var preds = new List<string>(2);
+        if (IsRangeOp)
+        {
+            if (!TryFormatFilterValue(FilterValue1, isFloat, out string lo) ||
+                !TryFormatFilterValue(FilterValue2, isFloat, out string hi))
+            { ErrorMessage = "Range needs two numeric bounds (low and high)."; return; }
+            preds.Add(PredicateJson(f, ">=", lo));
+            preds.Add(PredicateJson(f, "<=", hi));
+        }
+        else
+        {
+            if (!TryFormatFilterValue(FilterValue1, isFloat, out string v))
+            { ErrorMessage = $"Enter a numeric value for {f.Name}."; return; }
+            preds.Add(PredicateJson(f, FilterOp, v));
+        }
+
+        string joined = string.Join(",", preds);
+        string inner = cur.Length == 0 ? string.Empty : cur.Substring(1, cur.Length - 2).Trim();
+        FieldFilterJson = inner.Length == 0 ? $"[{joined}]" : $"[{inner},{joined}]";
+        ErrorMessage = null;
+    }
+
+    /// <summary>Clear the whole field-filter predicate set.</summary>
+    [RelayCommand]
+    private void ClearFieldFilter() => FieldFilterJson = string.Empty;
+
+    private static string PredicateJson(FilterFieldOption f, string op, string valueLiteral) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"{{\"offset\":{f.Offset},\"type\":\"{JsonEscape(f.Type)}\",\"op\":\"{op}\",\"value\":{valueLiteral}}}");
+
+    private static string JsonEscape(string s) =>
+        s.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+
+    /// <summary>Validate + normalise a user-entered value into a bare JSON
+    /// number literal. Integer types parse as Int64, float types as Double.</summary>
+    private static bool TryFormatFilterValue(string? s, bool isFloat, out string literal)
+    {
+        literal = "0";
+        s = (s ?? string.Empty).Trim();
+        if (s.Length == 0) return false;
+        if (isFloat)
+        {
+            if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out double d)
+                && !double.IsNaN(d) && !double.IsInfinity(d))
+            { literal = d.ToString("R", CultureInfo.InvariantCulture); return true; }
+            return false;
+        }
+        if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out long l))
+        { literal = l.ToString(CultureInfo.InvariantCulture); return true; }
+        return false;
+    }
+
     [ObservableProperty] private string? _classPointer;
 
     [ObservableProperty]
@@ -599,6 +722,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 _refilterSuppressionDepth--;
             }
             RefilterFields();
+            RebuildFilterFieldOptions();
 
             // Re-select the previously-focused field by Name + DeclaredIn so
             // the user keeps their viewport when flipping between instances
@@ -1903,6 +2027,28 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
 
         return display;
     }
+}
+
+/// <summary>One numeric top-level field offered by the field-filter builder
+/// dropdown. Carries the offset + managed type needed to compose a predicate.</summary>
+public sealed class FilterFieldOption
+{
+    public FilterFieldOption(string name, int offset, string type)
+    {
+        Name   = name;
+        Offset = offset;
+        Type   = type;
+    }
+    public string Name   { get; }
+    public int    Offset { get; }
+    public string Type   { get; }
+
+    private string ShortType => Type.StartsWith("System.", StringComparison.Ordinal)
+        ? Type.Substring("System.".Length) : Type;
+
+    /// <summary>Dropdown label, e.g. <c>level_  (+0x3C · Int32)</c>.</summary>
+    public string Display =>
+        string.Create(CultureInfo.InvariantCulture, $"{Name}  (+0x{Offset:X} · {ShortType})");
 }
 
 public sealed class InstanceItem
