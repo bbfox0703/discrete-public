@@ -76,6 +76,14 @@ static K SehGetParent(Fn fn, K cur) {
     __try { return fn(cur); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+// SEH-guarded class_value_size (two-arg: class + out-align). Returns the
+// value-type instance size used as the inline array-element stride for the
+// Dictionary walk; 0 on fault / unbound. Generic over both backends' class ptr.
+template <typename Fn, typename K>
+static int SehValueSize(Fn fn, K cur) {
+    __try { std::uint32_t align = 0; return fn(cur, &align); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 #pragma warning(pop)
 
 namespace {
@@ -181,6 +189,67 @@ bool ShouldExpandValueStruct(bool isValueType, bool isEnum, ClassPtr vtc,
            entry.contains("ptr") && !entry.contains("fields") && !entry.contains("value");
 }
 
+// ── Native Dictionary<K,V> key/value walk ──────────────────────────────────
+// A managed Dictionary field decodes to a bare reference pointer; left alone
+// the user only sees the dict object's _buckets/_freeList/_comparer noise with
+// `entries` leafed. Instead, detect the dict by type name, read its live
+// `count` + `entries` (Entry[]) and decode each used entry's key/value via
+// ReadClassInfo(EntryClass) — runtime offsets, never hard-coded layout. Pairs
+// are emitted as child `fields` named "[<keyRepr>]" so the Inspector (which
+// already renders nested `fields`) shows key→value with no UI change.
+
+// Mono TypeName + IL2CPP il2cpp_type_get_name both render the generic dict as
+// "System.Collections.Generic.Dictionary`2[...]" / "...`2<...>" — the literal
+// backtick-2 (`2) arity prefix is the stable cross-runtime signal.
+inline bool IsDictionaryType(const std::string& t) {
+    return t.rfind("System.Collections.Generic.Dictionary`2", 0) == 0;
+}
+
+constexpr std::size_t kDictDefaultPairCap = 256;  // emitted key/value pairs cap
+
+// Backend-agnostic hex — the file-scope helpers can't see the handler-local
+// `formatHex` lambda. Matches its "0x%016llX" form exactly.
+inline std::string DictFormatHex(std::uintptr_t v) {
+    char buf[32];
+    ::_snprintf_s(buf, sizeof(buf), _TRUNCATE, "0x%016llX",
+                  static_cast<unsigned long long>(v));
+    return std::string(buf);
+}
+
+// Case-insensitive field-name match tolerating one leading underscore.
+// referencesource uses `entries`/`count`/`hashCode`; some corlibs prefix `_`.
+inline bool DictNameIs(const std::string& s, const char* want) {
+    const char* p = s.c_str();
+    if (*p == '_') ++p;
+    for (; *p != '\0' && *want != '\0'; ++p, ++want) {
+        char a = (*p >= 'A' && *p <= 'Z') ? static_cast<char>(*p + 32) : *p;
+        char b = (*want >= 'A' && *want <= 'Z') ? static_cast<char>(*want + 32) : *want;
+        if (a != b) return false;
+    }
+    return *p == '\0' && *want == '\0';
+}
+
+// Short human-readable label from a decoded key field (string/number/bool/ptr).
+inline std::string DictKeyRepr(const json& kd, std::size_t i) {
+    if (kd.contains("string")) {
+        const json& s = kd["string"];
+        if (s.is_string()) return s.get<std::string>();
+        if (s.is_null())   return "null";
+    }
+    if (kd.contains("value")) {
+        const json& v = kd["value"];
+        // NB: is_number_integer() is also true for unsigned in nlohmann, so the
+        // unsigned check must come first to avoid get<long long> overflow.
+        if (v.is_boolean())         return v.get<bool>() ? "true" : "false";
+        if (v.is_number_unsigned()) return std::to_string(v.get<unsigned long long>());
+        if (v.is_number_integer())  return std::to_string(v.get<long long>());
+        if (v.is_number_float())    return std::to_string(v.get<double>());
+        return v.dump();
+    }
+    if (kd.contains("ptr") && kd["ptr"].is_string()) return kd["ptr"].get<std::string>();
+    return "#" + std::to_string(i);
+}
+
 #if defined(DISCRETE_BACKEND_MONO)
 json CaptureMonoStructFields(const StructDecodeFieldFn& decodeField,
                              ::Discrete::Mono::MonoClass* sc, std::uintptr_t structBase,
@@ -232,6 +301,154 @@ json CaptureMonoStructFields(const StructDecodeFieldFn& decodeField,
         ++produced;
     }
     return json{{"fields", std::move(members)}};
+}
+
+// Native Dictionary<K,V> walk (Mono) — see the shared header comment above.
+// `dictObj` is a live dict OBJECT pointer (reference type, has object header).
+// Returns {"dict_count":N,"fields":[pairs]} on success, {"dict_error":"..."} for
+// an unsupported/torn layout, or {} when it isn't a usable dict (caller keeps
+// the bare ptr). depthLeft bounds nested-dict recursion; pairCap bounds pairs.
+json CaptureMonoDictionary(const StructDecodeFieldFn& decodeField,
+                           std::uintptr_t dictObj, int depthLeft,
+                           std::size_t pairCap) {
+    namespace Mono = ::Discrete::Mono;
+    namespace ML   = ::Discrete::ManagedLayout;
+    if (dictObj == 0 || depthLeft <= 0) return json::object();
+
+    const auto& r = Mono::GetResolver();
+    if (r.class_get_element_class == nullptr || r.class_value_size == nullptr)
+        return json::object();  // runtime too old → keep bare ptr
+
+    auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
+        // Full qualification: the `namespace Memory = ...` alias is declared
+        // later in this TU (~line 1217), after these early helpers.
+        return ::Discrete::Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+    };
+
+    // 1. live dict class (SEH-guarded object_get_class) — fields are set up.
+    Mono::MonoClass* dictClass = Mono::ClassOfObject(dictObj);
+    if (dictClass == nullptr || !Mono::ProbeKlassValid(dictClass)) return json::object();
+    Mono::ClassInfoResult dr = Mono::ReadClassInfo(dictClass);
+    if (!dr.ok) return json::object();
+
+    // 2. locate `entries` (Entry[]) + `count` (Int32) by name. Missing → an
+    //    unsupported corlib layout (e.g. old mcs parallel-array dictionary).
+    const Mono::FieldEntry* entriesF = nullptr;
+    const Mono::FieldEntry* countF   = nullptr;
+    for (const auto& f : dr.info.fields) {
+        if (f.flags & 0x10u) continue;  // skip statics
+        if (entriesF == nullptr && DictNameIs(f.name, "entries")) entriesF = &f;
+        else if (countF == nullptr && DictNameIs(f.name, "count")) countF = &f;
+    }
+    if (entriesF == nullptr || countF == nullptr)
+        return json{{"dict_error", "unsupported dict layout"}};
+
+    // 3. read count + entries pointer. The dict is a reference object, so its
+    //    field offsets are header-inclusive → no -header here.
+    std::int32_t count = 0;
+    if (!rd(dictObj + static_cast<std::uintptr_t>(countF->offset), &count, 4))
+        return json{{"dict_error", "count unreadable"}};
+    if (count <= 0) return json{{"dict_count", 0}, {"fields", json::array()}};
+    if (count > (1 << 20)) count = (1 << 20);  // sanity clamp on torn data
+    std::uintptr_t entriesPtr = 0;
+    if (!rd(dictObj + static_cast<std::uintptr_t>(entriesF->offset), &entriesPtr,
+            sizeof(std::uintptr_t)) || entriesPtr == 0)
+        return json{{"dict_count", 0}, {"fields", json::array()}};
+    // clamp count to the entries array's real length.
+    std::uintptr_t arrLen = 0;
+    if (rd(entriesPtr + ML::kArrayMaxLengthOffset, &arrLen, sizeof(std::uintptr_t)) &&
+        arrLen < static_cast<std::uintptr_t>(count))
+        count = static_cast<std::int32_t>(arrLen);
+
+    // 4. Entry element class → stride + member offsets (all SEH-guarded).
+    Mono::MonoClass* arrClass = Mono::ClassOfObject(entriesPtr);
+    if (arrClass == nullptr) return json{{"dict_error", "entries class unresolved"}};
+    Mono::MonoClass* entryClass = SehGetParent(r.class_get_element_class, arrClass);
+    if (entryClass == nullptr || !Mono::ProbeKlassValid(entryClass))
+        return json{{"dict_error", "entry class unresolved"}};
+    const int stride = SehValueSize(r.class_value_size, entryClass);
+    if (stride <= 0) return json{{"dict_error", "entry stride unknown"}};
+    Mono::ClassInfoResult er = Mono::ReadClassInfo(entryClass);
+    if (!er.ok) return json{{"dict_error", "entry layout unreadable"}};
+
+    const Mono::FieldEntry* keyF  = nullptr;
+    const Mono::FieldEntry* valF  = nullptr;
+    const Mono::FieldEntry* hashF = nullptr;
+    for (const auto& f : er.info.fields) {
+        if (f.flags & 0x10u) continue;
+        if      (keyF  == nullptr && DictNameIs(f.name, "key"))      keyF  = &f;
+        else if (valF  == nullptr && DictNameIs(f.name, "value"))    valF  = &f;
+        else if (hashF == nullptr && DictNameIs(f.name, "hashCode")) hashF = &f;
+    }
+    if (keyF == nullptr || valF == nullptr)
+        return json{{"dict_error", "entry key/value not found"}};
+
+    const long hdr = static_cast<long>(ML::kObjectHeader);
+    const std::uintptr_t entriesData = entriesPtr + ML::kArrayDataOffset;
+    const std::string& keyDecType = (keyF->isEnum && !keyF->underlyingTypeName.empty())
+        ? keyF->underlyingTypeName : keyF->typeName;
+    const std::string& valDecType = (valF->isEnum && !valF->underlyingTypeName.empty())
+        ? valF->underlyingTypeName : valF->typeName;
+
+    json pairs = json::array();
+    std::size_t emitted = 0;
+    bool truncated = false;
+    for (std::int32_t i = 0; i < count; ++i) {
+        if (emitted >= pairCap) { truncated = true; break; }
+        const std::uintptr_t elemBase =
+            entriesData + static_cast<std::uintptr_t>(i) * static_cast<std::uintptr_t>(stride);
+        // liveness: a freed Entry has hashCode < 0 (referencesource convention).
+        if (hashF != nullptr) {
+            std::int32_t hc = 0;
+            const std::uintptr_t hcAddr =
+                elemBase + static_cast<std::uintptr_t>(static_cast<long>(hashF->offset) - hdr);
+            if (rd(hcAddr, &hc, 4) && hc < 0) continue;
+        }
+        const std::uintptr_t keyAddr =
+            elemBase + static_cast<std::uintptr_t>(static_cast<long>(keyF->offset) - hdr);
+        const std::uintptr_t valAddr =
+            elemBase + static_cast<std::uintptr_t>(static_cast<long>(valF->offset) - hdr);
+        json kd = decodeField(keyDecType, keyAddr);
+        json vd = decodeField(valDecType, valAddr);
+        const std::string keyRepr = DictKeyRepr(kd, static_cast<std::size_t>(i));
+
+        json pair = {
+            {"name",     "[" + keyRepr + "]"},
+            {"type",     valF->typeName},
+            {"offset",   static_cast<long>(valF->offset) - hdr},
+            {"address",  DictFormatHex(valAddr)},
+            {"index",    i},
+            {"dict_key", keyRepr},
+        };
+        if (valF->isEnum)      pair["is_enum"]       = true;
+        if (valF->isValueType) pair["is_value_type"] = true;
+        for (auto kv = vd.begin(); kv != vd.end(); ++kv) pair[kv.key()] = kv.value();
+
+        // value expansion: inline value-struct → fan out; nested dict → recurse.
+        if (ShouldExpandValueStruct(valF->isValueType, valF->isEnum, valF->valueTypeClass,
+                                    valF->typeName, pair)) {
+            json sub = CaptureMonoStructFields(decodeField, valF->valueTypeClass,
+                                               valAddr, depthLeft - 1, kStructDefaultMemberCap);
+            if (sub.contains("fields")) { pair.erase("ptr"); pair["fields"] = std::move(sub["fields"]); }
+        } else if (IsDictionaryType(valF->typeName) && pair.contains("ptr")) {
+            std::uintptr_t nested = 0;
+            if (rd(valAddr, &nested, sizeof(std::uintptr_t)) && nested != 0) {
+                json nd = CaptureMonoDictionary(decodeField, nested, depthLeft - 1, pairCap);
+                if (nd.contains("fields")) {
+                    pair.erase("ptr");
+                    pair["dict"]       = true;
+                    pair["dict_count"] = nd.value("dict_count", 0);
+                    if (nd.value("dict_truncated", false)) pair["dict_truncated"] = true;
+                    pair["fields"] = std::move(nd["fields"]);
+                }
+            }
+        }
+        pairs.push_back(std::move(pair));
+        ++emitted;
+    }
+    json out = {{"dict_count", emitted}, {"fields", std::move(pairs)}};
+    if (truncated) out["dict_truncated"] = true;
+    return out;
 }
 #endif  // DISCRETE_BACKEND_MONO
 
@@ -294,6 +511,144 @@ json CaptureIl2cppStructFields(const StructDecodeFieldFn& decodeField,
         ++produced;
     }
     return json{{"fields", std::move(members)}};
+}
+
+// Native Dictionary<K,V> walk (IL2CPP) — twin of CaptureMonoDictionary (see it
+// for the full rationale + the layout facts). Same algorithm with IL2CPP types:
+// object_get_class → ReadClassInfo for `entries`/`count`, element class for the
+// Entry stride + key/value/hashCode offsets, emit "[key]" child fields. IL2CPP
+// is x64-only today; the -kObjectHeader inline-element math is the same.
+json CaptureIl2cppDictionary(const StructDecodeFieldFn& decodeField,
+                             std::uintptr_t dictObj, int depthLeft,
+                             std::size_t pairCap) {
+    namespace ML = ::Discrete::ManagedLayout;
+    if (dictObj == 0 || depthLeft <= 0) return json::object();
+
+    const auto& r = IL2CPP::GetResolver();
+    if (r.class_get_element_class == nullptr || r.class_value_size == nullptr)
+        return json::object();
+
+    auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
+        // Full qualification: the `namespace Memory = ...` alias is declared
+        // later in this TU (~line 1217), after these early helpers.
+        return ::Discrete::Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+    };
+
+    IL2CPP::Il2CppClass* dictClass = IL2CPP::ClassOfObject(dictObj);
+    if (dictClass == nullptr || !IL2CPP::ProbeKlassValid(dictClass)) return json::object();
+    IL2CPP::ClassInfoResult dr = IL2CPP::ReadClassInfo(dictClass);
+    if (!dr.ok) return json::object();
+
+    const IL2CPP::FieldEntry* entriesF = nullptr;
+    const IL2CPP::FieldEntry* countF   = nullptr;
+    for (const auto& f : dr.info.fields) {
+        if (f.flags & 0x10u) continue;
+        if (entriesF == nullptr && DictNameIs(f.name, "entries")) entriesF = &f;
+        else if (countF == nullptr && DictNameIs(f.name, "count")) countF = &f;
+    }
+    if (entriesF == nullptr || countF == nullptr)
+        return json{{"dict_error", "unsupported dict layout"}};
+
+    std::int32_t count = 0;
+    if (!rd(dictObj + static_cast<std::uintptr_t>(countF->offset), &count, 4))
+        return json{{"dict_error", "count unreadable"}};
+    if (count <= 0) return json{{"dict_count", 0}, {"fields", json::array()}};
+    if (count > (1 << 20)) count = (1 << 20);
+    std::uintptr_t entriesPtr = 0;
+    if (!rd(dictObj + static_cast<std::uintptr_t>(entriesF->offset), &entriesPtr,
+            sizeof(std::uintptr_t)) || entriesPtr == 0)
+        return json{{"dict_count", 0}, {"fields", json::array()}};
+    std::uintptr_t arrLen = 0;
+    if (rd(entriesPtr + ML::kArrayMaxLengthOffset, &arrLen, sizeof(std::uintptr_t)) &&
+        arrLen < static_cast<std::uintptr_t>(count))
+        count = static_cast<std::int32_t>(arrLen);
+
+    IL2CPP::Il2CppClass* arrClass = IL2CPP::ClassOfObject(entriesPtr);
+    if (arrClass == nullptr) return json{{"dict_error", "entries class unresolved"}};
+    IL2CPP::Il2CppClass* entryClass = SehGetParent(r.class_get_element_class, arrClass);
+    if (entryClass == nullptr || !IL2CPP::ProbeKlassValid(entryClass))
+        return json{{"dict_error", "entry class unresolved"}};
+    const int stride = SehValueSize(r.class_value_size, entryClass);
+    if (stride <= 0) return json{{"dict_error", "entry stride unknown"}};
+    IL2CPP::ClassInfoResult er = IL2CPP::ReadClassInfo(entryClass);
+    if (!er.ok) return json{{"dict_error", "entry layout unreadable"}};
+
+    const IL2CPP::FieldEntry* keyF  = nullptr;
+    const IL2CPP::FieldEntry* valF  = nullptr;
+    const IL2CPP::FieldEntry* hashF = nullptr;
+    for (const auto& f : er.info.fields) {
+        if (f.flags & 0x10u) continue;
+        if      (keyF  == nullptr && DictNameIs(f.name, "key"))      keyF  = &f;
+        else if (valF  == nullptr && DictNameIs(f.name, "value"))    valF  = &f;
+        else if (hashF == nullptr && DictNameIs(f.name, "hashCode")) hashF = &f;
+    }
+    if (keyF == nullptr || valF == nullptr)
+        return json{{"dict_error", "entry key/value not found"}};
+
+    const long hdr = static_cast<long>(ML::kObjectHeader);
+    const std::uintptr_t entriesData = entriesPtr + ML::kArrayDataOffset;
+    const std::string& keyDecType = (keyF->isEnum && !keyF->underlyingTypeName.empty())
+        ? keyF->underlyingTypeName : keyF->typeName;
+    const std::string& valDecType = (valF->isEnum && !valF->underlyingTypeName.empty())
+        ? valF->underlyingTypeName : valF->typeName;
+
+    json pairs = json::array();
+    std::size_t emitted = 0;
+    bool truncated = false;
+    for (std::int32_t i = 0; i < count; ++i) {
+        if (emitted >= pairCap) { truncated = true; break; }
+        const std::uintptr_t elemBase =
+            entriesData + static_cast<std::uintptr_t>(i) * static_cast<std::uintptr_t>(stride);
+        if (hashF != nullptr) {
+            std::int32_t hc = 0;
+            const std::uintptr_t hcAddr =
+                elemBase + static_cast<std::uintptr_t>(static_cast<long>(hashF->offset) - hdr);
+            if (rd(hcAddr, &hc, 4) && hc < 0) continue;
+        }
+        const std::uintptr_t keyAddr =
+            elemBase + static_cast<std::uintptr_t>(static_cast<long>(keyF->offset) - hdr);
+        const std::uintptr_t valAddr =
+            elemBase + static_cast<std::uintptr_t>(static_cast<long>(valF->offset) - hdr);
+        json kd = decodeField(keyDecType, keyAddr);
+        json vd = decodeField(valDecType, valAddr);
+        const std::string keyRepr = DictKeyRepr(kd, static_cast<std::size_t>(i));
+
+        json pair = {
+            {"name",     "[" + keyRepr + "]"},
+            {"type",     valF->typeName},
+            {"offset",   static_cast<long>(valF->offset) - hdr},
+            {"address",  DictFormatHex(valAddr)},
+            {"index",    i},
+            {"dict_key", keyRepr},
+        };
+        if (valF->isEnum)      pair["is_enum"]       = true;
+        if (valF->isValueType) pair["is_value_type"] = true;
+        for (auto kv = vd.begin(); kv != vd.end(); ++kv) pair[kv.key()] = kv.value();
+
+        if (ShouldExpandValueStruct(valF->isValueType, valF->isEnum, valF->valueTypeClass,
+                                    valF->typeName, pair)) {
+            json sub = CaptureIl2cppStructFields(decodeField, valF->valueTypeClass,
+                                                 valAddr, depthLeft - 1, kStructDefaultMemberCap);
+            if (sub.contains("fields")) { pair.erase("ptr"); pair["fields"] = std::move(sub["fields"]); }
+        } else if (IsDictionaryType(valF->typeName) && pair.contains("ptr")) {
+            std::uintptr_t nested = 0;
+            if (rd(valAddr, &nested, sizeof(std::uintptr_t)) && nested != 0) {
+                json nd = CaptureIl2cppDictionary(decodeField, nested, depthLeft - 1, pairCap);
+                if (nd.contains("fields")) {
+                    pair.erase("ptr");
+                    pair["dict"]       = true;
+                    pair["dict_count"] = nd.value("dict_count", 0);
+                    if (nd.value("dict_truncated", false)) pair["dict_truncated"] = true;
+                    pair["fields"] = std::move(nd["fields"]);
+                }
+            }
+        }
+        pairs.push_back(std::move(pair));
+        ++emitted;
+    }
+    json out = {{"dict_count", emitted}, {"fields", std::move(pairs)}};
+    if (truncated) out["dict_truncated"] = true;
+    return out;
 }
 
 // Phase 30b — IL2CPP game-side streaming decoder. Owns the heap-walk result +
@@ -5000,6 +5355,12 @@ void RegisterCoreHandlers() {
         if (!args.contains("address") || !parseAddr(args["address"], addr)) {
             return json{{"error", "missing/invalid 'address'"}};
         }
+        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256).
+        std::size_t dictPairCap = kDictDefaultPairCap;
+        if (args.contains("dictLimit") && args["dictLimit"].is_number()) {
+            const long long dl = args["dictLimit"].get<long long>();
+            if (dl > 0) dictPairCap = static_cast<std::size_t>(dl);
+        }
         std::string err;
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
         if (k == nullptr) return json{{"error", err}};
@@ -5149,6 +5510,24 @@ void RegisterCoreHandlers() {
                         entry["fields"] = std::move(sub["fields"]);
                     } else if (sub.contains("struct_error")) {
                         entry["struct_error"] = sub["struct_error"];
+                    }
+                }
+                // Dictionary<K,V> — emit key→value pairs as child fields.
+                else if (IsDictionaryType(f.typeName) && entry.contains("ptr")) {
+                    std::uintptr_t dptr = 0;
+                    if (Memory::SafeReadBytes(reinterpret_cast<void*>(fieldAddr), &dptr,
+                                              sizeof(dptr)) && dptr != 0) {
+                        json d = CaptureMonoDictionary(decodeField, dptr,
+                                                       kStructMaxDepth, dictPairCap);
+                        if (d.contains("fields")) {
+                            entry.erase("ptr");
+                            entry["dict"]       = true;
+                            entry["dict_count"] = d.value("dict_count", 0);
+                            if (d.value("dict_truncated", false)) entry["dict_truncated"] = true;
+                            entry["fields"] = std::move(d["fields"]);
+                        } else if (d.contains("dict_error")) {
+                            entry["dict_error"] = d["dict_error"];
+                        }
                     }
                 }
                 fields.push_back(std::move(entry));
@@ -8128,6 +8507,12 @@ void RegisterCoreHandlers() {
         if (!args.contains("address") || !parseAddr(args["address"], addr)) {
             return json{{"error", "missing/invalid 'address'"}};
         }
+        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256).
+        std::size_t dictPairCap = kDictDefaultPairCap;
+        if (args.contains("dictLimit") && args["dictLimit"].is_number()) {
+            const long long dl = args["dictLimit"].get<long long>();
+            if (dl > 0) dictPairCap = static_cast<std::size_t>(dl);
+        }
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
         if (k == nullptr) return json{{"error", err}};
@@ -8248,6 +8633,24 @@ void RegisterCoreHandlers() {
                         entry["fields"] = std::move(sub["fields"]);
                     } else if (sub.contains("struct_error")) {
                         entry["struct_error"] = sub["struct_error"];
+                    }
+                }
+                // Dictionary<K,V> — emit key→value pairs as child fields.
+                else if (IsDictionaryType(f.typeName) && entry.contains("ptr")) {
+                    std::uintptr_t dptr = 0;
+                    if (Memory::SafeReadBytes(reinterpret_cast<void*>(fieldAddr), &dptr,
+                                              sizeof(dptr)) && dptr != 0) {
+                        json d = CaptureIl2cppDictionary(decodeField, dptr,
+                                                         kStructMaxDepth, dictPairCap);
+                        if (d.contains("fields")) {
+                            entry.erase("ptr");
+                            entry["dict"]       = true;
+                            entry["dict_count"] = d.value("dict_count", 0);
+                            if (d.value("dict_truncated", false)) entry["dict_truncated"] = true;
+                            entry["fields"] = std::move(d["fields"]);
+                        } else if (d.contains("dict_error")) {
+                            entry["dict_error"] = d["dict_error"];
+                        }
                     }
                 }
                 fields.push_back(std::move(entry));
