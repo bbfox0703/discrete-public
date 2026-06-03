@@ -142,6 +142,15 @@ public static class InstanceFieldClassifier
             return WalkedFieldKind.PointerToClass;
         }
 
+        // NOTE: Dictionary<K,V> stays a Leaf (Rule 5). Drilling it from the UI
+        // can't surface the key/value pairs — the inner _entries are
+        // System.…Entry value structs, which the name walk can't resolve
+        // (System.*) and which have no object header, and WalkedArrayElement
+        // exposes no class pointer to walk them by. A useful dict expansion needs
+        // a native Dictionary-aware walk (decode key/value via the Entry class
+        // metadata); see the Scan/Inspector backlog. Leafing here keeps Copy CE
+        // XML / Copy CE field on dicts safe (no recursion → no CTD).
+
         // Rule 5 — fallback.
         return WalkedFieldKind.Leaf;
     }

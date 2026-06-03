@@ -915,6 +915,9 @@
                       <ContextMenu>
                         <MenuItem Header="{StaticResource Inspector.CopyCeFieldNode}"
                                   Command="{Binding Inspector.CopyCeFieldNodeCommand}" />
+                        <MenuItem Header="{StaticResource Inspector.CopyCeFieldNodeRelative}"
+                                  ToolTip.Tip="Root entry uses +offset (the field's offset within its parent) instead of an absolute address, so you can paste it directly under the parent struct in CE."
+                                  Command="{Binding Inspector.CopyCeFieldNodeRelativeCommand}" />
                         <Separator />
                         <!-- Phase 17c — Inspector right-click reverse address
                              lookup. Pre-fills the Address Lookup tab's input

@@ -1496,17 +1496,27 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     private bool CanCopyInstance() => SelectedInstance is not null && HasTarget;
 
+    /// <summary>"Copy CE field" — each selected node becomes a STANDALONE subtree
+    /// rooted at its own ABSOLUTE storage address (paste anywhere in CE).</summary>
     [RelayCommand(CanExecute = nameof(CanCopyNode))]
-    private async Task CopyCeFieldNodeAsync()
+    private Task CopyCeFieldNodeAsync() => CopyCeFieldNodeCoreAsync(rootAsOffset: false);
+
+    /// <summary>"Copy CE field (relative root)" — same subtree, but the TOP entry
+    /// is addressed as <c>+{offset}</c> (the field's offset within its parent)
+    /// instead of an absolute address, so it can be pasted directly UNDER the
+    /// parent struct in CE and resolve there (e.g. a <c>member</c> field at +28
+    /// pasted under its <c>team</c> parent). Children stay relative beneath it.</summary>
+    [RelayCommand(CanExecute = nameof(CanCopyNode))]
+    private Task CopyCeFieldNodeRelativeAsync() => CopyCeFieldNodeCoreAsync(rootAsOffset: true);
+
+    private async Task CopyCeFieldNodeCoreAsync(bool rootAsOffset)
     {
         if (CopyToClipboardAsync is null) return;
 
         // Multi-select preferred — falls back to the singular SelectedNode
         // when the View hasn't wired the accessor (tests) or only one row
-        // is highlighted. Each node becomes a STANDALONE subtree rooted at its
-        // own absolute storage address, with the same value decode + relative
-        // drilldown the in-place export uses (depth-aware). A pointer / string /
-        // collection field expands properly; a scalar is a single leaf.
+        // is highlighted. A pointer / string / collection field expands
+        // properly; a scalar is a single leaf.
         IReadOnlyList<WalkedFieldNode> nodes = GetSelectedNodes?.Invoke() ?? Array.Empty<WalkedFieldNode>();
         if (nodes.Count == 0 && SelectedNode is not null)
             nodes = new[] { SelectedNode };
@@ -1535,14 +1545,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             CopyCeXmlProgress = "exporting…";
             var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
-                built, TargetAssembly, options, _backend, default, progress).ConfigureAwait(true);
+                built, TargetAssembly, options, _backend, default, progress, rootAsOffset)
+                .ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
             CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
             string summary = built.Count == 1
-                ? $"{nodes[0].Name} @ {built[0].absoluteAddress}"
+                ? $"{nodes[0].Name} @ {(rootAsOffset ? "+" + nodes[0].Offset.ToString("X") : built[0].absoluteAddress)}"
                 : $"{built.Count} nodes";
             _logger.Write(Constants.LogCategoryView,
-                $"copy CE field node {summary} ({xml.Length} bytes, depth={depth})");
+                $"copy CE field node {summary} ({xml.Length} bytes, depth={depth}, relRoot={rootAsOffset})");
         }
         catch (Exception ex)
         {

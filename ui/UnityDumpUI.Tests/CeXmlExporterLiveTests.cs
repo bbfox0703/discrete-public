@@ -380,6 +380,26 @@ public class CeXmlExporterLiveTests
         Assert.Equal(2, CountOccurrences(xml, "<CheatEntry>"));
     }
 
+    [Fact]
+    public async Task RenderFieldNodes_RootAsOffset_EmitsRelativeRoot()
+    {
+        // "Copy CE field (relative root)" — the top entry's Address is the field's
+        // +offset (paste under the parent struct in CE), not the absolute address.
+        var live = new FakeLive();
+        var field = new WalkedField { Name = "_value", Type = "System.Int32", Offset = 0x28,
+                                      Address = "0x1000", Value = Json("58") };
+        var options = new ExportOptions(
+            DrilldownDepth: 1, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 8);
+
+        string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
+            new[] { (field, "0x1000") }, "Assembly-CSharp", options, live,
+            TestContext.Current.CancellationToken, progress: null, rootAsOffset: true);
+
+        Assert.Contains("<Address>+28</Address>", xml);          // offset 0x28 → +28 (hex, no 0x)
+        Assert.DoesNotContain("<Address>0x1000</Address>", xml); // not the absolute addr
+    }
+
     // Mirror of LiveInspectionViewModel.HexAdd / little-endian formatting so the
     // fake's memory map keys match what the exporter computes.
     private static string HexAdd(string hexAddr, long delta)

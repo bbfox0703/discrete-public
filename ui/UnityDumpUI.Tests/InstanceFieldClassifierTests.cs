@@ -135,6 +135,23 @@ public class InstanceFieldClassifierTests
     }
 
     [Fact]
+    public void Classify_DictionaryPointer_StaysLeaf()
+    {
+        // Dictionary<K,V> is intentionally a Leaf (NOT expandable from the UI):
+        // its inner _entries are System.…Entry value structs that can't be
+        // resolved by name and have no header to walk, so a UI-only expansion
+        // would never surface key/value — only noisy internals. Leafing also
+        // keeps Copy CE XML / Copy CE field on dicts safe (no recursion → no
+        // CTD). A real dict expansion needs a native Dictionary-aware walk.
+        WalkedField f = Field(
+            type:    "System.Collections.Generic.Dictionary<System.Int32,System.Int32>",
+            address: "0x2000",
+            ptr:     "0x000002768BC65A0");
+
+        Assert.Equal(WalkedFieldKind.Leaf, InstanceFieldClassifier.Classify(f, isPointerValue: true));
+    }
+
+    [Fact]
     public void Classify_NullArrayPointer_DegradesToLeaf()
     {
         // Empty array → no expansion; row is a leaf (no chevron).

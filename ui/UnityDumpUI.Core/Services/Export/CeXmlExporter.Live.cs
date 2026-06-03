@@ -613,10 +613,16 @@ public static partial class CeXmlExporter
     /// / value structs / strings, or the deref'd object for array slots —
     /// whatever the caller computed as the node's effective root).
     /// </summary>
+    /// <param name="rootAsOffset">When true, each node's TOP entry is addressed
+    /// as a relative offset (<c>+{field.Offset:X}</c>) instead of its absolute
+    /// address, so the table can be pasted directly UNDER the field's parent
+    /// struct in CE and re-resolve there (e.g. a <c>member</c> field at +28 under
+    /// its <c>team</c> parent). Children stay relative beneath it either way.</param>
     public static async Task<string> RenderFieldNodesLiveAsync(
         IReadOnlyList<(WalkedField field, string absoluteAddress)> nodes,
         string? assemblyName, ExportOptions options, ILiveExportSource live,
-        CancellationToken ct = default, IProgress<int>? progress = null)
+        CancellationToken ct = default, IProgress<int>? progress = null,
+        bool rootAsOffset = false)
     {
         var sb = new StringBuilder(2048);
         var ids = new IdGen(progress);
@@ -637,10 +643,11 @@ public static partial class CeXmlExporter
         foreach ((WalkedField field, string absoluteAddress) in nodes)
         {
             var visited = new HashSet<string>();
+            string root = rootAsOffset ? RelAddr(field.Offset) : absoluteAddress;
             await EmitWalkedFieldLiveAsync(sb, "    ", ids, field, assemblyName,
                                            options, live, visited,
                                            currentDepth: 0, ct,
-                                           addrOverride: absoluteAddress)
+                                           addrOverride: root)
                 .ConfigureAwait(false);
         }
 
