@@ -18,7 +18,8 @@
 
 - **即時 class browser** — 列出每個 assembly → class → field/method,
   從 Mono runtime tables 或 IL2CPP 的 `global-metadata.dat`
-  (支援 v24/v27/v29/v31) 解析。**完全不需要遊戲原始碼**。
+  (metadata v24 → v39 — 涵蓋到 Unity 6.1 的每個版本,含 v38 的 section-header
+  改版) 解析。**完全不需要遊戲原始碼**。
 - **即時 instance walker** — 找到 heap 上某 class 的所有 live
   instance,inline 展開 pointer / array 欄位,以 250 ms / 1 s
   速度 watch 數值變化。
@@ -173,7 +174,7 @@ Bridge script 安裝:`.\build.cmd deploy` (publish 後),或手動把
 七款遊戲跨兩個 backend + 我們 ship 的所有 metadata version — 完整列表
 看 [docs/test-matrix.md](docs/test-matrix.md)。SaGa F2R (IL2CPP v29)、
 BongoCat (Mono bdwgc)、Farthest Frontier (IL2CPP v31)、Hollow Knight:
-Silksong (IL2CPP v31) 等。
+Silksong (IL2CPP v31)、Songs of Silence (IL2CPP v39, Unity 6.1) 等。
 
 ## 文件對照
 

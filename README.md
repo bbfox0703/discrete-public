@@ -18,7 +18,8 @@ Inject a single backend DLL into a running Unity game and get:
 
 - **Live class browser** — every assembly → class → field/method,
   decoded from Mono's runtime tables or IL2CPP's `global-metadata.dat`
-  (versions v24/v27/v29/v31). No game-source needed.
+  (metadata v24 → v39 — every shipped version through Unity 6.1, incl.
+  the v38 section-header rewrite). No game-source needed.
 - **Live instance walker** — find every live instance of a class on
   the heap, expand pointer / array fields inline, watch values
   refresh at 250 ms / 1 s.
@@ -182,7 +183,8 @@ for layout details.
 Seven games across both backends + every metadata version we ship —
 see [docs/test-matrix.md](docs/test-matrix.md) for the full list.
 SaGa F2R (IL2CPP v29), BongoCat (Mono bdwgc), Farthest Frontier
-(IL2CPP v31), Hollow Knight: Silksong (IL2CPP v31), and more.
+(IL2CPP v31), Hollow Knight: Silksong (IL2CPP v31), Songs of Silence
+(IL2CPP v39, Unity 6.1), and more.
 
 ## Documentation map
 
