@@ -7,13 +7,22 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #990(DLL Mono x64+x86 / IL2CPP x64 + UI build clean、UI 0/0 warnings)|
-| **Current phase** | ✅ **Phase 31**(31-1…31-6 全 SHIPPED;31-2 live-verified Core Keeper Mono x64;31-5 待 live-smoke)+ ✅ **Class Pivot UI/UX 大修 Waves A–D 全 SHIPPED**(responsiveness / toolbar+dialogs / jargon+gating+prune / handoff)+ ✅ **session bug-review 3 修正全 merged** |
-| **Branches** | `dev == main` @ `f621837`(review fixes merged 本批次) |
-| **Tests** | 685 UI tests green;DLL(Mono x64+x86 / IL2CPP x64)+ UI build clean、UI 0/0 warnings |
-| **Mid-flight** | 無。**待 live-smoke(需 inject 實機)**:31-5 reverse-lookup component 命名 + 含本批次 recursion 修正(value-scan / pointer-scan 命中 primitive 欄位內部不再 CTD);31-2 殘留(Mono x86 / IL2CPP x64);Class Pivot 各 dialog handoff/filter/sort 的實機觀感 |
+| **Current build** | #1059(UI/Core build clean、UI 0/0 warnings;本批次 UI/Core-only,DLL 未動)|
+| **Current phase** | ✅ **AOBMaker app 整合 + Method Overloads/Inspector UI fixes(2026-06-03)** 之上接續 ✅ **Phase 31**(31-1…31-6 全 SHIPPED)+ ✅ **Class Pivot UI/UX 大修 Waves A–D**+ ✅ **session bug-review 3 修正** |
+| **Branches** | `dev == main` @ `c108ed4`(AOBMaker app 整合 merged 本批次) |
+| **Tests** | 691 UI tests green(本批次 +4 generator 測試);UI/Core build clean、UI 0/0 warnings(本批次 UI/Core-only,無 DLL rebuild) |
+| **Mid-flight** | 無。**待 live-smoke(需 inject 實機 + 開 `AOBMaker.exe`)**:本批次 AOBMaker-app `GenerateAob` 唯一-AOB route(`Copy:`/`Push: aobscan` 連到 app 時產唯一 AOB、injectionOffset 偏移符號)+ App 狀態 chip 翻 connected;另:31-5 reverse-lookup component 命名;31-2 殘留(Mono x86 / IL2CPP x64);Class Pivot 各 dialog 觀感 |
 
-**最新批次(2026-06-02,session bug/leak review — 3 修正,build #990,merged `f621837`)**:
+**最新批次(2026-06-03,AOBMaker app 唯一-AOB 整合 + Method Overloads/Inspector UI fixes,build #1059,merged `c108ed4`,UI/Core-only)** — 整合說明見 [ce-bridge-integration.md → AOBMaker app integration](ce-bridge-integration.md#aobmaker-app-integration--unique-aob-via-generateaob):
+- **🆕 AOBMaker 標準版 app 整合(`\\.\pipe\AOBMaker` → `GenerateAob`)** — 新 `AobMakerAppClient`(與 CE-plugin bridge 同 length-prefixed JSON 線格式,response timeout 30s)。連線時 `Copy: aobscan` **與** `Push aobscan to CE` 改走 app 取**唯一 AOB**(Mode D,每個 overload 數秒);app 沒開/失敗則 fallback 回 DLL method-prologue pattern + 警語。目標 process 用連線中 `\\.\pipe\DiscreteBfx` 的 server PID(`GetNamedPipeServerProcessId` — backend DLL 在遊戲內)當 `processId`,未知時讓 app 自解。連線列新增 **「AOBMaker App: connected/disconnected」chip + ↻**;既有 chip 文字 `AOBMaker:` → **`AOBMaker DLL plugin:`**。
+- **`AobAaScriptGenerator` 前置 AOB-品質橫幅** — `if syntaxcheck then return end` 下一行、獨自一行:非唯一(DLL pattern)→ 醒目「NOT unique,請自行驗證/調整」;app 產的唯一 AOB → 「verified unique via AOBMaker app」。Mode-D 把 pattern 往前延伸(`injectionOffset > 0`)時,scan 進 `<sym>_aob` anchor、在 `{$lua}` 用 `anchor+offset` 註冊真正 method-entry symbol。
+- **`Copy: registersymbol`** — 原 3 行警語併成**一行** break-warning,緊接 syntaxcheck guard。
+- **`Copy: register (sig-match)`** — 改為**只在實驗模式開啟時顯示**(`ShowSignatureMatchCopy`);`Push register to CE ★` 不變。
+- **Inspector uGUI 解析 gap 修正** — `BuildAssemblyCandidates` 對 `UnityEngine.UI` namespace 補上 `UnityEngine.UI` / `UnityEngine.UIModule` / `UnityEngine.TextRenderingModule`,讓 Text/Image/Button 等型別在指標有效時能 by-name 解析(截圖紅條 `class not found: UnityEngine.UI.Text` 為「指標 garbage + 此 gap」疊加,非 crash)。
+- **Dev-tool 提示靠右 + 最低 Z-order** — 連線列改單格 `Grid` overlay,dev-tool 先宣告(底層、靠右),功能控制項後宣告(上層)→ 視窗太窄時被功能控制項蓋住而非擠出畫面。
+- **驗證**:build clean、**691 UI tests green**(+4 generator 測試:non-unique 警語在最前、unique note、offset 符號註冊、Mono-JIT 不出橫幅)。實機 live-smoke 待辦(需遊戲 + `AOBMaker.exe`)。
+
+**先前批次(2026-06-02,session bug/leak review — 3 修正,build #990,merged `f621837`)**:
 - 🔴 **CRITICAL — 31-5 `NameStructComponent` 無窮遞迴 → stack overflow → Game CTD**(`Mono`/`IL2CPPAddressFinder.cpp`)。`EnumerateInstanceFields` 把 **primitive** value-type 欄位也存了 `valueTypeClass`(註解原本說沒有,實際有)。reverse-lookup / value-scan 命中 primitive 欄位**內部**(如 float +2)→ 遞迴進 primitive 的 self-typed 內欄(`System.Single.m_value` @ struct-rel 0)且 interior offset **不變** → 無窮遞迴 → 崩遊戲。先前 31-5 smoke 沒踩到(命中在 struct base,interior 0 早退)。**修**:(a) primitive 不存 `valueTypeClass`(`TypeNameIsPrimitive` gate);(b) `NameStructComponent` 加 depth cap(4)。兩 backend。
 - 🟠 **HIGH — Wave A off-thread engine vs 並發 `Unload()`**(`SnapshotViewModel`)。Wave A 把 Pivot/SPC engine 移到 `Task.Run`(走訪 `env.Classes`);Snapshot tab 的 Diff/Drop/evict 在 UI thread 呼叫 `Unload()` 原本 `Classes.Clear()` **原地清空** → 背景 thread 走訪中清空 → "collection modified" crash。**修**:`Classes` 改 settable,`Unload()` **換 reference**(atomic)而非清空;in-flight reader 續用舊 list 安全,reload 照常重填。
 - 🟡 **LOW — `SuggestKeyAndRunAsync` re-entrancy**。await Score→Run 之間 `IsRunning` 短暫 false、按鈕重啟用 → 加 `_suggestKeyAndRunActive` guard 防重入。
