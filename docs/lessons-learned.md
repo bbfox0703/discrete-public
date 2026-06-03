@@ -11,9 +11,11 @@
 - [Mono / IL2CPP runtime invocation](#mono--il2cpp-runtime-invocation)
   — `runtime_invoke` non-uniform marshaling, exception address at
   `+0x18`, missing `method_get_pointer` export on Unity 2021.3+.
-- [Overload disambiguation](#overload-disambiguation) — IL2CPP code
-  stripping, enum-marshal-as-int32, `signatureMatch` substring traps,
-  AA-script idempotency.
+- [Overload disambiguation](#overload-disambiguation) — CE "Activate
+  Mono features" is universal (Mono + IL2CPP) so signature-match
+  register isn't Mono-only, IL2CPP code stripping,
+  enum-marshal-as-int32, `signatureMatch` substring traps, AA-script
+  idempotency.
 - [GC-root lifetime for `callMethod` returns](#gc-root-lifetime-for-callmethod-returns)
   — managed return values can be collected before the caller reads them.
 - [Avalonia 12 Windows-only build](#avalonia-12-windows-only-build) —
@@ -1085,6 +1087,36 @@ field has moved or been removed.
 ---
 
 ## Overload disambiguation
+
+### CE "Activate Mono features" is universal — `registerSymbolBySignatureMatch` works on IL2CPP too, not just Mono
+
+**Symptom**: assumed the `mono_*` CE Lua API (and therefore our
+`discrete_mono_registerSymbolBySignatureMatch` helper) was Mono-only, so the
+"register (sig-match)" buttons were gated behind a Mono backend check and hidden
+on IL2CPP targets. For IL2CPP we instead emitted hardcoded absolute addresses
+(break on relaunch) or a module-relative `GameAssembly.dll+offset` (breaks on
+game update) or a whole-module `aobscanmodule` of a non-unique prologue (matched
+hundreds of look-alike sites).
+
+**Root cause**: CE's **"Activate Mono features"** dissector / data collector
+drives the `mono_*` Lua API (`mono_findClass`, `mono_class_enumMethods`,
+`mono_method_getSignature`, `mono_compile_method`, …) on **BOTH Mono AND
+IL2CPP** Unity games. The `mono_` naming is a misnomer — it is the universal
+Unity runtime-introspection surface in CE. The user's own
+`registerSymbolBySignatureMatch` sample was running on an IL2CPP game.
+
+**Rule**:
+- **Never** gate signature-match registration behind a Mono-only backend check —
+  surface it for any connected Unity target (`SupportsSignatureMatch` = Mono ∨
+  IL2CPP). The only prerequisite is the user enabling *Activate Mono features* in
+  CE (a CE-side toggle we can't detect — surface it in the tooltip).
+- **Never** assert `ModuleName == ""` in `MonoRegisterSymbolAaScriptGenerator` —
+  the generated AA resolves by class+method+signature, so an IL2CPP method's
+  `GameAssembly.dll` module name is irrelevant.
+- **Never** special-case IL2CPP with `GameAssembly.dll+offset` — a baked module
+  offset is the ONE thing that breaks on a game update. Signature-match is the
+  only register path that survives BOTH relaunch (ASLR) and update (re-resolves
+  by name). See [ce-bridge-integration.md](ce-bridge-integration.md).
 
 ### IL2CPP code stripping removes "unused" Unity APIs — verify with `findMethodInstances`
 
