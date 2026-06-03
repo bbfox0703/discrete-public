@@ -316,8 +316,9 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     [ObservableProperty] private bool _aliveOnly;
 
     // Sane: drop stale/torn objects whose managed reference fields hold garbage
-    // (non-null but unreadable pointers). Generic, no per-class config.
-    [ObservableProperty] private bool _sane;
+    // (non-null but unreadable pointers) or out-of-range bools. Generic, no
+    // per-class config. On by default — false positives are the common pain.
+    [ObservableProperty] private bool _sane = true;
 
     [ObservableProperty] private string _fieldFilterJson = string.Empty;
 

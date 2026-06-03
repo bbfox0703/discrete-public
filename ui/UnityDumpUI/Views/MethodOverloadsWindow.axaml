@@ -35,7 +35,7 @@
       <NumericUpDown Grid.Column="3"
                      Value="{Binding AobLength, Mode=TwoWay}"
                      Minimum="8" Maximum="128" Increment="8"
-                     ShowButtonSpinner="True" Width="100" />
+                     ShowButtonSpinner="True" MinWidth="140" />
     </Grid>
 
     <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
@@ -105,11 +105,12 @@
     </DockPanel>
 
     <!-- Overload grid (multi-select via per-row checkbox) -->
-    <DataGrid ItemsSource="{Binding Overloads}"
+    <DataGrid x:Name="OverloadsGrid"
+              ItemsSource="{Binding Overloads}"
               IsReadOnly="False"
               AutoGenerateColumns="False"
               CanUserResizeColumns="True"
-              CanUserSortColumns="False"
+              CanUserSortColumns="True"
               GridLinesVisibility="Horizontal">
       <!-- Phase 19d: right-click any row → "Call method…" opens the
            MethodCallWindow seeded from that overload's signature. The
@@ -137,24 +138,29 @@
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
-        <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSignature}" Width="Auto" MinWidth="280"
+        <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSignature}" Width="Auto" MinWidth="140"
                             Binding="{Binding SignatureLabel}"
                             IsReadOnly="True"
+                            SortMemberPath="SignatureLabel" CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColReturn}" Width="120"
                             Binding="{Binding ReturnType}"
-                            IsReadOnly="True" />
+                            IsReadOnly="True"
+                            SortMemberPath="ReturnType" CanUserSort="True" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColAddress}" Width="160"
                             Binding="{Binding Address}"
                             IsReadOnly="True"
+                            SortMemberPath="Address" CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColSuffix}" Width="120"
                             Binding="{Binding HumanSuffix}"
                             IsReadOnly="True"
+                            SortMemberPath="HumanSuffix" CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource MethodOverloads.ColModifiers}" Width="110"
                             Binding="{Binding ModifiersLabel}"
-                            IsReadOnly="True" />
+                            IsReadOnly="True"
+                            SortMemberPath="ModifiersLabel" CanUserSort="True" />
       </DataGrid.Columns>
     </DataGrid>
   </DockPanel>

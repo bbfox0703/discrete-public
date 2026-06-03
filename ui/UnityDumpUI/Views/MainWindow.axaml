@@ -709,6 +709,9 @@
                 <Button Content="Clear"
                         Command="{Binding Inspector.ClearFieldFilterCommand}"
                         ToolTip.Tip="Remove all field-filter predicates." />
+                <Button Content="Apply ↻"
+                        Command="{Binding FindInspectorInstancesCommand}"
+                        ToolTip.Tip="Re-run Find instances now with the current field filter (the filter applies during the heap scan)." />
               </StackPanel>
 
               <!-- Phase 32 — field-filter row (generic per-class predicate). -->

@@ -473,46 +473,68 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         }
         if (CopyToClipboardAsync is null) return;
 
-        var sb = new StringBuilder(512);
-        sb.AppendLine("[ENABLE]");
-        sb.AppendLine("{$lua}");
-        sb.AppendLine("if syntaxcheck then return end");
-        sb.AppendLine("-- discrete: hardcoded address registration. Re-run after game relaunch.");
-        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var symbols = new List<string>();
-        foreach (var row in picks)
-        {
-            var ov = new AaScriptOverload
-            {
-                MethodName    = MethodName,
-                ClassName     = ClassName,
-                Namespace     = Namespace,
-                HumanSuffix   = row.HumanSuffix ?? "T",
-                Signature     = row.SignatureLabel,
-                Pattern       = string.Empty,
-                ModuleName    = string.Empty,
-                Address       = row.Address!,
-                ModuleOffset  = string.Empty,
-                ReturnType    = row.ReturnType,
-                DecoderBailed = false,
-            };
-            string sym = AobAaScriptGenerator.MakeSymbolName(ov, taken);
-            taken.Add(sym);
-            symbols.Add(sym);
-            sb.Append("registerSymbol(\"").Append(sym).Append("\", 0x")
-              .Append(ParseAddrAsHex(row.Address)).Append(")  -- ")
-              .Append(ClassName).Append('.').Append(MethodName).AppendLine(row.SignatureLabel);
-        }
-        sb.AppendLine();
-        sb.AppendLine("[DISABLE]");
-        sb.AppendLine("{$lua}");
-        foreach (var sym in symbols)
-        {
-            sb.Append("unregisterSymbol(\"").Append(sym).AppendLine("\")");
-        }
-
+        IsBusy = true;
+        ErrorMessage = null;
+        StatusMessage = $"Resolving module offsets for {picks.Count} overload(s)…";
         try
         {
+            // Need ModuleName + ModuleOffset per overload — the same bag the AOB
+            // path builds. For IL2CPP these come back populated (the method
+            // lives in GameAssembly.dll); for Mono JIT they're empty.
+            var bag = await BuildScriptBagAsync(picks, AobLength).ConfigureAwait(true);
+            if (bag is null) return;
+
+            var sb = new StringBuilder(512);
+            sb.AppendLine("[ENABLE]");
+            sb.AppendLine("{$lua}");
+            sb.AppendLine("if syntaxcheck then return end");
+            sb.AppendLine("-- discrete: module-relative symbol registration. getAddressSafe");
+            sb.AppendLine("-- re-resolves \"Module\"+offset (offset is ASLR-stable) on each enable,");
+            sb.AppendLine("-- so the symbol points at the right address after a game relaunch —");
+            sb.AppendLine("-- no hardcoded (ASLR-doomed) absolute address.");
+            sb.AppendLine("if _G.discrete_regModule == nil then");
+            sb.AppendLine("  _G.discrete_regModule = function(sym, expr)");
+            sb.AppendLine("    local a = getAddressSafe(expr)");
+            sb.AppendLine("    if a and a ~= 0 then");
+            sb.AppendLine("      registerSymbol(sym, a)");
+            sb.AppendLine("      print(string.format('[discrete] %s = %X  (%s)', sym, a, expr))");
+            sb.AppendLine("    else");
+            sb.AppendLine("      print(string.format('[discrete] %s NOT FOUND (%s)', sym, expr))");
+            sb.AppendLine("    end");
+            sb.AppendLine("  end");
+            sb.AppendLine("end");
+            var symbols = new List<string>();
+            var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var ov in bag)
+            {
+                string sym = AobAaScriptGenerator.MakeSymbolName(ov, taken);
+                taken.Add(sym);
+                symbols.Add(sym);
+                if (!string.IsNullOrEmpty(ov.ModuleName))
+                {
+                    // IL2CPP / module-resident: "Module"+offset is ASLR-stable —
+                    // the offset within GameAssembly.dll is fixed across relaunch.
+                    sb.Append("_G.discrete_regModule(\"").Append(sym).Append("\", \"")
+                      .Append(ov.ModuleName).Append('+').Append(StripHexOffset(ov.ModuleOffset))
+                      .Append("\")  -- ").Append(ClassName).Append('.').Append(MethodName).AppendLine(ov.Signature);
+                }
+                else
+                {
+                    // Mono JIT — no module; the address is re-JITted to a new
+                    // page each run, so a hardcoded value breaks on relaunch.
+                    // Use "Copy: mono_register" for a relaunch-safe Mono symbol.
+                    sb.Append("registerSymbol(\"").Append(sym).Append("\", 0x")
+                      .Append(ParseAddrAsHex(ov.Address)).Append(")  -- ")
+                      .Append(ClassName).Append('.').Append(MethodName).Append(ov.Signature)
+                      .AppendLine("  -- ⚠ Mono JIT: breaks on relaunch — prefer Copy: mono_register");
+                }
+            }
+            sb.AppendLine();
+            sb.AppendLine("[DISABLE]");
+            sb.AppendLine("{$lua}");
+            foreach (var sym in symbols)
+                sb.Append("unregisterSymbol(\"").Append(sym).AppendLine("\")");
+
             await CopyToClipboardAsync(sb.ToString()).ConfigureAwait(true);
             StatusMessage = $"Copied registerSymbol script for {symbols.Count} overload(s) to clipboard.";
         }
@@ -520,6 +542,20 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         {
             ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
         }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>Normalise a module-offset hex string ("0x000000000B21AB0") to
+    /// the bare CE expression form ("B21AB0") used in <c>Module+offset</c>.</summary>
+    private static string StripHexOffset(string? s)
+    {
+        s = (s ?? string.Empty).Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
+        s = s.TrimStart('0');
+        return s.Length == 0 ? "0" : s;
     }
 
     /// <summary>
