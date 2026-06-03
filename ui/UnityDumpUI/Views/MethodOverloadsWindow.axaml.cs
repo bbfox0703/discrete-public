@@ -5,6 +5,8 @@
 // 19d) opens the MethodCallWindow when the user picks "Call method…" from
 // the per-row context menu.
 
+using System.Collections;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -39,10 +41,25 @@ public partial class MethodOverloadsWindow : Window
         // populates without an extra click. Errors land in vm.ErrorMessage.
         Opened += async (_, _) =>
         {
+            // AOT-safe DataGrid sort: install per-column comparers once the
+            // grid is realised (see DataGridSortComparers three-layer trap).
+            this.FindControl<DataGrid>("OverloadsGrid")?.WireSortComparers(OverloadsSortComparers);
             try { await vm.RefreshAsync(); }
             catch { /* surfaced via VM */ }
         };
     }
+
+    /// <summary>Per-column sort comparers for the overloads grid. Address sorts
+    /// numerically (hex); the rest are short ordinal-string labels.</summary>
+    private static readonly IReadOnlyDictionary<string, IComparer> OverloadsSortComparers =
+        new Dictionary<string, IComparer>
+        {
+            ["SignatureLabel"] = DataGridSortComparers.Ordinal<MethodOverloadRow>(r => r.SignatureLabel),
+            ["ReturnType"]     = DataGridSortComparers.Ordinal<MethodOverloadRow>(r => r.ReturnType ?? string.Empty),
+            ["Address"]        = DataGridSortComparers.Hex<MethodOverloadRow>(r => r.Address ?? string.Empty),
+            ["HumanSuffix"]    = DataGridSortComparers.Ordinal<MethodOverloadRow>(r => r.HumanSuffix ?? string.Empty),
+            ["ModifiersLabel"] = DataGridSortComparers.Ordinal<MethodOverloadRow>(r => r.ModifiersLabel),
+        };
 
     /// <summary>
     /// Phase 19d — open the MethodCallWindow seeded from the right-clicked
