@@ -78,9 +78,11 @@
         <Button Content="{StaticResource MethodOverloads.CopyAddresses}"
                 Command="{Binding CopyAddressesCommand}" />
         <Button Content="{StaticResource MethodOverloads.CopyRegisterSymbol}"
-                Command="{Binding CopyRegisterSymbolScriptCommand}" />
+                Command="{Binding CopyRegisterSymbolScriptCommand}"
+                ToolTip.Tip="{StaticResource MethodOverloads.CopyRegisterSymbolTooltip}" />
         <Button Content="{StaticResource MethodOverloads.CopyAobScript}"
-                Command="{Binding CopyAobScriptCommand}" />
+                Command="{Binding CopyAobScriptCommand}"
+                ToolTip.Tip="{StaticResource MethodOverloads.CopyAobScriptTooltip}" />
         <!-- DLL-free Mono path: only surfaces when the live target is Mono.
              IL2CPP overloads have AOT addresses; mono_registerSymbolEx
              would fail at mono_findClass on the IL2CPP runtime. -->

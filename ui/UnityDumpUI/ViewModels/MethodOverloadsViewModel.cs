@@ -278,6 +278,15 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         IReadOnlyList<MethodOverloadRow> picks, int aobLength)
     {
         int len = Math.Clamp(aobLength, 8, 128);
+        // Every param-type token across ALL overloads of this method (not just
+        // the picked ones) — drives per-overload sigExcludes for the Mono
+        // signature-match register path, so a 1-param overload's signature
+        // match can exclude a longer-arity sibling.
+        var allParamTokens = Overloads
+            .Where(o => o.ParamTypes is { Count: > 0 })
+            .SelectMany(o => o.ParamTypes!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
         var bag = new List<AaScriptOverload>(picks.Count);
         foreach (var row in picks)
         {
@@ -315,6 +324,12 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                 ParamTypes       = row.ParamTypes is { Count: > 0 }
                     ? row.ParamTypes.ToArray()
                     : Array.Empty<string>(),
+                // Tokens present in OTHER overloads of this method but not in
+                // this one — the signature-match sigExcludes set.
+                SigExcludes      = allParamTokens
+                    .Where(t => row.ParamTypes is not { Count: > 0 }
+                                || !row.ParamTypes.Contains(t, StringComparer.Ordinal))
+                    .ToArray(),
             });
         }
         return bag;

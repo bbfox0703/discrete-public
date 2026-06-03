@@ -31,6 +31,7 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         string suffix     = "int32",
         string sig        = "(System.Int32)",
         IReadOnlyList<string>? paramTypes = null,
+        IReadOnlyList<string>? sigExcludes = null,
         string addr       = "0x0000018C5C470E30") => new()
     {
         MethodName    = method,
@@ -46,6 +47,7 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         ReturnType    = "System.Int32",
         DecoderBailed = false,
         ParamTypes    = paramTypes ?? new[] { "System.Int32" },
+        SigExcludes   = sigExcludes,
     };
 
     [Fact]
@@ -67,8 +69,8 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         // pattern, often missing mono_ensureAttached) must NOT be allowed
         // to suppress our helper load. Asserting the discrete_* form
         // catches accidental drift back to the public name.
-        Assert.Contains("if _G.discrete_mono_registerSymbolEx == nil then", s);
-        Assert.DoesNotContain("if _G.mono_registerSymbolEx == nil then", s);
+        Assert.Contains("if _G.discrete_mono_registerSymbolBySignatureMatch == nil then", s);
+        Assert.DoesNotContain("if _G.mono_registerSymbolBySignatureMatch == nil then", s);
 
         // findTableFile + chunk-load via createStringStream — same
         // mechanism BootstrapAaScriptGenerator uses.
@@ -86,20 +88,44 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
     }
 
     [Fact]
-    public void Build_SingleOverload_EmitsMonoRegisterSymbolEx_WithFullNameParamTypes()
+    public void Build_SingleOverload_EmitsSignatureMatch_WithFullNameParamTypes()
     {
         var ov = MonoOverload(paramTypes: new[] { "System.Int32" });
         string s = MonoRegisterSymbolAaScriptGenerator.Build(new[] { ov });
 
-        // Exact call shape: (symbol, namespace, class, method, paramTypes-table)
+        // Exact call shape: (symbol, ns, class, method, sigContains, sigExcludes).
+        // The runtime JIT-resolves the real address at enable → relaunch-safe.
+        // No hardcoded address; no aobscan. sigExcludes is {} with no siblings.
         Assert.Contains(
-            "_G.discrete_mono_registerSymbolEx('Mathf_Abs_int32', 'UnityEngine', 'Mathf', 'Abs', { 'System.Int32' })",
+            "_G.discrete_mono_registerSymbolBySignatureMatch('Mathf_Abs_int32', 'UnityEngine', 'Mathf', 'Abs', { 'System.Int32' }, {})",
             s);
+        // The relaunch-fragile hardcoded form must NOT appear.
+        Assert.DoesNotContain("registerSymbol('Mathf_Abs_int32', 0x", s);
 
         // Diagnostic comment line so the user can identify which row
         // a generated symbol came from.
         Assert.Contains("UnityEngine.Mathf.Abs(System.Int32)", s);
         Assert.Contains("last-seen address 0x0000018C5C470E30", s);
+    }
+
+    [Fact]
+    public void Build_SignatureMatch_EmitsSigExcludes_ForDisambiguation()
+    {
+        // A 1-param overload that must be told to EXCLUDE a 2-param sibling's
+        // extra token, else its sigContains substring would also match the
+        // longer overload's rendered signature.
+        var oneArg = MonoOverload(method: "Set", cls: "Foo", ns: "", suffix: "int",
+            sig: "(System.Int32)", paramTypes: new[] { "System.Int32" },
+            sigExcludes: new[] { "System.String" });
+        var twoArg = MonoOverload(method: "Set", cls: "Foo", ns: "", suffix: "int_string",
+            sig: "(System.Int32, System.String)",
+            paramTypes: new[] { "System.Int32", "System.String" });
+
+        string s = MonoRegisterSymbolAaScriptGenerator.Build(new[] { oneArg, twoArg });
+
+        Assert.Contains(
+            "_G.discrete_mono_registerSymbolBySignatureMatch('Foo_Set_int', '', 'Foo', 'Set', { 'System.Int32' }, { 'System.String' })",
+            s);
     }
 
     [Fact]
@@ -115,10 +141,10 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         string s = MonoRegisterSymbolAaScriptGenerator.Build(new[] { byInt, byBundle });
 
         Assert.Contains(
-            "_G.discrete_mono_registerSymbolEx('ItemBundle_AddItems_uint_uint', '', 'ItemBundle', 'AddItems', { 'System.UInt32', 'System.UInt32' })",
+            "_G.discrete_mono_registerSymbolBySignatureMatch('ItemBundle_AddItems_uint_uint', '', 'ItemBundle', 'AddItems', { 'System.UInt32', 'System.UInt32' }, {})",
             s);
         Assert.Contains(
-            "_G.discrete_mono_registerSymbolEx('ItemBundle_AddItems_ItemBundle', '', 'ItemBundle', 'AddItems', { 'ItemBundle' })",
+            "_G.discrete_mono_registerSymbolBySignatureMatch('ItemBundle_AddItems_ItemBundle', '', 'ItemBundle', 'AddItems', { 'ItemBundle' }, {})",
             s);
 
         // Both unregisterSymbol calls in [DISABLE], pcall-wrapped so a
