@@ -67,16 +67,15 @@ public class AobAaScriptGeneratorTests
     };
 
     [Fact]
-    public void Build_Il2cppOverload_UsesOffsetBoundedAobscanregion()
+    public void Build_Il2cppOverload_UsesAobscanmodule()
     {
         string s = AobAaScriptGenerator.Build(new[] { Il2cppOverload() });
 
-        // Module + known offset → aobscanregion bounded to the method's own
-        // bytes, so the (often non-unique) prologue matches exactly once at the
-        // right place. Start = Module+offset (0x-stripped, ASLR-stable).
-        Assert.Contains("aobscanregion(Mathf_Abs_int32, GameAssembly.dll+B23450, GameAssembly.dll+B23450+", s);
-        Assert.Contains("48 8B 05", s);                          // pattern still emitted
-        Assert.DoesNotContain("aobscanmodule(Mathf_Abs_int32", s); // NOT the whole-module scan
+        // Module present → use aobscanmodule with the module name. (This AOB
+        // form is the DLL-free fallback; the relaunch+update-safe primary is
+        // the signature-match register path — universal across Mono / IL2CPP.)
+        Assert.Contains("aobscanmodule(Mathf_Abs_int32, GameAssembly.dll, 48 8B 05", s);
+        Assert.DoesNotContain("aobscan(Mathf_Abs_int32,", s); // NOT the module-less form
         Assert.Contains("registersymbol(Mathf_Abs_int32)", s);
 
         // Trailing comment carries module + offset for cross-reference.
@@ -96,11 +95,10 @@ public class AobAaScriptGeneratorTests
         // overload-precise.
         string s = AobAaScriptGenerator.Build(new[] { MonoJitOverload() });
 
-        // Mono JIT path must NOT emit ANY aobscan/aobscanmodule/aobscanregion
-        // for the overload — those are inherently unstable for JIT'd code.
+        // Mono JIT path must NOT emit ANY aobscan/aobscanmodule for the
+        // overload — those are inherently unstable for JIT'd code.
         Assert.DoesNotContain("aobscan(Mathf_Abs_int32",       s);
         Assert.DoesNotContain("aobscanmodule(Mathf_Abs_int32", s);
-        Assert.DoesNotContain("aobscanregion(Mathf_Abs_int32", s);
 
         // Must call the bridge with the canonical arg order:
         //   registerMethodSymbol(symName, asm, ns, cls, method, sigFilter)
@@ -166,8 +164,8 @@ public class AobAaScriptGeneratorTests
         };
         string s = AobAaScriptGenerator.Build(new[] { Il2cppOverload(), monoVariant });
 
-        // IL2CPP overload keeps the AOB form (now offset-bounded aobscanregion).
-        Assert.Contains("aobscanregion(Mathf_Abs_int32, GameAssembly.dll+B23450,", s);
+        // IL2CPP overload keeps the AOB form.
+        Assert.Contains("aobscanmodule(Mathf_Abs_int32, GameAssembly.dll,", s);
         // Mono overload uses the bridge call.
         Assert.Contains(
             "registerMethodSymbol('Mathf_Sign_int32_2', 'UnityEngine.CoreModule', 'UnityEngine', 'Mathf', 'Sign', '(System.Int32)')",

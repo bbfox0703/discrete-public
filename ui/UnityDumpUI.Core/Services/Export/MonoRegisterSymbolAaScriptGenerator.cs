@@ -33,10 +33,13 @@
 //     in their cheat tables; this generator emits the exact same calls
 //     so it slots into their existing muscle memory.
 //
-// Mono-only — IL2CPP overloads should never reach here. The UI layer
-// is responsible for hiding the trigger button on IL2CPP targets;
-// we assert in Build() so a programming error surfaces loudly rather
-// than emitting a broken AA.
+// UNIVERSAL across Unity backends. CE's "Active Mono features" dissector
+// drives the mono_* Lua API on BOTH Mono AND IL2CPP games, so signature-match
+// registration resolves the live method address on either — no module name
+// needed (the prerequisite is purely "Active Mono features enabled" in CE).
+// Earlier revisions asserted ModuleName=="" here ("Mono JIT only"); that was
+// wrong — IL2CPP overloads carry a GameAssembly.dll module name but still
+// register fine via the runtime signature match.
 
 using System;
 using System.Collections.Generic;
@@ -56,27 +59,17 @@ public static class MonoRegisterSymbolAaScriptGenerator
     public const string HelpersFileName = "mono_registersymbol_helpers.lua";
 
     /// <summary>
-    /// Build the AA script for the given overloads. Every overload must
-    /// have <see cref="AaScriptOverload.ModuleName"/> empty — populated
-    /// ModuleName indicates an IL2CPP method (AOT addresses live in
-    /// GameAssembly.dll); the DLL-free Mono path is meaningless for
-    /// IL2CPP. The UI layer gates this for us; the runtime guard catches
-    /// misuse.
+    /// Build the AA script for the given overloads. Works for BOTH Mono and
+    /// IL2CPP overloads — signature-match registration goes through CE's Active
+    /// Mono features dissector, which handles either. <see cref="AaScriptOverload.ModuleName"/>
+    /// is ignored here (the script resolves by class+method+signature, not by
+    /// module/offset), so an IL2CPP method's GameAssembly.dll module name is
+    /// harmless.
     /// </summary>
     public static string Build(IReadOnlyList<AaScriptOverload> overloads)
     {
         if (overloads is null || overloads.Count == 0)
             throw new ArgumentException("at least one overload is required", nameof(overloads));
-
-        for (int i = 0; i < overloads.Count; ++i)
-        {
-            if (!string.IsNullOrEmpty(overloads[i].ModuleName))
-                throw new ArgumentException(
-                    $"overload[{i}] '{overloads[i].MethodName}' has ModuleName " +
-                    $"'{overloads[i].ModuleName}' set — DLL-free Mono register only " +
-                    $"applies to Mono JIT overloads (ModuleName empty).",
-                    nameof(overloads));
-        }
 
         var symbols = new string[overloads.Count];
         var used    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
