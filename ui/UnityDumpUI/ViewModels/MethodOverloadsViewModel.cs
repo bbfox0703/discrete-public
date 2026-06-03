@@ -35,6 +35,8 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     private readonly BackendAdapter    _backend;
     private readonly FileLogger        _logger;
     private readonly IAobMakerBridge?  _aobMaker;
+    private readonly IAobMakerAppClient? _aobMakerApp;
+    private readonly bool              _experimentalEnabled;
     private CancellationTokenSource? _refreshCts;
 
     public MethodOverloadsViewModel(BackendAdapter backend, FileLogger logger,
@@ -42,11 +44,15 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                                     string methodName,
                                     IAobMakerBridge? aobMaker = null,
                                     string? defaultInstanceAddress = null,
-                                    bool   supportsSignatureMatch = false)
+                                    bool   supportsSignatureMatch = false,
+                                    IAobMakerAppClient? aobMakerApp = null,
+                                    bool   experimentalEnabled = false)
     {
         _backend     = backend;
         _logger      = logger;
         _aobMaker    = aobMaker;
+        _aobMakerApp = aobMakerApp;
+        _experimentalEnabled = experimentalEnabled;
         Assembly     = assembly;
         Namespace    = @namespace;
         ClassName    = className;
@@ -89,6 +95,16 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// enable).
     /// </summary>
     public bool   ShowSignatureCreateInCe => SupportsSignatureMatch && HasAobMakerBridge;
+
+    /// <summary>
+    /// Gates the "Copy: register (sig-match)" clipboard button. The sig-match
+    /// register path is still considered experimental, so it surfaces only when
+    /// the user has opted into experimental features (footer checkbox). Its
+    /// "Push register to CE ★" sibling stays gated on
+    /// <see cref="ShowSignatureCreateInCe"/> as before — only the Copy button
+    /// is hidden by default.
+    /// </summary>
+    public bool   ShowSignatureMatchCopy => SupportsSignatureMatch && _experimentalEnabled;
 
     /// <summary>
     /// Phase 22e — exposed so the spawning window (MethodOverloadsWindow)
@@ -275,7 +291,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
     /// on failure (status / error message already set on the VM).
     /// </summary>
     private async Task<List<AaScriptOverload>?> BuildScriptBagAsync(
-        IReadOnlyList<MethodOverloadRow> picks, int aobLength)
+        IReadOnlyList<MethodOverloadRow> picks, int aobLength, bool preferUniqueAob = false)
     {
         int len = Math.Clamp(aobLength, 8, 128);
         // Every param-type token across ALL overloads of this method (not just
@@ -287,15 +303,55 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
             .SelectMany(o => o.ParamTypes!)
             .Distinct(StringComparer.Ordinal)
             .ToList();
+
+        // AOBMaker-app unique-AOB route: only when the caller asked for it AND
+        // the app pipe is up. Resolve the game PID once so the app scans the
+        // right process (falls back to the app's own resolution when unknown).
+        bool useApp = preferUniqueAob && _aobMakerApp is { IsAvailable: true };
+        uint? gamePid = null;
+        if (useApp && _backend.TryGetConnectedGamePid(out uint pid)) gamePid = pid;
+
         var bag = new List<AaScriptOverload>(picks.Count);
+        int idx = 0;
         foreach (var row in picks)
         {
+            idx++;
             var patt = await _backend.GetMethodAobPatternAsync(row.Address!, len).ConfigureAwait(true);
             if (!string.IsNullOrEmpty(patt.Error))
             {
                 StatusMessage = $"AOB scan failed for {row.SignatureLabel}: {patt.Error}";
                 return null;
             }
+
+            string moduleName = patt.ModuleName ?? string.Empty;
+            string pattern    = patt.Pattern ?? string.Empty;
+            bool   aobUnique  = false;
+            int    aobOffset  = 0;
+
+            // Module-backed (IL2CPP) overloads can be upgraded to a UNIQUE AOB
+            // via the app. Mono-JIT entries (empty module) keep the bridge
+            // resolve path. App failure (game unreadable / no unique pattern in
+            // the extend cap) falls back to the DLL prologue pattern + warning.
+            if (useApp && !string.IsNullOrEmpty(moduleName))
+            {
+                StatusMessage = $"Asking AOBMaker app for a unique AOB ({idx}/{picks.Count})…";
+                var gen = await _aobMakerApp!
+                    .GenerateAobAsync(moduleName, patt.Address ?? row.Address!, gamePid)
+                    .ConfigureAwait(true);
+                if (gen.Success && !string.IsNullOrEmpty(gen.Aob))
+                {
+                    pattern   = gen.Aob!;
+                    aobUnique = true;
+                    aobOffset = gen.InjectionOffset;
+                }
+                else
+                {
+                    _logger.Write(Constants.LogCategoryView,
+                        $"MethodOverloadsViewModel: AOBMaker app GenerateAob failed for {row.SignatureLabel} " +
+                        $"— falling back to DLL prologue pattern ({gen.Message ?? "no message"})");
+                }
+            }
+
             bag.Add(new AaScriptOverload
             {
                 MethodName       = MethodName,
@@ -304,19 +360,21 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
                 Assembly         = Assembly,  // Phase 22f follow-up: Mono JIT path needs this for registerMethodSymbol
                 HumanSuffix      = row.HumanSuffix ?? "T",
                 Signature        = row.SignatureLabel,
-                Pattern          = patt.Pattern ?? string.Empty,
+                Pattern          = pattern,
                 // ModuleName="" → Mono JIT path (no module); generator
                 // switches to bridge-call AA instead of aobscan. Don't
                 // default to GameAssembly.dll — that would silently
                 // misclassify Mono targets as IL2CPP and emit a broken
                 // aobscanmodule.
-                ModuleName       = patt.ModuleName ?? string.Empty,
+                ModuleName       = moduleName,
                 Address          = patt.Address ?? row.Address!,
                 ModuleOffset     = patt.ModuleOffset ?? "0x0",
                 ReturnType       = row.ReturnType,
-                DecoderBailed    = patt.DecoderBailed,
+                DecoderBailed    = aobUnique ? false : patt.DecoderBailed,
                 InstructionCount = patt.Stats?.Instructions ?? 0,
                 WildcardCount    = patt.Stats?.Wildcards ?? 0,
+                AobIsUnique      = aobUnique,
+                AobInjectionOffset = aobOffset,
                 // Per-param type names — populated for the DLL-free
                 // mono_registerSymbolEx generator path. Snapshot to an
                 // array so the generator can't see in-place mutations
@@ -351,7 +409,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         StatusMessage = $"Generating AOB pattern for {picks.Count} overload(s)…";
         try
         {
-            var bag = await BuildScriptBagAsync(picks, AobLength).ConfigureAwait(true);
+            var bag = await BuildScriptBagAsync(picks, AobLength, preferUniqueAob: true).ConfigureAwait(true);
             if (bag is null) return;
             string script = AobAaScriptGenerator.Build(bag);
             await CopyToClipboardAsync(script).ConfigureAwait(true);
@@ -391,7 +449,7 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         StatusMessage = $"Pushing AOB script for {picks.Count} overload(s) to CE…";
         try
         {
-            var bag = await BuildScriptBagAsync(picks, AobLength).ConfigureAwait(true);
+            var bag = await BuildScriptBagAsync(picks, AobLength, preferUniqueAob: true).ConfigureAwait(true);
             if (bag is null) return;
             string script      = AobAaScriptGenerator.Build(bag);
             string description = picks.Count == 1
@@ -477,9 +535,9 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         sb.AppendLine("[ENABLE]");
         sb.AppendLine("{$lua}");
         sb.AppendLine("if syntaxcheck then return end");
-        sb.AppendLine("-- discrete: hardcoded address — quick-and-dirty, BREAKS after a game");
-        sb.AppendLine("-- relaunch (the address changes). For a relaunch+update-safe symbol use");
-        sb.AppendLine("-- \"Copy: register (sig-match)\" (CE Active Mono features — Mono + IL2CPP).");
+        // Single, unmissable break warning on its own line, immediately after
+        // the guard — the hardcoded address goes stale on every relaunch.
+        sb.AppendLine("-- WARNING: hardcoded address — this BREAKS after a game relaunch/update (the address changes); use \"Copy: register (sig-match)\" for a relaunch-safe symbol.");
         var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var symbols = new List<string>();
         foreach (var row in picks)

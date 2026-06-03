@@ -85,6 +85,15 @@ public sealed class BackendAdapter : ILiveExportSource
     public bool IsConnected
         => _pipe.IsConnected && (ReferenceEquals(_bulk, _pipe) || _bulk.IsConnected);
 
+    /// <summary>
+    /// PID of the connected game process, resolved from the interactive pipe's
+    /// server end (our backend DLL lives inside the game). Used to target the
+    /// AOBMaker app's <c>GenerateAob</c> scan at the right process. Returns
+    /// false when disconnected or the OS query fails.
+    /// </summary>
+    public bool TryGetConnectedGamePid(out uint pid)
+        => _pipe.TryGetServerProcessId(out pid);
+
     public async Task ConnectAsync(int timeoutMs, CancellationToken ct = default)
     {
         await _pipe.ConnectAsync(timeoutMs, ct).ConfigureAwait(false);

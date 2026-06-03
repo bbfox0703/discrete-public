@@ -51,6 +51,43 @@ public sealed class PipeClient : IAsyncDisposable
 
     public bool IsConnected => _pipe is { IsConnected: true };
 
+    /// <summary>
+    /// Resolve the PID of the process that owns the *server* end of this pipe.
+    /// Our pipe server is the backend DLL running inside the target game, so
+    /// the server PID == the game's PID. Used to tell the AOBMaker app which
+    /// process to scan for <c>GenerateAob</c>, without depending on the
+    /// inject-time PID (works for plain Connect too). Returns false when not
+    /// connected or the query fails — callers then fall back to letting the
+    /// AOBMaker app resolve the process itself (e.g. via CE).
+    /// </summary>
+    public bool TryGetServerProcessId(out uint pid)
+    {
+        pid = 0;
+        var pipe = _pipe;
+        if (pipe is null || !pipe.IsConnected) return false;
+        try
+        {
+            var handle = pipe.SafePipeHandle;
+            if (handle is null || handle.IsInvalid || handle.IsClosed) return false;
+            return GetNamedPipeServerProcessId(handle, out pid) && pid != 0;
+        }
+        catch
+        {
+            // SafePipeHandle access can throw if the pipe tore down between the
+            // IsConnected check and here — treat as "unknown PID".
+            pid = 0;
+            return false;
+        }
+    }
+
+    // DllImport (not LibraryImport) so Core needn't enable AllowUnsafeBlocks —
+    // matches WindowsProcessEnumerator's kernel32 P/Invoke style and stays
+    // Native-AOT compatible (classic P/Invoke is fully supported under AOT).
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeServerProcessId(
+        Microsoft.Win32.SafeHandles.SafePipeHandle handle, out uint serverProcessId);
+
     public async Task ConnectAsync(int timeoutMs, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);

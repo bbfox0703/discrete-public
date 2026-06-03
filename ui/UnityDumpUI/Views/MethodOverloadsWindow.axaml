@@ -88,7 +88,7 @@
              Surfaces for any connected Unity target. -->
         <Button Content="{StaticResource MethodOverloads.CopyMonoSymbolScript}"
                 Command="{Binding CopyMonoSymbolScriptCommand}"
-                IsVisible="{Binding SupportsSignatureMatch}"
+                IsVisible="{Binding ShowSignatureMatchCopy}"
                 ToolTip.Tip="{StaticResource MethodOverloads.CopyMonoSymbolScriptTooltip}" />
         <!-- Push group: same scripts but pushed into CE via AOBMaker. -->
         <Button Content="{StaticResource MethodOverloads.CreateAaInCe}"

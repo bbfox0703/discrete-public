@@ -844,7 +844,12 @@ public partial class MainWindow : Window
             // whenever the backend is a recognised Unity runtime.
             supportsSignatureMatch:
                 (vm.Backend2 ?? string.Empty).StartsWith("Mono",   StringComparison.OrdinalIgnoreCase) ||
-                (vm.Backend2 ?? string.Empty).StartsWith("IL2CPP", StringComparison.OrdinalIgnoreCase));
+                (vm.Backend2 ?? string.Empty).StartsWith("IL2CPP", StringComparison.OrdinalIgnoreCase),
+            // AOBMaker standalone-app client: when its pipe is up, "Copy: aobscan"
+            // / "Push aobscan to CE" route through GenerateAob for a unique AOB.
+            aobMakerApp: vm.AobMakerApp,
+            // "Copy: register (sig-match)" is gated on the experimental opt-in.
+            experimentalEnabled: vm.ExperimentalEnabled);
     }
 
     /// <summary>
