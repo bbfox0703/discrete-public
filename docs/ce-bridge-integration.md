@@ -86,8 +86,19 @@ lua its own entries actually use:
 |---|---|---|
 | MethodCall → *Send to CE Table* | `unity_invoke.lua`            | `callUnityMethod` |
 | Methods → *Create AA in CE* (Mono JIT) | `unity_symbols.lua`     | `registerMethodSymbol` |
-| Methods → *Create Mono Symbol* (DLL-free) | `mono_registersymbol_helpers.lua` | `discrete_mono_registerSymbolEx` |
+| Methods → *register (sig-match)* (DLL-free) | `mono_registersymbol_helpers.lua` | `discrete_mono_registerSymbolBySignatureMatch` |
 | Address Lookup → *Send to CE Table* | *(none — pure asm symbol)* | — |
+
+> **`register (sig-match)` is universal across Mono AND IL2CPP.** CE's
+> "Activate Mono features" dissector drives the `mono_*` Lua API on *both*
+> backends, so signature-match registration resolves the live method address on
+> either — it is **not** Mono-only (the `mono_` prefix is a misnomer). It is the
+> recommended register path: relaunch-safe *and* game-update-safe (resolves by
+> class + method + signature, never a hardcoded address or baked module offset).
+> The button surfaces for any connected Unity target; the only prerequisite is
+> that the user enables **Activate Mono features** in CE for the game. Do **not**
+> special-case IL2CPP with `GameAssembly.dll+offset` — a baked offset breaks the
+> moment the game updates.
 
 The UI-only tools (Structure Dissect, Scene explorer, reverse address
 lookup) are **not** part of the bridge — DiscreteUI drives those over the
