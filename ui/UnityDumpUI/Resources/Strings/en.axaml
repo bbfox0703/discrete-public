@@ -320,16 +320,18 @@
        commands so the user sees what each path emits. -->
   <sys:String x:Key="MethodOverloads.CopyAddresses">Copy: addresses</sys:String>
   <sys:String x:Key="MethodOverloads.CopyRegisterSymbol">Copy: registersymbol</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyRegisterSymbolTooltip">Hardcodes the current address — BREAKS after a game relaunch (the address changes). On a Mono target prefer "Copy: mono_register" (re-resolves the real address at enable time). Only use this for a quick one-off in the current session.</sys:String>
   <sys:String x:Key="MethodOverloads.CopyAobScript">Copy: aobscan</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyAobScriptTooltip">AOB-scans the method prologue. Survives relaunch, but a method's opening bytes are often non-unique (many methods share the same prologue), so the scan can match the wrong site. On a Mono target prefer "Copy: mono_register".</sys:String>
   <sys:String x:Key="MethodOverloads.CreateAaInCe">Push aobscan to CE</sys:String>
   <sys:String x:Key="MethodOverloads.AutoActivate">Auto-activate</sys:String>
   <sys:String x:Key="MethodOverloads.Close">Close</sys:String>
   <sys:String x:Key="MethodOverloads.CallMethodMenu">Call method…</sys:String>
   <!-- DLL-free Mono path (helper file lives in the CT — Tools → Inject Discrete Bridge ships it) -->
-  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScript">Copy: mono_register</sys:String>
-  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScriptTooltip">DLL-free: generates an AA that calls mono_registerSymbolEx via CE's built-in Mono API. Mono targets only. Run Tools → Inject Discrete Bridge first to ship mono_registersymbol_helpers.lua into the cheat table.</sys:String>
-  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCe">Push mono_register to CE</sys:String>
-  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCeTooltip">Push the mono_register AA into CE's address list via AOBMaker. Same DLL-free Mono path as the Copy button — no Discrete DLL needed.</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScript">Copy: mono_register ★</sys:String>
+  <sys:String x:Key="MethodOverloads.CopyMonoSymbolScriptTooltip">RECOMMENDED for Mono targets. DLL-free: generates an AA that JIT-resolves the method at enable time via CE's Mono API (mono_registerSymbolBySignatureMatch), so the symbol points at the REAL address every run and survives a game relaunch — no hardcoded address, no fragile prologue AOB. Run Tools → Inject Discrete Bridge first to ship mono_registersymbol_helpers.lua into the cheat table, and enable CE's Mono features (Mono → Activate) for the game.</sys:String>
+  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCe">Push mono_register to CE ★</sys:String>
+  <sys:String x:Key="MethodOverloads.CreateMonoSymbolInCeTooltip">RECOMMENDED for Mono targets. Push the relaunch-safe mono_register AA into CE's address list via AOBMaker. Re-resolves the real address each enable via CE's Mono API — no Discrete DLL, no hardcoded address.</sys:String>
 
   <!-- Phase 19d — Call Method dialog -->
   <sys:String x:Key="MethodCall.Title">Call method</sys:String>

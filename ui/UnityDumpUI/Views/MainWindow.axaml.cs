@@ -838,11 +838,13 @@ public partial class MainWindow : Window
             // when its target class matches the browser's selected class.
             // Pre-fills the Instance address textbox in MethodCallWindow.
             defaultInstanceAddress: GetDefaultMethodCallInstance(vm, asm, ns, cls),
-            // Backend gate for the DLL-free Mono register actions —
-            // mono_registerSymbolEx is meaningless on IL2CPP. Backend2
-            // is the live handshake's backend string; falls back to
-            // false on disconnect / unknown backend.
-            isMonoBackend: string.Equals(vm.Backend2, "Mono", StringComparison.OrdinalIgnoreCase));
+            // Backend gate for the DLL-free Mono register actions — the
+            // mono_* CE API is meaningless on IL2CPP. Match on a "Mono" PREFIX
+            // (StartsWith, not Equals): the handshake backend string can carry
+            // a suffix ("Mono x64", "Mono (bdwgc)", …), and an exact-"Mono"
+            // test then hid the Mono register buttons on real Mono targets.
+            isMonoBackend: (vm.Backend2 ?? string.Empty)
+                .StartsWith("Mono", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

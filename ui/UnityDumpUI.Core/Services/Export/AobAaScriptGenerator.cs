@@ -70,6 +70,18 @@ public sealed class AaScriptOverload
     /// by the AOB-scan or bridge-resolve paths.
     /// </summary>
     public IReadOnlyList<string>? ParamTypes { get; init; }
+
+    /// <summary>
+    /// Parameter-type tokens that appear in OTHER overloads of this method but
+    /// NOT in this one. Consumed by <c>MonoRegisterSymbolAaScriptGenerator</c>'s
+    /// signature-match path as the <c>sigExcludes</c> argument: it lets
+    /// <c>discrete_mono_registerSymbolBySignatureMatch</c> reject a longer-arity
+    /// sibling whose rendered signature is a super-string of this overload's
+    /// (e.g. this = <c>(int)</c>, sibling = <c>(int, string)</c> — exclude
+    /// <c>System.String</c> so the 1-param overload isn't matched against the
+    /// 2-param one). Null/empty when there's nothing to disambiguate against.
+    /// </summary>
+    public IReadOnlyList<string>? SigExcludes { get; init; }
 }
 
 public static class AobAaScriptGenerator
