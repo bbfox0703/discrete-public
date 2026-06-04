@@ -13,7 +13,13 @@
 | **Tests** | 698 UI tests green;UI/Core + Mono x64/x86 + IL2CPP x64 DLL build clean、0 warnings / 0 AOT warnings |
 | **Mid-flight** | 無。**待 live-smoke**:native Dict 的 **Mono 端**(IL2CPP 已驗)+ in-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險);AOBMaker-app `GenerateAob` route(需遊戲 + 開 `AOBMaker.exe`)|
 
-**最新批次(2026-06-04,Phase 18e — Method overloads「Go to method address in CE」,UI-only,build # pending)**:
+**最新批次(2026-06-04,Phase 18e-B — Methods tab「Go to method address in CE (JIT if needed)」,UI-only,build # pending)**:
+- **Browser Methods tab 右鍵新增「Go to method address in CE (JIT if needed)」**(`OnMethodGotoAddressClicked`,MainWindow.axaml.cs)。IL2CPP 直接用 `MethodRow.Address`(AOT);Mono(或 row.Address 空)發 `FindMethodInstancesAsync` —— 該 RPC 列舉時已 `mono_compile_method` JIT 每個 overload —— 再用 **`MethodRow.Token` 對 `MethodOverloadEntry.Token`** 精準選到右鍵那列的 overload(grid row 無 signature 但有 token),取其位址走 `NavigateDisassemblerAsync` → CE disassembler。
+- **免動 C++** —— 原規劃要擴 `monoCompileMethod` 成 signature-aware,實作時發現複用既有 `findMethodInstances`(已 JIT + 已 signature/overload-aware)+ token 對位更省更穩,後端零改動。
+- **失敗回饋走 `Browser.ErrorMessage`**:AOBMaker pipe 不可用、abstract(無 body)、泛型定義/compile-fail(無 native entry)、多 overload 無法以 token 對到(導去 Find overloads…)。成功則由 CE 畫面跳轉呈現。位址 session-local(Mono 重啟即變)。
+- `dotnet build` UI 0/0,698 UI tests green。
+
+**先前批次(2026-06-04,Phase 18e — Method overloads「Go to method address in CE」,UI-only,build # pending)**:
 - **MethodOverloadsWindow 右鍵新增「Go to method address in CE (AOBMaker)」** — 逐 overload(右鍵選到那列)經 `AobMakerBridge.NavigateDisassemblerAsync` 把 CE disassembler 導到該 overload 的 method-head。新 `GoToMethodAddressInCeAsync(MethodOverloadRow)` 命令 + `CanGoToMethodAddress`(`Address` 空 → 灰掉),選單 gated on `HasAobMakerBridge`。
 - **Mono 也能用(關鍵差異)** — overloads 的 `Address` 在 `findMethodInstances` 列舉時就已 `mono_compile_method` JIT(MonoMethodFinder.cpp:191),IL2CPP 則 AOT。故灰掉只剩 abstract / 泛型定義 / compile-fail(JIT 也救不了)。不像 field-xref 的存取位址 Mono 必灰。
 - **後端全不動**;`dotnet build` UI 0/0,698 UI tests green。**B(deferred):Methods tab「JIT this method」** 已記入 [plan.md Open Backlog 18e-B](plan.md#open-backlog--todo)。

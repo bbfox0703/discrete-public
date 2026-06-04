@@ -810,6 +810,102 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Phase 18e-B — right-click a Methods row → jump CE's disassembler to
+    /// that method's native entry, JIT-compiling on demand for Mono.
+    /// IL2CPP rows already carry the AOT entry (<see cref="MethodRow.Address"/>),
+    /// so we jump straight there. Mono rows have no address until compiled, so
+    /// we issue <c>findMethodInstances</c> — which <c>mono_compile_method</c>s
+    /// every overload — and match THIS row by token (the grid lists each
+    /// overload as its own row but carries no signature). Abstract /
+    /// generic-definition methods have no compiled body; we surface that on
+    /// <c>Browser.ErrorMessage</c> instead of jumping nowhere. The resolved
+    /// address is session-local on Mono (a fresh JIT address each launch).
+    /// </summary>
+    private async void OnMethodGotoAddressClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var browser = vm.Browser;
+        if (browser.SelectedAssembly is null || browser.SelectedClass is null) return;
+
+        MethodRow? row = ResolveMethodRow(sender);
+        if (row is null) return;
+
+        var bridge = vm.AobMaker;
+        if (bridge is null || !bridge.IsAvailable)
+        {
+            browser.ErrorMessage = "AOBMaker pipe unavailable — open CE with the AOBMaker plugin loaded, then retry.";
+            return;
+        }
+
+        string asm = browser.SelectedAssembly.Name;
+        string ns  = browser.SelectedClass.Namespace;
+        string cls = browser.SelectedClass.Name;
+
+        // IL2CPP rows carry the AOT entry already; Mono (and any IL2CPP row
+        // whose AOT entry didn't resolve at browse time) need a JIT/resolve.
+        string? addr = row.Address;
+        if (string.IsNullOrEmpty(addr))
+        {
+            UnityDumpUI.Core.Services.FindMethodInstancesResult? probe = null;
+            try
+            {
+                probe = await vm.BackendAdapter
+                    .FindMethodInstancesAsync(asm, ns, cls, row.Name, signatureMatch: null,
+                                              ct: System.Threading.CancellationToken.None)
+                    .ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                browser.ErrorMessage = $"JIT/resolve failed: {ex.Message}";
+                return;
+            }
+            if (probe is null || !string.IsNullOrEmpty(probe.Error))
+            {
+                browser.ErrorMessage = probe?.Error ?? "findMethodInstances returned no result.";
+                return;
+            }
+
+            // Match the right overload by token; fall back to the sole match
+            // when a class has exactly one overload of this name.
+            UnityDumpUI.Core.Services.MethodOverloadEntry? match = null;
+            foreach (var m in probe.Matches)
+                if (m.Token == row.Token) { match = m; break; }
+            if (match is null && probe.Matches.Count == 1) match = probe.Matches[0];
+            if (match is null)
+            {
+                browser.ErrorMessage =
+                    $"Couldn't identify this overload of {row.Name} ({probe.Matches.Count} overloads) — "
+                    + "use “Find overloads…” and jump from there.";
+                return;
+            }
+
+            addr = match.Address;
+            if (string.IsNullOrEmpty(addr))
+            {
+                browser.ErrorMessage = match.IsAbstract
+                    ? $"{row.Name} is abstract — no compiled body to jump to."
+                    : $"{row.Name} has no compiled native entry (generic definition or compile failure).";
+                return;
+            }
+        }
+
+        bool ok = await bridge
+            .NavigateDisassemblerAsync(addr, System.Threading.CancellationToken.None)
+            .ConfigureAwait(true);
+        if (ok)
+        {
+            browser.ErrorMessage = null;
+            vm.Logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                $"goto method address in CE: {ns}.{cls}.{row.Name} @ {addr}");
+        }
+        else
+        {
+            browser.ErrorMessage =
+                "Couldn't reach CE's disassembler — open CE with the AOBMaker plugin loaded, then retry.";
+        }
+    }
+
+    /// <summary>
     /// Resolve which Methods-grid row the context-menu click targeted —
     /// trying the menu's PlacementTarget first (for menus opened on a
     /// specific row), falling back to the grid's current SelectedItem when

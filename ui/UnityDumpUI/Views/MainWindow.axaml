@@ -1114,6 +1114,13 @@
                               Click="OnMethodFindOverloadsClicked" />
                     <MenuItem Header="{StaticResource Browser.MethodCallMethodMenu}"
                               Click="OnMethodCallMethodClicked" />
+                    <!-- 18e-B: jump CE's disassembler to this method's native
+                         entry. IL2CPP uses the row's AOT address directly;
+                         Mono has no address until JIT'd, so this issues a
+                         findMethodInstances RPC (which mono_compile_method's
+                         every overload) and matches the row by token. -->
+                    <MenuItem Header="{StaticResource Browser.MethodGotoAddressMenu}"
+                              Click="OnMethodGotoAddressClicked" />
                     <Separator />
                     <!-- Per-cell clipboard helpers. MethodRow has no return
                          type (only the overload-picker RPC carries that), so
