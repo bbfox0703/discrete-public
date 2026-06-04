@@ -65,6 +65,15 @@ public enum WalkedFieldKind
 
     /// <summary>Value-type slot inside an expanded array — primitive leaf for now.</summary>
     ArraySlotLeaf,
+
+    /// <summary>
+    /// <c>Dictionary&lt;K,V&gt;</c> whose key→value pairs the DLL already
+    /// decoded inline. Expand from the embedded child <see cref="WalkedField.Fields"/>
+    /// (no RPC) — unlike ValueStruct/PointerToClass, the pairs exist only in the
+    /// wire payload (a re-walk of the dict object would yield _buckets/_entries
+    /// noise, not pairs).
+    /// </summary>
+    Dictionary,
 }
 
 /// <summary>
@@ -89,6 +98,14 @@ public static class InstanceFieldClassifier
         // Enums come back with the underlying integer already decoded into
         // Value, so the row is a Leaf showing that int.
         if (f.IsEnum) return WalkedFieldKind.Leaf;
+
+        // Rule 1b — Dictionary<K,V> the DLL fanned out inline. The native walk
+        // (CaptureMono/Il2cppDictionary) emits key→value pairs as embedded
+        // child Fields and marks the row with `dict`. Expandable only when there
+        // are pairs to show (dict_error / empty dict → Leaf). The pairs live in
+        // the payload, so expansion reads Fields directly (no RPC).
+        if (f.Dict && f.Fields is { Count: > 0 })
+            return WalkedFieldKind.Dictionary;
 
         // Rule 2 — Collection. `T[]` / `List<T>` is distinguishable from
         // Type alone, no wire payload inspection needed.

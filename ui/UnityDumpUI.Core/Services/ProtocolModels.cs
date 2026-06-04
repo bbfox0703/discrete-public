@@ -227,6 +227,21 @@ public sealed class WalkedField
     [JsonPropertyName("is_enum")]         public bool    IsEnum         { get; set; }
     [JsonPropertyName("is_value_type")]   public bool    IsValueType    { get; set; }
     [JsonPropertyName("underlying_type")] public string? UnderlyingType { get; set; }
+
+    // Dictionary<K,V> walk: the DLL emits key→value pairs as embedded child
+    // <see cref="Fields"/> (each named "[key]" with its value decode merged) and
+    // marks the parent with <c>dict</c>/<c>dict_count</c>. Unlike value-structs
+    // (which the Inspector re-walks via RPC on expand), dict pairs live only in
+    // this payload — the classifier routes a Dict row to embedded-child expand.
+    [JsonPropertyName("dict")]            public bool          Dict        { get; set; }
+    [JsonPropertyName("dict_count")]      public int           DictCount   { get; set; }
+    [JsonPropertyName("dict_truncated")]  public bool          DictTruncated { get; set; }
+    [JsonPropertyName("dict_error")]      public string?       DictError   { get; set; }
+    [JsonPropertyName("dict_key")]        public string?       DictKey     { get; set; }
+    [JsonPropertyName("index")]           public int?          Index       { get; set; }
+    /// <summary>Embedded child fields (dict pairs, or a pre-expanded value
+    /// struct). Present when the DLL fanned the field out inline.</summary>
+    [JsonPropertyName("fields")]          public List<WalkedField>? Fields { get; set; }
 }
 
 /// <summary>

@@ -198,11 +198,20 @@ bool ShouldExpandValueStruct(bool isValueType, bool isEnum, ClassPtr vtc,
 // are emitted as child `fields` named "[<keyRepr>]" so the Inspector (which
 // already renders nested `fields`) shows key→value with no UI change.
 
-// Mono TypeName + IL2CPP il2cpp_type_get_name both render the generic dict as
-// "System.Collections.Generic.Dictionary`2[...]" / "...`2<...>" — the literal
-// backtick-2 (`2) arity prefix is the stable cross-runtime signal.
+// Detect a managed Dictionary<K,V> field by type name. The metadata/IL form is
+// "System.Collections.Generic.Dictionary`2<...>" (backtick-2 arity), but a LIVE
+// IL2CPP walk (il2cpp_type_get_name) renders it DEMANGLED as
+// "System.Collections.Generic.Dictionary<System.Int32,FieldEnemyInfo>" — no
+// backtick (live-confirmed on Utawarerumono, build #1078). Accept either: the
+// shared "...Generic.Dictionary" prefix followed by '`' (backtick form) or '<'
+// (demangled instantiation). The char check excludes System.Collections.
+// DictionaryEntry (different namespace + next char 'E') and the open generic.
 inline bool IsDictionaryType(const std::string& t) {
-    return t.rfind("System.Collections.Generic.Dictionary`2", 0) == 0;
+    static constexpr char kBase[] = "System.Collections.Generic.Dictionary";
+    constexpr std::size_t kBaseLen = sizeof(kBase) - 1;
+    if (t.rfind(kBase, 0) != 0 || t.size() <= kBaseLen) return false;
+    const char c = t[kBaseLen];
+    return c == '`' || c == '<';
 }
 
 constexpr std::size_t kDictDefaultPairCap = 256;  // emitted key/value pairs cap
@@ -374,11 +383,13 @@ json CaptureMonoDictionary(const StructDecodeFieldFn& decodeField,
     const Mono::FieldEntry* keyF  = nullptr;
     const Mono::FieldEntry* valF  = nullptr;
     const Mono::FieldEntry* hashF = nullptr;
+    const Mono::FieldEntry* nextF = nullptr;
     for (const auto& f : er.info.fields) {
         if (f.flags & 0x10u) continue;
         if      (keyF  == nullptr && DictNameIs(f.name, "key"))      keyF  = &f;
         else if (valF  == nullptr && DictNameIs(f.name, "value"))    valF  = &f;
         else if (hashF == nullptr && DictNameIs(f.name, "hashCode")) hashF = &f;
+        else if (nextF == nullptr && DictNameIs(f.name, "next"))     nextF = &f;
     }
     if (keyF == nullptr || valF == nullptr)
         return json{{"dict_error", "entry key/value not found"}};
@@ -397,13 +408,25 @@ json CaptureMonoDictionary(const StructDecodeFieldFn& decodeField,
         if (emitted >= pairCap) { truncated = true; break; }
         const std::uintptr_t elemBase =
             entriesData + static_cast<std::uintptr_t>(i) * static_cast<std::uintptr_t>(stride);
-        // liveness: a freed Entry has hashCode < 0 (referencesource convention).
+        // Skip freed entries. referencesource marks a freed Entry with
+        // hashCode == -1 (the live hash is masked to 0x7FFFFFFF, never -1);
+        // CoreCLR marks it with next < -1 (next is a free-list link, StartOfFreeList
+        // = -3). Check both so the walk is correct across corlib variants without
+        // hard-coding which the target uses.
+        bool freed = false;
         if (hashF != nullptr) {
             std::int32_t hc = 0;
             const std::uintptr_t hcAddr =
                 elemBase + static_cast<std::uintptr_t>(static_cast<long>(hashF->offset) - hdr);
-            if (rd(hcAddr, &hc, 4) && hc < 0) continue;
+            if (rd(hcAddr, &hc, 4) && hc == -1) freed = true;
         }
+        if (!freed && nextF != nullptr) {
+            std::int32_t nx = 0;
+            const std::uintptr_t nxAddr =
+                elemBase + static_cast<std::uintptr_t>(static_cast<long>(nextF->offset) - hdr);
+            if (rd(nxAddr, &nx, 4) && nx < -1) freed = true;
+        }
+        if (freed) continue;
         const std::uintptr_t keyAddr =
             elemBase + static_cast<std::uintptr_t>(static_cast<long>(keyF->offset) - hdr);
         const std::uintptr_t valAddr =
@@ -576,11 +599,13 @@ json CaptureIl2cppDictionary(const StructDecodeFieldFn& decodeField,
     const IL2CPP::FieldEntry* keyF  = nullptr;
     const IL2CPP::FieldEntry* valF  = nullptr;
     const IL2CPP::FieldEntry* hashF = nullptr;
+    const IL2CPP::FieldEntry* nextF = nullptr;
     for (const auto& f : er.info.fields) {
         if (f.flags & 0x10u) continue;
         if      (keyF  == nullptr && DictNameIs(f.name, "key"))      keyF  = &f;
         else if (valF  == nullptr && DictNameIs(f.name, "value"))    valF  = &f;
         else if (hashF == nullptr && DictNameIs(f.name, "hashCode")) hashF = &f;
+        else if (nextF == nullptr && DictNameIs(f.name, "next"))     nextF = &f;
     }
     if (keyF == nullptr || valF == nullptr)
         return json{{"dict_error", "entry key/value not found"}};
@@ -599,12 +624,23 @@ json CaptureIl2cppDictionary(const StructDecodeFieldFn& decodeField,
         if (emitted >= pairCap) { truncated = true; break; }
         const std::uintptr_t elemBase =
             entriesData + static_cast<std::uintptr_t>(i) * static_cast<std::uintptr_t>(stride);
+        // Skip freed entries. referencesource marks freed with hashCode == -1
+        // (live hash masked to 0x7FFFFFFF); CoreCLR marks freed with next < -1
+        // (free-list link). Check both → correct across corlib variants.
+        bool freed = false;
         if (hashF != nullptr) {
             std::int32_t hc = 0;
             const std::uintptr_t hcAddr =
                 elemBase + static_cast<std::uintptr_t>(static_cast<long>(hashF->offset) - hdr);
-            if (rd(hcAddr, &hc, 4) && hc < 0) continue;
+            if (rd(hcAddr, &hc, 4) && hc == -1) freed = true;
         }
+        if (!freed && nextF != nullptr) {
+            std::int32_t nx = 0;
+            const std::uintptr_t nxAddr =
+                elemBase + static_cast<std::uintptr_t>(static_cast<long>(nextF->offset) - hdr);
+            if (rd(nxAddr, &nx, 4) && nx < -1) freed = true;
+        }
+        if (freed) continue;
         const std::uintptr_t keyAddr =
             elemBase + static_cast<std::uintptr_t>(static_cast<long>(keyF->offset) - hdr);
         const std::uintptr_t valAddr =

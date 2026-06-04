@@ -1008,6 +1008,24 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             case WalkedFieldKind.ArraySlotPointer:
                 await LoadPointerChildrenAsync(node, ct).ConfigureAwait(true);
                 break;
+
+            // Dictionary<K,V> — the DLL already decoded the key→value pairs
+            // into the wire payload (CaptureMono/Il2cppDictionary). Build the
+            // child rows straight from the embedded Fields; no RPC. Each child
+            // runs back through the classifier in FromInstanceField, so a nested
+            // dict / value-struct value stays recursively expandable.
+            case WalkedFieldKind.Dictionary:
+                if (node.EmbeddedFields is { } pairs)
+                {
+                    foreach (WalkedField f in pairs)
+                    {
+                        WalkedFieldNode child = WalkedFieldNode.FromInstanceField(
+                            f, indent: node.IndentLevel + 1, actions: _actions);
+                        child.Parent = node;
+                        node.Children.Add(child);
+                    }
+                }
+                break;
         }
     }
 
@@ -1957,7 +1975,13 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
         WalkedFieldKind.PointerToClass or
         WalkedFieldKind.ValueStruct    or
         WalkedFieldKind.Collection     or
-        WalkedFieldKind.ArraySlotPointer;
+        WalkedFieldKind.ArraySlotPointer or
+        WalkedFieldKind.Dictionary;
+
+    /// <summary>Embedded child fields the DLL fanned out inline (Dictionary
+    /// key→value pairs). The VM consumes these directly on expand — no RPC.
+    /// Null for nodes with no embedded payload.</summary>
+    public IReadOnlyList<WalkedField>? EmbeddedFields => _source?.Fields;
 
     /// <summary>"▶" / "▼" / "⋯" / " " — drives the chevron in the Name column.</summary>
     public string ExpandGlyph
@@ -2059,6 +2083,17 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
         if (kind == WalkedFieldKind.ValueStruct)
         {
             display = "(struct — expand)";
+        }
+        else if (f.Dict)
+        {
+            // Dictionary<K,V> fanned out by the DLL — show the live entry count
+            // (the wire `ptr` was erased on success). Expandable when > 0.
+            string unit = f.DictCount == 1 ? "entry" : "entries";
+            display = $"(dict — {f.DictCount} {unit}{(f.DictTruncated ? "+" : string.Empty)})";
+        }
+        else if (f.DictError is { Length: > 0 })
+        {
+            display = $"(dict — {f.DictError})";
         }
         else
         {
