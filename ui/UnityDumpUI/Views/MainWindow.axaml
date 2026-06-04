@@ -50,6 +50,14 @@
         <Button Content="{StaticResource Conn.ProxyDeploy}"
                 Command="{Binding OpenProxyDeployCommand}" />
 
+        <!-- Open the log root (%LOCALAPPDATA%\Discrete_Dumper\Logs) in Explorer —
+             holds the UI's `ui\` tree and the DLL's per-PID folders. Code-behind
+             Click (shell-open is a view concern); folder is created on demand so
+             the shell call never sees a missing path. -->
+        <Button Content="{StaticResource Conn.OpenLogFolder}"
+                Click="OnOpenLogFolderClicked"
+                ToolTip.Tip="Open the log folder (%LOCALAPPDATA%\Discrete_Dumper\Logs) — UI logs under ui\, DLL logs under &lt;pid&gt;\." />
+
         <!-- Phase 22d: Tools menu. Currently houses one entry (Inject
              Discrete Bridge); future entries (Phase 22e per-feature
              "Send to CE Table" actions) will join here. The button

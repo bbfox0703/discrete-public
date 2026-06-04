@@ -132,6 +132,18 @@ public sealed class FileLogger : IDisposable
     }
 
     /// <summary>
+    /// The log ROOT — <c>%LOCALAPPDATA%\Discrete_Dumper\Logs</c> — parent of the
+    /// UI's <c>ui\</c> tree and the DLL's per-PID folders. The "Open log folder"
+    /// toolbar button opens this so the user can reach both. The directory is NOT
+    /// created here; the caller lazy-creates it before opening.
+    /// </summary>
+    public static string LogRootDirectory()
+    {
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return Path.Combine(local, Constants.LogRootSubpath);
+    }
+
+    /// <summary>
     /// Keep only the most-recent <paramref name="keepRecent"/> DLL-side
     /// per-PID log directories (by last-write time); delete the older ones.
     /// Each game injection (Pick &amp; inject or proxy auto-load) creates a new

@@ -236,6 +236,7 @@
   <sys:String x:Key="Conn.StatusLabel">Status:</sys:String>
   <sys:String x:Key="Conn.Inject">Pick &amp; inject…</sys:String>
   <sys:String x:Key="Conn.ProxyDeploy">Proxy Deploy…</sys:String>
+  <sys:String x:Key="Conn.OpenLogFolder">📂 Open Logs</sys:String>
   <sys:String x:Key="Conn.ToolsMenu">Tools ▾</sys:String>
 
   <!-- Phase 22d: Tools menu — AOBMaker-backed CT mutation entries. -->
