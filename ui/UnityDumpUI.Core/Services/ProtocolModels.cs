@@ -239,6 +239,13 @@ public sealed class WalkedField
     [JsonPropertyName("dict_error")]      public string?       DictError   { get; set; }
     [JsonPropertyName("dict_key")]        public string?       DictKey     { get; set; }
     [JsonPropertyName("index")]           public int?          Index       { get; set; }
+    // Deref-chain offsets so the CE-XML exporter can address dict pairs
+    // relatively: dict field → +DictEntriesOffset (deref) → +DictDataOffset +
+    // Index*DictStride + pair.Offset. Raw offset of `entries` within the dict
+    // object; SZARRAY data start; Entry value-type stride.
+    [JsonPropertyName("dict_entries_offset")] public int DictEntriesOffset { get; set; }
+    [JsonPropertyName("dict_data_offset")]    public int DictDataOffset    { get; set; }
+    [JsonPropertyName("dict_stride")]         public int DictStride        { get; set; }
     /// <summary>Embedded child fields (dict pairs, or a pre-expanded value
     /// struct). Present when the DLL fanned the field out inline.</summary>
     [JsonPropertyName("fields")]          public List<WalkedField>? Fields { get; set; }

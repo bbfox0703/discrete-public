@@ -459,8 +459,11 @@ json CaptureMonoDictionary(const StructDecodeFieldFn& decodeField,
                 json nd = CaptureMonoDictionary(decodeField, nested, depthLeft - 1, pairCap);
                 if (nd.contains("fields")) {
                     pair.erase("ptr");
-                    pair["dict"]       = true;
-                    pair["dict_count"] = nd.value("dict_count", 0);
+                    pair["dict"]                = true;
+                    pair["dict_count"]          = nd.value("dict_count", 0);
+                    pair["dict_entries_offset"] = nd.value("dict_entries_offset", 0);
+                    pair["dict_data_offset"]    = nd.value("dict_data_offset", 0);
+                    pair["dict_stride"]         = nd.value("dict_stride", 0);
                     if (nd.value("dict_truncated", false)) pair["dict_truncated"] = true;
                     pair["fields"] = std::move(nd["fields"]);
                 }
@@ -469,7 +472,18 @@ json CaptureMonoDictionary(const StructDecodeFieldFn& decodeField,
         pairs.push_back(std::move(pair));
         ++emitted;
     }
-    json out = {{"dict_count", emitted}, {"fields", std::move(pairs)}};
+    // dict_entries_offset/data_offset/stride let the CE-XML exporter rebuild the
+    // relative deref chain: dict field → +entries_offset deref → +data_offset +
+    // index*stride + per-pair value offset. entries_offset is the raw (header-
+    // inclusive) offset of `entries` within the dict object; data_offset is the
+    // SZARRAY data start; stride is the Entry value-type size.
+    json out = {
+        {"dict_count",          emitted},
+        {"dict_entries_offset", static_cast<long>(entriesF->offset)},
+        {"dict_data_offset",    static_cast<long>(ML::kArrayDataOffset)},
+        {"dict_stride",         stride},
+        {"fields",              std::move(pairs)},
+    };
     if (truncated) out["dict_truncated"] = true;
     return out;
 }
@@ -672,8 +686,11 @@ json CaptureIl2cppDictionary(const StructDecodeFieldFn& decodeField,
                 json nd = CaptureIl2cppDictionary(decodeField, nested, depthLeft - 1, pairCap);
                 if (nd.contains("fields")) {
                     pair.erase("ptr");
-                    pair["dict"]       = true;
-                    pair["dict_count"] = nd.value("dict_count", 0);
+                    pair["dict"]                = true;
+                    pair["dict_count"]          = nd.value("dict_count", 0);
+                    pair["dict_entries_offset"] = nd.value("dict_entries_offset", 0);
+                    pair["dict_data_offset"]    = nd.value("dict_data_offset", 0);
+                    pair["dict_stride"]         = nd.value("dict_stride", 0);
                     if (nd.value("dict_truncated", false)) pair["dict_truncated"] = true;
                     pair["fields"] = std::move(nd["fields"]);
                 }
@@ -682,7 +699,14 @@ json CaptureIl2cppDictionary(const StructDecodeFieldFn& decodeField,
         pairs.push_back(std::move(pair));
         ++emitted;
     }
-    json out = {{"dict_count", emitted}, {"fields", std::move(pairs)}};
+    // See CaptureMonoDictionary for the chain-offset rationale.
+    json out = {
+        {"dict_count",          emitted},
+        {"dict_entries_offset", static_cast<long>(entriesF->offset)},
+        {"dict_data_offset",    static_cast<long>(ML::kArrayDataOffset)},
+        {"dict_stride",         stride},
+        {"fields",              std::move(pairs)},
+    };
     if (truncated) out["dict_truncated"] = true;
     return out;
 }
@@ -5557,8 +5581,11 @@ void RegisterCoreHandlers() {
                                                        kStructMaxDepth, dictPairCap);
                         if (d.contains("fields")) {
                             entry.erase("ptr");
-                            entry["dict"]       = true;
-                            entry["dict_count"] = d.value("dict_count", 0);
+                            entry["dict"]                = true;
+                            entry["dict_count"]          = d.value("dict_count", 0);
+                            entry["dict_entries_offset"] = d.value("dict_entries_offset", 0);
+                            entry["dict_data_offset"]    = d.value("dict_data_offset", 0);
+                            entry["dict_stride"]         = d.value("dict_stride", 0);
                             if (d.value("dict_truncated", false)) entry["dict_truncated"] = true;
                             entry["fields"] = std::move(d["fields"]);
                         } else if (d.contains("dict_error")) {
@@ -8680,8 +8707,11 @@ void RegisterCoreHandlers() {
                                                          kStructMaxDepth, dictPairCap);
                         if (d.contains("fields")) {
                             entry.erase("ptr");
-                            entry["dict"]       = true;
-                            entry["dict_count"] = d.value("dict_count", 0);
+                            entry["dict"]                = true;
+                            entry["dict_count"]          = d.value("dict_count", 0);
+                            entry["dict_entries_offset"] = d.value("dict_entries_offset", 0);
+                            entry["dict_data_offset"]    = d.value("dict_data_offset", 0);
+                            entry["dict_stride"]         = d.value("dict_stride", 0);
                             if (d.value("dict_truncated", false)) entry["dict_truncated"] = true;
                             entry["fields"] = std::move(d["fields"]);
                         } else if (d.contains("dict_error")) {

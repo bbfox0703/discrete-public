@@ -197,6 +197,14 @@ public static partial class CeXmlExporter
                     .ConfigureAwait(false);
                 return;
 
+            // ---- Dictionary<K,V> — relative deref chain (dict object → entries
+            //      array) with each key→value pair emitted at its computed slot.
+            case WalkedFieldKind.Dictionary:
+                await EmitDictionaryLiveAsync(sb, indent, ids, f, desc, rel, assemblyName,
+                                              options, live, visited, currentDepth, ct)
+                    .ConfigureAwait(false);
+                return;
+
             default:
                 EmitLeaf(sb, indent, ids, desc,
                          vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
@@ -400,6 +408,73 @@ public static partial class CeXmlExporter
     /// object via its header; string slots become String deref groups; value
     /// slots become typed leaves.
     /// </summary>
+    /// <summary>
+    /// Emit a <c>Dictionary&lt;K,V&gt;</c> as a relative deref chain. The DLL
+    /// already decoded the live key→value pairs into <see cref="WalkedField.Fields"/>
+    /// and supplied the chain offsets (entries-field offset, SZARRAY data start,
+    /// Entry stride). We rebuild the CE addressing:
+    /// <code>
+    ///   dict field +rel               Offsets=[0]   (deref → dict object)
+    ///     entries  +DictEntriesOffset  Offsets=[0]   (deref → Entry[] object)
+    ///       [key] +(DictDataOffset + index*stride + valueOffset)   (per pair)
+    /// </code>
+    /// Each pair's VALUE is handed back to <see cref="EmitWalkedFieldLiveAsync"/>
+    /// via <c>addrOverride</c>, so scalars / strings / pointer-to-class / nested
+    /// dictionaries / value structs / byte[] all reuse the existing per-kind
+    /// emit. Relative throughout, so swapping the root symbol re-targets the
+    /// whole table (stable as long as the dict isn't rehashed).
+    /// </summary>
+    private static async Task EmitDictionaryLiveAsync(
+        StringBuilder sb, string indent, IdGen ids, WalkedField f, string desc,
+        string rel, string? assemblyName, ExportOptions options, ILiveExportSource live,
+        HashSet<string> visited, int currentDepth, CancellationToken ct)
+    {
+        bool canDrill = currentDepth < options.DrilldownDepth;
+        List<WalkedField>? pairs = f.Fields;
+        // No pairs (empty / dict_error / depth cap) or missing chain metadata
+        // (older DLL) → emit a watchable pointer leaf instead of a broken chain.
+        if (!canDrill || pairs is not { Count: > 0 }
+            || f.DictEntriesOffset <= 0 || f.DictStride <= 0)
+        {
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
+                     showAsHex: true, address: rel, offsets: null);
+            return;
+        }
+
+        string headerLabel = options.VerboseDescription
+            ? $"{desc}  [dict, {f.DictCount} entries{(f.DictTruncated ? "+" : string.Empty)}]"
+            : desc;
+
+        // Group 1: deref the dict field pointer → dict object.
+        OpenGroup(sb, indent, ids, headerLabel, rel,
+                  offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                  varType: null, showAsHex: true);
+
+        // Group 2: deref the `entries` field → Entry[] array object.
+        string entriesIndent = indent + "  ";
+        OpenGroup(sb, entriesIndent, ids, FieldDesc("entries", "Entry[]", options),
+                  RelAddr(f.DictEntriesOffset),
+                  offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                  varType: null, showAsHex: true);
+
+        string pairIndent = entriesIndent + "  ";
+        foreach (WalkedField pair in pairs)
+        {
+            int idx = pair.Index ?? 0;
+            // Value address relative to the Entry[] object:
+            //   data_offset + index*stride + value-member-offset (pair.Offset).
+            string pairRel = RelAddr(f.DictDataOffset + idx * f.DictStride + pair.Offset);
+            // +2 depth for the two derefs consumed above (matches the List path).
+            await EmitWalkedFieldLiveAsync(sb, pairIndent, ids, pair, assemblyName,
+                                           options, live, visited, currentDepth + 2, ct,
+                                           addrOverride: pairRel)
+                .ConfigureAwait(false);
+        }
+
+        CloseGroup(sb, entriesIndent);
+        CloseGroup(sb, indent);
+    }
+
     private static async Task EmitCollectionLiveAsync(
         StringBuilder sb, string indent, IdGen ids, WalkedField f, string desc,
         string rel, string? assemblyName, ExportOptions options, ILiveExportSource live,
