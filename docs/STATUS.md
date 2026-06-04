@@ -13,7 +13,13 @@
 | **Tests** | 698 UI tests green;UI/Core + Mono x64/x86 + IL2CPP x64 DLL build clean、0 warnings / 0 AOT warnings |
 | **Mid-flight** | 無。**待 live-smoke**:native Dict 的 **Mono 端**(IL2CPP 已驗)+ in-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險);AOBMaker-app `GenerateAob` route(需遊戲 + 開 `AOBMaker.exe`)|
 
-**最新批次(2026-06-03,AOBMaker app 唯一-AOB 整合 + Method Overloads/Inspector UI fixes,build #1059,merged `c108ed4`,UI/Core-only)** — 整合說明見 [ce-bridge-integration.md → AOBMaker app integration](ce-bridge-integration.md#aobmaker-app-integration--unique-aob-via-generateaob):
+**最新批次(2026-06-04,Phase 28e — Field-references 雙路徑 CE 導覽,UI-only,build # pending)**:
+- **FieldReferencesWindow 表格新增可見 `Access addr` 欄** — 顯示後端早已回傳的 `hitAddress`(實際讀/寫 field 那條指令的 IP);原 `Address` 欄改標題為 `Method head`。兩欄皆 hex 數值排序(`DataGridSortComparers.Hex`)。
+- **右鍵單一 "Disassemble in CE" 拆成兩個明確項目** — 「Go to method head in CE (AOBMaker)」走 `address`、「Go to access address in CE (AOBMaker)」走 `hitAddress`,兩者皆經 `AobMakerBridge.NavigateDisassemblerAsync` → CE disassembler。共用 `NavigateInCeAsync` helper。
+- **Mono 自動灰掉** — Mono 端 `address`/`hitAddress` 皆 null(只回 IL offset)→ 兩命令 `CanExecute`(`CanGoToMethodHead`/`CanGoToAccessAddress`)回 false,選單項自動 disable。IL2CPP 兩位址恆有值。
+- **後端/protocol/C++ 全不動** — `findFieldReferences` 早已同時回傳 method-head(`address`)與精確存取位址(`hitAddress`),本批純 UI 呈現 + 命令拆分。`dotnet build` UI 0 warnings / 0 errors。
+
+**先前批次(2026-06-03,AOBMaker app 唯一-AOB 整合 + Method Overloads/Inspector UI fixes,build #1059,merged `c108ed4`,UI/Core-only)** — 整合說明見 [ce-bridge-integration.md → AOBMaker app integration](ce-bridge-integration.md#aobmaker-app-integration--unique-aob-via-generateaob):
 - **🆕 AOBMaker 標準版 app 整合(`\\.\pipe\AOBMaker` → `GenerateAob`)** — 新 `AobMakerAppClient`(與 CE-plugin bridge 同 length-prefixed JSON 線格式,response timeout 30s)。連線時 `Copy: aobscan` **與** `Push aobscan to CE` 改走 app 取**唯一 AOB**(Mode D,每個 overload 數秒);app 沒開/失敗則 fallback 回 DLL method-prologue pattern + 警語。目標 process 用連線中 `\\.\pipe\DiscreteBfx` 的 server PID(`GetNamedPipeServerProcessId` — backend DLL 在遊戲內)當 `processId`,未知時讓 app 自解。連線列新增 **「AOBMaker App: connected/disconnected」chip + ↻**;既有 chip 文字 `AOBMaker:` → **`AOBMaker DLL plugin:`**。
 - **`AobAaScriptGenerator` 前置 AOB-品質橫幅** — `if syntaxcheck then return end` 下一行、獨自一行:非唯一(DLL pattern)→ 醒目「NOT unique,請自行驗證/調整」;app 產的唯一 AOB → 「verified unique via AOBMaker app」。Mode-D 把 pattern 往前延伸(`injectionOffset > 0`)時,scan 進 `<sym>_aob` anchor、在 `{$lua}` 用 `anchor+offset` 註冊真正 method-entry symbol。
 - **`Copy: registersymbol`** — 原 3 行警語併成**一行** break-warning,緊接 syntaxcheck guard。

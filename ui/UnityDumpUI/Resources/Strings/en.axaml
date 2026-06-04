@@ -150,14 +150,16 @@
   <sys:String x:Key="FieldRefs.ColKind">Kind</sys:String>
   <sys:String x:Key="FieldRefs.ColClass">Class</sys:String>
   <sys:String x:Key="FieldRefs.ColMethod">Method</sys:String>
-  <sys:String x:Key="FieldRefs.ColAddress">Address</sys:String>
+  <sys:String x:Key="FieldRefs.ColAddress">Method head</sys:String>
+  <sys:String x:Key="FieldRefs.ColHitAddress">Access addr</sys:String>
   <sys:String x:Key="FieldRefs.ColIlOffset">IL offset</sys:String>
   <sys:String x:Key="FieldRefs.ColConfidence">Confidence</sys:String>
   <sys:String x:Key="FieldRefs.CopyClassMenu">Copy class name</sys:String>
   <sys:String x:Key="FieldRefs.CopyMethodMenu">Copy method name</sys:String>
-  <sys:String x:Key="FieldRefs.CopyAddressMenu">Copy method address</sys:String>
-  <sys:String x:Key="FieldRefs.CopyHitAddressMenu">Copy hit address</sys:String>
-  <sys:String x:Key="FieldRefs.DisassembleMenu">Open in CE disassembler (AOBMaker)</sys:String>
+  <sys:String x:Key="FieldRefs.CopyAddressMenu">Copy method head address</sys:String>
+  <sys:String x:Key="FieldRefs.CopyHitAddressMenu">Copy access address</sys:String>
+  <sys:String x:Key="FieldRefs.GotoMethodHeadMenu">Go to method head in CE (AOBMaker)</sys:String>
+  <sys:String x:Key="FieldRefs.GotoAccessAddrMenu">Go to access address in CE (AOBMaker)</sys:String>
   <!-- Right-click entry shared by Inspector grid, Symbol Finder result row,
        and Browser Fields tab. -->
   <sys:String x:Key="FieldRefs.FindMethodsMenu">Find methods that touch this field…</sys:String>

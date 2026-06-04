@@ -55,6 +55,7 @@ public partial class FieldReferencesWindow : Window
             ["ClassQualified"] = DataGridSortComparers.Ordinal<FieldReferenceRowVm>(r => r.ClassQualified),
             ["Method"]         = DataGridSortComparers.Ordinal<FieldReferenceRowVm>(r => r.Method),
             ["Address"]        = DataGridSortComparers.Hex<FieldReferenceRowVm>(r => r.Address),
+            ["HitAddress"]     = DataGridSortComparers.Hex<FieldReferenceRowVm>(r => r.HitAddress),
             ["IlOffset"]       = DataGridSortComparers.Ordinal<FieldReferenceRowVm>(r => r.IlOffset),
             ["Confidence"]     = DataGridSortComparers.Ordinal<FieldReferenceRowVm>(r => r.Confidence),
         };
