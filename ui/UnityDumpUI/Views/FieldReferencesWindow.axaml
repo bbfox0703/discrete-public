@@ -131,9 +131,13 @@
                     Command="{Binding CopyHitAddressCommand}"
                     CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
           <Separator IsVisible="{Binding HasAobMakerBridge}" />
-          <MenuItem Header="{StaticResource FieldRefs.DisassembleMenu}"
+          <MenuItem Header="{StaticResource FieldRefs.GotoMethodHeadMenu}"
                     IsVisible="{Binding HasAobMakerBridge}"
-                    Command="{Binding DisassembleInCeCommand}"
+                    Command="{Binding GoToMethodHeadInCeCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <MenuItem Header="{StaticResource FieldRefs.GotoAccessAddrMenu}"
+                    IsVisible="{Binding HasAobMakerBridge}"
+                    Command="{Binding GoToAccessAddressInCeCommand}"
                     CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
         </ContextMenu>
       </DataGrid.ContextMenu>
@@ -152,6 +156,10 @@
         <DataGridTextColumn Header="{StaticResource FieldRefs.ColAddress}" Width="160"
                             Binding="{Binding Address}"
                             SortMemberPath="Address" CanUserSort="True"
+                            FontFamily="Consolas,Cascadia Mono,monospace" />
+        <DataGridTextColumn Header="{StaticResource FieldRefs.ColHitAddress}" Width="160"
+                            Binding="{Binding HitAddress}"
+                            SortMemberPath="HitAddress" CanUserSort="True"
                             FontFamily="Consolas,Cascadia Mono,monospace" />
         <DataGridTextColumn Header="{StaticResource FieldRefs.ColIlOffset}" Width="100"
                             Binding="{Binding IlOffset}"

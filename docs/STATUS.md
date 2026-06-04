@@ -7,13 +7,30 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #1059(UI/Core build clean、UI 0/0 warnings;本批次 UI/Core-only,DLL 未動)|
-| **Current phase** | ✅ **AOBMaker app 整合 + Method Overloads/Inspector UI fixes(2026-06-03)** 之上接續 ✅ **Phase 31**(31-1…31-6 全 SHIPPED)+ ✅ **Class Pivot UI/UX 大修 Waves A–D**+ ✅ **session bug-review 3 修正** |
-| **Branches** | `dev == main` @ `c108ed4`(AOBMaker app 整合 merged 本批次) |
-| **Tests** | 691 UI tests green(本批次 +4 generator 測試);UI/Core build clean、UI 0/0 warnings(本批次 UI/Core-only,無 DLL rebuild) |
-| **Mid-flight** | 無。**待 live-smoke(需 inject 實機 + 開 `AOBMaker.exe`)**:本批次 AOBMaker-app `GenerateAob` 唯一-AOB route(`Copy:`/`Push: aobscan` 連到 app 時產唯一 AOB、injectionOffset 偏移符號)+ App 狀態 chip 翻 connected;另:31-5 reverse-lookup component 命名;31-2 殘留(Mono x86 / IL2CPP x64);Class Pivot 各 dialog 觀感 |
+| **Current build** | #1107(UI/Core + 兩 DLL build clean、0 warnings / 0 AOT warnings)|
+| **Current phase** | ✅ **CE disassembler 導覽三連發(2026-06-04,UI-only,Mono x64+x86 live-verified)** — 28e Field-references 雙路徑(method head + 精確存取位址)、18e Method overloads 逐 overload 跳、18e-B Methods tab「Go to method address (JIT if needed)」(Mono 經 findMethodInstances 觸發 JIT + token 對位;免動 C++)。之上接續 ✅ Native Dictionary<K,V> walk(IL2CPP live-verified)、AOBMaker app 整合(#1059)、Phase 31、Class Pivot 大修 |
+| **Branches** | `dev` @ `2ee587f` → merged `main == origin/main` @ `2d08070` |
+| **Tests** | 698 UI tests green;UI/Core + Mono x64/x86 + IL2CPP x64 DLL build clean、0 warnings / 0 AOT warnings |
+| **Mid-flight** | 無。**待 live-smoke**:native Dict 的 **Mono 端**(IL2CPP 已驗)+ in-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險);AOBMaker-app `GenerateAob` route(需遊戲 + 開 `AOBMaker.exe`)|
 
-**最新批次(2026-06-03,AOBMaker app 唯一-AOB 整合 + Method Overloads/Inspector UI fixes,build #1059,merged `c108ed4`,UI/Core-only)** — 整合說明見 [ce-bridge-integration.md → AOBMaker app integration](ce-bridge-integration.md#aobmaker-app-integration--unique-aob-via-generateaob):
+**最新批次(2026-06-04,Phase 18e-B — Methods tab「Go to method address in CE (JIT if needed)」,UI-only,Mono x64+x86 live-verified)**:
+- **Browser Methods tab 右鍵新增「Go to method address in CE (JIT if needed)」**(`OnMethodGotoAddressClicked`,MainWindow.axaml.cs)。IL2CPP 直接用 `MethodRow.Address`(AOT);Mono(或 row.Address 空)發 `FindMethodInstancesAsync` —— 該 RPC 列舉時已 `mono_compile_method` JIT 每個 overload —— 再用 **`MethodRow.Token` 對 `MethodOverloadEntry.Token`** 精準選到右鍵那列的 overload(grid row 無 signature 但有 token),取其位址走 `NavigateDisassemblerAsync` → CE disassembler。
+- **免動 C++** —— 原規劃要擴 `monoCompileMethod` 成 signature-aware,實作時發現複用既有 `findMethodInstances`(已 JIT + 已 signature/overload-aware)+ token 對位更省更穩,後端零改動。
+- **失敗回饋走 `Browser.ErrorMessage`**:AOBMaker pipe 不可用、abstract(無 body)、泛型定義/compile-fail(無 native entry)、多 overload 無法以 token 對到(導去 Find overloads…)。成功則由 CE 畫面跳轉呈現。位址 session-local(Mono 重啟即變)。
+- `dotnet build` UI 0/0,698 UI tests green。**Live-verified 2026-06-04:Mono x64 OK + Mono x86 OK**(右鍵未編譯 method → JIT + 正確跳 CE disassembler;token 對位選對 overload)。
+
+**先前批次(2026-06-04,Phase 18e — Method overloads「Go to method address in CE」,UI-only,Mono x64+x86 live-verified)**:
+- **MethodOverloadsWindow 右鍵新增「Go to method address in CE (AOBMaker)」** — 逐 overload(右鍵選到那列)經 `AobMakerBridge.NavigateDisassemblerAsync` 把 CE disassembler 導到該 overload 的 method-head。新 `GoToMethodAddressInCeAsync(MethodOverloadRow)` 命令 + `CanGoToMethodAddress`(`Address` 空 → 灰掉),選單 gated on `HasAobMakerBridge`。
+- **Mono 也能用(關鍵差異)** — overloads 的 `Address` 在 `findMethodInstances` 列舉時就已 `mono_compile_method` JIT(MonoMethodFinder.cpp:191),IL2CPP 則 AOT。故灰掉只剩 abstract / 泛型定義 / compile-fail(JIT 也救不了)。不像 field-xref 的存取位址 Mono 必灰。
+- **後端全不動**;`dotnet build` UI 0/0,698 UI tests green。**Live-verified 2026-06-04:Mono x64+x86 OK**(overloads 視窗逐 overload 跳 method-head)。**B(18e-B)已完成**(見上)。
+
+**先前批次(2026-06-04,Phase 28e — Field-references 雙路徑 CE 導覽,UI-only)**:
+- **FieldReferencesWindow 表格新增可見 `Access addr` 欄** — 顯示後端早已回傳的 `hitAddress`(實際讀/寫 field 那條指令的 IP);原 `Address` 欄改標題為 `Method head`。兩欄皆 hex 數值排序(`DataGridSortComparers.Hex`)。
+- **右鍵單一 "Disassemble in CE" 拆成兩個明確項目** — 「Go to method head in CE (AOBMaker)」走 `address`、「Go to access address in CE (AOBMaker)」走 `hitAddress`,兩者皆經 `AobMakerBridge.NavigateDisassemblerAsync` → CE disassembler。共用 `NavigateInCeAsync` helper。
+- **Mono 自動灰掉** — Mono 端 `address`/`hitAddress` 皆 null(只回 IL offset)→ 兩命令 `CanExecute`(`CanGoToMethodHead`/`CanGoToAccessAddress`)回 false,選單項自動 disable。IL2CPP 兩位址恆有值。
+- **後端/protocol/C++ 全不動** — `findFieldReferences` 早已同時回傳 method-head(`address`)與精確存取位址(`hitAddress`),本批純 UI 呈現 + 命令拆分。`dotnet build` UI 0 warnings / 0 errors。
+
+**先前批次(2026-06-03,AOBMaker app 唯一-AOB 整合 + Method Overloads/Inspector UI fixes,build #1059,merged `c108ed4`,UI/Core-only)** — 整合說明見 [ce-bridge-integration.md → AOBMaker app integration](ce-bridge-integration.md#aobmaker-app-integration--unique-aob-via-generateaob):
 - **🆕 AOBMaker 標準版 app 整合(`\\.\pipe\AOBMaker` → `GenerateAob`)** — 新 `AobMakerAppClient`(與 CE-plugin bridge 同 length-prefixed JSON 線格式,response timeout 30s)。連線時 `Copy: aobscan` **與** `Push aobscan to CE` 改走 app 取**唯一 AOB**(Mode D,每個 overload 數秒);app 沒開/失敗則 fallback 回 DLL method-prologue pattern + 警語。目標 process 用連線中 `\\.\pipe\DiscreteBfx` 的 server PID(`GetNamedPipeServerProcessId` — backend DLL 在遊戲內)當 `processId`,未知時讓 app 自解。連線列新增 **「AOBMaker App: connected/disconnected」chip + ↻**;既有 chip 文字 `AOBMaker:` → **`AOBMaker DLL plugin:`**。
 - **`AobAaScriptGenerator` 前置 AOB-品質橫幅** — `if syntaxcheck then return end` 下一行、獨自一行:非唯一(DLL pattern)→ 醒目「NOT unique,請自行驗證/調整」;app 產的唯一 AOB → 「verified unique via AOBMaker app」。Mode-D 把 pattern 往前延伸(`injectionOffset > 0`)時,scan 進 `<sym>_aob` anchor、在 `{$lua}` 用 `anchor+offset` 註冊真正 method-entry symbol。
 - **`Copy: registersymbol`** — 原 3 行警語併成**一行** break-warning,緊接 syntaxcheck guard。

@@ -122,6 +122,11 @@
           <MenuItem Header="{StaticResource MethodOverloads.CallMethodMenu}"
                     Command="{Binding CallMethodCommand}"
                     CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
+          <Separator IsVisible="{Binding HasAobMakerBridge}" />
+          <MenuItem Header="{StaticResource MethodOverloads.GotoAddressMenu}"
+                    IsVisible="{Binding HasAobMakerBridge}"
+                    Command="{Binding GoToMethodAddressInCeCommand}"
+                    CommandParameter="{Binding $parent[DataGrid].SelectedItem}" />
         </ContextMenu>
       </DataGrid.ContextMenu>
       <DataGrid.Columns>

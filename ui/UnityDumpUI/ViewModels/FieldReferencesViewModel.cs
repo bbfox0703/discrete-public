@@ -222,19 +222,40 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
             ? f(row.HitAddress) : Task.CompletedTask;
 
     /// <summary>
-    /// Hand the row's hit (or, failing that, method-entry) address to CE's
-    /// disassembler via the AOBMaker bridge. IL2CPP only in practice — Mono
-    /// rows carry an IL offset, not a native address, so there's nothing to
-    /// disassemble.
+    /// Hand the row's <b>method-entry</b> address to CE's disassembler via the
+    /// AOBMaker bridge — jumps to the head of the method that touches the field.
+    /// IL2CPP only: Mono rows carry no native address (<see cref="CanGoToMethodHead"/>
+    /// disables the menu item), so there's nothing to disassemble.
     /// </summary>
-    [RelayCommand]
-    private async Task DisassembleInCeAsync(FieldReferenceRowVm? row)
+    [RelayCommand(CanExecute = nameof(CanGoToMethodHead))]
+    private Task GoToMethodHeadInCeAsync(FieldReferenceRowVm? row) =>
+        NavigateInCeAsync(row, row?.Address, "method head");
+
+    private bool CanGoToMethodHead(FieldReferenceRowVm? row) =>
+        _aobMaker is not null && row is not null && !string.IsNullOrEmpty(row.Address);
+
+    /// <summary>
+    /// Hand the row's <b>exact access</b> address (the read/write instruction's
+    /// IP) to CE's disassembler via the AOBMaker bridge — lands on the precise
+    /// instruction that touches the field, not just the method head. IL2CPP
+    /// only: Mono rows report an IL offset instead, so
+    /// <see cref="CanGoToAccessAddress"/> disables the menu item.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanGoToAccessAddress))]
+    private Task GoToAccessAddressInCeAsync(FieldReferenceRowVm? row) =>
+        NavigateInCeAsync(row, row?.HitAddress, "access address");
+
+    private bool CanGoToAccessAddress(FieldReferenceRowVm? row) =>
+        _aobMaker is not null && row is not null && !string.IsNullOrEmpty(row.HitAddress);
+
+    /// <summary>Shared AOBMaker → CE disassembler hand-off for both the
+    /// method-head and access-address navigation commands.</summary>
+    private async Task NavigateInCeAsync(FieldReferenceRowVm? row, string? addr, string what)
     {
         if (row is null) return;
-        string addr = !string.IsNullOrEmpty(row.HitAddress) ? row.HitAddress : row.Address;
         if (string.IsNullOrEmpty(addr))
         {
-            ErrorMessage = "No native address for this row — Mono reports IL offsets only; "
+            ErrorMessage = $"No native {what} address for this row — Mono reports IL offsets only; "
                          + "this works on IL2CPP targets.";
             return;
         }
@@ -248,7 +269,7 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
             ErrorMessage = "Couldn't reach CE's disassembler — open CE with the AOBMaker plugin loaded, then retry.";
         else
             _logger.Write(Constants.LogCategoryView,
-                $"disassemble in CE: {row.ClassQualified}::{row.Method} @ {addr}");
+                $"goto {what} in CE: {row.ClassQualified}::{row.Method} @ {addr}");
     }
 }
 
