@@ -8,23 +8,23 @@
 | 項目 | 值 |
 |---|---|
 | **Current build** | #1107(UI/Core + 兩 DLL build clean、0 warnings / 0 AOT warnings)|
-| **Current phase** | ✅ **Native Dictionary<K,V> key/value walk(2026-06-04,IL2CPP live-verified)** — DLL 雙 backend dict walk + Inspector 展開 + Copy CE XML/field 相對 deref 鏈展開;同批修 Phase 26 完整性自檢 false-positive、加 📂 Open Logs 按鈕、移除 Export .CT… 按鈕。之上接續 ✅ AOBMaker app 整合(#1059)、Phase 31、Class Pivot 大修 |
+| **Current phase** | ✅ **CE disassembler 導覽三連發(2026-06-04,UI-only,Mono x64+x86 live-verified)** — 28e Field-references 雙路徑(method head + 精確存取位址)、18e Method overloads 逐 overload 跳、18e-B Methods tab「Go to method address (JIT if needed)」(Mono 經 findMethodInstances 觸發 JIT + token 對位;免動 C++)。之上接續 ✅ Native Dictionary<K,V> walk(IL2CPP live-verified)、AOBMaker app 整合(#1059)、Phase 31、Class Pivot 大修 |
 | **Branches** | `dev` @ `2ee587f` → merged `main == origin/main` @ `2d08070` |
 | **Tests** | 698 UI tests green;UI/Core + Mono x64/x86 + IL2CPP x64 DLL build clean、0 warnings / 0 AOT warnings |
 | **Mid-flight** | 無。**待 live-smoke**:native Dict 的 **Mono 端**(IL2CPP 已驗)+ in-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險);AOBMaker-app `GenerateAob` route(需遊戲 + 開 `AOBMaker.exe`)|
 
-**最新批次(2026-06-04,Phase 18e-B — Methods tab「Go to method address in CE (JIT if needed)」,UI-only,build # pending)**:
+**最新批次(2026-06-04,Phase 18e-B — Methods tab「Go to method address in CE (JIT if needed)」,UI-only,Mono x64+x86 live-verified)**:
 - **Browser Methods tab 右鍵新增「Go to method address in CE (JIT if needed)」**(`OnMethodGotoAddressClicked`,MainWindow.axaml.cs)。IL2CPP 直接用 `MethodRow.Address`(AOT);Mono(或 row.Address 空)發 `FindMethodInstancesAsync` —— 該 RPC 列舉時已 `mono_compile_method` JIT 每個 overload —— 再用 **`MethodRow.Token` 對 `MethodOverloadEntry.Token`** 精準選到右鍵那列的 overload(grid row 無 signature 但有 token),取其位址走 `NavigateDisassemblerAsync` → CE disassembler。
 - **免動 C++** —— 原規劃要擴 `monoCompileMethod` 成 signature-aware,實作時發現複用既有 `findMethodInstances`(已 JIT + 已 signature/overload-aware)+ token 對位更省更穩,後端零改動。
 - **失敗回饋走 `Browser.ErrorMessage`**:AOBMaker pipe 不可用、abstract(無 body)、泛型定義/compile-fail(無 native entry)、多 overload 無法以 token 對到(導去 Find overloads…)。成功則由 CE 畫面跳轉呈現。位址 session-local(Mono 重啟即變)。
-- `dotnet build` UI 0/0,698 UI tests green。
+- `dotnet build` UI 0/0,698 UI tests green。**Live-verified 2026-06-04:Mono x64 OK + Mono x86 OK**(右鍵未編譯 method → JIT + 正確跳 CE disassembler;token 對位選對 overload)。
 
-**先前批次(2026-06-04,Phase 18e — Method overloads「Go to method address in CE」,UI-only,build # pending)**:
+**先前批次(2026-06-04,Phase 18e — Method overloads「Go to method address in CE」,UI-only,Mono x64+x86 live-verified)**:
 - **MethodOverloadsWindow 右鍵新增「Go to method address in CE (AOBMaker)」** — 逐 overload(右鍵選到那列)經 `AobMakerBridge.NavigateDisassemblerAsync` 把 CE disassembler 導到該 overload 的 method-head。新 `GoToMethodAddressInCeAsync(MethodOverloadRow)` 命令 + `CanGoToMethodAddress`(`Address` 空 → 灰掉),選單 gated on `HasAobMakerBridge`。
 - **Mono 也能用(關鍵差異)** — overloads 的 `Address` 在 `findMethodInstances` 列舉時就已 `mono_compile_method` JIT(MonoMethodFinder.cpp:191),IL2CPP 則 AOT。故灰掉只剩 abstract / 泛型定義 / compile-fail(JIT 也救不了)。不像 field-xref 的存取位址 Mono 必灰。
-- **後端全不動**;`dotnet build` UI 0/0,698 UI tests green。**B(deferred):Methods tab「JIT this method」** 已記入 [plan.md Open Backlog 18e-B](plan.md#open-backlog--todo)。
+- **後端全不動**;`dotnet build` UI 0/0,698 UI tests green。**Live-verified 2026-06-04:Mono x64+x86 OK**(overloads 視窗逐 overload 跳 method-head)。**B(18e-B)已完成**(見上)。
 
-**先前批次(2026-06-04,Phase 28e — Field-references 雙路徑 CE 導覽,UI-only,build # pending)**:
+**先前批次(2026-06-04,Phase 28e — Field-references 雙路徑 CE 導覽,UI-only)**:
 - **FieldReferencesWindow 表格新增可見 `Access addr` 欄** — 顯示後端早已回傳的 `hitAddress`(實際讀/寫 field 那條指令的 IP);原 `Address` 欄改標題為 `Method head`。兩欄皆 hex 數值排序(`DataGridSortComparers.Hex`)。
 - **右鍵單一 "Disassemble in CE" 拆成兩個明確項目** — 「Go to method head in CE (AOBMaker)」走 `address`、「Go to access address in CE (AOBMaker)」走 `hitAddress`,兩者皆經 `AobMakerBridge.NavigateDisassemblerAsync` → CE disassembler。共用 `NavigateInCeAsync` helper。
 - **Mono 自動灰掉** — Mono 端 `address`/`hitAddress` 皆 null(只回 IL offset)→ 兩命令 `CanExecute`(`CanGoToMethodHead`/`CanGoToAccessAddress`)回 false,選單項自動 disable。IL2CPP 兩位址恆有值。
