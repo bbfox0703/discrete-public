@@ -13,7 +13,12 @@
 | **Tests** | 698 UI tests green;UI/Core + Mono x64/x86 + IL2CPP x64 DLL build clean、0 warnings / 0 AOT warnings |
 | **Mid-flight** | 無。**待 live-smoke**:native Dict 的 **Mono 端**(IL2CPP 已驗)+ in-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險);AOBMaker-app `GenerateAob` route(需遊戲 + 開 `AOBMaker.exe`)|
 
-**最新批次(2026-06-04,Phase 28e — Field-references 雙路徑 CE 導覽,UI-only,build # pending)**:
+**最新批次(2026-06-04,Phase 18e — Method overloads「Go to method address in CE」,UI-only,build # pending)**:
+- **MethodOverloadsWindow 右鍵新增「Go to method address in CE (AOBMaker)」** — 逐 overload(右鍵選到那列)經 `AobMakerBridge.NavigateDisassemblerAsync` 把 CE disassembler 導到該 overload 的 method-head。新 `GoToMethodAddressInCeAsync(MethodOverloadRow)` 命令 + `CanGoToMethodAddress`(`Address` 空 → 灰掉),選單 gated on `HasAobMakerBridge`。
+- **Mono 也能用(關鍵差異)** — overloads 的 `Address` 在 `findMethodInstances` 列舉時就已 `mono_compile_method` JIT(MonoMethodFinder.cpp:191),IL2CPP 則 AOT。故灰掉只剩 abstract / 泛型定義 / compile-fail(JIT 也救不了)。不像 field-xref 的存取位址 Mono 必灰。
+- **後端全不動**;`dotnet build` UI 0/0,698 UI tests green。**B(deferred):Methods tab「JIT this method」** 已記入 [plan.md Open Backlog 18e-B](plan.md#open-backlog--todo)。
+
+**先前批次(2026-06-04,Phase 28e — Field-references 雙路徑 CE 導覽,UI-only,build # pending)**:
 - **FieldReferencesWindow 表格新增可見 `Access addr` 欄** — 顯示後端早已回傳的 `hitAddress`(實際讀/寫 field 那條指令的 IP);原 `Address` 欄改標題為 `Method head`。兩欄皆 hex 數值排序(`DataGridSortComparers.Hex`)。
 - **右鍵單一 "Disassemble in CE" 拆成兩個明確項目** — 「Go to method head in CE (AOBMaker)」走 `address`、「Go to access address in CE (AOBMaker)」走 `hitAddress`,兩者皆經 `AobMakerBridge.NavigateDisassemblerAsync` → CE disassembler。共用 `NavigateInCeAsync` helper。
 - **Mono 自動灰掉** — Mono 端 `address`/`hitAddress` 皆 null(只回 IL offset)→ 兩命令 `CanExecute`(`CanGoToMethodHead`/`CanGoToAccessAddress`)回 false,選單項自動 disable。IL2CPP 兩位址恆有值。

@@ -706,6 +706,45 @@ public sealed partial class MethodOverloadsViewModel : ObservableObject
         StatusMessage = $"Copied {picks.Count} address(es) to clipboard.";
     }
 
+    /// <summary>
+    /// Navigate CE's disassembler to this overload's native entry address via
+    /// the AOBMaker bridge. The address is the method head resolved at
+    /// enumeration time — JIT-compiled for Mono (<c>mono_compile_method</c>),
+    /// AOT for IL2CPP. <see cref="CanGoToMethodAddress"/> disables the item for
+    /// rows with no address (abstract / generic-definition / compile failure),
+    /// which a one-off JIT couldn't fix anyway.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanGoToMethodAddress))]
+    public async Task GoToMethodAddressInCeAsync(MethodOverloadRow? row)
+    {
+        if (row is null) return;
+        if (string.IsNullOrEmpty(row.Address))
+        {
+            StatusMessage = "No native address for this overload — abstract / generic-definition "
+                          + "methods have no compiled body to jump to.";
+            return;
+        }
+        if (_aobMaker is null || !_aobMaker.IsAvailable)
+        {
+            StatusMessage = "AOBMaker pipe unavailable — open CE with the AOBMaker plugin loaded, then retry.";
+            return;
+        }
+        bool ok = await _aobMaker.NavigateDisassemblerAsync(row.Address, default).ConfigureAwait(true);
+        if (ok)
+        {
+            StatusMessage = $"CE disassembler → {ClassName}.{row.Name}{row.SignatureLabel} @ {row.Address}";
+            _logger.Write(Constants.LogCategoryView,
+                $"goto method address in CE: {ClassName}.{row.Name}{row.SignatureLabel} @ {row.Address}");
+        }
+        else
+        {
+            StatusMessage = "Couldn't reach CE's disassembler — open CE with the AOBMaker plugin loaded, then retry.";
+        }
+    }
+
+    private bool CanGoToMethodAddress(MethodOverloadRow? row) =>
+        _aobMaker is not null && row is not null && !string.IsNullOrEmpty(row.Address);
+
     private static string ParseAddrAsHex(string? addr)
     {
         if (string.IsNullOrEmpty(addr)) return "0";
