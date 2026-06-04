@@ -39,12 +39,21 @@ Game runs as if nothing changed; backend gets loaded for free.
 | `winmm.dll`   | 12b | ✅ Shipped |
 | `dxgi.dll`    | 12  | ❌ Not yet shipped (planned but not started — `version`/`winmm` cover the test matrix) |
 | `ProxyDeployWindow` (UI) | 12c | ✅ Shipped — bulk install panel, scans Steam library |
-| 32-bit support | 12d | ⏳ Deferred — engineering only, no external blocker |
+| 32-bit **Mono** support | 12e | ✅ Shipped (2026-06-04, UI/Core-only) — x86 build already produced dist/x86/ (proxy + Mono backend); installer now auto-picks it |
+| 32-bit **IL2CPP** support | — | ❌ N/A — no 32-bit IL2CPP backend exists (no shipping IL2CPP target is 32-bit) |
 
-The 32-bit gate covers everything: x86 build of `loader.cpp` + each
-proxy variant + each backend DLL, x86 path in `WindowsProxyInstaller`,
-x86/x64 selection in the install flyout. No 32-bit Unity game in the
-test matrix has surfaced yet, so the work is on the back burner.
+The x86 build (`build.ps1 -Arch x86`) had long produced `dist/x86/`
+(`version.dll` + `winmm.dll` + `Discrete-Mono.dll` + `inject-x86.exe`),
+and direct injection on x86 Mono was already live-verified (Phase 12d).
+The only gap was Proxy Deploy's UI/installer gating, closed in **12e**:
+- `UnityGameEntry.IsSupported` now allows **x86 Mono** (IL2CPP x86 stays
+  unsupported — there is no 32-bit IL2CPP backend).
+- `WindowsProxyInstaller` reads the target .exe's PE machine field and
+  sources from `dist/x86/` for x86 targets, copying only the x86 proxy +
+  `Discrete-Mono.dll` (no IL2CPP). The source-version comparison reads the
+  matching `dist/x86/` proxy so x86 rows don't falsely report "outdated".
+- No C++ change — the proxy `loader.cpp` only ever detects Mono on an x86
+  game, so it loads `Discrete-Mono.dll` without an IL2CPP branch.
 
 ## Architecture
 
@@ -189,8 +198,9 @@ the OS knows about. Each game row reports:
 - **Status** — `Available`, `Deployed (build #N)`, `Mismatch (file
   missing)`, `Unsupported (32-bit)`, etc.
 
-32-bit / Unsupported rows are hidden by default; toggle "Show 32-bit"
-to surface them. Bulk operations skip them.
+Unsupported rows (x86 IL2CPP / unknown backend) are hidden by default;
+toggle "Show unsupported" to surface them. Bulk operations skip them.
+**x86 Mono is supported (Phase 12e)** and shows without the toggle.
 
 ## Manual deploy (no UI)
 
@@ -219,8 +229,10 @@ game directory.
 - **Conflicts with other proxy-DLL mods** (RTSS, ReShade injector,
   MelonLoader). If `version.dll` is already taken, fall back to
   `winmm.dll`. If both are taken, use direct injection instead.
-- **32-bit games**: not supported yet. The UI grays out 32-bit rows
-  with `Unsupported (32-bit)` status and skips them in bulk ops.
+- **32-bit Mono games**: supported (Phase 12e). The installer auto-sources
+  the x86 proxy + `Discrete-Mono.dll` from `dist/x86/`. **32-bit IL2CPP**
+  stays unsupported (no 32-bit IL2CPP backend) — those rows are hidden
+  unless "Show unsupported" is on, and skipped in bulk ops.
 
 ## Source map
 
