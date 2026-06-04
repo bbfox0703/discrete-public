@@ -45,8 +45,9 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     [ObservableProperty] private string _filter = string.Empty;
     partial void OnFilterChanged(string value) => Refilter();
 
-    /// <summary>Toggle on to surface 32-bit / Unknown rows (Phase 12d gate).
-    /// Off by default — bulk ops can't act on them anyway.</summary>
+    /// <summary>Toggle on to surface unsupported rows (x86 IL2CPP / Unknown
+    /// backend). Off by default — bulk ops can't act on them anyway. Mono x86
+    /// is now supported, so those rows show without this toggle.</summary>
     [ObservableProperty] private bool _showUnsupported;
     partial void OnShowUnsupportedChanged(bool value) => Refilter();
 

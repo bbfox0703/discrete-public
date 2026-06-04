@@ -8,12 +8,18 @@
 | 項目 | 值 |
 |---|---|
 | **Current build** | #1107(UI/Core + 兩 DLL build clean、0 warnings / 0 AOT warnings)|
-| **Current phase** | ✅ **CE disassembler 導覽三連發(2026-06-04,UI-only,Mono x64+x86 live-verified)** — 28e Field-references 雙路徑(method head + 精確存取位址)、18e Method overloads 逐 overload 跳、18e-B Methods tab「Go to method address (JIT if needed)」(Mono 經 findMethodInstances 觸發 JIT + token 對位;免動 C++)。之上接續 ✅ Native Dictionary<K,V> walk(IL2CPP live-verified)、AOBMaker app 整合(#1059)、Phase 31、Class Pivot 大修 |
+| **Current phase** | ✅ **Phase 12e — Proxy Deploy 支援 x86 Mono(2026-06-04,UI/Core-only,待 live-smoke)** — `IsSupported` 放寬 x86 Mono + installer 依 PE bitness 從 `dist/x86/` 取 proxy/Mono backend(IL2CPP x86 仍不支援;C++ 零改動)。先前:✅ **CE disassembler 導覽三連發**(28e Field-references 雙路徑、18e Method overloads、18e-B Methods tab JIT-and-jump,Mono x64+x86 live-verified)。之上接續 ✅ Native Dictionary<K,V> walk、AOBMaker app 整合(#1059)、Phase 31、Class Pivot 大修 |
 | **Branches** | `dev` @ `2ee587f` → merged `main == origin/main` @ `2d08070` |
 | **Tests** | 698 UI tests green;UI/Core + Mono x64/x86 + IL2CPP x64 DLL build clean、0 warnings / 0 AOT warnings |
 | **Mid-flight** | 無。**待 live-smoke**:native Dict 的 **Mono 端**(IL2CPP 已驗)+ in-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險);AOBMaker-app `GenerateAob` route(需遊戲 + 開 `AOBMaker.exe`)|
 
-**最新批次(2026-06-04,Phase 18e-B — Methods tab「Go to method address in CE (JIT if needed)」,UI-only,Mono x64+x86 live-verified)**:
+**最新批次(2026-06-04,Phase 12e — Proxy Deploy 支援 x86 Mono,UI/Core-only,build # pending)**:
+- **根因**:12d 早已把 x86 proxy + x86 Mono backend 產到 `dist/x86/` 且 direct-inject 實機驗過,但 **Proxy Deploy 視窗**仍把所有 x86 遊戲 gate 成 `Unsupported`(偵測得到、但裝/更新被擋,且預設隱藏)。純 UI/installer 缺口。
+- **修**:(1)`UnityGameEntry.IsSupported` 放寬成允許 **x86 Mono**(x86 IL2CPP 維持不支援 —— 無 32-bit IL2CPP backend)。(2)`WindowsProxyInstaller` 讀目標 .exe 的 PE machine field(`TargetIsX86`),x86 目標改從 `dist/x86/` 取來源,且**只要求/複製 x86 proxy + `Discrete-Mono.dll`**(略過 `Discrete-IL2CPP.dll`);DetectSync 的 source-version 也讀對應 `dist/x86/` proxy → x86 列不再誤報 outdated。**C++ 零改動**(proxy `loader.cpp` 在 x86 只會 detect Mono)。
+- ProxyDeployViewModel / ProxyGameRow 不需改 —— 偵測/裝/更新/隱藏全部由 `IsSupported` 連動。
+- **+7 `UnityGameSupportTests`**(backend×bitness 矩陣);`dotnet build` UI 0/0,**705 UI tests green**。**待 live-smoke**:實機 x86 Mono Steam 遊戲 detect→install→啟動驗載入→update→uninstall。
+
+**先前批次(2026-06-04,Phase 18e-B — Methods tab「Go to method address in CE (JIT if needed)」,UI-only,Mono x64+x86 live-verified)**:
 - **Browser Methods tab 右鍵新增「Go to method address in CE (JIT if needed)」**(`OnMethodGotoAddressClicked`,MainWindow.axaml.cs)。IL2CPP 直接用 `MethodRow.Address`(AOT);Mono(或 row.Address 空)發 `FindMethodInstancesAsync` —— 該 RPC 列舉時已 `mono_compile_method` JIT 每個 overload —— 再用 **`MethodRow.Token` 對 `MethodOverloadEntry.Token`** 精準選到右鍵那列的 overload(grid row 無 signature 但有 token),取其位址走 `NavigateDisassemblerAsync` → CE disassembler。
 - **免動 C++** —— 原規劃要擴 `monoCompileMethod` 成 signature-aware,實作時發現複用既有 `findMethodInstances`(已 JIT + 已 signature/overload-aware)+ token 對位更省更穩,後端零改動。
 - **失敗回饋走 `Browser.ErrorMessage`**:AOBMaker pipe 不可用、abstract(無 body)、泛型定義/compile-fail(無 native entry)、多 overload 無法以 token 對到(導去 Find overloads…)。成功則由 CE 畫面跳轉呈現。位址 session-local(Mono 重啟即變)。

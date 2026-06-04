@@ -21,9 +21,11 @@ namespace UnityDumpUI.Models;
 /// </summary>
 public enum ProxyDeployStatus
 {
-    /// <summary>x86 / unknown backend / missing exe — bulk ops skip these.</summary>
+    /// <summary>Unsupported target — bulk ops skip these. Covers x86 IL2CPP
+    /// (no 32-bit IL2CPP backend), unknown backend, and missing exe. Mono is
+    /// supported on both x64 and x86.</summary>
     Unsupported,
-    /// <summary>x64 + recognised backend, no proxy in place.</summary>
+    /// <summary>Supported target (x64 Mono/IL2CPP or x86 Mono), no proxy in place.</summary>
     NotDeployed,
     /// <summary>Proxy installed and FileVersion matches <c>dist/</c>.</summary>
     DeployedCurrent,

@@ -11,9 +11,10 @@
 //   - <gameDir>\<exeStem>_Data\il2cpp_data\     → IL2CPP metadata folder
 //
 // Bitness comes from the .exe's PE header (IMAGE_FILE_MACHINE field).
-// The 32-bit Mono path itself isn't supported in the dumper yet — see
-// Phase 12d in STATUS.md — but the scanner still surfaces 32-bit games
-// so the UI can show a clear "(32-bit, not yet supported)" label.
+// Mono is supported on BOTH x64 and x86 (x86 backend + proxy ship in
+// dist/x86/; the installer auto-picks the matching build). IL2CPP is
+// x64-only — there is no 32-bit IL2CPP backend — so an x86 IL2CPP game
+// stays unsupported and the UI surfaces it as such. See Phase 12d / 12e.
 
 using System.Collections.Generic;
 using System.Threading;
@@ -98,10 +99,14 @@ public sealed class UnityGameEntry
         _                  => "—",
     };
 
-    /// <summary>True when the dumper actually supports this target today.</summary>
+    /// <summary>True when the dumper actually supports this target today.
+    /// x64 covers both Mono and IL2CPP. x86 covers Mono only — there is no
+    /// 32-bit IL2CPP backend (no shipping IL2CPP target is 32-bit), so an
+    /// x86 IL2CPP game stays unsupported.</summary>
     public bool IsSupported =>
-        Bitness == ExeBitness.X64 &&
-        Backend != UnityBackend.None;
+        Backend != UnityBackend.None &&
+        (Bitness == ExeBitness.X64 ||
+         (Bitness == ExeBitness.X86 && Backend == UnityBackend.Mono));
 }
 
 public interface IUnityGameScanner
