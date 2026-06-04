@@ -7,11 +7,11 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | #1059(UI/Core build clean、UI 0/0 warnings;本批次 UI/Core-only,DLL 未動)|
-| **Current phase** | ✅ **AOBMaker app 整合 + Method Overloads/Inspector UI fixes(2026-06-03)** 之上接續 ✅ **Phase 31**(31-1…31-6 全 SHIPPED)+ ✅ **Class Pivot UI/UX 大修 Waves A–D**+ ✅ **session bug-review 3 修正** |
-| **Branches** | `dev == main` @ `c108ed4`(AOBMaker app 整合 merged 本批次) |
-| **Tests** | 691 UI tests green(本批次 +4 generator 測試);UI/Core build clean、UI 0/0 warnings(本批次 UI/Core-only,無 DLL rebuild) |
-| **Mid-flight** | 無。**待 live-smoke(需 inject 實機 + 開 `AOBMaker.exe`)**:本批次 AOBMaker-app `GenerateAob` 唯一-AOB route(`Copy:`/`Push: aobscan` 連到 app 時產唯一 AOB、injectionOffset 偏移符號)+ App 狀態 chip 翻 connected;另:31-5 reverse-lookup component 命名;31-2 殘留(Mono x86 / IL2CPP x64);Class Pivot 各 dialog 觀感 |
+| **Current build** | #1107(UI/Core + 兩 DLL build clean、0 warnings / 0 AOT warnings)|
+| **Current phase** | ✅ **Native Dictionary<K,V> key/value walk(2026-06-04,IL2CPP live-verified)** — DLL 雙 backend dict walk + Inspector 展開 + Copy CE XML/field 相對 deref 鏈展開;同批修 Phase 26 完整性自檢 false-positive、加 📂 Open Logs 按鈕、移除 Export .CT… 按鈕。之上接續 ✅ AOBMaker app 整合(#1059)、Phase 31、Class Pivot 大修 |
+| **Branches** | `dev` @ `2ee587f` → merged `main == origin/main` @ `2d08070` |
+| **Tests** | 698 UI tests green;UI/Core + Mono x64/x86 + IL2CPP x64 DLL build clean、0 warnings / 0 AOT warnings |
+| **Mid-flight** | 無。**待 live-smoke**:native Dict 的 **Mono 端**(IL2CPP 已驗)+ in-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險);AOBMaker-app `GenerateAob` route(需遊戲 + 開 `AOBMaker.exe`)|
 
 **最新批次(2026-06-03,AOBMaker app 唯一-AOB 整合 + Method Overloads/Inspector UI fixes,build #1059,merged `c108ed4`,UI/Core-only)** — 整合說明見 [ce-bridge-integration.md → AOBMaker app integration](ce-bridge-integration.md#aobmaker-app-integration--unique-aob-via-generateaob):
 - **🆕 AOBMaker 標準版 app 整合(`\\.\pipe\AOBMaker` → `GenerateAob`)** — 新 `AobMakerAppClient`(與 CE-plugin bridge 同 length-prefixed JSON 線格式,response timeout 30s)。連線時 `Copy: aobscan` **與** `Push aobscan to CE` 改走 app 取**唯一 AOB**(Mode D,每個 overload 數秒);app 沒開/失敗則 fallback 回 DLL method-prologue pattern + 警語。目標 process 用連線中 `\\.\pipe\DiscreteBfx` 的 server PID(`GetNamedPipeServerProcessId` — backend DLL 在遊戲內)當 `processId`,未知時讓 app 自解。連線列新增 **「AOBMaker App: connected/disconnected」chip + ↻**;既有 chip 文字 `AOBMaker:` → **`AOBMaker DLL plugin:`**。
