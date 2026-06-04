@@ -135,6 +135,63 @@ public class InstanceFieldClassifierTests
     }
 
     [Fact]
+    public void Classify_DictionaryWithoutDllMarker_StaysLeaf()
+    {
+        // A Dictionary<K,V> field with NO native dict payload (older DLL, or the
+        // walk returned a dict_error / empty dict) is a plain Leaf: the UI can't
+        // surface key/value on its own (the inner Entry structs are System.* with
+        // no header to walk). Expansion requires the DLL's embedded pairs (see
+        // the positive test below).
+        WalkedField f = Field(
+            type:    "System.Collections.Generic.Dictionary<System.Int32,System.Int32>",
+            address: "0x2000",
+            ptr:     "0x000002768BC65A0");
+
+        Assert.Equal(WalkedFieldKind.Leaf, InstanceFieldClassifier.Classify(f, isPointerValue: true));
+    }
+
+    [Fact]
+    public void Classify_DictionaryWithNativePairs_IsDictionary()
+    {
+        // The native Dictionary-aware walk (CaptureMono/Il2cppDictionary) fans the
+        // dict out into embedded child Fields named "[key]" and sets dict=true.
+        // That makes the row expandable (Dictionary kind) WITHOUT an RPC — the
+        // pairs live in the wire payload. The `ptr` is erased on success.
+        var f = new WalkedField
+        {
+            Name      = "conquer_area_info_dic",
+            Type      = "System.Collections.Generic.Dictionary<System.String,ConquerAreaInfo>",
+            Address   = "0x2000",
+            Dict      = true,
+            DictCount = 2,
+            Fields    = new()
+            {
+                new WalkedField { Name = "[area01]", Type = "ConquerAreaInfo", Address = "0x3000", Ptr = "0x4000" },
+                new WalkedField { Name = "[area02]", Type = "ConquerAreaInfo", Address = "0x3008", Ptr = "0x4010" },
+            },
+        };
+
+        Assert.Equal(WalkedFieldKind.Dictionary, InstanceFieldClassifier.Classify(f, isPointerValue: true));
+    }
+
+    [Fact]
+    public void Classify_EmptyDictionary_StaysLeaf()
+    {
+        // dict=true but zero pairs → nothing to expand → Leaf (no chevron).
+        var f = new WalkedField
+        {
+            Name      = "empty_dic",
+            Type      = "System.Collections.Generic.Dictionary<System.Int32,System.Int32>",
+            Address   = "0x2000",
+            Dict      = true,
+            DictCount = 0,
+            Fields    = new(),
+        };
+
+        Assert.Equal(WalkedFieldKind.Leaf, InstanceFieldClassifier.Classify(f, isPointerValue: true));
+    }
+
+    [Fact]
     public void Classify_NullArrayPointer_DegradesToLeaf()
     {
         // Empty array → no expansion; row is a leaf (no chevron).

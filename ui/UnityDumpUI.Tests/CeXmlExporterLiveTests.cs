@@ -380,6 +380,83 @@ public class CeXmlExporterLiveTests
         Assert.Equal(2, CountOccurrences(xml, "<CheatEntry>"));
     }
 
+    [Fact]
+    public async Task RenderFieldNodes_RootAsOffset_EmitsRelativeRoot()
+    {
+        // "Copy CE field (relative root)" — the top entry's Address is the field's
+        // +offset (paste under the parent struct in CE), not the absolute address.
+        var live = new FakeLive();
+        var field = new WalkedField { Name = "_value", Type = "System.Int32", Offset = 0x28,
+                                      Address = "0x1000", Value = Json("58") };
+        var options = new ExportOptions(
+            DrilldownDepth: 1, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 8);
+
+        string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
+            new[] { (field, "0x1000") }, "Assembly-CSharp", options, live,
+            TestContext.Current.CancellationToken, progress: null, rootAsOffset: true);
+
+        Assert.Contains("<Address>+28</Address>", xml);          // offset 0x28 → +28 (hex, no 0x)
+        Assert.DoesNotContain("<Address>0x1000</Address>", xml); // not the absolute addr
+    }
+
+    [Fact]
+    public async Task RenderLive_Dictionary_RelativeDerefChain_PerPair()
+    {
+        // Dictionary<string,int> fanned out by the DLL: parent carries dict=true
+        // + chain offsets, each pair a child WalkedField named "[key]". The
+        // exporter must emit: dict field deref → entries deref → per-pair value
+        // leaf at +(data_offset + index*stride + value_offset).
+        const string baseAddr = "0x000000000000B900";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new()
+            {
+                Name = "game_flags",
+                Type = "System.Collections.Generic.Dictionary<System.String,System.Int32>",
+                Offset = 0xE8, Address = "0x000000000000B9E8",
+                Dict = true, DictCount = 2,
+                DictEntriesOffset = 0x10,   // `entries` field within dict object
+                DictDataOffset = 0x20,      // SZARRAY data start
+                DictStride = 0x18,          // Entry<string,int> size
+                Fields = new List<WalkedField>
+                {
+                    // value member offset within the Entry = 0x10.
+                    new() { Name = "[sc_00_01000]", Type = "System.Int32", Offset = 0x10,
+                            Index = 0, Value = Json("1"), DictKey = "sc_00_01000" },
+                    new() { Name = "[sc_01_05050]", Type = "System.Int32", Offset = 0x10,
+                            Index = 1, Value = Json("254"), DictKey = "sc_01_05050" },
+                },
+            },
+        });
+
+        var options = new ExportOptions(
+            DrilldownDepth: 3, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 8);
+
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            options, live, TestContext.Current.CancellationToken);
+
+        // Relative throughout — only the root is absolute.
+        Assert.Equal(1, CountOccurrences(xml, "<Address>0x"));
+        // Two pointer derefs (dict object + entries array).
+        Assert.Contains("<Offset>0</Offset>", xml);
+        // Outer dict deref group at the field offset, entries group at +10.
+        Assert.Contains("game_flags", xml);
+        Assert.Contains("<Address>+E8</Address>", xml);   // dict field deref
+        Assert.Contains("entries", xml);
+        Assert.Contains("<Address>+10</Address>", xml);   // entries field deref
+        // Per-pair value leaves: +(0x20 + index*0x18 + 0x10).
+        Assert.Contains("[sc_00_01000]", xml);
+        Assert.Contains("<Address>+30</Address>", xml);   // 0x20 + 0*0x18 + 0x10
+        Assert.Contains("[sc_01_05050]", xml);
+        Assert.Contains("<Address>+48</Address>", xml);   // 0x20 + 1*0x18 + 0x10
+        // Int values render as a 4-byte leaf.
+        Assert.Contains("<VariableType>4 Bytes</VariableType>", xml);
+    }
+
     // Mirror of LiveInspectionViewModel.HexAdd / little-endian formatting so the
     // fake's memory map keys match what the exporter computes.
     private static string HexAdd(string hexAddr, long delta)

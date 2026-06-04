@@ -626,6 +626,29 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Open the log root (<c>%LOCALAPPDATA%\Discrete_Dumper\Logs</c>) in
+    /// Explorer — the UI's <c>ui\</c> tree plus the DLL's per-PID folders. Created
+    /// on demand so the shell call never sees a missing path. Mirrors
+    /// <see cref="OnOpenSnapshotDbFolderClicked"/>.</summary>
+    private void OnOpenLogFolderClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        try
+        {
+            string folder = UnityDumpUI.Core.Services.FileLogger.LogRootDirectory();
+            System.IO.Directory.CreateDirectory(folder);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName        = folder,
+                UseShellExecute = true,
+            });
+        }
+        catch (System.Exception ex)
+        {
+            if (DataContext is MainWindowViewModel vm)
+                vm.ErrorMessage = $"Open log folder failed: {ex.Message}";
+        }
+    }
+
     /// <summary>Phase 29c-7: launch the Settings modal so the user can
     /// change DB directory / AutoSave / AutoPrune threshold. The modal
     /// edits a clone of UserSettings and hands the updated copy back via

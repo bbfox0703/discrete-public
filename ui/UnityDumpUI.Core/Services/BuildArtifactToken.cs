@@ -87,7 +87,7 @@ public static class BuildArtifactToken
 
             // Zero ALL three slots so the SHA256 cancels out the random
             // hash bytes that publish wrote into slots B + C.
-            SchemaConstants.ZeroAllSlots(binary);
+            SchemaConstants.ZeroAllSlots(binary, storedHash);
             var computed = SHA256.HashData(binary);
 
             for (int i = 0; i < SchemaConstants.HashLength; i++)

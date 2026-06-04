@@ -154,7 +154,52 @@ std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::u
 Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
     __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+// A real managed type / image name is a short printable-ASCII string. The
+// runtime accessors (class_get_name / image_get_name) only SEH-guard the FIELD
+// read that fetches the name pointer — they hand back whatever pointer sits in
+// that struct slot. For a garbage class (a managed-object pointer misread as an
+// Il2CppClass*) that slot holds an arbitrary value, and building a std::string
+// from it runs an UNBOUNDED strlen that AVs off the end of mapped memory — the
+// Copy-CE-field CTD. Validate the returned pointer here, reading each byte under
+// SEH so the validation itself can't fault, and reject anything that isn't a
+// non-empty printable string NUL-terminated within a sane bound.
+bool SehNameLooksSane(const char* s) {
+    if (s == nullptr) return false;
+    __try {
+        std::size_t i = 0;
+        for (; i < 512; ++i) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            if (c == 0) return i > 0;                 // non-empty, NUL within bound
+            if (c < 0x20 || c > 0x7E) return false;   // non-printable → garbage
+        }
+        return false;                                 // no NUL in 512 bytes → garbage
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;                                 // faulted while reading → garbage
+    }
+}
 #pragma warning(pop)
+
+// Shared validity gate, assuming the il2cpp thread is ALREADY attached (the
+// caller holds a ThreadAttachGuard) so it never nests attach/detach. A genuine
+// Il2CppClass — including the generic INSTANTIATIONS the header-walk targets —
+// has a sane type name AND belongs to an image whose own name is sane. A
+// managed-heap object misread as a class (e.g. a List<T> object pointer pulled
+// from a field slot during Copy-CE-field) derefs klass->image to garbage, which
+// has no sane image name — so the image round-trip is the discriminator the
+// original name-only check lacked. When the runtime doesn't export the image
+// accessors (older builds) the name-sanity check stands alone.
+bool KlassLooksValid_Attached(Il2CppClass* klass) {
+    const auto& r = GetResolver();
+    if (klass == nullptr || r.class_get_name == nullptr) return false;
+    if (!SehNameLooksSane(SehClassName(r.class_get_name, klass))) return false;
+    if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
+        const Il2CppImage* img = SehCall(r.class_get_image, klass);
+        if (img == nullptr) return false;
+        if (!SehNameLooksSane(SehCall(r.image_get_name, img))) return false;
+    }
+    return true;
+}
 
 void* ReadMethodPointer(const MethodInfo* m) {
     if (m == nullptr) return nullptr;
@@ -179,8 +224,7 @@ bool ProbeKlassValid(Il2CppClass* klass) {
     if (domain == nullptr) return false;
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return false;
-    const char* nm = SehClassName(r.class_get_name, klass);
-    return nm != nullptr && *nm != '\0';
+    return KlassLooksValid_Attached(klass);
 }
 
 std::vector<ClassEntry> EnumerateClasses(const Il2CppImage* image) {
@@ -318,6 +362,14 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
     if (domain == nullptr) return result;
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return result;
+
+    // Defence-in-depth: never decode a pointer that doesn't look like a real
+    // Il2CppClass. A garbage class (a managed-object pointer pulled from a field
+    // slot, or a stale parent handed back by class_get_parent) survives the
+    // per-accessor SEH guards but AVs in the unbounded strlen that builds the
+    // name string below. Reuse the already-held guard (no second attach → no
+    // nested attach/detach, no perf hit beyond the cheap name/image probe).
+    if (!KlassLooksValid_Attached(klass)) return result;
 
     DescribeClass(klass, result.info.self);
     if (r.class_get_parent != nullptr) {

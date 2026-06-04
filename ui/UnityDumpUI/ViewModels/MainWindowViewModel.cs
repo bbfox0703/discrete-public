@@ -1744,7 +1744,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (string.IsNullOrEmpty(row.Class) || string.IsNullOrEmpty(row.InstanceAddr)) return;
             Inspector.SetTarget(row.Assembly, row.Namespace, row.Class);
-            Inspector.FocusOnInstance(row.InstanceAddr);
+            // Pass the matched field's absolute address so the Inspector drills
+            // down to and selects it (a nested value-struct member would otherwise
+            // be left collapsed at the instance top level).
+            Inspector.FocusOnInstance(row.InstanceAddr, row.Address);
             SelectedDetailTabIndex = TabIndexInspector;
         }
         catch (Exception ex)

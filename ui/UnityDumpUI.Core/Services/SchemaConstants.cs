@@ -99,17 +99,30 @@ internal static class SchemaConstants
     /// computing SHA256 so each guardian's stored hash equals
     /// SHA256(binary-with-all-three-slots-cleared) — i.e. tampering any
     /// of the three slots breaks all three checks.
+    /// <para>
+    /// Slots are located by <c>sentinel + <paramref name="injectedHash"/></c>
+    /// (the 48-byte <see cref="FindSlot"/> match), NOT sentinel-only. The raw
+    /// 16-byte sentinels also appear elsewhere in the AOT image (the sentinel
+    /// DEFINITION arrays in this class), and a sentinel-only first match can
+    /// land on one of those DECOYS instead of the real slot — zeroing the wrong
+    /// bytes and leaving the injected hash in place, so the recompute no longer
+    /// matches the stamped hash and the integrity check FALSE-POSITIVES on a
+    /// clean publish. inject-hash.ps1 dodges this by matching sentinel + 32×0xCC
+    /// (the dev fill); at runtime the slots hold the injected hash, so we match
+    /// on that. All three slots carry the same injected hash, so the caller's
+    /// own stored hash uniquely identifies every real slot.
+    /// </para>
     /// </summary>
-    internal static void ZeroAllSlots(byte[] binary)
+    internal static void ZeroAllSlots(byte[] binary, byte[] injectedHash)
     {
-        ZeroOne(binary, SentinelA);
-        ZeroOne(binary, SentinelB);
-        ZeroOne(binary, SentinelC);
+        ZeroOne(binary, SentinelA, injectedHash);
+        ZeroOne(binary, SentinelB, injectedHash);
+        ZeroOne(binary, SentinelC, injectedHash);
     }
 
-    private static void ZeroOne(byte[] binary, byte[] sentinel)
+    private static void ZeroOne(byte[] binary, byte[] sentinel, byte[] injectedHash)
     {
-        int pos = FindSentinel(binary, sentinel);
+        int pos = FindSlot(binary, sentinel, injectedHash);
         if (pos < 0) return;
         for (int i = 0; i < HashLength; i++)
             binary[pos + SentinelLength + i] = 0x00;

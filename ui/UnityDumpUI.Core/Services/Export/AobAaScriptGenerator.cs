@@ -182,6 +182,26 @@ public static class AobAaScriptGenerator
         sb.AppendLine("    end");
         sb.AppendLine("  end");
         sb.AppendLine("end");
+        // discrete_runAfterAsm — defer a function until AFTER the {$asm} pass.
+        // CE executes {$lua} blocks during the assemble phase, BEFORE the
+        // {$asm} aobscanmodule/registersymbol directives run, so a symbol
+        // registered by the asm scan is NOT yet resolvable from a {$lua} block
+        // (getAddressSafe returns nil — the "NOT FOUND" the user hit). A one-
+        // shot timer fires on the next message-loop tick, by which point the
+        // asm pass has completed and the symbols exist. Owner=nil keeps the
+        // timer alive past this chunk (CE objects aren't Lua-GC'd); the
+        // callback destroys it after firing once.
+        sb.AppendLine("if _G.discrete_runAfterAsm == nil then");
+        sb.AppendLine("  _G.discrete_runAfterAsm = function(fn)");
+        sb.AppendLine("    local t = createTimer(nil)");
+        sb.AppendLine("    t.Interval = 1");
+        sb.AppendLine("    t.OnTimer = function(timer)");
+        sb.AppendLine("      timer.destroy()");
+        sb.AppendLine("      local ok, err = pcall(fn)");
+        sb.AppendLine("      if not ok then print('[discrete] deferred action error: ' .. tostring(err)) end");
+        sb.AppendLine("    end");
+        sb.AppendLine("  end");
+        sb.AppendLine("end");
         sb.AppendLine();
 
         // Mono JIT methods don't live inside any DLL module — the JIT
@@ -269,24 +289,42 @@ public static class AobAaScriptGenerator
         }
 
         sb.AppendLine("{$lua}");
+        // syntaxcheck guard — CE runs this block during the syntax-check pass
+        // too; without the guard we'd schedule a stray timer and run
+        // registrations against unresolved symbols every check.
+        sb.AppendLine("if syntaxcheck then return end");
 
-        // Offset-adjusted method-entry symbols for unique AOBs whose match
-        // start precedes the entry. Done FIRST (before the Mono-JIT bridge
-        // guard, which may early-return) so an IL2CPP offset entry is never
-        // skipped by a mixed-backend script. getAddressSafe tolerates a missing
-        // anchor (failed scan) without erroring the whole AA.
+        // Symbol-dependent work runs AFTER the {$asm} pass (see
+        // discrete_runAfterAsm). Scheduled FIRST — before the Mono-JIT bridge
+        // guard, which may early-return — so an IL2CPP offset/log entry is never
+        // skipped by a mixed-backend script. Inside the deferred callback:
+        //   1. Offset-adjusted method-entry symbols for unique AOBs whose match
+        //      start precedes the entry (getAddressSafe tolerates a missing
+        //      anchor from a failed scan without erroring the whole AA).
+        //   2. The per-symbol discrete_logScan confirmation — now reads the
+        //      symbols the asm pass actually registered (the fix for the
+        //      "NOT FOUND (AOB scan failed)" the inline form produced).
+        sb.AppendLine("_G.discrete_runAfterAsm(function()");
         for (int i = 0; i < overloads.Count; ++i)
         {
             if (!luaOffset[i]) continue;
-            sb.Append("do local b = getAddressSafe(\"").Append(anchors[i])
+            sb.Append("  do local b = getAddressSafe(\"").Append(anchors[i])
               .Append("\"); if b and b ~= 0 then registerSymbol(\"")
               .Append(symbols[i]).Append("\", b + ").Append(overloads[i].AobInjectionOffset)
               .AppendLine(") end end");
         }
+        for (int i = 0; i < overloads.Count; ++i)
+        {
+            sb.Append("  _G.discrete_logScan(\"").Append(symbols[i]).AppendLine("\")");
+        }
+        sb.AppendLine("end)");
+        sb.AppendLine();
 
-        // Mono JIT registrations go through the bridge. Guard with
-        // discrete_bridgeLoaded — without the bridge, registerMethodSymbol
-        // is undefined and the entry would silently no-op.
+        // Mono JIT registrations go through the bridge. Independent of the asm
+        // scan (mono_compile_method resolves directly), so they run immediately
+        // here rather than in the deferred block. Guard with discrete_bridgeLoaded
+        // — without the bridge, registerMethodSymbol is undefined and the entry
+        // would silently no-op.
         if (anyMonoJit)
         {
             sb.AppendLine("if not _G.discrete_bridgeLoaded then");
@@ -313,14 +351,6 @@ public static class AobAaScriptGenerator
                       .Append('\'').Append(LuaSqEscape(ov.Signature ?? "")).AppendLine("')");
                 }
             }
-        }
-        // Final discrete_logScan calls report each symbol's resolved
-        // address (covers both AOB-resolved and bridge-resolved
-        // entries — registerSymbol made the name visible to
-        // getAddressSafe regardless of how it got there).
-        for (int i = 0; i < overloads.Count; ++i)
-        {
-            sb.Append("_G.discrete_logScan(\"").Append(symbols[i]).AppendLine("\")");
         }
         sb.AppendLine();
 
