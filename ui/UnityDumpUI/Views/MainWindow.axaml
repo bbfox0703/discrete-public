@@ -493,8 +493,13 @@
                   Command="{Binding Browser.ExportSdkHeaderCommand}" />
           <Button Content="{StaticResource Browser.ExportCsx}"
                   Command="{Binding Browser.ExportCsxCommand}" />
-          <Button Content="{StaticResource Browser.ExportCeXml}"
-                  Command="{Binding Browser.ExportCeXmlCommand}" />
+          <!-- "Export .CT…" file-save button disabled 2026-06-04: redundant with
+               the clipboard "Copy CE XML" / "Copy CE field" paste-to-CE flow.
+               Code kept intact (Browser.ExportCeXmlCommand / ExportCeXmlAsync /
+               ExportAsync + the Browser.ExportCeXml string resource) — re-enable
+               by restoring the button:
+               <Button Content="{StaticResource Browser.ExportCeXml}"
+                       Command="{Binding Browser.ExportCeXmlCommand}" /> -->
           <!-- Class-level "Copy CE XML" removed: it used the template exporter
                (instance-agnostic), so a concrete Vector3 / nested struct never
                expanded and it was disabled when the Inspector was reached via
