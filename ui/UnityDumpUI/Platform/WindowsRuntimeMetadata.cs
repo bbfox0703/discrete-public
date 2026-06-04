@@ -84,7 +84,7 @@ internal static class WindowsRuntimeMetadata
             int slotPos = SchemaConstants.FindSlot(binary, SchemaConstants.SentinelC, storedHash);
             if (slotPos < 0) return 0;
 
-            SchemaConstants.ZeroAllSlots(binary);
+            SchemaConstants.ZeroAllSlots(binary, storedHash);
             var computed = SHA256.HashData(binary);
 
             for (int i = 0; i < SchemaConstants.HashLength; i++)
