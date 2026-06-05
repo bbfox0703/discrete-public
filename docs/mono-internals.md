@@ -330,8 +330,8 @@ instantiate the generic before calling `findMethodInstances` again.
   (Unity bdwgc) for every Phase 19 scenario.
 - **CE Lua**: [scripts/unity_invoke.lua](../scripts/unity_invoke.lua)
   + dofile + run scenarios from CE's Lua console. Verified on
-  BongoCat 2026-05-07 (4/4 green — see
-  [STATUS.md §Live verifications](STATUS.md#live-verifications-carried-forward--still-green)).
+  BongoCat 2026-05-07 (4/4 green — historical record in
+  [archive/status-history.md](archive/status-history.md)).
 
 ## Related
 

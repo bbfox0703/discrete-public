@@ -257,8 +257,7 @@ const literals (`const int kFoo = 42`) in
 enum defaults are type-aware — non-enum constants get the catch-all
 `int32` decode. Half-day of work to finish; non-blocking.
 
-See [STATUS.md "Open follow-ups"](STATUS.md#open-follow-ups-not-blocking-drip-feed)
-for context.
+See [plan.md "Open Backlog / TODO"](plan.md#open-backlog--todo) for context.
 
 ---
 

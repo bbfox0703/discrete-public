@@ -1,12 +1,104 @@
 # UnityCEDumper — Session Hand-off Archive
 
-> Historical "What landed" entries for sessions older than two
-> hand-offs ago. Carved out of [STATUS.md](../STATUS.md) on 2026-05-19
-> to keep the main hand-off doc readable.
+> Historical "What landed" entries for sessions older than the most-
+> recent ~1 week of batches.
 >
-> The current + most-recent-prior session stays in
-> [STATUS.md](../STATUS.md). Older sessions land here in
-> reverse-chronological order — newest section is at the top.
+> **2026-06-05 整理**:STATUS.md 已 deprecate(改成 1 行 redirect),
+> 最近 ~1 週的批次摘要移到 [plan.md](../plan.md) "Recent batches"
+> 區段;**2026-06-02 與更舊的批次**(從原 STATUS.md carve 出來)
+> 放在下方第一個區段。再舊的(2026-05-29 carve 那批)接在後面。
+>
+> 慣例:reverse-chronological,newest section 在上面。
+
+---
+
+## Batches carved from STATUS.md on 2026-06-05 (2026-06-02 → 2026-05-30)
+
+> 從原 STATUS.md(2026-06-05 deprecate 時)切下的舊批次。包含
+> Phase 31 收尾、Class Pivot UI/UX Waves A–D、Phase 29i、CT 分發/
+> 雙 pipe、Phase 28b instance、Snapshot UI/UX、Inspector 與 Value
+> Search 的 2026-05-30 大批次。當下的更上層 ledger 在 [plan.md](../plan.md)。
+
+**先前批次(2026-06-02,session bug/leak review — 3 修正,build #990,merged `f621837`)**:
+- 🔴 **CRITICAL — 31-5 `NameStructComponent` 無窮遞迴 → stack overflow → Game CTD**(`Mono`/`IL2CPPAddressFinder.cpp`)。`EnumerateInstanceFields` 把 **primitive** value-type 欄位也存了 `valueTypeClass`(註解原本說沒有,實際有)。reverse-lookup / value-scan 命中 primitive 欄位**內部**(如 float +2)→ 遞迴進 primitive 的 self-typed 內欄(`System.Single.m_value` @ struct-rel 0)且 interior offset **不變** → 無窮遞迴 → 崩遊戲。先前 31-5 smoke 沒踩到(命中在 struct base,interior 0 早退)。**修**:(a) primitive 不存 `valueTypeClass`(`TypeNameIsPrimitive` gate);(b) `NameStructComponent` 加 depth cap(4)。兩 backend。
+- 🟠 **HIGH — Wave A off-thread engine vs 並發 `Unload()`**(`SnapshotViewModel`)。Wave A 把 Pivot/SPC engine 移到 `Task.Run`(走訪 `env.Classes`);Snapshot tab 的 Diff/Drop/evict 在 UI thread 呼叫 `Unload()` 原本 `Classes.Clear()` **原地清空** → 背景 thread 走訪中清空 → "collection modified" crash。**修**:`Classes` 改 settable,`Unload()` **換 reference**(atomic)而非清空;in-flight reader 續用舊 list 安全,reload 照常重填。
+- 🟡 **LOW — `SuggestKeyAndRunAsync` re-entrancy**。await Score→Run 之間 `IsRunning` 短暫 false、按鈕重啟用 → 加 `_suggestKeyAndRunActive` guard 防重入。
+- **查證為安全(不需動)**:31-2 capture path、offset underflow、DLL static caches、7 dialogs、`Inspector.SendToPivotRequested` 訂閱、sort 接線、dead-code prune、Browse Grid+splitter。
+
+**較早批次(2026-06-02,Class Pivot UI/UX 大修 Waves A–D + Browse layout fix)** — 詳見 [class-pivot.md](../class-pivot.md) §「Class Pivot UI/UX overhaul」:
+- **A** responsiveness(engine `Task.Run` off-UI-thread + busy bar + 按鈕 busy 時 disable,Pivot & SPC)。
+- **B** toolbar + 7 個 per-mode dialog(共用 `MainWindowViewModel`,bindings/commands/handlers 原樣搬);Results grid 佔滿 tab。+ fixups(AOT sort 在 dialog 重新接線、2 個 filter、snapshot picker 依時間排序)。
+- **C** 去 jargon(Stage/Layer B)、依存 gating(「① Pick a class first」)、prune ~360 行 dead code。
+- **D** 「Pivot this class」handoff(Browser / Snapshot diff / Inspector → Class Pivot tab,免 copy-paste)。
+- **Browse layout fix**:兩個 grid 改 `Grid RowDefinitions="*,6,*"` + `GridSplitter`。
+
+**(2026-06-02,Phase 31-5 — reverse-lookup 命名 struct component,build #965,DLL-only)** — spec [value-type-structs.md](../value-type-structs.md) §5.4:
+- **目標**:value scan 命中一個 Vector3 欄位的 `.y` float 時,reverse-lookup 從只報 `Class._position` 升級成報 **`Class._position.y`**。
+- 兩 backend `MonoAddressFinder.cpp` / `IL2CPPAddressFinder.cpp`,**ExportAPI/protocol/UI 全不動** — `field.name` wire key 直接帶 component 名。`ResolvedField` 加 `valueTypeClass`;新 `NameStructComponent` 在 exact value-struct interior 命中時走訪 struct 成員(struct-relative = `member.offset − kObjectHeader`),改寫 `FieldHit`:`name→parent.member`、type/offset/size/kind→成員;巢狀成員再遞迴一層。
+- **build #965**:x64 backend build clean;685 UI tests green。
+
+**(2026-06-02,Phase 31-2 — DLL Phase B 泛型 value-type 遞迴,build #960)** — spec [value-type-structs.md](../value-type-structs.md) §3.2:
+- **根因延續**:Phase A 只認 Vector3/4 等;自訂 struct(int/double 成員)仍只讀一個 ptr-word。Phase B 補上任意 value-type struct 成員遞迴。
+- value-type 欄位的 runtime class 在 `ReadClassInfo` 時就存進 `FieldEntry.valueTypeClass`(兩 backend,`isValueType && !isEnum` 時設)→ 遞迴直接用 class 指標,巢狀型別自動 OK。
+- **helper**:`CaptureMonoStructFields` / `CaptureIl2cppStructFields`。`ReadClassInfo` struct class → 逐成員 `decodeField(memberType, structBase + member.offset − kObjectHeader)`(x64 扣 0x10 / x86 扣 0x08)。named struct/primitive 仍由 `decodeField` Phase A 處理;巢狀泛型 struct 再遞迴一層(depth 上限 4)。
+- **flags**:`Snapshot::Session.valueStructFields`(預設 **true**)+ `structMemberCap`(預設 **32**)。**預設開啟 → UI 完全不需改**。
+- **build #960**:Mono x64+x86 + IL2CPP x64 build clean;685 UI tests green。
+
+**Phase 31 收尾(2026-06-01,Core Keeper Mono x64 live-verified)**:
+- **31-1/31-3/31-4 ✅ verified** — snapshot Vector3 顯示 `(x,y,z)`、SPC 逐軸 + delta 正確;pivot per-component OK。
+- **31-6 ✅ verified** — live Inspector value-struct 展開修正(扣 header 0x10、巢狀型別 `FindClass` fallback)。
+- **深層 Copy CE XML Game CTD ✅ 修復** — 真因:depth-5 export 遞迴炸進整個 Unity ECS/DOTS + 引擎物件圖。**真正修法**:`CeXmlExporter.Live` 加 `IsEngineInternalType` + `IsFrameworkReferenceType`;輔以 DLL 硬化:Mono `walkInstance` 加 `ProbeKlassValid` + runaway-bail、walk-path ClassInfo 快取。輸出從 ~768K 行縮到只剩遊戲資料。
+- **AutoCompleteBox CTD 修復** — snapshot scope picker 選取時 re-entrancy → `Dispatcher.UIThread.Post` 延後。
+- **2 個 UI/UX** — Assemblies pane「Exclude system assemblies」勾選;Copy CE XML 進度 label。
+
+**Phase 31 live-smoke 發現(2026-06-01,Core Keeper/Pug Mono x64)** — 兩個既有 live Inspector value-struct 功能的真實 bug:
+1. **value-struct 展開多加 0x10(header double-count)** — `PlayerController.srOffSetPos` (Vector3@0xA34) 真值 (0,0,0) 但顯示 (0.6875,-0.0585,0) — 從 `structBase + 0x10` 開始讀(`mono_field_get_offset(Vector3.x)` 回 header-inclusive 的 0x10)。**定論:inline value-type 成員正確讀法 = `fieldAddr + member.offset − 2*ptrSize`**。✅ 已修 (31-6a, build #936)。
+2. **巢狀型別 value-struct 解析失敗** — `CharacterData.NonSerialized` 報 `class not found`;UI 把 `.` 拆成 ns/name,但 CharacterData 是 enclosing type 非 namespace。✅ 已修 (31-6b, build #936):`FindClass` 加 failure-only fallback。
+
+**(2026-06-01,Phase 31 — inline value-type struct,部分 SHIPPED)** — spec [value-type-structs.md](../value-type-structs.md):
+- **根因**:`decodeField` 對 value-type struct 只讀一個 pointer-word → snapshot/SPC/diff/pivot/value-search 全顯示 `(no value)`。
+- **31-1 SHIPPED**(DLL Phase A + UI)— `decodeField` catch-all 加 named Unity math struct 表(Vector2/3/4、Quaternion、Color(32)、Vector2/3Int、Rect)。
+- **31-3 SHIPPED**(UI)— `BuildFieldIndex` 加 `ExpandStructMembers`:struct 成員 fan-out。
+- **31-4 SHIPPED**(UI)— `SnapshotEnvelope.EnumerateFlatFields`/`ResolveDottedFieldValue`;PivotEngine/KeyDiscovery 支援 dotted component path。
+
+**(2026-06-01,Phase 29i — Pivot usability & value-driven discovery,UI/engine-only)** — spec 見 [class-pivot.md → Phase 29i](../class-pivot.md#phase-29i--pivot-usability--value-driven-discovery):
+- **29i-1** class 結構瀏覽 — `ClassShortlistEngine` 保留 field 名稱/型別 + preview 欄 + detail panel。
+- **29i-2** array inner-field 評分 picker — `KeyDiscoveryEngine` 加 `ArrayField` element 模式。
+- **29i-4 ★** 值驅動定位 — 新 `SnapshotValueLocatorEngine`:exact / delta 反查 → ranked (class, field);跨 session 可用。
+- **29i-3** 無監督排序 + preview — `ClassInterestEngine`:`interestingness = bestKeyScore × maxVolatility`。
+
+**(2026-06-01,CT 分發 + pipe 並發 + walk 硬化)** — live-verified(Utawarerumono IL2CPP):
+- **CT bridge 改 action-driven** — 砍掉 feature-picker;`Inject Discrete Bridge` 只塞 core,其餘 lua helper 由各動作按需自帶(`InjectTableFile` + 生成的 AA 用 `findTableFile` 自我載入,見新 `AaLuaLoader`)。`unity_dissect`/`unity_scene`/`unity_addrfind` 從 bridge 移除(2026-06-02 自 `scripts/` 一併刪除)。
+- **CT 分發** — DLL 不內嵌、與 .CT 同資料夾;`utils.lua` `M.dllPath` 改 table-folder 優先多候選搜尋 + `is32bitProcess()` 挑 x86。新 `tools/Package-CTDist.ps1`。
+- **DLL 卸載** — Tier-2 FreeLibrary 移除(對每幀 hook runtime_invoke 的 DLL 無法安全 unmap → CTD);只留 dormant teardown。
+- **Pipe 並發** — `BackendAdapter` 開兩條連線(interactive + bulk),依 cmd 路由;`BulkOperationGate` 跨 VM 互斥。
+- **walk drill-down CTD 全修(IL2CPP)** — `SehGetParent`、`SehCall` 包逐項 accessor、繼承鏈 runaway bail、String 非 text 偵測。
+
+**先前批次(2026-05-31 後段,Inspector nested-class drilldown + Copy CE XML x86)**:
+- **Mono nested-class drilldown 修正** — Inspector 展開只經 field-type reference 抵達的 ref-type 原本只顯示繼承的 `m_CachedPtr`。修法:Mono 端比照 IL2CPP 接受 `klass_from_header_addr`,用 `mono_object_get_class` 從物件 vtable 取活的 runtime class。Exporter 也加 name-based fallback。**Live-verified(活俠傳)**。
+- **Copy CE XML 32-bit pointer-size 修正** — IntPtr/reference/List-handle 葉節點輸出寫死 `8 Bytes` (x86 應 4);String header offset + `List._items` deref 用了 stale `GamePointerSize`。修法:DLL `walkInstance` 回應加權威 `pointer_size`;`WalkInstanceResult.PointerSize` + exporter 採用之;新 `PointerVartype(options)` 取代 9 處寫死。**Live-verified(活俠傳)**。
+- **SS5** — class-list「Inspect (find instances)…」補上切到 Inspector tab。**Export-options drilldown depth 上限 5→6**。
+
+**先前批次(2026-05-31 前段,Phase 28b instance + Snapshot UI/UX)**:
+- **Phase 28b — IL2CPP instance-field xref** — 不再回 v1 error;Zydis 掃宣告類自己的 methods 找 `[gpReg+fieldOffset]`(base≠rip/rsp/rbp),`confidence="heuristic"`,read/write 由 operand action 分類;method 範圍 = 下個 method entry,clamp 8KB + section end + `int3` 停;dedup by hitAddress。**Live-verified(活俠傳 IL2CPP x64:`CharacterData.life_` @0x40 → 126 matches)**。
+- **DataGrid 欄寬 rule(寫進 CLAUDE.md + ui-spec.md)** — result grid 禁用 `Width="*"`;改 `Width="Auto"+MinWidth` → 可橫向捲動。修了 5 個 result grid + Inspector MinWidth 調整。例外:MethodCall 參數格 / SPC picker。
+- **Snapshot UI/UX(SS1-4)** —(SS1)scope `+add assembly` 改 **AutoCompleteBox** 可打字過濾;`Include system assemblies` 在 Scope 有指定 assemblies 時 disable。(SS2)`Game: 32-bit Mono…` banner 併入 Decode budget 列;budget 說明改 hover tooltip。(SS3)`FormatMemory` MB/GB 一律 2 位小數。(SS4)**FIX 真 x86 bug**:`List<T>._items` 從寫死 +0x10 改 `2*ptrSize`(x86=+0x8)+ `ParseLittleEndianHexQword` 依長度 byte-swap → 32-bit Mono nested List 不再 "header unreadable"。**Live-verified(活俠傳)**。
+- **SS6/SS7 查證為正常(非 bug)**。
+
+**先前 UI 批次(2026-05-30,Inspector + Value Search)**:
+- **List<T> 可展開** — `InstanceFieldClassifier`/`UnityTypeMap`/`CeXmlExporter` 同時接受 IL-form `` List`1<> `` 與 live demangled `List<>`。
+- **Inspector instance 級 Copy CE XML 按鈕** — 跨 tab inspect 後可用,不需選欄位/不依賴 Browser。**(已 live-verified)**
+- **展開不再跳頂端** — `InsertChildrenIntoFields`/`CollapseSubtree` 無 filter 時直接 splice `FilteredFields`。
+- **String drilldown 修正** — List<String> slot DLL 回傳裸 pointer;UI 端 fallback 用 `readMemory` 解 managed String,header offset 隨 bitness。**Mono 32-bit live-verified**。
+- **Inspector Limit 欄位加大**;**Value Search Limit 預設 10000**,新增 `numeric (no 1-byte)` / `numeric (all widths)` 聚合型別 + `Ignore system assemblies` + results filter。
+- **Copy CE XML live-export 重寫** — 改用 `walkInstance`/`walkInstanceFromHeader` 取代舊的 static name-lookup;**Copy CE XML 改 relative addressing (UE5CEDumper model)** — 整張表只有 root 一個絕對位址,其餘全用 `+offset`。
+- **Copy CE XML drilldown depth 修正** — Inspector 的 「Copy CE XML」原本 hardcode `DrilldownDepth:1`;改由 `Inspector.ExportDepthProvider` 帶入。**64-bit live-verified(受讚頌者)**。
+- **Copy CE XML 32-bit 修正(build #855)** — DLL walkArray stride 改 `ManagedLayout::kPointerSize`(x86=4);array data-offset 改由 `walk.DataAddress − arrayAbs` 推 SZARRAY vector offset;String 子節點改中性 label。**Mono 32-bit live-verified(活俠傳)**。
+- **Inspector context-menu 精簡 + Copy CE field 重做** — 移除「Copy CE XML rooted here」(與 Copy CE field 重複);「Copy CE field」改成每個選取 node 各自一棵 standalone 子樹,depth-aware + multi-select。**64-bit + Mono 32-bit live-verified**。
+- **聚合 scan ReverseLookupIndex 重建修正** — 聚合 fan-out 原本每個寬度都重建 ~48s reverse-lookup index(8 寬度 → 6+ 分鐘 hang)。新增 process-wide TTL 重用 cache。**Mono 32-bit live-verified**。
+
+**先前批次(2026-05-30,scan,均已 merged)**:
+- **P2 Mono port**(#823)/ **候選數 gate**(#824)/ **P2 SIMD 內層**(#839)/ **Inspector「→ Browser」按鈕**。
 
 ---
 

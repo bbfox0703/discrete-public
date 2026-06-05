@@ -54,9 +54,7 @@
 - **Offline metadata CLI** — `metadata-cli.exe` 可獨立 parse
   `global-metadata.dat` (不需開遊戲),適合做 RE 探勘。
 
-正典 phase ledger + **集中 Open Backlog / TODO** 看 [docs/plan.md](docs/plan.md);
-[docs/STATUS.md](docs/STATUS.md) 是一行式狀態指標,已完成 phase 的長篇寫作在
-[docs/archive/](docs/archive/)。
+看 [docs/plan.md](docs/plan.md) — **單一窗口 / 唯一真相來源**:目前 build 狀態、目前 phase、**集中 Open Backlog / TODO**、最近批次、完整 phase ledger、cross-PC workflow。已完成 phase 的長篇寫作 + 舊批次摘要在 [docs/archive/](docs/archive/)。
 
 ## 架構
 
@@ -180,9 +178,8 @@ Silksong (IL2CPP v31)、Songs of Silence (IL2CPP v39, Unity 6.1) 等。
 
 | 檔案 | 內容 |
 |---|---|
-| [plan.md](docs/plan.md) | **正典 phase ledger (0 → 30) + 集中 Open Backlog / TODO** — 從這裡開始 |
-| [STATUS.md](docs/STATUS.md) | 一行式狀態指標(目前 build / phase → plan.md) |
-| [archive/](docs/archive/) | 已完成 phase 的長篇寫作 + 舊 session hand-offs |
+| [plan.md](docs/plan.md) | **單一窗口** — 目前狀態、Open Backlog / TODO、最近批次、phase ledger (0 → 32)、cross-PC workflow — 從這裡開始 |
+| [archive/](docs/archive/) | 已完成 phase 的長篇寫作 + 舊 session hand-offs + 舊批次摘要 |
 | [Archiutecture.md](docs/Archiutecture.md) | 規則與不變量 (rule of one backend、AOT mandate、單一 instance、async everywhere…) |
 | [pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI 線上協議 (每個指令、每個 shape) |
 | [test-matrix.md](docs/test-matrix.md) | 已驗證遊戲 + 工具版本 |
