@@ -1080,6 +1080,22 @@ public sealed class SnapshotBeginResult
 /// instances).</summary>
 public sealed class SnapshotFieldEntry
 {
+    // Phase "field-compact": this object exists ~12M× in a large snapshot, so
+    // its per-instance footprint dominates the retained Classes tree. The COMMON
+    // field (scalar number / bool / enum) populates only the schema keys
+    // (name/type/offset/from/is_enum/is_value_type) + one value (ValueRaw). The
+    // rarely-set members live in a lazily-allocated <see cref="FieldExtras"/> so
+    // the common field carries one extra null ref instead of ~9 inline slots, and
+    // the two tri-state bools pack into <see cref="_flags"/>. Every wire/DB
+    // property is preserved verbatim (same name + [JsonPropertyName] + type) as a
+    // forwarding accessor, so the source-gen JSON round-trip and every consumer
+    // (diff / SPC / pivot / export / interner) are byte- and behaviour-identical.
+    private byte         _flags;
+    private FieldExtras? _extras;
+
+    private const byte EnumKnown = 1 << 0, EnumTrue = 1 << 1;
+    private const byte VtKnown   = 1 << 2, VtTrue   = 1 << 3;
+
     [JsonPropertyName("name")]              public string       Name             { get; set; } = string.Empty;
     [JsonPropertyName("type")]              public string       Type             { get; set; } = string.Empty;
     // ulong: C++ writes IL2CPP::FieldEntry::offset which is std::size_t
@@ -1089,9 +1105,26 @@ public sealed class SnapshotFieldEntry
     // Int64 deserialization. Match C++ type.
     [JsonPropertyName("offset")]            public ulong        Offset           { get; set; }
     [JsonPropertyName("from")]              public string?      From             { get; set; }
-    [JsonPropertyName("is_enum")]           public bool?        IsEnum           { get; set; }
-    [JsonPropertyName("is_value_type")]     public bool?        IsValueType      { get; set; }
-    [JsonPropertyName("address")]           public string?      Address          { get; set; }
+
+    /// <summary>Tri-state (null / false / true), packed into <see cref="_flags"/>.
+    /// In practice the DLL only ever emits <c>true</c> (omits the key otherwise),
+    /// but the packing preserves all three states for a lossless round-trip.</summary>
+    [JsonPropertyName("is_enum")]
+    public bool? IsEnum
+    {
+        get => (_flags & EnumKnown) == 0 ? null : (_flags & EnumTrue) != 0;
+        set => _flags = (byte)((_flags & ~(EnumKnown | EnumTrue))
+                       | (value is bool b ? EnumKnown | (b ? EnumTrue : 0) : 0));
+    }
+
+    /// <summary>Tri-state (null / false / true), packed into <see cref="_flags"/>.</summary>
+    [JsonPropertyName("is_value_type")]
+    public bool? IsValueType
+    {
+        get => (_flags & VtKnown) == 0 ? null : (_flags & VtTrue) != 0;
+        set => _flags = (byte)((_flags & ~(VtKnown | VtTrue))
+                       | (value is bool b ? VtKnown | (b ? VtTrue : 0) : 0));
+    }
 
     /// <summary>Phase 30a-2 value compaction — the field's scalar value as raw
     /// JSON text (e.g. <c>325</c>, <c>true</c>, <c>"hi"</c>). Stored as a small
@@ -1122,10 +1155,45 @@ public sealed class SnapshotFieldEntry
 
     [JsonPropertyName("ptr")]               public string?      Ptr              { get; set; }
     [JsonPropertyName("string")]            public string?      StringValue      { get; set; }
-    [JsonPropertyName("string_length")]     public int?         StringLength     { get; set; }
-    [JsonPropertyName("string_error")]      public string?      StringError      { get; set; }
-    [JsonPropertyName("error")]             public string?      Error            { get; set; }
-    [JsonPropertyName("arrayElements")]     public SnapshotArrayElements? ArrayElements    { get; set; }
+
+    // ↓ rarely-set members — backed by the lazy FieldExtras side-object. A field
+    //   that doesn't set any of these keeps _extras == null. Snapshot decode does
+    //   NOT emit a per-field "address" (only instance/array-element level), so
+    //   Address is effectively always null here.
+    [JsonPropertyName("address")]
+    public string? Address
+    {
+        get => _extras?.Address;
+        set { if (value is not null) (_extras ??= new()).Address = value; else if (_extras is not null) _extras.Address = null; }
+    }
+
+    [JsonPropertyName("string_length")]
+    public int? StringLength
+    {
+        get => _extras?.StringLength;
+        set { if (value is not null) (_extras ??= new()).StringLength = value; else if (_extras is not null) _extras.StringLength = null; }
+    }
+
+    [JsonPropertyName("string_error")]
+    public string? StringError
+    {
+        get => _extras?.StringError;
+        set { if (value is not null) (_extras ??= new()).StringError = value; else if (_extras is not null) _extras.StringError = null; }
+    }
+
+    [JsonPropertyName("error")]
+    public string? Error
+    {
+        get => _extras?.Error;
+        set { if (value is not null) (_extras ??= new()).Error = value; else if (_extras is not null) _extras.Error = null; }
+    }
+
+    [JsonPropertyName("arrayElements")]
+    public SnapshotArrayElements? ArrayElements
+    {
+        get => _extras?.ArrayElements;
+        set { if (value is not null) (_extras ??= new()).ArrayElements = value; else if (_extras is not null) _extras.ArrayElements = null; }
+    }
 
     /// <summary>Phase 31 — inline value-type struct members (Vector3 x/y/z,
     /// Quaternion x/y/z/w, custom struct fields), one level deep, captured at
@@ -1135,14 +1203,48 @@ public sealed class SnapshotFieldEntry
     /// Mirrors <see cref="SnapshotArrayElement.Fields"/>; rides through the
     /// Phase 30a deduped <c>V</c> path + <c>payload_gzip</c> as a value key, so
     /// old <c>.db</c> files stay compatible (no members ⇒ shown as before).</summary>
-    [JsonPropertyName("fields")]            public List<SnapshotFieldEntry>? Fields { get; set; }
+    [JsonPropertyName("fields")]
+    public List<SnapshotFieldEntry>? Fields
+    {
+        get => _extras?.Fields;
+        set { if (value is not null) (_extras ??= new()).Fields = value; else if (_extras is not null) _extras.Fields = null; }
+    }
 
-    [JsonPropertyName("arrayError")]        public string?      ArrayError       { get; set; }
+    [JsonPropertyName("arrayError")]
+    public string? ArrayError
+    {
+        get => _extras?.ArrayError;
+        set { if (value is not null) (_extras ??= new()).ArrayError = value; else if (_extras is not null) _extras.ArrayError = null; }
+    }
+
     // ulong? not long?: C++ writes std::uintptr_t which on x64 is uint64.
     // False-positive instances can have garbage values > Int64.MaxValue
     // (build #627 SaGa F2R / BongoCat smoke: JsonException at this field
     // when value didn't fit signed long). ulong covers the full range.
-    [JsonPropertyName("arrayErrorLength")]  public ulong?       ArrayErrorLength { get; set; }
+    [JsonPropertyName("arrayErrorLength")]
+    public ulong? ArrayErrorLength
+    {
+        get => _extras?.ArrayErrorLength;
+        set { if (value is not null) (_extras ??= new()).ArrayErrorLength = value; else if (_extras is not null) _extras.ArrayErrorLength = null; }
+    }
+}
+
+/// <summary>Lazily-allocated overflow storage for the rarely-set
+/// <see cref="SnapshotFieldEntry"/> members. NOT serialized directly (no
+/// <c>[JsonPropertyName]</c>, never registered in the source-gen context) — the
+/// owning entry's forwarding properties carry the wire keys. Keeping these off
+/// the common (scalar) field cuts ~9 inline slots per entry × millions of
+/// fields.</summary>
+internal sealed class FieldExtras
+{
+    public string?                   Address;
+    public int?                      StringLength;
+    public string?                   StringError;
+    public string?                   Error;
+    public SnapshotArrayElements?    ArrayElements;
+    public List<SnapshotFieldEntry>? Fields;
+    public string?                   ArrayError;
+    public ulong?                    ArrayErrorLength;
 }
 
 /// <summary>Phase 30a — per-class field metadata, emitted ONCE per class on the
@@ -1164,6 +1266,12 @@ public sealed class SnapshotFieldSchema
 
 public sealed class SnapshotArrayElement
 {
+    // Same compaction rationale as SnapshotFieldEntry: ~6M of these in a large
+    // snapshot. A primitive element populates only Index + ValueRaw; the rarer
+    // members (error / address / fields / element_class_error) live in the lazy
+    // <see cref="ElementExtras"/>. Wire keys + public API preserved verbatim.
+    private ElementExtras? _extras;
+
     [JsonPropertyName("index")]   public int          Index   { get; set; }
 
     /// <summary>Phase 30a-2 value compaction — see
@@ -1188,8 +1296,20 @@ public sealed class SnapshotArrayElement
 
     [JsonPropertyName("ptr")]     public string?      Ptr     { get; set; }
     [JsonPropertyName("string")]  public string?      String  { get; set; }
-    [JsonPropertyName("error")]   public string?      Error   { get; set; }
-    [JsonPropertyName("address")] public string?      Address { get; set; }
+
+    [JsonPropertyName("error")]
+    public string? Error
+    {
+        get => _extras?.Error;
+        set { if (value is not null) (_extras ??= new()).Error = value; else if (_extras is not null) _extras.Error = null; }
+    }
+
+    [JsonPropertyName("address")]
+    public string? Address
+    {
+        get => _extras?.Address;
+        set { if (value is not null) (_extras ??= new()).Address = value; else if (_extras is not null) _extras.Address = null; }
+    }
 
     /// <summary>Phase 29f (Layer B) — for a reference-type array element,
     /// the element object's own captured fields, one level deep. Null on
@@ -1200,7 +1320,12 @@ public sealed class SnapshotArrayElement
     /// instead of by array index, sidestepping index-shuffle + address
     /// drift. <see cref="SnapshotElementClassError"/> is set instead when
     /// the element pointer didn't resolve to a managed object.</summary>
-    [JsonPropertyName("fields")] public List<SnapshotFieldEntry>? Fields { get; set; }
+    [JsonPropertyName("fields")]
+    public List<SnapshotFieldEntry>? Fields
+    {
+        get => _extras?.Fields;
+        set { if (value is not null) (_extras ??= new()).Fields = value; else if (_extras is not null) _extras.Fields = null; }
+    }
 
     /// <summary>Phase 29f — populated (in place of <see cref="Fields"/>)
     /// when Layer B capture was requested for this element but the element
@@ -1208,7 +1333,22 @@ public sealed class SnapshotArrayElement
     /// (<c>object_get_class</c> failed / null slot / garbage). Lets the UI
     /// distinguish "no inner capture attempted" (null) from "attempted but
     /// the slot wasn't a live object" (this set).</summary>
-    [JsonPropertyName("element_class_error")] public string? SnapshotElementClassError { get; set; }
+    [JsonPropertyName("element_class_error")]
+    public string? SnapshotElementClassError
+    {
+        get => _extras?.ElementClassError;
+        set { if (value is not null) (_extras ??= new()).ElementClassError = value; else if (_extras is not null) _extras.ElementClassError = null; }
+    }
+}
+
+/// <summary>Lazily-allocated overflow storage for the rarely-set
+/// <see cref="SnapshotArrayElement"/> members. See <see cref="FieldExtras"/>.</summary>
+internal sealed class ElementExtras
+{
+    public string?                   Error;
+    public string?                   Address;
+    public List<SnapshotFieldEntry>? Fields;
+    public string?                   ElementClassError;
 }
 
 public sealed class SnapshotArrayElements

@@ -43,7 +43,8 @@
 ### 📸 Snapshot line — 詳見 [snapshot-streaming-dedup.md](snapshot-streaming-dedup.md) + [archive/plan-archive-phases-29-30.md](archive/plan-archive-phases-29-30.md)
 - [x] **30c transient ~10 GB UI peak** — ✅ streaming chunk size 100→25(2026-05-30,`SnapshotViewModel.kChunkSize`;UI build clean、603 tests green)。per-chunk `NormalizeDeduped` re-expansion 是尖峰,較小 chunk 把單一最大 chunk 的 re-expansion 縮 ~4×,代價 ~4× round-trips(每 Chunk 是 server-side JSON slice,wall-clock 影響小)。**Live-verified 2026-05-30(Utawarerumono,193 chunks)**:capture 期間 DiscreteUI 尖峰僅 ~4.4 GB private / ~3.5 GB WS(chunk 144/152)— 對比 30c-shipped 當時的 ~10 GB transient peak;遊戲端維持 ~6.7 GB private(30b 不變),capture 結束 UI 落回 ~2.9 GB private / ~2.4 GB WS。
 - [ ] **30b Mono game-side stream-decode** — session-held-attach 生命週期;**HIGH-RISK**(活俠傳 BDWGC freeze)。Mono 維持 decode-in-Begin 直到驗證安全。
-- [ ] **schema-retention dedup** — 把 per-field metadata 折成 shared ref;**LOW-ROI**(per design doc)。
+- [x] **field-object 壓縮(29g stretch #4)** — ✅ 2026-06-05(UI/Core-only,712 UI tests green、AOT publish 0 warnings)。`SnapshotFieldEntry`/`SnapshotArrayElement` 把罕用欄位(Address/StringLength/StringError/Error/ArrayElements/Fields/ArrayError/ArrayErrorLength;element 的 Error/Address/Fields/ElementClassError)搬進 lazy `FieldExtras`/`ElementExtras`,`is_enum`/`is_value_type` 兩個 tri-state bool 打包進 1 byte flags。常見 scalar field 不配置 extras → 160 B→~88 B、element 96 B→~56 B,12M+ field × ~70 B 預估省 **~0.8–1 GB** 常駐。**public 屬性 API + `[JsonPropertyName]` 全保留**(forwarding accessor)→ source-gen round-trip + diff/SPC/pivot/export/interner 零變動,**舊 .db 照常讀寫**(無 wire/schema 變更)。**待實機記憶體量測**(現行 dotnet-dump baseline 是 30a-2 之前,需重量比對)。
+- [ ] **schema-retention dedup** — 把 per-class schema 從 UI model re-expand 的 12M `SnapshotFieldEntry` 進一步折成 schema-per-class + value-array(消掉物件本體);比 field-object 壓縮更大但要改全部消費端,**LOW-ROI / 高風險**(per design doc)。
 - [ ] **Mono static field VALUE capture**(optional / user-opt-in)— 目前 Mono 端跳過 static 值擷取(`mono_class_vtable` 從 worker thread → BDWGC freeze 根因)。
 
 ### 🧪 待補的 live-smoke(需 inject 實機)
@@ -74,6 +75,11 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-06-05 — Snapshot tab 重構 + field-object 壓縮**(UI/Core-only,712 UI tests green、AOT 0 warnings,**待實機目視 + 記憶體量測**):
+- **field-object 壓縮**(見 Open Backlog 📸):`SnapshotFieldEntry`/`SnapshotArrayElement` 罕用欄位搬進 lazy `FieldExtras`/`ElementExtras`、`is_enum`/`is_value_type` 打包進 flags byte;160 B→~88 B / 96 B→~56 B,預估省 ~0.8–1 GB 常駐。public 屬性 + `[JsonPropertyName]` 全保留(forwarding)→ source-gen round-trip + diff/SPC/pivot/export 零變動,舊 `.db` 相容。+7 `SnapshotFieldCompactionTests`。
+- **Snapshot tab UI 重構(4K/225% 太擠)**:整個 Capture 設定區搬進新的 **modeless `CaptureWindow`**(`📸 New snapshot…` 按鈕叫出,共用 `Snapshot` VM → 結果進 A/B;進度 + 新 `CancelCaptureCommand` 在視窗內,可關掉退背景,tab 狀態列鏡像)。Tab 只留 New-snapshot 鈕 + DB 列(合併「held memory」+ 砍掉與 `DbStatusLine` 重複的 idle `StatusMessage`)+ A/B + Diff + Filters(改 `WrapPanel` 不再橫向溢出)+ 結果 grid(拿回高度)。原則:**設定/動作 → 視窗;結果/分析 → 留主畫面**(見 [ui-spec.md](ui-spec.md))。
+- **下一步(依使用者順序)**:Value Search 打通 `List<T>-of-structs` reverse-lookup → 再做 snapshot 端 List/集合元素展開(讓 snapshot/SPC 也看得到 `List<struct>[i].field`)。
 
 **2026-06-04 — Phase 12e — Proxy Deploy 支援 x86 Mono**(UI/Core-only,build #1111,705 UI tests green):
 - 12d 早已把 x86 proxy + x86 Mono backend 產到 `dist/x86/` 且 direct-inject 實機驗過,但 **Proxy Deploy 視窗** 仍把所有 x86 遊戲 gate 成 `Unsupported`(偵測得到、但裝/更新被擋,且預設隱藏)。純 UI/installer 缺口。

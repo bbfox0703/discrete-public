@@ -665,6 +665,26 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Open the modeless snapshot Capture window. The capture
+    /// configuration was moved off the Snapshot tab (2026-06-05) so the result
+    /// grid gets its height back. Single-instance: re-focus the existing window
+    /// if open. Bound to the SHARED Snapshot VM so the capture's results +
+    /// progress flow into the tab's A/B dropdowns.</summary>
+    private CaptureWindow? _captureWindow;
+    private void OnNewSnapshotClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (_captureWindow is not null)
+        {
+            _captureWindow.Activate();
+            return;
+        }
+        var win = new CaptureWindow(vm.Snapshot);
+        win.Closed += (_, _) => _captureWindow = null;
+        _captureWindow = win;
+        win.Show(this);
+    }
+
     private async Task<ProcessRow?> ShowPickerDialogAsync()
     {
         if (DataContext is not MainWindowViewModel vm) return null;

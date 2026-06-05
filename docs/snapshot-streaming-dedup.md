@@ -243,5 +243,38 @@ sort + lower `instanceCap` keep the current build usable while Phase 30 lands.
 - **SQLite back-compat** — old snapshots must still load. Version-tag the row.
 - **Pipe threading for the session-held attach** (30b mitigation 1) — confirm chunks
   run on one thread.
-- **`JsonElement?[]` retention** — values still pin a `JsonDocument`; pair with the
-  deferred 29g-3 `RawJsonValue` (string-backed) to fully drop the JsonDocument pin.
+- **`JsonElement?[]` retention** — ✅ **resolved by 30a-2 value compaction** (the
+  `RawJsonValue`/29g-3 idea shipped as `ValueRaw` string + `RawJsonStringConverter`
+  on `SnapshotFieldEntry`/`SnapshotArrayElement`, interned by `SnapshotInterner`).
+  The per-value `JsonDocument` pin is gone for the shipped (NormalizeDeduped →
+  `SnapshotFieldEntry`) path. (The note above was written for the §3 deduped
+  `SnapshotInstanceValues.Values = JsonElement?[]` UI model, which was never shipped.)
+
+## 7. Field-object compaction (29g stretch #4) — SHIPPED 2026-06-05
+
+After 30a-2 removed the JsonDocuments, the top remaining retained cost is the
+re-expanded model objects themselves: `SnapshotFieldEntry` ~1.01 GB (~160 B ×
+12.17M) + `SnapshotArrayElement` ~564 MB (~96 B × 5.87M) at SaGa-F2R scale.
+Without going as far as the (deferred, high-risk) §3 schema-retention dedup, the
+per-object footprint was halved by moving the **rarely-set** members into a
+lazily-allocated side-object and packing the two tri-state bools into a flags
+byte ([ProtocolModels.cs](../ui/UnityDumpUI.Core/Services/ProtocolModels.cs)):
+
+- `SnapshotFieldEntry`: inline keeps `Name/Type/Offset/From/ValueRaw/Ptr/StringValue`
+  + `_flags` (is_enum / is_value_type, tri-state) + `_extras`. `FieldExtras` (lazy)
+  holds `Address/StringLength/StringError/Error/ArrayElements/Fields/ArrayError/
+  ArrayErrorLength`. A common scalar field never allocates `_extras`. ~160 B → ~88 B.
+- `SnapshotArrayElement`: inline keeps `Index/ValueRaw/Ptr/String` + `_extras`;
+  `ElementExtras` (lazy) holds `Error/Address/Fields/ElementClassError`. ~96 B → ~56 B.
+
+Every wire/DB property is preserved verbatim as a forwarding accessor (same name,
+type, `[JsonPropertyName]`), so the source-gen JSON round-trip is byte-compatible
+(old `.db` files load unchanged) and **every consumer — diff / SPC / pivot /
+export / inspector / `SnapshotInterner` — is unchanged** (they call the same
+property surface). `FieldExtras`/`ElementExtras` are internal storage, never
+registered in the source-gen context. **UI/Core only; no DLL / wire / SQLite
+schema change.** 712 UI tests green (incl. new
+[SnapshotFieldCompactionTests.cs](../ui/UnityDumpUI.Tests/SnapshotFieldCompactionTests.cs)),
+AOT publish 0 warnings. **Live memory re-measure still pending** (the 2026-05-28
+dotnet-dump baseline predates 30a-2 — re-capture on the current build to quantify
+the actual GB delta).
