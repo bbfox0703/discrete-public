@@ -20,6 +20,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -315,20 +316,28 @@ std::string ClassifyKind(const ResolvedField& rf, std::ptrdiff_t fieldOffset) {
 // kObjectHeader matches the queried interior offset. Rewrites `fh` in place;
 // recurses for nested struct members, depth-capped against any repeating-class
 // chain. Caller holds the ThreadAttachGuard.
-void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset,
-                         FieldHit& fh, int depthLeft = 4) {
-    if (depthLeft <= 0) return;
-    if (!parent.isValueType || parent.isEnum || parent.valueTypeClass == nullptr) return;
-    const std::ptrdiff_t interior = fieldOffset - static_cast<std::ptrdiff_t>(parent.offset);
-    if (interior <= 0) return;   // hit at the struct base → keep value-struct kind
+// Core of the struct-member-by-offset resolution, shared by the inline
+// value-type FIELD path (NameStructComponent) and the value-type ARRAY-ELEMENT
+// path (ResolveArrayElementSafe). Given a value-type struct class and an
+// `interior` byte offset WITHIN the struct (0 = struct base), find the member
+// containing it and rewrite `fh`: name = namePrefix + member ("_position." +
+// "y", or "[3]." + "count_"), plus type/size/kind/interiorOffset. `baseOffset`
+// is the struct's absolute offset within the containing object so fh.offset
+// stays absolute. Recurses one level per nested value struct, depth-capped.
+// PRECONDITION: `structClass` is a validated real Il2CppClass; caller holds a
+// ThreadAttachGuard.
+void NameValueStructMember(Il2CppClass* structClass, std::ptrdiff_t interior,
+                           const std::string& namePrefix, std::ptrdiff_t baseOffset,
+                           FieldHit& fh, int depthLeft = 4) {
+    if (depthLeft <= 0 || structClass == nullptr || interior <= 0) return;
     const long hdr = static_cast<long>(ManagedLayout::kObjectHeader);
-    auto members = EnumerateInstanceFields(parent.valueTypeClass);
+    auto members = EnumerateInstanceFields(structClass);
     for (const auto& m : members) {
         const std::ptrdiff_t rel = static_cast<std::ptrdiff_t>(m.offset) - hdr;
         if (rel < 0) continue;
         if (interior < rel || interior >= rel + static_cast<std::ptrdiff_t>(m.size)) continue;
-        const std::ptrdiff_t absOffset = static_cast<std::ptrdiff_t>(parent.offset) + rel;
-        fh.name        = parent.name + "." + m.name;
+        const std::ptrdiff_t absOffset = baseOffset + rel;
+        fh.name        = namePrefix + m.name;
         fh.typeName    = m.typeName;
         fh.offset      = static_cast<std::size_t>(absOffset);
         fh.size        = m.size;
@@ -342,13 +351,20 @@ void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset
         fh.interiorOffset = memberInterior;
         if (memberInterior > 0 && m.isValueType && !m.isEnum &&
             m.valueTypeClass != nullptr) {
-            ResolvedField nested = m;
-            nested.name   = fh.name;
-            nested.offset = static_cast<std::size_t>(absOffset);
-            NameStructComponent(nested, fieldOffset, fh, depthLeft - 1);
+            NameValueStructMember(m.valueTypeClass, memberInterior,
+                                  fh.name + ".", absOffset, fh, depthLeft - 1);
         }
         return;
     }
+}
+
+void NameStructComponent(const ResolvedField& parent, std::ptrdiff_t fieldOffset,
+                         FieldHit& fh, int depthLeft = 4) {
+    if (!parent.isValueType || parent.isEnum || parent.valueTypeClass == nullptr) return;
+    const std::ptrdiff_t interior = fieldOffset - static_cast<std::ptrdiff_t>(parent.offset);
+    if (interior <= 0) return;   // hit at the struct base → keep value-struct kind
+    NameValueStructMember(parent.valueTypeClass, interior, parent.name + ".",
+                          static_cast<std::ptrdiff_t>(parent.offset), fh, depthLeft);
 }
 
 // Project a ResolvedField + classifier back into the public FieldHit shape.
@@ -416,6 +432,246 @@ void ResolveFieldAt(Il2CppClass* klass, std::ptrdiff_t fieldOffset,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Value-type ARRAY-element reverse lookup (safe). Runtime-synthesized array
+// klasses (e.g. ItemInfo[], the List<T>._items backing array) are NOT in the
+// metadata classSet, so the reverse-lookup index drops hits that land inside
+// them. To recover those WITHOUT the fatal mistake of calling il2cpp class
+// APIs on unvalidated heap pointers (which CTD'd the game), we:
+//   (1) dynamically calibrate the offset of Il2CppClass::element_class once,
+//       using only classSet-validated classes + the bound API;
+//   (2) at scan time, READ that field off a candidate via SafeReadBytes
+//       (VirtualQuery+SEH-guarded, garbage-safe) and only trust the candidate
+//       as an array klass if the read points at a real classSet member;
+//   (3) run every subsequent API call on that validated ELEMENT class only —
+//       never on the array klass itself.
+// ---------------------------------------------------------------------------
+
+std::once_flag g_ecOnce;
+std::size_t    g_ecOffset = 0;   // offsetof(Il2CppClass, element_class); 0 = failed
+
+// Discover offsetof(Il2CppClass, element_class) by the same brute-force-find +
+// cache recipe as IL2CPPStaticFieldsOffset.cpp. For a NON-array class libil2cpp
+// sets element_class == self, so we scan classSet samples for the qword equal
+// to the class pointer and intersect the matching offsets across samples; the
+// lowest stable offset is element_class (castClass sits one slot higher and,
+// for szarrays, equals element_class anyway — so either is safe; lowest is
+// canonical). All API calls here are on classSet-validated pointers.
+void DiscoverElementClassOffset() {
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_element_class == nullptr) return;
+    if (!BuildClassRangeCache()) return;
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return;
+
+    constexpr std::size_t kScanLimit     = 512;
+    constexpr std::size_t kStep          = sizeof(void*);
+    constexpr std::size_t kSamplesWanted = 16;
+
+    std::vector<std::size_t> candidates;   // self-holding offsets, ascending
+    bool seeded = false;
+    std::size_t sampled = 0;
+
+    auto assemblies = EnumerateAssemblies();
+    for (const auto& a : assemblies) {
+        if (a.image == nullptr) continue;
+        auto classes = EnumerateClasses(a.image);
+        for (const auto& ce : classes) {
+            if (ce.klass == nullptr) continue;
+            const std::uintptr_t self = reinterpret_cast<std::uintptr_t>(ce.klass);
+            // Clean non-array sample: API returns the class itself.
+            if (SehElementClassProbe(r.class_get_element_class, ce.klass) != ce.klass) continue;
+            const auto* bytes = reinterpret_cast<const std::uint8_t*>(ce.klass);
+            std::vector<std::size_t> hits;
+            for (std::size_t off = 0; off + kStep <= kScanLimit; off += kStep) {
+                std::uintptr_t v = 0;
+                if (!Memory::SafeReadBytes(bytes + off, &v, sizeof(v))) break;
+                if (v == self) hits.push_back(off);
+            }
+            if (hits.empty()) continue;
+            if (!seeded) { candidates = std::move(hits); seeded = true; }
+            else {
+                std::vector<std::size_t> next;
+                for (std::size_t o : candidates)
+                    if (std::find(hits.begin(), hits.end(), o) != hits.end()) next.push_back(o);
+                candidates.swap(next);
+            }
+            if (seeded && candidates.empty()) {  // inconsistent — give up safely
+                Log::Write(MagicStrings::LogCategoryWalk,
+                    "AddrFinder: element_class offset discovery inconsistent — array reverse-lookup disabled");
+                return;
+            }
+            if (++sampled >= kSamplesWanted) break;
+        }
+        if (sampled >= kSamplesWanted) break;
+    }
+
+    if (!candidates.empty()) {
+        g_ecOffset = candidates.front();   // lowest = element_class
+        Log::Write(MagicStrings::LogCategoryWalk,
+            "AddrFinder: discovered element_class offset = " + std::to_string(g_ecOffset) +
+            " (from " + std::to_string(sampled) + " samples)");
+    } else {
+        Log::Write(MagicStrings::LogCategoryWalk,
+            "AddrFinder: element_class offset discovery failed — array reverse-lookup disabled");
+    }
+}
+
+std::size_t GetElementClassOffset() {
+    std::call_once(g_ecOnce, DiscoverElementClassOffset);
+    return g_ecOffset;
+}
+
+// Memo of confirmed value-type-element array klasses → their element class.
+struct ArrayKlassEntry { std::uintptr_t arrayKlass; std::uintptr_t elemKlass; };
+std::mutex                    g_arrayKlassMu;
+std::vector<ArrayKlassEntry>  g_arrayKlassSet;   // sorted by arrayKlass
+
+bool LookupArrayKlassMemo(std::uintptr_t k, std::uintptr_t& elemOut) {
+    std::lock_guard<std::mutex> lk(g_arrayKlassMu);
+    auto it = std::lower_bound(g_arrayKlassSet.begin(), g_arrayKlassSet.end(), k,
+        [](const ArrayKlassEntry& e, std::uintptr_t v) { return e.arrayKlass < v; });
+    if (it != g_arrayKlassSet.end() && it->arrayKlass == k) { elemOut = it->elemKlass; return true; }
+    return false;
+}
+void RememberArrayKlass(std::uintptr_t k, std::uintptr_t elem) {
+    std::lock_guard<std::mutex> lk(g_arrayKlassMu);
+    auto it = std::lower_bound(g_arrayKlassSet.begin(), g_arrayKlassSet.end(), k,
+        [](const ArrayKlassEntry& e, std::uintptr_t v) { return e.arrayKlass < v; });
+    if (it == g_arrayKlassSet.end() || it->arrayKlass != k)
+        g_arrayKlassSet.insert(it, ArrayKlassEntry{k, elem});
+}
+
+// NEGATIVE memo — header qword values proven NOT to be value-type-element array
+// klasses. This is the perf-critical lever: the array fallback runs a backward
+// scan per index-dropped candidate (tens of thousands), and adjacent candidates'
+// windows overlap heavily, so the SAME header values recur constantly. Without a
+// negative memo every recurrence re-pays the VirtualQuery-backed element_class
+// read → a 300s scan. Keyed by VALUE (hash set, O(1)); shared across the whole
+// scan so each distinct value is probed at most once. Hard-capped so total probes
+// are bounded: once full, unknowns are treated as non-arrays (feature degrades to
+// already-known array klasses only — never hangs).
+constexpr std::size_t        kNotArrayCap = 1u << 19;   // 524288 distinct values
+std::mutex                   g_notArrayMu;
+std::unordered_set<std::uintptr_t> g_notArrayKlass;
+
+bool IsKnownNotArray(std::uintptr_t k) {
+    std::lock_guard<std::mutex> lk(g_notArrayMu);
+    return g_notArrayKlass.find(k) != g_notArrayKlass.end();
+}
+// Returns false once the cap is hit (signals "stop probing unknowns").
+bool RememberNotArray(std::uintptr_t k) {
+    std::lock_guard<std::mutex> lk(g_notArrayMu);
+    if (g_notArrayKlass.size() >= kNotArrayCap) return false;
+    g_notArrayKlass.insert(k);
+    return true;
+}
+
+// Discard the array-klass memos (called from InvalidateClassRangeCache so a
+// `scan` RPC that loads new assemblies doesn't keep stale verdicts).
+void ResetArrayKlassMemos() {
+    { std::lock_guard<std::mutex> lk(g_arrayKlassMu); g_arrayKlassSet.clear(); }
+    { std::lock_guard<std::mutex> lk(g_notArrayMu);   g_notArrayKlass.clear(); }
+}
+
+// SAFE array-klass test: decide whether `candidate` is an array klass whose
+// element type is a known value type — using ONLY a raw SafeReadBytes of the
+// calibrated element_class field. No runtime API call ever touches `candidate`.
+// On success, `elemOut` is the (classSet-validated) element class.
+bool LooksLikeValueTypeElementArray(std::uintptr_t candidate, Il2CppClass*& elemOut) {
+    if (candidate == 0) return false;
+    std::uintptr_t memoElem = 0;
+    if (LookupArrayKlassMemo(candidate, memoElem)) {      // known array → O(log n)
+        elemOut = reinterpret_cast<Il2CppClass*>(memoElem);
+        return true;
+    }
+    if (IsKnownNotArray(candidate)) return false;          // known non-array → O(1), no probe
+    const std::size_t O = GetElementClassOffset();
+    if (O == 0) return false;
+    // First sighting of this value → one element_class read (the expensive op,
+    // now amortized by the negative memo across the whole scan).
+    std::uintptr_t elemPtr = 0;
+    bool isArray = false;
+    if (Memory::SafeReadBytes(reinterpret_cast<const void*>(candidate + O),
+                              &elemPtr, sizeof(elemPtr)) &&
+        elemPtr != 0 && elemPtr != candidate &&            // non-array (self)
+        ContainsClass(elemPtr)) {                          // element must be a real class
+        Il2CppClass* elem = reinterpret_cast<Il2CppClass*>(elemPtr);
+        const auto& r = GetResolver();
+        if (r.class_is_valuetype != nullptr &&
+            SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0) {   // value-type only
+            elemOut = elem;
+            RememberArrayKlass(candidate, elemPtr);
+            isArray = true;
+        }
+    }
+    if (!isArray) RememberNotArray(candidate);             // don't re-probe this value
+    return isArray;
+}
+
+// Fill `out` for a hit at `addr` inside the array object based at `p`, whose
+// element class is the VALIDATED `elemClass`. Uses only `elemClass` for every
+// API call (never the unvalidated array klass). Caller holds a ThreadAttachGuard.
+void ResolveArrayElementSafe(std::uintptr_t addr, std::uintptr_t p,
+                             Il2CppClass* elemClass, AddressLookup& out) {
+    const auto& r = GetResolver();
+    out.found       = true;
+    out.instance    = p;
+    out.klassPtr    = 0;   // array klass deliberately not exposed (unvalidated)
+    out.fieldOffset = static_cast<std::ptrdiff_t>(addr - p);
+
+    std::string elemName;
+    if (r.class_get_name != nullptr) {
+        const char* n = SehClassNameProbe(r.class_get_name, elemClass);
+        if (n != nullptr) elemName = n;
+    }
+    out.className = elemName.empty() ? "[]" : (elemName + "[]");
+    if (r.class_get_namespace != nullptr) {
+        const char* ns = SehClassNamespaceProbe(r.class_get_namespace, elemClass);
+        if (ns != nullptr) out.ns = ns;
+    }
+    if (r.class_get_image != nullptr && r.image_get_name != nullptr) {
+        const Il2CppImage* img = SehClassImageProbe(r.class_get_image, elemClass);
+        if (img != nullptr) {
+            const char* in = SehImageNameProbe(r.image_get_name, img);
+            if (in != nullptr) out.assembly = StripDllSuffix(in);
+        }
+    }
+
+    const std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
+    if (out.fieldOffset < dataOff) {   // hit in the array header (length/bounds)
+        out.field.present = true;
+        out.field.name    = "(array header)";
+        out.field.kind    = "array-interior";
+        return;
+    }
+    std::size_t elemSize = ManagedLayout::kPointerSize;
+    if (r.class_value_size != nullptr) {
+        int sz = SehValueSizeProbe(r.class_value_size, elemClass);
+        if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+    }
+    const std::ptrdiff_t into     = out.fieldOffset - dataOff;
+    const std::size_t    idx      = static_cast<std::size_t>(into) / elemSize;
+    const std::size_t    interior = static_cast<std::size_t>(into) % elemSize;
+
+    out.field.present     = true;
+    out.field.name        = "[" + std::to_string(idx) + "]";
+    out.field.offset      = static_cast<std::size_t>(dataOff) + idx * elemSize;
+    out.field.size        = elemSize;
+    out.field.isValueType = true;
+    out.field.kind        = (interior == 0) ? "array-element" : "array-interior";
+    out.field.interiorOffset = static_cast<std::ptrdiff_t>(interior);
+    out.field.typeName    = elemName;
+    if (interior > 0) {
+        NameValueStructMember(elemClass, static_cast<std::ptrdiff_t>(interior),
+                              "[" + std::to_string(idx) + "].",
+                              dataOff + static_cast<std::ptrdiff_t>(idx * elemSize),
+                              out.field);
+    }
+}
+
 }  // namespace
 
 bool BuildClassRangeCache() {
@@ -466,6 +722,10 @@ void InvalidateClassRangeCache() {
     g_minKlass = 0;
     g_maxKlass = 0;
     g_built    = false;
+    // Drop the array-klass verdicts too — a new assembly load can change which
+    // pointers are classSet members. (element_class offset is struct-stable, so
+    // g_ecOffset/g_ecOnce are intentionally left alone.)
+    ResetArrayKlassMemos();
 }
 
 ClassRangeStats GetClassRangeStats() {
@@ -687,6 +947,95 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         // Phase 30 P2 interval-tree path so both produce identical answers.
         // We already hold the ThreadAttachGuard (the helper's precondition).
         ResolveInstanceLookup(addr, p, klassCandidate, out);
+        return out;
+    }
+
+    out.reason = "no_klass_in_range";
+    return out;
+}
+
+AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwardScan) {
+    // Superset of WhatIsAt: also accepts value-type-element ARRAY objects
+    // (int[], ItemInfo[], List<T>._items) whose runtime array klass is absent
+    // from classSet. SAFE — an unvalidated candidate is only ever touched via
+    // SafeReadBytes (see LooksLikeValueTypeElementArray); all runtime API calls
+    // run on the validated element class inside ResolveArrayElementSafe.
+    AddressLookup out;
+    out.queriedAddr = addr;
+    if (addr == 0) { out.reason = "address is null"; return out; }
+    if (!BuildClassRangeCache()) { out.reason = "class_range_cache_unavailable"; return out; }
+
+    if (maxBackwardScan == 0)        maxBackwardScan = 4096;
+    if (maxBackwardScan > 16 * 1024) maxBackwardScan = 16 * 1024;
+    // Perf: the array base sits just below the hit (element offset = idx*stride),
+    // so a small window finds it for the low-index elements worth resolving, and
+    // keeps this per-dropped-candidate scan cheap (it runs tens of thousands of
+    // times). Large-index elements in huge arrays are intentionally not resolved.
+    constexpr std::size_t kArrayFallbackWindow = 1024;
+    if (maxBackwardScan > kArrayFallbackWindow) maxBackwardScan = kArrayFallbackWindow;
+
+    constexpr std::size_t  kStride = 8;
+    constexpr std::uintptr_t kMaxPlausibleArrayLen = 0x4000000;  // 64M elements
+    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
+    std::size_t maxSteps = maxBackwardScan / kStride;
+    if (maxSteps == 0) maxSteps = 1;
+    out.scannedFrom = (start >= maxSteps * kStride) ? (start - (maxSteps - 1) * kStride) : 0;
+    out.scannedTo   = start + kStride;
+
+    const auto& r = GetResolver();
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) { out.reason = "no_il2cpp_domain"; return out; }
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) { out.reason = "il2cpp_thread_attach_failed"; return out; }
+
+    const std::size_t bulkBytes = maxSteps * kStride;
+    const std::uintptr_t rangeStart = start >= (maxSteps - 1) * kStride
+        ? start - (maxSteps - 1) * kStride : 0;
+    std::vector<std::uint8_t> bulkBuf(bulkBytes, 0);
+    {
+        constexpr std::size_t kPageBytes = 4096;
+        std::size_t off = 0;
+        while (off < bulkBytes) {
+            std::size_t chunk = std::min<std::size_t>(kPageBytes, bulkBytes - off);
+            Memory::SafeReadBytes(reinterpret_cast<void*>(rangeStart + off),
+                                   bulkBuf.data() + off, chunk);
+            off += chunk;
+        }
+    }
+
+    for (std::size_t i = 0; i < maxSteps; ++i) {
+        std::uintptr_t p = start - i * kStride;
+        out.scannedSteps = i + 1;
+
+        const std::size_t bufIdx = (maxSteps - 1 - i) * kStride;   // == p - rangeStart
+        std::uintptr_t klassCandidate = 0;
+        std::memcpy(&klassCandidate, bulkBuf.data() + bufIdx, sizeof(klassCandidate));
+        if (klassCandidate == 0) continue;
+        if ((klassCandidate & 7u) != 0) continue;
+
+        if (ContainsClass(klassCandidate)) {
+            // Known metadata class — identical to WhatIsAt.
+            Il2CppClass* k = reinterpret_cast<Il2CppClass*>(klassCandidate);
+            const char* name = (r.class_get_name != nullptr)
+                ? SehClassNameProbe(r.class_get_name, k) : nullptr;
+            if (name == nullptr || *name == '\0') continue;
+            ResolveInstanceLookup(addr, p, klassCandidate, out);
+            return out;
+        }
+
+        // Not a known class — try it as a value-type-element array. Cheap
+        // structural gate from the bulk buffer first (sane length at
+        // p+kArrayMaxLengthOffset) so the VirtualQuery-backed element-class
+        // read only fires on array-shaped headers.
+        const std::size_t lenIdx = bufIdx + ManagedLayout::kArrayMaxLengthOffset;
+        if (lenIdx + sizeof(std::uintptr_t) > bulkBytes) continue;
+        std::uintptr_t arrLen = 0;
+        std::memcpy(&arrLen, bulkBuf.data() + lenIdx, sizeof(arrLen));
+        if (arrLen == 0 || arrLen > kMaxPlausibleArrayLen) continue;
+
+        Il2CppClass* elem = nullptr;
+        if (!LooksLikeValueTypeElementArray(klassCandidate, elem)) continue;
+        ResolveArrayElementSafe(addr, p, elem, out);
         return out;
     }
 

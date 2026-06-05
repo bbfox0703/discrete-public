@@ -96,6 +96,17 @@ ClassRangeStats GetClassRangeStats();
 // implicitly on first use.
 AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan);
 
+// Superset of WhatIsAt that also accepts value-type-element array objects
+// (int[], ItemInfo[], List<T>._items backing arrays) whose runtime-synthesized
+// klass is absent from the metadata class cache. Used as the value-scan
+// fallback for candidates the ReverseLookupIndex couldn't attribute, so a
+// scalar hit inside a struct array element resolves to ElementType[idx].member
+// instead of being dropped. SAFE: an unvalidated candidate is only read via
+// Memory::SafeReadBytes (never passed to a runtime API); every API call runs on
+// the validated element class. Same backward-scan + ThreadAttachGuard contract
+// as WhatIsAt.
+AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwardScan);
+
 // Phase 30 P2 — shared identity + field/array resolution, given a confirmed
 // managed instance (`instance` base + its validated Il2CppClass* `klassPtr`)
 // and the queried `addr`. Populates `out` exactly as WhatIsAt's tail does, so
