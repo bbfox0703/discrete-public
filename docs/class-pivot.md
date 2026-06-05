@@ -477,7 +477,7 @@ ViewModel-level integration tests:
 | deferred   | Layer B reference array inner pivot — own Phase  | needs DLL change |
 | deferred   | Anomaly auto-surface (plan.md stretch goal)      | research |
 
-Each wave ends green on the full unit test suite and writes a STATUS.md TL;DR.
+Each wave ends green on the full unit test suite and adds a plan.md "Recent batches" entry.
 
 ---
 
@@ -879,8 +879,8 @@ no Jaccard). Delta mode is two set builds + a membership test per field.
 | **29i-3** | Unsupervised ranking (`interestingness` + value-volatility) + lazy per-row preview | yes |
 | **29i-4** | `SnapshotValueLocatorEngine` + "Find by value" expander + auto-handoff to Stage 1/2 | yes (★ build first if optimizing for utility) |
 
-Each wave ends green on the full UI test suite and writes a STATUS.md
-TL;DR. Suggested order: **29i-1 → 29i-2 → 29i-4 → 29i-3** (1 unblocks the
+Each wave ends green on the full UI test suite and adds a plan.md "Recent
+batches" entry. Suggested order: **29i-1 → 29i-2 → 29i-4 → 29i-3** (1 unblocks the
 pickers and is lowest-risk; 4 is the highest-utility payoff; 3 is the
 "no known value" fallback and the most heuristic, so last).
 

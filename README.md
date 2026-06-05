@@ -57,11 +57,11 @@ Inject a single backend DLL into a running Unity game and get:
   `global-metadata.dat` standalone (no game required) for
   reverse-engineering scratch work.
 
-See [docs/plan.md](docs/plan.md) for the canonical phase ledger plus
-the centralized **Open Backlog / TODO** — start there.
-[docs/STATUS.md](docs/STATUS.md) is a one-line status pointer, and
+See [docs/plan.md](docs/plan.md) for the **single source of truth** —
+current build state, current phase, **centralized Open Backlog / TODO**,
+recent batches, full phase ledger, and cross-PC workflow.
 [docs/archive/](docs/archive/) holds the long-form write-ups for
-shipped phases.
+shipped phases and older batch summaries.
 
 ## Architecture
 
@@ -190,9 +190,8 @@ SaGa F2R (IL2CPP v29), BongoCat (Mono bdwgc), Farthest Frontier
 
 | File | What it covers |
 |---|---|
-| [plan.md](docs/plan.md) | **Canonical phase ledger (0 → 30) + centralized Open Backlog / TODO** — start here |
-| [STATUS.md](docs/STATUS.md) | One-line status pointer (current build / phase → plan.md) |
-| [archive/](docs/archive/) | Long-form write-ups for shipped phases + old session hand-offs |
+| [plan.md](docs/plan.md) | **Single source of truth** — current state, Open Backlog / TODO, recent batches, phase ledger (0 → 32), cross-PC workflow — start here |
+| [archive/](docs/archive/) | Long-form write-ups for shipped phases + old session hand-offs + older batch summaries |
 | [Archiutecture.md](docs/Archiutecture.md) | Rules and invariants (rule of one backend, AOT mandate, single-instance, async everywhere…) |
 | [pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI wire contract (every command, every shape) |
 | [test-matrix.md](docs/test-matrix.md) | Verified games + tooling versions |

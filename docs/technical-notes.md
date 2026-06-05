@@ -233,7 +233,7 @@ PRs adding any of the above are welcome.
 
 ## Out-of-scope features (drip-feed)
 
-Tracked in [STATUS.md](STATUS.md) §"Open follow-ups", but worth
+Tracked in [plan.md](plan.md) §"Open Backlog / TODO", but worth
 calling out here for visibility:
 
 - **Phase 5 segment 2d** — full `Il2CppMetadataRegistration` AOB

@@ -126,7 +126,7 @@ near-zero CTD risk.
 ### 3.2 Phase B — generic value-type recursion  ✅ offset RESOLVED (live-smoke 2026-06-01)
 
 > **The offset question is settled.** Live-smoke on Core Keeper (**Mono x64**)
-> proved the convention via hex (see STATUS.md "Phase 31 live-smoke"):
+> proved the convention via hex (see [archive/status-history.md](archive/status-history.md) "Phase 31 live-smoke 發現"):
 > `PlayerController.srOffSetPos` (Vector3 @ field-offset 0xA34) is truly
 > `(0,0,0)` in memory, but the existing live Inspector drill displayed
 > `(0.6875,-0.0585,0)` — it read from `structBase + 0x10`, i.e. it used
@@ -166,7 +166,7 @@ For a field with `is_value_type && !is_enum && !primitive && !namedStruct`:
 - recurse **one level** only; nested struct members render as their own
   summary/`(…)` (no unbounded recursion).
 
-**Hardening (apply the walk-CTD lessons — [STATUS.md](STATUS.md) 2026-06-01):**
+**Hardening (apply the walk-CTD lessons — [archive/status-history.md](archive/status-history.md) 2026-06-01 batch):**
 - wrap every member accessor (`field_get_offset` / `field_get_type` /
   `class_get_name`) in the generic `SehCall`;
 - runaway / garbage-class bail (depth + member-count cap, e.g. ≤ 64
@@ -189,7 +189,7 @@ OWNING field's inline address uses `addr + f.offset` which is already
 bitness-correct. Double-check: members that are themselves references /
 IntPtr inside a struct use pointer-size — read via `ManagedLayout::kPointerSize`,
 not a hard-coded 8 (the project has repeatedly hit x86 4-vs-8 bugs — see
-the Copy CE XML / array-stride fixes in [STATUS.md](STATUS.md)).
+the Copy CE XML / array-stride fixes in [archive/status-history.md](archive/status-history.md) 2026-05-30/31 batches).
 
 ---
 

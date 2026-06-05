@@ -155,7 +155,9 @@ short version:
   against the injected DLL — useful for headless verification without
   launching the UI.
 - **Manual click-through** for UI / live-runtime workflows. Recorded
-  in [docs/STATUS.md](docs/STATUS.md) §"Live verifications".
+  in [docs/plan.md](docs/plan.md) "Recent batches" (recent) or
+  [docs/archive/status-history.md](docs/archive/status-history.md)
+  (older), under each batch's "live-verified" / "live-smoke" notes.
 
 ### When you need to add a test
 
@@ -169,8 +171,9 @@ short version:
 - **UI feature touching ViewModels**: add a unit test that drives the
   VM with a mocked `IBackendAdapter` (the `BackendAdapter` interface
   is the seam — no need to spin up a real pipe).
-- **CE Lua bridge change**: write the verification recipe into
-  STATUS.md "Live verifications" once you've clicked through it.
+- **CE Lua bridge change**: add the verification recipe as a new entry
+  in plan.md "Recent batches" once you've clicked through it (older
+  entries flow into archive/status-history.md over time).
 
 ### What we don't have (yet)
 
