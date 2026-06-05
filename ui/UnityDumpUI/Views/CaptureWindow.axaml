@@ -1,0 +1,158 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:UnityDumpUI.ViewModels"
+        x:Class="UnityDumpUI.Views.CaptureWindow"
+        x:DataType="vm:SnapshotViewModel"
+        Width="900" Height="470" MinWidth="560" MinHeight="320"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Icon="avares://DiscreteUI/Assets/MainIcon.ico"
+        Title="{StaticResource Capture.Title}">
+  <!-- Capture configuration moved off the cramped Snapshot tab (2026-06-05).
+       DataContext is the SHARED SnapshotViewModel (MainWindowViewModel.Snapshot),
+       so bindings drop the "Snapshot." prefix and captured snapshots flow into
+       the tab's A/B dropdowns. Modeless — closable mid-capture; the capture
+       keeps running and the tab status mirrors progress.
+       Layout: a vertical label/field FORM (col0 = label, col1 = field). The
+       earlier single-wide-row grid overlapped at high DPI; a vertical form +
+       WrapPanels in the multi-control rows is resolution-robust. -->
+  <DockPanel LastChildFill="True" Margin="12">
+
+    <!-- Footer: error + indeterminate progress + Cancel/Close. -->
+    <StackPanel DockPanel.Dock="Bottom" Spacing="6" Margin="0,10,0,0">
+      <TextBlock Text="{Binding ErrorMessage}"
+                 Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"
+                 IsVisible="{Binding ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+      <ProgressBar IsIndeterminate="True" Height="4" Minimum="0" Maximum="100"
+                   IsVisible="{Binding IsBusy}"/>
+      <DockPanel LastChildFill="True">
+        <Button DockPanel.Dock="Right" Content="Close"
+                Click="OnCloseClicked" MinWidth="80" Margin="6,0,0,0"
+                ToolTip.Tip="Close this window. A running capture keeps going — its progress shows on the Snapshot tab; reopen to watch or Cancel."/>
+        <Button DockPanel.Dock="Right" Content="Cancel capture"
+                Command="{Binding CancelCaptureCommand}" MinWidth="120"
+                IsVisible="{Binding IsBusy}"
+                ToolTip.Tip="Abort the in-progress capture."/>
+        <TextBlock Text="{Binding StatusMessage}"
+                   VerticalAlignment="Center" TextWrapping="Wrap"
+                   FontSize="11" Opacity="0.9"/>
+      </DockPanel>
+    </StackPanel>
+
+    <!-- Capture controls — vertical form. -->
+    <Border Padding="10" Background="#1F808080" CornerRadius="3"
+            VerticalAlignment="Top">
+      <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+            ColumnSpacing="10" RowSpacing="8">
+
+        <!-- Primary actions -->
+        <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
+                    Orientation="Horizontal" Spacing="8">
+          <Button Content="Take Snapshot"
+                  Command="{Binding TakeSnapshotCommand}"
+                  MinWidth="130"/>
+          <Button Content="Clear All"
+                  Command="{Binding ClearAllCommand}"
+                  MinWidth="100"
+                  ToolTip.Tip="Drop every captured snapshot. Frees UI memory. Status line reports the amount freed."/>
+        </StackPanel>
+
+        <!-- Label -->
+        <TextBlock Grid.Row="1" Grid.Column="0" Text="Label:"
+                   VerticalAlignment="Center"/>
+        <TextBox Grid.Row="1" Grid.Column="1"
+                 Text="{Binding PendingLabel, Mode=TwoWay}"
+                 PlaceholderText="(optional — e.g. &quot;before boss&quot;)"/>
+
+        <!-- Scope + assembly picker -->
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Scope:"
+                   VerticalAlignment="Center"/>
+        <DockPanel Grid.Row="2" Grid.Column="1" LastChildFill="True">
+          <AutoCompleteBox DockPanel.Dock="Right" Width="220" Margin="6,0,0,0"
+                    ItemsSource="{Binding KnownScopeAssemblies}"
+                    SelectedItem="{Binding SelectedScopeAssembly, Mode=TwoWay}"
+                    Text="{Binding ScopeAssemblyQuery, Mode=TwoWay}"
+                    FilterMode="Contains"
+                    MinimumPrefixLength="0"
+                    PlaceholderText="＋ add assembly… (type to filter)"
+                    ToolTip.Tip="Pick a game assembly to append to the Scope filter. Populated on connect; type to filter by substring; selecting one adds it to the box on the left (deduped)."/>
+          <TextBox Text="{Binding ScopeAssembliesText, Mode=TwoWay}"
+                   VerticalAlignment="Center"
+                   PlaceholderText="(empty = capture every user assembly. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"/>
+        </DockPanel>
+
+        <!-- Caps (wrap so they never overflow at high DPI) -->
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="Caps:"
+                   VerticalAlignment="Center"/>
+        <WrapPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal">
+          <WrapPanel.Styles>
+            <Style Selector="WrapPanel > :is(Control)">
+              <Setter Property="Margin" Value="0,0,12,4"/>
+            </Style>
+          </WrapPanel.Styles>
+          <TextBlock Text="Instance cap" VerticalAlignment="Center"
+                     ToolTip.Tip="Per-class cap on instances captured per snapshot (max 8192). If a class has more live instances than the cap, the heap-walk-order subset is captured."/>
+          <NumericUpDown Value="{Binding InstanceCap, Mode=TwoWay}"
+                         Minimum="1" Maximum="8192" Increment="100" MinWidth="140"/>
+          <TextBlock Text="Array cap" VerticalAlignment="Center"
+                     ToolTip.Tip="Per-field cap on captured array / List&lt;T&gt; elements (max 4096). Longer arrays are truncated."/>
+          <NumericUpDown Value="{Binding ArrayCap, Mode=TwoWay}"
+                         Minimum="0" Maximum="4096" Increment="50" MinWidth="140"/>
+          <TextBlock Text="Decode budget" VerticalAlignment="Center"
+                     ToolTip.Tip="Total decoded-instance budget across ALL classes (0 = unlimited; server hard-cap 2,000,000). The dominant speed/memory dial. The DLL decodes low-population classes FIRST, so when this budget is reached it truncates the high-population 'noise' classes. Default 50000. A truncated capture shows a ⚠ PARTIAL note in the status line."/>
+          <NumericUpDown Value="{Binding InstanceDecodeBudget, Mode=TwoWay}"
+                         Minimum="0" Maximum="2000000" Increment="25000" MinWidth="170"/>
+        </WrapPanel>
+
+        <!-- Array-element capture row -->
+        <TextBlock Grid.Row="4" Grid.Column="0" Text="Arrays:"
+                   VerticalAlignment="Center"/>
+        <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal">
+          <WrapPanel.Styles>
+            <Style Selector="WrapPanel > :is(Control)">
+              <Setter Property="Margin" Value="0,0,12,4"/>
+            </Style>
+          </WrapPanel.Styles>
+          <CheckBox Content="Capture array element fields"
+                    VerticalAlignment="Center"
+                    IsChecked="{Binding CaptureArrayElementFields, Mode=TwoWay}"
+                    ToolTip.Tip="Capture each reference-type array element's own fields one level deep (so Class Pivot can pivot array elements by an inner field). OFF by default — multiplies capture size. On 64-bit captures every reference array; on 32-bit disabled unless you name targets below (OOM safety)."/>
+          <TextBlock Text="Elem field cap" VerticalAlignment="Center"
+                     ToolTip.Tip="Max fields captured per array element (server hard-cap 64). Only used when 'Capture array element fields' is on."/>
+          <NumericUpDown Value="{Binding ElementFieldCap, Mode=TwoWay}"
+                         Minimum="1" Maximum="64" Increment="1" MinWidth="120"/>
+          <CheckBox Content="Capture static values"
+                    VerticalAlignment="Center"
+                    IsChecked="{Binding CaptureStaticFieldValues, Mode=TwoWay}"
+                    ToolTip.Tip="Capture IL2CPP static-field VALUES (default off — static name/type/offset metadata is always captured). No effect on Mono."/>
+          <CheckBox Content="Include system assemblies"
+                    VerticalAlignment="Center"
+                    IsChecked="{Binding IncludeSystemAssemblies, Mode=TwoWay}"
+                    IsEnabled="{Binding IncludeSystemToggleEnabled}"
+                    ToolTip.Tip="Only applies to FULL-capture mode (Scope empty). When unchecked (default), full capture skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus. Disabled when you have named specific assemblies in Scope."/>
+        </WrapPanel>
+
+        <!-- Targets -->
+        <TextBlock Grid.Row="5" Grid.Column="0" Text="Targets:"
+                   VerticalAlignment="Center"/>
+        <TextBox Grid.Row="5" Grid.Column="1"
+                 Text="{Binding ArrayElementTargetsText, Mode=TwoWay}"
+                 PlaceholderText="(x64: blank = all ref arrays. x86: required, e.g. Mortal.Core.GameStat._statAdditionData)"
+                 ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' or 'Namespace.Class.fieldName', comma/semicolon separated. Required on 32-bit; leave blank on 64-bit for blanket capture."/>
+
+        <!-- Game-process memory + bitness -->
+        <TextBlock Grid.Row="6" Grid.Column="0" Text="Game:"
+                   VerticalAlignment="Center"
+                   IsVisible="{Binding GameMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+        <TextBlock Grid.Row="6" Grid.Column="1"
+                   Text="{Binding GameMemoryBanner}"
+                   IsVisible="{Binding GameMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                   VerticalAlignment="Center"
+                   Foreground="#60C0FF" FontSize="11"
+                   TextWrapping="Wrap" MaxLines="2"
+                   TextTrimming="CharacterEllipsis"
+                   ToolTip.Tip="{Binding GameMemoryBanner}"/>
+      </Grid>
+    </Border>
+  </DockPanel>
+</Window>

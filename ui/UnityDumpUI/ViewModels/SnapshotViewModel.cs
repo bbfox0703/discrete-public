@@ -189,7 +189,10 @@ public sealed partial class SnapshotViewModel : ObservableObject
             await AutoPruneAndMaybeVacuumAsync(ct).ConfigureAwait(true);
 
             await RefreshDbStatusAsync(ct).ConfigureAwait(true);
-            StatusMessage = $"Snapshot DB: {fileName} — {Snapshots.Count:N0} saved snapshot(s), {FormatMemory(_dbTotalBytes)}.";
+            // The DB name / saved-count / size already shows in the persistent
+            // DbStatusLine strip on the tab, so don't restate it here (it used to
+            // duplicate that row). Keep StatusMessage for capture/diff feedback.
+            StatusMessage = "Open “📸 New snapshot…” to capture; pick A and B to diff.";
             _logger.Write(SnapshotStore.LogCategory,
                 $"opened per-game DB {fileName} for buildId={gameBuildId} ({Snapshots.Count} saved)");
         }
@@ -914,7 +917,17 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(DiffCommand))]
     [NotifyCanExecuteChangedFor(nameof(DropSnapshotACommand))]
     [NotifyCanExecuteChangedFor(nameof(DropSnapshotBCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CancelCaptureCommand))]
     private bool _isBusy;
+
+    /// <summary>Cancel an in-flight capture. The capture loop already honours
+    /// the shared <c>_cts</c> (a new capture cancels the prior one) and swallows
+    /// <see cref="OperationCanceledException"/>; this just exposes the same
+    /// cancellation to the CaptureWindow's Cancel button. Enabled only while
+    /// <see cref="IsBusy"/>.</summary>
+    [RelayCommand(CanExecute = nameof(CanCancelCapture))]
+    private void CancelCapture() => _cts?.Cancel();
+    private bool CanCancelCapture() => IsBusy;
 
     [ObservableProperty] private string _statusMessage = "Press Take Snapshot to capture the game's current managed-state. Two snapshots needed for a diff.";
     [ObservableProperty] private string? _errorMessage;

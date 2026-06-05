@@ -1803,139 +1803,64 @@
           <TabItem Header="Snapshot" IsVisible="{Binding ExperimentalEnabled}">
             <DockPanel Margin="6">
 
-              <!-- Top: capture controls -->
-              <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
-                      Background="#1F808080" CornerRadius="3">
-                <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                      RowDefinitions="Auto,Auto,Auto,Auto">
-
-                  <!-- Row 0 — label + scope + caps + Take button -->
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Label:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"/>
-                  <TextBox Grid.Row="0" Grid.Column="1"
-                           Text="{Binding Snapshot.PendingLabel, Mode=TwoWay}"
-                           PlaceholderText="(optional — e.g. &quot;before boss&quot;)"
-                           Margin="0,0,12,0"/>
-
-                  <TextBlock Grid.Row="0" Grid.Column="2" Text="Instance cap:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"
-                             ToolTip.Tip="Per-class cap on instances captured per snapshot (max 8192, raised 2026-05-27 from 1024). If a class has more live instances than the cap, the heap-walk-order subset is captured. Different snapshots may capture different subsets — frequently re-allocated objects (e.g. UI text wrappers) often surface as added+removed pairs in the diff rather than 'changed', because the instance addresses differ between snapshots.&#x0a;&#x0a;Note (DLL #648): the bulk heap walk is a 2-level scan (qword → vtable → class) and can pick up non-object memory holding vtable-pointer values as fake 'instances' with garbage values. Filters at the DLL (MEM_MAPPED skip + 8-byte alignment) cut the noise, but on dense classes the cap may still need to be raised above the (live count + ~50%) headroom to capture every real instance. If the debug 'list captured instances' shows captured-count well above live findInstances and your target address isn't in the captured set, bump the cap."/>
-                  <NumericUpDown Grid.Row="0" Grid.Column="3"
-                                 Value="{Binding Snapshot.InstanceCap, Mode=TwoWay}"
-                                 Minimum="1" Maximum="8192" Increment="100"
-                                 MinWidth="150" Margin="0,0,12,0"/>
-
-                  <TextBlock Grid.Row="0" Grid.Column="4" Text="Array cap:"
-                             VerticalAlignment="Center" Margin="0,0,6,0"
-                             ToolTip.Tip="Per-field cap on captured array / List&lt;T&gt; elements (max 4096, raised 2026-05-27 from 256). Longer arrays are truncated; the field's row shows '[N elements, captured M]'."/>
-                  <NumericUpDown Grid.Row="0" Grid.Column="5"
-                                 Value="{Binding Snapshot.ArrayCap, Mode=TwoWay}"
-                                 Minimum="0" Maximum="4096" Increment="50"
-                                 MinWidth="150" Margin="0,0,12,0"/>
-
-                  <Button Grid.Row="0" Grid.Column="6"
-                          Content="Take Snapshot"
-                          Command="{Binding Snapshot.TakeSnapshotCommand}"
-                          MinWidth="120" Margin="0,0,6,0"/>
-                  <Button Grid.Row="0" Grid.Column="7" Grid.ColumnSpan="2"
-                          Content="Clear All"
-                          Command="{Binding Snapshot.ClearAllCommand}"
-                          MinWidth="100"
-                          ToolTip.Tip="Drop every captured snapshot. Frees UI memory. Status line reports the amount freed."/>
-
-                  <!-- Row 1 — scope assemblies + picker + include-system toggle.
-                       DockPanel so the assembly picker (a ComboBox) keeps a
-                       fixed width while the free-text scope box fills the rest. -->
-                  <TextBlock Grid.Row="1" Grid.Column="0" Text="Scope:"
-                             VerticalAlignment="Center" Margin="0,6,6,0"/>
-                  <DockPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="6"
-                             Margin="0,6,12,0" LastChildFill="True">
-                    <!-- Filterable assembly picker. AutoCompleteBox (not
-                         ComboBox) so a 50+ assembly list is narrowed by
-                         typing a substring rather than scrolled. Picking a
-                         suggestion appends it to the Scope box (deduped) and
-                         clears the filter text. -->
-                    <AutoCompleteBox DockPanel.Dock="Right" Width="220" Margin="6,0,0,0"
-                              ItemsSource="{Binding Snapshot.KnownScopeAssemblies}"
-                              SelectedItem="{Binding Snapshot.SelectedScopeAssembly, Mode=TwoWay}"
-                              Text="{Binding Snapshot.ScopeAssemblyQuery, Mode=TwoWay}"
-                              FilterMode="Contains"
-                              MinimumPrefixLength="0"
-                              PlaceholderText="＋ add assembly… (type to filter)"
-                              ToolTip.Tip="Pick a game assembly to append to the Scope filter. Populated on connect; type to filter the list by substring; selecting one adds it to the box on the left (deduped)."/>
-                    <TextBox Text="{Binding Snapshot.ScopeAssembliesText, Mode=TwoWay}"
-                             VerticalAlignment="Center"
-                             PlaceholderText="(empty = capture every user assembly. Or comma-separate: Assembly-CSharp, Mortal.Core, ...)"/>
-                  </DockPanel>
-                  <CheckBox Grid.Row="1" Grid.Column="7" Grid.ColumnSpan="2"
-                            Content="Include system assemblies"
-                            IsChecked="{Binding Snapshot.IncludeSystemAssemblies, Mode=TwoWay}"
-                            IsEnabled="{Binding Snapshot.IncludeSystemToggleEnabled}"
-                            Margin="0,6,0,0"
-                            ToolTip.Tip="Only applies to FULL-capture mode (Scope empty). When unchecked (default), full capture skips mscorlib, System.*, Microsoft.*, netstandard, Mono.*, UnityEngine.*, Unity.*, Fungus — engine + .NET system + popular-support assemblies that flood the snapshot with non-gameplay state. Check to keep everything.&#x0a;&#x0a;Disabled when you have named specific assemblies in Scope — that list is already an explicit allow-list, so this toggle has no effect there."/>
-
-                  <!-- Row 2 — Phase 29f Layer B: reference-array element inner-field
-                       capture. A self-contained DockPanel (spanning all columns) so
-                       the long checkbox label keeps its natural width instead of
-                       being crushed into the narrow shared Auto column (which made
-                       it wrap one char per line). Targets box fills the remainder. -->
-                  <DockPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="9"
-                             Margin="0,6,0,0" LastChildFill="True">
-                    <CheckBox DockPanel.Dock="Left"
-                              Content="Capture array element fields"
-                              VerticalAlignment="Center" Margin="0,0,16,0"
-                              IsChecked="{Binding Snapshot.CaptureArrayElementFields, Mode=TwoWay}"
-                              ToolTip.Tip="Capture each reference-type array element's own fields one level deep, so the Class Pivot tab can pivot array elements by an inner field (e.g. StatConvertCollectionData[] keyed by _propertyID). OFF by default — it multiplies capture size. On 64-bit this captures every reference array (blanket); on 32-bit it is disabled unless you name targets below (OOM safety)."/>
-                    <TextBlock DockPanel.Dock="Left" Text="Elem field cap:"
-                               VerticalAlignment="Center" Margin="0,0,6,0"
-                               ToolTip.Tip="Max fields captured per array element (server hard-cap 64). Only used when 'Capture array element fields' is on."/>
-                    <NumericUpDown DockPanel.Dock="Left"
-                                   Value="{Binding Snapshot.ElementFieldCap, Mode=TwoWay}"
-                                   Minimum="1" Maximum="64" Increment="1"
-                                   Width="120" Margin="0,0,16,0"/>
-                    <CheckBox DockPanel.Dock="Left"
-                              Content="Capture static values"
-                              VerticalAlignment="Center" Margin="0,0,16,0"
-                              IsChecked="{Binding Snapshot.CaptureStaticFieldValues, Mode=TwoWay}"
-                              ToolTip.Tip="Capture IL2CPP static-field VALUES (default off — static name/type/offset metadata is always captured). Statics are a small fraction of snapshot memory, so this is a modest lever. No effect on Mono (which always captures static metadata only to avoid a runtime freeze)."/>
-                    <TextBlock DockPanel.Dock="Left" Text="Targets:"
-                               VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <TextBox Text="{Binding Snapshot.ArrayElementTargetsText, Mode=TwoWay}"
-                             VerticalAlignment="Center"
-                             PlaceholderText="(x64: blank = all ref arrays. x86: required, e.g. Mortal.Core.GameStat._statAdditionData)"
-                             ToolTip.Tip="Optional inner-pivot targets — 'Namespace.Class' (all its reference arrays) or 'Namespace.Class.fieldName', comma/semicolon separated. Required to enable array-element capture on 32-bit targets; leave blank on 64-bit for blanket capture."/>
-                  </DockPanel>
-
-                  <!-- Row 3 — Phase 30a decode budget + the game-memory banner
-                       inline (SS2): the budget control sits left; the bitness /
-                       memory banner fills the remainder so it no longer needs
-                       its own stacked Border row. The banner caps at 2 lines
-                       (MaxLines) — it folds at most one line on a narrow window
-                       and ellipsizes beyond, with the full text on hover. The
-                       budget's explanation moved from a visible grey line to
-                       the NumericUpDown's tooltip to reclaim vertical space. -->
-                  <DockPanel Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="9"
-                             Margin="0,6,0,0" LastChildFill="True">
-                    <TextBlock DockPanel.Dock="Left" Text="Decode budget:"
-                               VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <NumericUpDown DockPanel.Dock="Left"
-                                   Value="{Binding Snapshot.InstanceDecodeBudget, Mode=TwoWay}"
-                                   Minimum="0" Maximum="2000000" Increment="25000"
-                                   Width="180" Margin="0,0,16,0"
-                                   ToolTip.Tip="Total decoded-instance budget across ALL classes (0 = unlimited; server hard-cap 2,000,000). The dominant speed/memory dial — decode time and game/UI memory scale with total decoded instances. The DLL decodes low-population classes FIRST, so when this budget is reached it truncates the high-population 'noise' classes (Node/Entry/containers) and keeps the low-population game-state classes. Default 50000 (live-smoke: ~65 s, game +0.7 GB, UI ~3.3 GB on a 22K-class IL2CPP game). Raise toward a complete capture if you have the RAM; lower for faster/leaner partial snapshots. A truncated capture shows a ⚠ PARTIAL note in the status line."/>
-                    <!-- Game-process memory + bitness banner (was a separate
-                         stacked Border). Color suffix (⚠ → ⛔) lives in the
-                         text. Hidden until the handshake sets GamePointerSize. -->
-                    <TextBlock Text="{Binding Snapshot.GameMemoryBanner}"
-                               IsVisible="{Binding Snapshot.GameMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
-                               VerticalAlignment="Center"
-                               Foreground="#60C0FF" FontSize="11"
-                               TextWrapping="Wrap" MaxLines="2"
-                               TextTrimming="CharacterEllipsis"
-                               ToolTip.Tip="{Binding Snapshot.GameMemoryBanner}"/>
-                  </DockPanel>
-                </Grid>
-              </Border>
+              <!-- Top action row (2026-06-05): capture config moved to the
+                   modeless CaptureWindow (📸 New snapshot…); the Snapshot-debug
+                   flyout sits on the SAME row so neither steals a line from the
+                   result grid. Progress + Cancel live in the capture window; the
+                   status strip below mirrors it. -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="8" Margin="0,0,0,6">
+                <Button Content="📸 New snapshot…"
+                        Click="OnNewSnapshotClicked"
+                        ToolTip.Tip="Open the capture window: caps, scope, array-element fields, decode budget, targets, and Take Snapshot. Opens as a separate window so the diff result grid below stays full-height. The captured snapshot lands in the A/B dropdowns."/>
+                <Button Content="🔍 Snapshot debug — instance &amp; class lookup ▾"
+                        ToolTip.Tip="Open a diagnostic flyout: look up a captured instance address or list a class's captured instances across the selected A/B snapshots. Opens as an overlay so it doesn't shrink the result grid.">
+                  <Button.Flyout>
+                    <Flyout Placement="Bottom">
+                      <Border Padding="6" Background="#1F808080" CornerRadius="3" Width="720">
+                        <DockPanel>
+                          <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,0,0,6">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                              <TextBlock Text="Address:" VerticalAlignment="Center" Width="60"/>
+                              <TextBox Text="{Binding Snapshot.DebugLookupAddress, Mode=TwoWay}"
+                                       Width="280"
+                                       FontFamily="Consolas,Menlo,monospace"
+                                       PlaceholderText="e.g. 0x000000002986ACC0 or 2986ACC0"/>
+                              <Button Content="Compare in A &amp; B"
+                                      Command="{Binding Snapshot.DebugLookupInstanceCommand}"
+                                      MinWidth="140"
+                                      ToolTip.Tip="Normalises the address, then walks both selected snapshots' FieldIndex for matching keys. Output below shows every captured field for this instance + per-field changed/added/removed/unchanged tally."/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                              <TextBlock Text="Class:" VerticalAlignment="Center" Width="60"/>
+                              <TextBox Text="{Binding Snapshot.DebugLookupClass, Mode=TwoWay}"
+                                       Width="280"
+                                       PlaceholderText="e.g. Mortal.Core.GameStat or just GameStat"/>
+                              <Button Content="List captured instances"
+                                      Command="{Binding Snapshot.DebugLookupClassInstancesCommand}"
+                                      MinWidth="170"
+                                      ToolTip.Tip="Walks each snapshot's Classes list for matches, dumps every captured instance address sorted numerically with a few spotlight fields (_name, _value). Use to confirm whether the snapshot saw the full instance set — e.g. 'live game has 152 GameStat instances, snap #2 only captured 80, and 0x2962ACC0 isn't among them'."/>
+                            </StackPanel>
+                            <TextBlock VerticalAlignment="Center" FontSize="11" Opacity="0.7"
+                                       Text="Pick A and B above first — empty selection = empty result."/>
+                          </StackPanel>
+                          <TextBox Text="{Binding Snapshot.DebugLookupOutput}"
+                                   IsReadOnly="True"
+                                   AcceptsReturn="True"
+                                   FontFamily="Consolas,Menlo,monospace"
+                                   FontSize="11"
+                                   TextWrapping="NoWrap"
+                                   MinHeight="200"
+                                   MaxHeight="400"
+                                   VerticalContentAlignment="Top"
+                                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                   ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+                        </DockPanel>
+                      </Border>
+                    </Flyout>
+                  </Button.Flyout>
+                </Button>
+              </StackPanel>
 
               <!-- Status + error. Two-row layout: Diff/Take/Drop summary
                    on top (overwritten by command actions), live filter
@@ -1970,6 +1895,12 @@
                           Click="OnSnapshotSettingsClicked"
                           Padding="6,2"
                           ToolTip.Tip="Configure snapshot DB directory, auto-save, and auto-prune threshold."/>
+                  <!-- Cumulative UI-memory of held snapshots, folded into the DB
+                       strip (2026-06-05) so store + memory info is one row. -->
+                  <TextBlock Text="{Binding Snapshot.TotalSnapshotsMemoryBanner}"
+                             FontSize="11" VerticalAlignment="Center" Opacity="0.75"
+                             Margin="8,0,0,0" TextWrapping="NoWrap"
+                             IsVisible="{Binding Snapshot.TotalSnapshotsMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                 </StackPanel>
               </Border>
 
@@ -2002,12 +1933,8 @@
               <Border DockPanel.Dock="Top" Padding="6" Margin="0,0,0,6"
                       Background="#1F808080" CornerRadius="3">
                 <StackPanel Spacing="4">
-                  <!-- Cumulative memory banner — visible only after at least
-                       one snapshot exists. Shows "N snapshots — ~X GB total UI
-                       memory" so the user can decide when to drop. -->
-                  <TextBlock Text="{Binding Snapshot.TotalSnapshotsMemoryBanner}"
-                             FontSize="11" Opacity="0.75"
-                             IsVisible="{Binding Snapshot.TotalSnapshotsMemoryBanner, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                  <!-- (Cumulative held-snapshot memory banner moved into the DB
+                       strip above — 2026-06-05.) -->
                   <Grid ColumnDefinitions="Auto,*,Auto,Auto,*,Auto,Auto,Auto"
                         RowDefinitions="Auto">
                     <TextBlock Grid.Column="0" Text="A:"
@@ -2098,7 +2025,15 @@
               <Border Padding="6"
                       Background="#1F808080" CornerRadius="3">
                 <StackPanel Spacing="6">
-                  <StackPanel Orientation="Horizontal" Spacing="12">
+                  <StackPanel.Styles>
+                    <!-- WrapPanel has no Spacing; give wrapped children a uniform
+                         gap so the filter rows WRAP instead of overflowing the
+                         window at high DPI (2026-06-05). -->
+                    <Style Selector="WrapPanel > :is(Control)">
+                      <Setter Property="Margin" Value="0,0,12,4"/>
+                    </Style>
+                  </StackPanel.Styles>
+                  <WrapPanel Orientation="Horizontal">
                     <CheckBox Content="Hide synthetic types"
                               IsChecked="{Binding Snapshot.HideSyntheticTypes, Mode=TwoWay}"
                               ToolTip.Tip="Hide rows whose class name starts with '&lt;' (compiler-generated: &lt;Module&gt;, &lt;&gt;f__AnonymousType*, &lt;&gt;c, &lt;Start&gt;d__N, async-state-machines). These are usually false-positive 'instances' from wide-scan picking up metadata references — not real game objects."/>
@@ -2141,9 +2076,9 @@
                     <CheckBox Content="Apply field exclusions"
                               IsChecked="{Binding Snapshot.HideNoisyFields, Mode=TwoWay}"
                               ToolTip.Tip="When ON, field names you've excluded via the right-side stats panel are filtered out of the result. Turn OFF to peek at them again without losing the exclusion list."/>
-                  </StackPanel>
+                  </WrapPanel>
 
-                  <StackPanel Orientation="Horizontal" Spacing="12">
+                  <WrapPanel Orientation="Horizontal">
                     <TextBlock Text="Class:" VerticalAlignment="Center"/>
                     <TextBox Text="{Binding Snapshot.ClassFilterText, Mode=TwoWay}"
                              PlaceholderText="substring (case-insensitive)"
@@ -2167,60 +2102,13 @@
                             Command="{Binding Snapshot.ClearValueRangeFilterCommand}"
                             MinWidth="60"
                             ToolTip.Tip="Reset Min and Max to empty (unbounded). NumericUpDown can't go back to empty via spinner clicks, so this is the only way out once a value is typed."/>
-                  </StackPanel>
+                  </WrapPanel>
                 </StackPanel>
               </Border>
               </Expander>
 
-              <!-- Phase 29-polish (2026-05-28) — instance lookup diagnostic.
-                   Collapsed by default; expand to type an address and dump
-                   everything both snapshots captured for that instance,
-                   side-by-side. Built for the 銀兩 GameStat case where the
-                   address is stable across snapshots but the value change
-                   isn't surfacing in the regular diff result. -->
-              <Expander DockPanel.Dock="Top" Header="🔍 Snapshot debug — instance &amp; class lookup"
-                        IsExpanded="False" Margin="0,0,0,6">
-                <Border Padding="6" Background="#1F808080" CornerRadius="3">
-                  <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,0,0,6">
-                      <StackPanel Orientation="Horizontal" Spacing="6">
-                        <TextBlock Text="Address:" VerticalAlignment="Center" Width="60"/>
-                        <TextBox Text="{Binding Snapshot.DebugLookupAddress, Mode=TwoWay}"
-                                 Width="280"
-                                 FontFamily="Consolas,Menlo,monospace"
-                                 PlaceholderText="e.g. 0x000000002986ACC0 or 2986ACC0"/>
-                        <Button Content="Compare in A &amp; B"
-                                Command="{Binding Snapshot.DebugLookupInstanceCommand}"
-                                MinWidth="140"
-                                ToolTip.Tip="Normalises the address, then walks both selected snapshots' FieldIndex for matching keys. Output below shows every captured field for this instance + per-field changed/added/removed/unchanged tally."/>
-                      </StackPanel>
-                      <StackPanel Orientation="Horizontal" Spacing="6">
-                        <TextBlock Text="Class:" VerticalAlignment="Center" Width="60"/>
-                        <TextBox Text="{Binding Snapshot.DebugLookupClass, Mode=TwoWay}"
-                                 Width="280"
-                                 PlaceholderText="e.g. Mortal.Core.GameStat or just GameStat"/>
-                        <Button Content="List captured instances"
-                                Command="{Binding Snapshot.DebugLookupClassInstancesCommand}"
-                                MinWidth="170"
-                                ToolTip.Tip="Walks each snapshot's Classes list for matches, dumps every captured instance address sorted numerically with a few spotlight fields (_name, _value). Use to confirm whether the snapshot saw the full instance set — e.g. 'live game has 152 GameStat instances, snap #2 only captured 80, and 0x2962ACC0 isn't among them'."/>
-                      </StackPanel>
-                      <TextBlock VerticalAlignment="Center" FontSize="11" Opacity="0.7"
-                                 Text="Pick A and B above first — empty selection = empty result."/>
-                    </StackPanel>
-                    <TextBox Text="{Binding Snapshot.DebugLookupOutput}"
-                             IsReadOnly="True"
-                             AcceptsReturn="True"
-                             FontFamily="Consolas,Menlo,monospace"
-                             FontSize="11"
-                             TextWrapping="NoWrap"
-                             MinHeight="200"
-                             MaxHeight="400"
-                             VerticalContentAlignment="Top"
-                             ScrollViewer.HorizontalScrollBarVisibility="Auto"
-                             ScrollViewer.VerticalScrollBarVisibility="Auto"/>
-                  </DockPanel>
-                </Border>
-              </Expander>
+              <!-- Snapshot-debug flyout moved up to the top action row
+                   (2026-06-05), sharing a line with “📸 New snapshot…”. -->
 
               <!-- Diff result area: DataGrid + collapsible stats panel.
                    GridSplitter lets the user resize; the stats panel can

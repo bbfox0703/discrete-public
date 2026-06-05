@@ -76,6 +76,11 @@
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
 
+**2026-06-05 — Snapshot tab 重構 + field-object 壓縮**(UI/Core-only,712 UI tests green、AOT 0 warnings,**待實機目視 + 記憶體量測**):
+- **field-object 壓縮**(見 Open Backlog 📸):`SnapshotFieldEntry`/`SnapshotArrayElement` 罕用欄位搬進 lazy `FieldExtras`/`ElementExtras`、`is_enum`/`is_value_type` 打包進 flags byte;160 B→~88 B / 96 B→~56 B,預估省 ~0.8–1 GB 常駐。public 屬性 + `[JsonPropertyName]` 全保留(forwarding)→ source-gen round-trip + diff/SPC/pivot/export 零變動,舊 `.db` 相容。+7 `SnapshotFieldCompactionTests`。
+- **Snapshot tab UI 重構(4K/225% 太擠)**:整個 Capture 設定區搬進新的 **modeless `CaptureWindow`**(`📸 New snapshot…` 按鈕叫出,共用 `Snapshot` VM → 結果進 A/B;進度 + 新 `CancelCaptureCommand` 在視窗內,可關掉退背景,tab 狀態列鏡像)。Tab 只留 New-snapshot 鈕 + DB 列(合併「held memory」+ 砍掉與 `DbStatusLine` 重複的 idle `StatusMessage`)+ A/B + Diff + Filters(改 `WrapPanel` 不再橫向溢出)+ 結果 grid(拿回高度)。原則:**設定/動作 → 視窗;結果/分析 → 留主畫面**(見 [ui-spec.md](ui-spec.md))。
+- **下一步(依使用者順序)**:Value Search 打通 `List<T>-of-structs` reverse-lookup → 再做 snapshot 端 List/集合元素展開(讓 snapshot/SPC 也看得到 `List<struct>[i].field`)。
+
 **2026-06-04 — Phase 12e — Proxy Deploy 支援 x86 Mono**(UI/Core-only,build #1111,705 UI tests green):
 - 12d 早已把 x86 proxy + x86 Mono backend 產到 `dist/x86/` 且 direct-inject 實機驗過,但 **Proxy Deploy 視窗** 仍把所有 x86 遊戲 gate 成 `Unsupported`(偵測得到、但裝/更新被擋,且預設隱藏)。純 UI/installer 缺口。
 - 修:(1) `UnityGameEntry.IsSupported` 放寬成允許 **x86 Mono**(x86 IL2CPP 維持不支援 — 無 32-bit IL2CPP backend)。(2) `WindowsProxyInstaller` 讀目標 .exe PE machine field (`TargetIsX86`),x86 目標改從 `dist/x86/` 取來源,只要求/複製 x86 proxy + `Discrete-Mono.dll`(略過 `Discrete-IL2CPP.dll`);DetectSync 的 source-version 也讀對應 `dist/x86/` proxy → x86 列不再誤報 outdated。**C++ 零改動**。

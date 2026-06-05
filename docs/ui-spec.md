@@ -291,9 +291,19 @@ The Inspector grid's Name/Type/Value floors were trimmed (220/160/320 →
 | `MethodOverloadsWindow` | Yes | Phase 18c — list every overload of a method, multi-select for AOB AA-script generation. |
 | `MethodCallWindow` | Yes | Phase 19d — invoke a single method overload with args + see result / exception. |
 | `SnapshotSettingsWindow` | Yes | Phase 29c-7 — configure snapshot DB directory (with `IStorageProvider` folder picker), AutoSave-on-capture toggle, AutoPrune threshold (GB). Returns the updated `UserSettings` via `Close(result)`; caller passes it to `SnapshotViewModel.ApplySettingsAsync` which persists + may reopen the DB. |
+| `CaptureWindow` | No (modeless) | 2026-06-05 — snapshot capture configuration (caps / scope / array-element fields / decode budget / targets / static) + `Take Snapshot` + indeterminate progress + `Cancel capture` (`CancelCaptureCommand`). Opened by the tab's `📸 New snapshot…` button (`OnNewSnapshotClicked`, single-instance: re-`Activate()` if already open). **Binds the SHARED `MainWindowViewModel.Snapshot` instance** (not a fresh VM) so captured snapshots flow into the tab's A/B dropdowns and progress mirrors on the tab; closable mid-capture (the capture keeps running). |
 
-All six share an icon (`avares://DiscreteUI/Assets/MainIcon.ico`)
+All windows share an icon (`avares://DiscreteUI/Assets/MainIcon.ico`)
 and the Inter font set up in `App.axaml`.
+
+> **Layout principle (codified 2026-06-05):** "config/action → window;
+> result/analysis → on the tab with max space." Set-once configuration and
+> occasional actions (capture setup, method invoke, settings) belong in
+> buttons-that-open-windows so the primary result surfaces (diff / inspector /
+> value-search grids) keep full height. This is why the Snapshot capture block
+> moved off the tab into `CaptureWindow`. Filter rows use `WrapPanel` (which has
+> no `Spacing` — give children a margin via a scoped `Style`) so they wrap
+> instead of overflowing at high DPI.
 
 ### Snapshot tab (Phase 29a-c)
 

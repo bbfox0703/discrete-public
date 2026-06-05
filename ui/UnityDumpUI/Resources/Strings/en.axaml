@@ -106,6 +106,9 @@
        struct / collection rows (those need GC-root marshaling, deferred). -->
   <sys:String x:Key="Inspector.WriteFieldMenu">Write value…</sys:String>
 
+  <!-- Snapshot capture window (capture config moved off the tab). -->
+  <sys:String x:Key="Capture.Title">New snapshot — capture configuration</sys:String>
+
   <!-- Phase 21b — Field write modal. -->
   <sys:String x:Key="FieldWrite.Title">Write field value</sys:String>
   <sys:String x:Key="FieldWrite.FieldLabel">Field</sys:String>
