@@ -38,6 +38,7 @@
 - [x] **P2 SIMD inner loop** — ✅ build #839(2026-05-30):AVX2 runtime-gated fast-path — `ScanForString` anchor scan(`cmpeq_epi8`,x64+x86)+ `ScanForPointer` 4-qword `cmpeq_epi64`(x64)。SIMD 當候選 finder + 原純量精確驗證 → 結果逐 byte 相同;非 AVX2 CPU 走 scalar fallback。兩 DLL build clean、603 tests green。**Live-smoke 待辦**(原生 scan 無自動測試覆蓋)。
 - [ ] **Mono `FindAllInstances` 平行化** — P1 follow-up;Mono 端仍單執行緒(IL2CPP 已平行)。
 - [ ] **P3 VirtualQuery cache** — 低優先,P1 已大幅降低需求。
+- [~] **IL2CPP value-scan:value-type 陣列 / `List<T>` 元素 reverse-lookup** — ✅ **safe + bounded 版 shipped(dev `a00dcf1`,2026-06-05,DLL-only)**,但**尚未真正解到目標值**。做法:動態校準 `offsetof(Il2CppClass, element_class)`(仿 `IL2CPPStaticFieldsOffset`)→ 對 index-dropped candidate 用 **`SafeReadBytes` 讀 element_class 欄位**驗證是否為「element 在 classSet 的 value-type 陣列」(**從不對未驗證指標呼叫 runtime API** —— 前一版那樣做會 **CTD**)→ `ResolveArrayElementSafe` 輸出 `ElementType[idx].member`。fallback 只在 `revIndex.Lookup` miss 時跑;perf 靠 **global negative memo + 1024B window + 512K hard cap**(前一版第一次掃 ~300s,現 bounded)。**Live(Utawarerumono):無 CTD、不再暴衝;但 `count_=56` 仍沒解到** —— 主因很可能是**上面那條 `kRawScanCap=50000`**:`56` 太常見(~49K candidates),raw scan 截斷,目標 address 根本沒被掃到(與 array 解析無關)。**完整解 = Option A(未做)**:在 `ReverseLookupIndex::Build` 時把 value-type 陣列 base 一起收進 index → 每 candidate O(log N),免 window/cap 限制、涵蓋全部;但會動到 hot heap-walk,需另行設計 + 量測。Mono 待辦(BDWGC freeze)。
 - [ ] **Value Search 結果改 stream-to-UI + 使用者可設記憶體預算(lift `kRawScanCap=50000`)** — 動機:(1)50000 raw 上限對某些 value(出現在大量陣列的常見數字)可能不夠,使用者要能設更大;(2)目前 candidate 清單存在 **注入 DLL 的 in-process 記憶體**(`ValueScanSession`),對 **32-bit Mono** 尤其危險 — DLL 與遊戲共用受限位址空間(~2-4 GB),大結果集會擠爆遊戲記憶體 → 不適合在 DLL 端無限放大 cap。**設計方向**:`beginValueScan`/`refineValueScan` 改 **streaming**,DLL 端只保留 minimal working set(或分批 emit),把 candidate 主體 **串到 UI process** 由 UI 持有;UI 提供「scan data 記憶體預算」設定(例如 1000 MB),超量再 spill-to-disk(比照 Phase 30 snapshot `UI stream-to-disk` 的作法)。Refine 仍需 DLL 重讀每個 address 的現值 → 要嘛 UI 把 address 清單批次回送 DLL 比對,要嘛 DLL 端保留「address-only」精簡清單(去掉 per-candidate metadata 字串,whatIsAt 結果可延後/惰性解析)。**風險**:pipe 吞吐(數十萬筆 row)、refine round-trip 設計、UI grid 對大清單的虛擬化。**現況 stopgap**:UI Limit 已 `ClipValueToMinMax` 夾到 50000 + tooltip 說明。參考 [snapshot-streaming-dedup.md](snapshot-streaming-dedup.md)(Phase 30 stream-to-disk 既有作法)。
 
 ### 📸 Snapshot line — 詳見 [snapshot-streaming-dedup.md](snapshot-streaming-dedup.md) + [archive/plan-archive-phases-29-30.md](archive/plan-archive-phases-29-30.md)
@@ -75,6 +76,11 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-06-05 — IL2CPP value-scan 陣列/`List<T>` 元素 reverse-lookup(safe rewrite)**(DLL-only,`a00dcf1`,712 UI tests green,**部分達成**):
+- 讓 Value Search 對「落在 value-type 陣列元素內」的命中(含 `List<T>._items`)解析成 `ElementType[idx].member`,而非當 non-managed 丟掉。**安全關鍵**:對未驗證指標只用 `SafeReadBytes`,所有 runtime API 只打 classSet-validated 的 element class(前一版對垃圾指標呼叫 `il2cpp_class_*` → **CTD**,已記取)。
+- 動態校準 `element_class` offset(仿 `IL2CPPStaticFieldsOffset`)、`WhatIsAtAcceptingArrays` 2nd-chance fallback、`NameValueStructMember` 抽共用。perf:negative memo + 1024B window + 512K cap(前一版 ~300s → bounded)。
+- **Live:無 CTD、不暴衝;但目標常見值 `56` 因 `kRawScanCap=50000` 截斷,address 沒被掃到 → 仍找不到**。完整解見 Open Backlog 的 Option A(index 整合)+ raw-cap streaming 兩條。**未 merge 前已 dev 驗無 CTD**。
 
 **2026-06-05 — Snapshot tab 重構 + field-object 壓縮**(UI/Core-only,712 UI tests green、AOT 0 warnings,**待實機目視 + 記憶體量測**):
 - **field-object 壓縮**(見 Open Backlog 📸):`SnapshotFieldEntry`/`SnapshotArrayElement` 罕用欄位搬進 lazy `FieldExtras`/`ElementExtras`、`is_enum`/`is_value_type` 打包進 flags byte;160 B→~88 B / 96 B→~56 B,預估省 ~0.8–1 GB 常駐。public 屬性 + `[JsonPropertyName]` 全保留(forwarding)→ source-gen round-trip + diff/SPC/pivot/export 零變動,舊 `.db` 相容。+7 `SnapshotFieldCompactionTests`。
