@@ -3427,9 +3427,13 @@ void RegisterCoreHandlers() {
         bool truncated = false;
         std::vector<std::string> missingAssemblies;
 
+        // One domain walk for the whole requested set — see BuildImageMap()
+        // (per-name FindImageByName re-walks the domain and risks a BDWGC freeze).
+        auto imageMap = Mono::BuildImageMap();
         for (const auto& assemblyName : assemblyNames) {
             if (truncated) break;
-            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            auto imgIt = imageMap.find(assemblyName);
+            Mono::MonoImage* img = (imgIt != imageMap.end()) ? imgIt->second : nullptr;
             if (img == nullptr) {
                 missingAssemblies.push_back(assemblyName);
                 continue;
@@ -3654,8 +3658,12 @@ void RegisterCoreHandlers() {
         };
         std::vector<ClassDesc> descs;
         std::unordered_map<Mono::MonoClass*, std::size_t> klassToDescIdx;
+        // One domain walk for the whole requested set — see BuildImageMap()
+        // (per-name FindImageByName re-walks the domain and risks a BDWGC freeze).
+        auto snapImageMap = Mono::BuildImageMap();
         for (const auto& assemblyName : requestedAssemblies) {
-            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            auto snapImgIt = snapImageMap.find(assemblyName);
+            Mono::MonoImage* img = (snapImgIt != snapImageMap.end()) ? snapImgIt->second : nullptr;
             if (img == nullptr) continue;
             auto classes = Mono::EnumerateClasses(img);
             for (const auto& ce : classes) {
@@ -4405,9 +4413,26 @@ void RegisterCoreHandlers() {
         std::vector<std::string> missingAssemblies;
         std::vector<std::string> truncatedAssemblies;  // per-asm budgets that filled
 
+        // Resolve every requested assembly in ONE domain walk. Calling
+        // FindImageByName per name re-walked the whole Mono domain each time —
+        // "Search all user assemblies" (≈170 assemblies) fired ≈170 back-to-back
+        // mono_assembly_foreach walks from the worker thread and deadlocked the
+        // game's BDWGC GC (Core Keeper freeze, 2026-06-06).
+        auto imageMap = Mono::BuildImageMap();
+
+        // BDWGC GC breathe. Unlike the snapshot decode loop (one big outer
+        // attach + GC-drain yields), searchSymbols leans on each Mono helper's
+        // own per-call ThreadAttachGuard — so a multi-assembly scan churns
+        // thousands of attach/ReadClassInfo cycles back-to-back, pegging the
+        // loader lock and starving the main-thread GC. Yield Sleep(1) every N
+        // classes (between self-attach scopes, holding no Mono lock) so the GC
+        // can reach a safepoint. Bounded: ≤ a few hundred yields per full-game
+        // search. Defence-in-depth on top of the BuildImageMap fix above.
+        constexpr std::size_t kSearchPaceClasses = 256;
         for (const auto& assemblyName : assemblyNames) {
             if (matches.size() >= globalCap) { truncated = true; break; }
-            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            auto imgIt = imageMap.find(assemblyName);
+            Mono::MonoImage* img = (imgIt != imageMap.end()) ? imgIt->second : nullptr;
             if (img == nullptr) {
                 if (assemblyNames.size() == 1) {
                     return json{{"error", "assembly not found: " + assemblyName}};
@@ -4428,6 +4453,7 @@ void RegisterCoreHandlers() {
                 if (thisAsmCapped) break;
                 if (matches.size() >= globalCap) { truncated = true; break; }
                 ++scanned;
+                if ((scanned % kSearchPaceClasses) == 0) ::Sleep(1);  // GC breathe
                 auto res = Mono::ReadClassInfo(ce.klass);
                 if (!res.ok) continue;
 
@@ -5721,7 +5747,10 @@ void RegisterCoreHandlers() {
         auto assemblies = Mono::EnumerateAssemblies();
         std::size_t scanned = 0;
         for (const auto& a : assemblies) {
-            Mono::MonoImage* img = Mono::FindImageByName(a.name);
+            // Use the image the enumeration already handed back — a per-name
+            // FindImageByName here re-walked the domain 337× per call
+            // (the documented "23K EnumerateAssemblies → freeze" shape).
+            Mono::MonoImage* img = a.image;
             if (img == nullptr) continue;
             auto classes = Mono::EnumerateClasses(img);
             for (const auto& c : classes) updateStats(s, c.ns, c.name);
