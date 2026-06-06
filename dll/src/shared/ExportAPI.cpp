@@ -3427,6 +3427,13 @@ void RegisterCoreHandlers() {
         bool truncated = false;
         std::vector<std::string> missingAssemblies;
 
+        // ONE outer attach for the whole bulk dump — turns every inner
+        // EnumerateClasses/FindClass/ReadClassInfo self-attach into a no-op
+        // (reentrancy counter), avoiding the thousands of attach/detach cycles
+        // that starve the main-thread BDWGC GC. Same pattern as searchSymbols
+        // and the snapshot decode loop.
+        Mono::ThreadAttachGuard dumpGuard(Mono::GetRootDomain());
+
         // One domain walk for the whole requested set — see BuildImageMap()
         // (per-name FindImageByName re-walks the domain and risks a BDWGC freeze).
         auto imageMap = Mono::BuildImageMap();
@@ -3456,7 +3463,9 @@ void RegisterCoreHandlers() {
                     continue;
                 }
 
-                auto res = Mono::ReadClassInfo(k);
+                // forceSetup=false: bulk dump must NOT call mono_class_vtable
+                // on never-set-up classes (worker-thread BDWGC deadlock).
+                auto res = Mono::ReadClassInfo(k, /*forceSetup=*/false);
                 if (!res.ok) {
                     row["error"] = "ReadClassInfo failed";
                     rows.push_back(std::move(row));
@@ -4413,6 +4422,18 @@ void RegisterCoreHandlers() {
         std::vector<std::string> missingAssemblies;
         std::vector<std::string> truncatedAssemblies;  // per-asm budgets that filled
 
+        // ONE outer attach for the whole bulk scan — the decisive freeze fix.
+        // Each Mono helper (EnumerateClasses / ReadClassInfo) self-attaches; with
+        // NO outer guard a multi-assembly scan churns thousands of
+        // mono_thread_attach/detach cycles, each leaving a finalizable MonoThread
+        // ref that piles up on the worker thread and starves the main-thread
+        // BDWGC GC (documented Phase 27 / 活俠傳 44s hang; Core Keeper froze here
+        // 2026-06-06). The ThreadAttachGuard reentrancy counter turns every inner
+        // self-attach into a no-op while this is held — exactly how the snapshot
+        // decode loop and the value-scan WhatIsAt batch stay safe. Held across
+        // the periodic Sleep(1) below (a sleeping attached thread is GC-safe).
+        Mono::ThreadAttachGuard searchGuard(Mono::GetRootDomain());
+
         // Resolve every requested assembly in ONE domain walk. Calling
         // FindImageByName per name re-walked the whole Mono domain each time —
         // "Search all user assemblies" (≈170 assemblies) fired ≈170 back-to-back
@@ -4454,7 +4475,9 @@ void RegisterCoreHandlers() {
                 if (matches.size() >= globalCap) { truncated = true; break; }
                 ++scanned;
                 if ((scanned % kSearchPaceClasses) == 0) ::Sleep(1);  // GC breathe
-                auto res = Mono::ReadClassInfo(ce.klass);
+                // forceSetup=false: bulk scan must NOT call mono_class_vtable
+                // on never-set-up classes (worker-thread BDWGC deadlock).
+                auto res = Mono::ReadClassInfo(ce.klass, /*forceSetup=*/false);
                 if (!res.ok) continue;
 
                 if (wantFields) {

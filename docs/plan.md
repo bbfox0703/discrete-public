@@ -8,9 +8,9 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1144** (DLL rebuild,Mono `searchSymbols` freeze 修正:BuildImageMap + GC-breathe pacing;Mono x64/x86 + IL2CPP x64 build clean、0 warnings) |
+| **Current build** | **#1152** (DLL,Mono `searchSymbols`/`dumpClassInfo` freeze 真凶修正:forceSetup gate + outer attach guard + BuildImageMap + pacing;Mono x64/x86 + IL2CPP x64 build clean、0 warnings) |
 | **Current phase** | ✅ **Mono multi-assembly `FindImageByName` freeze 修正** (2026-06-06, DLL-only,待 live-smoke) |
-| **Branches** | `dev` @ `f82ca67`(freeze 修正已 commit;尚未 merge main)|
+| **Branches** | `dev`(Symbol Finder freeze 兩輪修正已 commit;尚未 merge main)|
 | **Tests** | **712 UI tests green**(本批 DLL-only,UI 未動) |
 | **Mid-flight** | 無 |
 
@@ -19,7 +19,7 @@
 **待 live-smoke(none blocking)**:
 - ✅ ~~Phase 12e — 實機 x86 Mono Steam 遊戲 detect→install→啟動→update→uninstall~~ — **test OK(2026-06-06,使用者驗過)**。
 - ✅ ~~AOBMaker-app `GenerateAob` route~~ — **OK(先前已驗;app 沒開時 UI 自動 fallback 到一般 AOB 產生模式)**。
-- **🆕 Core Keeper(Mono x64)「Search all user assemblies」no-freeze re-test(build #1142)** — inspect instance + Symbol Finder「Search all user assemblies」連按數次不再凍機(原 ~173 次背靠背 `mono_assembly_foreach` → BDWGC deadlock,2026-06-06 修)。
+- **🆕 Core Keeper(Mono x64)「Search all user assemblies」no-freeze re-test(build #1152)** — inspect instance + Symbol Finder「Search all user assemblies」連按數次不再凍機。真凶是 bulk class-scan 的 worker-thread BDWGC 危害(`mono_class_vtable` force-setup + attach churn),非第一輪以為的 enumeration hammer。詳見 Recent batches。
 - Native Dictionary 的 **Mono 端** — 仍未驗(IL2CPP 已驗 Utawarerumono)。**註:Core Keeper 沒有 dictionary 欄位可測**;`conquer_area_info_dic` / `glossary_open_flags` 是 **Utawarerumono(IL2CPP)** 的資料,非 Core Keeper。Mono dict live-smoke 需另找有 `Dictionary<K,V>` 欄位的 Mono 遊戲。
 - In-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險;Copy CE field 已驗)
 - Phase 31-5 reverse-lookup 命名 struct component / Phase 32 findInstances filter(已 Core Keeper Mono x64 verified,可選 re-smoke)
@@ -82,13 +82,14 @@
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
 
-**2026-06-06 — Mono Symbol Finder freeze 修正(multi-assembly `FindImageByName` → BDWGC deadlock)**(DLL-only,build #1144,兩 DLL build clean、0 warnings,**待 Core Keeper live-smoke**):
-- **症狀**:Core Keeper(Mono x64)inspect instance 後用 Symbol Finder「Search all user assemblies」→ 遊戲凍機(log `Logs/4160`)。walk log 顯示一秒內 ~173 次 `EnumerateAssemblies: 337 assemblies` 爆發,最後一條後完全靜默,~2.5 分後使用者強制關 UI。
-- **根因(兩個放大器)**:(1)`Mono::FindImageByName` 每次都跑完整 `mono_assembly_foreach` + thread attach;`searchSymbols` 對 `assemblies[]`(「Search all user assemblies」≈170 個)**逐一**呼叫 → ~170 次背靠背 domain walk。(2)`searchSymbols` 沒有 snapshot 那種 outer-attach + GC-drain pacing,**每個 class 的 `ReadClassInfo` 自帶 `ThreadAttachGuard`**(MonoClassWalker.cpp:282),整場搜尋上千次 attach/decode 背靠背把 loader lock 佔死、餓死 main-thread GC。兩者皆從 worker thread 撞 BDWGC → deadlock。正是 docs「23K EnumerateAssemblies → freeze」同類。
-- **修正 1(call-count)**:新增 `Mono::BuildImageMap()`(單次 domain walk 建 name→image map)。4 個 Mono 迴圈點改用它 / 現成 `a.image`:`searchSymbols`、`dumpClassInfo`、snapshot explicit-scope class-index、`getMetadataStats`(後者本來就有 `EnumerateAssemblies` 的 `a.image`,卻多此一舉 re-lookup 337×)。單次 `FindImageByName`(`getClasses`/`getClassInfo`/`findFieldReferences`)維持原樣。每次搜尋 domain walk 由 ~170→1。
-- **修正 2(pacing)**:`searchSymbols` class 迴圈每 `kSearchPaceClasses=256` 個 class `::Sleep(1)`(在 self-attach scope 之間、不持任何 Mono lock 時),讓 BDWGC GC 跑到 safepoint。比照 snapshot decode 的 GC-drain breathe;成本 ≤ 每場全遊戲搜尋數百次 yield。
-- **不採用 shared/persistent cache**:(a)無現成的跨-RPC assembly cache 可共用;新建 persistent image cache 會有 stale/freed `MonoImage*` use-after-free 風險,只為省 1 次便宜的 walk,不划算。(b)ClassInfo cache 對 searchSymbols 幾乎無益 —— 它每個 class 只訪一次,且 `ReadClassInfo` 只讀 own-fields + parent **名字**(非遞迴 ancestor),不像 snapshot 因 ancestor chain 被重複命中才需要 cache。
-- **IL2CPP 同 `FindImageByName` redundancy 但不凍**(讀靜態 metadata table,非 BDWGC)→ 純 perf,列為 easy follow-up,未做。**待 live-smoke**:Core Keeper「Search all user assemblies」連按不再凍。
+**2026-06-06 — Mono Symbol Finder freeze 修正(兩輪;真凶 = bulk class-scan 的 worker-thread BDWGC 危害)**(DLL-only,build #1152,兩 DLL build clean、0 warnings,**待 Core Keeper live-smoke**):
+- **症狀**:Core Keeper(Mono x64)inspect instance 後用 Symbol Finder「Search all user assemblies」→ 遊戲凍機。第一次 log `Logs/4160`(一秒 ~173 次 `EnumerateAssemblies` 爆發);第二次 log `Logs/27844`(已含第一輪修正,build #1148)→ **只剩 1 次 `EnumerateAssemblies` @ 12:40:56,但 class-scan 階段仍凍**,connect 後 ~24s 強制關 UI。⇒ **第一輪沒打中 deadlock 真凶**。
+- **第一輪(build #1144,`f82ca67`,改善但非真凶)**:(1)新增 `Mono::BuildImageMap()` 把 `searchSymbols`/`dumpClassInfo`/snapshot explicit-scope/`getMetadataStats` 的 per-assembly `FindImageByName`(各跑完整 `mono_assembly_foreach`)收斂成單次 domain walk(~170→1);(2)class 迴圈每 256 個 `::Sleep(1)` pacing。**真實效果**:大幅降冗餘 + 確認真凶不在 enumeration —— 第二份 log 證明 class-scan 本身才是凍點。
+- **第二輪(build #1152,真凶)— bulk `ReadClassInfo` 的兩個 worker-thread BDWGC 危害,snapshot 早有對策、searchSymbols 沒有**:
+  - **危害 A — `mono_class_vtable` force-setup**:`ReadClassInfo`(MonoClassWalker.cpp:354)對「無自有欄位」的 class 會呼叫一次 `mono_class_vtable` 強制 setup 欄位表。**從 worker thread 呼叫 `mono_class_vtable` 正是 docs 記載的 BDWGC freeze 元凶**(plan「static field VALUE capture skipped 因 vtable from worker → freeze」;ExportAPI:3753「50K vtable calls → freeze」)。bulk 掃描碰到上千個 never-instantiated class → 上千次 vtable → 凍。**修**:`ReadClassInfo(klass, bool forceSetup=true)`;`searchSymbols`/`dumpClassInfo` 傳 **`forceSetup=false`**(接受 rare not-set-up class 不顯示欄位,換永不碰 vtable)。單一 class drilldown(Inspector/`getClassInfo`)維持 `true`,單次安全。
+  - **危害 B — attach/detach churn(缺 outer guard)**:`searchSymbols`/`dumpClassInfo` 沒像 snapshot 開一個 outer `ThreadAttachGuard`;每個 `EnumerateClasses`/`ReadClassInfo` 自帶 attach → 上千次 `mono_thread_attach/detach`,每次留一個 finalizable MonoThread ref(Phase 27 記載:活俠傳 44s hang 同因)。**修**:handler 開一次 `ThreadAttachGuard searchGuard/dumpGuard(GetRootDomain())`;`ThreadAttachGuard` 的 reentrancy counter 讓內層 self-attach 全 no-op。完全比照 snapshot decode loop 與 value-scan WhatIsAt batch 的既定 pattern。
+- **不採用 shared/persistent cache**:(a)無跨-RPC assembly cache 可共用;persistent image cache 有 stale/freed `MonoImage*` use-after-free 風險,只省 1 次便宜 walk,不划算。(b)ClassInfo cache 對 searchSymbols 無益 —— 每 class 只訪一次,`ReadClassInfo` 只讀 own-fields + parent 名字(非遞迴 ancestor),不像 snapshot 靠 ancestor 重複命中才需 cache。
+- **IL2CPP 不受影響**(無 BDWGC;`FindImageByName` redundancy 純 perf,列 easy follow-up)。**待 live-smoke**:Core Keeper「Search all user assemblies」連按不再凍(build #1152)。
 
 **2026-06-06 — Value Search:bitness cap + retain/display decouple + 可取消掃描**(DLL+UI,712 UI tests green、AOT 0 warnings,使用者實機驗過):
 - 詳見 Open Backlog 🔍 Scan line。重點:(1)`kRawScanCap` 寫死 50000 → bitness-gated(x64 1M / 32-bit Mono 50000)+ request-tunable;(2)`beginValueScan` retain(`retainCap`,留給 refine)與 display(`emitLimit`,送 UI)解耦,只 emit 列過 pipe;UI 加「Max:」控制 + truncation banner;(3)**可取消**:`ScanCancel` cooperative token + `cancelScan` RPC(第二條 pipe 連線)+ PipeServer 每-client `PeekNamedPipe` disconnect monitor(解「UI 關了 DLL 還掃 800s」)+ UI ⛔ Cancel 按鈕。
