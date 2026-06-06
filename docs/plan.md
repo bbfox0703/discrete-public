@@ -10,7 +10,7 @@
 |---|---|
 | **Current build** | **#1144** (DLL rebuild,Mono `searchSymbols` freeze 修正:BuildImageMap + GC-breathe pacing;Mono x64/x86 + IL2CPP x64 build clean、0 warnings) |
 | **Current phase** | ✅ **Mono multi-assembly `FindImageByName` freeze 修正** (2026-06-06, DLL-only,待 live-smoke) |
-| **Branches** | `dev` @ `1aabf94`(freeze 修正未 commit,working tree)|
+| **Branches** | `dev` @ `f82ca67`(freeze 修正已 commit;尚未 merge main)|
 | **Tests** | **712 UI tests green**(本批 DLL-only,UI 未動) |
 | **Mid-flight** | 無 |
 
