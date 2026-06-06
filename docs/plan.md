@@ -9,8 +9,8 @@
 | 項目 | 值 |
 |---|---|
 | **Current build** | **#1152** (DLL,Mono `searchSymbols`/`dumpClassInfo` freeze 真凶修正:forceSetup gate + outer attach guard + BuildImageMap + pacing;Mono x64/x86 + IL2CPP x64 build clean、0 warnings) |
-| **Current phase** | ✅ **Mono multi-assembly `FindImageByName` freeze 修正** (2026-06-06, DLL-only,待 live-smoke) |
-| **Branches** | `dev`(Symbol Finder freeze 兩輪修正已 commit;尚未 merge main)|
+| **Current phase** | ✅ **Mono Symbol Finder BDWGC freeze 修正** (2026-06-06, DLL-only, Core Keeper live-verified、已 merge main) |
+| **Branches** | `main == dev`(Symbol Finder freeze 修正已 merge main;2026-06-06)|
 | **Tests** | **712 UI tests green**(本批 DLL-only,UI 未動) |
 | **Mid-flight** | 無 |
 
