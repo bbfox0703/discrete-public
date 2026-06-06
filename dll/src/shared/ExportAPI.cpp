@@ -8342,7 +8342,7 @@ void RegisterCoreHandlers() {
         bool revIndexOk = candidates.size() >= kRevIndexMinCandidates && revIndex.Build();
 
         json rows = json::array();
-        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
+        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0, arrayResolved = 0;
         std::unordered_map<std::uintptr_t, int> perInstanceCount;
         for (const auto& c : candidates) {
             if (rows.size() >= emitLimit) break;
@@ -8350,6 +8350,12 @@ void RegisterCoreHandlers() {
             IL2CPP::AddressLookup lookup = revIndexOk
                 ? revIndex.Lookup(addr, maxBackwardScan)
                 : IL2CPP::WhatIsAt(addr, maxBackwardScan);
+            if (!lookup.found) {
+                // 2nd chance: a value-type array element (int[], ItemInfo[],
+                // List<T>._items) whose runtime array klass isn't in the index.
+                lookup = IL2CPP::WhatIsAtAcceptingArrays(addr, maxBackwardScan);
+                if (lookup.found) arrayResolved++;
+            }
             if (!lookup.found) { droppedNonManaged++; continue; }
             if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
             if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
@@ -8383,10 +8389,10 @@ void RegisterCoreHandlers() {
         {
             char line[320];
             std::snprintf(line, sizeof(line),
-                "scanFieldValue(IL2CPP) dt=%s raw=%zu rows=%zu non=%zu noise=%zu div=%zu bytes=%zu "
+                "scanFieldValue(IL2CPP) dt=%s raw=%zu rows=%zu non=%zu noise=%zu div=%zu arr=%zu bytes=%zu "
                 "revIndex=%d idxInst=%zu idxHits=%zu idxLocal=%zu",
                 dtStr.c_str(), candidates.size(), rows.size(),
-                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned,
+                droppedNonManaged, droppedNoise, droppedDiversity, arrayResolved, stats.bytesScanned,
                 revIndexOk ? 1 : 0, revIndex.InstanceCount(), revIndex.HitCount(), revIndex.LocalityHits());
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
@@ -8486,7 +8492,7 @@ void RegisterCoreHandlers() {
 
         std::vector<ValueScan::Candidate> sessionCands;
         sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
-        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
+        std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0, arrayResolved = 0;
         std::unordered_map<std::uintptr_t, int> perInstanceCount;
         const std::size_t vSize = Memory::ValueDataTypeSize(dt);
         for (const auto& c : rawCandidates) {
@@ -8495,6 +8501,12 @@ void RegisterCoreHandlers() {
             IL2CPP::AddressLookup lookup = revIndexOk
                 ? revIndex.Lookup(addr, maxBackwardScan)
                 : IL2CPP::WhatIsAt(addr, maxBackwardScan);
+            if (!lookup.found) {
+                // 2nd chance: a value-type array element (int[], ItemInfo[],
+                // List<T>._items) whose runtime array klass isn't in the index.
+                lookup = IL2CPP::WhatIsAtAcceptingArrays(addr, maxBackwardScan);
+                if (lookup.found) arrayResolved++;
+            }
             if (!lookup.found) { droppedNonManaged++; continue; }
             if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
             if (++perInstanceCount[lookup.instance] > kPerInstanceCap) { droppedDiversity++; continue; }
@@ -8535,10 +8547,10 @@ void RegisterCoreHandlers() {
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "beginValueScan(IL2CPP) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu bytes=%zu",
+                "beginValueScan(IL2CPP) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu arr=%zu bytes=%zu",
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
                 rawCandidates.size(), kept,
-                droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned);
+                droppedNonManaged, droppedNoise, droppedDiversity, arrayResolved, stats.bytesScanned);
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
