@@ -9413,7 +9413,15 @@ int Discrete_Init() {
         // worker isn't a Mono-known thread.
         Discrete::Mono::ThreadAttachGuard guard(domain);
         if (!guard.Attached()) return;
+        // Timed so we can tell whether the disconnect drain (vs. inherent
+        // metadata teardown at game-close) is what the user perceives as a
+        // slow close after a full-game searchSymbols scan.
+        auto drainStart = std::chrono::steady_clock::now();
         r.gc_collect(-1);
+        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - drainStart).count();
+        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+            "disconnect GC-drain (mono_gc_collect -1) " + std::to_string(drainMs) + " ms");
     });
     Discrete::Log::Init(
         "ExportAPI: registered Mono GC-drain disconnect hook");
@@ -9429,7 +9437,12 @@ int Discrete_Init() {
         // collect everything reachable).
         Discrete::IL2CPP::ThreadAttachGuard guard(domain);
         if (!guard.Attached()) return;
+        auto drainStart = std::chrono::steady_clock::now();
         r.gc_collect(0);
+        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - drainStart).count();
+        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+            "disconnect GC-drain (il2cpp_gc_collect 0) " + std::to_string(drainMs) + " ms");
     });
     Discrete::Log::Init(
         "ExportAPI: registered IL2CPP GC-drain disconnect hook");

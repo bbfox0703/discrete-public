@@ -19,7 +19,8 @@
 **待 live-smoke(none blocking)**:
 - ✅ ~~Phase 12e — 實機 x86 Mono Steam 遊戲 detect→install→啟動→update→uninstall~~ — **test OK(2026-06-06,使用者驗過)**。
 - ✅ ~~AOBMaker-app `GenerateAob` route~~ — **OK(先前已驗;app 沒開時 UI 自動 fallback 到一般 AOB 產生模式)**。
-- **🆕 Core Keeper(Mono x64)「Search all user assemblies」no-freeze re-test(build #1152)** — inspect instance + Symbol Finder「Search all user assemblies」連按數次不再凍機。真凶是 bulk class-scan 的 worker-thread BDWGC 危害(`mono_class_vtable` force-setup + attach churn),非第一輪以為的 enumeration hammer。詳見 Recent batches。
+- ✅ **Core Keeper(Mono x64)「Search all user assemblies」no-freeze — 實機驗證 PASS(build #1152)**:不再凍機。真凶是 bulk class-scan 的 worker-thread BDWGC 危害(`mono_class_vtable` force-setup + attach churn),非第一輪以為的 enumeration hammer。詳見 Recent batches。
+- **🆕 game-close 慢一點(殘留尾巴,調查中)** — searchSymbols 全遊戲掃描後關遊戲略慢(非凍,遠小於 docs 記載的 44s)。disconnect GC-drain hook 未 instrument → build #1156(`pid/pipe` log 加「disconnect GC-drain … ms」)量測 drain 耗時。Phase 29a-v4 心得([ExportAPI.cpp:4175])警告 Mono worker-thread `gc_collect` 可能清不到影響 main-thread 的 queue → 若 drain 很短但關閉仍慢,代表是 metadata teardown 本質成本,真正的槓桿是縮掃描面(搜單一 assembly 而非全部)。
 - Native Dictionary 的 **Mono 端** — 仍未驗(IL2CPP 已驗 Utawarerumono)。**註:Core Keeper 沒有 dictionary 欄位可測**;`conquer_area_info_dic` / `glossary_open_flags` 是 **Utawarerumono(IL2CPP)** 的資料,非 Core Keeper。Mono dict live-smoke 需另找有 `Dictionary<K,V>` 欄位的 Mono 遊戲。
 - In-place Copy CE XML(整 instance)dict 實機對比 CE(同 emitter,低風險;Copy CE field 已驗)
 - Phase 31-5 reverse-lookup 命名 struct component / Phase 32 findInstances filter(已 Core Keeper Mono x64 verified,可選 re-smoke)
