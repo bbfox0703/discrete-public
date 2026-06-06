@@ -66,7 +66,20 @@ struct ClassInfoResult {
     bool      ok = false;
     ClassInfo info;
 };
-ClassInfoResult ReadClassInfo(MonoClass* klass);
+// forceSetup (default true): when a class reports NO own fields (metadata not
+// set up — common for never-instantiated types), force a one-shot
+// mono_class_vtable() to populate the field table so the retry sees real
+// fields. REQUIRED for the Inspector single-class drilldown.
+//
+// FREEZE WARNING: mono_class_vtable() from the pipe worker thread races the
+// main-thread BDWGC GC and deadlocks the game. One call (single-class
+// drilldown) is safe; calling it across thousands of never-set-up classes is
+// NOT. BULK metadata scanners (searchSymbols / dumpClassInfo over every class
+// in an assembly) MUST pass forceSetup=false — they accept that the rare
+// not-set-up class shows no fields, in exchange for never touching the vtable.
+// (Core Keeper Mono x64 froze on "Search all user assemblies" until this gate
+// was added, 2026-06-06.)
+ClassInfoResult ReadClassInfo(MonoClass* klass, bool forceSetup = true);
 
 // Phase 29f (Layer B) — SEH-guarded mono_object_get_class on a raw managed
 // object pointer. Returns nullptr if the resolver lacks the export, the

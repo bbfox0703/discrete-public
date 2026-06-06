@@ -121,4 +121,14 @@ MonoImage* FindImageByName(const std::string& assemblyName) {
     return nullptr;
 }
 
+std::unordered_map<std::string, MonoImage*> BuildImageMap() {
+    std::unordered_map<std::string, MonoImage*> map;
+    auto all = EnumerateAssemblies();  // single domain walk
+    map.reserve(all.size());
+    for (auto& a : all) {
+        if (a.image != nullptr) map.emplace(a.name, a.image);
+    }
+    return map;
+}
+
 }  // namespace Discrete::Mono

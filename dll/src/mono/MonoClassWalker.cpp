@@ -269,7 +269,7 @@ MonoClass* FindClass(MonoImage* image, const std::string& ns, const std::string&
     return cur;
 }
 
-ClassInfoResult ReadClassInfo(MonoClass* klass) {
+ClassInfoResult ReadClassInfo(MonoClass* klass, bool forceSetup) {
     ClassInfoResult result;
     if (klass == nullptr) return result;
 
@@ -357,7 +357,13 @@ ClassInfoResult ReadClassInfo(MonoClass* klass) {
     // batched 17K-call form that wedged BDWGC on the reverse-lookup path. This
     // sets up the field table so the retry sees the real fields. Only fires on
     // the rare empty-field case, so already-set-up classes pay nothing.
-    if (result.info.fields.empty() && r.class_vtable != nullptr) {
+    //
+    // GATED on forceSetup: bulk metadata scanners (searchSymbols / dumpClassInfo)
+    // pass false because mono_class_vtable from the worker thread deadlocks the
+    // BDWGC GC, and a bulk scan hits thousands of never-set-up classes — each
+    // one a freeze roll. One call from a single-class drilldown is safe; a
+    // thousand from a bulk scan is not. (Core Keeper freeze, 2026-06-06.)
+    if (forceSetup && result.info.fields.empty() && r.class_vtable != nullptr) {
         if (SehVTable(r.class_vtable, domain, klass) != nullptr) {
             collectFields();
         }

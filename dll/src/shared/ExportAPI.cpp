@@ -3427,9 +3427,20 @@ void RegisterCoreHandlers() {
         bool truncated = false;
         std::vector<std::string> missingAssemblies;
 
+        // ONE outer attach for the whole bulk dump — turns every inner
+        // EnumerateClasses/FindClass/ReadClassInfo self-attach into a no-op
+        // (reentrancy counter), avoiding the thousands of attach/detach cycles
+        // that starve the main-thread BDWGC GC. Same pattern as searchSymbols
+        // and the snapshot decode loop.
+        Mono::ThreadAttachGuard dumpGuard(Mono::GetRootDomain());
+
+        // One domain walk for the whole requested set — see BuildImageMap()
+        // (per-name FindImageByName re-walks the domain and risks a BDWGC freeze).
+        auto imageMap = Mono::BuildImageMap();
         for (const auto& assemblyName : assemblyNames) {
             if (truncated) break;
-            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            auto imgIt = imageMap.find(assemblyName);
+            Mono::MonoImage* img = (imgIt != imageMap.end()) ? imgIt->second : nullptr;
             if (img == nullptr) {
                 missingAssemblies.push_back(assemblyName);
                 continue;
@@ -3452,7 +3463,9 @@ void RegisterCoreHandlers() {
                     continue;
                 }
 
-                auto res = Mono::ReadClassInfo(k);
+                // forceSetup=false: bulk dump must NOT call mono_class_vtable
+                // on never-set-up classes (worker-thread BDWGC deadlock).
+                auto res = Mono::ReadClassInfo(k, /*forceSetup=*/false);
                 if (!res.ok) {
                     row["error"] = "ReadClassInfo failed";
                     rows.push_back(std::move(row));
@@ -3654,8 +3667,12 @@ void RegisterCoreHandlers() {
         };
         std::vector<ClassDesc> descs;
         std::unordered_map<Mono::MonoClass*, std::size_t> klassToDescIdx;
+        // One domain walk for the whole requested set — see BuildImageMap()
+        // (per-name FindImageByName re-walks the domain and risks a BDWGC freeze).
+        auto snapImageMap = Mono::BuildImageMap();
         for (const auto& assemblyName : requestedAssemblies) {
-            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            auto snapImgIt = snapImageMap.find(assemblyName);
+            Mono::MonoImage* img = (snapImgIt != snapImageMap.end()) ? snapImgIt->second : nullptr;
             if (img == nullptr) continue;
             auto classes = Mono::EnumerateClasses(img);
             for (const auto& ce : classes) {
@@ -4405,9 +4422,38 @@ void RegisterCoreHandlers() {
         std::vector<std::string> missingAssemblies;
         std::vector<std::string> truncatedAssemblies;  // per-asm budgets that filled
 
+        // ONE outer attach for the whole bulk scan — the decisive freeze fix.
+        // Each Mono helper (EnumerateClasses / ReadClassInfo) self-attaches; with
+        // NO outer guard a multi-assembly scan churns thousands of
+        // mono_thread_attach/detach cycles, each leaving a finalizable MonoThread
+        // ref that piles up on the worker thread and starves the main-thread
+        // BDWGC GC (documented Phase 27 / 活俠傳 44s hang; Core Keeper froze here
+        // 2026-06-06). The ThreadAttachGuard reentrancy counter turns every inner
+        // self-attach into a no-op while this is held — exactly how the snapshot
+        // decode loop and the value-scan WhatIsAt batch stay safe. Held across
+        // the periodic Sleep(1) below (a sleeping attached thread is GC-safe).
+        Mono::ThreadAttachGuard searchGuard(Mono::GetRootDomain());
+
+        // Resolve every requested assembly in ONE domain walk. Calling
+        // FindImageByName per name re-walked the whole Mono domain each time —
+        // "Search all user assemblies" (≈170 assemblies) fired ≈170 back-to-back
+        // mono_assembly_foreach walks from the worker thread and deadlocked the
+        // game's BDWGC GC (Core Keeper freeze, 2026-06-06).
+        auto imageMap = Mono::BuildImageMap();
+
+        // BDWGC GC breathe. Unlike the snapshot decode loop (one big outer
+        // attach + GC-drain yields), searchSymbols leans on each Mono helper's
+        // own per-call ThreadAttachGuard — so a multi-assembly scan churns
+        // thousands of attach/ReadClassInfo cycles back-to-back, pegging the
+        // loader lock and starving the main-thread GC. Yield Sleep(1) every N
+        // classes (between self-attach scopes, holding no Mono lock) so the GC
+        // can reach a safepoint. Bounded: ≤ a few hundred yields per full-game
+        // search. Defence-in-depth on top of the BuildImageMap fix above.
+        constexpr std::size_t kSearchPaceClasses = 256;
         for (const auto& assemblyName : assemblyNames) {
             if (matches.size() >= globalCap) { truncated = true; break; }
-            Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
+            auto imgIt = imageMap.find(assemblyName);
+            Mono::MonoImage* img = (imgIt != imageMap.end()) ? imgIt->second : nullptr;
             if (img == nullptr) {
                 if (assemblyNames.size() == 1) {
                     return json{{"error", "assembly not found: " + assemblyName}};
@@ -4428,7 +4474,10 @@ void RegisterCoreHandlers() {
                 if (thisAsmCapped) break;
                 if (matches.size() >= globalCap) { truncated = true; break; }
                 ++scanned;
-                auto res = Mono::ReadClassInfo(ce.klass);
+                if ((scanned % kSearchPaceClasses) == 0) ::Sleep(1);  // GC breathe
+                // forceSetup=false: bulk scan must NOT call mono_class_vtable
+                // on never-set-up classes (worker-thread BDWGC deadlock).
+                auto res = Mono::ReadClassInfo(ce.klass, /*forceSetup=*/false);
                 if (!res.ok) continue;
 
                 if (wantFields) {
@@ -5721,7 +5770,10 @@ void RegisterCoreHandlers() {
         auto assemblies = Mono::EnumerateAssemblies();
         std::size_t scanned = 0;
         for (const auto& a : assemblies) {
-            Mono::MonoImage* img = Mono::FindImageByName(a.name);
+            // Use the image the enumeration already handed back — a per-name
+            // FindImageByName here re-walked the domain 337× per call
+            // (the documented "23K EnumerateAssemblies → freeze" shape).
+            Mono::MonoImage* img = a.image;
             if (img == nullptr) continue;
             auto classes = Mono::EnumerateClasses(img);
             for (const auto& c : classes) updateStats(s, c.ns, c.name);
@@ -9361,7 +9413,15 @@ int Discrete_Init() {
         // worker isn't a Mono-known thread.
         Discrete::Mono::ThreadAttachGuard guard(domain);
         if (!guard.Attached()) return;
+        // Timed so we can tell whether the disconnect drain (vs. inherent
+        // metadata teardown at game-close) is what the user perceives as a
+        // slow close after a full-game searchSymbols scan.
+        auto drainStart = std::chrono::steady_clock::now();
         r.gc_collect(-1);
+        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - drainStart).count();
+        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+            "disconnect GC-drain (mono_gc_collect -1) " + std::to_string(drainMs) + " ms");
     });
     Discrete::Log::Init(
         "ExportAPI: registered Mono GC-drain disconnect hook");
@@ -9377,7 +9437,12 @@ int Discrete_Init() {
         // collect everything reachable).
         Discrete::IL2CPP::ThreadAttachGuard guard(domain);
         if (!guard.Attached()) return;
+        auto drainStart = std::chrono::steady_clock::now();
         r.gc_collect(0);
+        auto drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - drainStart).count();
+        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+            "disconnect GC-drain (il2cpp_gc_collect 0) " + std::to_string(drainMs) + " ms");
     });
     Discrete::Log::Init(
         "ExportAPI: registered IL2CPP GC-drain disconnect hook");
