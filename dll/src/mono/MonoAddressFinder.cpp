@@ -6,6 +6,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
+#include "../shared/ScanCancel.h"
 #include "MonoClassWalker.h"
 #include "MonoDomain.h"
 #include "MonoResolver.h"
@@ -1150,6 +1151,7 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
     slots.reserve(1024);
 
     for (const auto& r : regions) {
+        if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
         if ((r.protect & kRW) == 0) continue;
         if (r.type == MEM_IMAGE || r.type == MEM_MAPPED) continue;
         const std::uint8_t* regionEnd = r.base + r.size;

@@ -12,6 +12,7 @@
 #include "Memory.h"
 #include "ModuleHelper.h"
 #include "PipeServer.h"
+#include "ScanCancel.h"
 #include "SnapshotSession.h"
 #include "ValueScanSession.h"
 
@@ -1654,6 +1655,27 @@ bool IsCompilerGeneratedClassName(std::string_view name) noexcept {
     return false;
 }
 
+// Bitness-gated ceiling for value-scan candidate counts (raw matches + retained
+// session). 32-bit Mono shares the game's restricted ~2-4 GB address space (the
+// DLL is injected in-process), so a large candidate list there risks OOM-ing the
+// game; x64 has plenty of headroom. Compile-time per DLL build:
+// IL2CPP + Mono-x64 → kPointerSize 8; Mono-x86 → 4.
+inline std::size_t ValueScanHardCap() {
+    return (Discrete::ManagedLayout::kPointerSize == 8) ? std::size_t{1000000}
+                                                        : std::size_t{50000};
+}
+// Default retain cap (how many managed candidates we KEEP for refine, separate
+// from how many we DISPLAY). High on x64 so a common value's instance survives
+// the first scan; conservative on 32-bit.
+inline std::size_t ValueScanDefaultRetain() {
+    return (Discrete::ManagedLayout::kPointerSize == 8) ? std::size_t{200000}
+                                                        : std::size_t{50000};
+}
+inline std::size_t ClampCap(std::size_t v, std::size_t deflt, std::size_t hard) {
+    if (v == 0) v = deflt;
+    return v > hard ? hard : v;
+}
+
 // Common: emit a Refine candidate as JSON row. Same shape as the global
 // scanFieldValue response so UI / Lua bridge code can render either with
 // the same template.
@@ -1966,6 +1988,17 @@ void RegisterCoreHandlers() {
             {"sessionId", std::to_string(sessionId)},
             {"dropped",   dropped},
         };
+    });
+
+    // Cooperative cancel of an in-flight value scan. The UI sends this on a
+    // SECOND pipe connection (the scanning connection is mid-scan and can't
+    // service a request); the long scan loops poll the flag and bail, freeing
+    // their work via RAII. No-op if nothing is scanning (RequestCancel is gated
+    // on g_scanActive). Registered once — backend-agnostic.
+    PipeServer::RegisterHandler(MagicStrings::CmdCancelScan,
+        [](const json& /*args*/) -> json {
+        Discrete::ScanCancel::RequestCancel();
+        return json{{"ok", true}, {"cancelled", true}};
     });
 
     // ----------------------------------------------------------------------
@@ -5259,6 +5292,9 @@ void RegisterCoreHandlers() {
     PipeServer::RegisterHandler(MagicStrings::CmdBeginValueScan,
         [formatHex](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        // Cancellation scope (see the IL2CPP twin): covers raw scan + index build
+        // + candidate loop so Cancel / disconnect aborts mid-flight.
+        ScanCancel::Scope scanCancelScope;
 
         std::string dtStr = args.value("dataType", std::string{"int32"});
         Memory::ValueDataType dt{};
@@ -5298,10 +5334,19 @@ void RegisterCoreHandlers() {
 
         // Phase 27 hardening — same decoupled-budget + diversity-cap +
         // noise-filter pattern as scanFieldValue.
+        // Decouple DISPLAY (emitLimit) / RETAIN (retainCap) / RAW (rawCap), all
+        // bitness-gated: Mono-x86 → hardCap 50000 (DLL shares the game's restricted
+        // address space); Mono-x64 → high, like IL2CPP. Only emitLimit rows cross
+        // the pipe; the retained set lives in the session for refine.
         const std::size_t emitLimit = req.limit;
-        constexpr std::size_t kRawScanCap = 50000;
+        const std::size_t hardCap   = ValueScanHardCap();
+        const std::size_t retainCap = ClampCap(
+            static_cast<std::size_t>(args.value("retainCap", ValueScanDefaultRetain())),
+            ValueScanDefaultRetain(), hardCap);
+        const std::size_t rawCap = ClampCap(
+            static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
         Memory::ValueScanRequest scanReq = req;
-        scanReq.limit = kRawScanCap;
+        scanReq.limit = rawCap;
 
         Memory::ValueScanStats stats{};
         auto rawCandidates = Memory::ScanForValue(scanReq, &stats);
@@ -5322,12 +5367,13 @@ void RegisterCoreHandlers() {
         bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build(reuseIndexMs);
 
         std::vector<ValueScan::Candidate> sessionCands;
-        sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
+        sessionCands.reserve(std::min<std::size_t>(retainCap, 65536));
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
         std::unordered_map<std::uintptr_t, int> perInstanceCount;
         const std::size_t vSize = Memory::ValueDataTypeSize(dt);
         for (const auto& c : rawCandidates) {
-            if (sessionCands.size() >= emitLimit) break;
+            if (sessionCands.size() >= retainCap) break;
+            if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
             Mono::AddressLookup lookup = revIndexOk
                 ? revIndex.Lookup(addr, maxBackwardScan)
@@ -5358,27 +5404,31 @@ void RegisterCoreHandlers() {
             sessionCands.push_back(std::move(sc));
         }
 
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
 
         // Re-render the same rows for immediate display — caller doesn't have
         // to make a second RPC to see the initial set. ViewWith locks the
         // session briefly (a few ms for 50K rows).
         json rows = json::array();
-        std::size_t kept = 0;
+        std::size_t kept = 0, shown = 0;
         auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHex);
         ValueScan::SessionManager::Instance().ViewWith(sessionId,
             [&](Memory::ValueDataType d, const std::vector<ValueScan::Candidate>& cands) {
-            kept = cands.size();
-            for (const auto& sc : cands) rows.push_back(EmitCandidateRow(sc, d, fmtHex));
+            kept  = cands.size();                       // RETAINED (for refine)
+            shown = std::min(kept, emitLimit);          // DISPLAYED (sent to UI)
+            for (std::size_t i = 0; i < shown; ++i)
+                rows.push_back(EmitCandidateRow(cands[i], d, fmtHex));
         });
 
         {
             char line[320];
             std::snprintf(line, sizeof(line),
-                "beginValueScan(Mono) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu bytes=%zu "
+                "beginValueScan(Mono) sess=%llu dt=%s raw=%zu rawCap=%zu retain=%zu shown=%zu non=%zu noise=%zu div=%zu bytes=%zu "
                 "revIndex=%d idxInst=%zu idxHits=%zu idxLocal=%zu",
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
-                rawCandidates.size(), kept,
+                rawCandidates.size(), rawCap, kept, shown,
                 droppedNonManaged, droppedNoise, droppedDiversity, stats.bytesScanned,
                 revIndexOk ? 1 : 0, revIndex.InstanceCount(), revIndex.HitCount(), revIndex.LocalityHits());
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
@@ -5390,12 +5440,16 @@ void RegisterCoreHandlers() {
             {"mode",              "global"},
             {"dataType",          dtStr},
             {"scanType",          stStr},
-            {"count",             kept},
+            {"count",             shown},
             {"totalCandidates",   kept},
+            {"retainCap",         retainCap},
             {"droppedNonManaged", droppedNonManaged},
             {"droppedNoise",      droppedNoise},
             {"droppedDiversity",  droppedDiversity},
-            {"truncated",         rawCandidates.size() >= kRawScanCap || kept >= emitLimit},
+            {"rawTruncated",      rawCandidates.size() >= rawCap},
+            {"retainTruncated",   kept >= retainCap},
+            {"displayTruncated",  kept > shown},
+            {"truncated",         (rawCandidates.size() >= rawCap) || (kept >= retainCap) || (kept > shown)},
             {"scannedBytes",      stats.bytesScanned},
             {"readFailureBytes",  stats.readFailureBytes},
             {"candidates",        std::move(rows)},
@@ -8430,6 +8484,10 @@ void RegisterCoreHandlers() {
     PipeServer::RegisterHandler(MagicStrings::CmdBeginValueScan,
         [formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        // Cancellation scope: clears any stale flag + marks a scan active for the
+        // whole of this handler (raw scan, index build, candidate loop), so the
+        // UI's Cancel button / a disconnect can abort it mid-flight.
+        ScanCancel::Scope scanCancelScope;
 
         std::string dtStr = args.value("dataType", std::string{"int32"});
         Memory::ValueDataType dt{};
@@ -8469,10 +8527,21 @@ void RegisterCoreHandlers() {
 
         // Phase 27 hardening — same decoupled-budget + diversity-cap +
         // noise-filter as scanFieldValue.
+        // Decouple DISPLAY (emitLimit — sent to the UI) from RETAIN (retainCap —
+        // kept in the session for refine) and the RAW match ceiling (rawCap). On
+        // x64 retain/raw go far above the old hardcoded 50000 so a common value's
+        // specific instance survives the first scan and refine can narrow to it;
+        // 32-bit Mono stays capped (the DLL shares the game's address space).
+        // All bitness-gated + request-tunable; only emitLimit rows cross the pipe.
         const std::size_t emitLimit = req.limit;
-        constexpr std::size_t kRawScanCap = 50000;
+        const std::size_t hardCap   = ValueScanHardCap();
+        const std::size_t retainCap = ClampCap(
+            static_cast<std::size_t>(args.value("retainCap", ValueScanDefaultRetain())),
+            ValueScanDefaultRetain(), hardCap);
+        const std::size_t rawCap = ClampCap(
+            static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
         Memory::ValueScanRequest scanReq = req;
-        scanReq.limit = kRawScanCap;
+        scanReq.limit = rawCap;
 
         Memory::ValueScanStats stats{};
         auto rawCandidates = Memory::ScanForValue(scanReq, &stats);
@@ -8491,12 +8560,13 @@ void RegisterCoreHandlers() {
         bool revIndexOk = rawCandidates.size() >= kRevIndexMinCandidates && revIndex.Build(reuseIndexMs);
 
         std::vector<ValueScan::Candidate> sessionCands;
-        sessionCands.reserve(std::min<std::size_t>(emitLimit, 4096));
+        sessionCands.reserve(std::min<std::size_t>(retainCap, 65536));
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0, arrayResolved = 0;
         std::unordered_map<std::uintptr_t, int> perInstanceCount;
         const std::size_t vSize = Memory::ValueDataTypeSize(dt);
         for (const auto& c : rawCandidates) {
-            if (sessionCands.size() >= emitLimit) break;
+            if (sessionCands.size() >= retainCap) break;
+            if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
             std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(c.addr);
             IL2CPP::AddressLookup lookup = revIndexOk
                 ? revIndex.Lookup(addr, maxBackwardScan)
@@ -8533,23 +8603,27 @@ void RegisterCoreHandlers() {
             sessionCands.push_back(std::move(sc));
         }
 
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
 
         json rows = json::array();
-        std::size_t kept = 0;
+        std::size_t kept = 0, shown = 0;
         auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHex);
         ValueScan::SessionManager::Instance().ViewWith(sessionId,
             [&](Memory::ValueDataType d, const std::vector<ValueScan::Candidate>& cands) {
-            kept = cands.size();
-            for (const auto& sc : cands) rows.push_back(EmitCandidateRow(sc, d, fmtHex));
+            kept  = cands.size();                       // RETAINED (for refine)
+            shown = std::min(kept, emitLimit);          // DISPLAYED (sent to UI)
+            for (std::size_t i = 0; i < shown; ++i)
+                rows.push_back(EmitCandidateRow(cands[i], d, fmtHex));
         });
 
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "beginValueScan(IL2CPP) sess=%llu dt=%s raw=%zu kept=%zu non=%zu noise=%zu div=%zu arr=%zu bytes=%zu",
+                "beginValueScan(IL2CPP) sess=%llu dt=%s raw=%zu rawCap=%zu retain=%zu shown=%zu non=%zu noise=%zu div=%zu arr=%zu bytes=%zu",
                 static_cast<unsigned long long>(sessionId), dtStr.c_str(),
-                rawCandidates.size(), kept,
+                rawCandidates.size(), rawCap, kept, shown,
                 droppedNonManaged, droppedNoise, droppedDiversity, arrayResolved, stats.bytesScanned);
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
@@ -8560,12 +8634,16 @@ void RegisterCoreHandlers() {
             {"mode",              "global"},
             {"dataType",          dtStr},
             {"scanType",          stStr},
-            {"count",             kept},
+            {"count",             shown},
             {"totalCandidates",   kept},
+            {"retainCap",         retainCap},
             {"droppedNonManaged", droppedNonManaged},
             {"droppedNoise",      droppedNoise},
             {"droppedDiversity",  droppedDiversity},
-            {"truncated",         rawCandidates.size() >= kRawScanCap || kept >= emitLimit},
+            {"rawTruncated",      rawCandidates.size() >= rawCap},
+            {"retainTruncated",   kept >= retainCap},
+            {"displayTruncated",  kept > shown},
+            {"truncated",         (rawCandidates.size() >= rawCap) || (kept >= retainCap) || (kept > shown)},
             {"scannedBytes",      stats.bytesScanned},
             {"readFailureBytes",  stats.readFailureBytes},
             {"candidates",        std::move(rows)},
