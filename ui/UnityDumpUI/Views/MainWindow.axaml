@@ -1626,7 +1626,7 @@
             <DockPanel Margin="6">
               <!-- Top bar: dataType + scanType + Value + ValueTo + Limit + buttons -->
               <Grid DockPanel.Dock="Top" Margin="0,0,0,6"
-                    ColumnDefinitions="Auto,*,Auto,*,Auto,*,Auto"
+                    ColumnDefinitions="Auto,*,Auto,*,Auto,2*,Auto"
                     RowDefinitions="Auto,Auto,Auto">
 
                 <!-- Row 0: dataType + scanType -->
@@ -1647,12 +1647,18 @@
 
                 <TextBlock Grid.Row="0" Grid.Column="4" Text="Limit:"
                            VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <NumericUpDown Grid.Row="0" Grid.Column="5"
-                               Value="{Binding ValueSearch.Limit, Mode=TwoWay}"
-                               Minimum="10" Maximum="50000" Increment="50"
-                               ClipValueToMinMax="True"
-                               HorizontalAlignment="Stretch" Margin="0,0,12,0"
-                               ToolTip.Tip="Max result rows. The raw memory scan is capped at 50,000 matches server-side, so 50,000 is the ceiling — typing more clamps to 50,000 (no out-of-memory). For a common value (e.g. 90) that appears in many arrays, narrow with a single type + Next Scan rather than chasing a bigger list. (A streaming redesign to lift this cap is on the backlog.)"/>
+                <StackPanel Grid.Row="0" Grid.Column="5" Orientation="Horizontal"
+                            Spacing="6" HorizontalAlignment="Left" Margin="0,0,12,0">
+                  <NumericUpDown Value="{Binding ValueSearch.Limit, Mode=TwoWay}"
+                                 Minimum="10" Maximum="50000" Increment="50"
+                                 ClipValueToMinMax="True" MinWidth="92"
+                                 ToolTip.Tip="Max result ROWS shown in the grid (display only). The DLL now RETAINS more candidates for refine than it displays (see 'Max:'), so a common value's instance survives the first scan even when it isn't shown — refine to narrow it into view."/>
+                  <TextBlock Text="Max:" VerticalAlignment="Center"/>
+                  <NumericUpDown Value="{Binding ValueSearch.MaxCandidates, Mode=TwoWay}"
+                                 Minimum="50000" Maximum="1000000" Increment="50000"
+                                 ClipValueToMinMax="True" MinWidth="108"
+                                 ToolTip.Tip="Max managed candidates the DLL RETAINS for refine (separate from the display Limit). Higher = a COMMON value's specific instance is more likely kept past the first scan. The DLL clamps by bitness: 32-bit Mono → 50,000 (the DLL shares the game's restricted address space); x64 → up to 1,000,000. Costs game-process memory while a scan session is open."/>
+                </StackPanel>
 
                 <StackPanel Grid.Row="0" Grid.Column="6" Orientation="Horizontal" Spacing="6">
                   <Button Content="First Scan"
@@ -1682,11 +1688,20 @@
 
                 <TextBlock Grid.Row="1" Grid.Column="4" Text="Tol:"
                            VerticalAlignment="Center" Margin="0,6,6,0"/>
-                <TextBox Grid.Row="1" Grid.Column="5"
-                         Text="{Binding ValueSearch.ToleranceText, Mode=TwoWay}"
-                         Margin="0,6,12,0"
-                         PlaceholderText="0.5"
-                         ToolTip.Tip="Float / double epsilon — only used for float/double scanning. Default 0.5 matches CE's 'Rounded (default)' float semantics: searching for 32 catches anything that displays as 32 (i.e. 31.5 to 32.5). Set to 0 for bit-exact match."/>
+                <StackPanel Grid.Row="1" Grid.Column="5" Orientation="Horizontal"
+                            Spacing="6" Margin="0,6,12,0">
+                  <TextBox Text="{Binding ValueSearch.ToleranceText, Mode=TwoWay}"
+                           MinWidth="120"
+                           PlaceholderText="0.5"
+                           ToolTip.Tip="Float / double epsilon — only used for float/double scanning. Default 0.5 matches CE's 'Rounded (default)' float semantics: searching for 32 catches anything that displays as 32 (i.e. 31.5 to 32.5). Set to 0 for bit-exact match."/>
+                  <!-- Cancel lives here (not the crowded button row) so it stays
+                       on-screen; visible only while a scan is running. -->
+                  <Button Content="⛔ Cancel"
+                          Command="{Binding ValueSearch.CancelScanCommand}"
+                          IsVisible="{Binding ValueSearch.IsBusy}"
+                          MinWidth="90"
+                          ToolTip.Tip="Abort the in-flight scan. Stops both the UI wait AND the DLL's scan (which otherwise runs to completion in the game process), freeing its work."/>
+                </StackPanel>
 
                 <!-- Row 2: encoding/matchMode (string mode) OR refine controls -->
                 <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="7"

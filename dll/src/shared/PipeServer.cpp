@@ -4,6 +4,7 @@
 
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "ScanCancel.h"
 
 #include <windows.h>
 
@@ -147,6 +148,30 @@ json Dispatch(const json& request) {
 
 void ServeClient(HANDLE pipe) {
     LogPipe("client connected");
+    // Disconnect monitor. A long scan handler runs SYNCHRONOUSLY on this thread,
+    // so while it's running we can't notice the pipe breaking until it returns
+    // (could be minutes). A side thread polls the pipe; if the client vanished
+    // (UI force-quit) it arms the cooperative scan-cancel so the DLL stops
+    // promptly + frees its work instead of churning to completion. It only
+    // probes WHILE a scan is active — then the main thread does no pipe IO, so
+    // PeekNamedPipe can't race the overlapped ReadFile on the same handle.
+    std::atomic<bool> monitorStop{false};
+    std::thread monitor([pipe, &monitorStop]() {
+        while (!monitorStop.load(std::memory_order_relaxed)) {
+            if (Discrete::ScanCancel::g_scanActive.load(std::memory_order_relaxed)) {
+                DWORD avail = 0;
+                if (!::PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr)) {
+                    DWORD e = ::GetLastError();
+                    if (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED ||
+                        e == ERROR_INVALID_HANDLE) {
+                        Discrete::ScanCancel::RequestCancel();
+                        break;
+                    }
+                }
+            }
+            if (::WaitForSingleObject(g_stopEvent, 150) == WAIT_OBJECT_0) break;
+        }
+    });
     while (g_running.load()) {
         std::string line;
         if (!ReadLine(pipe, line)) break;
@@ -176,6 +201,8 @@ void ServeClient(HANDLE pipe) {
         }
         if (!WriteLine(pipe, serialized)) break;
     }
+    monitorStop.store(true, std::memory_order_relaxed);
+    if (monitor.joinable()) monitor.join();
     LogPipe("client disconnected");
 }
 

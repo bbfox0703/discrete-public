@@ -6,6 +6,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
+#include "../shared/ScanCancel.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
@@ -1383,6 +1384,7 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
         auto& vec = perThread[tid];
         std::size_t qs = 0;
         for (;;) {
+            if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
             std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
             if (idx >= chunks.size()) break;
             SehSweepRegionFlat(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,

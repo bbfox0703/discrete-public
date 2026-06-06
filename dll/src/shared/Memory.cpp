@@ -2,6 +2,8 @@
 
 #include "Memory.h"
 
+#include "ScanCancel.h"
+
 #include <windows.h>
 #include <tlhelp32.h>
 #include <immintrin.h>   // AVX2 scan inner loops (Phase 30 P2 SIMD)
@@ -456,6 +458,7 @@ std::vector<ResultT> RunParallelScan(
     auto worker = [&]() {
         for (;;) {
             if (totalMatches.load(std::memory_order_relaxed) >= limit) break;
+            if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
             std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
             if (idx >= chunks.size()) break;
             auto& local = perChunk[idx];

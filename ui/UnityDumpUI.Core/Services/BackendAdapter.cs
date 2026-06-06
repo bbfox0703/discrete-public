@@ -943,7 +943,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<BeginValueScanResult> BeginValueScanAsync(
         string dataType, string scanType, double value,
         double? valueTo = null, int? limit = null, double? tolerance = null,
-        int? reuseIndexMs = null,
+        int? reuseIndexMs = null, int? retainCap = null,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
@@ -955,6 +955,10 @@ public sealed class BackendAdapter : ILiveExportSource
         if (valueTo.HasValue)   args["valueTo"]   = Dbl(valueTo.Value);
         if (limit.HasValue)     args["limit"]     = Int(limit.Value);
         if (tolerance.HasValue) args["tolerance"] = Dbl(tolerance.Value);
+        // Decoupled retain cap (how many managed candidates the DLL KEEPS for
+        // refine, separate from `limit` which is the display count). Bitness-
+        // gated server-side; null = server default.
+        if (retainCap.HasValue) args["retainCap"] = Int(retainCap.Value);
         // Opt the DLL into reusing a recently-built reverse-lookup index across
         // back-to-back scans (the aggregate "any numeric width" fan-out). 0 /
         // null = always a fresh heap walk.
@@ -965,6 +969,25 @@ public sealed class BackendAdapter : ILiveExportSource
             ProtocolJsonContext.Default.RpcEnvelopeBeginValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("beginValueScan returned no result");
+    }
+
+    /// <summary>Cancel an in-flight value scan. The primary connection is busy
+    /// running the scan, so this opens a SHORT-LIVED second pipe connection (the
+    /// DLL allows multiple instances) and sends <c>cancelScan</c>, which arms the
+    /// DLL's cooperative cancel flag so the long loops bail + free their work.
+    /// Best-effort / fire-and-forget — connect/IO failures are swallowed (if the
+    /// UI itself is going away, the DLL's disconnect monitor aborts the scan).</summary>
+    public async Task CancelScanAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            await using var cancelPipe = new PipeClient();
+            await cancelPipe.ConnectAsync(2000, ct).ConfigureAwait(false);
+            await cancelPipe.SendAsync(
+                "cancelScan", null,
+                ProtocolJsonContext.Default.RpcEnvelopeCancelScanResult, ct).ConfigureAwait(false);
+        }
+        catch { /* best-effort: the scan will still time out / disconnect-abort */ }
     }
 
     /// <summary>String-scan variant of beginValueScan. Server uses scanFieldValue

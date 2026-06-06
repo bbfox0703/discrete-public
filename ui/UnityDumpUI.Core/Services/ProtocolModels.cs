@@ -78,6 +78,13 @@ public sealed class PingResult
     [JsonPropertyName("pong")] public bool Pong { get; set; }
 }
 
+/// <summary>`cancelScan` ack — arms the DLL's cooperative scan-cancel flag.</summary>
+public sealed class CancelScanResult
+{
+    [JsonPropertyName("ok")]        public bool Ok        { get; set; }
+    [JsonPropertyName("cancelled")] public bool Cancelled { get; set; }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 8 — assembly / class introspection.
 //
@@ -804,10 +811,22 @@ public sealed class BeginValueScanResult
     [JsonPropertyName("mode")]              public string Mode              { get; set; } = string.Empty;
     [JsonPropertyName("dataType")]          public string DataType          { get; set; } = string.Empty;
     [JsonPropertyName("scanType")]          public string ScanType          { get; set; } = string.Empty;
+    /// <summary>Rows actually returned to the UI (= min(retained, display limit)).</summary>
     [JsonPropertyName("count")]             public int    Count             { get; set; }
+    /// <summary>Managed candidates RETAINED in the DLL session for refine (≥ Count).
+    /// Decoupled from display (2026-06-06) so a common value's instance survives
+    /// the first scan even though only Count rows cross the pipe.</summary>
     [JsonPropertyName("totalCandidates")]   public int    TotalCandidates   { get; set; }
+    [JsonPropertyName("retainCap")]         public int    RetainCap         { get; set; }
     [JsonPropertyName("droppedNonManaged")] public int    DroppedNonManaged { get; set; }
     [JsonPropertyName("truncated")]         public bool   Truncated         { get; set; }
+    /// <summary>Raw memory matches hit the rawCap ceiling — there may be MORE
+    /// instances of this value than were scanned (raise the cap or refine).</summary>
+    [JsonPropertyName("rawTruncated")]      public bool   RawTruncated      { get; set; }
+    /// <summary>Retained set hit retainCap — some managed matches weren't kept.</summary>
+    [JsonPropertyName("retainTruncated")]   public bool   RetainTruncated   { get; set; }
+    /// <summary>More candidates are retained than displayed (refine to narrow).</summary>
+    [JsonPropertyName("displayTruncated")]  public bool   DisplayTruncated  { get; set; }
     [JsonPropertyName("scannedBytes")]      public long   ScannedBytes      { get; set; }
     [JsonPropertyName("candidates")]        public List<ValueScanCandidate> Candidates { get; set; } = new();
     [JsonPropertyName("error")]             public string? Error            { get; set; }

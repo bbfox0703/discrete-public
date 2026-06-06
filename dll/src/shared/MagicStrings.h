@@ -281,6 +281,9 @@ inline constexpr const char* CmdScanFieldValue        = "scanFieldValue";
 inline constexpr const char* CmdBeginValueScan        = "beginValueScan";
 inline constexpr const char* CmdRefineValueScan       = "refineValueScan";
 inline constexpr const char* CmdEndValueScan          = "endValueScan";
+// Cooperative cancel of an in-flight value scan. Sent by the UI's Cancel button
+// on a SECOND pipe connection (the scanning connection is busy). Instant.
+inline constexpr const char* CmdCancelScan            = "cancelScan";
 
 // Phase 20-MT — diagnostic snapshot of the main-thread dispatcher state.
 // Args: (none).

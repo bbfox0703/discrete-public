@@ -14,6 +14,7 @@ namespace UnityDumpUI.Core.Services;
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(RpcEnvelope<HandshakeResult>))]
 [JsonSerializable(typeof(RpcEnvelope<PingResult>))]
+[JsonSerializable(typeof(RpcEnvelope<CancelScanResult>))]
 [JsonSerializable(typeof(RpcEnvelope<GetAssembliesResult>))]
 [JsonSerializable(typeof(RpcEnvelope<GetClassesResult>))]
 [JsonSerializable(typeof(RpcEnvelope<GetClassInfoResult>))]

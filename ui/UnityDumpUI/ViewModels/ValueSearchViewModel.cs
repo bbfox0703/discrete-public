@@ -214,6 +214,14 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     [ObservableProperty] private string _toleranceText = "0.5";
     [ObservableProperty] private int    _limit          = 10000;
 
+    /// <summary>Max managed candidates the DLL RETAINS for refine — decoupled
+    /// from the display <see cref="Limit"/> (only Limit rows cross the pipe).
+    /// High so a COMMON value's specific instance survives the first scan and
+    /// refine can narrow to it. The DLL clamps this by bitness (32-bit Mono →
+    /// 50000 since the DLL shares the game's address space; x64 → up to
+    /// 1,000,000), so it's a request, not a guarantee.</summary>
+    [ObservableProperty] private int    _maxCandidates  = 200000;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(NextScanCommand))]
     [NotifyCanExecuteChangedFor(nameof(EndSessionCommand))]
@@ -266,6 +274,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(FirstScanCommand))]
     [NotifyCanExecuteChangedFor(nameof(NextScanCommand))]
     [NotifyCanExecuteChangedFor(nameof(EndSessionCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CancelScanCommand))]
     private bool _isBusy;
 
     [ObservableProperty] private string _statusMessage = "Pick a dataType, type a value, press First Scan.";
@@ -344,9 +353,14 @@ public sealed partial class ValueSearchViewModel : ObservableObject
 
                 result = await _backend.BeginValueScanAsync(
                     SelectedDataType, SelectedScanType, val,
-                    valTo, Limit, tol, ct: ct).ConfigureAwait(true);
+                    valTo, Limit, tol, retainCap: MaxCandidates, ct: ct).ConfigureAwait(true);
             }
 
+            if (string.Equals(result.Error, "cancelled", StringComparison.Ordinal))
+            {
+                StatusMessage = "Scan cancelled.";
+                return;
+            }
             if (!string.IsNullOrEmpty(result.Error))
             {
                 ErrorMessage = result.Error;
@@ -363,9 +377,21 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             string sessionNote = HasSession ? $", session={SessionId}" : " (one-shot, no session)";
             string shownNote = FilteredResults.Count != Results.Count
                 ? $" (showing {FilteredResults.Count} after filters)" : string.Empty;
-            StatusMessage = result.Truncated
-                ? $"{Results.Count} hit(s){shownNote} (truncated at limit={Limit}); dropped {result.DroppedNonManaged} non-managed; scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}."
-                : $"{Results.Count} hit(s){shownNote}; dropped {result.DroppedNonManaged} non-managed; scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}.";
+            // Retain/display are decoupled: TotalCandidates = managed matches KEPT
+            // for refine; Results.Count = rows actually shown. Surface both + the
+            // reason for any truncation so the user knows whether to raise
+            // Max candidates or just refine.
+            int retained = result.TotalCandidates;
+            string retainNote = retained > Results.Count
+                ? $" — {retained:N0} retained for refine" : string.Empty;
+            string truncNote = result.RawTruncated
+                ? $" ⚠ raw scan capped — more instances may exist; raise Max candidates ({MaxCandidates:N0}) or refine."
+                : result.RetainTruncated
+                    ? $" ⚠ retained set capped at {result.RetainCap:N0} — raise Max candidates to keep more."
+                    : string.Empty;
+            StatusMessage =
+                $"{Results.Count} shown{shownNote}{retainNote}; dropped {result.DroppedNonManaged} non-managed; " +
+                $"scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}.{truncNote}";
         }
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
@@ -684,6 +710,20 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         StatusMessage = "Session ended.";
         ErrorMessage  = null;
     }
+
+    /// <summary>Cancel an in-flight scan. Two parts: cancel the UI-side awaits
+    /// (which also stops the aggregate "all widths" fan-out from sending the next
+    /// width) AND tell the DLL to abort the scan it's currently running — the
+    /// in-flight RPC runs uncancellable on the wire, so the UI token alone won't
+    /// stop the DLL; <c>cancelScan</c> arms the DLL's cooperative cancel.</summary>
+    [RelayCommand(CanExecute = nameof(CanCancelScan))]
+    private async Task CancelScanAsync()
+    {
+        StatusMessage = "Cancelling…";
+        _cts?.Cancel();
+        await _backend.CancelScanAsync().ConfigureAwait(true);
+    }
+    private bool CanCancelScan() => IsBusy;
 
     public void Activate(ValueSearchRow row) => NavigateToInspectorRequested?.Invoke(row);
     public void RequestWriteValue(ValueSearchRow row) => WriteValueRequested?.Invoke(row);
