@@ -223,6 +223,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     public void SetTarget(string assembly, string? @namespace, string name)
     {
         _ = StopAutoRefreshAsync();
+        // When the inspected class actually changes, reset the per-class filters
+        // (2026-06-08 user report): a stale Field filter JSON predicate or
+        // walked-fields keyword from the previous class otherwise silently hides
+        // the new class's instances/fields. Re-inspecting the SAME class keeps
+        // the filters (matches the existing "preserve on re-walk" behaviour).
+        bool classChanged =
+            !string.Equals(TargetAssembly, assembly, StringComparison.Ordinal) ||
+            !string.Equals(TargetNamespace ?? string.Empty, @namespace ?? string.Empty, StringComparison.Ordinal) ||
+            !string.Equals(TargetName, name, StringComparison.Ordinal);
         TargetAssembly  = assembly;
         TargetNamespace = @namespace ?? string.Empty;
         TargetName      = name;
@@ -231,6 +240,19 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         Fields.Clear();
         ErrorMessage = null;
         WalkSummary  = string.Empty;
+        if (classChanged)
+        {
+            FieldFilterJson = string.Empty;   // "Field filter" JSON predicate box
+            Filter          = string.Empty;   // "filter walked fields" keyword box
+            // Filter builder (numeric-field picker + value boxes): clear at the
+            // SAME time as the two filters above, not lazily on the next walk —
+            // otherwise the dropdown keeps showing the PREVIOUS class's fields
+            // until you click an instance (2026-06-08 user report).
+            FilterFieldOptions.Clear();
+            SelectedFilterField = null;
+            FilterValue1 = string.Empty;
+            FilterValue2 = string.Empty;
+        }
     }
 
     /// <summary>
@@ -393,13 +415,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         var prev = SelectedFilterField?.Name;
         FilterFieldOptions.Clear();
+        // Collect numeric top-level fields, then sort by name (case-insensitive)
+        // so the picker is alphabetical — far easier to locate a field by name
+        // than scrolling offset order, and it pairs with the type-to-filter
+        // dropdown (2026-06-08 user report: many fields, only findable by offset).
+        var opts = new List<FilterFieldOption>();
         foreach (WalkedFieldNode n in Fields)
         {
             if (n.IndentLevel != 0) continue;
             if (n.Offset < 0) continue;
             if (!string.IsNullOrEmpty(n.Type) && s_filterNumericTypes.Contains(n.Type))
-                FilterFieldOptions.Add(new FilterFieldOption(n.Name, n.Offset, n.Type));
+                opts.Add(new FilterFieldOption(n.Name, n.Offset, n.Type));
         }
+        opts.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        foreach (var o in opts) FilterFieldOptions.Add(o);
         if (prev is not null)
             SelectedFilterField = FilterFieldOptions.FirstOrDefault(o => o.Name == prev);
     }
@@ -1152,6 +1181,24 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 if (!list.Contains("UnityEngine.UIModule"))            list.Add("UnityEngine.UIModule");
                 if (!list.Contains("UnityEngine.TextRenderingModule")) list.Add("UnityEngine.TextRenderingModule");
             }
+        }
+        else if (@namespace.StartsWith("Unity.", StringComparison.Ordinal))
+        {
+            // DOTS / package types (Unity.Entities.Entity, Unity.Mathematics.
+            // quaternion / float3, Unity.Collections.*) live in an assembly
+            // usually named after the namespace itself or its two-segment
+            // prefix — NOT the field's declaring assembly. Without these the
+            // name fallback can never resolve them ("class not found:
+            // Unity.Entities.Entity"). Add both forms plus the common DOTS
+            // assemblies; the DLL ignores any that don't exist (and has its own
+            // cross-assembly backstop in resolveClassFromArgs).
+            void AddUnique(string a) { if (!string.IsNullOrEmpty(a) && !list.Contains(a)) list.Add(a); }
+            AddUnique(@namespace);
+            string[] segs = @namespace.Split('.');
+            if (segs.Length >= 2) AddUnique(segs[0] + "." + segs[1]);
+            AddUnique("Unity.Mathematics");
+            AddUnique("Unity.Entities");
+            AddUnique("Unity.Collections");
         }
         else if (@namespace.StartsWith("System", StringComparison.Ordinal))
         {
@@ -2313,6 +2360,12 @@ public sealed class FilterFieldOption
     /// <summary>Dropdown label, e.g. <c>level_  (+0x3C · Int32)</c>.</summary>
     public string Display =>
         string.Create(CultureInfo.InvariantCulture, $"{Name}  (+0x{Offset:X} · {ShortType})");
+
+    /// <summary>AutoCompleteBox uses the item's ToString for both its
+    /// type-to-filter matching and the selected-item text. Returning Display
+    /// lets the user type any part of the name (or offset / type) to narrow
+    /// the picker — not just scroll offset order.</summary>
+    public override string ToString() => Display;
 }
 
 public sealed class InstanceItem
