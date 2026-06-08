@@ -223,6 +223,15 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     public void SetTarget(string assembly, string? @namespace, string name)
     {
         _ = StopAutoRefreshAsync();
+        // When the inspected class actually changes, reset the per-class filters
+        // (2026-06-08 user report): a stale Field filter JSON predicate or
+        // walked-fields keyword from the previous class otherwise silently hides
+        // the new class's instances/fields. Re-inspecting the SAME class keeps
+        // the filters (matches the existing "preserve on re-walk" behaviour).
+        bool classChanged =
+            !string.Equals(TargetAssembly, assembly, StringComparison.Ordinal) ||
+            !string.Equals(TargetNamespace ?? string.Empty, @namespace ?? string.Empty, StringComparison.Ordinal) ||
+            !string.Equals(TargetName, name, StringComparison.Ordinal);
         TargetAssembly  = assembly;
         TargetNamespace = @namespace ?? string.Empty;
         TargetName      = name;
@@ -231,6 +240,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         Fields.Clear();
         ErrorMessage = null;
         WalkSummary  = string.Empty;
+        if (classChanged)
+        {
+            FieldFilterJson = string.Empty;   // "Field filter" JSON predicate box
+            Filter          = string.Empty;   // "filter walked fields" keyword box
+        }
     }
 
     /// <summary>
@@ -1152,6 +1166,24 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 if (!list.Contains("UnityEngine.UIModule"))            list.Add("UnityEngine.UIModule");
                 if (!list.Contains("UnityEngine.TextRenderingModule")) list.Add("UnityEngine.TextRenderingModule");
             }
+        }
+        else if (@namespace.StartsWith("Unity.", StringComparison.Ordinal))
+        {
+            // DOTS / package types (Unity.Entities.Entity, Unity.Mathematics.
+            // quaternion / float3, Unity.Collections.*) live in an assembly
+            // usually named after the namespace itself or its two-segment
+            // prefix — NOT the field's declaring assembly. Without these the
+            // name fallback can never resolve them ("class not found:
+            // Unity.Entities.Entity"). Add both forms plus the common DOTS
+            // assemblies; the DLL ignores any that don't exist (and has its own
+            // cross-assembly backstop in resolveClassFromArgs).
+            void AddUnique(string a) { if (!string.IsNullOrEmpty(a) && !list.Contains(a)) list.Add(a); }
+            AddUnique(@namespace);
+            string[] segs = @namespace.Split('.');
+            if (segs.Length >= 2) AddUnique(segs[0] + "." + segs[1]);
+            AddUnique("Unity.Mathematics");
+            AddUnique("Unity.Entities");
+            AddUnique("Unity.Collections");
         }
         else if (@namespace.StartsWith("System", StringComparison.Ordinal))
         {

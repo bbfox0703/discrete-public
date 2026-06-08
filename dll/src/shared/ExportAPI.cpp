@@ -3342,6 +3342,23 @@ void RegisterCoreHandlers() {
         Mono::MonoImage* img = Mono::FindImageByName(assemblyName);
         if (img == nullptr) { errOut = "assembly not found: " + assemblyName; return nullptr; }
         Mono::MonoClass* k = Mono::FindClass(img, ns, name);
+        if (k == nullptr) {
+            // Cross-assembly fallback (2026-06-08): a field's DECLARING assembly
+            // is often NOT the assembly that DEFINES its value-type. e.g.
+            // Pug.Other.PlayerController (Assembly-CSharp) carries
+            // Unity.Entities.Entity / Unity.Mathematics.quaternion struct fields;
+            // a struct-expand walkInstance arrives with assembly="Assembly-CSharp"
+            // but ns.name lives in Unity.Entities / Unity.Mathematics, so the
+            // single-image FindClass above misses and the Inspector reported
+            // "class not found: Unity.Entities.Entity". Search every loaded image
+            // for ns.name as a backstop. BuildImageMap() is ONE domain walk;
+            // FindClass is a metadata name lookup (no mono_class_vtable → no
+            // BDWGC freeze). Only runs on the rare miss path.
+            for (const auto& kv : Mono::BuildImageMap()) {
+                if (kv.second == nullptr || kv.second == img) continue;
+                if (Mono::MonoClass* alt = Mono::FindClass(kv.second, ns, name)) { k = alt; break; }
+            }
+        }
         if (k == nullptr) { errOut = "class not found: " + ns + "." + name; return nullptr; }
         return k;
     };
@@ -3653,12 +3670,10 @@ void RegisterCoreHandlers() {
             return json{{"error", "no assemblies visible (default exclude removed every assembly; try includeSystemAssemblies=true)"}};
         }
 
-        // Wide heap walk ------------------------------------------------------
-        auto bulk = Mono::FindAllInstances(instanceCap);
-
         // Build klass → (assembly, ns, name) index by enumerating each
         // requested assembly's classes ONCE — much cheaper than per-instance
-        // resolver calls.
+        // resolver calls. Built BEFORE the heap walk (2026-06-08) so a narrow
+        // explicit scope can drive the fast per-class scan below.
         struct ClassDesc {
             std::string  assembly;
             std::string  ns;
@@ -3685,6 +3700,74 @@ void RegisterCoreHandlers() {
                 klassToDescIdx[ce.klass] = descs.size();
                 descs.push_back(std::move(d));
             }
+        }
+
+        // Heap walk -----------------------------------------------------------
+        // Two strategies:
+        //   • Narrow EXPLICIT scope (≤ kSnapFastScanMaxClasses real classes):
+        //     resolve each class's MonoVTable* (a handful of mono_class_vtable
+        //     calls — the SAME call the single-class findInstances handler makes
+        //     safely; the documented BDWGC freezes were always from THOUSANDS of
+        //     vtable calls, never tens) under ONE outer attach guard, then SIMD-
+        //     scan committed memory per class with Memory::ScanForPointer. On a
+        //     4.7 GB DOTS heap (Core Keeper) the generic FindAllInstances walk
+        //     costs ~570 s for ALL ~9000 classes regardless of scope, whereas a
+        //     per-class ScanForPointer is ~1–2 s each — so a 16-class snapshot
+        //     drops from ~570 s to ~25 s. Gated to explicit scope so the default
+        //     "全抓" mode keeps the zero-vtable-call wide walk.
+        //   • Otherwise: the wide generic FindAllInstances walk (unchanged).
+        constexpr std::size_t kSnapFastScanMaxClasses = 64;
+        Mono::BulkInstancesResult bulk;
+        bool usedFastScan = false;
+        if (explicitScope && !descs.empty() && descs.size() <= kSnapFastScanMaxClasses) {
+            const auto& r = Mono::GetResolver();
+            Mono::MonoDomain* fsDomain = Mono::GetRootDomain();
+            if (r.class_vtable != nullptr && fsDomain != nullptr) {
+                // ONE outer attach guard for the whole loop kills the per-call
+                // attach/detach churn that leaves finalizable MonoThread refs
+                // (build #1152 Symbol Finder fix pattern). Inner self-attaches
+                // inside mono_class_vtable are reentrant no-ops.
+                Mono::ThreadAttachGuard fsGuard(fsDomain);
+                if (fsGuard.Attached()) {
+                    usedFastScan = true;
+                    std::size_t fsInstances = 0;
+                    for (const auto& d : descs) {
+                        if (d.klass == nullptr) continue;
+                        Mono::MonoVTable* vt = r.class_vtable(fsDomain, d.klass);
+                        if (vt == nullptr) continue;
+                        // skipMapped=true mirrors FindAllInstances' region filter:
+                        // MEM_MAPPED (file-backed game data) can hold stray
+                        // vtable-pointer values → false positives the bulk walk
+                        // drops. Matching it keeps the fast path's instance set
+                        // identical to the wide walk's — this fix only changes
+                        // scan SPEED, never WHICH instances are captured.
+                        auto m = Memory::ScanForPointer(
+                            reinterpret_cast<std::uintptr_t>(vt), instanceCap, nullptr,
+                            /*excludeLow=*/0, /*excludeHigh=*/0, /*skipMapped=*/true);
+                        if (!m.empty()) {
+                            auto& vec = bulk.byClass[d.klass];
+                            vec.reserve(m.size());
+                            for (const void* p : m)
+                                vec.push_back(reinterpret_cast<std::uintptr_t>(p));
+                            fsInstances += m.size();
+                        }
+                        // Per-class pacing: ScanForPointer is a parallel,
+                        // bandwidth-saturating walk; a 1 ms yield between classes
+                        // gives the game's main thread a scheduling slice so a
+                        // 16–64-class burst doesn't stutter the game.
+                        ::Sleep(1);
+                    }
+                    bulk.totalInstances = fsInstances;
+                    char fsLine[160];
+                    std::snprintf(fsLine, sizeof(fsLine),
+                        "Snapshot: fast per-class scan(Mono) classes=%zu instances=%zu scope=%zu",
+                        bulk.byClass.size(), fsInstances, descs.size());
+                    Discrete::Log::Write(MagicStrings::LogCategoryScan, fsLine);
+                }
+            }
+        }
+        if (!usedFastScan) {
+            bulk = Mono::FindAllInstances(instanceCap);
         }
 
         // Build the plan: one row per class. Statics are always captured
@@ -6330,6 +6413,17 @@ void RegisterCoreHandlers() {
         const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
         if (img == nullptr) { errOut = "assembly not found: " + assemblyName; return nullptr; }
         IL2CPP::Il2CppClass* k = IL2CPP::FindClass(img, ns, name);
+        if (k == nullptr) {
+            // Cross-assembly fallback (2026-06-08) — see the Mono twin. The
+            // field's declaring assembly may not DEFINE the value-type
+            // (Unity.Entities / Unity.Mathematics structs on an Assembly-CSharp
+            // class). Search every loaded image for ns.name as a backstop;
+            // il2cpp_class_from_name is a metadata lookup (no freeze risk).
+            for (const auto& a : IL2CPP::EnumerateAssemblies()) {
+                if (a.image == nullptr || a.image == img) continue;
+                if (IL2CPP::Il2CppClass* alt = IL2CPP::FindClass(a.image, ns, name)) { k = alt; break; }
+            }
+        }
         if (k == nullptr) { errOut = "class not found: " + ns + "." + name; return nullptr; }
         return k;
     };

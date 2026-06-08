@@ -49,6 +49,11 @@
   third-party `*Hook*` DLLs are *not* definitive evidence (counter-
   example: Subnautica); what work would be needed to support these
   targets (~6-8 days, deferred until 2+ samples land).
+- [Unity DOTS / ECS targets — gameplay data is NOT in managed objects](#unity-dots--ecs-targets--gameplay-data-is-not-in-managed-objects)
+  — why a managed snapshot comes back near-empty on a DOTS game
+  (Core Keeper), why CE sees 40–60 duplicate values, what
+  `lib_burst_generated_*` actually is, and the parked ECS-aware-walker
+  idea (Mono makes it feasible but C/P not worth it yet).
 
 ---
 
@@ -3228,3 +3233,86 @@ the index + kind so the user knows exactly which cell to fix.
 **Rule**: any "user-facing predicate language with optional
 operands" needs explicit empty-vs-meaningful-zero validation;
 silent fail-to-zero-results is the worst UX outcome.
+
+## Unity DOTS / ECS targets — gameplay data is NOT in managed objects
+
+**Symptom (Core Keeper, Mono x64, 2026-06-08)**: a full snapshot /
+`findInstances` over the managed heap returns almost nothing useful —
+16 in-scope classes with 0–28 live instances even though
+`FindAllInstances` reports **293 827** managed instances exist. In CE
+the same values show up as **40–60 identical copies** that have to be
+narrowed by binary-search, and "find what writes" always lands inside
+a module named **`lib_burst_generated_xxxxxxxxxxxxxxxx`** at
+`[reg+offset]`-style instructions with no static address.
+
+**Root cause — the game is built on Unity DOTS** (Data-Oriented
+Technology Stack). The data model is completely unlike MonoBehaviour
+games:
+
+| | Classic Unity | DOTS / ECS |
+|---|---|---|
+| Game object | a C# **object** (MonoObject, has a vtable) | an **Entity = just an ID** (index+version), no data |
+| Where data lives | the object's fields | a **Component** (`IComponentData`, a plain blittable struct) packed into a **16 KB chunk** |
+| Logic | the object's methods | a **System** running over all entities of a matching archetype |
+
+Two consequences that explain every symptom above:
+
+1. **Component data is unmanaged.** Components live in chunk memory
+   (chunk allocator → VirtualAlloc/native heap), NOT as MonoObjects.
+   Our snapshot / `findInstances` / `walkInstance` find instances by
+   matching a **MonoVTable\*** at object+0 — ECS chunk data has no
+   vtable, so the managed-instance scan **cannot see it**. The only
+   ECS-related things on the managed heap are `World` / `EntityManager`
+   / System objects and **entity handles** (e.g. the
+   `<entity>k__BackingField (Unity.Entities.Entity)` field on
+   `Pug.Other.PlayerController` is just the id, not the data).
+
+2. **Chunks are SoA (Structure of Arrays).** All entities of one
+   archetype store the same component contiguously — every `Health` in
+   one array, every `Position` in the next, NOT interleaved per-entity.
+   So 50 same-archetype entities → a contiguous run of 50 `Health`
+   values; identical defaults → CE finds 40–60 duplicates and the
+   player's value is one indistinguishable slot (hence binary-search).
+   Chunks also **move** on structural changes (entity create/destroy,
+   component add/remove) → a raw address is not stable across frames.
+
+**`lib_burst_generated_*` is CODE, not data.** Burst AOT-compiles the
+`[BurstCompile]` jobs/systems (C# → LLVM → native SIMD) into that
+module. The component **data** is in chunk heap; the **instructions
+that read/write it** are the Burst output, so CE's "what accesses
+this" points there. Those instructions take the chunk pointer in a
+register computed at runtime → no static address to lock. (Burst is
+independent of the scripting backend — it exists even on this Mono
+target.)
+
+**Is it solvable?** Not fundamentally unsolvable, in three tiers:
+
+- **Our tool (managed-instance path): no — for component data.** We can
+  surface the managed `EntityManager` / Systems and entity handles, but
+  not decode chunk contents.
+- **CE manually: yes, but painful.** (a) narrow with a 2-criteria scan
+  (filter by a value unique to the player's entity first, then the
+  target value) instead of value-alone; (b) don't lock addresses —
+  **AOB-hook the Burst system** in `lib_burst_generated` and read/modify
+  the component as the system iterates the player's slot each frame.
+  This is the standard DOTS cheat approach.
+- **Future "ECS-aware walker" (PARKED — C/P not worth it unless needed,
+  user call 2026-06-08).** Because Core Keeper is **Mono** (not IL2CPP),
+  `EntityManager` / `EntityComponentStore` ARE reachable managed
+  objects, so in principle:
+  `World → EntityManager → EntityComponentStore (→ unmanaged) → resolve
+  Entity{index,version} to archetype+chunk+index → chunk base +
+  component offset + index*stride → value address`. Doable and a real
+  differentiator, but needs reverse-engineering the specific
+  `Unity.Entities` version's internal `EntityComponentStore` /
+  `Archetype` / `Chunk` struct ABI, which is **undocumented and breaks
+  on game updates**. ~2–4 days reverse + a new backend module. Spec was
+  not written; revisit only if a DOTS target becomes a priority.
+
+**Rule**: before sinking time into managed-instance dumping on a Unity
+target, check for DOTS. Tells: a `lib_burst_generated_*` module loaded;
+`Unity.Entities` / `Unity.Mathematics` / `Unity.Collections` assemblies;
+`Unity.Entities.Entity` handle fields on game classes; CE value scans
+returning many identical duplicates. If DOTS, set expectations up front
+— the managed snapshot only covers managers/singletons; component data
+needs CE (multi-criteria scan + Burst AOB-hook) or a future ECS walker.
