@@ -244,6 +244,14 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         {
             FieldFilterJson = string.Empty;   // "Field filter" JSON predicate box
             Filter          = string.Empty;   // "filter walked fields" keyword box
+            // Filter builder (numeric-field picker + value boxes): clear at the
+            // SAME time as the two filters above, not lazily on the next walk —
+            // otherwise the dropdown keeps showing the PREVIOUS class's fields
+            // until you click an instance (2026-06-08 user report).
+            FilterFieldOptions.Clear();
+            SelectedFilterField = null;
+            FilterValue1 = string.Empty;
+            FilterValue2 = string.Empty;
         }
     }
 
@@ -407,13 +415,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     {
         var prev = SelectedFilterField?.Name;
         FilterFieldOptions.Clear();
+        // Collect numeric top-level fields, then sort by name (case-insensitive)
+        // so the picker is alphabetical — far easier to locate a field by name
+        // than scrolling offset order, and it pairs with the type-to-filter
+        // dropdown (2026-06-08 user report: many fields, only findable by offset).
+        var opts = new List<FilterFieldOption>();
         foreach (WalkedFieldNode n in Fields)
         {
             if (n.IndentLevel != 0) continue;
             if (n.Offset < 0) continue;
             if (!string.IsNullOrEmpty(n.Type) && s_filterNumericTypes.Contains(n.Type))
-                FilterFieldOptions.Add(new FilterFieldOption(n.Name, n.Offset, n.Type));
+                opts.Add(new FilterFieldOption(n.Name, n.Offset, n.Type));
         }
+        opts.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        foreach (var o in opts) FilterFieldOptions.Add(o);
         if (prev is not null)
             SelectedFilterField = FilterFieldOptions.FirstOrDefault(o => o.Name == prev);
     }
@@ -2345,6 +2360,12 @@ public sealed class FilterFieldOption
     /// <summary>Dropdown label, e.g. <c>level_  (+0x3C · Int32)</c>.</summary>
     public string Display =>
         string.Create(CultureInfo.InvariantCulture, $"{Name}  (+0x{Offset:X} · {ShortType})");
+
+    /// <summary>AutoCompleteBox uses the item's ToString for both its
+    /// type-to-filter matching and the selected-item text. Returning Display
+    /// lets the user type any part of the name (or offset / type) to narrow
+    /// the picker — not just scroll offset order.</summary>
+    public override string ToString() => Display;
 }
 
 public sealed class InstanceItem

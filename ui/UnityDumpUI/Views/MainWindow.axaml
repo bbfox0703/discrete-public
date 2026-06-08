@@ -730,16 +730,23 @@
               <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
                           Spacing="6" Margin="0,0,0,6">
                 <TextBlock Text="Filter builder" VerticalAlignment="Center" Opacity="0.7" />
-                <ComboBox MinWidth="190"
+                <!-- AutoCompleteBox (was ComboBox): fixed Width keeps the box +
+                     dropdown from resizing per class, and FilterMode=Contains
+                     lets the user type any part of the field NAME to narrow a
+                     long list instead of scrolling offset order (2026-06-08). -->
+                <AutoCompleteBox Width="280"
                           ItemsSource="{Binding Inspector.FilterFieldOptions}"
                           SelectedItem="{Binding Inspector.SelectedFilterField, Mode=TwoWay}"
-                          PlaceholderText="numeric field…">
-                  <ComboBox.ItemTemplate>
+                          FilterMode="Contains"
+                          MinimumPrefixLength="0"
+                          PlaceholderText="type a field name…"
+                          VerticalAlignment="Center">
+                  <AutoCompleteBox.ItemTemplate>
                     <DataTemplate x:DataType="vm:FilterFieldOption">
                       <TextBlock Text="{Binding Display}" />
                     </DataTemplate>
-                  </ComboBox.ItemTemplate>
-                </ComboBox>
+                  </AutoCompleteBox.ItemTemplate>
+                </AutoCompleteBox>
                 <ComboBox Width="92"
                           ItemsSource="{Binding Inspector.FilterOps}"
                           SelectedItem="{Binding Inspector.FilterOp, Mode=TwoWay}" />
