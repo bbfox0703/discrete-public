@@ -1373,7 +1373,10 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
     }
 
     // Parallel sweep into per-thread flat lists, then concatenate + sort.
-    unsigned int nthreads = Memory::ScanThreadCount();
+    // EffectiveScanThreads() honours the Value Search "Parallel" toggle (the
+    // value-scan handler caps it to 1 when the user wants serial scanning);
+    // default = ScanThreadCount() (full parallel).
+    unsigned int nthreads = Memory::EffectiveScanThreads();
     if (nthreads > chunks.size()) nthreads = static_cast<unsigned int>(chunks.size());
     if (nthreads < 1) nthreads = 1;
 

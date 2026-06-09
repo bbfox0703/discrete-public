@@ -75,6 +75,27 @@ std::vector<ThreadStackRange> CollectThreadStackRanges();
 // walk (IL2CPPAddressFinder::FindAllInstances).
 unsigned int ScanThreadCount() noexcept;
 
+// Per-scan thread cap (2026-06-08). The Value Search "Parallel" toggle lets the
+// user force single-threaded scanning on games whose anti-tamper reacts to many
+// threads hammering memory in parallel, without touching the hardware default
+// everywhere else. A value-scan handler opens a ScanThreadCapScope(cap) for its
+// duration; the parallel drivers (RunParallelScan + the IL2CPP reverse-lookup
+// index sweep) consult EffectiveScanThreads() instead of ScanThreadCount().
+//   cap == 0 → no cap (use ScanThreadCount, i.e. full parallel — the default).
+//   cap >= 1 → clamp to that many threads (cap == 1 ⇒ serial single-thread).
+// Global, not per-client — scans are serialized in practice (one at a time),
+// mirroring ScanCancel. NOTE: the Mono reverse-lookup index walk is ALWAYS
+// single-threaded by design (BDWGC bandwidth-starvation freeze risk) regardless
+// of this cap; it does not go through these drivers.
+void         SetScanThreadCap(unsigned int cap) noexcept;
+unsigned int EffectiveScanThreads() noexcept;
+struct ScanThreadCapScope {
+    explicit ScanThreadCapScope(unsigned int cap) noexcept { SetScanThreadCap(cap); }
+    ~ScanThreadCapScope() noexcept { SetScanThreadCap(0); }
+    ScanThreadCapScope(const ScanThreadCapScope&)            = delete;
+    ScanThreadCapScope& operator=(const ScanThreadCapScope&) = delete;
+};
+
 // Telemetry for one ScanForPointer invocation (helps debug "where did the false
 // positives go" without rebuilding with logging). Populated by ScanForPointer
 // when caller passes a non-null pointer.

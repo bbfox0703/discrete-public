@@ -8,9 +8,9 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1162** (DLL+UI,Core Keeper 四修:跨組件 value-struct 展開 cross-assembly fallback + Inspector filter 切 class 自動清空 + Filter-builder 打字搜尋 + snapshot 窄 scope 快掃;Mono x64/x86 + IL2CPP x64 build clean、712 UI tests green) |
-| **Current phase** | ✅ **Core Keeper Mono x64 使用者回報 bug 四修** (2026-06-08, DLL+UI, **live-verified 全過、已 merge main**) |
-| **Branches** | `main == dev`(本批已 merge main `665f13b`;2026-06-08)|
+| **Current build** | **#1175** (DLL+UI,Value Search「Parallel」開關 預設 ON:per-scan thread cap 讓使用者強制單緒掃描;Mono x64/x86 + IL2CPP x64 build clean、712 UI tests green) |
+| **Current phase** | 🔧 **Value Search「Parallel」可切換(預設 ON)** (2026-06-08, DLL+UI, **待 live-smoke**) |
+| **Branches** | `dev`(本批未 merge main;前一批四修已 merge `665f13b`)|
 | **Tests** | **712 UI tests green** |
 | **Mid-flight** | 無 |
 
@@ -85,6 +85,13 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-06-08 — Value Search「Parallel」可切換(預設 ON)**(DLL+UI,build #1175,兩 DLL build clean、712 UI tests green,**待 live-smoke**):
+- **動機**:Value Search 速度;平行掃描快但可能 trigger 某些遊戲的 anti-tamper(多緒狂掃記憶體)。使用者要平行作為**預設打開、可關**的選項;且 Mono 不得 GC error。
+- **現況盤點**:原始掃描(`ScanForValue`/`ScanForString` via `RunParallelScan`)兩 backend 早已平行;reverse-lookup index build → **Mono 永遠單緒**(刻意,避 BDWGC 頻寬餓死主緒凍機)、**IL2CPP 平行**;逐 candidate 解析單緒(在 outer `ThreadAttachGuard` 內)。
+- **做法**:新增 `Memory::EffectiveScanThreads()` + per-scan `Memory::ScanThreadCapScope`(cap=0 無上限=`ScanThreadCount()`;cap=1=單緒)。`RunParallelScan`(450)與 IL2CPP value-scan index sweep(`IL2CPPAddressFinder.cpp:1376`)改吃 `EffectiveScanThreads()`;snapshot 的 `FindAllInstances`(1234)**不動**。四個 value-scan handler(`beginValueScan`/`scanFieldValue` × Mono/IL2CPP)依 `args.value("parallel", true)` 開 `ScanThreadCapScope(parallel?0:1)`。UI:`ValueSearchViewModel.ParallelScan`(預設 true)+ Value Search 列 `Parallel` checkbox + `BackendAdapter` 兩 method 加 `bool? parallel` arg(僅 OFF 時送 `parallel:false`)。
+- **Mono GC 安全(打包票)**:平行部分(原始掃描)worker 緒**只 `SafeReadBytes`/SEH 讀記憶體,零 `mono_*` runtime 呼叫**;唯一 `mono_*` 在單緒 candidate 解析(attach guard 內)。Mono index build **無論開關都單緒**(沒去平行化它 —— 那才是頻寬凍機風險源)。故 parallel ON/OFF 都不碰 BDWGC。
+- **取捨**:此開關給控制權(預設 ON = 現行快路徑;OFF = 全單緒給 anti-tamper 遊戲)。**刻意未平行化 Mono index build**(避免重新引入凍機);若日後要更快需另開規格 + pacing。
 
 **2026-06-08 — Core Keeper Mono x64 使用者回報 bug 四修**(DLL+UI,build #1162,兩 DLL build clean、712 UI tests green,**全數 live-verified、已 merge main `665f13b`**;log `Logs/62208`):
 - **① 跨組件 value-struct 展開 `class not found`(Inspector)** — `Pug.Other.PlayerController` 對 `<entity>k__BackingField (Unity.Entities.Entity)` / `interactableDefaultRotation (Unity.Mathematics.quaternion)` 按 expand → `class not found`。真因:**欄位的 declaring assembly(Assembly-CSharp)≠ value-type 的 defining assembly(Unity.Entities / Unity.Mathematics)**,DLL `resolveClassFromArgs` 只查單一 image,UI `BuildAssemblyCandidates` 只懂 `UnityEngine*`/`System*`。`UnityEngine.Vector3`/`float3`/`Color` 能展開是因為剛好有 fallback。**修**:(a)DLL `resolveClassFromArgs` 兩 backend(Mono `BuildImageMap` / IL2CPP `EnumerateAssemblies`)在單 image miss 後遍歷全 image 找 `ns.name`(metadata name lookup,無 `mono_class_vtable` → 無 freeze,只跑 miss 路徑);(b)UI `BuildAssemblyCandidates` 加 `Unity.*` DOTS 分支(namespace 本身 + 兩段前綴 + Unity.Mathematics/Entities/Collections)。**live-verified**。

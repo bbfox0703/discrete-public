@@ -447,7 +447,7 @@ std::vector<ResultT> RunParallelScan(
     std::vector<ResultT> out;
     if (chunks.empty() || limit == 0) return out;
 
-    unsigned int nthreads = ScanThreadCount();
+    unsigned int nthreads = EffectiveScanThreads();
     if (nthreads > chunks.size()) nthreads = static_cast<unsigned int>(chunks.size());
     if (nthreads < 1) nthreads = 1;
 
@@ -542,6 +542,19 @@ unsigned int ScanThreadCount() noexcept {
     unsigned int t = (hc > 2) ? (hc - 2) : 1;
     if (t > 16) t = 16;
     return t;
+}
+
+// Per-scan thread cap (Value Search "Parallel" toggle). 0 = no cap. See Memory.h.
+static std::atomic<unsigned int> g_scanThreadCap{0};
+
+void SetScanThreadCap(unsigned int cap) noexcept {
+    g_scanThreadCap.store(cap, std::memory_order_relaxed);
+}
+
+unsigned int EffectiveScanThreads() noexcept {
+    const unsigned int base = ScanThreadCount();
+    const unsigned int cap  = g_scanThreadCap.load(std::memory_order_relaxed);
+    return (cap != 0 && cap < base) ? cap : base;
 }
 
 std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit, ScanStats* stats,

@@ -5029,6 +5029,9 @@ void RegisterCoreHandlers() {
     PipeServer::RegisterHandler(MagicStrings::CmdScanFieldValue,
         [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        // Value Search "Parallel" toggle (default on) — see beginValueScan. cap=1
+        // forces single-thread scanning; Mono worker threads only read memory.
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
 
         // --- Parse wire shape ---
         std::string dtStr = args.value("dataType", std::string{"int32"});
@@ -5427,6 +5430,12 @@ void RegisterCoreHandlers() {
         // Cancellation scope (see the IL2CPP twin): covers raw scan + index build
         // + candidate loop so Cancel / disconnect aborts mid-flight.
         ScanCancel::Scope scanCancelScope;
+        // Value Search "Parallel" toggle (default on). cap=1 forces single-thread
+        // scanning for games whose anti-tamper reacts to many threads hammering
+        // memory. Mono is GC-safe either way: the parallel parts (raw ScanForValue)
+        // only read process memory — no mono_* runtime call runs off the handler
+        // thread (the Mono reverse-lookup index is always single-threaded anyway).
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
 
         std::string dtStr = args.value("dataType", std::string{"int32"});
         Memory::ValueDataType dt{};
@@ -8266,6 +8275,9 @@ void RegisterCoreHandlers() {
     PipeServer::RegisterHandler(MagicStrings::CmdScanFieldValue,
         [resolveClassFromArgs, formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        // Value Search "Parallel" toggle (default on) — see beginValueScan. cap=1
+        // forces single-thread scanning (raw scan + reverse-lookup index sweep).
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
 
         std::string dtStr = args.value("dataType", std::string{"int32"});
 
@@ -8634,6 +8646,10 @@ void RegisterCoreHandlers() {
         // whole of this handler (raw scan, index build, candidate loop), so the
         // UI's Cancel button / a disconnect can abort it mid-flight.
         ScanCancel::Scope scanCancelScope;
+        // Value Search "Parallel" toggle (default on). cap=1 forces single-thread
+        // scanning (raw ScanForValue + the IL2CPP reverse-lookup index sweep) for
+        // anti-tamper-sensitive games; cap=0 = full parallel.
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
 
         std::string dtStr = args.value("dataType", std::string{"int32"});
         Memory::ValueDataType dt{};
