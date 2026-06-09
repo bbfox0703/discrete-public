@@ -222,6 +222,13 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     /// 1,000,000), so it's a request, not a guarantee.</summary>
     [ObservableProperty] private int    _maxCandidates  = 200000;
 
+    /// <summary>Multi-threaded scanning. On by default (cores−2 worker threads ⇒
+    /// much faster). Turn OFF for games whose anti-tamper reacts to many threads
+    /// hammering memory in parallel — the scan then runs single-threaded (slower
+    /// but lower-profile). Safe on Mono either way: the parallel parts only read
+    /// process memory, so no GC/BDWGC interaction regardless of this setting.</summary>
+    [ObservableProperty] private bool   _parallelScan   = true;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(NextScanCommand))]
     [NotifyCanExecuteChangedFor(nameof(EndSessionCommand))]
@@ -313,7 +320,8 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             if (IsStringMode)
             {
                 result = await _backend.ScanStringAsync(
-                    ValueText, SelectedEncoding, SelectedMatchMode, Limit, ct)
+                    ValueText, SelectedEncoding, SelectedMatchMode, Limit,
+                    parallel: ParallelScan, ct: ct)
                     .ConfigureAwait(true);
             }
             else
@@ -353,7 +361,8 @@ public sealed partial class ValueSearchViewModel : ObservableObject
 
                 result = await _backend.BeginValueScanAsync(
                     SelectedDataType, SelectedScanType, val,
-                    valTo, Limit, tol, retainCap: MaxCandidates, ct: ct).ConfigureAwait(true);
+                    valTo, Limit, tol, retainCap: MaxCandidates,
+                    parallel: ParallelScan, ct: ct).ConfigureAwait(true);
             }
 
             if (string.Equals(result.Error, "cancelled", StringComparison.Ordinal))
@@ -446,7 +455,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             {
                 r = await _backend.BeginValueScanAsync(
                     type, SelectedScanType, val, valTo, Limit, tol,
-                    reuseIndexMs: kReuseIndexMs, ct: ct)
+                    reuseIndexMs: kReuseIndexMs, parallel: ParallelScan, ct: ct)
                     .ConfigureAwait(true);
             }
             catch (OperationCanceledException) { return; }

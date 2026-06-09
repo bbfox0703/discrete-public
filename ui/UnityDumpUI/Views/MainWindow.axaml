@@ -1665,6 +1665,10 @@
                                  Minimum="50000" Maximum="1000000" Increment="50000"
                                  ClipValueToMinMax="True" MinWidth="108"
                                  ToolTip.Tip="Max managed candidates the DLL RETAINS for refine (separate from the display Limit). Higher = a COMMON value's specific instance is more likely kept past the first scan. The DLL clamps by bitness: 32-bit Mono → 50,000 (the DLL shares the game's restricted address space); x64 → up to 1,000,000. Costs game-process memory while a scan session is open."/>
+                  <CheckBox Content="Parallel"
+                            IsChecked="{Binding ValueSearch.ParallelScan, Mode=TwoWay}"
+                            VerticalAlignment="Center"
+                            ToolTip.Tip="Scan with multiple worker threads (cores − 2) — much faster. ON by default. Turn OFF for games whose anti-tamper reacts to many threads hammering memory in parallel: the scan then runs single-threaded (slower but lower-profile). Safe on Mono either way — the parallel work only reads process memory, so no GC/BDWGC interaction."/>
                 </StackPanel>
 
                 <StackPanel Grid.Row="0" Grid.Column="6" Orientation="Horizontal" Spacing="6">

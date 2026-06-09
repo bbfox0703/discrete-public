@@ -943,7 +943,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<BeginValueScanResult> BeginValueScanAsync(
         string dataType, string scanType, double value,
         double? valueTo = null, int? limit = null, double? tolerance = null,
-        int? reuseIndexMs = null, int? retainCap = null,
+        int? reuseIndexMs = null, int? retainCap = null, bool? parallel = null,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
@@ -955,6 +955,9 @@ public sealed class BackendAdapter : ILiveExportSource
         if (valueTo.HasValue)   args["valueTo"]   = Dbl(valueTo.Value);
         if (limit.HasValue)     args["limit"]     = Int(limit.Value);
         if (tolerance.HasValue) args["tolerance"] = Dbl(tolerance.Value);
+        // Value Search "Parallel" toggle (default on server-side). Only sent when
+        // the user turned it OFF → server caps the scan to a single thread.
+        if (parallel.HasValue)  args["parallel"]  = Bool(parallel.Value);
         // Decoupled retain cap (how many managed candidates the DLL KEEPS for
         // refine, separate from `limit` which is the display count). Bitness-
         // gated server-side; null = server default.
@@ -996,7 +999,7 @@ public sealed class BackendAdapter : ILiveExportSource
     /// always pass).</summary>
     public async Task<BeginValueScanResult> ScanStringAsync(
         string needle, string encoding = "utf16", string matchMode = "contains",
-        int? limit = null, CancellationToken ct = default)
+        int? limit = null, bool? parallel = null, CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
         {
@@ -1006,6 +1009,8 @@ public sealed class BackendAdapter : ILiveExportSource
             ["matchMode"] = Str(matchMode),
         };
         if (limit.HasValue) args["limit"] = Int(limit.Value);
+        // "Parallel" toggle — only sent when OFF (server caps to single thread).
+        if (parallel.HasValue) args["parallel"] = Bool(parallel.Value);
 
         // scanFieldValue returns the same wire envelope shape as
         // beginValueScan (minus sessionId), so it deserializes cleanly
