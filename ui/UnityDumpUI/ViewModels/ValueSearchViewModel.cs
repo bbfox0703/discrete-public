@@ -229,6 +229,14 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     /// process memory, so no GC/BDWGC interaction regardless of this setting.</summary>
     [ObservableProperty] private bool   _parallelScan   = true;
 
+    /// <summary>Wire form of <see cref="ParallelScan"/> for the backend's optional
+    /// <c>parallel</c> arg: <c>null</c> when ON (omitted from the request → the
+    /// DLL's <c>args.value("parallel", true)</c> default applies = full parallel),
+    /// <c>false</c> when OFF (sent → server caps the scan to a single thread). This
+    /// honours the "only sent when OFF" contract documented on BackendAdapter and
+    /// the DLL handlers, instead of always transmitting a redundant <c>true</c>.</summary>
+    private bool? ParallelArg => ParallelScan ? (bool?)null : false;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(NextScanCommand))]
     [NotifyCanExecuteChangedFor(nameof(EndSessionCommand))]
@@ -321,7 +329,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             {
                 result = await _backend.ScanStringAsync(
                     ValueText, SelectedEncoding, SelectedMatchMode, Limit,
-                    parallel: ParallelScan, ct: ct)
+                    parallel: ParallelArg, ct: ct)
                     .ConfigureAwait(true);
             }
             else
@@ -362,7 +370,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
                 result = await _backend.BeginValueScanAsync(
                     SelectedDataType, SelectedScanType, val,
                     valTo, Limit, tol, retainCap: MaxCandidates,
-                    parallel: ParallelScan, ct: ct).ConfigureAwait(true);
+                    parallel: ParallelArg, ct: ct).ConfigureAwait(true);
             }
 
             if (string.Equals(result.Error, "cancelled", StringComparison.Ordinal))
@@ -455,7 +463,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             {
                 r = await _backend.BeginValueScanAsync(
                     type, SelectedScanType, val, valTo, Limit, tol,
-                    reuseIndexMs: kReuseIndexMs, parallel: ParallelScan, ct: ct)
+                    reuseIndexMs: kReuseIndexMs, parallel: ParallelArg, ct: ct)
                     .ConfigureAwait(true);
             }
             catch (OperationCanceledException) { return; }

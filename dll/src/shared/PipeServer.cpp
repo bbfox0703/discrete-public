@@ -64,6 +64,11 @@ bool WriteLine(HANDLE pipe, const std::string& data) {
         ok = ::GetOverlappedResult(pipe, &ov, &written, FALSE) && written == framed.size();
     } else {
         ::CancelIoEx(pipe, &ov);
+        // Wait (bWait=TRUE) for the cancellation to actually complete before
+        // ov leaves scope — CancelIoEx is async, and the kernel may still
+        // write the completion status into the stack-resident OVERLAPPED
+        // after CancelIoEx returns. Ignore the result; we're tearing down.
+        ::GetOverlappedResult(pipe, &ov, &written, TRUE);
     }
     ::CloseHandle(ov.hEvent);
     return ok;
@@ -91,6 +96,10 @@ bool ReadLine(HANDLE pipe, std::string& out) {
         DWORD which = ::WaitForMultipleObjects(2, waits, FALSE, INFINITE);
         if (which != WAIT_OBJECT_0) {
             ::CancelIoEx(pipe, &ov);
+            // Drain the cancellation (bWait=TRUE) before ov + buf leave scope:
+            // CancelIoEx is async, so the kernel may still write into the
+            // stack-resident OVERLAPPED / read buffer after it returns.
+            ::GetOverlappedResult(pipe, &ov, &read, TRUE);
             ok = false;
             break;
         }
@@ -270,6 +279,11 @@ void WorkerThread() {
                 ready = ::GetOverlappedResult(pipe, &ov, &bytes, FALSE) != FALSE;
             } else {
                 ::CancelIoEx(pipe, &ov);
+                // Drain the cancellation (bWait=TRUE) before ov leaves scope —
+                // CancelIoEx is async; the kernel may still write the
+                // completion status into the stack-resident OVERLAPPED.
+                DWORD bytes = 0;
+                ::GetOverlappedResult(pipe, &ov, &bytes, TRUE);
             }
         }
 

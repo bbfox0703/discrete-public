@@ -66,9 +66,19 @@ namespace {
 // work, then sets done_event.
 struct WorkItem {
     WorkFn       fn;
-    HANDLE       done_event;        // auto-reset, signaled when work completes
+    HANDLE       done_event = nullptr;  // auto-reset, signaled when work completes
     std::atomic<bool> consumed;     // true once main thread has executed fn
     std::atomic<bool> aborted;      // true if SubmitAndWait gave up before drain
+
+    // The WorkItem OWNS the completion event: it's closed here, when the last
+    // shared_ptr (submitter or queue) is released — NOT in SubmitAndWait. This
+    // closes the timeout race: Drain holds a reference for the whole
+    // fn()+SetEvent, so SetEvent can never land on a closed (possibly
+    // kernel-reused) handle even if the submitter timed out and returned
+    // mid-drain. Last reference wins; closed exactly once.
+    ~WorkItem() {
+        if (done_event) ::CloseHandle(done_event);
+    }
 };
 
 // Global state. All access goes through g_mutex except for the cheap
@@ -287,8 +297,9 @@ DispatchResult SubmitAndWait(WorkFn work, std::int32_t timeout_ms) {
         }
     }
 
-    // Build work item. RAII handle: shared_ptr custom deleter closes
-    // the event so the worker thread can't leak it on early-return.
+    // Build work item. The WorkItem destructor owns done_event (see struct),
+    // so the event is closed when the last shared_ptr is released — never
+    // leaked on early-return, never closed out from under Drain's SetEvent.
     auto item = std::make_shared<WorkItem>();
     item->fn         = std::move(work);
     item->done_event = ::CreateEventW(nullptr, FALSE /*auto-reset*/, FALSE, nullptr);
@@ -308,8 +319,10 @@ DispatchResult SubmitAndWait(WorkFn work, std::int32_t timeout_ms) {
     // Block until main thread drains, or timeout fires.
     const DWORD wait = (timeout_ms < 0) ? INFINITE : static_cast<DWORD>(timeout_ms);
     const DWORD wr   = ::WaitForSingleObject(item->done_event, wait);
-    ::CloseHandle(item->done_event);
-    item->done_event = nullptr;
+    // Do NOT close done_event here. The queue may still hold a reference (we
+    // timed out, or Drain is mid-flight on this item); closing it now would
+    // let Drain's SetEvent fire on a dead/reused handle. The WorkItem
+    // destructor closes it when the last shared_ptr drops — see the struct.
 
     if (wr == WAIT_OBJECT_0 && item->consumed.load()) {
         dr.ok              = true;
