@@ -47,7 +47,7 @@
          SQLitePCLRaw.bundle_e_sqlite3 bundles a self-contained SQLite native
          library so we don't depend on an OS-shipped sqlite3.dll. Needs an
          early SQLitePCL.Batteries_V2.Init() call in Program.Main. -->
-    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.9" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
   </ItemGroup>
 

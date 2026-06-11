@@ -12,12 +12,17 @@
     <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
     <EnableAotAnalyzer>false</EnableAotAnalyzer>
 
-    <!-- .NET 10 SDK + Microsoft.Testing.Platform.MSBuild 2.2.3 disabled
-         the legacy VSTest target. Opt into the Microsoft Testing Platform
-         runner (xunit.v3 ships native MTP support so no test-code change
-         needed). `dotnet test` now drives the new runner directly. -->
+    <!-- Microsoft.Testing.Platform.MSBuild 2.2.x (MTP v2) removed the legacy
+         "run MTP under the VSTest target" path on the .NET 10 SDK. We opt into
+         the new `dotnet test` MTP mode instead — enabled by the
+         `test.runner = Microsoft.Testing.Platform` section in ../global.json.
+         In MTP mode TestingPlatformDotnetTestSupport (and the extra arg
+         separator) are no longer required (see aka.ms/dotnet-test-mtp-error).
+         `UseMicrosoftTestingPlatformRunner` stays true so xunit's MTP entry
+         point (not the VSTest one) is generated even with
+         Microsoft.NET.Test.Sdk referenced; xunit.v3 ships native MTP support
+         so no test-code change is needed. -->
     <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
-    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,16 +32,7 @@
     <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" Version="8.3.1.5" />
     <PackageReference Include="HarfBuzzSharp.NativeAssets.WebAssembly" Version="8.3.1.5" />
     <PackageReference Include="MicroCom.Runtime" Version="0.11.6" />
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.8" />
-    <!-- Microsoft.Testing.Platform.* packages intentionally NOT pinned —
-         xunit.v3 brings in a compatible Microsoft.Testing.Platform
-         version transitively. Pinning 2.2.3 explicitly here broke two
-         things: (1) Microsoft.Testing.Platform.MSBuild 2.2.3 refuses the
-         classic `dotnet test` VSTest path on .NET 10 SDK; (2)
-         Microsoft.Testing.Platform 2.2.3's IOutputDevice.DisplayAsync
-         signature drifted from what xunit.v3 3.2.2 was built against
-         (MissingMethodException at runtime). Let xunit.v3 own the
-         testing-platform version selection. -->
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.9" />
     <!-- Newtonsoft.Json kept explicit — bumped to a non-vulnerable
          version above the transitive default. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
@@ -44,6 +40,34 @@
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.4" />
     <PackageReference Include="SkiaSharp.NativeAssets.WebAssembly" Version="3.119.4" />
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.4" />
+    <!-- ===================================================================
+         DO **NOT** add explicit Microsoft.Testing.* PackageReferences here.
+         (A `_FailOnExplicitMtpPin` guard target below hard-fails the build if
+         you do — including via a NuGet "update all" bump, the usual culprit.)
+
+         Why: xunit.v3 3.2.2 is an MTP **v1** runner — it pulls
+         xunit.v3.core.mtp-v1 / xunit.v3.mtp-v1 and is compiled against the MTP
+         1.x API. Pinning the MTP **v2** packages
+         (Microsoft.Testing.Platform / .MSBuild / .Extensions.Telemetry /
+         .Extensions.TrxReport.Abstractions = 2.2.x) forces the runtime to 2.2.x,
+         whose IOutputDevice.DisplayAsync signature changed. Symptoms (verbatim,
+         for future grep):
+
+           error : Testing with VSTest target is no longer supported by
+             Microsoft.Testing.Platform on .NET 10 SDK and later.   (MSBuild, at build)
+           System.MissingMethodException: Method not found: 'System.Threading.
+             Tasks.Task Microsoft.Testing.Platform.OutputDevice.IOutputDevice.
+             DisplayAsync(...IOutputDeviceDataProducer, ...IOutputDeviceData)'  (at run)
+           -> "已執行零項測試 / Zero tests ran", exit code -532462766.
+
+         Leave these UNPINNED. xunit.v3 then resolves the transitive MTP 1.9.1
+         (>= 1.7.0, which the new `dotnet test` MTP mode requires — opted in via
+         ../global.json `test.runner`). The Azure / OpenTelemetry / Identity
+         packages an earlier bump dragged in via the v2 Telemetry extension were
+         removed too; the test code uses none of them. Only re-pin the 2.2.x MTP
+         packages once xunit.v3 ships an mtp-v2 integration (then delete the
+         guard below). See docs/lessons-learned.md (UPDATE 2026-06-11).
+         =================================================================== -->
     <PackageReference Include="xunit.v3" Version="3.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.*" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
@@ -57,4 +81,19 @@
          consuming it via ProjectReference. -->
     <ProjectReference Include="..\UnityDumpUI\UnityDumpUI.csproj" />
   </ItemGroup>
+
+  <!-- Guard rail for the package-list comment above. xunit.v3 3.2.2 is an MTP
+       v1 runner; an MTP 2.2.x runtime breaks it at run time
+       (MissingMethodException on IOutputDevice.DisplayAsync, "Zero tests ran",
+       exit -532462766). A NuGet "update all" loves to re-add these as explicit
+       pins, which silently forces the v2 runtime — so fail the build the
+       instant any Microsoft.Testing.* package is pinned here, instead of
+       letting it reach a test run. Batches over PackageReference, so it also
+       catches MTP packages we did not enumerate (e.g. CrashDump). Delete this
+       target only when moving to an mtp-v2-capable xunit.v3. -->
+  <Target Name="_FailOnExplicitMtpPin" BeforeTargets="CollectPackageReferences">
+    <Error
+      Condition="'%(PackageReference.Identity)' != '' and $([System.String]::Copy('%(PackageReference.Identity)').StartsWith('Microsoft.Testing.'))"
+      Text="Do NOT pin %(PackageReference.Identity) explicitly in UnityDumpUI.Tests.csproj. xunit.v3 3.2.2 is mtp-v1; an MTP 2.2.x runtime breaks it at run time (System.MissingMethodException on IOutputDevice.DisplayAsync -> 'Zero tests ran', exit -532462766). Remove the pin and let xunit.v3 resolve the transitive MTP 1.x version. See the package-list comment above + docs/lessons-learned.md (2026-06-11)." />
+  </Target>
 </Project>
