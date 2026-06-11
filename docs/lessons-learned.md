@@ -3053,6 +3053,49 @@ slightly different (one-line `成功! - 失敗: 0，通過: N` vs the
 legacy multi-line VSTest summary) but the wall-clock behaviour is
 identical.
 
+> **UPDATE 2026-06-11 — same regression, now resolved via MTP *mode* (not the VSTest bridge).**
+> A later package bump re-pinned the v2 MTP packages (2.2.3) AND the
+> SDK moved to **10.0.301**. On that SDK, `Microsoft.Testing.Platform.MSBuild`
+> 2.2.3 hard-refuses the VSTest target, so the Phase 29c stopgap of "keep
+> `TestingPlatformDotnetTestSupport=true` and stay in VSTest-bridge mode" no
+> longer works — it just re-triggers the `targets(263,5)` error. The durable
+> fix is to opt into the **new `dotnet test` MTP mode** instead of the legacy
+> bridge:
+>
+> 1. `ui/global.json` → add a `test` section:
+>    ```json
+>    { "sdk": { ... }, "test": { "runner": "Microsoft.Testing.Platform" } }
+>    ```
+> 2. `*.Tests.csproj` → **remove** `TestingPlatformDotnetTestSupport` (no longer
+>    required in MTP mode); keep `UseMicrosoftTestingPlatformRunner=true`.
+> 3. Still **do not pin any `Microsoft.Testing.*` version** — xunit.v3 3.2.2 is
+>    built against the MTP **v1** API (`xunit.v3.core.mtp-v1` / `.mtp-v1`), so it
+>    must run on the 1.x runtime. Pinning the 2.2.3 packages forces
+>    `Microsoft.Testing.Platform` to 2.2.3 and the v1 runner dies with
+>    `MissingMethodException` on `IOutputDevice.DisplayAsync`. With the pins
+>    gone, the transitive MTP resolves to **1.9.1** (≥ 1.7.0, which MTP mode
+>    requires). Also drop the Azure / OpenTelemetry / Identity packages the v2
+>    `Microsoft.Testing.Extensions.Telemetry` dragged in — the test code uses
+>    none of them.
+>
+> **Gotcha — MTP mode is cwd-sensitive.** `dotnet test` reads the `test.runner`
+> setting from the `global.json` found by walking *up* from the working
+> directory. Our `global.json` lives in `ui/`, so the runner must be invoked
+> from `ui/` (or a descendant). From the repo root there is no `global.json` on
+> the upward path, so `dotnet test` silently falls back to the VSTest target and
+> the 2.2.3 error returns. `build.ps1` `Run-Tests` now `Push-Location`s into
+> `ui/` and calls `dotnet test --project <proj> -c Release -v minimal`. Note the
+> flag changes for MTP mode: `--nologo` is a VSTest-only flag and is rejected
+> (exit 5), and the project is passed via `--project`, not positionally.
+>
+> **Regression guard.** Because this has now bitten twice via routine NuGet
+> bumps, `UnityDumpUI.Tests.csproj` carries a `_FailOnExplicitMtpPin` MSBuild
+> target that hard-fails the build (batched over `@(PackageReference)`) if any
+> `Microsoft.Testing.*` package is pinned explicitly. A comment can't stop an
+> "update all"; this does — and it surfaces the fix message at build time, long
+> before a test run. Remove the target only when xunit.v3 ships an mtp-v2
+> integration (at which point pinning 2.2.x becomes correct).
+
 ---
 
 ### Phase 29d-2 — `CommunityToolkit.Mvvm` `[RelayCommand]` strips `Async` suffix when naming the generated command  ✅ **Surfaced 2026-05-29**

@@ -428,13 +428,25 @@ function Build-Ui {
 # Tests (xUnit v3 standalone exe runner)
 # ---------------------------------------------------------------------------
 function Run-Tests {
-    Write-Banner 'Unit Tests  |  xUnit v3'
+    Write-Banner 'Unit Tests  |  xUnit v3 (Microsoft.Testing.Platform)'
     if (-not (Test-Path $TEST_PROJ)) {
         Write-Info 'Test project not found, skipping'
         return $true
     }
     Write-Step 'Building + running tests'
-    & dotnet test $TEST_PROJ -c Release --nologo -v minimal | Out-Host
+    # `dotnet test` runs in MTP mode — enabled by the `test.runner` section in
+    # ui/global.json. That runner config is read from the global.json found by
+    # walking UP from the working directory, so we must invoke from $UI_DIR
+    # (RepoRoot has no global.json, which would silently fall back to the
+    # VSTest target — removed in MTP v2 on the .NET 10 SDK). MTP mode also
+    # rejects VSTest-only flags such as --nologo, and takes --project instead
+    # of a positional project path.
+    Push-Location $UI_DIR
+    try {
+        & dotnet test --project $TEST_PROJ -c Release -v minimal | Out-Host
+    } finally {
+        Pop-Location
+    }
     if ($LASTEXITCODE -ne 0) { Write-Fail 'Tests failed'; return $false }
     Write-Ok 'All tests passed'
     return $true
