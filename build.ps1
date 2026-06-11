@@ -178,6 +178,17 @@ function Enter-VsDevEnvironment {
         throw "DevShell already loaded for $($script:DevShellLoadedFor); cannot switch to $Arch in the same process. Re-run build.ps1 per arch, or use -Arch Both which spawns a child process per arch."
     }
 
+    # Reuse a matching dev env already present in this shell (e.g. inherited from a
+    # parent Developer PowerShell, or a sibling repo's vcvars/DevShell publish run in
+    # this same session) instead of stacking another layer onto PATH/INCLUDE/LIB.
+    # Enter-VsDevShell PREPENDS the VC paths every time; re-entering overflows the
+    # linker command line -> AOT link "input line too long", exit 123.
+    if ($env:VSCMD_ARG_TGT_ARCH -eq $Arch) {
+        $script:DevShellLoadedFor = $Arch
+        Write-Ok "MSVC $Arch environment already loaded (reusing inherited env)"
+        return
+    }
+
     $vsPath = Resolve-VsInstallPath
     $devShellDll = Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
     if (-not (Test-Path $devShellDll)) {
@@ -356,6 +367,7 @@ function Build-Ui {
             -c Release `
             -r win-x64 `
             -p:PublishAot=true `
+            -p:IlcUseEnvironmentalTools=true `
             -o $publishDir `
             --nologo | Out-Host
     }
