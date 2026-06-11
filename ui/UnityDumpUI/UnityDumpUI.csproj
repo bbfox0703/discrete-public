@@ -66,6 +66,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Let the xUnit project assert on internal regression seams (e.g.
+         ValueSearchViewModel.ParallelArg and the scan-status note helpers)
+         without widening the public API. Mirrors Core's IVT to the same
+         test assembly. -->
+    <InternalsVisibleTo Include="UnityDumpUI.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Avalonia 12 — Windows-only build. We deliberately do NOT reference
          Avalonia.Desktop (the cross-platform metapackage), because it drags
          in Avalonia.X11 + Avalonia.FreeDesktop + Tmds.DBus.Protocol — all

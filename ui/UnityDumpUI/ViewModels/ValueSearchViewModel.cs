@@ -235,7 +235,31 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     /// <c>false</c> when OFF (sent → server caps the scan to a single thread). This
     /// honours the "only sent when OFF" contract documented on BackendAdapter and
     /// the DLL handlers, instead of always transmitting a redundant <c>true</c>.</summary>
-    private bool? ParallelArg => ParallelScan ? (bool?)null : false;
+    /// <remarks><c>internal</c> only so the regression test can pin the
+    /// null-when-ON / false-when-OFF wire contract (efd19b0).</remarks>
+    internal bool? ParallelArg => ParallelScan ? (bool?)null : false;
+
+    /// <summary>First-Scan status fragment for the retain/display decouple
+    /// (1aabf94): only appended when the DLL RETAINED more managed candidates
+    /// than the <paramref name="shown"/> rows that crossed the pipe, so the
+    /// user knows a refine can still reach instances not currently listed.
+    /// Empty when retained ≤ shown (no decouple to report).
+    /// <c>internal static</c> + pure so it can be unit-tested directly.</summary>
+    internal static string RetainNote(int retained, int shown)
+        => retained > shown ? $" — {retained:N0} retained for refine" : string.Empty;
+
+    /// <summary>First-Scan status fragment naming WHY the result set was capped,
+    /// so the user knows whether to raise Max candidates or just refine
+    /// (1aabf94). Raw-scan truncation takes priority over retain-set truncation
+    /// (a capped raw scan is the more fundamental limit); empty when neither
+    /// cap was hit. <c>internal static</c> + pure for direct unit testing.</summary>
+    internal static string ScanTruncationNote(
+        bool rawTruncated, bool retainTruncated, int retainCap, int maxCandidates)
+        => rawTruncated
+            ? $" ⚠ raw scan capped — more instances may exist; raise Max candidates ({maxCandidates:N0}) or refine."
+            : retainTruncated
+                ? $" ⚠ retained set capped at {retainCap:N0} — raise Max candidates to keep more."
+                : string.Empty;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(NextScanCommand))]
@@ -399,13 +423,9 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             // reason for any truncation so the user knows whether to raise
             // Max candidates or just refine.
             int retained = result.TotalCandidates;
-            string retainNote = retained > Results.Count
-                ? $" — {retained:N0} retained for refine" : string.Empty;
-            string truncNote = result.RawTruncated
-                ? $" ⚠ raw scan capped — more instances may exist; raise Max candidates ({MaxCandidates:N0}) or refine."
-                : result.RetainTruncated
-                    ? $" ⚠ retained set capped at {result.RetainCap:N0} — raise Max candidates to keep more."
-                    : string.Empty;
+            string retainNote = RetainNote(retained, Results.Count);
+            string truncNote  = ScanTruncationNote(
+                result.RawTruncated, result.RetainTruncated, result.RetainCap, MaxCandidates);
             StatusMessage =
                 $"{Results.Count} shown{shownNote}{retainNote}; dropped {result.DroppedNonManaged} non-managed; " +
                 $"scanned {result.ScannedBytes / (1024 * 1024)} MB in {sw.ElapsedMilliseconds} ms{sessionNote}.{truncNote}";
