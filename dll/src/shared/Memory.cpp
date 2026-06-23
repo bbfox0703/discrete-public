@@ -107,6 +107,48 @@ bool SafeReadBytes(const void* addr, void* dst, std::size_t size) noexcept {
     return ReadSeh(addr, dst, size);
 }
 
+namespace {
+// Thread-local one-region readability cache for SafeReadBytesSeq. Holds the
+// bounds of the last region a single-region read confirmed readable, so a burst
+// of small same-region reads needs no further VirtualQuery. Bytes are NOT cached
+// (only readability); the SEH-guarded memcpy still does the actual read.
+thread_local const std::uint8_t* tl_rdBase = nullptr;
+thread_local const std::uint8_t* tl_rdEnd  = nullptr;
+
+bool IsReadableSeq(const void* addr, std::size_t size) noexcept {
+    const std::uint8_t* p = static_cast<const std::uint8_t*>(addr);
+    if (tl_rdBase && p >= tl_rdBase && p < tl_rdEnd &&
+        static_cast<std::size_t>(tl_rdEnd - p) >= size)
+        return true;   // cache hit — no syscall
+
+    constexpr DWORD kReadable =
+        PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (::VirtualQuery(p, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & PAGE_GUARD) return false;
+    if (mbi.Protect & PAGE_NOACCESS) return false;
+    if ((mbi.Protect & kReadable) == 0) return false;
+
+    const std::uint8_t* rBase = static_cast<const std::uint8_t*>(mbi.BaseAddress);
+    const std::uint8_t* rEnd  = rBase + mbi.RegionSize;
+    if (p >= rBase && p < rEnd && static_cast<std::size_t>(rEnd - p) >= size) {
+        tl_rdBase = rBase; tl_rdEnd = rEnd;   // whole read fits one readable region — cache it
+        return true;
+    }
+    // Read straddles a region boundary (rare) — fall back to the multi-region
+    // walk and don't cache.
+    return RegionHasProtect(addr, size, kReadable, PAGE_NOACCESS);
+}
+}  // namespace
+
+bool SafeReadBytesSeq(const void* addr, void* dst, std::size_t size) noexcept {
+    if (!addr || !dst || size == 0) return false;
+    if (!IsReadableSeq(addr, size)) return false;
+    return ReadSeh(addr, dst, size);
+}
+
 bool SafeWriteBytes(void* addr, const void* src, std::size_t size) noexcept {
     if (!addr || !src || size == 0) return false;
     if (!IsWritable(addr, size)) return false;

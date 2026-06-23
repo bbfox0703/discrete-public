@@ -26,6 +26,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
@@ -69,6 +70,23 @@ public sealed class SnapshotStore : IAsyncDisposable
     /// Stored in <c>meta</c> so the UI can show it even when only the
     /// DB path is known.</summary>
     public string TargetProcess { get; }
+
+    /// <summary>Phase 30d perf telemetry — wall-clock ms spent gzip-compressing
+    /// per-class blobs (<see cref="SerializeAndGzip"/>) vs. executing the SQLite
+    /// INSERTs, accumulated across the current streaming capture's
+    /// <see cref="AppendClassesAsync"/> calls. Reset by
+    /// <see cref="ResetCaptureTelemetry"/> at capture start; read by the VM for a
+    /// one-line capture-cost summary so we can tell whether the <c>SmallestSize</c>
+    /// gzip or the DB write dominates without attaching a profiler. Single-writer
+    /// (the streaming consumer calls AppendClassesAsync serially), so plain fields
+    /// need no synchronisation.</summary>
+    public long LastCaptureGzipMs   { get; private set; }
+    public long LastCaptureInsertMs { get; private set; }
+
+    /// <summary>Reset the <see cref="LastCaptureGzipMs"/> /
+    /// <see cref="LastCaptureInsertMs"/> accumulators. Call once at the start of a
+    /// streaming capture, before the first <see cref="AppendClassesAsync"/>.</summary>
+    public void ResetCaptureTelemetry() { LastCaptureGzipMs = 0; LastCaptureInsertMs = 0; }
 
     private SnapshotStore(SqliteConnection conn, string dbPath, string buildId, string targetProcess, FileLogger? logger)
     {
@@ -366,17 +384,27 @@ public sealed class SnapshotStore : IAsyncDisposable
                 var pStat = cmd.Parameters.Add("$stat", SqliteType.Integer);
                 var pBlob = cmd.Parameters.Add("$blob", SqliteType.Blob);
                 pSnap.Value = snapshotId;
+                // Phase 30d telemetry — split gzip vs SQLite-insert wall-time so the
+                // VM's capture summary shows which dominates. GetTimestamp deltas
+                // avoid allocating a Stopwatch per class.
+                long gzipTicks = 0, insTicks = 0;
                 foreach (var c in classes)
                 {
+                    long tg = Stopwatch.GetTimestamp();
                     byte[] blob = SerializeAndGzip(c);
+                    gzipTicks += Stopwatch.GetTimestamp() - tg;
                     bytes += blob.LongLength;
                     pAsm.Value  = c.Assembly;
                     pFqn.Value  = string.IsNullOrEmpty(c.Namespace) ? c.Name : $"{c.Namespace}.{c.Name}";
                     pInst.Value = c.Instances?.Count ?? 0;
                     pStat.Value = c.Statics?.Count ?? 0;
                     pBlob.Value = blob;
+                    long ti = Stopwatch.GetTimestamp();
                     await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    insTicks += Stopwatch.GetTimestamp() - ti;
                 }
+                LastCaptureGzipMs   += gzipTicks * 1000 / Stopwatch.Frequency;
+                LastCaptureInsertMs += insTicks  * 1000 / Stopwatch.Frequency;
             }
             await tx.CommitAsync(ct).ConfigureAwait(false);
             return bytes;

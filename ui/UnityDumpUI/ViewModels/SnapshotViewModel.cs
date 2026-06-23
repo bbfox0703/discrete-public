@@ -1100,6 +1100,8 @@ public sealed partial class SnapshotViewModel : ObservableObject
                     IncludeUnchanged  = IncludeUnchangedRows,
                     AssemblyFilter    = string.IsNullOrWhiteSpace(ScopeAssembliesText) ? null : ScopeAssembliesText.Trim(),
                 }, ct).ConfigureAwait(true);
+                // Phase 30d telemetry — fresh gzip/insert accumulators for this capture.
+                _store!.ResetCaptureTelemetry();
             }
 
             // Non-streaming path accumulates here; streaming leaves it empty
@@ -1120,11 +1122,23 @@ public sealed partial class SnapshotViewModel : ObservableObject
             ulong? streamGameWs     = null;
             ulong? streamGamePu     = null;
             int?   streamGamePs     = null;
+            // Phase 30d telemetry — per-capture cost split, emitted as one line at
+            // completion. fetch = SnapshotChunkAsync round-trip (pipe + JSON parse +
+            // NormalizeDeduped re-expansion); write = the off-thread gzip+SQLite
+            // AppendClassesAsync (its gzip-vs-insert split is read back from the store).
+            long capFetchMs = 0, capExpandMs = 0, capReadMs = 0, capParseMs = 0, capWriteMs = 0;
+            long capRespChars = 0;
             var chunkPhaseSw = Stopwatch.StartNew();
             while (true)
             {
+                var fetchSw = Stopwatch.StartNew();
                 var chunk = await _backend.SnapshotChunkAsync(begin.SnapshotId, cursor, kChunkSize, ct)
                     .ConfigureAwait(true);
+                capFetchMs += fetchSw.ElapsedMilliseconds;
+                capExpandMs += chunk.ExpandMs;
+                capReadMs += chunk.ReadMs;
+                capParseMs += chunk.ParseMs;
+                capRespChars += chunk.ResponseChars;
                 if (!string.IsNullOrEmpty(chunk.Error))
                 {
                     ErrorMessage  = chunk.Error;
@@ -1145,12 +1159,14 @@ public sealed partial class SnapshotViewModel : ObservableObject
                     // SaveSnapshotAsync) keeps the window responsive and lets the
                     // GC reclaim each chunk's transients between chunks.
                     var capturedClasses = chunk.Classes;
+                    var writeSw = Stopwatch.StartNew();
                     var (chunkBytes, chunkFvc) = await Task.Run(async () =>
                     {
                         long b = await _store!.AppendClassesAsync(streamRowId, capturedClasses, ct).ConfigureAwait(false);
                         int  f = SnapshotEnvelope.CountFieldValues(capturedClasses);
                         return (b, f);
                     }, ct).ConfigureAwait(true);
+                    capWriteMs += writeSw.ElapsedMilliseconds;
                     streamPayloadBytes += chunkBytes;
                     streamFieldValues  += chunkFvc;
                     // Phase 30c — bound the transient peak. Each chunk's
@@ -1373,6 +1389,17 @@ public sealed partial class SnapshotViewModel : ObservableObject
             StatusMessage = $"Snapshot #{Snapshots.Count} {label} — {env.TotalClasses:N0} classes, {env.TotalInstances:N0} instances, {fieldValueCountForStatus:N0} field-values (captured in {sw.Elapsed.TotalSeconds:F1}s across {chunkCount} chunks{excluded}{cacheNote}{memNote}{gameMemNote}{streamNote}).{truncNote}";
             _logger.Write(Constants.LogCategoryView,
                 $"Snapshot: id={begin.SnapshotId} classes={env.TotalClasses} instances={env.TotalInstances} fieldValues={fieldValueCountForStatus} streamed={stream} elapsed={sw.Elapsed.TotalSeconds:F1}s excluded={begin.ExcludedSystemAssemblies} workingSet={wsEnd} workingSetDelta={wsEnd - _captureStartWorkingSet} gameWorkingSet={GameWorkingSet} gamePrivateUsage={GamePrivateUsage}");
+            // Phase 30d telemetry — per-capture cost split (always one line) so a perf
+            // regression or the "is SmallestSize gzip the bottleneck?" question is
+            // answerable straight from the log. fetch = pipe round-trip + re-expand;
+            // write = off-thread gzip + SQLite insert (streaming only).
+            string perfSplit = stream
+                ? $" write={capWriteMs}ms [gzip={_store!.LastCaptureGzipMs}ms insert={_store.LastCaptureInsertMs}ms]"
+                : " (non-stream; written via SaveSnapshot)";
+            _logger.Write(Constants.LogCategoryView,
+                $"Snapshot.perf: id={begin.SnapshotId} backend={GuessBackend()} chunks={chunkCount} classes={env.TotalClasses} " +
+                $"begin={beginElapsedSec:F1}s fetch={capFetchMs}ms [expand={capExpandMs} read={capReadMs} parse={capParseMs} other={capFetchMs - capExpandMs - capReadMs - capParseMs}] " +
+                $"resp={capRespChars / (1024.0 * 1024.0):F1}MB{perfSplit}");
 
             // Phase 29g-2b: a capture churns large transient LOH buffers (the
             // per-chunk pipe-read JSON byte[]/char[]). 29g-2 cut the rest of
@@ -1771,6 +1798,15 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// IL2CPP uses "GameAssembly". Falls back to <c>"unknown"</c>.</summary>
     private string GuessBackend()
     {
+        // Prefer the authoritative backend the DLL reported at handshake (stored in
+        // GameBackend via OnGameConnected). The module-name heuristic below was
+        // unreliable — it mislabelled an IL2CPP game as "mono" because the module
+        // string happened to contain "mono" — so it's only a fallback for when the
+        // handshake value is unavailable (e.g. loading an old on-disk snapshot).
+        var hs = (GameBackend ?? string.Empty).ToLowerInvariant();
+        if (hs.Contains("il2cpp")) return "il2cpp";
+        if (hs.Contains("mono"))   return "mono";
+
         var m = (_currentGameModule ?? string.Empty).ToLowerInvariant();
         if (m.Contains("mono")) return "mono";
         if (m.Contains("gameassembly") || m.Contains("il2cpp")) return "il2cpp";

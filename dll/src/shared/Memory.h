@@ -20,6 +20,17 @@ bool IsWritable(const void* addr, std::size_t size) noexcept;
 bool SafeReadBytes(const void* addr, void* dst, std::size_t size) noexcept;
 bool SafeWriteBytes(void* addr, const void* src, std::size_t size) noexcept;
 
+// Like SafeReadBytes, but for HOT bursts of small reads from the SAME committed
+// region (snapshot decode reads thousands of fields per GC-heap region). It
+// consults a THREAD-LOCAL one-region readability cache so all-but-the-first read
+// in a region skip the VirtualQuery syscall — which the snapshot decode-split
+// telemetry showed was the dominant capture cost (~84%, ~tens of µs per call on a
+// large/fragmented process). The SEH guard remains the real safety net: a stale
+// cache only ever lets a bad read fall through to SEH (returns false), never an
+// access beyond what SafeReadBytes already permits. Thread-local, so it composes
+// with parallel scans. Use ONLY for read-heavy sequential-region decode paths.
+bool SafeReadBytesSeq(const void* addr, void* dst, std::size_t size) noexcept;
+
 // Typed read. Returns std::nullopt on AV / unreadable region.
 template <typename T>
 std::optional<T> SafeRead(const void* addr) noexcept {

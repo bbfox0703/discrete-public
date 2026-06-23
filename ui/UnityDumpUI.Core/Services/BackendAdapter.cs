@@ -5,6 +5,7 @@
 // Abstraction" rule.
 
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1143,10 +1144,21 @@ public sealed class BackendAdapter : ILiveExportSource
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotChunkResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         var result = env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
+        // Phase 30d telemetry — copy the round-trip split off the pipe that handled
+        // this call (deterministic via PipeFor) so the capture summary can attribute
+        // the per-chunk cost to wire/server (read) vs JSON deserialize vs payload size.
+        var chunkPipe = PipeFor("snapshotChunk");
+        result.ReadMs        = chunkPipe.LastReadMs;
+        result.ParseMs       = chunkPipe.LastParseMs;
+        result.ResponseChars = chunkPipe.LastResponseChars;
         // Phase 30a — re-expand the deduped wire (schema-once + per-instance value
         // arrays) back into the inline SnapshotFieldEntry model the rest of the UI
         // + SQLite expect. No-op for old (non-deduped) chunks.
+        // Phase 30d telemetry — time the re-expansion so the capture summary can
+        // tell it apart from the server-decode + pipe cost inside `fetch`.
+        var expandSw = Stopwatch.StartNew();
         result.NormalizeDeduped();
+        result.ExpandMs = expandSw.ElapsedMilliseconds;
         return result;
     }
 

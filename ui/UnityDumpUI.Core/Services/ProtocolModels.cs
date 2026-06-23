@@ -1445,6 +1445,21 @@ public sealed class SnapshotChunkResult
     [JsonPropertyName("gamePrivateUsage")]  public ulong?               GamePrivateUsage  { get; set; }
     [JsonPropertyName("gamePointerSize")]   public int?                 GamePointerSize   { get; set; }
 
+    /// <summary>Phase 30d telemetry — wall-clock ms spent in
+    /// <see cref="NormalizeDeduped"/> re-expanding this chunk, set C#-side by the
+    /// adapter (NOT a wire field). Lets the capture summary split the SnapshotChunk
+    /// round-trip into server-decode+pipe ("rest") vs the C# re-expansion.</summary>
+    [JsonIgnore] public long ExpandMs { get; set; }
+
+    /// <summary>Phase 30d telemetry — the pipe round-trip split for this chunk, copied
+    /// from the <see cref="PipeClient"/> by the adapter (NOT wire fields).
+    /// <see cref="ReadMs"/> = ReadLineAsync wall (DLL handler + transfer);
+    /// <see cref="ParseMs"/> = JSON deserialize; <see cref="ResponseChars"/> = raw
+    /// response length.</summary>
+    [JsonIgnore] public long ReadMs        { get; set; }
+    [JsonIgnore] public long ParseMs       { get; set; }
+    [JsonIgnore] public int  ResponseChars { get; set; }
+
     /// <summary>Phase 30a — re-expand the deduped wire into the existing
     /// <see cref="SnapshotFieldEntry"/> model so every downstream consumer +
     /// SQLite stays unchanged. For each class with a non-null
