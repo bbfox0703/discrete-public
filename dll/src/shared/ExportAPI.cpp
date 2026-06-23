@@ -727,6 +727,20 @@ json CaptureIl2cppDictionary(const StructDecodeFieldFn& decodeField,
 // The shared json helpers (formatHex / decodeField / walkArrayElementsInline)
 // are function-local lambdas in RegisterCoreHandlers, so they're handed in as
 // std::function copies at construction.
+
+// Phase 30d — opt-in decode timing. The per-field chrono + the end-of-stream
+// "decode split" log line cost ~0.2s on a large capture, so they default OFF and
+// turn on only when the env var DISCRETE_SNAPSHOT_DECODE_TIMING is set to 1 (set
+// it on the GAME process to profile a slow capture). Read once per process.
+static bool SnapshotDecodeTimingEnabled() {
+    static const bool enabled = [] {
+        char buf[8] = {};
+        DWORD n = ::GetEnvironmentVariableA("DISCRETE_SNAPSHOT_DECODE_TIMING", buf, sizeof(buf));
+        return n > 0 && n < sizeof(buf) && (buf[0] == '1' || buf[0] == 't' || buf[0] == 'T');
+    }();
+    return enabled;
+}
+
 class Il2cppStreamDecoder final : public Snapshot::ISnapshotStreamDecoder {
 public:
     using FormatHexFn  = std::function<std::string(std::uintptr_t)>;
@@ -823,22 +837,25 @@ public:
             drained_ = true;
             // Phase 30d telemetry — one line localizing the serial decode cost so we
             // optimize the right thing (scalar reads vs array-element decode vs struct
-            // fan-out vs json churn) instead of guessing.
-            auto _ms = [](std::uint64_t ns) { return ns / 1000000ull; };
-            std::uint64_t _accounted = scalarNs_ + arrayNs_ + structNs_;
-            std::uint64_t _jsonChurnNs = (fieldLoopNs_ > _accounted) ? (fieldLoopNs_ - _accounted) : 0;
-            Discrete::Log::Write(Discrete::MagicStrings::LogCategoryScan,
-                "snapshotChunk(IL2CPP) decode split: fieldLoop=" + std::to_string(_ms(fieldLoopNs_)) +
-                "ms scalar=" + std::to_string(_ms(scalarNs_)) +
-                "ms array=" + std::to_string(_ms(arrayNs_)) +
-                "ms struct=" + std::to_string(_ms(structNs_)) +
-                "ms jsonChurn=" + std::to_string(_ms(_jsonChurnNs)) +
-                "ms | instances=" + std::to_string(decodedInstances_) +
-                " classes=" + std::to_string(decodedClasses_) +
-                " arrays=" + std::to_string(decodedArrays_) +
-                " elementSets=" + std::to_string(decodedElementSets_) +
-                " cacheHit=" + std::to_string(classInfoCacheHits_) +
-                " cacheMiss=" + std::to_string(classInfoCacheMisses_));
+            // fan-out vs json churn) instead of guessing. Gated behind
+            // DISCRETE_SNAPSHOT_DECODE_TIMING (off by default).
+            if (timing_) {
+                auto _ms = [](std::uint64_t ns) { return ns / 1000000ull; };
+                std::uint64_t _accounted = scalarNs_ + arrayNs_ + structNs_;
+                std::uint64_t _jsonChurnNs = (fieldLoopNs_ > _accounted) ? (fieldLoopNs_ - _accounted) : 0;
+                Discrete::Log::Write(Discrete::MagicStrings::LogCategoryScan,
+                    "snapshotChunk(IL2CPP) decode split: fieldLoop=" + std::to_string(_ms(fieldLoopNs_)) +
+                    "ms scalar=" + std::to_string(_ms(scalarNs_)) +
+                    "ms array=" + std::to_string(_ms(arrayNs_)) +
+                    "ms struct=" + std::to_string(_ms(structNs_)) +
+                    "ms jsonChurn=" + std::to_string(_ms(_jsonChurnNs)) +
+                    "ms | instances=" + std::to_string(decodedInstances_) +
+                    " classes=" + std::to_string(decodedClasses_) +
+                    " arrays=" + std::to_string(decodedArrays_) +
+                    " elementSets=" + std::to_string(decodedElementSets_) +
+                    " cacheHit=" + std::to_string(classInfoCacheHits_) +
+                    " cacheMiss=" + std::to_string(classInfoCacheMisses_));
+            }
             const auto& r = IL2CPP::GetResolver();
             if (r.gc_collect != nullptr) {
                 auto drainStart = std::chrono::steady_clock::now();
@@ -1107,13 +1124,13 @@ private:
             if (memBudgetHit_ || countBudgetHit_) break;
 
             Snapshot::ClassPayload values = Snapshot::ClassPayload::array();
-            auto _loopT0 = std::chrono::steady_clock::now();
+            auto _loopT0 = timing_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             for (const auto& fd : fieldDescs) {
                 std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(fd.offset);
                 Snapshot::ClassPayload entry = Snapshot::ClassPayload::object();
-                auto _fT0 = std::chrono::steady_clock::now();
+                auto _fT0 = timing_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 json d = decodeField_(*fd.decodeType, fieldAddr);
-                scalarNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                if (timing_) scalarNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - _fT0).count());
                 for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
 
@@ -1127,14 +1144,14 @@ private:
                             arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
                         }
                         if (arrPtr != 0) {
-                            auto _aT0 = std::chrono::steady_clock::now();
+                            auto _aT0 = timing_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                             json elems = walkArrayElementsInline_(
                                 arrPtr, *fd.type, arrayCap_,
                                 ShouldCaptureInner(classFqn, *fd.name)
                                     ? std::function<json(std::uintptr_t)>(
                                           [this](std::uintptr_t p) { return CaptureElementFields(p); })
                                     : std::function<json(std::uintptr_t)>{});
-                            arrayNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            if (timing_) arrayNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::steady_clock::now() - _aT0).count());
                             if (elems.contains("error")) {
                                 entry["arrayError"] = elems.value("error", std::string{"unknown"});
@@ -1152,10 +1169,10 @@ private:
                                fd.valueTypeClass, *fd.type, entry)) {
                     // Phase 31-2 (Phase B) — generic value-type struct member
                     // fan-out (gated). Named math structs already done in decodeField.
-                    auto _sT0 = std::chrono::steady_clock::now();
+                    auto _sT0 = timing_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                     json sub = CaptureIl2cppStructFields(decodeField_,
                         fd.valueTypeClass, fieldAddr, kStructMaxDepth, structMemberCap_);
-                    structNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    if (timing_) structNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - _sT0).count());
                     if (sub.contains("fields")) {
                         entry.erase("ptr");
@@ -1164,7 +1181,7 @@ private:
                 }
                 values.push_back(std::move(entry));
             }
-            fieldLoopNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            if (timing_) fieldLoopNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - _loopT0).count());
             Snapshot::ClassPayload instEntry = { {"address", formatHex_(instAddr)} };
             instEntry["v"] = std::move(values);
@@ -1210,7 +1227,10 @@ private:
     // the single-threaded decode bottleneck before optimizing: scalar field decode
     // (decodeField_) vs array-element decode (walkArrayElementsInline_) vs value-
     // struct fan-out (CaptureIl2cppStructFields) vs nlohmann::json churn (the
-    // per-instance field-loop remainder). Logged once at end-of-stream.
+    // per-instance field-loop remainder). Logged once at end-of-stream. Only
+    // accumulated + logged when `timing_` is set (env DISCRETE_SNAPSHOT_DECODE_TIMING)
+    // so a normal capture pays no per-field chrono cost.
+    const bool    timing_      = SnapshotDecodeTimingEnabled();
     std::uint64_t fieldLoopNs_ = 0;
     std::uint64_t scalarNs_    = 0;
     std::uint64_t arrayNs_     = 0;
