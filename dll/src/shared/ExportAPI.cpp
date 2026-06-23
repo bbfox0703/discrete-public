@@ -56,6 +56,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -820,6 +821,24 @@ public:
         // the WHOLE decode now lands once, on the final chunk.
         if (end >= plan_.size() && !drained_) {
             drained_ = true;
+            // Phase 30d telemetry — one line localizing the serial decode cost so we
+            // optimize the right thing (scalar reads vs array-element decode vs struct
+            // fan-out vs json churn) instead of guessing.
+            auto _ms = [](std::uint64_t ns) { return ns / 1000000ull; };
+            std::uint64_t _accounted = scalarNs_ + arrayNs_ + structNs_;
+            std::uint64_t _jsonChurnNs = (fieldLoopNs_ > _accounted) ? (fieldLoopNs_ - _accounted) : 0;
+            Discrete::Log::Write(Discrete::MagicStrings::LogCategoryScan,
+                "snapshotChunk(IL2CPP) decode split: fieldLoop=" + std::to_string(_ms(fieldLoopNs_)) +
+                "ms scalar=" + std::to_string(_ms(scalarNs_)) +
+                "ms array=" + std::to_string(_ms(arrayNs_)) +
+                "ms struct=" + std::to_string(_ms(structNs_)) +
+                "ms jsonChurn=" + std::to_string(_ms(_jsonChurnNs)) +
+                "ms | instances=" + std::to_string(decodedInstances_) +
+                " classes=" + std::to_string(decodedClasses_) +
+                " arrays=" + std::to_string(decodedArrays_) +
+                " elementSets=" + std::to_string(decodedElementSets_) +
+                " cacheHit=" + std::to_string(classInfoCacheHits_) +
+                " cacheMiss=" + std::to_string(classInfoCacheMisses_));
             const auto& r = IL2CPP::GetResolver();
             if (r.gc_collect != nullptr) {
                 auto drainStart = std::chrono::steady_clock::now();
@@ -1088,10 +1107,14 @@ private:
             if (memBudgetHit_ || countBudgetHit_) break;
 
             Snapshot::ClassPayload values = Snapshot::ClassPayload::array();
+            auto _loopT0 = std::chrono::steady_clock::now();
             for (const auto& fd : fieldDescs) {
                 std::uintptr_t fieldAddr = instAddr + static_cast<std::uintptr_t>(fd.offset);
                 Snapshot::ClassPayload entry = Snapshot::ClassPayload::object();
+                auto _fT0 = std::chrono::steady_clock::now();
                 json d = decodeField_(*fd.decodeType, fieldAddr);
+                scalarNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - _fT0).count());
                 for (auto kv = d.begin(); kv != d.end(); ++kv) entry[kv.key()] = kv.value();
 
                 if (fd.isArrayShape) {
@@ -1104,12 +1127,15 @@ private:
                             arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
                         }
                         if (arrPtr != 0) {
+                            auto _aT0 = std::chrono::steady_clock::now();
                             json elems = walkArrayElementsInline_(
                                 arrPtr, *fd.type, arrayCap_,
                                 ShouldCaptureInner(classFqn, *fd.name)
                                     ? std::function<json(std::uintptr_t)>(
                                           [this](std::uintptr_t p) { return CaptureElementFields(p); })
                                     : std::function<json(std::uintptr_t)>{});
+                            arrayNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - _aT0).count());
                             if (elems.contains("error")) {
                                 entry["arrayError"] = elems.value("error", std::string{"unknown"});
                                 if (elems.contains("length")) {
@@ -1126,8 +1152,11 @@ private:
                                fd.valueTypeClass, *fd.type, entry)) {
                     // Phase 31-2 (Phase B) — generic value-type struct member
                     // fan-out (gated). Named math structs already done in decodeField.
+                    auto _sT0 = std::chrono::steady_clock::now();
                     json sub = CaptureIl2cppStructFields(decodeField_,
                         fd.valueTypeClass, fieldAddr, kStructMaxDepth, structMemberCap_);
+                    structNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - _sT0).count());
                     if (sub.contains("fields")) {
                         entry.erase("ptr");
                         entry["fields"] = std::move(sub["fields"]);
@@ -1135,6 +1164,8 @@ private:
                 }
                 values.push_back(std::move(entry));
             }
+            fieldLoopNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - _loopT0).count());
             Snapshot::ClassPayload instEntry = { {"address", formatHex_(instAddr)} };
             instEntry["v"] = std::move(values);
             instArr.push_back(std::move(instEntry));
@@ -1174,6 +1205,16 @@ private:
     std::size_t elementsProcessed_        = 0;
     std::size_t decodedElementSets_       = 0;
     bool        elementBudgetHit_         = false;
+
+    // Phase 30d telemetry — per-stream serial decode cost split (ns), to localize
+    // the single-threaded decode bottleneck before optimizing: scalar field decode
+    // (decodeField_) vs array-element decode (walkArrayElementsInline_) vs value-
+    // struct fan-out (CaptureIl2cppStructFields) vs nlohmann::json churn (the
+    // per-instance field-loop remainder). Logged once at end-of-stream.
+    std::uint64_t fieldLoopNs_ = 0;
+    std::uint64_t scalarNs_    = 0;
+    std::uint64_t arrayNs_     = 0;
+    std::uint64_t structNs_    = 0;
 
     bool          memBudgetHit_    = false;
     bool          countBudgetHit_  = false;
@@ -1714,9 +1755,68 @@ std::string Utf8FromWide(const std::wstring& w) {
     return out;
 }
 
+// Phase 30d — memoize the immutable backend/version detection. The DLL lives
+// inside ONE game process for its whole lifetime, so backend / unity_version /
+// metadata_version / game_module never change; only assemblies_count + live
+// memory are dynamic (recomputed every handshake below). BackendDetector::Detect()
+// does disk reads — a data.unity3d / globalgamemanagers regex scan + a
+// global-metadata.dat header read — that cost seconds on publisher-stripped
+// titles, yet it ran on EVERY handshake AND every `scan` RPC. Cache the result
+// keyed by game_build_id (the cheap FNV-1a fingerprint the handshake already
+// computes) + a logic-revision so a detector code change forces one re-detect.
+// Guarded by a mutex (handshake/scan are serialized today, but the lock is cheap
+// and future-proofs concurrent callers).
+static constexpr int kVersionDetectLogicRev = 1;
+static std::mutex g_detectCacheMu;
+static std::optional<Discrete::BackendDetector::DetectionResult> g_detectCache;
+static std::string g_detectCacheKey;
+static int g_detectCacheRev = -1;
+
+// The game_build_id fingerprint for THIS build's runtime module. Cheap (file
+// metadata only — path + size + last-write-time FNV-1a, no content read), so it
+// is safe to compute on every handshake as the detection cache key.
+static std::string CurrentGameBuildId() {
+    using namespace Discrete;
+#if defined(DISCRETE_BACKEND_MONO)
+    std::string id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
+    if (id.empty()) id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
+    return id;
+#elif defined(DISCRETE_BACKEND_IL2CPP)
+    return Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
+#else
+    return std::string();
+#endif
+}
+
+// BackendDetector::Detect(), memoized per game_build_id (see g_detectCache). A
+// detection with backend == Unknown is NOT cached: the DLL may be injected before
+// the Mono/IL2CPP module is loaded, and a later handshake/scan must be able to
+// re-detect once the runtime appears (the version reads are deterministic, so
+// backend resolution is the only thing that legitimately changes at runtime).
+static Discrete::BackendDetector::DetectionResult CachedDetect(const std::string& buildId) {
+    using namespace Discrete;
+    std::lock_guard<std::mutex> lk(g_detectCacheMu);
+    if (g_detectCache && g_detectCacheRev == kVersionDetectLogicRev &&
+        !buildId.empty() && g_detectCacheKey == buildId) {
+        return *g_detectCache;   // hit — skip the disk reads
+    }
+    auto d = BackendDetector::Detect();
+    if (d.backend != BackendDetector::Backend::Unknown && !buildId.empty()) {
+        g_detectCache    = d;
+        g_detectCacheKey = buildId;
+        g_detectCacheRev = kVersionDetectLogicRev;
+    }
+    return d;
+}
+
 json BuildHandshakeJson() {
     using namespace Discrete;
-    auto d = BackendDetector::Detect();
+    // Compute the cheap build-id fingerprint first, then reuse it both as the
+    // detection cache key and as game_build_id below (one fingerprint, not two
+    // file-metadata passes). Detect() itself is memoized on this key — see
+    // CachedDetect / g_detectCache.
+    const std::string gameBuildId = CurrentGameBuildId();
+    auto d = CachedDetect(gameBuildId);
 
     json j;
     j["engine"]       = "Unity";
@@ -1739,18 +1839,11 @@ json BuildHandshakeJson() {
     j["assemblies_count"] = assembliesCount;
     j["build"]    = static_cast<std::uint32_t>(DISCRETE_BUILD_NUMBER);
     j["protocol"] = 1;
-    // Phase 29b — compute the same gameBuildId hash that snapshotBegin
-    // emits so the UI can detect "we reconnected to a different game"
-    // without taking a snapshot first. Same fingerprint scheme
-    // (FNV-1a over module path + file size + last-write-time).
-#if defined(DISCRETE_BACKEND_MONO)
-    j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
-    if (j["game_build_id"].get<std::string>().empty()) {
-        j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
-    }
-#elif defined(DISCRETE_BACKEND_IL2CPP)
-    j["game_build_id"] = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
-#endif
+    // Phase 29b — the same gameBuildId hash snapshotBegin emits, so the UI can
+    // detect "we reconnected to a different game" without taking a snapshot first.
+    // Computed once above (also the detection cache key); FNV-1a over module path
+    // + file size + last-write-time.
+    j["game_build_id"] = gameBuildId;
     // Game-process memory + bitness so UI can auto-clamp snapshot caps
     // on x86 targets (where DLL-side JSON cache can push past 4 GB
     // user space). pointer_size is sizeof(void*) in the game's
@@ -2082,8 +2175,12 @@ void RegisterCoreHandlers() {
     auto decodeField = [formatHex, bytesToHex](const std::string& typeName,
                                                std::uintptr_t addr) -> json {
         json out;
+        // Phase 30d — SafeReadBytesSeq (thread-local region cache) instead of
+        // SafeReadBytes: snapshot decode reads thousands of small fields per
+        // GC-heap region, and the per-read VirtualQuery was ~84% of capture time
+        // (decode-split telemetry). SEH still guards every read.
         auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
-            return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+            return Memory::SafeReadBytesSeq(reinterpret_cast<void*>(a), dst, n);
         };
 
         if (typeName == "System.Boolean") {
@@ -2272,8 +2369,11 @@ void RegisterCoreHandlers() {
             return json{{"length", 0}, {"count", 0}, {"elements", json::array()}};
         }
 
+        // Phase 30d — region-cached reads (see decodeField): array headers +
+        // contiguous elements are same-region bursts, so skip the per-read
+        // VirtualQuery. SEH still guards every read.
         auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
-            return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
+            return Memory::SafeReadBytesSeq(reinterpret_cast<void*>(a), dst, n);
         };
 
         std::uintptr_t bounds = 0;

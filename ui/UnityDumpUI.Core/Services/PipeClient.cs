@@ -13,6 +13,7 @@
 // MainWindowViewModel handler resets UI state + re-enables Connect).
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -50,6 +51,16 @@ public sealed class PipeClient : IAsyncDisposable
     }
 
     public bool IsConnected => _pipe is { IsConnected: true };
+
+    /// <summary>Phase 30d telemetry — split of the most recent <see cref="SendAsync"/>
+    /// round-trip: <see cref="LastReadMs"/> = ReadLineAsync wall-time (it blocks until
+    /// the DLL writes the WHOLE response, so it also covers the server-side handler +
+    /// pipe transfer); <see cref="LastParseMs"/> = JSON deserialize; and
+    /// <see cref="LastResponseChars"/> = the raw response length. Single-flight via
+    /// <c>_gate</c>, so plain fields are safe for a caller to read right after the call.</summary>
+    public long LastReadMs        { get; private set; }
+    public long LastParseMs       { get; private set; }
+    public int  LastResponseChars { get; private set; }
 
     /// <summary>
     /// Resolve the PID of the process that owns the *server* end of this pipe.
@@ -186,6 +197,7 @@ public sealed class PipeClient : IAsyncDisposable
             }
 
             string? responseLine;
+            var readSw = Stopwatch.StartNew();
             try
             {
                 responseLine = await _reader.ReadLineAsync().ConfigureAwait(false);
@@ -196,14 +208,23 @@ public sealed class PipeClient : IAsyncDisposable
                 await DisposeStreamsAsync().ConfigureAwait(false);
                 throw new PipeDisconnectedException(disconnectInfo.Reason, ex);
             }
+            readSw.Stop();
             if (responseLine is null)
             {
                 disconnectInfo = new PipeDisconnectedInfo("server closed pipe before responding");
                 await DisposeStreamsAsync().ConfigureAwait(false);
                 throw new PipeDisconnectedException(disconnectInfo.Reason);
             }
+            // Phase 30d telemetry — record the read-wait (covers DLL handler + transfer)
+            // and response size, then time the deserialize separately, so a caller can
+            // split a slow round-trip into wire/server vs JSON-parse vs payload size.
+            LastReadMs        = readSw.ElapsedMilliseconds;
+            LastResponseChars = responseLine.Length;
+            var parseSw = Stopwatch.StartNew();
             RpcEnvelope<TResult>? envelope =
                 JsonSerializer.Deserialize(responseLine, envelopeType);
+            parseSw.Stop();
+            LastParseMs = parseSw.ElapsedMilliseconds;
             if (envelope is null)
             {
                 throw new PipeProtocolException("Empty response envelope.");
