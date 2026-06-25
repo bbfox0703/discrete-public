@@ -14,6 +14,7 @@ public partial class PivotSnapshotsWindow : Window
     public PivotSnapshotsWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public PivotSnapshotsWindow(MainWindowViewModel vm) : this()

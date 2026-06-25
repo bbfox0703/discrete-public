@@ -14,6 +14,7 @@ public partial class CaptureWindow : Window
     public CaptureWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     /// <param name="vm">The shared <see cref="SnapshotViewModel"/> instance

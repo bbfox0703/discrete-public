@@ -15,6 +15,7 @@ public partial class PivotBrowseClassesWindow : Window
     public PivotBrowseClassesWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public PivotBrowseClassesWindow(MainWindowViewModel vm) : this()

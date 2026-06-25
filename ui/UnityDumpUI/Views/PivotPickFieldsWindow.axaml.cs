@@ -15,6 +15,7 @@ public partial class PivotPickFieldsWindow : Window
     public PivotPickFieldsWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public PivotPickFieldsWindow(MainWindowViewModel vm) : this()

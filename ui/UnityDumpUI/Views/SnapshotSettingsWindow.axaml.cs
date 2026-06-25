@@ -31,6 +31,7 @@ public partial class SnapshotSettingsWindow : Window
         _draft           = draft;
         _storageProvider = storageProvider;
         InitializeComponent();
+        DialogWindowGeometry.Attach(this);
 
         // Seed controls from the draft.
         var dirBox       = this.FindControl<TextBox>("DirectoryBox")!;

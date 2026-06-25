@@ -16,6 +16,7 @@ public partial class PivotQueryWindow : Window
     public PivotQueryWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public PivotQueryWindow(MainWindowViewModel vm) : this()

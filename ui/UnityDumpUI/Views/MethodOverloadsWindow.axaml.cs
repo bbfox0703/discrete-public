@@ -25,6 +25,7 @@ public partial class MethodOverloadsWindow : Window
     public MethodOverloadsWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public MethodOverloadsWindow(MethodOverloadsViewModel vm,

@@ -18,6 +18,7 @@ public partial class ProcessPickerWindow : Window
     public ProcessPickerWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
         // AOT-safe DataGrid sort — see DataGridSortComparers.cs.
         Loaded += (_, _) =>
             this.FindControl<DataGrid>("ProcessesGrid")?.WireSortComparers(SortComparers);

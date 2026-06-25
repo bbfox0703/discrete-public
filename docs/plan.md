@@ -87,6 +87,13 @@
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
 
+**2026-06-25 — 視窗位置記憶 + maximize→restore 還原修正(全視窗)**(UI-only,UI build clean 0/0、740 UI tests green 含 28 新測試,**待 live-smoke**):
+- **動機**:參考 `UE5CEDumper` 的視窗還原/位置記憶設計套用本 repo。兩個目標 —— (a)**全部視窗**修正 Avalonia 12 (Windows) 的 maximize→restore 落點 bug(還原時視窗跨螢幕/錯位);(b)**主 UI 位置記憶** —— 程式重開還原成上次關閉時的位置/大小/最大化狀態。
+- **現況盤點**:`MainWindow` 早有 in-memory 的 normal-vs-maximized snapshot(deferred-commit 防 Windows「Width/Height 先於 WindowState 翻轉」毒化),但**無跨重啟持久化**;其餘 16 個 dialog **完全沒有** maximize→restore 修正;`UserSettings`/`UserSettingsStore`(`%LOCALAPPDATA%\Discrete_Dumper\settings.json`)只存 snapshot 設定。
+- **做法**:移植 UE5 的純狀態機 + 持久化到 `ui/UnityDumpUI/Services/` —— `WindowRestoreState`(可單元測試的 seed/note/commit/restore 狀態機)、`WindowPlacement`(off-screen / 多螢幕驗證 `IsVisibleEnough`/`CenterIn`)、`WindowStateStore`(key=value 純文字 `%LOCALAPPDATA%\Discrete_Dumper\window-state.txt`,**同步**載入 → 顯示前套用、AOT-safe 無 JSON reflection)。`MainWindow.AttachWindowState()`(App 在 show 前呼叫):載入存檔→套 Position/Size、`Opened` 比對當前螢幕(舊螢幕消失/解析度縮小 → 置中重設)、`Closing` 存檔。dialog 端不沿用 UE5 的 `ManagedDialogWindow` 基底類別(本 repo dialog 是 XAML `x:Class` on `<Window>`,改 root type 要動 16 份 XAML 風險高),改用 `DialogWindowGeometry.Attach(this)` 透過 public 事件外掛同一套邏輯 —— 每個 dialog parameterless ctor 加一行。
+- **範圍**:16 個 dialog 全部加 `Attach`(maximize→restore 修正,**不**跨重啟持久化,對齊 UE5);僅 `MainWindow` 跨重啟記憶。
+- **建置/測試**:`dotnet build` UI + Tests clean(0/0);新增 `WindowRestoreStateTests`(6)+ `WindowStateTests`(22)= 28 測試全綠(Format/Parse round-trip 含負座標/最大化、off-screen reset、多螢幕移除、CenterIn clamp)。**待**:實機 maximize→restore 落點 + 重開還原 live-smoke。
+
 **2026-06-08 — Value Search「Parallel」可切換(預設 ON)**(DLL+UI,build #1175,兩 DLL build clean、712 UI tests green,**待 live-smoke**):
 - **動機**:Value Search 速度;平行掃描快但可能 trigger 某些遊戲的 anti-tamper(多緒狂掃記憶體)。使用者要平行作為**預設打開、可關**的選項;且 Mono 不得 GC error。
 - **現況盤點**:原始掃描(`ScanForValue`/`ScanForString` via `RunParallelScan`)兩 backend 早已平行;reverse-lookup index build → **Mono 永遠單緒**(刻意,避 BDWGC 頻寬餓死主緒凍機)、**IL2CPP 平行**;逐 candidate 解析單緒(在 outer `ThreadAttachGuard` 內)。

@@ -12,6 +12,7 @@ public partial class MethodCallWindow : Window
     public MethodCallWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public MethodCallWindow(MethodCallViewModel vm) : this()

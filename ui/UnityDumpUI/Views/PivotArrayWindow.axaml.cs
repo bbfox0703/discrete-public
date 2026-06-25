@@ -15,6 +15,7 @@ public partial class PivotArrayWindow : Window
     public PivotArrayWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public PivotArrayWindow(MainWindowViewModel vm) : this()
