@@ -23,6 +23,7 @@ public partial class FieldReferencesWindow : Window
     public FieldReferencesWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public FieldReferencesWindow(FieldReferencesViewModel vm) : this()

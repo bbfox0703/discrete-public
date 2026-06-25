@@ -15,6 +15,7 @@ public partial class PivotLikelyStateWindow : Window
     public PivotLikelyStateWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public PivotLikelyStateWindow(MainWindowViewModel vm) : this()

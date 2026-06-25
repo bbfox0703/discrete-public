@@ -16,6 +16,7 @@ public partial class FieldWriteWindow : Window
     public FieldWriteWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public FieldWriteWindow(FieldWriteViewModel vm) : this()

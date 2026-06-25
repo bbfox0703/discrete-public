@@ -17,6 +17,7 @@ public partial class PivotFindByValueWindow : Window
     public PivotFindByValueWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public PivotFindByValueWindow(MainWindowViewModel vm) : this()

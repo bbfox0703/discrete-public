@@ -17,6 +17,7 @@ public partial class ProxyDeployWindow : Window
     public ProxyDeployWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
         // AOT-safe DataGrid sort — see DataGridSortComparers.cs.
         Loaded += (_, _) =>
             this.FindControl<DataGrid>("GamesGrid")?.WireSortComparers(SortComparers);

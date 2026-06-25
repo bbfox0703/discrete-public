@@ -32,6 +32,7 @@ public partial class FieldAcrossInstancesWindow : Window
     public FieldAcrossInstancesWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        DialogWindowGeometry.Attach(this);
     }
 
     public FieldAcrossInstancesWindow(FieldAcrossInstancesViewModel vm) : this()
