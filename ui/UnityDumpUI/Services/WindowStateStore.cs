@@ -89,8 +89,8 @@ public sealed class WindowStateStore
     internal static string[] Format(WindowStateRecord r) => new[]
     {
         "# Discrete main window state",
-        $"x={r.X}",
-        $"y={r.Y}",
+        $"x={r.X.ToString(CultureInfo.InvariantCulture)}",
+        $"y={r.Y.ToString(CultureInfo.InvariantCulture)}",
         $"w={r.Width.ToString(CultureInfo.InvariantCulture)}",
         $"h={r.Height.ToString(CultureInfo.InvariantCulture)}",
         $"max={(r.Maximized ? 1 : 0)}",
