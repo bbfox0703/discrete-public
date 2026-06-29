@@ -11,6 +11,8 @@
 #include "ManagedLayout.h"
 #include "Memory.h"
 #include "ModuleHelper.h"
+#include "GroupMatch.h"
+#include "GroupScanSession.h"
 #include "PipeServer.h"
 #include "ScanCancel.h"
 #include "SnapshotSession.h"
@@ -1764,6 +1766,153 @@ json EmitCandidateRow(const ValueScan::Candidate& c,
     return row;
 }
 
+// ============================================================
+// Group scan (multiple-values) shared helpers — backend-agnostic.
+//
+// A single resolved group hit: one (instance, field) that the slot-`slotIdx`
+// scan matched. The backend-specific beginGroupScan produces a flat vector of
+// these (one shared ReverseLookupIndex, ScanForValue per slot); the helpers
+// below group them into per-instance candidates and run the SDR.
+// ============================================================
+struct GroupScanHit {
+    std::uintptr_t        instance    = 0;
+    std::uintptr_t        addr        = 0;
+    std::int64_t          fieldOffset = 0;
+    Memory::ValueDataType width       = Memory::ValueDataType::Int32;  // the field's own width
+    std::string           asmName;
+    std::string           ns;
+    std::string           className;
+    std::string           field;
+    std::string           fieldType;
+    std::string           fieldKind;
+    std::uint8_t          value[8]    = {};
+    int                   slotIdx     = 0;
+};
+
+// Expand a group slot's wire dataType into the concrete widths to scan. A
+// concrete type scans just that width; the aggregate sentinels scan the whole
+// numeric set so the user need not know how the game stores the value (the
+// motivating "I searched float but it's an int" case). NoByte drops the 1-byte
+// widths, which match a huge number of fields on a small value.
+std::vector<Memory::ValueDataType> GroupSlotScanWidths(const std::string& dtStr) {
+    using DT = Memory::ValueDataType;
+    if (dtStr == "aggregateNoByte" || dtStr == "numeric (no 1-byte)")
+        return { DT::Int16, DT::UInt16, DT::Int32, DT::UInt32, DT::Int64, DT::UInt64, DT::Float, DT::Double };
+    if (dtStr == "aggregateAll" || dtStr == "numeric (all widths)")
+        return { DT::Int8, DT::UInt8, DT::Int16, DT::UInt16, DT::Int32, DT::UInt32,
+                 DT::Int64, DT::UInt64, DT::Float, DT::Double };
+    Memory::ValueDataType dt{};
+    if (ParseValueDataType(dtStr, dt)) return { dt };
+    return {};  // unknown dataType
+}
+
+// Group hits by instance, dedup leaves by address (one leaf per field — the SDR
+// distinctness key), build each slot's convergence list, and keep only instances
+// where a System of Distinct Representatives exists across all slots. Result is
+// sorted by instance address for a deterministic view.
+std::vector<Discrete::GroupScan::Candidate> BuildGroupCandidates(
+        const std::vector<GroupScanHit>& hits, int nSlots,
+        std::size_t retainCap, std::size_t perInstanceLeafCap) {
+    namespace GS = Discrete::GroupScan;
+    struct Accum {
+        GS::Candidate cand;
+        std::unordered_map<std::uintptr_t, int> leafByAddr;  // addr -> index into cand.leaves
+    };
+    std::unordered_map<std::uintptr_t, Accum> byInst;
+    byInst.reserve(hits.size());
+    for (const auto& h : hits) {
+        Accum& a = byInst[h.instance];
+        if (a.cand.instAddr == 0) {
+            a.cand.instAddr  = h.instance;
+            a.cand.asmName   = h.asmName;
+            a.cand.ns        = h.ns;
+            a.cand.className = h.className;
+            a.cand.slotLeaves.assign(static_cast<std::size_t>(nSlots), {});
+        }
+        int leafIdx;
+        auto it = a.leafByAddr.find(h.addr);
+        if (it == a.leafByAddr.end()) {
+            if (a.cand.leaves.size() >= perInstanceLeafCap) continue;  // bound a single object's leaves
+            GS::Leaf lf;
+            lf.addr        = h.addr;
+            lf.fieldOffset = h.fieldOffset;
+            lf.width       = h.width;
+            lf.field       = h.field;
+            lf.fieldType   = h.fieldType;
+            lf.fieldKind   = h.fieldKind;
+            std::memcpy(lf.prevValue, h.value, 8);
+            leafIdx = static_cast<int>(a.cand.leaves.size());
+            a.cand.leaves.push_back(std::move(lf));
+            a.leafByAddr.emplace(h.addr, leafIdx);
+        } else {
+            leafIdx = it->second;
+        }
+        auto& sl = a.cand.slotLeaves[static_cast<std::size_t>(h.slotIdx)];
+        if (std::find(sl.begin(), sl.end(), leafIdx) == sl.end())
+            sl.push_back(leafIdx);
+    }
+
+    std::vector<GS::Candidate> out;
+    for (auto& kv : byInst) {
+        GS::Candidate& c = kv.second.cand;
+        std::vector<Discrete::GroupMatch::SlotMatches> sm(static_cast<std::size_t>(nSlots));
+        bool ok = true;
+        for (int s = 0; s < nSlots; ++s) {
+            sm[static_cast<std::size_t>(s)].leafIdx = c.slotLeaves[static_cast<std::size_t>(s)];
+            if (sm[static_cast<std::size_t>(s)].leafIdx.empty()) { ok = false; break; }
+        }
+        if (!ok) continue;
+        if (!Discrete::GroupMatch::HasDistinctAssignment(sm, static_cast<int>(c.leaves.size()))) continue;
+        out.push_back(std::move(c));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const GS::Candidate& a, const GS::Candidate& b) { return a.instAddr < b.instAddr; });
+    if (out.size() > retainCap) out.resize(retainCap);
+    return out;
+}
+
+// Serialize one group candidate. Each slot reports its matched-offset set, a
+// `locked` flag (singleton), and its SDR representative leaf (distinct per slot
+// via ResolveAssignment, so duplicate-value slots don't render the same field).
+json EmitGroupCandidateRow(const Discrete::GroupScan::Candidate& c,
+                           const std::vector<Discrete::GroupScan::SlotSpec>& slots,
+                           const std::function<std::string(std::uintptr_t)>& fmtHex) {
+    std::vector<Discrete::GroupMatch::SlotMatches> sm(slots.size());
+    for (std::size_t s = 0; s < slots.size(); ++s) sm[s].leafIdx = c.slotLeaves[s];
+    std::vector<int> rep;
+    Discrete::GroupMatch::ResolveAssignment(sm, static_cast<int>(c.leaves.size()), rep);
+
+    json slotsJson = json::array();
+    for (std::size_t s = 0; s < slots.size(); ++s) {
+        json offs = json::array();
+        for (int li : c.slotLeaves[s])
+            offs.push_back(c.leaves[static_cast<std::size_t>(li)].fieldOffset);
+        json sj = {
+            {"slotIdx",        static_cast<int>(s)},
+            {"matchedOffsets", std::move(offs)},
+            {"locked",         c.slotLeaves[s].size() == 1},
+        };
+        int r = (s < rep.size()) ? rep[s] : -1;
+        if (r >= 0 && r < static_cast<int>(c.leaves.size())) {
+            const auto& lf = c.leaves[static_cast<std::size_t>(r)];
+            sj["addr"]         = fmtHex(lf.addr);
+            sj["fieldOffset"]  = lf.fieldOffset;
+            sj["currentValue"] = DecodeValueBytesToJson(lf.prevValue, lf.width);
+            if (!lf.field.empty())     sj["field"]     = lf.field;
+            if (!lf.fieldType.empty()) sj["fieldType"] = lf.fieldType;
+            if (!lf.fieldKind.empty()) sj["fieldKind"] = lf.fieldKind;
+        }
+        slotsJson.push_back(std::move(sj));
+    }
+    return json{
+        {"instAddr", fmtHex(c.instAddr)},
+        {"asm",      c.asmName},
+        {"ns",       c.ns},
+        {"class",    c.className},
+        {"slots",    std::move(slotsJson)},
+    };
+}
+
 std::string Utf8FromWide(const std::wstring& w) {
     if (w.empty()) return {};
     int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
@@ -2096,6 +2245,190 @@ void RegisterCoreHandlers() {
             sessionId = std::stoull(args["sessionId"].get<std::string>());
         } catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
         bool dropped = ValueScan::SessionManager::Instance().End(sessionId);
+        return json{
+            {"ok",        true},
+            {"sessionId", std::to_string(sessionId)},
+            {"dropped",   dropped},
+        };
+    });
+
+    // ---- Group scan refine / query / end (backend-agnostic) ----
+    // refineGroupScan re-reads each candidate's leaves via SafeReadBytes (no
+    // Mono/IL2CPP runtime APIs) and applies each slot's PER-SLOT predicate
+    // (the group's power: e.g. slot0 decreased + slot1 unchanged), then
+    // re-checks the SDR — a candidate survives only while every slot still maps
+    // to a distinct field.
+    PipeServer::RegisterHandler(MagicStrings::CmdRefineGroupScan,
+        [formatHexCore](const json& args) -> json {
+        if (!args.contains("sessionId")) return json{{"error", "missing 'sessionId'"}};
+        std::uint64_t sessionId = 0;
+        try { sessionId = std::stoull(args["sessionId"].get<std::string>()); }
+        catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
+        if (!args.contains("slots") || !args["slots"].is_array())
+            return json{{"error", "missing 'slots' array"}};
+        const json& refineSlots = args["slots"];
+        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
+        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+
+        json rows = json::array();
+        std::size_t totalCands = 0, removed = 0;
+        std::string errorOut;
+        auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHexCore);
+
+        bool ok = GroupScan::SessionManager::Instance().RefineWith(sessionId,
+            [&](std::vector<GroupScan::SlotSpec>& slots,
+                std::vector<GroupScan::Candidate>& cands) {
+            if (refineSlots.size() != slots.size()) {
+                errorOut = "refine 'slots' length must match the session's slot count";
+                return;
+            }
+            // Parse each slot's refine predicate. The VALUE stays JSON and is packed
+            // per-LEAF at that leaf's own width (a slot may span several widths in
+            // aggregate mode), so a refine value that fits some leaves but not others
+            // narrows them individually instead of failing the whole slot.
+            struct RefSpec { std::string st; bool needsArg = false; json value; json valueTo; double tol = 0.0001; };
+            static const std::array<std::string_view, 7> kValid = {
+                "exact", "range", "newValue", "changed", "unchanged", "increased", "decreased"
+            };
+            std::vector<RefSpec> rs(slots.size());
+            for (std::size_t s = 0; s < slots.size(); ++s) {
+                const json& js = refineSlots[s];
+                RefSpec& r = rs[s];
+                r.st  = js.value("scanType", std::string{"unchanged"});
+                r.tol = js.value("tolerance", 0.0001);
+                bool valid = false;
+                for (auto v : kValid) if (r.st == v) { valid = true; break; }
+                if (!valid) { errorOut = "unknown 'scanType' in slot"; return; }
+                r.needsArg = (r.st == "exact" || r.st == "range" || r.st == "newValue");
+                if (r.needsArg) {
+                    if (!js.contains("value")) { errorOut = "missing 'value' for slot scanType=" + r.st; return; }
+                    r.value = js["value"];
+                    if (r.st == "range") {
+                        if (!js.contains("valueTo")) { errorOut = "slot scanType=range requires 'valueTo'"; return; }
+                        r.valueTo = js["valueTo"];
+                    }
+                }
+            }
+
+            std::size_t writer = 0;
+            for (std::size_t reader = 0; reader < cands.size(); ++reader) {
+                if (ScanCancel::IsCancelRequested()) break;
+                GroupScan::Candidate& c = cands[reader];
+                const std::size_t nLeaves = c.leaves.size();
+                // Re-read each leaf once (8 bytes; only the low N per slot dt used).
+                std::vector<std::array<std::uint8_t, 8>> cur(nLeaves);
+                std::vector<char> readOk(nLeaves, 0);
+                for (std::size_t li = 0; li < nLeaves; ++li) {
+                    std::uint8_t buf[8] = {};
+                    if (Memory::SafeReadBytes(reinterpret_cast<void*>(c.leaves[li].addr), buf, 8)) {
+                        std::memcpy(cur[li].data(), buf, 8);
+                        readOk[li] = 1;
+                    }
+                }
+                // Rebuild each slot's convergence list (refine narrows). Each slot
+                // compares against the leaf's OLD prevValue (a temp copy, so a
+                // leaf shared by two slots isn't double-advanced).
+                std::vector<GroupMatch::SlotMatches> sm(slots.size());
+                for (std::size_t s = 0; s < slots.size(); ++s) {
+                    for (int li : c.slotLeaves[s]) {
+                        if (li < 0 || static_cast<std::size_t>(li) >= nLeaves || !readOk[li]) continue;
+                        GroupScan::Leaf& leaf = c.leaves[static_cast<std::size_t>(li)];
+                        std::uint8_t lo[8] = {}, hi[8] = {};
+                        if (rs[s].needsArg) {
+                            // Pack the refine value at THIS leaf's width; a value that
+                            // can't fit the leaf's width simply doesn't match it.
+                            if (!PackJsonValueToBytes(rs[s].value, leaf.width, lo)) continue;
+                            if (rs[s].st == "range" && !PackJsonValueToBytes(rs[s].valueTo, leaf.width, hi)) continue;
+                        }
+                        std::uint8_t tmpPrev[8];
+                        std::memcpy(tmpPrev, leaf.prevValue, 8);
+                        if (CompareCandidateForRefine(leaf.width, rs[s].st, cur[static_cast<std::size_t>(li)].data(),
+                                                      tmpPrev, lo, hi, rs[s].tol)) {
+                            sm[s].leafIdx.push_back(li);
+                        }
+                    }
+                }
+                // Advance each read leaf's prevValue once (this round becomes the
+                // baseline for the next refine's changed/increased/...).
+                for (std::size_t li = 0; li < nLeaves; ++li)
+                    if (readOk[li]) std::memcpy(c.leaves[li].prevValue, cur[li].data(), 8);
+
+                if (!GroupMatch::HasDistinctAssignment(sm, static_cast<int>(nLeaves))) continue;  // drop candidate
+                for (std::size_t s = 0; s < slots.size(); ++s)
+                    c.slotLeaves[s] = std::move(sm[s].leafIdx);
+                if (reader != writer) cands[writer] = std::move(c);
+                ++writer;
+            }
+            removed = cands.size() - writer;
+            cands.resize(writer);
+            totalCands = cands.size();
+
+            std::size_t toShow = std::min(totalCands, emitLimit);
+            for (std::size_t i = 0; i < toShow; ++i)
+                rows.push_back(EmitGroupCandidateRow(cands[i], slots, fmtHex));
+        });
+
+        if (!ok)               return json{{"error", "session_not_found"}};
+        if (!errorOut.empty()) return json{{"error", errorOut}};
+
+        {
+            char line[200];
+            std::snprintf(line, sizeof(line),
+                "refineGroupScan sess=%llu total=%zu removed=%zu",
+                static_cast<unsigned long long>(sessionId), totalCands, removed);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+        return json{
+            {"ok",              true},
+            {"sessionId",       std::to_string(sessionId)},
+            {"count",           rows.size()},
+            {"totalCandidates", totalCands},
+            {"removed",         removed},
+            {"truncated",       totalCands > rows.size()},
+            {"candidates",      std::move(rows)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdQueryGroupCandidates,
+        [formatHexCore](const json& args) -> json {
+        if (!args.contains("sessionId")) return json{{"error", "missing 'sessionId'"}};
+        std::uint64_t sessionId = 0;
+        try { sessionId = std::stoull(args["sessionId"].get<std::string>()); }
+        catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
+        std::size_t offset = static_cast<std::size_t>(args.value("offset", 0));
+        std::size_t limit  = static_cast<std::size_t>(args.value("limit", 200));
+        if (limit == 0 || limit > 50000) limit = 200;
+
+        json rows = json::array();
+        std::size_t totalCands = 0;
+        auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHexCore);
+        bool ok = GroupScan::SessionManager::Instance().ViewWith(sessionId,
+            [&](std::vector<GroupScan::SlotSpec>& slots,
+                std::vector<GroupScan::Candidate>& cands) {
+            totalCands = cands.size();
+            std::size_t end = std::min(totalCands, offset + limit);
+            for (std::size_t i = offset; i < end; ++i)
+                rows.push_back(EmitGroupCandidateRow(cands[i], slots, fmtHex));
+        });
+        if (!ok) return json{{"error", "session_not_found"}};
+        return json{
+            {"ok",              true},
+            {"sessionId",       std::to_string(sessionId)},
+            {"offset",          offset},
+            {"count",           rows.size()},
+            {"totalCandidates", totalCands},
+            {"truncated",       totalCands > offset + rows.size()},
+            {"candidates",      std::move(rows)},
+        };
+    });
+
+    PipeServer::RegisterHandler(MagicStrings::CmdEndGroupScan,
+        [](const json& args) -> json {
+        if (!args.contains("sessionId")) return json{{"error", "missing 'sessionId'"}};
+        std::uint64_t sessionId = 0;
+        try { sessionId = std::stoull(args["sessionId"].get<std::string>()); }
+        catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
+        bool dropped = GroupScan::SessionManager::Instance().End(sessionId);
         return json{
             {"ok",        true},
             {"sessionId", std::to_string(sessionId)},
@@ -5717,6 +6050,187 @@ void RegisterCoreHandlers() {
         };
     });
 
+    // beginGroupScan (Mono) — multiple-values group scan. Identical pipeline to
+    // the IL2CPP handler (ScanForValue per slot, ONE shared ReverseLookupIndex,
+    // per-instance SDR combine). The Mono safety contract is UNCHANGED from the
+    // single value scan and does NOT grow: the index build is the only
+    // runtime-touching step and is single-threaded by design (Mono
+    // ReverseLookupIndex::Build) — building it ONCE for N slots is strictly less
+    // mono_* work than N single scans; the raw ScanForValue is pure SafeReadBytes
+    // and respects the Parallel toggle, exactly as today. No mono_class_vtable
+    // from worker threads is introduced.
+    PipeServer::RegisterHandler(MagicStrings::CmdBeginGroupScan,
+        [formatHex](const json& args) -> json {
+        if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        ScanCancel::Scope scanCancelScope;
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
+
+        if (!args.contains("slots") || !args["slots"].is_array())
+            return json{{"error", "missing 'slots' array"}};
+        const json& slotsJson = args["slots"];
+        if (slotsJson.size() < 2 || slotsJson.size() > 4)
+            return json{{"error", "group scan needs 2..4 slots"}};
+
+        struct ScanTask { int slotIdx; Memory::ValueDataType width; Memory::ValueScanRequest req; };
+        std::vector<GroupScan::SlotSpec> slotSpecs(slotsJson.size());
+        std::vector<ScanTask> tasks;
+        for (std::size_t s = 0; s < slotsJson.size(); ++s) {
+            const json& js = slotsJson[s];
+            std::string dtStr = js.value("dataType", std::string{"int32"});
+            auto widths = GroupSlotScanWidths(dtStr);
+            if (widths.empty()) return json{{"error", "unknown 'dataType' in slot"}};
+            std::string stStr = js.value("scanType", std::string{"exact"});
+            Memory::ValueScanType st{};
+            if (!ParseValueScanType(stStr, st))
+                return json{{"error", "slot scanType must be exact|range on first scan (prev-value modes go through refineGroupScan)"}};
+            if (!js.contains("value")) return json{{"error", "slot missing 'value'"}};
+            slotSpecs[s].dt = widths[0];
+            bool anyFit = false;
+            for (Memory::ValueDataType w : widths) {
+                Memory::ValueScanRequest req{};
+                req.dataType  = w;
+                req.scanType  = st;
+                req.tolerance = js.value("tolerance", 0.0001);
+                req.alignment = static_cast<std::size_t>(js.value("alignment", 0));
+                if (!PackJsonValueToBytes(js["value"], w, req.lo)) continue;  // value can't fit this width — aggregate skips it
+                if (st == Memory::ValueScanType::Range) {
+                    if (!js.contains("valueTo")) return json{{"error", "slot scanType=range requires 'valueTo'"}};
+                    if (!PackJsonValueToBytes(js["valueTo"], w, req.hi)) continue;
+                }
+                // Skip a width whose scan would be byte-identical to one already
+                // queued for this slot — int32/uint32 (and the other signed/unsigned
+                // pairs) of a positive value pack the same bytes, so scanning both
+                // just doubles the heap walk for identical hits.
+                const std::size_t wsz = Memory::ValueDataTypeSize(w);
+                bool dupTask = false;
+                for (const auto& tk : tasks) {
+                    if (tk.slotIdx != static_cast<int>(s)) continue;
+                    if (Memory::ValueDataTypeSize(tk.width) == wsz &&
+                        std::memcmp(tk.req.lo, req.lo, wsz) == 0 &&
+                        (st != Memory::ValueScanType::Range ||
+                         std::memcmp(tk.req.hi, req.hi, wsz) == 0)) { dupTask = true; break; }
+                }
+                if (dupTask) { anyFit = true; continue; }
+                tasks.push_back(ScanTask{ static_cast<int>(s), w, req });
+                anyFit = true;
+            }
+            if (!anyFit) return json{{"error", "slot 'value' fits no numeric width"}};
+        }
+
+        std::size_t maxBackwardScan = static_cast<std::size_t>(args.value("maxBackwardScan", 16384));
+        if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+        if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+        if (!Mono::BuildClassRangeCache()) {
+            return json{{"error", "address-finder class cache build failed"}};
+        }
+
+        const std::size_t hardCap   = ValueScanHardCap();
+        const std::size_t retainCap = ClampCap(
+            static_cast<std::size_t>(args.value("retainCap", ValueScanDefaultRetain())),
+            ValueScanDefaultRetain(), hardCap);
+        const std::size_t rawCapPerSlot = ClampCap(
+            static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
+        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
+        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t perInstanceLeafCap = 256;
+
+        // Phase 1 — raw scan every task (pure SafeReadBytes; no mono_* APIs).
+        std::vector<std::vector<Memory::ValueScanCandidate>> rawPerTask(tasks.size());
+        std::size_t totalRaw = 0, scannedBytesTotal = 0;
+        for (std::size_t t = 0; t < tasks.size(); ++t) {
+            if (ScanCancel::IsCancelRequested()) break;
+            Memory::ValueScanRequest scanReq = tasks[t].req;
+            scanReq.limit = rawCapPerSlot;
+            Memory::ValueScanStats stats{};
+            rawPerTask[t] = Memory::ScanForValue(scanReq, &stats);
+            totalRaw += rawPerTask[t].size();
+            scannedBytesTotal += stats.bytesScanned;
+        }
+
+        // Phase 2 — ONE shared reverse-lookup index (built single-threaded; gated
+        // on the COMBINED candidate count, same amortization rule as the single
+        // scan). This single build serves every task's resolution.
+        Mono::ThreadAttachGuard scanGuard(Mono::GetRootDomain());
+        Mono::ReverseLookupIndex revIndex;
+        bool revIndexOk = totalRaw >= kRevIndexMinCandidates && revIndex.Build(0);
+
+        // Phase 3 — resolve each raw hit to (instance, field), tag with its slot.
+        std::vector<GroupScanHit> hits;
+        std::size_t droppedNonManaged = 0, droppedNoField = 0, droppedNoise = 0;
+        for (std::size_t t = 0; t < rawPerTask.size(); ++t) {
+            if (ScanCancel::IsCancelRequested()) break;
+            const Memory::ValueDataType taskWidth = tasks[t].width;
+            const int taskSlot = tasks[t].slotIdx;
+            const std::size_t vSize = Memory::ValueDataTypeSize(taskWidth);
+            for (const auto& cc : rawPerTask[t]) {
+                if (ScanCancel::IsCancelRequested()) break;
+                std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(cc.addr);
+                Mono::AddressLookup lookup = revIndexOk
+                    ? revIndex.Lookup(addr, maxBackwardScan)
+                    : Mono::WhatIsAt(addr, maxBackwardScan);
+                if (!lookup.found) { droppedNonManaged++; continue; }
+                if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
+                if (!lookup.field.present) { droppedNoField++; continue; }  // group leaves must be real fields
+                GroupScanHit h;
+                h.instance    = lookup.instance;
+                h.addr        = addr;
+                h.fieldOffset = static_cast<std::int64_t>(lookup.fieldOffset);
+                h.width       = taskWidth;
+                h.asmName     = lookup.assembly;
+                h.ns          = lookup.ns;
+                h.className   = lookup.className;
+                h.field       = lookup.field.name;
+                h.fieldType   = lookup.field.typeName;
+                h.fieldKind   = lookup.field.kind;
+                std::memcpy(h.value, cc.value, vSize);
+                h.slotIdx     = taskSlot;
+                hits.push_back(std::move(h));
+            }
+        }
+
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
+        auto cands = BuildGroupCandidates(hits, static_cast<int>(slotSpecs.size()), retainCap, perInstanceLeafCap);
+        std::size_t totalCands = cands.size();
+        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(slotSpecs, std::move(cands));
+
+        json rows = json::array();
+        std::size_t shown = 0;
+        auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHex);
+        GroupScan::SessionManager::Instance().ViewWith(sessionId,
+            [&](std::vector<GroupScan::SlotSpec>& sl, std::vector<GroupScan::Candidate>& cs) {
+            shown = std::min(cs.size(), emitLimit);
+            for (std::size_t i = 0; i < shown; ++i)
+                rows.push_back(EmitGroupCandidateRow(cs[i], sl, fmtHex));
+        });
+
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "beginGroupScan(Mono) sess=%llu slots=%zu rawTotal=%zu hits=%zu cands=%zu shown=%zu non=%zu noField=%zu noise=%zu idx=%d bytes=%zu",
+                static_cast<unsigned long long>(sessionId), slotSpecs.size(), totalRaw,
+                hits.size(), totalCands, shown, droppedNonManaged, droppedNoField, droppedNoise,
+                revIndexOk ? 1 : 0, scannedBytesTotal);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+
+        return json{
+            {"ok",              true},
+            {"sessionId",       std::to_string(sessionId)},
+            {"mode",            "group"},
+            {"slotCount",       slotSpecs.size()},
+            {"count",           shown},
+            {"totalCandidates", totalCands},
+            {"retainCap",       retainCap},
+            {"rawTotal",        totalRaw},
+            {"truncated",       totalCands >= retainCap || totalCands > shown},
+            {"scannedBytes",    scannedBytesTotal},
+            {"candidates",      std::move(rows)},
+        };
+    });
+
     // Phase 6 segment B — walkInstance (Mono).
     // Given an instance address + class spec, walk the inheritance chain and
     // decode every instance field's value. Each MonoObject's first 16 bytes
@@ -8929,6 +9443,190 @@ void RegisterCoreHandlers() {
             {"scannedBytes",      stats.bytesScanned},
             {"readFailureBytes",  stats.readFailureBytes},
             {"candidates",        std::move(rows)},
+        };
+    });
+
+    // beginGroupScan (IL2CPP) — multiple-values group scan. Reuses the value-scan
+    // pipeline: ScanForValue per slot, all sharing ONE ReverseLookupIndex (the
+    // only runtime-touching step — built once for N slots, so it is strictly less
+    // work than N single scans), then a per-instance SDR combine (GroupMatch).
+    // Object-block + value-struct leaves only (value-struct fields come for free
+    // from the existing reverse-lookup's "value-struct" field kind); deep
+    // array/container blocks are a later phase.
+    PipeServer::RegisterHandler(MagicStrings::CmdBeginGroupScan,
+        [formatHex](const json& args) -> json {
+        if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        ScanCancel::Scope scanCancelScope;
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
+
+        if (!args.contains("slots") || !args["slots"].is_array())
+            return json{{"error", "missing 'slots' array"}};
+        const json& slotsJson = args["slots"];
+        if (slotsJson.size() < 2 || slotsJson.size() > 4)
+            return json{{"error", "group scan needs 2..4 slots"}};
+
+        // Parse each slot into one or more scan tasks. A concrete dataType yields
+        // one task; an aggregate ("numeric (no 1-byte)" / "all widths") yields one
+        // task per numeric width the value fits, so the user need not know how the
+        // game stores it (the "I searched float but it's an int" case).
+        struct ScanTask { int slotIdx; Memory::ValueDataType width; Memory::ValueScanRequest req; };
+        std::vector<GroupScan::SlotSpec> slotSpecs(slotsJson.size());
+        std::vector<ScanTask> tasks;
+        for (std::size_t s = 0; s < slotsJson.size(); ++s) {
+            const json& js = slotsJson[s];
+            std::string dtStr = js.value("dataType", std::string{"int32"});
+            auto widths = GroupSlotScanWidths(dtStr);
+            if (widths.empty()) return json{{"error", "unknown 'dataType' in slot"}};
+            std::string stStr = js.value("scanType", std::string{"exact"});
+            Memory::ValueScanType st{};
+            if (!ParseValueScanType(stStr, st))
+                return json{{"error", "slot scanType must be exact|range on first scan (prev-value modes go through refineGroupScan)"}};
+            if (!js.contains("value")) return json{{"error", "slot missing 'value'"}};
+            slotSpecs[s].dt = widths[0];
+            bool anyFit = false;
+            for (Memory::ValueDataType w : widths) {
+                Memory::ValueScanRequest req{};
+                req.dataType  = w;
+                req.scanType  = st;
+                req.tolerance = js.value("tolerance", 0.0001);
+                req.alignment = static_cast<std::size_t>(js.value("alignment", 0));
+                if (!PackJsonValueToBytes(js["value"], w, req.lo)) continue;  // value can't fit this width — aggregate skips it
+                if (st == Memory::ValueScanType::Range) {
+                    if (!js.contains("valueTo")) return json{{"error", "slot scanType=range requires 'valueTo'"}};
+                    if (!PackJsonValueToBytes(js["valueTo"], w, req.hi)) continue;
+                }
+                // Skip a width whose scan would be byte-identical to one already
+                // queued for this slot — int32/uint32 (and the other signed/unsigned
+                // pairs) of a positive value pack the same bytes, so scanning both
+                // just doubles the heap walk for identical hits.
+                const std::size_t wsz = Memory::ValueDataTypeSize(w);
+                bool dupTask = false;
+                for (const auto& tk : tasks) {
+                    if (tk.slotIdx != static_cast<int>(s)) continue;
+                    if (Memory::ValueDataTypeSize(tk.width) == wsz &&
+                        std::memcmp(tk.req.lo, req.lo, wsz) == 0 &&
+                        (st != Memory::ValueScanType::Range ||
+                         std::memcmp(tk.req.hi, req.hi, wsz) == 0)) { dupTask = true; break; }
+                }
+                if (dupTask) { anyFit = true; continue; }
+                tasks.push_back(ScanTask{ static_cast<int>(s), w, req });
+                anyFit = true;
+            }
+            if (!anyFit) return json{{"error", "slot 'value' fits no numeric width"}};
+        }
+
+        std::size_t maxBackwardScan = static_cast<std::size_t>(args.value("maxBackwardScan", 16384));
+        if (maxBackwardScan > 16384) maxBackwardScan = 16384;
+        if (maxBackwardScan == 0)    maxBackwardScan = 4096;
+
+        if (!IL2CPP::BuildClassRangeCache())
+            return json{{"error", "address-finder class cache build failed"}};
+
+        const std::size_t hardCap   = ValueScanHardCap();
+        const std::size_t retainCap = ClampCap(
+            static_cast<std::size_t>(args.value("retainCap", ValueScanDefaultRetain())),
+            ValueScanDefaultRetain(), hardCap);
+        const std::size_t rawCapPerSlot = ClampCap(
+            static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
+        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
+        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t perInstanceLeafCap = 256;
+
+        // Phase 1 — raw scan every task (pure SafeReadBytes; no runtime APIs).
+        std::vector<std::vector<Memory::ValueScanCandidate>> rawPerTask(tasks.size());
+        std::size_t totalRaw = 0, scannedBytesTotal = 0;
+        for (std::size_t t = 0; t < tasks.size(); ++t) {
+            if (ScanCancel::IsCancelRequested()) break;
+            Memory::ValueScanRequest scanReq = tasks[t].req;
+            scanReq.limit = rawCapPerSlot;
+            Memory::ValueScanStats stats{};
+            rawPerTask[t] = Memory::ScanForValue(scanReq, &stats);
+            totalRaw += rawPerTask[t].size();
+            scannedBytesTotal += stats.bytesScanned;
+        }
+
+        // Phase 2 — one shared reverse-lookup index (gated on the COMBINED count,
+        // same amortization rule as the single scan; below the threshold the
+        // per-candidate WhatIsAt backward scan is cheaper than a full-heap walk).
+        IL2CPP::ThreadAttachGuard scanGuard(IL2CPP::GetDomain());
+        IL2CPP::ReverseLookupIndex revIndex;
+        bool revIndexOk = totalRaw >= kRevIndexMinCandidates && revIndex.Build(0);
+
+        // Phase 3 — resolve each raw hit to (instance, field), tag with its slot.
+        std::vector<GroupScanHit> hits;
+        std::size_t droppedNonManaged = 0, droppedNoField = 0, droppedNoise = 0;
+        for (std::size_t t = 0; t < rawPerTask.size(); ++t) {
+            if (ScanCancel::IsCancelRequested()) break;
+            const Memory::ValueDataType taskWidth = tasks[t].width;
+            const int taskSlot = tasks[t].slotIdx;
+            const std::size_t vSize = Memory::ValueDataTypeSize(taskWidth);
+            for (const auto& cc : rawPerTask[t]) {
+                if (ScanCancel::IsCancelRequested()) break;
+                std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(cc.addr);
+                IL2CPP::AddressLookup lookup = revIndexOk
+                    ? revIndex.Lookup(addr, maxBackwardScan)
+                    : IL2CPP::WhatIsAt(addr, maxBackwardScan);
+                if (!lookup.found)
+                    lookup = IL2CPP::WhatIsAtAcceptingArrays(addr, maxBackwardScan);
+                if (!lookup.found) { droppedNonManaged++; continue; }
+                if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
+                if (!lookup.field.present) { droppedNoField++; continue; }  // group leaves must be real fields
+                GroupScanHit h;
+                h.instance    = lookup.instance;
+                h.addr        = addr;
+                h.fieldOffset = static_cast<std::int64_t>(lookup.fieldOffset);
+                h.width       = taskWidth;
+                h.asmName     = lookup.assembly;
+                h.ns          = lookup.ns;
+                h.className   = lookup.className;
+                h.field       = lookup.field.name;
+                h.fieldType   = lookup.field.typeName;
+                h.fieldKind   = lookup.field.kind;
+                std::memcpy(h.value, cc.value, vSize);
+                h.slotIdx     = taskSlot;
+                hits.push_back(std::move(h));
+            }
+        }
+
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
+        auto cands = BuildGroupCandidates(hits, static_cast<int>(slotSpecs.size()), retainCap, perInstanceLeafCap);
+        std::size_t totalCands = cands.size();
+        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(slotSpecs, std::move(cands));
+
+        json rows = json::array();
+        std::size_t shown = 0;
+        auto fmtHex = std::function<std::string(std::uintptr_t)>(formatHex);
+        GroupScan::SessionManager::Instance().ViewWith(sessionId,
+            [&](std::vector<GroupScan::SlotSpec>& sl, std::vector<GroupScan::Candidate>& cs) {
+            shown = std::min(cs.size(), emitLimit);
+            for (std::size_t i = 0; i < shown; ++i)
+                rows.push_back(EmitGroupCandidateRow(cs[i], sl, fmtHex));
+        });
+
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "beginGroupScan(IL2CPP) sess=%llu slots=%zu rawTotal=%zu hits=%zu cands=%zu shown=%zu non=%zu noField=%zu noise=%zu idx=%d bytes=%zu",
+                static_cast<unsigned long long>(sessionId), slotSpecs.size(), totalRaw,
+                hits.size(), totalCands, shown, droppedNonManaged, droppedNoField, droppedNoise,
+                revIndexOk ? 1 : 0, scannedBytesTotal);
+            Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
+        }
+
+        return json{
+            {"ok",              true},
+            {"sessionId",       std::to_string(sessionId)},
+            {"mode",            "group"},
+            {"slotCount",       slotSpecs.size()},
+            {"count",           shown},
+            {"totalCandidates", totalCands},
+            {"retainCap",       retainCap},
+            {"rawTotal",        totalRaw},
+            {"truncated",       totalCands >= retainCap || totalCands > shown},
+            {"scannedBytes",    scannedBytesTotal},
+            {"candidates",      std::move(rows)},
         };
     });
 

@@ -285,6 +285,26 @@ public static class SpcQueryEngine
         return results;
     }
 
+    /// <summary>Evaluate a field's value SEQUENCE against a per-snapshot predicate
+    /// CHAIN — the SPC match, factored out so the SPC GROUP engine reuses the exact
+    /// same semantics per slot. <paramref name="values"/> / <paramref name="nums"/>
+    /// are index-aligned with <paramref name="predicates"/> (one entry per selected
+    /// snapshot, oldest→newest). The first predicate cannot be relative (no prior
+    /// snapshot to compare against); returns false in that case rather than throwing
+    /// (the group engine validates this up front).</summary>
+    public static bool MatchesChain(IReadOnlyList<SpcPredicate> predicates,
+                                    IReadOnlyList<string> values, IReadOnlyList<double?> nums)
+    {
+        if (predicates.Count == 0 || predicates[0].IsRelative) return false;
+        for (int i = 0; i < predicates.Count; i++)
+        {
+            double? prevNum  = i > 0 ? nums[i - 1]   : null;
+            string? prevText = i > 0 ? values[i - 1] : null;
+            if (!Evaluate(predicates[i], values[i], nums[i], prevText, prevNum)) return false;
+        }
+        return true;
+    }
+
     /// <summary>Evaluate one predicate against one snapshot slot.</summary>
     private static bool Evaluate(
         SpcPredicate pred, string value, double? numeric,

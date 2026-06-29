@@ -1846,6 +1846,38 @@ public partial class MainWindow : Window
     }
 
     // -----------------------------------------------------------------------
+    // Group scan (multiple-values) — candidate activation + context menu.
+    // -----------------------------------------------------------------------
+    private void OnGroupCandidateActivated(object? sender, Avalonia.Input.TappedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("GroupResultsGrid");
+        if (grid?.SelectedItem is GroupCandidateRow row)
+            vm.ValueSearch.ActivateGroup(row);
+    }
+
+    private void OnGroupCandidateInspect(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var row = ResolveDataGridRow<GroupCandidateRow>(sender, this.FindControl<DataGrid>("GroupResultsGrid"));
+        if (row is not null) vm.ValueSearch.ActivateGroup(row);
+    }
+
+    private async void OnGroupCandidateCopyInstance(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<GroupCandidateRow>(sender, this.FindControl<DataGrid>("GroupResultsGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.InstanceAddr);
+    }
+
+    private async void OnGroupCandidateCopyClass(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var row = ResolveDataGridRow<GroupCandidateRow>(sender, this.FindControl<DataGrid>("GroupResultsGrid"));
+        if (row is null) return;
+        await CopyToClipboardAsync(row.ClassDisplay);
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 29b — Snapshot diff row activation + context menu.
     // -----------------------------------------------------------------------
 

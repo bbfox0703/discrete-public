@@ -1631,8 +1631,18 @@
                Finder / Scene Explorer convention. -->
           <TabItem Header="Value Search">
             <DockPanel Margin="6">
+              <!-- Single / Group mode toggle. Group = CE-style "Group Scan":
+                   find instances holding 2..4 values at distinct fields. -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="10"
+                          Margin="0,0,0,6">
+                <ToggleSwitch OffContent="Single value" OnContent="Group (multiple values)"
+                              IsChecked="{Binding ValueSearch.IsGroupMode, Mode=TwoWay}"
+                              ToolTip.Tip="Group scan finds instances that hold ALL of 2–4 values at distinct numeric fields (any order), in one shared heap walk. Far more selective than a single value."/>
+              </StackPanel>
+
               <!-- Top bar: dataType + scanType + Value + ValueTo + Limit + buttons -->
               <Grid DockPanel.Dock="Top" Margin="0,0,0,6"
+                    IsVisible="{Binding !ValueSearch.IsGroupMode}"
                     ColumnDefinitions="Auto,*,Auto,*,Auto,2*,Auto"
                     RowDefinitions="Auto,Auto,Auto">
 
@@ -1748,6 +1758,54 @@
                 </StackPanel>
               </Grid>
 
+              <!-- Group mode: 2..4 slot input rows + scan buttons -->
+              <StackPanel DockPanel.Dock="Top" Margin="0,0,0,6" Spacing="6"
+                          IsVisible="{Binding ValueSearch.IsGroupMode}">
+                <ItemsControl ItemsSource="{Binding ValueSearch.GroupInputs}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:GroupSlotInput">
+                      <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,*" Margin="0,0,0,4">
+                        <TextBlock Grid.Column="0" Text="Value:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <ComboBox Grid.Column="1" Width="96" Margin="0,0,8,0"
+                                  ItemsSource="{Binding DataTypes}"
+                                  SelectedItem="{Binding DataType, Mode=TwoWay}"
+                                  ToolTip.Tip="This value's data type / width."/>
+                        <ComboBox Grid.Column="2" Width="110" Margin="0,0,8,0"
+                                  ItemsSource="{Binding ScanTypes}"
+                                  SelectedItem="{Binding ScanType, Mode=TwoWay}"
+                                  ToolTip.Tip="First Scan uses exact / range. Next Scan also accepts changed / unchanged / increased / decreased / newValue (per row)."/>
+                        <TextBox Grid.Column="3" Margin="0,0,8,0"
+                                 Text="{Binding Value, Mode=TwoWay}"
+                                 IsVisible="{Binding RequiresValueInput}"
+                                 PlaceholderText="value"/>
+                        <TextBlock Grid.Column="4" Text="to" VerticalAlignment="Center" Margin="0,0,8,0"
+                                   IsVisible="{Binding RequiresValue2Input}"/>
+                        <TextBox Grid.Column="5"
+                                 Text="{Binding ValueTo, Mode=TwoWay}"
+                                 IsVisible="{Binding RequiresValue2Input}"
+                                 PlaceholderText="upper bound"/>
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Button Content="＋ Add value" Command="{Binding ValueSearch.AddSlotCommand}"/>
+                  <Button Content="－ Remove"   Command="{Binding ValueSearch.RemoveSlotCommand}"/>
+                  <Border Width="1" Background="#40808080" Margin="6,2"/>
+                  <Button Content="First Scan"  Command="{Binding ValueSearch.GroupFirstScanCommand}" MinWidth="100"/>
+                  <Button Content="Next Scan"   Command="{Binding ValueSearch.GroupNextScanCommand}" MinWidth="100"
+                          ToolTip.Tip="Refine using each row's mode — e.g. row 1 'decreased' + row 2 'unchanged' (Current HP fell, Max HP didn't). A candidate survives only while every value still maps to a distinct field."/>
+                  <Button Content="End Session" Command="{Binding ValueSearch.GroupEndSessionCommand}" MinWidth="100"/>
+                  <Button Content="⛔ Cancel"   Command="{Binding ValueSearch.CancelScanCommand}"
+                          IsVisible="{Binding ValueSearch.IsBusy}" MinWidth="90"/>
+                  <TextBlock Text="(session active)" VerticalAlignment="Center" Foreground="LimeGreen"
+                             Margin="6,0,0,0" IsVisible="{Binding ValueSearch.HasGroupSession}"/>
+                </StackPanel>
+                <CheckBox Content="Ignore system assemblies (Unity*/System*/…)"
+                          IsChecked="{Binding ValueSearch.IgnoreSystemAssembliesGroup, Mode=TwoWay}"
+                          ToolTip.Tip="Conservative opt-in (ON by default): hide group candidates in engine / framework assemblies (Unity*, System*, Cinemachine*, TMPro, …) so the grid shows game-code objects. Re-derives the view without re-scanning."/>
+              </StackPanel>
+
               <!-- Status / error band -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
                       Background="#1F808080" CornerRadius="3">
@@ -1766,7 +1824,8 @@
                    filter. Both re-derive the grid view from the unfiltered
                    scan results client-side (no re-scan). -->
               <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                          Spacing="8" Margin="0,0,0,6">
+                          Spacing="8" Margin="0,0,0,6"
+                          IsVisible="{Binding !ValueSearch.IsGroupMode}">
                 <CheckBox Content="Ignore system assemblies (Unity*/System*/…)"
                           IsChecked="{Binding ValueSearch.IgnoreSystemAssemblies, Mode=TwoWay}"
                           VerticalAlignment="Center"/>
@@ -1776,13 +1835,16 @@
                          PlaceholderText="filter results (class / field / type / address)…"/>
               </StackPanel>
 
-              <!-- Results grid -->
+              <!-- Results: single grid (Single mode) OR group master-detail (Group mode),
+                   overlaid in one fill cell; only the active mode's grid is visible. -->
+              <Grid>
               <DataGrid ItemsSource="{Binding ValueSearch.FilteredResults}"
                         SelectedItem="{Binding ValueSearch.SelectedRow, Mode=TwoWay}"
                         AutoGenerateColumns="False" CanUserReorderColumns="True"
                         CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
                         IsReadOnly="True"
                         CanUserSortColumns="True"
+                        IsVisible="{Binding !ValueSearch.IsGroupMode}"
                         DoubleTapped="OnValueSearchRowActivated"
                         Name="ValueSearchGrid">
                 <DataGrid.Columns>
@@ -1819,6 +1881,60 @@
                   </ContextMenu>
                 </DataGrid.ContextMenu>
               </DataGrid>
+
+              <!-- Group master-detail results (Group mode) -->
+              <DataGrid ItemsSource="{Binding ValueSearch.GroupResults}"
+                        SelectedItem="{Binding ValueSearch.SelectedGroupRow, Mode=TwoWay}"
+                        AutoGenerateColumns="False" IsReadOnly="True"
+                        GridLinesVisibility="Horizontal"
+                        CanUserResizeColumns="True" CanUserSortColumns="True"
+                        RowDetailsVisibilityMode="VisibleWhenSelected"
+                        IsVisible="{Binding ValueSearch.IsGroupMode}"
+                        DoubleTapped="OnGroupCandidateActivated"
+                        Name="GroupResultsGrid">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Class" Binding="{Binding ClassDisplay}"
+                                       Width="260" MinWidth="120"/>
+                  <DataGridTextColumn Header="Instance" Binding="{Binding InstanceAddr}"
+                                       Width="180" MinWidth="120"
+                                       FontFamily="Consolas,Menlo,monospace"/>
+                  <DataGridTextColumn Header="Matched (each value → field=value)"
+                                       Binding="{Binding Summary}" Width="540" MinWidth="240"/>
+                </DataGrid.Columns>
+                <DataGrid.RowDetailsTemplate>
+                  <DataTemplate x:DataType="vm:GroupCandidateRow">
+                    <StackPanel Margin="20,4,4,8" Spacing="4">
+                      <TextBlock Text="{Binding LockSummary}" FontWeight="Bold"
+                                 Foreground="LimeGreen" IsVisible="{Binding AllLocked}"/>
+                      <ItemsControl ItemsSource="{Binding Slots}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:GroupSlotMatchRow">
+                            <Grid ColumnDefinitions="Auto,200,120,90,140,Auto" Margin="0,1">
+                              <TextBlock Grid.Column="0" Text="{Binding SlotIndex, StringFormat='#{0}'}"
+                                         Margin="0,0,10,0" Opacity="0.7"/>
+                              <TextBlock Grid.Column="1" Text="{Binding FieldOrSlot}"/>
+                              <TextBlock Grid.Column="2" Text="{Binding FieldType}" Opacity="0.7"/>
+                              <TextBlock Grid.Column="3" Text="{Binding OffsetLabel}"
+                                         FontFamily="Consolas,Menlo,monospace"/>
+                              <TextBlock Grid.Column="4" Text="{Binding CurrentValue}"/>
+                              <TextBlock Grid.Column="5" Text="{Binding LockLabel}" Opacity="0.7"/>
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </DataTemplate>
+                </DataGrid.RowDetailsTemplate>
+                <DataGrid.ContextMenu>
+                  <ContextMenu>
+                    <MenuItem Header="Inspect this instance" Click="OnGroupCandidateInspect"/>
+                    <Separator/>
+                    <MenuItem Header="Copy instance address" Click="OnGroupCandidateCopyInstance"/>
+                    <MenuItem Header="Copy class name" Click="OnGroupCandidateCopyClass"/>
+                  </ContextMenu>
+                </DataGrid.ContextMenu>
+              </DataGrid>
+              </Grid>
             </DockPanel>
           </TabItem>
 
@@ -1827,7 +1943,12 @@
                any two snapshots in memory. UI strategy C: synthetic-type
                filtering is local (checkbox), not DLL-side. -->
           <TabItem Header="Snapshot" IsVisible="{Binding ExperimentalEnabled}">
-            <DockPanel Margin="6">
+            <Grid RowDefinitions="Auto,*">
+            <ToggleSwitch Grid.Row="0" Margin="6,6,6,0"
+                          OffContent="Diff" OnContent="Group (multiple values)"
+                          IsChecked="{Binding Snapshot.IsGroupMode, Mode=TwoWay}"
+                          ToolTip.Tip="Diff compares two snapshots field-by-field. Group finds objects that hold ALL of 2–4 values at distinct numeric fields — in one snapshot (absolute) or across two (temporal: Changed/Unchanged/Increased/Decreased)."/>
+            <DockPanel Grid.Row="1" Margin="6" IsVisible="{Binding !Snapshot.IsGroupMode}">
 
               <!-- Top action row (2026-06-05): capture config moved to the
                    modeless CaptureWindow (📸 New snapshot…); the Snapshot-debug
@@ -2235,6 +2356,102 @@
                 </Border>
               </Grid>
             </DockPanel>
+
+            <!-- Group mode: find objects holding 2–4 values at distinct fields -->
+            <DockPanel Grid.Row="1" Margin="6" IsVisible="{Binding Snapshot.IsGroupMode}">
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F808080" CornerRadius="3">
+                <TextBlock Text="{Binding Snapshot.StatusMessage}" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1FFF6060" CornerRadius="3"
+                      IsVisible="{Binding Snapshot.ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding Snapshot.ErrorMessage}" Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,*,Auto,*" Margin="0,0,0,6">
+                <TextBlock Grid.Column="0" Text="A:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Grid.Column="1" ItemsSource="{Binding Snapshot.Snapshots}"
+                          SelectedItem="{Binding Snapshot.SelectedSnapshotA, Mode=TwoWay}"
+                          DisplayMemberBinding="{Binding DisplayName}"
+                          HorizontalAlignment="Stretch" Margin="0,0,12,0"/>
+                <TextBlock Grid.Column="2" Text="B (optional — temporal):"
+                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Grid.Column="3" ItemsSource="{Binding Snapshot.Snapshots}"
+                          SelectedItem="{Binding Snapshot.SelectedSnapshotB, Mode=TwoWay}"
+                          DisplayMemberBinding="{Binding DisplayName}"
+                          HorizontalAlignment="Stretch"/>
+              </Grid>
+              <ItemsControl DockPanel.Dock="Top" ItemsSource="{Binding Snapshot.GroupInputs}" Margin="0,0,0,4">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:SnapshotGroupSlotInput">
+                    <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,*" Margin="0,0,0,4">
+                      <TextBlock Grid.Column="0" Text="Value:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                      <ComboBox Grid.Column="1" Width="150" Margin="0,0,8,0"
+                                ItemsSource="{Binding Scopes}" SelectedItem="{Binding Scope, Mode=TwoWay}"/>
+                      <ComboBox Grid.Column="2" Width="110" Margin="0,0,8,0"
+                                ItemsSource="{Binding Predicates}" SelectedItem="{Binding Predicate, Mode=TwoWay}"
+                                ToolTip.Tip="Exact/Bigger/Smaller/Between use the (newest) value; Changed/Unchanged/Increased/Decreased compare across A→B (need B)."/>
+                      <TextBox Grid.Column="3" Margin="0,0,8,0" Text="{Binding Target, Mode=TwoWay}"
+                               IsVisible="{Binding RequiresTarget}" PlaceholderText="value"/>
+                      <TextBlock Grid.Column="4" Text="to" VerticalAlignment="Center" Margin="0,0,8,0"
+                                 IsVisible="{Binding RequiresTarget2}"/>
+                      <TextBox Grid.Column="5" Text="{Binding Target2, Mode=TwoWay}"
+                               IsVisible="{Binding RequiresTarget2}" PlaceholderText="upper bound"/>
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6" Margin="0,0,0,6">
+                <Button Content="＋ Add value" Command="{Binding Snapshot.AddGroupSlotCommand}"/>
+                <Button Content="－ Remove"   Command="{Binding Snapshot.RemoveGroupSlotCommand}"/>
+                <Border Width="1" Background="#40808080" Margin="6,2"/>
+                <Button Content="Run group" Command="{Binding Snapshot.RunSnapshotGroupCommand}" MinWidth="100"/>
+                <CheckBox Content="Ignore system assemblies"
+                          IsChecked="{Binding Snapshot.IgnoreSystemAssembliesGroup, Mode=TwoWay}"
+                          VerticalAlignment="Center"/>
+                <TextBlock Text="(relative predicates need snapshot B)" VerticalAlignment="Center"
+                           Opacity="0.6" FontSize="11" Margin="6,0,0,0"/>
+              </StackPanel>
+              <DataGrid ItemsSource="{Binding Snapshot.GroupResults}"
+                        SelectedItem="{Binding Snapshot.SelectedGroupRow, Mode=TwoWay}"
+                        AutoGenerateColumns="False" IsReadOnly="True" GridLinesVisibility="Horizontal"
+                        CanUserResizeColumns="True" CanUserSortColumns="True"
+                        RowDetailsVisibilityMode="VisibleWhenSelected"
+                        Name="SnapshotGroupGrid">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Class" Binding="{Binding ClassDisplay}" Width="260" MinWidth="120"/>
+                  <DataGridTextColumn Header="Instance" Binding="{Binding InstanceAddr}" Width="180" MinWidth="120"
+                                       FontFamily="Consolas,Menlo,monospace"/>
+                  <DataGridTextColumn Header="Matched (each value → field=value)"
+                                       Binding="{Binding Summary}" Width="540" MinWidth="240"/>
+                </DataGrid.Columns>
+                <DataGrid.RowDetailsTemplate>
+                  <DataTemplate x:DataType="vm:GroupCandidateRow">
+                    <StackPanel Margin="20,4,4,8" Spacing="4">
+                      <TextBlock Text="{Binding LockSummary}" FontWeight="Bold"
+                                 Foreground="LimeGreen" IsVisible="{Binding AllLocked}"/>
+                      <ItemsControl ItemsSource="{Binding Slots}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:GroupSlotMatchRow">
+                            <Grid ColumnDefinitions="Auto,200,120,90,140,Auto" Margin="0,1">
+                              <TextBlock Grid.Column="0" Text="{Binding SlotIndex, StringFormat='#{0}'}"
+                                         Margin="0,0,10,0" Opacity="0.7"/>
+                              <TextBlock Grid.Column="1" Text="{Binding FieldOrSlot}"/>
+                              <TextBlock Grid.Column="2" Text="{Binding FieldType}" Opacity="0.7"/>
+                              <TextBlock Grid.Column="3" Text="{Binding OffsetLabel}"
+                                         FontFamily="Consolas,Menlo,monospace"/>
+                              <TextBlock Grid.Column="4" Text="{Binding CurrentValue}"/>
+                              <TextBlock Grid.Column="5" Text="{Binding LockLabel}" Opacity="0.7"/>
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </DataTemplate>
+                </DataGrid.RowDetailsTemplate>
+              </DataGrid>
+            </DockPanel>
+            </Grid>
           </TabItem>
 
           <!-- Phase 29d — SPC Query tab. N snapshots × N predicates
@@ -2244,7 +2461,12 @@
                GameStat by its spending pattern, no matter how much
                noise is in the heap). -->
           <TabItem Header="SPC Query" IsVisible="{Binding ExperimentalEnabled}">
-            <DockPanel Margin="6">
+            <Grid RowDefinitions="Auto,*">
+            <ToggleSwitch Grid.Row="0" Margin="6,6,6,0"
+                          OffContent="Single field" OnContent="Group (multiple values)"
+                          IsChecked="{Binding SpcQuery.IsGroupMode, Mode=TwoWay}"
+                          ToolTip.Tip="Single = one field's value sequence vs a per-snapshot predicate chain. Group = find objects where 2–4 fields EACH follow their own chain across the snapshots, at distinct offsets."/>
+            <DockPanel Grid.Row="1" Margin="6" IsVisible="{Binding !SpcQuery.IsGroupMode}">
               <!-- Wave A — busy indicator (engine compute runs off the UI thread). -->
               <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
                       Background="#264080FF" CornerRadius="3"
@@ -2461,6 +2683,113 @@
                 </Border>
               </Grid>
             </DockPanel>
+
+            <!-- Group mode: N-snapshot, per-slot predicate chain, distinct-field SDR -->
+            <DockPanel Grid.Row="1" Margin="6" IsVisible="{Binding SpcQuery.IsGroupMode}">
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,4"
+                      Background="#264080FF" CornerRadius="3"
+                      IsVisible="{Binding SpcQuery.IsRunning}">
+                <TextBlock Text="Working… computing in the background." FontSize="11" FontWeight="SemiBold"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1F808080" CornerRadius="3">
+                <TextBlock Text="{Binding SpcQuery.StatusMessage}" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6,3"
+                      Background="#1FFF6060" CornerRadius="3"
+                      IsVisible="{Binding SpcQuery.ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding SpcQuery.ErrorMessage}" Foreground="#FF8060" TextWrapping="Wrap" FontSize="11"/>
+              </Border>
+              <Border DockPanel.Dock="Top" Margin="0,0,0,6" Padding="6" Background="#1F808080" CornerRadius="3">
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Snapshots (tick to include, oldest → newest):" FontSize="11" Opacity="0.8"/>
+                  <ItemsControl ItemsSource="{Binding SpcQuery.SelectionRows}">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:SpcSnapshotRow">
+                        <CheckBox Margin="0,0,14,0"
+                                  IsChecked="{Binding Include, Mode=TwoWay}"
+                                  Content="{Binding Snapshot.DisplayName}"/>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </Border>
+              <ItemsControl DockPanel.Dock="Top" ItemsSource="{Binding SpcQuery.GroupInputs}" Margin="0,0,0,4">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:SpcGroupSlotInput">
+                    <Grid ColumnDefinitions="Auto,150,Auto,*,Auto,*,Auto,Auto" Margin="0,0,0,4">
+                      <TextBlock Grid.Column="0" Text="Value:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                      <ComboBox Grid.Column="1" Width="150" Margin="0,0,8,0"
+                                ItemsSource="{Binding Scopes}" SelectedItem="{Binding Scope, Mode=TwoWay}"/>
+                      <ComboBox Grid.Column="2" Width="92" Margin="0,0,6,0"
+                                ItemsSource="{Binding FirstKinds}" SelectedItem="{Binding FirstKind, Mode=TwoWay}"
+                                ToolTip.Tip="Predicate for the FIRST (oldest) selected snapshot."/>
+                      <TextBox Grid.Column="3" Margin="0,0,6,0" Text="{Binding Operand, Mode=TwoWay}"
+                               IsVisible="{Binding RequiresOperand}" PlaceholderText="value"/>
+                      <TextBlock Grid.Column="4" Text="to" VerticalAlignment="Center" Margin="0,0,6,0"
+                                 IsVisible="{Binding RequiresOperand2}"/>
+                      <TextBox Grid.Column="5" Margin="0,0,8,0" Text="{Binding Operand2, Mode=TwoWay}"
+                               IsVisible="{Binding RequiresOperand2}" PlaceholderText="upper bound"/>
+                      <TextBlock Grid.Column="6" Text="then each:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                      <ComboBox Grid.Column="7" Width="112"
+                                ItemsSource="{Binding RestKinds}" SelectedItem="{Binding RestKind, Mode=TwoWay}"
+                                ToolTip.Tip="Predicate applied to every snapshot AFTER the first (Unchanged = held, Increased = kept rising, …)."/>
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6" Margin="0,0,0,6">
+                <Button Content="＋ Add value" Command="{Binding SpcQuery.AddGroupSlotCommand}"/>
+                <Button Content="－ Remove"   Command="{Binding SpcQuery.RemoveGroupSlotCommand}"/>
+                <Border Width="1" Background="#40808080" Margin="6,2"/>
+                <Button Content="Run group" Command="{Binding SpcQuery.RunGroupCommand}" MinWidth="100"/>
+                <CheckBox Content="Ignore system assemblies"
+                          IsChecked="{Binding SpcQuery.IgnoreSystemAssembliesGroup, Mode=TwoWay}"
+                          VerticalAlignment="Center"/>
+              </StackPanel>
+              <DataGrid ItemsSource="{Binding SpcQuery.GroupResults}"
+                        SelectedItem="{Binding SpcQuery.SelectedGroupRow, Mode=TwoWay}"
+                        AutoGenerateColumns="False" IsReadOnly="True" GridLinesVisibility="Horizontal"
+                        CanUserResizeColumns="True" CanUserSortColumns="True"
+                        RowDetailsVisibilityMode="VisibleWhenSelected"
+                        Name="SpcGroupGrid">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Class" Binding="{Binding ClassDisplay}" Width="260" MinWidth="120"/>
+                  <DataGridTextColumn Header="Instance" Binding="{Binding InstanceAddr}" Width="180" MinWidth="120"
+                                       FontFamily="Consolas,Menlo,monospace"/>
+                  <DataGridTextColumn Header="Matched (each value → field=value)"
+                                       Binding="{Binding Summary}" Width="540" MinWidth="240"/>
+                </DataGrid.Columns>
+                <DataGrid.RowDetailsTemplate>
+                  <DataTemplate x:DataType="vm:GroupCandidateRow">
+                    <StackPanel Margin="20,4,4,8" Spacing="4">
+                      <TextBlock Text="{Binding LockSummary}" FontWeight="Bold"
+                                 Foreground="LimeGreen" IsVisible="{Binding AllLocked}"/>
+                      <ItemsControl ItemsSource="{Binding Slots}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:GroupSlotMatchRow">
+                            <Grid ColumnDefinitions="Auto,200,120,90,140,Auto" Margin="0,1">
+                              <TextBlock Grid.Column="0" Text="{Binding SlotIndex, StringFormat='#{0}'}"
+                                         Margin="0,0,10,0" Opacity="0.7"/>
+                              <TextBlock Grid.Column="1" Text="{Binding FieldOrSlot}"/>
+                              <TextBlock Grid.Column="2" Text="{Binding FieldType}" Opacity="0.7"/>
+                              <TextBlock Grid.Column="3" Text="{Binding OffsetLabel}"
+                                         FontFamily="Consolas,Menlo,monospace"/>
+                              <TextBlock Grid.Column="4" Text="{Binding CurrentValue}"/>
+                              <TextBlock Grid.Column="5" Text="{Binding LockLabel}" Opacity="0.7"/>
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </DataTemplate>
+                </DataGrid.RowDetailsTemplate>
+              </DataGrid>
+            </DockPanel>
+            </Grid>
           </TabItem>
 
           <!-- Phase 29e-2 — Class Pivot tab. SPC asks "for every

@@ -285,6 +285,20 @@ inline constexpr const char* CmdEndValueScan          = "endValueScan";
 // on a SECOND pipe connection (the scanning connection is busy). Instant.
 inline constexpr const char* CmdCancelScan            = "cancelScan";
 
+// Multiple-values group scan (CE "Group Scan", object-aware). Reuses the
+// value-scan pipeline: one shared ReverseLookupIndex, ScanForValue per slot,
+// then a System-of-Distinct-Representatives combine per instance (GroupMatch).
+//   beginGroupScan:  { slots:[{dataType,scanType(exact|range),value,valueTo?,tolerance?}], parallel?, retainCap?, rawCap?, limit?, maxBackwardScan? }
+//                    -> { ok, sessionId, mode:"group", count, totalCandidates, candidates:[{instAddr,asm,ns,class,slots:[{slotIdx,matchedOffsets,locked,addr,field,fieldType,fieldOffset,currentValue}]}] }
+//   refineGroupScan: { sessionId, slots:[{scanType,value?,valueTo?,tolerance?}], limit? }  (per-slot predicate; relative kinds re-check the SDR)
+//   queryGroupCandidates: { sessionId, offset?, limit? } -> paged candidate view
+//   endGroupScan:    { sessionId } -> { ok, sessionId, dropped }
+// Same 5-minute idle expiry + cancellation contract as the value scan.
+inline constexpr const char* CmdBeginGroupScan        = "beginGroupScan";
+inline constexpr const char* CmdRefineGroupScan       = "refineGroupScan";
+inline constexpr const char* CmdQueryGroupCandidates  = "queryGroupCandidates";
+inline constexpr const char* CmdEndGroupScan          = "endGroupScan";
+
 // Phase 20-MT — diagnostic snapshot of the main-thread dispatcher state.
 // Args: (none).
 // Returns: { initialized, hook_installed, main_thread_id, tick_count,

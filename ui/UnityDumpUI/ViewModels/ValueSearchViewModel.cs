@@ -51,6 +51,8 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             {
                 FirstScanCommand.NotifyCanExecuteChanged();
                 NextScanCommand.NotifyCanExecuteChanged();
+                GroupFirstScanCommand.NotifyCanExecuteChanged();
+                GroupNextScanCommand.NotifyCanExecuteChanged();
             };
 
         // Default dataType / scanType picks
@@ -314,6 +316,9 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(NextScanCommand))]
     [NotifyCanExecuteChangedFor(nameof(EndSessionCommand))]
     [NotifyCanExecuteChangedFor(nameof(CancelScanCommand))]
+    [NotifyCanExecuteChangedFor(nameof(GroupFirstScanCommand))]
+    [NotifyCanExecuteChangedFor(nameof(GroupNextScanCommand))]
+    [NotifyCanExecuteChangedFor(nameof(GroupEndSessionCommand))]
     private bool _isBusy;
 
     [ObservableProperty] private string _statusMessage = "Pick a dataType, type a value, press First Scan.";
