@@ -126,6 +126,13 @@ set(DLL_SHARED_SOURCES
     src/shared/MethodSignatureFormat.h
     src/shared/ValueScanSession.cpp
     src/shared/ValueScanSession.h
+    # Group Scan (multiple-values) — source-agnostic SDR matcher + session
+    # container for the group First/Next Scan workflow (begin/refine/query/end
+    # GroupScan). Reuses the value-scan pipeline (one shared ReverseLookupIndex,
+    # ScanForValue per slot) and combines per-instance via GroupMatch (Kuhn SDR).
+    src/shared/GroupMatch.h
+    src/shared/GroupScanSession.cpp
+    src/shared/GroupScanSession.h
     # Phase 29 — snapshot & diff session container. Holds the per-class
     # plan + cached instance address map between snapshotBegin / Chunk /
     # End RPCs so chunk emit can stream without re-running the wide heap

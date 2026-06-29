@@ -50,6 +50,7 @@ public sealed class BackendAdapter : ILiveExportSource
     {
         "snapshotBegin", "snapshotChunk", "snapshotEnd",
         "beginValueScan", "refineValueScan", "endValueScan", "scanFieldValue",
+        "beginGroupScan", "refineGroupScan", "queryGroupCandidates", "endGroupScan",
         "findInstances", "listFieldValuesAcrossInstances",
         "dumpIl2cppSymbols", "dumpClassInfo", "findFieldReferences",
     };
@@ -1060,6 +1061,91 @@ public sealed class BackendAdapter : ILiveExportSource
             ProtocolJsonContext.Default.RpcEnvelopeEndValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("endValueScan returned no result");
+    }
+
+    // -----------------------------------------------------------------------
+    // Group scan (multiple-values) — begin/refine/query/end. Reuses the value
+    // scan pipeline server-side (one shared reverse-lookup index, ScanForValue
+    // per slot, per-instance SDR). Same session/cancel contract.
+    // -----------------------------------------------------------------------
+
+    /// <summary>`beginGroupScan` — scan 2..4 values at once; returns instances
+    /// holding ALL of them at distinct numeric fields (a System of Distinct
+    /// Representatives). Each slot's first scan is exact|range; prev-value modes
+    /// go through <see cref="RefineGroupScanAsync"/>.</summary>
+    public async Task<BeginGroupScanResult> BeginGroupScanAsync(
+        List<GroupSlotRequest> slots,
+        int? limit = null, int? retainCap = null, int? rawCap = null, bool? parallel = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["slots"] = JsonSerializer.SerializeToElement(
+                slots, ProtocolJsonContext.Default.ListGroupSlotRequest),
+        };
+        if (limit.HasValue)     args["limit"]     = Int(limit.Value);
+        if (retainCap.HasValue) args["retainCap"] = Int(retainCap.Value);
+        if (rawCap.HasValue)    args["rawCap"]    = Int(rawCap.Value);
+        if (parallel.HasValue)  args["parallel"]  = Bool(parallel.Value);
+
+        var env = await Send(
+            "beginGroupScan", args,
+            ProtocolJsonContext.Default.RpcEnvelopeBeginGroupScanResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("beginGroupScan returned no result");
+    }
+
+    /// <summary>`refineGroupScan` — narrow a session with a PER-SLOT predicate
+    /// chain (slots aligned to the original scan). Each slot's scanType ∈ exact /
+    /// range / newValue / changed / unchanged / increased / decreased; value(s)
+    /// only required for exact / range / newValue. A candidate survives only
+    /// while every slot still maps to a distinct field.</summary>
+    public async Task<RefineGroupScanResult> RefineGroupScanAsync(
+        string sessionId, List<GroupSlotRequest> slots, int? limit = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["sessionId"] = Str(sessionId),
+            ["slots"]     = JsonSerializer.SerializeToElement(
+                slots, ProtocolJsonContext.Default.ListGroupSlotRequest),
+        };
+        if (limit.HasValue) args["limit"] = Int(limit.Value);
+
+        var env = await Send(
+            "refineGroupScan", args,
+            ProtocolJsonContext.Default.RpcEnvelopeRefineGroupScanResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("refineGroupScan returned no result");
+    }
+
+    /// <summary>`queryGroupCandidates` — paged view of a session's surviving
+    /// candidates (the result sets are small, but this supports scrolling).</summary>
+    public async Task<QueryGroupCandidatesResult> QueryGroupCandidatesAsync(
+        string sessionId, int? offset = null, int? limit = null,
+        CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement> { ["sessionId"] = Str(sessionId) };
+        if (offset.HasValue) args["offset"] = Int(offset.Value);
+        if (limit.HasValue)  args["limit"]  = Int(limit.Value);
+
+        var env = await Send(
+            "queryGroupCandidates", args,
+            ProtocolJsonContext.Default.RpcEnvelopeQueryGroupCandidatesResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("queryGroupCandidates returned no result");
+    }
+
+    /// <summary>`endGroupScan` — release the group session.</summary>
+    public async Task<EndGroupScanResult> EndGroupScanAsync(
+        string sessionId, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement> { ["sessionId"] = Str(sessionId) };
+        var env = await Send(
+            "endGroupScan", args,
+            ProtocolJsonContext.Default.RpcEnvelopeEndGroupScanResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("endGroupScan returned no result");
     }
 
     // -----------------------------------------------------------------------

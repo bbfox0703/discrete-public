@@ -854,6 +854,102 @@ public sealed class EndValueScanResult
     [JsonPropertyName("error")]     public string? Error    { get; set; }
 }
 
+// ---------------------------------------------------------------------------
+// Group scan (multiple-values) — begin/refine/query/end. The candidate +
+// slot-match DTOs are shared across the live (DLL) path and the Snapshot / SPC
+// group engines so all three bind the same master-detail result template.
+// ---------------------------------------------------------------------------
+
+/// <summary>One slot of a group scan REQUEST. On the first scan the server
+/// honours dataType + scanType(exact|range) + value(+valueTo); on refine it
+/// reads scanType (incl. changed/unchanged/increased/decreased) + value(s) and
+/// ignores dataType (the session remembers each slot's width).</summary>
+public sealed class GroupSlotRequest
+{
+    [JsonPropertyName("dataType")]  public string  DataType  { get; set; } = "int32";
+    [JsonPropertyName("scanType")]  public string  ScanType  { get; set; } = "exact";
+    [JsonPropertyName("value")]     public double? Value     { get; set; }
+    [JsonPropertyName("valueTo")]   public double? ValueTo   { get; set; }
+    [JsonPropertyName("tolerance")] public double? Tolerance { get; set; }
+}
+
+/// <summary>One slot's match within a group candidate. <see cref="MatchedOffsets"/>
+/// lists every field offset that still satisfies the slot; <see cref="Locked"/> is
+/// set once a single field remains. The other fields describe the slot's SDR
+/// representative leaf (distinct per slot).</summary>
+public sealed class GroupSlotMatch
+{
+    [JsonPropertyName("slotIdx")]        public int          SlotIndex      { get; set; }
+    [JsonPropertyName("matchedOffsets")] public List<long>   MatchedOffsets { get; set; } = new();
+    [JsonPropertyName("locked")]         public bool         Locked         { get; set; }
+    [JsonPropertyName("addr")]           public string?      Address        { get; set; }
+    [JsonPropertyName("fieldOffset")]    public long?        FieldOffset    { get; set; }
+    [JsonPropertyName("field")]          public string?      Field          { get; set; }
+    [JsonPropertyName("fieldType")]      public string?      FieldType      { get; set; }
+    [JsonPropertyName("fieldKind")]      public string?      FieldKind      { get; set; }
+    [JsonPropertyName("currentValue")]   public JsonElement? CurrentValue   { get; set; }
+}
+
+/// <summary>One matched instance: N values co-occur at distinct fields. Each
+/// slot maps to a distinct field (a System of Distinct Representatives).</summary>
+public sealed class GroupCandidate
+{
+    [JsonPropertyName("instAddr")] public string  InstanceAddr { get; set; } = string.Empty;
+    [JsonPropertyName("asm")]      public string? Assembly     { get; set; }
+    [JsonPropertyName("ns")]       public string? Namespace    { get; set; }
+    [JsonPropertyName("class")]    public string? Class        { get; set; }
+    [JsonPropertyName("slots")]    public List<GroupSlotMatch> Slots { get; set; } = new();
+}
+
+public sealed class BeginGroupScanResult
+{
+    [JsonPropertyName("ok")]              public bool   Ok              { get; set; }
+    [JsonPropertyName("sessionId")]       public string SessionId       { get; set; } = string.Empty;
+    [JsonPropertyName("mode")]            public string Mode            { get; set; } = string.Empty;
+    [JsonPropertyName("slotCount")]       public int    SlotCount       { get; set; }
+    [JsonPropertyName("count")]           public int    Count           { get; set; }
+    [JsonPropertyName("totalCandidates")] public int    TotalCandidates { get; set; }
+    [JsonPropertyName("retainCap")]       public int    RetainCap       { get; set; }
+    [JsonPropertyName("rawTotal")]        public long   RawTotal        { get; set; }
+    [JsonPropertyName("truncated")]       public bool   Truncated       { get; set; }
+    [JsonPropertyName("scannedBytes")]    public long   ScannedBytes    { get; set; }
+    [JsonPropertyName("cancelled")]       public bool   Cancelled       { get; set; }
+    [JsonPropertyName("candidates")]      public List<GroupCandidate> Candidates { get; set; } = new();
+    [JsonPropertyName("error")]           public string? Error          { get; set; }
+}
+
+public sealed class RefineGroupScanResult
+{
+    [JsonPropertyName("ok")]              public bool   Ok              { get; set; }
+    [JsonPropertyName("sessionId")]       public string SessionId       { get; set; } = string.Empty;
+    [JsonPropertyName("count")]           public int    Count           { get; set; }
+    [JsonPropertyName("totalCandidates")] public int    TotalCandidates { get; set; }
+    [JsonPropertyName("removed")]         public int    Removed         { get; set; }
+    [JsonPropertyName("truncated")]       public bool   Truncated       { get; set; }
+    [JsonPropertyName("candidates")]      public List<GroupCandidate> Candidates { get; set; } = new();
+    [JsonPropertyName("error")]           public string? Error          { get; set; }
+}
+
+public sealed class QueryGroupCandidatesResult
+{
+    [JsonPropertyName("ok")]              public bool   Ok              { get; set; }
+    [JsonPropertyName("sessionId")]       public string SessionId       { get; set; } = string.Empty;
+    [JsonPropertyName("offset")]          public int    Offset          { get; set; }
+    [JsonPropertyName("count")]           public int    Count           { get; set; }
+    [JsonPropertyName("totalCandidates")] public int    TotalCandidates { get; set; }
+    [JsonPropertyName("truncated")]       public bool   Truncated       { get; set; }
+    [JsonPropertyName("candidates")]      public List<GroupCandidate> Candidates { get; set; } = new();
+    [JsonPropertyName("error")]           public string? Error          { get; set; }
+}
+
+public sealed class EndGroupScanResult
+{
+    [JsonPropertyName("ok")]        public bool   Ok        { get; set; }
+    [JsonPropertyName("sessionId")] public string SessionId { get; set; } = string.Empty;
+    [JsonPropertyName("dropped")]   public bool   Dropped   { get; set; }
+    [JsonPropertyName("error")]     public string? Error    { get; set; }
+}
+
 public sealed class MethodOverloadEntry
 {
     [JsonPropertyName("name")]               public string       Name              { get; set; } = string.Empty;

@@ -741,6 +741,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(DiffCommand))]
     [NotifyCanExecuteChangedFor(nameof(DropSnapshotACommand))]
+    [NotifyCanExecuteChangedFor(nameof(RunSnapshotGroupCommand))]
     private SnapshotEnvelope? _selectedSnapshotA;
 
     [ObservableProperty]
@@ -918,6 +919,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(DropSnapshotACommand))]
     [NotifyCanExecuteChangedFor(nameof(DropSnapshotBCommand))]
     [NotifyCanExecuteChangedFor(nameof(CancelCaptureCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RunSnapshotGroupCommand))]
     private bool _isBusy;
 
     /// <summary>Cancel an in-flight capture. The capture loop already honours

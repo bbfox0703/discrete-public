@@ -166,6 +166,7 @@ public sealed partial class SpcQueryViewModel : ObservableObject
     // that would race on Results.
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(RunCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RunGroupCommand))]
     private bool _isRunning;
 
     /// <summary>Cross-tab handoff hook — wired by MainWindow code-behind
