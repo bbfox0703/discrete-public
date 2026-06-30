@@ -551,6 +551,49 @@
                               Text="{Binding Browser.CeXmlBaseAddress, Mode=TwoWay}"
                               FontFamily="Consolas,Cascadia Mono,monospace" />
                   </Grid>
+
+                  <!-- Collapse / flatten knobs (UE5CEDumper-style). Live CE XML
+                       only — they reshape the walked field tree, so they have no
+                       effect when "Use live data" is off. -->
+                  <Separator />
+                  <TextBlock Text="{StaticResource Browser.OptFlattenHeader}"
+                             Opacity="0.6" FontSize="11" />
+                  <CheckBox Content="{StaticResource Browser.OptDescShowOffset}"
+                            IsChecked="{Binding Browser.DescShowOffset, Mode=TwoWay}"
+                            ToolTip.Tip="Append the field's offset-within-parent to every CE Description, e.g. &quot;hp (+0x18)&quot;. Description text only — addresses and offsets emitted into CE are unchanged." />
+                  <CheckBox Content="{StaticResource Browser.OptFlattenValueStructs}"
+                            IsChecked="{Binding Browser.FlattenValueStructs, Mode=TwoWay}"
+                            ToolTip.Tip="Promote a value struct whose members are all primitive scalars (Vector3, a custom int/float struct) into sibling leaves at the combined offset instead of a nested group. A member that is itself a struct / pointer / collection keeps the struct nested." />
+                  <CheckBox Content="{StaticResource Browser.OptFlattenLeafRecords}"
+                            IsChecked="{Binding Browser.FlattenLeafRecords, Mode=TwoWay}"
+                            ToolTip.Tip="Superset of the above: also flatten structs whose members include managed string fields (a save-data &quot;record&quot;). String members emit the usual length / chars deref leaf at the combined offset." />
+                  <CheckBox Content="{StaticResource Browser.OptCollapseLeafPointers}"
+                            IsChecked="{Binding Browser.CollapseLeafPointers, Mode=TwoWay}"
+                            ToolTip.Tip="When a pointer dereferences to an object with exactly one primitive scalar field, fold it into a single CE record (Address=+ptrOff, Offsets=[fieldOff]) instead of a one-child group." />
+                  <CheckBox Content="{StaticResource Browser.OptCollapseChain}"
+                            IsChecked="{Binding Browser.CollapseChain, Mode=TwoWay}"
+                            ToolTip.Tip="Fold a spine of single-child pointer dereferences (A → B → C, each object holding one pointer) into ONE CE multi-level-pointer entry with a combined Offsets chain. Needs Drilldown depth &gt; 1 to have a chain to fold." />
+
+                  <Separator />
+                  <CheckBox Content="{StaticResource Browser.OptRecordColors}"
+                            IsChecked="{Binding Browser.RecordColors, Mode=TwoWay}"
+                            ToolTip.Tip="Tint alternating array element rows ([0],[2],… vs [1],[3],…) with a CE Color so big arrays read as banded rows. Colours are RRGGBB hex; the odd colour can be left blank to use CE's theme." />
+                  <Grid ColumnDefinitions="120,90,Auto,90" ColumnSpacing="6"
+                        IsEnabled="{Binding Browser.RecordColors}">
+                    <TextBlock Grid.Column="0"
+                               Text="{StaticResource Browser.OptRecordColorEven}"
+                               VerticalAlignment="Center" Opacity="0.8" />
+                    <TextBox  Grid.Column="1"
+                              Text="{Binding Browser.RecordColorEven, Mode=TwoWay}"
+                              FontFamily="Consolas,Cascadia Mono,monospace" />
+                    <TextBlock Grid.Column="2"
+                               Text="{StaticResource Browser.OptRecordColorOdd}"
+                               VerticalAlignment="Center" Opacity="0.8" />
+                    <TextBox  Grid.Column="3"
+                              Text="{Binding Browser.RecordColorOdd, Mode=TwoWay}"
+                              FontFamily="Consolas,Cascadia Mono,monospace"
+                              PlaceholderText="theme" />
+                  </Grid>
                 </StackPanel>
               </Flyout>
             </Button.Flyout>

@@ -145,7 +145,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // Inspector's instance / node "Copy CE XML" honours the same
         // Export-options drilldown depth + array limit + description verbosity
         // the user set on the Browser tab (instead of the old hardcoded depth 1).
-        Inspector.ExportDepthProvider = () => (Browser.DrilldownDepth, Browser.ArrayLimit, Browser.VerboseCeXmlDescription);
+        // Inspector's instance / node "Copy CE XML" / "Copy CE field" honours the
+        // FULL Export-options set the user configured on the Browser tab (depth,
+        // array limit, verbosity, and the collapse / flatten / record-colour
+        // knobs). LiveData + PointerSize are overlaid per-call by the Inspector.
+        Inspector.ExportOptionsProvider = () => Browser.CurrentExportOptions;
+        // Persist export knobs across launches: push loaded settings into the
+        // Browser (done in LoadUserSettingsAsync) and write them back whenever a
+        // knob changes (debounced, guarded until the initial load completes).
+        Browser.ExportOptionsChanged += OnBrowserExportOptionsChanged;
         AddressLookup.AobMaker = _aobMaker;  // Phase 22e Send-to-CE button
         _aobMaker.AvailabilityChanged += OnAobMakerAvailabilityChanged;
         // Opportunistic startup probe so the connection-bar status text
@@ -380,17 +388,66 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public UserSettingsStore SettingsStore { get; }
 
     private UserSettings _settings;
+    // Gate so the Browser's ApplyExportSettings (which fires the change event for
+    // every knob it sets) doesn't trigger a redundant save storm before the
+    // initial load has even finished. Flipped true once load completes.
+    private bool _exportSettingsLoaded;
+    private CancellationTokenSource? _exportSaveDebounce;
+
     private async Task LoadUserSettingsAsync()
     {
         try
         {
             _settings = await SettingsStore.LoadAsync().ConfigureAwait(true);
             Snapshot.ApplyLoadedSettings(_settings);
+            // Apply through the SAME object the Snapshot tab now owns
+            // (ApplyLoadedSettings stored it as Snapshot.Settings) so both tabs
+            // mutate one settings instance — see OnBrowserExportOptionsChanged.
+            Browser.ApplyExportSettings(Snapshot.Settings);
+            _exportSettingsLoaded = true;
         }
         catch (Exception ex)
         {
+            _exportSettingsLoaded = true;   // still allow saves of fresh defaults
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
                 $"UserSettings load failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>An Export-options knob changed — debounce-persist the full
+    /// settings (NumericUpDown fires per increment / keystroke, so coalesce a
+    /// burst into one atomic write ~400 ms after the last change). Fire-and-forget;
+    /// a save failure only logs.</summary>
+    private void OnBrowserExportOptionsChanged()
+    {
+        if (!_exportSettingsLoaded) return;
+        _exportSaveDebounce?.Cancel();
+        _exportSaveDebounce?.Dispose();
+        var cts = new CancellationTokenSource();
+        _exportSaveDebounce = cts;
+        _ = DebouncedSaveExportSettingsAsync(cts.Token);
+    }
+
+    private async Task DebouncedSaveExportSettingsAsync(CancellationToken ct)
+    {
+        try
+        {
+            await Task.Delay(400, ct).ConfigureAwait(true);
+            // Persist through Snapshot.Settings — the SINGLE live settings object.
+            // The Snapshot Settings dialog REPLACES its instance on Apply, so a
+            // cached local reference would go stale and a later export-knob save
+            // would clobber the snapshot keys the user just changed. Reading the
+            // live object each time keeps both tabs' keys intact (Clone copies
+            // export fields too, so the dialog's own save preserves ours).
+            UserSettings live = Snapshot.Settings;
+            Browser.WriteExportSettings(live);
+            await SettingsStore.SaveAsync(live, ct).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) { /* superseded by a newer change */ }
+        catch (Exception ex)
+        {
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+                $"Export-options save failed: {ex.Message}");
         }
     }
 
@@ -1887,6 +1944,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         _connectCts?.Cancel();
         _connectCts?.Dispose();
+        // Matches the _connectCts pattern — cancel/dispose the in-flight export
+        // settings debounce so its CTS doesn't leak on close. (A knob toggled in
+        // the final ~400 ms isn't flushed; it's a recoverable preference.)
+        _exportSaveDebounce?.Cancel();
+        _exportSaveDebounce?.Dispose();
+        Browser.ExportOptionsChanged -= OnBrowserExportOptionsChanged;
         _ = Inspector.DisposeAsync();
         _ = _pipe.DisposeAsync();
         _ = _bulkPipe.DisposeAsync();

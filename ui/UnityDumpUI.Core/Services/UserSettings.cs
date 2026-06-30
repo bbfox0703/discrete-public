@@ -46,14 +46,50 @@ public sealed class UserSettings
 
     public const long DefaultAutoPruneThresholdBytes = 200L * 1024 * 1024;
 
+    // ---------- CE-export knobs (Copy CE XML / Copy CE field) -------------
+    // Keys whose VM default is true / non-zero are NULLABLE so an older
+    // settings.json missing them leaves the VM default intact (a plain bool
+    // would deserialise to false and silently flip the toggle off). The
+    // OFF-by-default collapse / flatten knobs are plain bools (absent → false
+    // = the intended default).
+
+    [JsonPropertyName("export_drilldown_depth")]        public int?  ExportDrilldownDepth        { get; set; }
+    [JsonPropertyName("export_array_limit")]            public int?  ExportArrayLimit            { get; set; }
+    [JsonPropertyName("export_collapse_pointer_nodes")] public bool? ExportCollapsePointerNodes  { get; set; }
+    [JsonPropertyName("export_use_live_data")]          public bool? ExportUseLiveData           { get; set; }
+    [JsonPropertyName("export_verbose_description")]    public bool  ExportVerboseDescription    { get; set; }
+    [JsonPropertyName("export_desc_show_offset")]       public bool  ExportDescShowOffset        { get; set; }
+    [JsonPropertyName("export_flatten_value_structs")]  public bool  ExportFlattenValueStructs   { get; set; }
+    [JsonPropertyName("export_flatten_leaf_records")]   public bool  ExportFlattenLeafRecords    { get; set; }
+    [JsonPropertyName("export_collapse_leaf_pointers")] public bool  ExportCollapseLeafPointers  { get; set; }
+    [JsonPropertyName("export_collapse_chain")]         public bool  ExportCollapseChain         { get; set; }
+    [JsonPropertyName("export_record_colors")]          public bool  ExportRecordColors          { get; set; }
+    [JsonPropertyName("export_record_color_even")]      public string? ExportRecordColorEven     { get; set; }
+    [JsonPropertyName("export_record_color_odd")]       public string? ExportRecordColorOdd      { get; set; }
+    [JsonPropertyName("export_ce_xml_base_address")]    public string? ExportCeXmlBaseAddress     { get; set; }
+
     /// <summary>Deep clone for safe mutation in the Settings dialog
     /// without affecting the active in-memory copy until the user hits
     /// Apply / OK.</summary>
     public UserSettings Clone() => new()
     {
-        SnapshotDbDirectory     = SnapshotDbDirectory,
-        AutoSaveSnapshots       = AutoSaveSnapshots,
-        AutoPruneThresholdBytes = AutoPruneThresholdBytes,
+        SnapshotDbDirectory        = SnapshotDbDirectory,
+        AutoSaveSnapshots          = AutoSaveSnapshots,
+        AutoPruneThresholdBytes    = AutoPruneThresholdBytes,
+        ExportDrilldownDepth       = ExportDrilldownDepth,
+        ExportArrayLimit           = ExportArrayLimit,
+        ExportCollapsePointerNodes = ExportCollapsePointerNodes,
+        ExportUseLiveData          = ExportUseLiveData,
+        ExportVerboseDescription   = ExportVerboseDescription,
+        ExportDescShowOffset       = ExportDescShowOffset,
+        ExportFlattenValueStructs  = ExportFlattenValueStructs,
+        ExportFlattenLeafRecords   = ExportFlattenLeafRecords,
+        ExportCollapseLeafPointers = ExportCollapseLeafPointers,
+        ExportCollapseChain        = ExportCollapseChain,
+        ExportRecordColors         = ExportRecordColors,
+        ExportRecordColorEven      = ExportRecordColorEven,
+        ExportRecordColorOdd       = ExportRecordColorOdd,
+        ExportCeXmlBaseAddress     = ExportCeXmlBaseAddress,
     };
 }
 

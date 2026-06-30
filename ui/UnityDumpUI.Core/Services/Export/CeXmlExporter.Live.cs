@@ -53,7 +53,7 @@ public static partial class CeXmlExporter
         int currentDepth, CancellationToken ct,
         string? addrOverride = null)
     {
-        string desc = FieldDesc(f.Name, f.Type, options);
+        string desc = FieldDesc(f.Name, f.Type, options, f.Offset);
         // Normally a field is addressed RELATIVE to its parent (+offset). When
         // addrOverride is set (the "Copy CE field" standalone root), this node
         // uses that ABSOLUTE address instead so the entry stands on its own;
@@ -140,16 +140,60 @@ public static partial class CeXmlExporter
                              vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                     return;
                 }
-                OpenGroup(sb, indent, ids, desc, rel,
-                          offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
-                          varType: null, showAsHex: true);
-                await EmitChildFieldsByHeaderAsync(sb, indent + "  ", ids, f.Ptr!,
-                                                   assemblyName, options, live,
-                                                   visited, currentDepth + 1, ct,
-                                                   fallbackType: f.Type)
-                    .ConfigureAwait(false);
-                CloseGroup(sb, indent);
-                visited.Remove(f.Ptr!);
+                try
+                {
+                    // Collapse paths need the deref'd object's fields BEFORE deciding
+                    // how to emit, so walk first when either is enabled. Otherwise fall
+                    // straight through to the unchanged nested-group path.
+                    if (options.CollapseLeafPointers || options.CollapseChain)
+                    {
+                        List<WalkedField>? kids = await WalkObjectByHeaderAsync(
+                            f.Ptr!, assemblyName, options, live, f.Type, ct).ConfigureAwait(false);
+                        if (kids is { Count: > 0 })
+                        {
+                            // Collapse pointer → single scalar leaf into one CE record:
+                            // <Address>+ptrOff</Address> <Offsets>[fieldOff]</Offsets>.
+                            if (options.CollapseLeafPointers && kids.Count == 1
+                                && IsFlattenableScalarLive(kids[0]))
+                            {
+                                EmitCollapsedLeafPointer(sb, indent, ids, f, kids[0], options, rel);
+                                return;
+                            }
+                            // Collapse a single-child pointer spine into one multi-level
+                            // <Offsets> entry.
+                            if (options.CollapseChain && kids.Count == 1 && IsFoldablePointerChild(kids[0]))
+                            {
+                                await EmitCollapsedChainAsync(sb, indent, ids, f, kids, rel,
+                                                              assemblyName, options, live, visited,
+                                                              currentDepth, ct).ConfigureAwait(false);
+                                return;
+                            }
+                            // Didn't qualify — emit the normal nested group from the
+                            // already-walked children (no second walk).
+                            OpenGroup(sb, indent, ids, desc, rel,
+                                      offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                                      varType: null, showAsHex: true);
+                            foreach (WalkedField cf in kids)
+                                await EmitWalkedFieldLiveAsync(sb, indent + "  ", ids, cf, assemblyName,
+                                                               options, live, visited, currentDepth + 1, ct)
+                                    .ConfigureAwait(false);
+                            CloseGroup(sb, indent);
+                            return;
+                        }
+                        // Walk failed → fall through to the default path (which retries
+                        // and degrades to an empty group, same as before).
+                    }
+                    OpenGroup(sb, indent, ids, desc, rel,
+                              offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                              varType: null, showAsHex: true);
+                    await EmitChildFieldsByHeaderAsync(sb, indent + "  ", ids, f.Ptr!,
+                                                       assemblyName, options, live,
+                                                       visited, currentDepth + 1, ct,
+                                                       fallbackType: f.Type)
+                        .ConfigureAwait(false);
+                    CloseGroup(sb, indent);
+                }
+                finally { visited.Remove(f.Ptr!); }
                 return;
             }
 
@@ -171,6 +215,50 @@ public static partial class CeXmlExporter
                              showAsHex: true, address: rel, offsets: null);
                     return;
                 }
+
+                // Flatten path: walk the struct first so we can decide whether all
+                // its members are flatten-eligible. Only entered when a flatten flag
+                // is on; otherwise the default nested-group path below runs unchanged.
+                if ((options.FlattenValueStructs || options.FlattenLeafRecords)
+                    && InstanceFieldClassifier.TryParseClassName(f.Type, out string fvns, out string fvname))
+                {
+                    string fcycle = $"{f.Address}!{fvns}.{fvname}";
+                    if (visited.Add(fcycle))
+                    {
+                        try
+                        {
+                            List<WalkedField>? members = await WalkStructByNameAsync(
+                                f.Address!, assemblyName, fvns, fvname, options, live, ct)
+                                .ConfigureAwait(false);
+                            if (members is { Count: > 0 })
+                            {
+                                bool flattenScalars = options.FlattenValueStructs
+                                    && members.TrueForAll(IsFlattenableScalarLive);
+                                bool flattenRecords = options.FlattenLeafRecords
+                                    && members.TrueForAll(m => IsFlattenableLeafLive(m, allowStrings: true));
+                                if (flattenScalars || flattenRecords)
+                                {
+                                    EmitFlattenedStructLive(sb, indent, ids, f, members, options, rel);
+                                    return;   // finally removes fcycle
+                                }
+                                // Not flattenable — emit the normal nested group from the
+                                // already-walked members (equivalent to EmitChildFieldsByName).
+                                OpenGroup(sb, indent, ids, desc, rel,
+                                          offsets: null, collapsed: options.CollapsePointerNodes,
+                                          varType: null, showAsHex: true);
+                                foreach (WalkedField cf in members)
+                                    await EmitWalkedFieldLiveAsync(sb, indent + "  ", ids, cf, assemblyName,
+                                                                   options, live, visited, currentDepth + 1, ct)
+                                        .ConfigureAwait(false);
+                                CloseGroup(sb, indent);
+                                return;
+                            }
+                        }
+                        catch { /* fall through to default path */ }
+                        finally { visited.Remove(fcycle); }
+                    }
+                }
+
                 OpenGroup(sb, indent, ids, desc, rel,
                           offsets: null, collapsed: options.CollapsePointerNodes,
                           varType: null, showAsHex: true);
@@ -294,6 +382,24 @@ public static partial class CeXmlExporter
         HashSet<string> visited, int currentDepth, CancellationToken ct,
         string? fallbackType = null)
     {
+        List<WalkedField>? resolved = await WalkObjectByHeaderAsync(
+            objAddr, assemblyName, options, live, fallbackType, ct).ConfigureAwait(false);
+        if (resolved is null) return;
+        foreach (WalkedField cf in resolved)
+            await EmitWalkedFieldLiveAsync(sb, indent, ids, cf, assemblyName,
+                                           options, live, visited, currentDepth, ct)
+                .ConfigureAwait(false);
+    }
+
+    /// <summary>Walk an object via its header (IL2CPP) with the Mono name-based
+    /// fallback, returning its fields — or null when nothing resolves. The
+    /// walk-only half of <see cref="EmitChildFieldsByHeaderAsync"/>, factored
+    /// out so the collapse paths can inspect the deref'd object's members before
+    /// choosing how to emit. Pure resolution: no emission, no cycle bookkeeping.</summary>
+    private static async Task<List<WalkedField>?> WalkObjectByHeaderAsync(
+        string objAddr, string? assemblyName, ExportOptions options, ILiveExportSource live,
+        string? fallbackType, CancellationToken ct)
+    {
         WalkInstanceResult? res = null;
         try
         {
@@ -328,11 +434,7 @@ public static partial class CeXmlExporter
             }
         }
 
-        if (res?.Fields is not { Count: > 0 } resolved) return;
-        foreach (WalkedField cf in resolved)
-            await EmitWalkedFieldLiveAsync(sb, indent, ids, cf, assemblyName,
-                                           options, live, visited, currentDepth, ct)
-                .ConfigureAwait(false);
+        return res?.Fields is { Count: > 0 } resolved ? resolved : null;
     }
 
     /// <summary>Assembly search order for the name-based walk fallback —
@@ -373,6 +475,23 @@ public static partial class CeXmlExporter
         ILiveExportSource live, HashSet<string> visited, int currentDepth,
         CancellationToken ct)
     {
+        List<WalkedField>? fields = await WalkStructByNameAsync(
+            addr, assemblyName, ns, name, options, live, ct).ConfigureAwait(false);
+        if (fields is null) return;
+        foreach (WalkedField cf in fields)
+            await EmitWalkedFieldLiveAsync(sb, indent, ids, cf, assemblyName,
+                                           options, live, visited, currentDepth, ct)
+                .ConfigureAwait(false);
+    }
+
+    /// <summary>Walk an inline value-type struct by explicit class name across
+    /// the assembly candidate list (the walk-only half of
+    /// <see cref="EmitChildFieldsByNameAsync"/>). Returns its members or null.
+    /// Used by the flatten path to inspect members before emitting.</summary>
+    private static async Task<List<WalkedField>?> WalkStructByNameAsync(
+        string addr, string? assemblyName, string ns, string name, ExportOptions options,
+        ILiveExportSource live, CancellationToken ct)
+    {
         bool isGeneric = name.IndexOf('`') >= 0 || name.IndexOf('<') >= 0;
         var nameVariants = new List<string> { name };
         if (isGeneric) { nameVariants.Add(name + "`1"); nameVariants.Add(name + "`2"); nameVariants.Add(name + "`3"); }
@@ -393,11 +512,234 @@ public static partial class CeXmlExporter
             }
             if (res is not null) break;
         }
-        if (res?.Fields is not { Count: > 0 } fields) return;
-        foreach (WalkedField cf in fields)
-            await EmitWalkedFieldLiveAsync(sb, indent, ids, cf, assemblyName,
-                                           options, live, visited, currentDepth, ct)
-                .ConfigureAwait(false);
+        return res?.Fields is { Count: > 0 } fields ? fields : null;
+    }
+
+    // ---------- Flatten / collapse (UE5CEDumper-style) --------------------
+
+    /// <summary>True for a struct member that is a primitive SCALAR leaf —
+    /// safe to promote to a sibling leaf when flattening. Keys off the DLL's
+    /// own inline decode: an enum (int) or a field the runtime decoded into
+    /// <see cref="WalkedField.Value"/>. A member that is itself a value struct,
+    /// pointer-to-class, collection, dictionary, or managed string is NOT a
+    /// scalar leaf (it would lose structure if flattened), so it disqualifies
+    /// its parent from FlattenValueStructs. This is what keeps a Vector3 that's
+    /// a member of a larger struct nested (it flattens at its own level) rather
+    /// than collapsed into one opaque leaf.</summary>
+    private static bool IsFlattenableScalarLive(WalkedField c)
+    {
+        if (c is null) return false;
+        if (c.IsEnum) return true;
+        if (c.Dict || c.Fields is { Count: > 0 }) return false;
+        if (IsManagedString(c.Type)) return false;
+        if (!string.IsNullOrEmpty(c.Type)
+            && InstanceFieldClassifier.TryParseCollectionType(c.Type!, out _, out _)) return false;
+        // The DLL decoded an inline primitive value (Int32 / Single / Boolean …).
+        // Value structs come back with no Value (just Address); pointers come
+        // back as Ptr. So Value.HasValue is the precise "scalar primitive" gate.
+        return c.Value.HasValue;
+    }
+
+    /// <summary>Superset gate for FlattenLeafRecords: a scalar leaf, OR (when
+    /// <paramref name="allowStrings"/>) a managed String member (emitted as a
+    /// 2-level deref leaf at the combined offset).</summary>
+    private static bool IsFlattenableLeafLive(WalkedField c, bool allowStrings)
+        => (allowStrings && IsManagedString(c.Type)) || IsFlattenableScalarLive(c);
+
+    /// <summary>True when a deref'd object's single child is itself a drillable
+    /// pointer-to-class (so a single-child spine can be folded). Excludes
+    /// strings, value structs, collections, dictionaries, engine / framework
+    /// reference types, and null pointers.</summary>
+    private static bool IsFoldablePointerChild(WalkedField c)
+    {
+        if (c is null || string.IsNullOrEmpty(c.Ptr) || c.Ptr == "0x0000000000000000") return false;
+        if (c.IsValueType || c.Dict || c.Fields is { Count: > 0 }) return false;
+        if (IsManagedString(c.Type)) return false;
+        if (IsEngineInternalType(c.Type) || IsFrameworkReferenceType(c.Type)) return false;
+        if (!string.IsNullOrEmpty(c.Type)
+            && InstanceFieldClassifier.TryParseCollectionType(c.Type!, out _, out _)) return false;
+        return InstanceFieldClassifier.TryParseClassName(c.Type, out _, out _);
+    }
+
+    /// <summary>Description for a flattened struct member: <c>parent ▸ child</c>,
+    /// with the child's type (verbose) and the COMBINED offset (DescShowOffset)
+    /// appended.</summary>
+    private static string FlattenSegLabel(WalkedField parent, WalkedField child,
+                                          ExportOptions options, int combinedOffset)
+    {
+        string s = $"{parent.Name} ▸ {child.Name}";
+        if (options.VerboseDescription && !string.IsNullOrEmpty(child.Type))
+            s += $" : {child.Type}";
+        if (options.DescShowOffset)
+            s += $" (+{combinedOffset:X})";
+        return s;
+    }
+
+    /// <summary>Emit a value struct as flattened sibling leaves at combined
+    /// offsets (<c>parentOffset + memberOffset</c>), one CE entry per member.
+    /// Scalars become typed leaves; enums signed-int leaves; (records mode)
+    /// String members the canonical 2-level deref leaf.</summary>
+    private static void EmitFlattenedStructLive(
+        StringBuilder sb, string indent, IdGen ids,
+        WalkedField parent, List<WalkedField> members, ExportOptions options, string baseRel)
+    {
+        foreach (WalkedField child in members)
+        {
+            // Address is the struct's own base (relative OR absolute) + the
+            // member offset; the label shows the in-object combined offset.
+            int combined = parent.Offset + child.Offset;
+            string rel    = OffsetAddr(baseRel, child.Offset);
+            string label  = FlattenSegLabel(parent, child, options, combined);
+
+            if (IsManagedString(child.Type))
+            {
+                if (string.IsNullOrEmpty(child.Ptr) || child.Ptr == "0x0000000000000000")
+                {
+                    EmitLeaf(sb, indent, ids, options.VerboseDescription ? label + "  <null>" : label,
+                             vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
+                }
+                else
+                {
+                    string slabel = options.VerboseDescription && child.String is not null
+                        ? $"{label} = \"{child.String}\"" : label;
+                    EmitStringDerefGroup(sb, indent, ids, slabel, rel, child.StringLength, options.PointerSize);
+                }
+            }
+            else if (child.IsEnum)
+            {
+                EmitLeaf(sb, indent, ids, label, vartype: "4 Bytes",
+                         showAsHex: false, showAsSigned: true, address: rel, offsets: null);
+            }
+            else
+            {
+                (bool hex, bool signed) = UnityTypeMap.CeDisplay(child.Type);
+                EmitLeaf(sb, indent, ids, label,
+                         vartype: UnityTypeMap.Resolve(child.Type).CeTypeKeyword,
+                         showAsHex: hex, showAsSigned: signed, address: rel, offsets: null);
+            }
+        }
+    }
+
+    /// <summary>Emit a pointer-to-single-scalar as ONE collapsed CE record:
+    /// <c>&lt;Address&gt;+ptrOff&lt;/Address&gt; &lt;Offsets&gt;[fieldOff]&lt;/Offsets&gt;</c>
+    /// — CE dereferences the pointer at <c>parent + ptrOff</c> then reads the
+    /// scalar at <c>+ fieldOff</c>, no group wrapper.</summary>
+    private static void EmitCollapsedLeafPointer(
+        StringBuilder sb, string indent, IdGen ids,
+        WalkedField ptr, WalkedField child, ExportOptions options, string baseRel)
+    {
+        string label = $"{ptr.Name} ▸ {child.Name}";
+        if (options.VerboseDescription && !string.IsNullOrEmpty(child.Type))
+            label += $" : {child.Type}";
+        if (options.DescShowOffset)
+            label += $" (+{ptr.Offset:X}→+{child.Offset:X})";
+
+        // The pointer field's own address (relative in-place, or the absolute
+        // standalone-copy root) — CE dereferences it, then +child.Offset.
+        string rel = baseRel;
+        var offsets = new[] { child.Offset };
+        if (child.IsEnum)
+        {
+            EmitLeaf(sb, indent, ids, label, vartype: "4 Bytes",
+                     showAsHex: false, showAsSigned: true, address: rel, offsets: offsets);
+        }
+        else
+        {
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(child.Type);
+            EmitLeaf(sb, indent, ids, label,
+                     vartype: UnityTypeMap.Resolve(child.Type).CeTypeKeyword,
+                     showAsHex: hex, showAsSigned: signed, address: rel, offsets: offsets);
+        }
+    }
+
+    /// <summary>Fold a single-child pointer spine into ONE CE multi-level
+    /// pointer entry. <paramref name="firstChildren"/> are the already-walked
+    /// fields of the object the field points at. We keep descending while each
+    /// object has exactly one foldable pointer child, accumulating the deref
+    /// offsets, then emit a group whose <c>&lt;Offsets&gt;</c> chain resolves to
+    /// the final object's base; its members are emitted relative beneath.
+    ///
+    /// CE offsets are applied innermost-last, so the chain is
+    /// <c>[0, …reverse(chainOffsets)]</c>: the leading 0 is the final deref to
+    /// the last object's base, then the intermediate field offsets in reverse
+    /// depth order.</summary>
+    private static async Task EmitCollapsedChainAsync(
+        StringBuilder sb, string indent, IdGen ids,
+        WalkedField f, List<WalkedField> firstChildren, string baseRel,
+        string? assemblyName, ExportOptions options, ILiveExportSource live,
+        HashSet<string> visited, int currentDepth, CancellationToken ct)
+    {
+        const int kMaxFold = 16;
+        var chainOffsets = new List<int>();
+        var labels       = new List<string> { LabelSeg(f, options) };
+        var added        = new List<string>();   // intermediate ptrs added to visited
+        List<WalkedField> curChildren = firstChildren;
+
+        try
+        {
+            while (curChildren.Count == 1 && chainOffsets.Count < kMaxFold)
+            {
+                WalkedField only = curChildren[0];
+                if (!IsFoldablePointerChild(only)) break;
+                if (!visited.Add(only.Ptr!)) break;   // cycle — stop folding here
+                List<WalkedField>? next = await WalkObjectByHeaderAsync(
+                    only.Ptr!, assemblyName, options, live, only.Type, ct).ConfigureAwait(false);
+                if (next is not { Count: > 0 })
+                {
+                    visited.Remove(only.Ptr!);   // couldn't descend — don't fold this hop
+                    break;
+                }
+                added.Add(only.Ptr!);
+                chainOffsets.Add(only.Offset);
+                labels.Add(LabelSeg(only, options));
+                curChildren = next;
+            }
+
+            // [0, …reverse(chainOffsets)]
+            var offsets = new int[chainOffsets.Count + 1];
+            offsets[0] = 0;
+            for (int k = 0; k < chainOffsets.Count; k++)
+                offsets[k + 1] = chainOffsets[chainOffsets.Count - 1 - k];
+
+            OpenGroup(sb, indent, ids, string.Join(" ▸ ", labels), baseRel,
+                      offsets: offsets, collapsed: options.CollapsePointerNodes,
+                      varType: null, showAsHex: true);
+            foreach (WalkedField cf in curChildren)
+                await EmitWalkedFieldLiveAsync(sb, indent + "  ", ids, cf, assemblyName,
+                                               options, live, visited, currentDepth + 1, ct)
+                    .ConfigureAwait(false);
+            CloseGroup(sb, indent);
+        }
+        finally
+        {
+            foreach (string p in added) visited.Remove(p);
+        }
+    }
+
+    /// <summary>One segment label for a folded chain — bare field name plus an
+    /// optional <c>(+offset)</c>. No type suffix on chain crumbs (matches the
+    /// UE5 fold, which never decorates folded crumbs with the type).</summary>
+    private static string LabelSeg(WalkedField f, ExportOptions options)
+        => options.DescShowOffset ? $"{f.Name} (+{f.Offset:X})" : f.Name;
+
+    /// <summary>Add a byte delta to a CE base address string, preserving its
+    /// form: a relative <c>+{hex}</c> stays relative (<c>+{hex+delta}</c>); an
+    /// absolute <c>0x…</c> stays absolute. Used to address a flattened struct
+    /// member relative to its struct's base, which is itself either relative
+    /// (in-place export) or absolute (a standalone "Copy CE field" root /
+    /// dictionary value).</summary>
+    private static string OffsetAddr(string baseAddr, int delta)
+    {
+        if (delta == 0) return baseAddr;
+        if (baseAddr.StartsWith("+", StringComparison.Ordinal)
+            && int.TryParse(baseAddr.AsSpan(1), NumberStyles.HexNumber,
+                            CultureInfo.InvariantCulture, out int relBase))
+            return "+" + (relBase + delta).ToString("X", CultureInfo.InvariantCulture);
+        if (baseAddr.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            && ulong.TryParse(baseAddr.AsSpan(2), NumberStyles.HexNumber,
+                              CultureInfo.InvariantCulture, out ulong absBase))
+            return "0x" + (absBase + (ulong)(long)delta).ToString("X16", CultureInfo.InvariantCulture);
+        return baseAddr;   // unrecognised form — leave as-is
     }
 
     /// <summary>
@@ -592,19 +934,23 @@ public static partial class CeXmlExporter
             {
                 string slotLabel = $"[{elem.Index}]";
                 string slotRel = RelAddr(dataOff + elem.Index * stride);
+                // Alternating record colour by element index (null when the
+                // feature is off → no <Color>, CE keeps its theme).
+                string? elemColor = RecordColorFor(options, elem.Index);
 
                 if (walk.IsPointer && elemIsString)
                 {
                     if (string.IsNullOrEmpty(elem.Ptr) || elem.Ptr == "0x0000000000000000")
                     {
                         EmitLeaf(sb, elemIndent, ids, options.VerboseDescription ? slotLabel + "  <null>" : slotLabel,
-                                 vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null);
+                                 vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null,
+                                 color: elemColor);
                     }
                     else
                     {
                         string lbl = options.VerboseDescription && elem.String is not null
                             ? $"{slotLabel} = \"{elem.String}\"" : slotLabel;
-                        EmitStringDerefGroup(sb, elemIndent, ids, lbl, slotRel, elem.StringLength, ptr);
+                        EmitStringDerefGroup(sb, elemIndent, ids, lbl, slotRel, elem.StringLength, ptr, color: elemColor);
                     }
                 }
                 else if (walk.IsPointer)
@@ -613,12 +959,13 @@ public static partial class CeXmlExporter
                     if (slotPtr == 0 || !slotDrill || elemIsFrameworkRef || !visited.Add(elem.Ptr!))
                     {
                         EmitLeaf(sb, elemIndent, ids, slotLabel,
-                                 vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null);
+                                 vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null,
+                                 color: elemColor);
                         continue;
                     }
                     OpenGroup(sb, elemIndent, ids, slotLabel, slotRel,
                               offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
-                              varType: null, showAsHex: true);
+                              varType: null, showAsHex: true, color: elemColor);
                     await EmitChildFieldsByHeaderAsync(sb, elemIndent + "  ", ids, elem.Ptr!,
                                                        assemblyName, options, live,
                                                        visited, currentDepth + 2, ct,
@@ -643,7 +990,7 @@ public static partial class CeXmlExporter
                     {
                         OpenGroup(sb, elemIndent, ids, slotLabel, slotRel,
                                   offsets: null, collapsed: options.CollapsePointerNodes,
-                                  varType: null, showAsHex: true);
+                                  varType: null, showAsHex: true, color: elemColor);
                         await EmitChildFieldsByNameAsync(sb, elemIndent + "  ", ids, elem.Address!,
                                                          assemblyName, ens, ename, options, live,
                                                          visited, currentDepth + 2, ct)
@@ -656,7 +1003,8 @@ public static partial class CeXmlExporter
                         (bool h, bool s) = UnityTypeMap.CeDisplay(elementType);
                         EmitLeaf(sb, elemIndent, ids, slotLabel,
                                  vartype: PrimitiveVartype(elementType),
-                                 showAsHex: h, showAsSigned: s, address: slotRel, offsets: null);
+                                 showAsHex: h, showAsSigned: s, address: slotRel, offsets: null,
+                                 color: elemColor);
                     }
                 }
                 else
@@ -664,7 +1012,8 @@ public static partial class CeXmlExporter
                     (bool h, bool s) = UnityTypeMap.CeDisplay(elementType);
                     EmitLeaf(sb, elemIndent, ids, slotLabel,
                              vartype: PrimitiveVartype(elementType),
-                             showAsHex: h, showAsSigned: s, address: slotRel, offsets: null);
+                             showAsHex: h, showAsSigned: s, address: slotRel, offsets: null,
+                             color: elemColor);
                 }
             }
         }
@@ -765,7 +1114,8 @@ public static partial class CeXmlExporter
     /// </summary>
     private static void EmitStringDerefGroup(
         StringBuilder sb, string indent, IdGen ids,
-        string description, string rel, int? charLength, int pointerSize)
+        string description, string rel, int? charLength, int pointerSize,
+        string? color = null)
     {
         int ptr = pointerSize == 4 ? 4 : 8;
         int lenOff   = 2 * ptr;          // int32 length
@@ -774,7 +1124,7 @@ public static partial class CeXmlExporter
 
         OpenGroup(sb, indent, ids, description, rel,
                   offsets: new[] { 0 }, collapsed: true,
-                  varType: null, showAsHex: true);
+                  varType: null, showAsHex: true, color: color);
 
         string childIndent = indent + "  ";
         EmitLeaf(sb, childIndent, ids, "length (int32)",
