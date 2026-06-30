@@ -178,16 +178,25 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     [ObservableProperty] private int _gamePointerSize;
 
     /// <summary>
-    /// Supplies the live-export drilldown depth + array limit for the
-    /// instance / node "Copy CE XML" commands. Wired by MainWindowViewModel to
-    /// read the Browser's Export-options sliders so the Inspector honours the
-    /// same DrilldownDepth the user set there (previously these commands
-    /// hardcoded depth 1, ignoring the slider). Null ⇒ fall back to (1, 16).
+    /// Supplies the base live-export options (drilldown depth, array limit,
+    /// description verbosity, and the collapse / flatten / record-colour knobs)
+    /// for the instance / node "Copy CE XML" / "Copy CE field" commands. Wired by
+    /// MainWindowViewModel to read the Browser's Export-options flyout so the
+    /// Inspector honours the same settings the user set there. Null ⇒
+    /// <see cref="ExportOptions.Defaults"/>. The live flags (LiveData /
+    /// PointerSize) are overlaid per-call from the active game session.
     /// </summary>
-    public Func<(int Depth, int ArrayLimit, bool Verbose)>? ExportDepthProvider { get; set; }
+    public Func<ExportOptions>? ExportOptionsProvider { get; set; }
 
-    private (int Depth, int ArrayLimit, bool Verbose) ResolveExportDepth()
-        => ExportDepthProvider?.Invoke() ?? (1, 16, false);
+    private ExportOptions ResolveExportOptions()
+    {
+        ExportOptions baseOpts = ExportOptionsProvider?.Invoke() ?? ExportOptions.Defaults;
+        return baseOpts with
+        {
+            LiveData    = true,
+            PointerSize = GamePointerSize == 4 ? 4 : 8,
+        };
+    }
 
     // ---------- Target ----------------------------------------------------
 
@@ -1531,14 +1540,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
                 return;
             }
-            (int depth, int arrayLimit, bool verbose) = ResolveExportDepth();
-            ExportOptions options = new(
-                DrilldownDepth: depth,
-                ArrayLimit:     arrayLimit,
-                CollapsePointerNodes: true,
-                LiveData: true,
-                PointerSize: GamePointerSize == 4 ? 4 : 8,
-                VerboseDescription: verbose);
+            ExportOptions options = ResolveExportOptions();
             CopyCeXmlProgress = "exporting…";
             var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderAsync(
@@ -1589,14 +1591,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
         try
         {
-            (int depth, int arrayLimit, bool verbose) = ResolveExportDepth();
-            ExportOptions options = new(
-                DrilldownDepth: depth,
-                ArrayLimit:     arrayLimit,
-                CollapsePointerNodes: true,
-                LiveData: true,
-                PointerSize: GamePointerSize == 4 ? 4 : 8,
-                VerboseDescription: verbose);
+            ExportOptions options = ResolveExportOptions();
 
             var built = new List<(WalkedField field, string absoluteAddress)>(nodes.Count);
             foreach (WalkedFieldNode n in nodes)
@@ -1618,7 +1613,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                 ? $"{nodes[0].Name} @ {(rootAsOffset ? "+" + nodes[0].Offset.ToString("X") : built[0].absoluteAddress)}"
                 : $"{built.Count} nodes";
             _logger.Write(Constants.LogCategoryView,
-                $"copy CE field node {summary} ({xml.Length} bytes, depth={depth}, relRoot={rootAsOffset})");
+                $"copy CE field node {summary} ({xml.Length} bytes, depth={options.DrilldownDepth}, relRoot={rootAsOffset})");
         }
         catch (Exception ex)
         {

@@ -507,11 +507,14 @@ public static partial class CeXmlExporter
     private static void OpenGroup(
         StringBuilder sb, string indent, IdGen ids,
         string description, string address,
-        int[]? offsets, bool collapsed, string? varType, bool showAsHex)
+        int[]? offsets, bool collapsed, string? varType, bool showAsHex,
+        string? color = null)
     {
         sb.Append(indent).Append("<CheatEntry>\n");
         sb.Append(indent).Append("  <ID>").Append(ids.Next()).Append("</ID>\n");
         sb.Append(indent).Append("  <Description>\"").Append(XmlEscape(description)).Append("\"</Description>\n");
+        if (color is not null)
+            sb.Append(indent).Append("  <Color>").Append(color).Append("</Color>\n");
         // <Options moHideChildren=...> goes on every collapsed group node
         // regardless of addressing mode — CE keys off the GroupHeader, not
         // off the Offsets chain. Previous version restricted this to
@@ -538,11 +541,14 @@ public static partial class CeXmlExporter
     private static void EmitLeaf(
         StringBuilder sb, string indent, IdGen ids,
         string description, string vartype, bool showAsHex,
-        string address, int[]? offsets, bool showAsSigned = false)
+        string address, int[]? offsets, bool showAsSigned = false,
+        string? color = null)
     {
         sb.Append(indent).Append("<CheatEntry>\n");
         sb.Append(indent).Append("  <ID>").Append(ids.Next()).Append("</ID>\n");
         sb.Append(indent).Append("  <Description>\"").Append(XmlEscape(description)).Append("\"</Description>\n");
+        if (color is not null)
+            sb.Append(indent).Append("  <Color>").Append(color).Append("</Color>\n");
         if (showAsHex)
             sb.Append(indent).Append("  <ShowAsHex>1</ShowAsHex>\n");
         sb.Append(indent).Append("  <ShowAsSigned>").Append(showAsSigned ? '1' : '0').Append("</ShowAsSigned>\n");
@@ -601,8 +607,43 @@ public static partial class CeXmlExporter
     /// field <c>name</c> so the CE table stays terse. Callers append value /
     /// state suffixes (= "...", &lt;null&gt;, [N of T]) only in verbose mode.
     /// </summary>
-    private static string FieldDesc(string name, string? type, ExportOptions options)
-        => options.VerboseDescription ? $"{name} : {type ?? "?"}" : name;
+    private static string FieldDesc(string name, string? type, ExportOptions options,
+                                    int? offset = null)
+    {
+        string desc = options.VerboseDescription ? $"{name} : {type ?? "?"}" : name;
+        // DescShowOffset appends the field's offset-within-parent so the user
+        // can cross-check the CE address against the dumper grid. Shown as the
+        // real offset (not the cloaked one); the live exporter emits raw
+        // offsets too, so the two always agree on a clean build.
+        if (options.DescShowOffset && offset is int off)
+            desc += $" (+{off:X})";
+        return desc;
+    }
+
+    /// <summary>CE <c>&lt;Color&gt;</c> (BBGGRR) for the alternating record-colour
+    /// feature: even indices use <see cref="ExportOptions.RecordColorEven"/>,
+    /// odd use <see cref="ExportOptions.RecordColorOdd"/>. Null (→ no colour
+    /// element, CE keeps its theme) when the feature is off or that parity is
+    /// unset / malformed.</summary>
+    private static string? RecordColorFor(ExportOptions options, int index)
+    {
+        if (!options.RecordColors) return null;
+        return RgbToCeColor((index & 1) == 0 ? options.RecordColorEven : options.RecordColorOdd);
+    }
+
+    /// <summary>Convert a UI RGB hex string ("RRGGBB", optional '#') to a CE
+    /// COLORREF hex ("BBGGRR"), or null when empty / malformed. CE stores a
+    /// Win32 COLORREF (0x00BBGGRR), so the byte order is reversed from RGB:
+    /// "0080FF" (azure) → "FF8000".</summary>
+    private static string? RgbToCeColor(string? rgb)
+    {
+        if (string.IsNullOrWhiteSpace(rgb)) return null;
+        string s = rgb.Trim().TrimStart('#');
+        if (s.Length != 6) return null;
+        foreach (char c in s)
+            if (!Uri.IsHexDigit(c)) return null;
+        return (s.Substring(4, 2) + s.Substring(2, 2) + s.Substring(0, 2)).ToUpperInvariant();
+    }
 
     private static string XmlEscape(string s)
     {

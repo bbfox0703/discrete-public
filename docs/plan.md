@@ -87,6 +87,21 @@
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
 
+**2026-06-30 — Copy CE XML / Copy CE field collapse·flatten 客製化移植(參考 `UE5CEDumper`)**(UI/Core-only,無 DLL;**dotnet build 兩專案 clean 0/0、818 UI tests green(+15 新)**;**待 live-smoke = 貼進 CE 對位址 + 顏色**):
+- **動機**:`UE5CEDumper` 的 Copy CE XML / Copy CE Field 有一整排 collapse/flatten 客製 toggle;移植到本 repo。UE-only 的(GAS Attributes、FName/FText、Exclude System Components、Guess What)略過或本來就被 `IsFrameworkReferenceType` 處理掉;Unity 適用的全做。
+- **範圍(使用者選 full)**:core 四項 + Collapse chain + Record colours + 持久化,全部進 **live exporter**(`CeXmlExporter.Live`)—— flatten/collapse 操作的是 walked field tree,template exporter 根本不展開 value struct,所以只在 live 模式有意義(Inspector 的 Copy CE XML / Copy CE field 即 live)。`DescShowOffset` 純描述、兩模式皆套。
+- **新增 toggle(全 default OFF,既有 803 測試/snapshot byte-identical)**:
+  - **Flatten value structs** — 純 primitive scalar 成員的 value struct(Vector3 → `pos ▸ x / ▸ y / ▸ z` sibling leaf 在 combined offset)。gate 用 DLL 自己的 inline decode(`Value.HasValue`/`IsEnum`)→ 「Vector3 當某更大 struct 的成員」正確維持 nested(member 無 inline Value),只在自己那層 flatten(one-level)。
+  - **Flatten leaf records** — superset,含 string 成員的 record struct;string 成員 emit 標準 2-level deref leaf 在 combined offset。
+  - **Collapse leaf pointers** — pointer→單一 scalar 折成一筆(`Address=+ptrOff`、`Offsets=[fieldOff]`)。
+  - **Collapse chain** — 單一子節點 pointer 鏈 `A→B→C` 折成一筆 multi-level `Offsets=[0, …reverse(chainOffsets)]`(cap 16、cycle-detect、walk-fail 停);CE offset 語意:首 offset 最外、末 offset 最內。
+  - **Record colours** — array 元素依 index 奇偶上 `<Color>BBGGRR</Color>`(`RgbToCeColor` RRGGBB→COLORREF 反序,沿用 UE5)。
+  - **Desc show offset** — 描述後綴 `(+0xNN)`。
+- **關鍵正確性修正(自審抓到)**:flatten/collapse helper 不能寫死 `RelAddr(f.Offset)` —— 「Copy CE field」standalone 與 dict-value 走 `addrOverride`(absolute / 預算位址),成員必須相對該 base 偏移。新增 `OffsetAddr(baseRel, delta)`(保留 `+rel` / `0x…` 形式)貫穿三個 emitter。新增測試鎖定 standalone-absolute case。
+- **UI / 持久化**:`AssemblyBrowserViewModel` 加 8 個 bindable toggle + `CurrentExportOptions`(internal)串接;`ExportDepthProvider`(depth/arrayLimit/verbose tuple)→ **`ExportOptionsProvider`**(整包 `ExportOptions`,Inspector 疊 LiveData/PointerSize);MainWindow Export-options flyout 加 toggle + Record-colour Even/Odd RRGGBB 輸入(inline,免另開 dialog)。**全 toggle 持久化** 到 `settings.json`:true/非零 default 的 key 用 nullable(舊檔缺 key 不會把 toggle 翻成 false/0),`UserSettings.Clone()` 補齊 export 欄位,debounced(400ms)save。
+- **對抗式 code review(workflow,15 agents,4 維度 × adversarial verify)**:CE 定址數學(combined offset / Offsets chain / BBGGRR)9 項質疑全被駁回(= 正確);confirmed 2 項皆在持久化 wiring 並已修:(1)**HIGH** — Snapshot Settings dialog 會 **replace** `Snapshot._settings`,MainWindowViewModel 快取的 `_settings` 變 stale,下次 export-toggle save 會覆蓋掉使用者剛改的 snapshot 設定 → 改成 save 一律走 `Snapshot.Settings`(單一 live SSOT);(2)**LOW** — `Dispose()` 沒清 `_exportSaveDebounce` CTS → 補 Cancel/Dispose + 解除事件。新增 `ExportSettingsPersistenceTests`(5)鎖定 round-trip / 舊檔相容 / Clone / WriteExportSettings 不動 snapshot key。
+- **待 live-smoke**:連遊戲 → Inspector inspect 一個有 Vector3 / 字串 record / pointer 鏈 / 陣列的 class → 開各 toggle → Copy CE XML / Copy CE field → 貼進 CE,對 (a)flatten 後 offset 正確、(b)collapse-leaf/chain 的 Offsets deref 正確、(c)Record colours 奇偶列上色、(d)toggle 重開程式保留。
+
 **2026-06-29 — Group Scan(multiple-values group search)移植 — G1 matcher(進行中)**(參考 `UE5CEDumper` 的 *Multiple Values Group Scan* / `Orden` SDR matcher,套用到 Value Search / Snapshot / SPC。完整計畫 + 分階段 + 鎖定決策見 **[group-scan-plan.md](group-scan-plan.md)**):
 - **鎖定決策**:matcher 先→依序全做;v1 leaf 範圍 = object-block + value-struct(Deep/array 留 G8、cross-object drop);live **含 Mono**(保守單緒)。
 - **G1 完成 + 驗證(785 UI tests green、0 failed)**:C# `ui/.../ViewModels/GroupMatch.cs`(double-based、無 RoundMode、`System.*` scope gate)+ `GroupMatchTests`(28 新測試)。

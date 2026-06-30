@@ -60,6 +60,15 @@
   <sys:String x:Key="Browser.OptUseLiveData">Use live data in CE XML (real addresses, walks array elements)</sys:String>
   <sys:String x:Key="Browser.OptVerboseDesc">Verbose CE XML descriptions (name : type = value)</sys:String>
   <sys:String x:Key="Browser.OptCeXmlBase">CE XML base address</sys:String>
+  <sys:String x:Key="Browser.OptFlattenHeader">Collapse / flatten (live CE XML)</sys:String>
+  <sys:String x:Key="Browser.OptDescShowOffset">Show field offset in description (name (+0xNN))</sys:String>
+  <sys:String x:Key="Browser.OptFlattenValueStructs">Flatten value structs (Vector3 → x / y / z siblings)</sys:String>
+  <sys:String x:Key="Browser.OptFlattenLeafRecords">Flatten leaf records (also structs with string members)</sys:String>
+  <sys:String x:Key="Browser.OptCollapseLeafPointers">Collapse pointer → single scalar into one record</sys:String>
+  <sys:String x:Key="Browser.OptCollapseChain">Collapse single-child pointer chain into one entry</sys:String>
+  <sys:String x:Key="Browser.OptRecordColors">Record colours (tint alternating array rows)</sys:String>
+  <sys:String x:Key="Browser.OptRecordColorEven">Even row RRGGBB</sys:String>
+  <sys:String x:Key="Browser.OptRecordColorOdd">Odd row RRGGBB</sys:String>
 
   <!-- Phase 9 inspector panels. -->
   <sys:String x:Key="Inspector.Tab">Inspector</sys:String>

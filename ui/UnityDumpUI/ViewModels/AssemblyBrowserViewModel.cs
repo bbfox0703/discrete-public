@@ -93,15 +93,104 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// <summary>When set, CE XML descriptions carry the full
     /// <c>"name : Type [= value]"</c> form. Off by default → bare field name
     /// only, for a terser CE address list. Honoured by the class export here
-    /// and (via <c>ExportDepthProvider</c>) the Inspector's instance export.</summary>
+    /// and (via <c>ExportOptionsProvider</c>) the Inspector's instance export.</summary>
     [ObservableProperty] private bool _verboseCeXmlDescription = false;
 
-    private ExportOptions CurrentExportOptions => new(
+    // ---------- Collapse / flatten knobs (ported from UE5CEDumper) -------
+    // All default OFF; honoured by the live CE XML exporter (the Browser's
+    // class export AND, via ExportOptionsProvider, the Inspector's instance /
+    // node export). See ExportOptions for per-flag semantics.
+    [ObservableProperty] private bool _descShowOffset;
+    [ObservableProperty] private bool _flattenValueStructs;
+    [ObservableProperty] private bool _flattenLeafRecords;
+    [ObservableProperty] private bool _collapseLeafPointers;
+    [ObservableProperty] private bool _collapseChain;
+    [ObservableProperty] private bool _recordColors;
+    /// <summary>Even-row colour, RRGGBB hex (no '#'). Default azure.</summary>
+    [ObservableProperty] private string _recordColorEven = "0080FF";
+    /// <summary>Odd-row colour, RRGGBB hex; empty = CE theme.</summary>
+    [ObservableProperty] private string _recordColorOdd = string.Empty;
+
+    internal ExportOptions CurrentExportOptions => new(
         DrilldownDepth: Math.Max(0, DrilldownDepth),
         ArrayLimit:     Math.Max(0, ArrayLimit),
         CollapsePointerNodes: CollapsePointerNodes,
         LiveData: UseLiveData,
-        VerboseDescription: VerboseCeXmlDescription);
+        VerboseDescription: VerboseCeXmlDescription,
+        DescShowOffset:       DescShowOffset,
+        FlattenValueStructs:  FlattenValueStructs,
+        FlattenLeafRecords:   FlattenLeafRecords,
+        CollapseLeafPointers: CollapseLeafPointers,
+        CollapseChain:        CollapseChain,
+        RecordColors:         RecordColors,
+        RecordColorEven:      string.IsNullOrWhiteSpace(RecordColorEven) ? null : RecordColorEven,
+        RecordColorOdd:       string.IsNullOrWhiteSpace(RecordColorOdd)  ? null : RecordColorOdd);
+
+    /// <summary>Raised when any persisted export knob changes, so the owner can
+    /// write the full <see cref="UserSettings"/> back to disk. Distinct from the
+    /// MVVM PropertyChanged storm (only the export-option setters fire it).</summary>
+    public event Action? ExportOptionsChanged;
+
+    // Each export-knob setter notifies the persistence owner. CommunityToolkit's
+    // source generator emits these partial hooks from the [ObservableProperty]s.
+    partial void OnDrilldownDepthChanged(int value)        => ExportOptionsChanged?.Invoke();
+    partial void OnArrayLimitChanged(int value)            => ExportOptionsChanged?.Invoke();
+    partial void OnCollapsePointerNodesChanged(bool value) => ExportOptionsChanged?.Invoke();
+    partial void OnUseLiveDataChanged(bool value)          => ExportOptionsChanged?.Invoke();
+    partial void OnVerboseCeXmlDescriptionChanged(bool value) => ExportOptionsChanged?.Invoke();
+    partial void OnDescShowOffsetChanged(bool value)       => ExportOptionsChanged?.Invoke();
+    partial void OnFlattenValueStructsChanged(bool value)  => ExportOptionsChanged?.Invoke();
+    partial void OnFlattenLeafRecordsChanged(bool value)   => ExportOptionsChanged?.Invoke();
+    partial void OnCollapseLeafPointersChanged(bool value) => ExportOptionsChanged?.Invoke();
+    partial void OnCollapseChainChanged(bool value)        => ExportOptionsChanged?.Invoke();
+    partial void OnRecordColorsChanged(bool value)         => ExportOptionsChanged?.Invoke();
+    partial void OnRecordColorEvenChanged(string value)    => ExportOptionsChanged?.Invoke();
+    partial void OnRecordColorOddChanged(string value)     => ExportOptionsChanged?.Invoke();
+    partial void OnCeXmlBaseAddressChanged(string value)   => ExportOptionsChanged?.Invoke();
+
+    /// <summary>Push persisted export knobs from loaded <see cref="UserSettings"/>
+    /// into the bound properties. Numeric / true-default keys are nullable in the
+    /// settings model so an older settings.json missing them leaves the VM
+    /// defaults intact. Called once after load — the setters will fire
+    /// <see cref="ExportOptionsChanged"/>, which the owner ignores until load
+    /// completes.</summary>
+    public void ApplyExportSettings(UserSettings s)
+    {
+        if (s.ExportDrilldownDepth is int d)        DrilldownDepth       = d;
+        if (s.ExportArrayLimit is int al)           ArrayLimit           = al;
+        if (s.ExportCollapsePointerNodes is bool cp) CollapsePointerNodes = cp;
+        if (s.ExportUseLiveData is bool ul)         UseLiveData          = ul;
+        VerboseCeXmlDescription = s.ExportVerboseDescription;
+        DescShowOffset          = s.ExportDescShowOffset;
+        FlattenValueStructs     = s.ExportFlattenValueStructs;
+        FlattenLeafRecords      = s.ExportFlattenLeafRecords;
+        CollapseLeafPointers    = s.ExportCollapseLeafPointers;
+        CollapseChain           = s.ExportCollapseChain;
+        RecordColors            = s.ExportRecordColors;
+        if (!string.IsNullOrWhiteSpace(s.ExportRecordColorEven)) RecordColorEven = s.ExportRecordColorEven!;
+        RecordColorOdd          = s.ExportRecordColorOdd ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(s.ExportCeXmlBaseAddress)) CeXmlBaseAddress = s.ExportCeXmlBaseAddress!;
+    }
+
+    /// <summary>Copy current export knobs into <paramref name="s"/> ahead of a
+    /// persist. Mirrors <see cref="ApplyExportSettings"/>.</summary>
+    public void WriteExportSettings(UserSettings s)
+    {
+        s.ExportDrilldownDepth       = DrilldownDepth;
+        s.ExportArrayLimit           = ArrayLimit;
+        s.ExportCollapsePointerNodes = CollapsePointerNodes;
+        s.ExportUseLiveData          = UseLiveData;
+        s.ExportVerboseDescription   = VerboseCeXmlDescription;
+        s.ExportDescShowOffset       = DescShowOffset;
+        s.ExportFlattenValueStructs  = FlattenValueStructs;
+        s.ExportFlattenLeafRecords   = FlattenLeafRecords;
+        s.ExportCollapseLeafPointers = CollapseLeafPointers;
+        s.ExportCollapseChain        = CollapseChain;
+        s.ExportRecordColors         = RecordColors;
+        s.ExportRecordColorEven      = string.IsNullOrWhiteSpace(RecordColorEven) ? null : RecordColorEven;
+        s.ExportRecordColorOdd       = string.IsNullOrWhiteSpace(RecordColorOdd)  ? null : RecordColorOdd;
+        s.ExportCeXmlBaseAddress     = CeXmlBaseAddress;
+    }
 
     public AssemblyBrowserViewModel(BackendAdapter backend, FileLogger logger)
     {
