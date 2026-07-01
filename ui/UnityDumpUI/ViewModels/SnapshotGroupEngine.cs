@@ -166,17 +166,22 @@ public static class SnapshotGroupEngine
             int rep = (s < assignment.Length) ? assignment[s] : -1;
             if (rep >= 0 && rep < fields.Count)
             {
-                var fv = fields[rep].fv;
-                // Newest value: last index of the sequence (snapshot B in Mode B).
+                var (fv, leaf) = fields[rep];
+                // Show the NEWEST value: the last index of the per-snapshot sequence
+                // (snapshot B in Mode B). fv is always the snapshot-A row, so sourcing
+                // the display from fv.ValueDisplay alone showed the stale snapshot-A
+                // value in a Decreased/Unchanged workflow. leaf.Display/Num carry both
+                // snapshots (populated above); fall back to the anchor value if absent.
                 int last = snapCount - 1;
-                string display = fv.ValueDisplay;
-                double? num = GroupMatch.TryParseNumeric(display);
+                string display = (last >= 0 && last < leaf.Display.Count)
+                    ? leaf.Display[last] : fv.ValueDisplay;
+                double? num = (last >= 0 && last < leaf.Num.Count)
+                    ? leaf.Num[last] : GroupMatch.TryParseNumeric(display);
                 sm.FieldOffset  = (long)fv.FieldOffset;
                 sm.Field        = fv.FieldName;
                 sm.FieldType    = fv.FieldType;
                 sm.FieldKind    = fv.IsStatic ? "static" : "leaf";
                 sm.CurrentValue = MakeValueElement(num, display);
-                _ = last;
             }
             slotMatches.Add(sm);
         }

@@ -8,13 +8,13 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1175** (DLL+UI,Value Search「Parallel」開關 預設 ON:per-scan thread cap 讓使用者強制單緒掃描;Mono x64/x86 + IL2CPP x64 build clean、712 UI tests green) |
-| **Current phase** | 🔧 **Value Search「Parallel」可切換(預設 ON)** (2026-06-08, DLL+UI, **待 live-smoke**) |
+| **Current build** | **#1235** (DLL+UI,2026-07-01 leak/bug 復查 + 新一輪 audit 4 修:refineGroupScan stale-cancel、FieldReferences BulkGate 洩漏、Snapshot Group Mode B 顯示值、aggregate signed/unsigned width;Mono x64/x86 + IL2CPP x64 build clean、819 UI tests green) |
+| **Current phase** | 🔧 **Leak/bug 復查 + audit 4 修** (2026-07-01, DLL+UI, **待 live-smoke**) |
 | **Branches** | `dev`(本批未 merge main;前一批四修已 merge `665f13b`)|
-| **Tests** | **712 UI tests green** |
+| **Tests** | **819 UI tests green** |
 | **Mid-flight** | 無 |
 
-**Last updated**: 2026-06-08
+**Last updated**: 2026-07-01
 
 **待 live-smoke(none blocking)**:
 - ✅ **本批(Core Keeper Mono x64,2026-06-08)四修 — 全數 live-verified、已 merge main(`665f13b`)**:(1)**跨組件 value-struct 展開** — Inspector 對 `Unity.Entities.Entity` / `Unity.Mathematics.quaternion`(欄位 declaring assembly ≠ 型別 defining assembly)按 expand 不再 `class not found`(`resolveClassFromArgs` 兩 backend cross-assembly fallback + UI `BuildAssemblyCandidates` 補 `Unity.*` DOTS);(2)**Inspector 切 class 自動清空** Field filter + walked-fields keyword + Filter builder(`SetTarget` classChanged gate);(3)**Filter builder 打字搜尋** — `ComboBox`→`AutoCompleteBox`(`FilterMode=Contains`、固定寬度 280、依名字排序、`MinimumPrefixLength=0` 聚焦展開全部);(4)**snapshot 窄 explicit scope 快掃** — ≤64 classes 改 per-class `mono_class_vtable`+SIMD `ScanForPointer`(skipMapped=true 結果與 bulk 逐筆相同),Core Keeper 16-class ~570s→~快(使用者實測「很快」);**無 Mono GC freeze、預設全抓維持 bulk**。**重要心得**:Core Keeper 是 Unity DOTS/ECS,gameplay 資料在 unmanaged ECS chunk,managed snapshot 看不到 — 見 [lessons-learned.md → Unity DOTS / ECS targets](lessons-learned.md#unity-dots--ecs-targets--gameplay-data-is-not-in-managed-objects)。
@@ -86,6 +86,17 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-07-01 — Leak/bug 復查 + 新一輪 audit(自 2026-06-02 `f621837` 以來首次專門 pass)**(DLL+UI,build #1235,兩 DLL build clean、819 UI tests green(+1)、**待 live-smoke**):
+- **背景**:上次專門 leak/bug 檢查是 `f621837`(2026-06-02,build #990,3 修)。之後累積 **105 commits / 148 檔案**(Group Scan、CE Export flatten/collapse、window-state、parallel/cancellable scan、IL2CPP DecodeRange、Dictionary walk 等)未經專門 pass。用 multi-agent workflow(reverify + 8 維度 fan-out + 每 finding 3-verifier 對抗式 verify)。
+- **復查舊 3 修 → 全部 STILL-FIXED**:(1)31-5 `NameStructComponent` 遞迴 guard(primitive gate + depth cap,兩 backend 仍在);(2)Snapshot `Unload()` 仍 reference-swap(非原地 `Clear()`);(3)`SuggestKeyAndRunAsync` re-entrancy guard 仍在。SendToPivotRequested 訂閱 + 7 dialog 無回歸。
+- **新 4 修(全 3/3 對抗式 verify confirmed)**:
+  - 🟠 **HIGH — `refineGroupScan` stale cancel flag 清空 session**([ExportAPI.cpp](../dll/src/shared/ExportAPI.cpp))。唯一「輪詢 `IsCancelRequested()` 卻無 `ScanCancel::Scope`」的 handler;`~Scope` 只清 `g_scanActive` 不清 `g_scanCancel` → 前一次掃描取消/斷線後 flag 殘留 → 下次 Next Scan 首 iteration break → `cands.resize(writer==0)` 清光整個 group session、一筆未測。**修**:移除該 poll,對齊 immune 的 `refineValueScan`(refine 只重讀有限 candidate、很快;取消由持有 Scope 的 begin* 掃描負責)。
+  - 🟡 **MEDIUM — `FieldReferencesViewModel` BulkGate 訂閱洩漏**([FieldReferencesViewModel.cs](../ui/UnityDumpUI/ViewModels/FieldReferencesViewModel.cs))。每開一次 "Find methods that touch this field" modal `_bulkGate.PropertyChanged +=`(lambda 捕獲 `this`)無 `-=` → process-lifetime gate 永久 root VM + 全部 Rows。**修**:存 handler + `Cleanup()` 退訂,`FieldReferencesWindow.Closed` 呼叫。
+  - 🟡 **MEDIUM — Snapshot Group Mode B 顯示舊值**([SnapshotGroupEngine.cs](../ui/UnityDumpUI/ViewModels/SnapshotGroupEngine.cs))。representative `CurrentValue` 取 `fv.ValueDisplay`(snapshot A)而非最新 snapshot B;`int last` 算了卻 `_=last` 丟棄。**修**:改用 `leaf.Display[last]/Num[last]`;+1 回歸測試(HP 100→80 斷言顯示 80 非 100)。
+  - 🟢 **LOW — aggregate group scan signed/unsigned width dedup**([ExportAPI.cpp](../dll/src/shared/ExportAPI.cpp) 兩 backend)。byte-identical dedup 保留 signed width 到 leaf → refine 對跨 sign boundary 的 unsigned 欄位(UInt16 100→40000)ordered predicate(increased/decreased/range)誤判。**修**:leaf `h.width` 改用 reverse-lookup 解析的欄位真實型別(`ParseValueDataType(field.typeName)`,含正確 signedness;enum/Char/custom fallback probe width)。
+- **駁回 1 項**:window-state DIP 寬高 vs 實體像素座標混用(`MainWindow.axaml.cs` / `WindowRestoreState.cs`)—— 程式碼確有混單位,但 verifier 判定不產生使用者可見錯誤放置(2 REFUTED / 1 PLAUSIBLE)。high-DPI 多螢幕若見怪落點再查此處。
+- **建置**:`build.cmd dll`(#1233,Mono x64/x86 + IL2CPP x64 clean)+ `build.cmd test`(#1235,819 green,0 failed)。**待 live-smoke**:(a)group scan 取消/斷線後 Next Scan 不再清空 session;(b)Mono/IL2CPP unsigned 欄位跨 sign boundary 的 increased/decreased refine 正確;(c)Snapshot Mode B grid 顯示 snapshot-B 值;(d)反覆開關 Field References modal 記憶體不漲。
 
 **2026-06-30 — Copy CE XML / Copy CE field collapse·flatten 客製化移植(參考 `UE5CEDumper`)**(UI/Core-only,無 DLL;**dotnet build 兩專案 clean 0/0、818 UI tests green(+15 新)**;**待 live-smoke = 貼進 CE 對位址 + 顏色**):
 - **動機**:`UE5CEDumper` 的 Copy CE XML / Copy CE Field 有一整排 collapse/flatten 客製 toggle;移植到本 repo。UE-only 的(GAS Attributes、FName/FText、Exclude System Components、Guess What)略過或本來就被 `IsFrameworkReferenceType` 處理掉;Unity 適用的全做。

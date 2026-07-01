@@ -38,6 +38,9 @@ public partial class FieldReferencesWindow : Window
             try { await vm.RefreshCommand.ExecuteAsync(null); }
             catch { /* surfaced via VM */ }
         };
+        // Detach the VM from the shared BulkOperationGate so it (and its Rows) can be
+        // collected — the gate's PropertyChanged otherwise roots every opened modal.
+        Closed += (_, _) => _vm?.Cleanup();
     }
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
