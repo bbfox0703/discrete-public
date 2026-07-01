@@ -35,6 +35,10 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
 
     // Bulk lane: the findFieldReferences IL walk is a bulk op. Null = ungated.
     private readonly BulkOperationGate? _bulkGate;
+    // Kept so Cleanup() can detach from the shared, process-lifetime gate — the
+    // lambda captures `this`, so without the -= every opened modal VM (and its Rows)
+    // would stay rooted for the process lifetime.
+    private readonly System.ComponentModel.PropertyChangedEventHandler? _onBulkGateChanged;
     private IDisposable? _bulkLease;
     private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
 
@@ -60,7 +64,22 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
         _bulkGate        = bulkGate;
         _aobMaker        = aobMaker;
         if (_bulkGate is not null)
-            _bulkGate.PropertyChanged += (_, _) => RefreshCommand.NotifyCanExecuteChanged();
+        {
+            _onBulkGateChanged = (_, _) => RefreshCommand.NotifyCanExecuteChanged();
+            _bulkGate.PropertyChanged += _onBulkGateChanged;
+        }
+    }
+
+    /// <summary>Detach from the shared, process-lifetime BulkOperationGate and drop
+    /// any in-flight work so this modal VM (and its Rows) can be collected once the
+    /// window closes. FieldReferencesWindow calls this from its Closed handler.</summary>
+    public void Cleanup()
+    {
+        if (_bulkGate is not null && _onBulkGateChanged is not null)
+            _bulkGate.PropertyChanged -= _onBulkGateChanged;
+        _cts?.Cancel();
+        _bulkLease?.Dispose();
+        _bulkLease = null;
     }
 
     /// <summary>True when an AOBMaker bridge was supplied — gates the

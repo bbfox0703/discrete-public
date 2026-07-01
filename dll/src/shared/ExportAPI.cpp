@@ -2310,9 +2310,17 @@ void RegisterCoreHandlers() {
                 }
             }
 
+            // NOTE: like refineValueScan, this loop deliberately does NOT poll
+            // ScanCancel::IsCancelRequested(). It re-reads a bounded, already-
+            // retained candidate set (a few bytes per leaf) so it is fast, and —
+            // unlike the long begin* scans — owns no ScanCancel::Scope. Polling here
+            // would let a STALE g_scanCancel (armed by a previously-cancelled scan
+            // and only cleared by the NEXT begin* Scope) break on the first
+            // iteration, after which cands.resize(writer==0) would wipe the whole
+            // session without testing a single candidate. Left non-cancellable on
+            // purpose; a genuine cancel is honoured by the begin* scan that owns a Scope.
             std::size_t writer = 0;
             for (std::size_t reader = 0; reader < cands.size(); ++reader) {
-                if (ScanCancel::IsCancelRequested()) break;
                 GroupScan::Candidate& c = cands[reader];
                 const std::size_t nLeaves = c.leaves.size();
                 // Re-read each leaf once (8 bytes; only the low N per slot dt used).
@@ -6176,7 +6184,16 @@ void RegisterCoreHandlers() {
                 h.instance    = lookup.instance;
                 h.addr        = addr;
                 h.fieldOffset = static_cast<std::int64_t>(lookup.fieldOffset);
+                // Record the leaf's decode width from the RESOLVED field's true type
+                // (correct signedness), not the probe width. Aggregate-mode dedup keeps
+                // whichever byte-identical same-size width GroupSlotScanWidths emitted
+                // first (the SIGNED one), which would make refine's ordered increased/
+                // decreased/range misread an unsigned field whose value later crosses
+                // the sign boundary. Fall back to the probe width for types
+                // ParseValueDataType doesn't map (enums, Char, custom).
                 h.width       = taskWidth;
+                { Memory::ValueDataType fieldDt{};
+                  if (ParseValueDataType(lookup.field.typeName, fieldDt)) h.width = fieldDt; }
                 h.asmName     = lookup.assembly;
                 h.ns          = lookup.ns;
                 h.className   = lookup.className;
@@ -9575,7 +9592,16 @@ void RegisterCoreHandlers() {
                 h.instance    = lookup.instance;
                 h.addr        = addr;
                 h.fieldOffset = static_cast<std::int64_t>(lookup.fieldOffset);
+                // Record the leaf's decode width from the RESOLVED field's true type
+                // (correct signedness), not the probe width. Aggregate-mode dedup keeps
+                // whichever byte-identical same-size width GroupSlotScanWidths emitted
+                // first (the SIGNED one), which would make refine's ordered increased/
+                // decreased/range misread an unsigned field whose value later crosses
+                // the sign boundary. Fall back to the probe width for types
+                // ParseValueDataType doesn't map (enums, Char, custom).
                 h.width       = taskWidth;
+                { Memory::ValueDataType fieldDt{};
+                  if (ParseValueDataType(lookup.field.typeName, fieldDt)) h.width = fieldDt; }
                 h.asmName     = lookup.assembly;
                 h.ns          = lookup.ns;
                 h.className   = lookup.className;

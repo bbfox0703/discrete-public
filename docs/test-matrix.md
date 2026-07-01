@@ -103,3 +103,84 @@ For copy-paste into a fresh shell when re-verifying any of the above:
 $libs = Get-Content "$env:ProgramFiles (x86)\Steam\steamapps\libraryfolders.vdf" -Raw
 [regex]::Matches($libs, '"path"\s+"([^"]+)"') | %% { $_.Groups[1].Value -replace '\\\\','\\' }
 ```
+
+---
+
+## Regression live-smoke procedures
+
+Step-by-step verification recipes for specific bug fixes, so a future session can
+re-confirm the fix without re-deriving the repro. Convention (per
+[group-scan-plan.md §7](group-scan-plan.md)): C++ DLL logic has **no unit-test
+harness** → verify by `build.cmd dll` + a live-smoke recipe here; C# logic gets an
+**xUnit** test *and* (where it has a UI surface) a live-smoke pass. Each recipe lists
+the **failing symptom** (what the bug looked like) so the tester knows what a
+regression would look like.
+
+### 2026-07-01 leak/bug audit fixes
+
+Baseline: last dedicated leak/bug review before this batch was `f621837`
+(2026-06-02, build #990). The four fixes below landed in build #1235. See
+[plan.md → Recent batches (2026-07-01)](plan.md) for the full write-up.
+
+#### #1 (HIGH) — `refineGroupScan` stale scan-cancel flag wipes the session
+
+- **What broke**: `ScanCancel::Scope`'s destructor cleared `g_scanActive` but **not**
+  `g_scanCancel`. `refineGroupScan` ([ExportAPI.cpp](../dll/src/shared/ExportAPI.cpp))
+  was the only handler that polled `IsCancelRequested()` without owning a `Scope`, so a
+  cancel/disconnect on any *earlier* scan left the flag armed; the next **Next Scan**
+  (refine) broke on the first iteration and `cands.resize(0)` destroyed the whole group
+  session without testing anything. Fix removed the poll (mirrors the already-immune
+  `refineValueScan`, which never polls).
+- **Coverage**: DLL C++ → live-smoke only (no C++ unit harness). Not reproducible from
+  xUnit.
+- **Target**: any injectable Unity game (Mono **or** IL2CPP) with two known numeric
+  values living at distinct fields of the same object (e.g. `Hp` + `MaxHp`).
+- **Steps**:
+  1. Inject the DLL; **Value Search** tab → flip **Group** toggle ON.
+  2. Enter ≥2 slots with the known values → **First Scan**. Confirm the candidate grid
+     is **non-empty** (note the count, e.g. `12`).
+  3. Arm a stale cancel: start any other scan (a single-value "numeric all widths" scan,
+     or a fresh Group First Scan) and click **⛔ Cancel** before it finishes — this
+     leaves `g_scanCancel` set. (Equivalently: force-quit + relaunch a second UI client
+     whose disconnect monitor arms the flag mid-scan.)
+  4. Return to the still-open group session and click **Next Scan** (refine) with any
+     per-slot predicate (e.g. Unchanged / Unchanged).
+- **PASS (fixed)**: the refine re-tests every candidate and prunes only those failing
+  the predicate; the count stays sane (e.g. `12 → 12` for Unchanged). DLL log line
+  `refineGroupScan sess=<id> total=<N> removed=<M>` shows a real `total`, not `total=0
+  removed=all`.
+- **FAIL (regressed)**: the count collapses to **0** on the first Next Scan after a
+  cancel, and the log shows `total=0 removed=<all>` even though nothing was re-tested.
+
+#### #3 (MEDIUM) — Snapshot Group **Mode B** shows the stale snapshot-A value
+
+- **What broke**: `SnapshotGroupEngine.BuildCandidate`
+  ([SnapshotGroupEngine.cs](../ui/UnityDumpUI/ViewModels/SnapshotGroupEngine.cs)) sourced
+  each slot's displayed `CurrentValue` from `fv.ValueDisplay`, and `fv` always comes from
+  `Snapshots[0]` (snapshot A). In Mode B (2 snapshots) the grid therefore showed the
+  **old** value even though matching (via `leaf.Num`) was correct. Fix reads
+  `leaf.Display[last]` / `leaf.Num[last]` (`last = snapCount-1` → snapshot B).
+- **Coverage**: C# → **xUnit** `SnapshotGroupEngineTests.ModeB_Representative_ShowsNewestSnapshotValue`
+  (asserts the Decreased slot renders `80`, not `100`) + the UI live-smoke below.
+  Run the unit test with `build.cmd test`.
+- **Target**: any snapshot-capable game with a numeric field that changes between two
+  captures (HP is ideal).
+- **Steps**:
+  1. **Snapshot** tab → **Capture** snapshot A.
+  2. Change the value in-game (take damage so `Hp` drops, e.g. 100 → 80); **Capture**
+     snapshot B.
+  3. Flip **Group** toggle ON → pick **A + B** (Mode B) → add a **Decreased** slot for
+     `Hp` (and optionally an **Unchanged** slot for `MaxHp`) → **Run**.
+  4. Expand the matched object in the results grid and read the Decreased slot's
+     **Current** value.
+- **PASS (fixed)**: shows the snapshot-**B** (newest) value — `80`.
+- **FAIL (regressed)**: shows the snapshot-**A** value — `100`.
+
+> #2 (MEDIUM, `FieldReferencesViewModel` BulkGate subscription leak) and #4 (LOW,
+> aggregate group-scan signed/unsigned width dedup) verify the same way: #2 by
+> repeatedly opening/closing the "Find methods that touch this field…" modal and
+> watching that private/WS memory returns to baseline (the VM + its Rows must be
+> collectable after Close); #4 by a Value Search group scan in aggregate mode on an
+> **unsigned** field (e.g. `UInt16`) whose value later crosses the sign boundary
+> (e.g. 100 → 40000), then an `increased`/`decreased` Next Scan — the candidate must
+> survive (pre-fix it was misread as negative and wrongly dropped).

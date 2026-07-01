@@ -163,6 +163,32 @@ public class SnapshotGroupEngineTests
     }
 
     [Fact]
+    public void ModeB_Representative_ShowsNewestSnapshotValue()
+    {
+        // Regression: the displayed CurrentValue must be the snapshot-B (newest) value,
+        // not the stale snapshot-A value. Hp fell 100 -> 80 between A and B; the grid
+        // must show 80 for the Decreased slot (previously showed 100).
+        var s1 = MakeEnv("sess", MakeClass("Game.Unit", Inst("0x1", IntF("Hp", 100), IntF("MaxHp", 100))));
+        var s2 = MakeEnv("sess", MakeClass("Game.Unit", Inst("0x1", IntF("Hp", 80),  IntF("MaxHp", 100))));
+        var r = SnapshotGroupEngine.Run(new SnapshotGroupQuery
+        {
+            Snapshots = new[] { s1, s2 },
+            Slots = new[] { Rel(GroupMatch.Predicate.Decreased), Rel(GroupMatch.Predicate.Unchanged) },
+        });
+        Assert.Single(r);
+
+        var decreased = r[0].Slots[0];
+        Assert.Equal("Hp", decreased.Field);
+        Assert.True(decreased.CurrentValue.HasValue);
+        Assert.Equal(80d, decreased.CurrentValue!.Value.GetDouble());   // snapshot B, not 100
+
+        var unchanged = r[0].Slots[1];
+        Assert.Equal("MaxHp", unchanged.Field);
+        Assert.True(unchanged.CurrentValue.HasValue);
+        Assert.Equal(100d, unchanged.CurrentValue!.Value.GetDouble());
+    }
+
+    [Fact]
     public void ModeB_BothChanged_FailsUnchangedSlot()
     {
         // Level-up: both moved → the Unchanged slot can't be satisfied.
