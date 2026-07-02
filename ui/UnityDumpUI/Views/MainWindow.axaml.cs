@@ -42,6 +42,7 @@ public partial class MainWindow : Window
         vm.SpcQuery.CopyToClipboardAsync      = CopyToClipboardAsync;
         vm.ClassPivot.CopyToClipboardAsync    = CopyToClipboardAsync;
         vm.Teleport.CopyToClipboardAsync      = CopyToClipboardAsync;
+        vm.Teleport.HotkeyService             = new UnityDumpUI.Services.WindowsGlobalHotkeyService();
         vm.ShowProxyDeploy                    = ShowProxyDeployWindow;
         DataContext = vm;
         // Pane-collapse plumbing — IsVisible bindings on the panes' content

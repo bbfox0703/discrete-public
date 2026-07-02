@@ -12,6 +12,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core;
@@ -26,6 +27,7 @@ public sealed partial class TeleportViewModel : ObservableObject
     private readonly TeleportController _controller;
     private bool _busy;
     private TeleportPose? _lastPose;
+    private readonly List<IGlobalHotkeyRegistration> _hotkeyRegs = new();
 
     public TeleportViewModel(BackendAdapter backend, FileLogger logger)
     {
@@ -41,6 +43,10 @@ public sealed partial class TeleportViewModel : ObservableObject
 
     /// <summary>Clipboard writer injected by MainWindow (Avalonia TopLevel.Clipboard).</summary>
     public Func<string, Task>? CopyToClipboardAsync { get; set; }
+
+    /// <summary>Global-hotkey service, injected by MainWindow (Win32 impl). Null
+    /// on non-Windows / when unset — the toggle then reports unavailable.</summary>
+    public IGlobalHotkeyService? HotkeyService { get; set; }
 
     public IReadOnlyList<TeleportMarkerRowViewModel> MarkerRows { get; }
 
@@ -76,6 +82,11 @@ public sealed partial class TeleportViewModel : ObservableObject
 
     [ObservableProperty] private bool    _hasUndo;
     [ObservableProperty] private string? _statusMessage;
+
+    // --- global hotkeys ---
+
+    [ObservableProperty] private bool   _globalHotkeysEnabled;
+    [ObservableProperty] private string _hotkeyStatus = "Off.";
 
     // ------------------------------------------------------------------
     // Commands
@@ -121,7 +132,9 @@ public sealed partial class TeleportViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private Task UndoAsync() =>
+    private Task UndoAsync() => RecallLastAsync();
+
+    internal Task RecallLastAsync() =>
         RunActionAsync(() => _controller.RecallLastAsync(), "Undo");
 
     [RelayCommand]
@@ -241,6 +254,76 @@ public sealed partial class TeleportViewModel : ObservableObject
     {
         StatusMessage = $"{label} error: {ex.Message}";
         _logger.Write("Teleport", $"{label}: {ex}");
+    }
+
+    // ------------------------------------------------------------------
+    // Global hotkeys (fire while the game window is focused)
+    // ------------------------------------------------------------------
+
+    // Numpad virtual-key codes (NumLock must be ON for these to fire).
+    private const uint VK_NUMPAD0 = 0x60;
+    private const uint VK_NUMPAD1 = 0x61;
+    private const uint VK_NUMPAD2 = 0x62;
+    private const uint VK_NUMPAD3 = 0x63;
+
+    partial void OnGlobalHotkeysEnabledChanged(bool value)
+    {
+        if (value) RegisterHotkeys();
+        else { UnregisterHotkeys(); HotkeyStatus = "Off."; }
+    }
+
+    private void RegisterHotkeys()
+    {
+        UnregisterHotkeys();
+        if (HotkeyService is not { } svc)
+        {
+            HotkeyStatus = "Global hotkeys are unavailable on this platform.";
+            return;
+        }
+
+        // Fixed default scheme (numpad — dodges the Ctrl+1..3 skill binds most
+        // ARPGs use). Per-action rebinding is a v2 idea. Hotkey callbacks fire
+        // on a background thread, so marshal to the UI thread before touching VM
+        // state; the actions self-guard on connection / target.
+        var bindings = new (uint Mod, uint Vk, string Label, Func<Task> Action)[]
+        {
+            (HotkeyModifiers.Control, VK_NUMPAD1, "Ctrl+Num1", () => SaveMarkerAsync(0)),
+            (HotkeyModifiers.Control, VK_NUMPAD2, "Ctrl+Num2", () => SaveMarkerAsync(1)),
+            (HotkeyModifiers.Control, VK_NUMPAD3, "Ctrl+Num3", () => SaveMarkerAsync(2)),
+            (HotkeyModifiers.Alt,     VK_NUMPAD1, "Alt+Num1",  () => RecallMarkerAsync(0)),
+            (HotkeyModifiers.Alt,     VK_NUMPAD2, "Alt+Num2",  () => RecallMarkerAsync(1)),
+            (HotkeyModifiers.Alt,     VK_NUMPAD3, "Alt+Num3",  () => RecallMarkerAsync(2)),
+            (HotkeyModifiers.Control, VK_NUMPAD0, "Ctrl+Num0", () => RecallLastAsync()),
+        };
+
+        var failed = new List<string>();
+        foreach (var b in bindings)
+        {
+            Func<Task> action = b.Action;
+            IGlobalHotkeyRegistration? reg = svc.RegisterSpecific(
+                b.Mod, b.Vk, b.Label, () => Dispatcher.UIThread.Post(() => _ = action()));
+            if (reg is not null) _hotkeyRegs.Add(reg);
+            else                 failed.Add(b.Label);
+        }
+
+        if (_hotkeyRegs.Count == 0)
+        {
+            HotkeyStatus = "No hotkeys could be registered (all combos are in use elsewhere).";
+            return;
+        }
+        string status = "Save 1-3 = Ctrl+Num1/2/3 · Recall 1-3 = Alt+Num1/2/3 · Undo = Ctrl+Num0. NumLock must be ON.";
+        if (failed.Count > 0)
+            status += $"  Unavailable (in use elsewhere): {string.Join(", ", failed)}.";
+        HotkeyStatus = status;
+    }
+
+    private void UnregisterHotkeys()
+    {
+        foreach (IGlobalHotkeyRegistration r in _hotkeyRegs)
+        {
+            try { r.Dispose(); } catch { /* best-effort unregister */ }
+        }
+        _hotkeyRegs.Clear();
     }
 }
 

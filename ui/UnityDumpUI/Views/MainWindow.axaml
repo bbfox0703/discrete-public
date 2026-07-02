@@ -3087,6 +3087,15 @@
                   </Border>
                 </StackPanel>
 
+                <!-- Global hotkeys (independent of target — enable any time) -->
+                <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                  <StackPanel Spacing="6">
+                    <CheckBox Content="Enable global hotkeys (fire while the game window is focused)"
+                              IsChecked="{Binding Teleport.GlobalHotkeysEnabled}"/>
+                    <TextBlock Text="{Binding Teleport.HotkeyStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+                  </StackPanel>
+                </Border>
+
                 <TextBlock Text="{Binding Teleport.StatusMessage}" TextWrapping="Wrap" Opacity="0.85"/>
 
               </StackPanel>
