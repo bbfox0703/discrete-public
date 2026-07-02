@@ -119,6 +119,7 @@ that exactly one overload matches; otherwise the response is
 | `string`  |           | JSON string (UTF-8)          | **19c only**; rejected before 19c |
 | `address` | `intptr`, `uintptr`, `ptr` | JSON hex string `"0x..."` or uint | Pass a pre-resolved managed pointer |
 | `null`    |           | (value ignored)              | Reference null. Slot holds NULL ptr. |
+| `value-struct` | `valuestruct`, `struct` | `bytes` (NOT `value`): hex string or JSON byte array | **Teleport wave 1.** Value type by value (Vector3/Quaternion/user struct). `bytes` = the struct's raw little-endian memory image; the DLL points `params[i]` at a padded backing buffer (128 B cap). Lua builders: `argVector3` / `argQuaternion` / `argValueStruct`. |
 
 The wire `type` tag binds JSON encoding only; the marshaler then casts to
 the formal parameter's CLR type. Out-of-range values are truncated to the
@@ -183,10 +184,21 @@ method, etc.) — note no `ok` / `returnType` keys, only `error`:
 | `System.IntPtr` / `UIntPtr` | hex string `"0x..."` |
 | `System.String` | UTF-8 string (decoded from the managed UTF-16 buffer at `+0x14`) |
 | Other reference type | hex string `"0x..."` — caller chains `whatIsAt` / `walkInstance` |
-| Value type by value (Vector3, Color, ...) | `null`, plus `note` field saying decode is deferred to v2 |
+| Value type by value (Vector3, Color, ...) | `returnValue:null`. When the request set `returnStruct:true`, the raw little-endian struct bytes come back in `returnStructBytes` (hex) + `returnStructSize` (byte count). Without the flag, `returnValue:null` + a `note`. |
 
 The discriminator is `returnType`; UI / Lua callers should switch on that
 when consuming the response, not on the JSON type of `returnValue`.
+
+### Value-struct return decode (opt-in)
+
+Add `"returnStruct": true` to the request to receive a value-type-by-value
+return (Vector3/Quaternion/…) as `returnStructBytes` (a hex string of the
+struct's raw little-endian bytes) plus `returnStructSize`. The DLL unboxes it
+using the runtime's `class_value_size`; supply `"returnStructSize": <bytes>`
+as a fallback when that export is unbound (12 for Vector3, 16 for Quaternion).
+Off by default — the legacy `note` shape is unchanged for callers that don't
+ask. Lua: `callUnityMethod(..., { returnStruct = true, returnStructSize = 12 })`
+then `decodeStructFloats(result, 3)`.
 
 ### Error codes (in `result.error` or `result.ok=false` paths)
 
@@ -354,8 +366,13 @@ the exception type alone (decoded via `il2cpp_object_get_class` +
 These would slot in without breaking the v1 shape:
 - `args[i].byRef = true` flag for `ref`/`out` params; response gets an
   `outValues[]` array.
-- `args[i].type = "value-struct"` + `value` as either a hex address (for
-  pre-allocated) or a `{field: value}` object (for on-the-fly construction).
+- ✅ **IMPLEMENTED (teleport wave 1)** — `args[i].type = "value-struct"` with
+  `bytes` (hex string / byte array) = the struct's raw little-endian image, and
+  opt-in `returnStruct:true` (+ `returnStructSize`) for a value-struct RETURN in
+  `returnStructBytes`. Lua builders `argVector3` / `argQuaternion` /
+  `argValueStruct` + teleport helpers (`unityTeleportTo`, `unityGetPosition`,
+  `unityResolveTransform`) in unity_invoke.lua. Backs the Teleport tab —
+  see [teleport.md](teleport.md).
 - `args[i].type = "delegate"` with `{methodSymbol: "..."}` to wire a CE
   registered symbol as a managed delegate target.
 - `instantiate` arg for open-generic methods, listing concrete type

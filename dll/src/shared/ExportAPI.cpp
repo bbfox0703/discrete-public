@@ -6791,6 +6791,47 @@ void RegisterCoreHandlers() {
         [resolveClassFromArgs, parseAddr, formatHex](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
 
+        // Value-struct arg/return codec: bytes as a hex string ("0x…"/"…") or
+        // a JSON byte array; caller packs the struct in its native (little-
+        // endian) memory order. See docs/lua-invoke.md "value-struct".
+        auto parseHexBytes = [](const json& v, std::vector<std::uint8_t>& out) -> bool {
+            out.clear();
+            if (v.is_array()) {
+                for (const auto& e : v) {
+                    if (!e.is_number()) return false;
+                    std::int64_t n = e.get<std::int64_t>();
+                    if (n < 0 || n > 255) return false;
+                    out.push_back(static_cast<std::uint8_t>(n));
+                }
+                return true;
+            }
+            if (v.is_string()) {
+                std::string s = v.get<std::string>();
+                std::size_t i = (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 2 : 0;
+                auto hx = [](char c) -> int {
+                    if (c >= '0' && c <= '9') return c - '0';
+                    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                    return -1;
+                };
+                if (((s.size() - i) % 2) != 0) return false;
+                for (; i + 1 < s.size(); i += 2) {
+                    int hi = hx(s[i]), lo = hx(s[i + 1]);
+                    if (hi < 0 || lo < 0) return false;
+                    out.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+                }
+                return true;
+            }
+            return false;
+        };
+        auto formatHexBytes = [](const std::vector<std::uint8_t>& b) -> std::string {
+            static const char* H = "0123456789abcdef";
+            std::string s;
+            s.reserve(b.size() * 2);
+            for (std::uint8_t x : b) { s.push_back(H[x >> 4]); s.push_back(H[x & 0xF]); }
+            return s;
+        };
+
         std::string methodName = args.value("method", std::string{});
         if (methodName.empty()) return json{{"error", "missing 'method' arg"}};
         std::string sigMatch   = args.value("signatureMatch", std::string{});
@@ -6871,6 +6912,12 @@ void RegisterCoreHandlers() {
                       }
                   }
               }
+              else if (ty == "value-struct" || ty == "valuestruct" || ty == "struct") {
+                  out.kind = CallArgKind::ValueStruct;
+                  if (!a.contains("bytes") || !parseHexBytes(a["bytes"], out.bytes) || out.bytes.empty()) {
+                      return json{{"error", std::string{"args["} + std::to_string(i) + "].bytes must be a non-empty hex string or byte array"}};
+                  }
+              }
               else {
                   return json{{"error", std::string{"args["} + std::to_string(i) + "] unknown type '" + ty + "'"}};
               }
@@ -6886,6 +6933,11 @@ void RegisterCoreHandlers() {
         const bool mainThread = args.value("main_thread", false);
         const std::int32_t mtTimeoutMs = args.value("main_thread_timeout_ms",
                                                     std::int32_t{5000});
+        // Value-struct return decode is opt-in (get_position et al know their
+        // return is a struct); off by default keeps the legacy Unsupported+note
+        // shape for callers that don't ask.
+        const bool wantStructRet = args.value("returnStruct", false);
+        const std::uint32_t structRetSize = args.value("returnStructSize", 0u);
 
         Mono::CallMethodResult cr;
         std::string dispatchPath = "worker_direct";
@@ -6900,7 +6952,7 @@ void RegisterCoreHandlers() {
                 }
             }
             DispatchResult disp = SubmitAndWait(
-                [&]() { cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs); },
+                [&]() { cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs, wantStructRet, structRetSize); },
                 mtTimeoutMs);
             dispatchPath = disp.diagnostic_path;
             if (!disp.ok) {
@@ -6913,7 +6965,7 @@ void RegisterCoreHandlers() {
                 return result;
             }
         } else {
-            cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+            cr = Mono::CallMethod(k, methodName, sigMatch, instance, typedArgs, wantStructRet, structRetSize);
         }
 
         json returnValue = nullptr;
@@ -6924,6 +6976,7 @@ void RegisterCoreHandlers() {
         case Mono::CallReturn::Kind::Float:       returnValue = cr.ret.f; break;
         case Mono::CallReturn::Kind::Address:     returnValue = formatHex(static_cast<std::uintptr_t>(cr.ret.u64)); break;
         case Mono::CallReturn::Kind::String:      returnValue = cr.ret.s; break;
+        case Mono::CallReturn::Kind::ValueStruct: returnValue = nullptr; break;
         case Mono::CallReturn::Kind::Unsupported: returnValue = nullptr; break;
         }
 
@@ -6944,8 +6997,14 @@ void RegisterCoreHandlers() {
             {"humanSuffix", cr.humanSuffix},
         };
         result["dispatch"] = json{{"main_thread", mainThread}, {"path", std::move(dispatchPath)}};
+        if (cr.ret.kind == Mono::CallReturn::Kind::ValueStruct) {
+            // Raw little-endian struct bytes; caller decodes per returnType
+            // (Vector3 = 3 floats, Quaternion = 4 floats, …).
+            result["returnStructBytes"] = formatHexBytes(cr.ret.bytes);
+            result["returnStructSize"]  = static_cast<std::uint32_t>(cr.ret.bytes.size());
+        }
         if (cr.ret.kind == Mono::CallReturn::Kind::Unsupported) {
-            result["note"] = "value-type-by-value returns are not decoded in 19b; pass an out-buffer in v2 or read the address";
+            result["note"] = "value-type-by-value return not decoded — pass returnStruct:true (with returnStructSize as a fallback) to receive returnStructBytes";
         }
         return result;
     });
@@ -10161,6 +10220,47 @@ void RegisterCoreHandlers() {
         [resolveClassFromArgs, parseAddr, formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
+        // Value-struct arg/return codec: bytes as a hex string ("0x…"/"…") or
+        // a JSON byte array; caller packs the struct in its native (little-
+        // endian) memory order. See docs/lua-invoke.md "value-struct".
+        auto parseHexBytes = [](const json& v, std::vector<std::uint8_t>& out) -> bool {
+            out.clear();
+            if (v.is_array()) {
+                for (const auto& e : v) {
+                    if (!e.is_number()) return false;
+                    std::int64_t n = e.get<std::int64_t>();
+                    if (n < 0 || n > 255) return false;
+                    out.push_back(static_cast<std::uint8_t>(n));
+                }
+                return true;
+            }
+            if (v.is_string()) {
+                std::string s = v.get<std::string>();
+                std::size_t i = (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 2 : 0;
+                auto hx = [](char c) -> int {
+                    if (c >= '0' && c <= '9') return c - '0';
+                    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                    return -1;
+                };
+                if (((s.size() - i) % 2) != 0) return false;
+                for (; i + 1 < s.size(); i += 2) {
+                    int hi = hx(s[i]), lo = hx(s[i + 1]);
+                    if (hi < 0 || lo < 0) return false;
+                    out.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+                }
+                return true;
+            }
+            return false;
+        };
+        auto formatHexBytes = [](const std::vector<std::uint8_t>& b) -> std::string {
+            static const char* H = "0123456789abcdef";
+            std::string s;
+            s.reserve(b.size() * 2);
+            for (std::uint8_t x : b) { s.push_back(H[x >> 4]); s.push_back(H[x & 0xF]); }
+            return s;
+        };
+
         std::string methodName = args.value("method", std::string{});
         if (methodName.empty()) return json{{"error", "missing 'method' arg"}};
         std::string sigMatch   = args.value("signatureMatch", std::string{});
@@ -10243,6 +10343,12 @@ void RegisterCoreHandlers() {
                       }
                   }
               }
+              else if (ty == "value-struct" || ty == "valuestruct" || ty == "struct") {
+                  out.kind = CallArgKind::ValueStruct;
+                  if (!a.contains("bytes") || !parseHexBytes(a["bytes"], out.bytes) || out.bytes.empty()) {
+                      return json{{"error", std::string{"args["} + std::to_string(i) + "].bytes must be a non-empty hex string or byte array"}};
+                  }
+              }
               else {
                   return json{{"error", std::string{"args["} + std::to_string(i) + "] unknown type '" + ty + "'"}};
               }
@@ -10254,6 +10360,11 @@ void RegisterCoreHandlers() {
         const bool mainThread = args.value("main_thread", false);
         const std::int32_t mtTimeoutMs = args.value("main_thread_timeout_ms",
                                                     std::int32_t{5000});
+        // Value-struct return decode is opt-in (get_position et al know their
+        // return is a struct); off by default keeps the legacy Unsupported+note
+        // shape for callers that don't ask.
+        const bool wantStructRet = args.value("returnStruct", false);
+        const std::uint32_t structRetSize = args.value("returnStructSize", 0u);
 
         IL2CPP::CallMethodResult cr;
         std::string dispatchPath = "worker_direct";
@@ -10266,7 +10377,7 @@ void RegisterCoreHandlers() {
                 }
             }
             DispatchResult disp = SubmitAndWait(
-                [&]() { cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs); },
+                [&]() { cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs, wantStructRet, structRetSize); },
                 mtTimeoutMs);
             dispatchPath = disp.diagnostic_path;
             if (!disp.ok) {
@@ -10279,7 +10390,7 @@ void RegisterCoreHandlers() {
                 return result;
             }
         } else {
-            cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs);
+            cr = IL2CPP::CallMethod(k, methodName, sigMatch, instance, typedArgs, wantStructRet, structRetSize);
         }
 
         // Render the typed return into a JSON-friendly value. The discriminator
@@ -10293,6 +10404,7 @@ void RegisterCoreHandlers() {
         case IL2CPP::CallReturn::Kind::Float:       returnValue = cr.ret.f; break;
         case IL2CPP::CallReturn::Kind::Address:     returnValue = formatHex(cr.ret.u64); break;
         case IL2CPP::CallReturn::Kind::String:      returnValue = cr.ret.s; break;
+        case IL2CPP::CallReturn::Kind::ValueStruct: returnValue = nullptr; break;
         case IL2CPP::CallReturn::Kind::Unsupported: returnValue = nullptr; break;
         }
 
@@ -10313,10 +10425,16 @@ void RegisterCoreHandlers() {
             {"humanSuffix", cr.humanSuffix},
         };
         result["dispatch"] = json{{"main_thread", mainThread}, {"path", std::move(dispatchPath)}};
+        if (cr.ret.kind == IL2CPP::CallReturn::Kind::ValueStruct) {
+            // Raw little-endian struct bytes; caller decodes per returnType
+            // (Vector3 = 3 floats, Quaternion = 4 floats, …).
+            result["returnStructBytes"] = formatHexBytes(cr.ret.bytes);
+            result["returnStructSize"]  = static_cast<std::uint32_t>(cr.ret.bytes.size());
+        }
         if (cr.ret.kind == IL2CPP::CallReturn::Kind::Unsupported) {
             // Tell the caller why returnValue is null even though the call
-            // succeeded. 19a doesn't decode multi-field value-type returns.
-            result["note"] = "value-type-by-value returns are not decoded in 19a; pass an out-buffer in v2 or read the address";
+            // succeeded. Multi-field value-type returns need returnStruct:true.
+            result["note"] = "value-type-by-value return not decoded — pass returnStruct:true (with returnStructSize as a fallback) to receive returnStructBytes";
         }
         return result;
     });

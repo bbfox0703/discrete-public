@@ -8,6 +8,7 @@
 // against the right per-primitive context entry, one method per wire `type`
 // tag from docs/lua-invoke.md.
 
+using System;
 using System.Text.Json;
 
 namespace UnityDumpUI.Core.Services;
@@ -89,4 +90,63 @@ public static class CallArgFactory
         Value = JsonSerializer.SerializeToElement(hex,
             ProtocolJsonContext.Default.String),
     };
+
+    /// <summary>
+    /// Value-type-by-value arg (Vector3 / Quaternion / user struct). Wire
+    /// `type: "value-struct"`, <c>bytes</c> = the struct's raw little-endian
+    /// memory image as a hex string; the DLL points <c>params[i]</c> at these
+    /// bytes (value-type marshaling convention). The caller must pack the
+    /// exact managed layout — see <see cref="Vector3"/> / <see cref="Quaternion"/>.
+    /// </summary>
+    public static CallArgRequest ValueStruct(ReadOnlySpan<byte> bytes) => new()
+    {
+        Type = "value-struct",
+        // The DLL ignores `value` for value-struct args, but a default
+        // (Undefined) JsonElement can't be serialized — send JSON null.
+        Value = JsonSerializer.SerializeToElement<string?>(null,
+            ProtocolJsonContext.Default.String),
+        Bytes = Convert.ToHexString(bytes).ToLowerInvariant(),
+    };
+
+    /// <summary>UnityEngine.Vector3 arg — 3 contiguous little-endian floats (12 bytes).</summary>
+    public static CallArgRequest Vector3(float x, float y, float z)
+    {
+        Span<byte> b = stackalloc byte[12];
+        BitConverter.TryWriteBytes(b.Slice(0, 4), x);
+        BitConverter.TryWriteBytes(b.Slice(4, 4), y);
+        BitConverter.TryWriteBytes(b.Slice(8, 4), z);
+        return ValueStruct(b);
+    }
+
+    /// <summary>UnityEngine.Quaternion arg — 4 contiguous little-endian floats
+    /// (16 bytes, x/y/z/w order).</summary>
+    public static CallArgRequest Quaternion(float x, float y, float z, float w)
+    {
+        Span<byte> b = stackalloc byte[16];
+        BitConverter.TryWriteBytes(b.Slice(0, 4),  x);
+        BitConverter.TryWriteBytes(b.Slice(4, 4),  y);
+        BitConverter.TryWriteBytes(b.Slice(8, 4),  z);
+        BitConverter.TryWriteBytes(b.Slice(12, 4), w);
+        return ValueStruct(b);
+    }
+
+    /// <summary>
+    /// Decode the little-endian float components of a value-struct return
+    /// (<see cref="CallMethodResult.ReturnStructBytes"/>). Returns exactly
+    /// <paramref name="count"/> floats; missing bytes default to 0, extra
+    /// bytes are ignored. Bad / empty hex yields all-zero (never throws).
+    /// </summary>
+    public static float[] DecodeStructFloats(string? hex, int count)
+    {
+        var result = new float[count];
+        if (string.IsNullOrEmpty(hex)) return result;
+        byte[] bytes;
+        try { bytes = Convert.FromHexString(hex); }
+        catch (FormatException) { return result; }
+        for (int i = 0; i < count && (i * 4) + 4 <= bytes.Length; i++)
+        {
+            result[i] = BitConverter.ToSingle(bytes, i * 4);
+        }
+        return result;
+    }
 }

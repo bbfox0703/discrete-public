@@ -2975,6 +2975,132 @@
                 </Border>
             </DockPanel>
           </TabItem>
+
+          <!-- Teleport tab (wave 1). Gated on experimental until live-verified.
+               Target is user-picked: paste a managed instance address (copied
+               from Inspector / Address Lookup / Scene) since Unity has no
+               universal player chain. -->
+          <TabItem Header="Teleport" IsVisible="{Binding ExperimentalEnabled}">
+            <ScrollViewer HorizontalScrollBarVisibility="Auto">
+              <StackPanel Margin="12" Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
+
+                <TextBlock Text="Single-player only. Online games will rubber-band or may flag teleports."
+                           FontStyle="Italic" Opacity="0.7" TextWrapping="Wrap"/>
+
+                <!-- Target -->
+                <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                  <StackPanel Spacing="6">
+                    <TextBlock Text="Target" FontWeight="Bold"/>
+                    <TextBlock TextWrapping="Wrap" Opacity="0.75"
+                               Text="Paste the player's managed instance address (copy it from Inspector / Address Lookup / Scene). Tick 'GameObject' if the address is a GameObject rather than a MonoBehaviour/Component."/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                      <TextBox Width="240" PlaceholderText="0x..."
+                               Text="{Binding Teleport.TargetAddressInput}"
+                               FontFamily="Consolas,Cascadia Mono,monospace"/>
+                      <CheckBox Content="GameObject" IsChecked="{Binding Teleport.TargetIsGameObject}"
+                                VerticalAlignment="Center"/>
+                      <Button Content="Set Target" Command="{Binding Teleport.SetTargetCommand}"/>
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+
+                <!-- Actions (disabled until a target is resolved) -->
+                <StackPanel Spacing="12" IsEnabled="{Binding Teleport.HasTarget}">
+
+                  <!-- Live pose -->
+                  <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                    <StackPanel Spacing="6">
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="Current pose" FontWeight="Bold" VerticalAlignment="Center"/>
+                        <Button Content="Refresh" Command="{Binding Teleport.RefreshCommand}"/>
+                        <Button Content="Copy coords" Command="{Binding Teleport.CopyCoordsCommand}"/>
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Position:" Width="64"/>
+                        <TextBlock Text="{Binding Teleport.PositionText}"
+                                   FontFamily="Consolas,Cascadia Mono,monospace"/>
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Rotation:" Width="64"/>
+                        <TextBlock Text="{Binding Teleport.RotationText}"
+                                   FontFamily="Consolas,Cascadia Mono,monospace"/>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
+                  <!-- Markers -->
+                  <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                    <StackPanel Spacing="6">
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="Markers" FontWeight="Bold" VerticalAlignment="Center"/>
+                        <Button Content="Undo last jump" Command="{Binding Teleport.UndoCommand}"
+                                IsEnabled="{Binding Teleport.HasUndo}"/>
+                      </StackPanel>
+                      <ItemsControl ItemsSource="{Binding Teleport.MarkerRows}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:TeleportMarkerRowViewModel">
+                            <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2">
+                              <TextBlock Text="{Binding SlotLabel}" Width="56" VerticalAlignment="Center"/>
+                              <TextBlock Text="{Binding Display}" Width="260" VerticalAlignment="Center"
+                                         FontFamily="Consolas,Cascadia Mono,monospace"/>
+                              <Button Content="Save"   Command="{Binding SaveCommand}"/>
+                              <Button Content="Recall" Command="{Binding RecallCommand}"
+                                      IsEnabled="{Binding HasMarker}"/>
+                              <Button Content="Clear"  Command="{Binding ClearCommand}"
+                                      IsEnabled="{Binding HasMarker}"/>
+                            </StackPanel>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </Border>
+
+                  <!-- Explicit coordinates -->
+                  <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                    <StackPanel Spacing="6">
+                      <TextBlock Text="Teleport to coordinates" FontWeight="Bold"/>
+                      <TextBlock TextWrapping="Wrap" Opacity="0.75"
+                                 Text="Enter 3 numbers (x y z) or 6 (x y z + rotation). Accepts (1, 2, 3) and pasted 'Copy coords' output."/>
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBox Width="320" PlaceholderText="x y z"
+                                 Text="{Binding Teleport.CoordinateInput}"
+                                 FontFamily="Consolas,Cascadia Mono,monospace"/>
+                        <Button Content="Teleport" Command="{Binding Teleport.TeleportToCoordsCommand}"/>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
+                  <!-- Directional -->
+                  <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                    <StackPanel Spacing="6">
+                      <TextBlock Text="Directional teleport" FontWeight="Bold"/>
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="Distance:" VerticalAlignment="Center"/>
+                        <TextBox Width="90" Text="{Binding Teleport.DirectionalDistance}"/>
+                        <CheckBox Content="Horizontal (ground plane)"
+                                  IsChecked="{Binding Teleport.DirectionalHorizontal}"
+                                  VerticalAlignment="Center"/>
+                        <Button Content="Forward" Command="{Binding Teleport.TeleportForwardCommand}"/>
+                        <Button Content="Back"    Command="{Binding Teleport.TeleportBackwardCommand}"/>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+
+                <!-- Global hotkeys (independent of target — enable any time) -->
+                <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                  <StackPanel Spacing="6">
+                    <CheckBox Content="Enable global hotkeys (fire while the game window is focused)"
+                              IsChecked="{Binding Teleport.GlobalHotkeysEnabled}"/>
+                    <TextBlock Text="{Binding Teleport.HotkeyStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Text="{Binding Teleport.StatusMessage}" TextWrapping="Wrap" Opacity="0.85"/>
+
+              </StackPanel>
+            </ScrollViewer>
+          </TabItem>
         </TabControl>
         </Grid>
       </DockPanel>

@@ -34,6 +34,9 @@ enum class CallArgKind {
     Char,
     String,    // 19c — alloc Il2CppString* via il2cpp_string_new(utf8).
     Address,
+    ValueStruct,  // value-type-by-value arg (Vector3/Quaternion/…) — raw
+                  // little-endian struct bytes carried in `bytes`. params[i]
+                  // points at a padded backing buffer (value-type convention).
 };
 
 struct CallArg {
@@ -42,6 +45,7 @@ struct CallArg {
     std::uint64_t u64  = 0;        // unsigned integer / address / char carrier
     double        f    = 0.0;      // float / double carrier (separate so cast-loss is visible)
     std::string   s;               // utf-8 (string args — deferred to 19c)
+    std::vector<std::uint8_t> bytes;  // ValueStruct — raw struct value bytes
 };
 
 // Discriminated return shape. The invoker fills `kind` per the resolved
@@ -56,7 +60,8 @@ struct CallReturn {
         Float,        // single or double — value in f
         Address,      // reference-type return, raw managed pointer in u64
         String,       // 19c — managed string decoded to UTF-8 in s
-        Unsupported,  // value-type-by-value return we can't decode in 19a
+        ValueStruct,  // value-type-by-value return — raw unboxed bytes in `bytes`
+        Unsupported,  // value-type-by-value return we can't decode
     };
     Kind          kind = Kind::Void;
     std::string   typeName;        // e.g. "System.Int32", "System.Void"
@@ -64,6 +69,7 @@ struct CallReturn {
     std::uint64_t u64  = 0;
     double        f    = 0.0;
     std::string   s;               // for Kind::String
+    std::vector<std::uint8_t> bytes;  // for Kind::ValueStruct — raw struct bytes
 };
 
 struct CallMethodResult {
@@ -81,10 +87,17 @@ struct CallMethodResult {
 // resolved method is non-static); pass the managed object pointer
 // (typically from findInstances / whatIsAt) for instance dispatch. Method
 // resolution validates and routes accordingly.
+// `wantStructReturn` opts into decoding a value-type-by-value return
+// (Vector3/Quaternion/…) into CallReturn::bytes: the boxed return is unboxed
+// and `class_value_size` (or `structReturnSizeHint` when the export is
+// unbound / returns garbage) bytes are copied out. Off by default so the
+// legacy shape (Unsupported + note) is unchanged for callers that don't ask.
 CallMethodResult CallMethod(Il2CppClass* klass,
                             const std::string& methodName,
                             const std::string& signatureMatch,
                             std::uintptr_t instance,
-                            const std::vector<CallArg>& args);
+                            const std::vector<CallArg>& args,
+                            bool wantStructReturn = false,
+                            std::uint32_t structReturnSizeHint = 0);
 
 }  // namespace Discrete::IL2CPP

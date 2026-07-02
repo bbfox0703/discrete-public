@@ -37,6 +37,9 @@ enum class CallArgKind {
     Char,
     String,    // 19c — alloc MonoString* via mono_string_new(domain, utf8).
     Address,
+    ValueStruct,  // value-type-by-value arg (Vector3/Quaternion/…) — raw
+                  // little-endian struct bytes carried in `bytes`. params[i]
+                  // points at a padded backing buffer (value-type convention).
 };
 
 struct CallArg {
@@ -45,6 +48,7 @@ struct CallArg {
     std::uint64_t u64  = 0;
     double        f    = 0.0;
     std::string   s;
+    std::vector<std::uint8_t> bytes;  // ValueStruct — raw struct value bytes
 };
 
 struct CallReturn {
@@ -56,6 +60,7 @@ struct CallReturn {
         Float,
         Address,
         String,
+        ValueStruct,  // value-type-by-value return — raw unboxed bytes in `bytes`
         Unsupported,
     };
     Kind          kind = Kind::Void;
@@ -64,6 +69,7 @@ struct CallReturn {
     std::uint64_t u64  = 0;
     double        f    = 0.0;
     std::string   s;
+    std::vector<std::uint8_t> bytes;  // for Kind::ValueStruct — raw struct bytes
 };
 
 struct CallMethodResult {
@@ -81,10 +87,17 @@ struct CallMethodResult {
 // resolved method is non-static); pass the managed object pointer
 // (typically from findInstances / whatIsAt) for instance dispatch. Method
 // resolution validates and routes accordingly.
+// `wantStructReturn` opts into decoding a value-type-by-value return
+// (Vector3/Quaternion/…) into CallReturn::bytes: the boxed return is unboxed
+// and `class_value_size` (or `structReturnSizeHint` when the export is
+// unbound / returns garbage) bytes are copied out. Off by default so the
+// legacy shape (Unsupported + note) is unchanged for callers that don't ask.
 CallMethodResult CallMethod(MonoClass* klass,
                             const std::string& methodName,
                             const std::string& signatureMatch,
                             std::uintptr_t instance,
-                            const std::vector<CallArg>& args);
+                            const std::vector<CallArg>& args,
+                            bool wantStructReturn = false,
+                            std::uint32_t structReturnSizeHint = 0);
 
 }  // namespace Discrete::Mono
