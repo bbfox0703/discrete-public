@@ -1174,7 +1174,10 @@ rules, GC-root caveats: [lua-invoke.md](lua-invoke.md).
 | `method` | string | required — method name |
 | `signatureMatch` | string | optional — substring filter against the rendered signature, same semantics as `findMethodInstances` |
 | `instance` | hex string / int | managed object pointer for instance dispatch; null/omit for static methods (silently ignored if the resolved overload is static) |
-| `args` | array of `{type, value}` | one entry per formal parameter; `type` is one of `bool`/`byte`/`sbyte`/`int16`/`uint16`/`int32`/`uint32`/`int64`/`uint64`/`float`/`double`/`char`/`string`/`address`/`null` |
+| `args` | array of `{type, value}` | one entry per formal parameter; `type` is one of `bool`/`byte`/`sbyte`/`int16`/`uint16`/`int32`/`uint32`/`int64`/`uint64`/`float`/`double`/`char`/`string`/`address`/`null`/`value-struct` |
+| `args[].bytes` | hex string / byte array | **value-struct only** (Vector3/Quaternion/…): the struct's raw little-endian image, in place of `value` |
+| `main_thread` | bool | optional — run on the Unity main thread (required for engine methods that touch the scene graph, e.g. `Transform.set_position`) |
+| `returnStruct` | bool | optional — decode a value-type-by-value return into `returnStructBytes` (hex) + `returnStructSize`; pass `returnStructSize` as a byte-count fallback |
 
 ```jsonc
 // → success
@@ -1215,7 +1218,7 @@ rules, GC-root caveats: [lua-invoke.md](lua-invoke.md).
 | `System.Single` / `Double` | float |
 | `System.IntPtr` / `UIntPtr` / any reference type | hex string `"0x..."` |
 | `System.String` | UTF-8 string (decoded from the managed UTF-16 buffer) |
-| Value type by value (Vector3 etc.) | `null` + `note` field saying decode is deferred to v2 |
+| Value type by value (Vector3 etc.) | `returnValue:null`; with `returnStruct:true` in the request, raw little-endian bytes in `returnStructBytes` (hex) + `returnStructSize`. Without the flag, `null` + `note`. |
 
 Switch on `returnType`, not on the JSON type of `returnValue`.
 

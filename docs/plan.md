@@ -8,15 +8,16 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1235** (DLL+UI,2026-07-01 leak/bug 復查 + 新一輪 audit 4 修:refineGroupScan stale-cancel、FieldReferences BulkGate 洩漏、Snapshot Group Mode B 顯示值、aggregate signed/unsigned width;Mono x64/x86 + IL2CPP x64 build clean、819 UI tests green) |
-| **Current phase** | 🔧 **Leak/bug 復查 + audit 4 修** (2026-07-01, DLL+UI, **待 live-smoke**) |
-| **Branches** | `dev`(本批未 merge main;前一批四修已 merge `665f13b`)|
-| **Tests** | **819 UI tests green** |
+| **Current build** | **#1248** (DLL+UI,2026-07-02 **Teleport wave 1** — Unity teleport 移植:callMethod value-struct arg+return marshaling(兩 backend)→ Transform 讀/寫 primitive → markers/undo/explicit/directional → Teleport tab(experimental-gated)→ OS 全域熱鍵 → Lua bridge + docs;Mono x64/x86 + IL2CPP x64 clean、858 UI tests green) |
+| **Current phase** | 🧭 **Teleport wave 1(Unity 移植)** (2026-07-02, DLL+UI, **待 live-smoke**) |
+| **Branches** | `dev`(teleport wave 1 未 merge main;5 commits)|
+| **Tests** | **858 UI tests green** |
 | **Mid-flight** | 無 |
 
-**Last updated**: 2026-07-01
+**Last updated**: 2026-07-02
 
 **待 live-smoke(none blocking)**:
+- 🧭 **Teleport wave 1(2026-07-02)待 live-smoke** — 需 inject 實機(Mono + IL2CPP)驗:set target→Refresh 顯示合理座標、Save→移動→Recall 回原點、Undo、座標貼上 round-trip、directional Forward/Back、**遊戲聚焦時全域熱鍵(NumLock on)**、recall 旋轉還原。詳見 [teleport.md](teleport.md) live-smoke 表。**AOT publish 0/0 + integrity hash 三槽注入待跑**(wave 收尾;程式全 source-gen/compiled-binding/BCL,AOT 風險低)。
 - ✅ **本批(Core Keeper Mono x64,2026-06-08)四修 — 全數 live-verified、已 merge main(`665f13b`)**:(1)**跨組件 value-struct 展開** — Inspector 對 `Unity.Entities.Entity` / `Unity.Mathematics.quaternion`(欄位 declaring assembly ≠ 型別 defining assembly)按 expand 不再 `class not found`(`resolveClassFromArgs` 兩 backend cross-assembly fallback + UI `BuildAssemblyCandidates` 補 `Unity.*` DOTS);(2)**Inspector 切 class 自動清空** Field filter + walked-fields keyword + Filter builder(`SetTarget` classChanged gate);(3)**Filter builder 打字搜尋** — `ComboBox`→`AutoCompleteBox`(`FilterMode=Contains`、固定寬度 280、依名字排序、`MinimumPrefixLength=0` 聚焦展開全部);(4)**snapshot 窄 explicit scope 快掃** — ≤64 classes 改 per-class `mono_class_vtable`+SIMD `ScanForPointer`(skipMapped=true 結果與 bulk 逐筆相同),Core Keeper 16-class ~570s→~快(使用者實測「很快」);**無 Mono GC freeze、預設全抓維持 bulk**。**重要心得**:Core Keeper 是 Unity DOTS/ECS,gameplay 資料在 unmanaged ECS chunk,managed snapshot 看不到 — 見 [lessons-learned.md → Unity DOTS / ECS targets](lessons-learned.md#unity-dots--ecs-targets--gameplay-data-is-not-in-managed-objects)。
 - ✅ **AOT publish + 完整性 hash 注入 — DONE**:使用者用 **`build.cmd publish`** 產生 release build 並實測四項全過。`build.ps1` Publish 模式自動跑 `tools\inject-hash.ps1`(line 409-418,注入失敗即 BUILD FAILED)→ 此 build **完整性自檢 active(非 dev-bypass)**、AOT 0-warning、single-file。⚠️ Phase 26 decoy false-positive 對 layout 敏感(任何 code 改動可能重觸發);本批改了 ExportAPI.cpp + UI → struct-expand / snapshot 資料皆正確,已間接驗證無 self-poison(若要確認可比對 Inspector 單一已知值 vs CE + Copy CE XML offset 未偏移)。
 - ✅ ~~Phase 12e — 實機 x86 Mono Steam 遊戲 detect→install→啟動→update→uninstall~~ — **test OK(2026-06-06,使用者驗過)**。
@@ -86,6 +87,15 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-07-02 — Teleport wave 1(Unity teleport,參考 `UE5CEDumper` Teleport tab)**(DLL+UI,build #1248,5 commits on `dev`、**待 live-smoke**):
+- **動機/取捨**:UE teleport 零設定靠 GWorld→…→Pawn 引擎鏈;Unity 無此鏈 → target 由使用者挑(findInstances/Inspector/Scene 複製位址),只有 manipulation(寫 Transform)是通用的。這是 UE 的鏡像(UE 通用在「找玩家」,Unity 通用在「移動」)。詳見 [teleport.md](teleport.md) + `project_ue5_teleport_port_assessment` memory。
+- **DLL(兩 backend)**:callMethod 補 **value-struct arg + return marshaling** — `CallArgKind::ValueStruct`(padded 128B backing,size-mismatch 不 OOB-read)、`returnStruct` gated 用 `object_get_class→class_value_size` unbox(sizeHint fallback);wire 加 `value-struct` arg tag(bytes hex/array)、`returnStruct`/`returnStructSize`、`returnStructBytes`。**通用 primitive,非 teleport 專用**(POV/cursor raycast 未來也用)。
+- **C# 服務層**:`CallArgFactory.Vector3/Quaternion/DecodeStructFloats`;`TeleportService`(resolve Transform → get/set position+eulerAngles+directional,全 `main_thread`,CoreModule→UnityEngine fallback)、`TeleportMarkers`(store+`TeleportMath`)、`TeleportController`(save/recall/**單向 undo**/coords/directional,跳前自動存 last)、`TeleportCoordinateParser`(`(1,2,3)`/`x y z`/6-數)。
+- **UI**:`TeleportViewModel` + **Teleport tab**(experimental-gated;target 貼位址/pose/markers/coords/directional/hotkeys、compiled-binding)。
+- **OS 全域熱鍵**:移植 UE `WindowsGlobalHotkeyService`(Win32 `RegisterHotKey` + message-loop thread,AOT-safe blittable DllImport,`IGlobalHotkeyService` seam);Save `Ctrl+Num1/2/3`、Recall `Alt+Num1/2/3`、Undo `Ctrl+Num0`(numpad,閃開 ARPG `Ctrl+1..3`);callback marshal 回 UI 緒。
+- **Lua/docs**:`unity_invoke.lua` 加 `argVector3/argQuaternion/argValueStruct/unityTeleportTo/unityGetPosition/decodeStructFloats`(`string.pack`,CE 7.5+);[lua-invoke.md](lua-invoke.md) value-struct 節 + 新 [teleport.md](teleport.md)。
+- **驗證**:Mono x64/x86 + IL2CPP x64 build clean;**858 UI tests green**(+39:value-struct wire、Transform primitive、markers/math、controller recall-auto-save-last、coordinate parser、hotkey registration)。**待 live-smoke**(見上方);**AOT publish 未跑**(wave 收尾)。
 
 **2026-07-01 — Leak/bug 復查 + 新一輪 audit(自 2026-06-02 `f621837` 以來首次專門 pass)**(DLL+UI,build #1235,兩 DLL build clean、819 UI tests green(+1)、**待 live-smoke**):
 - **背景**:上次專門 leak/bug 檢查是 `f621837`(2026-06-02,build #990,3 修)。之後累積 **105 commits / 148 檔案**(Group Scan、CE Export flatten/collapse、window-state、parallel/cancellable scan、IL2CPP DecodeRange、Dictionary walk 等)未經專門 pass。用 multi-agent workflow(reverify + 8 維度 fan-out + 每 finding 3-verifier 對抗式 verify)。

@@ -320,6 +320,30 @@ function argAddress(v)
     return { type = "address", value = s }
 end
 
+-- Value-struct arg (Vector3 / Quaternion / user struct). `bytes` is the
+-- struct's raw little-endian memory image as a hex string; the DLL points the
+-- runtime_invoke param slot at these bytes (value-type marshaling convention).
+-- See argVector3 / argQuaternion for the common cases.
+function argValueStruct(bytesHex)
+    return { type = "value-struct", bytes = bytesHex }
+end
+
+-- Pack N Lua numbers as little-endian 32-bit floats → hex string. Requires
+-- Lua 5.3+ (Cheat Engine 7.5+) for string.pack — value-struct args are gated
+-- on that anyway.
+local function floatsToHex(...)
+    if not string.pack then
+        error(TAG .. " value-struct args need Lua 5.3+ (Cheat Engine 7.5+)")
+    end
+    local raw = string.pack("<" .. string.rep("f", select("#", ...)), ...)
+    return (raw:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
+end
+
+--- UnityEngine.Vector3 arg (3 contiguous little-endian floats).
+function argVector3(x, y, z)     return argValueStruct(floatsToHex(x, y, z))    end
+--- UnityEngine.Quaternion arg (4 little-endian floats, x/y/z/w).
+function argQuaternion(x, y, z, w) return argValueStruct(floatsToHex(x, y, z, w)) end
+
 -- ---------- Public API --------------------------------------------------
 
 --- Invoke a managed method. Returns the parsed result table; throws on
@@ -359,6 +383,21 @@ function callUnityMethod(assembly, namespace, class, method, args, opts)
             body.instance = tostring(opts.instance)
         end
     end
+    -- Phase 20-MT: run on the Unity main thread (required for engine methods
+    -- that touch the scene graph, e.g. Transform.set_position).
+    if opts.mainThread then
+        body.main_thread = true
+        if opts.mainThreadTimeoutMs then
+            body.main_thread_timeout_ms = opts.mainThreadTimeoutMs
+        end
+    end
+    -- Opt into value-type-by-value return decode (get_position et al) — the DLL
+    -- echoes the struct bytes in result.returnStructBytes (decode via
+    -- decodeStructFloats). returnStructSize is a fallback for the byte count.
+    if opts.returnStruct then
+        body.returnStruct = true
+        if opts.returnStructSize then body.returnStructSize = opts.returnStructSize end
+    end
 
     local resp = rpc("callMethod", body)
     if resp.error then
@@ -366,6 +405,81 @@ function callUnityMethod(assembly, namespace, class, method, args, opts)
               ": " .. tostring(resp.error.message or "?"))
     end
     return resp.result or {}
+end
+
+-- ---------- Teleport helpers (wave 1) -----------------------------------
+-- Unity has no universal player chain, so YOU identify the player object
+-- (e.g. via findInstances) and pass its managed instance address here. All
+-- Transform calls run on the Unity main thread. Requires Lua 5.3+ (CE 7.5+)
+-- for the value-struct float packing.
+
+local function hexToRaw(hex)
+    return (hex:gsub("..", function(cc) return string.char(tonumber(cc, 16)) end))
+end
+
+--- Decode a value-struct return (result.returnStructBytes) into `count`
+--- little-endian floats. Returns nil when the field is absent.
+function decodeStructFloats(result, count)
+    if not result or not result.returnStructBytes then return nil end
+    return string.unpack("<" .. string.rep("f", count), hexToRaw(result.returnStructBytes))
+end
+
+-- UnityEngine engine types live in UnityEngine.CoreModule (modular Unity) or
+-- the monolithic UnityEngine assembly. Try CoreModule first, fall back on
+-- class-not-found.
+local ENGINE_ASMS = { "UnityEngine.CoreModule", "UnityEngine" }
+
+local function callEngine(class, method, instance, args, o)
+    o = o or {}
+    local last
+    for _, asm in ipairs(ENGINE_ASMS) do
+        local r = callUnityMethod(asm, "UnityEngine", class, method, args or {}, {
+            instance         = instance,
+            mainThread       = true,
+            signatureMatch   = o.signatureMatch,
+            returnStruct     = o.returnStruct,
+            returnStructSize = o.returnStructSize,
+        })
+        last = r
+        if not (r.error and tostring(r.error):find("class not found")) then
+            return r
+        end
+    end
+    return last
+end
+
+--- Resolve the UnityEngine.Transform of a target instance (hex string).
+--- Pass isGameObject=true when the address is a GameObject.
+function unityResolveTransform(instance, isGameObject)
+    local r = callEngine(isGameObject and "GameObject" or "Component",
+                         "get_transform", instance, {})
+    if r.error then error(TAG .. " resolve transform: " .. tostring(r.error)) end
+    if not r.ok then error(TAG .. " resolve transform failed: " .. tostring(r.exception)) end
+    return r.returnValue
+end
+
+--- Read a Transform's world position → x, y, z (nil on failure).
+function unityGetPosition(transformAddr)
+    local r = callEngine("Transform", "get_position", transformAddr, {},
+                        { returnStruct = true, returnStructSize = 12 })
+    if r.error or not r.ok then return nil end
+    return decodeStructFloats(r, 3)
+end
+
+--- Write a Transform's world position to (x, y, z).
+function unitySetPosition(transformAddr, x, y, z)
+    local r = callEngine("Transform", "set_position", transformAddr,
+                        { argVector3(x, y, z) }, { signatureMatch = "Vector3" })
+    if r.error then error(TAG .. " set_position: " .. tostring(r.error)) end
+    if not r.ok then error(TAG .. " set_position failed: " .. tostring(r.exception)) end
+    return true
+end
+
+--- One-shot teleport: resolve the target's Transform and move it to (x,y,z).
+--- @param opts table?  { isGameObject = false }
+function unityTeleportTo(instance, x, y, z, opts)
+    opts = opts or {}
+    return unitySetPosition(unityResolveTransform(instance, opts.isGameObject), x, y, z)
 end
 
 --- Non-throwing wrapper. Returns (true, result) on success, (false,
