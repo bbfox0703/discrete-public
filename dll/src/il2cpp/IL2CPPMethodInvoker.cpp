@@ -65,6 +65,9 @@ Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
 void* SehObjectUnbox(fn_object_unbox fn, Il2CppObject* o) {
     __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
+int SehClassValueSize(fn_class_value_size fn, Il2CppClass* k, std::uint32_t* align) {
+    __try { return fn(k, align); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 Il2CppString* SehStringNew(fn_string_new fn, const char* utf8) {
     __try { return fn(utf8); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
@@ -93,6 +96,13 @@ bool SehRuntimeInvoke(fn_runtime_invoke fn,
 
 constexpr std::uint32_t kMethodStatic   = 0x0010u;
 constexpr std::uint32_t kMethodAbstract = 0x0400u;
+
+// Value-struct arg/return byte cap. Covers Vector2(8)/Vector3(12)/
+// Quaternion(16)/Color(16)/Matrix4x4(64). Value-struct arg backing buffers
+// are always padded to this size so a size-mismatched struct can never
+// OOB-read inside the JIT/AOT trampoline; struct returns bigger than this
+// surface as Unsupported rather than copying an unbounded blob.
+constexpr std::uint32_t kValueStructMaxBytes = 128u;
 
 // MethodInfo's first qword (`methodPointer`) is the AOT entry point — same
 // path as MethodFinder uses. il2cpp_method_get_pointer is not exported in
@@ -299,6 +309,8 @@ std::string FormatException(Il2CppException* exc) {
 // surface kind=Unsupported instead.
 void DecodeReturnValue(const std::string& returnType,
                        Il2CppObject* boxed,
+                       bool wantStructReturn,
+                       std::uint32_t sizeHint,
                        CallReturn& out) {
     out.typeName = returnType;
 
@@ -412,6 +424,32 @@ void DecodeReturnValue(const std::string& returnType,
         out.kind = CallReturn::Kind::String;
         out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
         out.s    = DecodeManagedString(reinterpret_cast<std::uintptr_t>(boxed));
+        return;
+    }
+
+    // Value-type-by-value return (Vector3/Quaternion/…) — only when the
+    // caller opted in via wantStructReturn (get_position et al know their
+    // return is a struct). Unbox and copy `class_value_size` bytes, falling
+    // back to the caller's sizeHint when the export is unbound / bogus.
+    if (wantStructReturn) {
+        std::uint32_t size = sizeHint;
+        if (r.object_get_class != nullptr && r.class_value_size != nullptr) {
+            if (Il2CppClass* vk = SehObjectGetClass(r.object_get_class, boxed)) {
+                std::uint32_t align = 0;
+                int vs = SehClassValueSize(r.class_value_size, vk, &align);
+                if (vs > 0) size = static_cast<std::uint32_t>(vs);
+            }
+        }
+        if (size > 0 && size <= kValueStructMaxBytes && r.object_unbox != nullptr) {
+            void* p = SehObjectUnbox(r.object_unbox, boxed);
+            out.bytes.assign(size, 0);
+            if (p != nullptr && Memory::SafeReadBytes(p, out.bytes.data(), size)) {
+                out.kind = CallReturn::Kind::ValueStruct;
+                return;
+            }
+            out.bytes.clear();
+        }
+        out.kind = CallReturn::Kind::Unsupported;
         return;
     }
 
@@ -552,6 +590,11 @@ bool MarshalArg(const CallArg& arg,
         paramPtr = s;
         return true;
     }
+    case CallArgKind::ValueStruct:
+        // Handled in the CallMethod marshaling loop (needs a >8-byte backing
+        // buffer); never routed through MarshalArg's 8-byte slot.
+        outErr = "value_struct_not_marshaled_here";
+        return false;
     }
     outErr = "unknown_arg_kind";
     return false;
@@ -563,7 +606,9 @@ CallMethodResult CallMethod(Il2CppClass* klass,
                             const std::string& methodName,
                             const std::string& signatureMatch,
                             std::uintptr_t instance,
-                            const std::vector<CallArg>& args) {
+                            const std::vector<CallArg>& args,
+                            bool wantStructReturn,
+                            std::uint32_t structReturnSizeHint) {
     CallMethodResult result;
     auto t0 = std::chrono::steady_clock::now();
 
@@ -630,7 +675,23 @@ CallMethodResult CallMethod(Il2CppClass* klass,
     //   * ref types   → paramPtrs[i] = the object pointer directly
     std::vector<std::uint64_t> slots(args.size(), 0u);
     std::vector<void*>         paramPtrs(args.size(), nullptr);
+    // Value-struct args need a >8-byte backing buffer. Reserve so the vector
+    // never reallocates mid-loop (which would dangle earlier paramPtrs).
+    std::vector<std::vector<std::uint8_t>> structBackings;
+    structBackings.reserve(args.size());
     for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i].kind == CallArgKind::ValueStruct) {
+            std::size_t n = args[i].bytes.size();
+            if (n == 0 || n > kValueStructMaxBytes) {
+                result.error = "value_struct_arg_bad_size";
+                return result;
+            }
+            // Always pad to the cap so a size-mismatched struct can't OOB-read.
+            structBackings.emplace_back(kValueStructMaxBytes, std::uint8_t{0});
+            std::memcpy(structBackings.back().data(), args[i].bytes.data(), n);
+            paramPtrs[i] = structBackings.back().data();
+            continue;
+        }
         std::string err;
         if (!MarshalArg(args[i], m.paramTypes[i], &slots[i], paramPtrs[i], err)) {
             result.error = err.empty() ? "arg_marshal_failed" : err;
@@ -656,7 +717,7 @@ CallMethodResult CallMethod(Il2CppClass* klass,
         result.ret.kind  = CallReturn::Kind::Void;
         result.ret.typeName = m.returnType;
     } else {
-        DecodeReturnValue(m.returnType, ret, result.ret);
+        DecodeReturnValue(m.returnType, ret, wantStructReturn, structReturnSizeHint, result.ret);
         result.ok = true;
     }
 

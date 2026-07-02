@@ -840,6 +840,7 @@ public sealed class BackendAdapter : ILiveExportSource
         IReadOnlyList<CallArgRequest> args,
         string? signatureMatch = null, string? instanceAddress = null,
         bool mainThread = false, int? mainThreadTimeoutMs = null,
+        bool returnStruct = false, int returnStructSize = 0,
         CancellationToken ct = default)
     {
         // Source-gen serialize the args list — keeps AOT clean (the
@@ -878,6 +879,15 @@ public sealed class BackendAdapter : ILiveExportSource
             {
                 d["main_thread_timeout_ms"] = Int(mainThreadTimeoutMs.Value);
             }
+        }
+        // Opt into value-type-by-value return decode (get_position et al):
+        // the DLL unboxes the struct and echoes its raw bytes in
+        // returnStructBytes. returnStructSize is a fallback the DLL uses only
+        // when class_value_size is unbound / bogus.
+        if (returnStruct)
+        {
+            d["returnStruct"] = Bool(true);
+            if (returnStructSize > 0) d["returnStructSize"] = Int(returnStructSize);
         }
         var env = await Send(
             "callMethod", d,

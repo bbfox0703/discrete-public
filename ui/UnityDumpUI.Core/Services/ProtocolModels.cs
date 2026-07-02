@@ -1017,6 +1017,14 @@ public sealed class CallArgRequest
 {
     [JsonPropertyName("type")]  public string      Type  { get; set; } = string.Empty;
     [JsonPropertyName("value")] public JsonElement Value { get; set; }
+    /// <summary>
+    /// Value-struct arg only (wire `type: "value-struct"`): the struct's raw
+    /// little-endian memory image as a hex string. Omitted (null) for every
+    /// other arg kind, which carry their payload in <see cref="Value"/>.
+    /// </summary>
+    [JsonPropertyName("bytes")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Bytes { get; set; }
 }
 
 public sealed class CallMethodResult
@@ -1037,6 +1045,15 @@ public sealed class CallMethodResult
     /// <summary>"Type: message" if a managed exception was caught; null otherwise.</summary>
     [JsonPropertyName("exception")]   public string?               Exception   { get; set; }
     [JsonPropertyName("elapsedMs")]   public long                  ElapsedMs   { get; set; }
+    /// <summary>
+    /// Value-type-by-value return (Vector3/Quaternion/…): the struct's raw
+    /// little-endian bytes as a hex string. Present only when the call passed
+    /// <c>returnStruct:true</c> and the DLL decoded it. Decode the float
+    /// components with <see cref="CallArgFactory.DecodeStructFloats"/>.
+    /// </summary>
+    [JsonPropertyName("returnStructBytes")] public string?         ReturnStructBytes { get; set; }
+    /// <summary>Byte length of <see cref="ReturnStructBytes"/> (0 when absent).</summary>
+    [JsonPropertyName("returnStructSize")]  public int             ReturnStructSize  { get; set; }
     /// <summary>
     /// Diagnostic note (e.g. "value-type-by-value returns are not decoded
     /// in 19a/19b/19c; pass an out-buffer in v2 or read the address").
