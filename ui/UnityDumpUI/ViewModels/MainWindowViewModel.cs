@@ -133,6 +133,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // responsive under sustained burst.
         Scene = new SceneExplorerViewModel(new SceneEnumerator(_backend, _logger), _logger);
         Scene.NavigateToInspectorRequested += OnSceneNavigateToInspector;
+        // Teleport tab (wave 1) — thin wrapper over the Core TeleportController.
+        Teleport = new TeleportViewModel(_backend, _logger);
         // Phase 22a/d: hoisted from Inspector to a top-level VM property.
         // AobMaker is session-wide — the Inspector's per-row HEX/Disasm
         // buttons, MethodOverloads' "Send AA script to CE" entries, and
@@ -460,6 +462,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     public SceneExplorerViewModel Scene { get; }
 
+    /// <summary>Teleport tab (wave 1) — marker save/recall + one-way undo,
+    /// explicit-coordinate and directional teleport. Wraps the Core
+    /// <see cref="UnityDumpUI.Core.Services.TeleportController"/>.</summary>
+    public TeleportViewModel Teleport { get; }
+
     /// <summary>
     /// Phase 22d — session-wide AOBMaker CE-plugin bridge. Inspector's
     /// HEX/Disasm row buttons, MethodOverloads' "Send AA script to CE",
@@ -512,6 +519,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public const int TabIndexSnapshot      = 7;
     public const int TabIndexSpcQuery      = 8;
     public const int TabIndexClassPivot    = 9;
+    public const int TabIndexTeleport      = 10;
 
     /// <summary>
     /// Gates the experimental tabs (Snapshot / SPC Query / Class Pivot), which

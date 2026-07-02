@@ -41,6 +41,7 @@ public partial class MainWindow : Window
         vm.AddressLookup.CopyToClipboardAsync = CopyToClipboardAsync;
         vm.SpcQuery.CopyToClipboardAsync      = CopyToClipboardAsync;
         vm.ClassPivot.CopyToClipboardAsync    = CopyToClipboardAsync;
+        vm.Teleport.CopyToClipboardAsync      = CopyToClipboardAsync;
         vm.ShowProxyDeploy                    = ShowProxyDeployWindow;
         DataContext = vm;
         // Pane-collapse plumbing — IsVisible bindings on the panes' content
