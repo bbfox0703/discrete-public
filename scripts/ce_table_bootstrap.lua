@@ -89,7 +89,24 @@ local FILES_TO_EXTRACT = {
 -- normal customisation surface is the FILES_TO_EXTRACT table above.
 --------------------------------------------------------------------
 
-local function _msg(fmt, ...) print("[bootstrap] " .. string.format(fmt, ...)) end
+-- Logging convention (docs/lua-logging.md): _msg() is progress output, gated
+-- behind the DEBUG flag (global DISCRETE_DEBUG == 1) so a normal table-activate
+-- stays quiet. Failures below use error() (which keeps CE's Lua Engine visible).
+local function _dbgOn() return (tonumber(rawget(_G, "DISCRETE_DEBUG")) or 0) >= 1 end
+local function _msg(fmt, ...) if _dbgOn() then print("[bootstrap] " .. string.format(fmt, ...)) end end
+
+-- Close CE's Lua Engine on a clean run so it stops covering CE's main window.
+-- bootstrap()/teardown() error() out on failure, so reaching their end means
+-- success; skip the close under DEBUG or if something set the shared error flag.
+local function _closeLuaEngineIfQuiet()
+    if _dbgOn() or rawget(_G, "DISCRETE_HAD_ERROR") then return end
+    if synchronize == nil or getLuaEngine == nil then return end
+    pcall(synchronize, function()
+        local e = getLuaEngine()
+        if e and not pcall(function() e.Close() end)
+            and not pcall(function() e.close() end) then pcall(function() e.hide() end) end
+    end)
+end
 
 local function _extractDir()
     local tempRoot = os.getenv("TEMP") or os.getenv("TMP") or os.getenv("LOCALAPPDATA")
@@ -223,6 +240,7 @@ function bootstrap()
     end
 
     _msg("bootstrap done — use inject(), getName(addr), etc. from your AA-script Lua blocks")
+    _closeLuaEngineIfQuiet()
 end
 
 --- Optional companion: tear down on table disable. Worth calling so a
@@ -235,4 +253,5 @@ function teardown()
     -- TEMP gets cleaned by Windows Disk Cleanup / aggressive users.
     -- If you want hard cleanup, do it from the user's [DISABLE]
     -- script AFTER the game process exits.
+    _closeLuaEngineIfQuiet()
 end

@@ -84,6 +84,9 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.AppendLine("[ENABLE]");
         sb.AppendLine("{$lua}");
         sb.AppendLine("if syntaxcheck then return end");
+        // Reset the shared did-anything-fail flag so the close-tail below judges
+        // THIS run (docs/lua-logging.md). Any failure path sets it true again.
+        AaLuaLoader.AppendHadErrorReset(sb);
         sb.AppendLine();
 
         // Lazy-load the helpers from the CT. Idempotency keys off the
@@ -100,6 +103,7 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.AppendLine("if _G.discrete_mono_registerSymbolBySignatureMatch == nil then");
         sb.Append("  local f = findTableFile('").Append(HelpersFileName).AppendLine("')");
         sb.AppendLine("  if not f then");
+        sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
         sb.Append("    print('[discrete] ").Append(HelpersFileName).AppendLine(" missing from CT.')");
         sb.AppendLine("    print('[discrete] Run DiscreteUI -> Tools -> Inject Discrete Bridge into CE Table first.')");
         sb.AppendLine("    return");
@@ -109,6 +113,7 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.Append("  local chunk, err = load(ss.DataString, '@").Append(HelpersFileName).AppendLine("')");
         sb.AppendLine("  ss.destroy()");
         sb.AppendLine("  if not chunk then");
+        sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
         sb.Append("    print('[discrete] parse error in ").Append(HelpersFileName).AppendLine(": ' .. tostring(err))");
         sb.AppendLine("    return");
         sb.AppendLine("  end");
@@ -164,6 +169,11 @@ public static class MonoRegisterSymbolAaScriptGenerator
             sb.AppendLine();
         }
 
+        // Quiet success closes CE's Lua Engine; a helper failure set
+        // _G.DISCRETE_HAD_ERROR (via its eprint) so the window stays up.
+        AaLuaLoader.AppendCloseLuaEngineTail(sb);
+        sb.AppendLine();
+
         sb.AppendLine("[DISABLE]");
         sb.AppendLine("{$lua}");
         sb.AppendLine("if syntaxcheck then return end");
@@ -175,6 +185,10 @@ public static class MonoRegisterSymbolAaScriptGenerator
             sb.Append("pcall(unregisterSymbol, '")
               .Append(LuaSqEscape(symbols[i])).AppendLine("')");
         }
+
+        // Close the Lua Engine on a clean disable too (no reset in DISABLE —
+        // an unregister failure is swallowed by pcall, so this is always quiet).
+        AaLuaLoader.AppendCloseLuaEngineTail(sb);
 
         return sb.ToString();
     }

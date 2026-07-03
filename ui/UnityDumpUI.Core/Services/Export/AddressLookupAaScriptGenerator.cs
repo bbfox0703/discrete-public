@@ -106,10 +106,18 @@ public static class AddressLookupAaScriptGenerator
         sb.AppendLine("[ENABLE]");
         sb.AppendLine("{$lua}");
         sb.AppendLine("if syntaxcheck then return end");
+        // Reset the shared did-anything-fail flag so the close-tail judges THIS
+        // run (docs/lua-logging.md).
+        AaLuaLoader.AppendHadErrorReset(sb);
         sb.AppendLine("if not _G.discrete_bridgeLoaded then");
+        sb.AppendLine("  _G.DISCRETE_HAD_ERROR = true");
         sb.AppendLine("  print('[Discrete] Enable \"Load Discrete Bridge\" first')");
         sb.AppendLine("  return");
         sb.AppendLine("end");
+        // Close CE's Lua Engine here on the clean path: the following {$asm}
+        // alloc/registersymbol prints nothing, and CE runs {$lua} before {$asm},
+        // so a quiet enable ends with the window closed. (docs/lua-logging.md)
+        AaLuaLoader.AppendCloseLuaEngineTail(sb);
         sb.AppendLine();
         sb.AppendLine("{$asm}");
         sb.Append("alloc(").Append(symbol).AppendLine(", 8)");

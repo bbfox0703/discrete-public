@@ -43,6 +43,18 @@
 -- (re-running the bootstrap, re-opening the .CT) don't redefine
 -- in-flight functions. Each guard wraps a single function.
 
+-- Logging convention (docs/lua-logging.md): this file's own print()s are
+-- progress/info, so we shadow print() with a DEBUG-gated version; a normal
+-- register call stays quiet and doesn't pop CE's Lua Engine over its main
+-- window. Failures use eprint(), which ALWAYS prints and sets the shared
+-- _G.DISCRETE_HAD_ERROR flag so the generated AA that self-loads this file
+-- keeps the Lua Engine open on a failed run. Both are declared before every
+-- function below so the _G.* closures capture them as upvalues.
+local _rawprint = print
+local function _dbgOn() return (tonumber(rawget(_G, "DISCRETE_DEBUG")) or 0) >= 1 end
+local function print(...) if _dbgOn() then _rawprint(...) end end
+local function eprint(...) rawset(_G, "DISCRETE_HAD_ERROR", true); _rawprint(...) end
+
 -- ----------------------------------------------------------------
 -- SafeMonoDestroy — clean teardown of CE's Mono data collector.
 -- ----------------------------------------------------------------
@@ -99,7 +111,7 @@ if _G.mono_ensureAttached == nil then
   _G.mono_ensureAttached = function()
     local pid = getOpenedProcessID()
     if pid == 0 then
-      print("mono_ensureAttached: ERROR no process attached. File -> Open Process first.")
+      eprint("mono_ensureAttached: ERROR no process attached. File -> Open Process first.")
       return false
     end
 
@@ -111,7 +123,7 @@ if _G.mono_ensureAttached == nil then
       end
       local ok, err = pcall(LaunchMonoDataCollector)
       if not ok then
-        print(string.format("mono_ensureAttached: ERROR LaunchMonoDataCollector failed: %s",
+        eprint(string.format("mono_ensureAttached: ERROR LaunchMonoDataCollector failed: %s",
                             tostring(err)))
         return false
       end
@@ -131,14 +143,14 @@ if _G.mono_registerSymbol == nil then
 
     local m = mono_findMethod(namespace, classname, methodname)
     if m == nil or m == 0 then
-      print(string.format("mono_registerSymbol: ERROR method not found - %s.%s.%s",
+      eprint(string.format("mono_registerSymbol: ERROR method not found - %s.%s.%s",
                           namespace, classname, methodname))
       return false
     end
 
     local addr = mono_compile_method(m)
     if addr == 0 then
-      print(string.format("mono_registerSymbol: ERROR could not compile - %s.%s.%s",
+      eprint(string.format("mono_registerSymbol: ERROR could not compile - %s.%s.%s",
                           namespace, classname, methodname))
       return false
     end
@@ -162,14 +174,14 @@ if _G.mono_registerSymbolEx == nil then
 
     local cls = mono_findClass(namespace, classname)
     if not cls then
-      print(string.format("mono_registerSymbolEx: ERROR class not found - %s.%s",
+      eprint(string.format("mono_registerSymbolEx: ERROR class not found - %s.%s",
                           namespace, classname))
       return false
     end
 
     local methods = mono_class_enumMethods(cls)
     if not methods then
-      print(string.format("mono_registerSymbolEx: ERROR no methods in %s.%s",
+      eprint(string.format("mono_registerSymbolEx: ERROR no methods in %s.%s",
                           namespace, classname))
       return false
     end
@@ -200,7 +212,7 @@ if _G.mono_registerSymbolEx == nil then
         if matched then
           local addr = mono_compile_method(m.method)
           if addr == 0 then
-            print(string.format("mono_registerSymbolEx: ERROR matched but failed to compile - %s.%s.%s",
+            eprint(string.format("mono_registerSymbolEx: ERROR matched but failed to compile - %s.%s.%s",
                                 namespace, classname, methodname))
             return false
           end
@@ -211,7 +223,7 @@ if _G.mono_registerSymbolEx == nil then
       end
     end
 
-    print(string.format("mono_registerSymbolEx: ERROR no matching overload - %s.%s.%s",
+    eprint(string.format("mono_registerSymbolEx: ERROR no matching overload - %s.%s.%s",
                         namespace, classname, methodname))
     return false
   end
@@ -231,14 +243,14 @@ if _G.mono_registerSymbolBySignatureMatch == nil then
 
     local cls = mono_findClass(namespace, classname)
     if not cls then
-      print(string.format("mono_registerSymbolBySignatureMatch: ERROR class not found - %s.%s",
+      eprint(string.format("mono_registerSymbolBySignatureMatch: ERROR class not found - %s.%s",
                           namespace, classname))
       return false
     end
 
     local methods = mono_class_enumMethods(cls)
     if not methods then
-      print(string.format("mono_registerSymbolBySignatureMatch: ERROR no methods in %s.%s",
+      eprint(string.format("mono_registerSymbolBySignatureMatch: ERROR no methods in %s.%s",
                           namespace, classname))
       return false
     end
@@ -267,7 +279,7 @@ if _G.mono_registerSymbolBySignatureMatch == nil then
         if matched then
           local addr = mono_compile_method(m.method)
           if addr == 0 then
-            print(string.format("mono_registerSymbolBySignatureMatch: ERROR matched but failed to compile - %s.%s.%s",
+            eprint(string.format("mono_registerSymbolBySignatureMatch: ERROR matched but failed to compile - %s.%s.%s",
                                 namespace, classname, methodname))
             return false
           end
@@ -279,7 +291,7 @@ if _G.mono_registerSymbolBySignatureMatch == nil then
       end
     end
 
-    print(string.format("mono_registerSymbolBySignatureMatch: ERROR no matching signature - %s.%s.%s",
+    eprint(string.format("mono_registerSymbolBySignatureMatch: ERROR no matching signature - %s.%s.%s",
                         namespace, classname, methodname))
     return false
   end
@@ -307,7 +319,7 @@ end
 local function _discrete_ensure_attached()
   local pid = getOpenedProcessID()
   if pid == 0 then
-    print("[discrete] No process attached. File -> Open Process first.")
+    eprint("[discrete] No process attached. File -> Open Process first.")
     return false
   end
   if _G.lastMonoPID == nil then _G.lastMonoPID = -1 end
@@ -317,7 +329,7 @@ local function _discrete_ensure_attached()
     end
     local ok, err = pcall(LaunchMonoDataCollector)
     if not ok then
-      print(string.format("[discrete] LaunchMonoDataCollector failed: %s",
+      eprint(string.format("[discrete] LaunchMonoDataCollector failed: %s",
                           tostring(err)))
       return false
     end
@@ -387,7 +399,7 @@ _G.discrete_mono_registerSymbol = function(symbolname, namespace, classname, met
     -- here too.
     local cls = _discrete_find_class(namespace, classname)
     if not cls then
-      print(string.format("[discrete] method not found - %s.%s.%s (class missing)",
+      eprint(string.format("[discrete] method not found - %s.%s.%s (class missing)",
                           namespace, classname, methodname))
       return false
     end
@@ -396,7 +408,7 @@ _G.discrete_mono_registerSymbol = function(symbolname, namespace, classname, met
       if mm.name == methodname then m = mm.method; break end
     end
     if not m or m == 0 then
-      print(string.format("[discrete] method not found - %s.%s.%s",
+      eprint(string.format("[discrete] method not found - %s.%s.%s",
                           namespace, classname, methodname))
       return false
     end
@@ -404,7 +416,7 @@ _G.discrete_mono_registerSymbol = function(symbolname, namespace, classname, met
 
   local addr = mono_compile_method(m)
   if addr == 0 then
-    print(string.format("[discrete] could not compile - %s.%s.%s",
+    eprint(string.format("[discrete] could not compile - %s.%s.%s",
                         namespace, classname, methodname))
     return false
   end
@@ -420,14 +432,14 @@ _G.discrete_mono_registerSymbolEx = function(symbolname, namespace, classname, m
 
   local cls = _discrete_find_class(namespace, classname)
   if not cls then
-    print(string.format("[discrete] class not found - %s.%s",
+    eprint(string.format("[discrete] class not found - %s.%s",
                         namespace, classname))
     return false
   end
 
   local methods = mono_class_enumMethods(cls)
   if not methods then
-    print(string.format("[discrete] no methods in %s.%s",
+    eprint(string.format("[discrete] no methods in %s.%s",
                         namespace, classname))
     return false
   end
@@ -491,7 +503,7 @@ _G.discrete_mono_registerSymbolEx = function(symbolname, namespace, classname, m
         if matched then
           local addr = mono_compile_method(m.method)
           if addr == 0 then
-            print(string.format("[discrete] matched but failed to compile - %s.%s.%s",
+            eprint(string.format("[discrete] matched but failed to compile - %s.%s.%s",
                                 namespace, classname, methodname))
             return false
           end
@@ -521,11 +533,11 @@ _G.discrete_mono_registerSymbolEx = function(symbolname, namespace, classname, m
   -- Reaching here means: class found, methods enumerated, ≥0 named matches
   -- but no full match. Dump what we saw so the user can diagnose typename
   -- mismatches without rebuilding the helper.
-  print(string.format("[discrete] no matching overload - %s.%s.%s",
+  eprint(string.format("[discrete] no matching overload - %s.%s.%s",
                       namespace, classname, methodname))
-  print(string.format("[discrete]   looked at %d candidate(s); expected (%d): %s",
+  eprint(string.format("[discrete]   looked at %d candidate(s); expected (%d): %s",
                       candidates, #paramTypes, table.concat(paramTypes, ", ")))
-  for i, line in ipairs(diag) do print("[discrete] " .. line) end
+  for i, line in ipairs(diag) do eprint("[discrete] " .. line) end
   return false
 end
 
@@ -537,14 +549,14 @@ _G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace
 
   local cls = _discrete_find_class(namespace, classname)
   if not cls then
-    print(string.format("[discrete] class not found - %s.%s",
+    eprint(string.format("[discrete] class not found - %s.%s",
                         namespace, classname))
     return false
   end
 
   local methods = mono_class_enumMethods(cls)
   if not methods then
-    print(string.format("[discrete] no methods in %s.%s",
+    eprint(string.format("[discrete] no methods in %s.%s",
                         namespace, classname))
     return false
   end
@@ -578,7 +590,7 @@ _G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace
         if matched then
           local addr = mono_compile_method(m.method)
           if addr == 0 then
-            print(string.format("[discrete] matched but failed to compile - %s.%s.%s",
+            eprint(string.format("[discrete] matched but failed to compile - %s.%s.%s",
                                 namespace, classname, methodname))
             return false
           end
@@ -591,7 +603,7 @@ _G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace
     end
   end
 
-  print(string.format("[discrete] no matching signature - %s.%s.%s",
+  eprint(string.format("[discrete] no matching signature - %s.%s.%s",
                       namespace, classname, methodname))
   return false
 end

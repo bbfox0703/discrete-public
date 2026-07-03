@@ -302,6 +302,47 @@ public class AobAaScriptGeneratorTests
     }
 
     [Fact]
+    public void Build_EmitsHadErrorReset_AndDeferredCloseLuaEngineTail_PerLuaLogging()
+    {
+        // docs/lua-logging.md: the first [ENABLE] {$lua} resets the shared flag
+        // after the syntaxcheck guard. Because the AOB scan result isn't known
+        // until AFTER the {$asm} pass, the close-tail lives at the END of the
+        // deferred discrete_runAfterAsm callback — NOT at the end of the
+        // synchronous block. discrete_logScan flags a NOT-FOUND so the window
+        // stays up on a failed scan; its success line is DEBUG-gated.
+        string s = AobAaScriptGenerator.Build(new[] { Il2cppOverload() });
+
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = false", s);
+        // NOT-FOUND path sets the flag; success is gated behind DEBUG.
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = true", s);
+        Assert.Contains(
+            "if _G.DISCRETE_DEBUG == 1 then print(string.format(\"[discrete] %s = %X\", name, addr)) end",
+            s);
+
+        // Close-tail present and INSIDE the deferred callback: it must appear
+        // AFTER the logScan call and BEFORE the callback's closing "end)".
+        Assert.Contains(
+            "synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)", s);
+        int deferIdx = s.IndexOf("_G.discrete_runAfterAsm(function()", StringComparison.Ordinal);
+        int logIdx   = s.IndexOf("_G.discrete_logScan(\"Mathf_Abs_int32\")", StringComparison.Ordinal);
+        int closeIdx = s.IndexOf("if e then e.Close() end", StringComparison.Ordinal);
+        int endIdx   = s.IndexOf("end)", closeIdx, StringComparison.Ordinal);
+        Assert.True(deferIdx >= 0 && logIdx > deferIdx && closeIdx > logIdx && endIdx > closeIdx,
+            "close-tail must sit inside the deferred callback, after logScan and before end)");
+    }
+
+    [Fact]
+    public void Build_DeferredActionError_SetsHadErrorFlag()
+    {
+        // The deferred-action error branch must set the shared flag so a thrown
+        // deferred callback keeps the Lua Engine open.
+        string s = AobAaScriptGenerator.Build(new[] { Il2cppOverload() });
+        Assert.Contains(
+            "if not ok then _G.DISCRETE_HAD_ERROR = true; print('[discrete] deferred action error: ' .. tostring(err)) end",
+            s);
+    }
+
+    [Fact]
     public void Build_MonoJitOnly_EmitsNeitherWarningNorUniqueNote()
     {
         // No aobscan at all (bridge-resolve) → no AOB-quality banner.

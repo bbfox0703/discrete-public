@@ -165,6 +165,9 @@ public static class AobAaScriptGenerator
         sb.AppendLine("[ENABLE]");
         sb.AppendLine("{$lua}");
         sb.AppendLine("if syntaxcheck then return end");
+        // Reset the shared did-anything-fail flag so the deferred close-tail
+        // judges THIS run (docs/lua-logging.md).
+        AaLuaLoader.AppendHadErrorReset(sb);
         // The warning/note MUST be the first thing after the guard, on its own
         // line, so it's impossible to miss when the user pastes the script.
         if (anyNonUniqueAob)
@@ -176,8 +179,9 @@ public static class AobAaScriptGenerator
         sb.AppendLine("  _G.discrete_logScan = function(name)");
         sb.AppendLine("    local addr = getAddressSafe(name)");
         sb.AppendLine("    if addr and addr ~= 0 then");
-        sb.AppendLine("      print(string.format(\"[discrete] %s = %X\", name, addr))");
+        sb.AppendLine("      if _G.DISCRETE_DEBUG == 1 then print(string.format(\"[discrete] %s = %X\", name, addr)) end");
         sb.AppendLine("    else");
+        sb.AppendLine("      _G.DISCRETE_HAD_ERROR = true");
         sb.AppendLine("      print(string.format(\"[discrete] %s NOT FOUND (AOB scan failed)\", name))");
         sb.AppendLine("    end");
         sb.AppendLine("  end");
@@ -198,7 +202,7 @@ public static class AobAaScriptGenerator
         sb.AppendLine("    t.OnTimer = function(timer)");
         sb.AppendLine("      timer.destroy()");
         sb.AppendLine("      local ok, err = pcall(fn)");
-        sb.AppendLine("      if not ok then print('[discrete] deferred action error: ' .. tostring(err)) end");
+        sb.AppendLine("      if not ok then _G.DISCRETE_HAD_ERROR = true; print('[discrete] deferred action error: ' .. tostring(err)) end");
         sb.AppendLine("    end");
         sb.AppendLine("  end");
         sb.AppendLine("end");
@@ -317,6 +321,15 @@ public static class AobAaScriptGenerator
         {
             sb.Append("  _G.discrete_logScan(\"").Append(symbols[i]).AppendLine("\")");
         }
+        // Close CE's Lua Engine on a clean run — INSIDE the deferred callback,
+        // because success/failure of the AOB scan isn't known until the {$asm}
+        // pass has completed (discrete_logScan sets _G.DISCRETE_HAD_ERROR on a
+        // NOT-FOUND). Hand-emitted (2-space indent) rather than via
+        // AppendCloseLuaEngineTail so the indentation matches the callback body.
+        // See docs/lua-logging.md.
+        sb.AppendLine("  if _G.DISCRETE_DEBUG ~= 1 and not _G.DISCRETE_HAD_ERROR then");
+        sb.AppendLine("    synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)");
+        sb.AppendLine("  end");
         sb.AppendLine("end)");
         sb.AppendLine();
 
@@ -328,6 +341,7 @@ public static class AobAaScriptGenerator
         if (anyMonoJit)
         {
             sb.AppendLine("if not _G.discrete_bridgeLoaded then");
+            sb.AppendLine("  _G.DISCRETE_HAD_ERROR = true");
             sb.AppendLine("  print('[Discrete] Enable \"Load Discrete Bridge\" first (Mono JIT methods resolve via the bridge)')");
             sb.AppendLine("  return");
             sb.AppendLine("end");
@@ -375,6 +389,11 @@ public static class AobAaScriptGenerator
                 if (string.IsNullOrEmpty(overloads[i].ModuleName) || luaOffset[i])
                     sb.Append("pcall(unregisterSymbol, '").Append(LuaSqEscape(symbols[i])).AppendLine("')");
             }
+            // Close the Lua Engine on a clean disable. The unregisters are all
+            // pcall-wrapped (quiet), so this DISABLE {$lua} block runs silently.
+            // Only emitted when a real {$lua} block exists (anyLuaSymbol) — a
+            // pure-{$asm} DISABLE runs no Lua, so nothing pops the engine.
+            AaLuaLoader.AppendCloseLuaEngineTail(sb);
         }
         bool anyAob = false;
         for (int i = 0; i < overloads.Count; ++i)

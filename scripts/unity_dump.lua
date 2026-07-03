@@ -220,7 +220,9 @@ if registerLuaFunctionHighlight ~= nil then
     pcall(registerLuaFunctionHighlight, "discreteShutdown")
 end
 
-local pcallOk, pcallErr = pcall(main)
-if not pcallOk then
-    print("[Discrete FATAL] " .. tostring(pcallErr))
-end
+-- Run main() under the logging/close convention (docs/lua-logging.md): on a
+-- clean run (no U.err(), DISCRETE_DEBUG off) U.guard closes the Lua Engine so
+-- it stops covering CE's main window; any error (thrown, or the non-throwing
+-- U.err()+return paths in main() like "no process attached") leaves the window
+-- open with the message visible. Set DISCRETE_DEBUG = 1 to see the banners.
+U.guard(main)

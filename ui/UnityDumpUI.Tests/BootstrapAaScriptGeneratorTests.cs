@@ -202,6 +202,46 @@ public class BootstrapAaScriptGeneratorTests
     }
 
     [Fact]
+    public void Build_EmitsHadErrorReset_AndCloseLuaEngineTail_InBothBlocks()
+    {
+        // docs/lua-logging.md: both [ENABLE] and [DISABLE] {$lua} blocks reset
+        // the shared did-anything-fail flag after the syntaxcheck guard and
+        // close CE's Lua Engine on a clean run. Smoke failures + missing
+        // discreteShutdown flag the error so the window stays up.
+        string script = BootstrapAaScriptGenerator.Build();
+
+        // Reset appears in BOTH blocks (ENABLE + DISABLE each run Lua statements).
+        int resetCount = CountOccurrences(script, "_G.DISCRETE_HAD_ERROR = false");
+        Assert.Equal(2, resetCount);
+
+        // Close-tail appears in BOTH blocks.
+        int tailCount = CountOccurrences(script,
+            "synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)");
+        Assert.Equal(2, tailCount);
+        Assert.Contains("if _G.DISCRETE_DEBUG ~= 1 and not _G.DISCRETE_HAD_ERROR then", script);
+
+        // Failure paths flag the error (pipe unreachable / handshake unparseable /
+        // discreteShutdown unavailable).
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = true", script);
+
+        // Close-tail in [ENABLE] runs after the bridge-loaded flag is set.
+        int enableTail = script.IndexOf("if e then e.Close() end", StringComparison.Ordinal);
+        int flagSet    = script.IndexOf("_G.discrete_bridgeLoaded = true", StringComparison.Ordinal);
+        Assert.True(flagSet >= 0 && enableTail > flagSet);
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0, idx = 0;
+        while ((idx = haystack.IndexOf(needle, idx, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += needle.Length;
+        }
+        return count;
+    }
+
+    [Fact]
     public void Build_HasNo_AdjacentSingleQuotes_LuaSyntaxTrap()
     {
         // Phase 22f live smoke regression (2026-05-12): the soft-fail
