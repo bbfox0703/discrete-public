@@ -9,23 +9,109 @@
 local M = {}
 
 -- ---------- Logging ----------------------------------------------------
+--
+-- Convention (docs/lua-logging.md): CE routes print() to the Lua Engine form
+-- and force-shows it on any output, so it covers CE's main window on every run.
+-- To keep a normal run quiet we gate informational output behind a DEBUG flag
+-- and only ever print unconditionally for errors.
+--   * log()/dbg()/warn() print ONLY when DEBUG is on.
+--   * err() ALWAYS prints and sets a sticky "this run failed" flag.
+-- Combined with closeLuaEngineIfQuiet()/guard() below, a clean run finishes
+-- silently and closes the Lua Engine; a failed run leaves it open with the
+-- error visible.
 
 local TAG = "[Discrete]"
 
-function M.log(fmt, ...)
-    print(string.format(TAG .. " " .. fmt, ...))
+-- Per-module debug flag. Default off. The global `DISCRETE_DEBUG = 1` (set
+-- before running a script) also turns output on without editing this file.
+M.DEBUG = false
+
+local function debugOn()
+    if M.DEBUG then return true end
+    local g = rawget(_G, "DISCRETE_DEBUG")
+    return g == 1 or g == true or g == "1"
+end
+M.debugOn = debugOn
+
+-- Sticky per-session error flag. err() sets it; guard()/closeLuaEngineIfQuiet()
+-- read it to decide whether to close the Lua Engine. resetError() clears it at
+-- the start of a guarded run. It is ALSO mirrored to the global
+-- `_G.DISCRETE_HAD_ERROR` so standalone bridge scripts + generated AA {$lua}
+-- blocks (which don't require 'utils') share one "did anything fail?" signal
+-- when deciding whether to close the Lua Engine. See docs/lua-logging.md.
+local hadError = false
+function M.hadError()   return hadError end
+function M.resetError()
+    hadError = false
+    rawset(_G, "DISCRETE_HAD_ERROR", false)
 end
 
+function M.log(fmt, ...)
+    if debugOn() then print(string.format(TAG .. " " .. fmt, ...)) end
+end
+
+-- Alias for log(): use when you want the call site to read as "debug-only".
+M.dbg = M.log
+
 function M.warn(fmt, ...)
-    print(string.format(TAG .. " WARN " .. fmt, ...))
+    if debugOn() then print(string.format(TAG .. " WARN " .. fmt, ...)) end
 end
 
 function M.err(fmt, ...)
+    hadError = true
+    rawset(_G, "DISCRETE_HAD_ERROR", true)  -- shared cross-script failure signal
     print(string.format(TAG .. " ERROR " .. fmt, ...))
 end
 
 function M.toHex(addr)
     return string.format("0x%X", addr or 0)
+end
+
+-- ---------- Lua Engine window + guarded run ---------------------------
+--
+-- CE's Lua Engine form pops on top of CE's main window whenever a script
+-- prints. Close it on a clean run so it stops covering CE. See CE API notes in
+-- docs/lua-logging.md — getLuaEngine()/synchronize() are verified CE functions;
+-- form close is the published Pascal `Close()` (celua.txt also documents the
+-- lowercase close()/hide()), so we try each in turn, all pcall-guarded.
+
+--- Force-close the Lua Engine window (best-effort). Runs on the main thread
+--- because form operations must. Never raises.
+function M.closeLuaEngine()
+    if synchronize == nil or getLuaEngine == nil then return end
+    pcall(synchronize, function()
+        local e = getLuaEngine()
+        if e == nil then return end
+        if not pcall(function() e.Close() end)
+            and not pcall(function() e.close() end) then
+            pcall(function() e.hide() end)
+        end
+    end)
+end
+
+--- Close the Lua Engine only on a "quiet" finish: no err() emitted and DEBUG
+--- off. A debug run keeps the window (the user turned output on to read it);
+--- an errored run keeps the window (so the error is seen). Returns true if it
+--- closed the window.
+function M.closeLuaEngineIfQuiet()
+    if hadError or debugOn() then return false end
+    M.closeLuaEngine()
+    return true
+end
+
+--- Run an entry-point body under the logging/close convention. body() runs
+--- inside pcall; a thrown error is reported via err() (always prints, keeps the
+--- window open). On a clean run the Lua Engine is closed. Returns (ok, result)
+--- where ok is false if body threw or emitted an err().
+--- @param body function
+function M.guard(body)
+    M.resetError()
+    local ok, result = pcall(body)
+    if not ok then
+        M.err("%s", tostring(result))
+    end
+    M.closeLuaEngineIfQuiet()
+    return ok and not hadError, result
 end
 
 -- ---------- DLL function calls (CE Lua executeCodeEx wrapper) ----------

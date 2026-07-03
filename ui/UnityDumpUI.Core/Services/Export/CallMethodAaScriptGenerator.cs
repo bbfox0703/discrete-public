@@ -130,6 +130,10 @@ public static class CallMethodAaScriptGenerator
             sb.AppendLine("  args)");
         }
         sb.AppendLine("prettyPrint(r)");
+        // NB: deliberately NO close-tail here. A call-method AA exists to SHOW
+        // the result — prettyPrint always prints (see unity_invoke.lua) — so we
+        // leave CE's Lua Engine open on this action rather than closing it like
+        // the quiet register / address-lookup generators. (docs/lua-logging.md)
         sb.AppendLine();
 
         // [DISABLE]: nothing to tear down. CE re-fires [ENABLE] on every

@@ -76,10 +76,25 @@
 -- GC-root caveat, and the marshaling convention shared with the UI /
 -- PowerShell smoke.
 
+-- Logging convention (docs/lua-logging.md): log()/warn() print only when the
+-- DEBUG flag (global DISCRETE_DEBUG == 1) is on. prettyPrint's success summary
+-- rides log(), so a routine call is quiet unless you opt into output; managed
+-- exceptions / pipe errors ride err(), which ALWAYS prints and sets the shared
+-- _G.DISCRETE_HAD_ERROR flag so the generated AA that self-loads this file keeps
+-- the Lua Engine open on a failed call.
 local TAG = "[Discrete.invoke]"
-local function log (fmt, ...) print(string.format(TAG .. " "       .. fmt, ...)) end
-local function warn(fmt, ...) print(string.format(TAG .. " WARN "  .. fmt, ...)) end
-local function err (fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
+local function _dbgOn() return (tonumber(rawget(_G, "DISCRETE_DEBUG")) or 0) >= 1 end
+local function log (fmt, ...) if _dbgOn() then print(string.format(TAG .. " "      .. fmt, ...)) end end
+local function warn(fmt, ...) if _dbgOn() then print(string.format(TAG .. " WARN " .. fmt, ...)) end end
+local function err (fmt, ...)
+    rawset(_G, "DISCRETE_HAD_ERROR", true)
+    print(string.format(TAG .. " ERROR " .. fmt, ...))
+end
+-- Always-print (bypasses the DEBUG gate): prettyPrint is an explicit "show me
+-- the result" call, so its output must appear even with DISCRETE_DEBUG off. The
+-- CallMethod AA that emits prettyPrint(r) intentionally does NOT close the Lua
+-- Engine (docs/lua-logging.md), so the result stays visible.
+local function emit(fmt, ...) print(string.format(TAG .. " " .. fmt, ...)) end
 
 -- ---------- Tiny JSON parser (response-shape-specific) ------------------
 -- Minimal standalone parser (kept inline so this file stays drop-in).
@@ -531,7 +546,7 @@ end
 --- Pretty-print a callUnityMethod result to CE's Lua console. Returns
 --- the same table so callers can `prettyPrint(callUnityMethod(...))`.
 function prettyPrint(r)
-    if r == nil then log("(no result)"); return r end
+    if r == nil then emit("(no result)"); return r end
     if r.error and r.error ~= "" then
         err("call failed: %s", tostring(r.error))
         return r
@@ -562,13 +577,13 @@ function prettyPrint(r)
         rendered = tostring(rv)
     end
 
-    log("%s%s -> %s = %s  (%sms)",
+    emit("%s%s -> %s = %s  (%sms)",
         m.humanSuffix or "?",
         sig,
         rt,
         rendered,
         tostring(r.elapsedMs or 0))
-    if r.note and r.note ~= "" then warn("note: %s", r.note) end
+    if r.note and r.note ~= "" then emit("note: %s", r.note) end
     return r
 end
 

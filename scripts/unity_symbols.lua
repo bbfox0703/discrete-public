@@ -43,10 +43,19 @@
 -- Ships its own inline pipe RPC + JSON parser (below) so the file
 -- stays drop-in standalone — no extra require needed.
 
+-- Logging convention (docs/lua-logging.md): log()/warn() print only when the
+-- DEBUG flag (global DISCRETE_DEBUG == 1) is on, so routine symbol registration
+-- stays quiet and doesn't pop CE's Lua Engine over its main window. err() always
+-- prints and sets the shared _G.DISCRETE_HAD_ERROR flag so the generated AA block
+-- that self-loads this file knows not to close the Lua Engine on a failed run.
 local TAG = "[Discrete.symbols]"
-local function log(fmt, ...) print(string.format(TAG .. " " .. fmt, ...)) end
-local function warn(fmt, ...) print(string.format(TAG .. " WARN " .. fmt, ...)) end
-local function err(fmt, ...) print(string.format(TAG .. " ERROR " .. fmt, ...)) end
+local function _dbgOn() return (tonumber(rawget(_G, "DISCRETE_DEBUG")) or 0) >= 1 end
+local function log(fmt, ...) if _dbgOn() then print(string.format(TAG .. " " .. fmt, ...)) end end
+local function warn(fmt, ...) if _dbgOn() then print(string.format(TAG .. " WARN " .. fmt, ...)) end end
+local function err(fmt, ...)
+    rawset(_G, "DISCRETE_HAD_ERROR", true)
+    print(string.format(TAG .. " ERROR " .. fmt, ...))
+end
 
 -- Minimal pipe RPC + JSON parser (duplicated to keep this script standalone).
 local PIPE   = [[\\.\pipe\DiscreteBfx]]

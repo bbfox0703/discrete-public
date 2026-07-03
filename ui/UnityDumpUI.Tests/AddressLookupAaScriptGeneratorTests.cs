@@ -205,6 +205,27 @@ public class AddressLookupAaScriptGeneratorTests
     }
 
     [Fact]
+    public void Build_EmitsHadErrorReset_AndCloseLuaEngineTail_PerLuaLogging()
+    {
+        // docs/lua-logging.md: the parent [ENABLE] {$lua} resets the shared
+        // did-anything-fail flag after the syntaxcheck guard, flags the error
+        // before the bridge-guard print, and closes CE's Lua Engine on the clean
+        // path (the following {$asm} prints nothing, and CE runs {$lua} first).
+        var p = AddressLookupAaScriptGenerator.Build(BasicReq());
+
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = false", p.ParentScript);
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = true", p.ParentScript);
+        Assert.Contains("if _G.DISCRETE_DEBUG ~= 1 and not _G.DISCRETE_HAD_ERROR then",
+                        p.ParentScript);
+        Assert.Contains(
+            "synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)",
+            p.ParentScript);
+        // Close-tail sits inside the {$lua} block — BEFORE the {$asm} directive.
+        Assert.True(p.ParentScript.IndexOf("if e then e.Close() end", StringComparison.Ordinal)
+                  < p.ParentScript.IndexOf("{$asm}", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Build_HasNo_AdjacentSingleQuotes_LuaSyntaxTrap()
     {
         // See BootstrapAaScriptGeneratorTests for the full story.

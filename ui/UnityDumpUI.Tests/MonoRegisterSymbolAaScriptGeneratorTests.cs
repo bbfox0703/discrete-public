@@ -273,6 +273,26 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
     }
 
     [Fact]
+    public void Build_EmitsHadErrorReset_AndCloseLuaEngineTail_PerLuaLogging()
+    {
+        // docs/lua-logging.md: every generated {$lua} entry point resets the
+        // shared did-anything-fail flag right after the syntaxcheck guard, and
+        // closes CE's Lua Engine on a clean finish so a quiet register run
+        // stops covering CE. Failure paths set the flag before their prints so
+        // the close-tail leaves the window up on error.
+        string s = MonoRegisterSymbolAaScriptGenerator.Build(new[] { MonoOverload() });
+
+        // Reset appears in [ENABLE] (not [DISABLE] — no reset there per spec).
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = false", s);
+        // Close-tail present in both ENABLE and DISABLE — count the guard line.
+        Assert.Contains("if _G.DISCRETE_DEBUG ~= 1 and not _G.DISCRETE_HAD_ERROR then", s);
+        Assert.Contains(
+            "synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)", s);
+        // Missing-file failure path flags the error so the window stays up.
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = true", s);
+    }
+
+    [Fact]
     public void Build_EmptyInput_Throws()
     {
         var ex = Assert.Throws<ArgumentException>(

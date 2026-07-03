@@ -118,13 +118,20 @@ public static class BootstrapAaScriptGenerator
     private const string Template = @"[ENABLE]
 {$lua}
 if syntaxcheck then return end
+-- Reset the shared did-anything-fail flag so the close-tail below judges THIS
+-- run (docs/lua-logging.md). Any failure path sets it true again.
+_G.DISCRETE_HAD_ERROR = false
 
 -- Idempotency: re-enabling the entry should be a no-op until the user
 -- explicitly disables it. CE doesn't unload lua chunks once they've
 -- run, so the second [ENABLE] would otherwise duplicate every global
--- symbol unity_dump.lua + friends create.
+-- symbol unity_dump.lua + friends create. This is a benign no-op, not a
+-- failure — gate its notice behind DEBUG so a quiet re-enable doesn't pop
+-- CE's Lua Engine over its main window.
 if _G.discrete_bridgeLoaded then
-  print('[Discrete] __ENTRY_DESCRIPTION__: already loaded (toggle DISABLE then re-enable to reload)')
+  if _G.DISCRETE_DEBUG == 1 then
+    print('[Discrete] __ENTRY_DESCRIPTION__: already loaded (toggle DISABLE then re-enable to reload)')
+  end
   return
 end
 
@@ -193,13 +200,22 @@ if pipe then
   local build   = resp and resp:match('""build""%s*:%s*(%d+)') or nil
   local backend = resp and resp:match('""backend""%s*:%s*""([^""]+)""') or nil
   if build and backend then
-    print(string.format('[Discrete] __ENTRY_DESCRIPTION__: ready — %s / DLL build %s',
-                        backend, build))
+    -- Success is progress output — gate behind DEBUG so a clean load stays
+    -- quiet and the close-tail below can dismiss the Lua Engine.
+    if _G.DISCRETE_DEBUG == 1 then
+      print(string.format('[Discrete] __ENTRY_DESCRIPTION__: ready — %s / DLL build %s',
+                          backend, build))
+    end
   else
+    -- Handshake failed to parse — an error: flag it (keeps the window up) and
+    -- always print so the user sees it.
+    _G.DISCRETE_HAD_ERROR = true
     print('[Discrete] __ENTRY_DESCRIPTION__: bridge loaded, handshake response unparseable: '
           .. tostring(resp))
   end
 else
+  -- Pipe unreachable — an error: flag it + always print.
+  _G.DISCRETE_HAD_ERROR = true
   print('[Discrete] __ENTRY_DESCRIPTION__: lua loaded, but DLL pipe unreachable.')
   print('[Discrete]   If you ran this before DiscreteUI injected the DLL,')
   print('[Discrete]   wait a moment then disable + re-enable this entry.')
@@ -207,9 +223,17 @@ end
 
 _G.discrete_bridgeLoaded = true
 
+-- Close CE's Lua Engine on a clean run so it stops covering CE (docs/lua-logging.md).
+if _G.DISCRETE_DEBUG ~= 1 and not _G.DISCRETE_HAD_ERROR then
+  synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)
+end
+
 [DISABLE]
 {$lua}
 if syntaxcheck then return end
+-- Reset the shared did-anything-fail flag so the close-tail below judges THIS
+-- run (docs/lua-logging.md).
+_G.DISCRETE_HAD_ERROR = false
 -- Teardown: stop the DLL's pipe server + remove its runtime_invoke hook
 -- so it goes dormant. The DLL stays MAPPED — this is intentional, and the
 -- only teardown we offer: a full FreeLibrary unload of a DLL that hooks
@@ -221,9 +245,19 @@ if syntaxcheck then return end
 if type(discreteShutdown) == 'function' then
   pcall(discreteShutdown)
 else
+  -- Missing discreteShutdown is a failure worth surfacing: flag it + print.
+  _G.DISCRETE_HAD_ERROR = true
   print('[Discrete] __ENTRY_DESCRIPTION__: discreteShutdown() unavailable — DLL left running')
 end
 _G.discrete_bridgeLoaded = nil
-print('[Discrete] __ENTRY_DESCRIPTION__: teardown — pipe stopped, ready for reload')
+-- Teardown progress is gated so a clean disable stays quiet.
+if _G.DISCRETE_DEBUG == 1 then
+  print('[Discrete] __ENTRY_DESCRIPTION__: teardown — pipe stopped, ready for reload')
+end
+
+-- Close CE's Lua Engine on a clean run so it stops covering CE (docs/lua-logging.md).
+if _G.DISCRETE_DEBUG ~= 1 and not _G.DISCRETE_HAD_ERROR then
+  synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)
+end
 ";
 }

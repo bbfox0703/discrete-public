@@ -204,6 +204,26 @@ public class CallMethodAaScriptGeneratorTests
     }
 
     [Fact]
+    public void Build_DoesNotCloseLuaEngine_SoTheCallResultStaysVisible()
+    {
+        // docs/lua-logging.md: a call-method AA is the deliberate exception to the
+        // close-on-clean-run rule. Its whole purpose is to SHOW the result, and
+        // prettyPrint always prints (unity_invoke.lua), so — unlike the quiet
+        // register / address-lookup generators — this generator emits NO flag
+        // reset and NO close-tail; CE's Lua Engine stays open with the result.
+        string s = CallMethodAaScriptGenerator.Build(
+            "mscorlib", "System", "Math", "Abs",
+            signatureMatch: null, instanceAddress: null, args: NoArgs());
+
+        Assert.Contains("prettyPrint(r)", s);
+        // No close-tail: the window is left open on this action.
+        Assert.DoesNotContain("getLuaEngine()", s);
+        Assert.DoesNotContain("e.Close()", s);
+        // No flag reset either (nothing here consumes it).
+        Assert.DoesNotContain("_G.DISCRETE_HAD_ERROR = false", s);
+    }
+
+    [Fact]
     public void Build_HasNo_AdjacentSingleQuotes_LuaSyntaxTrap()
     {
         // See BootstrapAaScriptGeneratorTests for full story. Bug
