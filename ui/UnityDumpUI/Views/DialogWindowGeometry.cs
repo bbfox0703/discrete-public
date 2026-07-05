@@ -60,6 +60,10 @@ public sealed class DialogWindowGeometry
     private DialogWindowGeometry(Window window)
     {
         _window = window ?? throw new ArgumentNullException(nameof(window));
+        // Close the IME whenever focus enters a text field in this dialog. Every
+        // dialog funnels through this Attach, so wiring it here (rather than in
+        // each dialog ctor) covers all of them from one place. See ImeSoftDisable.
+        ImeSoftDisable.Attach(window);
         // Position isn't an AvaloniaProperty in 12 — listen via the explicit event.
         _window.PositionChanged += OnPositionChanged;
         // Width/Height/WindowState are AvaloniaProperties — observe via PropertyChanged.
