@@ -296,6 +296,30 @@ The Inspector grid's Name/Type/Value floors were trimmed (220/160/320 →
 All windows share an icon (`avares://DiscreteUI/Assets/MainIcon.ico`)
 and the Inter font set up in `App.axaml`.
 
+### IME soft-disable on text-field focus
+
+Every input field in the app takes ASCII (hex addresses, AOB patterns,
+numbers, class / field / method names, signatures, file paths), so a CJK IME
+left in composition mode only gets in the way. `Views/ImeSoftDisable.cs` closes
+the Windows IME's open status whenever focus lands on a `TextBox`, dropping it
+out of composition so keystrokes flow through as direct alphanumeric input.
+
+- **Soft / one-directional**: we never force the IME off at the OS level and
+  never re-open it on focus-out. A user who wants CJK input flips it back on
+  manually (Win+Space).
+- **One handler per window root**: a bubble `InputElement.GotFocusEvent`
+  handler with `handledEventsToo` (so it fires even when a child marks the
+  event handled) beats wiring 170+ controls individually. The single `TextBox`
+  check also covers `AutoCompleteBox` / `NumericUpDown`, which route focus to an
+  inner `TextBox`.
+- **Wiring**: `ImeSoftDisable.Attach(window)` is called once per top-level
+  window — from `DialogWindowGeometry`'s ctor (every dialog funnels through it)
+  and directly from `MainWindow`'s ctor (it manages its own geometry). Any new
+  top-level `Window` must add one of those two, or it silently keeps the IME on.
+- The IME close is deferred one Background dispatcher tick so it lands *after*
+  Avalonia's own Win32 IME association for the same focus event. Ported from
+  UE5CEDumper's platform-service IME guard.
+
 > **Layout principle (codified 2026-06-05):** "config/action → window;
 > result/analysis → on the tab with max space." Set-once configuration and
 > occasional actions (capture setup, method invoke, settings) belong in

@@ -78,6 +78,12 @@ public partial class MainWindow : Window
         // concurrent maximize in the same Win32 message doesn't poison it.
         PositionChanged += OnWindowPositionChanged;
         PropertyChanged += OnWindowPropertyChanged;
+        // Close the IME whenever focus enters a text field, app-wide. Every input
+        // field takes ASCII (hex addresses, AOB patterns, numbers, class / field
+        // names, file paths), so a CJK IME left in composition mode only gets in
+        // the way. Dialogs get this via DialogWindowGeometry; the main window
+        // wires it here since it manages its own geometry. See ImeSoftDisable.
+        ImeSoftDisable.Attach(this);
         // Block a still-queued Background restore re-apply from touching the
         // window after it has closed (the posted lambda reads _closed first).
         Closed += (_, _) => _closed = true;
