@@ -10,7 +10,8 @@
         Icon="avares://DiscreteUI/Assets/MainIcon.ico"
         Title="{StaticResource Deploy.Title}">
   <!-- UE5CEDumper-style proxy deploy panel.
-         Top toolbar  : filter + showUnsupported + Refresh + select-all/none/invert
+         Top toolbar  : filter + show-32bit-Mono / show-unsupported (two
+                        independent gates) + Refresh + select-all/none/invert
                         + default-kind radios.
          Middle       : multi-select DataGrid of detected Steam Unity games.
          Bottom action: Install / Uninstall / UpdateAll + summary + last-op msg.
@@ -43,9 +44,15 @@
                    IsChecked="{Binding DefaultKindWinmm, Mode=TwoWay}"
                    VerticalAlignment="Center" Margin="6,0,0,0" />
       <Border Width="1" Background="#444" Margin="4,2" />
+      <!-- Two independent visibility gates. 32-bit Mono is a supported
+           target, so its toggle is ON by default; unsupported rows
+           (x86 IL2CPP / unknown backend / ARM64) stay hidden until asked. -->
+      <CheckBox Content="{StaticResource Deploy.Show32BitMono}"
+                IsChecked="{Binding Show32BitMono, Mode=TwoWay}"
+                VerticalAlignment="Center" />
       <CheckBox Content="{StaticResource Deploy.ShowUnsupported}"
                 IsChecked="{Binding ShowUnsupported, Mode=TwoWay}"
-                VerticalAlignment="Center" />
+                VerticalAlignment="Center" Margin="6,0,0,0" />
     </StackPanel>
 
     <!-- Filter row -->

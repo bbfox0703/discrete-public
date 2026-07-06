@@ -28,4 +28,20 @@ public class UnityGameSupportTests
     {
         Assert.Equal(expected, Make(backend, bitness).IsSupported);
     }
+
+    // Is32BitMono gates the "Show 32-bit Mono" toggle (on by default) in the
+    // Proxy Deploy filter. Only x86 Mono qualifies — it must NOT overlap the
+    // "Show unsupported" set, so x86 IL2CPP stays false here.
+    [Theory]
+    [InlineData(UnityBackend.Mono,   ExeBitness.X86, true)]    // the one supported 32-bit case
+    [InlineData(UnityBackend.IL2CPP, ExeBitness.X86, false)]   // unsupported → "Show unsupported"
+    [InlineData(UnityBackend.Mono,   ExeBitness.X64, false)]   // 64-bit, not gated
+    [InlineData(UnityBackend.IL2CPP, ExeBitness.X64, false)]
+    [InlineData(UnityBackend.None,   ExeBitness.X86, false)]
+    [InlineData(UnityBackend.Mono,   ExeBitness.Unknown, false)]
+    public void Is32BitMono_OnlyTrueForX86Mono(
+        UnityBackend backend, ExeBitness bitness, bool expected)
+    {
+        Assert.Equal(expected, Make(backend, bitness).Is32BitMono);
+    }
 }
