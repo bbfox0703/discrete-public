@@ -157,7 +157,7 @@ Phase 12c shipped a dedicated **Proxy Deploy** window — open via
 
 ```
 ┌─ Proxy DLL Deploy ──────────────────────────────────────────────┐
-│ [filter…] [Show 32-bit]  [↻ Rescan]                             │
+│ [filter…] [☑ Show 32-bit Mono] [☐ Show unsupported] [↻ Rescan]  │
 │                                                                 │
 │ When installing: ⦿ version  ○ winmm                             │
 │ [Select all] [Unselect all] [Invert]                            │
@@ -198,9 +198,18 @@ the OS knows about. Each game row reports:
 - **Status** — `Available`, `Deployed (build #N)`, `Mismatch (file
   missing)`, `Unsupported (32-bit)`, etc.
 
-Unsupported rows (x86 IL2CPP / unknown backend) are hidden by default;
-toggle "Show unsupported" to surface them. Bulk operations skip them.
-**x86 Mono is supported (Phase 12e)** and shows without the toggle.
+Two independent visibility toggles (the old combined "Show 32-bit /
+unsupported" checkbox split in two):
+
+- **"Show 32-bit Mono"** — **on by default**. x86 Mono is a supported target
+  (Phase 12e), so its rows list like any x64 game; uncheck only to hide them
+  in a mixed library.
+- **"Show unsupported"** — off by default. Surfaces truly-unsupported rows
+  (x86 IL2CPP — no 32-bit IL2CPP backend — unknown backend, ARM64 / corrupt
+  PE). Bulk operations skip them.
+
+32-bit Mono is the only supported 32-bit case, so the two toggles never
+gate the same row.
 
 ## Manual deploy (no UI)
 

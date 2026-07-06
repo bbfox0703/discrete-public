@@ -78,6 +78,7 @@ public sealed partial class ProxyGameRow : ObservableObject
     public string BitnessLabel => Game.BitnessLabel;
     public string ProxyLabel   => Game.ProxyLabel;
     public bool   IsSupported  => Game.IsSupported;
+    public bool   Is32BitMono  => Game.Is32BitMono;
 
     public string DeployStatusLabel => DeployStatus switch
     {

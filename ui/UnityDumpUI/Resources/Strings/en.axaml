@@ -279,7 +279,8 @@
        multi-select bulk panel). -->
   <sys:String x:Key="Deploy.Title">Proxy DLL Deploy</sys:String>
   <sys:String x:Key="Deploy.FilterWatermark">filter (name or path)…</sys:String>
-  <sys:String x:Key="Deploy.ShowUnsupported">Show 32-bit / unsupported</sys:String>
+  <sys:String x:Key="Deploy.Show32BitMono">Show 32-bit Mono</sys:String>
+  <sys:String x:Key="Deploy.ShowUnsupported">Show unsupported</sys:String>
   <sys:String x:Key="Deploy.Refresh">↻ Rescan</sys:String>
   <sys:String x:Key="Deploy.SelectAll">Select all</sys:String>
   <sys:String x:Key="Deploy.UnselectAll">Unselect all</sys:String>

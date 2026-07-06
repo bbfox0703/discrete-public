@@ -45,9 +45,19 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     [ObservableProperty] private string _filter = string.Empty;
     partial void OnFilterChanged(string value) => Refilter();
 
-    /// <summary>Toggle on to surface unsupported rows (x86 IL2CPP / Unknown
-    /// backend). Off by default — bulk ops can't act on them anyway. Mono x86
-    /// is now supported, so those rows show without this toggle.</summary>
+    /// <summary>Show the supported 32-bit Mono rows. On by default — x86 Mono
+    /// is a first-class supported target (x86 backend + proxy ship in
+    /// dist/x86/), so it lists like any x64 game. Uncheck to hide 32-bit Mono
+    /// when working a mixed library. Split out of the old combined
+    /// "32-bit / unsupported" toggle so the two concerns are independent.</summary>
+    [ObservableProperty] private bool _show32BitMono = true;
+    partial void OnShow32BitMonoChanged(bool value) => Refilter();
+
+    /// <summary>Toggle on to surface truly-unsupported rows (x86 IL2CPP —
+    /// no 32-bit IL2CPP backend — Unknown backend, ARM64 / corrupt PE). Off
+    /// by default: bulk ops can't act on them anyway. Distinct from
+    /// <see cref="Show32BitMono"/>, which gates the SUPPORTED 32-bit Mono
+    /// rows.</summary>
     [ObservableProperty] private bool _showUnsupported;
     partial void OnShowUnsupportedChanged(bool value) => Refilter();
 
@@ -242,7 +252,19 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         bool unfiltered = f.Length == 0;
         foreach (ProxyGameRow r in Games)
         {
-            if (!ShowUnsupported && !r.IsSupported) continue;
+            // Two independent visibility gates:
+            //   • supported 32-bit Mono → "Show 32-bit Mono" (on by default)
+            //   • truly-unsupported     → "Show unsupported"  (off by default)
+            // 32-bit Mono is the only supported 32-bit case, so the two sets
+            // never overlap.
+            if (r.Is32BitMono)
+            {
+                if (!Show32BitMono) continue;
+            }
+            else if (!r.IsSupported && !ShowUnsupported)
+            {
+                continue;
+            }
             if (unfiltered ||
                 r.DisplayName.Contains(f, StringComparison.OrdinalIgnoreCase) ||
                 r.ExePath.Contains(f, StringComparison.OrdinalIgnoreCase))

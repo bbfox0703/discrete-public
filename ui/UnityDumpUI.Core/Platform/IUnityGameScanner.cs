@@ -107,6 +107,14 @@ public sealed class UnityGameEntry
         Backend != UnityBackend.None &&
         (Bitness == ExeBitness.X64 ||
          (Bitness == ExeBitness.X86 && Backend == UnityBackend.Mono));
+
+    /// <summary>The one supported 32-bit case — x86 Mono. (There is no
+    /// 32-bit IL2CPP backend, so every other 32-bit target is unsupported.)
+    /// Surfaced so the Proxy Deploy filter can gate these rows behind their
+    /// own "Show 32-bit Mono" toggle — on by default — separately from the
+    /// truly-unsupported rows gated by "Show unsupported".</summary>
+    public bool Is32BitMono =>
+        Backend == UnityBackend.Mono && Bitness == ExeBitness.X86;
 }
 
 public interface IUnityGameScanner
