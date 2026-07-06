@@ -28,18 +28,22 @@
   <ItemGroup>
     <!-- xUnit v3 (per project decision) -->
     <PackageReference Include="Avalonia.Angle.Windows.Natives" Version="2.1.27548.20260419" />
-    <PackageReference Include="HarfBuzzSharp" Version="8.3.1.5" />
-    <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" Version="8.3.1.5" />
-    <PackageReference Include="HarfBuzzSharp.NativeAssets.WebAssembly" Version="8.3.1.5" />
+    <PackageReference Include="HarfBuzzSharp" Version="14.2.0" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" Version="14.2.0" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.macOS" Version="14.2.0" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.WebAssembly" Version="14.2.0" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Win32" Version="14.2.0" />
     <PackageReference Include="MicroCom.Runtime" Version="0.11.6" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.9" />
     <!-- Newtonsoft.Json kept explicit — bumped to a non-vulnerable
          version above the transitive default. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
-    <PackageReference Include="SkiaSharp" Version="3.119.4" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.4" />
-    <PackageReference Include="SkiaSharp.NativeAssets.WebAssembly" Version="3.119.4" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.4" />
+    <PackageReference Include="SkiaSharp" Version="4.148.0" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="4.148.0" />
+    <PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="4.148.0" />
+    <PackageReference Include="SkiaSharp.NativeAssets.WebAssembly" Version="4.148.0" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="4.148.0" />
+    <PackageReference Include="SourceGear.sqlite3" Version="3.53.3" />
     <!-- ===================================================================
          DO **NOT** add explicit Microsoft.Testing.* PackageReferences here.
          (A `_FailOnExplicitMtpPin` guard target below hard-fails the build if
@@ -70,7 +74,7 @@
          =================================================================== -->
     <PackageReference Include="xunit.v3" Version="3.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.*" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -92,8 +96,6 @@
        catches MTP packages we did not enumerate (e.g. CrashDump). Delete this
        target only when moving to an mtp-v2-capable xunit.v3. -->
   <Target Name="_FailOnExplicitMtpPin" BeforeTargets="CollectPackageReferences">
-    <Error
-      Condition="'%(PackageReference.Identity)' != '' and $([System.String]::Copy('%(PackageReference.Identity)').StartsWith('Microsoft.Testing.'))"
-      Text="Do NOT pin %(PackageReference.Identity) explicitly in UnityDumpUI.Tests.csproj. xunit.v3 3.2.2 is mtp-v1; an MTP 2.2.x runtime breaks it at run time (System.MissingMethodException on IOutputDevice.DisplayAsync -> 'Zero tests ran', exit -532462766). Remove the pin and let xunit.v3 resolve the transitive MTP 1.x version. See the package-list comment above + docs/lessons-learned.md (2026-06-11)." />
+    <Error Condition="'%(PackageReference.Identity)' != '' and $([System.String]::Copy('%(PackageReference.Identity)').StartsWith('Microsoft.Testing.'))" Text="Do NOT pin %(PackageReference.Identity) explicitly in UnityDumpUI.Tests.csproj. xunit.v3 3.2.2 is mtp-v1; an MTP 2.2.x runtime breaks it at run time (System.MissingMethodException on IOutputDevice.DisplayAsync -&gt; 'Zero tests ran', exit -532462766). Remove the pin and let xunit.v3 resolve the transitive MTP 1.x version. See the package-list comment above + docs/lessons-learned.md (2026-06-11)." />
   </Target>
 </Project>
