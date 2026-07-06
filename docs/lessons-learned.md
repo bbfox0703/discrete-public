@@ -719,6 +719,51 @@ Callers should check `IsHealthy` (exposed via `getDispatcherStats` /
 the `main_thread.is_healthy` handshake field) before routing through
 the queue, and fall back to the worker-thread path when stale.
 
+### Phase 20-MT addendum — IL2CPP strips `Application.set_runInBackground`, so the "Enable runInBackground" banner can't help on some targets
+
+**Symptom**: on **R-Type Dimensions EX** (IL2CPP, Unity 2018.1.9f2,
+metadata v24) the connection-bar "Enable runInBackground" banner (and
+the Scene tab's equivalent button) fails every click with
+`set_runInBackground failed across [UnityEngine.CoreModule, UnityEngine].
+last error: method_not_found`. The game keeps pausing in background; the
+user clicked Enable 4× and got the generic "try again" each time.
+
+**Root cause**: IL2CPP managed-code stripping removed **both**
+`UnityEngine.Application.set_runInBackground` and `get_runInBackground`
+from the build. Verified offline:
+`metadata-cli method <global-metadata.dat> UnityEngine Application
+set_runInBackground` → *"no method named 'set_runInBackground' (type has
+15 methods total)"*; zero `runInBackground` references in the entire
+12 MB `global-metadata.dat`. The 15 surviving `Application` methods are
+only those the game's own code calls (`Quit`, `get_dataPath`,
+`set_targetFrameRate`, …). A game that deliberately pauses in background
+never sets `runInBackground` itself → the accessor is unreferenced →
+stripped. This is **not** a Discrete resolution/signature bug:
+`il2cpp_type_get_name` renders the bool param as `System.Boolean`, so the
+`(System.Boolean)` filter would match if the method existed, and the
+class IS resolved (a class/image miss returns a *different* error, not
+`method_not_found`). Mono targets (e.g. 活俠傳) keep the setter, so the
+same banner call logs `ok` there.
+
+**Fix (UX)**: `SceneEnumerator.SetApplicationRunInBackgroundAsync` now
+flags `method_not_found` as `SetRunInBackgroundResult.SetterUnavailable`.
+Both surfaces (the `MainWindowViewModel` banner and the
+`SceneExplorerViewModel` button) detect it, show the shared
+`SetterStrippedHint` workaround ("build stripped it — keep the game window
+focused, or use Focus delay and alt-tab back"), and **grey out the
+button** (`RunInBackgroundUnavailable` gates the command's `CanExecute`)
+so the user stops re-clicking a doomed action. Reset on each Connect /
+Disconnect. The genuine fix for keeping the loop running on such a target
+is writing the **native** runInBackground flag directly (not the stripped
+managed accessor) — not yet implemented.
+
+**Note on what runInBackground would even buy**: R-Type's own pause path
+is `LibPbx.PRenderDevice2D.OnApplicationPause(bool)` +
+`RType.ArcadeScene.CheckShowingPause`. With `runInBackground` permanently
+false, Unity 2018 also suspends the whole player loop on focus loss — so
+un-suspending the loop (native flag) is the master switch; the game's own
+pause overlay is secondary.
+
 ### Phase 28b IL2CPP — `static_fields` is runtime-heap-allocated so RIP scan cannot find references
 
 **Symptom**: `findFieldReferences` on an IL2CPP static field that

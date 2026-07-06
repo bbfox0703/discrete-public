@@ -722,6 +722,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [NotifyCanExecuteChangedFor(nameof(DismissDispatcherBannerCommand))]
     private bool _dispatcherBannerBusy;
 
+    /// <summary>Set once the Enable call comes back <c>method_not_found</c> —
+    /// the target stripped <c>Application.set_runInBackground</c> (IL2CPP), so
+    /// the banner can never succeed here. Greys out the Enable button (the
+    /// call is doomed) while the banner stays visible with the explanatory
+    /// message until the user dismisses it. Reset each Connect.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundFromBannerCommand))]
+    private bool _runInBackgroundUnavailable;
+
     /// <summary>One-shot probe kicked from the Connect happy-path. Reads
     /// dispatcher stats with a brief delay (gives Unity a few frames to
     /// tick after the engine pause that frequently follows window
@@ -733,6 +742,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         try
         {
+            // Fresh Connect — a previous session may have flagged the setter
+            // as stripped for a different game; re-enable the button so this
+            // target gets its own shot.
+            RunInBackgroundUnavailable = false;
+
             // Give Unity a moment to tick at least once after Connect. The
             // pipe handshake happens on a worker thread; the engine may
             // still be focused on DiscreteUI's connect dialog at the exact
@@ -796,6 +810,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
                     $"runInBackground enabled via banner ({r.ResolvedAssembly})");
             }
+            else if (r.SetterUnavailable)
+            {
+                // Stripped setter — the call is doomed on this build. Show the
+                // workaround and grey out the button instead of the generic
+                // "try again" that had the user re-clicking it repeatedly.
+                DispatcherBannerMessage    = SetRunInBackgroundResult.SetterStrippedHint;
+                RunInBackgroundUnavailable = true;
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
+                    "runInBackground unavailable on this target — Application.set_runInBackground "
+                    + "stripped from the build (method_not_found)");
+            }
             else
             {
                 DispatcherBannerMessage =
@@ -817,7 +842,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    private bool CanEnableRunInBackgroundFromBanner() => !DispatcherBannerBusy;
+    private bool CanEnableRunInBackgroundFromBanner() =>
+        !DispatcherBannerBusy && !RunInBackgroundUnavailable;
 
     [RelayCommand(CanExecute = nameof(CanDismissDispatcherBanner))]
     private void DismissDispatcherBanner() => DispatcherBannerVisible = false;
@@ -1124,6 +1150,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             MetadataWarning = null;
             DispatcherBannerVisible = false;
             DispatcherBannerMessage = string.Empty;
+            RunInBackgroundUnavailable = false;
+            Scene.RunInBackgroundUnavailable = false;
 
             // Phase 8: stale data is misleading — wipe the browser too.
             Browser.Assemblies.Clear();
