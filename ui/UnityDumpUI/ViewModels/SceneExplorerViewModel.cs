@@ -93,6 +93,18 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
     private bool _runInBackgroundEnabled;
 
+    /// <summary>
+    /// Set once <see cref="EnableRunInBackgroundAsync"/> comes back
+    /// <c>method_not_found</c> — the target stripped
+    /// <c>Application.set_runInBackground</c> (IL2CPP code stripping), so the
+    /// toggle can never succeed on this game. Greys out the Enable button; the
+    /// status/error explains the focus workaround. Reset by
+    /// <see cref="MainWindowViewModel"/> on disconnect.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
+    private bool _runInBackgroundUnavailable;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
     [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
@@ -268,6 +280,17 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
                 _logger.Write(Constants.LogCategoryView,
                     $"SceneExplorer: runInBackground enabled via {r.ResolvedAssembly}");
             }
+            else if (r.SetterUnavailable)
+            {
+                // Stripped setter — doomed on this build. Grey out the button
+                // and point the user at the focus workaround instead.
+                RunInBackgroundUnavailable = true;
+                ErrorMessage  = SetRunInBackgroundResult.SetterStrippedHint;
+                StatusMessage = "runInBackground not available on this build.";
+                _logger.Write(Constants.LogCategoryView,
+                    "SceneExplorer: runInBackground unavailable — Application.set_runInBackground "
+                    + "stripped from the build (method_not_found)");
+            }
             else
             {
                 ErrorMessage = $"Failed to enable runInBackground: {r.Error}";
@@ -288,7 +311,8 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
         }
     }
 
-    private bool CanEnableRunInBackground() => !IsBusy && !RunInBackgroundEnabled;
+    private bool CanEnableRunInBackground() =>
+        !IsBusy && !RunInBackgroundEnabled && !RunInBackgroundUnavailable;
 
     private bool CanSearch() => !IsBusy;
 

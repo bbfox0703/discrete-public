@@ -313,6 +313,7 @@ public sealed class SceneEnumerator
         }
 
         string? lastErr = null;
+        bool sawMethodNotFound = false;
         foreach (string asm in attempts)
         {
             var r = await _backend.CallMethodAsync(
@@ -331,12 +332,27 @@ public sealed class SceneEnumerator
                 return SetRunInBackgroundResult.Success(asm);
             }
             lastErr = r.Exception ?? r.Error ?? "unknown failure";
+
+            // "method_not_found" means the Application class WAS resolved (a
+            // class/image miss returns a different DLL error) but has no
+            // set_runInBackground method. On IL2CPP the managed accessor is
+            // stripped whenever the game never sets runInBackground itself —
+            // e.g. R-Type Dimensions EX, where both set_/get_runInBackground
+            // are absent from the whole build (verified offline via
+            // metadata-cli). The call can never succeed on such a target, so
+            // callers should stop offering it rather than inviting a doomed
+            // retry. (Mono targets keep the setter, so this stays false there.)
+            if (string.Equals(r.Error, "method_not_found", StringComparison.Ordinal))
+                sawMethodNotFound = true;
         }
 
         _logger.Write(Constants.LogCategoryView,
             $"SceneEnumerator: set_runInBackground failed across "
-            + $"[{string.Join(", ", attempts)}]. last error: {lastErr ?? "<none>"}.");
-        return SetRunInBackgroundResult.Failure(lastErr ?? "no UnityEngine assembly responded");
+            + $"[{string.Join(", ", attempts)}]. last error: {lastErr ?? "<none>"}."
+            + (sawMethodNotFound ? " (setter stripped from this build — unavailable)" : string.Empty));
+        return SetRunInBackgroundResult.Failure(
+            lastErr ?? "no UnityEngine assembly responded",
+            setterUnavailable: sawMethodNotFound);
     }
 
     /// <summary>
@@ -563,14 +579,34 @@ public sealed class SetRunInBackgroundResult
     public string? ResolvedAssembly { get; }
     public string? Error            { get; }
 
-    private SetRunInBackgroundResult(string? asm, string? error)
+    /// <summary>True when the failure was <c>method_not_found</c> — i.e. the
+    /// target's <c>UnityEngine.Application</c> has no <c>set_runInBackground</c>
+    /// (IL2CPP stripped the managed accessor because the game never sets it).
+    /// The call can never succeed on this build, so UI should surface the
+    /// <see cref="SetterStrippedHint"/> workaround and stop offering the
+    /// button rather than inviting another doomed retry.</summary>
+    public bool SetterUnavailable { get; }
+
+    private SetRunInBackgroundResult(string? asm, string? error, bool setterUnavailable)
     {
-        ResolvedAssembly = asm;
-        Error            = error;
+        ResolvedAssembly  = asm;
+        Error             = error;
+        SetterUnavailable = setterUnavailable;
     }
 
     public bool Ok => Error is null;
 
-    internal static SetRunInBackgroundResult Success(string asm) => new(asm, null);
-    internal static SetRunInBackgroundResult Failure(string err) => new(null, err);
+    /// <summary>Shared, target-agnostic guidance shown when the managed
+    /// <c>Application.set_runInBackground</c> is stripped from the build so it
+    /// can't be toggled via a managed call. Surfaced by both the connection-bar
+    /// banner and the Scene tab button so the two stay in sync.</summary>
+    public const string SetterStrippedHint =
+        "This game's build stripped Application.runInBackground (IL2CPP code "
+        + "stripping), so it can't be toggled from here. Keep the game window "
+        + "focused, or set Focus delay (s) and alt-tab back to the game during "
+        + "the countdown.";
+
+    internal static SetRunInBackgroundResult Success(string asm) => new(asm, null, false);
+    internal static SetRunInBackgroundResult Failure(string err, bool setterUnavailable = false)
+        => new(null, err, setterUnavailable);
 }
