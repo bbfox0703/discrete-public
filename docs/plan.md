@@ -62,6 +62,12 @@
 - [ ] **29h live-smoke** — re-inject build #739,實機 re-run find instances 驗證 metadata-arena false-positive 修正。
 - [ ] **29f-5 live-smoke**(部分已驗)— 活俠傳 `GameStat._statAdditionData`(x86 targeted)+ x64 blanket smoke。
 
+### 🧭 Teleport line — 詳見 [teleport.md](teleport.md)
+- [x] **Auto-detect player wave A** — ✅ **實作完成(2026-07-07,UI/Core-only,build #1263,886 UI tests green、待 live-smoke)**。Teleport target 手動貼位址是採用阻礙(使用者不可能知道哪個 instance 是 player)。新 `PlayerLocator`(Core,零 DLL 改動,SceneEnumerator 同型)多訊號候選評分:A 主相機錨點+parent chain(`Camera.get_main` 驗證存活)、B `FindWithTag("Player")` 探測(IL2CPP 常被 strip → 錯誤即略過;Mono 必有)、C CharacterController 列舉(PhysicsModule Type + FindObjectsByType 三段 fallback)、D `GameObject.Find` 常見名清單、E user-class 名稱過濾 + `findInstances(aliveOnly,sane)`。同 Transform 跨訊號家族分數相加、家族內取最大(別名不重複計分)+ 相機距離加分;Teleport tab「Auto-detect」→ 排名清單(Score/Name/Distance/Sources)→ Use 一鍵設 target(走既有 Set Target 路徑 revalidate);dispatcher drain-timeout 即中止並回 focus 提示。16 新測試(`PlayerLocatorTests`:filter/merge/五訊號 wire + strip 降級 + drain-timeout abort)。**待 live-smoke**:Mono + IL2CPP 實機各跑一次 Auto-detect,驗 top 候選確為 player、Use→Refresh→移動位置有變。設計/成本/風險見 [teleport.md](teleport.md) auto-detect 節。
+- [ ] **Auto-detect wave B** — 移動相關性取樣(Δt 兩次取樣,跟著相機動的就是 player;對混淆 build 免疫)、Cinemachine `Follow` target、相機 follow-script Transform 欄位反查。
+- [ ] **One-click "Send to Teleport" handoff**(Inspector/Scene 右鍵)— 與 auto-detect 互補的手動路徑改善。
+- [ ] Teleport wave 1 其餘 v2 項目(cursor raycast、Camera POV、velocity settle、scene-name guard、marker persistence、hotkey rebinding)— 見 [teleport.md](teleport.md) v2 backlog。
+
 ### 🌉 CE bridge / inspector(2026-06-01 批次的殘留選配)
 - [ ] **String non-text 偵測殘留邊角** — `decodeField` 用「嵌入 NUL / ≥25% 控制字元」heuristic 擋掉非字串指標(CJK 安全)。若某非字串指標剛好指向「全 ≥0x20 可印碼位、零 NUL」區域仍可能漏判(極少見)。**定論修法**:讀 String 物件 header 的 class 指標、驗證為 `System.String`(需在共用 `decodeField` 分 backend,較重)。目前 heuristic 已涵蓋實測 case。
 - [x] **`NavigateDisassembler` 已接線**(2026-06-04,Phase 28e + 18e)— FieldReferencesWindow 右鍵「Go to method head in CE」(`address`)+「Go to access address in CE」(`hitAddress`)兩命令(共用 `NavigateInCeAsync`,失敗回 false → 設 ErrorMessage;Mono 兩位址 null → CanExecute 灰掉);MethodOverloadsWindow 右鍵「Go to method address in CE」(逐 overload `Address`,Mono=JIT 後 / IL2CPP=AOT)。皆走 `AobMakerBridge.NavigateDisassemblerAsync` → CE disassembler。
