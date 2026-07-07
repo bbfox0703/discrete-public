@@ -115,3 +115,32 @@ leaf = `{ownerObject, fieldOffset, width, bytes/value}`。matcher 是純 SDR;每
 discrete **無 C++ 測試框架**(不像 UE5 有 `dll_helpers_test`)。SDR 演算法正確性由 C# 雙生
 `GroupMatchTests` 覆蓋(同演算法),C++ matcher 由 DLL build + live-smoke 驗證 —— 對齊
 discrete 既有「xUnit + live-smoke」慣例。
+
+## 8. Fix log — wide-probe cross-field false match(2026-07-07)
+
+**症狀**:aggregate 模式 group scan 找 `20,20,26,20`,某些列(StoryDemoScene /
+MangaKomaPosition)slot #2(值 26)卻顯示 `20`,四個 slot 全是 value-20 的 array-element
+leaf。
+
+**根因(兩個互相依賴的 bug,缺一都無法修好那幾列)**:
+1. **Wide-probe 越界比對** — aggregate `"numeric (no 1-byte)"` 展開含 **Float+Double**。
+   `ScanChunk<double>` 從欄位位址讀 8 bytes,`MatchExactFloat`(±0.5)可用「窄欄位(值 20)
+   ++ 相鄰欄位 bytes」湊出落在 `[25.5,26.5]` 的 double → value-26 probe 命中一個實際存 20 的
+   窄欄位位址。leaf 以 **raw addr 去重、prevValue first-hit-wins**:slot-0 的窄 value-20
+   hit 先建 leaf(prevValue=20),slot-2 的 Double value-26 hit 同址重用該 leaf 並掛進
+   `slotLeaves[2]`,SDR 忠實地把這個 value-20 leaf 當 slot #2 代表 → 顯示 20。
+2. **非陣列物件被誤判為陣列** — Mono/IL2CPP `class_get_element_class` 對「非陣列」class
+   回傳 **class 自身**(非 null)。原本只用 `elemClass != nullptr` 當陣列判斷 → 每個普通物件
+   都走 array-element 分支,欄位名變 `[N]`、`field.size=elemSize=pointerSize(8)`,並讓
+   `field.present` 恆真而繞過 group scan 的 `droppedNoField` 剪枝。因為 `field.size` 被灌成
+   8,單靠 #1 的越界檢查(`vSize>fieldSize` = `8>8`)不會觸發 → 必須先修 #2 露出真實 4-byte
+   欄位大小。
+
+**修法**:
+- `MonoAddressFinder.cpp` / `IL2CPPAddressFinder.cpp`:array 分支加 `elemClass != k` guard
+  (對齊既有 IL2CPP `!= ce.klass` idiom)。
+- `ExportAPI.cpp` beginGroupScan Phase-3(Mono + IL2CPP):resolve 欄位後,
+  `if (lookup.field.size != 0 && vSize > lookup.field.size) { droppedOverrun++; continue; }`
+  —— 丟棄讀超出欄位儲存的 wide-probe 命中。log 加 `overrun=` 計數。
+- 殘留(未修,非本症狀):**窄 probe 命中寬欄位子片段**的鏡像 false-positive;它顯示的是子片段
+  值而非錯誤的 20,不產生本症狀,故暫不處理。

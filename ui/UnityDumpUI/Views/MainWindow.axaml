@@ -602,6 +602,11 @@
                      VerticalAlignment="Center" Opacity="0.75" FontSize="11"
                      IsVisible="{Binding Browser.CopyCeXmlProgress, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                      ToolTip.Tip="Copy CE XML progress — live entry count while exporting, then the final line count." />
+          <Button Content="Cancel"
+                  VerticalAlignment="Center" Margin="4,0,0,0"
+                  IsVisible="{Binding Browser.IsExporting}"
+                  Command="{Binding Browser.CancelExportCommand}"
+                  ToolTip.Tip="Abort the in-progress Copy CE XML / Copy CE field export." />
           <ProgressBar IsIndeterminate="True"
                        IsVisible="{Binding Browser.IsLoadingDetail}"
                        Width="120" Height="4"
@@ -747,6 +752,11 @@
                            VerticalAlignment="Center" Opacity="0.75" FontSize="11"
                            IsVisible="{Binding Inspector.CopyCeXmlProgress, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                            ToolTip.Tip="Copy CE XML / field progress — live entry count while exporting, then the final line count." />
+                <Button Content="Cancel"
+                        VerticalAlignment="Center" Margin="4,0,0,0"
+                        IsVisible="{Binding Inspector.IsExporting}"
+                        Command="{Binding Inspector.CancelExportCommand}"
+                        ToolTip.Tip="Abort the in-progress Copy CE XML / Copy CE field export." />
                 <TextBlock Text="{StaticResource Inspector.LimitLabel}"
                            VerticalAlignment="Center" Opacity="0.7" Margin="8,0,0,0" />
                 <NumericUpDown Value="{Binding Inspector.InstanceLimit, Mode=TwoWay}"

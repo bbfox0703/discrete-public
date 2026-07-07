@@ -6165,7 +6165,7 @@ void RegisterCoreHandlers() {
 
         // Phase 3 — resolve each raw hit to (instance, field), tag with its slot.
         std::vector<GroupScanHit> hits;
-        std::size_t droppedNonManaged = 0, droppedNoField = 0, droppedNoise = 0;
+        std::size_t droppedNonManaged = 0, droppedNoField = 0, droppedNoise = 0, droppedOverrun = 0;
         for (std::size_t t = 0; t < rawPerTask.size(); ++t) {
             if (ScanCancel::IsCancelRequested()) break;
             const Memory::ValueDataType taskWidth = tasks[t].width;
@@ -6180,6 +6180,14 @@ void RegisterCoreHandlers() {
                 if (!lookup.found) { droppedNonManaged++; continue; }
                 if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
                 if (!lookup.field.present) { droppedNoField++; continue; }  // group leaves must be real fields
+                // Reject a WIDE probe that matched by reading PAST the resolved
+                // field's own storage — the value bytes came partly from the
+                // physically-adjacent field, so this hit does not mean the field
+                // holds the slot's value. Without this, a value-26 Double/Int64
+                // probe co-tags a genuine value-20 narrow field into a 26-slot
+                // (leaves are addr-keyed + first-hit-wins), and the SDR then
+                // renders the neighbour-crossed slot as the wrong value.
+                if (lookup.field.size != 0 && vSize > lookup.field.size) { droppedOverrun++; continue; }
                 GroupScanHit h;
                 h.instance    = lookup.instance;
                 h.addr        = addr;
@@ -6226,10 +6234,10 @@ void RegisterCoreHandlers() {
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "beginGroupScan(Mono) sess=%llu slots=%zu rawTotal=%zu hits=%zu cands=%zu shown=%zu non=%zu noField=%zu noise=%zu idx=%d bytes=%zu",
+                "beginGroupScan(Mono) sess=%llu slots=%zu rawTotal=%zu hits=%zu cands=%zu shown=%zu non=%zu noField=%zu noise=%zu overrun=%zu idx=%d bytes=%zu",
                 static_cast<unsigned long long>(sessionId), slotSpecs.size(), totalRaw,
                 hits.size(), totalCands, shown, droppedNonManaged, droppedNoField, droppedNoise,
-                revIndexOk ? 1 : 0, scannedBytesTotal);
+                droppedOverrun, revIndexOk ? 1 : 0, scannedBytesTotal);
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
@@ -9630,7 +9638,7 @@ void RegisterCoreHandlers() {
 
         // Phase 3 — resolve each raw hit to (instance, field), tag with its slot.
         std::vector<GroupScanHit> hits;
-        std::size_t droppedNonManaged = 0, droppedNoField = 0, droppedNoise = 0;
+        std::size_t droppedNonManaged = 0, droppedNoField = 0, droppedNoise = 0, droppedOverrun = 0;
         for (std::size_t t = 0; t < rawPerTask.size(); ++t) {
             if (ScanCancel::IsCancelRequested()) break;
             const Memory::ValueDataType taskWidth = tasks[t].width;
@@ -9647,6 +9655,9 @@ void RegisterCoreHandlers() {
                 if (!lookup.found) { droppedNonManaged++; continue; }
                 if (IsCompilerGeneratedClassName(lookup.className)) { droppedNoise++; continue; }
                 if (!lookup.field.present) { droppedNoField++; continue; }  // group leaves must be real fields
+                // Reject a WIDE probe that matched by reading PAST the resolved
+                // field's own storage (see the Mono handler for the rationale).
+                if (lookup.field.size != 0 && vSize > lookup.field.size) { droppedOverrun++; continue; }
                 GroupScanHit h;
                 h.instance    = lookup.instance;
                 h.addr        = addr;
@@ -9693,10 +9704,10 @@ void RegisterCoreHandlers() {
         {
             char line[256];
             std::snprintf(line, sizeof(line),
-                "beginGroupScan(IL2CPP) sess=%llu slots=%zu rawTotal=%zu hits=%zu cands=%zu shown=%zu non=%zu noField=%zu noise=%zu idx=%d bytes=%zu",
+                "beginGroupScan(IL2CPP) sess=%llu slots=%zu rawTotal=%zu hits=%zu cands=%zu shown=%zu non=%zu noField=%zu noise=%zu overrun=%zu idx=%d bytes=%zu",
                 static_cast<unsigned long long>(sessionId), slotSpecs.size(), totalRaw,
                 hits.size(), totalCands, shown, droppedNonManaged, droppedNoField, droppedNoise,
-                revIndexOk ? 1 : 0, scannedBytesTotal);
+                droppedOverrun, revIndexOk ? 1 : 0, scannedBytesTotal);
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
 
