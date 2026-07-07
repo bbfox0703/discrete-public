@@ -68,6 +68,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private CancellationTokenSource? _findCts;
     private CancellationTokenSource? _walkCts;
     private CancellationTokenSource? _autoRefreshCts;
+    private CancellationTokenSource? _exportCts;
     private Task?                    _autoRefreshLoop;
 
     // Cross-VM bulk lane: findInstances is a heap-scan bulk op. Null in
@@ -1496,6 +1497,19 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// feedback the (removed) class-level Copy CE XML used to show.</summary>
     [ObservableProperty] private string? _copyCeXmlProgress;
 
+    /// <summary>True while a Copy CE XML / Copy CE field export is running. Drives
+    /// the toolbar Cancel button's visibility and the <see cref="CancelExportCommand"/>
+    /// CanExecute so the user can abort a deep (multi-second) walk.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(CancelExportCommand))]
+    private bool _isExporting;
+
+    /// <summary>Abort the in-progress export. Cancels the shared export token; the
+    /// exporter's next pipe RPC throws OperationCanceledException and the command
+    /// surfaces "export cancelled".</summary>
+    [RelayCommand(CanExecute = nameof(IsExporting))]
+    private void CancelExport() => _exportCts?.Cancel();
+
     private static int CountLines(string s)
     {
         if (string.IsNullOrEmpty(s)) return 0;
@@ -1521,6 +1535,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
         string ns   = TargetNamespace ?? string.Empty;
         string name = TargetName!;
+
+        _exportCts?.Cancel();
+        _exportCts = new CancellationTokenSource();
+        CancellationToken ct = _exportCts.Token;
+        IsExporting = true;
         try
         {
             // Same assembly-resolution fallback as the expansion / node-copy
@@ -1532,7 +1551,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             foreach (string asm in candidates)
             {
                 GetClassInfoResult attempt = await _backend
-                    .GetClassInfoAsync(asm, ns, name, default).ConfigureAwait(true);
+                    .GetClassInfoAsync(asm, ns, name, ct).ConfigureAwait(true);
                 if (string.IsNullOrEmpty(attempt.Error)) { info = attempt; usedAssembly = asm; break; }
             }
             if (info is null)
@@ -1545,12 +1564,16 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderAsync(
                 SelectedInstance.Address, info, ancestors: null,
-                usedAssembly, options, _backend, default, progress)
+                usedAssembly, options, _backend, ct, progress)
                 .ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
             CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE XML instance {TargetLabel} @ {SelectedInstance.Address} ({xml.Length} bytes)");
+        }
+        catch (OperationCanceledException)
+        {
+            CopyCeXmlProgress = "export cancelled";
         }
         catch (Exception ex)
         {
@@ -1558,6 +1581,10 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             ErrorMessage = $"copy CE XML failed: {ex.Message}";
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE XML instance failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsExporting = false;
         }
     }
 
@@ -1589,6 +1616,10 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             nodes = new[] { SelectedNode };
         if (nodes.Count == 0) return;
 
+        _exportCts?.Cancel();
+        _exportCts = new CancellationTokenSource();
+        CancellationToken ct = _exportCts.Token;
+        IsExporting = true;
         try
         {
             ExportOptions options = ResolveExportOptions();
@@ -1605,7 +1636,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             CopyCeXmlProgress = "exporting…";
             var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
-                built, TargetAssembly, options, _backend, default, progress, rootAsOffset)
+                built, TargetAssembly, options, _backend, ct, progress, rootAsOffset)
                 .ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
             CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
@@ -1615,12 +1646,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE field node {summary} ({xml.Length} bytes, depth={options.DrilldownDepth}, relRoot={rootAsOffset})");
         }
+        catch (OperationCanceledException)
+        {
+            CopyCeXmlProgress = "export cancelled";
+        }
         catch (Exception ex)
         {
             CopyCeXmlProgress = "export failed";
             ErrorMessage = $"copy CE field failed: {ex.Message}";
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE field node failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsExporting = false;
         }
     }
 

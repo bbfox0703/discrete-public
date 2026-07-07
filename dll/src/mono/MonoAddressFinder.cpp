@@ -447,10 +447,19 @@ void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
     // Phase 27c — array element resolution. If klass is an array type (T[] /
     // List<T>'s _items), compute element index from the offset instead of
     // falling through to per-field resolution.
+    //
+    // GUARD: mono_class_get_element_class returns the class ITSELF for a
+    // NON-array class (element_class == klass), so `elemClass != nullptr` alone
+    // misclassifies EVERY plain object as an array — reporting real declared
+    // fields as "[N]" elements with a bogus pointer-size element stride, and
+    // (via field.present being set unconditionally below) defeating the group
+    // scan's droppedNoField prune. Only treat it as an array when the element
+    // class is genuinely a DIFFERENT class. This mirrors the IL2CPP idiom at
+    // IL2CPPAddressFinder.cpp (`SehElementClassProbe(...) != ce.klass`).
     bool resolvedAsArray = false;
     if (r.class_get_element_class != nullptr) {
         MonoClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
-        if (elemClass != nullptr) {
+        if (elemClass != nullptr && elemClass != k) {
             std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
             if (out.fieldOffset >= dataOff) {
                 std::uintptr_t arrayLength = 0;

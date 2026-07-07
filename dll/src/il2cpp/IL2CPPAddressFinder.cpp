@@ -801,10 +801,16 @@ void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
     // Phase 27c — array element resolution. If klass is an array type, compute
     // the element index from the queried offset and report it as an array-
     // element instead of falling through to declared-field resolution.
+    //
+    // GUARD: il2cpp_class_get_element_class returns the class ITSELF for a
+    // NON-array class (see the `!= ce.klass` non-array test used during
+    // element_class-offset discovery above), so `elemClass != nullptr` alone
+    // misclassifies every plain object as an array. Only treat it as an array
+    // when the element class is genuinely a DIFFERENT class.
     bool resolvedAsArray = false;
     if (r.class_get_element_class != nullptr) {
         Il2CppClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
-        if (elemClass != nullptr) {
+        if (elemClass != nullptr && elemClass != k) {
             std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
             if (out.fieldOffset >= dataOff) {
                 std::uintptr_t arrayLength = 0;

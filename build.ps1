@@ -89,7 +89,7 @@ if ($LogFile) {
         Start-Transcript -Path $LogFile -Force | Out-Null
         $script:transcriptActive = $true
     } catch {
-        Write-Infoing "Could not start transcript to $LogFile : $_"
+        Write-Warning "Could not start transcript to $LogFile : $_"
     }
 }
 

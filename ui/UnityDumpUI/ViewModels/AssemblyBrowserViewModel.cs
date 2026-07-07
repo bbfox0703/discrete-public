@@ -42,6 +42,7 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     private readonly FileLogger     _logger;
     private CancellationTokenSource? _detailCts;
     private CancellationTokenSource? _classesCts;
+    private CancellationTokenSource? _exportCts;
 
     /// <summary>
     /// Most recent class-info chain (oldest-first ancestors + self at the
@@ -67,6 +68,17 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// during a (potentially large/slow) live export, then "copied N lines".
     /// Shown next to the Export options button. Empty until the first export.</summary>
     [ObservableProperty] private string _copyCeXmlProgress = string.Empty;
+
+    /// <summary>True while a Copy CE XML / Copy CE field export is running. Drives
+    /// the Cancel button next to the progress label and the
+    /// <see cref="CancelExportCommand"/> CanExecute.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(CancelExportCommand))]
+    private bool _isExporting;
+
+    /// <summary>Abort the in-progress Copy CE XML / Copy CE field export.</summary>
+    [RelayCommand(CanExecute = nameof(IsExporting))]
+    private void CancelExport() => _exportCts?.Cancel();
 
     /// <summary>
     /// View-supplied accessor for the Fields DataGrid's current multi-row
@@ -507,6 +519,10 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
                 : null;
         string assembly = SelectedAssembly?.Name ?? "Assembly";
 
+        _exportCts?.Cancel();
+        _exportCts = new CancellationTokenSource();
+        CancellationToken ct = _exportCts.Token;
+        IsExporting = true;
         try
         {
             // Progress<T> created on the UI thread → its Report() marshals the
@@ -515,12 +531,16 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
             var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
             string xml = await CeXmlExporter.RenderAsync(
                 CeXmlBaseAddress, self, ancestors, assembly,
-                CurrentExportOptions, _backend, default, progress).ConfigureAwait(true);
+                CurrentExportOptions, _backend, ct, progress).ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
             int lines = CountLines(xml);
             CopyCeXmlProgress = $"copied {lines:N0} lines";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"copy CE XML clipboard ({xml.Length} bytes, {lines} lines, drilldown={DrilldownDepth} arr={ArrayLimit} collapse={CollapsePointerNodes})");
+        }
+        catch (OperationCanceledException)
+        {
+            CopyCeXmlProgress = "export cancelled";
         }
         catch (Exception ex)
         {
@@ -528,6 +548,10 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
             ErrorMessage = $"copy CE XML failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"copy CE XML failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsExporting = false;
         }
     }
 
@@ -600,23 +624,39 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         if (entries.Count == 0) return;
 
         string assembly = SelectedAssembly?.Name ?? "Assembly";
+
+        _exportCts?.Cancel();
+        _exportCts = new CancellationTokenSource();
+        CancellationToken ct = _exportCts.Token;
+        IsExporting = true;
         try
         {
+            CopyCeXmlProgress = "exporting…";
             string xml = await CeXmlExporter.RenderFieldsAsync(
                 CeXmlBaseAddress, entries, declaring, assembly,
-                CurrentExportOptions, _backend, default).ConfigureAwait(true);
+                CurrentExportOptions, _backend, ct).ConfigureAwait(true);
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
             string nameSummary = entries.Count == 1
                 ? entries[0].Name
                 : $"{entries.Count} fields ({entries[0].Name}, …)";
+            CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"copy CE field {nameSummary} clipboard ({xml.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit})");
         }
+        catch (OperationCanceledException)
+        {
+            CopyCeXmlProgress = "export cancelled";
+        }
         catch (Exception ex)
         {
+            CopyCeXmlProgress = "export failed";
             ErrorMessage = $"copy CE field failed: {ex.Message}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"copy CE field failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            IsExporting = false;
         }
     }
 
