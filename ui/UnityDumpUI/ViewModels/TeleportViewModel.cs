@@ -11,6 +11,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -49,6 +51,17 @@ public sealed partial class TeleportViewModel : ObservableObject
     public IGlobalHotkeyService? HotkeyService { get; set; }
 
     public IReadOnlyList<TeleportMarkerRowViewModel> MarkerRows { get; }
+
+    // --- auto-detect (wave A) ---
+
+    /// <summary>Ranked PlayerLocator candidates from the last Auto-detect run.</summary>
+    public ObservableCollection<PlayerCandidateRowViewModel> AutoDetectCandidates { get; } = new();
+
+    [ObservableProperty]
+    private bool _autoDetecting;
+
+    [ObservableProperty]
+    private bool _hasAutoDetectResults;
 
     // --- target ---
 
@@ -91,6 +104,55 @@ public sealed partial class TeleportViewModel : ObservableObject
     // ------------------------------------------------------------------
     // Commands
     // ------------------------------------------------------------------
+
+    [RelayCommand]
+    private async Task AutoDetectAsync()
+    {
+        if (_busy) return;
+        if (!_backend.IsConnected) { StatusMessage = "Not connected — connect to a running game first."; return; }
+
+        _busy = true;
+        AutoDetecting = true;
+        try
+        {
+            StatusMessage = "Auto-detecting player candidates (camera chain / tag / "
+                + "CharacterController / common names / player-ish classes)…";
+            AutoDetectCandidates.Clear();
+            HasAutoDetectResults = false;
+
+            // A fresh locator per run — its engine-assembly cache must not
+            // outlive a reconnect to a different game.
+            var locator = new PlayerLocator(_backend, _logger);
+            PlayerLocateResult r = await locator.LocateAsync().ConfigureAwait(true);
+            if (!r.Ok)
+            {
+                StatusMessage = r.Error ?? "Auto-detect failed.";
+                return;
+            }
+
+            foreach (PlayerCandidate c in r.Candidates)
+                AutoDetectCandidates.Add(new PlayerCandidateRowViewModel(c, this));
+            HasAutoDetectResults = AutoDetectCandidates.Count > 0;
+
+            StatusMessage = r.Candidates.Count == 0
+                ? "No candidates found. Paste the player's instance address manually "
+                  + "(findInstances / Address Lookup / Scene / Inspector)."
+                : $"Found {r.Candidates.Count} candidate(s) — best guess is on top. "
+                  + "Click Use, then verify with Refresh (position should change as you move in-game).";
+        }
+        catch (Exception ex) { Fail("Auto-detect", ex); }
+        finally { _busy = false; AutoDetecting = false; }
+    }
+
+    internal async Task UseCandidateAsync(PlayerCandidateRowViewModel row)
+    {
+        // Feed the resolved Transform through the normal Set Target path —
+        // Component.get_transform on a Transform returns itself, so this
+        // revalidates the pointer for free.
+        TargetAddressInput = row.TransformAddress;
+        TargetIsGameObject = false;
+        await SetTargetAsync().ConfigureAwait(true);
+    }
 
     [RelayCommand]
     private async Task SetTargetAsync()
@@ -325,6 +387,35 @@ public sealed partial class TeleportViewModel : ObservableObject
         }
         _hotkeyRegs.Clear();
     }
+}
+
+/// <summary>One auto-detect candidate row (immutable display strings + a Use
+/// button that delegates back to the parent <see cref="TeleportViewModel"/>).</summary>
+public sealed partial class PlayerCandidateRowViewModel : ObservableObject
+{
+    private readonly TeleportViewModel _parent;
+
+    public PlayerCandidateRowViewModel(PlayerCandidate candidate, TeleportViewModel parent)
+    {
+        _parent          = parent;
+        TransformAddress = candidate.TransformAddress;
+        Score            = candidate.Score.ToString(CultureInfo.InvariantCulture);
+        Name             = string.IsNullOrEmpty(candidate.Name) ? "<no name>" : candidate.Name;
+        ClassName        = candidate.ClassName ?? string.Empty;
+        Distance         = candidate.DistanceToCamera is { } d
+            ? d.ToString("0.0", CultureInfo.InvariantCulture) + " m"
+            : "—";
+        Sources          = string.Join(" + ", candidate.Sources);
+    }
+
+    public string TransformAddress { get; }
+    public string Score            { get; }
+    public string Name             { get; }
+    public string ClassName        { get; }
+    public string Distance         { get; }
+    public string Sources          { get; }
+
+    [RelayCommand] private Task Use() => _parent.UseCandidateAsync(this);
 }
 
 /// <summary>One marker slot row: display + Save / Recall / Clear buttons that

@@ -1,0 +1,861 @@
+// PlayerLocator.cs — Teleport auto-detect wave A. Multi-signal "which instance
+// is the player?" candidate scorer. Unity has no engine-level player chain
+// (see teleport.md), so instead of one universal resolver this runs several
+// cheap, independent signals and ranks the union:
+//
+//   A  camera anchor    Camera.get_main -> transform -> parent chain (players
+//                       parent the camera in FPS / many TPS rigs) + the camera
+//                       position anchors distance scoring for every candidate
+//   B  tag lookup       GameObject.FindWithTag("Player") — authoritative when
+//                       the game uses the built-in tag; stripped on many
+//                       IL2CPP builds -> any error just disables the signal
+//   C  CharacterController enumeration — games that use a CC almost always
+//                       have exactly one: the player
+//   D  well-known names GameObject.Find over common player object names
+//   E  user-class names offline class-list filter (Assembly-CSharp etc.) ->
+//                       findInstances(aliveOnly, sane) -> classes with 1-3
+//                       live instances resolve their Transform
+//
+// Pure composition over BackendAdapter (same idiom as SceneEnumerator) — zero
+// DLL changes. Every signal degrades gracefully: a stripped / missing engine
+// API contributes no candidates instead of failing the run. All engine icalls
+// are mainThread:true (Phase 20-MT dispatcher); the run aborts early with the
+// focus hint when the dispatcher drain-timeout fires (runInBackground pause).
+//
+// Calls are strictly sequential so the wire behaviour is deterministic and
+// testable with the queued fake-pipe harness.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace UnityDumpUI.Core.Services;
+
+/// <summary>One ranked auto-detect result. <see cref="TransformAddress"/> is
+/// already resolved — feed it through the normal Set Target path with
+/// targetIsGameObject=false (Component.get_transform on a Transform returns
+/// itself, revalidating the pointer for free).</summary>
+public sealed class PlayerCandidate
+{
+    public string  TransformAddress  { get; init; } = string.Empty;
+    public string? GameObjectAddress { get; init; }
+    /// <summary>The user-class instance behind signal E hits; null otherwise.</summary>
+    public string? InstanceAddress   { get; init; }
+    /// <summary>GameObject name ("" when unreadable).</summary>
+    public string  Name              { get; init; } = string.Empty;
+    /// <summary>Class behind the hit ("CharacterController", user class, …).</summary>
+    public string? ClassName         { get; init; }
+    /// <summary>Signals that produced this candidate (merged duplicates).</summary>
+    public IReadOnlyList<string> Sources { get; init; } = Array.Empty<string>();
+    public int     Score             { get; init; }
+    public double? DistanceToCamera  { get; init; }
+    public (double X, double Y, double Z)? Position { get; init; }
+}
+
+/// <summary>Per-signal toggles + caps. Defaults are the wave A shipping shape;
+/// tests flip signals off to pin one wire sequence at a time.</summary>
+public sealed class PlayerLocateOptions
+{
+    public bool EnableCameraChain         { get; init; } = true;
+    public bool EnableTagLookup           { get; init; } = true;
+    public bool EnableCharacterController { get; init; } = true;
+    public bool EnableWellKnownNames      { get; init; } = true;
+    public bool EnableUserClassScan       { get; init; } = true;
+
+    /// <summary>How far up the camera's parent chain to walk.</summary>
+    public int MaxParentChainDepth { get; init; } = 8;
+    /// <summary>Heap-scan budget for signal E (findInstances is per-class).</summary>
+    public int MaxUserClassScans   { get; init; } = 8;
+    /// <summary>Game assemblies to getClasses over (Assembly-CSharp* first).</summary>
+    public int MaxAssemblies       { get; init; } = 12;
+    /// <summary>Ranked rows returned to the UI.</summary>
+    public int MaxCandidates       { get; init; } = 12;
+}
+
+/// <summary>Result envelope. <see cref="Ok"/>=false only on a whole-run abort
+/// (dispatcher drain timeout); "no candidates" is Ok=true + empty list.</summary>
+public sealed class PlayerLocateResult
+{
+    public bool    Ok    { get; init; }
+    public string? Error { get; init; }
+    public IReadOnlyList<PlayerCandidate> Candidates { get; init; } = Array.Empty<PlayerCandidate>();
+    public string? CameraTransformAddress { get; init; }
+    public (double X, double Y, double Z)? CameraPosition { get; init; }
+    /// <summary>Per-signal soft notes (unavailable APIs, hit counts) for the log.</summary>
+    public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
+}
+
+/// <summary>One raw signal hit before merge / enrichment.</summary>
+public sealed class PlayerSignalHit
+{
+    public PlayerSignalHit(string transformAddress, string source, int score,
+        string? gameObjectAddress = null, string? instanceAddress = null, string? className = null)
+    {
+        TransformAddress  = transformAddress;
+        Source            = source;
+        Score             = score;
+        GameObjectAddress = gameObjectAddress;
+        InstanceAddress   = instanceAddress;
+        ClassName         = className;
+    }
+
+    public string  TransformAddress  { get; }
+    public string  Source            { get; }
+    public int     Score             { get; }
+    public string? GameObjectAddress { get; }
+    public string? InstanceAddress   { get; }
+    public string? ClassName         { get; }
+}
+
+/// <summary>Pure merge / scoring rules — no pipe, fully unit-testable.</summary>
+public static class PlayerLocatorRanking
+{
+    public const int ScoreTag              = 100;
+    public const int ScoreCharController   = 80;
+    public const int ScoreExactPlayerName  = 70;
+    public const int ScoreCameraChain      = 60;
+    public const int ScoreWellKnownName    = 50;
+    public const int ScoreSingleInstance   = 50;
+    public const int ScoreFewInstances     = 30;
+
+    /// <summary>Camera-proximity bonus: the player is nearly always the
+    /// player-ish object closest to the main camera.</summary>
+    public static int DistanceBonus(double? distance) => distance switch
+    {
+        null   => 0,
+        < 2.0  => 30,
+        < 10.0 => 20,
+        < 30.0 => 10,
+        _      => 0,
+    };
+
+    /// <summary>Merged (pre-enrichment) candidate: same Transform hit by
+    /// several signal families sums their scores — combined evidence beats any
+    /// single name hit. Within ONE family only the best hit counts: two
+    /// GameObject.Find aliases (or two player-ish classes on one GameObject)
+    /// are correlated evidence, not independent confirmation.</summary>
+    public sealed class Merged
+    {
+        public string  TransformAddress  { get; init; } = string.Empty;
+        public string? GameObjectAddress { get; set; }
+        public string? InstanceAddress   { get; set; }
+        public string? ClassName         { get; set; }
+        public List<string> Sources      { get; } = new();
+        public int     Score             { get; set; }
+
+        internal Dictionary<string, int> FamilyBest { get; } = new(StringComparer.Ordinal);
+    }
+
+    public static IReadOnlyList<Merged> Merge(IEnumerable<PlayerSignalHit> hits)
+    {
+        var byTransform = new Dictionary<string, Merged>(StringComparer.OrdinalIgnoreCase);
+        var ordered     = new List<Merged>();
+        foreach (PlayerSignalHit h in hits)
+        {
+            if (string.IsNullOrEmpty(h.TransformAddress)) continue;
+            if (!byTransform.TryGetValue(h.TransformAddress, out Merged? m))
+            {
+                m = new Merged { TransformAddress = h.TransformAddress };
+                byTransform[h.TransformAddress] = m;
+                ordered.Add(m);
+            }
+
+            string family = FamilyOf(h.Source);
+            if (m.FamilyBest.TryGetValue(family, out int best))
+            {
+                if (h.Score > best)
+                {
+                    m.Score += h.Score - best;
+                    m.FamilyBest[family] = h.Score;
+                }
+            }
+            else
+            {
+                m.FamilyBest[family] = h.Score;
+                m.Score += h.Score;
+            }
+
+            if (!m.Sources.Contains(h.Source)) m.Sources.Add(h.Source);
+            m.GameObjectAddress ??= h.GameObjectAddress;
+            m.InstanceAddress   ??= h.InstanceAddress;
+            m.ClassName         ??= h.ClassName;
+        }
+        return ordered;
+    }
+
+    /// <summary>"name:\"Player\"" and "name:\"player\"" are one family
+    /// ("name"); "camera-chain" / "CharacterController" are their own.</summary>
+    private static string FamilyOf(string source)
+    {
+        int i = source.IndexOf(':');
+        return i < 0 ? source : source[..i];
+    }
+}
+
+/// <summary>Signal E's offline class-name filter — pure, unit-testable.</summary>
+public static class PlayerClassNameFilter
+{
+    public sealed class ClassCandidate
+    {
+        public string  Assembly  { get; init; } = string.Empty;
+        public string? Namespace { get; init; }
+        public string  Name      { get; init; } = string.Empty;
+        /// <summary>Lower = better name quality (0 = exact "Player").</summary>
+        public int     Rank      { get; init; }
+    }
+
+    // Player-ish naming. Bare "Character" is deliberately absent — it pulls
+    // NPC base classes whose heap scans are wasted budget (they exceed the
+    // instance cap anyway).
+    private static readonly string[] Keywords =
+        { "player", "hero", "avatar", "protagonist", "playable" };
+
+    // Classes that NAME the player but aren't the pawn: managers, data bags,
+    // UI, settings. Substring, case-insensitive.
+    private static readonly string[] Exclusions =
+    {
+        "manager", "settings", "config", "data", "info", "save", "pref",
+        "profile", "stats", "ui", "hud", "menu", "icon", "audio", "sound",
+        "input", "network", "spawn", "factory", "pool", "event", "util",
+        "helper", "editor", "debug", "test", "camera", "animation", "anim",
+        "inventory", "achievement", "shop", "dialog", "state",
+    };
+
+    public static IReadOnlyList<ClassCandidate> Select(
+        IEnumerable<(string Assembly, string? Namespace, string Name)> classes, int cap)
+    {
+        var picked = new List<ClassCandidate>();
+        foreach ((string asm, string? ns, string name) in classes)
+        {
+            if (string.IsNullOrEmpty(name)) continue;
+            // Compiler-generated / generic definitions can't be the pawn.
+            if (name.IndexOfAny(new[] { '<', '`', '$' }) >= 0) continue;
+
+            string lower = name.ToLowerInvariant();
+            bool keyword = false;
+            foreach (string k in Keywords)
+            {
+                if (lower.Contains(k, StringComparison.Ordinal)) { keyword = true; break; }
+            }
+            if (!keyword) continue;
+
+            bool excluded = false;
+            foreach (string e in Exclusions)
+            {
+                if (lower.Contains(e, StringComparison.Ordinal)) { excluded = true; break; }
+            }
+            if (excluded) continue;
+
+            int rank =
+                string.Equals(name, "Player", StringComparison.OrdinalIgnoreCase) ? 0 :
+                lower.StartsWith("player", StringComparison.Ordinal)              ? 1 :
+                lower.Contains("player", StringComparison.Ordinal)                ? 2 : 3;
+            picked.Add(new ClassCandidate { Assembly = asm, Namespace = ns, Name = name, Rank = rank });
+        }
+
+        return picked
+            .OrderBy(c => c.Rank)
+            .ThenBy(c => c.Name.Length)            // "Player" beats "PlayerLocomotionDriver"
+            .ThenBy(c => c.Name, StringComparer.Ordinal)
+            .Take(Math.Max(0, cap))
+            .ToList();
+    }
+}
+
+/// <summary>
+/// The wave A auto-detect runner. Construct per run or reuse — the only cached
+/// state is the resolved engine assembly (CoreModule vs monolithic), which is
+/// stable for a process lifetime.
+/// </summary>
+public sealed class PlayerLocator
+{
+    private static readonly string[] EngineAssemblyCandidates =
+        { "UnityEngine.CoreModule", "UnityEngine" };
+
+    private const string EngineNamespace = "UnityEngine";
+    private const int    Vector3Bytes    = 12;
+
+    // Signal C: CharacterController lives in PhysicsModule on module-split
+    // Unity (5.4+), in the monolithic UnityEngine assembly before that.
+    private static readonly string[] CharacterControllerFqns =
+    {
+        "UnityEngine.CharacterController, UnityEngine.PhysicsModule",
+        "UnityEngine.CharacterController, UnityEngine",
+    };
+
+    // Signal D: exact GameObject names games commonly give the player pawn.
+    // GameObject.Find is exact-match + active-only, so aliases cost one icall
+    // each. "PlayerArmature" is Unity's official Starter Assets rig name.
+    private static readonly string[] WellKnownNames =
+    {
+        "Player", "player", "PLAYER", "Player1", "Player 1",
+        "PlayerObject", "PlayerArmature", "PlayerCharacter", "PlayerController",
+        "Character", "MainCharacter", "Main Character", "Hero", "Avatar",
+    };
+
+    // Signal E: assemblies that can't contain game code.
+    private static readonly string[] NonGameAssemblyPrefixes =
+    {
+        "mscorlib", "System", "netstandard", "Mono.", "Microsoft.",
+        "UnityEngine", "Unity.", "UnityEditor", "Newtonsoft",
+    };
+
+    private static readonly IReadOnlyList<CallArgRequest> NoArgs = new List<CallArgRequest>();
+
+    private readonly BackendAdapter _backend;
+    private readonly FileLogger?    _logger;
+    private readonly int            _mainThreadTimeoutMs;
+
+    private string? _resolvedEngineAssembly;
+    private bool    _drainTimeout;
+
+    public PlayerLocator(BackendAdapter backend, FileLogger? logger = null,
+                         int mainThreadTimeoutMs = 8000)
+    {
+        _backend = backend ?? throw new ArgumentNullException(nameof(backend));
+        _logger  = logger;
+        _mainThreadTimeoutMs = mainThreadTimeoutMs;
+    }
+
+    public async Task<PlayerLocateResult> LocateAsync(
+        PlayerLocateOptions? options = null, CancellationToken ct = default)
+    {
+        PlayerLocateOptions opt = options ?? new PlayerLocateOptions();
+        _drainTimeout = false;
+
+        var hits  = new List<PlayerSignalHit>();
+        var notes = new List<string>();
+
+        // --- signal A: camera anchor + parent chain -----------------------
+        string? camTransform = null;
+        (double X, double Y, double Z)? camPos = null;
+        if (opt.EnableCameraChain)
+        {
+            (camTransform, camPos) = await CameraAnchorAsync(hits, notes, opt, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+        }
+
+        // --- signal B: tag lookup ------------------------------------------
+        if (opt.EnableTagLookup)
+        {
+            await TagLookupAsync(hits, notes, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+        }
+
+        // --- signal C: CharacterController enumeration ---------------------
+        if (opt.EnableCharacterController)
+        {
+            await CharacterControllerAsync(hits, notes, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+        }
+
+        // --- signal D: well-known GameObject names --------------------------
+        if (opt.EnableWellKnownNames)
+        {
+            await WellKnownNamesAsync(hits, notes, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+        }
+
+        // --- signal E: user-class name heuristic ----------------------------
+        if (opt.EnableUserClassScan)
+        {
+            await UserClassScanAsync(hits, notes, opt, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+        }
+
+        // --- merge + enrich + rank ------------------------------------------
+        IReadOnlyList<PlayerLocatorRanking.Merged> merged = PlayerLocatorRanking.Merge(hits);
+        // Enrichment costs ~3 icalls per candidate — bound it to the plausible
+        // top of the pre-score order (ranked rows cap lower still).
+        var top = merged.OrderByDescending(m => m.Score).Take(24).ToList();
+
+        var final = new List<PlayerCandidate>(top.Count);
+        foreach (PlayerLocatorRanking.Merged m in top)
+        {
+            ct.ThrowIfCancellationRequested();
+            PlayerCandidate c = await EnrichAsync(m, camPos, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+            final.Add(c);
+        }
+
+        var ranked = final
+            .OrderByDescending(c => c.Score)
+            .ThenBy(c => c.DistanceToCamera ?? double.MaxValue)
+            .ThenBy(c => c.TransformAddress, StringComparer.Ordinal)
+            .Take(Math.Max(1, opt.MaxCandidates))
+            .ToList();
+
+        Log($"PlayerLocator: {hits.Count} raw hits -> {merged.Count} unique -> {ranked.Count} ranked. "
+            + string.Join(" | ", notes));
+
+        return new PlayerLocateResult
+        {
+            Ok = true,
+            Candidates = ranked,
+            CameraTransformAddress = camTransform,
+            CameraPosition = camPos,
+            Notes = notes,
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Signals
+    // ------------------------------------------------------------------
+
+    private async Task<(string? camTransform, (double, double, double)? camPos)> CameraAnchorAsync(
+        List<PlayerSignalHit> hits, List<string> notes, PlayerLocateOptions opt, CancellationToken ct)
+    {
+        CallMethodResult main = await CallEngineAsync(
+            "Camera", "get_main", instanceHex: null, NoArgs, "()",
+            wantStruct: false, ct).ConfigureAwait(false);
+        string? camera = SuccessAddress(main);
+        if (camera is null)
+        {
+            notes.Add($"camera: unavailable ({Describe(main)})");
+            return (null, null);
+        }
+
+        CallMethodResult tr = await CallEngineAsync(
+            "Component", "get_transform", camera, NoArgs, "()",
+            wantStruct: false, ct).ConfigureAwait(false);
+        string? camTransform = SuccessAddress(tr);
+        if (camTransform is null)
+        {
+            notes.Add($"camera: transform unresolved ({Describe(tr)})");
+            return (null, null);
+        }
+
+        (double, double, double)? camPos = null;
+        CallMethodResult pos = await CallEngineAsync(
+            "Transform", "get_position", camTransform, NoArgs, sigMatch: null,
+            wantStruct: true, ct).ConfigureAwait(false);
+        if (pos.Ok && string.IsNullOrEmpty(pos.Error))
+        {
+            float[] p = CallArgFactory.DecodeStructFloats(pos.ReturnStructBytes, 3);
+            camPos = (p[0], p[1], p[2]);
+        }
+
+        // Parent chain: FPS + many TPS rigs parent the camera under the player
+        // root, so every ancestor is a candidate. The camera transform itself
+        // is NOT — teleporting a follow-camera just gets snapped back.
+        string current = camTransform;
+        for (int depth = 0; depth < opt.MaxParentChainDepth; depth++)
+        {
+            ct.ThrowIfCancellationRequested();
+            CallMethodResult parent = await CallEngineAsync(
+                "Transform", "get_parent", current, NoArgs, "()",
+                wantStruct: false, ct).ConfigureAwait(false);
+            string? parentAddr = SuccessAddress(parent);
+            if (parentAddr is null) break;
+            hits.Add(new PlayerSignalHit(parentAddr, "camera-chain",
+                PlayerLocatorRanking.ScoreCameraChain));
+            current = parentAddr;
+        }
+
+        notes.Add(camPos is null ? "camera: found (position unreadable)" : "camera: found");
+        return (camTransform, camPos);
+    }
+
+    private async Task TagLookupAsync(
+        List<PlayerSignalHit> hits, List<string> notes, CancellationToken ct)
+    {
+        // Stripped on many shipping IL2CPP builds (method_not_found) — that
+        // just disables the signal. "Player" is a built-in tag, so no
+        // UnityException-for-undefined-tag risk.
+        CallMethodResult r = await CallEngineAsync(
+            "GameObject", "FindWithTag", instanceHex: null,
+            new[] { CallArgFactory.String("Player") }, "(System.String)",
+            wantStruct: false, ct).ConfigureAwait(false);
+        string? go = SuccessAddress(r);
+        if (go is null)
+        {
+            notes.Add($"tag \"Player\": {(r.Ok ? "no object" : Describe(r))}");
+            return;
+        }
+
+        string? transform = await ResolveGameObjectTransformAsync(go, ct).ConfigureAwait(false);
+        if (transform is null) { notes.Add("tag \"Player\": transform unresolved"); return; }
+        hits.Add(new PlayerSignalHit(transform, "tag:Player",
+            PlayerLocatorRanking.ScoreTag, gameObjectAddress: go));
+        notes.Add("tag \"Player\": hit");
+    }
+
+    private async Task CharacterControllerAsync(
+        List<PlayerSignalHit> hits, List<string> notes, CancellationToken ct)
+    {
+        string? typeAddr = null;
+        foreach (string fqn in CharacterControllerFqns)
+        {
+            CallMethodResult r = await _backend.CallMethodAsync(
+                "mscorlib", "System", "Type", "GetType",
+                new[] { CallArgFactory.String(fqn) },
+                signatureMatch: "(System.String)",
+                mainThread: true, mainThreadTimeoutMs: _mainThreadTimeoutMs,
+                ct: ct).ConfigureAwait(false);
+            NoteDrainTimeout(r);
+            if (_drainTimeout) return;
+            typeAddr = SuccessAddress(r);
+            if (typeAddr is not null) break;
+        }
+        if (typeAddr is null)
+        {
+            notes.Add("CharacterController: type unresolved");
+            return;
+        }
+
+        // Same 3-attempt probe order as SceneEnumerator (Unity 2022+ ByType ->
+        // 2-arg OfType (stripping survivor) -> 1-arg OfType). Exact signatures
+        // to dodge the close-paren substring trap.
+        var attempts = new (string Method, string Signature, CallArgRequest[] Args)[]
+        {
+            ("FindObjectsByType",
+             "(System.Type, UnityEngine.FindObjectsInactive, UnityEngine.FindObjectsSortMode)",
+             new[] { CallArgFactory.Address(typeAddr), CallArgFactory.Int("int32", 1), CallArgFactory.Int("int32", 0) }),
+            ("FindObjectsOfType",
+             "(System.Type, System.Boolean)",
+             new[] { CallArgFactory.Address(typeAddr), CallArgFactory.Bool(true) }),
+            ("FindObjectsOfType",
+             "(System.Type)",
+             new[] { CallArgFactory.Address(typeAddr) }),
+        };
+
+        string? arrayAddress = null;
+        foreach (var attempt in attempts)
+        {
+            CallMethodResult r = await CallEngineAsync(
+                "Object", attempt.Method, instanceHex: null, attempt.Args, attempt.Signature,
+                wantStruct: false, ct).ConfigureAwait(false);
+            if (_drainTimeout) return;
+            arrayAddress = SuccessAddress(r);
+            if (arrayAddress is not null) break;
+        }
+        if (arrayAddress is null)
+        {
+            notes.Add("CharacterController: FindObjects* unavailable");
+            return;
+        }
+
+        WalkArrayResult array = await _backend.WalkArrayAsync(arrayAddress, limit: 8, ct: ct)
+                                              .ConfigureAwait(false);
+        int found = 0;
+        foreach (WalkedArrayElement e in array.Elements ?? new List<WalkedArrayElement>())
+        {
+            string? cc = ElementAddress(e);
+            if (cc is null) continue;
+            CallMethodResult tr = await CallEngineAsync(
+                "Component", "get_transform", cc, NoArgs, "()",
+                wantStruct: false, ct).ConfigureAwait(false);
+            if (_drainTimeout) return;
+            string? transform = SuccessAddress(tr);
+            if (transform is null) continue;
+            hits.Add(new PlayerSignalHit(transform, "CharacterController",
+                PlayerLocatorRanking.ScoreCharController, className: "CharacterController"));
+            found++;
+        }
+        notes.Add($"CharacterController: {found} hit(s)");
+    }
+
+    private async Task WellKnownNamesAsync(
+        List<PlayerSignalHit> hits, List<string> notes, CancellationToken ct)
+    {
+        int found = 0;
+        foreach (string name in WellKnownNames)
+        {
+            ct.ThrowIfCancellationRequested();
+            CallMethodResult r = await CallEngineAsync(
+                "GameObject", "Find", instanceHex: null,
+                new[] { CallArgFactory.String(name) }, "(System.String)",
+                wantStruct: false, ct).ConfigureAwait(false);
+            if (_drainTimeout) return;
+            if (!r.Ok && IsMethodNotFound(r.Error))
+            {
+                notes.Add("names: GameObject.Find unavailable");
+                return;
+            }
+            string? go = SuccessAddress(r);
+            if (go is null) continue;
+
+            string? transform = await ResolveGameObjectTransformAsync(go, ct).ConfigureAwait(false);
+            if (_drainTimeout) return;
+            if (transform is null) continue;
+            int score = string.Equals(name, "Player", StringComparison.Ordinal)
+                ? PlayerLocatorRanking.ScoreExactPlayerName
+                : PlayerLocatorRanking.ScoreWellKnownName;
+            hits.Add(new PlayerSignalHit(transform, $"name:\"{name}\"", score, gameObjectAddress: go));
+            found++;
+        }
+        notes.Add($"names: {found} hit(s)");
+    }
+
+    private async Task UserClassScanAsync(
+        List<PlayerSignalHit> hits, List<string> notes, PlayerLocateOptions opt, CancellationToken ct)
+    {
+        GetAssembliesResult assemblies;
+        try { assemblies = await _backend.GetAssembliesAsync(ct).ConfigureAwait(false); }
+        catch (PipeProtocolException ex) { notes.Add($"classes: getAssemblies failed ({ex.Message})"); return; }
+
+        // Assembly-CSharp(-firstpass) first — that's where the pawn class
+        // lives in the overwhelming majority of games; asmdef assemblies after.
+        var gameAssemblies = assemblies.Assemblies
+            .Select(a => a.Name)
+            .Where(n => !string.IsNullOrEmpty(n) && !IsNonGameAssembly(n))
+            .OrderBy(n => n.StartsWith("Assembly-CSharp", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .Take(Math.Max(0, opt.MaxAssemblies))
+            .ToList();
+
+        var classTriples = new List<(string Assembly, string? Namespace, string Name)>();
+        foreach (string asm in gameAssemblies)
+        {
+            ct.ThrowIfCancellationRequested();
+            GetClassesResult classes;
+            try { classes = await _backend.GetClassesAsync(asm, ct).ConfigureAwait(false); }
+            catch (PipeProtocolException) { continue; }
+            if (!string.IsNullOrEmpty(classes.Error)) continue;
+            foreach (ClassEntry c in classes.Classes)
+                classTriples.Add((asm, c.Namespace, c.Name));
+        }
+
+        IReadOnlyList<PlayerClassNameFilter.ClassCandidate> picked =
+            PlayerClassNameFilter.Select(classTriples, opt.MaxUserClassScans);
+
+        int candidateCount = 0;
+        foreach (PlayerClassNameFilter.ClassCandidate cls in picked)
+        {
+            ct.ThrowIfCancellationRequested();
+            FindInstancesResult inst;
+            try
+            {
+                // aliveOnly drops destroyed Unity shells, sane drops torn
+                // objects (Phase 32) — both cut the heap-scan false positives
+                // that would otherwise crash the get_transform probe.
+                inst = await _backend.FindInstancesAsync(
+                    cls.Assembly, cls.Namespace, cls.Name,
+                    limit: 4, aliveOnly: true, sane: true, ct: ct).ConfigureAwait(false);
+            }
+            catch (PipeProtocolException) { continue; }
+            if (!string.IsNullOrEmpty(inst.Error)) continue;
+
+            // Exactly 1 live instance is the "this IS the player" shape;
+            // 2-3 could be player + prefab/pool copies. More = NPC class.
+            int count = inst.Matches.Count;
+            if (count is < 1 or > 3) continue;
+            int score = count == 1
+                ? PlayerLocatorRanking.ScoreSingleInstance
+                : PlayerLocatorRanking.ScoreFewInstances;
+
+            foreach (string instance in inst.Matches.Take(2))
+            {
+                CallMethodResult tr = await CallEngineAsync(
+                    "Component", "get_transform", instance, NoArgs, "()",
+                    wantStruct: false, ct).ConfigureAwait(false);
+                if (_drainTimeout) return;
+                string? transform = SuccessAddress(tr);
+                if (transform is null) continue;   // not a Component — skip
+                hits.Add(new PlayerSignalHit(transform, $"class:{cls.Name}({count})",
+                    score, instanceAddress: instance, className: cls.Name));
+                candidateCount++;
+            }
+        }
+        notes.Add($"classes: {picked.Count} scanned, {candidateCount} hit(s)");
+    }
+
+    // ------------------------------------------------------------------
+    // Enrichment
+    // ------------------------------------------------------------------
+
+    private async Task<PlayerCandidate> EnrichAsync(
+        PlayerLocatorRanking.Merged m, (double X, double Y, double Z)? camPos, CancellationToken ct)
+    {
+        // GameObject (for the display name): a Transform is a Component, so
+        // get_gameObject resolves it when no signal recorded one.
+        string? go = m.GameObjectAddress;
+        if (go is null)
+        {
+            CallMethodResult r = await CallEngineAsync(
+                "Component", "get_gameObject", m.TransformAddress, NoArgs, "()",
+                wantStruct: false, ct).ConfigureAwait(false);
+            go = SuccessAddress(r);
+        }
+
+        string name = string.Empty;
+        if (go is not null && !_drainTimeout)
+        {
+            CallMethodResult r = await CallEngineAsync(
+                "Object", "get_name", go, NoArgs, "()",
+                wantStruct: false, ct).ConfigureAwait(false);
+            if (r.Ok && string.IsNullOrEmpty(r.Error)
+                && r.ReturnValue.ValueKind == JsonValueKind.String)
+            {
+                name = r.ReturnValue.GetString() ?? string.Empty;
+            }
+        }
+
+        (double X, double Y, double Z)? position = null;
+        double? distance = null;
+        if (!_drainTimeout)
+        {
+            CallMethodResult pos = await CallEngineAsync(
+                "Transform", "get_position", m.TransformAddress, NoArgs, sigMatch: null,
+                wantStruct: true, ct).ConfigureAwait(false);
+            if (pos.Ok && string.IsNullOrEmpty(pos.Error))
+            {
+                float[] p = CallArgFactory.DecodeStructFloats(pos.ReturnStructBytes, 3);
+                position = (p[0], p[1], p[2]);
+                if (camPos is { } c)
+                {
+                    double dx = p[0] - c.X, dy = p[1] - c.Y, dz = p[2] - c.Z;
+                    distance = Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
+                }
+            }
+        }
+
+        return new PlayerCandidate
+        {
+            TransformAddress  = m.TransformAddress,
+            GameObjectAddress = go,
+            InstanceAddress   = m.InstanceAddress,
+            Name              = name,
+            ClassName         = m.ClassName,
+            Sources           = m.Sources,
+            Score             = m.Score + PlayerLocatorRanking.DistanceBonus(distance),
+            DistanceToCamera  = distance,
+            Position          = position,
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Internals
+    // ------------------------------------------------------------------
+
+    /// <summary>Focus-hint message returned when a mainThread call hits the
+    /// Phase 20-MT drain timeout (runInBackground pause).</summary>
+    public const string DrainTimeoutHint =
+        "Auto-detect aborted: the game's Update() loop isn't ticking (main-thread "
+        + "dispatcher drain timeout). Unity pauses when the game window loses focus "
+        + "(Application.runInBackground = false default). Click \"Enable "
+        + "runInBackground\" on the connection bar, or keep the game window focused, "
+        + "then retry.";
+
+    private PlayerLocateResult Abort() =>
+        new() { Ok = false, Error = DrainTimeoutHint };
+
+    private async Task<string?> ResolveGameObjectTransformAsync(string gameObject, CancellationToken ct)
+    {
+        CallMethodResult r = await CallEngineAsync(
+            "GameObject", "get_transform", gameObject, NoArgs, "()",
+            wantStruct: false, ct).ConfigureAwait(false);
+        return SuccessAddress(r);
+    }
+
+    // Engine instance/static call with CoreModule -> monolithic fallback. The
+    // survivor assembly is cached — every class this locator names lives in
+    // CoreModule (Camera / Component / Transform / GameObject / Object), so
+    // one resolution answers for all of them.
+    private async Task<CallMethodResult> CallEngineAsync(
+        string className, string method, string? instanceHex,
+        IReadOnlyList<CallArgRequest> args, string? sigMatch, bool wantStruct,
+        CancellationToken ct)
+    {
+        if (_resolvedEngineAssembly is string resolved)
+        {
+            CallMethodResult single = await _backend.CallMethodAsync(
+                resolved, EngineNamespace, className, method, args,
+                signatureMatch: sigMatch, instanceAddress: instanceHex,
+                mainThread: true, mainThreadTimeoutMs: _mainThreadTimeoutMs,
+                returnStruct: wantStruct, returnStructSize: wantStruct ? Vector3Bytes : 0,
+                ct: ct).ConfigureAwait(false);
+            NoteDrainTimeout(single);
+            return single;
+        }
+
+        CallMethodResult? last = null;
+        foreach (string asm in EngineAssemblyCandidates)
+        {
+            CallMethodResult r = await _backend.CallMethodAsync(
+                asm, EngineNamespace, className, method, args,
+                signatureMatch: sigMatch, instanceAddress: instanceHex,
+                mainThread: true, mainThreadTimeoutMs: _mainThreadTimeoutMs,
+                returnStruct: wantStruct, returnStructSize: wantStruct ? Vector3Bytes : 0,
+                ct: ct).ConfigureAwait(false);
+            last = r;
+            NoteDrainTimeout(r);
+            if (string.IsNullOrEmpty(r.Error) || !IsClassNotFound(r.Error))
+            {
+                // Any non-class-miss outcome means the assembly resolved the
+                // class — lock it in for the rest of the run.
+                _resolvedEngineAssembly = asm;
+                return r;
+            }
+        }
+        return last!;
+    }
+
+    private void NoteDrainTimeout(CallMethodResult r)
+    {
+        if (!string.IsNullOrEmpty(r.Error)
+            && r.Error.Contains("main-thread queue drain timeout", StringComparison.Ordinal))
+        {
+            _drainTimeout = true;
+        }
+    }
+
+    private static bool IsClassNotFound(string error) =>
+        error.Contains("class not found", StringComparison.OrdinalIgnoreCase) ||
+        error.Contains("class_not_found", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsMethodNotFound(string? error) =>
+        !string.IsNullOrEmpty(error)
+        && error.Contains("method_not_found", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNonGameAssembly(string name)
+    {
+        foreach (string prefix in NonGameAssemblyPrefixes)
+        {
+            if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Non-null "0x…" return address iff the call succeeded.</summary>
+    private static string? SuccessAddress(CallMethodResult r)
+    {
+        if (!r.Ok || !string.IsNullOrEmpty(r.Error)) return null;
+        if (r.ReturnValue.ValueKind != JsonValueKind.String) return null;
+        string? addr = r.ReturnValue.GetString();
+        if (string.IsNullOrEmpty(addr)) return null;
+        return IsNullAddress(addr) ? null : addr;
+    }
+
+    private static string? ElementAddress(WalkedArrayElement e)
+    {
+        string? hex = e.Ptr;
+        if (string.IsNullOrEmpty(hex)
+            && e.Value is JsonElement v && v.ValueKind == JsonValueKind.String)
+        {
+            hex = v.GetString();
+        }
+        if (string.IsNullOrEmpty(hex)) return null;
+        return IsNullAddress(hex) ? null : hex;
+    }
+
+    private static bool IsNullAddress(string hex)
+    {
+        // "0x0", "0x0000000000000000" and friends.
+        int i = hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+        for (; i < hex.Length; i++)
+        {
+            if (hex[i] != '0') return false;
+        }
+        return true;
+    }
+
+    private static string Describe(CallMethodResult r) =>
+        !string.IsNullOrEmpty(r.Error)     ? r.Error :
+        !string.IsNullOrEmpty(r.Exception) ? r.Exception : "null";
+
+    private void Log(string message) => _logger?.Write("Teleport", message);
+}

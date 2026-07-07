@@ -28,6 +28,12 @@ copy-address affordance). This is the opposite split from UE, and it's why the
 Teleport tab has a "paste the player's instance address" box instead of a
 one-click resolver.
 
+Wave 1's live feedback: manual target-picking is the tab's adoption blocker —
+a user who hasn't already reverse-engineered the game has no way to know WHICH
+instance is the player. The answer is the **auto-detect candidate scorer**
+below: not a universal chain (Unity still has none), but a multi-signal
+best-effort resolver built entirely from verified-surviving engine APIs.
+
 ## The unlock: value-struct `callMethod` marshaling
 
 Unity's `Transform.position` / `rotation` are **native icall property
@@ -72,12 +78,60 @@ main-thread-only):
 `UnityEngine.CoreModule` is tried first, falling back to the monolithic
 `UnityEngine` assembly on class-not-found.
 
+## Auto-detect player (target acquisition, wave A)
+
+`PlayerLocator` (UnityDumpUI.Core) is a multi-signal candidate scorer — pure
+composition over `BackendAdapter` (same idiom as `SceneEnumerator`), **zero DLL
+changes**. Every signal degrades gracefully: a stripped / missing API just
+means that signal contributes no candidates.
+
+### Signals
+
+| # | Signal | How | Base score | Notes |
+|---|--------|-----|-----------|-------|
+| A | Camera anchor | `Camera.get_main()` → transform → position; walk `Transform.get_parent` chain (≤ 8 levels) | 60 per ancestor | The camera sits at/near the player in almost every 3D game; FPS + many TPS rigs parent the camera under the player root. `Camera.get_main` survives IL2CPP stripping (verified live, see lessons-learned). Camera position also anchors distance scoring. |
+| B | Tag `"Player"` | `GameObject.FindWithTag("Player")` | 100 | `Player` is a built-in tag — authoritative when the game assigns it. Stripped on many IL2CPP builds (SaGa: count=0); any error → signal unavailable. Mono always keeps it. |
+| C | CharacterController | `Type.GetType("UnityEngine.CharacterController, UnityEngine.PhysicsModule")` (monolithic fallback) → `FindObjectsByType`/`FindObjectsOfType` probe chain (same 3-attempt list as SceneEnumerator) | 80 | Games that use a CharacterController almost always have exactly one — the player. |
+| D | Well-known GameObject names | `GameObject.Find(name)` over ~14 common names (`Player`, `PlayerArmature`, `Character`, …) | 70 exact-"Player" / 50 others | `GameObject.Find(string)` survives stripping (verified). Active objects only. |
+| E | User-class name heuristic | `getAssemblies` → `getClasses` on non-engine assemblies → player-ish class-name filter (cap ~16, soft-excluding `*Manager`/`*Settings`/… ) → `findInstances(aliveOnly, sane)` → `Component.get_transform` per instance | 50 (exactly 1 live instance) / 30 (2–3) | The class list is an offline pipe RPC — no main-thread cost until transform resolution. Obfuscated builds get nothing here (wave B's movement correlation is the counter). |
+
+Every candidate resolves to a **Transform address** + GameObject name; then
+distance-to-camera is scored on top (+30 < 2 m, +20 < 10 m, +10 < 30 m).
+Duplicates (same Transform) merge and their scores sum — CharacterController
+*plus* near-camera beats any single name hit. The ranked list shows
+Score / Name / Class / Distance / Sources; **Use** feeds the Transform address
+through the normal Set Target path (`Component.get_transform` on a Transform
+returns itself, so the target is revalidated for free).
+
+### Cost & failure modes
+
+- ~30–90 main-thread icalls ≈ a few seconds at the dispatcher's 5–15 ms/call.
+- The run aborts early with the focus hint when the **first** camera call hits
+  the main-thread drain timeout (`runInBackground=false` + game unfocused —
+  same failure mode as the Scene tab, same remedies).
+- 0 candidates → status message points back to the manual paste box. Games
+  where the player isn't one Transform (DOTS/ECS, vehicle swap, custom managed
+  Vector3 fields) still need the manual path.
+
+### Wave B (backlog)
+
+- **Movement correlation** — sample candidate + camera positions twice
+  (Δt ≈ 1 s); the candidate that tracks the camera is the player. Name-free,
+  so it works on obfuscated builds. Optional interactive "move your character
+  now" mode.
+- **Cinemachine `Follow` target** — near-authoritative when the game ships
+  Cinemachine (`CinemachineVirtualCamera.Follow` / CM3 `CinemachineCamera`
+  tracking target IS the player transform).
+- **Camera follow-script field walk** — walkInstance the main camera's
+  components for a Transform-typed field named `target`/`follow`/`player`.
+
 ## The Teleport tab
 
 Experimental-gated (flip the footer checkbox) until live-verified. Sections:
 
-- **Target** — paste a managed instance address (+ "GameObject" toggle) → Set
-  Target resolves its Transform.
+- **Target** — **Auto-detect** runs the PlayerLocator scorer and lists ranked
+  candidates (Use → sets target); or paste a managed instance address
+  (+ "GameObject" toggle) → Set Target resolves its Transform.
 - **Current pose** — position + rotation, Refresh, Copy coords (clipboard).
 - **Markers** — 3 slots (Save / Recall / Clear) + one-way **Undo last jump**
   (every jump auto-saves the pre-jump pose).
@@ -104,8 +158,9 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
 
 ## Known Unity-specific limits (by design, not bugs)
 
-- **No universal player resolver** — the user picks the target. The cached
-  Transform pointer can go stale (GC move / despawn); re-run Set Target.
+- **No universal player resolver** — auto-detect is a best-effort scorer, not
+  a guarantee; the manual paste box stays as the fallback. The cached Transform
+  pointer can go stale (GC move / despawn); re-run Auto-detect / Set Target.
 - **Velocity reset / "stop"** is game-specific (Rigidbody vs CharacterController
   vs NavMeshAgent vs custom) — not attempted in wave 1, so a physics/CC mover
   may snap the pawn back. (v2.)
@@ -128,6 +183,8 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
 
 ## v2 backlog
 
+- Auto-detect wave B — movement correlation / Cinemachine Follow /
+  follow-script field walk (see the wave B list above).
 - Cursor raycast teleport (`Camera.main.ScreenPointToRay(Input.mousePosition)` +
   `Physics.Raycast`) — needs Ray/RaycastHit value-struct args+returns.
 - Camera POV read (`Camera.main` transform + fieldOfView).
