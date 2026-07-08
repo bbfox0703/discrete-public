@@ -35,7 +35,7 @@ public sealed partial class TeleportViewModel : ObservableObject
     {
         _backend    = backend;
         _logger     = logger;
-        _controller = new TeleportController(new TeleportService(backend));
+        _controller = new TeleportController(new TeleportService(backend, logger: logger));
 
         var rows = new List<TeleportMarkerRowViewModel>(TeleportMarkerStore.SlotCount);
         for (int i = 0; i < TeleportMarkerStore.SlotCount; i++)

@@ -128,11 +128,16 @@ public sealed class TeleportService
     private string? _ccTypeAddress;
     private bool    _ccTypeResolved;
 
-    public TeleportService(BackendAdapter adapter, int mainThreadTimeoutMs = 8000)
+    private readonly FileLogger? _logger;
+
+    public TeleportService(BackendAdapter adapter, int mainThreadTimeoutMs = 8000, FileLogger? logger = null)
     {
         _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
         _mainThreadTimeoutMs = mainThreadTimeoutMs;
+        _logger = logger;
     }
+
+    private void Log(string message) => _logger?.Write("Teleport", message);
 
     /// <summary>
     /// Resolve the UnityEngine.Transform of a picked target. Pass
@@ -288,30 +293,46 @@ public sealed class TeleportService
         // never reaches the wire) would leave the controller disabled = the
         // character frozen. Re-enabling an already-enabled CC is a harmless no-op.
         string cc = d.ComponentAddress!;
+
+        // Disable is best-effort: if set_enabled can't be resolved (stripped on
+        // some IL2CPP builds), we STILL write — a plain set_position may be
+        // overridden by the live controller, but silently doing nothing is worse,
+        // and the log records what happened. Only when the disable actually took
+        // do we re-enable afterwards.
+        CallMethodResult disable = await SetCharacterControllerEnabledAsync(cc, false, ct).ConfigureAwait(false);
+        bool disabled = disable.Ok && string.IsNullOrEmpty(disable.Error);
+        if (!disabled)
+            Log($"teleport: CharacterController disable failed ({disable.Error ?? disable.Exception ?? "?"}) "
+                + "— writing position anyway (may be overridden by the live controller).");
+
         (bool ok, string? error) result;
         try
         {
-            CallMethodResult disable = await SetCharacterControllerEnabledAsync(cc, false, ct).ConfigureAwait(false);
-            if (!string.IsNullOrEmpty(disable.Error))
-                return (false, $"couldn't disable CharacterController: {disable.Error}");
-            if (!disable.Ok)
-                return (false, $"couldn't disable CharacterController: {disable.Exception ?? "set_enabled(false) failed"}");
-
             result = await SetPoseRawAsync(transformAddress, x, y, z, euler, ct).ConfigureAwait(false);
         }
         catch
         {
-            // Any throw (incl. a disable that committed on the game before a
-            // post-read cancellation) — best-effort restore, then propagate.
-            try { await SetCharacterControllerEnabledAsync(cc, true, CancellationToken.None).ConfigureAwait(false); } catch { }
+            // Restore control on any throw (uncancellable — cleanup must survive).
+            if (disabled)
+                try { await SetCharacterControllerEnabledAsync(cc, true, CancellationToken.None).ConfigureAwait(false); } catch { }
             throw;
         }
 
-        CallMethodResult enable = await SetCharacterControllerEnabledAsync(cc, true, CancellationToken.None).ConfigureAwait(false);
-        if (!enable.Ok || !string.IsNullOrEmpty(enable.Error))
-            return (false, "teleported, but FAILED to re-enable the CharacterController "
-                + $"({enable.Error ?? enable.Exception ?? "set_enabled(true) failed"}) — "
-                + "the character may be frozen; toggle it in-game or re-run.");
+        string? reEnableWarn = null;
+        if (disabled)
+        {
+            CallMethodResult enable = await SetCharacterControllerEnabledAsync(cc, true, CancellationToken.None).ConfigureAwait(false);
+            if (!enable.Ok || !string.IsNullOrEmpty(enable.Error))
+                reEnableWarn = "teleported, but FAILED to re-enable the CharacterController "
+                    + $"({enable.Error ?? enable.Exception ?? "set_enabled(true) failed"}) — "
+                    + "the character may be frozen; toggle it in-game or re-run.";
+        }
+
+        Log($"teleport CC-write to {transformAddress}: disabled={disabled}, "
+            + $"set_position ok={result.ok} err={result.error ?? "-"}"
+            + (reEnableWarn is null ? "" : " | re-enable FAILED"));
+
+        if (reEnableWarn is not null) return (false, reEnableWarn);
         return result;
     }
 
@@ -455,14 +476,40 @@ public sealed class TeleportService
         return (null, -1);
     }
 
-    // CharacterController.enabled is declared on Collider (PhysicsModule).
-    private Task<CallMethodResult> SetCharacterControllerEnabledAsync(
-        string cc, bool enabled, CancellationToken ct) =>
-        CallEngineAsync(
-            "Collider", "set_enabled", cc,
-            new[] { CallArgFactory.Bool(enabled) },
-            wantStruct: false, structSize: 0, sigMatch: "(System.Boolean)", ct,
-            assemblies: PhysicsAssemblyCandidates);
+    // CharacterController.enabled is declared on Collider (PhysicsModule), but
+    // which class name resolves the set_enabled method varies by build/backend,
+    // so try the declaring class (Collider) then the runtime class
+    // (CharacterController). Fall through only on a resolution failure (class /
+    // method not found); a real invoke error is returned as-is.
+    private static readonly (string Class, string[] Asms)[] SetEnabledTargets =
+    {
+        ("Collider",            PhysicsAssemblyCandidates),
+        ("CharacterController", PhysicsAssemblyCandidates),
+    };
+
+    private async Task<CallMethodResult> SetCharacterControllerEnabledAsync(
+        string cc, bool enabled, CancellationToken ct)
+    {
+        CallMethodResult? last = null;
+        foreach ((string cls, string[] asms) in SetEnabledTargets)
+        {
+            CallMethodResult r = await CallEngineAsync(
+                cls, "set_enabled", cc,
+                new[] { CallArgFactory.Bool(enabled) },
+                wantStruct: false, structSize: 0, sigMatch: "(System.Boolean)", ct,
+                assemblies: asms).ConfigureAwait(false);
+            last = r;
+            if (r.Ok && string.IsNullOrEmpty(r.Error)) return r;
+            if (!IsResolutionFailure(r.Error)) return r;   // real invoke error — surface it
+        }
+        return last ?? new CallMethodResult { Ok = false, Error = "set_enabled: no class candidate resolved" };
+    }
+
+    private static bool IsResolutionFailure(string? error) =>
+        !string.IsNullOrEmpty(error)
+        && (IsClassNotFound(error)
+            || error.Contains("method_not_found", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("method not found", StringComparison.OrdinalIgnoreCase));
 
     // --- internals ---
 
