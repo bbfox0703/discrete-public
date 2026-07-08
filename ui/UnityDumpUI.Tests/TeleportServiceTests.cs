@@ -346,6 +346,53 @@ public class TeleportServiceTests
     }
 
     [Fact]
+    public async Task DetectDriver_FullWidthNullComponent_ClimbsToRealAncestorCc()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Live Utawarerumono bug: GetComponent returns the FULL-WIDTH managed null
+        // "0x0000000000000000" (not "0x0") when the object has no
+        // CharacterController. The old guard only caught "0x0", so it accepted the
+        // full-width zero as a FOUND component and stopped at a phantom CC
+        // (instance 0 -> set_enabled instance_required_for_non_static), never
+        // climbing to the REAL CC on the ancestor rig. It must read as null.
+        var responses = new[]
+        {
+            Ref("0xCC7E"),                 // Type.GetType(CharacterController)
+            Ref("0x0000000000000000"),     // GetComponent(target) -> full-width null (NOT a CC)
+            Ref("0xA100"),                 // get_parent(target) -> ancestor rig
+            Ref("0xCC00"),                 // GetComponent(ancestor) -> the REAL CC (stop)
+            Ref("0xCC01"),                 // get_transform(cc) -> its transform
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var svc = new TeleportService(fp.Adapter);
+            var (driver, effective, note) = await svc.DetectMovementDriverAsync("0x2000", ct)
+                                                     .ConfigureAwait(true);
+
+            // The phantom self-CC is rejected; the walk finds the real ancestor CC.
+            Assert.Equal(MovementDriverKind.CharacterController, driver.Kind);
+            Assert.True(driver.IsCharacterController);
+            Assert.Equal("0xCC00", driver.ComponentAddress);
+            Assert.Equal("0xCC01", effective);
+            Assert.Contains("ancestor +1", note);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("0x0", true)]
+    [InlineData("0x", true)]
+    [InlineData("0x0000000000000000", true)]     // full-width managed null
+    [InlineData("0X0000000000000000", true)]     // case-insensitive prefix
+    [InlineData("0xCC00", false)]
+    [InlineData("0x0000000000000001", false)]
+    public void IsNullAddress_NormalizesZeroForms(string? hex, bool expected) =>
+        Assert.Equal(expected, TeleportService.IsNullAddress(hex));
+
+    [Fact]
     public async Task WritePose_CharacterControllerDriver_DisablesSetsReEnables()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

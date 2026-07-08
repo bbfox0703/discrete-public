@@ -75,7 +75,8 @@ public sealed class MovementDriver
     public static readonly MovementDriver Transform = new();
 
     public bool IsCharacterController =>
-        Kind == MovementDriverKind.CharacterController && !string.IsNullOrEmpty(ComponentAddress);
+        Kind == MovementDriverKind.CharacterController
+        && !TeleportService.IsNullAddress(ComponentAddress);   // rejects "" / "0x0" / full-width zero
 
     /// <summary>Short human label for the UI ("CharacterController" / "Transform").</summary>
     public string Label => Kind switch
@@ -535,6 +536,31 @@ public sealed class TeleportService
         error.Contains("class not found", StringComparison.OrdinalIgnoreCase) ||
         error.Contains("class_not_found", StringComparison.OrdinalIgnoreCase);
 
-    private static string? AsAddress(CallMethodResult r) =>
-        r.ReturnValue.ValueKind == JsonValueKind.String ? r.ReturnValue.GetString() : null;
+    // A managed reference return. Any all-zero pointer — short "0x0" OR the
+    // full-width "0x0000000000000000" the DLL emits for a managed null (e.g.
+    // GetComponent finding nothing) — is normalized to null. Missing this was a
+    // real bug: FindComponent treated the full-width zero as a FOUND component,
+    // so driver detection stopped at a phantom CharacterController (instance 0),
+    // set_enabled failed with instance_required_for_non_static, AND the walk
+    // never climbed to the real CC on an ancestor rig — the character's visual
+    // node moved but the logical/camera root didn't.
+    private static string? AsAddress(CallMethodResult r)
+    {
+        string? addr = r.ReturnValue.ValueKind == JsonValueKind.String
+            ? r.ReturnValue.GetString() : null;
+        return IsNullAddress(addr) ? null : addr;
+    }
+
+    /// <summary>True for a missing or all-zero address ("0x0",
+    /// "0x0000000000000000", "0x", ""). Matches PlayerLocator's null handling so
+    /// the two services agree on "no object".</summary>
+    internal static bool IsNullAddress(string? hex)
+    {
+        if (string.IsNullOrEmpty(hex)) return true;
+        int i = hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+        if (i >= hex.Length) return true;   // "0x" with no digits
+        for (; i < hex.Length; i++)
+            if (hex[i] != '0') return false;
+        return true;
+    }
 }
