@@ -71,11 +71,19 @@ orbits / snaps back (the live Utawarerumono symptom). `TeleportService` is now
 **driver-aware**:
 
 - `DetectMovementDriverAsync(transform)` — resolve
-  `Type.GetType("UnityEngine.CharacterController, …")` (cached), then
-  `Component.GetComponentInParent(ccType)` (self **+ ancestors**, falling back to
-  `GetComponent` self-only) on the target. A hit means CharacterController-driven,
-  and the target is **retargeted to the CharacterController's OWN transform**
-  (`Component.get_transform(cc)`) — the picked child bone would just snap back.
+  `Type.GetType("UnityEngine.CharacterController, …")` (cached), then walk the
+  target + ancestors (`GetComponent` + `get_parent` per rung — `GetComponentInParent`
+  is stripped on many IL2CPP builds and even where present returns the *nearest*
+  match) for the **OUTERMOST** CharacterController. The target is **retargeted to
+  that controller's OWN transform** (`Component.get_transform(cc)`).
+  - *Why outermost, not nearest* (live Utawarerumono): a character is
+    `LogicalRoot(CC) → Model(its own CC) → bones`. The game drives the **outer**
+    controller; writing an **inner** model CC's transform desyncs the visual from
+    the logical position — the camera detaches and movement breaks. Picking either
+    the model root (`P_Chara`) or the logical root (`AttachPoint`) now both retarget
+    to the same outer controller, so the teleport lands correctly regardless of
+    which candidate the user Uses. Scene containers above the character carry no
+    CC, so the walk stops at the character's real root.
 - `WritePoseAsync(…, driver)` — for a CharacterController driver: `Collider`
   `set_enabled(false)` (enabled lives on Collider, PhysicsModule) → position/euler
   write → `set_enabled(true)`. Wrapped so a throw during the write still
