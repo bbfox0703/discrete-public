@@ -816,19 +816,96 @@ public class PlayerLocatorTests
             PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
                                                 .ConfigureAwait(true);
             Assert.True(r.Ok);
-            // DCA (hips) first, then the character root, then the raw bones.
-            Assert.Equal("0xA110", r.Candidates[0].TransformAddress);
-            Assert.Equal("Hips", r.Candidates[0].Name);
+            // The character root (non-bone name) is #1; "Hips" is a joint bone,
+            // demoted below it even though it is the DCA.
+            Assert.Equal("0xA000", r.Candidates[0].TransformAddress);
+            Assert.Equal("CharacterRoot", r.Candidates[0].Name);
             Assert.Contains("moving-root", r.Candidates[0].Sources[0]);
             Assert.Equal(PlayerConfidence.High, r.Candidates[0].Confidence);
-            Assert.Equal("0xA000", r.Candidates[1].TransformAddress);
-            Assert.Equal("CharacterRoot", r.Candidates[1].Name);
+            Assert.Equal("0xA110", r.Candidates[1].TransformAddress);
+            Assert.Equal("Hips", r.Candidates[1].Name);
+            Assert.Equal(PlayerConfidence.Medium, r.Candidates[1].Confidence);   // skeleton bone
             // The leaf bones survive as evidence, ranked below the roots.
             Assert.Contains(r.Candidates, c => c.TransformAddress == "0xB100");
             Assert.True(r.Candidates[0].Score > r.Candidates.First(c => c.TransformAddress == "0xB100").Score);
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
+
+    [Fact]
+    public async Task Movement_CharacterRoot_LiftedAboveSkeletonBones()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Mirrors the live Utawarerumono ladder: three env_bone: leaves whose DCA
+        // is a spine bone; the ladder climbs env_bone bones up to the character
+        // GameObject "P_Chara_00109@fld" (non-bone name) then a container. The
+        // character rung must be #1, not the DCA spine bone.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xB100", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 10f),                        // t1 B100
+            Vector3Ok(0f, 0f, 8f),                         // t1 B200
+            AddrOk("UnityEngine.GameObject", "0xB1F0"), StringOk("env_bone:mabutaR"),  // enrich B100
+            AddrOk("UnityEngine.GameObject", "0xB2F0"), StringOk("env_bone:RightPinky"), // enrich B200
+            // walk B100: Spine1 -> Hips -> P_Chara -> AttachPoint -> null
+            AddrOk("UnityEngine.Transform", "0xC001"),     // get_parent(B100) -> Spine1
+            AddrOk("UnityEngine.Transform", "0xC002"),     // get_parent(Spine1) -> Hips
+            AddrOk("UnityEngine.Transform", "0xC003"),     // get_parent(Hips) -> P_Chara
+            AddrOk("UnityEngine.Transform", "0xC004"),     // get_parent(P_Chara) -> AttachPoint
+            NullAddrOk("UnityEngine.Transform"),           // get_parent(AttachPoint) -> root
+            AddrOk("UnityEngine.Transform", "0xC001"),     // get_parent(B200) -> Spine1 (cached rest)
+            // ladder enrich in DCA->root order: Spine1, Hips, P_Chara, AttachPoint
+            AddrOk("UnityEngine.GameObject", "0xC01F"), StringOk("env_bone:Spine1"),
+            AddrOk("UnityEngine.GameObject", "0xC02F"), StringOk("env_bone:Hips"),
+            AddrOk("UnityEngine.GameObject", "0xC03F"), StringOk("P_Chara_00109@fld"),
+            AddrOk("UnityEngine.GameObject", "0xC04F"), StringOk("AttachPoint"),
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            // Character GameObject #1, its container next, skeleton bones after.
+            Assert.Equal("P_Chara_00109@fld", r.Candidates[0].Name);
+            Assert.Equal("0xC003", r.Candidates[0].TransformAddress);
+            Assert.Equal(PlayerConfidence.High, r.Candidates[0].Confidence);
+            Assert.Equal("AttachPoint", r.Candidates[1].Name);                     // container above
+            // The DCA spine bone is demoted below the character.
+            var spine = r.Candidates.First(c => c.Name == "env_bone:Spine1");
+            Assert.Equal(PlayerConfidence.Medium, spine.Confidence);
+            Assert.True(r.Candidates[0].Score > spine.Score);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Theory]
+    [InlineData("env_bone:Spine1", "env_bone:", true)]
+    [InlineData("env_bone:GlobalSRT", "env_bone:", true)]
+    [InlineData("Hips", "", true)]                 // joint token, no prefix
+    [InlineData("RightPinky", "", true)]
+    [InlineData("Bip01_Spine", "", true)]
+    [InlineData("P_Chara_00109@fld", "env_bone:", false)]   // the character
+    [InlineData("AttachPoint", "env_bone:", false)]
+    [InlineData("PlayerRoot", "", false)]          // "root" is not a joint token
+    public void IsBoneName_Classifies(string name, string prefix, bool expected) =>
+        Assert.Equal(expected, PlayerLocator.IsBoneName(name, prefix));
+
+    [Theory]
+    [InlineData(new[] { "env_bone:mabutaR", "env_bone:Spine1_2p", "env_bone:RightPinky" }, "env_bone:")]
+    [InlineData(new[] { "Bip01 L Hand", "Bip01 Spine", "Bip01 Head" }, "Bip01 ")]
+    [InlineData(new[] { "foot", "hand" }, "")]     // no common prefix
+    public void CommonBonePrefix_Computes(string[] names, string expected) =>
+        Assert.Equal(expected, PlayerLocator.CommonBonePrefix(names));
 
     [Fact]
     public async Task Movement_SingleMover_NotPromotedToRoot()

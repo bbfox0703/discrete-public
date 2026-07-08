@@ -867,25 +867,123 @@ public sealed class PlayerLocator
         bool containerish = shared.Count == 1 && Eq(shared[0], anchorRoot);
 
         int clusterSize = cluster.Count;
-        var roots = new List<PlayerCandidate>(shared.Count);
-        for (int i = 0; i < shared.Count; i++)
+
+        // Enrich each rung with its name (DCA → root order).
+        var rungs = new List<(string Addr, string? Go, string Name)>(shared.Count);
+        foreach (string addr in shared)
+        {
+            (string? go, string name) = await ResolveNameAsync(null, addr, ct).ConfigureAwait(false);
+            if (_drainTimeout) return empty;
+            rungs.Add((addr, go, name));
+        }
+
+        // The DCA is only the tightest ancestor of the *sampled* bones — for an
+        // upper-body sample that's a spine bone, not the character. But an
+        // animated skeleton names its bones with a shared prefix ("env_bone:")
+        // or joint words, so the ladder climbs through bones until it hits the
+        // character GameObject (e.g. "P_Chara_00109@fld"). That first non-bone
+        // rung is the real teleport target — pull it to the top.
+        string bonePrefix = CommonBonePrefix(cluster.Select(c => NameOf(movers, c.Addrs[0])));
+        bool[] isBone = rungs.Select(r => IsBoneName(r.Name, bonePrefix)).ToArray();
+        int charIdx = Array.FindIndex(isBone, b => !b);
+
+        // Present order: character root first, then its container ancestors
+        // (root-ward), then the skeleton bones (root-ward, so the skeleton root
+        // outranks a mid-spine bone). If every rung looks like a bone, keep the
+        // DCA-first ladder.
+        var order = new List<int>(rungs.Count);
+        if (charIdx >= 0)
+        {
+            order.Add(charIdx);
+            for (int i = charIdx + 1; i < rungs.Count; i++) order.Add(i);   // containers above
+            for (int i = charIdx - 1; i >= 0; i--)          order.Add(i);   // bones below
+        }
+        else
+        {
+            for (int i = 0; i < rungs.Count; i++) order.Add(i);
+        }
+
+        var roots = new List<PlayerCandidate>(order.Count);
+        for (int rank = 0; rank < order.Count; rank++)
         {
             ct.ThrowIfCancellationRequested();
-            (string? go, string name) = await ResolveNameAsync(null, shared[i], ct).ConfigureAwait(false);
-            if (_drainTimeout) return empty;
+            int idx = order[rank];
+            (string addr, string? go, string name) = rungs[idx];
+            bool bone   = isBone[idx];
+            bool isChar = charIdx >= 0 && idx == charIdx;
+            string src  = isChar ? $"moving-root ×{clusterSize}"
+                        : bone   ? "skeleton bone"
+                                 : "ancestor";
+            // A skeleton bone is a poor target (deforms the mesh); demote it. A
+            // lone containerish root is only a best-effort guess.
+            PlayerConfidence conf = (bone || containerish)
+                ? PlayerConfidence.Medium
+                : PlayerConfidence.High;
             roots.Add(new PlayerCandidate
             {
-                TransformAddress  = shared[i],
+                TransformAddress  = addr,
                 GameObjectAddress = go,
                 Name              = name,
-                // DCA (i==0) is the tightest subtree containing all the moving
-                // parts — recommend it first; climbing rungs are alternatives.
-                Sources           = new[] { i == 0 ? $"moving-root ×{clusterSize}" : $"root ↑{i}" },
-                Score             = RootScoreBase - i,
-                Confidence        = containerish ? PlayerConfidence.Medium : PlayerConfidence.High,
+                Sources           = new[] { src },
+                Score             = RootScoreBase - rank,
+                Confidence        = conf,
             });
         }
         return roots;
+    }
+
+    private static string NameOf(IReadOnlyList<PlayerCandidate> movers, string addr)
+    {
+        foreach (PlayerCandidate m in movers)
+            if (Eq(m.TransformAddress, addr)) return m.Name;
+        return string.Empty;
+    }
+
+    // Common skeletal-joint words (bones an animated character exposes). "root"
+    // is deliberately absent — it appears in both bone roots (Bip01) AND the
+    // character root ("PlayerRoot"/"CharacterRoot"), so it can't discriminate.
+    private static readonly string[] JointTokens =
+    {
+        "spine", "hips", "pelvis", "neck", "clavicle", "shoulder", "upperarm",
+        "forearm", "elbow", "wrist", "hand", "finger", "thumb", "pinky", "thigh",
+        "calf", "shin", "knee", "ankle", "foot", "toe", "head", "jaw", "eye",
+        "srt", "bip", "bone", "joint", "twist", "roll", "chest", "ball", "heel",
+    };
+
+    /// <summary>Longest common prefix of the bone names, trimmed to a natural
+    /// separator (":" / "_" / "/" / "." / space) — e.g. "env_bone:". Empty when
+    /// the bones don't share a meaningful namespace.</summary>
+    internal static string CommonBonePrefix(IEnumerable<string> names)
+    {
+        string? prefix = null;
+        foreach (string n in names)
+        {
+            if (string.IsNullOrEmpty(n)) continue;
+            if (prefix is null) { prefix = n; continue; }
+            int k = 0;
+            int max = Math.Min(prefix.Length, n.Length);
+            while (k < max && char.ToLowerInvariant(prefix[k]) == char.ToLowerInvariant(n[k])) k++;
+            prefix = prefix.Substring(0, k);
+            if (prefix.Length == 0) break;
+        }
+        if (string.IsNullOrEmpty(prefix)) return string.Empty;
+        int sep = prefix.LastIndexOfAny(new[] { ':', '_', '/', '.', ' ' });
+        return sep >= 0 ? prefix.Substring(0, sep + 1) : prefix;
+    }
+
+    /// <summary>True when a ladder rung name reads like a skeleton bone rather
+    /// than the character GameObject: it shares the bones' namespace prefix, or
+    /// a tokenized word is a known joint.</summary>
+    internal static bool IsBoneName(string? name, string bonePrefix)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        if (bonePrefix.Length >= 3 && name.StartsWith(bonePrefix, StringComparison.OrdinalIgnoreCase))
+            return true;
+        foreach (string tok in NameTokenMatch.Tokenize(name))
+        {
+            if (Array.IndexOf(JointTokens, tok) >= 0) return true;
+        }
+        return false;
     }
 
     private const int RootScoreBase = 1000;

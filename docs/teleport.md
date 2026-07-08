@@ -185,6 +185,19 @@ Two-phase, so the UI can run the countdown in between:
    that container, giving a one-rung ladder — surfaced at **Medium** confidence
    (teleporting a container moves everything under it; pick a different target).
 
+   **Character-root detection (name-based).** The DCA is only the tightest
+   ancestor of the *sampled* bones — an upper-body sample (eyelid + spine + pinky)
+   converges at a spine bone, not the character. But a skeleton names its bones
+   with a shared prefix (`env_bone:`) or joint words (`Hips`, `Spine`, `GlobalSRT`,
+   `Bip01 …`), so the ladder climbs through bones until it hits the character
+   GameObject (live example: `env_bone:Spine1 → env_bone:Hips → env_bone:GlobalSRT
+   → P_Chara_00109@fld → AttachPoint`). The first rung whose name **breaks** the
+   bone prefix / isn't a joint word (`P_Chara_00109@fld`) is the real teleport
+   target and is pulled to **#1**; its container ancestors follow; the skeleton
+   bones drop to **Medium** below it. (`root` is deliberately *not* a joint word —
+   it appears in both `Bip01Root` bones and `CharacterRoot` GameObjects.) When no
+   rung breaks the bone pattern, the DCA-first ladder is kept as the fallback.
+
 **Honest limits.** The sweep is capped, so on a huge scene (Utawarerumono has
 ~15 k GameObjects) the player might be outside the sample — the status line
 says so and points at raising the cap / moving a larger distance. A displacement
