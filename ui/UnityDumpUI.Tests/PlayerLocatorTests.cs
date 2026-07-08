@@ -1055,12 +1055,14 @@ public class PlayerLocatorTests
     }
 
     [Fact]
-    public async Task UserClassScan_PlayerSingleton_FieldWalkSurfacesRealTransform()
+    public async Task UserClassScan_PlayerSingleton_FieldWalkIsDiagnosticOnly()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        // The "Player" singleton isn't a Component (get_transform fails), so its
-        // fields are mined: a Transform-typed field (_character) points at the
-        // real controllable object; a Vector3 field is logged, not surfaced.
+        // The "Player" singleton isn't a Component (get_transform fails) — very
+        // likely a findInstances false positive. We walkInstance it to LOG its
+        // shape, but must surface NOTHING and dereference NO field pointer:
+        // invoking an engine method on a garbage `this` hangs the game (live
+        // Utawarerumono). So: walkInstance is called, zero candidates result.
         var responses = new[]
         {
             """{ "count": 1, "assemblies": [ { "name": "Assembly-CSharp" } ] }""",
@@ -1070,16 +1072,14 @@ public class PlayerLocatorTests
             """,
             """{ "count": 1, "limit": 5, "matches": [ "0xE100" ] }""",   // findInstances(Player)
             NullAddrOk("UnityEngine.Transform"),                          // get_transform -> not a Component
-            // walkInstance(0xE100): a Transform ref, a Vector3 position, a scalar
+            // walkInstance(0xE100): Transform + Vector3 + scalar fields. NONE
+            // of these pointers may be dereferenced (no follow-up RPCs queued).
             """
             { "address": "0xE100", "count": 3, "fields": [
-              { "name": "_character", "type": "UnityEngine.Transform", "offset": 24, "ptr": "0xC100" },
+              { "name": "_Transform", "type": "UnityEngine.Transform", "offset": 24, "ptr": "0xC100" },
               { "name": "_logicalPos", "type": "UnityEngine.Vector3", "offset": 32 },
-              { "name": "hp", "type": "System.Int32", "offset": 40, "value": 100 } ] }
+              { "name": "_Controller", "type": "UnityEngine.CharacterController", "offset": 40, "ptr": "0xCC00" } ] }
             """,
-            AddrOk("UnityEngine.GameObject", "0xC1E0"),                   // enrich: get_gameObject
-            StringOk("MapChara"),                                        // enrich: get_name
-            Vector3Ok(5f, 0f, 5f),                                       // enrich: get_position
         };
         var fp = await TeleportFakePipe.StartAsync(responses, ct);
         try
@@ -1087,13 +1087,12 @@ public class PlayerLocatorTests
             var locator = new PlayerLocator(fp.Adapter);
             PlayerLocateResult r = await locator.LocateAsync(Only(classes: true), ct)
                                                 .ConfigureAwait(true);
-            PlayerCandidate c = Assert.Single(r.Candidates);
-            Assert.Equal("0xC100", c.TransformAddress);       // the field's Transform, not the singleton
-            Assert.Equal("MapChara", c.Name);
-            Assert.Equal(new[] { "class:Player._character" }, c.Sources);
-            Assert.Equal(PlayerConfidence.High, c.Confidence);
+            Assert.True(r.Ok);
+            Assert.Empty(r.Candidates);   // diagnostic only — nothing surfaced, nothing dereferenced
 
             var reqs = await fp.ServerTask.ConfigureAwait(true);
+            // Exactly these 5 RPCs: no get_gameObject/get_transform on a field ptr.
+            Assert.Equal(5, reqs.Count);
             Assert.Equal("walkInstance", Cmd(reqs[4]));
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }

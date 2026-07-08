@@ -1437,10 +1437,7 @@ public sealed class PlayerLocator
                     if (fieldWalkBudget > 0 && count == 1 && NameLooksLikePlayer(cls.Name))
                     {
                         fieldWalkBudget--;
-                        int refs = await InspectSingletonFieldsAsync(cls, instance, score, hits, ct)
-                            .ConfigureAwait(false);
-                        if (_drainTimeout) return;
-                        candidateCount += refs;
+                        await InspectSingletonFieldsAsync(cls, instance, ct).ConfigureAwait(false);
                     }
                     continue;
                 }
@@ -1455,16 +1452,17 @@ public sealed class PlayerLocator
             + (skippedCount > 0 ? $", {skippedCount} count-skipped" : string.Empty));
     }
 
-    // Walk a non-Component player singleton's fields to find the real object it
-    // drives. Surfaces Transform-/GameObject-typed fields as candidates, logs
-    // every field (so the singleton's structure lands in the log) and flags
-    // Vector3 fields — a game that stores the player's *logical* position in a
-    // managed Vector3 (the visual Transform following it) is exactly the "the
-    // character orbits a pivot when I set its Transform" case. Returns the
-    // number of Transform/GameObject references surfaced.
-    private async Task<int> InspectSingletonFieldsAsync(
-        PlayerClassNameFilter.ClassCandidate cls, string instance, int score,
-        List<PlayerSignalHit> hits, CancellationToken ct)
+    // DIAGNOSTIC ONLY. Walk a non-Component player singleton's fields and LOG
+    // its shape — Transform/GameObject/Vector3 fields point at the real object
+    // it drives. Deliberately surfaces NOTHING and invokes NOTHING on the field
+    // pointers: an instance whose get_transform fails is very likely a
+    // findInstances FALSE POSITIVE, so its field pointers are garbage, and
+    // calling an engine method (get_transform / get_gameObject) on a garbage
+    // `this` HANGS or crashes the game (learned live on Utawarerumono). The
+    // field NAMES/TYPES come from class metadata and are reliable; the pointer
+    // VALUES are not, so we never dereference them here.
+    private async Task InspectSingletonFieldsAsync(
+        PlayerClassNameFilter.ClassCandidate cls, string instance, CancellationToken ct)
     {
         WalkInstanceResult walk;
         try
@@ -1472,56 +1470,23 @@ public sealed class PlayerLocator
             walk = await _backend.WalkInstanceAsync(instance, cls.Assembly, cls.Namespace, cls.Name, ct)
                 .ConfigureAwait(false);
         }
-        catch (PipeProtocolException ex) { Log($"signal-E {cls.Name}: walkInstance threw {ex.Message}"); return 0; }
-        if (!string.IsNullOrEmpty(walk.Error)) { Log($"signal-E {cls.Name}: walkInstance error {walk.Error}"); return 0; }
+        catch (PipeProtocolException ex) { Log($"signal-E {cls.Name}: walkInstance threw {ex.Message}"); return; }
+        if (!string.IsNullOrEmpty(walk.Error)) { Log($"signal-E {cls.Name}: walkInstance error {walk.Error}"); return; }
 
         List<WalkedField> fields = walk.Fields ?? new List<WalkedField>();
-        // Diagnostic dump — name:type for every field, so the singleton's shape
-        // is captured even when nothing is auto-surfaced.
         Log($"signal-E {cls.Name} fields[{fields.Count}]: "
             + string.Join(", ", fields.Take(48).Select(f => $"{f.Name}:{f.Type ?? "?"}")));
 
-        int found = 0;
-        var vectors = new List<string>();
-        foreach (WalkedField f in fields)
-        {
-            ct.ThrowIfCancellationRequested();
-            string? type = f.Type;
-            if (type is null) continue;
-
-            if (IsTransformType(type) && NonNullPtr(f.Ptr) is string trPtr)
-            {
-                hits.Add(new PlayerSignalHit(trPtr, $"class:{cls.Name}.{f.Name}",
-                    score, className: cls.Name));
-                found++;
-            }
-            else if (IsGameObjectType(type) && NonNullPtr(f.Ptr) is string goPtr)
-            {
-                string? tr = await ResolveGameObjectTransformAsync(goPtr, ct).ConfigureAwait(false);
-                if (_drainTimeout) return found;
-                if (tr is not null)
-                {
-                    hits.Add(new PlayerSignalHit(tr, $"class:{cls.Name}.{f.Name}",
-                        score, gameObjectAddress: goPtr, className: cls.Name));
-                    found++;
-                }
-            }
-            else if (IsVector3Type(type))
-            {
-                vectors.Add($"{f.Name}@+{f.Offset}");
-            }
-        }
-
-        if (vectors.Count > 0)
-        {
-            // Not auto-usable yet (teleport writes Transform.set_position, not a
-            // managed field), but the likely fix for a "logical position" game —
-            // surfaced in the log so it can be targeted with a field-write.
-            Log($"signal-E {cls.Name}: Vector3 field(s) [{string.Join(", ", vectors)}] "
-                + "— possible logical position (needs field-write teleport)");
-        }
-        Log($"signal-E {cls.Name}: field-walk surfaced {found} Transform/GameObject reference(s)");
-        return found;
+        // Note the interesting field TYPES (no dereference) so the structure is
+        // easy to spot in the log for follow-up work.
+        var refs = fields
+            .Where(f => f.Type is not null
+                        && (IsTransformType(f.Type) || IsGameObjectType(f.Type) || IsVector3Type(f.Type)))
+            .Select(f => $"{f.Name}:{f.Type}")
+            .ToList();
+        if (refs.Count > 0)
+            Log($"signal-E {cls.Name}: position-bearing fields [{string.Join(", ", refs)}] "
+                + "— DIAGNOSTIC ONLY (field pointers not dereferenced; instance may be a false positive)");
     }
 
     private static bool NameLooksLikePlayer(string name) =>
@@ -1541,9 +1506,6 @@ public sealed class PlayerLocator
     private static bool IsVector3Type(string type) =>
         type.EndsWith("UnityEngine.Vector3", StringComparison.Ordinal) ||
         type == "Vector3";
-
-    private static string? NonNullPtr(string? ptr) =>
-        !string.IsNullOrEmpty(ptr) && !IsNullAddress(ptr) ? ptr : null;
 
     // ------------------------------------------------------------------
     // Enrichment
