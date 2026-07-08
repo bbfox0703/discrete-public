@@ -1055,6 +1055,51 @@ public class PlayerLocatorTests
     }
 
     [Fact]
+    public async Task UserClassScan_PlayerSingleton_FieldWalkSurfacesRealTransform()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // The "Player" singleton isn't a Component (get_transform fails), so its
+        // fields are mined: a Transform-typed field (_character) points at the
+        // real controllable object; a Vector3 field is logged, not surfaced.
+        var responses = new[]
+        {
+            """{ "count": 1, "assemblies": [ { "name": "Assembly-CSharp" } ] }""",
+            """
+            { "assembly": "Assembly-CSharp", "count": 1, "classes": [
+              { "namespace": "Game", "name": "Player" } ] }
+            """,
+            """{ "count": 1, "limit": 5, "matches": [ "0xE100" ] }""",   // findInstances(Player)
+            NullAddrOk("UnityEngine.Transform"),                          // get_transform -> not a Component
+            // walkInstance(0xE100): a Transform ref, a Vector3 position, a scalar
+            """
+            { "address": "0xE100", "count": 3, "fields": [
+              { "name": "_character", "type": "UnityEngine.Transform", "offset": 24, "ptr": "0xC100" },
+              { "name": "_logicalPos", "type": "UnityEngine.Vector3", "offset": 32 },
+              { "name": "hp", "type": "System.Int32", "offset": 40, "value": 100 } ] }
+            """,
+            AddrOk("UnityEngine.GameObject", "0xC1E0"),                   // enrich: get_gameObject
+            StringOk("MapChara"),                                        // enrich: get_name
+            Vector3Ok(5f, 0f, 5f),                                       // enrich: get_position
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.LocateAsync(Only(classes: true), ct)
+                                                .ConfigureAwait(true);
+            PlayerCandidate c = Assert.Single(r.Candidates);
+            Assert.Equal("0xC100", c.TransformAddress);       // the field's Transform, not the singleton
+            Assert.Equal("MapChara", c.Name);
+            Assert.Equal(new[] { "class:Player._character" }, c.Sources);
+            Assert.Equal(PlayerConfidence.High, c.Confidence);
+
+            var reqs = await fp.ServerTask.ConfigureAwait(true);
+            Assert.Equal("walkInstance", Cmd(reqs[4]));
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
     public async Task StrongSignal_OnRigName_StaysHighConfidence()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

@@ -89,6 +89,12 @@ public sealed class PlayerLocateOptions
     public int MaxParentChainDepth { get; init; } = 8;
     /// <summary>Heap-scan budget for signal E (findInstances is per-class).</summary>
     public int MaxUserClassScans   { get; init; } = 8;
+
+    /// <summary>When a player-named singleton isn't a Component (get_transform
+    /// fails), walkInstance it and mine its fields for a Transform/GameObject
+    /// reference to the real controllable object. Capped — walkInstance is a
+    /// heavier RPC than a single icall.</summary>
+    public int MaxSingletonFieldWalks { get; init; } = 2;
     /// <summary>Game assemblies to getClasses over (Assembly-CSharp* first).</summary>
     public int MaxAssemblies       { get; init; } = 12;
     /// <summary>Ranked rows returned to the UI.</summary>
@@ -1376,6 +1382,7 @@ public sealed class PlayerLocator
 
         int candidateCount = 0;
         int skippedCount    = 0;
+        int fieldWalkBudget = Math.Max(0, opt.MaxSingletonFieldWalks);
         foreach (PlayerClassNameFilter.ClassCandidate cls in picked)
         {
             ct.ThrowIfCancellationRequested();
@@ -1418,7 +1425,25 @@ public sealed class PlayerLocator
                     wantStruct: false, ct).ConfigureAwait(false);
                 if (_drainTimeout) return;
                 string? transform = SuccessAddress(tr);
-                if (transform is null) { failed++; continue; }   // not a Component — skip
+                if (transform is null)
+                {
+                    failed++;
+                    // Not a Component — a controller/model singleton. Mine its
+                    // fields for a Transform/GameObject reference to the real
+                    // object (and log any Vector3 "logical position" fields). The
+                    // exact-1-instance, strongly-player-named case is the payoff:
+                    // e.g. Utawarerumono's `Player` singleton (get_transform
+                    // fails; the character it drives lives in a field).
+                    if (fieldWalkBudget > 0 && count == 1 && NameLooksLikePlayer(cls.Name))
+                    {
+                        fieldWalkBudget--;
+                        int refs = await InspectSingletonFieldsAsync(cls, instance, score, hits, ct)
+                            .ConfigureAwait(false);
+                        if (_drainTimeout) return;
+                        candidateCount += refs;
+                    }
+                    continue;
+                }
                 hits.Add(new PlayerSignalHit(transform, $"class:{cls.Name}({count})",
                     score, instanceAddress: instance, className: cls.Name));
                 candidateCount++;
@@ -1429,6 +1454,96 @@ public sealed class PlayerLocator
         notes.Add($"classes: {picked.Count} scanned, {candidateCount} hit(s)"
             + (skippedCount > 0 ? $", {skippedCount} count-skipped" : string.Empty));
     }
+
+    // Walk a non-Component player singleton's fields to find the real object it
+    // drives. Surfaces Transform-/GameObject-typed fields as candidates, logs
+    // every field (so the singleton's structure lands in the log) and flags
+    // Vector3 fields — a game that stores the player's *logical* position in a
+    // managed Vector3 (the visual Transform following it) is exactly the "the
+    // character orbits a pivot when I set its Transform" case. Returns the
+    // number of Transform/GameObject references surfaced.
+    private async Task<int> InspectSingletonFieldsAsync(
+        PlayerClassNameFilter.ClassCandidate cls, string instance, int score,
+        List<PlayerSignalHit> hits, CancellationToken ct)
+    {
+        WalkInstanceResult walk;
+        try
+        {
+            walk = await _backend.WalkInstanceAsync(instance, cls.Assembly, cls.Namespace, cls.Name, ct)
+                .ConfigureAwait(false);
+        }
+        catch (PipeProtocolException ex) { Log($"signal-E {cls.Name}: walkInstance threw {ex.Message}"); return 0; }
+        if (!string.IsNullOrEmpty(walk.Error)) { Log($"signal-E {cls.Name}: walkInstance error {walk.Error}"); return 0; }
+
+        List<WalkedField> fields = walk.Fields ?? new List<WalkedField>();
+        // Diagnostic dump — name:type for every field, so the singleton's shape
+        // is captured even when nothing is auto-surfaced.
+        Log($"signal-E {cls.Name} fields[{fields.Count}]: "
+            + string.Join(", ", fields.Take(48).Select(f => $"{f.Name}:{f.Type ?? "?"}")));
+
+        int found = 0;
+        var vectors = new List<string>();
+        foreach (WalkedField f in fields)
+        {
+            ct.ThrowIfCancellationRequested();
+            string? type = f.Type;
+            if (type is null) continue;
+
+            if (IsTransformType(type) && NonNullPtr(f.Ptr) is string trPtr)
+            {
+                hits.Add(new PlayerSignalHit(trPtr, $"class:{cls.Name}.{f.Name}",
+                    score, className: cls.Name));
+                found++;
+            }
+            else if (IsGameObjectType(type) && NonNullPtr(f.Ptr) is string goPtr)
+            {
+                string? tr = await ResolveGameObjectTransformAsync(goPtr, ct).ConfigureAwait(false);
+                if (_drainTimeout) return found;
+                if (tr is not null)
+                {
+                    hits.Add(new PlayerSignalHit(tr, $"class:{cls.Name}.{f.Name}",
+                        score, gameObjectAddress: goPtr, className: cls.Name));
+                    found++;
+                }
+            }
+            else if (IsVector3Type(type))
+            {
+                vectors.Add($"{f.Name}@+{f.Offset}");
+            }
+        }
+
+        if (vectors.Count > 0)
+        {
+            // Not auto-usable yet (teleport writes Transform.set_position, not a
+            // managed field), but the likely fix for a "logical position" game —
+            // surfaced in the log so it can be targeted with a field-write.
+            Log($"signal-E {cls.Name}: Vector3 field(s) [{string.Join(", ", vectors)}] "
+                + "— possible logical position (needs field-write teleport)");
+        }
+        Log($"signal-E {cls.Name}: field-walk surfaced {found} Transform/GameObject reference(s)");
+        return found;
+    }
+
+    private static bool NameLooksLikePlayer(string name) =>
+        name.Contains("player", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("hero", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("protagonist", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTransformType(string type) =>
+        type.EndsWith("UnityEngine.Transform", StringComparison.Ordinal) ||
+        type.EndsWith("UnityEngine.RectTransform", StringComparison.Ordinal) ||
+        type == "Transform" || type == "RectTransform";
+
+    private static bool IsGameObjectType(string type) =>
+        type.EndsWith("UnityEngine.GameObject", StringComparison.Ordinal) ||
+        type == "GameObject";
+
+    private static bool IsVector3Type(string type) =>
+        type.EndsWith("UnityEngine.Vector3", StringComparison.Ordinal) ||
+        type == "Vector3";
+
+    private static string? NonNullPtr(string? ptr) =>
+        !string.IsNullOrEmpty(ptr) && !IsNullAddress(ptr) ? ptr : null;
 
     // ------------------------------------------------------------------
     // Enrichment
