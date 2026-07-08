@@ -41,6 +41,11 @@ public sealed class TeleportController
     /// CharacterController). Drives which write path teleports take + the UI note.</summary>
     public MovementDriver Driver => _driver;
 
+    /// <summary>Human-readable outcome of the last driver detection (how/where a
+    /// CharacterController was found, or why the plain Transform path was used).
+    /// Null until the first SetTarget with detection.</summary>
+    public string? LastDriverNote { get; private set; }
+
     /// <summary>
     /// Resolve + cache the picked target's Transform, then detect its movement
     /// driver (a CharacterController re-targets to its own transform + brackets
@@ -64,13 +69,15 @@ public sealed class TeleportController
         {
             _transform = transform;
             _driver = MovementDriver.Transform;
+            LastDriverNote = null;
             return error;
         }
 
-        (MovementDriver driver, string effective, _) = await _service
+        (MovementDriver driver, string effective, string? note) = await _service
             .DetectMovementDriverAsync(transform, ct).ConfigureAwait(false);
         _transform = effective;
         _driver = driver;
+        LastDriverNote = note;
         return error;
     }
 

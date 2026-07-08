@@ -180,15 +180,27 @@ public sealed class TeleportService
 
         string? ccType = await ResolveCharacterControllerTypeAsync(ct).ConfigureAwait(false);
         if (ccType is null)
-            return (MovementDriver.Transform, transformAddress, null);   // stripped / unavailable
+            return (MovementDriver.Transform, transformAddress,
+                "CharacterController type not loaded — plain Transform write.");
 
-        // Self + ancestors first (the CC often lives above a picked child bone),
-        // then self-only as a fallback when GetComponentInParent is stripped.
+        // Fast path: GetComponentInParent walks self + ancestors in one call.
+        // But many IL2CPP builds STRIP it (it fails method resolution and just
+        // returns null here), so fall back to a manual parent walk using
+        // GetComponent + get_parent — both survive stripping. The CC usually
+        // lives on an ANCESTOR of a picked child bone / model root, so self-only
+        // GetComponent isn't enough.
+        string via = "GetComponentInParent";
         string? cc = await FindComponentAsync(transformAddress, ccType, "GetComponentInParent", ct)
             .ConfigureAwait(false);
-        cc ??= await FindComponentAsync(transformAddress, ccType, "GetComponent", ct).ConfigureAwait(false);
+        if (cc is null)
+        {
+            (cc, int depth) = await FindComponentInAncestorsAsync(transformAddress, ccType, ct)
+                .ConfigureAwait(false);
+            via = cc is null ? "none" : depth == 0 ? "self" : $"ancestor +{depth}";
+        }
         if (string.IsNullOrEmpty(cc))
-            return (MovementDriver.Transform, transformAddress, null);
+            return (MovementDriver.Transform, transformAddress,
+                "No CharacterController on the target or its ancestors — plain Transform write.");
 
         // The CharacterController's own transform is the authoritative position
         // node — retarget to it (the picked child would just snap back).
@@ -206,7 +218,7 @@ public sealed class TeleportService
             ComponentAddress = cc,
         };
         return (driver, effective,
-            "CharacterController-driven — teleport disables it during the write so it isn't fought.");
+            $"CharacterController-driven (found via {via}) — teleport disables it during the write.");
     }
 
     /// <summary>Read a Transform's world position + Euler rotation.</summary>
@@ -397,6 +409,32 @@ public sealed class TeleportService
         if (!r.Ok || !string.IsNullOrEmpty(r.Error)) return null;
         string? addr = AsAddress(r);
         return string.IsNullOrEmpty(addr) || addr == "0x0" ? null : addr;
+    }
+
+    // Manual GetComponentInParent: GetComponent on the transform's GameObject,
+    // then climb `get_parent` and repeat. Used when the engine
+    // GetComponentInParent overload is stripped. Returns (component, depth) —
+    // depth 0 = on the target itself, N = on the Nth ancestor.
+    private const int MaxAncestorWalk = 16;
+
+    private async Task<(string? cc, int depth)> FindComponentInAncestorsAsync(
+        string transformAddress, string typeAddress, CancellationToken ct)
+    {
+        string cur = transformAddress;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { cur };
+        for (int depth = 0; depth <= MaxAncestorWalk; depth++)
+        {
+            string? cc = await FindComponentAsync(cur, typeAddress, "GetComponent", ct).ConfigureAwait(false);
+            if (cc is not null) return (cc, depth);
+
+            CallMethodResult pr = await CallEngineAsync(
+                "Transform", "get_parent", cur, NoArgs,
+                wantStruct: false, structSize: 0, sigMatch: null, ct).ConfigureAwait(false);
+            string? parent = pr.Ok ? AsAddress(pr) : null;
+            if (string.IsNullOrEmpty(parent) || parent == "0x0" || !seen.Add(parent)) break;
+            cur = parent;
+        }
+        return (null, -1);
     }
 
     // CharacterController.enabled is declared on Collider (PhysicsModule).

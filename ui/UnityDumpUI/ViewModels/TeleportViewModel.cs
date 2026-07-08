@@ -268,6 +268,7 @@ public sealed partial class TeleportViewModel : ObservableObject
             }
             HasTarget = _controller.HasTarget;
             MovementDriver driver = _controller.Driver;
+            _logger.Write("Teleport", $"SetTarget driver={driver.Label}: {_controller.LastDriverNote ?? "(none)"}");
             if (driver.IsCharacterController)
             {
                 DriverText = "Driver: CharacterController (teleport disables it during the write)";
@@ -277,7 +278,9 @@ public sealed partial class TeleportViewModel : ObservableObject
             else
             {
                 DriverText = "Driver: Transform (direct write)";
-                StatusMessage = "Target resolved (plain Transform write).";
+                StatusMessage = "Target resolved (plain Transform write). "
+                    + "If the character orbits / won't move, it may be physics-driven "
+                    + "(CharacterController not found on it or its ancestors).";
             }
             await RefreshPoseInternalAsync().ConfigureAwait(true);
             RefreshMarkerRows();

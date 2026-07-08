@@ -289,8 +289,10 @@ public class TeleportServiceTests
         var responses = new[]
         {
             Ref("0xCC7E"),   // CharacterController Type resolves
-            Ref("0x0"),      // GetComponentInParent -> null
-            Ref("0x0"),      // GetComponent -> null
+            Ref("0x0"),      // GetComponentInParent -> null (stripped / no CC)
+            // manual ancestor walk: GetComponent(self) -> null, get_parent -> root
+            Ref("0x0"),      // GetComponent(self) -> null
+            Ref("0x0"),      // get_parent -> null (top of hierarchy) -> stop
         };
         var fp = await TeleportFakePipe.StartAsync(responses, ct);
         try
@@ -302,10 +304,44 @@ public class TeleportServiceTests
             Assert.Equal(MovementDriverKind.Transform, driver.Kind);
             Assert.False(driver.IsCharacterController);
             Assert.Equal("0x2000", effective);                 // unchanged
-            Assert.Null(note);
+            Assert.NotNull(note);                              // "No CharacterController …"
 
             var reqs = await fp.ServerTask.ConfigureAwait(true);
+            Assert.Equal(4, reqs.Count);
             Assert.Equal("GetComponent", TeleportFakePipe.Params(reqs[2]).GetProperty("method").GetString());
+            Assert.Equal("get_parent",   TeleportFakePipe.Params(reqs[3]).GetProperty("method").GetString());
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task DetectDriver_CharacterControllerOnAncestor_ManualWalkFindsIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // GetComponentInParent is stripped (returns null); the CC lives on the
+        // grandparent. The manual walk must climb to it.
+        var responses = new[]
+        {
+            Ref("0xCC7E"),   // Type.GetType(CharacterController)
+            Ref("0x0"),      // GetComponentInParent -> null (stripped)
+            Ref("0x0"),      // walk d0: GetComponent(target) -> null
+            Ref("0xA100"),   // walk d0: get_parent -> parent
+            Ref("0x0"),      // walk d1: GetComponent(parent) -> null
+            Ref("0xA200"),   // walk d1: get_parent -> grandparent
+            Ref("0xCC00"),   // walk d2: GetComponent(grandparent) -> the CC!
+            Ref("0xCC01"),   // get_transform(cc) -> the CC's transform
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var svc = new TeleportService(fp.Adapter);
+            var (driver, effective, note) = await svc.DetectMovementDriverAsync("0x2000", ct)
+                                                     .ConfigureAwait(true);
+
+            Assert.Equal(MovementDriverKind.CharacterController, driver.Kind);
+            Assert.Equal("0xCC00", driver.ComponentAddress);
+            Assert.Equal("0xCC01", effective);                 // retargeted to the CC's transform
+            Assert.Contains("ancestor", note);                 // found via ancestor walk
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
