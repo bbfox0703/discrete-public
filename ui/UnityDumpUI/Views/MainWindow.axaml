@@ -3076,6 +3076,8 @@
                         <TextBlock Text="{Binding Teleport.RotationText}"
                                    FontFamily="Consolas,Cascadia Mono,monospace"/>
                       </StackPanel>
+                      <TextBlock Text="{Binding Teleport.DriverText}" Opacity="0.7" TextWrapping="Wrap"
+                                 IsVisible="{Binding Teleport.DriverText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                     </StackPanel>
                   </Border>
 

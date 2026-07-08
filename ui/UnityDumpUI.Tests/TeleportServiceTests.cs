@@ -127,7 +127,7 @@ public class TeleportServiceTests
         try
         {
             var svc = new TeleportService(fp.Adapter);
-            var (ok, error) = await svc.WritePoseAsync("0x2000", 1.0, 2.0, 3.0, euler: null, ct)
+            var (ok, error) = await svc.WritePoseAsync("0x2000", 1.0, 2.0, 3.0, euler: null, ct: ct)
                                        .ConfigureAwait(true);
 
             Assert.True(ok);
@@ -152,7 +152,7 @@ public class TeleportServiceTests
         try
         {
             var svc = new TeleportService(fp.Adapter);
-            var (ok, error) = await svc.WritePoseAsync("0x2000", 1.0, 2.0, 3.0, (10.0, 20.0, 30.0), ct)
+            var (ok, error) = await svc.WritePoseAsync("0x2000", 1.0, 2.0, 3.0, (10.0, 20.0, 30.0), ct: ct)
                                        .ConfigureAwait(true);
 
             Assert.True(ok);
@@ -204,7 +204,7 @@ public class TeleportServiceTests
         try
         {
             var svc = new TeleportService(fp.Adapter);
-            var (ok, error) = await svc.TeleportDirectionalAsync("0x2000", 5.0, horizontal: false, ct)
+            var (ok, error) = await svc.TeleportDirectionalAsync("0x2000", 5.0, horizontal: false, ct: ct)
                                        .ConfigureAwait(true);
 
             Assert.True(ok);
@@ -239,5 +239,127 @@ public class TeleportServiceTests
         float[] r = CallArgFactory.DecodeStructFloats("nothex", 3);
         Assert.Equal(new float[] { 0, 0, 0 }, r);
         Assert.Equal(new float[] { 0, 0, 0 }, CallArgFactory.DecodeStructFloats(null, 3));
+    }
+
+    // --- driver-aware teleport ---
+
+    // An address-returning success (Type / component / transform pointer).
+    private static string Ref(string hex) => $$"""
+        { "ok": true, "returnType": "System.Object", "returnValue": "{{hex}}",
+          "elapsedMs": 1, "method": { "address": "0x0", "signature": "()", "humanSuffix": "" } }
+        """;
+
+    [Fact]
+    public async Task DetectDriver_CharacterController_RetargetsToItsTransform()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var responses = new[]
+        {
+            Ref("0xCC7E"),   // Type.GetType(CharacterController)
+            Ref("0xCC00"),   // Component.GetComponentInParent(ccType) -> the CC
+            Ref("0xCC01"),   // Component.get_transform(cc) -> the CC's own transform
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var svc = new TeleportService(fp.Adapter);
+            var (driver, effective, note) = await svc.DetectMovementDriverAsync("0x2000", ct)
+                                                     .ConfigureAwait(true);
+
+            Assert.Equal(MovementDriverKind.CharacterController, driver.Kind);
+            Assert.True(driver.IsCharacterController);
+            Assert.Equal("0xCC00", driver.ComponentAddress);
+            Assert.Equal("0xCC01", effective);                 // retargeted to the CC's transform
+            Assert.NotNull(note);
+
+            var reqs = await fp.ServerTask.ConfigureAwait(true);
+            Assert.Equal("GetType",              TeleportFakePipe.Params(reqs[0]).GetProperty("method").GetString());
+            JsonElement p1 = TeleportFakePipe.Params(reqs[1]);
+            Assert.Equal("Component",            p1.GetProperty("name").GetString());
+            Assert.Equal("GetComponentInParent", p1.GetProperty("method").GetString());
+            Assert.Equal("get_transform",        TeleportFakePipe.Params(reqs[2]).GetProperty("method").GetString());
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task DetectDriver_NoCharacterController_FallsBackToTransform()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var responses = new[]
+        {
+            Ref("0xCC7E"),   // CharacterController Type resolves
+            Ref("0x0"),      // GetComponentInParent -> null
+            Ref("0x0"),      // GetComponent -> null
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var svc = new TeleportService(fp.Adapter);
+            var (driver, effective, note) = await svc.DetectMovementDriverAsync("0x2000", ct)
+                                                     .ConfigureAwait(true);
+
+            Assert.Equal(MovementDriverKind.Transform, driver.Kind);
+            Assert.False(driver.IsCharacterController);
+            Assert.Equal("0x2000", effective);                 // unchanged
+            Assert.Null(note);
+
+            var reqs = await fp.ServerTask.ConfigureAwait(true);
+            Assert.Equal("GetComponent", TeleportFakePipe.Params(reqs[2]).GetProperty("method").GetString());
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task WritePose_CharacterControllerDriver_DisablesSetsReEnables()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var driver = new MovementDriver
+        {
+            Kind = MovementDriverKind.CharacterController,
+            ComponentAddress = "0xCC00",
+        };
+        var fp = await TeleportFakePipe.StartAsync(new[] { VoidOk, VoidOk, VoidOk }, ct);
+        try
+        {
+            var svc = new TeleportService(fp.Adapter);
+            var (ok, error) = await svc.WritePoseAsync("0xCC01", 1.0, 2.0, 3.0, euler: null, driver, ct)
+                                       .ConfigureAwait(true);
+            Assert.True(ok);
+            Assert.Null(error);
+
+            var reqs = await fp.ServerTask.ConfigureAwait(true);
+            Assert.Equal(3, reqs.Count);
+            // disable → set_position → re-enable, and the CC calls hit PhysicsModule.
+            JsonElement dis = TeleportFakePipe.Params(reqs[0]);
+            Assert.Equal("set_enabled", dis.GetProperty("method").GetString());
+            Assert.Equal("Collider",    dis.GetProperty("name").GetString());
+            Assert.Equal("UnityEngine.PhysicsModule", dis.GetProperty("assembly").GetString());
+            Assert.Equal(JsonValueKind.False, dis.GetProperty("args")[0].GetProperty("value").ValueKind);
+            Assert.Equal("set_position", TeleportFakePipe.Params(reqs[1]).GetProperty("method").GetString());
+            JsonElement en = TeleportFakePipe.Params(reqs[2]);
+            Assert.Equal("set_enabled", en.GetProperty("method").GetString());
+            Assert.Equal(JsonValueKind.True, en.GetProperty("args")[0].GetProperty("value").ValueKind);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task WritePose_NoDriver_WritesDirectly()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var fp = await TeleportFakePipe.StartAsync(new[] { VoidOk }, ct);
+        try
+        {
+            var svc = new TeleportService(fp.Adapter);
+            var (ok, _) = await svc.WritePoseAsync("0x2000", 1.0, 2.0, 3.0,
+                euler: null, driver: MovementDriver.Transform, ct: ct).ConfigureAwait(true);
+            Assert.True(ok);
+
+            var reqs = await fp.ServerTask.ConfigureAwait(true);
+            Assert.Single(reqs);   // just set_position — no disable/enable
+            Assert.Equal("set_position", TeleportFakePipe.Params(reqs[0]).GetProperty("method").GetString());
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
 }

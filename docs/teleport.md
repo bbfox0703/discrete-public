@@ -53,6 +53,46 @@ Wire spec: [lua-invoke.md](lua-invoke.md) → "value-struct". This primitive is
 general (any Vector3/Quaternion/Color-taking or -returning method), not
 teleport-specific.
 
+## Movement-driver-aware write (2026-07-08)
+
+Unity moves characters four ways, and a plain `Transform.set_position` only
+works for the first:
+
+| Driver | Write path |
+|---|---|
+| **Transform** (script sets `position`) | `set_position` ✅ (default) |
+| **CharacterController** (`.Move`/`.SimpleMove`) | disable the controller → `set_position` → re-enable |
+| Rigidbody physics | (future) `Rigidbody.position`/`MovePosition` + sleep |
+| NavMeshAgent | (future) `NavMeshAgent.Warp` |
+
+A `CharacterController` **re-drives its GameObject's transform every frame**, so
+writing the transform while it's enabled just gets fought — the character
+orbits / snaps back (the live Utawarerumono symptom). `TeleportService` is now
+**driver-aware**:
+
+- `DetectMovementDriverAsync(transform)` — resolve
+  `Type.GetType("UnityEngine.CharacterController, …")` (cached), then
+  `Component.GetComponentInParent(ccType)` (self **+ ancestors**, falling back to
+  `GetComponent` self-only) on the target. A hit means CharacterController-driven,
+  and the target is **retargeted to the CharacterController's OWN transform**
+  (`Component.get_transform(cc)`) — the picked child bone would just snap back.
+- `WritePoseAsync(…, driver)` — for a CharacterController driver: `Collider`
+  `set_enabled(false)` (enabled lives on Collider, PhysicsModule) → position/euler
+  write → `set_enabled(true)`. Wrapped so a throw during the write still
+  re-enables; a re-enable failure is surfaced (don't silently leave the character
+  frozen). No CC → the raw `set_position` path (unchanged).
+
+The detection runs once at **Set Target** (`TeleportController` caches the driver
++ effective transform); markers / coords / directional all inherit it. The tab
+shows `Driver: CharacterController …` under the pose. It's fully **auto-selected**
+— the user never picks a mode. This is the first member of the driver family;
+Rigidbody / NavMeshAgent slot into the same dispatch later.
+
+This is why signal C (`FindObjectsByType(CharacterController)`) reported 0 on
+Utawarerumono while the player *was* CharacterController-driven: that enumeration
+API is stripped, but the component still exists and `GetComponentInParent` finds
+it from the movement-detected transform.
+
 ## Architecture (layers, all shipped)
 
 ```

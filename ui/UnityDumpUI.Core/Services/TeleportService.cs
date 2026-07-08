@@ -48,12 +48,50 @@ public sealed class TeleportPose
     public double EulerZ { get; init; }
 }
 
+/// <summary>How the target character is moved — decides which write path a
+/// teleport must use. <c>Transform</c> (None) writes position directly;
+/// physics/controller drivers re-drive the transform every frame and need a
+/// driver-aware write. This is the first member of that family (the most
+/// common); Rigidbody / NavMeshAgent are future additions to the same
+/// dispatch.</summary>
+public enum MovementDriverKind
+{
+    /// <summary>Plain transform write works (no component re-drives it).</summary>
+    Transform = 0,
+    /// <summary>UnityEngine.CharacterController — overrides transform writes
+    /// while enabled, so the write is bracketed by disable/enable.</summary>
+    CharacterController = 1,
+}
+
+/// <summary>The resolved movement driver for a teleport target.</summary>
+public sealed class MovementDriver
+{
+    public MovementDriverKind Kind { get; init; } = MovementDriverKind.Transform;
+
+    /// <summary>The driver component to disable during a write (the
+    /// CharacterController). Null for <see cref="MovementDriverKind.Transform"/>.</summary>
+    public string? ComponentAddress { get; init; }
+
+    public static readonly MovementDriver Transform = new();
+
+    public bool IsCharacterController =>
+        Kind == MovementDriverKind.CharacterController && !string.IsNullOrEmpty(ComponentAddress);
+
+    /// <summary>Short human label for the UI ("CharacterController" / "Transform").</summary>
+    public string Label => Kind switch
+    {
+        MovementDriverKind.CharacterController => "CharacterController",
+        _                                      => "Transform",
+    };
+}
+
 /// <summary>
 /// The universal Unity teleport primitive: resolve a picked target's Transform,
 /// then read / write its world position + rotation through callMethod
 /// value-struct marshaling on the Unity main thread. Both backends
 /// (Mono / IL2CPP) are transparent — the same engine method names resolve on
-/// each.
+/// each. Driver-aware: a CharacterController-driven character is written with
+/// the controller disabled so the write isn't fought every frame.
 /// </summary>
 public sealed class TeleportService
 {
@@ -63,14 +101,32 @@ public sealed class TeleportService
     private static readonly string[] EngineAssemblyCandidates =
         { "UnityEngine.CoreModule", "UnityEngine" };
 
-    private const string EngineNamespace = "UnityEngine";
-    private const int    Vector3Bytes    = 12;   // 3 little-endian floats
+    // Collider / CharacterController live in PhysicsModule (module-split) or the
+    // monolithic UnityEngine assembly (older builds).
+    private static readonly string[] PhysicsAssemblyCandidates =
+        { "UnityEngine.PhysicsModule", "UnityEngine" };
+
+    private const string MscorlibAssembly = "mscorlib";
+    private const string SystemNamespace  = "System";
+    private const string EngineNamespace  = "UnityEngine";
+    private const int    Vector3Bytes     = 12;   // 3 little-endian floats
+
+    // CharacterController lives in PhysicsModule (5.4+) / monolithic UnityEngine.
+    private static readonly string[] CharacterControllerTypeFqns =
+    {
+        "UnityEngine.CharacterController, UnityEngine.PhysicsModule",
+        "UnityEngine.CharacterController, UnityEngine",
+    };
 
     private static readonly IReadOnlyList<CallArgRequest> NoArgs =
         new List<CallArgRequest>();
 
     private readonly BackendAdapter _adapter;
     private readonly int _mainThreadTimeoutMs;
+
+    // Cached managed Type* for UnityEngine.CharacterController (per process).
+    private string? _ccTypeAddress;
+    private bool    _ccTypeResolved;
 
     public TeleportService(BackendAdapter adapter, int mainThreadTimeoutMs = 8000)
     {
@@ -103,6 +159,54 @@ public sealed class TeleportService
         if (string.IsNullOrEmpty(addr) || addr == "0x0")
             return (null, "target has no Transform");
         return (addr, null);
+    }
+
+    /// <summary>
+    /// Detect how the target's character is moved so writes take the right path.
+    /// Probes for a <c>UnityEngine.CharacterController</c> on the target OR any
+    /// ancestor (<c>GetComponentInParent</c>, falling back to <c>GetComponent</c>).
+    /// A CharacterController re-drives its GameObject's transform every frame, so
+    /// a plain <c>set_position</c> just fights it (the character orbits / snaps
+    /// back). When one is found, its OWN transform is the authoritative node —
+    /// returned as <paramref name="effectiveTransform"/> so the caller re-targets
+    /// to it. When none is found (or the API is stripped), returns
+    /// <see cref="MovementDriver.Transform"/> and the original transform.
+    /// </summary>
+    public async Task<(MovementDriver driver, string effectiveTransform, string? note)> DetectMovementDriverAsync(
+        string transformAddress, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(transformAddress) || transformAddress == "0x0")
+            return (MovementDriver.Transform, transformAddress ?? string.Empty, null);
+
+        string? ccType = await ResolveCharacterControllerTypeAsync(ct).ConfigureAwait(false);
+        if (ccType is null)
+            return (MovementDriver.Transform, transformAddress, null);   // stripped / unavailable
+
+        // Self + ancestors first (the CC often lives above a picked child bone),
+        // then self-only as a fallback when GetComponentInParent is stripped.
+        string? cc = await FindComponentAsync(transformAddress, ccType, "GetComponentInParent", ct)
+            .ConfigureAwait(false);
+        cc ??= await FindComponentAsync(transformAddress, ccType, "GetComponent", ct).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(cc))
+            return (MovementDriver.Transform, transformAddress, null);
+
+        // The CharacterController's own transform is the authoritative position
+        // node — retarget to it (the picked child would just snap back).
+        string effective = transformAddress;
+        CallMethodResult tr = await CallEngineAsync(
+            "Component", "get_transform", cc, NoArgs,
+            wantStruct: false, structSize: 0, sigMatch: null, ct).ConfigureAwait(false);
+        string? ccTransform = tr.Ok ? AsAddress(tr) : null;
+        if (!string.IsNullOrEmpty(ccTransform) && ccTransform != "0x0")
+            effective = ccTransform;
+
+        var driver = new MovementDriver
+        {
+            Kind = MovementDriverKind.CharacterController,
+            ComponentAddress = cc,
+        };
+        return (driver, effective,
+            "CharacterController-driven — teleport disables it during the write so it isn't fought.");
     }
 
     /// <summary>Read a Transform's world position + Euler rotation.</summary>
@@ -151,11 +255,51 @@ public sealed class TeleportService
         string transformAddress,
         double x, double y, double z,
         (double x, double y, double z)? euler = null,
+        MovementDriver? driver = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(transformAddress) || transformAddress == "0x0")
             return (false, "no Transform resolved");
 
+        MovementDriver d = driver ?? MovementDriver.Transform;
+        if (!d.IsCharacterController)
+            return await SetPoseRawAsync(transformAddress, x, y, z, euler, ct).ConfigureAwait(false);
+
+        // CharacterController-aware write: the controller overrides transform
+        // writes while enabled, so disable it, write, then re-enable from the new
+        // position. Standard Unity teleport idiom.
+        string cc = d.ComponentAddress!;
+        CallMethodResult disable = await SetCharacterControllerEnabledAsync(cc, false, ct).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(disable.Error))
+            return (false, $"couldn't disable CharacterController: {disable.Error}");
+        if (!disable.Ok)
+            return (false, $"couldn't disable CharacterController: {disable.Exception ?? "set_enabled(false) failed"}");
+
+        (bool ok, string? error) result;
+        try
+        {
+            result = await SetPoseRawAsync(transformAddress, x, y, z, euler, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Restore control before propagating — never leave the CC disabled.
+            try { await SetCharacterControllerEnabledAsync(cc, true, ct).ConfigureAwait(false); } catch { }
+            throw;
+        }
+
+        CallMethodResult enable = await SetCharacterControllerEnabledAsync(cc, true, ct).ConfigureAwait(false);
+        if (!enable.Ok || !string.IsNullOrEmpty(enable.Error))
+            return (false, "teleported, but FAILED to re-enable the CharacterController "
+                + $"({enable.Error ?? enable.Exception ?? "set_enabled(true) failed"}) — "
+                + "the character may be frozen; toggle it in-game or re-run.");
+        return result;
+    }
+
+    // The raw transform write (position + optional Euler), driver-agnostic.
+    private async Task<(bool ok, string? error)> SetPoseRawAsync(
+        string transformAddress, double x, double y, double z,
+        (double x, double y, double z)? euler, CancellationToken ct)
+    {
         var posArgs = new List<CallArgRequest>
         {
             CallArgFactory.Vector3((float)x, (float)y, (float)z),
@@ -190,7 +334,8 @@ public sealed class TeleportService
     /// Rotation is preserved. Reads position + forward, then writes.
     /// </summary>
     public async Task<(bool ok, string? error)> TeleportDirectionalAsync(
-        string transformAddress, double distance, bool horizontal, CancellationToken ct = default)
+        string transformAddress, double distance, bool horizontal,
+        MovementDriver? driver = null, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(transformAddress) || transformAddress == "0x0")
             return (false, "no Transform resolved");
@@ -211,8 +356,57 @@ public sealed class TeleportService
 
         var (dx, dy, dz) = TeleportMath.Directional(
             p[0], p[1], p[2], f[0], f[1], f[2], distance, horizontal);
-        return await WritePoseAsync(transformAddress, dx, dy, dz, euler: null, ct).ConfigureAwait(false);
+        return await WritePoseAsync(transformAddress, dx, dy, dz, euler: null, driver, ct).ConfigureAwait(false);
     }
+
+    // --- driver internals ---
+
+    // Resolve + cache the managed Type* for UnityEngine.CharacterController.
+    // Null (cached) when the type isn't loaded — a game with no CharacterController.
+    private async Task<string?> ResolveCharacterControllerTypeAsync(CancellationToken ct)
+    {
+        if (_ccTypeResolved) return _ccTypeAddress;
+        _ccTypeResolved = true;
+        foreach (string fqn in CharacterControllerTypeFqns)
+        {
+            CallMethodResult r = await _adapter.CallMethodAsync(
+                MscorlibAssembly, SystemNamespace, "Type", "GetType",
+                new[] { CallArgFactory.String(fqn) },
+                signatureMatch: "(System.String)",
+                mainThread: true, mainThreadTimeoutMs: _mainThreadTimeoutMs,
+                ct: ct).ConfigureAwait(false);
+            string? addr = r.Ok ? AsAddress(r) : null;
+            if (!string.IsNullOrEmpty(addr) && addr != "0x0")
+            {
+                _ccTypeAddress = addr;
+                return addr;
+            }
+        }
+        return null;
+    }
+
+    // Component.GetComponent[InParent](System.Type) on a transform — returns the
+    // component address, or null when absent / the overload is stripped.
+    private async Task<string?> FindComponentAsync(
+        string transformAddress, string typeAddress, string method, CancellationToken ct)
+    {
+        CallMethodResult r = await CallEngineAsync(
+            "Component", method, transformAddress,
+            new[] { CallArgFactory.Address(typeAddress) },
+            wantStruct: false, structSize: 0, sigMatch: "(System.Type)", ct).ConfigureAwait(false);
+        if (!r.Ok || !string.IsNullOrEmpty(r.Error)) return null;
+        string? addr = AsAddress(r);
+        return string.IsNullOrEmpty(addr) || addr == "0x0" ? null : addr;
+    }
+
+    // CharacterController.enabled is declared on Collider (PhysicsModule).
+    private Task<CallMethodResult> SetCharacterControllerEnabledAsync(
+        string cc, bool enabled, CancellationToken ct) =>
+        CallEngineAsync(
+            "Collider", "set_enabled", cc,
+            new[] { CallArgFactory.Bool(enabled) },
+            wantStruct: false, structSize: 0, sigMatch: "(System.Boolean)", ct,
+            assemblies: PhysicsAssemblyCandidates);
 
     // --- internals ---
 
@@ -222,10 +416,10 @@ public sealed class TeleportService
     private async Task<CallMethodResult> CallEngineAsync(
         string className, string method, string? instanceHex,
         IReadOnlyList<CallArgRequest> args, bool wantStruct, int structSize,
-        string? sigMatch, CancellationToken ct)
+        string? sigMatch, CancellationToken ct, string[]? assemblies = null)
     {
         CallMethodResult? last = null;
-        foreach (string asm in EngineAssemblyCandidates)
+        foreach (string asm in assemblies ?? EngineAssemblyCandidates)
         {
             CallMethodResult r = await _adapter.CallMethodAsync(
                 asm, EngineNamespace, className, method, args,

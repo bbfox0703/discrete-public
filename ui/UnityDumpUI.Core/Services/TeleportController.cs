@@ -26,6 +26,7 @@ public sealed class TeleportController
     private readonly TeleportService _service;
     private readonly TeleportMarkerStore _markers = new();
     private string? _transform;
+    private MovementDriver _driver = MovementDriver.Transform;
 
     public TeleportController(TeleportService service)
     {
@@ -36,18 +37,48 @@ public sealed class TeleportController
 
     public bool HasTarget => !string.IsNullOrEmpty(_transform);
 
-    /// <summary>Resolve + cache the picked target's Transform. Returns null on
-    /// success, or an error string (target cleared on failure).</summary>
+    /// <summary>The resolved movement driver of the current target (Transform /
+    /// CharacterController). Drives which write path teleports take + the UI note.</summary>
+    public MovementDriver Driver => _driver;
+
+    /// <summary>
+    /// Resolve + cache the picked target's Transform, then detect its movement
+    /// driver (a CharacterController re-targets to its own transform + brackets
+    /// writes with disable/enable). Returns null on success, or an error string
+    /// (target cleared on failure).
+    /// </summary>
     public async Task<string?> SetTargetAsync(
-        string targetAddress, bool targetIsGameObject, CancellationToken ct = default)
+        string targetAddress, bool targetIsGameObject, CancellationToken ct = default,
+        bool detectDriver = true)
     {
         (string? transform, string? error) = await _service
             .ResolveTransformAsync(targetAddress, targetIsGameObject, ct).ConfigureAwait(false);
-        _transform = transform;
+        if (transform is null)
+        {
+            _transform = null;
+            _driver = MovementDriver.Transform;
+            return error;
+        }
+
+        if (!detectDriver)
+        {
+            _transform = transform;
+            _driver = MovementDriver.Transform;
+            return error;
+        }
+
+        (MovementDriver driver, string effective, _) = await _service
+            .DetectMovementDriverAsync(transform, ct).ConfigureAwait(false);
+        _transform = effective;
+        _driver = driver;
         return error;
     }
 
-    public void ClearTarget() => _transform = null;
+    public void ClearTarget()
+    {
+        _transform = null;
+        _driver = MovementDriver.Transform;
+    }
 
     /// <summary>Read the live pose of the resolved target.</summary>
     public Task<TeleportPose> ReadPoseAsync(CancellationToken ct = default) =>
@@ -93,7 +124,7 @@ public sealed class TeleportController
         if (_transform is null) return "no target resolved";
         await SaveLastAsync(ct).ConfigureAwait(false);
         (bool ok, string? error) = await _service
-            .WritePoseAsync(_transform, x, y, z, euler, ct).ConfigureAwait(false);
+            .WritePoseAsync(_transform, x, y, z, euler, _driver, ct).ConfigureAwait(false);
         return ok ? null : error;
     }
 
@@ -104,7 +135,7 @@ public sealed class TeleportController
         if (_transform is null) return "no target resolved";
         await SaveLastAsync(ct).ConfigureAwait(false);
         (bool ok, string? error) = await _service
-            .TeleportDirectionalAsync(_transform, distance, horizontal, ct).ConfigureAwait(false);
+            .TeleportDirectionalAsync(_transform, distance, horizontal, _driver, ct).ConfigureAwait(false);
         return ok ? null : error;
     }
 
@@ -121,7 +152,7 @@ public sealed class TeleportController
         (double x, double y, double z)? euler =
             m.HasRotation ? (m.EulerX, m.EulerY, m.EulerZ) : null;
         (bool ok, string? error) = await _service
-            .WritePoseAsync(_transform!, m.X, m.Y, m.Z, euler, ct).ConfigureAwait(false);
+            .WritePoseAsync(_transform!, m.X, m.Y, m.Z, euler, _driver, ct).ConfigureAwait(false);
         return ok ? null : error;
     }
 }

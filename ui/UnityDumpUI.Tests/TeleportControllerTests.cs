@@ -50,7 +50,10 @@ public class TeleportControllerTests
         {
             var controller = new TeleportController(new TeleportService(fp.Adapter));
 
-            Assert.Null(await controller.SetTargetAsync("0x1000", false, ct).ConfigureAwait(true));
+            // detectDriver:false — these tests exercise the marker/recall write
+            // flow with a plain Transform target; driver detection has its own
+            // tests in TeleportServiceTests and would add unrelated RPCs here.
+            Assert.Null(await controller.SetTargetAsync("0x1000", false, ct, detectDriver: false).ConfigureAwait(true));
             Assert.True(controller.HasTarget);
             Assert.Null(await controller.SaveMarkerAsync(0, ct).ConfigureAwait(true));
             Assert.Null(await controller.RecallMarkerAsync(0, ct).ConfigureAwait(true));
@@ -78,7 +81,10 @@ public class TeleportControllerTests
         try
         {
             var controller = new TeleportController(new TeleportService(fp.Adapter));
-            Assert.Null(await controller.SetTargetAsync("0x1000", false, ct).ConfigureAwait(true));
+            // detectDriver:false — these tests exercise the marker/recall write
+            // flow with a plain Transform target; driver detection has its own
+            // tests in TeleportServiceTests and would add unrelated RPCs here.
+            Assert.Null(await controller.SetTargetAsync("0x1000", false, ct, detectDriver: false).ConfigureAwait(true));
 
             string? error = await controller.RecallMarkerAsync(1, ct).ConfigureAwait(true);
             Assert.Equal("marker slot is empty", error);
@@ -97,7 +103,10 @@ public class TeleportControllerTests
         try
         {
             var controller = new TeleportController(new TeleportService(fp.Adapter));
-            Assert.Null(await controller.SetTargetAsync("0x1000", false, ct).ConfigureAwait(true));
+            // detectDriver:false — these tests exercise the marker/recall write
+            // flow with a plain Transform target; driver detection has its own
+            // tests in TeleportServiceTests and would add unrelated RPCs here.
+            Assert.Null(await controller.SetTargetAsync("0x1000", false, ct, detectDriver: false).ConfigureAwait(true));
 
             Assert.Equal("nothing to undo", await controller.RecallLastAsync(ct).ConfigureAwait(true));
         }

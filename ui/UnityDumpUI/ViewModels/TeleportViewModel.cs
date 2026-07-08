@@ -94,6 +94,8 @@ public sealed partial class TeleportViewModel : ObservableObject
 
     [ObservableProperty] private string _positionText = "—";   // em dash
     [ObservableProperty] private string _rotationText = "—";
+    /// <summary>Movement driver of the resolved target (Transform / CharacterController).</summary>
+    [ObservableProperty] private string _driverText = string.Empty;
 
     // --- explicit coordinates ---
 
@@ -265,7 +267,18 @@ public sealed partial class TeleportViewModel : ObservableObject
                 return;
             }
             HasTarget = _controller.HasTarget;
-            StatusMessage = "Target resolved.";
+            MovementDriver driver = _controller.Driver;
+            if (driver.IsCharacterController)
+            {
+                DriverText = "Driver: CharacterController (teleport disables it during the write)";
+                StatusMessage = "Target resolved — CharacterController-driven, so teleports "
+                    + "disable the controller during the write (retargeted to its own transform).";
+            }
+            else
+            {
+                DriverText = "Driver: Transform (direct write)";
+                StatusMessage = "Target resolved (plain Transform write).";
+            }
             await RefreshPoseInternalAsync().ConfigureAwait(true);
             RefreshMarkerRows();
         }
@@ -401,6 +414,7 @@ public sealed partial class TeleportViewModel : ObservableObject
         _lastPose = null;
         PositionText = "—";
         RotationText = "—";
+        DriverText = string.Empty;
     }
 
     private void Fail(string label, Exception ex)
