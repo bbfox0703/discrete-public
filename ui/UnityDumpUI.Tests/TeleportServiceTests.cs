@@ -253,12 +253,11 @@ public class TeleportServiceTests
     public async Task DetectDriver_CharacterController_RetargetsToItsTransform()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        // CC on the target itself, no higher CC (parent is the hierarchy root).
+        // CC on the target itself — nearest walk stops immediately (no get_parent).
         var responses = new[]
         {
             Ref("0xCC7E"),   // Type.GetType(CharacterController)
-            Ref("0xCC00"),   // walk d0: GetComponent(target) -> the CC
-            Ref("0x0"),      // walk d0: get_parent(target) -> root (stop)
+            Ref("0xCC00"),   // walk d0: GetComponent(target) -> the CC (stop)
             Ref("0xCC01"),   // Component.get_transform(cc) -> the CC's own transform
         };
         var fp = await TeleportFakePipe.StartAsync(responses, ct);
@@ -279,7 +278,7 @@ public class TeleportServiceTests
             JsonElement p1 = TeleportFakePipe.Params(reqs[1]);
             Assert.Equal("Component",     p1.GetProperty("name").GetString());
             Assert.Equal("GetComponent",  p1.GetProperty("method").GetString());
-            Assert.Equal("get_transform", TeleportFakePipe.Params(reqs[3]).GetProperty("method").GetString());
+            Assert.Equal("get_transform", TeleportFakePipe.Params(reqs[2]).GetProperty("method").GetString());
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
@@ -316,23 +315,20 @@ public class TeleportServiceTests
     }
 
     [Fact]
-    public async Task DetectDriver_PrefersOutermostControllerOverInnerModelCC()
+    public async Task DetectDriver_CharacterControllerOnAncestor_NearestFound()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        // The picked model root (0x2000) has its OWN CC (0xCC10, inner/collision),
-        // and the grandparent logical root has the driving CC (0xCC00, outer).
-        // The walk must keep climbing and return the OUTERMOST — writing the inner
-        // model CC's transform is the live Utawarerumono desync bug.
+        // No CC on the picked object or its parent; the nearest one is on the
+        // grandparent — the walk climbs to it and STOPS (doesn't over-climb).
         var responses = new[]
         {
             Ref("0xCC7E"),   // Type.GetType(CharacterController)
-            Ref("0xCC10"),   // walk d0: GetComponent(target) -> INNER model CC
+            Ref("0x0"),      // walk d0: GetComponent(target) -> null
             Ref("0xA100"),   // walk d0: get_parent -> parent
             Ref("0x0"),      // walk d1: GetComponent(parent) -> null
-            Ref("0xA200"),   // walk d1: get_parent -> grandparent (logical root)
-            Ref("0xCC00"),   // walk d2: GetComponent(grandparent) -> OUTER driving CC
-            Ref("0x0"),      // walk d2: get_parent -> root (stop)
-            Ref("0xCC01"),   // get_transform(outer cc) -> its transform
+            Ref("0xA200"),   // walk d1: get_parent -> grandparent
+            Ref("0xCC00"),   // walk d2: GetComponent(grandparent) -> the CC (stop)
+            Ref("0xCC01"),   // get_transform(cc) -> its transform
         };
         var fp = await TeleportFakePipe.StartAsync(responses, ct);
         try
@@ -342,8 +338,8 @@ public class TeleportServiceTests
                                                      .ConfigureAwait(true);
 
             Assert.Equal(MovementDriverKind.CharacterController, driver.Kind);
-            Assert.Equal("0xCC00", driver.ComponentAddress);   // OUTER, not 0xCC10
-            Assert.Equal("0xCC01", effective);                 // its transform, not the model's
+            Assert.Equal("0xCC00", driver.ComponentAddress);
+            Assert.Equal("0xCC01", effective);
             Assert.Contains("ancestor +2", note);
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }

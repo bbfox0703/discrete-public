@@ -161,6 +161,12 @@ public sealed class MovementDetectOptions
     /// <summary>How many rungs of the DCA→root ladder to present.</summary>
     public int MaxRootLadder { get; init; } = 6;
 
+    /// <summary>Promote the moving-root's parent to #1 when that parent carries a
+    /// CharacterController — the model/skeleton root (where bones converge) is
+    /// usually a child of the controllable logical root, and teleporting the
+    /// model desyncs it. Costs one Type.GetType (cached) + one GetComponent.</summary>
+    public bool PromoteControllerRoot { get; init; } = true;
+
     /// <summary>Ranked rows returned.</summary>
     public int MaxCandidates { get; init; } = 12;
 }
@@ -935,7 +941,80 @@ public sealed class PlayerLocator
                 Confidence        = conf,
             });
         }
+
+        // The moving-root (roots[0]) is the model / skeleton root — the moving
+        // bones converge there. But a character is usually
+        // LogicalRoot(controller) → Model → bones, and writing the MODEL root
+        // desyncs the visual from the logical position (camera detaches, movement
+        // breaks — the live Utawarerumono symptom). Its immediate parent
+        // (roots[1]) is the controllable root when it carries a
+        // CharacterController (i.e. it's part of the controller hierarchy, not a
+        // static scene container). Promote it to #1 in that case.
+        if (opt.PromoteControllerRoot && roots.Count >= 2 && charIdx >= 0)
+        {
+            string? ccType = await ResolveControllerTypeAsync(ct).ConfigureAwait(false);
+            if (ccType is not null && !_drainTimeout
+                && await HasCharacterControllerAsync(roots[1].TransformAddress, ccType, ct).ConfigureAwait(false)
+                && !_drainTimeout)
+            {
+                PlayerCandidate model  = roots[0];
+                PlayerCandidate parent = roots[1];
+                roots[0] = new PlayerCandidate
+                {
+                    TransformAddress  = parent.TransformAddress,
+                    GameObjectAddress = parent.GameObjectAddress,
+                    Name              = parent.Name,
+                    Sources           = new[] { "controller root" },
+                    Score             = model.Score,
+                    Confidence        = PlayerConfidence.High,
+                };
+                roots[1] = new PlayerCandidate
+                {
+                    TransformAddress  = model.TransformAddress,
+                    GameObjectAddress = model.GameObjectAddress,
+                    Name              = model.Name,
+                    Sources           = new[] { "model root (try if the controller row misbehaves)" },
+                    Score             = parent.Score,
+                    Confidence        = model.Confidence,
+                };
+                Log($"PlayerLocator movement: promoted controller root '{parent.Name}' above model root '{model.Name}'.");
+            }
+        }
         return roots;
+    }
+
+    private string? _controllerTypeAddress;
+    private bool    _controllerTypeResolved;
+
+    // Type* for UnityEngine.CharacterController (cached). Null when not loaded.
+    private async Task<string?> ResolveControllerTypeAsync(CancellationToken ct)
+    {
+        if (_controllerTypeResolved) return _controllerTypeAddress;
+        foreach (string fqn in CharacterControllerFqns)
+        {
+            CallMethodResult r = await _backend.CallMethodAsync(
+                "mscorlib", "System", "Type", "GetType",
+                new[] { CallArgFactory.String(fqn) },
+                signatureMatch: "(System.String)",
+                mainThread: true, mainThreadTimeoutMs: _mainThreadTimeoutMs, ct: ct).ConfigureAwait(false);
+            NoteDrainTimeout(r);
+            if (_drainTimeout) return null;   // don't latch on a transient failure
+            string? addr = SuccessAddress(r);
+            if (addr is not null) { _controllerTypeAddress = addr; _controllerTypeResolved = true; return addr; }
+        }
+        _controllerTypeResolved = true;
+        _controllerTypeAddress  = null;
+        return null;
+    }
+
+    // True when the transform's GameObject has a CharacterController (self only).
+    private async Task<bool> HasCharacterControllerAsync(string transformAddr, string ccType, CancellationToken ct)
+    {
+        CallMethodResult r = await CallEngineAsync(
+            "Component", "GetComponent", transformAddr,
+            new[] { CallArgFactory.Address(ccType) }, "(System.Type)", false, ct).ConfigureAwait(false);
+        if (!r.Ok || !string.IsNullOrEmpty(r.Error)) return false;
+        return SuccessAddress(r) is not null;
     }
 
     private static string NameOf(IReadOnlyList<PlayerCandidate> movers, string addr)

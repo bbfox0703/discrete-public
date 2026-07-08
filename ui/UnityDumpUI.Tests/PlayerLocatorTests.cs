@@ -808,7 +808,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.GameObject", "0xA0F0"),    // enrich A000: get_gameObject
             StringOk("CharacterRoot"),                     // enrich A000: get_name
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -868,7 +868,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.GameObject", "0xC03F"), StringOk("P_Chara_00109@fld"),
             AddrOk("UnityEngine.GameObject", "0xC04F"), StringOk("AttachPoint"),
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -884,6 +884,59 @@ public class PlayerLocatorTests
             var spine = r.Candidates.First(c => c.Name == "env_bone:Spine1");
             Assert.Equal(PlayerConfidence.Medium, spine.Confidence);
             Assert.True(r.Candidates[0].Score > spine.Score);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_PromotesControllerBearingParentAboveModelRoot()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Two env_bone leaves under P_Chara (model root) under AttachPoint (the
+        // logical root, which carries a CharacterController). The model root would
+        // be #1 by name, but writing it desyncs the character — so the
+        // CC-bearing parent is promoted to #1. (Live Utawarerumono fix.)
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xB100", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 10f),                        // t1 B100
+            Vector3Ok(0f, 0f, 8f),                         // t1 B200
+            AddrOk("UnityEngine.GameObject", "0xB1F0"), StringOk("env_bone:foot"),   // enrich B100
+            AddrOk("UnityEngine.GameObject", "0xB2F0"), StringOk("env_bone:hand"),   // enrich B200
+            // walk: B100 -> C000 (P_Chara) -> A000 (AttachPoint) -> null; B200 -> C000
+            AddrOk("UnityEngine.Transform", "0xC000"),     // get_parent(B100)
+            AddrOk("UnityEngine.Transform", "0xA000"),     // get_parent(C000)
+            NullAddrOk("UnityEngine.Transform"),           // get_parent(A000) -> root
+            AddrOk("UnityEngine.Transform", "0xC000"),     // get_parent(B200)
+            // ladder enrich: C000, A000
+            AddrOk("UnityEngine.GameObject", "0xC0F0"), StringOk("P_Chara"),
+            AddrOk("UnityEngine.GameObject", "0xA0F0"), StringOk("AttachPoint"),
+            // promotion probe: Type.GetType(CC), then GetComponent(A000) -> a CC
+            AddrOk("System.Type", "0xCC7E"),
+            AddrOk("UnityEngine.CharacterController", "0xCC00"),
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            // AttachPoint (has the CC) promoted above the P_Chara model root.
+            Assert.Equal("0xA000", r.Candidates[0].TransformAddress);
+            Assert.Equal("AttachPoint", r.Candidates[0].Name);
+            Assert.Equal("controller root", r.Candidates[0].Sources[0]);
+            Assert.Equal(PlayerConfidence.High, r.Candidates[0].Confidence);
+            Assert.Equal("0xC000", r.Candidates[1].TransformAddress);   // model root, demoted
+            Assert.Equal("P_Chara", r.Candidates[1].Name);
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
@@ -925,7 +978,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.GameObject", "0xB1F0"),
             StringOk("env_bone:foot"),
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -968,7 +1021,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.Transform", "0xR000"),     // get_parent(B200) -> root
             AddrOk("UnityEngine.GameObject", "0xR0F0"), StringOk("Characters"),  // enrich R000
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -1007,7 +1060,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.Transform", "0xA110"),     // get_parent(B200) -> A110
             NullAddrOk("UnityEngine.Transform"),           // get_parent(A110) -> root
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {

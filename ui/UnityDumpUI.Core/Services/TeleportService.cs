@@ -168,17 +168,14 @@ public sealed class TeleportService
 
     /// <summary>
     /// Detect how the target's character is moved so writes take the right path.
-    /// Walks the target + ancestors for the <b>OUTERMOST</b>
-    /// <c>UnityEngine.CharacterController</c>. A character is typically
-    /// LogicalRoot(CC) → Model(maybe its own CC) → bones; the game drives the
-    /// OUTER controller, and writing an inner model CC's transform desyncs the
-    /// visual from the logical position (camera detaches, movement breaks — the
-    /// live Utawarerumono symptom of picking the model root over its parent). So
-    /// we return the highest CC found, and its OWN transform as
-    /// <paramref name="effectiveTransform"/> so the caller retargets to it —
-    /// which makes Using the model root OR the logical root both land on the
-    /// controllable object. When none is found (or the type is stripped),
-    /// returns <see cref="MovementDriver.Transform"/> and the original transform.
+    /// Walks the target + ancestors for the NEAREST
+    /// <c>UnityEngine.CharacterController</c> (a picked child bone's controller
+    /// lives above it). Retargets to that controller's OWN transform so the write
+    /// lands on the object the game positions. NOTE: a character can nest several
+    /// CharacterControllers (model / logical-root / higher rig); the *nearest*
+    /// one to the picked object is used, so picking the right movement candidate
+    /// matters — the ranking promotes the controllable root. When none is found
+    /// (or the type is stripped), returns <see cref="MovementDriver.Transform"/>.
     /// </summary>
     public async Task<(MovementDriver driver, string effectiveTransform, string? note)> DetectMovementDriverAsync(
         string transformAddress, CancellationToken ct = default)
@@ -191,10 +188,9 @@ public sealed class TeleportService
             return (MovementDriver.Transform, transformAddress,
                 "CharacterController type not loaded — plain Transform write.");
 
-        // Manual walk (GetComponentInParent is stripped on many IL2CPP builds,
-        // and even where present it returns the NEAREST match — we want the
-        // outermost). GetComponent + get_parent both survive stripping.
-        (string? cc, int depth) = await FindOutermostControllerAsync(transformAddress, ccType, ct)
+        // Manual walk — GetComponentInParent is stripped on many IL2CPP builds;
+        // GetComponent + get_parent both survive stripping. Returns the nearest CC.
+        (string? cc, int depth) = await FindNearestControllerAsync(transformAddress, ccType, ct)
             .ConfigureAwait(false);
         string via = depth == 0 ? "self" : $"ancestor +{depth}";
         if (string.IsNullOrEmpty(cc))
@@ -444,26 +440,23 @@ public sealed class TeleportService
         return string.IsNullOrEmpty(addr) || addr == "0x0" ? null : addr;
     }
 
-    // Walk the target's GameObject and every ancestor (GetComponent + get_parent
-    // — both survive IL2CPP stripping) and return the OUTERMOST
-    // CharacterController found, i.e. the highest one in the chain. Returns
-    // (component, depth): depth 0 = on the target itself, N = on the Nth
-    // ancestor. Keeps climbing past a match so an inner model CC is superseded by
-    // the outer logical-root CC that the game actually drives. Scene containers
-    // above the character carry no CC, so this stops at the character's root.
+    // Walk the target's GameObject and each ancestor (GetComponent + get_parent
+    // — both survive IL2CPP stripping) and return the NEAREST CharacterController.
+    // Returns (component, depth): depth 0 = on the target itself, N = on the Nth
+    // ancestor. Stops at the first match (climbing past it to an outer rig CC
+    // over-shoots the object the game actually drives — the controllable root is
+    // chosen by the movement RANKING, not by climbing the whole chain here).
     private const int MaxAncestorWalk = 16;
 
-    private async Task<(string? cc, int depth)> FindOutermostControllerAsync(
+    private async Task<(string? cc, int depth)> FindNearestControllerAsync(
         string transformAddress, string typeAddress, CancellationToken ct)
     {
         string cur = transformAddress;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { cur };
-        string? best = null;
-        int bestDepth = -1;
         for (int depth = 0; depth <= MaxAncestorWalk; depth++)
         {
             string? cc = await FindComponentAsync(cur, typeAddress, "GetComponent", ct).ConfigureAwait(false);
-            if (cc is not null) { best = cc; bestDepth = depth; }   // keep the last (outermost)
+            if (cc is not null) return (cc, depth);
 
             CallMethodResult pr = await CallEngineAsync(
                 "Transform", "get_parent", cur, NoArgs,
@@ -472,7 +465,7 @@ public sealed class TeleportService
             if (string.IsNullOrEmpty(parent) || parent == "0x0" || !seen.Add(parent)) break;
             cur = parent;
         }
-        return (best, bestDepth);
+        return (null, -1);
     }
 
     // CharacterController.enabled is declared on Collider (PhysicsModule), but

@@ -76,14 +76,19 @@ orbits / snaps back (the live Utawarerumono symptom). `TeleportService` is now
   is stripped on many IL2CPP builds and even where present returns the *nearest*
   match) for the **OUTERMOST** CharacterController. The target is **retargeted to
   that controller's OWN transform** (`Component.get_transform(cc)`).
-  - *Why outermost, not nearest* (live Utawarerumono): a character is
-    `LogicalRoot(CC) → Model(its own CC) → bones`. The game drives the **outer**
-    controller; writing an **inner** model CC's transform desyncs the visual from
-    the logical position — the camera detaches and movement breaks. Picking either
-    the model root (`P_Chara`) or the logical root (`AttachPoint`) now both retarget
-    to the same outer controller, so the teleport lands correctly regardless of
-    which candidate the user Uses. Scene containers above the character carry no
-    CC, so the walk stops at the character's real root.
+  - *Nearest, not outermost* (live Utawarerumono): a character can nest several
+    CharacterControllers — `HigherRig(CC) → LogicalRoot(CC) → Model(CC) → bones` —
+    and only the **middle** logical root is the correct teleport target (writing
+    the inner model CC desyncs the visual → camera detaches / moves too fast;
+    writing an outer rig CC also misbehaves). So the retarget uses the **nearest**
+    CC (don't over-climb), and the correct rung is chosen by the **movement
+    ranking** instead:
+    - **Controller-root promotion** (`PromoteControllerRoot`, on by default): the
+      movement DCA is the model/skeleton root; its immediate parent is promoted to
+      **#1** (`controller root`) when that parent carries a CharacterController
+      (`Type.GetType` + `GetComponent`), i.e. it's part of the controller
+      hierarchy rather than a static scene container. So Using the default #1 lands
+      on the logical root. If it still misbehaves, the model root sits at #2.
 - `WritePoseAsync(…, driver)` — for a CharacterController driver: `Collider`
   `set_enabled(false)` (enabled lives on Collider, PhysicsModule) → position/euler
   write → `set_enabled(true)`. Wrapped so a throw during the write still
