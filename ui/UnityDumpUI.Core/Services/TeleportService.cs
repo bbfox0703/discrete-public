@@ -280,26 +280,34 @@ public sealed class TeleportService
         // CharacterController-aware write: the controller overrides transform
         // writes while enabled, so disable it, write, then re-enable from the new
         // position. Standard Unity teleport idiom.
+        //
+        // The disable is INSIDE the try and every re-enable runs with
+        // CancellationToken.None: restoring control is cleanup that must survive
+        // cancellation. Otherwise a cancelled `ct` (the disable RPC can commit on
+        // the game then throw a post-read OCE; a re-enable on a cancelled token
+        // never reaches the wire) would leave the controller disabled = the
+        // character frozen. Re-enabling an already-enabled CC is a harmless no-op.
         string cc = d.ComponentAddress!;
-        CallMethodResult disable = await SetCharacterControllerEnabledAsync(cc, false, ct).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(disable.Error))
-            return (false, $"couldn't disable CharacterController: {disable.Error}");
-        if (!disable.Ok)
-            return (false, $"couldn't disable CharacterController: {disable.Exception ?? "set_enabled(false) failed"}");
-
         (bool ok, string? error) result;
         try
         {
+            CallMethodResult disable = await SetCharacterControllerEnabledAsync(cc, false, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(disable.Error))
+                return (false, $"couldn't disable CharacterController: {disable.Error}");
+            if (!disable.Ok)
+                return (false, $"couldn't disable CharacterController: {disable.Exception ?? "set_enabled(false) failed"}");
+
             result = await SetPoseRawAsync(transformAddress, x, y, z, euler, ct).ConfigureAwait(false);
         }
         catch
         {
-            // Restore control before propagating — never leave the CC disabled.
-            try { await SetCharacterControllerEnabledAsync(cc, true, ct).ConfigureAwait(false); } catch { }
+            // Any throw (incl. a disable that committed on the game before a
+            // post-read cancellation) — best-effort restore, then propagate.
+            try { await SetCharacterControllerEnabledAsync(cc, true, CancellationToken.None).ConfigureAwait(false); } catch { }
             throw;
         }
 
-        CallMethodResult enable = await SetCharacterControllerEnabledAsync(cc, true, ct).ConfigureAwait(false);
+        CallMethodResult enable = await SetCharacterControllerEnabledAsync(cc, true, CancellationToken.None).ConfigureAwait(false);
         if (!enable.Ok || !string.IsNullOrEmpty(enable.Error))
             return (false, "teleported, but FAILED to re-enable the CharacterController "
                 + $"({enable.Error ?? enable.Exception ?? "set_enabled(true) failed"}) — "
@@ -378,7 +386,12 @@ public sealed class TeleportService
     private async Task<string?> ResolveCharacterControllerTypeAsync(CancellationToken ct)
     {
         if (_ccTypeResolved) return _ccTypeAddress;
-        _ccTypeResolved = true;
+        // Latch the cache ONLY on a clean (non-throwing) finish. Setting the flag
+        // up-front would poison the cache on a transient failure (pipe
+        // disconnect / cancellation mid-probe): the flag would stay latched with
+        // a null address, permanently disabling CharacterController detection for
+        // the life of this service. On a throw we leave it unresolved so the next
+        // call re-probes.
         foreach (string fqn in CharacterControllerTypeFqns)
         {
             CallMethodResult r = await _adapter.CallMethodAsync(
@@ -390,10 +403,15 @@ public sealed class TeleportService
             string? addr = r.Ok ? AsAddress(r) : null;
             if (!string.IsNullOrEmpty(addr) && addr != "0x0")
             {
-                _ccTypeAddress = addr;
+                _ccTypeAddress  = addr;
+                _ccTypeResolved = true;
                 return addr;
             }
         }
+        // Both probes ran cleanly and the type genuinely isn't loaded — cache the
+        // negative so we don't re-probe every SetTarget.
+        _ccTypeAddress  = null;
+        _ccTypeResolved = true;
         return null;
     }
 
