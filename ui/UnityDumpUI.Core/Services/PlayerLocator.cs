@@ -151,8 +151,11 @@ public sealed class MovementDetectOptions
     /// just deforms the mesh; the thing to teleport is the root above them.</summary>
     public bool ResolveToRoot { get; init; } = true;
 
-    /// <summary>How many top movers to walk up when resolving roots.</summary>
-    public int MaxRootWalkMovers { get; init; } = 8;
+    /// <summary>How many top movers to walk up when resolving roots. Capped in
+    /// practice by <see cref="MaxCandidates"/> (only that many movers are
+    /// enriched). Higher = more of the character's skeleton feeds the cluster
+    /// vote, so a few camera/VFX movers can't out-number the bones.</summary>
+    public int MaxRootWalkMovers { get; init; } = 12;
 
     /// <summary>Max parent-chain depth to climb (skeletons can be deep; a cache
     /// makes shared ancestors cheap).</summary>
@@ -829,7 +832,7 @@ public sealed class PlayerLocator
         if (top.Count < 2) return empty;
 
         var parentCache = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        var chains = new List<(List<string> Addrs, double Dist)>();
+        var chains = new List<(List<string> Addrs, double Dist, string Name)>();
         foreach (PlayerCandidate m in top)
         {
             ct.ThrowIfCancellationRequested();
@@ -839,18 +842,40 @@ public sealed class PlayerLocator
             // A walk that hit a get_parent ERROR (not a genuine 0x0 root) is
             // incomplete — its terminal node is a false root that would seed a
             // bogus cluster, so drop it from clustering.
-            if (ok && addrs.Count >= 2) chains.Add((addrs, m.MovedDistance ?? 0));
+            if (ok && addrs.Count >= 2) chains.Add((addrs, m.MovedDistance ?? 0, m.Name));
         }
         if (chains.Count < 2) return empty;
 
-        // Anchor on the highest-displacement chain (chains preserve the movers'
-        // displacement order) — that's the object the user deliberately moved,
-        // so we resolve ITS character rather than whichever unrelated hierarchy
-        // happens to contribute the most sampled bones.
-        (List<string> Addrs, double Dist) anchor = chains[0];
+        // Group the moving chains into clusters by their top-level root. Every
+        // skeleton bone of one character shares that character's root GameObject;
+        // a follow-camera rig and camera-parented VFX live under DIFFERENT roots.
+        // So this separates "the character" from "the things that also move when
+        // you walk" (the camera that tracks you, the fire/effect props).
+        //
+        // Then anchor on the cluster that looks most like an ANIMATED CHARACTER —
+        // many co-moving parts sharing a real bone namespace / joint names — NOT
+        // on the single object that moved farthest. A panning camera or a swinging
+        // VFX out-displaces a walking character, and anchoring on raw top
+        // displacement let it hijack the whole resolution: the live Utawarerumono
+        // regression surfaced "FieldCameraControl" / "Encount_Effect" as the
+        // moving-root and dropped the real character (P_Chara / AttachPoint) off
+        // the list entirely. The bone-namespace vote is immune to that.
+        var clusters = chains
+            .GroupBy(c => c.Addrs[^1], StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() >= 2)   // a cluster needs ≥2 movers sharing a root
+            .Select(g => g.ToList())
+            .ToList();
+        if (clusters.Count == 0) return empty;
+
+        List<(List<string> Addrs, double Dist, string Name)> cluster =
+            clusters.OrderByDescending(g => ClusterCharacterScore(g))
+                    .ThenByDescending(g => g.Sum(c => c.Dist))
+                    .First();
+        // Anchor = the highest-displacement chain WITHIN the chosen cluster; its
+        // address order seeds the DCA→root ladder below.
+        (List<string> Addrs, double Dist, string Name) anchor =
+            cluster.OrderByDescending(c => c.Dist).First();
         string anchorRoot = anchor.Addrs[^1];
-        var cluster = chains.Where(c => Eq(c.Addrs[^1], anchorRoot)).ToList();
-        if (cluster.Count < 2) return empty;
 
         // Exclude LEAF movers (a mover not itself an ancestor of another mover)
         // from the ladder so the top rung is a genuine ancestor, never a swinging
@@ -858,7 +883,7 @@ public sealed class PlayerLocator
         // may be the real (moving) character root.
         var moverAddrs  = new HashSet<string>(cluster.Select(c => c.Addrs[0]), StringComparer.OrdinalIgnoreCase);
         var internalMov = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach ((List<string> addrs, _) in cluster)
+        foreach ((List<string> addrs, _, _) in cluster)
         {
             for (int i = 1; i < addrs.Count; i++)
                 if (moverAddrs.Contains(addrs[i])) internalMov.Add(addrs[i]);
@@ -895,7 +920,7 @@ public sealed class PlayerLocator
         // or joint words, so the ladder climbs through bones until it hits the
         // character GameObject (e.g. "P_Chara_00109@fld"). That first non-bone
         // rung is the real teleport target — pull it to the top.
-        string bonePrefix = CommonBonePrefix(cluster.Select(c => NameOf(movers, c.Addrs[0])));
+        string bonePrefix = CommonBonePrefix(cluster.Select(c => c.Name));
         bool[] isBone = rungs.Select(r => IsBoneName(r.Name, bonePrefix)).ToArray();
         int charIdx = Array.FindIndex(isBone, b => !b);
 
@@ -1017,13 +1042,6 @@ public sealed class PlayerLocator
         return SuccessAddress(r) is not null;
     }
 
-    private static string NameOf(IReadOnlyList<PlayerCandidate> movers, string addr)
-    {
-        foreach (PlayerCandidate m in movers)
-            if (Eq(m.TransformAddress, addr)) return m.Name;
-        return string.Empty;
-    }
-
     // Common skeletal-joint words (bones an animated character exposes). "root"
     // is deliberately absent — it appears in both bone roots (Bip01) AND the
     // character root ("PlayerRoot"/"CharacterRoot"), so it can't discriminate.
@@ -1070,6 +1088,51 @@ public sealed class PlayerLocator
         }
         return false;
     }
+
+    /// <summary>Heuristic "how much does this moving cluster look like an animated
+    /// character?" — the disambiguator when several hierarchies move at once (the
+    /// character, plus the follow-camera and VFX that track it). A character
+    /// exposes MANY co-moving skeleton bones that share a real namespace
+    /// ("env_bone:") or carry joint names (spine/hips/hand); a camera rig or a
+    /// fire-VFX cluster has neither. Pure / name-based (the mover names are
+    /// already enriched), so it adds no RPCs. Higher = more character-like.</summary>
+    internal static double ClusterCharacterScore(
+        IReadOnlyList<(List<string> Addrs, double Dist, string Name)> cluster)
+    {
+        var names = cluster.Select(c => c.Name).ToList();
+
+        // A REAL bone namespace ends at a separator ("env_bone:") — that's the
+        // strong "these are one skeleton" signal. A coincidental character-run
+        // shared by unrelated props ("Fire04"/"Fire06" → "Fire0") does NOT end
+        // at a separator, so it earns no namespace credit.
+        string prefix     = CommonBonePrefix(names);
+        bool   namespaced = EndsWithSeparator(prefix);
+
+        // Joint tokens (spine/hips/hand/…) are unambiguous skeleton names — the
+        // clincher even when the bones share no namespace prefix.
+        int joints = names.Count(HasJointToken);
+
+        double score = cluster.Count * 6          // more co-moving parts
+                     + joints * 12                 // unambiguous skeleton bones
+                     + (namespaced ? 40 : 0);      // a real shared bone namespace
+        // A cluster named like a camera rig (follow-cam + camera-parented FX) is
+        // almost never the player — sink it below any plausible character.
+        if (names.Any(IsCameraRigName)) score -= 60;
+        return score;
+    }
+
+    private static bool HasJointToken(string name)
+    {
+        foreach (string tok in NameTokenMatch.Tokenize(name))
+            if (Array.IndexOf(JointTokens, tok) >= 0) return true;
+        return false;
+    }
+
+    // True when a computed common prefix ends at a name separator — i.e. it is a
+    // genuine namespace ("env_bone:", "Bip01 ") rather than a coincidental run of
+    // shared characters ("Fire0").
+    private static bool EndsWithSeparator(string prefix) =>
+        prefix.Length >= 2 && prefix[^1] is ':' or '_' or '/' or '.' or ' ';
 
     private const int RootScoreBase = 1000;
 

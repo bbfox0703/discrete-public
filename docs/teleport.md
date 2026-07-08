@@ -230,9 +230,18 @@ Two-phase, so the UI can run the countdown in between:
    itself, not a skeleton); (b) leaf movers are excluded from the ladder so the
    top rung is never a swinging bone (an *internal* mover that is an ancestor of
    another mover stays eligible — it may be a moving character root); (c) the
-   cluster is **anchored on the highest-displacement mover** (the object the user
-   deliberately moved), not on whichever hierarchy has the most sampled bones, so
-   a heavily-animated NPC can't outvote the player; (d) a `get_parent` *error* is
+   moving chains are **grouped into clusters by their top-level root**, and the
+   resolution anchors on the cluster that most **looks like an animated character**
+   (`ClusterCharacterScore` = member count + joint-named members + a real shared
+   bone namespace, minus a camera-rig-name penalty) — **NOT** the single object
+   that moved farthest. This is the fix for the live regression where a walking
+   character's feet moved *less* than the follow-camera that panned to track it and
+   the camera-parented VFX (`Fire*` / `Encount_*`): raw top-displacement anchoring
+   locked onto `FieldCameraControl` / `Encount_Effect` and the real character
+   (`P_Chara` / `AttachPoint`) fell off the list entirely. A real bone namespace is
+   a common prefix that ends at a separator (`env_bone:`), so a coincidental
+   character-run shared by unrelated props (`Fire04`/`Fire06` → `Fire0`) earns no
+   skeleton credit; (d) a `get_parent` *error* is
    distinguished from a genuine `0x0` root, and the errored chain is dropped
    rather than seeding a false cluster. **Caveat:** when several characters are
    parented under one shared container GameObject, the movers converge only at

@@ -941,6 +941,110 @@ public class PlayerLocatorTests
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
 
+    [Fact]
+    public async Task Movement_PicksCharacterCluster_OverFartherMovingCameraAndVfx()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // The live Utawarerumono regression: when you walk, the follow-camera and
+        // camera-parented VFX (Fire*) move FARTHER than the character's feet. Two
+        // fire props (0xF100/0xF200, moved 30/28) share an effect root 0xE000; two
+        // skeleton bones (0xB100/0xB200, moved 12/10) share P_Chara(0xP000) →
+        // AttachPoint(0xA000, has a CharacterController). Anchoring on raw top
+        // displacement would resolve the FIRE cluster and drop the character. The
+        // bone-namespace vote must instead resolve the character and surface
+        // AttachPoint at #1.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xF100", GameObjectAddress = "0xF1F0", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xF200", GameObjectAddress = "0xF2F0", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB100", GameObjectAddress = "0xB1F0", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", GameObjectAddress = "0xB2F0", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            // phase-2 positions (track order): fire moved farther than the bones
+            Vector3Ok(0f, 0f, 30f),   // 0xF100 Fire04
+            Vector3Ok(0f, 0f, 28f),   // 0xF200 Fire06
+            Vector3Ok(0f, 0f, 12f),   // 0xB100 bone
+            Vector3Ok(0f, 0f, 10f),   // 0xB200 bone
+            // enrich (GameObject preset → get_name only), in displacement order
+            StringOk("Fire04"),
+            StringOk("Fire06"),
+            StringOk("env_bone:Spine1"),
+            StringOk("env_bone:hand"),
+            // root walk: F100 -> E000 -> null; F200 -> E000 (cached)
+            AddrOk("UnityEngine.Transform", "0xE000"),   // get_parent(F100)
+            NullAddrOk("UnityEngine.Transform"),         // get_parent(E000) -> root
+            AddrOk("UnityEngine.Transform", "0xE000"),   // get_parent(F200)
+            // B100 -> P000 -> A000 -> null; B200 -> P000 (cached rest)
+            AddrOk("UnityEngine.Transform", "0xP000"),   // get_parent(B100)
+            AddrOk("UnityEngine.Transform", "0xA000"),   // get_parent(P000)
+            NullAddrOk("UnityEngine.Transform"),         // get_parent(A000) -> root
+            AddrOk("UnityEngine.Transform", "0xP000"),   // get_parent(B200)
+            // ladder enrich (chosen = character cluster): P000, A000
+            AddrOk("UnityEngine.GameObject", "0xP0F0"), StringOk("P_Chara"),
+            AddrOk("UnityEngine.GameObject", "0xA0F0"), StringOk("AttachPoint"),
+            // controller-root promotion probe: Type.GetType(CC), GetComponent(A000)
+            AddrOk("System.Type", "0xCC7E"),
+            AddrOk("UnityEngine.CharacterController", "0xCC00"),
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            // The character (not the farther-moving fire) is resolved: AttachPoint
+            // (the CC-bearing controller root) is #1.
+            Assert.Equal("0xA000", r.Candidates[0].TransformAddress);
+            Assert.Equal("AttachPoint", r.Candidates[0].Name);
+            Assert.Equal("controller root", r.Candidates[0].Sources[0]);
+            // The fire props NEVER become a resolved "moving-root" — the wrong
+            // cluster must not win.
+            Assert.DoesNotContain(r.Candidates,
+                c => c.Sources.Any(s => s.Contains("moving-root", StringComparison.Ordinal))
+                     && (c.Name == "Fire04" || c.Name == "Fire06"));
+            // The fire movers survive as raw evidence below the character.
+            Assert.Contains(r.Candidates, c => c.TransformAddress == "0xF100");
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public void ClusterCharacterScore_PrefersSkeletonOverCameraAndVfx()
+    {
+        // A skeleton cluster (shared "env_bone:" namespace + joint names) must
+        // out-score a fire-VFX cluster that shares only a coincidental "Fire0"
+        // character-run, AND a camera-rig cluster — even when the non-character
+        // clusters have MORE members.
+        static (List<string>, double, string) M(string name) => (new List<string> { "0x0", "0xR" }, 1.0, name);
+
+        var skeleton = new List<(List<string>, double, string)>
+        {
+            M("env_bone:Spine1"), M("env_bone:hand"),
+        };
+        var fireVfx = new List<(List<string>, double, string)>
+        {
+            M("Fire04"), M("Fire06"), M("Fire06_3"), M("Fire04b"),   // 4 members, "Fire0" prefix
+        };
+        var cameraRig = new List<(List<string>, double, string)>
+        {
+            M("FieldCamera"), M("FieldCameraControl"), M("CM_Encount_Normal"),
+        };
+
+        double skel = PlayerLocator.ClusterCharacterScore(skeleton);
+        Assert.True(skel > PlayerLocator.ClusterCharacterScore(fireVfx),
+            $"skeleton {skel} should beat fire-VFX {PlayerLocator.ClusterCharacterScore(fireVfx)}");
+        Assert.True(skel > PlayerLocator.ClusterCharacterScore(cameraRig),
+            $"skeleton {skel} should beat camera rig {PlayerLocator.ClusterCharacterScore(cameraRig)}");
+    }
+
     [Theory]
     [InlineData("env_bone:Spine1", "env_bone:", true)]
     [InlineData("env_bone:GlobalSRT", "env_bone:", true)]
