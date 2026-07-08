@@ -158,7 +158,7 @@ public class PlayerLocatorTests
     };
 
     [Fact]
-    public async Task CameraChain_AncestorBecomesCandidate_WithDistanceBonus()
+    public async Task CameraChain_OnlyHit_NoDistanceBonus_LowConfidence()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         var responses = new[]
@@ -170,8 +170,8 @@ public class PlayerLocatorTests
             NullAddrOk("UnityEngine.Transform"),           // get_parent -> chain ends
             // enrichment of 0x1200:
             AddrOk("UnityEngine.GameObject", "0x1300"),    // Component.get_gameObject
-            StringOk("PlayerRoot"),                        // Object.get_name
-            Vector3Ok(3f, 4f, 0f),                         // position -> distance 5 -> +20
+            StringOk("PlayerRoot"),                        // Object.get_name (not a rig name)
+            Vector3Ok(3f, 4f, 0f),                         // position -> distance 5
         };
         var fp = await TeleportFakePipe.StartAsync(responses, ct);
         try
@@ -185,22 +185,76 @@ public class PlayerLocatorTests
             PlayerCandidate c = Assert.Single(r.Candidates);
             Assert.Equal("0x1200", c.TransformAddress);
             Assert.Equal("PlayerRoot", c.Name);
-            Assert.Equal(PlayerLocatorRanking.ScoreCameraChain + 20, c.Score);
+            // Camera-chain-only: distance bonus is suppressed (circular) and
+            // confidence is Low even though the name isn't a rig.
+            Assert.Equal(PlayerLocatorRanking.ScoreCameraChain, c.Score);
+            Assert.Equal(PlayerConfidence.Low, c.Confidence);
+            Assert.Equal(PlayerConfidence.Low, r.TopConfidence);
             Assert.NotNull(c.DistanceToCamera);
             Assert.Equal(5.0, c.DistanceToCamera!.Value, 3);
             Assert.Equal(new[] { "camera-chain" }, c.Sources);
 
             var reqs = await fp.ServerTask.ConfigureAwait(true);
             JsonElement first = TeleportFakePipe.Params(reqs[0]);
-            Assert.Equal("UnityEngine.CoreModule", first.GetProperty("assembly").GetString());
-            Assert.Equal("Camera",   first.GetProperty("name").GetString());
             Assert.Equal("get_main", first.GetProperty("method").GetString());
-            Assert.Equal(JsonValueKind.True, first.GetProperty("main_thread").ValueKind);
             Assert.Equal("get_parent",
                 TeleportFakePipe.Params(reqs[3]).GetProperty("method").GetString());
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
+
+    [Fact]
+    public async Task CameraChain_RigNamedAncestor_IsDemoted()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var responses = new[]
+        {
+            AddrOk("UnityEngine.Camera", "0x1000"),
+            AddrOk("UnityEngine.Transform", "0x1100"),
+            Vector3Ok(0f, 0f, 0f),
+            AddrOk("UnityEngine.Transform", "0x1200"),
+            NullAddrOk("UnityEngine.Transform"),
+            AddrOk("UnityEngine.GameObject", "0x1300"),
+            StringOk("Main Camera Rig"),                   // rig name -> penalty
+            Vector3Ok(1f, 0f, 0f),
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.LocateAsync(Only(camera: true), ct)
+                                                .ConfigureAwait(true);
+            PlayerCandidate c = Assert.Single(r.Candidates);
+            // 40 (camera-chain) - 45 (rig penalty) = -5.
+            Assert.Equal(PlayerLocatorRanking.ScoreCameraChain
+                         - PlayerLocatorRanking.CameraRigNamePenalty, c.Score);
+            Assert.Equal(PlayerConfidence.Low, c.Confidence);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Theory]
+    // True: long tokens (safe substrings) + camelCase / boundary short tokens.
+    [InlineData("Main Camera", true)]
+    [InlineData("CM vcam1", true)]
+    [InlineData("CameraRig", true)]
+    [InlineData("PlayerPivot", true)]
+    [InlineData("FollowCamHolder", true)]
+    [InlineData("FollowCam", true)]        // camelCase short token
+    [InlineData("PlayerRig", true)]        // camelCase short token
+    [InlineData("Boom", true)]
+    // False: short tokens embedded in a real word must NOT match.
+    [InlineData("Cameron", false)]         // not "cam"
+    [InlineData("Frigate", false)]         // not "rig"
+    [InlineData("Trigger", false)]         // not "rig"
+    [InlineData("Mountain", false)]        // not "mount"
+    [InlineData("Redeye", false)]          // not "eye"
+    [InlineData("Boomer", false)]          // not "boom"
+    [InlineData("PlayerRoot", false)]
+    [InlineData("Knight", false)]
+    [InlineData("", false)]
+    public void IsCameraRigName_Classifies(string name, bool expected) =>
+        Assert.Equal(expected, PlayerLocator.IsCameraRigName(name));
 
     [Fact]
     public async Task DrainTimeout_AbortsWholeRunWithFocusHint()
@@ -422,6 +476,357 @@ public class PlayerLocatorTests
             Assert.Equal("PlayerController", fi.GetProperty("name").GetString());
             Assert.Equal(JsonValueKind.True, fi.GetProperty("aliveOnly").ValueKind);
             Assert.Equal(JsonValueKind.True, fi.GetProperty("sane").ValueKind);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    // ------------------------------------------------------------------
+    // Movement-correlation detection
+    // ------------------------------------------------------------------
+
+    // Sweep-only movement options (static signals off) so the wire is the pure
+    // Transform-sweep path.
+    private static MovementDetectOptions SweepOnly() => new()
+    {
+        Signals = Only(),               // all static signals disabled
+        SweepAllTransforms = true,
+    };
+
+    [Fact]
+    public async Task Movement_MoverIsRankedTop()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Begin: enumerate 2 transforms, capture t0. A stays put, B will move.
+        var begin = new[]
+        {
+            AddrOk("System.Type", "0x9000"),               // Type.GetType(Transform)
+            AddrOk("UnityEngine.Transform[]", "0x9100"),   // FindObjectsByType
+            """
+            { "count": 2, "length": 2, "is_pointer": true,
+              "elements": [ { "index": 0, "ptr": "0xA000" }, { "index": 1, "ptr": "0xB000" } ] }
+            """,
+            Vector3Ok(0f, 0f, 0f),                         // t0 A
+            Vector3Ok(5f, 0f, 0f),                         // t0 B
+        };
+        var fp = await TeleportFakePipe.StartAsync(begin, ct);
+        MovementSample sample;
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            sample = await locator.BeginMovementSampleAsync(SweepOnly(), ct).ConfigureAwait(true);
+            Assert.True(sample.Ok);
+            Assert.Equal(2, sample.Tracks.Count);
+            Assert.False(sample.Truncated);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+
+        // Finish: A unchanged, B moved +3 on Y. Then enrich B (get_gameObject + name).
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 0f),                         // t1 A -> moved 0
+            Vector3Ok(5f, 3f, 0f),                         // t1 B -> moved 3
+            AddrOk("UnityEngine.GameObject", "0xB100"),    // enrich B: get_gameObject
+            StringOk("Chr01"),                             // enrich B: get_name
+        };
+        var fp2 = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            // A fresh locator over the second pipe; the sample carries all state.
+            var locator2 = new PlayerLocator(fp2.Adapter);
+            PlayerLocateResult r = await locator2.FinishMovementSampleAsync(sample, SweepOnly(), ct)
+                                                 .ConfigureAwait(true);
+
+            Assert.True(r.Ok);
+            PlayerCandidate c = Assert.Single(r.Candidates);
+            Assert.Equal("0xB000", c.TransformAddress);
+            Assert.Equal("Chr01", c.Name);
+            Assert.NotNull(c.MovedDistance);
+            Assert.Equal(3.0, c.MovedDistance!.Value, 3);
+            Assert.Equal(30, c.Score);                     // round(3 * 10)
+            Assert.Equal(PlayerConfidence.High, c.Confidence);
+            Assert.Contains("moved", c.Sources);
+        }
+        finally { await fp2.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_NothingMoves_NoCandidates()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var begin = new[]
+        {
+            AddrOk("System.Type", "0x9000"),
+            AddrOk("UnityEngine.Transform[]", "0x9100"),
+            """
+            { "count": 1, "length": 1, "is_pointer": true,
+              "elements": [ { "index": 0, "ptr": "0xA000" } ] }
+            """,
+            Vector3Ok(7f, 7f, 7f),                         // t0 A
+        };
+        var fp = await TeleportFakePipe.StartAsync(begin, ct);
+        MovementSample sample;
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            sample = await locator.BeginMovementSampleAsync(SweepOnly(), ct).ConfigureAwait(true);
+            Assert.True(sample.Ok);
+            Assert.Single(sample.Tracks);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+
+        var finish = new[] { Vector3Ok(7f, 7f, 7f) };      // t1 A -> no movement
+        var fp2 = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator2 = new PlayerLocator(fp2.Adapter);
+            PlayerLocateResult r = await locator2.FinishMovementSampleAsync(sample, SweepOnly(), ct)
+                                                 .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            Assert.Empty(r.Candidates);
+        }
+        finally { await fp2.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_DrainTimeoutDuringBegin_ReturnsError()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var begin = new[] { ErrorResult("main-thread queue drain timeout after 8000 ms") };
+        var fp = await TeleportFakePipe.StartAsync(begin, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            MovementSample sample = await locator.BeginMovementSampleAsync(SweepOnly(), ct)
+                                                 .ConfigureAwait(true);
+            Assert.False(sample.Ok);
+            Assert.Equal(PlayerLocator.DrainTimeoutHint, sample.Error);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_CameraExcluded_EvenIfLargestMover()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Hand-built sample: the camera (IsCamera) is skipped, so its t1 is never
+        // read; only the player's t1 is consumed from the queue. If the skip were
+        // removed, the player would read the camera's queued position and the
+        // player/camera assertions would fail.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xCA00", IsCamera = true,
+                                    Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB00B", IsCamera = false,
+                                    Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 5f),                         // t1 player -> moved 5
+            AddrOk("UnityEngine.GameObject", "0xB010"),    // enrich player: get_gameObject
+            StringOk("Hero"),                              // enrich player: get_name
+        };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, SweepOnly(), ct)
+                                                .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            PlayerCandidate c = Assert.Single(r.Candidates);
+            Assert.Equal("0xB00B", c.TransformAddress);   // player, NOT the camera
+            Assert.Equal("Hero", c.Name);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_TruncatedSweep_ReportsTrueTotal()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var opt = new MovementDetectOptions { Signals = Only(), SweepAllTransforms = true, MaxSweepTransforms = 1 };
+        var begin = new[]
+        {
+            AddrOk("System.Type", "0x9000"),
+            AddrOk("UnityEngine.Transform[]", "0x9100"),
+            // Header says 5, but only 1 element returned -> truncated.
+            """
+            { "count": 1, "length": 5, "is_pointer": true,
+              "elements": [ { "index": 0, "ptr": "0xA000" } ] }
+            """,
+            Vector3Ok(0f, 0f, 0f),                         // t0 for the single sampled transform
+        };
+        var fp = await TeleportFakePipe.StartAsync(begin, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            MovementSample sample = await locator.BeginMovementSampleAsync(opt, ct).ConfigureAwait(true);
+            Assert.True(sample.Ok);
+            Assert.Single(sample.Tracks);
+            Assert.True(sample.Truncated);
+            Assert.Equal(5, sample.SceneTransformTotal);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_RigMoverDemotedBelowPlayer()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Two movers: a rig-named object moves FARTHER (8) than the player (5).
+        // The rig penalty must re-rank the player above it.
+        var begin = new[]
+        {
+            AddrOk("System.Type", "0x9000"),
+            AddrOk("UnityEngine.Transform[]", "0x9100"),
+            """
+            { "count": 2, "length": 2, "is_pointer": true,
+              "elements": [ { "index": 0, "ptr": "0xC000" }, { "index": 1, "ptr": "0xB000" } ] }
+            """,
+            Vector3Ok(0f, 0f, 0f),                         // t0 C000 (rig)
+            Vector3Ok(0f, 0f, 0f),                         // t0 B000 (player)
+        };
+        var fp = await TeleportFakePipe.StartAsync(begin, ct);
+        MovementSample sample;
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            sample = await locator.BeginMovementSampleAsync(SweepOnly(), ct).ConfigureAwait(true);
+            Assert.Equal(2, sample.Tracks.Count);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 8f),                         // t1 C000 -> moved 8 (farther)
+            Vector3Ok(0f, 0f, 5f),                         // t1 B000 -> moved 5
+            AddrOk("UnityEngine.GameObject", "0xC100"),    // enrich C000
+            StringOk("CameraRig"),                         // rig name -> penalty
+            AddrOk("UnityEngine.GameObject", "0xB100"),    // enrich B000
+            StringOk("Hero"),
+        };
+        var fp2 = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator2 = new PlayerLocator(fp2.Adapter);
+            PlayerLocateResult r = await locator2.FinishMovementSampleAsync(sample, SweepOnly(), ct)
+                                                 .ConfigureAwait(true);
+            Assert.Equal(2, r.Candidates.Count);
+            // Player (moved 5, score 50) ranks above the rig (moved 8, score 80-45=35).
+            Assert.Equal("0xB000", r.Candidates[0].TransformAddress);
+            Assert.Equal("Hero", r.Candidates[0].Name);
+            Assert.Equal("0xC000", r.Candidates[1].TransformAddress);
+            Assert.True(r.Candidates[0].Score > r.Candidates[1].Score);
+        }
+        finally { await fp2.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_StructlessPositionSuccess_TreatedUnreadable()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // t0 is far from origin (10,0,0); t1 comes back Ok but WITHOUT struct
+        // bytes. Without the payload guard that would decode to (0,0,0) and
+        // fabricate a displacement of 10; with the guard the object is skipped.
+        var begin = new[]
+        {
+            AddrOk("System.Type", "0x9000"),
+            AddrOk("UnityEngine.Transform[]", "0x9100"),
+            """
+            { "count": 1, "length": 1, "is_pointer": true,
+              "elements": [ { "index": 0, "ptr": "0xA000" } ] }
+            """,
+            Vector3Ok(10f, 0f, 0f),                        // t0 -> far from origin
+        };
+        var fp = await TeleportFakePipe.StartAsync(begin, ct);
+        MovementSample sample;
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            sample = await locator.BeginMovementSampleAsync(SweepOnly(), ct).ConfigureAwait(true);
+            Assert.Single(sample.Tracks);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+
+        // Ok success but no returnStructBytes.
+        var finish = new[]
+        {
+            """
+            { "ok": true, "returnType": "UnityEngine.Vector3", "returnValue": null,
+              "elapsedMs": 1, "method": { "address": "0x0", "signature": "()", "humanSuffix": "" } }
+            """,
+        };
+        var fp2 = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator2 = new PlayerLocator(fp2.Adapter);
+            PlayerLocateResult r = await locator2.FinishMovementSampleAsync(sample, SweepOnly(), ct)
+                                                 .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            Assert.Empty(r.Candidates);   // struct-less success must not fabricate a mover
+        }
+        finally { await fp2.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    // ------------------------------------------------------------------
+    // Signal-E gate + strong-signal confidence
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task UserClassScan_ManyInstances_CountSkipped()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var responses = new[]
+        {
+            """{ "count": 1, "assemblies": [ { "name": "Assembly-CSharp" } ] }""",
+            """
+            { "assembly": "Assembly-CSharp", "count": 1, "classes": [
+              { "namespace": "Game", "name": "Character" } ] }
+            """,
+            // 5 live instances -> count 5 > 4 -> shared/NPC class, must be skipped.
+            """{ "count": 5, "limit": 5, "matches": [ "0x10", "0x20", "0x30", "0x40", "0x50" ] }""",
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.LocateAsync(Only(classes: true), ct)
+                                                .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            Assert.Empty(r.Candidates);   // no get_transform, no candidate
+            Assert.Contains(r.Notes, n => n.Contains("count-skipped", StringComparison.Ordinal));
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task StrongSignal_OnRigName_StaysHighConfidence()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // A Player-tagged object whose name trips the rig heuristic must NOT be
+        // force-demoted to Low — the strong tag signal recovers confidence.
+        var responses = new[]
+        {
+            AddrOk("UnityEngine.GameObject", "0x2000"),    // FindWithTag("Player")
+            AddrOk("UnityEngine.Transform", "0x2100"),     // GameObject.get_transform
+            StringOk("PlayerCameraTarget"),                // rig name (contains "camera")
+            Vector3Ok(1f, 2f, 3f),
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.LocateAsync(Only(tag: true), ct)
+                                                .ConfigureAwait(true);
+            PlayerCandidate c = Assert.Single(r.Candidates);
+            Assert.Equal(PlayerConfidence.High, c.Confidence);
+            Assert.NotEqual(PlayerConfidence.Low, r.TopConfidence);
+            // Score still eats the rig penalty (100 - 45) but confidence is High.
+            Assert.Equal(PlayerLocatorRanking.ScoreTag - PlayerLocatorRanking.CameraRigNamePenalty, c.Score);
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }

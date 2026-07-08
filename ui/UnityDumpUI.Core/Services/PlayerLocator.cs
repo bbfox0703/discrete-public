@@ -27,6 +27,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -53,6 +54,25 @@ public sealed class PlayerCandidate
     public int     Score             { get; init; }
     public double? DistanceToCamera  { get; init; }
     public (double X, double Y, double Z)? Position { get; init; }
+    /// <summary>How much to trust this pick — see <see cref="PlayerConfidence"/>.</summary>
+    public PlayerConfidence Confidence { get; init; }
+    /// <summary>Displacement magnitude from a movement-detection run (null for
+    /// the static scorer). The mover is the player.</summary>
+    public double? MovedDistance { get; init; }
+}
+
+/// <summary>How trustworthy an auto-detect pick is. Camera-chain-only hits are
+/// <see cref="Low"/> — usually a camera rig, not the player.</summary>
+public enum PlayerConfidence
+{
+    /// <summary>Only the camera chain fired (or a demoted camera-rig name) —
+    /// probably not the player. Prompt the user to move-detect or pick manually.</summary>
+    Low = 0,
+    /// <summary>One corroborating name/class signal, or a moderate score.</summary>
+    Medium = 1,
+    /// <summary>A strong signal (tag / CharacterController / single-instance user
+    /// class), or movement-confirmed, or multiple signals agree.</summary>
+    High = 2,
 }
 
 /// <summary>Per-signal toggles + caps. Defaults are the wave A shipping shape;
@@ -86,6 +106,69 @@ public sealed class PlayerLocateResult
     public (double X, double Y, double Z)? CameraPosition { get; init; }
     /// <summary>Per-signal soft notes (unavailable APIs, hit counts) for the log.</summary>
     public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
+
+    /// <summary>Best candidate's confidence — drives the "maybe pick manually /
+    /// move-detect" guidance. <see cref="PlayerConfidence.Low"/> when the only
+    /// hit is the camera chain.</summary>
+    public PlayerConfidence TopConfidence =>
+        Candidates.Count == 0 ? PlayerConfidence.Low : Candidates[0].Confidence;
+}
+
+/// <summary>Options for movement-correlation detection (the robust disambiguator
+/// for games where static signals don't fire).</summary>
+public sealed class MovementDetectOptions
+{
+    /// <summary>Static signals that seed the sample pool before the broad
+    /// scene sweep. Same defaults as <see cref="PlayerLocateOptions"/>.</summary>
+    public PlayerLocateOptions Signals { get; init; } = new();
+
+    /// <summary>Also fold in a capped <c>FindObjectsByType(Transform)</c> sweep
+    /// so the player is in the pool even when no static signal named it. This
+    /// is the expensive part (one get_position per pooled transform × 2 passes),
+    /// so it's capped.</summary>
+    public bool SweepAllTransforms { get; init; } = true;
+
+    /// <summary>Max transforms to sample from the broad sweep. Each costs two
+    /// main-thread get_position calls; keep it to a few seconds of budget. The
+    /// scene may hold far more objects — a strided sample covers the whole
+    /// array sparsely but can still miss a specific object (surfaced to the UI).</summary>
+    public int MaxSweepTransforms { get; init; } = 600;
+
+    /// <summary>Minimum displacement (world units) to count as "moved" — filters
+    /// idle jitter / animation micro-motion.</summary>
+    public double MinMoveDistance { get; init; } = 0.20;
+
+    /// <summary>Ranked rows returned.</summary>
+    public int MaxCandidates { get; init; } = 12;
+}
+
+/// <summary>One tracked transform between the two movement samples.</summary>
+public sealed class MovementTrack
+{
+    public string TransformAddress { get; init; } = string.Empty;
+    public string? GameObjectAddress { get; init; }
+    public string? InstanceAddress   { get; init; }
+    public string? ClassName         { get; init; }
+    public IReadOnlyList<string> Sources { get; init; } = Array.Empty<string>();
+    /// <summary>True for the main camera's transform — excluded from movers
+    /// (it moves whenever the user rotates the view).</summary>
+    public bool IsCamera { get; init; }
+    public (double X, double Y, double Z) Start { get; init; }
+}
+
+/// <summary>Phase-1 output of movement detection: the pool + start positions.
+/// Hold it, let the user move, then pass it to
+/// <see cref="PlayerLocator.FinishMovementSampleAsync"/>.</summary>
+public sealed class MovementSample
+{
+    public bool    Ok    { get; init; }
+    public string? Error { get; init; }
+    public IReadOnlyList<MovementTrack> Tracks { get; init; } = Array.Empty<MovementTrack>();
+    public int     SceneTransformTotal { get; init; }
+    public bool    Truncated { get; init; }
+    public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
+
+    internal PlayerLocator? Owner { get; init; }
 }
 
 /// <summary>One raw signal hit before merge / enrichment.</summary>
@@ -116,10 +199,15 @@ public static class PlayerLocatorRanking
     public const int ScoreTag              = 100;
     public const int ScoreCharController   = 80;
     public const int ScoreExactPlayerName  = 70;
-    public const int ScoreCameraChain      = 60;
+    public const int ScoreCameraChain      = 40;   // weak: often a camera rig
     public const int ScoreWellKnownName    = 50;
     public const int ScoreSingleInstance   = 50;
     public const int ScoreFewInstances     = 30;
+
+    /// <summary>Subtracted from a candidate whose GameObject name reads as a
+    /// camera rig — enough to sink a camera-chain-only hit below any real
+    /// player signal, but recoverable if a strong signal also tagged it.</summary>
+    public const int CameraRigNamePenalty  = 45;
 
     /// <summary>Camera-proximity bonus: the player is nearly always the
     /// player-ish object closest to the main camera.</summary>
@@ -195,6 +283,56 @@ public static class PlayerLocatorRanking
     }
 }
 
+/// <summary>Whole-word token matching, shared by the class-name keyword filter
+/// and the camera-rig name detector. Short tokens (chr/cam/rig/…) must match a
+/// whole tokenized word, not a fragment of a longer one — else "chr" hits
+/// "Archer", "cam" hits "Cameron", "rig" hits "Frigate", "boom" hits "Boomer".
+/// Tokenizing on separators AND camelCase / digit edges keeps "FollowCam" and
+/// "PlayerRig" matching while "Cameron"/"Mountain" don't.</summary>
+internal static class NameTokenMatch
+{
+    /// <summary>Split into lowercase alphanumeric tokens on any non-alphanumeric
+    /// char, on lower→upper camelCase transitions, and on letter↔digit edges.
+    /// "MainCameraRig" → [main,camera,rig]; "CM vcam1" → [cm,vcam,1];
+    /// "Player_Chr02" → [player,chr,02].</summary>
+    public static List<string> Tokenize(string name)
+    {
+        var tokens = new List<string>();
+        if (string.IsNullOrEmpty(name)) return tokens;
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < name.Length; i++)
+        {
+            char c = name[i];
+            if (!char.IsLetterOrDigit(c))
+            {
+                if (sb.Length > 0) { tokens.Add(sb.ToString().ToLowerInvariant()); sb.Clear(); }
+                continue;
+            }
+            if (sb.Length > 0)
+            {
+                char prev = name[i - 1];
+                bool camel     = char.IsLower(prev) && char.IsUpper(c);
+                bool digitEdge = char.IsDigit(prev) != char.IsDigit(c);
+                if (camel || digitEdge) { tokens.Add(sb.ToString().ToLowerInvariant()); sb.Clear(); }
+            }
+            sb.Append(c);
+        }
+        if (sb.Length > 0) tokens.Add(sb.ToString().ToLowerInvariant());
+        return tokens;
+    }
+
+    /// <summary>True when any whole token equals <paramref name="token"/>
+    /// (which must already be lowercase).</summary>
+    public static bool HasToken(string name, string token)
+    {
+        foreach (string t in Tokenize(name))
+        {
+            if (t == token) return true;
+        }
+        return false;
+    }
+}
+
 /// <summary>Signal E's offline class-name filter — pure, unit-testable.</summary>
 public static class PlayerClassNameFilter
 {
@@ -207,11 +345,17 @@ public static class PlayerClassNameFilter
         public int     Rank      { get; init; }
     }
 
-    // Player-ish naming. Bare "Character" is deliberately absent — it pulls
-    // NPC base classes whose heap scans are wasted budget (they exceed the
-    // instance cap anyway).
+    // Player-ish naming, incl. common Japanese-game conventions (chara/chr/unit
+    // /actor). "playable" is dropped — it over-matches Unity's PlayableDirector
+    // /PlayableGraph, not the pawn. Whole-word-ish short tokens (chr/pc) are
+    // matched with boundary care in Select to avoid "Archer"/"Purchase" hits.
     private static readonly string[] Keywords =
-        { "player", "hero", "avatar", "protagonist", "playable" };
+        { "player", "hero", "protagonist", "avatar", "chara", "character",
+          "actor", "pawn", "unit" };
+
+    // Short tokens that need word-boundary matching (else "chr" hits "Archer",
+    // "pc" hits "Purchase"). Matched as a standalone token or with a digit.
+    private static readonly string[] ShortTokens = { "chr", "pc" };
 
     // Classes that NAME the player but aren't the pawn: managers, data bags,
     // UI, settings. Substring, case-insensitive.
@@ -235,12 +379,7 @@ public static class PlayerClassNameFilter
             if (name.IndexOfAny(new[] { '<', '`', '$' }) >= 0) continue;
 
             string lower = name.ToLowerInvariant();
-            bool keyword = false;
-            foreach (string k in Keywords)
-            {
-                if (lower.Contains(k, StringComparison.Ordinal)) { keyword = true; break; }
-            }
-            if (!keyword) continue;
+            if (!MatchesKeyword(name, lower)) continue;
 
             bool excluded = false;
             foreach (string e in Exclusions)
@@ -249,10 +388,14 @@ public static class PlayerClassNameFilter
             }
             if (excluded) continue;
 
+            // Rank: exact "Player" is the gold hit; then any player* name; then
+            // the strong pawn synonyms; then the rest. Lower = better.
             int rank =
                 string.Equals(name, "Player", StringComparison.OrdinalIgnoreCase) ? 0 :
                 lower.StartsWith("player", StringComparison.Ordinal)              ? 1 :
-                lower.Contains("player", StringComparison.Ordinal)                ? 2 : 3;
+                lower.Contains("player", StringComparison.Ordinal)                ? 2 :
+                (lower.Contains("hero", StringComparison.Ordinal)
+                 || lower.Contains("protagonist", StringComparison.Ordinal))     ? 3 : 4;
             picked.Add(new ClassCandidate { Assembly = asm, Namespace = ns, Name = name, Rank = rank });
         }
 
@@ -262,6 +405,24 @@ public static class PlayerClassNameFilter
             .ThenBy(c => c.Name, StringComparer.Ordinal)
             .Take(Math.Max(0, cap))
             .ToList();
+    }
+
+    // `name` is the original (for camelCase tokenization); `lower` is its
+    // lower-cased form (for the substring keyword scan).
+    private static bool MatchesKeyword(string name, string lower)
+    {
+        foreach (string k in Keywords)
+        {
+            if (lower.Contains(k, StringComparison.Ordinal)) return true;
+        }
+        // Short tokens (chr/pc) only match a whole tokenized word, else "chr"
+        // hits "Archer", "pc" hits "Purchase". Tokenize the ORIGINAL name so a
+        // camelCase boundary ("MapChr" → chr) is preserved.
+        foreach (string t in ShortTokens)
+        {
+            if (NameTokenMatch.HasToken(name, t)) return true;
+        }
+        return false;
     }
 }
 
@@ -303,6 +464,24 @@ public sealed class PlayerLocator
         "UnityEngine", "Unity.", "UnityEditor", "Newtonsoft",
     };
 
+    // Camera-rig object names — the camera-chain signal walks the camera's
+    // parents, and its immediate parent is very often a rig / holder, NOT the
+    // player. A candidate whose name matches this is demoted so it stops
+    // winning by default when it's the only hit.
+    //
+    // Long tokens are safe as plain substrings; short tokens must match at a
+    // word boundary (else "cam" hits "Cameron", "rig" hits "Frigate", "mount"
+    // hits "Mountain", "eye" hits "Redeye", "boom" hits "Boomer").
+    private static readonly string[] CameraRigLongTokens =
+    {
+        "camera", "cinemachine", "vcam", "cmvcam", "freelook", "viewpoint",
+        "lookat", "holder", "dolly", "crane", "gimbal", "socket", "pivot",
+    };
+    private static readonly string[] CameraRigShortTokens =
+    {
+        "cam", "rig", "boom", "mount", "eye", "pov",
+    };
+
     private static readonly IReadOnlyList<CallArgRequest> NoArgs = new List<CallArgRequest>();
 
     private readonly BackendAdapter _backend;
@@ -329,42 +508,9 @@ public sealed class PlayerLocator
         var hits  = new List<PlayerSignalHit>();
         var notes = new List<string>();
 
-        // --- signal A: camera anchor + parent chain -----------------------
-        string? camTransform = null;
-        (double X, double Y, double Z)? camPos = null;
-        if (opt.EnableCameraChain)
-        {
-            (camTransform, camPos) = await CameraAnchorAsync(hits, notes, opt, ct).ConfigureAwait(false);
-            if (_drainTimeout) return Abort();
-        }
-
-        // --- signal B: tag lookup ------------------------------------------
-        if (opt.EnableTagLookup)
-        {
-            await TagLookupAsync(hits, notes, ct).ConfigureAwait(false);
-            if (_drainTimeout) return Abort();
-        }
-
-        // --- signal C: CharacterController enumeration ---------------------
-        if (opt.EnableCharacterController)
-        {
-            await CharacterControllerAsync(hits, notes, ct).ConfigureAwait(false);
-            if (_drainTimeout) return Abort();
-        }
-
-        // --- signal D: well-known GameObject names --------------------------
-        if (opt.EnableWellKnownNames)
-        {
-            await WellKnownNamesAsync(hits, notes, ct).ConfigureAwait(false);
-            if (_drainTimeout) return Abort();
-        }
-
-        // --- signal E: user-class name heuristic ----------------------------
-        if (opt.EnableUserClassScan)
-        {
-            await UserClassScanAsync(hits, notes, opt, ct).ConfigureAwait(false);
-            if (_drainTimeout) return Abort();
-        }
+        (string? camTransform, (double X, double Y, double Z)? camPos, bool aborted) =
+            await GatherSignalsAsync(opt, hits, notes, ct).ConfigureAwait(false);
+        if (aborted) return Abort();
 
         // --- merge + enrich + rank ------------------------------------------
         IReadOnlyList<PlayerLocatorRanking.Merged> merged = PlayerLocatorRanking.Merge(hits);
@@ -388,8 +534,9 @@ public sealed class PlayerLocator
             .Take(Math.Max(1, opt.MaxCandidates))
             .ToList();
 
-        Log($"PlayerLocator: {hits.Count} raw hits -> {merged.Count} unique -> {ranked.Count} ranked. "
-            + string.Join(" | ", notes));
+        PlayerConfidence topConf = ranked.Count == 0 ? PlayerConfidence.Low : ranked[0].Confidence;
+        Log($"PlayerLocator: {hits.Count} raw hits -> {merged.Count} unique -> {ranked.Count} ranked "
+            + $"(top confidence {topConf}). " + string.Join(" | ", notes));
 
         return new PlayerLocateResult
         {
@@ -399,6 +546,340 @@ public sealed class PlayerLocator
             CameraPosition = camPos,
             Notes = notes,
         };
+    }
+
+    /// <summary>Guidance shown when static auto-detect can't confidently name the
+    /// player (only the camera fired, or the top hit is a camera rig). Points at
+    /// the movement-detection fallback.</summary>
+    public const string LowConfidenceHint =
+        "Low confidence — the only thing found looks like the camera, not the player. "
+        + "This game doesn't expose the usual player markers (no \"Player\" tag / "
+        + "CharacterController / player-named object). Use \"Detect by movement\" "
+        + "(move your character while it samples) or pick the target manually.";
+
+    // Run signals A-E into `hits`; returns the camera transform+position and an
+    // abort flag (dispatcher drain timeout). Shared by LocateAsync and movement
+    // detection (whose seed pool is the same signal set).
+    private async Task<(string? camTransform, (double X, double Y, double Z)? camPos, bool aborted)>
+        GatherSignalsAsync(PlayerLocateOptions opt, List<PlayerSignalHit> hits,
+                           List<string> notes, CancellationToken ct)
+    {
+        string? camTransform = null;
+        (double X, double Y, double Z)? camPos = null;
+
+        if (opt.EnableCameraChain)
+        {
+            (camTransform, camPos) = await CameraAnchorAsync(hits, notes, opt, ct).ConfigureAwait(false);
+            if (_drainTimeout) return (camTransform, camPos, true);
+        }
+        if (opt.EnableTagLookup)
+        {
+            await TagLookupAsync(hits, notes, ct).ConfigureAwait(false);
+            if (_drainTimeout) return (camTransform, camPos, true);
+        }
+        if (opt.EnableCharacterController)
+        {
+            await CharacterControllerAsync(hits, notes, ct).ConfigureAwait(false);
+            if (_drainTimeout) return (camTransform, camPos, true);
+        }
+        if (opt.EnableWellKnownNames)
+        {
+            await WellKnownNamesAsync(hits, notes, ct).ConfigureAwait(false);
+            if (_drainTimeout) return (camTransform, camPos, true);
+        }
+        if (opt.EnableUserClassScan)
+        {
+            await UserClassScanAsync(hits, notes, opt, ct).ConfigureAwait(false);
+            if (_drainTimeout) return (camTransform, camPos, true);
+        }
+        return (camTransform, camPos, false);
+    }
+
+    // ------------------------------------------------------------------
+    // Movement-correlation detection (the robust disambiguator)
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Phase 1 of movement detection: build a pool of transforms (the static
+    /// signals' hits + the camera + a capped <c>FindObjectsByType(Transform)</c>
+    /// sweep) and record each one's start position. The caller then lets the
+    /// user move their character for a moment and calls
+    /// <see cref="FinishMovementSampleAsync"/> with the returned sample.
+    /// </summary>
+    public async Task<MovementSample> BeginMovementSampleAsync(
+        MovementDetectOptions? options = null, CancellationToken ct = default)
+    {
+        MovementDetectOptions opt = options ?? new MovementDetectOptions();
+        _drainTimeout = false;
+
+        var seedHits = new List<PlayerSignalHit>();
+        var notes    = new List<string>();
+        (string? camTransform, _, bool aborted) =
+            await GatherSignalsAsync(opt.Signals, seedHits, notes, ct).ConfigureAwait(false);
+        if (aborted) return new MovementSample { Ok = false, Error = DrainTimeoutHint };
+
+        // Pool = every transform we can name from the signals, keyed by address.
+        var poolMeta = new Dictionary<string, PlayerSignalHit>(StringComparer.OrdinalIgnoreCase);
+        foreach (PlayerSignalHit h in seedHits)
+            poolMeta.TryAdd(h.TransformAddress, h);
+
+        int sceneTotal = 0;
+        bool truncated = false;
+        if (opt.SweepAllTransforms)
+        {
+            (IReadOnlyList<string> transforms, sceneTotal, truncated) =
+                await EnumerateSceneTransformsAsync(opt.MaxSweepTransforms, ct).ConfigureAwait(false);
+            if (_drainTimeout) return new MovementSample { Ok = false, Error = DrainTimeoutHint };
+            foreach (string t in transforms)
+                poolMeta.TryAdd(t, null!);   // sweep entries have no signal metadata
+            notes.Add($"sweep: {transforms.Count} of {sceneTotal} scene transforms"
+                + (truncated ? " (capped)" : string.Empty));
+        }
+
+        // Capture t0 for every pooled transform.
+        var tracks = new List<MovementTrack>(poolMeta.Count);
+        foreach (KeyValuePair<string, PlayerSignalHit> kv in poolMeta)
+        {
+            ct.ThrowIfCancellationRequested();
+            (double, double, double)? p = await ReadTransformPositionAsync(kv.Key, ct).ConfigureAwait(false);
+            if (_drainTimeout) return new MovementSample { Ok = false, Error = DrainTimeoutHint };
+            if (p is not { } start) continue;
+            PlayerSignalHit? meta = kv.Value;
+            tracks.Add(new MovementTrack
+            {
+                TransformAddress  = kv.Key,
+                GameObjectAddress = meta?.GameObjectAddress,
+                InstanceAddress   = meta?.InstanceAddress,
+                ClassName         = meta?.ClassName,
+                Sources           = meta is null ? Array.Empty<string>() : new[] { meta.Source },
+                IsCamera          = camTransform is not null
+                                    && string.Equals(kv.Key, camTransform, StringComparison.OrdinalIgnoreCase),
+                Start             = start,
+            });
+        }
+
+        Log($"PlayerLocator movement: pool {tracks.Count} transforms "
+            + $"(sweep {(opt.SweepAllTransforms ? sceneTotal.ToString(CultureInfo.InvariantCulture) : "off")}). "
+            + string.Join(" | ", notes));
+
+        return new MovementSample
+        {
+            Ok = true,
+            Tracks = tracks,
+            SceneTransformTotal = sceneTotal,
+            Truncated = truncated,
+            Notes = notes,
+            Owner = this,
+        };
+    }
+
+    /// <summary>
+    /// Phase 2 of movement detection: re-read every tracked transform's position
+    /// and rank by how far it moved. The camera transform is excluded (it moves
+    /// on view rotation); movers below <see cref="MovementDetectOptions.MinMoveDistance"/>
+    /// are dropped. The top movers are enriched with names + returned as
+    /// High-confidence candidates.
+    /// </summary>
+    public async Task<PlayerLocateResult> FinishMovementSampleAsync(
+        MovementSample sample, MovementDetectOptions? options = null, CancellationToken ct = default)
+    {
+        if (sample is null || !sample.Ok)
+            return new PlayerLocateResult { Ok = false, Error = sample?.Error ?? "no movement sample" };
+
+        MovementDetectOptions opt = options ?? new MovementDetectOptions();
+        _drainTimeout = false;
+
+        var movers = new List<(MovementTrack Track, double Dist, (double, double, double) End)>();
+        foreach (MovementTrack track in sample.Tracks)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (track.IsCamera) continue;   // camera moves on view rotation
+            (double, double, double)? p = await ReadTransformPositionAsync(track.TransformAddress, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+            if (p is not { } end) continue;
+            double dx = end.Item1 - track.Start.X;
+            double dy = end.Item2 - track.Start.Y;
+            double dz = end.Item3 - track.Start.Z;
+            double dist = Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
+            if (dist >= opt.MinMoveDistance) movers.Add((track, dist, end));
+        }
+
+        // Take the top movers by raw displacement first (bounds how many get the
+        // costly name enrichment), then re-rank by the penalty-adjusted score so
+        // a rig-named follow-cam that swings a slightly wider arc can't out-rank
+        // the real player it tracks.
+        var ordered = movers
+            .OrderByDescending(m => m.Dist)
+            .Take(Math.Max(1, opt.MaxCandidates))
+            .ToList();
+
+        var candidates = new List<PlayerCandidate>(ordered.Count);
+        foreach (var mv in ordered)
+        {
+            ct.ThrowIfCancellationRequested();
+            (string? go, string name) = await ResolveNameAsync(
+                mv.Track.GameObjectAddress, mv.Track.TransformAddress, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+
+            // A mover named like a camera rig is still suspicious (a follow-cam
+            // that tracks the player moves too) — demote but keep it visible.
+            bool rig = IsCameraRigName(name);
+            candidates.Add(new PlayerCandidate
+            {
+                TransformAddress  = mv.Track.TransformAddress,
+                GameObjectAddress = go,
+                InstanceAddress   = mv.Track.InstanceAddress,
+                Name              = name,
+                ClassName         = mv.Track.ClassName,
+                Sources           = mv.Track.Sources.Count > 0
+                                    ? new List<string>(mv.Track.Sources) { "moved" }
+                                    : new[] { "moved" },
+                Score             = (int)Math.Round(mv.Dist * 10) + (rig ? -PlayerLocatorRanking.CameraRigNamePenalty : 0),
+                Position          = mv.End,
+                MovedDistance     = mv.Dist,
+                Confidence        = rig ? PlayerConfidence.Medium : PlayerConfidence.High,
+            });
+        }
+
+        candidates = candidates
+            .OrderByDescending(c => c.Score)
+            .ThenByDescending(c => c.MovedDistance ?? 0d)
+            .ThenBy(c => c.TransformAddress, StringComparer.Ordinal)
+            .ToList();
+
+        Log($"PlayerLocator movement finish: {movers.Count} moved (of {sample.Tracks.Count} tracked), "
+            + $"top {candidates.Count} returned.");
+
+        return new PlayerLocateResult
+        {
+            Ok = true,
+            Candidates = candidates,
+            Notes = new[] { $"{movers.Count} object(s) moved of {sample.Tracks.Count} tracked" },
+        };
+    }
+
+    // FindObjectsByType(Transform) -> capped list of transform addresses, plus
+    // the true scene total and whether we truncated. Same probe order as the
+    // CharacterController sweep (Unity 2022+ ByType -> 2-arg OfType -> 1-arg).
+    private async Task<(IReadOnlyList<string> transforms, int total, bool truncated)>
+        EnumerateSceneTransformsAsync(int cap, CancellationToken ct)
+    {
+        string? typeAddr = null;
+        foreach (string fqn in new[]
+                 { "UnityEngine.Transform, UnityEngine.CoreModule",
+                   "UnityEngine.Transform, UnityEngine" })
+        {
+            CallMethodResult r = await _backend.CallMethodAsync(
+                "mscorlib", "System", "Type", "GetType",
+                new[] { CallArgFactory.String(fqn) },
+                signatureMatch: "(System.String)",
+                mainThread: true, mainThreadTimeoutMs: _mainThreadTimeoutMs,
+                ct: ct).ConfigureAwait(false);
+            NoteDrainTimeout(r);
+            if (_drainTimeout) return (Array.Empty<string>(), 0, false);
+            typeAddr = SuccessAddress(r);
+            if (typeAddr is not null) break;
+        }
+        if (typeAddr is null) return (Array.Empty<string>(), 0, false);
+
+        var attempts = new (string Method, string Signature, CallArgRequest[] Args)[]
+        {
+            ("FindObjectsByType",
+             "(System.Type, UnityEngine.FindObjectsInactive, UnityEngine.FindObjectsSortMode)",
+             new[] { CallArgFactory.Address(typeAddr), CallArgFactory.Int("int32", 1), CallArgFactory.Int("int32", 0) }),
+            ("FindObjectsOfType",
+             "(System.Type, System.Boolean)",
+             new[] { CallArgFactory.Address(typeAddr), CallArgFactory.Bool(true) }),
+            ("FindObjectsOfType",
+             "(System.Type)",
+             new[] { CallArgFactory.Address(typeAddr) }),
+        };
+
+        string? arrayAddress = null;
+        foreach (var attempt in attempts)
+        {
+            CallMethodResult r = await CallEngineAsync(
+                "Object", attempt.Method, instanceHex: null, attempt.Args, attempt.Signature,
+                wantStruct: false, ct).ConfigureAwait(false);
+            if (_drainTimeout) return (Array.Empty<string>(), 0, false);
+            arrayAddress = SuccessAddress(r);
+            if (arrayAddress is not null) break;
+        }
+        if (arrayAddress is null) return (Array.Empty<string>(), 0, false);
+
+        // Fetch as wide a window as the DLL allows (hard cap 4096), then STRIDE
+        // -select `cap` transforms evenly across it — sampling a contiguous
+        // first-`cap` prefix would blind us to a player that sorts later in the
+        // FindObjectsByType order. The header `length` is the true scene total
+        // regardless of how many elements come back, so truncation is honest.
+        int fetch = Math.Min(4096, Math.Max(cap, 1));
+        WalkArrayResult array = await _backend.WalkArrayAsync(arrayAddress, limit: fetch, ct: ct)
+                                              .ConfigureAwait(false);
+        int total = array.Length > int.MaxValue ? int.MaxValue : (int)array.Length;
+
+        var window = new List<string>();
+        foreach (WalkedArrayElement e in array.Elements ?? new List<WalkedArrayElement>())
+        {
+            string? hex = ElementAddress(e);
+            if (hex is not null) window.Add(hex);
+        }
+
+        IReadOnlyList<string> list;
+        if (window.Count <= cap)
+        {
+            list = window;
+        }
+        else
+        {
+            // Even stride across the fetched window: indices 0, N/cap, 2N/cap, …
+            var strided = new List<string>(cap);
+            for (int i = 0; i < cap; i++)
+                strided.Add(window[(int)((long)i * window.Count / cap)]);
+            list = strided;
+        }
+
+        bool truncated = total > list.Count;
+        return (list, total == 0 ? list.Count : total, truncated);
+    }
+
+    private async Task<(double, double, double)?> ReadTransformPositionAsync(
+        string transformAddr, CancellationToken ct)
+    {
+        CallMethodResult pos = await CallEngineAsync(
+            "Transform", "get_position", transformAddr, NoArgs, sigMatch: null,
+            wantStruct: true, ct).ConfigureAwait(false);
+        if (!pos.Ok || !string.IsNullOrEmpty(pos.Error)) return null;
+        // A success with no/short struct payload decodes to all-zeros, which
+        // would masquerade as world-origin (0,0,0). Treat it as unreadable so a
+        // one-sided glitch across the two movement passes can't fabricate a
+        // displacement equal to the object's distance from origin. Vector3 = 12
+        // bytes = 24 hex chars.
+        if (!HasVector3Payload(pos)) return null;
+        float[] p = CallArgFactory.DecodeStructFloats(pos.ReturnStructBytes, 3);
+        return (p[0], p[1], p[2]);
+    }
+
+    private async Task<(string? go, string name)> ResolveNameAsync(
+        string? gameObject, string transformAddr, CancellationToken ct)
+    {
+        string? go = gameObject;
+        if (go is null)
+        {
+            CallMethodResult r = await CallEngineAsync(
+                "Component", "get_gameObject", transformAddr, NoArgs, "()",
+                wantStruct: false, ct).ConfigureAwait(false);
+            go = SuccessAddress(r);
+        }
+        if (go is null || _drainTimeout) return (go, string.Empty);
+
+        CallMethodResult nr = await CallEngineAsync(
+            "Object", "get_name", go, NoArgs, "()",
+            wantStruct: false, ct).ConfigureAwait(false);
+        string name = (nr.Ok && string.IsNullOrEmpty(nr.Error)
+                       && nr.ReturnValue.ValueKind == JsonValueKind.String)
+            ? nr.ReturnValue.GetString() ?? string.Empty
+            : string.Empty;
+        return (go, name);
     }
 
     // ------------------------------------------------------------------
@@ -432,7 +913,7 @@ public sealed class PlayerLocator
         CallMethodResult pos = await CallEngineAsync(
             "Transform", "get_position", camTransform, NoArgs, sigMatch: null,
             wantStruct: true, ct).ConfigureAwait(false);
-        if (pos.Ok && string.IsNullOrEmpty(pos.Error))
+        if (pos.Ok && HasVector3Payload(pos))
         {
             float[] p = CallArgFactory.DecodeStructFloats(pos.ReturnStructBytes, 3);
             camPos = (p[0], p[1], p[2]);
@@ -621,8 +1102,11 @@ public sealed class PlayerLocator
 
         IReadOnlyList<PlayerClassNameFilter.ClassCandidate> picked =
             PlayerClassNameFilter.Select(classTriples, opt.MaxUserClassScans);
+        if (picked.Count > 0)
+            Log("PlayerLocator signal-E picked: " + string.Join(", ", picked.Select(p => p.Name)));
 
         int candidateCount = 0;
+        int skippedCount    = 0;
         foreach (PlayerClassNameFilter.ClassCandidate cls in picked)
         {
             ct.ThrowIfCancellationRequested();
@@ -631,36 +1115,50 @@ public sealed class PlayerLocator
             {
                 // aliveOnly drops destroyed Unity shells, sane drops torn
                 // objects (Phase 32) — both cut the heap-scan false positives
-                // that would otherwise crash the get_transform probe.
+                // that would otherwise crash the get_transform probe. limit:5
+                // (one past the accept gate's upper bound) so a shared/NPC class
+                // with many instances reports count>4 and is rejected — the DLL
+                // caps `matches` at `limit`, so limit:4 could never exceed 4 and
+                // the "too many = not the player" branch was dead.
                 inst = await _backend.FindInstancesAsync(
                     cls.Assembly, cls.Namespace, cls.Name,
-                    limit: 4, aliveOnly: true, sane: true, ct: ct).ConfigureAwait(false);
+                    limit: 5, aliveOnly: true, sane: true, ct: ct).ConfigureAwait(false);
             }
-            catch (PipeProtocolException) { continue; }
-            if (!string.IsNullOrEmpty(inst.Error)) continue;
+            catch (PipeProtocolException ex) { Log($"signal-E {cls.Name}: findInstances threw {ex.Message}"); continue; }
+            if (!string.IsNullOrEmpty(inst.Error)) { Log($"signal-E {cls.Name}: error {inst.Error}"); continue; }
 
-            // Exactly 1 live instance is the "this IS the player" shape;
-            // 2-3 could be player + prefab/pool copies. More = NPC class.
-            int count = inst.Matches.Count;
-            if (count is < 1 or > 3) continue;
+            // Some heap-scan matches parse into the header count but not the
+            // matches[] array; fall back to the header count for the gate and
+            // sample whatever addresses actually came through.
+            int count = inst.Matches.Count > 0 ? inst.Matches.Count : inst.Count;
+            // Exactly 1 live instance is the "this IS the player" shape; 2-4
+            // could be player + prefab/pool copies. More = NPC / shared class.
+            if (count is < 1 or > 4) { skippedCount++; Log($"signal-E {cls.Name}: count={count} (matches[]={inst.Matches.Count}) — skipped"); continue; }
             int score = count == 1
                 ? PlayerLocatorRanking.ScoreSingleInstance
                 : PlayerLocatorRanking.ScoreFewInstances;
 
+            int resolved = 0, failed = 0;
             foreach (string instance in inst.Matches.Take(2))
             {
+                // These are user classes that may or may not be Components.
+                // Component.get_transform works for any Component/MonoBehaviour;
+                // a plain data class returns 0x0 / errors → a clean skip.
                 CallMethodResult tr = await CallEngineAsync(
                     "Component", "get_transform", instance, NoArgs, "()",
                     wantStruct: false, ct).ConfigureAwait(false);
                 if (_drainTimeout) return;
                 string? transform = SuccessAddress(tr);
-                if (transform is null) continue;   // not a Component — skip
+                if (transform is null) { failed++; continue; }   // not a Component — skip
                 hits.Add(new PlayerSignalHit(transform, $"class:{cls.Name}({count})",
                     score, instanceAddress: instance, className: cls.Name));
                 candidateCount++;
+                resolved++;
             }
+            Log($"signal-E {cls.Name}: count={count}, transform resolved={resolved} failed={failed}");
         }
-        notes.Add($"classes: {picked.Count} scanned, {candidateCount} hit(s)");
+        notes.Add($"classes: {picked.Count} scanned, {candidateCount} hit(s)"
+            + (skippedCount > 0 ? $", {skippedCount} count-skipped" : string.Empty));
     }
 
     // ------------------------------------------------------------------
@@ -701,7 +1199,7 @@ public sealed class PlayerLocator
             CallMethodResult pos = await CallEngineAsync(
                 "Transform", "get_position", m.TransformAddress, NoArgs, sigMatch: null,
                 wantStruct: true, ct).ConfigureAwait(false);
-            if (pos.Ok && string.IsNullOrEmpty(pos.Error))
+            if (pos.Ok && HasVector3Payload(pos))
             {
                 float[] p = CallArgFactory.DecodeStructFloats(pos.ReturnStructBytes, 3);
                 position = (p[0], p[1], p[2]);
@@ -713,6 +1211,24 @@ public sealed class PlayerLocator
             }
         }
 
+        // Scoring adjustments (the wave-A version over-trusted the camera chain):
+        //  * Distance-to-camera bonus applies ONLY to candidates with a
+        //    non-camera signal. A camera-chain ancestor is near the camera by
+        //    construction, so bonusing it is circular and let camera rigs win.
+        //  * A camera-rig NAME (or a camera-chain-only candidate whose name says
+        //    "camera"/"rig"/…) is heavily demoted so it stops out-ranking the
+        //    real player when it's the only hit.
+        bool cameraOnly = m.Sources.Count > 0
+            && m.Sources.All(s => s.StartsWith("camera", StringComparison.Ordinal));
+        int distanceBonus = cameraOnly ? 0 : PlayerLocatorRanking.DistanceBonus(distance);
+
+        bool rigName = IsCameraRigName(name);
+        int rigPenalty = rigName ? PlayerLocatorRanking.CameraRigNamePenalty : 0;
+
+        int score = m.Score + distanceBonus - rigPenalty;
+
+        PlayerConfidence confidence = ClassifyConfidence(m.Sources, rigName, cameraOnly);
+
         return new PlayerCandidate
         {
             TransformAddress  = m.TransformAddress,
@@ -721,10 +1237,63 @@ public sealed class PlayerLocator
             Name              = name,
             ClassName         = m.ClassName,
             Sources           = m.Sources,
-            Score             = m.Score + PlayerLocatorRanking.DistanceBonus(distance),
+            Score             = score,
             DistanceToCamera  = distance,
             Position          = position,
+            Confidence        = confidence,
         };
+    }
+
+    /// <summary>True when a GameObject name looks like a camera rig / holder
+    /// rather than the player (the camera-chain signal's classic false hit).
+    /// Long tokens match as substrings; short tokens only at a word boundary.</summary>
+    internal static bool IsCameraRigName(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        string lower = name.ToLowerInvariant();
+        foreach (string t in CameraRigLongTokens)
+        {
+            if (lower.Contains(t, StringComparison.Ordinal)) return true;
+        }
+        // Short tokens tokenized off the ORIGINAL name so camelCase boundaries
+        // ("FollowCam"/"PlayerRig") match but "Cameron"/"Frigate"/"Mountain" don't.
+        foreach (string t in CameraRigShortTokens)
+        {
+            if (NameTokenMatch.HasToken(name, t)) return true;
+        }
+        return false;
+    }
+
+    // Confidence: strong signals (tag / CharacterController / single-instance
+    // user class) => High; a name/class hit => Medium; camera-chain-only or a
+    // camera-rig name => Low (probably not the player).
+    //
+    // A strong signal is checked FIRST — it recovers confidence the same way it
+    // recovers score, so a real player whose GameObject name merely trips the
+    // rig heuristic (e.g. a "PlayerRig" object with the Player tag) is not
+    // force-demoted to Low. Only a lone camera-chain / rig-named hit stays Low.
+    private static PlayerConfidence ClassifyConfidence(
+        IReadOnlyList<string> sources, bool rigName, bool cameraOnly)
+    {
+        bool strong = sources.Any(s =>
+            s.StartsWith("tag", StringComparison.Ordinal) ||
+            s.StartsWith("CharacterController", StringComparison.Ordinal) ||
+            s.StartsWith("class:", StringComparison.Ordinal));
+        if (strong) return PlayerConfidence.High;
+
+        if (rigName || cameraOnly) return PlayerConfidence.Low;
+
+        // Corroboration across ≥2 distinct signal families also earns High.
+        int families = sources.Select(FamilyPrefix).Distinct(StringComparer.Ordinal).Count();
+        if (families >= 2) return PlayerConfidence.High;
+
+        return PlayerConfidence.Medium;
+    }
+
+    private static string FamilyPrefix(string source)
+    {
+        int i = source.IndexOf(':');
+        return i < 0 ? source : source[..i];
     }
 
     // ------------------------------------------------------------------
@@ -841,6 +1410,12 @@ public sealed class PlayerLocator
         if (string.IsNullOrEmpty(hex)) return null;
         return IsNullAddress(hex) ? null : hex;
     }
+
+    // A Vector3 returnStruct is 12 bytes = 24 hex chars. A success that came
+    // back without (or with a short) struct payload would decode to all-zeros
+    // and masquerade as world-origin — reject it.
+    private static bool HasVector3Payload(CallMethodResult r) =>
+        !string.IsNullOrEmpty(r.ReturnStructBytes) && r.ReturnStructBytes.Length >= 24;
 
     private static bool IsNullAddress(string hex)
     {
