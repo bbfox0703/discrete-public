@@ -97,11 +97,34 @@ means that signal contributes no candidates.
 
 Every candidate resolves to a **Transform address** + GameObject name; then
 distance-to-camera is scored on top (+30 < 2 m, +20 < 10 m, +10 < 30 m).
-Duplicates (same Transform) merge and their scores sum — CharacterController
-*plus* near-camera beats any single name hit. The ranked list shows
-Score / Name / Class / Distance / Sources; **Use** feeds the Transform address
-through the normal Set Target path (`Component.get_transform` on a Transform
-returns itself, so the target is revalidated for free).
+Duplicates (same Transform) merge and their scores sum **across signal
+families** (max within a family, so `Find("Player")`/`Find("player")` aliases
+don't double-count) — CharacterController *plus* near-camera beats any single
+name hit. The ranked list shows Confidence / Score / Name / Distance / Sources;
+**Use** feeds the Transform address through the normal Set Target path
+(`Component.get_transform` on a Transform returns itself, so the target is
+revalidated for free).
+
+**Camera-rig guard (live-fix, 2026-07-07).** First live test (Utawarerumono,
+IL2CPP) had *only* the camera chain fire — every other signal came up empty —
+so auto-detect confidently returned the camera's parent (a camera rig), not the
+player. Three corrections keep that from reading as a real hit:
+
+- **Camera chain is weak evidence** — base score dropped 60 → 40; it's a hint,
+  not a primary signal.
+- **No circular distance bonus** — the distance-to-camera bonus is suppressed
+  for a candidate whose *only* source is the camera chain (it sits next to the
+  camera by construction, so bonusing it just guaranteed it won).
+- **Camera-rig name demotion** — a candidate whose GameObject name reads like a
+  rig (`camera`/`cam`/`cinemachine`/`vcam`/`rig`/`pivot`/`holder`/`boom`/`dolly`/…)
+  takes a −45 penalty, sinking it below any real player signal.
+
+**Confidence.** Each candidate carries `PlayerConfidence` High/Medium/Low.
+Strong signals (tag / CharacterController / single-instance user class) or ≥2
+agreeing families → **High**; a lone name hit → **Medium**; camera-chain-only or
+a camera-rig name → **Low**. When the top pick is **Low**, the UI stops
+pretending — it shows the "this looks like the camera, not the player; use
+Detect by movement or pick manually" guidance instead of a false "found it".
 
 ### Cost & failure modes
 
@@ -113,25 +136,93 @@ returns itself, so the target is revalidated for free).
   where the player isn't one Transform (DOTS/ECS, vehicle swap, custom managed
   Vector3 fields) still need the manual path.
 
-### Wave B (backlog)
+## Detect by movement (wave B — shipped 2026-07-07)
 
-- **Movement correlation** — sample candidate + camera positions twice
-  (Δt ≈ 1 s); the candidate that tracks the camera is the player. Name-free,
-  so it works on obfuscated builds. Optional interactive "move your character
-  now" mode.
+The robust fallback for games where **no static signal fires** (SRPG/VN,
+console ports, obfuscated builds — Utawarerumono is the canonical case). The
+player is whatever the user controls, so: sample every scene object's position,
+let the user move, sample again — **the mover is the player**. Name-free and
+tag-free.
+
+Two-phase, so the UI can run the countdown in between:
+
+1. `BeginMovementSampleAsync` — build the pool and record start positions. Pool =
+   the five static signals' hits ∪ the camera ∪ a capped
+   `FindObjectsByType(Transform)` sweep (default cap 600; each pooled transform
+   costs one `get_position` per pass). Returns a `MovementSample` (the tracks +
+   whether the sweep was truncated).
+2. UI countdown — "**MOVE YOUR CHARACTER NOW — Ns left**" for
+   `MovementSampleSeconds` (default 4 s, clamped 2–20).
+3. `FinishMovementSampleAsync` — re-read every tracked position, rank by
+   displacement. The camera transform is excluded (view rotation moves it);
+   movers below `MinMoveDistance` (0.2 u) are dropped. Top movers are enriched
+   with names and returned **High**-confidence (a rig-named mover — e.g. a
+   follow-cam that tracks the player — is demoted to Medium).
+4. **Resolve to root** (`ResolveToRoot`, on by default). An animated character
+   exposes its *skeleton*, so the raw top movers are the leaf bones that swing
+   MOST — `env_bone:skirt`, `neckless`, `beltL5`, `RightFoot` — because their
+   displacement is locomotion **+** secondary animation. Teleporting a bone just
+   deforms the mesh. So after ranking, the top movers' `get_parent` chains are
+   walked and the **shared-ancestor ladder** (deepest common ancestor → root) is
+   surfaced as the primary candidates (High, scored above the bones). The DCA is
+   the tightest subtree containing all the moving parts = the character / armature
+   root; the ladder rungs above it are the climb toward the character's controller
+   GameObject. The user picks the rung whose name reads like their character; the
+   leaf bones stay below as evidence. This is what made the first Utawarerumono
+   movement run return `env_bone:*` bones instead of a teleportable target.
+
+   Hardening (adversarial review): (a) resolution runs only when **≥2** movers
+   share a root — a lone mover is left as its own row (it's usually the object
+   itself, not a skeleton); (b) leaf movers are excluded from the ladder so the
+   top rung is never a swinging bone (an *internal* mover that is an ancestor of
+   another mover stays eligible — it may be a moving character root); (c) the
+   cluster is **anchored on the highest-displacement mover** (the object the user
+   deliberately moved), not on whichever hierarchy has the most sampled bones, so
+   a heavily-animated NPC can't outvote the player; (d) a `get_parent` *error* is
+   distinguished from a genuine `0x0` root, and the errored chain is dropped
+   rather than seeding a false cluster. **Caveat:** when several characters are
+   parented under one shared container GameObject, the movers converge only at
+   that container, giving a one-rung ladder — surfaced at **Medium** confidence
+   (teleporting a container moves everything under it; pick a different target).
+
+   **Character-root detection (name-based).** The DCA is only the tightest
+   ancestor of the *sampled* bones — an upper-body sample (eyelid + spine + pinky)
+   converges at a spine bone, not the character. But a skeleton names its bones
+   with a shared prefix (`env_bone:`) or joint words (`Hips`, `Spine`, `GlobalSRT`,
+   `Bip01 …`), so the ladder climbs through bones until it hits the character
+   GameObject (live example: `env_bone:Spine1 → env_bone:Hips → env_bone:GlobalSRT
+   → P_Chara_00109@fld → AttachPoint`). The first rung whose name **breaks** the
+   bone prefix / isn't a joint word (`P_Chara_00109@fld`) is the real teleport
+   target and is pulled to **#1**; its container ancestors follow; the skeleton
+   bones drop to **Medium** below it. (`root` is deliberately *not* a joint word —
+   it appears in both `Bip01Root` bones and `CharacterRoot` GameObjects.) When no
+   rung breaks the bone pattern, the DCA-first ladder is kept as the fallback.
+
+**Honest limits.** The sweep is capped, so on a huge scene (Utawarerumono has
+~15 k GameObjects) the player might be outside the sample — the status line
+says so and points at raising the cap / moving a larger distance. A displacement
+tie (player + follow-cam move together) surfaces both; the user picks.
+
+### Wave B still-backlog
+
 - **Cinemachine `Follow` target** — near-authoritative when the game ships
   Cinemachine (`CinemachineVirtualCamera.Follow` / CM3 `CinemachineCamera`
   tracking target IS the player transform).
 - **Camera follow-script field walk** — walkInstance the main camera's
   components for a Transform-typed field named `target`/`follow`/`player`.
+- **Proximity-prioritised sweep** — a DLL-side batch position read would let the
+  movement sweep cover the whole scene instead of a cap (native transform layout
+  is version-fragile — deferred).
 
 ## The Teleport tab
 
 Experimental-gated (flip the footer checkbox) until live-verified. Sections:
 
-- **Target** — **Auto-detect** runs the PlayerLocator scorer and lists ranked
-  candidates (Use → sets target); or paste a managed instance address
-  (+ "GameObject" toggle) → Set Target resolves its Transform.
+- **Target** — **Auto-detect** runs the static PlayerLocator scorer;
+  **Detect by movement** (for `N` s) samples the scene while you move your
+  character and ranks by displacement. Both list ranked candidates
+  (Confidence / Score / Name / Distance / Sources; Use → sets target). Or paste
+  a managed instance address (+ "GameObject" toggle) → Set Target.
 - **Current pose** — position + rotation, Refresh, Copy coords (clipboard).
 - **Markers** — 3 slots (Save / Recall / Clear) + one-way **Undo last jump**
   (every jump auto-saves the pre-jump pose).

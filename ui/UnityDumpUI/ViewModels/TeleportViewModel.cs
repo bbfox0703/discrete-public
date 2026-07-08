@@ -63,6 +63,19 @@ public sealed partial class TeleportViewModel : ObservableObject
     [ObservableProperty]
     private bool _hasAutoDetectResults;
 
+    // --- detect-by-movement (wave B) ---
+
+    /// <summary>Seconds to keep sampling while the user moves their character.</summary>
+    [ObservableProperty]
+    private double _movementSampleSeconds = 4.0;
+
+    /// <summary>Countdown / prompt shown during the movement sample.</summary>
+    [ObservableProperty]
+    private string _movementStatus = string.Empty;
+
+    [ObservableProperty]
+    private bool _movementDetecting;
+
     // --- target ---
 
     /// <summary>Managed instance address (hex, 0x-optional) of the player object.</summary>
@@ -134,14 +147,92 @@ public sealed partial class TeleportViewModel : ObservableObject
                 AutoDetectCandidates.Add(new PlayerCandidateRowViewModel(c, this));
             HasAutoDetectResults = AutoDetectCandidates.Count > 0;
 
-            StatusMessage = r.Candidates.Count == 0
-                ? "No candidates found. Paste the player's instance address manually "
-                  + "(findInstances / Address Lookup / Scene / Inspector)."
-                : $"Found {r.Candidates.Count} candidate(s) — best guess is on top. "
-                  + "Click Use, then verify with Refresh (position should change as you move in-game).";
+            if (r.Candidates.Count == 0)
+            {
+                StatusMessage = "No candidates found. Try \"Detect by movement\", or paste the "
+                    + "player's instance address manually (findInstances / Address Lookup / Scene / Inspector).";
+            }
+            else if (r.TopConfidence == PlayerConfidence.Low)
+            {
+                // The camera-was-the-only-hit case — don't pretend we found the player.
+                StatusMessage = PlayerLocator.LowConfidenceHint;
+            }
+            else
+            {
+                StatusMessage = $"Found {r.Candidates.Count} candidate(s) — best guess is on top. "
+                    + "Click Use, then verify with Refresh (position should change as you move in-game).";
+            }
         }
         catch (Exception ex) { Fail("Auto-detect", ex); }
         finally { _busy = false; AutoDetecting = false; }
+    }
+
+    [RelayCommand]
+    private async Task DetectByMovementAsync()
+    {
+        if (_busy) return;
+        if (!_backend.IsConnected) { StatusMessage = "Not connected — connect to a running game first."; return; }
+
+        _busy = true;
+        MovementDetecting = true;
+        try
+        {
+            AutoDetectCandidates.Clear();
+            HasAutoDetectResults = false;
+
+            var locator = new PlayerLocator(_backend, _logger);
+
+            MovementStatus = "Building the object pool…";
+            StatusMessage  = "Detect by movement: get ready to move your character.";
+            MovementSample sample = await locator.BeginMovementSampleAsync().ConfigureAwait(true);
+            if (!sample.Ok)
+            {
+                StatusMessage = sample.Error ?? "Movement sampling failed to start.";
+                return;
+            }
+            if (sample.Tracks.Count == 0)
+            {
+                StatusMessage = "Movement detection found no transforms to sample.";
+                return;
+            }
+
+            // Countdown while the user moves. The sample already captured start
+            // positions; we just wait, then capture the end positions.
+            int seconds = Math.Clamp((int)Math.Round(MovementSampleSeconds), 2, 20);
+            for (int s = seconds; s > 0; s--)
+            {
+                string trunc = sample.Truncated
+                    ? $" (sampling {sample.Tracks.Count} of {sample.SceneTransformTotal} objects)"
+                    : $" (tracking {sample.Tracks.Count} objects)";
+                MovementStatus = $"MOVE YOUR CHARACTER NOW — {s}s left{trunc}";
+                await Task.Delay(1000).ConfigureAwait(true);
+            }
+            MovementStatus = "Measuring who moved…";
+
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample).ConfigureAwait(true);
+            MovementStatus = string.Empty;
+            if (!r.Ok)
+            {
+                StatusMessage = r.Error ?? "Movement detection failed.";
+                return;
+            }
+
+            foreach (PlayerCandidate c in r.Candidates)
+                AutoDetectCandidates.Add(new PlayerCandidateRowViewModel(c, this));
+            HasAutoDetectResults = AutoDetectCandidates.Count > 0;
+
+            StatusMessage = r.Candidates.Count == 0
+                ? (sample.Truncated
+                    ? $"Nothing moved among the {sample.Tracks.Count} sampled objects. The player may be "
+                      + $"outside the sample ({sample.SceneTransformTotal} total) — raise the sample cap, or "
+                      + "move a larger distance, then retry."
+                    : "Nothing moved. Move your character during the countdown, then retry.")
+                : "Top rows are the resolved ROOT of the moving parts (what you teleport); the leaf "
+                  + "bones below are the raw movers. Pick the root whose name looks like your character, "
+                  + "click Use, then Refresh to confirm.";
+        }
+        catch (Exception ex) { Fail("Detect by movement", ex); MovementStatus = string.Empty; }
+        finally { _busy = false; MovementDetecting = false; }
     }
 
     internal async Task UseCandidateAsync(PlayerCandidateRowViewModel row)
@@ -402,16 +493,26 @@ public sealed partial class PlayerCandidateRowViewModel : ObservableObject
         Score            = candidate.Score.ToString(CultureInfo.InvariantCulture);
         Name             = string.IsNullOrEmpty(candidate.Name) ? "<no name>" : candidate.Name;
         ClassName        = candidate.ClassName ?? string.Empty;
-        Distance         = candidate.DistanceToCamera is { } d
-            ? d.ToString("0.0", CultureInfo.InvariantCulture) + " m"
-            : "—";
-        Sources          = string.Join(" + ", candidate.Sources);
+        Confidence       = candidate.Confidence switch
+        {
+            PlayerConfidence.High   => "High",
+            PlayerConfidence.Medium => "Medium",
+            _                       => "Low",
+        };
+        // Movement runs report displacement; static runs report camera distance.
+        Distance = candidate.MovedDistance is { } moved
+            ? "moved " + moved.ToString("0.0", CultureInfo.InvariantCulture) + " m"
+            : candidate.DistanceToCamera is { } d
+                ? d.ToString("0.0", CultureInfo.InvariantCulture) + " m"
+                : "—";
+        Sources = string.Join(" + ", candidate.Sources);
     }
 
     public string TransformAddress { get; }
     public string Score            { get; }
     public string Name             { get; }
     public string ClassName        { get; }
+    public string Confidence       { get; }
     public string Distance         { get; }
     public string Sources          { get; }
 
