@@ -158,6 +158,32 @@ Two-phase, so the UI can run the countdown in between:
    movers below `MinMoveDistance` (0.2 u) are dropped. Top movers are enriched
    with names and returned **High**-confidence (a rig-named mover — e.g. a
    follow-cam that tracks the player — is demoted to Medium).
+4. **Resolve to root** (`ResolveToRoot`, on by default). An animated character
+   exposes its *skeleton*, so the raw top movers are the leaf bones that swing
+   MOST — `env_bone:skirt`, `neckless`, `beltL5`, `RightFoot` — because their
+   displacement is locomotion **+** secondary animation. Teleporting a bone just
+   deforms the mesh. So after ranking, the top movers' `get_parent` chains are
+   walked and the **shared-ancestor ladder** (deepest common ancestor → root) is
+   surfaced as the primary candidates (High, scored above the bones). The DCA is
+   the tightest subtree containing all the moving parts = the character / armature
+   root; the ladder rungs above it are the climb toward the character's controller
+   GameObject. The user picks the rung whose name reads like their character; the
+   leaf bones stay below as evidence. This is what made the first Utawarerumono
+   movement run return `env_bone:*` bones instead of a teleportable target.
+
+   Hardening (adversarial review): (a) resolution runs only when **≥2** movers
+   share a root — a lone mover is left as its own row (it's usually the object
+   itself, not a skeleton); (b) leaf movers are excluded from the ladder so the
+   top rung is never a swinging bone (an *internal* mover that is an ancestor of
+   another mover stays eligible — it may be a moving character root); (c) the
+   cluster is **anchored on the highest-displacement mover** (the object the user
+   deliberately moved), not on whichever hierarchy has the most sampled bones, so
+   a heavily-animated NPC can't outvote the player; (d) a `get_parent` *error* is
+   distinguished from a genuine `0x0` root, and the errored chain is dropped
+   rather than seeding a false cluster. **Caveat:** when several characters are
+   parented under one shared container GameObject, the movers converge only at
+   that container, giving a one-rung ladder — surfaced at **Medium** confidence
+   (teleporting a container moves everything under it; pick a different target).
 
 **Honest limits.** The sweep is capped, so on a huge scene (Utawarerumono has
 ~15 k GameObjects) the player might be outside the sample — the status line

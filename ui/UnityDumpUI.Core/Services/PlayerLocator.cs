@@ -138,6 +138,23 @@ public sealed class MovementDetectOptions
     /// idle jitter / animation micro-motion.</summary>
     public double MinMoveDistance { get; init; } = 0.20;
 
+    /// <summary>After ranking movers, walk their parent chains and surface the
+    /// common-ancestor "root" of a moving cluster as the primary candidate.
+    /// Animated characters expose their skeleton, so the raw top movers are the
+    /// leaf bones (skirt / hair / foot) that swing MOST — teleporting a bone
+    /// just deforms the mesh; the thing to teleport is the root above them.</summary>
+    public bool ResolveToRoot { get; init; } = true;
+
+    /// <summary>How many top movers to walk up when resolving roots.</summary>
+    public int MaxRootWalkMovers { get; init; } = 8;
+
+    /// <summary>Max parent-chain depth to climb (skeletons can be deep; a cache
+    /// makes shared ancestors cheap).</summary>
+    public int MaxRootWalkDepth { get; init; } = 64;
+
+    /// <summary>How many rungs of the DCA→root ladder to present.</summary>
+    public int MaxRootLadder { get; init; } = 6;
+
     /// <summary>Ranked rows returned.</summary>
     public int MaxCandidates { get; init; } = 12;
 }
@@ -747,15 +764,169 @@ public sealed class PlayerLocator
             .ThenBy(c => c.TransformAddress, StringComparer.Ordinal)
             .ToList();
 
+        // Resolve the moving bones up to their shared root — that's what you
+        // teleport, not a leaf bone. Roots rank above the raw bones.
+        string rootNote = string.Empty;
+        if (opt.ResolveToRoot && candidates.Count > 0)
+        {
+            List<PlayerCandidate> roots =
+                await ResolveMovementRootsAsync(candidates, opt, ct).ConfigureAwait(false);
+            if (_drainTimeout) return Abort();
+            if (roots.Count > 0)
+            {
+                var rootAddrs = new HashSet<string>(
+                    roots.Select(r => r.TransformAddress), StringComparer.OrdinalIgnoreCase);
+                // Drop any bone row that IS one of the surfaced roots (dedup),
+                // keep the rest as evidence below the roots.
+                var bones = candidates.Where(c => !rootAddrs.Contains(c.TransformAddress)).ToList();
+                candidates = roots.Concat(bones)
+                    .Take(Math.Max(1, opt.MaxCandidates))
+                    .ToList();
+                rootNote = $"; resolved {roots.Count} root(s) above the moving bones";
+            }
+        }
+
         Log($"PlayerLocator movement finish: {movers.Count} moved (of {sample.Tracks.Count} tracked), "
-            + $"top {candidates.Count} returned.");
+            + $"top {candidates.Count} returned{rootNote}.");
 
         return new PlayerLocateResult
         {
             Ok = true,
             Candidates = candidates,
-            Notes = new[] { $"{movers.Count} object(s) moved of {sample.Tracks.Count} tracked" },
+            Notes = new[] { $"{movers.Count} object(s) moved of {sample.Tracks.Count} tracked{rootNote}" },
         };
+    }
+
+    /// <summary>
+    /// Walk the top movers' parent chains and surface the common-ancestor
+    /// "root" of the dominant moving cluster. Animated characters expose their
+    /// skeleton, so the raw top movers are the leaf bones that swing most;
+    /// their shared ancestors — the skeleton / character root — are the real
+    /// teleport targets. Returns a DCA→root ladder (tightest common ancestor
+    /// first), name-enriched and scored above the bones.
+    /// </summary>
+    private async Task<List<PlayerCandidate>> ResolveMovementRootsAsync(
+        IReadOnlyList<PlayerCandidate> movers, MovementDetectOptions opt, CancellationToken ct)
+    {
+        var empty = new List<PlayerCandidate>();
+
+        // A single moving object has no "shared ancestor" — resolving it would
+        // just re-surface the object itself (or promote its scene container).
+        // Leave the raw mover row in place.
+        var top = movers.Take(Math.Max(1, opt.MaxRootWalkMovers)).ToList();
+        if (top.Count < 2) return empty;
+
+        var parentCache = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        var chains = new List<(List<string> Addrs, double Dist)>();
+        foreach (PlayerCandidate m in top)
+        {
+            ct.ThrowIfCancellationRequested();
+            (List<string> addrs, bool ok) = await WalkParentChainAsync(m.TransformAddress, parentCache, opt, ct)
+                .ConfigureAwait(false);
+            if (_drainTimeout) return empty;
+            // A walk that hit a get_parent ERROR (not a genuine 0x0 root) is
+            // incomplete — its terminal node is a false root that would seed a
+            // bogus cluster, so drop it from clustering.
+            if (ok && addrs.Count >= 2) chains.Add((addrs, m.MovedDistance ?? 0));
+        }
+        if (chains.Count < 2) return empty;
+
+        // Anchor on the highest-displacement chain (chains preserve the movers'
+        // displacement order) — that's the object the user deliberately moved,
+        // so we resolve ITS character rather than whichever unrelated hierarchy
+        // happens to contribute the most sampled bones.
+        (List<string> Addrs, double Dist) anchor = chains[0];
+        string anchorRoot = anchor.Addrs[^1];
+        var cluster = chains.Where(c => Eq(c.Addrs[^1], anchorRoot)).ToList();
+        if (cluster.Count < 2) return empty;
+
+        // Exclude LEAF movers (a mover not itself an ancestor of another mover)
+        // from the ladder so the top rung is a genuine ancestor, never a swinging
+        // bone. A mover that IS an ancestor of another mover stays eligible — it
+        // may be the real (moving) character root.
+        var moverAddrs  = new HashSet<string>(cluster.Select(c => c.Addrs[0]), StringComparer.OrdinalIgnoreCase);
+        var internalMov = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach ((List<string> addrs, _) in cluster)
+        {
+            for (int i = 1; i < addrs.Count; i++)
+                if (moverAddrs.Contains(addrs[i])) internalMov.Add(addrs[i]);
+        }
+
+        // Shared ancestors = nodes in EVERY cluster chain (minus leaf movers),
+        // ordered by proximity to the movers (anchor index → DCA first, root last).
+        var shared = anchor.Addrs
+            .Where(a => (!moverAddrs.Contains(a) || internalMov.Contains(a))
+                        && cluster.All(c => c.Addrs.Contains(a, StringComparer.OrdinalIgnoreCase)))
+            .Take(Math.Max(1, opt.MaxRootLadder))
+            .ToList();
+        if (shared.Count == 0) return empty;
+
+        // A one-rung ladder whose only node is the top-level root often means a
+        // flat hierarchy OR a container shared by several characters (the movers
+        // only converge at the top) — surface it but at Medium confidence.
+        bool containerish = shared.Count == 1 && Eq(shared[0], anchorRoot);
+
+        int clusterSize = cluster.Count;
+        var roots = new List<PlayerCandidate>(shared.Count);
+        for (int i = 0; i < shared.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            (string? go, string name) = await ResolveNameAsync(null, shared[i], ct).ConfigureAwait(false);
+            if (_drainTimeout) return empty;
+            roots.Add(new PlayerCandidate
+            {
+                TransformAddress  = shared[i],
+                GameObjectAddress = go,
+                Name              = name,
+                // DCA (i==0) is the tightest subtree containing all the moving
+                // parts — recommend it first; climbing rungs are alternatives.
+                Sources           = new[] { i == 0 ? $"moving-root ×{clusterSize}" : $"root ↑{i}" },
+                Score             = RootScoreBase - i,
+                Confidence        = containerish ? PlayerConfidence.Medium : PlayerConfidence.High,
+            });
+        }
+        return roots;
+    }
+
+    private const int RootScoreBase = 1000;
+
+    private static bool Eq(string a, string b) =>
+        string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    // Walk [mover, p1, …, root]. Returns ok=false when a get_parent call FAILED
+    // (as opposed to reaching a genuine 0x0 root) so the caller can drop the
+    // incomplete chain instead of treating the failure point as a false root.
+    private async Task<(List<string> addrs, bool ok)> WalkParentChainAsync(
+        string moverAddr, Dictionary<string, string?> cache, MovementDetectOptions opt, CancellationToken ct)
+    {
+        var chain = new List<string> { moverAddr };
+        var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { moverAddr };
+        string cur = moverAddr;
+        for (int d = 0; d < opt.MaxRootWalkDepth; d++)
+        {
+            (string? parent, bool ok) = await GetParentCachedAsync(cache, cur, ct).ConfigureAwait(false);
+            if (_drainTimeout || !ok) return (chain, false);
+            if (parent is null || !seen.Add(parent)) break;   // genuine root, or cycle guard
+            chain.Add(parent);
+            cur = parent;
+        }
+        return (chain, true);
+    }
+
+    // get_parent with a success/failure discriminator. ok=false = the call
+    // errored (stale pointer / RPC hiccup); ok=true with parent==null = a
+    // genuine hierarchy root (0x0). Only successful results are cached.
+    private async Task<(string? parent, bool ok)> GetParentCachedAsync(
+        Dictionary<string, string?> cache, string transformAddr, CancellationToken ct)
+    {
+        if (cache.TryGetValue(transformAddr, out string? cached)) return (cached, true);
+        CallMethodResult r = await CallEngineAsync(
+            "Transform", "get_parent", transformAddr, NoArgs, "()",
+            wantStruct: false, ct).ConfigureAwait(false);
+        if (!r.Ok || !string.IsNullOrEmpty(r.Error)) return (null, false);   // real error — don't cache
+        string? parent = SuccessAddress(r);   // null here = genuine 0x0 root
+        cache[transformAddr] = parent;
+        return (parent, true);
     }
 
     // FindObjectsByType(Transform) -> capped list of transform addresses, plus

@@ -227,8 +227,9 @@ public sealed partial class TeleportViewModel : ObservableObject
                       + $"outside the sample ({sample.SceneTransformTotal} total) — raise the sample cap, or "
                       + "move a larger distance, then retry."
                     : "Nothing moved. Move your character during the countdown, then retry.")
-                : "Ranked by how far each object moved — the top mover is most likely the player. "
-                  + "Click Use, then Refresh to confirm.";
+                : "Top rows are the resolved ROOT of the moving parts (what you teleport); the leaf "
+                  + "bones below are the raw movers. Pick the root whose name looks like your character, "
+                  + "click Use, then Refresh to confirm.";
         }
         catch (Exception ex) { Fail("Detect by movement", ex); MovementStatus = string.Empty; }
         finally { _busy = false; MovementDetecting = false; }

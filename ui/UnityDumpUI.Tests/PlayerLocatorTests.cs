@@ -484,12 +484,13 @@ public class PlayerLocatorTests
     // Movement-correlation detection
     // ------------------------------------------------------------------
 
-    // Sweep-only movement options (static signals off) so the wire is the pure
-    // Transform-sweep path.
+    // Sweep-only movement options (static signals off, root resolution off) so
+    // the wire is the pure Transform-sweep + displacement path.
     private static MovementDetectOptions SweepOnly() => new()
     {
         Signals = Only(),               // all static signals disabled
         SweepAllTransforms = true,
+        ResolveToRoot = false,          // tested separately (adds parent walks)
     };
 
     [Fact]
@@ -770,6 +771,179 @@ public class PlayerLocatorTests
             Assert.Empty(r.Candidates);   // struct-less success must not fabricate a mover
         }
         finally { await fp2.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_ResolvesBonesToSharedRoot()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Two moving "bones" (0xB100, 0xB200) share parent 0xA110 (hips) whose
+        // parent is 0xA000 (character root). Root resolution must surface the
+        // hips (DCA) + root ABOVE the raw bones.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xB100", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 10f),                        // t1 0xB100 -> moved 10
+            Vector3Ok(0f, 0f, 8f),                         // t1 0xB200 -> moved 8
+            AddrOk("UnityEngine.GameObject", "0xB1F0"),    // enrich B100: get_gameObject
+            StringOk("env_bone:skirt"),                    // enrich B100: get_name
+            AddrOk("UnityEngine.GameObject", "0xB2F0"),    // enrich B200: get_gameObject
+            StringOk("env_bone:belt"),                     // enrich B200: get_name
+            // root walk: B100 -> A110 -> A000 -> null; B200 -> A110 (cached rest)
+            AddrOk("UnityEngine.Transform", "0xA110"),     // get_parent(0xB100)
+            AddrOk("UnityEngine.Transform", "0xA000"),     // get_parent(0xA110)
+            NullAddrOk("UnityEngine.Transform"),           // get_parent(0xA000) -> root
+            AddrOk("UnityEngine.Transform", "0xA110"),     // get_parent(0xB200)
+            // ladder enrich: A110 (DCA), then A000 (root)
+            AddrOk("UnityEngine.GameObject", "0xA1F0"),    // enrich A110: get_gameObject
+            StringOk("Hips"),                              // enrich A110: get_name
+            AddrOk("UnityEngine.GameObject", "0xA0F0"),    // enrich A000: get_gameObject
+            StringOk("CharacterRoot"),                     // enrich A000: get_name
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            // DCA (hips) first, then the character root, then the raw bones.
+            Assert.Equal("0xA110", r.Candidates[0].TransformAddress);
+            Assert.Equal("Hips", r.Candidates[0].Name);
+            Assert.Contains("moving-root", r.Candidates[0].Sources[0]);
+            Assert.Equal(PlayerConfidence.High, r.Candidates[0].Confidence);
+            Assert.Equal("0xA000", r.Candidates[1].TransformAddress);
+            Assert.Equal("CharacterRoot", r.Candidates[1].Name);
+            // The leaf bones survive as evidence, ranked below the roots.
+            Assert.Contains(r.Candidates, c => c.TransformAddress == "0xB100");
+            Assert.True(r.Candidates[0].Score > r.Candidates.First(c => c.TransformAddress == "0xB100").Score);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_SingleMover_NotPromotedToRoot()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Only one object moved — there is no "shared ancestor", so root
+        // resolution must NOT run (else it would re-surface the mover itself or
+        // promote its scene container). The raw mover row survives.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[] { new MovementTrack { TransformAddress = "0xB100", Start = (0, 0, 0) } },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 10f),                        // t1 -> moved 10
+            AddrOk("UnityEngine.GameObject", "0xB1F0"),
+            StringOk("env_bone:foot"),
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            PlayerCandidate c = Assert.Single(r.Candidates);
+            Assert.Equal("0xB100", c.TransformAddress);
+            Assert.Contains("moved", c.Sources);           // raw mover, not a resolved root
+            Assert.DoesNotContain(c.Sources, s => s.Contains("moving-root", StringComparison.Ordinal));
+            Assert.NotNull(c.MovedDistance);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_ContainerRoot_MediumConfidence()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Both movers sit directly under one root (they converge only at the
+        // top) — a one-rung ladder == the top root, which reads as a flat /
+        // container hierarchy → Medium, not High.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xB100", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 10f),                        // t1 B100
+            Vector3Ok(0f, 0f, 8f),                         // t1 B200
+            AddrOk("UnityEngine.GameObject", "0xB1F0"), StringOk("thingA"),   // enrich B100
+            AddrOk("UnityEngine.GameObject", "0xB2F0"), StringOk("thingB"),   // enrich B200
+            AddrOk("UnityEngine.Transform", "0xR000"),     // get_parent(B100) -> root
+            NullAddrOk("UnityEngine.Transform"),           // get_parent(R000) -> null
+            AddrOk("UnityEngine.Transform", "0xR000"),     // get_parent(B200) -> root
+            AddrOk("UnityEngine.GameObject", "0xR0F0"), StringOk("Characters"),  // enrich R000
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            Assert.Equal("0xR000", r.Candidates[0].TransformAddress);
+            Assert.Equal("Characters", r.Candidates[0].Name);
+            Assert.Equal(PlayerConfidence.Medium, r.Candidates[0].Confidence);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_ParentWalkError_FallsBackToRawBones()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // A get_parent ERROR (not a 0x0 root) must not seed a false cluster: the
+        // errored chain is dropped, leaving <2 chains → no roots, raw bones kept.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xB100", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 10f),                        // t1 B100
+            Vector3Ok(0f, 0f, 8f),                         // t1 B200
+            AddrOk("UnityEngine.GameObject", "0xB1F0"), StringOk("boneA"),
+            AddrOk("UnityEngine.GameObject", "0xB2F0"), StringOk("boneB"),
+            ErrorResult("native_crash_in_runtime_invoke"), // get_parent(B100) FAILS
+            AddrOk("UnityEngine.Transform", "0xA110"),     // get_parent(B200) -> A110
+            NullAddrOk("UnityEngine.Transform"),           // get_parent(A110) -> root
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            // No root row (errored chain dropped -> single valid chain -> no DCA).
+            Assert.DoesNotContain(r.Candidates, c => c.Sources.Any(s => s.Contains("moving-root", StringComparison.Ordinal)));
+            Assert.Contains(r.Candidates, c => c.TransformAddress == "0xB100");
+            Assert.Contains(r.Candidates, c => c.TransformAddress == "0xB200");
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
 
     // ------------------------------------------------------------------
