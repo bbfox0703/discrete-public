@@ -14,11 +14,13 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Threading.Tasks;
+using Avalonia.Input;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using UnityDumpUI.Core;
 using UnityDumpUI.Core.Services;
+using UnityDumpUI.Services;
 
 namespace UnityDumpUI.ViewModels;
 
@@ -29,7 +31,12 @@ public sealed partial class TeleportViewModel : ObservableObject
     private readonly TeleportController _controller;
     private bool _busy;
     private TeleportPose? _lastPose;
-    private readonly List<IGlobalHotkeyRegistration> _hotkeyRegs = new();
+
+    // Active registrations + persisted bindings, keyed by action id ("save0",
+    // "recall2", "undo", "forward", "back").
+    private readonly Dictionary<string, IGlobalHotkeyRegistration> _hotkeyRegs = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TeleportHotkeyBinding> _bindings       = new(StringComparer.Ordinal);
+    private TeleportHotkeyRow? _capturingRow;
 
     public TeleportViewModel(BackendAdapter backend, FileLogger logger)
     {
@@ -41,6 +48,9 @@ public sealed partial class TeleportViewModel : ObservableObject
         for (int i = 0; i < TeleportMarkerStore.SlotCount; i++)
             rows.Add(new TeleportMarkerRowViewModel(i, this));
         MarkerRows = rows;
+
+        BuildHotkeyRows();
+        SeedDefaultBindings();
     }
 
     /// <summary>Clipboard writer injected by MainWindow (Avalonia TopLevel.Clipboard).</summary>
@@ -115,6 +125,17 @@ public sealed partial class TeleportViewModel : ObservableObject
 
     [ObservableProperty] private bool   _globalHotkeysEnabled;
     [ObservableProperty] private string _hotkeyStatus = "Off.";
+
+    /// <summary>Per-action rebindable hotkey rows (Save/Recall/Undo/Forward/Back).</summary>
+    public ObservableCollection<TeleportHotkeyRow> HotkeyRows { get; } = new();
+
+    /// <summary>Binding persistence, injected by MainWindow. Null in tests /
+    /// before wiring → default bindings live only in memory.</summary>
+    public TeleportHotkeyStore? HotkeyStore { get; set; }
+
+    /// <summary>True while a row is waiting for a key combo — the view's tunnel
+    /// KeyDown handler routes the next press to <see cref="ApplyCapturedKey"/>.</summary>
+    public bool IsCapturingHotkey => _capturingRow is not null;
 
     // ------------------------------------------------------------------
     // Commands
@@ -427,73 +448,305 @@ public sealed partial class TeleportViewModel : ObservableObject
     }
 
     // ------------------------------------------------------------------
-    // Global hotkeys (fire while the game window is focused)
+    // Global hotkeys (fire while the game window is focused) — rebindable
     // ------------------------------------------------------------------
 
-    // Numpad virtual-key codes (NumLock must be ON for these to fire).
-    private const uint VK_NUMPAD0 = 0x60;
-    private const uint VK_NUMPAD1 = 0x61;
-    private const uint VK_NUMPAD2 = 0x62;
-    private const uint VK_NUMPAD3 = 0x63;
+    // Bindable actions. Ids are digit-suffixed for markers ("save0".."save2",
+    // "recall0".."recall2") plus "undo" / "forward" / "back".
+    private static readonly (string Id, string Name, string Hint)[] HotkeyActionDefs =
+    {
+        ("save0",   "Save marker 1",    "Store the current pose in slot 1."),
+        ("save1",   "Save marker 2",    "Store the current pose in slot 2."),
+        ("save2",   "Save marker 3",    "Store the current pose in slot 3."),
+        ("recall0", "Recall marker 1",  "Teleport to slot 1 (auto-saves undo)."),
+        ("recall1", "Recall marker 2",  "Teleport to slot 2 (auto-saves undo)."),
+        ("recall2", "Recall marker 3",  "Teleport to slot 3 (auto-saves undo)."),
+        ("undo",    "Undo last jump",   "Return to the pre-jump pose."),
+        ("forward", "Teleport forward", "Move along facing by the directional distance."),
+        ("back",    "Teleport back",    "Move opposite facing by the directional distance."),
+    };
+
+    private void BuildHotkeyRows()
+    {
+        foreach ((string id, string name, string hint) in HotkeyActionDefs)
+            HotkeyRows.Add(new TeleportHotkeyRow(this, id, name, hint));
+    }
+
+    // First-run defaults: the pre-rebinding numpad scheme (Ctrl/Alt+Num, which
+    // dodges the Ctrl+1..3 skill binds most ARPGs use). Forward/back start
+    // unbound. A persisted config overrides these via LoadHotkeys().
+    private void SeedDefaultBindings()
+    {
+        Bind("save0",   HotkeyModifiers.Control, 0x61);   // Ctrl+Num1
+        Bind("save1",   HotkeyModifiers.Control, 0x62);   // Ctrl+Num2
+        Bind("save2",   HotkeyModifiers.Control, 0x63);   // Ctrl+Num3
+        Bind("recall0", HotkeyModifiers.Alt,     0x61);   // Alt+Num1
+        Bind("recall1", HotkeyModifiers.Alt,     0x62);   // Alt+Num2
+        Bind("recall2", HotkeyModifiers.Alt,     0x63);   // Alt+Num3
+        Bind("undo",    HotkeyModifiers.Control, 0x60);   // Ctrl+Num0
+
+        void Bind(string id, uint mod, uint vk)
+        {
+            var b = new TeleportHotkeyBinding(mod, vk);
+            _bindings[id] = b;
+            SetRowLabel(id, b.Label);
+        }
+    }
+
+    /// <summary>Load persisted bindings (called by MainWindow once the store is
+    /// injected). An existing file — even an empty one — is respected verbatim
+    /// (the user may have cleared everything); only a MISSING file keeps the
+    /// seeded defaults and writes them out.</summary>
+    public void LoadHotkeys()
+    {
+        if (HotkeyStore is not { } store) return;
+        if (store.Exists)
+        {
+            _bindings.Clear();
+            foreach (KeyValuePair<string, TeleportHotkeyBinding> kv in store.Load())
+                if (IsKnownAction(kv.Key)) _bindings[kv.Key] = kv.Value;
+            foreach (TeleportHotkeyRow row in HotkeyRows)
+                row.Label = _bindings.TryGetValue(row.ActionId, out TeleportHotkeyBinding b) ? b.Label : string.Empty;
+        }
+        else
+        {
+            store.Save(_bindings);   // persist the first-run defaults
+        }
+        if (GlobalHotkeysEnabled) RegisterAllHotkeys();
+    }
+
+    private static bool IsKnownAction(string id)
+    {
+        foreach ((string aid, _, _) in HotkeyActionDefs)
+            if (aid == id) return true;
+        return false;
+    }
+
+    private void SetRowLabel(string actionId, string label)
+    {
+        foreach (TeleportHotkeyRow row in HotkeyRows)
+            if (row.ActionId == actionId) { row.Label = label; return; }
+    }
 
     partial void OnGlobalHotkeysEnabledChanged(bool value)
     {
-        if (value) RegisterHotkeys();
-        else { UnregisterHotkeys(); HotkeyStatus = "Off."; }
+        if (value) { RegisterAllHotkeys(); return; }
+        UnregisterAllHotkeys();
+        // No registrations left → no combo can be "in use", so drop any stale ⚠
+        // badges (they'd otherwise imply a broken binding while the feature is off).
+        foreach (TeleportHotkeyRow row in HotkeyRows) row.Conflicted = false;
+        HotkeyStatus = "Off.";
     }
 
-    private void RegisterHotkeys()
+    // Register every bound row. Hotkey callbacks fire on a BACKGROUND thread, so
+    // marshal to the UI thread before touching VM state; the actions self-guard
+    // on connection / target.
+    private void RegisterAllHotkeys()
     {
-        UnregisterHotkeys();
-        if (HotkeyService is not { } svc)
+        UnregisterAllHotkeys();
+        if (HotkeyService is null)
         {
             HotkeyStatus = "Global hotkeys are unavailable on this platform.";
             return;
         }
 
-        // Fixed default scheme (numpad — dodges the Ctrl+1..3 skill binds most
-        // ARPGs use). Per-action rebinding is a v2 idea. Hotkey callbacks fire
-        // on a background thread, so marshal to the UI thread before touching VM
-        // state; the actions self-guard on connection / target.
-        var bindings = new (uint Mod, uint Vk, string Label, Func<Task> Action)[]
+        var conflicts = new List<string>();
+        foreach (TeleportHotkeyRow row in HotkeyRows)
         {
-            (HotkeyModifiers.Control, VK_NUMPAD1, "Ctrl+Num1", () => SaveMarkerAsync(0)),
-            (HotkeyModifiers.Control, VK_NUMPAD2, "Ctrl+Num2", () => SaveMarkerAsync(1)),
-            (HotkeyModifiers.Control, VK_NUMPAD3, "Ctrl+Num3", () => SaveMarkerAsync(2)),
-            (HotkeyModifiers.Alt,     VK_NUMPAD1, "Alt+Num1",  () => RecallMarkerAsync(0)),
-            (HotkeyModifiers.Alt,     VK_NUMPAD2, "Alt+Num2",  () => RecallMarkerAsync(1)),
-            (HotkeyModifiers.Alt,     VK_NUMPAD3, "Alt+Num3",  () => RecallMarkerAsync(2)),
-            (HotkeyModifiers.Control, VK_NUMPAD0, "Ctrl+Num0", () => RecallLastAsync()),
-        };
-
-        var failed = new List<string>();
-        foreach (var b in bindings)
-        {
-            Func<Task> action = b.Action;
-            IGlobalHotkeyRegistration? reg = svc.RegisterSpecific(
-                b.Mod, b.Vk, b.Label, () => Dispatcher.UIThread.Post(() => _ = action()));
-            if (reg is not null) _hotkeyRegs.Add(reg);
-            else                 failed.Add(b.Label);
+            if (!_bindings.TryGetValue(row.ActionId, out TeleportHotkeyBinding b)) continue;
+            bool ok = TryRegister(row.ActionId, b);
+            row.Conflicted = !ok;
+            if (!ok) conflicts.Add(b.Label);
         }
-
-        if (_hotkeyRegs.Count == 0)
-        {
-            HotkeyStatus = "No hotkeys could be registered (all combos are in use elsewhere).";
-            return;
-        }
-        string status = "Save 1-3 = Ctrl+Num1/2/3 · Recall 1-3 = Alt+Num1/2/3 · Undo = Ctrl+Num0. NumLock must be ON.";
-        if (failed.Count > 0)
-            status += $"  Unavailable (in use elsewhere): {string.Join(", ", failed)}.";
-        HotkeyStatus = status;
+        UpdateHotkeyStatus(conflicts);
     }
 
-    private void UnregisterHotkeys()
+    private void UnregisterAllHotkeys()
     {
-        foreach (IGlobalHotkeyRegistration r in _hotkeyRegs)
+        foreach (IGlobalHotkeyRegistration r in _hotkeyRegs.Values)
         {
             try { r.Dispose(); } catch { /* best-effort unregister */ }
         }
         _hotkeyRegs.Clear();
+    }
+
+    // Register one action's hotkey. The prior registration for the same action
+    // is kept UNTIL the new one succeeds, so a rebind that hits an OS-taken combo
+    // doesn't strand the working binding. False = combo already claimed elsewhere
+    // / no service (in which case any stale registration IS dropped).
+    private bool TryRegister(string actionId, TeleportHotkeyBinding b)
+    {
+        if (HotkeyService is not { } svc)
+        {
+            if (_hotkeyRegs.Remove(actionId, out IGlobalHotkeyRegistration? stale))
+                try { stale.Dispose(); } catch { /* best-effort */ }
+            return false;
+        }
+        IGlobalHotkeyRegistration? reg = svc.RegisterSpecific(
+            b.WinMods, b.Vk, b.Label, () => Dispatcher.UIThread.Post(() => OnHotkeyPressed(actionId)));
+        if (reg is null) return false;   // combo taken → leave the old binding live
+        if (_hotkeyRegs.Remove(actionId, out IGlobalHotkeyRegistration? old))
+            try { old.Dispose(); } catch { /* best-effort */ }
+        _hotkeyRegs[actionId] = reg;
+        return true;
+    }
+
+    private void UpdateHotkeyStatus(IReadOnlyList<string> conflicts)
+    {
+        string status = $"On — {_hotkeyRegs.Count} of {_bindings.Count} bound hotkey(s) active.";
+        if (conflicts.Count > 0)
+            status += $" In use elsewhere: {string.Join(", ", conflicts)}.";
+        if (AnyNumpadBinding())
+            status += " (Numpad combos need NumLock ON.)";
+        HotkeyStatus = status;
+    }
+
+    private bool AnyNumpadBinding()
+    {
+        foreach (TeleportHotkeyBinding b in _bindings.Values)
+            if (b.Vk >= 0x60 && b.Vk <= 0x69) return true;
+        return false;
+    }
+
+    // --- rebinding (driven by the view's tunnel KeyDown capture) ---
+
+    /// <summary>Begin (or cancel) capturing a key combo for a row. The view's
+    /// tunnel KeyDown handler routes the next press to <see cref="ApplyCapturedKey"/>.
+    /// Called by the row's Set button.</summary>
+    internal void BeginCaptureHotkey(TeleportHotkeyRow row)
+    {
+        if (ReferenceEquals(_capturingRow, row)) { CancelCapture(); HotkeyStatus = "Rebind cancelled."; return; }
+        if (_capturingRow is not null) _capturingRow.IsCapturing = false;
+        _capturingRow = row;
+        row.IsCapturing = true;
+        OnPropertyChanged(nameof(IsCapturingHotkey));
+        HotkeyStatus = $"Press a key or combo for '{row.DisplayName}' (Esc to cancel)…";
+    }
+
+    /// <summary>Remove a row's binding (unregister + persist). Called by the
+    /// row's Clear button.</summary>
+    internal void ClearHotkey(TeleportHotkeyRow row)
+    {
+        if (ReferenceEquals(_capturingRow, row)) CancelCapture();
+        if (_hotkeyRegs.Remove(row.ActionId, out IGlobalHotkeyRegistration? reg))
+        {
+            try { reg.Dispose(); } catch { /* best-effort */ }
+        }
+        _bindings.Remove(row.ActionId);
+        row.Label = string.Empty;
+        row.Conflicted = false;
+        HotkeyStore?.Save(_bindings);
+        if (GlobalHotkeysEnabled) UpdateHotkeyStatus(Array.Empty<string>());
+        else HotkeyStatus = $"Cleared {row.DisplayName}.";
+    }
+
+    private void CancelCapture()
+    {
+        if (_capturingRow is not null) _capturingRow.IsCapturing = false;
+        _capturingRow = null;
+        OnPropertyChanged(nameof(IsCapturingHotkey));
+    }
+
+    /// <summary>
+    /// Handle a key press captured while a row is in capture mode. Returns true
+    /// when the press was consumed (bound, cancelled, or a rejected combo),
+    /// false when not capturing (let the event pass through). A modifier-only
+    /// press keeps capturing (returns true, no bind) so "hold Ctrl then press F7"
+    /// works.
+    /// </summary>
+    public bool ApplyCapturedKey(Key key, KeyModifiers mods)
+    {
+        if (_capturingRow is not { } row) return false;
+        if (key == Key.Escape) { CancelCapture(); HotkeyStatus = "Rebind cancelled."; return true; }
+
+        // Modifier-only press → keep listening (don't end capture).
+        if (!HotkeyKeyMap.TryConvert(key, mods, out uint winMods, out uint vk, out string label))
+            return true;
+
+        // A bare (modifier-less) TYPING key would be claimed OS-wide and stop the
+        // user typing that character anywhere — keep listening for a safer combo.
+        // Bare F-keys / navigation keys are exempt (games rarely use them and they
+        // don't block typing).
+        if (winMods == 0 && RequiresModifier(vk))
+        {
+            HotkeyStatus = $"'{label}' needs a modifier (Ctrl/Alt/Shift) — or use an F-key. Still listening…";
+            return true;
+        }
+
+        var binding = new TeleportHotkeyBinding(winMods, vk);
+        _capturingRow = null;
+        row.IsCapturing = false;
+        OnPropertyChanged(nameof(IsCapturingHotkey));
+
+        // Re-binding to the combo this action ALREADY holds is a no-op — skip
+        // re-registration (RegisterHotKey would reject our own still-live
+        // registration as a duplicate and falsely cry "conflict").
+        if (_bindings.TryGetValue(row.ActionId, out TeleportHotkeyBinding cur) && cur == binding)
+        {
+            row.Label = label;
+            HotkeyStatus = $"{row.DisplayName} is already {label}.";
+            return true;
+        }
+
+        // If hotkeys are live, claim the combo NOW so a conflict is caught
+        // immediately.
+        if (GlobalHotkeysEnabled && HotkeyService is not null && !TryRegister(row.ActionId, binding))
+        {
+            // The attempted combo is taken (another app, or another teleport
+            // action). The OLD binding is untouched and still live, so leave the
+            // row showing it — do NOT flag the working binding as broken.
+            row.Conflicted = false;
+            HotkeyStatus = $"'{label}' is already in use (another app, or another teleport action) — pick a different combo.";
+            return true;
+        }
+
+        _bindings[row.ActionId] = binding;
+        row.Label = label;
+        row.Conflicted = false;
+        HotkeyStore?.Save(_bindings);
+        HotkeyStatus = GlobalHotkeysEnabled
+            ? $"Bound {row.DisplayName} → {label}."
+            : $"Bound {row.DisplayName} → {label} (enable hotkeys to activate).";
+        return true;
+    }
+
+    // True for a "typing" virtual-key whose modifier-less global registration
+    // would swallow that character system-wide (letters, digits, numpad digits /
+    // operators, space, the -/= OEM keys). F-keys and navigation keys are safe bare.
+    private static bool RequiresModifier(uint vk) =>
+        (vk >= 0x30 && vk <= 0x39) ||   // 0-9
+        (vk >= 0x41 && vk <= 0x5A) ||   // A-Z
+        (vk >= 0x60 && vk <= 0x69) ||   // Num0-9
+        (vk >= 0x6A && vk <= 0x6F) ||   // Num * + - . /
+        vk == 0x20 || vk == 0xBB || vk == 0xBD;   // Space, =, -
+
+    /// <summary>Cancel any in-progress hotkey capture. The view calls this on
+    /// window-deactivate / click-away so an armed capture can't hijack an
+    /// unrelated keystroke (e.g. a movement key pressed after alt-tabbing to the
+    /// game).</summary>
+    public void CancelActiveCapture()
+    {
+        if (_capturingRow is null) return;
+        CancelCapture();
+        HotkeyStatus = "Rebind cancelled.";
+    }
+
+    // Dispatch a fired hotkey to its teleport action (already on the UI thread).
+    // Each action self-guards on connection / target via RunActionAsync.
+    private void OnHotkeyPressed(string actionId)
+    {
+        switch (actionId)
+        {
+            case "save0":   _ = SaveMarkerAsync(0);      break;
+            case "save1":   _ = SaveMarkerAsync(1);      break;
+            case "save2":   _ = SaveMarkerAsync(2);      break;
+            case "recall0": _ = RecallMarkerAsync(0);    break;
+            case "recall1": _ = RecallMarkerAsync(1);    break;
+            case "recall2": _ = RecallMarkerAsync(2);    break;
+            case "undo":    _ = RecallLastAsync();       break;
+            case "forward": _ = TeleportForwardAsync();  break;
+            case "back":    _ = TeleportBackwardAsync(); break;
+        }
     }
 }
 
@@ -564,4 +817,51 @@ public sealed partial class TeleportMarkerRowViewModel : ObservableObject
         HasMarker = m.Valid;
         Display   = m.Valid ? TeleportCoordinateParser.Format(m.X, m.Y, m.Z) : "empty";
     }
+}
+
+/// <summary>One rebindable teleport-hotkey row: the action name, its current
+/// combo, and capture/conflict state. Set / Clear delegate back to the parent
+/// <see cref="TeleportViewModel"/> (same pattern as the marker rows).</summary>
+public sealed partial class TeleportHotkeyRow : ObservableObject
+{
+    private readonly TeleportViewModel _parent;
+
+    public TeleportHotkeyRow(TeleportViewModel parent, string actionId, string displayName, string hint)
+    {
+        _parent     = parent;
+        ActionId    = actionId;
+        DisplayName = displayName;
+        Hint        = hint;
+    }
+
+    public string ActionId    { get; }
+    public string DisplayName { get; }
+    public string Hint        { get; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayLabel), nameof(HasBinding))]
+    private string _label = string.Empty;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayLabel), nameof(CaptureButtonText))]
+    private bool _isCapturing;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayLabel))]
+    private bool _conflicted;
+
+    public bool HasBinding => !string.IsNullOrEmpty(Label);
+
+    /// <summary>What the combo cell shows: the prompt while capturing, the combo
+    /// (with a ⚠ when it couldn't be claimed), or an em dash when unbound.</summary>
+    public string DisplayLabel =>
+        IsCapturing ? "Press keys…"
+        : HasBinding ? (Conflicted ? $"{Label} ⚠" : Label)
+        : "—";
+
+    /// <summary>Capture-button text — flips to "Cancel" mid-capture.</summary>
+    public string CaptureButtonText => IsCapturing ? "Cancel" : "Set";
+
+    [RelayCommand] private void BeginCapture() => _parent.BeginCaptureHotkey(this);
+    [RelayCommand] private void Clear()        => _parent.ClearHotkey(this);
 }

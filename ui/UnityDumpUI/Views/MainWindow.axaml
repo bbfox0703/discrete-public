@@ -2992,7 +2992,7 @@
                universal player chain. -->
           <TabItem Header="Teleport" IsVisible="{Binding ExperimentalEnabled}">
             <ScrollViewer HorizontalScrollBarVisibility="Auto">
-              <StackPanel Margin="12" Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
+              <StackPanel x:Name="TeleportContent" Margin="12" Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
 
                 <TextBlock Text="Single-player only. Online games will rubber-band or may flag teleports."
                            FontStyle="Italic" Opacity="0.7" TextWrapping="Wrap"/>
@@ -3145,6 +3145,26 @@
                   <StackPanel Spacing="6">
                     <CheckBox Content="Enable global hotkeys (fire while the game window is focused)"
                               IsChecked="{Binding Teleport.GlobalHotkeysEnabled}"/>
+                    <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                               Text="Click Set, then press the key combo (e.g. Ctrl+F5). Prefer a modifier + F-key — a bare key is captured system-wide. Defaults use the numpad and need NumLock ON."/>
+                    <ItemsControl ItemsSource="{Binding Teleport.HotkeyRows}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:TeleportHotkeyRow">
+                          <Grid ColumnDefinitions="150,130,Auto,Auto" Margin="0,2" ToolTip.Tip="{Binding Hint}">
+                            <TextBlock Grid.Column="0" Text="{Binding DisplayName}" VerticalAlignment="Center"/>
+                            <Border Grid.Column="1" Margin="0,0,8,0" Padding="6,2"
+                                    Background="#20808080" CornerRadius="3" VerticalAlignment="Center">
+                              <TextBlock Text="{Binding DisplayLabel}"
+                                         FontFamily="Consolas,Cascadia Mono,monospace"/>
+                            </Border>
+                            <Button Grid.Column="2" Content="{Binding CaptureButtonText}" Width="64"
+                                    Command="{Binding BeginCaptureCommand}"/>
+                            <Button Grid.Column="3" Content="Clear" Margin="4,0,0,0"
+                                    Command="{Binding ClearCommand}" IsEnabled="{Binding HasBinding}"/>
+                          </Grid>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
                     <TextBlock Text="{Binding Teleport.HotkeyStatus}" TextWrapping="Wrap" Opacity="0.75"/>
                   </StackPanel>
                 </Border>

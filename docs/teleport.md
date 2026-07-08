@@ -292,8 +292,17 @@ Experimental-gated (flip the footer checkbox) until live-verified. Sections:
 - **Teleport to coordinates** — accepts `(1,2,3)` / `x y z` / 6-number (with
   rotation) / pasted "Copy coords" output.
 - **Directional** — distance + horizontal (ground-plane) toggle + Forward/Back.
-- **Global hotkeys** — enable to fire while the game is focused: Save 1-3 =
-  `Ctrl+Num1/2/3`, Recall 1-3 = `Alt+Num1/2/3`, Undo = `Ctrl+Num0` (NumLock ON).
+- **Global hotkeys (rebindable)** — enable to fire while the *game* window is
+  focused, no alt-tab. Each action (Save/Recall marker 1-3, Undo, Forward, Back)
+  is a row: click **Set**, then press the combo (e.g. `Ctrl+F5`). A tunnelling
+  KeyDown handler captures the press; `HotkeyKeyMap` converts Avalonia
+  `Key`+`KeyModifiers` → Win32 `(mask, vk)`; the combo is claimed via
+  `RegisterHotKey` and persisted to `%LOCALAPPDATA%\Discrete_Dumper\teleport-hotkeys.txt`
+  (`action=mods,vk`, AOT-safe plaintext). Defaults are the old numpad scheme
+  (`Ctrl/Alt+Num1..3`, `Ctrl+Num0`; NumLock ON) — rebind to F-keys to drop the
+  NumLock requirement. A combo already held by another app is reported and the
+  old binding kept. Registration is gated on the master **Enable** checkbox;
+  bindings survive it.
 
 Actions are disabled until a target resolves. Single-player only (online games
 rubber-band / may flag teleports — the tab says so).
@@ -332,7 +341,7 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
 | 3 | Undo after a bad jump | returns to the pre-jump pose |
 | 4 | Teleport to coordinates (copy → paste round-trip) | lands exactly |
 | 5 | Directional Forward/Back, horizontal on/off | moves along facing / on ground plane |
-| 6 | Global hotkey with the GAME focused (NumLock on) | Ctrl+Num1 saves; Alt+Num1 recalls |
+| 6 | Global hotkey with the GAME focused (default NumLock on, or rebind to an F-key) | the bound combo saves / recalls without alt-tab |
 | 7 | Rotation restore on recall | facing restored (where the game doesn't override it) |
 
 ## v2 backlog
@@ -346,5 +355,4 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
   `CharacterController` disable-write-enable.
 - Scene-name mismatch guard; marker persistence across sessions.
 - One-click "Send to Teleport" handoff (Inspector/Scene right-click).
-- Per-action hotkey rebinding UI + persistence.
 - Movement knobs reframed as generic field-write + `Physics.gravity`.
