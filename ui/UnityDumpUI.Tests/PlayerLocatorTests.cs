@@ -808,7 +808,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.GameObject", "0xA0F0"),    // enrich A000: get_gameObject
             StringOk("CharacterRoot"),                     // enrich A000: get_name
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -868,7 +868,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.GameObject", "0xC03F"), StringOk("P_Chara_00109@fld"),
             AddrOk("UnityEngine.GameObject", "0xC04F"), StringOk("AttachPoint"),
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -886,6 +886,163 @@ public class PlayerLocatorTests
             Assert.True(r.Candidates[0].Score > spine.Score);
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_PromotesControllerBearingParentAboveModelRoot()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // Two env_bone leaves under P_Chara (model root) under AttachPoint (the
+        // logical root, which carries a CharacterController). The model root would
+        // be #1 by name, but writing it desyncs the character — so the
+        // CC-bearing parent is promoted to #1. (Live Utawarerumono fix.)
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xB100", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            Vector3Ok(0f, 0f, 10f),                        // t1 B100
+            Vector3Ok(0f, 0f, 8f),                         // t1 B200
+            AddrOk("UnityEngine.GameObject", "0xB1F0"), StringOk("env_bone:foot"),   // enrich B100
+            AddrOk("UnityEngine.GameObject", "0xB2F0"), StringOk("env_bone:hand"),   // enrich B200
+            // walk: B100 -> C000 (P_Chara) -> A000 (AttachPoint) -> null; B200 -> C000
+            AddrOk("UnityEngine.Transform", "0xC000"),     // get_parent(B100)
+            AddrOk("UnityEngine.Transform", "0xA000"),     // get_parent(C000)
+            NullAddrOk("UnityEngine.Transform"),           // get_parent(A000) -> root
+            AddrOk("UnityEngine.Transform", "0xC000"),     // get_parent(B200)
+            // ladder enrich: C000, A000
+            AddrOk("UnityEngine.GameObject", "0xC0F0"), StringOk("P_Chara"),
+            AddrOk("UnityEngine.GameObject", "0xA0F0"), StringOk("AttachPoint"),
+            // promotion probe: Type.GetType(CC), then GetComponent(A000) -> a CC
+            AddrOk("System.Type", "0xCC7E"),
+            AddrOk("UnityEngine.CharacterController", "0xCC00"),
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            // AttachPoint (has the CC) promoted above the P_Chara model root.
+            Assert.Equal("0xA000", r.Candidates[0].TransformAddress);
+            Assert.Equal("AttachPoint", r.Candidates[0].Name);
+            Assert.Equal("controller root", r.Candidates[0].Sources[0]);
+            Assert.Equal(PlayerConfidence.High, r.Candidates[0].Confidence);
+            Assert.Equal("0xC000", r.Candidates[1].TransformAddress);   // model root, demoted
+            Assert.Equal("P_Chara", r.Candidates[1].Name);
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task Movement_PicksCharacterCluster_OverFartherMovingCameraAndVfx()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // The live Utawarerumono regression: when you walk, the follow-camera and
+        // camera-parented VFX (Fire*) move FARTHER than the character's feet. Two
+        // fire props (0xF100/0xF200, moved 30/28) share an effect root 0xE000; two
+        // skeleton bones (0xB100/0xB200, moved 12/10) share P_Chara(0xP000) →
+        // AttachPoint(0xA000, has a CharacterController). Anchoring on raw top
+        // displacement would resolve the FIRE cluster and drop the character. The
+        // bone-namespace vote must instead resolve the character and surface
+        // AttachPoint at #1.
+        var sample = new MovementSample
+        {
+            Ok = true,
+            Tracks = new[]
+            {
+                new MovementTrack { TransformAddress = "0xF100", GameObjectAddress = "0xF1F0", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xF200", GameObjectAddress = "0xF2F0", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB100", GameObjectAddress = "0xB1F0", Start = (0, 0, 0) },
+                new MovementTrack { TransformAddress = "0xB200", GameObjectAddress = "0xB2F0", Start = (0, 0, 0) },
+            },
+        };
+        var finish = new[]
+        {
+            // phase-2 positions (track order): fire moved farther than the bones
+            Vector3Ok(0f, 0f, 30f),   // 0xF100 Fire04
+            Vector3Ok(0f, 0f, 28f),   // 0xF200 Fire06
+            Vector3Ok(0f, 0f, 12f),   // 0xB100 bone
+            Vector3Ok(0f, 0f, 10f),   // 0xB200 bone
+            // enrich (GameObject preset → get_name only), in displacement order
+            StringOk("Fire04"),
+            StringOk("Fire06"),
+            StringOk("env_bone:Spine1"),
+            StringOk("env_bone:hand"),
+            // root walk: F100 -> E000 -> null; F200 -> E000 (cached)
+            AddrOk("UnityEngine.Transform", "0xE000"),   // get_parent(F100)
+            NullAddrOk("UnityEngine.Transform"),         // get_parent(E000) -> root
+            AddrOk("UnityEngine.Transform", "0xE000"),   // get_parent(F200)
+            // B100 -> P000 -> A000 -> null; B200 -> P000 (cached rest)
+            AddrOk("UnityEngine.Transform", "0xP000"),   // get_parent(B100)
+            AddrOk("UnityEngine.Transform", "0xA000"),   // get_parent(P000)
+            NullAddrOk("UnityEngine.Transform"),         // get_parent(A000) -> root
+            AddrOk("UnityEngine.Transform", "0xP000"),   // get_parent(B200)
+            // ladder enrich (chosen = character cluster): P000, A000
+            AddrOk("UnityEngine.GameObject", "0xP0F0"), StringOk("P_Chara"),
+            AddrOk("UnityEngine.GameObject", "0xA0F0"), StringOk("AttachPoint"),
+            // controller-root promotion probe: Type.GetType(CC), GetComponent(A000)
+            AddrOk("System.Type", "0xCC7E"),
+            AddrOk("UnityEngine.CharacterController", "0xCC00"),
+        };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = true };
+        var fp = await TeleportFakePipe.StartAsync(finish, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.FinishMovementSampleAsync(sample, opt, ct)
+                                                .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            // The character (not the farther-moving fire) is resolved: AttachPoint
+            // (the CC-bearing controller root) is #1.
+            Assert.Equal("0xA000", r.Candidates[0].TransformAddress);
+            Assert.Equal("AttachPoint", r.Candidates[0].Name);
+            Assert.Equal("controller root", r.Candidates[0].Sources[0]);
+            // The fire props NEVER become a resolved "moving-root" — the wrong
+            // cluster must not win.
+            Assert.DoesNotContain(r.Candidates,
+                c => c.Sources.Any(s => s.Contains("moving-root", StringComparison.Ordinal))
+                     && (c.Name == "Fire04" || c.Name == "Fire06"));
+            // The fire movers survive as raw evidence below the character.
+            Assert.Contains(r.Candidates, c => c.TransformAddress == "0xF100");
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public void ClusterCharacterScore_PrefersSkeletonOverCameraAndVfx()
+    {
+        // A skeleton cluster (shared "env_bone:" namespace + joint names) must
+        // out-score a fire-VFX cluster that shares only a coincidental "Fire0"
+        // character-run, AND a camera-rig cluster — even when the non-character
+        // clusters have MORE members.
+        static (List<string>, double, string) M(string name) => (new List<string> { "0x0", "0xR" }, 1.0, name);
+
+        var skeleton = new List<(List<string>, double, string)>
+        {
+            M("env_bone:Spine1"), M("env_bone:hand"),
+        };
+        var fireVfx = new List<(List<string>, double, string)>
+        {
+            M("Fire04"), M("Fire06"), M("Fire06_3"), M("Fire04b"),   // 4 members, "Fire0" prefix
+        };
+        var cameraRig = new List<(List<string>, double, string)>
+        {
+            M("FieldCamera"), M("FieldCameraControl"), M("CM_Encount_Normal"),
+        };
+
+        double skel = PlayerLocator.ClusterCharacterScore(skeleton);
+        Assert.True(skel > PlayerLocator.ClusterCharacterScore(fireVfx),
+            $"skeleton {skel} should beat fire-VFX {PlayerLocator.ClusterCharacterScore(fireVfx)}");
+        Assert.True(skel > PlayerLocator.ClusterCharacterScore(cameraRig),
+            $"skeleton {skel} should beat camera rig {PlayerLocator.ClusterCharacterScore(cameraRig)}");
     }
 
     [Theory]
@@ -925,7 +1082,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.GameObject", "0xB1F0"),
             StringOk("env_bone:foot"),
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -968,7 +1125,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.Transform", "0xR000"),     // get_parent(B200) -> root
             AddrOk("UnityEngine.GameObject", "0xR0F0"), StringOk("Characters"),  // enrich R000
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -1007,7 +1164,7 @@ public class PlayerLocatorTests
             AddrOk("UnityEngine.Transform", "0xA110"),     // get_parent(B200) -> A110
             NullAddrOk("UnityEngine.Transform"),           // get_parent(A110) -> root
         };
-        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true };
+        var opt = new MovementDetectOptions { Signals = Only(), ResolveToRoot = true, PromoteControllerRoot = false };
         var fp = await TeleportFakePipe.StartAsync(finish, ct);
         try
         {
@@ -1050,6 +1207,50 @@ public class PlayerLocatorTests
             Assert.True(r.Ok);
             Assert.Empty(r.Candidates);   // no get_transform, no candidate
             Assert.Contains(r.Notes, n => n.Contains("count-skipped", StringComparison.Ordinal));
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
+    [Fact]
+    public async Task UserClassScan_PlayerSingleton_FieldWalkIsDiagnosticOnly()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // The "Player" singleton isn't a Component (get_transform fails) — very
+        // likely a findInstances false positive. We walkInstance it to LOG its
+        // shape, but must surface NOTHING and dereference NO field pointer:
+        // invoking an engine method on a garbage `this` hangs the game (live
+        // Utawarerumono). So: walkInstance is called, zero candidates result.
+        var responses = new[]
+        {
+            """{ "count": 1, "assemblies": [ { "name": "Assembly-CSharp" } ] }""",
+            """
+            { "assembly": "Assembly-CSharp", "count": 1, "classes": [
+              { "namespace": "Game", "name": "Player" } ] }
+            """,
+            """{ "count": 1, "limit": 5, "matches": [ "0xE100" ] }""",   // findInstances(Player)
+            NullAddrOk("UnityEngine.Transform"),                          // get_transform -> not a Component
+            // walkInstance(0xE100): Transform + Vector3 + scalar fields. NONE
+            // of these pointers may be dereferenced (no follow-up RPCs queued).
+            """
+            { "address": "0xE100", "count": 3, "fields": [
+              { "name": "_Transform", "type": "UnityEngine.Transform", "offset": 24, "ptr": "0xC100" },
+              { "name": "_logicalPos", "type": "UnityEngine.Vector3", "offset": 32 },
+              { "name": "_Controller", "type": "UnityEngine.CharacterController", "offset": 40, "ptr": "0xCC00" } ] }
+            """,
+        };
+        var fp = await TeleportFakePipe.StartAsync(responses, ct);
+        try
+        {
+            var locator = new PlayerLocator(fp.Adapter);
+            PlayerLocateResult r = await locator.LocateAsync(Only(classes: true), ct)
+                                                .ConfigureAwait(true);
+            Assert.True(r.Ok);
+            Assert.Empty(r.Candidates);   // diagnostic only — nothing surfaced, nothing dereferenced
+
+            var reqs = await fp.ServerTask.ConfigureAwait(true);
+            // Exactly these 5 RPCs: no get_gameObject/get_transform on a field ptr.
+            Assert.Equal(5, reqs.Count);
+            Assert.Equal("walkInstance", Cmd(reqs[4]));
         }
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }

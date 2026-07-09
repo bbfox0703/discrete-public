@@ -6,8 +6,10 @@ using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
 using UnityDumpUI.Core.Services;
 using UnityDumpUI.ViewModels;
 
@@ -43,8 +45,29 @@ public partial class MainWindow : Window
         vm.ClassPivot.CopyToClipboardAsync    = CopyToClipboardAsync;
         vm.Teleport.CopyToClipboardAsync      = CopyToClipboardAsync;
         vm.Teleport.HotkeyService             = new UnityDumpUI.Services.WindowsGlobalHotkeyService();
+        vm.Teleport.HotkeyStore               = new UnityDumpUI.Services.TeleportHotkeyStore();
+        vm.Teleport.LoadHotkeys();
         vm.ShowProxyDeploy                    = ShowProxyDeployWindow;
         DataContext = vm;
+
+        // Teleport hotkey rebinding: capture the key press while a row is in
+        // "Press keys…" mode BEFORE any focused child (e.g. a TextBox) consumes
+        // it, via a tunnelling KeyDown handler on the window.
+        AddHandler(KeyDownEvent, OnTeleportHotkeyCapture, RoutingStrategies.Tunnel);
+
+        // Cancel an armed capture if the window loses focus (alt-tab to the game
+        // — otherwise the next in-game keystroke would be swallowed and bound) or
+        // the user clicks away from the Set/Cancel button.
+        Deactivated += (_, _) => (DataContext as MainWindowViewModel)?.Teleport.CancelActiveCapture();
+        AddHandler(PointerPressedEvent, OnTeleportCaptureClickAway, RoutingStrategies.Tunnel);
+
+        // Kill the ScrollViewer's auto-BringIntoView on the Teleport tab: when a
+        // button/textbox there gains focus (a click, or focus moving on
+        // reconnect), Avalonia scrolls it into view and the long page "jumps",
+        // sometimes out from under the cursor. Swallowing RequestBringIntoView on
+        // the content — before it bubbles to the ScrollViewer — keeps the scroll
+        // position put. Scoped to the Teleport tab only.
+        TeleportContent.AddHandler(RequestBringIntoViewEvent, (_, e) => e.Handled = true);
         // Pane-collapse plumbing — IsVisible bindings on the panes' content
         // hide the body, but the column itself only shrinks if we mutate
         // ColumnDefinition.Width. Listen to the VM's bool property so the
@@ -608,6 +631,29 @@ public partial class MainWindow : Window
     /// thanks to the GridSplitter).</summary>
     private GridLength _assembliesPaneExpandedWidth = new GridLength(240);
     private GridLength _classesPaneExpandedWidth    = new GridLength(280);
+
+    // Tunnelling KeyDown: while a teleport-hotkey row is capturing, route the
+    // press to the VM and swallow it so it doesn't reach a focused TextBox / the
+    // command bindings. No-op otherwise.
+    private void OnTeleportHotkeyCapture(object? sender, KeyEventArgs e)
+    {
+        if (DataContext is MainWindowViewModel vm
+            && vm.Teleport.IsCapturingHotkey
+            && vm.Teleport.ApplyCapturedKey(e.Key, e.KeyModifiers))
+        {
+            e.Handled = true;
+        }
+    }
+
+    // While a hotkey row is capturing, a pointer press anywhere EXCEPT on the
+    // Set/Cancel button (whose Click toggles capture) cancels the capture — so a
+    // click into a textbox can't leave the capture armed to eat the next key.
+    private void OnTeleportCaptureClickAway(object? sender, PointerPressedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm || !vm.Teleport.IsCapturingHotkey) return;
+        if ((e.Source as Visual)?.FindAncestorOfType<Button>(includeSelf: true) is null)
+            vm.Teleport.CancelActiveCapture();
+    }
 
     private void OnMainViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {

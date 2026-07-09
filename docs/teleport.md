@@ -53,6 +53,59 @@ Wire spec: [lua-invoke.md](lua-invoke.md) → "value-struct". This primitive is
 general (any Vector3/Quaternion/Color-taking or -returning method), not
 teleport-specific.
 
+## Movement-driver-aware write (2026-07-08)
+
+Unity moves characters four ways, and a plain `Transform.set_position` only
+works for the first:
+
+| Driver | Write path |
+|---|---|
+| **Transform** (script sets `position`) | `set_position` ✅ (default) |
+| **CharacterController** (`.Move`/`.SimpleMove`) | disable the controller → `set_position` → re-enable |
+| Rigidbody physics | (future) `Rigidbody.position`/`MovePosition` + sleep |
+| NavMeshAgent | (future) `NavMeshAgent.Warp` |
+
+A `CharacterController` **re-drives its GameObject's transform every frame**, so
+writing the transform while it's enabled just gets fought — the character
+orbits / snaps back (the live Utawarerumono symptom). `TeleportService` is now
+**driver-aware**:
+
+- `DetectMovementDriverAsync(transform)` — resolve
+  `Type.GetType("UnityEngine.CharacterController, …")` (cached), then walk the
+  target + ancestors (`GetComponent` + `get_parent` per rung — `GetComponentInParent`
+  is stripped on many IL2CPP builds and even where present returns the *nearest*
+  match) for the **OUTERMOST** CharacterController. The target is **retargeted to
+  that controller's OWN transform** (`Component.get_transform(cc)`).
+  - *Nearest, not outermost* (live Utawarerumono): a character can nest several
+    CharacterControllers — `HigherRig(CC) → LogicalRoot(CC) → Model(CC) → bones` —
+    and only the **middle** logical root is the correct teleport target (writing
+    the inner model CC desyncs the visual → camera detaches / moves too fast;
+    writing an outer rig CC also misbehaves). So the retarget uses the **nearest**
+    CC (don't over-climb), and the correct rung is chosen by the **movement
+    ranking** instead:
+    - **Controller-root promotion** (`PromoteControllerRoot`, on by default): the
+      movement DCA is the model/skeleton root; its immediate parent is promoted to
+      **#1** (`controller root`) when that parent carries a CharacterController
+      (`Type.GetType` + `GetComponent`), i.e. it's part of the controller
+      hierarchy rather than a static scene container. So Using the default #1 lands
+      on the logical root. If it still misbehaves, the model root sits at #2.
+- `WritePoseAsync(…, driver)` — for a CharacterController driver: `Collider`
+  `set_enabled(false)` (enabled lives on Collider, PhysicsModule) → position/euler
+  write → `set_enabled(true)`. Wrapped so a throw during the write still
+  re-enables; a re-enable failure is surfaced (don't silently leave the character
+  frozen). No CC → the raw `set_position` path (unchanged).
+
+The detection runs once at **Set Target** (`TeleportController` caches the driver
++ effective transform); markers / coords / directional all inherit it. The tab
+shows `Driver: CharacterController …` under the pose. It's fully **auto-selected**
+— the user never picks a mode. This is the first member of the driver family;
+Rigidbody / NavMeshAgent slot into the same dispatch later.
+
+This is why signal C (`FindObjectsByType(CharacterController)`) reported 0 on
+Utawarerumono while the player *was* CharacterController-driven: that enumeration
+API is stripped, but the component still exists and `GetComponentInParent` finds
+it from the movement-detected transform.
+
 ## Architecture (layers, all shipped)
 
 ```
@@ -94,6 +147,7 @@ means that signal contributes no candidates.
 | C | CharacterController | `Type.GetType("UnityEngine.CharacterController, UnityEngine.PhysicsModule")` (monolithic fallback) → `FindObjectsByType`/`FindObjectsOfType` probe chain (same 3-attempt list as SceneEnumerator) | 80 | Games that use a CharacterController almost always have exactly one — the player. |
 | D | Well-known GameObject names | `GameObject.Find(name)` over ~14 common names (`Player`, `PlayerArmature`, `Character`, …) | 70 exact-"Player" / 50 others | `GameObject.Find(string)` survives stripping (verified). Active objects only. |
 | E | User-class name heuristic | `getAssemblies` → `getClasses` on non-engine assemblies → player-ish class-name filter (cap ~16, soft-excluding `*Manager`/`*Settings`/… ) → `findInstances(aliveOnly, sane)` → `Component.get_transform` per instance | 50 (exactly 1 live instance) / 30 (2–3) | The class list is an offline pipe RPC — no main-thread cost until transform resolution. Obfuscated builds get nothing here (wave B's movement correlation is the counter). |
+| E′ | Player-singleton field walk (**diagnostic only**) | when a player-named singleton (exactly 1 instance) **isn't a Component** (get_transform fails), `walkInstance` it and **log** its field shape (Transform/GameObject/Vector3 fields point at the real object it drives) | none (logs only) | An instance whose get_transform fails is very likely a `findInstances` **false positive**, so its field pointers are garbage — invoking any engine method (get_transform/get_gameObject) on a garbage `this` **hangs the game** (learned live on Utawarerumono). So this NEVER surfaces a candidate or dereferences a field pointer; it only records the shape (field names/types are reliable class metadata) for follow-up. Capped (`MaxSingletonFieldWalks`). |
 
 Every candidate resolves to a **Transform address** + GameObject name; then
 distance-to-camera is scored on top (+30 < 2 m, +20 < 10 m, +10 < 30 m).
@@ -176,9 +230,18 @@ Two-phase, so the UI can run the countdown in between:
    itself, not a skeleton); (b) leaf movers are excluded from the ladder so the
    top rung is never a swinging bone (an *internal* mover that is an ancestor of
    another mover stays eligible — it may be a moving character root); (c) the
-   cluster is **anchored on the highest-displacement mover** (the object the user
-   deliberately moved), not on whichever hierarchy has the most sampled bones, so
-   a heavily-animated NPC can't outvote the player; (d) a `get_parent` *error* is
+   moving chains are **grouped into clusters by their top-level root**, and the
+   resolution anchors on the cluster that most **looks like an animated character**
+   (`ClusterCharacterScore` = member count + joint-named members + a real shared
+   bone namespace, minus a camera-rig-name penalty) — **NOT** the single object
+   that moved farthest. This is the fix for the live regression where a walking
+   character's feet moved *less* than the follow-camera that panned to track it and
+   the camera-parented VFX (`Fire*` / `Encount_*`): raw top-displacement anchoring
+   locked onto `FieldCameraControl` / `Encount_Effect` and the real character
+   (`P_Chara` / `AttachPoint`) fell off the list entirely. A real bone namespace is
+   a common prefix that ends at a separator (`env_bone:`), so a coincidental
+   character-run shared by unrelated props (`Fire04`/`Fire06` → `Fire0`) earns no
+   skeleton credit; (d) a `get_parent` *error* is
    distinguished from a genuine `0x0` root, and the errored chain is dropped
    rather than seeding a false cluster. **Caveat:** when several characters are
    parented under one shared container GameObject, the movers converge only at
@@ -229,8 +292,17 @@ Experimental-gated (flip the footer checkbox) until live-verified. Sections:
 - **Teleport to coordinates** — accepts `(1,2,3)` / `x y z` / 6-number (with
   rotation) / pasted "Copy coords" output.
 - **Directional** — distance + horizontal (ground-plane) toggle + Forward/Back.
-- **Global hotkeys** — enable to fire while the game is focused: Save 1-3 =
-  `Ctrl+Num1/2/3`, Recall 1-3 = `Alt+Num1/2/3`, Undo = `Ctrl+Num0` (NumLock ON).
+- **Global hotkeys (rebindable)** — enable to fire while the *game* window is
+  focused, no alt-tab. Each action (Save/Recall marker 1-3, Undo, Forward, Back)
+  is a row: click **Set**, then press the combo (e.g. `Ctrl+F5`). A tunnelling
+  KeyDown handler captures the press; `HotkeyKeyMap` converts Avalonia
+  `Key`+`KeyModifiers` → Win32 `(mask, vk)`; the combo is claimed via
+  `RegisterHotKey` and persisted to `%LOCALAPPDATA%\Discrete_Dumper\teleport-hotkeys.txt`
+  (`action=mods,vk`, AOT-safe plaintext). Defaults are the old numpad scheme
+  (`Ctrl/Alt+Num1..3`, `Ctrl+Num0`; NumLock ON) — rebind to F-keys to drop the
+  NumLock requirement. A combo already held by another app is reported and the
+  old binding kept. Registration is gated on the master **Enable** checkbox;
+  bindings survive it.
 
 Actions are disabled until a target resolves. Single-player only (online games
 rubber-band / may flag teleports — the tab says so).
@@ -269,7 +341,7 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
 | 3 | Undo after a bad jump | returns to the pre-jump pose |
 | 4 | Teleport to coordinates (copy → paste round-trip) | lands exactly |
 | 5 | Directional Forward/Back, horizontal on/off | moves along facing / on ground plane |
-| 6 | Global hotkey with the GAME focused (NumLock on) | Ctrl+Num1 saves; Alt+Num1 recalls |
+| 6 | Global hotkey with the GAME focused (default NumLock on, or rebind to an F-key) | the bound combo saves / recalls without alt-tab |
 | 7 | Rotation restore on recall | facing restored (where the game doesn't override it) |
 
 ## v2 backlog
@@ -283,5 +355,4 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
   `CharacterController` disable-write-enable.
 - Scene-name mismatch guard; marker persistence across sessions.
 - One-click "Send to Teleport" handoff (Inspector/Scene right-click).
-- Per-action hotkey rebinding UI + persistence.
 - Movement knobs reframed as generic field-write + `Physics.gravity`.

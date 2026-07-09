@@ -89,6 +89,12 @@ public sealed class PlayerLocateOptions
     public int MaxParentChainDepth { get; init; } = 8;
     /// <summary>Heap-scan budget for signal E (findInstances is per-class).</summary>
     public int MaxUserClassScans   { get; init; } = 8;
+
+    /// <summary>When a player-named singleton isn't a Component (get_transform
+    /// fails), walkInstance it and mine its fields for a Transform/GameObject
+    /// reference to the real controllable object. Capped — walkInstance is a
+    /// heavier RPC than a single icall.</summary>
+    public int MaxSingletonFieldWalks { get; init; } = 2;
     /// <summary>Game assemblies to getClasses over (Assembly-CSharp* first).</summary>
     public int MaxAssemblies       { get; init; } = 12;
     /// <summary>Ranked rows returned to the UI.</summary>
@@ -145,8 +151,11 @@ public sealed class MovementDetectOptions
     /// just deforms the mesh; the thing to teleport is the root above them.</summary>
     public bool ResolveToRoot { get; init; } = true;
 
-    /// <summary>How many top movers to walk up when resolving roots.</summary>
-    public int MaxRootWalkMovers { get; init; } = 8;
+    /// <summary>How many top movers to walk up when resolving roots. Capped in
+    /// practice by <see cref="MaxCandidates"/> (only that many movers are
+    /// enriched). Higher = more of the character's skeleton feeds the cluster
+    /// vote, so a few camera/VFX movers can't out-number the bones.</summary>
+    public int MaxRootWalkMovers { get; init; } = 12;
 
     /// <summary>Max parent-chain depth to climb (skeletons can be deep; a cache
     /// makes shared ancestors cheap).</summary>
@@ -154,6 +163,12 @@ public sealed class MovementDetectOptions
 
     /// <summary>How many rungs of the DCA→root ladder to present.</summary>
     public int MaxRootLadder { get; init; } = 6;
+
+    /// <summary>Promote the moving-root's parent to #1 when that parent carries a
+    /// CharacterController — the model/skeleton root (where bones converge) is
+    /// usually a child of the controllable logical root, and teleporting the
+    /// model desyncs it. Costs one Type.GetType (cached) + one GetComponent.</summary>
+    public bool PromoteControllerRoot { get; init; } = true;
 
     /// <summary>Ranked rows returned.</summary>
     public int MaxCandidates { get; init; } = 12;
@@ -817,7 +832,7 @@ public sealed class PlayerLocator
         if (top.Count < 2) return empty;
 
         var parentCache = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        var chains = new List<(List<string> Addrs, double Dist)>();
+        var chains = new List<(List<string> Addrs, double Dist, string Name)>();
         foreach (PlayerCandidate m in top)
         {
             ct.ThrowIfCancellationRequested();
@@ -827,18 +842,40 @@ public sealed class PlayerLocator
             // A walk that hit a get_parent ERROR (not a genuine 0x0 root) is
             // incomplete — its terminal node is a false root that would seed a
             // bogus cluster, so drop it from clustering.
-            if (ok && addrs.Count >= 2) chains.Add((addrs, m.MovedDistance ?? 0));
+            if (ok && addrs.Count >= 2) chains.Add((addrs, m.MovedDistance ?? 0, m.Name));
         }
         if (chains.Count < 2) return empty;
 
-        // Anchor on the highest-displacement chain (chains preserve the movers'
-        // displacement order) — that's the object the user deliberately moved,
-        // so we resolve ITS character rather than whichever unrelated hierarchy
-        // happens to contribute the most sampled bones.
-        (List<string> Addrs, double Dist) anchor = chains[0];
+        // Group the moving chains into clusters by their top-level root. Every
+        // skeleton bone of one character shares that character's root GameObject;
+        // a follow-camera rig and camera-parented VFX live under DIFFERENT roots.
+        // So this separates "the character" from "the things that also move when
+        // you walk" (the camera that tracks you, the fire/effect props).
+        //
+        // Then anchor on the cluster that looks most like an ANIMATED CHARACTER —
+        // many co-moving parts sharing a real bone namespace / joint names — NOT
+        // on the single object that moved farthest. A panning camera or a swinging
+        // VFX out-displaces a walking character, and anchoring on raw top
+        // displacement let it hijack the whole resolution: the live Utawarerumono
+        // regression surfaced "FieldCameraControl" / "Encount_Effect" as the
+        // moving-root and dropped the real character (P_Chara / AttachPoint) off
+        // the list entirely. The bone-namespace vote is immune to that.
+        var clusters = chains
+            .GroupBy(c => c.Addrs[^1], StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() >= 2)   // a cluster needs ≥2 movers sharing a root
+            .Select(g => g.ToList())
+            .ToList();
+        if (clusters.Count == 0) return empty;
+
+        List<(List<string> Addrs, double Dist, string Name)> cluster =
+            clusters.OrderByDescending(g => ClusterCharacterScore(g))
+                    .ThenByDescending(g => g.Sum(c => c.Dist))
+                    .First();
+        // Anchor = the highest-displacement chain WITHIN the chosen cluster; its
+        // address order seeds the DCA→root ladder below.
+        (List<string> Addrs, double Dist, string Name) anchor =
+            cluster.OrderByDescending(c => c.Dist).First();
         string anchorRoot = anchor.Addrs[^1];
-        var cluster = chains.Where(c => Eq(c.Addrs[^1], anchorRoot)).ToList();
-        if (cluster.Count < 2) return empty;
 
         // Exclude LEAF movers (a mover not itself an ancestor of another mover)
         // from the ladder so the top rung is a genuine ancestor, never a swinging
@@ -846,7 +883,7 @@ public sealed class PlayerLocator
         // may be the real (moving) character root.
         var moverAddrs  = new HashSet<string>(cluster.Select(c => c.Addrs[0]), StringComparer.OrdinalIgnoreCase);
         var internalMov = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach ((List<string> addrs, _) in cluster)
+        foreach ((List<string> addrs, _, _) in cluster)
         {
             for (int i = 1; i < addrs.Count; i++)
                 if (moverAddrs.Contains(addrs[i])) internalMov.Add(addrs[i]);
@@ -883,7 +920,7 @@ public sealed class PlayerLocator
         // or joint words, so the ladder climbs through bones until it hits the
         // character GameObject (e.g. "P_Chara_00109@fld"). That first non-bone
         // rung is the real teleport target — pull it to the top.
-        string bonePrefix = CommonBonePrefix(cluster.Select(c => NameOf(movers, c.Addrs[0])));
+        string bonePrefix = CommonBonePrefix(cluster.Select(c => c.Name));
         bool[] isBone = rungs.Select(r => IsBoneName(r.Name, bonePrefix)).ToArray();
         int charIdx = Array.FindIndex(isBone, b => !b);
 
@@ -929,14 +966,80 @@ public sealed class PlayerLocator
                 Confidence        = conf,
             });
         }
+
+        // The moving-root (roots[0]) is the model / skeleton root — the moving
+        // bones converge there. But a character is usually
+        // LogicalRoot(controller) → Model → bones, and writing the MODEL root
+        // desyncs the visual from the logical position (camera detaches, movement
+        // breaks — the live Utawarerumono symptom). Its immediate parent
+        // (roots[1]) is the controllable root when it carries a
+        // CharacterController (i.e. it's part of the controller hierarchy, not a
+        // static scene container). Promote it to #1 in that case.
+        if (opt.PromoteControllerRoot && roots.Count >= 2 && charIdx >= 0)
+        {
+            string? ccType = await ResolveControllerTypeAsync(ct).ConfigureAwait(false);
+            if (ccType is not null && !_drainTimeout
+                && await HasCharacterControllerAsync(roots[1].TransformAddress, ccType, ct).ConfigureAwait(false)
+                && !_drainTimeout)
+            {
+                PlayerCandidate model  = roots[0];
+                PlayerCandidate parent = roots[1];
+                roots[0] = new PlayerCandidate
+                {
+                    TransformAddress  = parent.TransformAddress,
+                    GameObjectAddress = parent.GameObjectAddress,
+                    Name              = parent.Name,
+                    Sources           = new[] { "controller root" },
+                    Score             = model.Score,
+                    Confidence        = PlayerConfidence.High,
+                };
+                roots[1] = new PlayerCandidate
+                {
+                    TransformAddress  = model.TransformAddress,
+                    GameObjectAddress = model.GameObjectAddress,
+                    Name              = model.Name,
+                    Sources           = new[] { "model root (try if the controller row misbehaves)" },
+                    Score             = parent.Score,
+                    Confidence        = model.Confidence,
+                };
+                Log($"PlayerLocator movement: promoted controller root '{parent.Name}' above model root '{model.Name}'.");
+            }
+        }
         return roots;
     }
 
-    private static string NameOf(IReadOnlyList<PlayerCandidate> movers, string addr)
+    private string? _controllerTypeAddress;
+    private bool    _controllerTypeResolved;
+
+    // Type* for UnityEngine.CharacterController (cached). Null when not loaded.
+    private async Task<string?> ResolveControllerTypeAsync(CancellationToken ct)
     {
-        foreach (PlayerCandidate m in movers)
-            if (Eq(m.TransformAddress, addr)) return m.Name;
-        return string.Empty;
+        if (_controllerTypeResolved) return _controllerTypeAddress;
+        foreach (string fqn in CharacterControllerFqns)
+        {
+            CallMethodResult r = await _backend.CallMethodAsync(
+                "mscorlib", "System", "Type", "GetType",
+                new[] { CallArgFactory.String(fqn) },
+                signatureMatch: "(System.String)",
+                mainThread: true, mainThreadTimeoutMs: _mainThreadTimeoutMs, ct: ct).ConfigureAwait(false);
+            NoteDrainTimeout(r);
+            if (_drainTimeout) return null;   // don't latch on a transient failure
+            string? addr = SuccessAddress(r);
+            if (addr is not null) { _controllerTypeAddress = addr; _controllerTypeResolved = true; return addr; }
+        }
+        _controllerTypeResolved = true;
+        _controllerTypeAddress  = null;
+        return null;
+    }
+
+    // True when the transform's GameObject has a CharacterController (self only).
+    private async Task<bool> HasCharacterControllerAsync(string transformAddr, string ccType, CancellationToken ct)
+    {
+        CallMethodResult r = await CallEngineAsync(
+            "Component", "GetComponent", transformAddr,
+            new[] { CallArgFactory.Address(ccType) }, "(System.Type)", false, ct).ConfigureAwait(false);
+        if (!r.Ok || !string.IsNullOrEmpty(r.Error)) return false;
+        return SuccessAddress(r) is not null;
     }
 
     // Common skeletal-joint words (bones an animated character exposes). "root"
@@ -985,6 +1088,51 @@ public sealed class PlayerLocator
         }
         return false;
     }
+
+    /// <summary>Heuristic "how much does this moving cluster look like an animated
+    /// character?" — the disambiguator when several hierarchies move at once (the
+    /// character, plus the follow-camera and VFX that track it). A character
+    /// exposes MANY co-moving skeleton bones that share a real namespace
+    /// ("env_bone:") or carry joint names (spine/hips/hand); a camera rig or a
+    /// fire-VFX cluster has neither. Pure / name-based (the mover names are
+    /// already enriched), so it adds no RPCs. Higher = more character-like.</summary>
+    internal static double ClusterCharacterScore(
+        IReadOnlyList<(List<string> Addrs, double Dist, string Name)> cluster)
+    {
+        var names = cluster.Select(c => c.Name).ToList();
+
+        // A REAL bone namespace ends at a separator ("env_bone:") — that's the
+        // strong "these are one skeleton" signal. A coincidental character-run
+        // shared by unrelated props ("Fire04"/"Fire06" → "Fire0") does NOT end
+        // at a separator, so it earns no namespace credit.
+        string prefix     = CommonBonePrefix(names);
+        bool   namespaced = EndsWithSeparator(prefix);
+
+        // Joint tokens (spine/hips/hand/…) are unambiguous skeleton names — the
+        // clincher even when the bones share no namespace prefix.
+        int joints = names.Count(HasJointToken);
+
+        double score = cluster.Count * 6          // more co-moving parts
+                     + joints * 12                 // unambiguous skeleton bones
+                     + (namespaced ? 40 : 0);      // a real shared bone namespace
+        // A cluster named like a camera rig (follow-cam + camera-parented FX) is
+        // almost never the player — sink it below any plausible character.
+        if (names.Any(IsCameraRigName)) score -= 60;
+        return score;
+    }
+
+    private static bool HasJointToken(string name)
+    {
+        foreach (string tok in NameTokenMatch.Tokenize(name))
+            if (Array.IndexOf(JointTokens, tok) >= 0) return true;
+        return false;
+    }
+
+    // True when a computed common prefix ends at a name separator — i.e. it is a
+    // genuine namespace ("env_bone:", "Bip01 ") rather than a coincidental run of
+    // shared characters ("Fire0").
+    private static bool EndsWithSeparator(string prefix) =>
+        prefix.Length >= 2 && prefix[^1] is ':' or '_' or '/' or '.' or ' ';
 
     private const int RootScoreBase = 1000;
 
@@ -1376,6 +1524,7 @@ public sealed class PlayerLocator
 
         int candidateCount = 0;
         int skippedCount    = 0;
+        int fieldWalkBudget = Math.Max(0, opt.MaxSingletonFieldWalks);
         foreach (PlayerClassNameFilter.ClassCandidate cls in picked)
         {
             ct.ThrowIfCancellationRequested();
@@ -1418,7 +1567,22 @@ public sealed class PlayerLocator
                     wantStruct: false, ct).ConfigureAwait(false);
                 if (_drainTimeout) return;
                 string? transform = SuccessAddress(tr);
-                if (transform is null) { failed++; continue; }   // not a Component — skip
+                if (transform is null)
+                {
+                    failed++;
+                    // Not a Component — a controller/model singleton. Mine its
+                    // fields for a Transform/GameObject reference to the real
+                    // object (and log any Vector3 "logical position" fields). The
+                    // exact-1-instance, strongly-player-named case is the payoff:
+                    // e.g. Utawarerumono's `Player` singleton (get_transform
+                    // fails; the character it drives lives in a field).
+                    if (fieldWalkBudget > 0 && count == 1 && NameLooksLikePlayer(cls.Name))
+                    {
+                        fieldWalkBudget--;
+                        await InspectSingletonFieldsAsync(cls, instance, ct).ConfigureAwait(false);
+                    }
+                    continue;
+                }
                 hits.Add(new PlayerSignalHit(transform, $"class:{cls.Name}({count})",
                     score, instanceAddress: instance, className: cls.Name));
                 candidateCount++;
@@ -1429,6 +1593,61 @@ public sealed class PlayerLocator
         notes.Add($"classes: {picked.Count} scanned, {candidateCount} hit(s)"
             + (skippedCount > 0 ? $", {skippedCount} count-skipped" : string.Empty));
     }
+
+    // DIAGNOSTIC ONLY. Walk a non-Component player singleton's fields and LOG
+    // its shape — Transform/GameObject/Vector3 fields point at the real object
+    // it drives. Deliberately surfaces NOTHING and invokes NOTHING on the field
+    // pointers: an instance whose get_transform fails is very likely a
+    // findInstances FALSE POSITIVE, so its field pointers are garbage, and
+    // calling an engine method (get_transform / get_gameObject) on a garbage
+    // `this` HANGS or crashes the game (learned live on Utawarerumono). The
+    // field NAMES/TYPES come from class metadata and are reliable; the pointer
+    // VALUES are not, so we never dereference them here.
+    private async Task InspectSingletonFieldsAsync(
+        PlayerClassNameFilter.ClassCandidate cls, string instance, CancellationToken ct)
+    {
+        WalkInstanceResult walk;
+        try
+        {
+            walk = await _backend.WalkInstanceAsync(instance, cls.Assembly, cls.Namespace, cls.Name, ct)
+                .ConfigureAwait(false);
+        }
+        catch (PipeProtocolException ex) { Log($"signal-E {cls.Name}: walkInstance threw {ex.Message}"); return; }
+        if (!string.IsNullOrEmpty(walk.Error)) { Log($"signal-E {cls.Name}: walkInstance error {walk.Error}"); return; }
+
+        List<WalkedField> fields = walk.Fields ?? new List<WalkedField>();
+        Log($"signal-E {cls.Name} fields[{fields.Count}]: "
+            + string.Join(", ", fields.Take(48).Select(f => $"{f.Name}:{f.Type ?? "?"}")));
+
+        // Note the interesting field TYPES (no dereference) so the structure is
+        // easy to spot in the log for follow-up work.
+        var refs = fields
+            .Where(f => f.Type is not null
+                        && (IsTransformType(f.Type) || IsGameObjectType(f.Type) || IsVector3Type(f.Type)))
+            .Select(f => $"{f.Name}:{f.Type}")
+            .ToList();
+        if (refs.Count > 0)
+            Log($"signal-E {cls.Name}: position-bearing fields [{string.Join(", ", refs)}] "
+                + "— DIAGNOSTIC ONLY (field pointers not dereferenced; instance may be a false positive)");
+    }
+
+    private static bool NameLooksLikePlayer(string name) =>
+        name.Contains("player", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("hero", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("protagonist", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTransformType(string type) =>
+        type.EndsWith("UnityEngine.Transform", StringComparison.Ordinal) ||
+        type.EndsWith("UnityEngine.RectTransform", StringComparison.Ordinal) ||
+        type == "Transform" || type == "RectTransform";
+
+    private static bool IsGameObjectType(string type) =>
+        type.EndsWith("UnityEngine.GameObject", StringComparison.Ordinal) ||
+        type == "GameObject";
+
+    private static bool IsVector3Type(string type) =>
+        type.EndsWith("UnityEngine.Vector3", StringComparison.Ordinal) ||
+        type == "Vector3";
 
     // ------------------------------------------------------------------
     // Enrichment
