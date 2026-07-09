@@ -807,6 +807,22 @@ ControlTheme reads:
 - **`Avalonia.Diagnostics` is 11.x only as of 2026-05.** Add behind
   `<IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>`
   to keep out of AOT publish.
+- **A compiled `x:Name`/`Name` field is NULL under AOT for a control nested
+  in a non-selected `TabItem` (or other lazily-realized content) — a direct
+  deref in the ctor NRE-crashes startup, JIT-only.** The trimmer drops the
+  generated field assignment for content the ContentPresenter hasn't realized
+  yet, so `MyControl.AddHandler(...)` / `MyControl.Foo` in a View/Window ctor
+  throws `NullReferenceException` at `..ctor()` **before the window shows** —
+  and it passes Debug/Release (JIT) + all unit tests, only dying in the trimmed
+  publish. Never touch a named-control field at construction time. Use the
+  codebase idiom `this.FindControl<T>("name")?.…` deferred to a `Loaded`
+  handler, or — best — wire the control's OWN `Loaded="OnX"` in XAML and take
+  the instance from `sender` (no name resolution at all). Paid for by
+  discrete's Teleport-tab `TeleportContent.AddHandler(...)` (build #1316, fixed
+  #1320): shipped a hard 0xC0000409 crash on `build.cmd publish` that no JIT
+  build reproduced. **Corollary: add the `Program.Main` crash-log guard
+  ([§8.3](#83-stack-trace-fidelity)) — without it a WinExe startup crash is a
+  silent process-vanish with no console and no log.**
 
 ---
 

@@ -61,13 +61,11 @@ public partial class MainWindow : Window
         Deactivated += (_, _) => (DataContext as MainWindowViewModel)?.Teleport.CancelActiveCapture();
         AddHandler(PointerPressedEvent, OnTeleportCaptureClickAway, RoutingStrategies.Tunnel);
 
-        // Kill the ScrollViewer's auto-BringIntoView on the Teleport tab: when a
-        // button/textbox there gains focus (a click, or focus moving on
-        // reconnect), Avalonia scrolls it into view and the long page "jumps",
-        // sometimes out from under the cursor. Swallowing RequestBringIntoView on
-        // the content — before it bubbles to the ScrollViewer — keeps the scroll
-        // position put. Scoped to the Teleport tab only.
-        TeleportContent.AddHandler(RequestBringIntoViewEvent, (_, e) => e.Handled = true);
+        // The Teleport tab's auto-BringIntoView suppression is wired from the
+        // content's OWN Loaded event (OnTeleportContentLoaded), NOT here. A
+        // direct `TeleportContent.AddHandler(...)` in the ctor NREs at startup
+        // under Native AOT: the compiled x:Name field for a control nested in a
+        // non-selected TabItem is left null by the trimmer. See that handler.
         // Pane-collapse plumbing — IsVisible bindings on the panes' content
         // hide the body, but the column itself only shrinks if we mutate
         // ColumnDefinition.Width. Listen to the VM's bool property so the
@@ -653,6 +651,31 @@ public partial class MainWindow : Window
         if (DataContext is not MainWindowViewModel vm || !vm.Teleport.IsCapturingHotkey) return;
         if ((e.Source as Visual)?.FindAncestorOfType<Button>(includeSelf: true) is null)
             vm.Teleport.CancelActiveCapture();
+    }
+
+    private bool _teleportBringIntoViewWired;
+
+    /// <summary>
+    /// Suppress the Teleport tab's auto-BringIntoView. When a button / textbox
+    /// on the tab gains focus (a click, or focus moving on reconnect), the
+    /// enclosing ScrollViewer scrolls it into view and the long page "jumps",
+    /// sometimes out from under the cursor. Swallowing RequestBringIntoView on
+    /// the tab content — before it bubbles to the ScrollViewer — keeps the
+    /// scroll position put.
+    ///
+    /// Wired from the content's own <c>Loaded</c> event (via <paramref name="sender"/>),
+    /// NOT the ctor. The x:Name field for a control nested in a non-selected
+    /// TabItem is null under Native AOT — the trimmer drops the compiled field
+    /// assignment — so a direct <c>TeleportContent.AddHandler(...)</c> in the
+    /// ctor NRE-crashes startup. Taking the instance from <paramref name="sender"/>
+    /// sidesteps name resolution entirely (AOT-safe). Guarded so a tab
+    /// re-attach (switch away and back) doesn't stack duplicate handlers.
+    /// </summary>
+    private void OnTeleportContentLoaded(object? sender, RoutedEventArgs e)
+    {
+        if (_teleportBringIntoViewWired || sender is not Control content) return;
+        _teleportBringIntoViewWired = true;
+        content.AddHandler(RequestBringIntoViewEvent, (_, ev) => ev.Handled = true);
     }
 
     private void OnMainViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)

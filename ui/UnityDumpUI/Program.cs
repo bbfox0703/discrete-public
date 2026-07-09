@@ -36,7 +36,46 @@ internal static class Program
         // in Program.Main ensures every UI startup is covered.
         SQLitePCL.Batteries_V2.Init();
 
-        return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        try
+        {
+            return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        }
+        catch (Exception ex)
+        {
+            // AOT stack traces are gutted and a WinExe has no console, so an
+            // unhandled startup exception otherwise dies silently — the user
+            // sees the process vanish with no signal. Persist it next to the
+            // other app-data files so startup crashes are diagnosable. Best
+            // effort: never let the crash reporter throw over the real fault.
+            WriteCrashLog(ex);
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// Write an unhandled-startup-exception dump to
+    /// <c>%LOCALAPPDATA%\Discrete_Dumper\crash.log</c> (same app-data root as
+    /// window-state.txt / teleport-hotkeys.txt / the FileLogger). AOT-safe: no
+    /// reflection, best-effort IO. See docs/aot-pitfalls.md §8.3.
+    /// </summary>
+    private static void WriteCrashLog(Exception ex)
+    {
+        try
+        {
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string subRoot = Constants.LogRootSubpath;      // "Discrete_Dumper\Logs"
+            int slash = subRoot.IndexOf('\\');
+            string appRoot = slash > 0 ? subRoot[..slash] : subRoot;
+            string dir = System.IO.Path.Combine(localAppData, appRoot);
+            System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.WriteAllText(
+                System.IO.Path.Combine(dir, "crash.log"),
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Startup crash:{Environment.NewLine}{ex}{Environment.NewLine}");
+        }
+        catch
+        {
+            // best effort — nothing more we can safely do here
+        }
     }
 
     public static AppBuilder BuildAvaloniaApp() =>

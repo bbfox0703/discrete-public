@@ -2992,7 +2992,7 @@
                universal player chain. -->
           <TabItem Header="Teleport" IsVisible="{Binding ExperimentalEnabled}">
             <ScrollViewer HorizontalScrollBarVisibility="Auto">
-              <StackPanel x:Name="TeleportContent" Margin="12" Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
+              <StackPanel Loaded="OnTeleportContentLoaded" Margin="12" Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
 
                 <TextBlock Text="Single-player only. Online games will rubber-band or may flag teleports."
                            FontStyle="Italic" Opacity="0.7" TextWrapping="Wrap"/>
