@@ -573,6 +573,23 @@
                   <CheckBox Content="{StaticResource Browser.OptCollapseChain}"
                             IsChecked="{Binding Browser.CollapseChain, Mode=TwoWay}"
                             ToolTip.Tip="Fold a spine of single-child pointer dereferences (A → B → C, each object holding one pointer) into ONE CE multi-level-pointer entry with a combined Offsets chain. Needs Drilldown depth &gt; 1 to have a chain to fold." />
+                  <CheckBox Content="{StaticResource Browser.OptFillEmptyArraySlots}"
+                            IsChecked="{Binding Browser.FillEmptyArraySlots, Mode=TwoWay}"
+                            ToolTip.Tip="Assume every array slot holds data even when a slot is a null pointer or the whole collection is empty/unallocated (the game hasn't loaded that record yet). Null pointer slots + empty collections are filled from the element class's metadata layout so the CE table has the full per-element structure ready for any save; string slots reserve the longest length seen in the array. Populated slots keep their own live walk. Never expands framework types (List&lt;Transform&gt; etc. stay leaves)." />
+
+                  <!-- Feature 1: minimum CE String buffer length. -->
+                  <CheckBox Content="{StaticResource Browser.OptEnforceMinStringLength}"
+                            IsChecked="{Binding Browser.EnforceMinStringLength, Mode=TwoWay}"
+                            ToolTip.Tip="Reserve at least this many UTF-16 characters for every CE String field/element. A currently-short string still displays a longer value under a different save; a string already at or above the floor is left as-is. Off = each string uses exactly its decoded length." />
+                  <Grid ColumnDefinitions="200,160"
+                        IsEnabled="{Binding Browser.EnforceMinStringLength}">
+                    <TextBlock Grid.Column="0"
+                               Text="{StaticResource Browser.OptMinStringLength}"
+                               VerticalAlignment="Center" Opacity="0.8" />
+                    <NumericUpDown Grid.Column="1"
+                                   Value="{Binding Browser.MinStringLength, Mode=TwoWay}"
+                                   Minimum="0" Maximum="1024" Increment="8" />
+                  </Grid>
 
                   <Separator />
                   <CheckBox Content="{StaticResource Browser.OptRecordColors}"

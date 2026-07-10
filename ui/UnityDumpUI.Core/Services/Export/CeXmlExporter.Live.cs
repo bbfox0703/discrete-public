@@ -74,6 +74,25 @@ public static partial class CeXmlExporter
         // effect on non-DOTS games (no such types).
         bool engineInternal = IsEngineInternalType(f.Type);
 
+        // ---- Feature 2: a collection field with a null / empty handle is
+        //      classified as a plain Leaf upstream (InstanceFieldClassifier Rule 2
+        //      — no expand chevron in the Inspector). For CE export with fill on,
+        //      route it through the collection emitter anyway so it can be
+        //      templated from the element class's metadata (an unallocated "not
+        //      loaded yet" list). Strings are excluded (handled just below); the
+        //      framework skip is re-checked inside EmitCollectionLiveAsync.
+        if (kind == WalkedFieldKind.Leaf && options.FillEmptyArraySlots
+            && !IsManagedString(f.Type)
+            && (string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
+            && !string.IsNullOrEmpty(f.Type)
+            && InstanceFieldClassifier.TryParseCollectionType(f.Type!, out _, out _))
+        {
+            await EmitCollectionLiveAsync(sb, indent, ids, f, desc, rel, assemblyName,
+                                          options, live, visited, currentDepth, ct)
+                .ConfigureAwait(false);
+            return;
+        }
+
         // ---- String — always deref to the inline UTF-16 buffer (terminal, so
         //      not gated by depth). Emits the canonical _stringLength/_firstChar
         //      pair so CE shows both the length and the text.
@@ -89,7 +108,8 @@ public static partial class CeXmlExporter
                          vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
                 return;
             }
-            EmitStringDerefGroup(sb, indent, ids, slabel, rel, f.StringLength, options.PointerSize);
+            EmitStringDerefGroup(sb, indent, ids, slabel, rel, f.StringLength, options.PointerSize,
+                                 minChars: options.MinStringChars);
             return;
         }
 
@@ -602,7 +622,8 @@ public static partial class CeXmlExporter
                 {
                     string slabel = options.VerboseDescription && child.String is not null
                         ? $"{label} = \"{child.String}\"" : label;
-                    EmitStringDerefGroup(sb, indent, ids, slabel, rel, child.StringLength, options.PointerSize);
+                    EmitStringDerefGroup(sb, indent, ids, slabel, rel, child.StringLength, options.PointerSize,
+                                         minChars: options.MinStringChars);
                 }
             }
             else if (child.IsEnum)
@@ -823,13 +844,6 @@ public static partial class CeXmlExporter
         HashSet<string> visited, int currentDepth, CancellationToken ct)
     {
         bool canDrill = currentDepth < options.DrilldownDepth;
-        if (!canDrill || options.ArrayLimit <= 0
-            || string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
-        {
-            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options), showAsHex: true,
-                     address: rel, offsets: null);
-            return;
-        }
 
         int ptr = options.PointerSize == 4 ? 4 : 8;
         int itemsOff = 2 * ptr;        // List<T>._items managed-field offset
@@ -840,6 +854,52 @@ public static partial class CeXmlExporter
 
         bool isList = f.Type is { Length: > 0 } t
                       && InstanceFieldClassifier.TryParseCollectionType(t, out _, out bool il) && il;
+
+        // Element type + class spec are needed both to walk a live array and to
+        // fill an empty / null-slot one from metadata, so resolve them up front
+        // (was computed after the array deref; hoisting is a pure move).
+        InstanceFieldClassifier.TryParseCollectionType(f.Type ?? string.Empty,
+                                                       out string elementType, out _);
+        if (string.IsNullOrEmpty(elementType)) elementType = "System.Object";
+        (string ns, string name)? elemSpec = SplitElementClass(f.Type);
+        bool elemIsFrameworkRef = IsEngineInternalType(elementType)
+                                  || IsFrameworkReferenceType(elementType);
+        // Feature 2 gates for THIS array. fillArray = the user opted in and depth
+        // / limit allow slots. It intentionally does NOT exclude framework types,
+        // because System.String IS a framework type yet string slots are safe (and
+        // wanted) to fill — the string branch keys off elemIsString, so a
+        // non-string framework array (List<Transform>) sees no effect from it.
+        // fillFromMeta = the stricter gate for metadata-driven pointer-to-class
+        // fill: never fan out a framework / engine reference class, and only when
+        // the element class is resolvable and not a string.
+        bool fillArray    = options.FillEmptyArraySlots && canDrill && options.ArrayLimit > 0;
+        bool fillFromMeta = fillArray && !elemIsFrameworkRef
+                            && elemSpec is not null && !IsManagedString(elementType);
+
+        // Depth / limit off → leaf regardless of fill (no slot level to fill).
+        if (!canDrill || options.ArrayLimit <= 0)
+        {
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options), showAsHex: true,
+                     address: rel, offsets: null);
+            return;
+        }
+        // Unallocated collection (null field handle): the game hasn't built the
+        // list yet. Fill from metadata so the relative deref re-resolves once it
+        // does; else the historical watchable pointer leaf.
+        if (string.IsNullOrEmpty(f.Ptr) || f.Ptr == "0x0000000000000000")
+        {
+            if (fillFromMeta)
+            {
+                await EmitFilledEmptyCollectionAsync(sb, indent, ids, desc, rel, elementType,
+                                                     elemSpec!.Value, isList, ptr, itemsOff, dataOff,
+                                                     assemblyName, options, live, currentDepth, ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options), showAsHex: true,
+                     address: rel, offsets: null);
+            return;
+        }
 
         // Resolve the backing T[] object address (List<T> needs an extra deref
         // through _items; raw arrays point straight at the array object).
@@ -858,15 +918,20 @@ public static partial class CeXmlExporter
         }
         if (arrayAbs == 0)
         {
+            // Allocated-but-empty List (_items == null). Same treatment as an
+            // unallocated collection — fill from metadata when opted in.
+            if (fillFromMeta)
+            {
+                await EmitFilledEmptyCollectionAsync(sb, indent, ids, desc, rel, elementType,
+                                                     elemSpec!.Value, isList, ptr, itemsOff, dataOff,
+                                                     assemblyName, options, live, currentDepth, ct)
+                    .ConfigureAwait(false);
+                return;
+            }
             EmitLeaf(sb, indent, ids, options.VerboseDescription ? desc + "  <empty>" : desc,
                      vartype: PointerVartype(options), showAsHex: true, address: rel, offsets: null);
             return;
         }
-
-        InstanceFieldClassifier.TryParseCollectionType(f.Type ?? string.Empty,
-                                                       out string elementType, out _);
-        if (string.IsNullOrEmpty(elementType)) elementType = "System.Object";
-        (string ns, string name)? elemSpec = SplitElementClass(f.Type);
 
         WalkArrayResult? walk = null;
         try
@@ -920,16 +985,24 @@ public static partial class CeXmlExporter
             int stride = walk.ElementSize > 0 ? walk.ElementSize : ptr;
             bool elemIsString = IsManagedString(elementType);
             bool slotDrill = (currentDepth + 1) < options.DrilldownDepth;
-            // Element type is an engine/framework REFERENCE (UnityEngine.*,
-            // Unity.* DOTS, System.* internals): do NOT recurse into each
-            // element object — emit a watchable pointer leaf per slot instead.
-            // This is the dominant Copy-CE-XML bloat source: List<SpriteRenderer>,
-            // SpriteRenderer[], List<Texture2D/GameObject/Renderer/Transform> …
-            // each fanned out full component subtrees per element (~100k+ rows in
-            // the 706k-line sample). Collections of GAME types (List<EquipmentSlot>)
+            // elemIsFrameworkRef is hoisted above (also gates the fill flags):
+            // engine/framework REFERENCE element types (UnityEngine.*, Unity.*
+            // DOTS, System.* internals) are emitted as one watchable pointer leaf
+            // per slot instead of fanning out full component subtrees — the
+            // dominant Copy-CE-XML bloat source. GAME-type element collections
             // and value-struct elements (Color[], Vector3[]) are unaffected.
-            bool elemIsFrameworkRef = IsEngineInternalType(elementType)
-                                      || IsFrameworkReferenceType(elementType);
+
+            // Feature 2 (string arrays): reserve the SAME max UTF-16 length for
+            // every string slot so a currently-null / shorter slot still shows a
+            // longer sibling's text under a different save; floored by
+            // MinStringChars. Free — the walk already decoded each StringLength.
+            int fillChars = 0;
+            if (fillArray && elemIsString)
+            {
+                foreach (WalkedArrayElement e in elems)
+                    if (e.StringLength is int sl && sl > fillChars) fillChars = sl;
+                if (options.MinStringChars > fillChars) fillChars = options.MinStringChars;
+            }
             foreach (WalkedArrayElement elem in elems)
             {
                 string slotLabel = $"[{elem.Index}]";
@@ -940,7 +1013,8 @@ public static partial class CeXmlExporter
 
                 if (walk.IsPointer && elemIsString)
                 {
-                    if (string.IsNullOrEmpty(elem.Ptr) || elem.Ptr == "0x0000000000000000")
+                    bool slotNull = string.IsNullOrEmpty(elem.Ptr) || elem.Ptr == "0x0000000000000000";
+                    if (slotNull && !fillArray)
                     {
                         EmitLeaf(sb, elemIndent, ids, options.VerboseDescription ? slotLabel + "  <null>" : slotLabel,
                                  vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null,
@@ -950,12 +1024,37 @@ public static partial class CeXmlExporter
                     {
                         string lbl = options.VerboseDescription && elem.String is not null
                             ? $"{slotLabel} = \"{elem.String}\"" : slotLabel;
-                        EmitStringDerefGroup(sb, elemIndent, ids, lbl, slotRel, elem.StringLength, ptr, color: elemColor);
+                        // Fill on → uniform max length (fillChars) for null AND
+                        // populated slots; off → each slot's own decoded length
+                        // (with the standalone MinStringChars floor).
+                        EmitStringDerefGroup(sb, elemIndent, ids, lbl, slotRel,
+                                             fillArray ? fillChars : elem.StringLength, ptr,
+                                             minChars: fillArray ? 0 : options.MinStringChars, color: elemColor);
                     }
                 }
                 else if (walk.IsPointer)
                 {
                     ulong slotPtr = ParseHexLoose(elem.Ptr ?? "0");
+                    // Feature 2: a null pointer slot in an otherwise-populated
+                    // array — fill it from the element class's metadata layout so
+                    // it carries the same field structure a populated sibling does
+                    // and re-resolves once the game writes an instance here. Only
+                    // when the sibling path WOULD drill (slotDrill) and the element
+                    // is a resolvable game type (fillFromMeta already excludes
+                    // framework/engine refs). A fresh type-keyed cycle set per slot
+                    // (address-agnostic — there is no live pointer to key on).
+                    if (slotPtr == 0 && fillFromMeta && slotDrill)
+                    {
+                        OpenGroup(sb, elemIndent, ids, slotLabel, slotRel,
+                                  offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                                  varType: null, showAsHex: true, color: elemColor);
+                        await EmitMetadataBodyAsync(sb, elemIndent + "  ", ids, assemblyName,
+                                                    elemSpec!.Value.ns, elemSpec!.Value.name,
+                                                    options, live, new HashSet<string>(),
+                                                    currentDepth + 2, ct).ConfigureAwait(false);
+                        CloseGroup(sb, elemIndent);
+                        continue;
+                    }
                     if (slotPtr == 0 || !slotDrill || elemIsFrameworkRef || !visited.Add(elem.Ptr!))
                     {
                         EmitLeaf(sb, elemIndent, ids, slotLabel,
@@ -1019,6 +1118,260 @@ public static partial class CeXmlExporter
         }
 
         if (innerGroup) CloseGroup(sb, indent + "  ");
+        CloseGroup(sb, indent);
+    }
+
+    // ---------- Feature 2: metadata-driven fill of empty / null slots -------
+
+    /// <summary>
+    /// Emit an unallocated / empty collection (null field handle, or a List whose
+    /// <c>_items</c> is null) as a fully-templated CE group: outer deref of the
+    /// field pointer, an inner <c>_items</c> deref for List&lt;T&gt;, then
+    /// <see cref="ExportOptions.ArrayLimit"/> per-slot groups whose bodies come
+    /// from the element class's METADATA layout (no live object needed). Every
+    /// address is relative (slotRel / RelAddr), so once the game allocates the
+    /// collection and writes instances into the slots CE dereferences the now-live
+    /// pointers and the whole table resolves.
+    /// <para/>
+    /// Only REFERENCE element classes are filled: their slot stride is exactly the
+    /// pointer size and each slot is a pointer deref. A VALUE-type element (struct
+    /// / enum) is stored inline at a stride we cannot derive exactly from metadata
+    /// (alignment / padding), so rather than risk a mis-strided, wrongly-deref'd
+    /// table we fall back to a single watchable pointer leaf. Reference-vs-value is
+    /// decided authoritatively from the element class's base type
+    /// (System.ValueType / System.Enum ⇒ value), resolved once and reused per slot.
+    /// </summary>
+    private static async Task EmitFilledEmptyCollectionAsync(
+        StringBuilder sb, string indent, IdGen ids, string desc, string rel,
+        string elementType, (string ns, string name) elemSpec, bool isList,
+        int ptr, int itemsOff, int dataOff,
+        string? assemblyName, ExportOptions options, ILiveExportSource live,
+        int currentDepth, CancellationToken ct)
+    {
+        // Resolve the element class once. If it can't be resolved, or it's a value
+        // type (inline, unknown stride), don't fabricate a reference-array template
+        // — emit the historical watchable pointer leaf instead.
+        GetClassInfoResult? elemInfo = await ResolveClassInfoAsync(
+            assemblyName, elemSpec.ns, elemSpec.name, live, ct).ConfigureAwait(false);
+        if (elemInfo is null || IsValueTypeClass(elemInfo))
+        {
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options), showAsHex: true,
+                     address: rel, offsets: null);
+            return;
+        }
+
+        string headerLabel = options.VerboseDescription
+            ? $"{desc}  [empty, filled {options.ArrayLimit} of {elementType}]"
+            : desc;
+
+        // Outer group: deref the field pointer (List object or array object).
+        OpenGroup(sb, indent, ids, headerLabel, rel,
+                  offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                  varType: null, showAsHex: true);
+
+        string elemIndent = indent + "  ";
+        if (isList)
+        {
+            OpenGroup(sb, elemIndent, ids, FieldDesc("_items", elementType + "[]", options), RelAddr(itemsOff),
+                      offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                      varType: null, showAsHex: true);
+            elemIndent += "  ";
+        }
+
+        bool slotDrill = (currentDepth + 1) < options.DrilldownDepth;
+        for (int i = 0; i < options.ArrayLimit; ++i)
+        {
+            string slotLabel  = $"[{i}]";
+            string slotRel    = RelAddr(dataOff + i * ptr);   // reference elements → pointer stride
+            string? elemColor = RecordColorFor(options, i);
+            if (!slotDrill)
+            {
+                EmitLeaf(sb, elemIndent, ids, slotLabel,
+                         vartype: PointerVartype(options), showAsHex: true, address: slotRel, offsets: null,
+                         color: elemColor);
+                continue;
+            }
+            OpenGroup(sb, elemIndent, ids, slotLabel, slotRel,
+                      offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                      varType: null, showAsHex: true, color: elemColor);
+            await EmitMetadataClassAsync(sb, elemIndent + "  ", ids, elemInfo, assemblyName,
+                                         options, live, new HashSet<string>(), currentDepth + 2, ct)
+                .ConfigureAwait(false);
+            CloseGroup(sb, elemIndent);
+        }
+
+        if (isList) CloseGroup(sb, indent + "  ");
+        CloseGroup(sb, indent);
+    }
+
+    /// <summary>Resolve a class layout across the same assembly candidates the live
+    /// walk uses (owning assembly first, then well-known images by namespace).
+    /// Returns null when nothing resolves. Soft-fails per candidate.</summary>
+    private static async Task<GetClassInfoResult?> ResolveClassInfoAsync(
+        string? assemblyName, string ns, string name, ILiveExportSource live, CancellationToken ct)
+    {
+        foreach (string asm in BuildExportAssemblyCandidates(assemblyName, ns))
+        {
+            GetClassInfoResult? info;
+            try { info = await live.GetClassInfoAsync(asm, ns, name, ct).ConfigureAwait(false); }
+            catch { info = null; }
+            if (info is not null && string.IsNullOrEmpty(info.Error) && info.Fields is { Count: > 0 })
+                return info;
+        }
+        return null;
+    }
+
+    /// <summary>True when a resolved class is a managed VALUE type — its base is
+    /// <c>System.ValueType</c> (struct) or <c>System.Enum</c> (enum). getClassInfo
+    /// reports the base as <see cref="GetClassInfoResult.Parent"/> = {ns,name}.
+    /// A value type is stored inline (no pointer to deref); a reference type is
+    /// not. This is the only reliable value/reference signal the metadata layer
+    /// carries (FieldEntry has no per-field is_value_type flag).</summary>
+    private static bool IsValueTypeClass(GetClassInfoResult info)
+        => info.Parent is { Namespace: "System", Name: "ValueType" or "Enum" };
+
+    /// <summary>True when a resolved class is an enum (base <c>System.Enum</c>).</summary>
+    private static bool IsEnumClass(GetClassInfoResult info)
+        => info.Parent is { Namespace: "System", Name: "Enum" };
+
+    /// <summary>
+    /// Emit a class's field tree from METADATA (<c>getClassInfo</c>) rather than a
+    /// live object — used to fill null pointer slots / empty collections so they
+    /// carry the same structure a populated instance would. Resolves the class,
+    /// then delegates to <see cref="EmitMetadataClassAsync"/>. Silent no-op when
+    /// the class can't be resolved.
+    /// </summary>
+    private static async Task EmitMetadataBodyAsync(
+        StringBuilder sb, string indent, IdGen ids,
+        string? assemblyName, string ns, string name, ExportOptions options,
+        ILiveExportSource live, HashSet<string> typeVisited, int currentDepth,
+        CancellationToken ct)
+    {
+        GetClassInfoResult? info = await ResolveClassInfoAsync(assemblyName, ns, name, live, ct)
+            .ConfigureAwait(false);
+        if (info is null) return;
+        await EmitMetadataClassAsync(sb, indent, ids, info, assemblyName, options, live,
+                                     typeVisited, currentDepth, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Emit an already-resolved class's inherited-then-declared fields.
+    /// Walks the base-class chain first (mirrors the live inheritance-chain walk),
+    /// bounded by a type-keyed visited set + <see cref="ExportOptions.DrilldownDepth"/>.
+    /// Every field is addressed relative to the (deref'd) object.</summary>
+    private static async Task EmitMetadataClassAsync(
+        StringBuilder sb, string indent, IdGen ids, GetClassInfoResult info,
+        string? assemblyName, ExportOptions options, ILiveExportSource live,
+        HashSet<string> typeVisited, int currentDepth, CancellationToken ct)
+    {
+        string typeKey = $"{info.Namespace}.{info.Name}";
+        if (!typeVisited.Add(typeKey)) return;   // self-referential type — stop
+        try
+        {
+            // Inherited fields first. Stop at framework / value-type base classes
+            // (System.Object / ValueType / Enum and any framework namespace).
+            if (info.Parent is { Name: { Length: > 0 } pn } parent
+                && !(parent.Namespace == "System" && pn is "Object" or "ValueType" or "Enum")
+                && !IsFrameworkReferenceType($"{parent.Namespace}.{pn}"))
+            {
+                await EmitMetadataBodyAsync(sb, indent, ids, assemblyName,
+                                            parent.Namespace ?? string.Empty, pn, options,
+                                            live, typeVisited, currentDepth, ct).ConfigureAwait(false);
+            }
+            if (info.Fields is { Count: > 0 } fields)
+            {
+                foreach (FieldEntry fld in fields)
+                {
+                    if (fld.Static) continue;
+                    await EmitMetadataFieldAsync(sb, indent, ids, fld, assemblyName,
+                                                 options, live, typeVisited, currentDepth, ct)
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+        finally { typeVisited.Remove(typeKey); }
+    }
+
+    /// <summary>One metadata field → CE entry. Known primitive scalars → typed
+    /// leaf; String → the standard deref group (no live length → fallback /
+    /// MinStringChars floor). For a GAME type that <see cref="UnityTypeMap"/> can't
+    /// classify (it defaults unknown types to pointer-shaped, so an ENUM or custom
+    /// VALUE struct is indistinguishable from a reference here), resolve the class
+    /// and route on its base type: enum → inline 4-byte signed leaf (matches the
+    /// live walk); value struct → inline group (NO deref) + recurse; reference →
+    /// pointer deref group + recurse. Collections / framework / engine refs / an
+    /// unresolvable type / a depth-capped reference → a watchable pointer leaf
+    /// (a metadata layout has no live SZARRAY offset, so nested arrays are never
+    /// fabricated).</summary>
+    private static async Task EmitMetadataFieldAsync(
+        StringBuilder sb, string indent, IdGen ids, FieldEntry fld,
+        string? assemblyName, ExportOptions options, ILiveExportSource live,
+        HashSet<string> typeVisited, int currentDepth, CancellationToken ct)
+    {
+        string desc = FieldDesc(fld.Name, fld.Type, options, fld.Offset);
+        string rel  = RelAddr(fld.Offset);
+        ManagedTypeShape shape = UnityTypeMap.Resolve(fld.Type);
+
+        // Known primitive scalar (Int32 / Single / Boolean / …) → typed leaf.
+        if (!shape.IsPointer)
+        {
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(fld.Type);
+            EmitLeaf(sb, indent, ids, desc, vartype: shape.CeTypeKeyword,
+                     showAsHex: hex, showAsSigned: signed, address: rel, offsets: null);
+            return;
+        }
+        if (IsManagedString(fld.Type))
+        {
+            EmitStringDerefGroup(sb, indent, ids, desc, rel, charLength: null, options.PointerSize,
+                                 minChars: options.MinStringChars);
+            return;
+        }
+        // Collections / dictionaries / framework / engine refs / unresolvable name
+        // → watchable pointer leaf (never fabricate a nested-array chain here).
+        bool isCollection = !string.IsNullOrEmpty(fld.Type)
+                            && UnityTypeMap.IsCollectionType(fld.Type!);
+        if (isCollection || IsEngineInternalType(fld.Type) || IsFrameworkReferenceType(fld.Type)
+            || !InstanceFieldClassifier.TryParseClassName(fld.Type, out string cns, out string cname))
+        {
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
+                     showAsHex: true, address: rel, offsets: null);
+            return;
+        }
+
+        // Ambiguous GAME type — resolve its base to tell enum / value struct /
+        // reference apart (UnityTypeMap can't). Unresolvable → watchable leaf.
+        GetClassInfoResult? mi = await ResolveClassInfoAsync(assemblyName, cns, cname, live, ct)
+            .ConfigureAwait(false);
+        if (mi is null)
+        {
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
+                     showAsHex: true, address: rel, offsets: null);
+            return;
+        }
+        // Enum is terminal — inline 4-byte signed leaf regardless of depth
+        // (matches the live Leaf/enum emit).
+        if (IsEnumClass(mi))
+        {
+            EmitLeaf(sb, indent, ids, desc, vartype: "4 Bytes",
+                     showAsHex: false, showAsSigned: true, address: rel, offsets: null);
+            return;
+        }
+        bool valueStruct = IsValueTypeClass(mi);
+        // Depth cap: don't expand further. A reference → watchable pointer leaf;
+        // a value struct → also a leaf (its inline members aren't expanded here).
+        if (currentDepth >= options.DrilldownDepth)
+        {
+            EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
+                     showAsHex: true, address: rel, offsets: null);
+            return;
+        }
+        // Within depth: value struct = inline group (NO Offsets — storage lives at
+        // parent+offset); reference = pointer deref group (Offsets=[0]).
+        OpenGroup(sb, indent, ids, desc, rel,
+                  offsets: valueStruct ? null : new[] { 0 },
+                  collapsed: options.CollapsePointerNodes, varType: null, showAsHex: true);
+        await EmitMetadataClassAsync(sb, indent + "  ", ids, mi, assemblyName,
+                                     options, live, typeVisited, currentDepth + 1, ct)
+            .ConfigureAwait(false);
         CloseGroup(sb, indent);
     }
 
@@ -1115,12 +1468,17 @@ public static partial class CeXmlExporter
     private static void EmitStringDerefGroup(
         StringBuilder sb, string indent, IdGen ids,
         string description, string rel, int? charLength, int pointerSize,
-        string? color = null)
+        int minChars = 0, string? color = null)
     {
         int ptr = pointerSize == 4 ? 4 : 8;
         int lenOff   = 2 * ptr;          // int32 length
         int charsOff = 2 * ptr + 4;      // first UTF-16 char
         int len = charLength is int n && n >= 0 ? n : 64;
+        // Feature 1: floor the reserved UTF-16 buffer to the configured minimum
+        // so a currently-short (or another save's longer) string still displays.
+        // ZeroTerminate=1 keeps CE stopping at the real NUL, so over-reserving is
+        // harmless. minChars==0 (feature off) leaves len exactly as decoded.
+        if (minChars > len) len = minChars;
 
         OpenGroup(sb, indent, ids, description, rel,
                   offsets: new[] { 0 }, collapsed: true,

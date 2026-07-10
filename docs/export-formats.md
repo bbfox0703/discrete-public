@@ -113,6 +113,46 @@ Each field is classified by `WalkedFieldKind` and rendered:
 | `Collapse pointer/array nodes` | off | Render pointer / array as a single line instead of expanding children. |
 | `Use live data` | off | Switch from structure to live mode (real addresses + walked array elements). |
 | `CE XML base address` | inferred | Override for structure mode's root `<Address>`. |
+| `Reserve a minimum string length` + `Min string length (chars)` | off / 32 | Floor every CE `String` `<Length>` to N characters. A currently-short string still reserves enough UTF-16 buffer to display a longer value under a different save; a string already ≥ N is left as-is. `ZeroTerminate=1` keeps CE stopping at the real NUL. Threaded through the single `EmitStringDerefGroup` choke point, so it covers instance-field, flattened-struct-member, and array-element string surfaces. |
+| `Fill empty array slots` | off | Assume every array slot holds data even when a slot is a null pointer or the whole collection is empty/unallocated (the game hasn't loaded that record yet). See below. |
+
+#### `Fill empty array slots` (live mode)
+
+Different save files populate different slots, so a live array is often
+heterogeneous — some slots point at real instances, some are null (`0x0`), and
+the whole list may not be allocated yet. Off, the exporter emits only what is
+live now (null slots → bare `[i]` leaf, empty list → one watchable pointer). On,
+every slot is templated so the CE table carries the full per-element structure
+for any save:
+
+- **Null pointer slots** in a populated array are filled from the **element
+  class's metadata** (`GetClassInfoAsync` — no live object needed), addressed
+  with the same relative deref chain (`+dataOff+i*stride`, `Offsets=[0]`) a
+  populated sibling uses. Because no live pointer value ever enters the table,
+  the slot re-resolves the moment the game writes an instance into it. Populated
+  slots keep their own live walk (full fidelity).
+- **Empty / unallocated collections** (null handle or `List._items == null`) are
+  filled with `Array element limit` metadata slots so the table is ready before
+  the game builds the list.
+- **String slots** reserve the **max** length observed across the array (floored
+  by `Min string length` when that option is on), so the array reads uniformly.
+- **Framework / engine reference** element types (`List<Transform>`,
+  `SpriteRenderer[]`, `Unity.Entities.*`, `System.*` …) are **never** filled or
+  fanned out — the framework skip always wins.
+
+Metadata-filled bodies walk the base-class chain (inherited fields first, like
+the live walk). Because a metadata `FieldEntry` carries no per-field
+enum/value-type flag, an ambiguous game-type member is classified from the
+member class's **base type** (`getClassInfo`'s `parent`): `System.Enum` → inline
+4-byte signed leaf, `System.ValueType` → inline group (no deref), otherwise a
+reference → pointer-deref group; each recurses within `Drilldown depth`. Nested
+collections inside a metadata body are emitted as watchable leaves (a metadata
+layout lacks the live SZARRAY data offset, so a nested-array chain is never
+fabricated). Only **reference** element classes are filled for the empty/
+unallocated-collection case (exact pointer stride); a value-struct element array
+whose handle is null falls back to a single leaf rather than risk a mis-strided
+inline fill. Filled slots are emitted collapsed when `Collapse pointer/array
+nodes` is on, so slots that stay null don't visually dominate the table.
 
 ---
 
@@ -489,7 +529,7 @@ options + (for CE XML live mode) the optional walked-instance tree.
 | [CsxExporter.cs](../ui/UnityDumpUI.Core/Services/Export/CsxExporter.cs) | `.csx` Structure Dissect emitter |
 | [SdkHeaderExporter.cs](../ui/UnityDumpUI.Core/Services/Export/SdkHeaderExporter.cs) | `.h` C/C++ struct emitter |
 | [SymbolExporter.cs](../ui/UnityDumpUI.Core/Services/Export/SymbolExporter.cs) | x64dbg `.dd64` / Ghidra label / IDA `.idc` emitter (IL2CPP only) |
-| [ExportOptions.cs](../ui/UnityDumpUI.Core/Services/Export/ExportOptions.cs) | Shared option DTO (depth, array limit, collapse, live, base address) |
+| [ExportOptions.cs](../ui/UnityDumpUI.Core/Services/Export/ExportOptions.cs) | Shared option DTO (depth, array limit, collapse, live, base address, min string length, fill empty array slots) |
 | [UnityTypeMap.cs](../ui/UnityDumpUI.Core/Services/Export/UnityTypeMap.cs) | Type-name → CE / C / size mapping |
 | [IClassInfoLookup.cs](../ui/UnityDumpUI.Core/Services/Export/IClassInfoLookup.cs) | Drilldown peer lookup interface |
 | [AobAaScriptGenerator.cs](../ui/UnityDumpUI.Core/Services/Export/AobAaScriptGenerator.cs) | Phase 18c AOB AA-script emitter |

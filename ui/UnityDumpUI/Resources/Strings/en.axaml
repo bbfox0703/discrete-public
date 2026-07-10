@@ -66,6 +66,9 @@
   <sys:String x:Key="Browser.OptFlattenLeafRecords">Flatten leaf records (also structs with string members)</sys:String>
   <sys:String x:Key="Browser.OptCollapseLeafPointers">Collapse pointer → single scalar into one record</sys:String>
   <sys:String x:Key="Browser.OptCollapseChain">Collapse single-child pointer chain into one entry</sys:String>
+  <sys:String x:Key="Browser.OptFillEmptyArraySlots">Fill empty array slots (assume every slot has data)</sys:String>
+  <sys:String x:Key="Browser.OptEnforceMinStringLength">Reserve a minimum string length</sys:String>
+  <sys:String x:Key="Browser.OptMinStringLength">Min string length (chars)</sys:String>
   <sys:String x:Key="Browser.OptRecordColors">Record colours (tint alternating array rows)</sys:String>
   <sys:String x:Key="Browser.OptRecordColorEven">Even row RRGGBB</sys:String>
   <sys:String x:Key="Browser.OptRecordColorOdd">Odd row RRGGBB</sys:String>

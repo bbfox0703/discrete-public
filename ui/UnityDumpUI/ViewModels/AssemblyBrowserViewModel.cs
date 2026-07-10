@@ -123,6 +123,16 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// <summary>Odd-row colour, RRGGBB hex; empty = CE theme.</summary>
     [ObservableProperty] private string _recordColorOdd = string.Empty;
 
+    // ---------- Feature 1 / Feature 2 opt-ins ---------------------------
+    /// <summary>Feature 1: floor every CE String &lt;Length&gt; to
+    /// <see cref="MinStringLength"/> characters. Off by default.</summary>
+    [ObservableProperty] private bool _enforceMinStringLength;
+    /// <summary>Feature 1: the minimum CE String buffer length (characters).</summary>
+    [ObservableProperty] private int  _minStringLength = 32;
+    /// <summary>Feature 2: fill null pointer slots / empty collections from the
+    /// element class's metadata so every array slot carries data. Off by default.</summary>
+    [ObservableProperty] private bool _fillEmptyArraySlots;
+
     internal ExportOptions CurrentExportOptions => new(
         DrilldownDepth: Math.Max(0, DrilldownDepth),
         ArrayLimit:     Math.Max(0, ArrayLimit),
@@ -136,7 +146,10 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         CollapseChain:        CollapseChain,
         RecordColors:         RecordColors,
         RecordColorEven:      string.IsNullOrWhiteSpace(RecordColorEven) ? null : RecordColorEven,
-        RecordColorOdd:       string.IsNullOrWhiteSpace(RecordColorOdd)  ? null : RecordColorOdd);
+        RecordColorOdd:       string.IsNullOrWhiteSpace(RecordColorOdd)  ? null : RecordColorOdd,
+        EnforceMinStringLength: EnforceMinStringLength,
+        MinStringLength:        Math.Max(0, MinStringLength),
+        FillEmptyArraySlots:    FillEmptyArraySlots);
 
     /// <summary>Raised when any persisted export knob changes, so the owner can
     /// write the full <see cref="UserSettings"/> back to disk. Distinct from the
@@ -159,6 +172,9 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     partial void OnRecordColorEvenChanged(string value)    => ExportOptionsChanged?.Invoke();
     partial void OnRecordColorOddChanged(string value)     => ExportOptionsChanged?.Invoke();
     partial void OnCeXmlBaseAddressChanged(string value)   => ExportOptionsChanged?.Invoke();
+    partial void OnEnforceMinStringLengthChanged(bool value) => ExportOptionsChanged?.Invoke();
+    partial void OnMinStringLengthChanged(int value)         => ExportOptionsChanged?.Invoke();
+    partial void OnFillEmptyArraySlotsChanged(bool value)    => ExportOptionsChanged?.Invoke();
 
     /// <summary>Push persisted export knobs from loaded <see cref="UserSettings"/>
     /// into the bound properties. Numeric / true-default keys are nullable in the
@@ -182,6 +198,9 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(s.ExportRecordColorEven)) RecordColorEven = s.ExportRecordColorEven!;
         RecordColorOdd          = s.ExportRecordColorOdd ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(s.ExportCeXmlBaseAddress)) CeXmlBaseAddress = s.ExportCeXmlBaseAddress!;
+        EnforceMinStringLength  = s.ExportEnforceMinStringLength;
+        if (s.ExportMinStringLength is int msl) MinStringLength = msl;
+        FillEmptyArraySlots     = s.ExportFillEmptyArraySlots;
     }
 
     /// <summary>Copy current export knobs into <paramref name="s"/> ahead of a
@@ -202,6 +221,9 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         s.ExportRecordColorEven      = string.IsNullOrWhiteSpace(RecordColorEven) ? null : RecordColorEven;
         s.ExportRecordColorOdd       = string.IsNullOrWhiteSpace(RecordColorOdd)  ? null : RecordColorOdd;
         s.ExportCeXmlBaseAddress     = CeXmlBaseAddress;
+        s.ExportEnforceMinStringLength = EnforceMinStringLength;
+        s.ExportMinStringLength        = MinStringLength;
+        s.ExportFillEmptyArraySlots    = FillEmptyArraySlots;
     }
 
     public AssemblyBrowserViewModel(BackendAdapter backend, FileLogger logger)
