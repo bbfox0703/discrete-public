@@ -129,8 +129,18 @@ for any save:
   class's metadata** (`GetClassInfoAsync` — no live object needed), addressed
   with the same relative deref chain (`+dataOff+i*stride`, `Offsets=[0]`) a
   populated sibling uses. Because no live pointer value ever enters the table,
-  the slot re-resolves the moment the game writes an instance into it. Populated
-  slots keep their own live walk (full fidelity).
+  the slot re-resolves the moment the game writes an instance into it.
+- **Polymorphic collections** — a collection declared as base type `T` that
+  actually holds subclass instances (e.g. `LibraryItemData[]` holding `Book`
+  entries with more fields). Walking each populated slot by its object header
+  shows each slot's *real* runtime type, so a `Book` slot (many fields) sits
+  next to a base slot (few) as structurally different rows. When type variance
+  is detected across the populated slots, **every** slot is instead templated
+  from the **richest** concrete type found (the one with the most fields), so
+  the whole array is uniform and any slot resolves for a fully-completed save
+  where it might hold the richest subclass. A **monomorphic** array (every slot
+  exactly the declared type) keeps its faithful per-slot live walk (which also
+  preserves live values and resolves generic instantiations metadata can't).
 - **Empty / unallocated collections** (null handle or `List._items == null`) are
   filled with `Array element limit` metadata slots so the table is ready before
   the game builds the list.

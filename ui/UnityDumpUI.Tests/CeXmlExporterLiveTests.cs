@@ -34,14 +34,19 @@ public class CeXmlExporterLiveTests
         // because the exporter queries with the X16-padded form while tests
         // set up keys in shorthand — Norm() bridges the two so a "0x20000000"
         // store matches a "0x0000000020000000" lookup.
-        private readonly Dictionary<string, List<WalkedField>> _instances = new();
+        private readonly Dictionary<string, WalkInstanceResult> _instances = new();
         private readonly Dictionary<string, WalkArrayResult>   _arrays    = new();
         private readonly Dictionary<string, string>            _memory    = new();
         // Metadata class layouts keyed by "ns.name" — feeds GetClassInfoAsync so
         // the Feature 2 metadata fill (null slots / empty collections) resolves.
         private readonly Dictionary<string, GetClassInfoResult> _classes  = new();
 
-        public void AddInstance(string addr, List<WalkedField> fields) => _instances[Norm(addr)] = fields;
+        // ns/name are optional — set them when a test needs the header walk to
+        // report a concrete runtime type (Feature 2 richest-subclass discovery).
+        public void AddInstance(string addr, List<WalkedField> fields,
+                                string? @namespace = null, string? name = null)
+            => _instances[Norm(addr)] = new WalkInstanceResult
+            { Fields = fields, Namespace = @namespace, Name = name };
         public void AddArray(string addr, WalkArrayResult r)           => _arrays[Norm(addr)]    = r;
         public void AddMemory(string addr, string leHex)               => _memory[Norm(addr)]    = leHex;
         public void AddClassInfo(string @namespace, string name, List<FieldEntry> fields, ClassRef? parent = null)
@@ -75,12 +80,12 @@ public class CeXmlExporterLiveTests
 
         public Task<WalkInstanceResult> WalkInstanceAsync(
             string address, string assembly, string? @namespace, string name, CancellationToken ct = default)
-            => Task.FromResult(_instances.TryGetValue(Norm(address), out List<WalkedField>? f)
-                ? new WalkInstanceResult { Fields = f } : new WalkInstanceResult());
+            => Task.FromResult(_instances.TryGetValue(Norm(address), out WalkInstanceResult? r)
+                ? r : new WalkInstanceResult());
 
         public Task<WalkInstanceResult> WalkInstanceFromHeaderAsync(string address, CancellationToken ct = default)
-            => Task.FromResult(_instances.TryGetValue(Norm(address), out List<WalkedField>? f)
-                ? new WalkInstanceResult { Fields = f } : new WalkInstanceResult());
+            => Task.FromResult(_instances.TryGetValue(Norm(address), out WalkInstanceResult? r)
+                ? r : new WalkInstanceResult());
     }
 
     private static JsonElement Json(string raw)
@@ -853,5 +858,78 @@ public class CeXmlExporterLiveTests
         Assert.Contains("coords_", xml);                             // field still listed (as a leaf)
         Assert.DoesNotContain("empty, filled", xml);                 // NOT templated as a reference array
         Assert.DoesNotContain("structFieldX", xml);                  // struct members not fanned out
+    }
+
+    [Fact]
+    public async Task RenderLive_FillEmptyArraySlots_PolymorphicArray_AllSlotsUseRichestSubclass()
+    {
+        // A LibraryItemData[] that actually holds a MIX of Book (subclass, more
+        // fields) and base LibraryItemData, plus a null slot. With fill on, EVERY
+        // slot is templated from the RICHEST concrete type (Book) so the array is
+        // uniform and any slot resolves for a fully-completed save — instead of a
+        // Book slot (3 fields) sitting next to a base slot (1) as different shapes.
+        const string baseAddr = "0x000000000000B900";
+        const string arrayObj = "0x0000000000500000";
+        const string book0    = "0x0000000000600000";
+        const string base2    = "0x0000000000600200";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "items_", Type = "MainGame.LibraryItemData[]", Offset = 0x18,
+                    Address = "0x000000000000B918", Ptr = arrayObj },
+        });
+        live.AddArray(arrayObj, new WalkArrayResult
+        {
+            Length = 3, Count = 3, IsPointer = true, ElementSize = 8,
+            DataAddress = "0x0000000000500020", ElementClassName = "LibraryItemData",
+            Elements = new List<WalkedArrayElement>
+            {
+                new() { Index = 0, Ptr = book0 },                    // Book (rich)
+                new() { Index = 1, Ptr = "0x0000000000000000" },     // null
+                new() { Index = 2, Ptr = base2 },                    // base LibraryItemData
+            },
+        });
+        // Header walks report the concrete runtime type: slot 0 → Book (3 fields),
+        // slot 2 → base LibraryItemData (1 field).
+        live.AddInstance(book0, new List<WalkedField>
+        {
+            new() { Name = "id",        Type = "System.Int32",   Offset = 0x10, Value = Json("1") },
+            new() { Name = "unlocked",  Type = "System.Boolean", Offset = 0x14, Value = Json("true") },
+            new() { Name = "pageCount", Type = "System.Int32",   Offset = 0x18, Value = Json("42") },
+        }, "MainGame", "Book");
+        live.AddInstance(base2, new List<WalkedField>
+        {
+            new() { Name = "id", Type = "System.Int32", Offset = 0x10, Value = Json("2") },
+        }, "MainGame", "LibraryItemData");
+        // Metadata: Book (richest) = id + unlocked + pageCount; base = id only.
+        live.AddClassInfo("MainGame", "Book", new List<FieldEntry>
+        {
+            new() { Name = "id",        Type = "System.Int32",   Offset = 0x10 },
+            new() { Name = "unlocked",  Type = "System.Boolean", Offset = 0x14 },
+            new() { Name = "pageCount", Type = "System.Int32",   Offset = 0x18 },
+        });
+        live.AddClassInfo("MainGame", "LibraryItemData", new List<FieldEntry>
+        {
+            new() { Name = "id", Type = "System.Int32", Offset = 0x10 },
+        });
+
+        var on = ExportOptions.Defaults with
+        { LiveData = true, PointerSize = 8, DrilldownDepth = 2, FillEmptyArraySlots = true };
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "MainGame", on, live,
+            TestContext.Current.CancellationToken);
+
+        // All 3 slots (Book, null, base) carry the richest (Book) structure —
+        // pageCount is Book-only, so it appears once per slot = 3 times.
+        Assert.Equal(3, CountOccurrences(xml, "pageCount"));
+        Assert.Equal(3, CountOccurrences(xml, "unlocked"));
+
+        // With fill OFF, the base slot [2] keeps its own 1-field walk and the null
+        // slot is a bare leaf → pageCount comes only from the Book slot (once).
+        var off = on with { FillEmptyArraySlots = false };
+        string xmlOff = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "MainGame", off, live,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(1, CountOccurrences(xmlOff, "pageCount"));
     }
 }
