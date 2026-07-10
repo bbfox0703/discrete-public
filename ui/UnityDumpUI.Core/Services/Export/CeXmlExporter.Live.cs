@@ -1003,6 +1003,23 @@ public static partial class CeXmlExporter
                     if (e.StringLength is int sl && sl > fillChars) fillChars = sl;
                 if (options.MinStringChars > fillChars) fillChars = options.MinStringChars;
             }
+
+            // Feature 2 (polymorphic reference arrays): a collection declared as
+            // base type T often holds subclass instances (e.g. LibraryItemData[]
+            // actually holding Book — 19 fields vs the base's 7). Walking each
+            // populated slot via its header shows each slot's REAL runtime type, so
+            // a Book slot sits next to a base slot as structurally different rows.
+            // To make the table uniform AND ready for a fully-completed save (where
+            // any slot could hold the richest subclass), discover the richest
+            // concrete type among the populated slots and emit EVERY slot from that
+            // type's metadata template. Reference-element GAME arrays only;
+            // string / value-struct / framework element arrays are unaffected.
+            GetClassInfoResult? richestInfo = null;
+            if (fillFromMeta && walk.IsPointer && !elemIsString && !elemIsFrameworkRef && slotDrill)
+                richestInfo = await DiscoverRichestElementAsync(elems, elemSpec!.Value,
+                                                                assemblyName, live, ct)
+                    .ConfigureAwait(false);
+
             foreach (WalkedArrayElement elem in elems)
             {
                 string slotLabel = $"[{elem.Index}]";
@@ -1034,6 +1051,23 @@ public static partial class CeXmlExporter
                 }
                 else if (walk.IsPointer)
                 {
+                    // Polymorphic-uniform path: emit EVERY slot (null or populated)
+                    // from the richest concrete type's metadata template, so the
+                    // whole array is uniform and any slot resolves for a fully-
+                    // populated save. Only when a richest type was discovered
+                    // (≥1 populated slot with a resolvable class); otherwise fall
+                    // through to the per-slot path below.
+                    if (richestInfo is not null)
+                    {
+                        OpenGroup(sb, elemIndent, ids, slotLabel, slotRel,
+                                  offsets: new[] { 0 }, collapsed: options.CollapsePointerNodes,
+                                  varType: null, showAsHex: true, color: elemColor);
+                        await EmitMetadataClassAsync(sb, elemIndent + "  ", ids, richestInfo, assemblyName,
+                                                     options, live, new HashSet<string>(),
+                                                     currentDepth + 2, ct).ConfigureAwait(false);
+                        CloseGroup(sb, elemIndent);
+                        continue;
+                    }
                     ulong slotPtr = ParseHexLoose(elem.Ptr ?? "0");
                     // Feature 2: a null pointer slot in an otherwise-populated
                     // array — fill it from the element class's metadata layout so
@@ -1219,6 +1253,52 @@ public static partial class CeXmlExporter
                 return info;
         }
         return null;
+    }
+
+    /// <summary>Discover the RICHEST concrete element type across a reference
+    /// array's populated slots — the runtime class with the most fields (a Book
+    /// among LibraryItemData). Header-walks each non-null slot (the concrete class
+    /// is read from the object header), then resolves the winner's full metadata
+    /// layout so every slot can be templated from it.
+    /// <para/>
+    /// Returns null (⇒ caller keeps the faithful per-slot walk) UNLESS the array
+    /// shows actual TYPE VARIANCE — more than one distinct runtime type, or a
+    /// runtime type different from the declared element type (a subclass). A
+    /// monomorphic-exact array (every slot exactly the declared type) needs no
+    /// normalization and keeps its per-slot live walk (which also preserves live
+    /// values + resolves generic instantiations the metadata layer can't). The
+    /// header walks are cheap (depth 1) and replace the per-slot DEEP walks the
+    /// uniform template makes unnecessary.</summary>
+    private static async Task<GetClassInfoResult?> DiscoverRichestElementAsync(
+        System.Collections.Generic.IEnumerable<WalkedArrayElement> elems,
+        (string ns, string name) declared,
+        string? assemblyName, ILiveExportSource live, CancellationToken ct)
+    {
+        string? bestNs = null, bestName = null;
+        int bestCount = -1;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        bool differsFromDeclared = false;
+        foreach (WalkedArrayElement e in elems)
+        {
+            if (string.IsNullOrEmpty(e.Ptr) || e.Ptr == "0x0000000000000000") continue;
+            WalkInstanceResult r;
+            try { r = await live.WalkInstanceFromHeaderAsync(e.Ptr!, ct).ConfigureAwait(false); }
+            catch { continue; }
+            if (!string.IsNullOrEmpty(r.Error) || string.IsNullOrEmpty(r.Name)) continue;
+            string cns = r.Namespace ?? string.Empty;
+            seen.Add($"{cns}.{r.Name}");
+            if (!string.Equals(r.Name, declared.name, StringComparison.Ordinal)
+                || !string.Equals(cns, declared.ns, StringComparison.Ordinal))
+                differsFromDeclared = true;
+            int c = r.Fields?.Count ?? 0;
+            if (c > bestCount) { bestCount = c; bestNs = cns; bestName = r.Name; }
+        }
+        if (string.IsNullOrEmpty(bestName)) return null;
+        // No variance (every populated slot is exactly the declared type) → no
+        // normalization; the per-slot walk is already uniform and more faithful.
+        if (seen.Count <= 1 && !differsFromDeclared) return null;
+        return await ResolveClassInfoAsync(assemblyName, bestNs ?? string.Empty, bestName!, live, ct)
+            .ConfigureAwait(false);
     }
 
     /// <summary>True when a resolved class is a managed VALUE type — its base is
