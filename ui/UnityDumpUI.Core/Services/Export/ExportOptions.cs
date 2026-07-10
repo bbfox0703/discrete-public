@@ -62,7 +62,41 @@ public sealed record ExportOptions(
     // converted to CE's COLORREF (BBGGRR) byte order at emit time.
     bool RecordColors          = false,
     string? RecordColorEven    = "0080FF",
-    string? RecordColorOdd     = null)
+    string? RecordColorOdd     = null,
+
+    // ---- Feature 1: minimum CE String buffer length (opt-in) --------------
+    // When EnforceMinStringLength is on, every emitted CE String <Length> is
+    // floored to MinStringLength CHARACTERS: a live string shorter than the
+    // floor still reserves the floor's worth of UTF-16 buffer (so a different
+    // save's longer string in the same field renders fully), while a string at
+    // or above the floor is left exactly as decoded. Off by default so existing
+    // string <Length> output is byte-identical. Threaded through the single
+    // EmitStringDerefGroup choke point, so it covers instance-field, flattened
+    // struct member, and array-element string surfaces alike.
+    bool EnforceMinStringLength = false,
+    int  MinStringLength        = 32,
+
+    // ---- Feature 2: fill empty array slots (opt-in) -----------------------
+    // Assume every array slot holds data even when the current slot is a null
+    // pointer, or the whole collection is empty / unallocated (the game hasn't
+    // loaded that record yet — different save files populate different slots).
+    // Null pointer-element slots and empty/unallocated collections are filled
+    // from the element class's metadata layout (GetClassInfoAsync — no live
+    // object needed) so the CE table carries the full per-element structure,
+    // ready to resolve once any instance is written into the slot. String slots
+    // reserve the MAX length observed across the array (floored by
+    // MinStringLength when EnforceMinStringLength is on). POPULATED slots keep
+    // their own live walk — only null / empty slots are templated. Never
+    // overrides the framework/engine reference skip (List<Transform> etc. stay
+    // watchable leaves). Off by default → the collection emit path is unchanged.
+    bool FillEmptyArraySlots    = false)
 {
     public static ExportOptions Defaults { get; } = new();
+
+    /// <summary>Effective minimum CE String character length to floor emitted
+    /// <c>&lt;Length&gt;</c> to — <see cref="MinStringLength"/> when
+    /// <see cref="EnforceMinStringLength"/> is on (clamped non-negative), else 0
+    /// (no floor).</summary>
+    public int MinStringChars
+        => EnforceMinStringLength ? System.Math.Max(0, MinStringLength) : 0;
 }

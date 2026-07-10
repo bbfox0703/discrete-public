@@ -68,6 +68,13 @@ public sealed class UserSettings
     [JsonPropertyName("export_record_color_odd")]       public string? ExportRecordColorOdd      { get; set; }
     [JsonPropertyName("export_ce_xml_base_address")]    public string? ExportCeXmlBaseAddress     { get; set; }
 
+    // Feature 1 / Feature 2 opt-ins. The enable flags are plain bools (absent →
+    // false = OFF default). MinStringLength is NULLABLE so an older settings.json
+    // missing it keeps the VM default (32) rather than deserialising to 0.
+    [JsonPropertyName("export_enforce_min_string_length")] public bool  ExportEnforceMinStringLength { get; set; }
+    [JsonPropertyName("export_min_string_length")]         public int?  ExportMinStringLength        { get; set; }
+    [JsonPropertyName("export_fill_empty_array_slots")]    public bool  ExportFillEmptyArraySlots    { get; set; }
+
     /// <summary>Deep clone for safe mutation in the Settings dialog
     /// without affecting the active in-memory copy until the user hits
     /// Apply / OK.</summary>
@@ -90,6 +97,9 @@ public sealed class UserSettings
         ExportRecordColorEven      = ExportRecordColorEven,
         ExportRecordColorOdd       = ExportRecordColorOdd,
         ExportCeXmlBaseAddress     = ExportCeXmlBaseAddress,
+        ExportEnforceMinStringLength = ExportEnforceMinStringLength,
+        ExportMinStringLength        = ExportMinStringLength,
+        ExportFillEmptyArraySlots    = ExportFillEmptyArraySlots,
     };
 }
 

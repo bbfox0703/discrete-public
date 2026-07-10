@@ -37,10 +37,16 @@ public class CeXmlExporterLiveTests
         private readonly Dictionary<string, List<WalkedField>> _instances = new();
         private readonly Dictionary<string, WalkArrayResult>   _arrays    = new();
         private readonly Dictionary<string, string>            _memory    = new();
+        // Metadata class layouts keyed by "ns.name" — feeds GetClassInfoAsync so
+        // the Feature 2 metadata fill (null slots / empty collections) resolves.
+        private readonly Dictionary<string, GetClassInfoResult> _classes  = new();
 
         public void AddInstance(string addr, List<WalkedField> fields) => _instances[Norm(addr)] = fields;
         public void AddArray(string addr, WalkArrayResult r)           => _arrays[Norm(addr)]    = r;
         public void AddMemory(string addr, string leHex)               => _memory[Norm(addr)]    = leHex;
+        public void AddClassInfo(string @namespace, string name, List<FieldEntry> fields, ClassRef? parent = null)
+            => _classes[$"{@namespace}.{name}"] = new GetClassInfoResult
+            { Namespace = @namespace, Name = name, Fields = fields, Parent = parent };
 
         internal static string Norm(string a)
         {
@@ -53,7 +59,7 @@ public class CeXmlExporterLiveTests
 
         public Task<GetClassInfoResult?> GetClassInfoAsync(
             string assembly, string @namespace, string name, CancellationToken ct = default)
-            => Task.FromResult<GetClassInfoResult?>(null);
+            => Task.FromResult(_classes.TryGetValue($"{@namespace}.{name}", out GetClassInfoResult? c) ? c : null);
 
         public Task<ReadMemoryResult> ReadMemoryAsync(string address, int size, CancellationToken ct = default)
             => Task.FromResult(_memory.TryGetValue(Norm(address), out string? hex)
@@ -541,5 +547,311 @@ public class CeXmlExporterLiveTests
         Assert.Contains("<Address>+8</Address>", xml);
         Assert.Contains("<Address>+C</Address>", xml);
         Assert.DoesNotContain("<Address>+14</Address>", xml);
+    }
+
+    // ---- Feature 1: minimum CE String buffer length ----------------------
+
+    [Fact]
+    public async Task RenderLive_EnforceMinStringLength_FloorsShortStringsOnly()
+    {
+        // A short string (< floor) reserves the floor's worth of UTF-16 buffer;
+        // a string already at/above the floor is left exactly as decoded.
+        // <Length> is emitted in BYTES = (chars + 1) * 2 (incl. the NUL pair).
+        const string baseAddr = "0x000000000000B900";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "shortName", Type = "System.String", Offset = 0x10,
+                    Address = "0x000000000000B910", Ptr = "0x00000000000A0000",
+                    String = "abc", StringLength = 3 },
+            new() { Name = "longName", Type = "System.String", Offset = 0x18,
+                    Address = "0x000000000000B918", Ptr = "0x00000000000A1000",
+                    String = new string('x', 50), StringLength = 50 },
+        });
+
+        // Floor OFF (baseline): short reserves (3+1)*2 = 8, long (50+1)*2 = 102.
+        var off = ExportOptions.Defaults with { LiveData = true, PointerSize = 8 };
+        string xmlOff = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", off, live,
+            TestContext.Current.CancellationToken);
+        Assert.Contains("<Length>8</Length>", xmlOff);
+        Assert.Contains("<Length>102</Length>", xmlOff);
+
+        // Floor ON at 32: short is raised to (32+1)*2 = 66; long (>= 32) unchanged.
+        var on = off with { EnforceMinStringLength = true, MinStringLength = 32 };
+        string xmlOn = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", on, live,
+            TestContext.Current.CancellationToken);
+        Assert.Contains("<Length>66</Length>", xmlOn);      // short floored
+        Assert.Contains("<Length>102</Length>", xmlOn);     // long untouched
+        Assert.DoesNotContain("<Length>8</Length>", xmlOn); // no un-floored short
+    }
+
+    // ---- Feature 2: fill empty / null array slots ------------------------
+
+    private static WalkedField QuestArrayField(string arrayObj) => new()
+    {
+        Name = "quests_", Type = "MainGame.QuestData[]", Offset = 0x18,
+        Address = "0x000000000000B918", Ptr = arrayObj,
+    };
+
+    private static List<FieldEntry> QuestDataLayout() => new()
+    {
+        new() { Name = "questId", Type = "System.Int32",  Offset = 0x10 },
+        new() { Name = "title",   Type = "System.String", Offset = 0x18 },
+    };
+
+    private static List<WalkedField> QuestInstance(int id, string titlePtr, string title) => new()
+    {
+        new() { Name = "questId", Type = "System.Int32", Offset = 0x10, Value = Json(id.ToString()) },
+        new() { Name = "title", Type = "System.String", Offset = 0x18,
+                Ptr = titlePtr, String = title, StringLength = title.Length },
+    };
+
+    [Fact]
+    public async Task RenderLive_FillEmptyArraySlots_NullPointerSlots_FilledFromMetadata()
+    {
+        // A QuestData[] with slots 0,2 populated and 1,3 null. With fill ON every
+        // slot carries the element field tree (populated from the live walk, null
+        // from QuestData metadata); with fill OFF null slots stay bare leaves.
+        const string baseAddr = "0x000000000000B900";
+        const string arrayObj = "0x0000000000500000";
+        const string q0 = "0x0000000000600000";
+        const string q2 = "0x0000000000600100";
+
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField> { QuestArrayField(arrayObj) });
+        live.AddArray(arrayObj, new WalkArrayResult
+        {
+            Length = 4, Count = 4, IsPointer = true, ElementSize = 8,
+            DataAddress = "0x0000000000500020",            // dataOff = 0x20
+            ElementClassName = "QuestData",
+            Elements = new List<WalkedArrayElement>
+            {
+                new() { Index = 0, Ptr = q0 },
+                new() { Index = 1, Ptr = "0x0000000000000000" },   // null
+                new() { Index = 2, Ptr = q2 },
+                new() { Index = 3, Ptr = "0x0000000000000000" },   // null
+            },
+        });
+        live.AddInstance(q0, QuestInstance(5, "0x0000000000600080", "Q0"));
+        live.AddInstance(q2, QuestInstance(7, "0x0000000000600180", "Q2"));
+        live.AddClassInfo("MainGame", "QuestData", QuestDataLayout());
+
+        var off = ExportOptions.Defaults with { LiveData = true, PointerSize = 8, DrilldownDepth = 2 };
+        string xmlOff = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", off, live,
+            TestContext.Current.CancellationToken);
+        // Only the 2 populated slots are walked → 2 questId leaves.
+        Assert.Equal(2, CountOccurrences(xmlOff, "questId"));
+
+        var on = off with { FillEmptyArraySlots = true };
+        string xmlOn = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", on, live,
+            TestContext.Current.CancellationToken);
+        // Every slot (2 populated + 2 filled-from-metadata) now carries questId + title.
+        Assert.Equal(4, CountOccurrences(xmlOn, "questId"));
+        Assert.Equal(4, CountOccurrences(xmlOn, "title"));
+        // The null slot [1] group sits at dataOff + 1*stride = 0x20 + 8 = +28.
+        Assert.Contains("<Address>+28</Address>", xmlOn);
+        // Still relative — only the root instance carries an absolute address.
+        Assert.Equal(1, CountOccurrences(xmlOn, "<Address>0x"));
+    }
+
+    [Fact]
+    public async Task RenderLive_FillEmptyArraySlots_FrameworkElement_NotFilled()
+    {
+        // A framework-reference element array (Transform[]) must NOT be filled —
+        // the framework skip wins over fill, so a null slot stays a leaf and the
+        // element class is never fanned out (even though metadata is available).
+        const string baseAddr = "0x000000000000C000";
+        const string arrayObj = "0x0000000000700000";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "bones_", Type = "UnityEngine.Transform[]", Offset = 0x10,
+                    Address = "0x000000000000C010", Ptr = arrayObj },
+        });
+        live.AddArray(arrayObj, new WalkArrayResult
+        {
+            Length = 2, Count = 2, IsPointer = true, ElementSize = 8,
+            DataAddress = "0x0000000000700020", ElementClassName = "Transform",
+            Elements = new List<WalkedArrayElement>
+            {
+                new() { Index = 0, Ptr = "0x0000000000000000" },   // null
+                new() { Index = 1, Ptr = "0x0000000000000000" },   // null
+            },
+        });
+        // Metadata IS available — but must NOT be used for a framework type.
+        live.AddClassInfo("UnityEngine", "Transform", new List<FieldEntry>
+        {
+            new() { Name = "SECRET_TRANSFORM_FIELD", Type = "System.Int32", Offset = 0x10 },
+        });
+
+        var on = ExportOptions.Defaults with
+        { LiveData = true, PointerSize = 8, DrilldownDepth = 2, FillEmptyArraySlots = true };
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", on, live,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("bones_", xml);                              // field still listed
+        Assert.DoesNotContain("SECRET_TRANSFORM_FIELD", xml);        // never fanned out
+    }
+
+    [Fact]
+    public async Task RenderLive_FillEmptyArraySlots_UnallocatedList_FilledFromMetadata()
+    {
+        // A List<QuestData> whose handle is null (game hasn't built it yet). With
+        // fill ON it becomes an outer deref + _items group + ArrayLimit metadata
+        // slots so the table is ready once the game allocates it; with fill OFF a
+        // single watchable pointer leaf (historical behaviour).
+        const string baseAddr = "0x000000000000B900";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "quests_",
+                    Type = "System.Collections.Generic.List`1<MainGame.QuestData>",
+                    Offset = 0x20, Address = "0x000000000000B920",
+                    Ptr = "0x0000000000000000" },   // unallocated
+        });
+        live.AddClassInfo("MainGame", "QuestData", QuestDataLayout());
+
+        var baseOpts = ExportOptions.Defaults with
+        { LiveData = true, PointerSize = 8, DrilldownDepth = 2, ArrayLimit = 4 };
+
+        string xmlOff = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", baseOpts, live,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(0, CountOccurrences(xmlOff, "questId"));        // just a leaf
+
+        string xmlOn = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            baseOpts with { FillEmptyArraySlots = true }, live,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(4, CountOccurrences(xmlOn, "questId"));         // ArrayLimit slots filled
+        Assert.Contains("_items", xmlOn);                            // List inner deref group
+        Assert.Contains("empty, filled 4 of", xmlOn);               // header annotation
+    }
+
+    [Fact]
+    public async Task RenderLive_FillEmptyArraySlots_StringArray_NullSlotGetsMaxLengthDerefGroup()
+    {
+        // A String[] with a null middle slot. Fill ON → every slot (incl. the
+        // null one) is a String deref group whose length is the array MAX
+        // (10 chars → (10+1)*2 = 22 bytes). Fill OFF → the null slot is a
+        // "<null>" leaf and populated slots keep their own length.
+        const string baseAddr = "0x000000000000B900";
+        const string arrayObj = "0x0000000000800000";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "names_", Type = "System.String[]", Offset = 0x10,
+                    Address = "0x000000000000B910", Ptr = arrayObj },
+        });
+        live.AddArray(arrayObj, new WalkArrayResult
+        {
+            Length = 3, Count = 3, IsPointer = true, ElementSize = 8,
+            DataAddress = "0x0000000000800020", ElementClassName = "String",
+            Elements = new List<WalkedArrayElement>
+            {
+                new() { Index = 0, Ptr = "0x00000000008A0000", String = "abcdefghij", StringLength = 10 },
+                new() { Index = 1, Ptr = "0x0000000000000000" },   // null
+                new() { Index = 2, Ptr = "0x00000000008A2000", String = "xy", StringLength = 2 },
+            },
+        });
+
+        var baseOpts = ExportOptions.Defaults with { LiveData = true, PointerSize = 8, DrilldownDepth = 1 };
+
+        string xmlOff = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", baseOpts, live,
+            TestContext.Current.CancellationToken);
+        Assert.Contains("&lt;null&gt;", xmlOff);                     // null slot is a leaf
+        Assert.Equal(2, CountOccurrences(xmlOff, "<VariableType>String</VariableType>"));
+
+        string xmlOn = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            baseOpts with { FillEmptyArraySlots = true }, live,
+            TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("&lt;null&gt;", xmlOn);                // null slot now a deref group
+        Assert.Equal(3, CountOccurrences(xmlOn, "<VariableType>String</VariableType>"));
+        Assert.Contains("<Length>22</Length>", xmlOn);               // uniform max length (10 chars)
+        Assert.DoesNotContain("<Length>6</Length>", xmlOn);          // no per-slot (2-char) length
+    }
+
+    [Fact]
+    public async Task RenderLive_FillEmptyArraySlots_EnumMember_InlineFourByteLeaf_NotDerefGroup()
+    {
+        // A metadata-filled null slot must emit an ENUM member as an inline 4-byte
+        // signed leaf (like the live walk), NOT a pointer-deref group that recurses
+        // into the enum's value__ (which would deref the inline int as a pointer →
+        // garbage). Reference-vs-value/enum is decided from the class's base type.
+        const string baseAddr = "0x000000000000B900";
+        const string arrayObj = "0x0000000000500000";
+        const string q0 = "0x0000000000600000";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField> { QuestArrayField(arrayObj) });
+        live.AddArray(arrayObj, new WalkArrayResult
+        {
+            Length = 2, Count = 2, IsPointer = true, ElementSize = 8,
+            DataAddress = "0x0000000000500020", ElementClassName = "QuestData",
+            Elements = new List<WalkedArrayElement>
+            {
+                new() { Index = 0, Ptr = q0 },
+                new() { Index = 1, Ptr = "0x0000000000000000" },   // null → filled from metadata
+            },
+        });
+        live.AddInstance(q0, QuestInstance(5, "0x0000000000600080", "Q0"));
+        // QuestData has an enum member `status : MainGame.QuestStatus`.
+        live.AddClassInfo("MainGame", "QuestData", new List<FieldEntry>
+        {
+            new() { Name = "questId", Type = "System.Int32", Offset = 0x10 },
+            new() { Name = "status",  Type = "MainGame.QuestStatus", Offset = 0x14 },
+        });
+        // QuestStatus is an ENUM (base System.Enum).
+        live.AddClassInfo("MainGame", "QuestStatus",
+            new List<FieldEntry> { new() { Name = "value__", Type = "System.Int32", Offset = 0x0 } },
+            parent: new ClassRef { Namespace = "System", Name = "Enum" });
+
+        var on = ExportOptions.Defaults with
+        { LiveData = true, PointerSize = 8, DrilldownDepth = 2, FillEmptyArraySlots = true };
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", on, live,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("status", xml);                              // enum member present in the fill
+        Assert.DoesNotContain("value__", xml);                       // NOT recursed as a deref group
+        // The filled null slot's status leaf is a 4-byte SIGNED enum leaf at +14.
+        Assert.Contains("<Address>+14</Address>", xml);
+        Assert.Contains("<ShowAsSigned>1</ShowAsSigned>", xml);
+    }
+
+    [Fact]
+    public async Task RenderLive_FillEmptyArraySlots_ValueStructElementArray_NotFilledAsReference()
+    {
+        // An empty VALUE-struct element array must NOT be filled with reference
+        // (pointer-stride + deref) semantics — that would mis-address inline
+        // structs and deref their bytes as a pointer. It falls back to a single
+        // watchable leaf instead. Reference/value is read from the base type.
+        const string baseAddr = "0x000000000000B900";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "coords_", Type = "MainGame.SomeStruct[]", Offset = 0x18,
+                    Address = "0x000000000000B918", Ptr = "0x0000000000000000" },   // unallocated
+        });
+        // SomeStruct is a VALUE type (base System.ValueType).
+        live.AddClassInfo("MainGame", "SomeStruct",
+            new List<FieldEntry> { new() { Name = "structFieldX", Type = "System.Int32", Offset = 0x0 } },
+            parent: new ClassRef { Namespace = "System", Name = "ValueType" });
+
+        var on = ExportOptions.Defaults with
+        { LiveData = true, PointerSize = 8, DrilldownDepth = 2, ArrayLimit = 4, FillEmptyArraySlots = true };
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp", on, live,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("coords_", xml);                             // field still listed (as a leaf)
+        Assert.DoesNotContain("empty, filled", xml);                 // NOT templated as a reference array
+        Assert.DoesNotContain("structFieldX", xml);                  // struct members not fanned out
     }
 }
