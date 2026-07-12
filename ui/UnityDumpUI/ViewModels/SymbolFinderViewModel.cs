@@ -47,7 +47,16 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
         _logger     = logger;
         Assemblies  = assemblies;
         _statFinder = new StatFinderService(backend, logger);
+        // Ticking a class facet re-runs the client-side refilter (no re-query).
+        ClassFacets.Changed += RefilterMatches;
     }
+
+    /// <summary>Reusable "hide these noise classes" histogram over the current
+    /// search results. A pure display filter — never re-queries.</summary>
+    public ClassFacetFilter ClassFacets { get; } = new();
+
+    [RelayCommand] private void AutoHideNoiseClasses() => ClassFacets.AutoHideNoise();
+    [RelayCommand] private void ClearHiddenClasses()   => ClassFacets.ClearHidden();
 
     /// <summary>
     /// Mirrors <see cref="AssemblyBrowserViewModel.Assemblies"/>. Same
@@ -207,6 +216,7 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
 
             foreach (var m in result.Matches)
                 Matches.Add(new SymbolFinderRow(m));
+            ClassFacets.Rebuild(Matches.Select(m => m.ClassDisplay));
             RefilterMatches();
 
             sw.Stop();
@@ -457,6 +467,7 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
         {
             if (numericOnly && !IsNumericType(r.Type)) continue;
             if (hasFilter && !RowMatchesFilter(r, filter)) continue;
+            if (ClassFacets.IsHidden(r.ClassDisplay)) continue;   // class-facet noise filter
             FilteredMatches.Add(r);
         }
     }
