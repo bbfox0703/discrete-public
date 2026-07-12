@@ -85,6 +85,16 @@ public sealed class CancelScanResult
     [JsonPropertyName("cancelled")] public bool Cancelled { get; set; }
 }
 
+/// <summary>
+/// `setKeepForeground` / `getKeepForeground` result. Native run-in-background
+/// Win32 hook state: 1 = enabled, 0 = disabled, negative = hook-install error.
+/// </summary>
+public sealed class KeepForegroundResult
+{
+    [JsonPropertyName("state")] public int     State { get; set; }
+    [JsonPropertyName("error")] public string? Error { get; set; }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 8 — assembly / class introspection.
 //

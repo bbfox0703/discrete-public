@@ -400,4 +400,13 @@ inline constexpr const char* CmdSnapshotBegin         = "snapshotBegin";
 inline constexpr const char* CmdSnapshotChunk         = "snapshotChunk";
 inline constexpr const char* CmdSnapshotEnd           = "snapshotEnd";
 
+// Keep-foreground (native run-in-background). Backend-agnostic Win32 hook
+// (ForegroundHook) — keeps the game ticking while unfocused even when IL2CPP
+// strips UnityEngine.Application.set_runInBackground. Args / returns:
+//   setKeepForeground : { enable: bool }  -> { state: <1|0|negative> }
+//   getKeepForeground : (none)            -> { state: <1|0> }
+// state: 1 = enabled, 0 = disabled, negative = hook-install error.
+inline constexpr const char* CmdSetKeepForeground     = "setKeepForeground";
+inline constexpr const char* CmdGetKeepForeground     = "getKeepForeground";
+
 }  // namespace Discrete::MagicStrings

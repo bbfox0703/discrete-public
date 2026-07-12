@@ -131,6 +131,47 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
+    /// `setKeepForeground` — toggle the DLL's native run-in-background Win32
+    /// hook (ForegroundHook). Returns the resulting state: 1 = enabled,
+    /// 0 = disabled, negative = hook-install error. Native because IL2CPP
+    /// strips <c>UnityEngine.Application.set_runInBackground</c> on real games.
+    /// Light command → interactive pipe.
+    /// </summary>
+    public async Task<KeepForegroundResult> SetKeepForegroundAsync(bool enable, CancellationToken ct = default)
+    {
+        var args = new Dictionary<string, JsonElement>
+        {
+            ["enable"] = Bool(enable),
+        };
+        var env = await Send(
+            "setKeepForeground", args,
+            ProtocolJsonContext.Default.RpcEnvelopeKeepForegroundResult, ct).ConfigureAwait(false);
+        ThrowIfError(env.Error);
+        return env.Result ?? throw new PipeProtocolException("setKeepForeground returned no result");
+    }
+
+    /// <summary>
+    /// `getKeepForeground` — read the native run-in-background hook state
+    /// (1 = enabled, 0 = disabled). Soft-fails to <c>null</c> on pipe error so
+    /// a connect-time sync doesn't gate the rest of the flow.
+    /// </summary>
+    public async Task<KeepForegroundResult?> GetKeepForegroundAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var env = await Send(
+                "getKeepForeground", args: null,
+                ProtocolJsonContext.Default.RpcEnvelopeKeepForegroundResult, ct).ConfigureAwait(false);
+            if (env.Error is not null) return null;
+            return env.Result;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Identifies the runtime / DLL build / backend.
     /// </summary>
     public async Task<HandshakeResult> HandshakeAsync(CancellationToken ct = default)

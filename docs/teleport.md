@@ -332,6 +332,44 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
 - **Managed Transform is a native peer** — a managed-field write won't move the
   object; the setter path is mandatory.
 
+## Keep-foreground (native run-in-background, 2026-07-12)
+
+Native Win32 "keep the game running while unfocused" hook, ported from
+UE5CEDumper's *Grausam*. A CheckBox on the Teleport tab ("Keep the game running
+when unfocused (native hook)"). Distinct from the managed
+`UnityEngine.Application.set_runInBackground` path the Scene tab drives:
+**IL2CPP strips `set_runInBackground` on real games** (see
+`reference_il2cpp_strips_runinbackground`), so the managed setter is
+method-not-found there — the native hook works regardless of the managed
+runtime, and even while the game thread is idle.
+
+**Mechanism** (DLL `dll/src/shared/ForegroundHook.cpp`, backend-agnostic,
+compiled into both DLLs; one atomic `g_enabled` gates three illusions):
+1. MinHook `user32!GetForegroundWindow` → report the game's own (largest,
+   visible, un-owned, this-PID) window as foreground when the real foreground
+   belongs to another process (defeats poll-based idle / `Application.HasFocus`).
+2. `SetWindowLongPtrW(GWLP_WNDPROC)` subclass on every top-level game window →
+   rewrite `WM_ACTIVATEAPP`/`WM_ACTIVATE`/`WM_NCACTIVATE`→active, swallow
+   `WM_KILLFOCUS` (defeats event-driven pauses).
+3. MinHook `user32!ClipCursor` + `SetCursorPos` → while backgrounded, release
+   cursor confinement / swallow recentring so the mouse isn't trapped
+   desktop-wide; pass through when the game is genuinely foreground.
+
+Disable is **soft** (flip the atomic + release the cursor) — hooks/subclass are
+never removed in place to avoid a teardown race; they pass through when off.
+Full teardown at DLL shutdown (`ForegroundHook::Shutdown`). MinHook is
+per-target-enabled (never `MH_ALL_HOOKS`) so it doesn't disturb the shared
+main-thread hook.
+
+**Wire:** `setKeepForeground {enable}` / `getKeepForeground` →
+`{state: 1|0|<0}` (1 on, 0 off, negative = hook-install error). Light commands
+on the interactive pipe. The Teleport tab syncs the toggle to the DLL's real
+state on connect (the hook can survive a UI reconnect); the state clears when
+the game restarts. **No auto-disable on UI disconnect** — discrete's 2-lane
+pipe + post-hook client-count decrement make a reliable "last client left"
+trigger racy, and the enabled state is benign (game runs when unfocused, cursor
+freed, normal when focused).
+
 ## 待 live-smoke (needs a running Unity game)
 
 | # | Check | Pass sign |
@@ -343,6 +381,9 @@ Requires CE 7.5+ (Lua 5.3+, for `string.pack`).
 | 5 | Directional Forward/Back, horizontal on/off | moves along facing / on ground plane |
 | 6 | Global hotkey with the GAME focused (default NumLock on, or rebind to an F-key) | the bound combo saves / recalls without alt-tab |
 | 7 | Rotation restore on recall | facing restored (where the game doesn't override it) |
+| 8 | Keep-foreground ON (Mono): tick → alt-tab to another window | game keeps ticking (audio/anim) + mouse freed; untick → pauses again |
+| 9 | Keep-foreground ON (IL2CPP where managed runInBackground is stripped) | keeps running even though the Scene-tab managed toggle reports SetterUnavailable |
+| 10 | Reconnect the UI with the hook ON | Teleport tab re-syncs the checkbox to "On" |
 
 ## v2 backlog
 

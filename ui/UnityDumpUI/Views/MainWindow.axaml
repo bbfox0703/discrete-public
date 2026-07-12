@@ -3186,6 +3186,19 @@
                   </StackPanel>
                 </Border>
 
+                <!-- Keep-foreground: native run-in-background Win32 hook. Works
+                     even when IL2CPP strips Application.runInBackground, and
+                     while the game thread is idle. -->
+                <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                  <StackPanel Spacing="6">
+                    <CheckBox Content="Keep the game running when unfocused (native hook)"
+                              IsChecked="{Binding Teleport.KeepForegroundEnabled}"/>
+                    <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                               Text="Hooks GetForegroundWindow / window activation / cursor confinement so the game keeps ticking (and the mouse is freed) while another window is focused. Native — works even when IL2CPP strips Application.runInBackground. Clears when the game restarts."/>
+                    <TextBlock Text="{Binding Teleport.KeepForegroundStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+                  </StackPanel>
+                </Border>
+
                 <TextBlock Text="{Binding Teleport.StatusMessage}" TextWrapping="Wrap" Opacity="0.85"/>
 
               </StackPanel>

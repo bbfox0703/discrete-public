@@ -944,6 +944,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // first Scene/Method/Field RPC eats a 5-second timeout.
             // Soft-fail.
             _ = CheckDispatcherHealthAsync();
+
+            // Sync the Teleport tab's native keep-foreground toggle to the DLL's
+            // actual hook state (it can survive a UI reconnect). Soft-fail.
+            _ = Teleport.SyncKeepForegroundStateAsync();
         }
         catch (OperationCanceledException)
         {

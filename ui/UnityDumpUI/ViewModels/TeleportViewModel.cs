@@ -137,6 +137,84 @@ public sealed partial class TeleportViewModel : ObservableObject
     /// KeyDown handler routes the next press to <see cref="ApplyCapturedKey"/>.</summary>
     public bool IsCapturingHotkey => _capturingRow is not null;
 
+    // --- keep-foreground (native run-in-background) ---
+
+    /// <summary>Native "keep the game running when unfocused" Win32 hook
+    /// (ForegroundHook in the DLL). Independent of the managed
+    /// <c>Application.runInBackground</c> path, which IL2CPP strips on real
+    /// games. Toggling drives <c>setKeepForeground</c> over the pipe.</summary>
+    [ObservableProperty] private bool _keepForegroundEnabled;
+
+    /// <summary>Badge text reflecting the DLL hook state.</summary>
+    [ObservableProperty] private string _keepForegroundStatus = string.Empty;
+
+    // Set while we sync the toggle to the DLL's actual state (connect-time or a
+    // revert) so the [ObservableProperty] change handler doesn't re-send a
+    // command / recurse.
+    private bool _syncingKeepForeground;
+
+    partial void OnKeepForegroundEnabledChanged(bool value)
+    {
+        if (_syncingKeepForeground) return;
+        _ = ApplyKeepForegroundAsync(value);
+    }
+
+    private async Task ApplyKeepForegroundAsync(bool enable)
+    {
+        if (!_backend.IsConnected)
+        {
+            KeepForegroundStatus = "Not connected — connect to a running game first.";
+            SetKeepForegroundToggle(false);   // revert without re-triggering
+            return;
+        }
+        try
+        {
+            KeepForegroundResult r = await _backend.SetKeepForegroundAsync(enable).ConfigureAwait(true);
+            ApplyKeepForegroundState(r.State);
+            if (r.Error is { Length: > 0 } err)
+                _logger.Write("Teleport", $"setKeepForeground({enable}) error: {err}");
+        }
+        catch (Exception ex)
+        {
+            KeepForegroundStatus = "Error toggling keep-foreground.";
+            _logger.Write("Teleport", $"setKeepForeground({enable}) failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>Map the DLL state (1 = on, 0 = off, negative = hook error) to the
+    /// checkbox + badge without re-triggering the change handler.</summary>
+    private void ApplyKeepForegroundState(int state)
+    {
+        SetKeepForegroundToggle(state == 1);
+        KeepForegroundStatus = state switch
+        {
+            1 => "On — the game keeps running while unfocused.",
+            0 => "Off.",
+            _ => "Hook error — the DLL couldn't install the foreground hook.",
+        };
+    }
+
+    private void SetKeepForegroundToggle(bool value)
+    {
+        _syncingKeepForeground = true;
+        KeepForegroundEnabled = value;
+        _syncingKeepForeground = false;
+    }
+
+    /// <summary>Sync the toggle to the DLL's actual hook state. Called on connect
+    /// so a hook left enabled across a UI reconnect is reflected. Soft — does
+    /// nothing if disconnected or the backend doesn't answer.</summary>
+    public async Task SyncKeepForegroundStateAsync()
+    {
+        if (!_backend.IsConnected) return;
+        try
+        {
+            KeepForegroundResult? r = await _backend.GetKeepForegroundAsync().ConfigureAwait(true);
+            if (r is not null) ApplyKeepForegroundState(r.State);
+        }
+        catch { /* soft — connect-time nicety */ }
+    }
+
     // ------------------------------------------------------------------
     // Commands
     // ------------------------------------------------------------------
