@@ -3199,6 +3199,42 @@
                   </StackPanel>
                 </Border>
 
+                <!-- World tweaks: universal speed (Time.timeScale) + gravity
+                     (Physics.gravity). Both are static engine setters reached via
+                     the same callMethod primitive as teleport → no per-game target. -->
+                <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="World tweaks (universal — no target needed)" FontWeight="SemiBold"/>
+
+                    <Grid ColumnDefinitions="Auto,110,Auto,Auto,Auto,Auto,Auto,Auto">
+                      <TextBlock Grid.Column="0" Text="Speed ×" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                      <NumericUpDown Grid.Column="1" Value="{Binding Teleport.TimeScaleInput, Mode=TwoWay}"
+                                     Minimum="0" Maximum="100" Increment="0.25" FormatString="0.###"/>
+                      <Button Grid.Column="2" Content="Apply"  Margin="8,0,0,0" Command="{Binding Teleport.ApplyTimeScaleCommand}"/>
+                      <Button Grid.Column="3" Content="1×"     Margin="4,0,0,0" Command="{Binding Teleport.ResetTimeScaleCommand}"/>
+                      <Button Grid.Column="4" Content="0.25×"  Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="0.25"/>
+                      <Button Grid.Column="5" Content="0.5×"   Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="0.5"/>
+                      <Button Grid.Column="6" Content="2×"     Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="2"/>
+                      <Button Grid.Column="7" Content="4×"     Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="4"/>
+                    </Grid>
+                    <TextBlock Text="{Binding Teleport.TimeScaleStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+
+                    <Grid ColumnDefinitions="Auto,110,Auto,Auto,Auto,Auto">
+                      <TextBlock Grid.Column="0" Text="Gravity ×" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                      <NumericUpDown Grid.Column="1" Value="{Binding Teleport.GravityScaleInput, Mode=TwoWay}"
+                                     Minimum="0" Maximum="20" Increment="0.25" FormatString="0.###"/>
+                      <Button Grid.Column="2" Content="Apply"      Margin="8,0,0,0" Command="{Binding Teleport.ApplyGravityCommand}"/>
+                      <Button Grid.Column="3" Content="1×"         Margin="4,0,0,0" Command="{Binding Teleport.ResetGravityCommand}"/>
+                      <Button Grid.Column="4" Content="Moon 0.16×" Margin="4,0,0,0" Command="{Binding Teleport.ApplyGravityPresetCommand}" CommandParameter="0.16"/>
+                      <Button Grid.Column="5" Content="Zero-G"     Margin="4,0,0,0" Command="{Binding Teleport.ApplyGravityPresetCommand}" CommandParameter="0"/>
+                    </Grid>
+                    <TextBlock Text="{Binding Teleport.GravityStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+
+                    <TextBlock TextWrapping="Wrap" Opacity="0.6"
+                               Text="Speed drives UnityEngine.Time.timeScale (0 = pause, slider is a multiplier). Gravity scales the captured Physics.gravity (0 = zero-G, &lt;1 = low-gravity). Both are engine globals — they need no target and reset when the game restarts."/>
+                  </StackPanel>
+                </Border>
+
                 <TextBlock Text="{Binding Teleport.StatusMessage}" TextWrapping="Wrap" Opacity="0.85"/>
 
               </StackPanel>

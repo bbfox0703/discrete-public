@@ -29,6 +29,7 @@ public sealed partial class TeleportViewModel : ObservableObject
     private readonly BackendAdapter _backend;
     private readonly FileLogger     _logger;
     private readonly TeleportController _controller;
+    private readonly GameTweaksService _tweaks;
     private bool _busy;
     private TeleportPose? _lastPose;
 
@@ -43,6 +44,7 @@ public sealed partial class TeleportViewModel : ObservableObject
         _backend    = backend;
         _logger     = logger;
         _controller = new TeleportController(new TeleportService(backend, logger: logger));
+        _tweaks     = new GameTweaksService(backend, logger: logger);
 
         var rows = new List<TeleportMarkerRowViewModel>(TeleportMarkerStore.SlotCount);
         for (int i = 0; i < TeleportMarkerStore.SlotCount; i++)
@@ -214,6 +216,94 @@ public sealed partial class TeleportViewModel : ObservableObject
         }
         catch { /* soft — connect-time nicety */ }
     }
+
+    // --- world tweaks: universal speed (Time.timeScale) + gravity (Physics.gravity) ---
+
+    /// <summary>Game speed multiplier for <c>Time.timeScale</c> (1 = normal,
+    /// 0 = paused, &gt;1 = faster). Universal — a static engine setter, no
+    /// per-game target.</summary>
+    [ObservableProperty] private double _timeScaleInput = 1.0;
+    [ObservableProperty] private string _timeScaleStatus = string.Empty;
+
+    /// <summary>Gravity multiplier applied to the game's captured base
+    /// <c>Physics.gravity</c> (1 = normal, 0 = zero-G, &lt;1 = low-gravity).</summary>
+    [ObservableProperty] private double _gravityScaleInput = 1.0;
+    [ObservableProperty] private string _gravityStatus = string.Empty;
+
+    // The game's base gravity, captured ONCE before our first change so the scale
+    // is relative to the real starting value (survives repeated Apply). Null until
+    // the first gravity Apply.
+    private (float X, float Y, float Z)? _baseGravity;
+
+    [RelayCommand]
+    private Task ApplyTimeScaleAsync() => ApplyTimeScaleCoreAsync(ClampScale(TimeScaleInput, 100.0));
+
+    [RelayCommand]
+    private Task ResetTimeScaleAsync()
+    {
+        TimeScaleInput = 1.0;
+        return ApplyTimeScaleCoreAsync(1.0f);
+    }
+
+    [RelayCommand]
+    private Task ApplyTimeScalePresetAsync(string? value)
+    {
+        if (!TryParseInvariant(value, out double s)) return Task.CompletedTask;
+        TimeScaleInput = s;
+        return ApplyTimeScaleCoreAsync(ClampScale(s, 100.0));
+    }
+
+    private async Task ApplyTimeScaleCoreAsync(float scale)
+    {
+        if (!_backend.IsConnected) { TimeScaleStatus = "Not connected — connect to a running game first."; return; }
+        (bool ok, string? error) = await _tweaks.SetTimeScaleAsync(scale).ConfigureAwait(true);
+        TimeScaleStatus = ok
+            ? $"Time scale = {scale:0.###}× ({DescribeSpeed(scale)})."
+            : $"Failed: {error ?? "unknown error"}";
+    }
+
+    [RelayCommand]
+    private async Task ApplyGravityAsync()
+    {
+        if (!_backend.IsConnected) { GravityStatus = "Not connected — connect to a running game first."; return; }
+        // Capture the game's base gravity ONCE, before our first change.
+        _baseGravity ??= await _tweaks.GetGravityAsync().ConfigureAwait(true) ?? DefaultGravity;
+        (float X, float Y, float Z) b = _baseGravity.Value;
+        float s = ClampScale(GravityScaleInput, 20.0);
+        (bool ok, string? error) = await _tweaks.SetGravityAsync(b.X * s, b.Y * s, b.Z * s).ConfigureAwait(true);
+        GravityStatus = ok
+            ? $"Gravity = {s:0.###}× base (Y {b.Y * s:0.##})."
+            : $"Failed: {error ?? "unknown error"}";
+    }
+
+    [RelayCommand]
+    private async Task ResetGravityAsync()
+    {
+        GravityScaleInput = 1.0;
+        if (!_backend.IsConnected) { GravityStatus = "Not connected."; return; }
+        (float X, float Y, float Z) b = _baseGravity ?? DefaultGravity;
+        (bool ok, string? error) = await _tweaks.SetGravityAsync(b.X, b.Y, b.Z).ConfigureAwait(true);
+        GravityStatus = ok ? "Gravity restored to base." : $"Failed: {error ?? "unknown error"}";
+    }
+
+    [RelayCommand]
+    private Task ApplyGravityPresetAsync(string? value)
+    {
+        if (!TryParseInvariant(value, out double s)) return Task.CompletedTask;
+        GravityScaleInput = s;
+        return ApplyGravityAsync();
+    }
+
+    private static readonly (float X, float Y, float Z) DefaultGravity = (0f, -9.81f, 0f);
+
+    private static float ClampScale(double v, double max) => (float)Math.Clamp(v, 0.0, max);
+
+    private static string DescribeSpeed(float scale) =>
+        scale == 0f ? "paused" : scale < 1f ? "slow-mo" : scale > 1f ? "fast" : "normal";
+
+    private static bool TryParseInvariant(string? value, out double result) =>
+        double.TryParse(value, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out result);
 
     // ------------------------------------------------------------------
     // Commands

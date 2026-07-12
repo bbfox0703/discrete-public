@@ -8,15 +8,16 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1248** (DLL+UI,2026-07-02 **Teleport wave 1** — Unity teleport 移植:callMethod value-struct arg+return marshaling(兩 backend)→ Transform 讀/寫 primitive → markers/undo/explicit/directional → Teleport tab(experimental-gated)→ OS 全域熱鍵 → Lua bridge + docs;Mono x64/x86 + IL2CPP x64 clean、858 UI tests green) |
-| **Current phase** | 🧭 **Teleport wave 1(Unity 移植)** (2026-07-02, DLL+UI, **待 live-smoke**) |
-| **Branches** | `dev`(teleport wave 1 未 merge main;5 commits)|
-| **Tests** | **858 UI tests green** |
+| **Current build** | **#1329**(2026-07-12 **UE5CEDumper 功能移植 wave**:① **Keep-Foreground 原生 hook**(`dll/src/shared/ForegroundHook`,MinHook GetForegroundWindow + WndProc subclass + ClipCursor/SetCursorPos,兩 backend,已 commit `a780eab`)② **通用變速/低重力** `Time.timeScale` + `Physics.gravity`(`GameTweaksService`,UI/Core-only,靠現成 callMethod;待 commit);Mono x64/x86 + IL2CPP x64 clean、**1013 UI tests green**)|
+| **Current phase** | 🎮 **UE5CEDumper 功能移植**(keep-foreground + 通用變速/低重力,2026-07-12,**待 live-smoke**)|
+| **Branches** | `dev`(keep-foreground `a780eab` 已 push;通用變速/低重力 working-tree 待 commit;皆未 merge main)|
+| **Tests** | **1013 UI tests green** |
 | **Mid-flight** | 無 |
 
-**Last updated**: 2026-07-02
+**Last updated**: 2026-07-12
 
 **待 live-smoke(none blocking)**:
+- 🎮 **UE5-port wave(2026-07-12)待 live-smoke** — ① **Keep-Foreground**:Mono + IL2CPP(尤其 managed `runInBackground` 被 strip 的 IL2CPP 遊戲)勾選 → alt-tab → 遊戲持續執行 + 滑鼠釋放、取消 → 恢復暫停;reconnect 後 toggle 重新同步。② **通用變速/低重力**:`Time.timeScale`(0.25×/2× 等 + 0 暫停)即時生效、`Physics.gravity` scale(Moon 0.16× / Zero-G 0×)套用 + Reset 還原 base。詳見 [teleport.md](teleport.md)。**AOT publish 待跑**(全 source-gen/compiled-binding,AOT 風險低)。
 - 🧭 **Teleport wave 1(2026-07-02)待 live-smoke** — 需 inject 實機(Mono + IL2CPP)驗:set target→Refresh 顯示合理座標、Save→移動→Recall 回原點、Undo、座標貼上 round-trip、directional Forward/Back、**遊戲聚焦時全域熱鍵(NumLock on)**、recall 旋轉還原。詳見 [teleport.md](teleport.md) live-smoke 表。**AOT publish 0/0 + integrity hash 三槽注入待跑**(wave 收尾;程式全 source-gen/compiled-binding/BCL,AOT 風險低)。
 - ✅ **本批(Core Keeper Mono x64,2026-06-08)四修 — 全數 live-verified、已 merge main(`665f13b`)**:(1)**跨組件 value-struct 展開** — Inspector 對 `Unity.Entities.Entity` / `Unity.Mathematics.quaternion`(欄位 declaring assembly ≠ 型別 defining assembly)按 expand 不再 `class not found`(`resolveClassFromArgs` 兩 backend cross-assembly fallback + UI `BuildAssemblyCandidates` 補 `Unity.*` DOTS);(2)**Inspector 切 class 自動清空** Field filter + walked-fields keyword + Filter builder(`SetTarget` classChanged gate);(3)**Filter builder 打字搜尋** — `ComboBox`→`AutoCompleteBox`(`FilterMode=Contains`、固定寬度 280、依名字排序、`MinimumPrefixLength=0` 聚焦展開全部);(4)**snapshot 窄 explicit scope 快掃** — ≤64 classes 改 per-class `mono_class_vtable`+SIMD `ScanForPointer`(skipMapped=true 結果與 bulk 逐筆相同),Core Keeper 16-class ~570s→~快(使用者實測「很快」);**無 Mono GC freeze、預設全抓維持 bulk**。**重要心得**:Core Keeper 是 Unity DOTS/ECS,gameplay 資料在 unmanaged ECS chunk,managed snapshot 看不到 — 見 [lessons-learned.md → Unity DOTS / ECS targets](lessons-learned.md#unity-dots--ecs-targets--gameplay-data-is-not-in-managed-objects)。
 - ✅ **AOT publish + 完整性 hash 注入 — DONE**:使用者用 **`build.cmd publish`** 產生 release build 並實測四項全過。`build.ps1` Publish 模式自動跑 `tools\inject-hash.ps1`(line 409-418,注入失敗即 BUILD FAILED)→ 此 build **完整性自檢 active(非 dev-bypass)**、AOT 0-warning、single-file。⚠️ Phase 26 decoy false-positive 對 layout 敏感(任何 code 改動可能重觸發);本批改了 ExportAPI.cpp + UI → struct-expand / snapshot 資料皆正確,已間接驗證無 self-poison(若要確認可比對 Inspector 單一已知值 vs CE + Copy CE XML offset 未偏移)。
@@ -94,6 +95,13 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-07-12 — UE5CEDumper 功能移植 wave**(依 `project_ue5_full_feature_diff` memory 的排序;工具:multi-agent 比對 workflow):
+- **背景**:全面比對 `D:\Github\UE5CEDumper` vs discrete(51 vs 48 功能)。核心不對稱 = UE 把玩家鏈烤進 base class(找目標通用、操作 game-specific);Unity 無 gameplay framework(找目標 game-specific、操作通用)。所以 UE 靠玩家鏈的作弊(Fly/God/SeeThrough/DebugCam/per-pawn speed)**不移植**;能拿的是引擎無關的那幾個。
+- **① Keep-Foreground 原生 hook(build #1327,DLL+UI,已 commit `a780eab` + push)**:移植 UE `Grausam`。`dll/src/shared/ForegroundHook.{h,cpp}`(backend-agnostic,兩 DLL):一個 atomic gate 三招 —— MinHook `GetForegroundWindow`(背景時回自家最大視窗)、`SetWindowLongPtrW` WndProc subclass(WM_ACTIVATEAPP/ACTIVATE/NCACTIVATE→active、吞 WM_KILLFOCUS)、MinHook `ClipCursor`/`SetCursorPos`(背景時釋放游標)。soft-disable(翻 atomic、絕不原地 unhook);`Shutdown()` 在 Discrete_Shutdown;per-target `MH_EnableHook`(非 MH_ALL_HOOKS,共用 MinHook 與 main-thread hook)。pipe `setKeepForeground {enable}`/`getKeepForeground`→`{state}`(RegisterCoreHandlers 共用 prologue)。C#:`KeepForegroundResult` + ProtocolJson ×2 + BackendAdapter Set/GetKeepForegroundAsync;TeleportViewModel `KeepForegroundEnabled` toggle + badge + connect-time re-sync(MainWindowViewModel post-connect);Teleport tab CheckBox。**動機**:IL2CPP strip 掉 `Application.runInBackground`([[reference_il2cpp_strips_runinbackground]]),managed 路徑 method-not-found,原生 hook 無視 managed runtime。**設計決策 — 不在 UI 斷線時 auto-disable**:PipeServer 在 client-count 遞減前 fire disconnect hook + discrete 雙 lane → 「最後一個 client 離開」判定 racy;改以 shutdown teardown + connect re-sync + benign state(遊戲重啟即清)保底。tests:KeepForegroundTests(5)。
+- **② 通用變速/低重力(UI/Core-only,無 DLL 改動,待 commit)**:`Time.timeScale` + `Physics.gravity` —— 兩者都是 **static engine setter**,靠現成 callMethod(float primitive / Vector3 value-struct marshaling)一鍵切,零 per-game 設定(丟掉 UE 的 per-pawn CMC knobs,那在 Unity 是 game-specific)。`GameTweaksService`(`UnityEngine.Time.set_timeScale(System.Single)` / `Physics.set_gravity(UnityEngine.Vector3)`,CoreModule/PhysicsModule→UnityEngine fallback,全 main-thread,static 無 instance);TeleportViewModel 加 speed/gravity 輸入 + Apply/Reset/preset 命令(gravity 首次 Apply 前 capture base、scale 相對 base、Reset 還原);Teleport tab「World tweaks」card(NumericUpDown + preset buttons 0.25×/2× / Moon 0.16× / Zero-G)。tests:GameTweaksTests(8)。
+- **驗證**:`build.cmd dll`(#1327,Mono x64/x86 + IL2CPP x64 clean)+ `build.cmd test`(#1329,**1013 UI tests green**)。**待 live-smoke + AOT publish**(見上方)。
+- **feature-diff 其餘 backlog**(依序):KeywordTokenizer → Interesting Fields/Properties 計分 → DetectStats「一鍵找 HP/Gold」;class-wide Freeze 欄位;ClassFacetFilter 噪音過濾;CheatTableBuilder 跨來源 .CT;RelatedObjects;BookmarkStore。UE-only 略過清單見 memory。
 
 **2026-07-02 — Teleport wave 1(Unity teleport,參考 `UE5CEDumper` Teleport tab)**(DLL+UI,build #1248,5 commits on `dev`、**待 live-smoke**):
 - **動機/取捨**:UE teleport 零設定靠 GWorld→…→Pawn 引擎鏈;Unity 無此鏈 → target 由使用者挑(findInstances/Inspector/Scene 複製位址),只有 manipulation(寫 Transform)是通用的。這是 UE 的鏡像(UE 通用在「找玩家」,Unity 通用在「移動」)。詳見 [teleport.md](teleport.md) + `project_ue5_teleport_port_assessment` memory。
