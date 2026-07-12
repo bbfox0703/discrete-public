@@ -1882,6 +1882,14 @@ public partial class MainWindow : Window
             vm.SymbolFinder.SendToBrowser(row);
     }
 
+    private void OnStatFindingSendToBrowserMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("StatFindingsGrid");
+        if (grid?.SelectedItem is StatFindingRow row)
+            vm.SymbolFinder.SendFindingToBrowser(row);
+    }
+
     // -----------------------------------------------------------------------
     // Phase 27d — Value Search row activation + context menu.
     // -----------------------------------------------------------------------
