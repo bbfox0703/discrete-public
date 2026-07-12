@@ -375,13 +375,21 @@ public static class KeyDiscoveryEngine
             || n.EndsWith("pointer", StringComparison.Ordinal);
     }
 
-    private static double NamePrior(string name)
+    // internal for direct regression testing (UnityDumpUI.Tests has IVT).
+    internal static double NamePrior(string name)
     {
-        string n = name.ToLowerInvariant();
+        // Token-EXACT match (KeywordTokenizer), not naive substring: the old
+        // n.Contains("id") false-fired on width/grid/guid/valid/rigidbody,
+        // "key" on monkey/keyboard, "code" on decoded/barcode — inflating the
+        // name prior for fields that are not keys. Tokenizing first means "id"
+        // only credits a standalone token (userId -> {user, id}), never a
+        // buried substring (grid -> {grid}). Fixes the latent scorer bug the
+        // UE5 KeywordTokenizer port was brought in to close.
+        HashSet<string> tokens = KeywordTokenizer.TokenizeAsSet(name);
         double max = 0;
-        void Bump(string sub, double w)
+        void Bump(string token, double w)
         {
-            if (n.Contains(sub, StringComparison.Ordinal) && w > max) max = w;
+            if (tokens.Contains(token) && w > max) max = w;
         }
         Bump("id", 0.30);
         Bump("name", 0.20);
