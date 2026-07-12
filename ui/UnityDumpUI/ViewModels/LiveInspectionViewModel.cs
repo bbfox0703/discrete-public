@@ -479,6 +479,57 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     private void PersistBookmarks() => _bookmarkStore.Save(GameKey, Bookmarks);
 
+    // ---------- Related objects (scene-graph navigation) ------------------
+
+    private SceneEnumerator? _relatedScene;
+    private CancellationTokenSource? _relatedCts;
+
+    /// <summary>GameObject / parent / children related to the selected instance.
+    /// Each row re-inspects at its address on activation.</summary>
+    public ObservableCollection<RelatedObject> RelatedObjects { get; } = new();
+
+    [ObservableProperty] private string _relatedStatus =
+        "Show the GameObject, parent, and children of the selected instance.";
+
+    /// <summary>Populate the related-objects list for the current selected
+    /// instance (its GameObject + transform parent + direct children).</summary>
+    [RelayCommand]
+    private async Task ShowRelatedAsync()
+    {
+        RelatedObjects.Clear();
+        if (!HasTarget || SelectedInstance is null)
+        {
+            RelatedStatus = "Select an instance first, then Show related.";
+            return;
+        }
+        _relatedScene ??= new SceneEnumerator(_backend, _logger);
+        _relatedCts?.Cancel();
+        _relatedCts = new CancellationTokenSource();
+        CancellationToken ct = _relatedCts.Token;
+        try
+        {
+            RelatedStatus = "Resolving related objects…";
+            RelatedObjectsResult r = await _relatedScene
+                .GetRelatedObjectsAsync(SelectedInstance.Address, TargetName!, ct).ConfigureAwait(true);
+            if (ct.IsCancellationRequested) return;
+            if (r.Error is not null) { RelatedStatus = r.Error; return; }
+            foreach (RelatedObject o in r.Objects) RelatedObjects.Add(o);
+            RelatedStatus = RelatedObjects.Count == 0
+                ? "No related objects found."
+                : $"{RelatedObjects.Count} related object(s) — double-click (or Go) to re-inspect.";
+        }
+        catch (OperationCanceledException) { /* superseded */ }
+        catch (Exception ex) { RelatedStatus = $"Related lookup failed: {ex.Message}"; }
+    }
+
+    /// <summary>Re-inspect a related object — jump the Inspector to its address.</summary>
+    public void GoToRelated(RelatedObject? related)
+    {
+        if (related is null) return;
+        SetTarget(related.Assembly, related.Namespace, related.Class);
+        FocusOnInstance(related.Address);
+    }
+
     // ---------- Instances -------------------------------------------------
 
     public ObservableCollection<InstanceItem> Instances { get; } = new();

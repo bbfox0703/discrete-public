@@ -456,6 +456,89 @@ public sealed class SceneEnumerator
     }
 
     /// <summary>
+    /// Build the "related objects" list for an inspected instance: its
+    /// GameObject, the parent GameObject, and the direct child GameObjects —
+    /// each a live address the Inspector can jump to. Given a Component /
+    /// MonoBehaviour the GameObject is resolved via Component.get_gameObject;
+    /// given a GameObject it's used directly. (Sibling components are a v2
+    /// follow-up — they need GameObject.GetComponents(Type) array marshaling.)
+    /// </summary>
+    public async Task<RelatedObjectsResult> GetRelatedObjectsAsync(
+        string instanceAddress, string instanceClass, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(instanceAddress))
+            return new RelatedObjectsResult { Error = "No instance selected." };
+
+        // Resolve the engine assembly (modular CoreModule vs monolithic
+        // UnityEngine) so every downstream Object / Component / Transform call
+        // targets the image the runtime actually loaded.
+        string? goType = await ResolveGameObjectTypeAsync(ct).ConfigureAwait(false);
+        if (goType is null)
+            return new RelatedObjectsResult { Error = _lastResolveError ?? "Unity engine types not reachable." };
+
+        string asm = UnityEngineAssembly;
+        var objects = new List<RelatedObject>();
+
+        // 1. The GameObject this instance lives on.
+        string? go = string.Equals(instanceClass, "GameObject", StringComparison.Ordinal)
+            ? instanceAddress
+            : await CallRefAsync("Component", "get_gameObject", instanceAddress, ct).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(go))
+            return new RelatedObjectsResult
+            {
+                Error = "Couldn't resolve a GameObject — this instance isn't a scene Component / GameObject.",
+            };
+
+        string goName = await GetNameAsync(go, ct).ConfigureAwait(false) ?? string.Empty;
+        objects.Add(GameObjectRow(RelatedKind.GameObject, goName, go, asm));
+
+        // 2. Parent GameObject (transform.parent -> gameObject).
+        string? tr = await CallRefAsync("Component", "get_transform", go, ct).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(tr))
+        {
+            string? parentTr = await CallRefAsync("Transform", "get_parent", tr, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(parentTr))
+            {
+                string? parentGo = await CallRefAsync("Component", "get_gameObject", parentTr, ct).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(parentGo))
+                {
+                    string pn = await GetNameAsync(parentGo, ct).ConfigureAwait(false) ?? string.Empty;
+                    objects.Add(GameObjectRow(RelatedKind.Parent, pn, parentGo, asm));
+                }
+            }
+        }
+
+        // 3. Direct children (reuse the Scene tree walk).
+        foreach (GameObjectRef child in await GetChildrenAsync(go, ct).ConfigureAwait(false))
+            objects.Add(GameObjectRow(RelatedKind.Child, child.Name, child.Address, asm));
+
+        return new RelatedObjectsResult { Objects = objects };
+    }
+
+    private RelatedObject GameObjectRow(RelatedKind kind, string name, string address, string asm) => new()
+    {
+        Kind      = kind,
+        Label     = string.IsNullOrEmpty(name) ? "GameObject" : name,
+        Address   = address,
+        Assembly  = asm,
+        Namespace = UnityEngineNamespace,
+        Class     = "GameObject",
+    };
+
+    // Invoke a no-arg reference-returning engine accessor; null on failure / a
+    // managed-null (all-zero) return.
+    private async Task<string?> CallRefAsync(string cls, string method, string instance, CancellationToken ct)
+    {
+        var r = await _backend.CallMethodAsync(
+            UnityEngineAssembly, UnityEngineNamespace, cls, method,
+            new List<CallArgRequest>(), signatureMatch: "()",
+            instanceAddress: instance, mainThread: true, ct: ct).ConfigureAwait(false);
+        if (!r.Ok || r.ReturnValue.ValueKind != JsonValueKind.String) return null;
+        string? a = r.ReturnValue.GetString();
+        return string.IsNullOrEmpty(a) || a == "0x0000000000000000" ? null : a;
+    }
+
+    /// <summary>
     /// Resolve and cache the managed <c>Type</c> instance pointer for
     /// <c>UnityEngine.GameObject</c>. First call goes over the wire to
     /// <c>System.Type.GetType(string)</c>; subsequent calls return the
@@ -541,6 +624,30 @@ public sealed class GameObjectRef
     /// <summary>Number of direct children. Null when not yet probed
     /// (the cheap enumeration path doesn't decode this).</summary>
     public int?   ChildCount { get; }
+}
+
+/// <summary>Relationship of a related object to the inspected instance.</summary>
+public enum RelatedKind { GameObject, Parent, Child, Component }
+
+/// <summary>One related object the Inspector can jump to (re-inspect).</summary>
+public sealed class RelatedObject
+{
+    public required RelatedKind Kind      { get; init; }
+    public required string      Label     { get; init; }
+    public required string      Address   { get; init; }
+    public required string      Assembly  { get; init; }
+    public required string      Namespace { get; init; }
+    public required string      Class     { get; init; }
+
+    public string KindLabel    => Kind.ToString();
+    public string ClassDisplay => string.IsNullOrEmpty(Namespace) ? Class : $"{Namespace}.{Class}";
+}
+
+/// <summary>Result of <see cref="SceneEnumerator.GetRelatedObjectsAsync"/>.</summary>
+public sealed class RelatedObjectsResult
+{
+    public IReadOnlyList<RelatedObject> Objects { get; init; } = Array.Empty<RelatedObject>();
+    public string? Error { get; init; }
 }
 
 /// <summary>Result envelope from

@@ -926,6 +926,38 @@
                         ToolTip.Tip="Delete the selected bookmark." />
               </StackPanel>
 
+              <!-- Related objects: the selected instance's GameObject, parent,
+                   and children — double-click a row to re-inspect it. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        Header="🔗 Related objects (GameObject / parent / children)">
+                <StackPanel Spacing="6" Margin="0,6,0,0">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Show related"
+                            Command="{Binding Inspector.ShowRelatedCommand}" />
+                    <TextBlock Text="{Binding Inspector.RelatedStatus}"
+                               VerticalAlignment="Center" Opacity="0.7" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <DataGrid x:Name="RelatedObjectsGrid"
+                            ItemsSource="{Binding Inspector.RelatedObjects}"
+                            IsReadOnly="True" AutoGenerateColumns="False"
+                            CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
+                            MaxHeight="220"
+                            DoubleTapped="OnRelatedObjectActivated">
+                    <DataGrid.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Go (re-inspect)" Click="OnRelatedObjectGoMenu" />
+                      </ContextMenu>
+                    </DataGrid.ContextMenu>
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="Kind"    Binding="{Binding KindLabel}"    Width="Auto" MinWidth="80" />
+                      <DataGridTextColumn Header="Name"    Binding="{Binding Label}"        Width="Auto" MinWidth="140" />
+                      <DataGridTextColumn Header="Class"   Binding="{Binding ClassDisplay}" Width="Auto" MinWidth="120" />
+                      <DataGridTextColumn Header="Address" Binding="{Binding Address}"      Width="Auto" MinWidth="120" />
+                    </DataGrid.Columns>
+                  </DataGrid>
+                </StackPanel>
+              </Expander>
+
               <!-- Inspector error banner -->
               <Border DockPanel.Dock="Top"
                       IsVisible="{Binding Inspector.ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
