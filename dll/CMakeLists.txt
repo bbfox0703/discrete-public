@@ -110,6 +110,10 @@ set(DLL_SHARED_SOURCES
     src/shared/AobPattern.h
     src/shared/BackendDetector.cpp
     src/shared/BackendDetector.h
+    # Keep-foreground native hook (run-in-background). Pure Win32/user32 +
+    # MinHook, backend-agnostic → compiles into both DLL flavors.
+    src/shared/ForegroundHook.cpp
+    src/shared/ForegroundHook.h
     src/shared/Logger.cpp
     src/shared/Logger.h
     src/shared/MagicStrings.h

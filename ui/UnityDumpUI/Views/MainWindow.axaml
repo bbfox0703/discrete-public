@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:UnityDumpUI.ViewModels"
+        xmlns:services="using:UnityDumpUI.Core.Services"
         xmlns:controls="using:UnityDumpUI.Controls"
         xmlns:converters="using:UnityDumpUI.Views.Converters"
         x:Class="UnityDumpUI.Views.MainWindow"
@@ -895,6 +896,68 @@
                            IsVisible="{Binding Inspector.HasSelectedInstance}" />
               </StackPanel>
 
+              <!-- Bookmarks: pin the inspected instance + jump back later
+                   (persisted per game; re-anchors the class on recall). -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="6" Margin="0,0,0,6">
+                <Button Content="★ Bookmark"
+                        Command="{Binding Inspector.BookmarkCurrentCommand}"
+                        ToolTip.Tip="Pin the current class + selected instance so you can jump back later (saved per game)." />
+                <TextBox Width="150" VerticalAlignment="Center"
+                         Text="{Binding Inspector.BookmarkLabelInput, Mode=TwoWay}"
+                         PlaceholderText="label (optional)" />
+                <ComboBox Width="220" VerticalAlignment="Center"
+                          ItemsSource="{Binding Inspector.Bookmarks}"
+                          SelectedItem="{Binding Inspector.SelectedBookmark, Mode=TwoWay}"
+                          PlaceholderText="saved bookmarks…">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate x:DataType="services:InstanceBookmark">
+                      <TextBlock Text="{Binding DisplayLabel}" ToolTip.Tip="{Binding ClassDisplay}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+                <Button Content="Recall"
+                        Command="{Binding Inspector.RecallBookmarkCommand}"
+                        CommandParameter="{Binding Inspector.SelectedBookmark}"
+                        ToolTip.Tip="Re-inspect the bookmarked class and focus its instance (re-anchors after a restart)." />
+                <Button Content="✕"
+                        Command="{Binding Inspector.DeleteBookmarkCommand}"
+                        CommandParameter="{Binding Inspector.SelectedBookmark}"
+                        ToolTip.Tip="Delete the selected bookmark." />
+              </StackPanel>
+
+              <!-- Related objects: the selected instance's GameObject, parent,
+                   and children — double-click a row to re-inspect it. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,6"
+                        Header="🔗 Related objects (GameObject / parent / children)">
+                <StackPanel Spacing="6" Margin="0,6,0,0">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Show related"
+                            Command="{Binding Inspector.ShowRelatedCommand}" />
+                    <TextBlock Text="{Binding Inspector.RelatedStatus}"
+                               VerticalAlignment="Center" Opacity="0.7" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <DataGrid x:Name="RelatedObjectsGrid"
+                            ItemsSource="{Binding Inspector.RelatedObjects}"
+                            IsReadOnly="True" AutoGenerateColumns="False"
+                            CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
+                            MaxHeight="220"
+                            DoubleTapped="OnRelatedObjectActivated">
+                    <DataGrid.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Go (re-inspect)" Click="OnRelatedObjectGoMenu" />
+                      </ContextMenu>
+                    </DataGrid.ContextMenu>
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="Kind"    Binding="{Binding KindLabel}"    Width="Auto" MinWidth="80" />
+                      <DataGridTextColumn Header="Name"    Binding="{Binding Label}"        Width="Auto" MinWidth="140" />
+                      <DataGridTextColumn Header="Class"   Binding="{Binding ClassDisplay}" Width="Auto" MinWidth="120" />
+                      <DataGridTextColumn Header="Address" Binding="{Binding Address}"      Width="Auto" MinWidth="120" />
+                    </DataGrid.Columns>
+                  </DataGrid>
+                </StackPanel>
+              </Expander>
+
               <!-- Inspector error banner -->
               <Border DockPanel.Dock="Top"
                       IsVisible="{Binding Inspector.ErrorMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
@@ -1318,6 +1381,87 @@
                 </Grid>
               </StackPanel>
 
+              <!-- Auto-find gameplay fields: keyword-scored (HP/Gold/Damage/…),
+                   optionally live-confirmed. No pattern needed. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,8"
+                        Header="🎯 Auto-find gameplay fields (keyword-scored; optionally live-confirmed)">
+                <StackPanel Spacing="6" Margin="0,6,0,0">
+                  <StackPanel Orientation="Horizontal" Spacing="10">
+                    <Button Content="Find gameplay fields"
+                            Command="{Binding SymbolFinder.FindGameplayFieldsCommand}"
+                            Classes="accent" />
+                    <CheckBox Content="Confirm live values (resolve an instance + read the current value)"
+                              IsChecked="{Binding SymbolFinder.ConfirmLive, Mode=TwoWay}"
+                              VerticalAlignment="Center" />
+                  </StackPanel>
+                  <TextBlock Text="{Binding SymbolFinder.FindingsStatus}"
+                             TextWrapping="Wrap" Opacity="0.75" />
+                  <DataGrid x:Name="StatFindingsGrid"
+                            ItemsSource="{Binding SymbolFinder.Findings}"
+                            IsReadOnly="True" AutoGenerateColumns="False"
+                            CanUserResizeColumns="True" CanUserSortColumns="True"
+                            GridLinesVisibility="Horizontal" MaxHeight="360">
+                    <DataGrid.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Send class to Browser"
+                                  Click="OnStatFindingSendToBrowserMenu" />
+                      </ContextMenu>
+                    </DataGrid.ContextMenu>
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="✓"        Binding="{Binding ConfirmedMark}" Width="Auto" MinWidth="28" />
+                      <DataGridTextColumn Header="Category"  Binding="{Binding Category}"      Width="Auto" MinWidth="80"  SortMemberPath="Category" />
+                      <DataGridTextColumn Header="Class"     Binding="{Binding ClassDisplay}"  Width="Auto" MinWidth="160" SortMemberPath="ClassDisplay" />
+                      <DataGridTextColumn Header="Field"     Binding="{Binding Member}"        Width="Auto" MinWidth="120" SortMemberPath="Member" />
+                      <DataGridTextColumn Header="Type"      Binding="{Binding Type}"          Width="Auto" MinWidth="90"  SortMemberPath="Type" />
+                      <DataGridTextColumn Header="Offset"    Binding="{Binding OffsetLabel}"   Width="Auto" MinWidth="64" />
+                      <DataGridTextColumn Header="Value"     Binding="{Binding LiveValue}"     Width="Auto" MinWidth="60" />
+                      <DataGridTextColumn Header="Score"     Binding="{Binding Score}"         Width="Auto" MinWidth="50" SortMemberPath="Score" />
+                      <DataGridTextColumn Header="Conf"      Binding="{Binding Confidence}"    Width="Auto" MinWidth="50" SortMemberPath="Confidence" />
+                      <DataGridTextColumn Header="Keywords"  Binding="{Binding Keywords}"      Width="Auto" MinWidth="120" />
+                      <DataGridTextColumn Header="Static"    Binding="{Binding StaticLabel}"   Width="Auto" MinWidth="48" />
+                    </DataGrid.Columns>
+                  </DataGrid>
+                </StackPanel>
+              </Expander>
+
+              <!-- Auto-find gameplay METHODS: keyword-scored invoke targets
+                   (SetHealth / AddGold / Teleport / Kill / God). No pattern. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,8"
+                        Header="🎮 Auto-find gameplay methods (invoke targets — keyword-scored)">
+                <StackPanel Spacing="6" Margin="0,6,0,0">
+                  <StackPanel Orientation="Horizontal" Spacing="10">
+                    <Button Content="Find gameplay methods"
+                            Command="{Binding SymbolFinder.FindGameplayMethodsCommand}"
+                            Classes="accent" />
+                    <CheckBox Content="Include gameplay actions (Dash / Interact / Buy / Sell — noisier)"
+                              IsChecked="{Binding SymbolFinder.IncludeGameplayActions, Mode=TwoWay}"
+                              VerticalAlignment="Center" />
+                  </StackPanel>
+                  <TextBlock Text="{Binding SymbolFinder.MethodFindingsStatus}"
+                             TextWrapping="Wrap" Opacity="0.75" />
+                  <DataGrid x:Name="MethodFindingsGrid"
+                            ItemsSource="{Binding SymbolFinder.MethodFindings}"
+                            IsReadOnly="True" AutoGenerateColumns="False"
+                            CanUserResizeColumns="True" CanUserSortColumns="True"
+                            GridLinesVisibility="Horizontal" MaxHeight="360">
+                    <DataGrid.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Send class to Browser"
+                                  Click="OnMethodFindingSendToBrowserMenu" />
+                      </ContextMenu>
+                    </DataGrid.ContextMenu>
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="Category" Binding="{Binding Category}"     Width="Auto" MinWidth="90"  SortMemberPath="Category" />
+                      <DataGridTextColumn Header="Class"    Binding="{Binding ClassDisplay}" Width="Auto" MinWidth="160" SortMemberPath="ClassDisplay" />
+                      <DataGridTextColumn Header="Method"   Binding="{Binding Method}"       Width="Auto" MinWidth="140" SortMemberPath="Method" />
+                      <DataGridTextColumn Header="Score"    Binding="{Binding Score}"        Width="Auto" MinWidth="50"  SortMemberPath="Score" />
+                      <DataGridTextColumn Header="Keywords" Binding="{Binding Keywords}"     Width="Auto" MinWidth="120" />
+                      <DataGridTextColumn Header="Static"   Binding="{Binding StaticLabel}"  Width="Auto" MinWidth="48" />
+                    </DataGrid.Columns>
+                  </DataGrid>
+                </StackPanel>
+              </Expander>
+
               <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
                            IsVisible="{Binding SymbolFinder.IsBusy}"
                            Height="3" Margin="0,0,0,4" />
@@ -1346,6 +1490,33 @@
                 <CheckBox Content="Numeric types only (bool / byte / int / single / double / …)"
                           IsChecked="{Binding SymbolFinder.NumericTypesOnly, Mode=TwoWay}"
                           VerticalAlignment="Center" />
+                <!-- Class-facet noise filter: tick classes to hide (display-only). -->
+                <Button VerticalAlignment="Center"
+                        IsVisible="{Binding SymbolFinder.ClassFacets.AnyFacets}"
+                        Content="Hide classes ▾">
+                  <Button.Flyout>
+                    <Flyout>
+                      <StackPanel Spacing="6" MinWidth="260">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <Button Content="Auto-hide engine noise"
+                                  Command="{Binding SymbolFinder.AutoHideNoiseClassesCommand}" />
+                          <Button Content="Clear"
+                                  Command="{Binding SymbolFinder.ClearHiddenClassesCommand}" />
+                        </StackPanel>
+                        <ScrollViewer MaxHeight="320">
+                          <ItemsControl ItemsSource="{Binding SymbolFinder.ClassFacets.Facets}">
+                            <ItemsControl.ItemTemplate>
+                              <DataTemplate x:DataType="vm:ClassFacet">
+                                <CheckBox Content="{Binding Display}"
+                                          IsChecked="{Binding IsHidden, Mode=TwoWay}" />
+                              </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                          </ItemsControl>
+                        </ScrollViewer>
+                      </StackPanel>
+                    </Flyout>
+                  </Button.Flyout>
+                </Button>
               </StackPanel>
 
               <!-- Results — double-click navigates back to the Browser. -->
@@ -3183,6 +3354,55 @@
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>
                     <TextBlock Text="{Binding Teleport.HotkeyStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+                  </StackPanel>
+                </Border>
+
+                <!-- Keep-foreground: native run-in-background Win32 hook. Works
+                     even when IL2CPP strips Application.runInBackground, and
+                     while the game thread is idle. -->
+                <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                  <StackPanel Spacing="6">
+                    <CheckBox Content="Keep the game running when unfocused (native hook)"
+                              IsChecked="{Binding Teleport.KeepForegroundEnabled}"/>
+                    <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                               Text="Hooks GetForegroundWindow / window activation / cursor confinement so the game keeps ticking (and the mouse is freed) while another window is focused. Native — works even when IL2CPP strips Application.runInBackground. Clears when the game restarts."/>
+                    <TextBlock Text="{Binding Teleport.KeepForegroundStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+                  </StackPanel>
+                </Border>
+
+                <!-- World tweaks: universal speed (Time.timeScale) + gravity
+                     (Physics.gravity). Both are static engine setters reached via
+                     the same callMethod primitive as teleport → no per-game target. -->
+                <Border BorderBrush="#40808080" BorderThickness="1" CornerRadius="4" Padding="10">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="World tweaks (universal — no target needed)" FontWeight="SemiBold"/>
+
+                    <Grid ColumnDefinitions="Auto,110,Auto,Auto,Auto,Auto,Auto,Auto">
+                      <TextBlock Grid.Column="0" Text="Speed ×" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                      <NumericUpDown Grid.Column="1" Value="{Binding Teleport.TimeScaleInput, Mode=TwoWay}"
+                                     Minimum="0" Maximum="100" Increment="0.25" FormatString="0.###"/>
+                      <Button Grid.Column="2" Content="Apply"  Margin="8,0,0,0" Command="{Binding Teleport.ApplyTimeScaleCommand}"/>
+                      <Button Grid.Column="3" Content="1×"     Margin="4,0,0,0" Command="{Binding Teleport.ResetTimeScaleCommand}"/>
+                      <Button Grid.Column="4" Content="0.25×"  Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="0.25"/>
+                      <Button Grid.Column="5" Content="0.5×"   Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="0.5"/>
+                      <Button Grid.Column="6" Content="2×"     Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="2"/>
+                      <Button Grid.Column="7" Content="4×"     Margin="4,0,0,0" Command="{Binding Teleport.ApplyTimeScalePresetCommand}" CommandParameter="4"/>
+                    </Grid>
+                    <TextBlock Text="{Binding Teleport.TimeScaleStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+
+                    <Grid ColumnDefinitions="Auto,110,Auto,Auto,Auto,Auto">
+                      <TextBlock Grid.Column="0" Text="Gravity ×" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                      <NumericUpDown Grid.Column="1" Value="{Binding Teleport.GravityScaleInput, Mode=TwoWay}"
+                                     Minimum="0" Maximum="20" Increment="0.25" FormatString="0.###"/>
+                      <Button Grid.Column="2" Content="Apply"      Margin="8,0,0,0" Command="{Binding Teleport.ApplyGravityCommand}"/>
+                      <Button Grid.Column="3" Content="1×"         Margin="4,0,0,0" Command="{Binding Teleport.ResetGravityCommand}"/>
+                      <Button Grid.Column="4" Content="Moon 0.16×" Margin="4,0,0,0" Command="{Binding Teleport.ApplyGravityPresetCommand}" CommandParameter="0.16"/>
+                      <Button Grid.Column="5" Content="Zero-G"     Margin="4,0,0,0" Command="{Binding Teleport.ApplyGravityPresetCommand}" CommandParameter="0"/>
+                    </Grid>
+                    <TextBlock Text="{Binding Teleport.GravityStatus}" TextWrapping="Wrap" Opacity="0.75"/>
+
+                    <TextBlock TextWrapping="Wrap" Opacity="0.6"
+                               Text="Speed drives UnityEngine.Time.timeScale (0 = pause, slider is a multiplier). Gravity scales the captured Physics.gravity (0 = zero-G, &lt;1 = low-gravity). Both are engine globals — they need no target and reset when the game restarts."/>
                   </StackPanel>
                 </Border>
 

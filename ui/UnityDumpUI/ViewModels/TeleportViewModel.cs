@@ -29,6 +29,7 @@ public sealed partial class TeleportViewModel : ObservableObject
     private readonly BackendAdapter _backend;
     private readonly FileLogger     _logger;
     private readonly TeleportController _controller;
+    private readonly GameTweaksService _tweaks;
     private bool _busy;
     private TeleportPose? _lastPose;
 
@@ -43,6 +44,7 @@ public sealed partial class TeleportViewModel : ObservableObject
         _backend    = backend;
         _logger     = logger;
         _controller = new TeleportController(new TeleportService(backend, logger: logger));
+        _tweaks     = new GameTweaksService(backend, logger: logger);
 
         var rows = new List<TeleportMarkerRowViewModel>(TeleportMarkerStore.SlotCount);
         for (int i = 0; i < TeleportMarkerStore.SlotCount; i++)
@@ -136,6 +138,172 @@ public sealed partial class TeleportViewModel : ObservableObject
     /// <summary>True while a row is waiting for a key combo — the view's tunnel
     /// KeyDown handler routes the next press to <see cref="ApplyCapturedKey"/>.</summary>
     public bool IsCapturingHotkey => _capturingRow is not null;
+
+    // --- keep-foreground (native run-in-background) ---
+
+    /// <summary>Native "keep the game running when unfocused" Win32 hook
+    /// (ForegroundHook in the DLL). Independent of the managed
+    /// <c>Application.runInBackground</c> path, which IL2CPP strips on real
+    /// games. Toggling drives <c>setKeepForeground</c> over the pipe.</summary>
+    [ObservableProperty] private bool _keepForegroundEnabled;
+
+    /// <summary>Badge text reflecting the DLL hook state.</summary>
+    [ObservableProperty] private string _keepForegroundStatus = string.Empty;
+
+    // Set while we sync the toggle to the DLL's actual state (connect-time or a
+    // revert) so the [ObservableProperty] change handler doesn't re-send a
+    // command / recurse.
+    private bool _syncingKeepForeground;
+
+    partial void OnKeepForegroundEnabledChanged(bool value)
+    {
+        if (_syncingKeepForeground) return;
+        _ = ApplyKeepForegroundAsync(value);
+    }
+
+    private async Task ApplyKeepForegroundAsync(bool enable)
+    {
+        if (!_backend.IsConnected)
+        {
+            KeepForegroundStatus = "Not connected — connect to a running game first.";
+            SetKeepForegroundToggle(false);   // revert without re-triggering
+            return;
+        }
+        try
+        {
+            KeepForegroundResult r = await _backend.SetKeepForegroundAsync(enable).ConfigureAwait(true);
+            ApplyKeepForegroundState(r.State);
+            if (r.Error is { Length: > 0 } err)
+                _logger.Write("Teleport", $"setKeepForeground({enable}) error: {err}");
+        }
+        catch (Exception ex)
+        {
+            KeepForegroundStatus = "Error toggling keep-foreground.";
+            _logger.Write("Teleport", $"setKeepForeground({enable}) failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>Map the DLL state (1 = on, 0 = off, negative = hook error) to the
+    /// checkbox + badge without re-triggering the change handler.</summary>
+    private void ApplyKeepForegroundState(int state)
+    {
+        SetKeepForegroundToggle(state == 1);
+        KeepForegroundStatus = state switch
+        {
+            1 => "On — the game keeps running while unfocused.",
+            0 => "Off.",
+            _ => "Hook error — the DLL couldn't install the foreground hook.",
+        };
+    }
+
+    private void SetKeepForegroundToggle(bool value)
+    {
+        _syncingKeepForeground = true;
+        KeepForegroundEnabled = value;
+        _syncingKeepForeground = false;
+    }
+
+    /// <summary>Sync the toggle to the DLL's actual hook state. Called on connect
+    /// so a hook left enabled across a UI reconnect is reflected. Soft — does
+    /// nothing if disconnected or the backend doesn't answer.</summary>
+    public async Task SyncKeepForegroundStateAsync()
+    {
+        if (!_backend.IsConnected) return;
+        try
+        {
+            KeepForegroundResult? r = await _backend.GetKeepForegroundAsync().ConfigureAwait(true);
+            if (r is not null) ApplyKeepForegroundState(r.State);
+        }
+        catch { /* soft — connect-time nicety */ }
+    }
+
+    // --- world tweaks: universal speed (Time.timeScale) + gravity (Physics.gravity) ---
+
+    /// <summary>Game speed multiplier for <c>Time.timeScale</c> (1 = normal,
+    /// 0 = paused, &gt;1 = faster). Universal — a static engine setter, no
+    /// per-game target.</summary>
+    [ObservableProperty] private double _timeScaleInput = 1.0;
+    [ObservableProperty] private string _timeScaleStatus = string.Empty;
+
+    /// <summary>Gravity multiplier applied to the game's captured base
+    /// <c>Physics.gravity</c> (1 = normal, 0 = zero-G, &lt;1 = low-gravity).</summary>
+    [ObservableProperty] private double _gravityScaleInput = 1.0;
+    [ObservableProperty] private string _gravityStatus = string.Empty;
+
+    // The game's base gravity, captured ONCE before our first change so the scale
+    // is relative to the real starting value (survives repeated Apply). Null until
+    // the first gravity Apply.
+    private (float X, float Y, float Z)? _baseGravity;
+
+    [RelayCommand]
+    private Task ApplyTimeScaleAsync() => ApplyTimeScaleCoreAsync(ClampScale(TimeScaleInput, 100.0));
+
+    [RelayCommand]
+    private Task ResetTimeScaleAsync()
+    {
+        TimeScaleInput = 1.0;
+        return ApplyTimeScaleCoreAsync(1.0f);
+    }
+
+    [RelayCommand]
+    private Task ApplyTimeScalePresetAsync(string? value)
+    {
+        if (!TryParseInvariant(value, out double s)) return Task.CompletedTask;
+        TimeScaleInput = s;
+        return ApplyTimeScaleCoreAsync(ClampScale(s, 100.0));
+    }
+
+    private async Task ApplyTimeScaleCoreAsync(float scale)
+    {
+        if (!_backend.IsConnected) { TimeScaleStatus = "Not connected — connect to a running game first."; return; }
+        (bool ok, string? error) = await _tweaks.SetTimeScaleAsync(scale).ConfigureAwait(true);
+        TimeScaleStatus = ok
+            ? $"Time scale = {scale:0.###}× ({DescribeSpeed(scale)})."
+            : $"Failed: {error ?? "unknown error"}";
+    }
+
+    [RelayCommand]
+    private async Task ApplyGravityAsync()
+    {
+        if (!_backend.IsConnected) { GravityStatus = "Not connected — connect to a running game first."; return; }
+        // Capture the game's base gravity ONCE, before our first change.
+        _baseGravity ??= await _tweaks.GetGravityAsync().ConfigureAwait(true) ?? DefaultGravity;
+        (float X, float Y, float Z) b = _baseGravity.Value;
+        float s = ClampScale(GravityScaleInput, 20.0);
+        (bool ok, string? error) = await _tweaks.SetGravityAsync(b.X * s, b.Y * s, b.Z * s).ConfigureAwait(true);
+        GravityStatus = ok
+            ? $"Gravity = {s:0.###}× base (Y {b.Y * s:0.##})."
+            : $"Failed: {error ?? "unknown error"}";
+    }
+
+    [RelayCommand]
+    private async Task ResetGravityAsync()
+    {
+        GravityScaleInput = 1.0;
+        if (!_backend.IsConnected) { GravityStatus = "Not connected."; return; }
+        (float X, float Y, float Z) b = _baseGravity ?? DefaultGravity;
+        (bool ok, string? error) = await _tweaks.SetGravityAsync(b.X, b.Y, b.Z).ConfigureAwait(true);
+        GravityStatus = ok ? "Gravity restored to base." : $"Failed: {error ?? "unknown error"}";
+    }
+
+    [RelayCommand]
+    private Task ApplyGravityPresetAsync(string? value)
+    {
+        if (!TryParseInvariant(value, out double s)) return Task.CompletedTask;
+        GravityScaleInput = s;
+        return ApplyGravityAsync();
+    }
+
+    private static readonly (float X, float Y, float Z) DefaultGravity = (0f, -9.81f, 0f);
+
+    private static float ClampScale(double v, double max) => (float)Math.Clamp(v, 0.0, max);
+
+    private static string DescribeSpeed(float scale) =>
+        scale == 0f ? "paused" : scale < 1f ? "slow-mo" : scale > 1f ? "fast" : "normal";
+
+    private static bool TryParseInvariant(string? value, out double result) =>
+        double.TryParse(value, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out result);
 
     // ------------------------------------------------------------------
     // Commands

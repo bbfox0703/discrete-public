@@ -48,6 +48,25 @@
       <TextBlock Text="{Binding ErrorMessage}" Foreground="#FFD32F2F" TextWrapping="Wrap" />
     </Border>
 
+    <!-- Class-wide Freeze: hold this field at a value across EVERY live
+         instance, re-enumerating so respawns get frozen too. Only shown for
+         writable scalar types. -->
+    <Border DockPanel.Dock="Top" IsVisible="{Binding CanFreeze}"
+            BorderBrush="#4066AAFF" BorderThickness="1" CornerRadius="4"
+            Padding="10,6" Margin="0,0,0,8">
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBlock Text="❄ Freeze at:" VerticalAlignment="Center" />
+        <TextBox Width="140" VerticalAlignment="Center"
+                 Text="{Binding FreezeValueInput, Mode=TwoWay}"
+                 PlaceholderText="value" />
+        <ToggleSwitch OffContent="Off" OnContent="Frozen"
+                      IsChecked="{Binding IsFrozen, Mode=TwoWay}"
+                      ToolTip.Tip="Continuously write this value to the field on every live instance (respawn-safe)." />
+        <TextBlock Text="{Binding FreezeStatus}" VerticalAlignment="Center"
+                   Opacity="0.75" TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
     <!-- Footer: Close button. -->
     <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
       <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">

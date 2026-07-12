@@ -5,6 +5,7 @@
 
 #include "AobPattern.h"
 #include "BackendDetector.h"
+#include "ForegroundHook.h"
 #include "Logger.h"
 #include "MagicStrings.h"
 #include "MainThreadDispatcher.h"
@@ -2127,6 +2128,21 @@ void RegisterCoreHandlers() {
             {"queue_depth",      s.queue_depth},
             {"is_healthy",       IsHealthy()},
         };
+    });
+
+    // Keep-foreground — native "run in background" Win32 hook. Backend-agnostic
+    // (pure user32 + MinHook), so registered here in the shared prologue and
+    // compiled into both DLL flavors. See ForegroundHook.h for why this exists
+    // (IL2CPP strips Application.set_runInBackground).
+    PipeServer::RegisterHandler(MagicStrings::CmdSetKeepForeground, [](const json& args) -> json {
+        if (!args.contains("enable") || !args["enable"].is_boolean()) {
+            return json{{"error", "missing/invalid 'enable' (bool)"}};
+        }
+        int state = ForegroundHook::SetKeepForeground(args["enable"].get<bool>());
+        return json{{"state", state}};
+    });
+    PipeServer::RegisterHandler(MagicStrings::CmdGetKeepForeground, [](const json&) -> json {
+        return json{{"state", ForegroundHook::IsKeepForegroundEnabled()}};
     });
 
     // Phase 27b — refineValueScan + endValueScan. Backend-agnostic: refine
@@ -10537,6 +10553,10 @@ int Discrete_Init() {
 void Discrete_Shutdown() {
     if (!g_initialized.exchange(false)) return;
     Discrete::PipeServer::Stop();
+    // Keep-foreground: soft-disable + release cursor + MH_DisableHook our user32
+    // targets. Done after PipeServer::Stop() so no setKeepForeground can race in.
+    // Safe when the feature was never enabled (guarded no-op).
+    Discrete::ForegroundHook::Shutdown();
     // Phase 20-MT: tear down the main-thread hook + dispatcher so we don't
     // leave the runtime_invoke detour pointing at our soon-to-be-unloaded
     // code. Safe to call when never installed (atomic-guarded no-op).

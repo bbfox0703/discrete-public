@@ -1882,6 +1882,36 @@ public partial class MainWindow : Window
             vm.SymbolFinder.SendToBrowser(row);
     }
 
+    private void OnStatFindingSendToBrowserMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("StatFindingsGrid");
+        if (grid?.SelectedItem is StatFindingRow row)
+            vm.SymbolFinder.SendFindingToBrowser(row);
+    }
+
+    private void OnMethodFindingSendToBrowserMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("MethodFindingsGrid");
+        if (grid?.SelectedItem is MethodFindingRow row)
+            vm.SymbolFinder.SendMethodFindingToBrowser(row);
+    }
+
+    private void OnRelatedObjectActivated(object? sender, Avalonia.Input.TappedEventArgs e)
+        => GoToSelectedRelated();
+
+    private void OnRelatedObjectGoMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+        => GoToSelectedRelated();
+
+    private void GoToSelectedRelated()
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("RelatedObjectsGrid");
+        if (grid?.SelectedItem is UnityDumpUI.Core.Services.RelatedObject row)
+            vm.Inspector.GoToRelated(row);
+    }
+
     // -----------------------------------------------------------------------
     // Phase 27d — Value Search row activation + context menu.
     // -----------------------------------------------------------------------

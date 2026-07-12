@@ -15,6 +15,7 @@
 
 using System;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,6 +37,11 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
     private IDisposable? _bulkLease;
     private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
 
+    // Class-wide Freeze: writability + editor kind for the freeze value textbox.
+    private readonly FieldWriteTypeInfo _freezeTypeInfo;
+    private CancellationTokenSource? _freezeCts;
+    private Task? _freezeLoop;
+
     public FieldAcrossInstancesViewModel(
         BackendAdapter backend, FileLogger logger,
         string targetAssembly, string? targetNamespace, string targetName,
@@ -53,6 +59,7 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
         _bulkGate        = bulkGate;
         if (_bulkGate is not null)
             _bulkGate.PropertyChanged += (_, _) => RefreshCommand.NotifyCanExecuteChanged();
+        _freezeTypeInfo  = InspectorWriteTypeMap.Resolve(fieldType);
     }
 
     public string TargetAssembly  { get; }
@@ -196,6 +203,138 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
         if (row is null || string.IsNullOrEmpty(row.Instance)) return;
         InspectInstanceRequested?.Invoke(this, new InspectInstanceRequest(
             TargetAssembly, TargetNamespace, TargetName, row.Instance));
+    }
+
+    // ---------- Class-wide Freeze -----------------------------------------
+    // Freeze the field at a constant value across EVERY live instance, on a
+    // timer, re-enumerating periodically so respawned / new instances get frozen
+    // too and freed ones drop off. Rides findInstances (via the existing refresh)
+    // + setInstanceField (the write-side sibling of the read this window does).
+
+    /// <summary>True when the field's type is writable (freeze bar is enabled).</summary>
+    public bool CanFreeze => _freezeTypeInfo.Supported;
+
+    /// <summary>Value to hold the field at (parsed per the field's type).</summary>
+    [ObservableProperty] private string _freezeValueInput = string.Empty;
+
+    [ObservableProperty] private bool _isFrozen;
+
+    [ObservableProperty] private string _freezeStatus = string.Empty;
+
+    // Freeze cadence: re-write every ~400 ms; re-enumerate instances every ~5 s.
+    private const int FreezeWriteIntervalMs = 400;
+    private const int FreezeReEnumEveryTicks = 12;
+
+    // Guards the revert of IsFrozen so it doesn't re-enter OnIsFrozenChanged and
+    // clobber the validation error status.
+    private bool _applyingFreeze;
+
+    partial void OnIsFrozenChanged(bool value)
+    {
+        if (_applyingFreeze) return;
+        if (!value) { _ = StopFreezeAsync(); return; }
+
+        // Validate before starting; on failure revert the toggle.
+        if (!_freezeTypeInfo.Supported)
+        {
+            FreezeStatus = "This field's type can't be frozen (not a writable scalar).";
+            RevertFrozen();
+            return;
+        }
+        if (!SetFieldValueParser.TryParse(_freezeTypeInfo, FreezeValueInput, out _, out string? err))
+        {
+            FreezeStatus = err ?? "Enter a value to freeze at.";
+            RevertFrozen();
+            return;
+        }
+        _freezeCts = new CancellationTokenSource();
+        _freezeLoop = FreezeLoopAsync(_freezeCts.Token);
+    }
+
+    private void RevertFrozen()
+    {
+        _applyingFreeze = true;
+        IsFrozen = false;
+        _applyingFreeze = false;
+    }
+
+    private async Task StopFreezeAsync()
+    {
+        _freezeCts?.Cancel();
+        if (_freezeLoop is not null)
+        {
+            try { await _freezeLoop.ConfigureAwait(true); } catch { /* loop is defensive */ }
+        }
+        _freezeLoop = null;
+        FreezeStatus = "Freeze off.";
+    }
+
+    /// <summary>Cancel any running freeze loop — called when the window closes so
+    /// we don't keep writing to the game after the dialog is gone.</summary>
+    public void StopFreeze() => _freezeCts?.Cancel();
+
+    private async Task FreezeLoopAsync(CancellationToken ct)
+    {
+        int tick = 0;
+        while (!ct.IsCancellationRequested)
+        {
+            // Re-enumerate periodically so respawns / new spawns get frozen and
+            // freed instances drop off (the class-wide + respawn-survival value).
+            if (tick % FreezeReEnumEveryTicks == 0)
+                await ReEnumerateForFreezeAsync(ct).ConfigureAwait(true);
+
+            // Re-parse each tick so the user can edit the target value live.
+            if (SetFieldValueParser.TryParse(_freezeTypeInfo, FreezeValueInput, out JsonElement value, out _))
+            {
+                int ok = 0, total = Rows.Count;
+                foreach (FieldAcrossInstanceRow row in Rows.ToArray())   // snapshot
+                {
+                    if (ct.IsCancellationRequested) break;
+                    if (string.IsNullOrEmpty(row.FieldAddress)) continue;
+                    try
+                    {
+                        SetInstanceFieldResult r = await _backend
+                            .SetInstanceFieldAsync(row.FieldAddress, fieldOffset: 0,
+                                type: _freezeTypeInfo.WireType, value: value, ct)
+                            .ConfigureAwait(true);
+                        if (r.Ok && string.IsNullOrEmpty(r.Error)) ok++;
+                    }
+                    catch (OperationCanceledException) { return; }
+                    catch { /* a torn / freed instance — dropped on next re-enum */ }
+                }
+                if (!ct.IsCancellationRequested)
+                    FreezeStatus = $"Frozen {ok}/{total} instance(s) at {FreezeValueInput}.";
+            }
+
+            try { await Task.Delay(FreezeWriteIntervalMs, ct).ConfigureAwait(true); }
+            catch (OperationCanceledException) { break; }
+            tick++;
+        }
+    }
+
+    // Lightweight re-enumerate for the freeze loop: repopulate Rows with the
+    // current live instances without touching IsBusy / the bulk lease churn the
+    // Refresh command does (freeze runs continuously).
+    private async Task ReEnumerateForFreezeAsync(CancellationToken ct)
+    {
+        try
+        {
+            ListFieldValuesResult result = await _backend
+                .ListFieldValuesAcrossInstancesAsync(
+                    TargetAssembly, TargetNamespace, TargetName,
+                    FieldOffset, FieldType, InstanceLimit, ct)
+                .ConfigureAwait(true);
+            if (ct.IsCancellationRequested || !string.IsNullOrEmpty(result.Error) || result.Rows is null)
+                return;
+            Rows.Clear();
+            foreach (ListFieldValueRow r in result.Rows)
+                Rows.Add(new FieldAcrossInstanceRow(
+                    r.Instance ?? string.Empty, r.FieldAddress ?? string.Empty, FormatValue(r)));
+            MatchCount = result.Count;
+            RefilterRows();
+        }
+        catch (OperationCanceledException) { }
+        catch { /* keep the previous row set on a transient re-enum failure */ }
     }
 
     /// <summary>
