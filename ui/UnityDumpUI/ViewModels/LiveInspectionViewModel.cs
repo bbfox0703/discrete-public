@@ -76,6 +76,9 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private readonly BulkOperationGate? _bulkGate;
     private IDisposable? _bulkLease;
 
+    // Persistent per-game Inspector bookmarks (pin an instance, jump back later).
+    private readonly BookmarkStore _bookmarkStore = new();
+
     /// <summary>True when ANOTHER bulk op (snapshot / value-scan) holds the
     /// lane — greys out Find Instances. Our own scan holds _bulkLease.</summary>
     private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
@@ -361,6 +364,120 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         if (alreadySelected && _pendingFocusFieldAddr is not null)
             _ = WalkInstanceAsync(existing.Address);
     }
+
+    // ---------- Bookmarks (persistent per-game pins) ----------------------
+
+    /// <summary>Per-game identity (GameBuildId) selecting the bookmark file. Set
+    /// by MainWindowViewModel on connect; changing it reloads the list.</summary>
+    [ObservableProperty] private string? _gameKey;
+
+    partial void OnGameKeyChanged(string? value)
+    {
+        Bookmarks.Clear();
+        if (string.IsNullOrEmpty(value)) return;   // disconnected — just clear
+        foreach (InstanceBookmark b in _bookmarkStore.Load(value))
+            Bookmarks.Add(b);
+    }
+
+    /// <summary>Saved Inspector pins for the connected game.</summary>
+    public ObservableCollection<InstanceBookmark> Bookmarks { get; } = new();
+
+    /// <summary>Optional label for the next bookmark (blank = class name).</summary>
+    [ObservableProperty] private string _bookmarkLabelInput = string.Empty;
+
+    /// <summary>Bookmark picked in the dropdown (Recall / Delete target).</summary>
+    [ObservableProperty] private InstanceBookmark? _selectedBookmark;
+
+    /// <summary>Pin the current target + selected instance so you can jump back
+    /// later (persisted per game). No-op without a target.</summary>
+    [RelayCommand]
+    private void BookmarkCurrent()
+    {
+        if (!HasTarget) { ErrorMessage = "Inspect a class first, then bookmark it."; return; }
+        string address = SelectedInstance?.Address ?? string.Empty;
+        string asm = TargetAssembly!;
+        string ns  = TargetNamespace ?? string.Empty;
+        string cls = TargetName!;
+
+        // De-dup on (assembly, class, address): re-bookmarking the same instance
+        // just refreshes the label and moves it to the top.
+        for (int i = Bookmarks.Count - 1; i >= 0; i--)
+        {
+            InstanceBookmark b = Bookmarks[i];
+            if (string.Equals(b.Assembly, asm, StringComparison.Ordinal)
+                && string.Equals(b.Class, cls, StringComparison.Ordinal)
+                && string.Equals(b.Address, address, StringComparison.OrdinalIgnoreCase))
+                Bookmarks.RemoveAt(i);
+        }
+        Bookmarks.Insert(0, new InstanceBookmark
+        {
+            Label = BookmarkLabelInput.Trim(), Assembly = asm, Namespace = ns,
+            Class = cls, Address = address,
+        });
+        BookmarkLabelInput = string.Empty;
+        PersistBookmarks();
+    }
+
+    /// <summary>Jump back to a bookmark: re-target its class and focus its
+    /// instance. After a restart the saved address is stale, so we re-anchor the
+    /// stable CLASS via findInstances (Unity has no universal root to re-walk).</summary>
+    [RelayCommand]
+    private async Task RecallBookmarkAsync(InstanceBookmark? bookmark)
+    {
+        if (bookmark is null) return;
+        SetTarget(bookmark.Assembly, bookmark.Namespace, bookmark.Class);
+
+        _bulkLease = _bulkGate?.TryEnter("Recall bookmark");
+        if (_bulkGate is not null && _bulkLease is null)
+        {
+            ErrorMessage = "Another bulk operation is running — try Recall again in a moment.";
+            return;
+        }
+        _findCts?.Cancel();
+        _findCts = new CancellationTokenSource();
+        CancellationToken ct = _findCts.Token;
+        try
+        {
+            FindInstancesResult r = await _backend.FindInstancesAsync(
+                bookmark.Assembly, bookmark.Namespace, bookmark.Class,
+                InstanceLimit, aliveOnly: true, null, Sane, ct).ConfigureAwait(true);
+            if (ct.IsCancellationRequested) return;
+            if (!string.IsNullOrEmpty(r.Error) || r.Matches.Count == 0)
+            {
+                ErrorMessage = $"Bookmark '{bookmark.DisplayLabel}': no live instance of {bookmark.ClassDisplay} — it may be stale (game restarted or object destroyed). Use Find instances to re-pick.";
+                return;
+            }
+            // Prefer the exact saved address if it's still alive; otherwise
+            // re-anchor to the first live instance and update the pin.
+            string chosen = r.Matches[0];
+            foreach (string a in r.Matches)
+                if (string.Equals(a, bookmark.Address, StringComparison.OrdinalIgnoreCase)) { chosen = a; break; }
+            if (!string.Equals(chosen, bookmark.Address, StringComparison.OrdinalIgnoreCase))
+            {
+                bookmark.Address = chosen;   // re-anchored across a restart
+                PersistBookmarks();
+            }
+            FocusOnInstance(chosen);
+        }
+        catch (OperationCanceledException) { /* superseded */ }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Recall failed: {ex.Message}";
+        }
+        finally
+        {
+            _bulkLease?.Dispose(); _bulkLease = null;
+        }
+    }
+
+    /// <summary>Remove a saved bookmark.</summary>
+    [RelayCommand]
+    private void DeleteBookmark(InstanceBookmark? bookmark)
+    {
+        if (bookmark is not null && Bookmarks.Remove(bookmark)) PersistBookmarks();
+    }
+
+    private void PersistBookmarks() => _bookmarkStore.Save(GameKey, Bookmarks);
 
     // ---------- Instances -------------------------------------------------
 

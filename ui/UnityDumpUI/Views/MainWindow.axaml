@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:UnityDumpUI.ViewModels"
+        xmlns:services="using:UnityDumpUI.Core.Services"
         xmlns:controls="using:UnityDumpUI.Controls"
         xmlns:converters="using:UnityDumpUI.Views.Converters"
         x:Class="UnityDumpUI.Views.MainWindow"
@@ -893,6 +894,36 @@
                 <TextBlock Text="{Binding Inspector.WalkSummary}"
                            Opacity="0.6" FontSize="11"
                            IsVisible="{Binding Inspector.HasSelectedInstance}" />
+              </StackPanel>
+
+              <!-- Bookmarks: pin the inspected instance + jump back later
+                   (persisted per game; re-anchors the class on recall). -->
+              <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
+                          Spacing="6" Margin="0,0,0,6">
+                <Button Content="★ Bookmark"
+                        Command="{Binding Inspector.BookmarkCurrentCommand}"
+                        ToolTip.Tip="Pin the current class + selected instance so you can jump back later (saved per game)." />
+                <TextBox Width="150" VerticalAlignment="Center"
+                         Text="{Binding Inspector.BookmarkLabelInput, Mode=TwoWay}"
+                         PlaceholderText="label (optional)" />
+                <ComboBox Width="220" VerticalAlignment="Center"
+                          ItemsSource="{Binding Inspector.Bookmarks}"
+                          SelectedItem="{Binding Inspector.SelectedBookmark, Mode=TwoWay}"
+                          PlaceholderText="saved bookmarks…">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate x:DataType="services:InstanceBookmark">
+                      <TextBlock Text="{Binding DisplayLabel}" ToolTip.Tip="{Binding ClassDisplay}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+                <Button Content="Recall"
+                        Command="{Binding Inspector.RecallBookmarkCommand}"
+                        CommandParameter="{Binding Inspector.SelectedBookmark}"
+                        ToolTip.Tip="Re-inspect the bookmarked class and focus its instance (re-anchors after a restart)." />
+                <Button Content="✕"
+                        Command="{Binding Inspector.DeleteBookmarkCommand}"
+                        CommandParameter="{Binding Inspector.SelectedBookmark}"
+                        ToolTip.Tip="Delete the selected bookmark." />
               </StackPanel>
 
               <!-- Inspector error banner -->

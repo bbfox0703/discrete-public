@@ -268,6 +268,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         IsConnected      = false;
         ConnectionStatus = $"Disconnected ({reason})";
         Engine = Backend2 = DllVariant = GameModule = UnityVersion = null;
+        Inspector.GameKey = null;   // clear the connected game's bookmarks
         MetadataVersion = null;
         AssembliesCount = 0;
         Build           = 0;
@@ -880,6 +881,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             ConnectionStatus = $"Connected — build {hs.Build}";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryPipe,
                 $"connected backend={hs.Backend} build={hs.Build} unity={hs.UnityVersion}");
+
+            // Load this game's persisted Inspector bookmarks (keyed by the same
+            // GameBuildId the snapshot DB uses).
+            Inspector.GameKey = string.IsNullOrEmpty(hs.GameBuildId) ? hs.GameModule : hs.GameBuildId;
 
             // Phase 29b — mark snapshots from a different game build
             // as stale. User feedback: if I take a snapshot of 活俠傳,
