@@ -132,6 +132,7 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
     [NotifyCanExecuteChangedFor(nameof(FindGameplayFieldsCommand))]
+    [NotifyCanExecuteChangedFor(nameof(FindGameplayMethodsCommand))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -357,6 +358,71 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
         => SendToBrowserRequested?.Invoke(this,
             new InspectorBrowseRequest(row.Assembly, row.Namespace, row.Class));
 
+    // ---------- Interesting gameplay methods (auto keyword scan) ------------------
+
+    /// <summary>Ranked gameplay-method findings (invoke targets) from the last scan.</summary>
+    public ObservableCollection<MethodFindingRow> MethodFindings { get; } = new();
+
+    /// <summary>Opt into the extra GameplayAction keyword pack (Dash / Interact /
+    /// Buy / Sell). Off by default — those verbs are noisier.</summary>
+    [ObservableProperty] private bool _includeGameplayActions;
+
+    [ObservableProperty] private string _methodFindingsStatus =
+        "Auto-find keyword-scores every method name for gameplay verbs (SetHealth / AddGold / Teleport / Kill / God …) — invoke targets.";
+
+    /// <summary>#7 — keyword-score every method in the user assemblies, surfacing
+    /// gameplay invoke targets. One bulk dumpClassInfo; no pattern needed.</summary>
+    [RelayCommand(CanExecute = nameof(CanFindGameplay))]
+    public async Task FindGameplayMethodsAsync()
+    {
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        var ct = _searchCts.Token;
+
+        IsBusy = true;
+        ErrorMessage = null;
+        MethodFindings.Clear();
+
+        List<string> userAssemblies = SystemAssemblyFilter.SelectUserAssemblies(
+            Assemblies.Select(a => a.Name));
+        if (userAssemblies.Count == 0)
+        {
+            IsBusy = false;
+            MethodFindingsStatus = "No user assemblies found — connect to a running game first.";
+            return;
+        }
+
+        string asmLabel = $"{userAssemblies.Count} user assembl{(userAssemblies.Count == 1 ? "y" : "ies")}";
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            MethodFindingsStatus = $"Scoring methods across {asmLabel}…";
+            var scored = await _statFinder
+                .ScoreMethodsAsync(userAssemblies, IncludeGameplayActions, ct: ct).ConfigureAwait(true);
+            foreach (var m in scored) MethodFindings.Add(new MethodFindingRow(m));
+            sw.Stop();
+            MethodFindingsStatus =
+                $"{scored.Count} gameplay method(s) across {asmLabel} ({sw.ElapsedMilliseconds} ms). "
+                + "Right-click → Send class to Browser, then invoke from the Methods tab.";
+        }
+        catch (OperationCanceledException) { /* superseded */ }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            MethodFindingsStatus = "Auto-find failed.";
+            _logger.Write(Constants.LogCategoryView, $"SymbolFinder: method auto-find failed: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>Reuse the Send-to-Browser handoff for a method-findings row.</summary>
+    public void SendMethodFindingToBrowser(MethodFindingRow row)
+        => SendToBrowserRequested?.Invoke(this,
+            new InspectorBrowseRequest(row.Assembly, row.Namespace, row.Class));
+
     // ---------- Client-side result filtering -----------------------------
 
     /// <summary>System.* primitive type names treated as "numeric" by the
@@ -490,6 +556,33 @@ public sealed class StatFindingRow
     public bool   IsConfirmed  { get; }
     public string ConfirmedMark{ get; }
     public string LiveValue    { get; }
+    public string Keywords     { get; }
+    public string StaticLabel  { get; }
+}
+
+/// <summary>One row in the auto-find gameplay-methods grid (invoke targets).</summary>
+public sealed class MethodFindingRow
+{
+    public MethodFindingRow(InterestingMethod m)
+    {
+        Assembly     = m.Assembly;
+        Namespace    = m.Namespace;
+        Class        = m.Class;
+        ClassDisplay = m.ClassDisplay;
+        Method       = m.Name;
+        Category     = m.Category.ToString();
+        Score        = m.Score;
+        Keywords     = m.KeywordsDisplay;
+        StaticLabel  = m.IsStatic ? "static" : string.Empty;
+    }
+
+    public string Assembly     { get; }
+    public string Namespace    { get; }
+    public string Class        { get; }
+    public string ClassDisplay { get; }
+    public string Method       { get; }
+    public string Category     { get; }
+    public int    Score        { get; }
     public string Keywords     { get; }
     public string StaticLabel  { get; }
 }

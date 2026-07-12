@@ -1424,6 +1424,44 @@
                 </StackPanel>
               </Expander>
 
+              <!-- Auto-find gameplay METHODS: keyword-scored invoke targets
+                   (SetHealth / AddGold / Teleport / Kill / God). No pattern. -->
+              <Expander DockPanel.Dock="Top" Margin="0,0,0,8"
+                        Header="🎮 Auto-find gameplay methods (invoke targets — keyword-scored)">
+                <StackPanel Spacing="6" Margin="0,6,0,0">
+                  <StackPanel Orientation="Horizontal" Spacing="10">
+                    <Button Content="Find gameplay methods"
+                            Command="{Binding SymbolFinder.FindGameplayMethodsCommand}"
+                            Classes="accent" />
+                    <CheckBox Content="Include gameplay actions (Dash / Interact / Buy / Sell — noisier)"
+                              IsChecked="{Binding SymbolFinder.IncludeGameplayActions, Mode=TwoWay}"
+                              VerticalAlignment="Center" />
+                  </StackPanel>
+                  <TextBlock Text="{Binding SymbolFinder.MethodFindingsStatus}"
+                             TextWrapping="Wrap" Opacity="0.75" />
+                  <DataGrid x:Name="MethodFindingsGrid"
+                            ItemsSource="{Binding SymbolFinder.MethodFindings}"
+                            IsReadOnly="True" AutoGenerateColumns="False"
+                            CanUserResizeColumns="True" CanUserSortColumns="True"
+                            GridLinesVisibility="Horizontal" MaxHeight="360">
+                    <DataGrid.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Send class to Browser"
+                                  Click="OnMethodFindingSendToBrowserMenu" />
+                      </ContextMenu>
+                    </DataGrid.ContextMenu>
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="Category" Binding="{Binding Category}"     Width="Auto" MinWidth="90"  SortMemberPath="Category" />
+                      <DataGridTextColumn Header="Class"    Binding="{Binding ClassDisplay}" Width="Auto" MinWidth="160" SortMemberPath="ClassDisplay" />
+                      <DataGridTextColumn Header="Method"   Binding="{Binding Method}"       Width="Auto" MinWidth="140" SortMemberPath="Method" />
+                      <DataGridTextColumn Header="Score"    Binding="{Binding Score}"        Width="Auto" MinWidth="50"  SortMemberPath="Score" />
+                      <DataGridTextColumn Header="Keywords" Binding="{Binding Keywords}"     Width="Auto" MinWidth="120" />
+                      <DataGridTextColumn Header="Static"   Binding="{Binding StaticLabel}"  Width="Auto" MinWidth="48" />
+                    </DataGrid.Columns>
+                  </DataGrid>
+                </StackPanel>
+              </Expander>
+
               <ProgressBar DockPanel.Dock="Top" IsIndeterminate="True"
                            IsVisible="{Binding SymbolFinder.IsBusy}"
                            Height="3" Margin="0,0,0,4" />

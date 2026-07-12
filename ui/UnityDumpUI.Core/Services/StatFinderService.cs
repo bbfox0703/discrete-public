@@ -80,6 +80,22 @@ public sealed class StatFinderService
         return scored;
     }
 
+    /// <summary>#7 — keyword-score every METHOD in the user assemblies (same bulk
+    /// dumpClassInfo), surfacing gameplay invoke targets (SetHealth / AddGold /
+    /// Teleport…). Ranked, above threshold.</summary>
+    public async Task<IReadOnlyList<InterestingMethod>> ScoreMethodsAsync(
+        IReadOnlyList<string> userAssemblies, bool includeGameplayActions,
+        int? limit = null, CancellationToken ct = default)
+    {
+        if (userAssemblies is null || userAssemblies.Count == 0)
+            return Array.Empty<InterestingMethod>();
+        DumpClassInfoResult dump = await _adapter
+            .DumpClassInfoAsync(userAssemblies, limit, ct).ConfigureAwait(false);
+        IReadOnlyList<InterestingMethod> scored = InterestingMethodScorer.Score(dump, includeGameplayActions);
+        Log($"ScoreMethodsAsync: {dump.Rows.Count} classes -> {scored.Count} interesting methods");
+        return scored;
+    }
+
     /// <summary>#6 — score, then live-confirm the top numeric candidates. Returns
     /// findings ranked confirmed-first, highest-confidence-first.</summary>
     public async Task<IReadOnlyList<StatFinding>> DetectAsync(

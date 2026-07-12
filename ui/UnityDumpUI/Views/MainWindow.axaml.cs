@@ -1890,6 +1890,14 @@ public partial class MainWindow : Window
             vm.SymbolFinder.SendFindingToBrowser(row);
     }
 
+    private void OnMethodFindingSendToBrowserMenu(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var grid = this.FindControl<DataGrid>("MethodFindingsGrid");
+        if (grid?.SelectedItem is MethodFindingRow row)
+            vm.SymbolFinder.SendMethodFindingToBrowser(row);
+    }
+
     private void OnRelatedObjectActivated(object? sender, Avalonia.Input.TappedEventArgs e)
         => GoToSelectedRelated();
 

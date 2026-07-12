@@ -256,7 +256,9 @@ public static class InterestingFieldScorer
         return (score, best, matched);
     }
 
-    private static int ClassBonus(string className)
+    // internal so the method scorer (InterestingMethodScorer) shares the same
+    // Unity class-location bias table.
+    internal static int ClassBonus(string className)
     {
         HashSet<string> classTokens = KeywordTokenizer.TokenizeAsSet(className);
         int bonus = 0;

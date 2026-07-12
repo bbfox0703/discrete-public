@@ -79,6 +79,37 @@ public class StatFinderServiceTests
         finally { await fp.DisposeAsync().ConfigureAwait(true); }
     }
 
+    private const string MethodDump = """
+        { "rows": [
+            { "assembly": "Assembly-CSharp", "namespace": "Game", "name": "Player",
+              "fields": [],
+              "methods": [
+                { "name": "SetHealth", "static": false },
+                { "name": "AddGold",   "static": false },
+                { "name": "Update",    "static": false }
+              ] }
+          ], "count": 1, "scanned": 1, "truncated": false }
+        """;
+
+    [Fact]
+    public async Task ScoreMethodsAsync_SurfacesGameplayInvokeTargets()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var fp = await TeleportFakePipe.StartAsync(new[] { MethodDump }, ct);
+        try
+        {
+            var svc = new StatFinderService(fp.Adapter);
+            var methods = await svc.ScoreMethodsAsync(new[] { "Assembly-CSharp" }, includeGameplayActions: false, ct: ct)
+                                   .ConfigureAwait(true);
+
+            Assert.Equal(2, methods.Count);   // Update has no gameplay keyword
+            Assert.Contains(methods, m => m.Name == "SetHealth");
+            Assert.Contains(methods, m => m.Name == "AddGold");
+            Assert.DoesNotContain(methods, m => m.Name == "Update");
+        }
+        finally { await fp.DisposeAsync().ConfigureAwait(true); }
+    }
+
     [Fact]
     public async Task DetectAsync_NoLiveInstance_NotConfirmed()
     {
