@@ -50,6 +50,10 @@ public partial class FieldAcrossInstancesWindow : Window
             Close();
         };
 
+        // Stop the class-wide freeze loop when the dialog closes so it doesn't
+        // keep writing to the game after the window is gone.
+        Closed += (_, _) => _vm?.StopFreeze();
+
         // Loaded fires after the DataGrid materializes its column collection,
         // which is the safe time to assign CustomSortComparer per column.
         Loaded += OnLoaded;
