@@ -34,6 +34,10 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
 
     // Bulk lane: this heap-scan field walk is a bulk op. Null = ungated.
     private readonly BulkOperationGate? _bulkGate;
+    // Kept so Cleanup() can detach from the shared, process-lifetime gate — the
+    // lambda captures `this`, so without the -= every opened modal VM (and its
+    // Rows) would stay rooted for the process lifetime.
+    private readonly System.ComponentModel.PropertyChangedEventHandler? _onBulkGateChanged;
     private IDisposable? _bulkLease;
     private bool BulkBusyElsewhere => _bulkGate is not null && _bulkGate.IsBusy && _bulkLease is null;
 
@@ -41,6 +45,9 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
     private readonly FieldWriteTypeInfo _freezeTypeInfo;
     private CancellationTokenSource? _freezeCts;
     private Task? _freezeLoop;
+    // Monotonic generation so a stale StopFreezeAsync can't clobber a newer
+    // start's loop reference / status message on rapid off→on toggling.
+    private int _freezeGen;
 
     public FieldAcrossInstancesViewModel(
         BackendAdapter backend, FileLogger logger,
@@ -58,7 +65,10 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
         FieldOffset      = fieldOffset;
         _bulkGate        = bulkGate;
         if (_bulkGate is not null)
-            _bulkGate.PropertyChanged += (_, _) => RefreshCommand.NotifyCanExecuteChanged();
+        {
+            _onBulkGateChanged = (_, _) => RefreshCommand.NotifyCanExecuteChanged();
+            _bulkGate.PropertyChanged += _onBulkGateChanged;
+        }
         _freezeTypeInfo  = InspectorWriteTypeMap.Resolve(fieldType);
     }
 
@@ -247,8 +257,10 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
             RevertFrozen();
             return;
         }
-        _freezeCts = new CancellationTokenSource();
-        _freezeLoop = FreezeLoopAsync(_freezeCts.Token);
+        _freezeGen++;
+        var cts = new CancellationTokenSource();
+        _freezeCts = cts;
+        _freezeLoop = FreezeLoopAsync(cts.Token);
     }
 
     private void RevertFrozen()
@@ -260,18 +272,42 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
 
     private async Task StopFreezeAsync()
     {
-        _freezeCts?.Cancel();
-        if (_freezeLoop is not null)
-        {
-            try { await _freezeLoop.ConfigureAwait(true); } catch { /* loop is defensive */ }
-        }
+        int gen = ++_freezeGen;   // supersede any in-flight start/stop
+        // Take ownership synchronously BEFORE the first await so a concurrent
+        // stop (or a new start) can't cancel/dispose the same CTS twice or have
+        // its loop reference nulled out from under it.
+        CancellationTokenSource? cts = _freezeCts;
+        Task? loop = _freezeLoop;
+        _freezeCts = null;
         _freezeLoop = null;
-        FreezeStatus = "Freeze off.";
+        if (cts is null)
+        {
+            if (gen == _freezeGen) FreezeStatus = "Freeze off.";
+            return;
+        }
+        cts.Cancel();
+        try { if (loop is not null) await loop.ConfigureAwait(true); }
+        catch { /* loop is defensive */ }
+        cts.Dispose();
+        // Don't clobber the status of a newer start that superseded us mid-await.
+        if (gen == _freezeGen) FreezeStatus = "Freeze off.";
     }
 
-    /// <summary>Cancel any running freeze loop — called when the window closes so
-    /// we don't keep writing to the game after the dialog is gone.</summary>
-    public void StopFreeze() => _freezeCts?.Cancel();
+    /// <summary>Detach from the shared, process-lifetime BulkOperationGate and
+    /// stop the freeze loop so this modal VM (and its Rows) can be collected once
+    /// the window closes. FieldAcrossInstancesWindow calls this from its Closed
+    /// handler. Idempotent + null-safe — may run when freeze was never used or
+    /// the gate is null (test/ungated ctor).</summary>
+    public void Cleanup()
+    {
+        if (_bulkGate is not null && _onBulkGateChanged is not null)
+            _bulkGate.PropertyChanged -= _onBulkGateChanged;
+        _freezeGen++;             // supersede any in-flight start/stop
+        _freezeCts?.Cancel();     // stop writing to the live game after close
+        _cts?.Cancel();
+        _bulkLease?.Dispose();
+        _bulkLease = null;
+    }
 
     private async Task FreezeLoopAsync(CancellationToken ct)
     {

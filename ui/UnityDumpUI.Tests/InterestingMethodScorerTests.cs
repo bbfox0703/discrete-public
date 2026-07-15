@@ -36,6 +36,20 @@ public class InterestingMethodScorerTests
     }
 
     [Fact]
+    public void ScoreMethod_HP_ScoresOnce_NotDoubleFromHpAlias()
+    {
+        // "HP" and "Hp" both tokenize to {hp}; the Stats table must not list both,
+        // or "SetHP" would score 10 (2×5) and duplicate the keyword in the display.
+        (int score, MethodCategory cat, List<string> matched) =
+            InterestingMethodScorer.ScoreMethod("SetHP", "Foo", false);
+        Assert.Equal(5, score);                 // single Stats hit, no class bonus on "Foo"
+        Assert.Equal(MethodCategory.Stats, cat);
+        Assert.Single(matched);
+        Assert.Equal("HP", matched[0]);
+        Assert.DoesNotContain("Hp", matched);
+    }
+
+    [Fact]
     public void ScoreMethod_FoldsClassTokens()
     {
         // "Add" alone is not a keyword; folding the class "GoldManager" makes it

@@ -783,7 +783,11 @@ public partial class MainWindow : Window
         item.Set(DataFormat.Text, text);
         var transfer = new DataTransfer();
         transfer.Add(item);
-        await clipboard.SetDataAsync(transfer);
+        // SetDataAsync can throw when the clipboard is locked by another process
+        // (clipboard managers, RDP). Swallow — a failed copy is non-destructive
+        // and retryable; letting it escape an async void handler crashes the app.
+        try { await clipboard.SetDataAsync(transfer); }
+        catch { /* clipboard busy/locked — ignore */ }
     }
 
     /// <summary>Phase 29d-2: double-clicking a SPC result row pushes
@@ -973,7 +977,7 @@ public partial class MainWindow : Window
         string folder = vm.Snapshot.SnapshotDbFolder;
         try
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            using var _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName        = folder,
                 UseShellExecute = true,
@@ -995,7 +999,7 @@ public partial class MainWindow : Window
         {
             string folder = UnityDumpUI.Core.Services.FileLogger.LogRootDirectory();
             System.IO.Directory.CreateDirectory(folder);
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            using var _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName        = folder,
                 UseShellExecute = true,
