@@ -24,6 +24,20 @@ public class InterestingFieldScorerTests
     }
 
     [Fact]
+    public void ScoreField_HP_ScoresOnce_NotDoubleFromHpAlias()
+    {
+        // "HP" and "Hp" both tokenize to {hp}; the Stats table must not list both,
+        // or an hp field would score 10 (2×5) and show a duplicate keyword.
+        (int score, FieldCategory cat, List<string> matched) =
+            InterestingFieldScorer.ScoreField("HP", "Foo");
+        Assert.Equal(5, score);
+        Assert.Equal(FieldCategory.Stats, cat);
+        Assert.Single(matched);
+        Assert.Equal("HP", matched[0]);
+        Assert.DoesNotContain("Hp", matched);
+    }
+
+    [Fact]
     public void ScoreField_TokenExact_NoSubstringFalsePositives()
     {
         // "Component" contains "mp" but must NOT hit the "MP" (mana) keyword.

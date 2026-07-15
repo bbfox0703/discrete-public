@@ -50,9 +50,11 @@ public partial class FieldAcrossInstancesWindow : Window
             Close();
         };
 
-        // Stop the class-wide freeze loop when the dialog closes so it doesn't
-        // keep writing to the game after the window is gone.
-        Closed += (_, _) => _vm?.StopFreeze();
+        // Detach the VM from the shared BulkOperationGate AND stop the class-wide
+        // freeze loop when the dialog closes — the gate's PropertyChanged otherwise
+        // roots every opened modal VM, and the freeze loop would keep writing to
+        // the game after the window is gone.
+        Closed += (_, _) => _vm?.Cleanup();
 
         // Loaded fires after the DataGrid materializes its column collection,
         // which is the safe time to assign CustomSortComparer per column.
@@ -106,7 +108,11 @@ public partial class FieldAcrossInstancesWindow : Window
         item.Set(DataFormat.Text, text);
         var transfer = new DataTransfer();
         transfer.Add(item);
-        await clipboard.SetDataAsync(transfer);
+        // SetDataAsync can throw when the clipboard is locked by another process
+        // (clipboard managers, RDP). Swallow — a failed copy is non-destructive
+        // and retryable; letting it escape an async void handler crashes the app.
+        try { await clipboard.SetDataAsync(transfer); }
+        catch { /* clipboard busy/locked — ignore */ }
     }
 
     private void OnCloseClicked(object? sender, RoutedEventArgs e) => Close();

@@ -173,6 +173,32 @@ void SubclassAllGameWindows() {
     ::EnumWindows(&SubclassEnumProc, 0);
 }
 
+// Reverse of SubclassEnumProc: restore the original WNDPROC on every window we
+// subclassed and drop our property. Called from Shutdown() so an actual DLL
+// unload (FreeLibrary path in DllMain::OnDetach) can't leave a window's
+// GWLP_WNDPROC pointing at &SubclassProc in soon-to-be-unmapped memory — the
+// next window message would dispatch into freed code and crash the host.
+BOOL CALLBACK UnsubclassEnumProc(HWND hwnd, LPARAM /*lp*/) {
+    HANDLE origProp = ::GetPropW(hwnd, kOrigProcProp);
+    if (!origProp) return TRUE;  // not one of ours
+    // Only restore if OUR proc is still the active WndProc. If a foreign
+    // subclass chained on top of us, clobbering GWLP_WNDPROC would break their
+    // chain — leave it and just drop our property (standard un-subclass
+    // etiquette; the residual pass-through is already gated off by g_enabled).
+    WNDPROC cur = reinterpret_cast<WNDPROC>(
+        static_cast<LONG_PTR>(::GetWindowLongPtrW(hwnd, GWLP_WNDPROC)));
+    if (cur == &SubclassProc) {
+        ::SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                            reinterpret_cast<LONG_PTR>(reinterpret_cast<WNDPROC>(origProp)));
+    }
+    ::RemovePropW(hwnd, kOrigProcProp);
+    return TRUE;
+}
+
+void UnsubclassAllGameWindows() {
+    ::EnumWindows(&UnsubclassEnumProc, 0);
+}
+
 }  // namespace
 
 int SetKeepForeground(bool enable) {
@@ -280,13 +306,19 @@ void Shutdown() {
 
     // Disable our own MinHook targets so no new detour entry occurs after we go
     // away. Per-target only (never MH_ALL_HOOKS — the main-thread hook shares the
-    // instance and is torn down separately). The WndProc subclass is left in
-    // place: it now gates on the false g_enabled and passes through, which is
-    // safer than un-subclassing mid-chain, and the DLL only unloads at game exit.
+    // instance and is torn down separately).
     if (g_pGetForegroundWindow) MH_DisableHook(g_pGetForegroundWindow);
     if (g_pClipCursor)          MH_DisableHook(g_pClipCursor);
     if (g_pSetCursorPos)        MH_DisableHook(g_pSetCursorPos);
-    LogF("[ForegroundHook] Shutdown (hooks disabled, subclass left as pass-through)");
+
+    // Restore the original WNDPROC on every subclassed window. g_enabled is
+    // already false, so no new message is intercepted; SetWindowLongPtrW is
+    // per-window atomic, so any SubclassProc call already on the game UI
+    // thread's stack finishes safely and no NEW dispatch enters &SubclassProc
+    // afterward. This is what makes an eventual FreeLibrary unload safe — the
+    // subclass must not outlive the module's mapped code.
+    UnsubclassAllGameWindows();
+    LogF("[ForegroundHook] Shutdown (hooks disabled, subclass restored)");
 }
 
 }  // namespace Discrete::ForegroundHook

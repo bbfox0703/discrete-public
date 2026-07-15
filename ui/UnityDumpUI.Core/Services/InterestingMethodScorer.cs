@@ -53,7 +53,7 @@ public static class InterestingMethodScorer
     {
         (MethodCategory.Stats, 5, new[]
         {
-            "HP", "Hp", "Health", "MP", "Mana", "SP", "Stamina", "Energy",
+            "HP", "Health", "MP", "Mana", "SP", "Stamina", "Energy",
             "XP", "Exp", "Experience", "Level", "Score",
             "Damage", "Heal", "Hurt", "Kill", "Revive", "Death",
         }),

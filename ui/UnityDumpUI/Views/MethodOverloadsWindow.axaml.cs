@@ -122,7 +122,11 @@ public partial class MethodOverloadsWindow : Window
         item.Set(DataFormat.Text, text);
         var transfer = new DataTransfer();
         transfer.Add(item);
-        await clipboard.SetDataAsync(transfer);
+        // SetDataAsync can throw when the clipboard is locked by another process
+        // (clipboard managers, RDP). Swallow — a failed copy is non-destructive
+        // and retryable; letting it escape an async void handler crashes the app.
+        try { await clipboard.SetDataAsync(transfer); }
+        catch { /* clipboard busy/locked — ignore */ }
     }
 
     private void OnCloseClicked(object? sender, RoutedEventArgs e) => Close();

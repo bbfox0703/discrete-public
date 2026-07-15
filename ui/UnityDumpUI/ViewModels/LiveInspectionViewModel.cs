@@ -70,6 +70,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     private CancellationTokenSource? _autoRefreshCts;
     private CancellationTokenSource? _exportCts;
     private Task?                    _autoRefreshLoop;
+    // Monotonic generation guarding auto-refresh restart. Every restart/stop
+    // bumps it; a restart that finds the gen changed after its await bails so
+    // only the newest intent installs a loop — prevents overlapping restarts
+    // from orphaning an uncancelable walk loop (or double-disposing a CTS).
+    private int                     _autoRefreshGen;
 
     // Cross-VM bulk lane: findInstances is a heap-scan bulk op. Null in
     // tests / single-VM use.
@@ -235,6 +240,7 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     public void SetTarget(string assembly, string? @namespace, string name)
     {
+        _autoRefreshGen++;   // invalidate any in-flight restart before we stop
         _ = StopAutoRefreshAsync();
         // When the inspected class actually changes, reset the per-class filters
         // (2026-06-08 user report): a stale Field filter JSON predicate or
@@ -1895,11 +1901,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     private async Task RestartAutoRefreshAsync()
     {
+        // Claim ownership at the synchronous top (before any await) so overlapping
+        // restarts get distinct generations. After the await, bail unless we're
+        // still the newest — otherwise a stale restart would install a second loop
+        // and dispose the live CTS the newest restart just armed.
+        int gen = ++_autoRefreshGen;
         await StopAutoRefreshAsync().ConfigureAwait(true);
+        if (gen != _autoRefreshGen) return;   // superseded while we awaited the stop
         if (AutoRefreshIntervalMs <= 0) return;
 
-        _autoRefreshCts = new CancellationTokenSource();
-        CancellationToken ct = _autoRefreshCts.Token;
+        var cts = new CancellationTokenSource();
+        _autoRefreshCts = cts;
+        CancellationToken ct = cts.Token;
         TimeSpan interval = TimeSpan.FromMilliseconds(AutoRefreshIntervalMs);
         _autoRefreshLoop = Task.Run(async () =>
         {
@@ -1931,24 +1944,32 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     private async Task StopAutoRefreshAsync()
     {
-        if (_autoRefreshCts is null) return;
-        _autoRefreshCts.Cancel();
+        // Take ownership synchronously BEFORE any await so a concurrent stop sees
+        // null and no-ops (never cancels/disposes the same CTS twice), and a
+        // concurrent restart's freshly-installed CTS is never disposed from under
+        // it. Whatever loop we take, we cancel it — solving the orphaned-loop race.
+        CancellationTokenSource? cts = _autoRefreshCts;
+        Task? loop = _autoRefreshLoop;
+        _autoRefreshCts = null;
+        _autoRefreshLoop = null;
+        if (cts is null) return;
+        cts.Cancel();
         try
         {
-            if (_autoRefreshLoop is not null) await _autoRefreshLoop.ConfigureAwait(true);
+            if (loop is not null) await loop.ConfigureAwait(true);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch { /* swallow shutdown errors */ }
-        _autoRefreshCts.Dispose();
-        _autoRefreshCts = null;
-        _autoRefreshLoop = null;
+        cts.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
+        _autoRefreshGen++;   // invalidate any in-flight restart before teardown
         await StopAutoRefreshAsync().ConfigureAwait(false);
         _findCts?.Cancel();
         _walkCts?.Cancel();
+        _relatedCts?.Cancel();
     }
 
     // ---------- Filter ---------------------------------------------------

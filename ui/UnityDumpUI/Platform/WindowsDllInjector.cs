@@ -158,28 +158,39 @@ public sealed partial class WindowsDllInjector : IDllInjector
         psi.ArgumentList.Add(pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
         psi.ArgumentList.Add(dllPath);
 
-        Process? proc;
+        Process? started;
         try
         {
-            proc = Process.Start(psi);
-            if (proc is null)
+            started = Process.Start(psi);
+            if (started is null)
                 return InjectResult.Failure("Process.Start(inject-x86.exe) returned null.");
         }
         catch (Exception ex)
         {
             return InjectResult.Failure($"Failed to launch {helperPath}: {ex.Message}");
         }
+        using var proc = started;   // dispose the process handle on every exit path
 
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
+        // Drain both pipes concurrently: reading one to end while the child fills
+        // the other would deadlock if the helper ever emitted heavily on both.
+        // Harvest after the child exits (which closes both pipes and completes the
+        // reads), so GetResult never blocks.
+        Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        Task<string> stderrTask = proc.StandardError.ReadToEndAsync();
         // 30s budget is conservative; the helper itself caps at 10s for the
         // remote thread + ~ms for the rest. Anything beyond 30s is hung.
         if (!proc.WaitForExit(30_000))
         {
             try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+            // Observe the read tasks before `using` disposes the streams, so a
+            // read aborted by the kill doesn't surface as an unobserved exception.
+            try { stdoutTask.GetAwaiter().GetResult(); } catch { /* killed */ }
+            try { stderrTask.GetAwaiter().GetResult(); } catch { /* killed */ }
             return InjectResult.Failure(
                 "inject-x86.exe did not exit within 30 s; killed.");
         }
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
 
         int code = proc.ExitCode;
         if (code == 0)

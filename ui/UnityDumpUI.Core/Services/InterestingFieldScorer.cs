@@ -66,7 +66,7 @@ public static class InterestingFieldScorer
     {
         (FieldCategory.Stats, 5, new[]
         {
-            "HP", "Hp", "Health", "MP", "Mana", "SP", "Stamina", "Energy",
+            "HP", "Health", "MP", "Mana", "SP", "Stamina", "Energy",
             "XP", "Exp", "Experience", "Level", "Lv", "Lvl",
             "Dead", "IsDead", "Alive", "IsAlive",
             "Regen", "Regenerate", "Max",

@@ -61,14 +61,23 @@ void LogF(const char* fmt, Args... args) {
 
 namespace {
 
+// Lifecycle of a queued work item. A single atomic state replaces the old
+// separate consumed/aborted bools so the worker (on timeout) and the main
+// thread (Drain) coordinate ownership of the closure via CAS. This closes a
+// use-after-free: the closure captures the submitter's stack frame BY
+// REFERENCE (cr / typedArgs), so once Drain has started fn() the submitter
+// must not unwind that frame until fn() returns.
+//   Pending -> Running -> Done   (main thread ran the closure to completion)
+//   Pending -> Aborted           (worker timed out before Drain claimed it)
+enum class ItemState : int { Pending, Running, Aborted, Done };
+
 // One entry on the work queue. The dispatcher owns the WorkFn and the
 // completion event. Worker thread waits on done_event; main thread runs
 // work, then sets done_event.
 struct WorkItem {
     WorkFn       fn;
     HANDLE       done_event = nullptr;  // auto-reset, signaled when work completes
-    std::atomic<bool> consumed;     // true once main thread has executed fn
-    std::atomic<bool> aborted;      // true if SubmitAndWait gave up before drain
+    std::atomic<ItemState> state{ItemState::Pending};
 
     // The WorkItem OWNS the completion event: it's closed here, when the last
     // shared_ptr (submitter or queue) is released — NOT in SubmitAndWait. This
@@ -181,12 +190,17 @@ bool Init() {
 void Shutdown() {
     g_initialized.store(false);
 
-    // Drain queue with aborted=true so any worker thread still waiting
-    // wakes up + sees the abort.
+    // Abort every still-queued item so any worker thread waiting on it wakes
+    // and unwinds. Items in the queue are always Pending — Drain pops an item
+    // BEFORE it CASes to Running, so a Running item is never in g_queue. Use
+    // CAS (not a blind store) to stay consistent with the Drain state machine:
+    // if a worker already timed out and Aborted it, leave it be.
     std::lock_guard<std::mutex> lock(g_mutex);
     for (auto& item : g_queue) {
-        item->aborted.store(true);
-        ::SetEvent(item->done_event);
+        ItemState expected = ItemState::Pending;
+        if (item->state.compare_exchange_strong(expected, ItemState::Aborted)) {
+            ::SetEvent(item->done_event);
+        }
     }
     g_queue.clear();
 }
@@ -225,8 +239,12 @@ void Drain() {
             item = g_queue.front();
             g_queue.pop_front();
         }
-        if (item->aborted.load()) {
-            // Worker thread already gave up; skip the closure entirely.
+        // Claim the item. If the worker already aborted it (its wait timed out
+        // and it won the race), the CAS fails and we skip the closure entirely
+        // — critical, because the closure captures the worker's now-unwound
+        // stack frame by reference.
+        ItemState expected = ItemState::Pending;
+        if (!item->state.compare_exchange_strong(expected, ItemState::Running)) {
             continue;
         }
         // Run the closure outside the mutex so nested SubmitAndWait
@@ -242,7 +260,7 @@ void Drain() {
             LogF("[MainThreadDispatcher] Drain: work closure threw — swallowed");
         }
         t_inside_work_item = false;
-        item->consumed.store(true);
+        item->state.store(ItemState::Done);
         ::SetEvent(item->done_event);
         g_drain_count.fetch_add(1);
     }
@@ -308,8 +326,7 @@ DispatchResult SubmitAndWait(WorkFn work, std::int32_t timeout_ms) {
         dr.diagnostic_path = "event_create_failed";
         return dr;
     }
-    item->consumed.store(false);
-    item->aborted.store(false);
+    // state defaults to ItemState::Pending (see WorkItem) — no init needed.
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -324,17 +341,50 @@ DispatchResult SubmitAndWait(WorkFn work, std::int32_t timeout_ms) {
     // let Drain's SetEvent fire on a dead/reused handle. The WorkItem
     // destructor closes it when the last shared_ptr drops — see the struct.
 
-    if (wr == WAIT_OBJECT_0 && item->consumed.load()) {
+    if (wr == WAIT_OBJECT_0 && item->state.load() == ItemState::Done) {
         dr.ok              = true;
         dr.diagnostic_path = "drained";
         return dr;
     }
 
-    // Timeout: mark item as aborted so Drain skips it when it eventually
-    // reaches the front of the queue. We don't yank the entry — that
-    // would need to scan the deque under lock and is a bigger surgery
-    // for marginal benefit. The Drain path checks aborted before invoking.
-    item->aborted.store(true);
+    // Timeout (or a rare WAIT_FAILED). Try to abort before Drain claims the
+    // item. compare_exchange loads the ACTUAL state into `expected` on failure,
+    // so we branch on where the item really ended up — we must NOT blindly wait
+    // on done_event, because a Shutdown-aborted item may already have consumed
+    // our event (its SetEvent satisfied our first wait) and a second wait would
+    // block forever.
+    ItemState expected = ItemState::Pending;
+    if (item->state.compare_exchange_strong(expected, ItemState::Aborted)) {
+        // Won the abort race — item was still Pending, Drain will skip it.
+        g_timeout_count.fetch_add(1);
+        dr.timed_out       = true;
+        dr.error           = "main-thread queue drain timeout";
+        dr.diagnostic_path = "timeout";
+        return dr;
+    }
+    if (expected == ItemState::Running) {
+        // Drain is executing the closure against THIS caller's stack frame by
+        // reference — we MUST NOT unwind until it finishes, or the closure
+        // writes cr / reads typedArgs in freed stack (the use-after-free this
+        // fix closes). SetEvent only fires after Done/Aborted, so with state
+        // still Running our first wait cannot have consumed the event; block
+        // until Drain signals completion. Bounded by the closure's own runtime
+        // — the same Unity call the worker-direct path makes with no timeout.
+        ::WaitForSingleObject(item->done_event, INFINITE);
+        dr.ok              = true;
+        dr.diagnostic_path = "timeout_completed";
+        return dr;
+    }
+    if (expected == ItemState::Done) {
+        // Closure completed between our wait and this CAS — its result is valid,
+        // so report success. Do NOT re-wait: if our first wait consumed the
+        // event, a second wait would block forever.
+        dr.ok              = true;
+        dr.diagnostic_path = "drained";
+        return dr;
+    }
+    // expected == Aborted: Shutdown aborted us (and may already have consumed
+    // our event via SetEvent). Do not re-wait — just report the timeout/abort.
     g_timeout_count.fetch_add(1);
     dr.timed_out       = true;
     dr.error           = "main-thread queue drain timeout";
