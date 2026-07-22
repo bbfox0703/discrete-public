@@ -81,35 +81,35 @@
          which makes ILC emit "will always throw" diagnostics for the
          Linux entry points whose DBus types were trimmed away. Avalonia.Win32
          is the bare Windows backend. -->
-    <PackageReference Include="Avalonia" Version="12.0.5" />
+    <PackageReference Include="Avalonia" Version="12.1.0" />
     <PackageReference Include="Avalonia.Angle.Windows.Natives" Version="2.1.27548.20260419" />
-    <PackageReference Include="Avalonia.Win32" Version="12.0.5" />
+    <PackageReference Include="Avalonia.Win32" Version="12.1.0" />
     <!-- Avalonia.Desktop used to bring Skia + HarfBuzz in transitively. With
          Desktop dropped, we have to reference both explicitly — Skia is the
          rendering backend; HarfBuzz is the text shaper. AppBuilder.Setup
          throws "No text shaping system configured" if HarfBuzz isn't
          registered (Avalonia 12 breaking change — UsePlatformDetect used to
          wire it in for free; UseSkia by itself does not). -->
-    <PackageReference Include="Avalonia.Skia" Version="12.0.5" />
-    <PackageReference Include="Avalonia.HarfBuzz" Version="12.0.5" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.5" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.5" />
-    <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.0.1" />
+    <PackageReference Include="Avalonia.Skia" Version="12.1.0" />
+    <PackageReference Include="Avalonia.HarfBuzz" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.1.0" />
 
     <!-- AOT-friendly MVVM via source generators ([ObservableProperty], [RelayCommand]).
          Avalonia.ReactiveUI is NOT used: it has no v12 release and depends on reflection. -->
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.*" />
-    <PackageReference Include="HarfBuzzSharp" Version="14.2.0" />
-    <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" Version="14.2.0" />
-    <PackageReference Include="HarfBuzzSharp.NativeAssets.macOS" Version="14.2.0" />
-    <PackageReference Include="HarfBuzzSharp.NativeAssets.WebAssembly" Version="14.2.0" />
-    <PackageReference Include="HarfBuzzSharp.NativeAssets.Win32" Version="14.2.0" />
+    <PackageReference Include="HarfBuzzSharp" Version="14.2.1.1" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" Version="14.2.1.1" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.macOS" Version="14.2.1.1" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.WebAssembly" Version="14.2.1.1" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Win32" Version="14.2.1.1" />
     <PackageReference Include="MicroCom.Runtime" Version="0.11.6" />
-    <PackageReference Include="SkiaSharp" Version="4.148.0" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="4.148.0" />
-    <PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="4.148.0" />
-    <PackageReference Include="SkiaSharp.NativeAssets.WebAssembly" Version="4.148.0" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="4.148.0" />
+    <PackageReference Include="SkiaSharp" Version="4.150.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="4.150.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="4.150.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.WebAssembly" Version="4.150.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="4.150.1" />
     <PackageReference Include="SourceGear.sqlite3" Version="3.53.3" />
   </ItemGroup>
 
