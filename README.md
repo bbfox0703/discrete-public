@@ -55,7 +55,8 @@ Inject a single backend DLL into a running Unity game and get:
   to selected games.
 - **Offline metadata CLI** — `metadata-cli.exe` parses
   `global-metadata.dat` standalone (no game required) for
-  reverse-engineering scratch work.
+  reverse-engineering scratch work. Point it at a game install
+  root or just a Steam game name — it finds the metadata itself.
 
 See [docs/plan.md](docs/plan.md) for the **single source of truth** —
 current build state, current phase, **centralized Open Backlog / TODO**,

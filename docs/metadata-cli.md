@@ -5,7 +5,9 @@
 > CI dumping, static analysis of stripped/obfuscated metadata, and
 > sanity-checking `MetadataParser` against the live runtime.
 
-Phase 13. Ships as `dist/metadata-cli.exe` (~70 KB).
+Phase 13. Ships as `dist/metadata-cli.exe` (~250 KB — grown well past
+the original ~70 KB as Phase D's PE parser / registration finder /
+symbol pipeline landed).
 
 ---
 
@@ -45,12 +47,90 @@ To build just the CLI:
 ## Usage
 
 ```
-metadata-cli <subcommand> <path-to-global-metadata.dat> [args]
+metadata-cli <subcommand> <spec> [args]
 ```
 
 Output is **line-oriented JSON** to stdout. Errors and diagnostic
 notes go to stderr. Exit code 0 on success, non-zero on parse
 failure.
+
+Global option: **`--ascii`** — escape non-ASCII as `\uXXXX` so output
+survives a shell that mangles UTF-8. See
+[Non-ASCII names](#non-ascii-names-chcp-is-not-the-thing-to-check).
+
+`metadata-cli --help` (also `-h` / `help` / `/?`) prints the full usage,
+including the PowerShell encoding guidance. The help text is
+deliberately **pure 7-bit ASCII** — it's what you read *while* your
+shell is mangling UTF-8, so it must stay legible under any code page.
+
+### `<spec>` — you don't have to type the full path
+
+Both artefacts the CLI reads (`global-metadata.dat`, `GameAssembly.dll`)
+live at fixed offsets from a Unity game's install root, so the tool
+finds them itself. Every subcommand's first argument accepts three
+shapes, resolved in this order:
+
+| `<spec>` | Behaviour |
+|---|---|
+| **An existing file** — `…\Metadata\global-metadata.dat` | Used verbatim. |
+| **A game install root** — `D:\SteamLibrary\steamapps\common\My Game` | The artefact is located by Unity's layout rules. |
+| **A Steam game name** — `"FINAL FANTASY VI"` | Install path looked up via the registry + `libraryfolders.vdf`, then resolved as a game root. |
+
+Two hard rules, so the tool never quietly parses a different file than
+the one you asked for:
+
+- **A path-shaped spec that doesn't exist is a hard failure.** Anything
+  containing a separator, a drive letter, a leading `.`, or a
+  `.dat`/`.dll`/`.exe` suffix is a path — a missing one fails, it is
+  never reinterpreted as a Steam name.
+- **Auto-detection failing is a hard failure.** No fallback guessing;
+  stderr lists every location that was probed.
+
+```powershell
+# All three are equivalent:
+metadata-cli stats "D:\SteamLibrary\steamapps\common\SaGa Frontier Remastered\SaGa Frontier Remastered_Data\il2cpp_data\Metadata\global-metadata.dat"
+metadata-cli stats "D:\SteamLibrary\steamapps\common\SaGa Frontier Remastered"
+metadata-cli stats "SaGa Frontier Remastered"
+```
+
+When the spec wasn't a literal file, the resolved path is echoed on
+stderr so stdout stays pure JSON:
+
+```
+metadata-cli: using D:\...\global-metadata.dat  [steam 'SaGa Frontier Remastered' -> D:\SteamLibrary\steamapps\common\SaGa Frontier Remastered]
+```
+
+**Layouts probed** from a directory spec — the spec may be the install
+root or any of its Unity sub-directories (`<Game>_Data`, `il2cpp_data`,
+`Metadata`), which are climbed out of first. One extra level below the
+root is also searched, for installs that nest the payload:
+
+- `<root>\<Game>_Data\il2cpp_data\Metadata\global-metadata.dat`
+- `<root>\il2cpp_data\Metadata\global-metadata.dat`
+- `<root>\Metadata\global-metadata.dat`
+- `<root>\global-metadata.dat`
+- `<root>\GameAssembly.dll`
+
+**Steam name matching** is case- and punctuation-insensitive, and works
+against both the store name from `appmanifest_*.acf` and the install
+folder name — which frequently differ (`Persona 3 Reload` → `P3R`,
+`FINAL FANTASY VI` → `FINAL FANTASY VI PR`). Exact match beats
+normalised match beats substring; an ambiguous substring lists the
+candidates and fails rather than picking one:
+
+```powershell
+metadata-cli info "Kiseki"
+# → metadata-cli: 'Kiseki' is ambiguous — 3 Steam games match:
+#       (run `metadata-cli steam-vdf` to see every name -> folder mapping)
+#       The Legend of Heroes: Zero no Kiseki Kai  ->  D:\SteamLibrary\steamapps\common\...
+#       Sora no Kiseki the 1st                    ->  D:\SteamLibrary\steamapps\common\...
+#       The Legend of Heroes: Ao no Kiseki KAI    ->  E:\SteamLibrary\steamapps\common\...
+#     Pass the install directory explicitly.
+```
+
+Non-ASCII store names work — the CLI entry point is `wmain`, so a
+CJK-named game (`活俠傳`) survives argv intact rather than being
+mangled by the ANSI code page.
 
 ### Subcommands
 
@@ -382,15 +462,32 @@ link to native AOT addresses + emit `.dd64` (x64dbg) + `.ghidra.txt`
 **Export Symbols → x64dbg / Ghidra / IDA** triple without launching
 the game.
 
+`symbols` needs *both* artefacts, so it has a short form that resolves
+the pair from one `<spec>`:
+
+```powershell
+metadata-cli symbols "SaGa Frontier Remastered" "D:\out\mygame"
+# → produces D:\out\mygame.dd64
+#            D:\out\mygame.ghidra.txt
+#            D:\out\mygame.idc
+```
+
+The three-positional form still works, for scripts that already pass
+both paths and for the rare install where the two artefacts don't share
+a root. Each path goes through the resolver independently, so a game
+root works in either slot:
+
 ```powershell
 metadata-cli symbols `
     "C:\Path\To\GameAssembly.dll" `
     "C:\Path\To\game_Data\il2cpp_data\Metadata\global-metadata.dat" `
     "D:\out\mygame"
-# → produces D:\out\mygame.dd64
-#            D:\out\mygame.ghidra.txt
-#            D:\out\mygame.idc
 ```
+
+Naming one of the two files in the short form pins it and auto-locates
+the other from the derived install root — so
+`metadata-cli symbols "…\global-metadata.dat" out` finds the sibling
+`GameAssembly.dll` on its own.
 
 JSON stats summary to stdout:
 
@@ -469,6 +566,172 @@ bit-for-bit).
   Symbols` path reaches everything by enumerating from the runtime
   side.
 
+#### `resolve` — show what a `<spec>` maps to
+
+Diagnostic surface for the path rules. Resolves without parsing
+anything, so you can check auto-detection before kicking off a long
+dump. Exits 1 only when *neither* artefact is found (a Mono game
+legitimately has neither).
+
+```powershell
+metadata-cli resolve "FINAL FANTASY VI"
+```
+
+```json
+{
+  "resolved": true,
+  "spec": "FINAL FANTASY VI",
+  "origin": "steam-name",
+  "game_root": "E:\\SteamLibrary\\steamapps\\common\\FINAL FANTASY VI PR",
+  "global_metadata": "E:\\SteamLibrary\\steamapps\\common\\FINAL FANTASY VI PR\\FINAL FANTASY VI_Data\\il2cpp_data\\Metadata\\global-metadata.dat",
+  "game_assembly": "E:\\SteamLibrary\\steamapps\\common\\FINAL FANTASY VI PR\\GameAssembly.dll",
+  "note": "steam 'FINAL FANTASY VI' -> E:\\SteamLibrary\\steamapps\\common\\FINAL FANTASY VI PR"
+}
+```
+
+`origin` is one of `explicit-file` / `game-root` / `steam-name`. When
+the spec names one of the two files directly, that file is reported in
+its own slot and the *other* is located from the derived install root —
+unlike the parsing subcommands, which use an explicitly-named file
+verbatim whatever they were asked for.
+
+#### `steam-vdf` — list VDF name → install folder
+
+The discoverability answer for "what name do I type?". Dumps what
+Steam's VDF files declare: every library folder from
+`libraryfolders.vdf`, and under each, the `appmanifest_*.acf`
+name → install target folder mapping.
+
+```powershell
+metadata-cli steam-vdf
+```
+
+```
+Steam libraries: 4   (apps: 125)
+
+[D:\SteamLibrary]  25 apps
+  APPID    NAME                                     INSTALL FOLDER
+  1295270  SaGa Frontier Remastered                 D:\SteamLibrary\steamapps\common\SaGa Frontier Remastered
+  2161700  Persona 3 Reload                         D:\SteamLibrary\steamapps\common\P3R
+  2288150  ROMANCE OF THE THREE KINGDOMS 8  REMAKE  D:\SteamLibrary\steamapps\common\SAN8R
+  -        3DMark                                   D:\SteamLibrary\steamapps\common\3DMark
+
+[E:\SteamLibrary]  20 apps
+  APPID    NAME                         INSTALL FOLDER
+  1859910  活俠傳                       E:\SteamLibrary\steamapps\common\LegendOfMortal
+  524220   NieR:Automata™               E:\SteamLibrary\steamapps\common\NieRAutomata
+```
+
+Columns are sized to the content — names are never truncated, since
+the whole point is to show the string you'd pass as a `<spec>`.
+Alignment is East-Asian-width aware, so CJK store names don't skew the
+table.
+
+- `APPID` is `-` for folders with no readable `appmanifest_*.acf`
+  (manual copies, partial uninstalls). Those are still listed and still
+  matchable, by folder name.
+- Rows prefixed `!` have a manifest but **no install folder** —
+  uninstalled, or moved outside Steam. They appear because they're
+  genuinely in the VDF, but they are deliberately *not* matchable by
+  name: a stale manifest must never win a lookup.
+
+Exit 1 when Steam isn't installed.
+
+##### Non-ASCII names: `chcp` is not the thing to check
+
+All output is UTF-8. If a CJK game name comes out as mojibake —
+
+```
+{"app_id":"1859910","name":"瘣颱???,"install_dir":...     ← closing quote eaten
+```
+
+— that is not merely a display glitch. A legacy double-byte lead byte
+swallows the following ASCII character, so the JSON loses its closing
+quote and **stops parsing** (`ConvertFrom-Json` → *"必須有 ':' 或 '}'"*).
+
+**The cause is the shell, not the console.** PowerShell never lets a
+native program write to the console directly: it captures stdout into
+a pipe and re-decodes the bytes using `[Console]::OutputEncoding`.
+That value is cached when the shell starts, so a session launched
+under a legacy code page keeps decoding as Big5 **even after
+`chcp 65001` reports UTF-8**:
+
+```
+chcp = 65001   [Console]::OutputEncoding = big5     ← the actual trap
+```
+
+So `chcp` is the wrong diagnostic. Check the real one:
+
+```powershell
+[Console]::OutputEncoding
+```
+
+**Fix (recommended — helps every CLI tool, not just this one):**
+
+```powershell
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+```
+
+Verified to fix both `steam-games` and `steam-vdf` mid-session, on
+Windows PowerShell 5.1 and PowerShell 7. Put it in your `$PROFILE` to
+make it stick.
+
+**Fix without touching the shell — `--ascii`:**
+
+```powershell
+metadata-cli steam-games --ascii
+```
+
+Escapes every non-ASCII character as `\uXXXX`, so the output is pure
+7-bit ASCII and no decoding step can corrupt it. JSON parsers decode
+the escapes natively, so the value you get back is the real name:
+
+```json
+{"app_id":"1859910","name":"活俠傳","install_dir":"E:\\SteamLibrary\\steamapps\\common\\LegendOfMortal", ...}
+```
+```powershell
+(metadata-cli steam-games --ascii | ConvertFrom-Json).name   # → 活俠傳
+```
+
+`--ascii` may appear anywhere on the command line and applies to
+`steam-vdf`'s table too (column alignment is preserved — the escaped
+form is ASCII, so its width is its length).
+
+For a CJK-named game there's also a shell-proof workaround: pass the
+**install folder name** as the `<spec>` instead of the store name —
+matching accepts either, and the folder name is usually ASCII
+(`LegendOfMortal` for 活俠傳).
+
+Separately, the tool switches the *console* to UTF-8 for the duration
+of a run and restores the previous code page on exit. That covers
+running under `cmd.exe`, whose console is typically cp950/cp932 — but
+it cannot help the PowerShell case above, where stdout is a pipe
+rather than a console. It also can't help `metadata-cli … > CON`,
+because cmd opens `CON` write-only and `GetConsoleMode` needs read
+access to identify a console handle.
+
+#### `steam-games` — the same data as JSON
+
+Machine-readable sibling of `steam-vdf`, for scripting. One JSON line
+per install; excludes the `!` stale-manifest rows.
+
+```powershell
+metadata-cli steam-games
+```
+
+```json
+{"app_id":"2161700","name":"Persona 3 Reload","install_dir":"D:\\SteamLibrary\\steamapps\\common\\P3R","library":"D:\\SteamLibrary"}
+{"app_id":"1859910","name":"活俠傳","install_dir":"E:\\SteamLibrary\\steamapps\\common\\LegendOfMortal","library":"E:\\SteamLibrary"}
+{"app_id":null,"name":"3DMark","install_dir":"D:\\SteamLibrary\\steamapps\\common\\3DMark","library":"D:\\SteamLibrary"}
+```
+
+```powershell
+# Which installed Steam games are IL2CPP?
+metadata-cli steam-games | jq -r .name | ForEach-Object {
+    if (metadata-cli resolve $_ 2>$null) { $_ }
+}
+```
+
 ## Comparing CLI output to live RPC
 
 Quick sanity check: the CLI's `info` output should match the DLL's
@@ -517,6 +780,11 @@ Mismatch indicates one of:
 
 - [tools/metadata-cli/main.cpp](../tools/metadata-cli/main.cpp) —
   CLI entry point + JSON formatting.
+- [tools/metadata-cli/PathResolver.h](../tools/metadata-cli/PathResolver.h)
+  / [.cpp](../tools/metadata-cli/PathResolver.cpp) — `<spec>` resolution:
+  Unity layout probing + Steam discovery (registry → `libraryfolders.vdf`
+  → `appmanifest_*.acf`). The VDF tokeniser mirrors
+  [ui/UnityDumpUI/Platform/SteamGameScanner.cs](../ui/UnityDumpUI/Platform/SteamGameScanner.cs).
 - [tools/metadata-cli/CMakeLists.txt](../tools/metadata-cli/CMakeLists.txt)
   — build target (links against the same `MetadataParser` source the
   DLL uses).

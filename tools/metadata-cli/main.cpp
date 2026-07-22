@@ -11,10 +11,13 @@
 //     getMetadataStats / getClasses).
 //
 // Subcommands:
-//   metadata-cli info  <path>                — version + table sizes
-//   metadata-cli stats <path>                — strip/obfuscation heuristic
-//   metadata-cli types <path>                — JSON line per type
-//   metadata-cli type  <path> <ns> <name>    — fields + defaults of one type
+//   metadata-cli info  <spec>                — version + table sizes
+//   metadata-cli stats <spec>                — strip/obfuscation heuristic
+//   metadata-cli types <spec>                — JSON line per type
+//   metadata-cli type  <spec> <ns> <name>    — fields + defaults of one type
+//
+// <spec> is resolved by PathResolver: a full file path, a game install root,
+// or a Steam game name all work — see PathResolver.h for the exact rules.
 //
 // Output format: line-oriented JSON to stdout. Errors → stderr + exit 1.
 // No host process is touched — Logger is intentionally not initialised so
@@ -25,35 +28,65 @@
 #include "RegistrationFinder.h"
 #include "CodeGenModulesFinder.h"
 #include "SymbolPipeline.h"
+#include "PathResolver.h"
 
+#include <algorithm>
 #include <fstream>
+#include <vector>
 
 #include <windows.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <optional>
 #include <string>
 #include <string_view>
 
 using Discrete::IL2CPP::Metadata::Parser;
+namespace Resolve = Discrete::CLI::PathResolve;
 
 namespace {
 
-// Convert a UTF-8 argv string to a wide path for the parser's CreateFileW.
-std::wstring Utf8ToWide(const char* utf8) {
-    if (utf8 == nullptr || *utf8 == '\0') return {};
-    int n = ::MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    if (n <= 1) return {};
-    std::wstring out(static_cast<std::size_t>(n - 1), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out.data(), n);
-    return out;
-}
+// --ascii: emit only 7-bit ASCII, escaping every non-ASCII character as
+// \uXXXX. Output then survives any shell, console code page, or transport,
+// because nothing outside 0x00-0x7F is ever written.
+//
+// Why this exists: PowerShell does not let a native program write to the
+// console directly — it captures stdout into a pipe and re-decodes the bytes
+// using [Console]::OutputEncoding. That value is cached when the shell
+// starts, so a session launched under a legacy code page keeps decoding as
+// (say) Big5 even after `chcp 65001` reports UTF-8. Our UTF-8 bytes are then
+// misread, and a legacy double-byte lead byte swallows the following ASCII
+// character — which silently eats a JSON closing quote and breaks parsing.
+// Escaping sidesteps the whole problem; JSON parsers decode \uXXXX natively.
+bool g_ascii = false;
 
-// JSON-escape a UTF-8 string into stdout. Lazy: only the characters CE /
-// nlohmann would actually emit need quoting (\, ", control bytes).
 void PutJsonString(const std::string& s) {
     std::fputc('"', stdout);
+    if (g_ascii) {
+        // Work in UTF-16 so each escape is one code unit. Astral characters
+        // come out as a surrogate pair — two \uXXXX escapes — which is
+        // exactly how JSON represents them.
+        for (wchar_t wc : Resolve::Utf8ToWide(s)) {
+            auto u = static_cast<unsigned>(wc);
+            switch (u) {
+                case L'\\': std::fputs("\\\\", stdout); continue;
+                case L'"':  std::fputs("\\\"", stdout); continue;
+                case L'\b': std::fputs("\\b",  stdout); continue;
+                case L'\f': std::fputs("\\f",  stdout); continue;
+                case L'\n': std::fputs("\\n",  stdout); continue;
+                case L'\r': std::fputs("\\r",  stdout); continue;
+                case L'\t': std::fputs("\\t",  stdout); continue;
+                default: break;
+            }
+            if (u < 0x20 || u > 0x7E) std::fprintf(stdout, "\\u%04X", u);
+            else                      std::fputc(static_cast<char>(u), stdout);
+        }
+        std::fputc('"', stdout);
+        return;
+    }
     for (unsigned char c : s) {
         switch (c) {
             case '\\': std::fputs("\\\\", stdout); break;
@@ -70,6 +103,27 @@ void PutJsonString(const std::string& s) {
         }
     }
     std::fputc('"', stdout);
+}
+
+void PutJsonWide(const std::wstring& w) {
+    PutJsonString(Resolve::WideToUtf8(w));
+}
+
+// Resolve a <spec> argument into the artefact path a subcommand needs.
+// Prints the failure diagnostic (and, for anything but a verbatim file path,
+// a one-line provenance note) to stderr so stdout stays pure JSON.
+std::optional<std::wstring> ResolveSpec(const std::wstring& spec, Resolve::Target target) {
+    std::string err;
+    auto r = Resolve::Resolve(spec, target, &err);
+    if (!r) {
+        std::fprintf(stderr, "metadata-cli: %s\n", err.empty() ? "path resolution failed" : err.c_str());
+        return std::nullopt;
+    }
+    if (r->origin != Resolve::Origin::ExplicitFile) {
+        std::fprintf(stderr, "metadata-cli: using %s  [%s]\n",
+                     Resolve::WideToUtf8(r->path).c_str(), r->note.c_str());
+    }
+    return r->path;
 }
 
 int CmdInfo(const std::wstring& path) {
@@ -615,21 +669,53 @@ int CmdCodeModules(const std::wstring& path) {
 //   → write .dd64 + Ghidra symbols.txt + IDA .idc to `<prefix>` paths.
 //
 // Usage:
+//   metadata-cli symbols <spec> <output-prefix>
 //   metadata-cli symbols <GameAssembly.dll> <global-metadata.dat> <output-prefix>
+//
+// The short form resolves both inputs from one <spec> (game root, Steam game
+// name, or either of the two files). The long form stays supported for
+// scripts that already pass both paths, and for the odd install where the
+// two artefacts don't sit under a common root.
 //
 // Produces three files: <prefix>.dd64, <prefix>.ghidra.txt, <prefix>.idc.
 // Stdout is a JSON stats summary so the caller can see resolution rate
 // (resolved / total methods) without having to count file rows.
-int CmdSymbols(int argc, char** argv) {
-    if (argc < 5) {
+int CmdSymbols(int argc, wchar_t** argv) {
+    std::wstring gaPath, metadataPath, outPrefix;
+
+    if (argc == 4) {
+        // Short form: <spec> <output-prefix>.
+        std::string err;
+        auto pair = Resolve::ResolvePair(argv[2], &err);
+        if (!pair) {
+            std::fprintf(stderr, "metadata-cli: %s\n",
+                         err.empty() ? "path resolution failed" : err.c_str());
+            return 1;
+        }
+        gaPath       = pair->gameAssembly;
+        metadataPath = pair->metadata;
+        outPrefix    = argv[3];
+        std::fprintf(stderr, "metadata-cli: using %s + %s  [%s]\n",
+                     Resolve::WideToUtf8(pair->gameAssembly).c_str(),
+                     Resolve::WideToUtf8(pair->metadata).c_str(),
+                     pair->note.c_str());
+    } else if (argc >= 5) {
+        // Long form: each path still goes through the resolver so a game
+        // root works in either slot.
+        auto ga = ResolveSpec(argv[2], Resolve::Target::GameAssembly);
+        if (!ga) return 1;
+        auto md = ResolveSpec(argv[3], Resolve::Target::Metadata);
+        if (!md) return 1;
+        gaPath       = *ga;
+        metadataPath = *md;
+        outPrefix    = argv[4];
+    } else {
         std::fputs(
-            "USAGE: metadata-cli symbols <GameAssembly.dll> <global-metadata.dat> <output-prefix>\n",
+            "USAGE: metadata-cli symbols <spec> <output-prefix>\n"
+            "       metadata-cli symbols <GameAssembly.dll> <global-metadata.dat> <output-prefix>\n",
             stderr);
         return 2;
     }
-    std::wstring gaPath       = Utf8ToWide(argv[2]);
-    std::wstring metadataPath = Utf8ToWide(argv[3]);
-    std::string  outPrefix    = argv[4];
 
     if (gaPath.empty() || metadataPath.empty() || outPrefix.empty()) {
         std::fprintf(stderr, "metadata-cli: symbols requires non-empty paths\n");
@@ -658,11 +744,12 @@ int CmdSymbols(int argc, char** argv) {
     // Write the three formats. `\n` translation lives at the OS layer
     // for ofstream in text mode; we want LF for cross-tool compat
     // (matches the C# SymbolExporter which writes UTF-8 without BOM).
-    auto writeFile = [&](const std::string& suffix, const std::string& body) -> bool {
-        std::string path = outPrefix + suffix;
-        std::ofstream f(path, std::ios::binary);
+    auto writeFile = [&](const wchar_t* suffix, const std::string& body) -> bool {
+        std::wstring path = outPrefix + suffix;
+        std::ofstream f(path, std::ios::binary);   // MSVC accepts a wide path
         if (!f) {
-            std::fprintf(stderr, "metadata-cli: cannot open %s for write\n", path.c_str());
+            std::fprintf(stderr, "metadata-cli: cannot open %s for write\n",
+                         Resolve::WideToUtf8(path).c_str());
             return false;
         }
         f.write(body.data(), static_cast<std::streamsize>(body.size()));
@@ -673,9 +760,9 @@ int CmdSymbols(int argc, char** argv) {
     std::string ghidra = Discrete::Phase_D::Symbols::RenderGhidra(*r, imageBase);
     std::string ida    = Discrete::Phase_D::Symbols::RenderIda(*r, imageBase);
 
-    bool ok = writeFile(".dd64", dd64)
-           && writeFile(".ghidra.txt", ghidra)
-           && writeFile(".idc", ida);
+    bool ok = writeFile(L".dd64", dd64)
+           && writeFile(L".ghidra.txt", ghidra)
+           && writeFile(L".idc", ida);
     if (!ok) return 1;
 
     // Stats line for the CLI consumer.
@@ -696,64 +783,405 @@ int CmdSymbols(int argc, char** argv) {
                 r->methodsTotal > 0
                     ? static_cast<double>(r->methodsResolved) / static_cast<double>(r->methodsTotal)
                     : 0.0);
-    PutJsonString(outPrefix);
+    PutJsonWide(outPrefix);
     std::fputs("}\n", stdout);
     return 0;
 }
 
-void Usage() {
+// `resolve` — diagnostic surface for the path rules. Shows what a <spec>
+// maps to without parsing anything, so a user can check auto-detection
+// before running a long dump. Exits 1 only when *neither* artefact is found.
+int CmdResolve(const std::wstring& spec) {
+    std::string errMeta, errGa;
+    auto meta = Resolve::Resolve(spec, Resolve::Target::Metadata,     &errMeta);
+    auto ga   = Resolve::Resolve(spec, Resolve::Target::GameAssembly, &errGa);
+
+    // Report how the *spec* was read, not how the re-resolve below ran.
+    std::optional<Resolve::Origin> specOrigin;
+    std::wstring specRoot;
+    std::string  specNote;
+    if (meta || ga) {
+        const Resolve::Resolved& s = meta ? *meta : *ga;
+        specOrigin = s.origin;
+        specRoot   = s.gameRoot;
+        specNote   = s.note;
+    }
+
+    // An existing file is taken verbatim for *whatever* target was asked
+    // for — correct for the parsing subcommands (the user named that exact
+    // file), but here it would report the same path in both slots. Pin the
+    // named file to the slot its extension implies and re-resolve the other
+    // one from the derived install root.
+    auto endsWithI = [](const std::wstring& s, const wchar_t* suf) {
+        std::size_t n = std::wcslen(suf);
+        return s.size() >= n && ::_wcsnicmp(s.c_str() + (s.size() - n), suf, n) == 0;
+    };
+    if (meta && meta->origin == Resolve::Origin::ExplicitFile && !meta->gameRoot.empty()) {
+        if (endsWithI(meta->path, L".dat")) {
+            errGa.clear();
+            ga = Resolve::Resolve(meta->gameRoot, Resolve::Target::GameAssembly, &errGa);
+        } else if (endsWithI(meta->path, L".dll")) {
+            errMeta.clear();
+            auto reMeta = Resolve::Resolve(meta->gameRoot, Resolve::Target::Metadata, &errMeta);
+            meta = reMeta;
+        }
+    }
+
+    if (!meta && !ga) {
+        std::fprintf(stderr, "metadata-cli: %s\n",
+                     errMeta.empty() ? "path resolution failed" : errMeta.c_str());
+        std::fputs("{\"resolved\":false}\n", stdout);
+        return 1;
+    }
+
+    const char* originStr =
+        specOrigin == Resolve::Origin::ExplicitFile ? "explicit-file" :
+        specOrigin == Resolve::Origin::SteamName    ? "steam-name"    : "game-root";
+
+    std::fputs("{\"resolved\":true,\"spec\":", stdout);
+    PutJsonWide(spec);
+    std::fputs(",\"origin\":", stdout);
+    PutJsonString(originStr);
+    std::fputs(",\"game_root\":", stdout);
+    PutJsonWide(specRoot);
+    std::fputs(",\"global_metadata\":", stdout);
+    if (meta) PutJsonWide(meta->path); else std::fputs("null", stdout);
+    std::fputs(",\"game_assembly\":", stdout);
+    if (ga)   PutJsonWide(ga->path);   else std::fputs("null", stdout);
+    std::fputs(",\"note\":", stdout);
+    PutJsonString(specNote);
+    std::fputs("}\n", stdout);
+
+    // Surface the half that missed — an IL2CPP dump needs both, a Mono game
+    // legitimately has neither of these two files.
+    if (!meta) std::fprintf(stderr, "metadata-cli: note — %s\n", errMeta.c_str());
+    if (!ga)   std::fprintf(stderr, "metadata-cli: note — %s\n", errGa.c_str());
+    return 0;
+}
+
+// `steam-games` — one JSON line per install Steam reports. The machine-readable
+// half of the discoverability answer for "what name do I type?".
+int CmdSteamGames() {
+    auto games = Resolve::EnumerateSteamGames();
+    for (const auto& g : games) {
+        std::fputs("{\"app_id\":", stdout);
+        if (g.appId.empty()) std::fputs("null", stdout); else PutJsonWide(g.appId);
+        std::fputs(",\"name\":", stdout);
+        PutJsonWide(g.name);
+        std::fputs(",\"install_dir\":", stdout);
+        PutJsonWide(g.installDir);
+        std::fputs(",\"library\":", stdout);
+        PutJsonWide(g.library);
+        std::fputs("}\n", stdout);
+    }
+    if (games.empty()) {
+        std::fputs("metadata-cli: no Steam installs found (Steam not installed, or "
+                   "HKCU\\Software\\Valve\\Steam unreadable)\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
+// Terminal columns a string occupies. UTF-16 code units in the CJK / Hangul /
+// fullwidth blocks render double-width, so a naive .size() misaligns any table
+// containing them — and Steam store names routinely do (活俠傳).
+std::size_t DisplayWidth(const std::wstring& s) {
+    std::size_t w = 0;
+    for (wchar_t c : s) {
+        auto u = static_cast<unsigned>(c);
+        // Low surrogate: the pair was already counted on the high half.
+        if (u >= 0xDC00 && u <= 0xDFFF) continue;
+        bool wide =
+            (u >= 0x1100 && u <= 0x115F) ||   // Hangul Jamo
+            (u >= 0x2E80 && u <= 0xA4CF) ||   // CJK radicals .. Yi
+            (u >= 0xAC00 && u <= 0xD7A3) ||   // Hangul syllables
+            (u >= 0xD800 && u <= 0xDBFF) ||   // high surrogate (assume wide: emoji / CJK ext)
+            (u >= 0xF900 && u <= 0xFAFF) ||   // CJK compatibility ideographs
+            (u >= 0xFE30 && u <= 0xFE4F) ||   // CJK compatibility forms
+            (u >= 0xFF00 && u <= 0xFF60) ||   // fullwidth forms
+            (u >= 0xFFE0 && u <= 0xFFE6);     // fullwidth signs
+        w += wide ? 2 : 1;
+    }
+    return w;
+}
+
+// A table cell, rendered per the --ascii setting. Under --ascii a non-ASCII
+// name becomes its \uXXXX escapes: not pretty, but unambiguous and immune to
+// the shell's decoding — and column widths still line up, because the escaped
+// form is plain ASCII whose display width is its length.
+std::string RenderCell(const std::wstring& s) {
+    if (!g_ascii) return Resolve::WideToUtf8(s);
+    std::string out;
+    char buf[8];
+    for (wchar_t wc : s) {
+        auto u = static_cast<unsigned>(wc);
+        if (u >= 0x20 && u <= 0x7E) {
+            out.push_back(static_cast<char>(u));
+        } else {
+            std::snprintf(buf, sizeof buf, "\\u%04X", u);
+            out += buf;
+        }
+    }
+    return out;
+}
+
+std::size_t CellWidth(const std::wstring& s) {
+    return g_ascii ? RenderCell(s).size() : DisplayWidth(s);
+}
+
+void PutPadded(const std::wstring& s, std::size_t column) {
+    std::fputs(RenderCell(s).c_str(), stdout);
+    std::size_t w = CellWidth(s);
+    for (std::size_t i = w; i < column; ++i) std::fputc(' ', stdout);
+}
+
+// `steam-vdf` — human-readable dump of what Steam's VDF files declare:
+// every library folder from libraryfolders.vdf, and under each, the
+// appmanifest name -> install target folder mapping. This is the "what do I
+// type?" listing; `steam-games` is the same data as JSON for scripts.
+//
+// Unlike the matcher, this includes manifests whose install folder is gone —
+// flagged with `!` — because a stale manifest is genuinely in the VDF and
+// otherwise shows up only as a confusing absence.
+int CmdSteamVdf() {
+    auto libs  = Resolve::EnumerateSteamLibraryRoots();
+    auto games = Resolve::EnumerateSteamGames(/*includeMissing=*/true);
+
+    if (libs.empty()) {
+        std::fputs("metadata-cli: no Steam installation found (checked "
+                   "HKCU\\Software\\Valve\\Steam and HKLM\\SOFTWARE\\Valve\\Steam)\n", stderr);
+        return 1;
+    }
+
+    std::printf("Steam libraries: %zu   (apps: %zu)\n", libs.size(), games.size());
+
+    std::size_t missing = 0;
+    for (const std::wstring& lib : libs) {
+        // Rows for this library, in enumeration order.
+        std::vector<const Resolve::SteamGame*> rows;
+        for (const auto& g : games) {
+            if (g.library == lib) rows.push_back(&g);
+        }
+
+        std::fputc('\n', stdout);
+        std::fputs("[", stdout);
+        std::fputs(Resolve::WideToUtf8(lib).c_str(), stdout);
+        std::printf("]  %zu apps\n", rows.size());
+        if (rows.empty()) continue;
+
+        // Size the columns to the content — names and appids vary a lot and
+        // truncating a name would defeat the point of the listing.
+        std::size_t wId = std::strlen("APPID");
+        std::size_t wNm = std::strlen("NAME");
+        for (const auto* g : rows) {
+            wId = std::max(wId, CellWidth(g->appId));
+            wNm = std::max(wNm, CellWidth(g->name));
+        }
+
+        std::fputs("  ", stdout);
+        PutPadded(L"APPID", wId + 2);
+        PutPadded(L"NAME", wNm + 2);
+        std::fputs("INSTALL FOLDER\n", stdout);
+
+        for (const auto* g : rows) {
+            if (!g->exists) ++missing;
+            std::fputs(g->exists ? "  " : "! ", stdout);
+            PutPadded(g->appId.empty() ? L"-" : g->appId, wId + 2);
+            PutPadded(g->name, wNm + 2);
+            std::fputs(RenderCell(g->installDir).c_str(), stdout);
+            std::fputc('\n', stdout);
+        }
+    }
+
+    if (missing > 0) {
+        std::fprintf(stderr,
+            "metadata-cli: note — %zu entr%s marked `!` have an appmanifest but no "
+            "install folder (uninstalled, or moved outside Steam). They are not "
+            "matchable by name.\n",
+            missing, missing == 1 ? "y" : "ies");
+    }
+    return 0;
+}
+
+// Every string we emit is UTF-8, but a console renders bytes through its
+// *output code page* — cp950 / cp932 / cp1252 by default. A UTF-8 name then
+// shows as mojibake, and worse: a legacy double-byte lead byte swallows the
+// following ASCII character, so `"活俠傳"` loses its closing quote and the
+// JSON stops parsing.
+//
+// Switch the console to UTF-8 for the duration of the run and put it back
+// afterwards (the code page belongs to the console, not to us — leaving it
+// flipped would surprise the next command). If the user already runs a UTF-8
+// console, we touch nothing.
+//
+// stdout also goes unbuffered while it's a console: the CRT converts each
+// write from the console CP, and a multi-byte sequence split across a stdio
+// flush boundary would corrupt. Unbuffered means every write we make is a
+// complete string. Redirected output keeps normal buffering — there's no
+// conversion in that path, so splitting is harmless, and `types` / `methods`
+// dump tens of thousands of lines where buffering matters.
+class ConsoleUtf8Scope {
+public:
+    ConsoleUtf8Scope() {
+        auto isConsole = [](DWORD stdHandle) {
+            HANDLE h = ::GetStdHandle(stdHandle);
+            DWORD mode = 0;
+            return h != nullptr && h != INVALID_HANDLE_VALUE && ::GetConsoleMode(h, &mode) != 0;
+        };
+        bool consoleOut = isConsole(STD_OUTPUT_HANDLE);
+        bool consoleErr = isConsole(STD_ERROR_HANDLE);
+        if (!consoleOut && !consoleErr) return;
+
+        UINT cp = ::GetConsoleOutputCP();
+        if (cp != CP_UTF8 && ::SetConsoleOutputCP(CP_UTF8)) prevCp_ = cp;
+        if (consoleOut) std::setvbuf(stdout, nullptr, _IONBF, 0);
+    }
+
+    ~ConsoleUtf8Scope() {
+        std::fflush(stdout);
+        std::fflush(stderr);
+        if (prevCp_ != 0) ::SetConsoleOutputCP(prevCp_);
+    }
+
+    ConsoleUtf8Scope(const ConsoleUtf8Scope&)            = delete;
+    ConsoleUtf8Scope& operator=(const ConsoleUtf8Scope&) = delete;
+
+private:
+    UINT prevCp_ = 0;   // 0 = nothing to restore
+};
+
+// Deliberately pure 7-bit ASCII — no em dashes, no arrows. This is the text a
+// user reads *while* their shell is mangling UTF-8, so it must never be
+// mojibake itself. Goes to stdout for an explicit `--help`, stderr otherwise.
+void Usage(std::FILE* out) {
     std::fputs(
-        "metadata-cli — offline IL2CPP global-metadata.dat parser + PE inspector\n\n"
+        "metadata-cli - offline IL2CPP global-metadata.dat parser + PE inspector\n\n"
         "USAGE:\n"
-        "  metadata-cli info    <path-to-global-metadata.dat>\n"
-        "  metadata-cli stats   <path-to-global-metadata.dat>\n"
-        "  metadata-cli types   <path-to-global-metadata.dat>\n"
-        "  metadata-cli type    <path-to-global-metadata.dat> <namespace> <name>\n"
-        "  metadata-cli methods <path-to-global-metadata.dat>\n"
-        "  metadata-cli method  <path-to-global-metadata.dat> <namespace> <type> <method>\n"
-        "  metadata-cli images        <path-to-global-metadata.dat>\n"
-        "  metadata-cli pe-info       <path-to-GameAssembly.dll>\n"
-        "  metadata-cli registration  <path-to-GameAssembly.dll>\n"
-        "  metadata-cli code-modules  <path-to-GameAssembly.dll>\n"
+        "  metadata-cli info    <spec>\n"
+        "  metadata-cli stats   <spec>\n"
+        "  metadata-cli types   <spec>\n"
+        "  metadata-cli type    <spec> <namespace> <name>\n"
+        "  metadata-cli methods <spec>\n"
+        "  metadata-cli method  <spec> <namespace> <type> <method>\n"
+        "  metadata-cli images        <spec>\n"
+        "  metadata-cli pe-info       <spec>\n"
+        "  metadata-cli registration  <spec>\n"
+        "  metadata-cli code-modules  <spec>\n"
+        "  metadata-cli symbols       <spec> <output-prefix>\n"
         "  metadata-cli symbols       <GameAssembly.dll> <global-metadata.dat> <output-prefix>\n"
-        "      (emits <prefix>.dd64 + <prefix>.ghidra.txt + <prefix>.idc)\n\n"
-        "Output is line-oriented JSON to stdout. Errors → stderr (exit 1).\n",
-        stderr);
+        "      (emits <prefix>.dd64 + <prefix>.ghidra.txt + <prefix>.idc)\n"
+        "  metadata-cli resolve       <spec>       show what <spec> maps to\n"
+        "  metadata-cli steam-vdf                  list Steam VDF: name -> install folder\n"
+        "  metadata-cli steam-games                same, as JSON lines (for scripts)\n"
+        "  metadata-cli --help                     this text\n\n"
+        "OPTIONS:\n"
+        "  --ascii    Escape every non-ASCII character as \\uXXXX, so output is pure\n"
+        "             7-bit ASCII that no shell can corrupt. May appear anywhere on\n"
+        "             the command line. See ENCODING below.\n\n"
+        "<spec> is any of:\n"
+        "  * a full file path        \"...\\Metadata\\global-metadata.dat\" / \"...\\GameAssembly.dll\"\n"
+        "                            (used verbatim; missing file = hard failure)\n"
+        "  * a game install root     \"D:\\SteamLibrary\\steamapps\\common\\My Game\"\n"
+        "                            (the file is located by Unity's fixed layout)\n"
+        "  * a Steam game name       \"Songs of Silence\"\n"
+        "                            (install path looked up via libraryfolders.vdf)\n\n"
+        "ENCODING - non-ASCII game names in PowerShell:\n"
+        "  Output is UTF-8. PowerShell never lets a native program write to the\n"
+        "  console directly: it captures stdout and decodes the bytes using\n"
+        "  [Console]::OutputEncoding, which is cached when the shell STARTS. A\n"
+        "  session opened under a legacy code page therefore keeps mangling UTF-8\n"
+        "  even after `chcp 65001` reports otherwise. That is not just a display\n"
+        "  glitch: a legacy double-byte character eats the JSON closing quote, so\n"
+        "  the output stops parsing.\n\n"
+        "  Diagnose (`chcp` is NOT the right check):\n"
+        "      [Console]::OutputEncoding\n\n"
+        "  Fix - recommended, helps every CLI tool. Add it to your $PROFILE:\n"
+        "      [Console]::OutputEncoding = [Text.Encoding]::UTF8\n\n"
+        "  Or leave the shell alone and pass --ascii:\n"
+        "      metadata-cli steam-games --ascii\n"
+        "      (metadata-cli steam-games --ascii | ConvertFrom-Json).name\n\n"
+        "  A CJK-named game can also be selected by its install FOLDER name, which\n"
+        "  is usually ASCII - <spec> matching accepts either.\n\n"
+        "Output is line-oriented JSON to stdout. Errors go to stderr (exit 1).\n",
+        out);
 }
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    if (argc < 2) { Usage(); return 2; }
-    std::string_view sub = argv[1];
+// wmain, not main: <spec> can be a Steam store name with non-ASCII
+// characters, and narrow argv on Windows is ANSI-code-page encoded — a CJK
+// game name would be mangled before it ever reached the resolver.
+int wmain(int argc, wchar_t** argv) {
+    // Must outlive every code path below — its destructor restores the
+    // console code page, so no `return` may bypass it.
+    ConsoleUtf8Scope consoleUtf8;
 
-    // The `symbols` subcommand takes 3 positional args (ga.dll +
-    // metadata.dat + output-prefix), so its arg parsing is delegated
-    // to CmdSymbols. Every other subcommand takes one path as argv[2].
-    if (sub == "symbols") return CmdSymbols(argc, argv);
+    // Strip global options out of argv before subcommand dispatch, so every
+    // subcommand's positional arguments keep their existing indices.
+    std::vector<wchar_t*> av;
+    av.reserve(static_cast<std::size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        if (i > 0 && std::wcscmp(argv[i], L"--ascii") == 0) { g_ascii = true; continue; }
+        av.push_back(argv[i]);
+    }
+    argc = static_cast<int>(av.size());
+    argv = av.data();
 
-    if (argc < 3) { Usage(); return 2; }
-    std::wstring path = Utf8ToWide(argv[2]);
-    if (path.empty()) {
+    if (argc < 2) { Usage(stderr); return 2; }
+    std::wstring_view sub = argv[1];
+
+    // An explicit help request is a successful run: text to stdout, exit 0.
+    if (sub == L"--help" || sub == L"-h" || sub == L"/?" || sub == L"help") {
+        Usage(stdout);
+        return 0;
+    }
+
+    // The `symbols` subcommand has two positional shapes, so its arg parsing
+    // is delegated to CmdSymbols. `steam-games` takes no arguments at all.
+    if (sub == L"symbols")     return CmdSymbols(argc, argv);
+    if (sub == L"steam-games") return CmdSteamGames();
+    if (sub == L"steam-vdf")   return CmdSteamVdf();
+
+    if (argc < 3) { Usage(stderr); return 2; }
+    std::wstring spec = argv[2];
+    if (spec.empty()) {
         std::fprintf(stderr, "metadata-cli: invalid path argument\n");
         return 2;
     }
-    if      (sub == "info")    return CmdInfo(path);
-    else if (sub == "stats")   return CmdStats(path);
-    else if (sub == "types")   return CmdTypes(path);
-    else if (sub == "type") {
-        if (argc < 5) { Usage(); return 2; }
-        return CmdType(path, argv[3], argv[4]);
+
+    if (sub == L"resolve") return CmdResolve(spec);
+
+    // Metadata-consuming subcommands resolve to global-metadata.dat; the PE
+    // ones resolve to GameAssembly.dll.
+    auto run = [&](Resolve::Target target, auto&& body) -> int {
+        auto path = ResolveSpec(spec, target);
+        if (!path) return 1;
+        return body(*path);
+    };
+    const auto kMeta = Resolve::Target::Metadata;
+    const auto kGa   = Resolve::Target::GameAssembly;
+
+    if      (sub == L"info")    return run(kMeta, [](const std::wstring& p) { return CmdInfo(p); });
+    else if (sub == L"stats")   return run(kMeta, [](const std::wstring& p) { return CmdStats(p); });
+    else if (sub == L"types")   return run(kMeta, [](const std::wstring& p) { return CmdTypes(p); });
+    else if (sub == L"type") {
+        if (argc < 5) { Usage(stderr); return 2; }
+        std::string ns = Resolve::WideToUtf8(argv[3]);
+        std::string nm = Resolve::WideToUtf8(argv[4]);
+        return run(kMeta, [&](const std::wstring& p) { return CmdType(p, ns, nm); });
     }
-    else if (sub == "methods") return CmdMethods(path);
-    else if (sub == "images")  return CmdImages(path);
-    else if (sub == "method") {
-        if (argc < 6) { Usage(); return 2; }
-        return CmdMethod(path, argv[3], argv[4], argv[5]);
+    else if (sub == L"methods") return run(kMeta, [](const std::wstring& p) { return CmdMethods(p); });
+    else if (sub == L"images")  return run(kMeta, [](const std::wstring& p) { return CmdImages(p); });
+    else if (sub == L"method") {
+        if (argc < 6) { Usage(stderr); return 2; }
+        std::string ns = Resolve::WideToUtf8(argv[3]);
+        std::string ty = Resolve::WideToUtf8(argv[4]);
+        std::string mn = Resolve::WideToUtf8(argv[5]);
+        return run(kMeta, [&](const std::wstring& p) { return CmdMethod(p, ns, ty, mn); });
     }
-    else if (sub == "pe-info")      return CmdPeInfo(path);
-    else if (sub == "registration") return CmdRegistration(path);
-    else if (sub == "code-modules") return CmdCodeModules(path);
-    Usage();
+    else if (sub == L"pe-info")      return run(kGa, [](const std::wstring& p) { return CmdPeInfo(p); });
+    else if (sub == L"registration") return run(kGa, [](const std::wstring& p) { return CmdRegistration(p); });
+    else if (sub == L"code-modules") return run(kGa, [](const std::wstring& p) { return CmdCodeModules(p); });
+    Usage(stderr);
     return 2;
 }

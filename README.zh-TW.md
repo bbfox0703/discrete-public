@@ -52,7 +52,8 @@
   side-by-side 安裝器,給直接 inject 不方便的遊戲用。批次 install
   panel 可掃 Steam 遊戲庫並選擇要 deploy 哪些。
 - **Offline metadata CLI** — `metadata-cli.exe` 可獨立 parse
-  `global-metadata.dat` (不需開遊戲),適合做 RE 探勘。
+  `global-metadata.dat` (不需開遊戲),適合做 RE 探勘。給遊戲安裝
+  目錄、甚至只給 Steam 遊戲名稱即可,檔案位置它自己找。
 
 看 [docs/plan.md](docs/plan.md) — **單一窗口 / 唯一真相來源**:目前 build 狀態、目前 phase、**集中 Open Backlog / TODO**、最近批次、完整 phase ledger、cross-PC workflow。已完成 phase 的長篇寫作 + 舊批次摘要在 [docs/archive/](docs/archive/)。
 
