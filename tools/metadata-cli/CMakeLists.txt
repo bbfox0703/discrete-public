@@ -6,6 +6,7 @@
 
 add_executable(metadata-cli
     main.cpp
+    PathResolver.cpp
     PEParser.cpp
     RegistrationFinder.cpp
     CodeGenModulesFinder.cpp
@@ -13,6 +14,9 @@ add_executable(metadata-cli
     ../../dll/src/il2cpp/MetadataParser.cpp
     ../../dll/src/shared/Logger.cpp
 )
+
+# PathResolver reads HKCU/HKLM\Software\Valve\Steam via RegGetValueW.
+target_link_libraries(metadata-cli PRIVATE Advapi32)
 
 target_include_directories(metadata-cli PRIVATE
     ../../dll/src
