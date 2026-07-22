@@ -242,6 +242,15 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
             out.typesArrayRva = typesVa - img.imageBase;
             out.nearMissCount = nearMissCount;
             out.sectionName   = sec->name;
+
+            // Slots the validator doesn't gate on. Read them opportunistically:
+            // a target that resolves types[] but has an odd fieldOffsets slot
+            // should still return the hit and simply skip offset enrichment,
+            // rather than be rejected outright.
+            ReadAt(bytes, size, windowOff + 0x50, &out.fieldOffsetsCount, 4);
+            ReadAt(bytes, size, windowOff + 0x58, &out.fieldOffsetsVa,    8);
+            ReadAt(bytes, size, windowOff + 0x60, &out.typeDefSizesCount, 4);
+            ReadAt(bytes, size, windowOff + 0x68, &out.typeDefSizesVa,    8);
             return out;
         }
     }

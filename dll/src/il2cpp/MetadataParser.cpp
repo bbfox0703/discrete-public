@@ -681,6 +681,7 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
             v.methodStart         = td.methodStart;
             v.methodCount         = td.method_count;
             v.flags               = td.flags;
+            v.bitfield               = td.bitfield;
             v.token               = td.token;
         };
         if (v24Variant_ == V24Variant::V24_0) {
@@ -709,6 +710,7 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         v.methodStart        = td.methodStart;
         v.methodCount        = td.method_count;
         v.flags              = td.flags;
+        v.bitfield              = td.bitfield;
         v.token              = td.token;
     } else if (version_ >= 38) {
         // v38+: variable-width metadata-index plumbing. Hand-walk the row
@@ -779,8 +781,11 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         std::memcpy(&field_count,    row + fixedPrefix + varBlock + 36 + 4,  2);
         // 8 *_count ushorts (16 bytes total) span [+36 .. +52].
         // Then uint bitfield (+52), uint token (+56). Total stride = +60.
+        std::uint32_t bitfield = 0;
+        std::memcpy(&bitfield,       row + fixedPrefix + varBlock + 52,      4);
         std::memcpy(&token,          row + fixedPrefix + varBlock + 56,      4);
 
+        v.bitfield           = bitfield;
         v.ns                 = GetHeapString(namespaceIndex);
         v.name               = GetHeapString(nameIndex);
         v.declaringTypeIndex = declaringTypeIndex;
@@ -805,6 +810,7 @@ std::optional<Parser::TypeDefView> Parser::GetTypeDefinition(std::int32_t idx) c
         v.methodStart        = td.methodStart;
         v.methodCount        = td.method_count;
         v.flags              = td.flags;
+        v.bitfield              = td.bitfield;
         v.token              = td.token;
     }
     return v;

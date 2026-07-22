@@ -54,9 +54,14 @@ Output is **line-oriented JSON** to stdout. Errors and diagnostic
 notes go to stderr. Exit code 0 on success, non-zero on parse
 failure.
 
-Global option: **`--ascii`** — escape non-ASCII as `\uXXXX` so output
-survives a shell that mangles UTF-8. See
-[Non-ASCII names](#non-ascii-names-chcp-is-not-the-thing-to-check).
+Global options:
+
+- **`--ascii`** — escape non-ASCII as `\uXXXX` so output survives a
+  shell that mangles UTF-8. See
+  [Non-ASCII names](#non-ascii-names-chcp-is-not-the-thing-to-check).
+- **`--no-binary`** — don't read `GameAssembly.dll`; `type` / `types`
+  then report `offset` / `is_static` / `instance_size` as `null`. See
+  [Field offsets](#field-offsets).
 
 `metadata-cli --help` (also `-h` / `help` / `/?`) prints the full usage,
 including the PowerShell encoding guidance. The help text is
@@ -229,21 +234,31 @@ metadata-cli type "C:\...\global-metadata.dat" "MainGame" "PLY_WORK"
 
 ```json
 {
-  "namespace": "MainGame",
-  "name": "PLY_WORK",
-  "index": 12345,
-  "token": 33567778,
+  "namespace": "Microsoft.Win32",
+  "name": "RegistryKey",
+  "index": 100,
+  "token": 33554533,
+  "is_value_type": false,
+  "instance_size": 64,
   "fields": [
-    {"index": 0, "name": "HP", "type_index": 4321, "offset": 16, "is_static": false},
-    {"index": 1, "name": "MAX_HP", "type_index": 4321, "offset": 20, "is_static": false},
-    {"index": 2, "name": "LV", "type_index": 4322, "offset": 24, "is_static": false},
-    ...
+    {"name":"handle","index":399,"type_index":22416,"token":67109264,
+     "is_static":false,"attrs":1,"is_literal":false,"type_tag":"Object","offset":24},
+    {"name":"qname","index":402,"type_index":22125,"token":67109267,
+     "is_static":false,"attrs":33,"is_literal":false,"type_tag":"String","offset":48},
+    {"name":"RegistryApi","index":405,"type_index":22418,"token":67109270,
+     "is_static":true,"attrs":49,"is_literal":false,"type_tag":"Class","offset":0}
   ]
 }
 ```
 
 For enums, fields with `FieldDefaultValue` entries also include the
 typed default value.
+
+`offset` / `is_static` / `attrs` / `type_tag` / `instance_size` do **not**
+come from `global-metadata.dat` — the file has no field offsets at all.
+They are read from `GameAssembly.dll`, which `<spec>` resolution locates
+for you. See [Field offsets](#field-offsets). When the binary isn't
+available those keys are `null` (or absent), never guessed.
 
 #### `methods` — JSON line per method
 
@@ -732,6 +747,102 @@ metadata-cli steam-games | jq -r .name | ForEach-Object {
 }
 ```
 
+## Field offsets
+
+`global-metadata.dat` contains **no field offsets**.
+`Il2CppFieldDefinition` is exactly `{nameIndex, typeIndex, token}`. The
+three things a dumper actually wants all live in `GameAssembly.dll`,
+hanging off the `Il2CppMetadataRegistration` struct that
+[`registration`](#registration--offline-il2cppmetadataregistration-finder)
+already locates:
+
+| Emitted as | Source | Struct slot (x64) |
+|---|---|---|
+| `offset` | `fieldOffsets[typeDefIndex][fieldIndexInType]` | `+0x50` count, `+0x58` ptr |
+| `is_static`, `attrs`, `is_literal`, `type_tag` | `types[]` → `Il2CppType` bitfield | `+0x30` count, `+0x38` ptr |
+| `instance_size` | `typeDefinitionsSizes[]` | `+0x60` count, `+0x68` ptr |
+
+`type` and `types` read these automatically — `<spec>` resolution
+already hands back `GameAssembly.dll` alongside the metadata, so there
+are **no new arguments**. stderr reports what was used:
+
+```
+metadata-cli: offsets from …\GameAssembly.dll  [fieldOffsets: pointers mode, 44932 types, 7514 sizes]
+```
+
+Pass `--no-binary` to skip it. When the binary is missing or
+unreadable, the affected keys come back `null` and stderr says why —
+never a guessed number.
+
+### What `null` means
+
+A `null` offset is a deliberate "unknown", distinguishable from a real
+offset of 0:
+
+- **`const` fields** (`is_literal: true`) have no storage. The offset
+  table still holds a zero for them; reporting it would read as "lives
+  at 0". Il2CppDumper likewise emits no offset for literals.
+- **Types that were never laid out** — interfaces, open generic
+  definitions, linker-stripped types — report `instance_size: 0` and
+  carry an all-zero offsets row. That is "no layout", not "offset 0".
+- **An instance field of a reference type below the object header**
+  (< 16 bytes on x64) is physically impossible, so it is reported as
+  unknown rather than as a number a caller would poke memory with.
+  Upstream passes such values through unchecked; this does not.
+
+### Two traps, both handled
+
+- **`fieldOffsets` entries are not always pointers.** Upstream carries a
+  `fieldOffsetsArePointers` flag
+  ([Il2Cpp.cs:180-186](../vendor/Il2CppDumperV35plus/Il2CppDumper/Il2Cpp/Il2Cpp.cs))
+  — nominally true above metadata v21, but some builds store offsets
+  inline as `uint32` indexed by the *global* field index. Dereferencing
+  the wrong mode yields plausible garbage, not an error, so
+  `FieldOffsets.cpp` probes the leading entries and lets the bytes
+  overrule the version either way. The mode in use is printed on stderr.
+- **Raw offsets are not final.** An instance field of a **value type**
+  has the boxed object header baked into its stored offset and needs one
+  header subtracted (16 on x64, 8 on x86). Statics index a separate
+  block and are never adjusted.
+
+### Verification
+
+Cross-checked against **Il2CppDumper** — a separate implementation, so
+agreement is evidence rather than self-consistency. Build it from
+`vendor/Il2CppDumperV35plus/`, run it on the same binary, and diff its
+`dump.cs` offsets field-by-field against `metadata-cli type`:
+
+| Game | Metadata | Fields compared | Agree | Disagree |
+|---|---|---|---|---|
+| SaGa Frontier Remastered | v24 | 967 | **967** | 0 |
+| FINAL FANTASY VI PR | v24 | 1056 | **1056** | 0 |
+| Utawarerumono PPR | v31 | 1252 | **1252** | 0 |
+
+Plus structural invariants over a further 500 sampled types (reference
+field ⇒ `16 ≤ offset < instance_size`; value-type field ⇒
+`0 ≤ offset < instance_size − 16`): 0 violations.
+
+Known layouts land exactly where they should — `Vector3` `x@0 y@4 z@8`,
+`Quaternion` `x@0 y@4 z@8 w@12`, `String` `m_stringLength@16
+m_firstChar@20` — and explicit-layout unions survive intact
+(`Color32` → `rgba@0 r@0 g@1 b@2 a@3`).
+
+> **Comparing offsets yourself?** Use a case-**sensitive** map. C#
+> routinely declares `OnSelected` and `onSelected` on one class, and a
+> case-insensitive lookup silently merges them into one wrong entry —
+> which is exactly what produced the only two "disagreements" seen while
+> building this, both of them harness bugs.
+
+### Still index-only
+
+`type_index` / `return_type_index` on `methods` / `method` stay raw.
+Resolving them to readable type names needs a full `Il2CppType` decoder
+(generics, arrays, pointers, and a v24-vs-v27+ split in how the type
+handle maps back to a TypeDefinition) — a separate piece of work, not a
+by-product of this one. `type_tag` on fields gives the primitive shape
+(`Int32`, `String`, `Class`, `GenericInst`, …) from the same bitfield
+this feature already reads.
+
 ## Comparing CLI output to live RPC
 
 Quick sanity check: the CLI's `info` output should match the DLL's
@@ -768,6 +879,11 @@ Mismatch indicates one of:
   the on-disk bytes literally. If they're encrypted, parse fails
   with `sanity_mismatch`. Use the live DLL path (which sees the
   decrypted in-memory copy).
+- **Resolved type names are still index-only**. `type_index` /
+  `return_type_index` stay raw; see
+  [Still index-only](#still-index-only). Field offsets / `is_static` /
+  `instance_size` **are** available — see
+  [Field offsets](#field-offsets).
 - **No method bodies**. The CLI parses TypeDefinitions, FieldDefinitions,
   StringLiterals, FieldDefaults. MethodDefinitions are deferred (no
   current consumer). For method information, use the live DLL with
@@ -780,6 +896,10 @@ Mismatch indicates one of:
 
 - [tools/metadata-cli/main.cpp](../tools/metadata-cli/main.cpp) —
   CLI entry point + JSON formatting.
+- [tools/metadata-cli/FieldOffsets.h](../tools/metadata-cli/FieldOffsets.h)
+  / [.cpp](../tools/metadata-cli/FieldOffsets.cpp) — binary-side field
+  offsets / attributes / instance sizes, incl. the storage-mode probe and
+  the value-type header adjustment.
 - [tools/metadata-cli/PathResolver.h](../tools/metadata-cli/PathResolver.h)
   / [.cpp](../tools/metadata-cli/PathResolver.cpp) — `<spec>` resolution:
   Unity layout probing + Steam discovery (registry → `libraryfolders.vdf`
