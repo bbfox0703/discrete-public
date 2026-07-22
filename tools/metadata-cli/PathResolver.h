@@ -73,6 +73,23 @@ std::optional<Resolved> Resolve(const std::wstring& spec, Target target, std::st
 // relative to the derived install root).
 std::optional<ResolvedPair> ResolvePair(const std::wstring& spec, std::string* err);
 
+// Metadata is required, the binary is best-effort — for subcommands that parse
+// global-metadata.dat but can enrich their output from GameAssembly.dll when
+// it happens to sit alongside (field offsets, field attributes, instance
+// sizes). `gameAssembly` is empty when it wasn't found, with the reason in
+// `binaryError`; that is not a failure of the call.
+struct MetadataWithBinary {
+    std::wstring metadata;
+    std::wstring gameAssembly;   // empty when unavailable
+    std::wstring gameRoot;
+    Origin       origin = Origin::GameRoot;
+    std::string  note;
+    std::string  binaryError;    // empty iff gameAssembly is set
+};
+
+std::optional<MetadataWithBinary> ResolveMetadataWithBinary(const std::wstring& spec,
+                                                            std::string*        err);
+
 // ---------------------------------------------------------------------------
 // Steam discovery — exposed for the `resolve` subcommand's diagnostics and
 // for the "did you mean" list emitted when a name lookup misses.

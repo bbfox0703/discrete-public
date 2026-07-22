@@ -47,6 +47,20 @@ struct Found {
     std::uint32_t   typesCount       = 0;   // length of types[] (regRva field at +0x30)
     std::uint64_t   typesArrayVa     = 0;   // absolute VA = imageBase + typesArrayRva
     int             nearMissCount    = 0;   // candidates that passed the cheap rejector but failed full validation
+
+    // Field-offset plumbing (struct slots +0x50 / +0x58). `fieldOffsets` is
+    // `const int32_t**` — one entry per TypeDefinition, each pointing at that
+    // type's offsets. Read verbatim; 0 when the slot looks unusable. See
+    // FieldOffsets.h for how the two storage modes are told apart.
+    std::uint32_t   fieldOffsetsCount = 0;
+    std::uint64_t   fieldOffsetsVa    = 0;
+
+    // Il2CppTypeDefinitionSizes** (slots +0x60 / +0x68) — instance_size per
+    // TypeDefinition. Doubles as a validation oracle: an instance field's
+    // offset must land inside its type's instance size.
+    std::uint32_t   typeDefSizesCount = 0;
+    std::uint64_t   typeDefSizesVa    = 0;
+
     // For diagnostics — the section that contained the hit.
     std::string     sectionName;
 };

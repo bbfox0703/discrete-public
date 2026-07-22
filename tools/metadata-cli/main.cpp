@@ -29,9 +29,11 @@
 #include "CodeGenModulesFinder.h"
 #include "SymbolPipeline.h"
 #include "PathResolver.h"
+#include "FieldOffsets.h"
 
 #include <algorithm>
 #include <fstream>
+#include <memory>
 #include <vector>
 
 #include <windows.h>
@@ -124,6 +126,58 @@ std::optional<std::wstring> ResolveSpec(const std::wstring& spec, Resolve::Targe
                      Resolve::WideToUtf8(r->path).c_str(), r->note.c_str());
     }
     return r->path;
+}
+
+// --- binary-side enrichment -------------------------------------------------
+// Field offsets, field attributes and instance sizes are not in metadata.dat;
+// they hang off Il2CppMetadataRegistration in GameAssembly.dll. <spec>
+// resolution already hands us that file when it sits alongside, so `type` and
+// `types` enrich transparently and fall back to nulls when it doesn't.
+//
+// Heap-allocated and never moved: TypeInfo holds raw pointers into `bytes` and
+// a reference to `img`, so the owner's address must stay put.
+struct BinaryEnrichment {
+    std::vector<std::uint8_t>                     bytes;
+    Discrete::Phase_D::PE::Image                  img;
+    Discrete::Phase_D::Registration::Found        reg;
+    std::optional<Discrete::Phase_D::Binary::TypeInfo> info;
+};
+
+bool g_noBinary = false;   // --no-binary: skip enrichment entirely
+
+// The metadata header is {int32 sanity; int32 version; ...}. Peeking 8 bytes
+// beats a second full Parser load just to seed the offset-mode probe; the
+// probe treats the version as a hint and lets the actual bytes overrule it.
+// Returns 0 when the file isn't readable metadata.
+int PeekMetadataVersion(const std::wstring& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return 0;
+    std::int32_t hdr[2] = {0, 0};
+    f.read(reinterpret_cast<char*>(hdr), sizeof hdr);
+    if (f.gcount() != static_cast<std::streamsize>(sizeof hdr)) return 0;
+    constexpr std::uint32_t kSanity = 0xFAB11BAFu;
+    if (static_cast<std::uint32_t>(hdr[0]) != kSanity) return 0;
+    return hdr[1];
+}
+
+std::unique_ptr<BinaryEnrichment> LoadBinaryEnrichment(const std::wstring& gaPath,
+                                                       int                 metadataVersion,
+                                                       std::string*        err) {
+    using namespace Discrete::Phase_D;
+    auto e = std::make_unique<BinaryEnrichment>();
+
+    auto imgOpt = PE::ParseFile(gaPath, &e->bytes, err);
+    if (!imgOpt) return nullptr;
+    e->img = *imgOpt;
+
+    auto regOpt = Registration::FindOffline(e->bytes.data(), e->bytes.size(), e->img, err);
+    if (!regOpt) return nullptr;
+    e->reg = *regOpt;
+
+    e->info = Binary::TypeInfo::Bind(e->bytes.data(), e->bytes.size(), e->img, e->reg,
+                                     metadataVersion, err);
+    if (!e->info) return nullptr;
+    return e;
 }
 
 int CmdInfo(const std::wstring& path) {
@@ -246,7 +300,7 @@ int CmdStats(const std::wstring& path) {
     return 0;
 }
 
-int CmdTypes(const std::wstring& path) {
+int CmdTypes(const std::wstring& path, const BinaryEnrichment* enr) {
     Parser p;
     if (!p.LoadFromPath(path)) {
         std::fputs("metadata-cli: load failed — see `info` subcommand for diagnostics, "
@@ -262,8 +316,16 @@ int CmdTypes(const std::wstring& path) {
         PutJsonString(td->ns);
         std::fputs(",\"name\":", stdout);
         PutJsonString(td->name);
-        std::printf(",\"field_count\":%u,\"method_count\":%u,\"token\":%u}\n",
+        std::printf(",\"field_count\":%u,\"method_count\":%u,\"token\":%u",
                     td->fieldCount, td->methodCount, td->token);
+        std::printf(",\"is_value_type\":%s", td->IsValueType() ? "true" : "false");
+        // instance_size needs the binary; `null` distinguishes "unknown" from
+        // a genuine size, which a 0 would not.
+        std::fputs(",\"instance_size\":", stdout);
+        std::optional<std::uint32_t> sz;
+        if (enr && enr->info) sz = enr->info->InstanceSize(td->index);
+        if (sz) std::printf("%u", *sz); else std::fputs("null", stdout);
+        std::fputs("}\n", stdout);
     }
     return 0;
 }
@@ -394,7 +456,8 @@ int CmdMethod(const std::wstring& path,
     return 0;
 }
 
-int CmdType(const std::wstring& path, const std::string& ns, const std::string& name) {
+int CmdType(const std::wstring& path, const std::string& ns, const std::string& name,
+            const BinaryEnrichment* enr) {
     Parser p;
     if (!p.LoadFromPath(path)) {
         std::fputs("metadata-cli: load failed — see `info` subcommand for diagnostics, "
@@ -406,12 +469,21 @@ int CmdType(const std::wstring& path, const std::string& ns, const std::string& 
         std::fprintf(stderr, "metadata-cli: type not found: %s.%s\n", ns.c_str(), name.c_str());
         return 1;
     }
+    const auto* info = (enr && enr->info) ? &*enr->info : nullptr;
+    const bool  isValueType = td->IsValueType();
+
     auto fields = p.EnumerateTypeFields(*td);
     std::fputs("{\"namespace\":", stdout);
     PutJsonString(td->ns);
     std::fputs(",\"name\":", stdout);
     PutJsonString(td->name);
-    std::printf(",\"index\":%d,\"token\":%u,\"fields\":[", td->index, td->token);
+    std::printf(",\"index\":%d,\"token\":%u", td->index, td->token);
+    std::printf(",\"is_value_type\":%s", isValueType ? "true" : "false");
+    std::fputs(",\"instance_size\":", stdout);
+    std::optional<std::uint32_t> instSize;
+    if (info) instSize = info->InstanceSize(td->index);
+    if (instSize) std::printf("%u", *instSize); else std::fputs("null", stdout);
+    std::fputs(",\"fields\":[", stdout);
     bool first = true;
     for (const auto& f : fields) {
         if (!first) std::fputc(',', stdout);
@@ -420,6 +492,38 @@ int CmdType(const std::wstring& path, const std::string& ns, const std::string& 
         PutJsonString(f.name);
         std::printf(",\"index\":%d,\"type_index\":%d,\"token\":%u",
                     f.index, f.typeIndex, f.token);
+
+        // Binary-side enrichment. `fieldIndexInType` is the field's position
+        // within its declaring type — the fieldOffsets row is indexed by that,
+        // not by the global field index.
+        if (info) {
+            namespace Bin = Discrete::Phase_D::Binary;
+            bool isStatic  = info->IsStaticField(f.typeIndex);
+            bool isLiteral = false;
+            std::printf(",\"is_static\":%s", isStatic ? "true" : "false");
+            if (auto attrs = info->TypeAttrs(f.typeIndex)) {
+                isLiteral = (*attrs & Bin::kFieldAttrLiteral) != 0;
+                std::printf(",\"attrs\":%u", static_cast<unsigned>(*attrs));
+                std::printf(",\"is_literal\":%s", isLiteral ? "true" : "false");
+            }
+            if (auto tag = info->TypeTag(f.typeIndex)) {
+                if (const char* tn = Bin::TypeTagName(*tag)) {
+                    std::fputs(",\"type_tag\":", stdout);
+                    PutJsonString(tn);
+                } else {
+                    std::printf(",\"type_tag\":%u", static_cast<unsigned>(*tag));
+                }
+            }
+            std::fputs(",\"offset\":", stdout);
+            // A `const` has no storage at all — the offset table still holds a
+            // zero for it, but reporting that would read as "lives at 0".
+            // Il2CppDumper likewise emits no offset for literals.
+            auto off = isLiteral
+                ? std::nullopt
+                : info->FieldOffset(td->index, f.index - td->fieldStart, f.index,
+                                    isValueType, isStatic);
+            if (off) std::printf("%d", *off); else std::fputs("null", stdout);
+        }
         // Decode any FieldDefault that looks string-shaped — numeric
         // defaults need the runtime types[] table which the offline tool
         // can't see, so we limit ourselves to strings.
@@ -1075,9 +1179,11 @@ void Usage(std::FILE* out) {
         "  metadata-cli steam-games                same, as JSON lines (for scripts)\n"
         "  metadata-cli --help                     this text\n\n"
         "OPTIONS:\n"
-        "  --ascii    Escape every non-ASCII character as \\uXXXX, so output is pure\n"
-        "             7-bit ASCII that no shell can corrupt. May appear anywhere on\n"
-        "             the command line. See ENCODING below.\n\n"
+        "  --ascii       Escape every non-ASCII character as \\uXXXX, so output is pure\n"
+        "                7-bit ASCII that no shell can corrupt. May appear anywhere on\n"
+        "                the command line. See ENCODING below.\n"
+        "  --no-binary   Skip reading GameAssembly.dll. `type` / `types` then report\n"
+        "                offset / is_static / instance_size as null (see FIELD OFFSETS).\n\n"
         "<spec> is any of:\n"
         "  * a full file path        \"...\\Metadata\\global-metadata.dat\" / \"...\\GameAssembly.dll\"\n"
         "                            (used verbatim; missing file = hard failure)\n"
@@ -1085,6 +1191,13 @@ void Usage(std::FILE* out) {
         "                            (the file is located by Unity's fixed layout)\n"
         "  * a Steam game name       \"Songs of Silence\"\n"
         "                            (install path looked up via libraryfolders.vdf)\n\n"
+        "FIELD OFFSETS:\n"
+        "  global-metadata.dat has no field offsets - Il2CppFieldDefinition is only\n"
+        "  {nameIndex, typeIndex, token}. `type` and `types` therefore also read\n"
+        "  GameAssembly.dll (offset / is_static / attrs / type_tag / instance_size),\n"
+        "  which <spec> resolution locates for you. When the binary is missing or\n"
+        "  unreadable those fields come back as null rather than a guess - stderr\n"
+        "  says which happened. For live offsets instead, use the injected DLL.\n\n"
         "ENCODING - non-ASCII game names in PowerShell:\n"
         "  Output is UTF-8. PowerShell never lets a native program write to the\n"
         "  console directly: it captures stdout and decodes the bytes using\n"
@@ -1121,7 +1234,8 @@ int wmain(int argc, wchar_t** argv) {
     std::vector<wchar_t*> av;
     av.reserve(static_cast<std::size_t>(argc));
     for (int i = 0; i < argc; ++i) {
-        if (i > 0 && std::wcscmp(argv[i], L"--ascii") == 0) { g_ascii = true; continue; }
+        if (i > 0 && std::wcscmp(argv[i], L"--ascii")     == 0) { g_ascii    = true; continue; }
+        if (i > 0 && std::wcscmp(argv[i], L"--no-binary") == 0) { g_noBinary = true; continue; }
         av.push_back(argv[i]);
     }
     argc = static_cast<int>(av.size());
@@ -1161,14 +1275,65 @@ int wmain(int argc, wchar_t** argv) {
     const auto kMeta = Resolve::Target::Metadata;
     const auto kGa   = Resolve::Target::GameAssembly;
 
+    // `type` / `types` can enrich from GameAssembly.dll. Resolve the pair and
+    // load the binary once, then hand it to the command; a missing or
+    // unparseable binary degrades to null offsets rather than failing.
+    auto runEnriched = [&](auto&& body) -> int {
+        std::string err;
+        auto mb = Resolve::ResolveMetadataWithBinary(spec, &err);
+        if (!mb) {
+            std::fprintf(stderr, "metadata-cli: %s\n",
+                         err.empty() ? "path resolution failed" : err.c_str());
+            return 1;
+        }
+        if (mb->origin != Resolve::Origin::ExplicitFile) {
+            std::fprintf(stderr, "metadata-cli: using %s  [%s]\n",
+                         Resolve::WideToUtf8(mb->metadata).c_str(), mb->note.c_str());
+        }
+
+        std::unique_ptr<BinaryEnrichment> enr;
+        if (g_noBinary) {
+            std::fputs("metadata-cli: note — --no-binary given; offsets / is_static / "
+                       "instance_size will be null\n", stderr);
+        } else if (mb->gameAssembly.empty()) {
+            std::fprintf(stderr,
+                "metadata-cli: note — no GameAssembly.dll (%s); offsets / is_static / "
+                "instance_size will be null\n", mb->binaryError.c_str());
+        } else {
+            std::string binErr;
+            enr = LoadBinaryEnrichment(mb->gameAssembly, PeekMetadataVersion(mb->metadata),
+                                       &binErr);
+            if (!enr) {
+                std::fprintf(stderr,
+                    "metadata-cli: note — %s could not be mined for offsets (%s); "
+                    "offsets / is_static / instance_size will be null\n",
+                    Resolve::WideToUtf8(mb->gameAssembly).c_str(),
+                    binErr.empty() ? "unknown error" : binErr.c_str());
+            } else {
+                std::fprintf(stderr,
+                    "metadata-cli: offsets from %s  [fieldOffsets: %s mode, %u types, %u sizes]\n",
+                    Resolve::WideToUtf8(mb->gameAssembly).c_str(),
+                    enr->info->offsetModeName(),
+                    enr->reg.typesCount, enr->reg.typeDefSizesCount);
+            }
+        }
+        return body(mb->metadata, enr.get());
+    };
+
     if      (sub == L"info")    return run(kMeta, [](const std::wstring& p) { return CmdInfo(p); });
     else if (sub == L"stats")   return run(kMeta, [](const std::wstring& p) { return CmdStats(p); });
-    else if (sub == L"types")   return run(kMeta, [](const std::wstring& p) { return CmdTypes(p); });
+    else if (sub == L"types") {
+        return runEnriched([](const std::wstring& p, const BinaryEnrichment* e) {
+            return CmdTypes(p, e);
+        });
+    }
     else if (sub == L"type") {
         if (argc < 5) { Usage(stderr); return 2; }
         std::string ns = Resolve::WideToUtf8(argv[3]);
         std::string nm = Resolve::WideToUtf8(argv[4]);
-        return run(kMeta, [&](const std::wstring& p) { return CmdType(p, ns, nm); });
+        return runEnriched([&](const std::wstring& p, const BinaryEnrichment* e) {
+            return CmdType(p, ns, nm, e);
+        });
     }
     else if (sub == L"methods") return run(kMeta, [](const std::wstring& p) { return CmdMethods(p); });
     else if (sub == L"images")  return run(kMeta, [](const std::wstring& p) { return CmdImages(p); });

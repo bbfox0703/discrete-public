@@ -58,8 +58,16 @@ public:
         std::uint16_t fieldCount   = 0;
         std::int32_t  methodStart  = 0;
         std::uint16_t methodCount  = 0;
-        std::uint32_t flags        = 0;
+        std::uint32_t flags        = 0;   // TypeAttributes (public/sealed/abstract/...)
+        // Il2CppTypeDefinition::bitfield — a *different* field from `flags`.
+        // Bit 0 = valuetype, bit 1 = enumtype (see upstream comment in
+        // MetadataClass.cs). Needed offline because a value type's field
+        // offsets include the object header and must be adjusted.
+        std::uint32_t bitfield     = 0;
         std::uint32_t token        = 0;
+
+        bool IsValueType() const { return (bitfield & 0x1u) != 0; }
+        bool IsEnum()      const { return (bitfield & 0x2u) != 0; }
     };
 
     struct FieldDefView {

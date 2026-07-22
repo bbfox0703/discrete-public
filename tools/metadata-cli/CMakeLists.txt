@@ -7,6 +7,7 @@
 add_executable(metadata-cli
     main.cpp
     PathResolver.cpp
+    FieldOffsets.cpp
     PEParser.cpp
     RegistrationFinder.cpp
     CodeGenModulesFinder.cpp

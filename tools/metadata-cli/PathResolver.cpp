@@ -647,4 +647,32 @@ std::optional<ResolvedPair> ResolvePair(const std::wstring& rawSpec, std::string
     return p;
 }
 
+std::optional<MetadataWithBinary> ResolveMetadataWithBinary(const std::wstring& spec,
+                                                            std::string*        err) {
+    auto meta = Resolve(spec, Target::Metadata, err);
+    if (!meta) return std::nullopt;
+
+    MetadataWithBinary out;
+    out.metadata = meta->path;
+    out.gameRoot = meta->gameRoot;
+    out.origin   = meta->origin;
+    out.note     = meta->note;
+
+    // An explicitly-named file is honoured for whatever target was asked, so
+    // a spec pointing at global-metadata.dat comes back as `meta` verbatim.
+    // The binary must then be located from the derived install root instead of
+    // by re-running the spec, which would just hand back the same .dat.
+    std::wstring binarySpec = out.gameRoot.empty() ? spec : out.gameRoot;
+
+    std::string binErr;
+    if (auto ga = Resolve(binarySpec, Target::GameAssembly, &binErr)) {
+        out.gameAssembly = ga->path;
+    } else {
+        out.binaryError = binErr.empty()
+            ? ("GameAssembly.dll not found alongside " + WideToUtf8(out.metadata))
+            : binErr;
+    }
+    return out;
+}
+
 }  // namespace Discrete::CLI::PathResolve
