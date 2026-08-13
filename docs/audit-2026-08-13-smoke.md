@@ -1,8 +1,13 @@
 # Audit #4 實機 smoke 檢查表(2026-08-13)
 
 > [audit-2026-08-13.md](audit-2026-08-13.md) 九批修正的實機驗證清單。
-> 全部靜態驗證與自動化都已通過(build #1402 AOT publish clean、1130 UI tests green);
-> **這份清單是唯一剩下的未驗證面**。
+> 全部靜態驗證與自動化都已通過(build #1402 AOT publish clean、1130 UI tests green)。
+>
+> ## ✅ **2026-08-13 收工:25 項裡 24 項已驗**
+>
+> 唯一沒驗的是 **I-1**,而那是**原理上驗不出來**(見下方分析:`(long)value` 與 `ulong` 的
+> 位元樣式相同,round-trip 不管修沒修都會通過;真正有差別的是 wire 上的 JSON 文字,
+> 那是那 4 個單元測試的層級)。**A-1 由使用者實測**(Steam overlay);其餘 23 項見下面各輪紀錄。
 >
 > **依「你面前需要有什麼」分組**,不是依批次 —— 一次遊戲 session 可以一口氣掃完一整組。
 > 每項都寫了 **PASS 長什麼樣**與 **FAIL 長什麼樣**,因為這輪修的缺陷多半是**靜默**的
@@ -406,7 +411,7 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
   **FAIL**:UI 顯示已啟用但 alt-tab 後遊戲暫停(修正前:`Shutdown` 沒重置 `g_hookInstalled`,
   再次啟用時整個安裝區塊被跳過 → detour 仍是 disabled)。
 
-- [ ] **A-1 · overlay 共存**
+- [x] **A-1 · overlay 共存**  ✅ *使用者實測 OK(2026-08-13,Steam overlay)*
   開著會 subclass 視窗的 overlay(Steam overlay / Discord / RTSS),勾選 keep-foreground 後再
   `Discrete_Shutdown`。
   **PASS**:遊戲視窗仍正常回應輸入、正常繪製、可正常關閉。
@@ -415,10 +420,24 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
 
 ---
 
-## 完成後
+## 完成後 —— ✅ DONE(2026-08-13)
 
-全部通過的話,把 [plan.md](plan.md) 的 audit #4 條目標成 live-verified,並把本檔標為 done。
-任何一項 FAIL:對照 [audit-2026-08-13.md](audit-2026-08-13.md) 該批的說明,那裡有完整的機制分析與修法理由。
+**24/25 已驗,0 FAIL。** 唯一未驗的 I-1 是設計上驗不出來的(見上),以單元測試為準。
+
+這一輪順手修掉的、以及新發現的問題(都在下面各節有完整紀錄):
+
+| | 狀態 |
+|---|---|
+| `dev` HEAD 無法編譯(batch I 的 `memoNegative`)| ✅ 已修,build #1408/#1409 clean |
+| `dist/` 的 DLL 落後 batch H + I | ✅ 已重建 |
+| C-2 的 audit 修法沒解到真因(colon vs dot)| ✅ 已重修 + live-verified |
+| `injectDLL` 失敗被吞掉 → bridge 謊報 "Pipe ready" | ✅ 已修 |
+| `scanFieldValue` 完全不可取消 | ⬜ 待修(新發現)|
+| `getMethodAobPattern` 會越過函式尾端 | ⬜ 待修(新發現)|
+| CE 文件與程式不符(`unity_dump.lua` 沒有 `inject()`)| ⬜ 待修文件 |
+
+**回歸用**:整套 headless harness 在 [tools/smoke/](../tools/smoke/),含這一輪踩過的所有坑。
+任何一項要重驗:對照 [audit-2026-08-13.md](audit-2026-08-13.md) 該批的機制分析。
 
 ---
 

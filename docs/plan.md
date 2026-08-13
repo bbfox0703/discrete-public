@@ -8,15 +8,16 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1353**(2026-07-15 **Leak/bug audit #3 全數修復**:P1 MainThreadDispatcher timeout-UAF(atomic-state+CAS)、P2 FieldAcrossInstances BulkGate 洩漏+freeze race、P3 auto-refresh 重啟 race、P4 ForegroundHook subclass 懸空、lows;DLL+IL2CPP x64/x86 clean、**1123 UI tests green**;前 feature wave = #1343 UE5-port ⑨ ClassFacetFilter)|
-| **Current phase** | 🐛 **Leak/bug audit #3 修復**(2026-07-15,DLL+UI,**待 live-smoke**);前:🎮 UE5CEDumper 功能移植(**待 live-smoke**)|
-| **Branches** | `dev`(audit 修復 working-tree 待 commit;UE5-port wave 未 merge main)|
-| **Tests** | **1123 UI tests green** |
+| **Current build** | **#1409**(2026-08-13:DLL x64 **#1408** / x86 **#1409**,0 warning;`dist` UI = `0.1.0.1403+7e87105`)|
+| **Current phase** | 🐛 **Leak/bug audit #4 —— 修復完成 + live-smoke 收工(24/25,0 FAIL)**。詳見 [audit-2026-08-13-smoke.md](audit-2026-08-13-smoke.md);前:audit #3(2026-07-15)|
+| **Branches** | `dev` → 已 merge `main`(2026-08-13)|
+| **Tests** | **1130 UI tests green**(2026-08-13 重跑,0 failed —— 涵蓋本輪的 Lua/C++ 改動)|
 | **Mid-flight** | 無 |
 
-**Last updated**: 2026-07-14
+**Last updated**: 2026-08-13
 
 **待 live-smoke(none blocking)**:
+- ✅ **audit #4 的 live-smoke 已收工(2026-08-13,24/25、0 FAIL)** —— 見 [audit-2026-08-13-smoke.md](audit-2026-08-13-smoke.md)。唯一未驗的 I-1 是**原理上驗不出來**(`(long)value` 與 `ulong` 位元樣式相同,round-trip 不管修沒修都會過),以單元測試為準。A-1 由使用者實測 OK(Steam overlay)。整套 harness 留在 [tools/smoke/](../tools/smoke/)。**以下是 audit #4 之前就存在的 smoke backlog,仍未動:**
 - 🎮 **UE5-port wave(2026-07-12)待 live-smoke** — ① **Keep-Foreground**:Mono + IL2CPP(尤其 managed `runInBackground` 被 strip 的 IL2CPP 遊戲)勾選 → alt-tab → 遊戲持續執行 + 滑鼠釋放、取消 → 恢復暫停;reconnect 後 toggle 重新同步。② **通用變速/低重力**:`Time.timeScale`(0.25×/2× 等 + 0 暫停)即時生效、`Physics.gravity` scale(Moon 0.16× / Zero-G 0×)套用 + Reset 還原 base。詳見 [teleport.md](teleport.md)。**AOT publish 待跑**(全 source-gen/compiled-binding,AOT 風險低)。
 - 🧭 **Teleport wave 1(2026-07-02)待 live-smoke** — 需 inject 實機(Mono + IL2CPP)驗:set target→Refresh 顯示合理座標、Save→移動→Recall 回原點、Undo、座標貼上 round-trip、directional Forward/Back、**遊戲聚焦時全域熱鍵(NumLock on)**、recall 旋轉還原。詳見 [teleport.md](teleport.md) live-smoke 表。**AOT publish 0/0 + integrity hash 三槽注入待跑**(wave 收尾;程式全 source-gen/compiled-binding/BCL,AOT 風險低)。
 - ✅ **本批(Core Keeper Mono x64,2026-06-08)四修 — 全數 live-verified、已 merge main(`665f13b`)**:(1)**跨組件 value-struct 展開** — Inspector 對 `Unity.Entities.Entity` / `Unity.Mathematics.quaternion`(欄位 declaring assembly ≠ 型別 defining assembly)按 expand 不再 `class not found`(`resolveClassFromArgs` 兩 backend cross-assembly fallback + UI `BuildAssemblyCandidates` 補 `Unity.*` DOTS);(2)**Inspector 切 class 自動清空** Field filter + walked-fields keyword + Filter builder(`SetTarget` classChanged gate);(3)**Filter builder 打字搜尋** — `ComboBox`→`AutoCompleteBox`(`FilterMode=Contains`、固定寬度 280、依名字排序、`MinimumPrefixLength=0` 聚焦展開全部);(4)**snapshot 窄 explicit scope 快掃** — ≤64 classes 改 per-class `mono_class_vtable`+SIMD `ScanForPointer`(skipMapped=true 結果與 bulk 逐筆相同),Core Keeper 16-class ~570s→~快(使用者實測「很快」);**無 Mono GC freeze、預設全抓維持 bulk**。**重要心得**:Core Keeper 是 Unity DOTS/ECS,gameplay 資料在 unmanaged ECS chunk,managed snapshot 看不到 — 見 [lessons-learned.md → Unity DOTS / ECS targets](lessons-learned.md#unity-dots--ecs-targets--gameplay-data-is-not-in-managed-objects)。
