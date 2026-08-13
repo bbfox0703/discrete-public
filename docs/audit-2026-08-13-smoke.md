@@ -156,6 +156,39 @@ UI 是 `DiscreteUI 0.1.0.1403+7e87105`(init log 自報)—— commit `7e87105` �
   但它的 pipe 沒開(UI log 一直回 `pipe unavailable`,它的 server 大概要在自己的介面裡啟用)。
   所以每次呼叫都在 connect 就失敗,race window 比真的有 server 時窄。
 
+### 第七輪:CE-Lua 有限 timeout —— 用「遊戲真的暫停」把它驗完(2026-08-13)
+
+使用者的質疑很合理:**遊戲整個暫停的話,呼叫不就回不來?** 活俠傳失焦時確實會暫停。
+答案是:要看走哪條路,而兩條路差很多。
+
+先確認遊戲真的停住(不是我猜的):`handshake.main_thread` 的 `tick_count` 完全不動、
+`last_tick_age_ms` 一路長到 **183915 ms(超過 3 分鐘沒有一次 Update)**、`is_healthy=false`。
+
+| 在 Update 已死 3 分鐘的情況下呼叫 | 耗時 | 結果 |
+|---|---|---|
+| `ping`(純 pipe) | 0.000 s | 正常 |
+| `getAssemblies`(進 Mono runtime) | 0.006 s | 正常回 114 個 assembly |
+| `Discrete_GetBuildNumber`(remote thread,**= `callDLL` 做的事**)| 0.002–0.009 s | 回 1409 |
+| `callMethod main_thread=false` | 0.00 s | 正常回應 |
+| **`callMethod main_thread=true`** | **5.01 s** | `main-thread queue drain timeout`,`path: timeout` |
+
+所以:**「遊戲暫停」不會讓 `callDLL` 回不來** —— Unity 的暫停停的是 player loop,
+執行緒全都還活著,`CreateRemoteThread` 建的新執行緒照樣被排程。真正會被卡住的只有
+**主執行緒 marshaling**(`main_thread:true`),而那條路自己就有 5 秒的有限 timeout,
+乾淨回錯誤而不是掛住(`getDispatcherStats` 的 `timeout_count` 也從 0 變 1)。
+這順手也是 **Phase 20-MT 的實機確認**。
+
+**最惡劣的組合**也試了:讓一個 `main_thread:true` 呼叫卡在 `SubmitAndWait` 裡,
+同時去呼叫 `Discrete_Shutdown`(CE 的 `callDLL` 會呼叫的那個 export)——
+teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那個卡住的呼叫也在 8.39 秒
+被中止(= audit #3 P1 的 `Aborted → 回 timeout 不再等`)。**6.41 s < CE 的 10 s 上限**,
+所以 CE 會在上限之前就拿到結果。
+
+**結論**:這條鏈上每一層的等待都是有限的(dispatcher 5 s → Shutdown ~6.4 s → CE 10 s),
+所以修好之後**做不出「>10 秒」的情況**,也就做不出 CE 永久凍結。這正是修正的目的。
+把它從「無法重現失敗條件」改判為 **PASS**:量到的最惡劣路徑落在上限內,
+而檢查表原本建議的 repro(暫停遊戲行程)**是無效的**(見上一節)。
+
 **CE 那組的額外發現**
 
 - 🔴 **`injectDLL` 失敗被吞掉 → bridge 謊報成功**(已修)。celua.txt:581 說 `injectDLL` 成功回 true,失敗回 **false**;`unity_dump.lua` 卻只檢查 `ok == nil`。實測 `injectDLL("<不存在>.dll")` 回 **false(boolean)**,於是 main() 一路印出 `DLL injected` + **`Pipe ready`** + `Launch DiscreteUI.exe and click Connect`,而實際上**什麼都沒注入**(module 沒 mapped、pipe 沒開)。唯一線索是 DEBUG-gated 的 WARN,預設看不到。這正好是 P3 同一個病:沒查 CE API 的回傳約定。修法:改 `if not ok`,並把找過的路徑印出來。
@@ -258,7 +291,7 @@ UI 是 `DiscreteUI 0.1.0.1403+7e87105`(init log 自報)—— commit `7e87105` �
   **FAIL**:CE 當掉、遊戲 CTD、或「call failed」(修正前:export 位址被當成 timeout、
   第一個參數被當成程式碼位址跳過去)。
 
-- [~] **CE-Lua · 有限 timeout(不再凍結 CE)**  ⚠️ *檢查表建議的 repro(暫停遊戲行程)無效 —— 新建的 remote thread 照跑,呼叫 0 ms 就成功回值。需要另一種讓 remote thread 卡住的方法*
+- [x] **CE-Lua · 有限 timeout(不再凍結 CE)**  ✅ *在 Update 已死 3 分鐘的活俠傳上量:`callDLL` 的 export 仍 0.002–0.009 s 回值;`main_thread:true` 走它自己的 5 s 有限 timeout;最惡劣組合(Shutdown 撞上卡住的 main-thread 呼叫)6.41 s < 10 s 上限。鏈上每層等待都有限,做不出永久凍結*
   在 bridge 連線狀態下,讓一次 DLL 呼叫遇到麻煩 —— 最直接的做法是**用 CE 暫停遊戲行程**後再觸發一次
   bridge 動作。
   **PASS**:最多 10 秒後回錯誤訊息,**CE 視窗全程可操作**。
