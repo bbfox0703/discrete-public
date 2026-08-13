@@ -59,4 +59,27 @@ public class SetFieldValueParserTests
         Assert.False(Parse("System.String", "hello", out _, out string? err));
         Assert.NotNull(err);
     }
+
+    // ── Audit 2026-08-13 batch I (F29): ulong must not wrap through long ──
+
+    [Theory]
+    [InlineData("18446744073709551615")]   // ulong.MaxValue
+    [InlineData("9223372036854775808")]    // long.MaxValue + 1 — the first value that wrapped
+    [InlineData("10000000000000000000")]
+    public void UInt64_AboveLongMaxValue_SurvivesTheWire(string input)
+    {
+        Assert.True(Parse("System.UInt64", input, out JsonElement value, out string? err));
+        Assert.Null(err);
+        // Previously this went out as (long)value — a NEGATIVE number — so the
+        // DLL received a completely different value than the user typed.
+        Assert.Equal(ulong.Parse(input), value.GetUInt64());
+        Assert.DoesNotContain("-", value.GetRawText());
+    }
+
+    [Fact]
+    public void UInt64_NormalRange_StillRoundTrips()
+    {
+        Assert.True(Parse("System.UInt64", "42", out JsonElement value, out _));
+        Assert.Equal(42UL, value.GetUInt64());
+    }
 }

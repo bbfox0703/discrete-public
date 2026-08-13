@@ -1019,12 +1019,24 @@ public partial class MainWindow : Window
     private async void OnSnapshotSettingsClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
-        var draft = vm.Snapshot.Settings.Clone();
-        var dialog = new SnapshotSettingsWindow(draft, this.StorageProvider);
-        var result = await dialog.ShowDialog<UserSettings?>(this);
-        if (result is not null)
+        try
         {
-            await vm.Snapshot.ApplySettingsAsync(result).ConfigureAwait(true);
+            var draft = vm.Snapshot.Settings.Clone();
+            var dialog = new SnapshotSettingsWindow(draft, this.StorageProvider);
+            var result = await dialog.ShowDialog<UserSettings?>(this);
+            if (result is not null)
+            {
+                await vm.Snapshot.ApplySettingsAsync(result).ConfigureAwait(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            // async void: an escaping exception is unhandled and terminates the
+            // process, with no dialog under Native AOT. ApplySettingsAsync can
+            // genuinely throw — it moves the DB directory and runs prune/VACUUM,
+            // so a locked file, a full disk or a corrupt database all surface
+            // here. Report it in the UI instead of taking the app down.
+            vm.Snapshot.ErrorMessage = $"Settings could not be applied: {ex.Message}";
         }
     }
 
