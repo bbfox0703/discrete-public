@@ -1,0 +1,174 @@
+=== dispatcher armed (CE 7.7) ===
+
+######## job0 start (tick=121589796) ########
+=== job0 environment probe ===
+ceVersion       = 7.7
+cheatEngineDir  = C:\Program Files\Cheat Engine\
+openedProcessID = 0
+targetIs64Bit   = true   <- the correct bitness query
+is32bitProcess  = nil   <- must be nil; calling it was the P3 bug
+targetIsX86     = true   <- exists but is the arch FAMILY (true for x64 too)
+executeCodeEx   = true
+createTableFile = true
+findTableFile   = true
+injectDLL       = true
+loadLibrary     = false
+mono_enumImages = function: 000000001415E7D0   <- callback-only, returns nothing (C-1)
+######## job0 end (tick=121589875) ########
+JOB0-COMPLETE
+  [hb:job0] tick 1 at +109 ms
+=== job1: C-2 Mode-B .CT bootstrap ===
+  embed utils.lua              src=14424     tableFile.Stream.Size=14424  SIZE-OK
+  embed unity_dump.lua         src=10016     tableFile.Stream.Size=10016  SIZE-OK
+  embed Discrete-Mono.dll      src=1037824   tableFile.Stream.Size=1037824  SIZE-OK
+  dofile bootstrap script: true 
+  bootstrap() -> ok=false err=...thub\discrete\tools\smoke\ce\ce_table_bootstrap_test.lua:158: [bootstrap] unexpected Stream:read result type: nil
+  reached backend-detect stage (=> extraction completed): false
+  extract dir = C:\Users\%USERNAME%\AppData\Local\Temp\Discrete_Dumper\default-table\
+  utils.lua              src=14424     extracted=nil       tail64=DIFFER  MISMATCH
+  unity_dump.lua         src=10016     extracted=0         tail64=DIFFER  MISMATCH
+  Discrete-Mono.dll      src=1037824   extracted=nil       tail64=DIFFER  MISMATCH
+  C-2 verdict: FAIL
+  saveTable(D:\Github\discrete\tools\smoke\ce\modeb_roundtrip.CT) -> true size=574870
+  loadTable -> true
+  table files after reload: utils.lua=14424  unity_dump.lua=10016  Discrete-Mono.dll=1037824
+  bootstrap() after .CT reload -> ok=false err=...thub\discrete\tools\smoke\ce\ce_table_bootstrap_test.lua:158: [bootstrap] unexpected Stream:read result type: nil
+  round-trip utils.lua              src=14424     extracted=nil       MISMATCH
+  round-trip unity_dump.lua         src=10016     extracted=0         MISMATCH
+  round-trip Discrete-Mono.dll      src=1037824   extracted=nil       MISMATCH
+  .CT round-trip verdict: FAIL
+=== job1 done ===
+=== job2: CE 7.7 Stream / TableFile API probe ===
+  tableFile type=userdata  Name=utils.lua
+  Stream type=userdata Size=14424 Position=0
+  (a) s:read(16)  ok=true type=nil len=-
+  (b) s.read(16)  ok=true type=table len=16
+      first bytes: 2D 2D 20 3D 3D 3D 3D 3D   (source starts with '-- utils.lua' = 2D 2D 20)
+  (c) Position before=0 after reading 4 bytes=4
+=== job3: extraction routes on CE 7.7 ===
+  --- utils.lua (14424 bytes)
+    route1 tf.saveToFile         ok=true EXACT  err=
+    route2 stream.read + chunked ok=true EXACT  err=true
+    route3 getData().saveToFile  ok=true EXACT  err=
+  --- Discrete-Mono.dll (1037824 bytes)
+    route1 tf.saveToFile         ok=true EXACT  err=
+    route2 stream.read + chunked ok=true EXACT  err=true
+    route3 getData().saveToFile  ok=true EXACT  err=
+=== job3 done ===
+=== job1: C-2 Mode-B .CT bootstrap ===
+  embed utils.lua              src=14424     tableFile.Stream.Size=14424  SIZE-OK
+  embed unity_dump.lua         src=10016     tableFile.Stream.Size=10016  SIZE-OK
+  embed Discrete-Mono.dll      src=1037824   tableFile.Stream.Size=1037824  SIZE-OK
+  dofile bootstrap script: true 
+  bootstrap() -> ok=false err=...thub\discrete\tools\smoke\ce\ce_table_bootstrap_test.lua:224: [bootstrap] backend detect failed: no opened process — open the game first
+  reached backend-detect stage (=> extraction completed): true
+  extract dir = C:\Users\%USERNAME%\AppData\Local\Temp\Discrete_Dumper\default-table\
+  utils.lua              src=14424     extracted=14424     tail64=same  OK
+  unity_dump.lua         src=10016     extracted=10016     tail64=same  OK
+  Discrete-Mono.dll      src=1037824   extracted=1037824   tail64=same  OK
+  C-2 verdict: PASS
+  saveTable(D:\Github\discrete\tools\smoke\ce\modeb_roundtrip.CT) -> true size=574870
+  loadTable -> true
+  table files after reload: utils.lua=14424  unity_dump.lua=10016  Discrete-Mono.dll=1037824
+  bootstrap() after .CT reload -> ok=false err=...thub\discrete\tools\smoke\ce\ce_table_bootstrap_test.lua:224: [bootstrap] backend detect failed: no opened process — open the game first
+  round-trip utils.lua              src=14424     extracted=14424     OK
+  round-trip unity_dump.lua         src=10016     extracted=10016     OK
+  round-trip Discrete-Mono.dll      src=1037824   extracted=1037824   OK
+  .CT round-trip verdict: PASS
+=== job1 done ===
+=== job4: pipe-open retry loop (no DLL injected) ===
+  openedProcessID = 0 (0 = no process, which is fine for this item)
+  dofile unity_symbols.lua -> ok=true err=
+  registerClassSymbols -> ok=false  elapsed=3078 ms
+  error text: D:\Github\discrete\scripts\unity_symbols.lua:158: pipe open: \\.\pipe\DiscreteBfx: No such file or directory
+  spent the retry budget (>=2500 ms): true
+  message names the cause (pipe open / No such file): true
+=== job4 done ===
+=== job5: P1 U.callDLL via the bridge ===
+  openProcess(CoreKeeper.exe) -> ok=true pid=58000
+  attached pid=58000 targetIs64Bit=true
+  dofile unity_dump.lua -> ok=true err=
+  inject() -> ok=false err=attempt to call a nil value  (0 ms)
+  callDLL(Discrete_GetBuildNumber,uint32) -> ok=false value/err=D:\Github\discrete\scripts\utils.lua:148: [Discrete] export not found: Discrete_GetBuildNumber — symbolhandler may not have scanned the new DLL yet.  (0 ms)
+  expected build = 1408
+  P1 verdict: FAIL/ERROR
+  callDLL(Discrete_StartPipe,int32) -> ok=false ret=D:\Github\discrete\scripts\utils.lua:148: [Discrete] export not found: Discrete_StartPipe — symbolhandler may not have scanned the new DLL yet. (0 = ok, pipe already up is fine)
+  pipe RPC after bridge inject: FAIL (cannot open pipe)
+=== job5 done ===
+=== job6: P1 with bridge diagnostics ===
+  attached pid=58000  targetIs64Bit=true
+  U.detectBackend() = Mono
+  U.dllPath('Mono') = C:\Program Files\Cheat Engine\discrete\Discrete-Mono.dll
+  that path exists = false
+  --- running unity_dump.lua (this is the inject step) ---
+  [ce] [Discrete] Attached PID: 58000
+  [ce] [Discrete] Backend detected: Mono
+  [ce] [Discrete] DLL path: C:\Program Files\Cheat Engine\discrete\Discrete-Mono.dll
+  [ce] [Discrete] WARN Skipping explicit StartPipe call: D:\Github\discrete\scripts\utils.lua:148: [Discrete] export not found: Discrete_StartPipe — symbolhandler may not have scanned the new DLL yet.
+  [ce] [Discrete] Backend: Mono — DLL injected (build unknown — symbol not yet resolvable)
+  [ce] [Discrete] Pipe ready: \\.\pipe\DiscreteBfx
+  [ce] [Discrete] Launch DiscreteUI.exe and click Connect.
+  dofile -> ok=true err=
+  Discrete module mapped in target: nil
+  callDLL(Discrete_GetBuildNumber) -> ok=false value=D:\Github\discrete\scripts\utils.lua:148: [Discrete] export not found: Discrete_GetBuildNumber — symbolhandler may not have scanned the new DLL yet. (0 ms)
+  P1 verdict: FAIL
+  pipe not open
+=== job6 done ===
+=== job7: injectDLL contract + P1 ===
+  injectDLL(<missing file>) -> value=false type=boolean   (unity_dump only errors on == nil)
+  => 'ok == nil' check catches this: false
+  injecting D:\Github\discrete\dist\Discrete-Mono.dll
+  injectDLL(<real file>) -> value=true type=boolean
+  module mapped now: Discrete-Mono.dll
+  callDLL(Discrete_GetBuildNumber,uint32) -> ok=true value=1408 (0 ms)
+  P1 verdict: PASS - correct value via executeCodeEx(1, timeout, addr)
+  callDLL(Discrete_StartPipe,int32) -> ok=true ret=0 (0 ms)
+  pipe handshake: {"id":1,"result":{"assemblies_count":333,"backend":"Mono","build":1408,"dll_variant":"Mono","engine":"Unity","game_build_id":"c028dde79ca85b62","game_module":"CoreKeeper.exe","game_pointer_size":8,"ga
+  pipe works after bridge inject: PASS
+=== job7 done ===
+=== job8: finite executeCodeEx timeout with the target suspended ===
+  attached pid=58000
+  callDLL -> ok=true value/err=1408
+  elapsed = 0 ms  (ceiling is 10000 ms)
+  bounded by the 10 s cap: true
+  came back at all (pre-fix: never): yes
+  error names CE's own reason (Execution timeout / Failure launching thread): false
+=== job8 done ===
+=== job9: C-1 mono image fallback (modular UnityEngine) ===
+  attached pid=58000
+  (a) mono_enumImages() with NO callback -> ok=true err=(returned nothing)
+  (b) mono_enumImages(callback) -> ok=true err= images=0
+      first images: 
+  (c) fallback found UnityEngine.Camera: false
+  [ce] [discrete] mono_registersymbol_helpers.lua loaded — DLL-free Mono symbol register helpers ready.
+  (d) dofile helpers -> ok=true err=
+  [ce] [discrete] registered SmokeCamGetMain = 1C19BBF1BC0
+      discrete_mono_registerSymbol(UnityEngine.Camera.get_main) -> true
+      symbol resolves to: 0x1C19BBF1BC0
+  C-1 verdict: FAIL
+=== job9 done ===
+=== job10: C-1 retry with the mono data collector forced up ===
+  LaunchMonoDataCollector    = function
+  monoAA_attach              = nil
+  mono_initialize            = function
+  LaunchMonoDataCollector() -> ok=true ret=true
+  after collector launch: ok=true err= images=333  System.IO.Compression.FileSystem, System.IO.Compression, System.Threading.Tasks.Extensions, System.Memory, System.IO, System.Diagnostics.Debug, Mono.Security, System.Runtime.InteropServices
+  mono_enumDomains() -> ok=true type=table count=1
+  mono_enumAssemblies() -> ok=true type=table count=333
+  UnityEngine.Camera  fast=true  fallback=true
+  UnityEngine.Transform  fast=true  fallback=true
+  UnityEngine.Physics  fast=true  fallback=true
+  C-1 verdict: PASS (callback form enumerates and per-image lookup works)
+=== job10 done ===
+=== job11: P3 x86 DLL selection ===
+  openProcess(Mortal.exe) -> ok=true pid=56384
+  targetIs64Bit() = false   (false => 32-bit, so the x86 branch must fire)
+  targetIsX86()   = true   (family only - true for x64 as well)
+  is32bitProcess  = nil   (the API the bug called)
+  U.detectBackend() = Mono
+  U.dllPath('Mono') = C:\Program Files\Cheat Engine\discrete\Discrete-Mono-x86.dll
+  P3 verdict: PASS - selected the x86 DLL name
+  Discrete module already mapped (proxy): Discrete-Mono.dll
+  callDLL(Discrete_GetBuildNumber) on 32-bit target -> ok=true value=1409
+  x86 export call verdict: PASS (build 1409 = the x86 build)
+=== job11 done ===
