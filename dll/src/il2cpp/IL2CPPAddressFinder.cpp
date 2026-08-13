@@ -162,7 +162,10 @@ std::size_t SizeOfPrimitive(const std::string& t) {
     if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
     if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
     if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-    if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+    // Pointer-sized. Identical to 8 in this backend (IL2CPP ships x64 only),
+    // but spelled as the constant so a future x86 port cannot silently inherit
+    // the bug this exact literal caused on the x86 Mono side.
+    if (t == "System.IntPtr"  || t == "System.UIntPtr") return ManagedLayout::kPointerSize;
     return 0;
 }
 
@@ -280,8 +283,10 @@ std::vector<ResolvedField> EnumerateInstanceFields(Il2CppClass* klass) {
                 sz = SizeOfPrimitive(rf.typeName);
             }
             if (sz == 0) {
-                // Reference type or unresolved type → pointer width.
-                sz = 8;
+                // Reference type or unresolved type → pointer width. Spelled as
+                // the constant rather than 8 (same value here, IL2CPP is x64
+                // only) so the intent survives a future x86 port.
+                sz = ManagedLayout::kPointerSize;
             }
             rf.size = sz;
             out.push_back(std::move(rf));

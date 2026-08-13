@@ -2781,7 +2781,13 @@ void RegisterCoreHandlers() {
             if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
             if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
             if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-            if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+            // Pointer-sized, NOT a literal 8. The Mono backend builds x86, where
+            // these are 4 bytes: an 8-byte stride walks every OTHER element and
+            // runs off the end of the array data by up to n*4 bytes. Note the
+            // reference-type path below already gets this right via
+            // sizeof(std::uintptr_t) — only this line was wrong.
+            if (t == "System.IntPtr"  || t == "System.UIntPtr")
+                return ::Discrete::ManagedLayout::kPointerSize;
             return 0;
         };
 
@@ -2996,7 +3002,9 @@ void RegisterCoreHandlers() {
             if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
             if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
             if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-            if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+            // Pointer-sized, NOT a literal 8 — see the twin above (x86 Mono).
+            if (t == "System.IntPtr"  || t == "System.UIntPtr")
+                return ::Discrete::ManagedLayout::kPointerSize;
             return 0;  // unknown / reference type
         };
 

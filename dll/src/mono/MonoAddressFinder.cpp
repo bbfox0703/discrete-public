@@ -177,7 +177,8 @@ std::size_t SizeOfPrimitive(const std::string& t) {
     if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
     if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
     if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-    if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+    // Pointer-sized, NOT a literal 8: this backend builds x86 as well.
+    if (t == "System.IntPtr"  || t == "System.UIntPtr") return ManagedLayout::kPointerSize;
     return 0;
 }
 
@@ -266,7 +267,13 @@ std::vector<ResolvedField> EnumerateInstanceFields(MonoClass* klass) {
                 }
             }
             if (sz == 0) sz = SizeOfPrimitive(rf.typeName);
-            if (sz == 0) sz = 8;
+            // Last resort: an unresolved field is a reference (pointer) slot.
+            // MUST be pointer-sized, not a literal 8 — Mono builds x86 too, and
+            // rf.size decides field containment (see the `interior` / `end`
+            // checks below). Four bytes too wide on x86 makes a field swallow
+            // the start of the NEXT one, so whatIsAt / the address finder name
+            // the wrong field with no sign anything went wrong.
+            if (sz == 0) sz = ManagedLayout::kPointerSize;
             rf.size = sz;
             out.push_back(std::move(rf));
         }
