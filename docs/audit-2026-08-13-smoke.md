@@ -198,7 +198,7 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
 
 - 🔴 **`injectDLL` 失敗被吞掉 → bridge 謊報成功**(已修)。celua.txt:581 說 `injectDLL` 成功回 true,失敗回 **false**;`unity_dump.lua` 卻只檢查 `ok == nil`。實測 `injectDLL("<不存在>.dll")` 回 **false(boolean)**,於是 main() 一路印出 `DLL injected` + **`Pipe ready`** + `Launch DiscreteUI.exe and click Connect`,而實際上**什麼都沒注入**(module 沒 mapped、pipe 沒開)。唯一線索是 DEBUG-gated 的 WARN,預設看不到。這正好是 P3 同一個病:沒查 CE API 的回傳約定。修法:改 `if not ok`,並把找過的路徑印出來。
 - 🟡 **`U.dllPath` 在這台實際解到不存在的路徑** — 回 `C:\Program Files\Cheat Engine\discrete\Discrete-Mono.dll`(該檔不存在;`dist/` 的 DLL 從沒複製進去)。「.CT 旁邊優先」那段依賴 CE 的 dialog FileName / TrainerOrigin,實測沒被填時就直接掉到 CE 安裝目錄。配合上一條,使用者會看到「成功」訊息但完全沒 bridge。
-- 🟡 **文件與程式不符**:本檢查表與 `ce_table_bootstrap.lua` 都寫「`unity_dump.lua` 的 `inject()`」,但該檔**沒有** `inject()` —— 它在 load 時就 `U.guard(main)` 跑完。照文件呼叫 `inject()` 會得到 `attempt to call a nil value`。
+- ✅ **文件與程式不符 —— 已修文件**(2026-08-13):本檢查表與 `ce_table_bootstrap.lua` 都寫過「`unity_dump.lua` 的 `inject()`」,但該檔**沒有** `inject()` —— 它在 load 時就 `U.guard(main)` 跑完。照文件呼叫 `inject()` 會得到 `attempt to call a nil value`。
 - 🟡 **從 Lua Engine 執行的腳本關掉 Lua Engine 會讓 CE 拋例外** — clean-run 時 `_closeLuaEngineIfQuiet()` 呼叫 `getLuaEngine().Close()`,CE 7.7 跳 `[TCustomForm.SetFocus] frmLuaEngine … Can not focus (EInvalidOperation)` 並自動存出 `ExceptionAutoSave_*.ct`。正式路徑(AA `{$lua}` / table Lua script)不從 Lua Engine 執行,所以可能只影響開發時的手動執行 —— 但值得知道。
 
 **新發現(不在 audit #4 清單內)**
@@ -321,7 +321,7 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
 需要 Cheat Engine + 一個 .CT。
 
 - [x] **P1 · `U.callDLL` 位址正確**  ✅ *CE 7.7: callDLL returned the real build (1408 x64 / 1409 x86)*
-  從 CE 走 bridge 路徑注入並初始化(`unity_dump.lua` 的 `inject()`)。
+  從 CE 走 bridge 路徑注入並初始化(`dofile` `unity_dump.lua` —— 它在 load 時就跑完,沒有 `inject()`)。
   **PASS**:注入成功、pipe 起來、後續 RPC 正常。
   **FAIL**:CE 當掉、遊戲 CTD、或「call failed」(修正前:export 位址被當成 timeout、
   第一個參數被當成程式碼位址跳過去)。
@@ -464,7 +464,7 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
 | `injectDLL` 失敗被吞掉 → bridge 謊報 "Pipe ready" | ✅ 已修 |
 | `scanFieldValue` 完全不可取消 | ✅ 已修 + live-verified(Mono + IL2CPP)|
 | `getMethodAobPattern` 會越過函式尾端 | ✅ 已修 + live-verified |
-| CE 文件與程式不符(`unity_dump.lua` 沒有 `inject()`)| ⬜ 待修文件 |
+| CE 文件與程式不符(`unity_dump.lua` 沒有 `inject()`)| ✅ 已修文件 |
 
 **回歸用**:整套 headless harness 在 [tools/smoke/](../tools/smoke/),含這一輪踩過的所有坑。
 任何一項要重驗:對照 [audit-2026-08-13.md](audit-2026-08-13.md) 該批的機制分析。
