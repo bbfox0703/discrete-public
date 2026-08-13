@@ -433,12 +433,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         if (bookmark is null) return;
         SetTarget(bookmark.Assembly, bookmark.Namespace, bookmark.Class);
 
-        _bulkLease = _bulkGate?.TryEnter("Recall bookmark");
-        if (_bulkGate is not null && _bulkLease is null)
+        // Take the lease into a LOCAL and only publish it to _bulkLease once it
+        // was actually granted. Assigning the field first meant a failed
+        // TryEnter overwrote a lease that a DIFFERENT command (Find instances)
+        // was still holding: its finally then ran _bulkLease?.Dispose() on null,
+        // the gate was never released, and every bulk command stayed dead until
+        // the app restarted. It also corrupted BulkBusyElsewhere, which reads
+        // `_bulkLease is null` to decide whose scan is running.
+        IDisposable? lease = _bulkGate?.TryEnter("Recall bookmark");
+        if (_bulkGate is not null && lease is null)
         {
             ErrorMessage = "Another bulk operation is running — try Recall again in a moment.";
             return;
         }
+        _bulkLease = lease;
         _findCts?.Cancel();
         _findCts = new CancellationTokenSource();
         CancellationToken ct = _findCts.Token;
@@ -771,8 +779,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         // Bulk lane: skip if a snapshot / value-scan holds it (also covers
         // the auto-refresh timer path, which calls ExecuteAsync directly and
         // bypasses CanExecute).
-        _bulkLease = _bulkGate?.TryEnter("Find instances");
-        if (_bulkGate is not null && _bulkLease is null) return;
+        // Local first — see RecallBookmarkAsync: publishing a failed TryEnter
+        // into _bulkLease destroys a live lease held by the other command.
+        IDisposable? lease = _bulkGate?.TryEnter("Find instances");
+        if (_bulkGate is not null && lease is null) return;
+        _bulkLease = lease;
 
         _findCts?.Cancel();
         _findCts = new CancellationTokenSource();

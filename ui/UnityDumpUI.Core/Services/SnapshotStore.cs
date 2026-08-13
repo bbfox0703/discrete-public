@@ -146,30 +146,44 @@ public sealed class SnapshotStore : IAsyncDisposable
         }.ConnectionString;
 
         var conn = new SqliteConnection(connStr);
-        await conn.OpenAsync(ct).ConfigureAwait(false);
+        // Everything from OpenAsync to handing `conn` to the SnapshotStore must
+        // be unwound on failure. Without this, a corrupt or schema-mismatched
+        // .db — exactly the case MigrateAsync throws on — left the connection
+        // open forever: SQLite kept the file (plus its -wal/-shm) locked for the
+        // whole process lifetime, so the user could neither retry nor delete the
+        // bad database without killing the app. Cancellation had the same shape.
+        try
+        {
+            await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        // WAL + NORMAL synchronous: crash-safe AND fast enough for the
-        // chunky per-class blob writes. Default DELETE journal mode is
-        // ~5× slower on bulk INSERT under transaction.
-        await ExecuteAsync(conn, "PRAGMA journal_mode=WAL;", ct).ConfigureAwait(false);
-        await ExecuteAsync(conn, "PRAGMA synchronous=NORMAL;", ct).ConfigureAwait(false);
-        // Cascade DELETEs from snapshots → snapshot_classes are wired in
-        // the schema as ON DELETE CASCADE, but SQLite requires the FK
-        // enforcement to be explicitly enabled per-connection.
-        await ExecuteAsync(conn, "PRAGMA foreign_keys=ON;", ct).ConfigureAwait(false);
+            // WAL + NORMAL synchronous: crash-safe AND fast enough for the
+            // chunky per-class blob writes. Default DELETE journal mode is
+            // ~5× slower on bulk INSERT under transaction.
+            await ExecuteAsync(conn, "PRAGMA journal_mode=WAL;", ct).ConfigureAwait(false);
+            await ExecuteAsync(conn, "PRAGMA synchronous=NORMAL;", ct).ConfigureAwait(false);
+            // Cascade DELETEs from snapshots → snapshot_classes are wired in
+            // the schema as ON DELETE CASCADE, but SQLite requires the FK
+            // enforcement to be explicitly enabled per-connection.
+            await ExecuteAsync(conn, "PRAGMA foreign_keys=ON;", ct).ConfigureAwait(false);
 
-        bool freshSchema = await MigrateAsync(conn, gameBuildId, targetProcess, ct).ConfigureAwait(false);
+            bool freshSchema = await MigrateAsync(conn, gameBuildId, targetProcess, ct).ConfigureAwait(false);
 
-        // Phase 30c — sweep any streaming capture (payload_bytes < 0 sentinel)
-        // that crashed/aborted before FinishStreamingSaveAsync ran. ON DELETE
-        // CASCADE drops its orphan class rows. No-op on a fresh DB.
-        await ExecuteAsync(conn, "DELETE FROM snapshots WHERE payload_bytes < 0;", ct).ConfigureAwait(false);
+            // Phase 30c — sweep any streaming capture (payload_bytes < 0 sentinel)
+            // that crashed/aborted before FinishStreamingSaveAsync ran. ON DELETE
+            // CASCADE drops its orphan class rows. No-op on a fresh DB.
+            await ExecuteAsync(conn, "DELETE FROM snapshots WHERE payload_bytes < 0;", ct).ConfigureAwait(false);
 
-        var store = new SnapshotStore(conn, dbPath, gameBuildId, targetProcess, logger);
-        store.Log(freshSchema
-            ? $"opened (fresh schema v{CurrentSchemaVersion}) buildId={gameBuildId} target={targetProcess}"
-            : $"opened (existing schema) buildId={gameBuildId} target={targetProcess}");
-        return store;
+            var store = new SnapshotStore(conn, dbPath, gameBuildId, targetProcess, logger);
+            store.Log(freshSchema
+                ? $"opened (fresh schema v{CurrentSchemaVersion}) buildId={gameBuildId} target={targetProcess}"
+                : $"opened (existing schema) buildId={gameBuildId} target={targetProcess}");
+            return store;   // ownership of `conn` passes to the store
+        }
+        catch
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async ValueTask DisposeAsync()

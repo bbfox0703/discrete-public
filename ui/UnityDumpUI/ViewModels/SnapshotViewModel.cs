@@ -398,10 +398,44 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// <summary>Hydrate an envelope's <see cref="SnapshotEnvelope.Classes"/>
     /// + <see cref="SnapshotEnvelope.FieldIndex"/> from disk on demand.
     /// No-op if already loaded or if this envelope isn't persisted.</summary>
-    public async Task EnsureLoadedAsync(SnapshotEnvelope env, CancellationToken ct = default)
+    /// <summary>In-flight hydrations, keyed by persisted snapshot id. Concurrent
+    /// callers for the SAME envelope await the same Task instead of each running
+    /// their own load — see <see cref="EnsureLoadedAsync"/>.</summary>
+    private readonly Dictionary<long, Task> _loadsInFlight = new();
+
+    public Task EnsureLoadedAsync(SnapshotEnvelope env, CancellationToken ct = default)
     {
-        if (env.ClassesLoaded) return;
-        if (_store is null || env.PersistedId is not long id) return;
+        if (env.ClassesLoaded) return Task.CompletedTask;
+        if (_store is null || env.PersistedId is not long id) return Task.CompletedTask;
+
+        // Coalesce concurrent hydrations of the SAME envelope. The load takes
+        // ~10 s for a streamed capture and ClassesLoaded is only set at the very
+        // end, so two callers (Diff and Pivot, or two tabs) both saw false, both
+        // ran the load, and both AddRange'd into env.Classes — silently DOUBLING
+        // every class in the envelope: wrong diffs, wrong pivots, doubled field
+        // counts and doubled memory. Sharing one Task also avoids paying for the
+        // ~280 MB decompress twice.
+        lock (_loadsInFlight)
+        {
+            if (_loadsInFlight.TryGetValue(id, out Task? pending)) return pending;
+            Task run = LoadClassesIntoAsync(env, id, ct);
+            // Only track it while it is actually in flight. Removing under the
+            // same lock keeps a later re-load (e.g. after a failure) possible.
+            _loadsInFlight[id] = run;
+            _ = run.ContinueWith(_ =>
+            {
+                lock (_loadsInFlight) _loadsInFlight.Remove(id);
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+               TaskScheduler.Default);
+            return run;
+        }
+    }
+
+    /// <summary>The actual hydration. Only ever entered through
+    /// <see cref="EnsureLoadedAsync"/>, which guarantees one run per envelope.</summary>
+    private async Task LoadClassesIntoAsync(SnapshotEnvelope env, long id, CancellationToken ct)
+    {
+        SnapshotStore store = _store!;   // null-checked by the caller
         // Decompress + deserialize + intern on a BACKGROUND thread: a streamed
         // (Phase 30c) snapshot is metadata-only, so the first diff/pivot after
         // capture reloads the whole ~280 MB blob set from disk — doing that
@@ -410,7 +444,7 @@ public sealed partial class SnapshotViewModel : ObservableObject
         // before we publish it onto the envelope on the UI thread.
         var loaded = await Task.Run(async () =>
         {
-            var classes = await _store.LoadClassesAsync(id, ct).ConfigureAwait(false);
+            var classes = await store.LoadClassesAsync(id, ct).ConfigureAwait(false);
             // Phase 29g-1: dedup metadata strings on the lazily-loaded tree too
             // (each blob deserializes its own copies of "System.Int32" etc.).
             SnapshotInterner.Intern(classes);
