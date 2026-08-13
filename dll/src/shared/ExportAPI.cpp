@@ -3328,7 +3328,12 @@ void RegisterCoreHandlers() {
             };
         }
 
-        auto pr = Aob::BuildPattern(buf.data(), buf.size());
+        // `length` is an upper bound on how much to sign, not a claim that the
+        // function is that long. BuildPattern stops at the first RET / JMP so the
+        // pattern never includes padding, JIT bookkeeping or the next function.
+        // Callers that really want the raw window can pass stopAtTerminal:false.
+        const bool stopAtTerminal = args.value("stopAtTerminal", true);
+        auto pr = Aob::BuildPattern(buf.data(), buf.size(), stopAtTerminal);
 
         // Resolve containing module — needed for the AA script's
         // aobscanmodule(name, MODULE, AOB) form.
@@ -3373,9 +3378,33 @@ void RegisterCoreHandlers() {
                 {"ripRel",       pr.ripRelCount},
             }},
             {"decoderBailed", pr.decoderBailed},
+            // What was actually signed, vs what the caller asked for.
+            {"requestedLength",   pr.requestedLength},
+            {"stoppedAtTerminal", pr.stoppedAtTerminal},
         };
         if (pr.decoderBailed) {
             result["bailedAt"] = pr.bailedAt;
+        }
+        // A prologue AOB can only be unique if the code it covers is distinctive.
+        // Short leaf functions — property getters especially — are byte-identical
+        // across many classes, so no window over them can single one out. Say so
+        // rather than letting a caller paste a 24-byte pattern into CE and wonder
+        // why it reports hundreds of hits. (The AOBMaker app's job is to find a
+        // genuinely unique AOB; this handler only signs the prologue.)
+        // Thresholds are deliberately generous: measured on Core Keeper, a
+        // trimmed 24-byte getter prologue still matched 136 places in 308 MB of
+        // executable memory, because such getters are byte-identical across
+        // classes. The DLL cannot actually know the match count without scanning,
+        // so this states the facts and the risk rather than predicting uniqueness.
+        std::size_t literalBytes = pr.length - wildcards;
+        if (pr.length < 32 || literalBytes < 24) {
+            result["uniquenessWarning"] =
+                "this pattern covers only " + std::to_string(pr.length) +
+                " bytes (" + std::to_string(literalBytes) + " literal). Short leaf "
+                "functions are byte-identical across classes, so a prologue AOB "
+                "over one is very unlikely to be unique — check the hit count "
+                "before relying on it, or use the AOBMaker app, which searches for "
+                "an AOB that IS unique.";
         }
         return result;
     });
