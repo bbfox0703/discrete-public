@@ -5520,6 +5520,23 @@ void RegisterCoreHandlers() {
         // forces single-thread scanning; Mono worker threads only read memory.
         Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
 
+        // This handler sweeps the whole heap (Memory::ScanForValue /
+        // ScanForString) and builds a ReverseLookupIndex, i.e. it is exactly as
+        // long as the begin* scans — tens of seconds on a multi-GB heap. It used
+        // to own no Scope, so `g_scanActive` stayed false, so RequestCancel() was
+        // a no-op and NOTHING could stop it: not the UI's Cancel button, not the
+        // pipe server's disconnect monitor. Measured on a 4 GB Mono heap: the
+        // client was force-killed 2 s in and the scan still ran its full 33 s,
+        // pinning a core inside the game.
+        //
+        // The polling was already in place underneath (RunParallelScan and
+        // ReverseLookupIndex::Build both check IsCancelRequested), so owning a
+        // Scope is what actually wires cancellation up. Every result return below
+        // must then check the flag — a cancelled sweep produces a TRUNCATED
+        // candidate list, and returning that as a normal result would be P2's
+        // silent-truncation bug arriving from the other direction.
+        ScanCancel::Scope scanCancelScope;
+
         // --- Parse wire shape ---
         std::string dtStr = args.value("dataType", std::string{"int32"});
 
@@ -5606,6 +5623,12 @@ void RegisterCoreHandlers() {
                 }
                 rows.push_back(std::move(row));
             }
+            // A cancelled sweep leaves a TRUNCATED candidate list. Say so rather
+            // than handing it back as a complete result — that would be P2's
+            // silent truncation arriving from the other direction.
+            if (ScanCancel::IsCancelRequested())
+                return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
             return json{
                 {"ok",                true},
                 {"mode",              "global"},
@@ -5784,6 +5807,12 @@ void RegisterCoreHandlers() {
                 }
             }
 
+            // A cancelled sweep leaves a TRUNCATED candidate list. Say so rather
+            // than handing it back as a complete result — that would be P2's
+            // silent truncation arriving from the other direction.
+            if (ScanCancel::IsCancelRequested())
+                return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
             return json{
                 {"ok",                true},
                 {"mode",              "class-scoped"},
@@ -5832,6 +5861,12 @@ void RegisterCoreHandlers() {
         // or the candidate count is below the amortization threshold.
         Mono::ReverseLookupIndex revIndex;
         bool revIndexOk = candidates.size() >= kRevIndexMinCandidates && revIndex.Build();
+        // Bail as soon as the index walk reports a cancel, rather than resolving
+        // every candidate first and only noticing at the return. Build() itself
+        // already refuses to publish a partial index (P2).
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
 
         json rows = json::array();
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0;
@@ -5882,6 +5917,12 @@ void RegisterCoreHandlers() {
                 revIndexOk ? 1 : 0, revIndex.InstanceCount(), revIndex.HitCount(), revIndex.LocalityHits());
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
+
+        // A cancelled sweep leaves a TRUNCATED candidate list. Say so rather
+        // than handing it back as a complete result — that would be P2's
+        // silent truncation arriving from the other direction.
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
 
         return json{
             {"ok",                true},
@@ -9019,6 +9060,12 @@ void RegisterCoreHandlers() {
     PipeServer::RegisterHandler(MagicStrings::CmdScanFieldValue,
         [resolveClassFromArgs, formatHex](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
+        // Cancellable for the same reason as the Mono twin: this sweeps the whole
+        // heap and builds a ReverseLookupIndex, and without a Scope
+        // RequestCancel() is a no-op, so neither the Cancel button nor a client
+        // disconnect could stop it. Each result return below checks the flag so a
+        // cancelled (truncated) sweep is never reported as a complete one.
+        ScanCancel::Scope scanCancelScope;
         // Value Search "Parallel" toggle (default on) — see beginValueScan. cap=1
         // forces single-thread scanning (raw scan + reverse-lookup index sweep).
         Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
@@ -9102,6 +9149,12 @@ void RegisterCoreHandlers() {
                 }
                 rows.push_back(std::move(row));
             }
+            // A cancelled sweep leaves a TRUNCATED candidate list. Say so rather
+            // than handing it back as a complete result — that would be P2's
+            // silent truncation arriving from the other direction.
+            if (ScanCancel::IsCancelRequested())
+                return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
             return json{
                 {"ok",                true},
                 {"mode",              "global"},
@@ -9254,6 +9307,12 @@ void RegisterCoreHandlers() {
                 }
             }
 
+            // A cancelled sweep leaves a TRUNCATED candidate list. Say so rather
+            // than handing it back as a complete result — that would be P2's
+            // silent truncation arriving from the other direction.
+            if (ScanCancel::IsCancelRequested())
+                return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
             return json{
                 {"ok",                true},
                 {"mode",              "class-scoped"},
@@ -9296,6 +9355,12 @@ void RegisterCoreHandlers() {
         // the candidate count is below the amortization threshold.
         IL2CPP::ReverseLookupIndex revIndex;
         bool revIndexOk = candidates.size() >= kRevIndexMinCandidates && revIndex.Build();
+        // Bail as soon as the index walk reports a cancel, rather than resolving
+        // every candidate first and only noticing at the return. Build() itself
+        // already refuses to publish a partial index (P2).
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+
 
         json rows = json::array();
         std::size_t droppedNonManaged = 0, droppedDiversity = 0, droppedNoise = 0, arrayResolved = 0;
@@ -9352,6 +9417,12 @@ void RegisterCoreHandlers() {
                 revIndexOk ? 1 : 0, revIndex.InstanceCount(), revIndex.HitCount(), revIndex.LocalityHits());
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
+
+        // A cancelled sweep leaves a TRUNCATED candidate list. Say so rather
+        // than handing it back as a complete result — that would be P2's
+        // silent truncation arriving from the other direction.
+        if (ScanCancel::IsCancelRequested())
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
 
         return json{
             {"ok",                true},

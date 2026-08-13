@@ -173,7 +173,9 @@ void ServeClient(HANDLE pipe) {
     std::atomic<bool> monitorStop{false};
     std::thread monitor([pipe, &monitorStop]() {
         while (!monitorStop.load(std::memory_order_relaxed)) {
-            if (Discrete::ScanCancel::g_scanActive.load(std::memory_order_relaxed)) {
+            // g_scanActive is a COUNT of live scan Scopes (see ScanCancel.h), so
+            // "a scan is running" is > 0 — including while several overlap.
+            if (Discrete::ScanCancel::g_scanActive.load(std::memory_order_relaxed) > 0) {
                 DWORD avail = 0;
                 if (!::PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr)) {
                     DWORD e = ::GetLastError();
