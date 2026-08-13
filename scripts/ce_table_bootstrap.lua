@@ -20,7 +20,8 @@ How to embed files in your .CT
       targets a multi-backend game like Farthest Frontier)
 
      utils.lua
-     unity_dump.lua            (provides `inject()` — the entry point)
+     unity_dump.lua            (the bridge itself — see note below: it runs
+                                on dofile(), there is no inject() to call)
 
    If targeting 32-bit games:
      Discrete-Mono.dll      (x86 build from dist/x86/; embed under
@@ -48,8 +49,10 @@ What this script does on table-activate
   4. Pick the matching backend DLL from the extracted files
   5. injectDLL() the backend DLL into the game
   6. Wait for the pipe to come up (~0.5 s)
-  7. dofile() the lua bridges so `inject()`/`getName()`/etc. are
-     globally available to subsequent AA-script Lua blocks
+  7. dofile() the lua bridges. unity_dump.lua does its work AT LOAD TIME
+     (it ends with `U.guard(main)`) — there is no inject() to call
+     afterwards; calling one gives "attempt to call a nil value". The
+     helper bridges do define globals (getName(addr) etc.)
 
 ================================================================
 ]]--
@@ -65,7 +68,9 @@ local TABLE_ID = "default-table"
 --   kind = "dll-mono-x64"   → 64-bit Mono backend
 --   kind = "dll-mono-x86"   → 32-bit Mono backend
 --   kind = "dll-il2cpp-x64" → 64-bit IL2CPP backend
---   kind = "lua-main"       → Lua bridge with `inject()` (must be unity_dump.lua)
+--   kind = "lua-main"       → The main bridge (must be unity_dump.lua). NOTE: it
+--                             has NO inject() function — dofile()ing it runs the
+--                             whole thing via U.guard(main).
 --   kind = "lua-utils"      → Shared utilities (utils.lua) — needed by every bridge
 --   kind = "lua-helper"     → Other optional bridges (unity_invoke / unity_symbols / etc.)
 local FILES_TO_EXTRACT = {
@@ -98,6 +103,12 @@ local function _msg(fmt, ...) if _dbgOn() then print("[bootstrap] " .. string.fo
 -- Close CE's Lua Engine on a clean run so it stops covering CE's main window.
 -- bootstrap()/teardown() error() out on failure, so reaching their end means
 -- success; skip the close under DEBUG or if something set the shared error flag.
+-- ⚠️ Closing the Lua Engine from a script that is ITSELF running in the Lua
+-- Engine (the Execute-script button) makes CE 7.7 raise
+-- `[TCustomForm.SetFocus] frmLuaEngine … Can not focus (EInvalidOperation)` and
+-- auto-save the table to ExceptionAutoSave_*.ct. The real distribution path — an
+-- AA `{$lua}` block or the table's Lua script — is unaffected, so this only bites
+-- while developing by hand. Verified on CE 7.7, 2026-08-13.
 local function _closeLuaEngineIfQuiet()
     if _dbgOn() or rawget(_G, "DISCRETE_HAD_ERROR") then return end
     if synchronize == nil or getLuaEngine == nil then return end
@@ -274,7 +285,8 @@ function bootstrap()
         _msg("loaded lua-helper %s", p)
     end
 
-    _msg("bootstrap done — use inject(), getName(addr), etc. from your AA-script Lua blocks")
+    _msg("bootstrap done — unity_dump already injected + started the pipe on load; "
+         .. "use getName(addr) etc. from your AA-script Lua blocks")
     _closeLuaEngineIfQuiet()
 end
 
