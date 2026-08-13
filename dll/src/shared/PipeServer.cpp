@@ -39,6 +39,12 @@ std::atomic<int> g_activeClients{0};
 
 constexpr DWORD kPipeBufferSize = 64 * 1024;
 
+// Upper bound on how long Stop() waits for the acceptor thread. It normally
+// exits in milliseconds once g_stopEvent is signalled; this only exists so the
+// DllMain/loader-lock path can never deadlock. Matches the ~2 s cap already
+// used below for in-flight client workers.
+constexpr DWORD kWorkerExitTimeoutMs = 2000;
+
 void LogPipe(const std::string& msg) {
     Log::Write(MagicStrings::LogCategoryPipe, msg);
 }
@@ -395,7 +401,34 @@ bool Start() {
 void Stop() {
     if (!g_running.exchange(false)) return;
     if (g_stopEvent) ::SetEvent(g_stopEvent);
-    if (g_worker.joinable()) g_worker.join();
+
+    if (g_worker.joinable()) {
+        // BOUNDED wait, never a bare join(). Stop() is reachable from DllMain:
+        // main.cpp OnDetach() -> Discrete_Shutdown() -> here, on the
+        // lpReserved == NULL (FreeLibrary) path — and DllMain runs holding the
+        // loader lock. The worker's own exit epilogue (_endthreadex ->
+        // ExitThread -> ntdll!LdrShutdownThread) must ACQUIRE that same lock to
+        // run DLL_THREAD_DETACH across every loaded module, so it can never
+        // finish while we hold it. An unconditional join() therefore wedges the
+        // calling thread forever *while still holding the loader lock*, which
+        // then blocks every LoadLibrary and every thread exit in the game —
+        // the whole process freezes, not just us. DisableThreadLibraryCalls on
+        // our own module (main.cpp) does not help: the walk still covers
+        // ucrtbase / UnityPlayer / mono-2.0-bdwgc / GameAssembly.
+        //
+        // g_stopEvent is already signalled above, so a worker that is free to
+        // run exits within milliseconds and the wait returns at once. Only the
+        // pathological case falls through to detach.
+        const DWORD w = ::WaitForSingleObject(g_worker.native_handle(),
+                                              kWorkerExitTimeoutMs);
+        if (w == WAIT_OBJECT_0) {
+            g_worker.join();   // already terminated — returns immediately
+        } else {
+            g_worker.detach();
+            LogPipe("PipeServer::Stop: worker did not exit within "
+                    "the timeout — detached rather than deadlocking");
+        }
+    }
 
     // The acceptor has stopped — no new client threads will be created, so
     // g_activeClients can now only decrease. Wait for in-flight ServeClient

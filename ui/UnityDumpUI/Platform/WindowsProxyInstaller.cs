@@ -8,6 +8,7 @@
 // AOT-safe: pure file IO + Environment APIs, no reflection.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -118,6 +119,36 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
         }
     }
 
+    /// <summary>
+    /// True when the file at <paramref name="path"/> is one of OUR binaries.
+    /// Every Discrete DLL is stamped ProductName="Discrete" by version.rc.in
+    /// (hard-coded in the template, so it holds for every target).
+    ///
+    /// This is the guard that keeps install/uninstall from touching a
+    /// third-party version.dll / winmm.dll — ReShade, ENB, SpecialK, mod
+    /// loaders and anti-cheat shims all use exactly these two filenames, and
+    /// clobbering one loses the user's setup silently: our proxy forwards
+    /// every export to System32, so the game still launches and behaves
+    /// normally while their mods simply stop existing.
+    ///
+    /// Returns FALSE for anything it cannot positively identify (missing
+    /// version resource, unreadable file). "Unknown" must never be treated as
+    /// "ours" — the whole point is to refuse to destroy what we did not create.
+    /// </summary>
+    private static bool IsOurDll(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            FileVersionInfo info = FileVersionInfo.GetVersionInfo(path);
+            return string.Equals(info.ProductName, "Discrete", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;   // unreadable → treat as foreign, i.e. do not touch
+        }
+    }
+
     private static ProxyOperationResult InstallSync(string gameExePath, ProxyKind kind)
     {
         if (kind == ProxyKind.None)
@@ -155,12 +186,30 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
             }
         }
 
+        // Refuse to overwrite a proxy slot occupied by somebody else's DLL.
+        // version.dll / winmm.dll are the two filenames every other injector
+        // uses too; silently replacing one costs the user their ReShade / ENB /
+        // mod loader with no error and no way back.
+        string targetPath = Path.Combine(dstDir, proxyName);
+        if (File.Exists(targetPath) && !IsOurDll(targetPath))
+        {
+            var st0 = DetectSync(gameExePath);
+            return new ProxyOperationResult(false,
+                $"{proxyName} already exists in the game folder and was not installed by Discrete " +
+                "(no Discrete version resource). Refusing to overwrite it — it is most likely " +
+                "ReShade, ENB, SpecialK or a mod loader. Remove or rename it yourself if you " +
+                $"really want the {proxyName} proxy, or install the other proxy kind instead.", st0);
+        }
+
         try
         {
-            // Mutex install: drop the OTHER proxy first so the directory
-            // never has both at any moment.
+            // Mutex install: drop the OTHER proxy so the directory never holds
+            // both of OURS at once — but only when that file is actually ours.
+            // A foreign DLL in the other slot is left alone: the user gets to
+            // keep their existing tool, and the two can coexist (Windows loads
+            // both). Only OUR two proxies are mutually exclusive.
             string otherPath = Path.Combine(dstDir, otherProxy);
-            if (File.Exists(otherPath)) File.Delete(otherPath);
+            if (File.Exists(otherPath) && IsOurDll(otherPath)) File.Delete(otherPath);
 
             foreach (string f in required)
             {
@@ -189,12 +238,20 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
         string dstDir = Path.GetDirectoryName(gameExePath) ?? string.Empty;
         string[] toRemove = { VersionDll, WinmmDll, MonoDll, Il2cppDll };
         int removed = 0;
+        var skipped = new List<string>();
         try
         {
             foreach (string f in toRemove)
             {
                 string p = Path.Combine(dstDir, f);
-                if (File.Exists(p)) { File.Delete(p); ++removed; }
+                if (!File.Exists(p)) continue;
+                // Only delete what we installed. version.dll / winmm.dll may
+                // belong to ReShade / ENB / SpecialK / a mod loader — deleting
+                // one of those on "uninstall Discrete" is unrecoverable data
+                // loss from the user's point of view.
+                if (!IsOurDll(p)) { skipped.Add(f); continue; }
+                File.Delete(p);
+                ++removed;
             }
         }
         catch (Exception ex)
@@ -203,9 +260,15 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
             return new ProxyOperationResult(false, $"delete failed: {ex.Message}", st0);
         }
         var st = DetectSync(gameExePath);
+        string skipNote = skipped.Count == 0
+            ? string.Empty
+            : $" Left {string.Join(", ", skipped)} alone — not installed by Discrete.";
         return new ProxyOperationResult(true,
-            removed == 0 ? "Nothing to uninstall (no proxy files present)"
-                         : $"Removed {removed} file(s) from {dstDir}", st);
+            removed == 0
+                ? (skipped.Count == 0
+                    ? "Nothing to uninstall (no proxy files present)"
+                    : $"Nothing removed.{skipNote}")
+                : $"Removed {removed} file(s) from {dstDir}.{skipNote}", st);
     }
 
     /// <summary>Directory the backend + proxy DLLs are copied FROM. x64 build

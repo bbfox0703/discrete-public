@@ -74,17 +74,17 @@ int CmdVersion() {
     return 0;
 }
 
-// Resolve the absolute, UTF-16 path to the DLL. The injected target reads
-// the bytes we write via WriteProcessMemory and passes that pointer to
-// LoadLibraryW, so the encoding must be UTF-16LE + NUL-terminated.
-std::wstring Utf8ToWidePath(const char* utf8) {
-    if (utf8 == nullptr) return {};
-    int n = ::MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    if (n <= 1) return {};
-    std::wstring out(static_cast<std::size_t>(n - 1), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out.data(), n);
-    return out;
-}
+// NOTE: there is deliberately no narrow-to-wide path conversion here any more.
+// We take wchar_t** argv straight from wmain, so the UTF-16 the parent built
+// with CreateProcessW arrives byte-for-byte intact.
+//
+// The previous version took char** argv and decoded it with
+// MultiByteToWideChar(CP_UTF8, ...). That was a straight encoding mismatch:
+// the UCRT builds narrow argv from GetCommandLineA, i.e. the process ANSI code
+// page (CP950 on a Traditional-Chinese install), never UTF-8. Any non-ASCII
+// byte decoded as invalid UTF-8 became U+FFFD — silently, because dwFlags did
+// not include MB_ERR_INVALID_CHARS — so a game under e.g. D:\遊戲\ failed with
+// a misleading "DLL not found" for a path that exists.
 
 bool TargetIsWow64(HANDLE hProc) {
     BOOL wow = FALSE;
@@ -217,7 +217,15 @@ int CmdInject(int pid, const std::wstring& dllPath) {
             "inject-x86: remote thread did not finish within %lu ms "
             "(WaitForSingleObject=%lu)\n", kRemoteThreadWaitMs, wait);
         ::CloseHandle(hThread);
-        ::VirtualFreeEx(hProc, remoteAddr, 0, MEM_RELEASE);
+        // DELIBERATELY NOT freeing remoteAddr. A non-signalled wait means the
+        // remote thread is STILL ALIVE and remoteAddr is the lpParameter its
+        // LoadLibraryW is about to read (ntdll wraps the caller's buffer in a
+        // UNICODE_STRING and does not copy it until name resolution). Releasing
+        // it here unmaps the page under a live thread → access violation inside
+        // ntdll → the GAME dies, turning a failed injection into a lost session.
+        // The cost of not freeing is one leaked page (typically 4 KB) in the
+        // target, which is the right trade. The other error paths below/above
+        // DO free: there the thread either never started or has already exited.
         ::CloseHandle(hProc);
         return 1;
     }
@@ -254,21 +262,25 @@ int CmdInject(int pid, const std::wstring& dllPath) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    if (argc == 2 && (std::strcmp(argv[1], "--version") == 0 ||
-                      std::strcmp(argv[1], "-V") == 0)) {
+// wmain, NOT main: the DLL path must survive as UTF-16 all the way from the
+// parent's CreateProcessW command line to the WriteProcessMemory buffer the
+// remote LoadLibraryW reads. Going through narrow argv would re-encode it
+// through the ANSI code page and mangle every non-ASCII path.
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && (std::wcscmp(argv[1], L"--version") == 0 ||
+                      std::wcscmp(argv[1], L"-V") == 0)) {
         return CmdVersion();
     }
     if (argc < 3) { Usage(); return 1; }
 
-    char* end = nullptr;
-    long pid = std::strtol(argv[1], &end, 10);
+    wchar_t* end = nullptr;
+    long pid = std::wcstol(argv[1], &end, 10);
     if (end == argv[1] || pid <= 0 || pid > 0x7FFFFFFF) {
-        std::fprintf(stderr, "inject-x86: invalid PID argument '%s'\n", argv[1]);
+        std::fprintf(stderr, "inject-x86: invalid PID argument '%ls'\n", argv[1]);
         return 1;
     }
 
-    std::wstring dllPath = Utf8ToWidePath(argv[2]);
+    std::wstring dllPath = argv[2];
     if (dllPath.empty()) {
         std::fprintf(stderr, "inject-x86: invalid DLL path argument\n");
         return 1;
