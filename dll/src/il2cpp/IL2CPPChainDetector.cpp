@@ -135,6 +135,15 @@ ZydisRegister Canonical(ZydisRegister r) {
 // (former single-reg-clobber helper `WritesRegister` removed —
 // multi-register ChainState below does its own per-operand iteration.)
 
+// Displacement of a memory operand, treating "no displacement encoded" as 0.
+// x86 encodes an access at offset 0 with NO displacement byte (`mov reg,[reg]`),
+// so a `disp.size == 0` early-out — which is what these matchers used to do —
+// made any target at offset 0 impossible to match. That is not a corner case:
+// the first static field of a class sits at offset 0.
+std::size_t DispOrZero(const ZydisDecodedOperandMem& mem) {
+    return mem.disp.size == 0 ? 0u : static_cast<std::size_t>(mem.disp.value);
+}
+
 // Tries to match the hop-2 pattern at `instr`:
 //     mov R2, [classPtrReg + staticFieldsOffset]
 // On match, sets `*outDestReg` to R2 (canonicalised) and returns true.
@@ -149,9 +158,10 @@ bool MatchHopTwo(const ZydisDecodedInstruction& instr,
     if (ops[1].type != ZYDIS_OPERAND_TYPE_MEMORY)   return false;
     if (Canonical(ops[1].mem.base) != classPtrReg)  return false;
     if (ops[1].mem.index != ZYDIS_REGISTER_NONE)    return false;
-    if (ops[1].mem.disp.size == 0)                  return false;  // no disp present
-    if (static_cast<std::size_t>(ops[1].mem.disp.value) != staticFieldsOffset)
-        return false;
+    // A missing displacement means offset ZERO, not "no match". `mov reg,[reg]`
+    // is exactly how the compiler encodes an access at offset 0, so rejecting
+    // disp.size == 0 made an offset-0 target permanently unmatchable.
+    if (DispOrZero(ops[1].mem) != staticFieldsOffset) return false;
     *outDestReg = Canonical(ops[0].reg.value);
     return true;
 }
@@ -182,8 +192,7 @@ bool MatchHopThreeRead(const ZydisDecodedInstruction& instr,
     if (ops[1].type != ZYDIS_OPERAND_TYPE_MEMORY)   return false;
     if (Canonical(ops[1].mem.base) != staticFieldsReg) return false;
     if (ops[1].mem.index != ZYDIS_REGISTER_NONE)    return false;
-    if (ops[1].mem.disp.size == 0)                  return false;  // no disp present
-    return static_cast<std::size_t>(ops[1].mem.disp.value) == targetFieldOffset;
+    return DispOrZero(ops[1].mem) == targetFieldOffset;   // absent disp == 0
 }
 
 // Tries to match the hop-3 write pattern:
@@ -208,8 +217,7 @@ bool MatchHopThreeWrite(const ZydisDecodedInstruction& instr,
         ops[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE) return false;
     if (Canonical(ops[0].mem.base) != staticFieldsReg) return false;
     if (ops[0].mem.index != ZYDIS_REGISTER_NONE)    return false;
-    if (ops[0].mem.disp.size == 0)                  return false;  // no disp present
-    return static_cast<std::size_t>(ops[0].mem.disp.value) == targetFieldOffset;
+    return DispOrZero(ops[0].mem) == targetFieldOffset;   // absent disp == 0
 }
 
 // MS x64 ABI volatile registers — clobbered by CALL. Drop these from
@@ -470,6 +478,17 @@ std::vector<ChainMatch> DetectFieldAccessChains(
     std::size_t bytesScanned     = 0;
     bool truncated = false;
 
+    // (resolved target, hit IP) pairs already emitted — collapses the REX /
+    // non-REX double match without the false negatives the old p-1 byte test
+    // produced. Spans the whole scan, so it also covers the chunk overlap.
+    struct PairHash {
+        std::size_t operator()(const std::pair<std::uintptr_t, std::uintptr_t>& v) const noexcept {
+            return std::hash<std::uintptr_t>{}(v.first) ^
+                   (std::hash<std::uintptr_t>{}(v.second) << 1);
+        }
+    };
+    std::unordered_set<std::pair<std::uintptr_t, std::uintptr_t>, PairHash> emitted;
+
     for (const auto& sec : sections) {
         if (truncated) break;
         std::size_t pos = 0;
@@ -501,17 +520,22 @@ std::vector<ChainMatch> DetectFieldAccessChains(
                 const std::size_t avail = readWant - p;
                 const std::uintptr_t insnIP = sec.va + pos + p;
 
-                // Build #565-followup bugfix — REX-skip dedup. A 7-byte
-                // REX-prefixed insn `48 8B 05 ...` would otherwise match
-                // TWICE: once at the REX byte (7-byte form), once at the
-                // op byte (6-byte form would interpret the 0x8B as a
-                // standalone opcode). Same disp, same resolved target,
-                // same hit. Detected live on SaGa F2R: SteamManager
-                // hits showed up doubled (4 rows for get_Instance when
-                // real chain count was 2). Skipping when the previous
-                // byte was a REX prefix means the 7-byte form already
-                // covered this instruction at p-1.
-                if (p > 0 && IsRexByte(buf[p - 1])) continue;
+                // Build #565-followup: a REX-prefixed `48 8B 05 ...` matches
+                // TWICE — at the REX byte as the 7-byte form, and at the 0x8B
+                // as a standalone 6-byte form. Both resolve to the SAME target
+                // and the same hit (live on SaGa F2R: get_Instance showed 4 rows
+                // for 2 real chains).
+                //
+                // This used to be suppressed with `if (IsRexByte(buf[p-1]))
+                // continue;`, which asks the wrong question: a preceding byte in
+                // 0x40..0x4F is not necessarily a REX prefix of THIS instruction
+                // — it is just as likely the tail of the previous one (a disp8,
+                // an immediate byte, embedded data). Roughly one in sixteen
+                // genuine hop-1 loads was silently dropped for that coincidence.
+                // The duplicates are now collapsed at the RESULT level instead,
+                // on the pair that actually characterises them — see `emitted`
+                // below. Ascending p means the correct REX-start form is always
+                // the one kept.
 
                 // Try every slot's target (still O(1) per slot via hash).
                 // In practice we just check if THIS insn's resolved
@@ -560,6 +584,13 @@ std::vector<ChainMatch> DetectFieldAccessChains(
                     ++chainBroken;
                     continue;
                 }
+
+                // Collapse the REX/non-REX double match described above. Keyed on
+                // (resolved target, hit IP) rather than hitIP alone: two distinct
+                // slots can legitimately funnel into the same hit instruction, and
+                // those are genuinely different chains that must both be reported.
+                // The duplicate pair has BOTH values identical by construction.
+                if (!emitted.insert({target, hitIP}).second) continue;
 
                 ChainMatch m;
                 m.hitIP    = hitIP;

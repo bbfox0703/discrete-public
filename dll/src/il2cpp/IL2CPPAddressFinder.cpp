@@ -121,6 +121,18 @@ Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k)
 #pragma warning(pop)
 
 bool ContainsClass(std::uintptr_t p) {
+    // MUST hold the lock. classSet is rebuilt (clear + push_back + sort + erase)
+    // by BuildClassRangeCache and emptied by InvalidateClassRangeCache, both of
+    // which are reachable from RPC handlers — `rebuild: true` on the address
+    // lookup, and the rescan path — while ANOTHER client's WhatIsAt is walking
+    // backwards through this function. Reading begin()/end() unlocked across a
+    // reallocation is a use-after-free. g_minKlass / g_maxKlass are written under
+    // the same lock, so this covers them too.
+    //
+    // Cheap enough: the callers are per-query backward scans bounded by
+    // maxBackwardScan/8 (<= 2048 iterations), not the index hot loop — that one
+    // already takes a snapshot under this same mutex and searches the copy.
+    std::lock_guard<std::mutex> lk(cache().mu);
     if (cache().classSet.empty()) return false;
     if (p < g_minKlass || p > g_maxKlass) return false;
     return std::binary_search(cache().classSet.begin(), cache().classSet.end(), p);

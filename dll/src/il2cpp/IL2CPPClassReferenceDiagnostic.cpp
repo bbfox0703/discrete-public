@@ -130,7 +130,17 @@ void ScanRangeForPointer(std::uintptr_t base, std::size_t size,
     if (outBytesScanned == nullptr || outSlots == nullptr) return;
 
     constexpr std::size_t kChunkSize = 1024u * 1024u;
-    std::vector<std::uint8_t> buf(kChunkSize);
+    // Thread-local and reused across calls. This function runs once per
+    // (target pointer x committed region), and EnumerateCommittedRegions
+    // returns thousands of regions in a Unity process — so a fresh
+    // `std::vector<std::uint8_t> buf(kChunkSize)` here meant a 1 MB allocation
+    // AND a 1 MB memset per call (vector's sized ctor value-initialises), i.e.
+    // gigabytes of pointless zeroing before a single byte was scanned. The
+    // buffer is fully overwritten by SafeReadBytes before it is read, so its
+    // prior contents never matter. thread_local keeps the parallel scan paths
+    // independent without a lock.
+    thread_local std::vector<std::uint8_t> buf;
+    if (buf.size() < kChunkSize) buf.resize(kChunkSize);
 
     std::size_t pos = 0;
     while (pos < size) {
