@@ -21,6 +21,11 @@ struct OpcodeInfo {
     int  immSize  = 0;
     bool relImm   = false;
     bool unknown  = false;
+    // Ends the flow: RET / RETF / IRET / unconditional JMP. Everything after one
+    // of these, inside a window that started at a function entry, is no longer
+    // part of the path we are signing — it is padding, JIT bookkeeping or the
+    // next function. See BuildPattern.
+    bool terminal = false;
 };
 
 OpcodeInfo Lookup1B(std::uint8_t op) {
@@ -80,17 +85,17 @@ OpcodeInfo Lookup1B(std::uint8_t op) {
 
     // 0xC0/C1 group 2 shifts (ModRM + imm8); 0xC2 RET imm16; 0xC3 RET.
     if (op == 0xC0 || op == 0xC1) { o.hasModRm = true; o.immSize = 1; return o; }
-    if (op == 0xC2) { o.immSize = 2; return o; }
-    if (op == 0xC3) { return o; }
+    if (op == 0xC2) { o.immSize = 2; o.terminal = true; return o; }
+    if (op == 0xC3) { o.terminal = true; return o; }
     if (op == 0xC6) { o.hasModRm = true; o.immSize = 1; return o; }   // group 11 MOV r/m8 imm8
     if (op == 0xC7) { o.hasModRm = true; o.immSize = 4; return o; }   // group 11 MOV r/m32 imm32
     if (op == 0xC8) { o.immSize = 3; return o; }   // ENTER imm16, imm8
     if (op == 0xC9) { return o; }                  // LEAVE
-    if (op == 0xCA) { o.immSize = 2; return o; }   // RETF imm16
-    if (op == 0xCB) { return o; }                  // RETF
+    if (op == 0xCA) { o.immSize = 2; o.terminal = true; return o; }   // RETF imm16
+    if (op == 0xCB) { o.terminal = true; return o; }               // RETF
     if (op == 0xCC) { return o; }                  // INT3
     if (op == 0xCD) { o.immSize = 1; return o; }   // INT imm8
-    if (op == 0xCF) { return o; }                  // IRET
+    if (op == 0xCF) { o.terminal = true; return o; }               // IRET
 
     // 0xD0-0xD3 shift by 1 / by CL (ModRM only).
     if (op >= 0xD0 && op <= 0xD3) { o.hasModRm = true; return o; }
@@ -106,9 +111,9 @@ OpcodeInfo Lookup1B(std::uint8_t op) {
 
     // 0xE8 CALL rel32, 0xE9 JMP rel32, 0xEB JMP rel8 — the headline cases.
     if (op == 0xE8) { o.immSize = 4; o.relImm = true; return o; }
-    if (op == 0xE9) { o.immSize = 4; o.relImm = true; return o; }
+    if (op == 0xE9) { o.immSize = 4; o.relImm = true; o.terminal = true; return o; }
     if (op == 0xEA) { o.unknown = true; return o; }   // far jmp invalid in 64-bit
-    if (op == 0xEB) { o.immSize = 1; o.relImm = true; return o; }
+    if (op == 0xEB) { o.immSize = 1; o.relImm = true; o.terminal = true; return o; }
     if (op >= 0xEC && op <= 0xEF) { return o; }   // I/O port
 
     if (op == 0xF1 || op == 0xF4 || op == 0xF5) { return o; }
@@ -166,6 +171,7 @@ struct Decoded {
     bool relImm      = false;
     bool relDisp     = false;   // RIP-relative ModRM disp32
     bool valid       = true;
+    bool terminal    = false;   // RET / RETF / IRET / unconditional JMP
 };
 
 Decoded DecodeOne(const std::uint8_t* p, std::size_t avail) {
@@ -223,6 +229,7 @@ Decoded DecodeOne(const std::uint8_t* p, std::size_t avail) {
     }
     pos += opLen;
     if (info.unknown) { d.valid = false; d.length = pos; return d; }
+    d.terminal = info.terminal;
 
     // ModR/M byte → SIB / displacement / RIP-relative detection.
     if (info.hasModRm) {
@@ -245,6 +252,16 @@ Decoded DecodeOne(const std::uint8_t* p, std::size_t avail) {
         // not depend on the ModRM.reg field.
         if (opLen == 1 && (op == 0xF6 || op == 0xF7) && reg <= 1) {
             info.immSize = (op == 0xF6) ? 1 : 4;   // 0x66 demotes F7's to 2 below
+        }
+
+        // Group 5 `FF /4` is JMP r/m64 — an indirect tail jump, which ends the
+        // flow just as much as a RET does. `FF /5` is the far form. Like group 3
+        // above, this depends on ModRM.reg, so Lookup1B cannot see it. IL2CPP AOT
+        // and import thunks reach the end of a function this way rather than with
+        // a RET, so without this the window would keep decoding into whatever
+        // follows the jump.
+        if (opLen == 1 && op == 0xFF && (reg == 4 || reg == 5)) {
+            d.terminal = true;
         }
 
         bool sib = false;
@@ -313,9 +330,11 @@ Decoded DecodeOne(const std::uint8_t* p, std::size_t avail) {
 
 }  // namespace
 
-PatternResult BuildPattern(const std::uint8_t* bytes, std::size_t len) {
+PatternResult BuildPattern(const std::uint8_t* bytes, std::size_t len,
+                           bool stopAtTerminal) {
     PatternResult r;
     r.length = len;
+    r.requestedLength = len;
     r.bytes.assign(bytes, bytes + len);
     r.wildcardMask.assign(len, false);
 
@@ -343,6 +362,23 @@ PatternResult BuildPattern(const std::uint8_t* bytes, std::size_t len) {
         }
         cursor += static_cast<std::size_t>(d.length);
         ++r.instructionCount;
+
+        // Stop AFTER the wildcards for this instruction have been applied — a
+        // terminal `E9 rel32` still needs its target wildcarded, and checking
+        // before that would have emitted the jump target as a literal.
+        if (stopAtTerminal && d.terminal) {
+            if (cursor < len) {
+                // The requested length ran past the end of this code. Keep the
+                // terminal instruction, drop the padding / bookkeeping / next
+                // function that follows it.
+                r.stoppedAtTerminal = true;
+                r.length = cursor;
+                r.bytes.resize(cursor);
+                r.wildcardMask.resize(cursor);
+                len = cursor;
+            }
+            break;
+        }
     }
 
     // CE-style pattern: "48 89 5C 24 ?? E8 ?? ?? ?? ??".

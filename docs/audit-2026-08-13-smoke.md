@@ -228,10 +228,21 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
   下一次掃描 200/200。
   UI 端不需要改:`ValueSearchViewModel` 早就把 `error == "cancelled"` 當成 sentinel
   (顯示 `Scan cancelled.`),而 `beginValueScan` 本來就會回這個形狀,所以這不是新的 wire 契約。
-- 🟡 **`getMethodAobPattern` 會越過函式尾端** — 要 48 bytes 就給 48 bytes,即使函式本體只有
-  24 bytes(`...C3` 之後全是 padding/零)。結果 pattern 帶著一串零 → 在 308 MB 可執行記憶體
-  裡 **223 個命中**。決定唯一性的是「視窗長度 vs 函式長度」,不是解碼器;唯一 AOB 本來就
-  由 AOBMaker app 那條路負責,但 UI 直接用這個 pattern 時值得提醒。
+- ✅ **`getMethodAobPattern` 會越過函式尾端 —— 已修 + live-verified**(2026-08-13,build #1412/#1413)。
+  要 48 bytes 就給 48,即使函式本體只有 24 bytes,尾巴是 `C3 01 04 01 00 04 02 00 00 …`
+  ——**padding / JIT 簿記 / 下一個函式**,不屬於這個函式。那串零讓 pattern 在 308 MB 可執行
+  記憶體裡有 **223 個命中**;而 padding 每次執行還會變,所以簽它既脆弱又沒好處。
+  **修法**:解碼器認出 **terminal 指令**(`C3`/`C2` ret、`CA`/`CB` retf、`CF` iret、
+  `E9`/`EB` jmp、以及 group 5 的 `FF /4`、`FF /5` 間接 tail-jump —— 後者跟 batch H 的 group 3
+  同樣是「要看 ModRM.reg 才知道」,`Lookup1B` 看不到,IL2CPP AOT 與 import thunk 常靠它結束),
+  `BuildPattern` 在**套完該指令的 wildcard 之後**截斷(順序很重要:terminal 的 `E9 rel32`
+  仍然需要把跳躍目標 wildcard 掉)。回傳新增 `requestedLength` / `stoppedAtTerminal`,
+  另外在「碼太短、不可能唯一」時附 `uniquenessWarning`。
+  **實測(Core Keeper,要 48 bytes,抽 40 個 method)**:**24 個被截到函式尾端**、
+  全部仍在自己的位址 byte-exact 命中、截斷的都結束在 terminal 指令上;那些 24-byte getter
+  的命中數從 223 降到 136 —— **仍然不唯一,而這是本質的**:那些 getter 的機器碼逐 byte 相同,
+  任何 prototype 視窗都分不出它們,所以現在會明確警告並指向 AOBMaker app(唯一 AOB 是它的職責)。
+  警告門檻刻意放寬到 `<32 bytes 或 <24 literal`,因為實測 24 bytes 仍有 136 個命中。
 - 🟢 `TableFile` 有 `saveToFile(filename)`(celua.txt:2248)—— `ce_table_bootstrap.lua`
   的 `_extractOne` 手工 `stream:read` + 分塊 `string.char` 可以整段換成一行,順便免掉
   bytetable 那個坑。
@@ -452,7 +463,7 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
 | C-2 的 audit 修法沒解到真因(colon vs dot)| ✅ 已重修 + live-verified |
 | `injectDLL` 失敗被吞掉 → bridge 謊報 "Pipe ready" | ✅ 已修 |
 | `scanFieldValue` 完全不可取消 | ✅ 已修 + live-verified(Mono + IL2CPP)|
-| `getMethodAobPattern` 會越過函式尾端 | ⬜ 待修(新發現)|
+| `getMethodAobPattern` 會越過函式尾端 | ✅ 已修 + live-verified |
 | CE 文件與程式不符(`unity_dump.lua` 沒有 `inject()`)| ⬜ 待修文件 |
 
 **回歸用**:整套 headless harness 在 [tools/smoke/](../tools/smoke/),含這一輪踩過的所有坑。
