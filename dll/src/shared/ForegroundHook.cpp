@@ -77,6 +77,16 @@ HWND FindGameWindow() {
     return best.first;
 }
 
+// MH_CreateHook answers ALREADY_CREATED when we are re-installing a hook that a
+// previous Shutdown() disabled but did not remove. The trampoline captured by the
+// first install is still valid, so that is a success — re-enabling is all that is
+// left to do. Treating it as failure is what made keep-foreground come back dead
+// after a Discrete_Shutdown -> Discrete_Init cycle.
+bool CreateOrReuseHook(void* target, void* detour, void** orig) {
+    const MH_STATUS st = MH_CreateHook(target, detour, orig);
+    return st == MH_OK || st == MH_ERROR_ALREADY_CREATED;
+}
+
 // ── (1) GetForegroundWindow hook ─────────────────────────────────────
 
 HWND WINAPI HookedGetForegroundWindow() {
@@ -179,19 +189,39 @@ void SubclassAllGameWindows() {
 // GWLP_WNDPROC pointing at &SubclassProc in soon-to-be-unmapped memory — the
 // next window message would dispatch into freed code and crash the host.
 BOOL CALLBACK UnsubclassEnumProc(HWND hwnd, LPARAM /*lp*/) {
+    // Same process filter as SubclassEnumProc / PickLargestProc. EnumWindows walks
+    // every top-level window on the desktop, and window properties are readable and
+    // REMOVABLE cross-process — without this, a second injected game's Shutdown
+    // would strip the property off THIS game's windows (whose GWLP_WNDPROC points
+    // at its own copy of SubclassProc, so the restore below is skipped) and leave
+    // them in exactly the broken state this function exists to prevent.
+    DWORD pid = 0;
+    ::GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != ::GetCurrentProcessId()) return TRUE;
+
     HANDLE origProp = ::GetPropW(hwnd, kOrigProcProp);
     if (!origProp) return TRUE;  // not one of ours
-    // Only restore if OUR proc is still the active WndProc. If a foreign
-    // subclass chained on top of us, clobbering GWLP_WNDPROC would break their
-    // chain — leave it and just drop our property (standard un-subclass
-    // etiquette; the residual pass-through is already gated off by g_enabled).
+
+    // Only restore if OUR proc is still the active WndProc. If a foreign subclass
+    // chained on top of us, clobbering GWLP_WNDPROC would break their chain.
     WNDPROC cur = reinterpret_cast<WNDPROC>(
         static_cast<LONG_PTR>(::GetWindowLongPtrW(hwnd, GWLP_WNDPROC)));
-    if (cur == &SubclassProc) {
-        ::SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
-                            reinterpret_cast<LONG_PTR>(reinterpret_cast<WNDPROC>(origProp)));
+    if (cur != &SubclassProc) {
+        // We are still IN the chain, just no longer at its head. The property must
+        // STAY: SubclassProc reads it to forward to the original proc, and without
+        // it every message the foreign subclass passes down would fall through to
+        // DefWindowProcW instead — permanently bypassing the game's real WndProc
+        // (dead input / broken paint / unclosable window). Message rewriting is
+        // already off via g_enabled, so leaving the pass-through in place is inert.
+        LogF("[ForegroundHook] Window %p re-subclassed by another module — leaving our "
+             "subclass in the chain (module must not be unloaded while this stands)",
+             reinterpret_cast<void*>(hwnd));
+        return TRUE;
     }
-    ::RemovePropW(hwnd, kOrigProcProp);
+
+    ::SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                        reinterpret_cast<LONG_PTR>(reinterpret_cast<WNDPROC>(origProp)));
+    ::RemovePropW(hwnd, kOrigProcProp);   // only after the restore actually happened
     return TRUE;
 }
 
@@ -227,14 +257,13 @@ int SetKeepForeground(bool enable) {
             }
 
             // (1) GetForegroundWindow — the primary illusion. Fatal on failure.
-            MH_STATUS st = MH_CreateHook(pGfw,
-                                         reinterpret_cast<void*>(&HookedGetForegroundWindow),
-                                         reinterpret_cast<void**>(&g_origGetForegroundWindow));
-            if (st != MH_OK) {
-                LogF("[ForegroundHook] MH_CreateHook(GetForegroundWindow) failed: status=%d", static_cast<int>(st));
+            if (!CreateOrReuseHook(pGfw,
+                                   reinterpret_cast<void*>(&HookedGetForegroundWindow),
+                                   reinterpret_cast<void**>(&g_origGetForegroundWindow))) {
+                LogF("[ForegroundHook] MH_CreateHook(GetForegroundWindow) failed");
                 return -3;
             }
-            st = MH_EnableHook(pGfw);
+            MH_STATUS st = MH_EnableHook(pGfw);
             if (st != MH_OK) {
                 LogF("[ForegroundHook] MH_EnableHook(GetForegroundWindow) failed: status=%d", static_cast<int>(st));
                 MH_RemoveHook(pGfw);
@@ -249,9 +278,9 @@ int SetKeepForeground(bool enable) {
             // MonoMainThreadHook / IL2CPPMainThreadHook share this MinHook
             // instance and must not be re-enabled here.
             if (pClip
-                && MH_CreateHook(pClip,
-                                 reinterpret_cast<void*>(&HookedClipCursor),
-                                 reinterpret_cast<void**>(&g_origClipCursor)) == MH_OK
+                && CreateOrReuseHook(pClip,
+                                     reinterpret_cast<void*>(&HookedClipCursor),
+                                     reinterpret_cast<void**>(&g_origClipCursor))
                 && MH_EnableHook(pClip) == MH_OK) {
                 g_pClipCursor = pClip;
             } else {
@@ -259,9 +288,9 @@ int SetKeepForeground(bool enable) {
             }
 
             if (pSetP
-                && MH_CreateHook(pSetP,
-                                 reinterpret_cast<void*>(&HookedSetCursorPos),
-                                 reinterpret_cast<void**>(&g_origSetCursorPos)) == MH_OK
+                && CreateOrReuseHook(pSetP,
+                                     reinterpret_cast<void*>(&HookedSetCursorPos),
+                                     reinterpret_cast<void**>(&g_origSetCursorPos))
                 && MH_EnableHook(pSetP) == MH_OK) {
                 g_pSetCursorPos = pSetP;
             }
@@ -318,6 +347,16 @@ void Shutdown() {
     // afterward. This is what makes an eventual FreeLibrary unload safe — the
     // subclass must not outlive the module's mapped code.
     UnsubclassAllGameWindows();
+
+    // The detours are DISABLED but still created (MinHook keeps the trampolines).
+    // Clear the installed flag so a later SetKeepForeground(true) — e.g. after a
+    // Discrete_Shutdown -> Discrete_Init cycle — walks the install path again and
+    // re-enables them. Leaving it set made that path skip the whole block, so the
+    // lock reported ENABLED while the GetForegroundWindow illusion stayed dead and
+    // only the WndProc subclass still worked. CreateOrReuseHook absorbs the
+    // ALREADY_CREATED that MH_CreateHook then returns.
+    g_hookInstalled = false;
+
     LogF("[ForegroundHook] Shutdown (hooks disabled, subclass restored)");
 }
 

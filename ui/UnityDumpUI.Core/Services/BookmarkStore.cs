@@ -72,17 +72,36 @@ public sealed class BookmarkStore
     public string PathFor(string? gameKey) =>
         Path.Combine(_dir, FilePrefix + Sanitize(gameKey) + FileSuffix);
 
+    /// <summary>Games whose last Load() failed on an EXISTING file. Save() must
+    /// not overwrite those: the caller is holding the empty list we handed back,
+    /// and rewriting the file with it would delete bookmarks we simply could not
+    /// read. Absent files are not recorded here — "no file" really is "none".</summary>
+    private readonly HashSet<string> _unreadable = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Load the bookmarks for a game; empty list on absent / unreadable
     /// file (best-effort — a corrupt file must not break the Inspector).</summary>
     public List<InstanceBookmark> Load(string? gameKey)
     {
+        string path = PathFor(gameKey);
         try
         {
-            string path = PathFor(gameKey);
-            return File.Exists(path) ? Parse(File.ReadAllLines(path)) : new List<InstanceBookmark>();
+            if (!File.Exists(path))
+            {
+                _unreadable.Remove(path);
+                return new List<InstanceBookmark>();
+            }
+            List<InstanceBookmark> parsed = Parse(File.ReadAllLines(path));
+            _unreadable.Remove(path);
+            return parsed;
         }
         catch
         {
+            // The file EXISTS but we could not read it — a transient lock (AV
+            // scan, backup agent, another process) or a half-written file.
+            // Returning an empty list is fine for display, but it must not be
+            // mistaken for "this game has no bookmarks", because the next Save()
+            // would then persist that emptiness and destroy them for good.
+            _unreadable.Add(path);
             return new List<InstanceBookmark>();
         }
     }
@@ -90,10 +109,28 @@ public sealed class BookmarkStore
     /// <summary>Rewrite the whole bookmark set for a game (best-effort; swallowed).</summary>
     public void Save(string? gameKey, IReadOnlyList<InstanceBookmark> bookmarks)
     {
+        string path = PathFor(gameKey);
+        // Refuse the destructive half of the read-fail → save-empty chain.
+        if (_unreadable.Contains(path) && bookmarks.Count == 0) return;
         try
         {
             Directory.CreateDirectory(_dir);
-            File.WriteAllLines(PathFor(gameKey), Format(bookmarks));
+            // Write-then-replace instead of writing in place. File.WriteAllLines
+            // truncates first, so a crash or a full disk mid-write left a
+            // truncated or zero-byte bookmark file with no way back.
+            string tmp = path + ".tmp";
+            File.WriteAllLines(tmp, Format(bookmarks));
+            if (File.Exists(path))
+            {
+                // Replace keeps a .bak of the previous good file, so even a
+                // logically-wrong overwrite is recoverable by hand.
+                File.Replace(tmp, path, path + ".bak", ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(tmp, path);
+            }
+            _unreadable.Remove(path);
         }
         catch
         {

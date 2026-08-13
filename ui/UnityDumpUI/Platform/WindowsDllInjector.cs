@@ -73,6 +73,14 @@ public sealed partial class WindowsDllInjector : IDllInjector
             if (remoteAddr == IntPtr.Zero)
                 return InjectResult.Failure($"VirtualAllocEx failed (Win32 {Marshal.GetLastWin32Error()}).");
 
+            // Cleared once the remote thread owns remoteAddr and has NOT been
+            // observed to finish. remoteAddr is the lpParameter that thread's
+            // LoadLibraryW reads, and ntdll wraps the caller's buffer in a
+            // UNICODE_STRING rather than copying it until name resolution — so
+            // releasing it under a live thread faults inside ntdll and kills the
+            // GAME, turning a failed injection into a lost session. On timeout we
+            // deliberately leak one page (a few KB) in the target instead.
+            bool safeToFreeRemote = true;
             try
             {
                 if (!WriteProcessMemory(hProc, remoteAddr, pathBytes, size, out _))
@@ -88,6 +96,8 @@ public sealed partial class WindowsDllInjector : IDllInjector
 
                 IntPtr hThread = CreateRemoteThread(hProc, IntPtr.Zero, UIntPtr.Zero,
                                                     loadLib, remoteAddr, 0, IntPtr.Zero);
+                // A failed CreateRemoteThread never took ownership of remoteAddr,
+                // so safeToFreeRemote stays true and the finally reclaims it.
                 if (hThread == IntPtr.Zero)
                     return InjectResult.Failure($"CreateRemoteThread failed (Win32 {Marshal.GetLastWin32Error()}).");
 
@@ -95,7 +105,10 @@ public sealed partial class WindowsDllInjector : IDllInjector
                 {
                     uint wait = WaitForSingleObject(hThread, REMOTE_THREAD_TIMEOUT_MS);
                     if (wait != WAIT_OBJECT_0)
+                    {
+                        safeToFreeRemote = false;   // thread still alive — leak the page
                         return InjectResult.Failure($"Remote thread did not finish in 10 s (wait code 0x{wait:X8}).");
+                    }
 
                     if (!GetExitCodeThread(hThread, out uint exitCode))
                         return InjectResult.Failure($"GetExitCodeThread failed (Win32 {Marshal.GetLastWin32Error()}).");
@@ -115,7 +128,8 @@ public sealed partial class WindowsDllInjector : IDllInjector
             }
             finally
             {
-                VirtualFreeEx(hProc, remoteAddr, UIntPtr.Zero, MEM_RELEASE);
+                if (safeToFreeRemote)
+                    VirtualFreeEx(hProc, remoteAddr, UIntPtr.Zero, MEM_RELEASE);
             }
         }
         finally

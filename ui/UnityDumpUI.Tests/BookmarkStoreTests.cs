@@ -107,4 +107,55 @@ public class BookmarkStoreTests : System.IDisposable
     [InlineData("bad/key:name*?", "bad_key_name__")]
     public void Sanitize_MakesSafeFileFragment(string? key, string expected)
         => Assert.Equal(expected, BookmarkStore.Sanitize(key));
+
+    // ── Audit 2026-08-13 batch F (F28): read-failure must not become data loss ──
+
+    [Fact]
+    public void Save_AfterUnreadableLoad_DoesNotWipeTheFile()
+    {
+        const string key = "game-a";
+        _store.Save(key, new[] { Bm("keepme", "PlayerStats", "0x1000") });
+        string path = _store.PathFor(key);
+        string original = File.ReadAllText(path);
+
+        // Simulate the transient failure: hold the file exclusively so
+        // File.ReadAllLines throws, exactly as an AV scan or backup agent does.
+        List<InstanceBookmark> loaded;
+        using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            loaded = _store.Load(key);
+        }
+        Assert.Empty(loaded);   // display degrades gracefully...
+
+        // ...but persisting that empty view must be refused, or the user's
+        // bookmarks are gone for good.
+        _store.Save(key, loaded);
+        Assert.Equal(original, File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void Save_AfterSuccessfulLoad_StillAllowsClearingToEmpty()
+    {
+        // The guard must not block a legitimate "delete my last bookmark".
+        const string key = "game-b";
+        _store.Save(key, new[] { Bm("gone", "Temp", "0x1") });
+        List<InstanceBookmark> loaded = _store.Load(key);
+        Assert.Single(loaded);
+
+        _store.Save(key, new List<InstanceBookmark>());
+        Assert.Empty(_store.Load(key));
+    }
+
+    [Fact]
+    public void Save_LeavesNoTempFileAndKeepsABackup()
+    {
+        const string key = "game-c";
+        _store.Save(key, new[] { Bm("first", "One", "0x1") });
+        _store.Save(key, new[] { Bm("second", "Two", "0x2") });
+
+        string path = _store.PathFor(key);
+        Assert.False(File.Exists(path + ".tmp"));     // write-then-replace cleaned up
+        Assert.True(File.Exists(path + ".bak"));      // previous good copy retained
+        Assert.Equal("Two", _store.Load(key)[0].Class);
+    }
 }

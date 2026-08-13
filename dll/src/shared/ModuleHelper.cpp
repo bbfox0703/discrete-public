@@ -28,11 +28,24 @@ void* ResolveExport(const wchar_t* moduleName, const char* exportName) noexcept 
 std::vector<ModuleInfo> EnumerateModules() {
     std::vector<ModuleInfo> result;
     HANDLE proc = ::GetCurrentProcess();
-    HMODULE mods[1024];
+
+    // EnumProcessModules reports in cbNeeded the bytes required for ALL modules,
+    // NOT the bytes it wrote. Dividing that by sizeof(HMODULE) and looping over
+    // a fixed 1024-entry stack array therefore read PAST THE END of that array
+    // in any process with more than 1024 modules, handing garbage HMODULEs to
+    // GetModuleBaseNameW / GetModuleInformation. Grow until the buffer is big
+    // enough instead — the documented way to use this API.
+    std::vector<HMODULE> mods(1024);
     DWORD cbNeeded = 0;
-    if (!::EnumProcessModules(proc, mods, sizeof(mods), &cbNeeded)) return result;
+    for (;;) {
+        const DWORD cb = static_cast<DWORD>(mods.size() * sizeof(HMODULE));
+        if (!::EnumProcessModules(proc, mods.data(), cb, &cbNeeded)) return result;
+        if (cbNeeded <= cb) break;                       // everything fitted
+        mods.resize(cbNeeded / sizeof(HMODULE) + 16);    // headroom for churn
+    }
 
     DWORD count = cbNeeded / sizeof(HMODULE);
+    if (count > mods.size()) count = static_cast<DWORD>(mods.size());   // belt and braces
     result.reserve(count);
     for (DWORD i = 0; i < count; ++i) {
         wchar_t baseName[MAX_PATH] = {};

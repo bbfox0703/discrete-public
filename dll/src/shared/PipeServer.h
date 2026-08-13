@@ -46,6 +46,19 @@ void RegisterHandler(std::string name, Handler handler);
 using DisconnectHook = std::function<void()>;
 void RegisterDisconnectHook(DisconnectHook hook);
 
+/// Drop every registered disconnect hook. MUST be called on the teardown that
+/// pairs with whatever registered them: the hook list is append-only, and
+/// Discrete_Shutdown clears the g_initialized latch, so a Shutdown -> Init
+/// cycle would otherwise register a SECOND copy of each backend hook and every
+/// later client disconnect would run N full GC drains instead of one.
+void ClearDisconnectHooks();
+
+/// Number of per-client worker threads currently inside DLL-owned work.
+/// Counted before the worker is detached and decremented as its last act, so
+/// inside a disconnect hook the calling worker still counts itself: a value of
+/// 1 there means "I am the last client".
+int ActiveClientCount();
+
 // Start the server thread (idempotent). Returns false if already running or failed to start.
 bool Start();
 

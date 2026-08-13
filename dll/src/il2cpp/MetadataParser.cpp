@@ -340,12 +340,22 @@ bool Parser::LoadTables() {
         nestedTypesSize_   = h.nestedTypesSize;
     }
 
+    // images / nestedTypes are copied verbatim out of the v38+ section header
+    // and were NOT validated here, unlike every other table — yet both are
+    // indexed later (EnumerateImages walks data_ + imagesOffset_, and the nested
+    // type walk uses nestedTypesOffset_). A truncated or malformed
+    // global-metadata.dat therefore produced an out-of-bounds read rather than a
+    // clean "tables out of bounds" rejection. They are only checked when
+    // populated: both legitimately stay 0 on the layouts where they are absent
+    // (see the deferred-images note above), and inBounds must not reject that.
     if (!inBounds(typeDefinitionsOffset_,  typeDefinitionsSize_)  ||
         !inBounds(fieldsOffset_,           fieldsSize_)           ||
         !inBounds(fieldDefaultsOffset_,    fieldDefaultsSize_)    ||
         !inBounds(fieldDefaultDataOffset_, fieldDefaultDataSize_) ||
         !inBounds(methodsOffset_,          methodsSize_)          ||
-        !inBounds(parametersOffset_,       parametersSize_)) {
+        !inBounds(parametersOffset_,       parametersSize_)       ||
+        (imagesSize_      > 0 && !inBounds(imagesOffset_,      imagesSize_)) ||
+        (nestedTypesSize_ > 0 && !inBounds(nestedTypesOffset_, nestedTypesSize_))) {
         Discrete::Log::Write(MagicStrings::LogCategoryMetadata,
             "MetadataParser: tables out of bounds");
         return false;

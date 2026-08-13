@@ -219,6 +219,18 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
     private const string TypeInjectTableFile           = "InjectTableFile";
 
     private readonly FileLogger? _logger;
+    /// <summary>Serialises every connect → write → read → cleanup cycle.
+    /// <see cref="_pipe"/> is a single shared field, so two overlapping calls
+    /// would have the second ReconnectAsync overwrite the first's live stream
+    /// (leaking it) and then both would read/write the SAME pipe — interleaved
+    /// frames, or an ObjectDisposedException when one call's CleanupPipe fires
+    /// under the other. Reachable from the UI: Copy/Push aobscan, the two
+    /// Navigate commands and the availability probe are independent commands
+    /// with no mutual exclusion of their own. Mirrors PipeClient's semaphore.
+    /// Non-reentrant, so it is taken at exactly two places — ExchangeAsync and
+    /// CheckAvailabilityAsync — which every public entry point funnels through
+    /// without nesting.</summary>
+    private readonly SemaphoreSlim _pipeGate = new(1, 1);
     private NamedPipeClientStream? _pipe;
     private bool _disposed;
     private bool _isAvailable;
@@ -244,17 +256,29 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
 
     public async Task<bool> CheckAvailabilityAsync(CancellationToken ct = default)
     {
-        bool ok = await ReconnectAsync(ct).ConfigureAwait(false);
-        if (ok)
+        // Under the same gate as ExchangeAsync: this probe both REPLACES _pipe
+        // (ReconnectAsync) and DISPOSES it (CleanupPipe), so running it beside a
+        // real exchange would pull the stream out from under it. The ↻ button
+        // and the automatic availability refresh are exactly that scenario.
+        await _pipeGate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            CleanupPipe(); // probe only — release immediately
-            SetAvailable(true);
-            Log("AobMaker CheckAvailability: ok");
-            return true;
+            bool ok = await ReconnectAsync(ct).ConfigureAwait(false);
+            if (ok)
+            {
+                CleanupPipe(); // probe only — release immediately
+                SetAvailable(true);
+                Log("AobMaker CheckAvailability: ok");
+                return true;
+            }
+            SetAvailable(false);
+            Log("AobMaker CheckAvailability: pipe unavailable");
+            return false;
         }
-        SetAvailable(false);
-        Log("AobMaker CheckAvailability: pipe unavailable");
-        return false;
+        finally
+        {
+            _pipeGate.Release();
+        }
     }
 
     public Task<bool> NavigateHexViewAsync(string hexAddress, CancellationToken ct = default)
@@ -410,6 +434,9 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
     private async Task<bool> ExchangeAsync(AobMakerMessage request, int timeoutMs,
                                            string logTag, CancellationToken ct)
     {
+        await _pipeGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
         if (!await ReconnectAsync(ct).ConfigureAwait(false))
         {
             SetAvailable(false);
@@ -447,6 +474,11 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
             SetAvailable(false);
             CleanupPipe();
             return false;
+        }
+        }
+        finally
+        {
+            _pipeGate.Release();
         }
     }
 
@@ -554,6 +586,7 @@ public sealed class AobMakerBridge : IAobMakerBridge, IDisposable
         if (_disposed) return;
         _disposed = true;
         CleanupPipe();
+        _pipeGate.Dispose();
     }
 }
 

@@ -2329,12 +2329,14 @@ void RegisterCoreHandlers() {
             // NOTE: like refineValueScan, this loop deliberately does NOT poll
             // ScanCancel::IsCancelRequested(). It re-reads a bounded, already-
             // retained candidate set (a few bytes per leaf) so it is fast, and —
-            // unlike the long begin* scans — owns no ScanCancel::Scope. Polling here
-            // would let a STALE g_scanCancel (armed by a previously-cancelled scan
-            // and only cleared by the NEXT begin* Scope) break on the first
-            // iteration, after which cands.resize(writer==0) would wipe the whole
-            // session without testing a single candidate. Left non-cancellable on
-            // purpose; a genuine cancel is honoured by the begin* scan that owns a Scope.
+            // unlike the long begin* scans — owns no ScanCancel::Scope. Breaking out
+            // early here would run cands.resize(writer==0) and wipe the whole session
+            // without testing a single candidate, so there is nothing to gain.
+            // (Historically this was also self-defence: Scope only cleared the flag on
+            // entry, so a cancelled scan left g_scanCancel armed until the NEXT begin*
+            // Scope. Scope's dtor now clears it too — see ScanCancel.h — so a stale
+            // flag no longer leaks across requests. Left non-cancellable regardless:
+            // a genuine cancel is honoured by the begin* scan that owns the Scope.)
             std::size_t writer = 0;
             for (std::size_t reader = 0; reader < cands.size(); ++reader) {
                 GroupScan::Candidate& c = cands[reader];
@@ -2779,7 +2781,13 @@ void RegisterCoreHandlers() {
             if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
             if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
             if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-            if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+            // Pointer-sized, NOT a literal 8. The Mono backend builds x86, where
+            // these are 4 bytes: an 8-byte stride walks every OTHER element and
+            // runs off the end of the array data by up to n*4 bytes. Note the
+            // reference-type path below already gets this right via
+            // sizeof(std::uintptr_t) — only this line was wrong.
+            if (t == "System.IntPtr"  || t == "System.UIntPtr")
+                return ::Discrete::ManagedLayout::kPointerSize;
             return 0;
         };
 
@@ -2994,7 +3002,9 @@ void RegisterCoreHandlers() {
             if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
             if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
             if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-            if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+            // Pointer-sized, NOT a literal 8 — see the twin above (x86 Mono).
+            if (t == "System.IntPtr"  || t == "System.UIntPtr")
+                return ::Discrete::ManagedLayout::kPointerSize;
             return 0;  // unknown / reference type
         };
 
@@ -10546,6 +10556,29 @@ int Discrete_Init() {
     Discrete::Log::Init(
         "ExportAPI: registered IL2CPP GC-drain disconnect hook");
 #endif
+
+    // Release retained scan/snapshot state when the LAST client goes away.
+    // Sessions are only pruned by ExpireOldSessions(), which runs from Begin()
+    // — so if a client disconnects (or force-quits) and nothing ever begins
+    // another session, whatever it had live at that moment stays resident in
+    // the game's address space until the process exits. A snapshot plan is tens
+    // of MB, which is a lot to hold in a 32-bit game for nothing.
+    //
+    // Gated on being the last client because sessions carry no owner id: with
+    // up to kMaxPipeInstances clients, dropping unconditionally would destroy a
+    // concurrent client's session. Inside a disconnect hook the calling worker
+    // still counts itself, so 1 == "I am the last". A client that connects and
+    // begins a session inside the resulting window would lose it and have to
+    // re-run — the same collateral-cancel trade ScanCancel already documents,
+    // and far cheaper than the retention it prevents.
+    Discrete::PipeServer::RegisterDisconnectHook([]() {
+        if (Discrete::PipeServer::ActiveClientCount() > 1) return;
+        Discrete::Snapshot::SessionManager::Instance().DropAll();
+        Discrete::ValueScan::SessionManager::Instance().DropAll();
+        Discrete::GroupScan::SessionManager::Instance().DropAll();
+        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+            "last client disconnected — dropped snapshot / value-scan / group-scan sessions");
+    });
 
     return 0;
 }

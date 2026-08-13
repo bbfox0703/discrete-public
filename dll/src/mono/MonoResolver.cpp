@@ -15,7 +15,8 @@ namespace Discrete::Mono {
 
 namespace {
 
-std::once_flag g_once;
+// (the former g_once is gone — see GetResolver: latching on the first CALL
+// made a too-early resolve permanent)
 Resolver       g_resolver;
 
 const wchar_t* PickMonoModule() {
@@ -189,7 +190,18 @@ void DoResolve() {
 }  // namespace
 
 const Resolver& GetResolver() {
-    std::call_once(g_once, DoResolve);
+    // NOT std::call_once. call_once latches on the CALL, not on success, so a
+    // first attempt made before the game had loaded mono-2.0-bdwgc.dll left
+    // g_resolver.resolved == false FOREVER — DoResolve could never run again and
+    // the `scan` re-detect RPC, whose whole purpose is to recover exactly that
+    // state, was powerless. Retry until we actually resolve, then latch.
+    //
+    // Cost of the retry path is a handful of GetModuleHandle / GetProcAddress
+    // lookups, and only while unresolved; once resolved this is a lock plus a
+    // load. Callers are RPC entry points, not inner loops.
+    static std::mutex resolveMu;
+    std::lock_guard<std::mutex> lk(resolveMu);
+    if (!g_resolver.resolved) DoResolve();
     return g_resolver;
 }
 

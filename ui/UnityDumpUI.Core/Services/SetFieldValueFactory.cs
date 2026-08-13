@@ -34,13 +34,19 @@ public static class SetFieldValueFactory
         => JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.Int64);
 
     /// <summary>
-    /// Wire value for any unsigned integer width up to
-    /// <see cref="long.MaxValue"/>. Values above are not representable on
-    /// the wire today (no UInt64 context entry); use
-    /// <see cref="Address(string)"/> for raw 64-bit bit patterns.
+    /// Wire value for any unsigned integer width, including the full
+    /// <see cref="ulong"/> range.
     /// </summary>
+    /// <remarks>
+    /// This used to cast to <c>long</c> and serialize through the Int64 context,
+    /// on the stated grounds that there was "no UInt64 context entry". There is
+    /// one — <c>[JsonSerializable(typeof(ulong))]</c> in ProtocolJsonContext — so
+    /// the cast was simply wrapping every value above <see cref="long.MaxValue"/>
+    /// to a negative number and shipping that, silently, for a field the user
+    /// asked to set to a large unsigned value.
+    /// </remarks>
     public static JsonElement UInt(ulong value)
-        => JsonSerializer.SerializeToElement((long)value, ProtocolJsonContext.Default.Int64);
+        => JsonSerializer.SerializeToElement(value, ProtocolJsonContext.Default.UInt64);
 
     /// <summary>Wire value for `float` or `double`. Serialized as JSON number.</summary>
     public static JsonElement Float(double value)

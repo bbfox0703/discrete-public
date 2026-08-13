@@ -114,7 +114,10 @@ OpcodeInfo Lookup1B(std::uint8_t op) {
     if (op == 0xF1 || op == 0xF4 || op == 0xF5) { return o; }
     if (op >= 0xF8 && op <= 0xFD) { return o; }   // CLC/STC/CLI/STI/CLD/STD
 
-    if (op == 0xF6) { o.hasModRm = true; return o; }   // group 3 byte (sub-op imm decoded later)
+    // Group 3: immediate presence depends on the ModRM.reg sub-opcode (only the
+    // TEST forms have one), so it is resolved after ModRM is read — see the
+    // group-3 fixup in DecodeOne.
+    if (op == 0xF6) { o.hasModRm = true; return o; }   // group 3 byte
     if (op == 0xF7) { o.hasModRm = true; return o; }   // group 3 word/dword
     if (op == 0xFE) { o.hasModRm = true; return o; }   // group 4 INC/DEC
     if (op == 0xFF) { o.hasModRm = true; return o; }   // group 5 CALL/JMP indirect
@@ -227,6 +230,22 @@ Decoded DecodeOne(const std::uint8_t* p, std::size_t avail) {
         const std::uint8_t modrm = p[pos++];
         const std::uint8_t mod = modrm >> 6;
         const std::uint8_t rm  = modrm & 0x7;
+        const std::uint8_t reg = (modrm >> 3) & 0x7;
+
+        // Group 3 (0xF6 / 0xF7) carries an immediate ONLY for its TEST sub-ops
+        // (reg 0 and 1); NOT / NEG / MUL / IMUL / DIV / IDIV (reg 2..7) do not.
+        // That cannot be decided from the opcode byte alone, so Lookup() leaves
+        // immSize at 0 and it has to be filled in here — which nothing did. The
+        // result was a length 1 byte short for `F6 /0` and 4 short for `F7 /0`,
+        // so the decoder resumed mid-instruction and every subsequent
+        // instruction boundary in the window was wrong: the emitted AOB got its
+        // wildcards in the wrong places and matched nothing (or, worse, matched
+        // something else). The other immediate-bearing groups (0x80/81/83,
+        // 0xC0/C1, 0xC6/C7) already set immSize in Lookup because theirs does
+        // not depend on the ModRM.reg field.
+        if (opLen == 1 && (op == 0xF6 || op == 0xF7) && reg <= 1) {
+            info.immSize = (op == 0xF6) ? 1 : 4;   // 0x66 demotes F7's to 2 below
+        }
 
         bool sib = false;
         int  dispSize = 0;

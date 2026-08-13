@@ -177,6 +177,16 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.AppendLine("[DISABLE]");
         sb.AppendLine("{$lua}");
         sb.AppendLine("if syntaxcheck then return end");
+        // Reset here too. _G.DISCRETE_HAD_ERROR lives in CE's process-lifetime
+        // Lua state, so without this the close-tail below reads whatever a
+        // PREVIOUS run left behind: one failed [ENABLE] and every later disable
+        // sees a stale `true` and refuses to close the Lua Engine, leaving it
+        // covering CE's main window for the rest of the session. It is not
+        // enough that this block cannot itself fail (the pcalls below see to
+        // that) — see AaLuaLoader.AppendHadErrorReset, whose contract is that
+        // EVERY [ENABLE]/[DISABLE] block clears the flag so the close-tail
+        // judges this run, not an earlier one.
+        AaLuaLoader.AppendHadErrorReset(sb);
         // unregisterSymbol may not exist if [ENABLE] bailed before
         // registering anything (helper file missing, etc.). pcall keeps
         // the disable path harmless in that case.
@@ -186,8 +196,10 @@ public static class MonoRegisterSymbolAaScriptGenerator
               .Append(LuaSqEscape(symbols[i])).AppendLine("')");
         }
 
-        // Close the Lua Engine on a clean disable too (no reset in DISABLE —
-        // an unregister failure is swallowed by pcall, so this is always quiet).
+        // Close the Lua Engine on a clean disable too. The unregister failures
+        // above are swallowed by pcall, so this run is always quiet — and the
+        // reset at the top of the block means "quiet" is now actually what the
+        // close-tail observes.
         AaLuaLoader.AppendCloseLuaEngineTail(sb);
 
         return sb.ToString();

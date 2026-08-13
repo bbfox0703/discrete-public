@@ -27,6 +27,23 @@ EXPORTS
     waveOutWrite             = Proxy_waveOutWrite
     waveOutReset             = Proxy_waveOutReset
     waveOutGetNumDevs        = Proxy_waveOutGetNumDevs
+    waveOutGetDevCapsA       = Proxy_waveOutGetDevCapsA
+    waveOutGetDevCapsW       = Proxy_waveOutGetDevCapsW
+    waveOutGetPosition       = Proxy_waveOutGetPosition
+    waveOutGetErrorTextW     = Proxy_waveOutGetErrorTextW
+
+    ; waveIn* — UnityPlayer.dll statically imports all of these; missing any
+    ; one of them stops the game from starting at all.
+    waveInGetNumDevs         = Proxy_waveInGetNumDevs
+    waveInGetDevCapsA        = Proxy_waveInGetDevCapsA
+    waveInGetDevCapsW        = Proxy_waveInGetDevCapsW
+    waveInOpen               = Proxy_waveInOpen
+    waveInClose              = Proxy_waveInClose
+    waveInPrepareHeader      = Proxy_waveInPrepareHeader
+    waveInUnprepareHeader    = Proxy_waveInUnprepareHeader
+    waveInAddBuffer          = Proxy_waveInAddBuffer
+    waveInStart              = Proxy_waveInStart
+    waveInReset              = Proxy_waveInReset
 
     midiOutOpen              = Proxy_midiOutOpen
     midiOutClose             = Proxy_midiOutClose

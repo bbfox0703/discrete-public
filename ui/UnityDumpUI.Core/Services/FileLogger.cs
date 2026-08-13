@@ -26,6 +26,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace UnityDumpUI.Core.Services;
 
@@ -34,7 +35,7 @@ public sealed class FileLogger : IDisposable
     private readonly string _root;
     private readonly long   _maxFileBytes;
     private readonly int    _rotationFiles;
-    private readonly ConcurrentDictionary<string, CategoryWriter> _writers = new();
+    private readonly ConcurrentDictionary<string, Lazy<CategoryWriter>> _writers = new();
     private bool _disposed;
 
     public FileLogger(string? logRootOverride = null,
@@ -61,15 +62,28 @@ public sealed class FileLogger : IDisposable
     {
         if (_disposed) return;
         if (string.IsNullOrEmpty(category)) throw new ArgumentException("category required", nameof(category));
-        var writer = _writers.GetOrAdd(category, c => new CategoryWriter(_root, c, _maxFileBytes, _rotationFiles));
-        writer.Write(message);
+        // Lazy, not a bare factory: ConcurrentDictionary.GetOrAdd may invoke its
+        // value factory MORE THAN ONCE for the same key under contention and
+        // keep only one result. CategoryWriter opens current.log in its
+        // constructor with FileShare.Read, so a losing factory call either threw
+        // a sharing violation straight out of this logging call, or (when it won
+        // the race to the file) leaked an undisposed FileStream. Lazy with
+        // ExecutionAndPublication guarantees the writer is constructed exactly
+        // once per category.
+        var writer = _writers.GetOrAdd(category, c => new Lazy<CategoryWriter>(
+            () => new CategoryWriter(_root, c, _maxFileBytes, _rotationFiles),
+            LazyThreadSafetyMode.ExecutionAndPublication));
+        writer.Value.Write(message);
     }
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        foreach (var w in _writers.Values) w.Dispose();
+        // IsValueCreated guard: touching .Value on a Lazy that was never
+        // realised would CONSTRUCT a writer (opening a log file) purely to
+        // dispose it.
+        foreach (var w in _writers.Values) if (w.IsValueCreated) w.Value.Dispose();
         _writers.Clear();
     }
 

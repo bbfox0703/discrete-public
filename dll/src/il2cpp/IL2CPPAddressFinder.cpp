@@ -121,6 +121,18 @@ Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k)
 #pragma warning(pop)
 
 bool ContainsClass(std::uintptr_t p) {
+    // MUST hold the lock. classSet is rebuilt (clear + push_back + sort + erase)
+    // by BuildClassRangeCache and emptied by InvalidateClassRangeCache, both of
+    // which are reachable from RPC handlers — `rebuild: true` on the address
+    // lookup, and the rescan path — while ANOTHER client's WhatIsAt is walking
+    // backwards through this function. Reading begin()/end() unlocked across a
+    // reallocation is a use-after-free. g_minKlass / g_maxKlass are written under
+    // the same lock, so this covers them too.
+    //
+    // Cheap enough: the callers are per-query backward scans bounded by
+    // maxBackwardScan/8 (<= 2048 iterations), not the index hot loop — that one
+    // already takes a snapshot under this same mutex and searches the copy.
+    std::lock_guard<std::mutex> lk(cache().mu);
     if (cache().classSet.empty()) return false;
     if (p < g_minKlass || p > g_maxKlass) return false;
     return std::binary_search(cache().classSet.begin(), cache().classSet.end(), p);
@@ -162,7 +174,10 @@ std::size_t SizeOfPrimitive(const std::string& t) {
     if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
     if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
     if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-    if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+    // Pointer-sized. Identical to 8 in this backend (IL2CPP ships x64 only),
+    // but spelled as the constant so a future x86 port cannot silently inherit
+    // the bug this exact literal caused on the x86 Mono side.
+    if (t == "System.IntPtr"  || t == "System.UIntPtr") return ManagedLayout::kPointerSize;
     return 0;
 }
 
@@ -280,8 +295,10 @@ std::vector<ResolvedField> EnumerateInstanceFields(Il2CppClass* klass) {
                 sz = SizeOfPrimitive(rf.typeName);
             }
             if (sz == 0) {
-                // Reference type or unresolved type → pointer width.
-                sz = 8;
+                // Reference type or unresolved type → pointer width. Spelled as
+                // the constant rather than 8 (same value here, IL2CPP is x64
+                // only) so the intent survives a future x86 port.
+                sz = ManagedLayout::kPointerSize;
             }
             rf.size = sz;
             out.push_back(std::move(rf));
@@ -1408,6 +1425,19 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
         pool.reserve(nthreads);
         for (unsigned int t = 0; t < nthreads; ++t) pool.emplace_back(worker, t);
         for (auto& th : pool) th.join();
+    }
+
+    // A cancelled sweep left each worker's slice partial (the workers break on
+    // cancel). Publishing the concatenation would stamp a truncated index as
+    // `valid` in the process-wide reuse cache and report success, so every later
+    // Lookup() — including ones from a *different*, uncancelled request that
+    // reuses the cache — would silently miss. Discard it and fail: callers fall
+    // back to the (slower) direct backward scan and stay correct.
+    if (ScanCancel::IsCancelRequested()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "ReverseLookupIndex(IL2CPP): build cancelled — partial index discarded, cache untouched");
+        bases_.clear();
+        return false;
     }
 
     std::size_t total = 0;

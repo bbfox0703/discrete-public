@@ -433,12 +433,20 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         if (bookmark is null) return;
         SetTarget(bookmark.Assembly, bookmark.Namespace, bookmark.Class);
 
-        _bulkLease = _bulkGate?.TryEnter("Recall bookmark");
-        if (_bulkGate is not null && _bulkLease is null)
+        // Take the lease into a LOCAL and only publish it to _bulkLease once it
+        // was actually granted. Assigning the field first meant a failed
+        // TryEnter overwrote a lease that a DIFFERENT command (Find instances)
+        // was still holding: its finally then ran _bulkLease?.Dispose() on null,
+        // the gate was never released, and every bulk command stayed dead until
+        // the app restarted. It also corrupted BulkBusyElsewhere, which reads
+        // `_bulkLease is null` to decide whose scan is running.
+        IDisposable? lease = _bulkGate?.TryEnter("Recall bookmark");
+        if (_bulkGate is not null && lease is null)
         {
             ErrorMessage = "Another bulk operation is running — try Recall again in a moment.";
             return;
         }
+        _bulkLease = lease;
         _findCts?.Cancel();
         _findCts = new CancellationTokenSource();
         CancellationToken ct = _findCts.Token;
@@ -771,8 +779,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         // Bulk lane: skip if a snapshot / value-scan holds it (also covers
         // the auto-refresh timer path, which calls ExecuteAsync directly and
         // bypasses CanExecute).
-        _bulkLease = _bulkGate?.TryEnter("Find instances");
-        if (_bulkGate is not null && _bulkLease is null) return;
+        // Local first — see RecallBookmarkAsync: publishing a failed TryEnter
+        // into _bulkLease destroys a live lease held by the other command.
+        IDisposable? lease = _bulkGate?.TryEnter("Find instances");
+        if (_bulkGate is not null && lease is null) return;
+        _bulkLease = lease;
 
         _findCts?.Cancel();
         _findCts = new CancellationTokenSource();
@@ -854,7 +865,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     [RelayCommand]
     private void Clear()
     {
+        // Bump the generation like SetTarget does. Without it an in-flight
+        // RestartAutoRefreshAsync — which captured its gen, is awaiting the stop,
+        // and re-checks the counter afterwards — is not invalidated by Clear, so
+        // it re-arms a walk loop against the target Clear just wiped.
+        _autoRefreshGen++;
         _ = StopAutoRefreshAsync();
+        // Reset the interval too, or the toolbar keeps showing Fast/Slow while
+        // nothing is refreshing: the loop is stopped here, and because the
+        // property itself did not change, OnAutoRefreshIntervalMsChanged never
+        // fires again to restart it. The UI would be advertising a state that is
+        // not true until the user toggled it off and on.
+        AutoRefreshIntervalMs = 0;
         TargetAssembly  = null;
         TargetNamespace = null;
         TargetName      = null;
@@ -1919,12 +1941,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             using var timer = new PeriodicTimer(interval);
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(true))
             {
-                if (SelectedInstance is null || IsLoadingWalk) continue;
+                // Read SelectedInstance ONCE. This continuation runs on a pool
+                // thread, so the property can be set to null between a check and
+                // a later re-read — Clear() does exactly that — and the second
+                // dereference then threw a NullReferenceException that faulted
+                // the loop task and silently killed auto-refresh.
+                InstanceItem? sel = SelectedInstance;
+                if (sel is null || IsLoadingWalk) continue;
                 // The walk mutates the UI-bound Fields collection, so it MUST run
                 // on the UI thread — the PeriodicTimer continuation is on a pool
                 // thread, which previously tripped Avalonia's cross-thread guard
                 // ("calling thread cannot access this object…") every tick.
-                string addr = SelectedInstance.Address;
+                string addr = sel.Address;
                 bool ok = await Dispatcher.UIThread
                     .InvokeAsync(() => WalkInstanceAsync(addr))
                     .ConfigureAwait(true);

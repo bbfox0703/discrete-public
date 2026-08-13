@@ -177,7 +177,8 @@ std::size_t SizeOfPrimitive(const std::string& t) {
     if (t == "System.Int16"   || t == "System.UInt16" || t == "System.Char") return 2;
     if (t == "System.Int32"   || t == "System.UInt32" || t == "System.Single") return 4;
     if (t == "System.Int64"   || t == "System.UInt64" || t == "System.Double") return 8;
-    if (t == "System.IntPtr"  || t == "System.UIntPtr") return 8;
+    // Pointer-sized, NOT a literal 8: this backend builds x86 as well.
+    if (t == "System.IntPtr"  || t == "System.UIntPtr") return ManagedLayout::kPointerSize;
     return 0;
 }
 
@@ -266,7 +267,13 @@ std::vector<ResolvedField> EnumerateInstanceFields(MonoClass* klass) {
                 }
             }
             if (sz == 0) sz = SizeOfPrimitive(rf.typeName);
-            if (sz == 0) sz = 8;
+            // Last resort: an unresolved field is a reference (pointer) slot.
+            // MUST be pointer-sized, not a literal 8 — Mono builds x86 too, and
+            // rf.size decides field containment (see the `interior` / `end`
+            // checks below). Four bytes too wide on x86 makes a field swallow
+            // the start of the NEXT one, so whatIsAt / the address finder name
+            // the wrong field with no sign anything went wrong.
+            if (sz == 0) sz = ManagedLayout::kPointerSize;
             rf.size = sz;
             out.push_back(std::move(rf));
         }
@@ -814,8 +821,18 @@ void SehSweepRegionLoad(const std::uint8_t* base, std::size_t size,
     __try {
         const std::size_t count = size / sizeof(std::uintptr_t);
         const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
-        outQwords.reserve(outQwords.size() + count);
-        outAddrs.reserve(outAddrs.size() + count);
+        // Reserve a BOUNDED amount, not the whole worst case. `count` is one
+        // entry per qword in the region, and both vectors were reserved to that
+        // — so a 1 GB region committed 2 GB up front, inside the game's own
+        // address space, before a single qword was examined. Instantly fatal on
+        // the 32-bit Mono build's 2 GB user space. The loop below filters hard
+        // (zero, unaligned, below 0x10000), so the kept fraction is small;
+        // reserving a cap and letting push_back grow geometrically keeps almost
+        // all of the anti-realloc benefit at a fixed, sane cost.
+        constexpr std::size_t kMaxReservePerRegion = 1u << 20;   // 1M entries = 8 MB
+        const std::size_t want = count < kMaxReservePerRegion ? count : kMaxReservePerRegion;
+        outQwords.reserve(outQwords.size() + want);
+        outAddrs.reserve(outAddrs.size() + want);
         for (std::size_t i = 0; i < count; ++i) {
             std::uintptr_t qw = arr[i];
             if (qw == 0) continue;
@@ -883,6 +900,24 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     std::vector<std::uintptr_t> classSet;
     std::uintptr_t minKlass = 0, maxKlass = 0;
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
+
+    // The NEGATIVE entries are the unbounded ones. A positive memo is capped by
+    // the number of real vtables, but a negative is recorded for every DISTINCT
+    // non-vtable qword in the entire heap walk — and heap words are
+    // overwhelmingly unique (floats, counters, one-off pointers, string bytes).
+    // At roughly 48 bytes per unordered_map node a multi-GB heap grew this to
+    // hundreds of MB *inside the game's own address space*, which the comment
+    // above ("most qwords are repeat vtables") only holds for the positives.
+    // Past the cap we stop recording new negatives; everything already recorded
+    // still serves, so the frequently-repeated values — the ones the memo
+    // actually exists for — stay cached because they are seen early.
+    // The 32-bit build gets a far smaller cap: it shares the game's 2 GB.
+    constexpr std::size_t kMaxMemoEntries =
+        (sizeof(void*) == 8) ? (2u * 1024u * 1024u) : (256u * 1024u);
+    auto memoNegative = [&vtMemo](std::uintptr_t key) {
+        if (vtMemo.size() < kMaxMemoEntries) vtMemo[key] = 0;
+    };
+
     {
         std::lock_guard<std::mutex> lk(cache().mu);
         classSet = cache().classSet;
@@ -979,17 +1014,17 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
             } else {
                 std::uintptr_t derefed = 0;
                 if (!SehReadKlassAt(qw, derefed)) {
-                    vtMemo[qw] = 0;  // memo negative
+                    memoNegative(qw);  // memo negative
                     continue;
                 }
                 // Klass candidate range filter (cheap reject).
                 if (derefed < minKlass || derefed > maxKlass) {
-                    vtMemo[qw] = 0;
+                    memoNegative(qw);
                     continue;
                 }
-                if ((derefed & 7u) != 0) { vtMemo[qw] = 0; continue; }
+                if ((derefed & 7u) != 0) { memoNegative(qw); continue; }
                 if (!std::binary_search(classSet.begin(), classSet.end(), derefed)) {
-                    vtMemo[qw] = 0;
+                    memoNegative(qw);
                     continue;
                 }
                 // 2026-05-28 vtable structural validation. MonoVTable
@@ -1005,7 +1040,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                 std::uintptr_t domainAt = 0;
                 if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
                     domainAt != rootDomainAddr) {
-                    vtMemo[qw] = 0;  // structurally not a vtable
+                    memoNegative(qw);  // structurally not a vtable
                     continue;
                 }
                 klass = derefed;
@@ -1192,17 +1227,17 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
                 if (klass == 0) continue;   // memoised negative
             } else {
                 std::uintptr_t derefed = 0;
-                if (!SehReadKlassAt(qw, derefed)) { vtMemo[qw] = 0; continue; }
-                if (derefed < minKlass || derefed > maxKlass) { vtMemo[qw] = 0; continue; }
-                if ((derefed & 7u) != 0) { vtMemo[qw] = 0; continue; }
+                if (!SehReadKlassAt(qw, derefed)) { memoNegative(qw); continue; }
+                if (derefed < minKlass || derefed > maxKlass) { memoNegative(qw); continue; }
+                if ((derefed & 7u) != 0) { memoNegative(qw); continue; }
                 if (!std::binary_search(classSet.begin(), classSet.end(), derefed)) {
-                    vtMemo[qw] = 0; continue;
+                    memoNegative(qw); continue;
                 }
                 // MonoVTable structural validation: +2*ptr is MonoDomain*.
                 std::uintptr_t domainAt = 0;
                 if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
                     domainAt != rootDomainAddr) {
-                    vtMemo[qw] = 0; continue;
+                    memoNegative(qw); continue;
                 }
                 klass = derefed;
                 vtMemo[qw] = klass;
@@ -1212,6 +1247,19 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
             if ((instAddr & 7u) != 0) continue;   // real objects are 8-aligned
             bases_.push_back(Entry{instAddr, qw, klass});
         }
+    }
+
+    // A cancelled walk left `bases_` a low-address PREFIX of the heap (the region
+    // loop above breaks on cancel). Publishing that would stamp a near-empty index
+    // as `valid` in the process-wide reuse cache and report success, so every later
+    // Lookup() — including ones from a *different*, uncancelled request that reuses
+    // the cache — would silently miss. Discard it and fail: callers fall back to
+    // the (slower) direct backward scan and stay correct.
+    if (ScanCancel::IsCancelRequested()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "ReverseLookupIndex(Mono): build cancelled — partial index discarded, cache untouched");
+        bases_.clear();
+        return false;
     }
 
     // Sort ascending by base for the binary-search lookup.

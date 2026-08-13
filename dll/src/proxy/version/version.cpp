@@ -12,25 +12,27 @@
 
 #include <windows.h>
 
+#include <atomic>
+
 namespace {
 
-HMODULE       g_real     = nullptr;
-volatile LONG g_initOnce = 0;
-
+std::atomic<HMODULE> g_real{nullptr};
+// Non-blocking and re-entrant — see the twin in winmm.cpp for the full
+// reasoning. The old CAS + bounded `for (i < 1000) Sleep(0)` spin blocked the
+// losing thread and, if the spin expired, left g_real null so the thunk called
+// through a null pointer. Proxy_LoadRealDll is already SRWLOCK-serialised,
+// name-cached and refcount-safe, so racing callers converge on their own.
 void EnsureReal() noexcept {
-    if (g_real != nullptr) return;
-    if (::InterlockedCompareExchange(&g_initOnce, 1, 0) == 0) {
-        g_real = Discrete::Proxy::Proxy_LoadRealDll(L"version.dll");
-    } else {
-        for (int i = 0; i < 1000 && g_real == nullptr; ++i) ::Sleep(0);
-    }
+    if (g_real.load(std::memory_order_acquire) != nullptr) return;
+    HMODULE m = Discrete::Proxy::Proxy_LoadRealDll(L"version.dll");
+    g_real.store(m, std::memory_order_release);
 }
 
 template <typename Fn>
 Fn ResolveExport(const char* name) noexcept {
     EnsureReal();
-    return reinterpret_cast<Fn>(
-        Discrete::Proxy::Proxy_GetRealExport(g_real, name));
+    return reinterpret_cast<Fn>(Discrete::Proxy::Proxy_GetRealExport(
+        g_real.load(std::memory_order_acquire), name));
 }
 
 }  // namespace
@@ -79,7 +81,10 @@ PROXY_THUNK(DWORD, WINAPI, VerLanguageNameW,
 BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID /*reserved*/) {
     if (reason == DLL_PROCESS_ATTACH) {
         ::DisableThreadLibraryCalls(self);
-        EnsureReal();
+        // No EnsureReal() here — resolving under the loader lock while the
+        // host .exe's static imports are still initialising is what crashed
+        // Octopath Traveler for UE5CEDumper's dxgi proxy. Thunks resolve on
+        // first call, on a game thread, after DllMain returns.
         Discrete::Proxy::Proxy_StartBackendLoader(self);
     }
     return TRUE;
