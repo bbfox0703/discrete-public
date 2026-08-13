@@ -184,7 +184,17 @@ void ServeClient(HANDLE pipe) {
                     }
                 }
             }
-            if (::WaitForSingleObject(g_stopEvent, 150) == WAIT_OBJECT_0) break;
+            // Snapshot the handle: Stop() may clear g_stopEvent while this
+            // monitor is still alive (its client is mid-scan and outlived the
+            // drain). A NULL handle makes WaitForSingleObject return WAIT_FAILED
+            // *immediately*, which is neither WAIT_OBJECT_0 nor a delay — the
+            // loop would then spin at 100% CPU for the rest of the scan. Treat
+            // anything that is not a clean signal as "sleep, then re-check".
+            HANDLE stopEvt = g_stopEvent;
+            const DWORD w = stopEvt ? ::WaitForSingleObject(stopEvt, 150)
+                                    : WAIT_FAILED;
+            if (w == WAIT_OBJECT_0) break;
+            if (w != WAIT_TIMEOUT) ::Sleep(150);   // never busy-wait
         }
     });
     while (g_running.load()) {
@@ -329,7 +339,23 @@ void WorkerThread() {
             // in after Stop() starts waiting.
             g_activeClients.fetch_add(1, std::memory_order_relaxed);
             std::thread([pipe]() {
+              // Exception barrier for the WHOLE thread body. This is a detached
+              // std::thread, so anything escaping its function calls
+              // std::terminate and takes the GAME process down with it. Dispatch
+              // guards handler exceptions, but plenty of allocation happens
+              // outside that guard — ReadLine growing its buffer, WriteLine's
+              // string copy, the json id/cmd extraction in Dispatch itself, and
+              // even BuildError inside Dispatch's own catch (which re-throws if
+              // the original exception was bad_alloc). A DLL sharing a 32-bit
+              // game's 2 GB address space can genuinely hit bad_alloc on a large
+              // scan response. Losing one client beats killing the game.
+              try {
                 ServeClient(pipe);
+              } catch (const std::exception& ex) {
+                LogPipe(std::string("client worker aborted: ") + ex.what());
+              } catch (...) {
+                LogPipe("client worker aborted: non-std exception");
+              }
                 ::DisconnectNamedPipe(pipe);
                 ::CloseHandle(pipe);
 
@@ -385,6 +411,15 @@ void RegisterDisconnectHook(DisconnectHook hook) {
     g_disconnectHooks.push_back(std::move(hook));
 }
 
+void ClearDisconnectHooks() {
+    std::lock_guard lock(g_mutex);
+    g_disconnectHooks.clear();
+}
+
+int ActiveClientCount() {
+    return g_activeClients.load(std::memory_order_relaxed);
+}
+
 bool Start() {
     bool expected = false;
     if (!g_running.compare_exchange_strong(expected, true)) return false;
@@ -401,6 +436,12 @@ bool Start() {
 void Stop() {
     if (!g_running.exchange(false)) return;
     if (g_stopEvent) ::SetEvent(g_stopEvent);
+    // Arm the cooperative scan cancel. A client worker sitting in a multi-minute
+    // value scan polls this and bails within milliseconds; without it the drain
+    // below simply burns its full 2 s and gives up while the scan grinds on,
+    // which is the case that then trips the g_stopEvent lifetime problem handled
+    // at the end of this function.
+    Discrete::ScanCancel::RequestCancel();
 
     if (g_worker.joinable()) {
         // BOUNDED wait, never a bare join(). Stop() is reachable from DllMain:
@@ -441,10 +482,29 @@ void Stop() {
         ::Sleep(5); // up to ~2 s worst case
     }
 
-    if (g_stopEvent) {
-        ::CloseHandle(g_stopEvent);
-        g_stopEvent = nullptr;
+    // Only reclaim the event once the drain actually succeeded. Client workers
+    // and their disconnect monitors read g_stopEvent without synchronisation, so
+    // closing it while any of them is still alive is a use-after-close: the
+    // monitor either waits on a NULL handle (WAIT_FAILED, handled above) or — far
+    // worse — on a recycled handle value that now names an unrelated kernel
+    // object. If the drain timed out, deliberately leak this one event handle;
+    // one HANDLE for the remaining process lifetime is cheaper than that race,
+    // and Start() allocates a fresh one if the server is ever restarted.
+    if (g_activeClients.load(std::memory_order_relaxed) == 0) {
+        if (g_stopEvent) {
+            ::CloseHandle(g_stopEvent);
+            g_stopEvent = nullptr;
+        }
+    } else {
+        LogPipe("PipeServer::Stop: clients still active after drain — "
+                "leaking the stop event rather than closing it under them");
     }
+
+    // Registered by Discrete_Init, which can run again after Discrete_Shutdown
+    // clears the init latch. The hook list is append-only, so without this a
+    // Shutdown -> Init cycle leaves two copies of each backend hook and every
+    // later client disconnect runs that many full GC drains (~100 ms each).
+    ClearDisconnectHooks();
 }
 
 bool IsRunning() noexcept {

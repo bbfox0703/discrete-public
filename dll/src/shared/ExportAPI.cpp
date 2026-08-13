@@ -10557,6 +10557,29 @@ int Discrete_Init() {
         "ExportAPI: registered IL2CPP GC-drain disconnect hook");
 #endif
 
+    // Release retained scan/snapshot state when the LAST client goes away.
+    // Sessions are only pruned by ExpireOldSessions(), which runs from Begin()
+    // — so if a client disconnects (or force-quits) and nothing ever begins
+    // another session, whatever it had live at that moment stays resident in
+    // the game's address space until the process exits. A snapshot plan is tens
+    // of MB, which is a lot to hold in a 32-bit game for nothing.
+    //
+    // Gated on being the last client because sessions carry no owner id: with
+    // up to kMaxPipeInstances clients, dropping unconditionally would destroy a
+    // concurrent client's session. Inside a disconnect hook the calling worker
+    // still counts itself, so 1 == "I am the last". A client that connects and
+    // begins a session inside the resulting window would lose it and have to
+    // re-run — the same collateral-cancel trade ScanCancel already documents,
+    // and far cheaper than the retention it prevents.
+    Discrete::PipeServer::RegisterDisconnectHook([]() {
+        if (Discrete::PipeServer::ActiveClientCount() > 1) return;
+        Discrete::Snapshot::SessionManager::Instance().DropAll();
+        Discrete::ValueScan::SessionManager::Instance().DropAll();
+        Discrete::GroupScan::SessionManager::Instance().DropAll();
+        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+            "last client disconnected — dropped snapshot / value-scan / group-scan sessions");
+    });
+
     return 0;
 }
 
