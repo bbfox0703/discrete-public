@@ -159,12 +159,11 @@ local function _detectBackendInTarget()
 end
 
 local function _is32bit()
-    -- CE exposes `is32bitProcess()` on 7.x. Fall back to checking the
-    -- target's main module size / shape heuristic if missing.
-    if is32bitProcess then return is32bitProcess() end
-    -- Best-effort fallback: assume 64-bit on modern Unity. The CE
-    -- table author should ship a 32-bit-aware bootstrap if targeting
-    -- old games.
+    -- CE's bitness query is `targetIs64Bit()` — there is no `is32bitProcess`
+    -- on any CE version. (`targetIsX86()` is the architecture family and is
+    -- true for x64 targets too, so it cannot answer this.)
+    if targetIs64Bit then return not targetIs64Bit() end
+    -- Query missing (very old CE): assume 64-bit, the modern Unity default.
     return false
 end
 

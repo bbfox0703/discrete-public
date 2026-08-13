@@ -128,12 +128,17 @@ function M.callDLL(funcName, retType, ...)
               " — symbolhandler may not have scanned the new DLL yet.")
     end
 
-    -- executeCodeEx: arg 1 = calling-convention flag.
-    --   0 = void return, 1 = integer/bool return (cdecl-ish on x64).
-    -- Our DLL exports use the default __cdecl on x64, which is the same
-    -- as Microsoft's __fastcall/x64 calling convention CE assumes.
-    local conv = (retType == "void") and 0 or 1
-    local ret  = executeCodeEx(conv, fn, ...)
+    -- CE signature (celua.txt): executeCodeEx(callmethod, timeout, address, ...)
+    --   callmethod — 0 = stdcall, 1 = cdecl. Our exports are declared
+    --     `extern "C" __declspec(dllexport)` with no explicit convention, so
+    --     MSVC gives them __cdecl. This matters on the 32-bit Mono build;
+    --     x64 has a single convention either way. It does NOT depend on the
+    --     return type.
+    --   timeout — milliseconds; nil = wait indefinitely. Never pass 0: CE then
+    --     skips freeing the call stub, leaking it on every call.
+    --   address — must be the THIRD argument. Passing it second makes CE read
+    --     the export address as a timeout and the first vararg as the address.
+    local ret = executeCodeEx(1, nil, fn, ...)
     if retType == "void" then return nil end
     if ret == nil then
         error(TAG .. " " .. funcName .. " call returned nil (executeCodeEx failed).")
@@ -208,7 +213,10 @@ local function _dllName(backend)
     if backend == "IL2CPP" then
         return "Discrete-IL2CPP.dll"  -- x64 only — no shipping 32-bit IL2CPP
     end
-    local x86 = (is32bitProcess and is32bitProcess()) or false
+    -- CE's bitness query is `targetIs64Bit()`; there is no `is32bitProcess`.
+    -- (`targetIsX86()` is the architecture family — true for x64 too — so it
+    -- cannot answer this.) Missing query = very old CE: assume x64.
+    local x86 = (targetIs64Bit and not targetIs64Bit()) or false
     if backend == "Mono" and x86 then
         return "Discrete-Mono-x86.dll"
     end

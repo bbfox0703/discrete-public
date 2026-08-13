@@ -12,6 +12,13 @@
 // IsCancelRequested(). Resources free via RAII (the session is created only
 // after the loops, so a cancel never leaks one).
 //
+// The Scope clears the cancel flag on BOTH ends (ctor and dtor) so it can never
+// stay armed past the scan that owns it. Handlers may therefore still poll
+// IsCancelRequested() anywhere inside the Scope — including after the loops, to
+// answer `{"cancelled": true}` — because the dtor only runs once the handler
+// returns. Code that polls WITHOUT owning a Scope must still treat a set flag as
+// advisory and must never publish partial results built under one.
+//
 // Global (not per-client): heavy scans are effectively serialized (DiscreteUI
 // runs one at a time; the CE-Lua bridge doesn't value-scan), so a single flag is
 // sufficient. RequestCancel() is gated on `g_scanActive` so a stray cancel can't
@@ -44,7 +51,16 @@ struct Scope {
         g_scanActive.store(true,  std::memory_order_relaxed);
     }
     ~Scope() noexcept {
+        // Clear BOTH flags: the cancel flag's lifetime must not outlive the scan
+        // that owns it. Leaving it armed poisons every later IsCancelRequested()
+        // poll that runs OUTSIDE a Scope — e.g. `scanFieldValue`, which builds a
+        // ReverseLookupIndex without owning one; its region walk would bail on the
+        // first region and silently hand back a near-empty index.
+        //
+        // Order matters: drop `active` FIRST, so RequestCancel()'s gate is already
+        // closed for any cancel arriving while we clear `cancel` below.
         g_scanActive.store(false, std::memory_order_relaxed);
+        g_scanCancel.store(false, std::memory_order_relaxed);
     }
     Scope(const Scope&)            = delete;
     Scope& operator=(const Scope&) = delete;

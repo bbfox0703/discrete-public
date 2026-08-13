@@ -1214,6 +1214,19 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
         }
     }
 
+    // A cancelled walk left `bases_` a low-address PREFIX of the heap (the region
+    // loop above breaks on cancel). Publishing that would stamp a near-empty index
+    // as `valid` in the process-wide reuse cache and report success, so every later
+    // Lookup() — including ones from a *different*, uncancelled request that reuses
+    // the cache — would silently miss. Discard it and fail: callers fall back to
+    // the (slower) direct backward scan and stay correct.
+    if (ScanCancel::IsCancelRequested()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "ReverseLookupIndex(Mono): build cancelled — partial index discarded, cache untouched");
+        bases_.clear();
+        return false;
+    }
+
     // Sort ascending by base for the binary-search lookup.
     std::sort(bases_.begin(), bases_.end(),
               [](const Entry& a, const Entry& b) { return a.base < b.base; });

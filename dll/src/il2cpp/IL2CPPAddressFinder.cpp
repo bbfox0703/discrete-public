@@ -1410,6 +1410,19 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
         for (auto& th : pool) th.join();
     }
 
+    // A cancelled sweep left each worker's slice partial (the workers break on
+    // cancel). Publishing the concatenation would stamp a truncated index as
+    // `valid` in the process-wide reuse cache and report success, so every later
+    // Lookup() — including ones from a *different*, uncancelled request that
+    // reuses the cache — would silently miss. Discard it and fail: callers fall
+    // back to the (slower) direct backward scan and stay correct.
+    if (ScanCancel::IsCancelRequested()) {
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "ReverseLookupIndex(IL2CPP): build cancelled — partial index discarded, cache untouched");
+        bases_.clear();
+        return false;
+    }
+
     std::size_t total = 0;
     for (auto& v : perThread) total += v.size();
     bases_.reserve(total);

@@ -36,7 +36,17 @@
 
 > 這是**唯一**的待辦清單。所有 open 項目集中於此;Phase Overview 表只記 ship 狀態,不重複放 todo。
 
-### 🐛 Leak/bug audit(2026-07-14)— ✅ 全數修復(2026-07-15,build #1353)
+### 🐛 Leak/bug audit #4(2026-08-13)— ⚠️ 已發現,**未修復**
+> 全 repo 掃描,含 2026-05 以前從未專門審計的早期程式碼(Lua bridge / proxy / injector / 早期 Mono+IL2CPP / 早期 C# 服務)。
+> 完整清單見 **[audit-2026-08-13.md](audit-2026-08-13.md)**。61 筆原始發現;P1–P4 已人工端到端驗證,其餘待追控制流。
+
+- [x] 🔴 **P1 — `U.callDLL` 每次呼叫都打錯位址** ✅ FIXED(2026-08-13,`scripts/utils.lua` + `dist/utils.lua`)。CE 簽章是 `executeCodeEx(callmethod, timeout, address, ...)`(本機 `celua.txt:589`),程式碼只給兩個位置參數 → export 位址被當成 timeout、第一個 vararg 被當成 address(無參數時為 nil)。**CE-table 分發路徑上整條 bridge 的 DLL 呼叫都是錯的**。同一行第二個缺陷:`callmethod` 是 `0=stdcall/1=cdecl`(celua.txt:590)與回傳型別無關,原碼卻用 `(retType=="void") and 0 or 1` 依回傳型別跳動慣例。改為 `executeCodeEx(1, nil, fn, ...)`(exports 是 MSVC 預設 `__cdecl`;`timeout=nil`=無限等待,不用 0 因為 celua.txt:591 註明 0 不釋放 call stub)。**待實機 smoke;需 UI rebuild 才會重新內嵌進 `UnityDumpUI.Core.dll`**。
+- [x] 🔴 **P2 — ScanCancel 陳舊旗標 → reverse-lookup index 靜默截斷並發佈進全域快取** ✅ FIXED(2026-08-13,build #1382)。`Scope` 解構子只清 `g_scanActive` 不清 `g_scanCancel`;`CmdScanFieldValue`(ExportAPI.cpp:5506)沒開 Scope 卻在 :5824 `revIndex.Build()` → 取消過一次 value scan 後,Build 在第一個 region 就 break,仍照樣 publish 並 `c.valid=true` / `return true` → 結果靜默錯誤且污染 reuse cache。**兩層修法**:① [ScanCancel.h](../dll/src/shared/ScanCancel.h) dtor 一併清 `g_scanCancel`(順序先 `active` 後 `cancel`,縮小 re-arm 視窗;已驗四個 handler 的 cancelled-回報都在 Scope 生命週期內故不受影響);② 兩 backend `ReverseLookupIndex::Build` 偵測取消即 `bases_.clear()` + `return false`,**完全不碰 reuse cache**([MonoAddressFinder.cpp](../dll/src/mono/MonoAddressFinder.cpp) / [IL2CPPAddressFinder.cpp](../dll/src/il2cpp/IL2CPPAddressFinder.cpp))。順手修掉 ExportAPI.cpp:2329 已失效的註解前提。**待實機 smoke**:value scan → Cancel → 接著 Scan field value 應回正確結果。
+- [x] 🟠 **P3 — `is32bitProcess()` 在 CE 不存在** ✅ FIXED(2026-08-13,`utils.lua` + `ce_table_bootstrap.lua`,scripts + dist 共 4 檔)。CE 只有 `targetIs64Bit()` → x86 分支恆為 false → **32-bit Mono 遊戲永遠拿到 x64 DLL**,且因寫成 `(fn and fn())` 而靜默失敗。改用 `targetIs64Bit`;**不可**用 `targetIsX86()`(celua.txt:713 是架構家族,x64 也回 true)。`Discrete-Mono-x86.dll` 檔名確認正確 —— 是 [ce-bridge-integration.md:126](ce-bridge-integration.md) 記載的手動改名步驟。**待實機 smoke(需 32-bit Mono 遊戲)**。
+- [ ] 🟡 **P4 — `dist/` 殘留三個已退役的 lua**(2026-08-13 查清,**降級**:非原始碼遺失)— `unity_addrfind.lua` / `unity_dissect.lua` / `unity_scene.lua` 是刻意退役的(`BridgeLuaResourcesTests.cs:145` `Read_RejectsRemovedUiOnlyFiles` 有 regression test 守著)。真因是 `dist/` 在 `.gitignore:9` 被忽略、build 只複製不修剪 → 退役前的產出殘留至今。風險:使用者照 `dist/` 組 CE table 可能複製並 `dofile()` 到講舊協定的腳本。修法:刪除那三個檔,或讓 build.ps1 複製前先修剪 `dist/*.lua`。
+- [ ] 🟡 **待驗證批** — ~30 項(ForegroundHook audit#3 修正自身可能引入的 prop/process-filter 問題、`DropAll` 零呼叫點、`WindowsProxyInstaller` 無備份覆寫第三方 DLL 的資料遺失風險、32-bit Mono 欄位寬度寫死 8 bytes、`BookmarkStore` 非原子寫入等)。詳見 audit 文件。
+
+### 🐛 Leak/bug audit #3(2026-07-14)— ✅ 全數修復(2026-07-15,build #1353)
 > 三線 audit(C++ DLL 全域 / C# UI 全域 / 最近 5 commits 深讀),medium+ 發現全部人工二次驗證(追全控制流)。上次專門 pass = 2026-07-01(build #1235)。**2026-07-15:6-agent 對抗式 re-verify(P1–P4 CONFIRMED、P4 latent、lows CONFIRMED,0 駁回)→ 全數修復 → build.cmd dll clean(#1348)+ 1123 UI tests green → /code-review high 抓出並修掉 P1 fix 自身引入的一個 shutdown-race 死結**。DLL x64/x86 + IL2CPP clean、0 test fail。
 > **P1 fix 二階修正**:CAS-fail 分支原本無條件 `WaitForSingleObject(INFINITE)`,但 Shutdown 中止的 item 其 `SetEvent` 可能已被首次 timed-wait 消耗 → 第二次 INFINITE wait 永久阻塞(DLL teardown 撞上 in-flight `mainThread:true` RPC 時吊死 pipe 執行緒)。改為讀 CAS 失敗後的實際 state 分支:Running→等、Done→回成功、Aborted→回 timeout 不再等。
 

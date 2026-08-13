@@ -2329,12 +2329,14 @@ void RegisterCoreHandlers() {
             // NOTE: like refineValueScan, this loop deliberately does NOT poll
             // ScanCancel::IsCancelRequested(). It re-reads a bounded, already-
             // retained candidate set (a few bytes per leaf) so it is fast, and —
-            // unlike the long begin* scans — owns no ScanCancel::Scope. Polling here
-            // would let a STALE g_scanCancel (armed by a previously-cancelled scan
-            // and only cleared by the NEXT begin* Scope) break on the first
-            // iteration, after which cands.resize(writer==0) would wipe the whole
-            // session without testing a single candidate. Left non-cancellable on
-            // purpose; a genuine cancel is honoured by the begin* scan that owns a Scope.
+            // unlike the long begin* scans — owns no ScanCancel::Scope. Breaking out
+            // early here would run cands.resize(writer==0) and wipe the whole session
+            // without testing a single candidate, so there is nothing to gain.
+            // (Historically this was also self-defence: Scope only cleared the flag on
+            // entry, so a cancelled scan left g_scanCancel armed until the NEXT begin*
+            // Scope. Scope's dtor now clears it too — see ScanCancel.h — so a stale
+            // flag no longer leaks across requests. Left non-cancellable regardless:
+            // a genuine cancel is honoured by the begin* scan that owns the Scope.)
             std::size_t writer = 0;
             for (std::size_t reader = 0; reader < cands.size(); ++reader) {
                 GroupScan::Candidate& c = cands[reader];
