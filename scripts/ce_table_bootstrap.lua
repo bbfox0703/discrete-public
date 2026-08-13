@@ -129,15 +129,34 @@ local function _extractOne(tableFileName, outPath)
     end
     local stream = tf.Stream
     local size   = stream.Size
-    -- Read entire blob, write to disk. For Lua-string-friendly write
-    -- use stream:read(size) → byte string → io.open binary write.
     stream.Position = 0
+    -- CE's Stream:read(count) returns a BYTETABLE, not a string
+    -- (celua.txt: "read(count): bytetable"). io's file:write accepts only
+    -- strings/numbers, so handing it the table raised "bad argument #1 to
+    -- 'write' (string expected, got table)" and the Mode-B .CT bootstrap
+    -- died on its very first embedded file.
+    --
+    -- Convert in chunks: string.char(table.unpack(t)) in one shot blows the
+    -- Lua stack (unpack is bounded by LUAI_MAXSTACK) and these blobs are
+    -- multi-MB DLLs.
     local bytes = stream:read(size)
     local f, err = io.open(outPath, "wb")
     if not f then
         error("[bootstrap] cannot open " .. outPath .. " for write: " .. tostring(err))
     end
-    f:write(bytes)
+    if type(bytes) == "string" then
+        f:write(bytes)                      -- future-proof if CE ever changes it
+    elseif type(bytes) == "table" then
+        local CHUNK = 4096
+        local n = #bytes
+        for i = 1, n, CHUNK do
+            local j = math.min(i + CHUNK - 1, n)
+            f:write(string.char(table.unpack(bytes, i, j)))
+        end
+    else
+        f:close()
+        error("[bootstrap] unexpected Stream:read result type: " .. type(bytes))
+    end
     f:close()
 end
 

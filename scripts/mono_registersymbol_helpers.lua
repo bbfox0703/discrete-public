@@ -257,36 +257,44 @@ if _G.mono_registerSymbolBySignatureMatch == nil then
 
     for _, m in ipairs(methods) do
       if m.name == methodname then
-        local sig = mono_method_getSignature(m.method)
-        local matched = true
+        -- Same defensive shape as the discrete_* twin below.
+        -- mono_method_getSignature can throw or return nil for generic /
+        -- uncompiled methods; skip past those rather than crashing the whole
+        -- AA script. Unguarded, string.find(nil, ...) aborted the [ENABLE]
+        -- block on any class that merely HAS such an overload — and
+        -- ipairs(sigContains) threw outright when the caller omitted it.
+        local sigOk, sig = pcall(mono_method_getSignature, m.method)
+        if sigOk and type(sig) == "string" then
+          local matched = true
 
-        for _, kw in ipairs(sigContains) do
-          if not string.find(sig, kw, 1, true) then
-            matched = false
-            break
-          end
-        end
-
-        if matched and sigExcludes then
-          for _, ex in ipairs(sigExcludes) do
-            if string.find(sig, ex, 1, true) then
+          for _, kw in ipairs(sigContains or {}) do
+            if type(kw) ~= "string" or not string.find(sig, kw, 1, true) then
               matched = false
               break
             end
           end
-        end
 
-        if matched then
-          local addr = mono_compile_method(m.method)
-          if addr == 0 then
-            eprint(string.format("mono_registerSymbolBySignatureMatch: ERROR matched but failed to compile - %s.%s.%s",
-                                namespace, classname, methodname))
-            return false
+          if matched and sigExcludes then
+            for _, ex in ipairs(sigExcludes) do
+              if type(ex) == "string" and string.find(sig, ex, 1, true) then
+                matched = false
+                break
+              end
+            end
           end
-          registerSymbol(symbolname, addr)
-          print(string.format("mono_registerSymbolBySignatureMatch: registered %s = %X (sig=%s)",
-                              symbolname, addr, sig))
-          return true
+
+          if matched then
+            local addr = mono_compile_method(m.method)
+            if addr == 0 then
+              eprint(string.format("mono_registerSymbolBySignatureMatch: ERROR matched but failed to compile - %s.%s.%s",
+                                  namespace, classname, methodname))
+              return false
+            end
+            registerSymbol(symbolname, addr)
+            print(string.format("mono_registerSymbolBySignatureMatch: registered %s = %X (sig=%s)",
+                                symbolname, addr, sig))
+            return true
+          end
         end
       end
     end
@@ -375,17 +383,24 @@ local function _discrete_find_class(namespace, classname)
   -- UnityEngine into many modular DLLs (CoreModule / PhysicsModule /...)
   -- and CE's cached image list is sometimes stale on first lookup after
   -- the data collector launches.
-  local imgs = mono_enumImages()
-  if imgs then
-    for _, entry in ipairs(imgs) do
-      local img = (type(entry) == "table" and entry.image) or entry
-      if mono_image_findClass and img and img ~= 0 then
-        r = mono_image_findClass(img, namespace, classname)
-        if r and r ~= 0 then return r end
-      end
-    end
+  -- CE's mono_enumImages is CALLBACK-ONLY and returns nothing:
+  --     function mono_enumImages(onImage)  ... onImage(image) ... end
+  -- (monoscript.lua). Calling it as `local imgs = mono_enumImages()` left
+  -- onImage nil, so the first image found raised "attempt to call a nil
+  -- value" — this fallback threw instead of running, precisely in the case
+  -- it exists for (a class CE's cached image list cannot resolve).
+  if not mono_image_findClass then return nil end
+  local found = nil
+  local ok, err = pcall(mono_enumImages, function(img)
+    if found or not img or img == 0 then return end
+    local hit = mono_image_findClass(img, namespace, classname)
+    if hit and hit ~= 0 then found = hit end
+  end)
+  if not ok then
+    eprint("[discrete] mono_enumImages fallback failed: " .. tostring(err))
+    return nil
   end
-  return nil
+  return found
 end
 
 -- discrete_mono_registerSymbol — first matching method name.
