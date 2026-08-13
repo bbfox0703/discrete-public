@@ -156,9 +156,19 @@ local function main()
         U.log("DLL path: %s", dll)
 
         if injectDLL ~= nil then
+            -- celua.txt:581 — "Injects a dll ... and returns true on success",
+            -- i.e. it returns **false** when the file is missing or injection
+            -- fails, NOT nil. An `== nil` test therefore let every failure
+            -- through, and main() went on to print "DLL injected" and
+            -- "Pipe ready" having done neither — the only hint being a
+            -- DEBUG-gated WARN about StartPipe. Verified on CE 7.7:
+            -- injectDLL("<missing>.dll") -> false (boolean).
             local ok = injectDLL(dll)
-            if ok == nil then
-                U.err("injectDLL returned nil — DLL not found or injection failed.")
+            if not ok then
+                U.err("injectDLL failed (returned %s) — DLL not found or injection refused.",
+                      tostring(ok))
+                U.err("Looked for: %s", tostring(dll))
+                U.err("Put the backend DLL beside your .CT (or in <CE>\\discrete\\).")
                 U.err("Check %%LOCALAPPDATA%%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
                 return
             end

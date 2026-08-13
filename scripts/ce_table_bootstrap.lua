@@ -121,25 +121,41 @@ local function _extractDir()
 end
 
 local function _extractOne(tableFileName, outPath)
-    -- CE's TableFile object → stream API. Works on every CE 7.x build.
     local tf = findTableFile(tableFileName)
     if tf == nil then
         error("[bootstrap] table file not found in this .CT: " .. tableFileName
               .. " (did you add it via Table menu → Add file…?)")
     end
+
+    -- ⚠️ CE's Lua class methods are bound closures that take their documented
+    -- arguments and NOTHING ELSE — there is no implicit self. So `obj:method(x)`
+    -- passes the object itself as the FIRST documented argument and silently
+    -- misbehaves. Verified on CE 7.7: `tf.Stream:read(16)` returns **nil**,
+    -- while `tf.Stream.read(16)` returns the 16-byte bytetable. Every CE object
+    -- call in this file therefore uses DOT syntax. (Plain Lua `io` handles are
+    -- different — `f:write(...)` below is real Lua and correct.)
+    --
+    -- Route 1 is TableFile.saveToFile (celua.txt: "saveToFile(filename)"): CE
+    -- writes the blob itself, so there is no read, no bytetable and no chunking.
+    local okSave = pcall(function() return tf.saveToFile(outPath) end)
+    if okSave then
+        local chk = io.open(outPath, "rb")
+        if chk then
+            local n = chk:seek("end")
+            chk:close()
+            if n and n > 0 then return end
+        end
+    end
+
+    -- Route 2 (older CE builds without TableFile.saveToFile): read the stream
+    -- ourselves. `read(count)` hands back a BYTETABLE, not a string
+    -- (celua.txt: "read(count): bytetable"), and string.char(table.unpack(t))
+    -- in one shot blows the Lua stack (unpack is bounded by LUAI_MAXSTACK) on
+    -- the multi-MB DLL blobs — so convert in chunks.
     local stream = tf.Stream
     local size   = stream.Size
     stream.Position = 0
-    -- CE's Stream:read(count) returns a BYTETABLE, not a string
-    -- (celua.txt: "read(count): bytetable"). io's file:write accepts only
-    -- strings/numbers, so handing it the table raised "bad argument #1 to
-    -- 'write' (string expected, got table)" and the Mode-B .CT bootstrap
-    -- died on its very first embedded file.
-    --
-    -- Convert in chunks: string.char(table.unpack(t)) in one shot blows the
-    -- Lua stack (unpack is bounded by LUAI_MAXSTACK) and these blobs are
-    -- multi-MB DLLs.
-    local bytes = stream:read(size)
+    local bytes = stream.read(size)
     local f, err = io.open(outPath, "wb")
     if not f then
         error("[bootstrap] cannot open " .. outPath .. " for write: " .. tostring(err))
@@ -155,7 +171,8 @@ local function _extractOne(tableFileName, outPath)
         end
     else
         f:close()
-        error("[bootstrap] unexpected Stream:read result type: " .. type(bytes))
+        error("[bootstrap] Stream.read gave " .. type(bytes)
+              .. " — if this says nil, something re-introduced colon syntax")
     end
     f:close()
 end
