@@ -92,6 +92,47 @@ G3/G4/G7 需要特定目標,有機會再補;G5/G8 屬確認性質。
 > ⚠️ **B-1 過程中我自己誤判過一次,值得記下來**:直接跑 `BongoCat.exe` 會看到行程立刻消失,> 我一度以為是 proxy 讓遊戲開不起來。真相是 Steamworks 的 `RestartAppIfNecessary` ——> 遊戲會透過 Steam 重新啟動自己,原行程必然結束。Unity 的 `Player.log` 停在> `Initialising for app 3419430` 就是那一刻。而且那個「失敗」的直接啟動,> **payload 其實也載入成功了**(另一個 pid 的 init log 有 `attached 0.1.0.1408`)。
 > 順手做的靜態複驗:掃過 BongoCat 資料夾**全部 80 個 PE**(不只 UnityPlayer.dll ——> 還有 `SDL2.dll` 20 個 winmm import、`mono-2.0-bdwgc.dll` 5 個、`discord_partner_sdk.dll` 5 個),> **未滿足的 import 0 個**。所以 batch B 的 export 清單對這款遊戲的整個模組圖都夠。
 
+### 第五輪:A-3(2026-08-13,headless,不需要 alt-tab)
+
+A-3 的修正是 `ForegroundHook::Shutdown` 少了一行 `g_hookInstalled = false`:它把 MinHook
+detour 停掉卻留著旗標,所以下一次 `SetKeepForeground(true)` 會**跳過整個安裝區塊** ——
+鎖回報 ENABLED,而 `GetForegroundWindow` 的幻術其實是死的。
+
+**這件事在遊戲記憶體裡直接看得到**:啟用時 MinHook 會把 `user32!GetForegroundWindow`
+的前幾個 byte 改成 jmp,停用時還原。所以不必 alt-tab 用眼睛判斷,直接讀那幾個 byte:
+
+| 步驟 | `GetForegroundWindow` 前 8 bytes | 判定 |
+|---|---|---|
+| 1 baseline | `48 89 5C 24 08 57 48 83` | pristine |
+| 2 `setKeepForeground(true)` | `E9 1E 91 7F FF 57 48 83` | **HOOKED**(E9 jmp rel32)|
+| 3 `Discrete_Shutdown`(remote thread)| `48 89 5C 24 08 57 48 83` | 還原 → detour 確實被停掉 |
+| 4 `Discrete_Init` + `Discrete_StartPipe` | — | pipe 回來 |
+| 5 **再 `setKeepForeground(true)`** | `E9 1E 91 7F FF 57 48 83` | **HOOKED —— A-3 PASS** |
+
+修正前第 5 步會停在 pristine,而 `getKeepForeground` 照樣回 `state=1`。
+
+順手釐清一件容易誤判的事:`setKeepForeground(false)` 是**刻意的 soft-disable** ——
+`ForegroundHook.cpp` 註解寫明「留著 hook + subclass,它們 gate 在 `g_enabled` 上,
+關掉時直接 pass through,以避免與 in-flight 呼叫發生 unhook race」。只有 `Shutdown()` 會真的
+`MH_DisableHook`。所以「關掉後 detour 還在」是設計,不是缺陷(我第一版斷言寫錯,已修正);
+也因此**重跑這支腳本時 baseline 本來就會是 HOOKED**,腳本現在會說明而不是誤報 FAIL。
+
+### I-1 的觀察:這個 live round-trip 在原理上驗不出東西
+
+I-1 的修正是 UI 序列化時的 `(long)` cast(`ProtocolJson.cs`)。問題是:對任何 `ulong`,
+`(long)value` 的 **64-bit 位元樣式完全相同**。所以 wire 上雖然會變成一個負數,DLL 端
+把它讀回 uint64 之後**記憶體裡的 8 個 byte 一模一樣** —— 寫入再讀回會「通過」,不管修沒修。
+要真正看見差異,只能檢查 wire 上那串 JSON 文字本身,那正是那 4 個單元測試在做的事
+(檢查表自己也註明「已有 4 個單元測試覆蓋,實機只是確認端到端」)。
+
+另外 Core Keeper 是 DOTS,**沒有安全的 64-bit 受管欄位可以寫**:
+搜出來的候選只有 `BlockAllocator.m_nextPtr`(配置器指標)、
+`EntityComponentStore.m_WorldSequenceNumber` 這類 ECS 內部狀態,
+以及一批位址只差 8 bytes、值全為 0 的假 instance(metadata arena 的 false positive,
+就是 29h 那個形狀)。往那些位址寫 `0xFFFFFFFFFFFFFFFF` 只會弄壞遊戲,不會驗到任何東西。
+**建議**:這項就靠單元測試,實機要做的話換一個有正常 gameplay `long` 欄位的 Mono 遊戲
+(例如 Elin),並且寫入前先存原值、驗完還原。
+
 **CE 那組的額外發現**
 
 - 🔴 **`injectDLL` 失敗被吞掉 → bridge 謊報成功**(已修)。celua.txt:581 說 `injectDLL` 成功回 true,失敗回 **false**;`unity_dump.lua` 卻只檢查 `ok == nil`。實測 `injectDLL("<不存在>.dll")` 回 **false(boolean)**,於是 main() 一路印出 `DLL injected` + **`Pipe ready`** + `Launch DiscreteUI.exe and click Connect`,而實際上**什麼都沒注入**(module 沒 mapped、pipe 沒開)。唯一線索是 DEBUG-gated 的 WARN,預設看不到。這正好是 P3 同一個病:沒查 CE API 的回傳約定。修法:改 `if not ok`,並把找過的路徑印出來。
@@ -152,19 +193,19 @@ G3/G4/G7 需要特定目標,有機會再補;G5/G8 屬確認性質。
   **PASS**:記憶體回落(最後一個 client 離開時 session 被釋放)。
   **FAIL**:數十 MB 一直留著不還。
 
-- [ ] **F-1 · BulkGate lease**(使用者立即有感)
+- [ ] **F-1 · BulkGate lease**(使用者立即有感)  ⬜ *UI-only;2026-08-13 的 computer-use 授權被拒,未執行*
   Inspector 跑 **Find instances**,**在它還在跑的時候**按 **Recall bookmark**。
   應看到「Another bulk operation is running」提示。等 Find 結束後,**再跑一次任何 bulk 指令**。
   **PASS**:後續 bulk 指令正常可用。
   **FAIL**:所有 bulk 指令從此失效,直到重開 app(修正前:失敗的 `TryEnter` 把 Find 的 lease 覆寫成 null,
   gate 永不釋放)。
 
-- [ ] **F-2 · AobMaker 並發**
+- [ ] **F-2 · AobMaker 並發**  ⬜ *UI-only;同上未執行*
   快速連續觸發兩個 AobMaker 命令(例如 `Copy: aobscan` 後立刻按連線列的 ↻)。
   **PASS**:兩者各自完成或乾淨失敗。
   **FAIL**:`ObjectDisposedException`、回應內容交錯、或 chip 狀態亂跳。
 
-- [ ] **I-1 · `ulong` 欄位寫入**(需要一個 `ulong` / `UInt64` 欄位)
+- [ ] **I-1 · `ulong` 欄位寫入**(需要一個 `ulong` / `UInt64` 欄位)  ⬜ *見下方分析:這個 round-trip 在原理上分不出修沒修,且 Core Keeper 找不到安全的 64-bit 目標*
   找一個 `ulong` 欄位,寫入 **`18446744073709551615`**(或任何 > `9223372036854775807` 的值),回讀。
   **PASS**:讀回你寫的值。
   **FAIL**:讀回負數或完全不同的值(修正前:`(long)` cast 讓超過 `long.MaxValue` 的值回繞成負數送出)。
@@ -303,7 +344,7 @@ G3/G4/G7 需要特定目標,有機會再補;G5/G8 屬確認性質。
 
 ## G8 — Keep-foreground
 
-- [ ] **A-3 · shutdown → init 循環後仍有效**
+- [x] **A-3 · shutdown → init 循環後仍有效**  ✅ *headless: enable → Shutdown → Init → re-enable, and user32!GetForegroundWindow is patched again (pre-fix: stays pristine while the flag reports enabled)*
   勾選 keep-foreground → 觸發 `Discrete_Shutdown` → 再 `Discrete_Init` → **再勾一次** → alt-tab 離開遊戲。
   **PASS**:遊戲持續執行。
   **FAIL**:UI 顯示已啟用但 alt-tab 後遊戲暫停(修正前:`Shutdown` 沒重置 `g_hookInstalled`,
