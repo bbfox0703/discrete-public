@@ -59,6 +59,20 @@ end
 
 -- Minimal pipe RPC + JSON parser (duplicated to keep this script standalone).
 local PIPE   = [[\\.\pipe\DiscreteBfx]]
+-- Keep CE's window alive while we block. CE's Lua `sleep` is a bare Win32
+-- Sleep and pumps NOTHING, so every sleep in a retry loop must be paired with
+-- this or Cheat Engine freezes for the loop's whole duration.
+--
+-- Prefers processMessagesPaintOnly: celua.txt labels plain processMessages
+-- "Warning, not recommended" (other Lua scripts and timers run during it and
+-- can modify locals underneath us), and paint-only ignores mouse/keyboard so
+-- it cannot re-enter our own handlers. Feature-tested, not version-gated -- an
+-- undefined global is nil in Lua, not an error.
+local function pump()
+    local f = rawget(_G, "processMessagesPaintOnly") or rawget(_G, "processMessages")
+    if type(f) == "function" then pcall(f) end
+end
+
 local nextId = 0
 
 local function parseValue(s, i)
@@ -111,10 +125,11 @@ local function rpc(cmd, args)
     -- Yield to CE's Windows message pump every RPC. registerClassSymbols on
     -- a 300+ method class issues that many back-to-back pipe round-trips on
     -- CE's main thread; without this CE appears hung for the duration of
-    -- the loop. processMessages() alone proved insufficient — empirically
-    -- a kernel-level sleep(1) is required to actually let the message pump
-    -- breathe. Per-method cost is ~1 ms, so 330 methods ~= +330 ms total.
-    if processMessages then processMessages() end
+    -- the loop. BOTH calls are needed and they do different jobs: pump()
+    -- drains the message queue, while sleep(1) yields the timeslice so the
+    -- queue actually refills. CE's `sleep` is a bare Win32 Sleep and pumps
+    -- nothing on its own. Per-method cost is ~1 ms, so 330 methods ~= +330 ms.
+    pump()
     sleep(1)
     nextId = nextId + 1
     local function quote(x) return '"' .. tostring(x):gsub('"', '\\"') .. '"' end
@@ -134,7 +149,11 @@ local function rpc(cmd, args)
     for attempt = 1, 15 do
         f, fe = io.open(PIPE, "r+b")
         if f then break end
-        sleep(200)
+        -- pump() belongs INSIDE the loop. The one at the top of rpc() fires
+        -- once, before it; without this the 15 x 200 ms retry budget is three
+        -- seconds of completely frozen Cheat Engine — on exactly the path that
+        -- runs when the DLL's pipe is not up yet, i.e. the common first try.
+        sleep(200); pump()
     end
     if f == nil then error("pipe open: " .. tostring(fe)) end
     f:write(line .. "\n"); f:flush()

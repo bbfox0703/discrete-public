@@ -33,6 +33,27 @@ local function debugOn()
 end
 M.debugOn = debugOn
 
+-- Ceiling on how long a single DLL export call may freeze Cheat Engine.
+-- See M.callDLL for why this must never be nil.
+local kDllCallTimeoutMs = 10000
+
+--- Keep CE's window responsive while we block.
+---
+--- CE's Lua `sleep` is a bare Win32 Sleep — it pumps NOTHING. Any retry loop
+--- that just sleeps freezes Cheat Engine for its whole duration, so every such
+--- loop must call this alongside the sleep.
+---
+--- Prefers `processMessagesPaintOnly`: CE's own docs (celua.txt) label plain
+--- `processMessages` "Warning, not recommended" because other Lua scripts and
+--- timers run during it and can modify locals underneath us — and paint-only
+--- ignores mouse/keyboard, so it cannot re-enter our own handlers. Feature-
+--- tested rather than version-gated, since an undefined global is simply nil
+--- in Lua rather than an error.
+function M.pump()
+    local f = rawget(_G, "processMessagesPaintOnly") or rawget(_G, "processMessages")
+    if type(f) == "function" then pcall(f) end
+end
+
 -- Sticky per-session error flag. err() sets it; guard()/closeLuaEngineIfQuiet()
 -- read it to decide whether to close the Lua Engine. resetError() clears it at
 -- the start of a guarded run. It is ALSO mirrored to the global
@@ -134,14 +155,27 @@ function M.callDLL(funcName, retType, ...)
     --     MSVC gives them __cdecl. This matters on the 32-bit Mono build;
     --     x64 has a single convention either way. It does NOT depend on the
     --     return type.
-    --   timeout — milliseconds; nil = wait indefinitely. Never pass 0: CE then
-    --     skips freeing the call stub, leaking it on every call.
     --   address — must be the THIRD argument. Passing it second makes CE read
     --     the export address as a timeout and the first vararg as the address.
-    local ret = executeCodeEx(1, nil, fn, ...)
+    --
+    --   timeout — MUST BE FINITE. `nil` means INFINITE, not "use a default",
+    --     and executeCodeEx blocks the CALLING thread in a WaitForSingleObject
+    --     with nothing on that path pumping messages. Called from an AA
+    --     {$lua} block that thread is CE's GUI thread, so a suspended target
+    --     or a faulting stub freezes Cheat Engine outright with no UI-level
+    --     recovery. A Lua-side pump cannot help — we are inside CE's call.
+    --     This value is therefore the ceiling on how long CE can sit frozen.
+    --     10 s because Discrete_Shutdown legitimately takes a few seconds:
+    --     PipeServer::Stop waits up to ~2 s for the acceptor and ~2 s more to
+    --     drain in-flight clients.
+    local ret, why = executeCodeEx(1, kDllCallTimeoutMs, fn, ...)
     if retType == "void" then return nil end
     if ret == nil then
-        error(TAG .. " " .. funcName .. " call returned nil (executeCodeEx failed).")
+        -- CE hands back `nil, reason` and the reason distinguishes six quite
+        -- different problems ('Execution timeout', 'Failure launching thread',
+        -- 'Failure reading the result address', …). Report what CE already
+        -- worked out rather than guessing at it.
+        error(TAG .. " " .. funcName .. " call failed: " .. tostring(why))
     end
     if retType == "bool" then return ret ~= 0 end
     return ret

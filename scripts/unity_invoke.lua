@@ -258,10 +258,24 @@ end
 -- Same retry scaffolding + main-thread yield as the sibling scripts.
 
 local PIPE   = [[\\.\pipe\DiscreteBfx]]
+-- Keep CE's window alive while we block. CE's Lua `sleep` is a bare Win32
+-- Sleep and pumps NOTHING, so every sleep in a retry loop must be paired with
+-- this or Cheat Engine freezes for the loop's whole duration.
+--
+-- Prefers processMessagesPaintOnly: celua.txt labels plain processMessages
+-- "Warning, not recommended" (other Lua scripts and timers run during it and
+-- can modify locals underneath us), and paint-only ignores mouse/keyboard so
+-- it cannot re-enter our own handlers. Feature-tested, not version-gated -- an
+-- undefined global is nil in Lua, not an error.
+local function pump()
+    local f = rawget(_G, "processMessagesPaintOnly") or rawget(_G, "processMessages")
+    if type(f) == "function" then pcall(f) end
+end
+
 local nextId = 0
 
 local function rpc(cmd, args)
-    if processMessages then processMessages() end
+    pump()
     nextId = nextId + 1
     local id = nextId
 
@@ -273,7 +287,12 @@ local function rpc(cmd, args)
     for _ = 1, 15 do
         f, fe = io.open(PIPE, "r+b")
         if f then break end
+        -- pump() must be INSIDE the loop. The one at the top of rpc() fires
+        -- once, before it, so without this the 15 x 200 ms retry budget is
+        -- three seconds of frozen Cheat Engine — on exactly the path that runs
+        -- when the DLL's pipe is not up yet, i.e. the common first attempt.
         if sleep then sleep(200) end
+        pump()
     end
     if f == nil then
         error(TAG .. " cannot open pipe " .. PIPE .. ": " .. tostring(fe) ..
