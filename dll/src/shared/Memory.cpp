@@ -329,16 +329,23 @@ struct ThreadBasicInformation {
 using NtQueryInformationThreadFn = LONG(NTAPI*)(HANDLE, int, void*, ULONG, ULONG*);
 
 NtQueryInformationThreadFn ResolveNtQueryInformationThread() noexcept {
-    static NtQueryInformationThreadFn cached = nullptr;
-    static bool tried = false;
-    if (!tried) {
-        tried = true;
+    // Dynamically-initialised function-local static: the C++11 rules make this
+    // resolve exactly once and block every other thread until it has.
+    //
+    // The previous `static bool tried` double-check was NOT thread-safe. Both
+    // statics were constant-initialised, so no guard was emitted, and a thread
+    // that set `tried = true` could be preempted before assigning `cached` — a
+    // concurrent caller then saw tried == true and took away a NULL pointer.
+    // Its caller reads that as "this OS cannot report thread stacks" and
+    // silently drops ALL thread-stack filtering for that scan, so stack memory
+    // gets scanned as if it were heap. Reachable on the first scan whenever two
+    // clients start one at once.
+    static const NtQueryInformationThreadFn cached = []() noexcept {
         HMODULE nt = ::GetModuleHandleW(L"ntdll.dll");
-        if (nt) {
-            cached = reinterpret_cast<NtQueryInformationThreadFn>(
-                ::GetProcAddress(nt, "NtQueryInformationThread"));
-        }
-    }
+        return nt ? reinterpret_cast<NtQueryInformationThreadFn>(
+                        ::GetProcAddress(nt, "NtQueryInformationThread"))
+                  : nullptr;
+    }();
     return cached;
 }
 
