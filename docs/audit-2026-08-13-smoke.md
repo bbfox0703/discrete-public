@@ -133,6 +133,29 @@ I-1 的修正是 UI 序列化時的 `(long)` cast(`ProtocolJson.cs`)。問題是
 **建議**:這項就靠單元測試,實機要做的話換一個有正常 gameplay `long` 欄位的 Mono 遊戲
 (例如 Elin),並且寫入前先存原值、驗完還原。
 
+### 第六輪:F-1 / F-2(2026-08-13,DiscreteUI 實機)
+
+UI 是 `DiscreteUI 0.1.0.1403+7e87105`(init log 自報)—— commit `7e87105` 就是 batch I,
+所以這個 exe **確實含 batch F + I 的 C# 修正**。連線後 Status 顯示 `Connected — build 1408`,
+也就是配對到重建後的 DLL。另外:**Phase 26 完整性自檢沒有誤報** —— `dist\DiscreteUI.exe`
+正常啟動、正常連線,這條 plan.md 上的待確認項順手清掉了。
+
+| 項 | 結果 | 證據 |
+|---|---|---|
+| **F-1** BulkGate lease | ✅ **PASS(關鍵性質)** | 修正的核心是「失敗的 `TryEnter` 把進行中的 lease 覆寫成 null → gate 永不釋放 → 所有 bulk 指令到重開 app 為止全死」。所以決定性的觀察是**跑完一個長 bulk op 之後 bulk 指令還能不能用**:用 Value Search 掃描當持有者(實測 **3732 MB / 61.7 秒**、2901 筆命中),結束後切回 Inspector 按 **Find instances → 正常回 1 match**(`view` log:`findInstances … matches=1/4096`),Recall 也正常運作。gate 乾淨釋放,沒有卡死 |
+| **F-2** AobMaker 並發 | ✅ **PASS(在此可達的範圍內)** | 對兩個 AobMaker 通道(DLL plugin ↻ / App ↻)連續快點 **9 次**(同一個 batch 內背靠背,沒有 round-trip 間隔):兩個 chip 狀態全程穩定、Status 保持 connected、**UI log 四個類別(init/pipe/view/snapshot)完全沒有任何 exception / error 行**,只有乾淨的 `AobMaker CheckAvailability: pipe unavailable`。修正前共用 `_pipe` 欄位且無同步原語,並發會互相 dispose 對方的 stream(`ObjectDisposedException`)|
+
+**兩點誠實的限制**
+
+- **F-1 的「爭用」那一半沒能觸發**:主視窗在 bulk op 進行中會把整個 tab strip disable
+  (Class Pivot Wave A 的 busy-gating),所以從主視窗根本按不到第二個 bulk 指令 —— 這本身
+  比錯誤訊息更好。而 Inspector 自己的 `Find instances` 在這台只要 **<1 秒**(SIMD 掃描,
+  我另外量過 40 個 class 沒有一個超過 0.8 秒),所以連續兩次點擊也撞不進那個視窗。
+  驗到的是「gate 會正確釋放」,沒驗到「失敗的 TryEnter 不會弄壞 lease」。
+- **F-2 兩端都沒有 server 在聽**:`AOBMaker.UI.exe` 有跑起來(`D:\Github\AOBMaker\publish`),
+  但它的 pipe 沒開(UI log 一直回 `pipe unavailable`,它的 server 大概要在自己的介面裡啟用)。
+  所以每次呼叫都在 connect 就失敗,race window 比真的有 server 時窄。
+
 **CE 那組的額外發現**
 
 - 🔴 **`injectDLL` 失敗被吞掉 → bridge 謊報成功**(已修)。celua.txt:581 說 `injectDLL` 成功回 true,失敗回 **false**;`unity_dump.lua` 卻只檢查 `ok == nil`。實測 `injectDLL("<不存在>.dll")` 回 **false(boolean)**,於是 main() 一路印出 `DLL injected` + **`Pipe ready`** + `Launch DiscreteUI.exe and click Connect`,而實際上**什麼都沒注入**(module 沒 mapped、pipe 沒開)。唯一線索是 DEBUG-gated 的 WARN,預設看不到。這正好是 P3 同一個病:沒查 CE API 的回傳約定。修法:改 `if not ok`,並把找過的路徑印出來。
@@ -193,14 +216,14 @@ I-1 的修正是 UI 序列化時的 `(long)` cast(`ProtocolJson.cs`)。問題是
   **PASS**:記憶體回落(最後一個 client 離開時 session 被釋放)。
   **FAIL**:數十 MB 一直留著不還。
 
-- [ ] **F-1 · BulkGate lease**(使用者立即有感)  ⬜ *UI-only;2026-08-13 的 computer-use 授權被拒,未執行*
+- [x] **F-1 · BulkGate lease**(使用者立即有感)  ✅ *gate 在 61.7s 的 value scan 後乾淨釋放,Find instances 正常;爭用那半被 UI 的 busy-gating 擋住而觸發不了(見上)*
   Inspector 跑 **Find instances**,**在它還在跑的時候**按 **Recall bookmark**。
   應看到「Another bulk operation is running」提示。等 Find 結束後,**再跑一次任何 bulk 指令**。
   **PASS**:後續 bulk 指令正常可用。
   **FAIL**:所有 bulk 指令從此失效,直到重開 app(修正前:失敗的 `TryEnter` 把 Find 的 lease 覆寫成 null,
   gate 永不釋放)。
 
-- [ ] **F-2 · AobMaker 並發**  ⬜ *UI-only;同上未執行*
+- [x] **F-2 · AobMaker 並發**  ✅ *兩通道連續快點 9 次:chip 穩定、UI log 零 exception;但兩端都沒有 server 在聽,race window 較窄*
   快速連續觸發兩個 AobMaker 命令(例如 `Copy: aobscan` 後立刻按連線列的 ↻)。
   **PASS**:兩者各自完成或乾淨失敗。
   **FAIL**:`ObjectDisposedException`、回應內容交錯、或 chip 狀態亂跳。
