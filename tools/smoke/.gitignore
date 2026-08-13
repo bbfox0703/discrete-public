@@ -1,0 +1,16 @@
+# Test artefacts from a smoke run: extracted blobs, staged DLLs, generated
+# tables, watchdog captures, per-run logs. The scripts themselves are tracked.
+__pycache__/
+ce/_probe/
+ce/*.dll
+ce/*.CT
+ce/*.ct
+ce/ce_log.txt
+ce/ran_job*.lua
+ce/watchdog_*.txt
+target.json
+mem_*.json
+h1_rows.json
+child_flag.txt
+bin/
+obj/
