@@ -203,12 +203,31 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
 
 **新發現(不在 audit #4 清單內)**
 
-- 🟠 **`scanFieldValue` 完全不可取消** — 它沒有開 `ScanCancel::Scope`
-  ([ExportAPI.cpp:5506](../dll/src/shared/ExportAPI.cpp) 附近),而 `RequestCancel()` gate 在
-  `g_scanActive`,所以 **Cancel 按鈕與 client 斷線都殺不掉它**。實測:client 在第 2 秒被
-  強制 kill,掃描仍跑完整 33 秒(Core Keeper 4 GB heap)。`ScanCancel.h` 的註解已經寫到
-  「`scanFieldValue` 沒有 Scope」,但只談了旗標污染,沒談「因此無法取消」。
-  同一個 handler 正是 P2 的現場,值得一起處理。
+- ✅ **`scanFieldValue` 完全不可取消 —— 已修 + live-verified(2026-08-13,build #1410/#1411)**。
+  它沒有開 `ScanCancel::Scope`,所以 `g_scanActive` 永遠是 false、`RequestCancel()` 是 no-op ——
+  **Cancel 按鈕和 client 斷線都殺不掉它**(實測:client 在第 2 秒被 kill,4 GB heap 上仍跑完
+  整整 33 秒)。底層的輪詢本來就在(`RunParallelScan` 與 `ReverseLookupIndex::Build` 都查
+  `IsCancelRequested`),缺的只是那個 Scope。
+  **修法三部分**:
+  ① 兩個 backend 的 `CmdScanFieldValue` 各開一個 `ScanCancel::Scope`;
+  ② **每一個結果 return 前檢查旗標** —— 被取消的掃描留下的是**截斷的**候選清單,把它當成完整
+     結果送回去就是 P2 的靜默截斷從反方向再來一次;另外在 index build 之後補一個 early-out,
+     不必等到把每個候選都 resolve 完才發現已取消;
+  ③ **`ScanCancel.h` 的 `g_scanActive` 由 bool 改成計數** —— 掃描真的會重疊(第二個 pipe
+     client、CE bridge、或另一個 DiscreteUI),而 bool 之下新加的這個 Scope 會**弄壞既有行為**:
+     第二個 Scope 的 ctor 會清掉第一個掃描的 cancel(讓它變不可取消),dtor 又會在第一個還在跑
+     時把 `active` 歸零(再一次讓它不可取消)。計數之後只有**最外層**進場時清、只有**最後一個**
+     離場時清,順便讓 nesting 也安全。
+  **實測(Core Keeper Mono x64,4 GB heap,未取消掃描 33.3 s)**:`cancelScan` 後 **0.40 秒**
+  回來、回報 `ok=false / cancelled=true / error=cancelled`、**0 筆候選**(沒有截斷清單);
+  client 被 kill 後 CPU 在 **t=+3.0 s** 回到 idle(修前是整整 33 秒);下一次掃描完整
+  (3.90 GB、200 筆、與 baseline 197/200 —— 與「連續兩次未取消掃描」的對照組同一水準,
+  所以 P2 沒有回歸)。**重疊測試**:兩個同時進行的掃描 + 一次 cancel → 兩邊都在 6.9 秒內
+  回報 cancelled,之後的掃描完整。**IL2CPP(Utawarerumono)也驗過**:那邊 SIMD 路徑 4.3 GB
+  只要 ~1.8 s,所以 cancel 延遲要縮到 0.4 s 才落在掃描期間內 —— 0.13 s 後回報 cancelled、
+  下一次掃描 200/200。
+  UI 端不需要改:`ValueSearchViewModel` 早就把 `error == "cancelled"` 當成 sentinel
+  (顯示 `Scan cancelled.`),而 `beginValueScan` 本來就會回這個形狀,所以這不是新的 wire 契約。
 - 🟡 **`getMethodAobPattern` 會越過函式尾端** — 要 48 bytes 就給 48 bytes,即使函式本體只有
   24 bytes(`...C3` 之後全是 padding/零)。結果 pattern 帶著一串零 → 在 308 MB 可執行記憶體
   裡 **223 個命中**。決定唯一性的是「視窗長度 vs 函式長度」,不是解碼器;唯一 AOB 本來就
@@ -432,7 +451,7 @@ teardown 確實得等那個卡住的 client,**但 6.41 秒就回來了**,而那�
 | `dist/` 的 DLL 落後 batch H + I | ✅ 已重建 |
 | C-2 的 audit 修法沒解到真因(colon vs dot)| ✅ 已重修 + live-verified |
 | `injectDLL` 失敗被吞掉 → bridge 謊報 "Pipe ready" | ✅ 已修 |
-| `scanFieldValue` 完全不可取消 | ⬜ 待修(新發現)|
+| `scanFieldValue` 完全不可取消 | ✅ 已修 + live-verified(Mono + IL2CPP)|
 | `getMethodAobPattern` 會越過函式尾端 | ⬜ 待修(新發現)|
 | CE 文件與程式不符(`unity_dump.lua` 沒有 `inject()`)| ⬜ 待修文件 |
 
