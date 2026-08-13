@@ -863,6 +863,23 @@ bool SehReadKlassAt(std::uintptr_t vtable, std::uintptr_t& outKlass) noexcept {
 
 #pragma warning(pop)
 
+// Cap for NEGATIVE vtable-memo entries. A positive memo is bounded by the
+// number of real vtables, but a negative is recorded for every DISTINCT
+// non-vtable qword in the entire heap walk — and heap words are overwhelmingly
+// unique (floats, counters, one-off pointers, string bytes). At roughly 48
+// bytes per unordered_map node a multi-GB heap grew this to hundreds of MB
+// *inside the game's own address space*. Past the cap we stop recording new
+// negatives; everything already recorded still serves, so the
+// frequently-repeated values — the ones the memo exists for — stay cached
+// because they are seen early. The 32-bit build gets a far smaller cap: it
+// shares the game's 2 GB.
+//
+// Namespace-scope on purpose: both heap walkers below (FindAllInstances and
+// ReverseLookupIndex::Build) memoise, and keeping the cap in one place is what
+// stops the two from drifting apart again.
+constexpr std::size_t kMaxMemoEntries =
+    (sizeof(void*) == 8) ? (2u * 1024u * 1024u) : (256u * 1024u);
+
 }  // namespace
 
 BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
@@ -901,19 +918,9 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     std::uintptr_t minKlass = 0, maxKlass = 0;
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
 
-    // The NEGATIVE entries are the unbounded ones. A positive memo is capped by
-    // the number of real vtables, but a negative is recorded for every DISTINCT
-    // non-vtable qword in the entire heap walk — and heap words are
-    // overwhelmingly unique (floats, counters, one-off pointers, string bytes).
-    // At roughly 48 bytes per unordered_map node a multi-GB heap grew this to
-    // hundreds of MB *inside the game's own address space*, which the comment
-    // above ("most qwords are repeat vtables") only holds for the positives.
-    // Past the cap we stop recording new negatives; everything already recorded
-    // still serves, so the frequently-repeated values — the ones the memo
-    // actually exists for — stay cached because they are seen early.
-    // The 32-bit build gets a far smaller cap: it shares the game's 2 GB.
-    constexpr std::size_t kMaxMemoEntries =
-        (sizeof(void*) == 8) ? (2u * 1024u * 1024u) : (256u * 1024u);
+    // Negative memo entries are the unbounded ones — see kMaxMemoEntries above,
+    // which the comment "most qwords are repeat vtables" only holds for the
+    // positives.
     auto memoNegative = [&vtMemo](std::uintptr_t key) {
         if (vtMemo.size() < kMaxMemoEntries) vtMemo[key] = 0;
     };
@@ -1179,8 +1186,13 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
 
     // Per-scan vtable→klass memo (a class with N instances pays ONE deref +
     // domain check, then N-1 cache hits). Not merged into the global cache —
-    // this is a throwaway index.
+    // this is a throwaway index. Negatives are capped exactly as in
+    // FindAllInstances: this walk covers the same multi-GB heap, so an
+    // uncapped negative memo grows just as far inside the game's address space.
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
+    auto memoNegative = [&vtMemo](std::uintptr_t key) {
+        if (vtMemo.size() < kMaxMemoEntries) vtMemo[key] = 0;
+    };
 
     // Single-threaded by design (see header): the Mono heap walk carries the
     // 活俠傳 BDWGC-freeze risk, so we reuse FindAllInstances' Sleep(1)-yield
