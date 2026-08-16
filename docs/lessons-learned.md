@@ -19,7 +19,9 @@
 - [GC-root lifetime for `callMethod` returns](#gc-root-lifetime-for-callmethod-returns)
   — managed return values can be collected before the caller reads them.
 - [Avalonia 12 Windows-only build](#avalonia-12-windows-only-build) —
-  Skia + HarfBuzz + Win32 wiring, AOT analyzer strictness, the
+  Skia + HarfBuzz + Win32 wiring, **`SkiaSharp`/`HarfBuzzSharp` must
+  match what Avalonia was built against** (NuGet cannot enforce it →
+  native heap corruption), AOT analyzer strictness, the
   **DataGrid AOT sort three-layer trap**.
 - [Native AOT + integrity-stamping (Phase 26)](#native-aot--integrity-stamping-phase-26) —
   `InternalsVisibleTo` matches AssemblyName, AOT preserves byte
@@ -1366,6 +1368,85 @@ be added explicitly:
 
 Documented in the [Avalonia 12 Win-only memory entry](../C:\Users\%USERNAME%\.claude\projects\D--Github-discrete\memory\feedback_avalonia12_winonly.md);
 the symptom-to-cause map is the load-bearing part for diagnosis.
+
+### `SkiaSharp` / `HarfBuzzSharp` must match what Avalonia was built against — NuGet cannot enforce it
+
+**Rule: never bump `SkiaSharp` or `HarfBuzzSharp` with the rest of the
+dependencies.** They are not ours to choose — they are whatever
+`Avalonia.Skia` / `Avalonia.HarfBuzz` were compiled against. Both
+versions live once in [ui/Directory.Build.props](../ui/Directory.Build.props)
+as `$(SkiaSharpVersion)` / `$(HarfBuzzSharpVersion)`, feeding all 20
+references across `UnityDumpUI` and `UnityDumpUI.Tests`.
+
+**Why nothing in the build catches a mismatch.** Avalonia declares an
+**open-ended minimum** (`SkiaSharp >= 3.119.4`), so a major-version jump
+*satisfies* the constraint. No NU1608, no NU1605, and
+`TreatWarningsAsErrors=true` has nothing to fail on — NuGet's dependency
+model simply cannot express "and not a different major". The build stays
+green, the app starts, and what breaks is native, later, and elsewhere.
+
+**What it costs when it drifts.** On the sibling
+[UE5CEDumper](https://github.com/bbfox0703/UE5CEDumper) project (commit
+`a2c02875`), routine dependency bumps had carried SkiaSharp one major
+ahead and HarfBuzzSharp six majors ahead. Its UI died twice in 14 minutes
+with `0xC0000374` **STATUS_HEAP_CORRUPTION**. Method note, because the
+first dump was useless and *had* to be: heap corruption is detected at
+the **next** heap operation, so its stack is the **detector, not the
+culprit**. Re-running under full **page heap** (IFEO
+`GlobalFlag=0x02000000` + `PageHeapFlags=0x3`) converted the next
+occurrence into an immediate `0xC0000005` inside `libSkiaSharp.dll`
+(WER event `AutoVerifierV2`, faulting address a guard page).
+**Re-run a heap-corruption crash under page heap; do not try to read the
+first dump.**
+
+This repo had drifted the same way — SkiaSharp **4.150.1** (one major
+ahead) and HarfBuzzSharp **14.2.1.1** (six ahead) against Avalonia
+12.1.0, which asks for **3.119.4** / **8.3.1.3** — and was realigned
+preemptively, before it produced a crash of its own.
+
+**How to re-derive the right versions** after any Avalonia change (read
+them out of the resolved graph, never off nuget.org's "latest"):
+
+```bash
+python -c "import json;d=json.load(open('ui/UnityDumpUI/obj/project.assets.json'));t=list(d['targets'].values())[0];print(t['Avalonia.Skia/12.1.0']['dependencies'])"
+```
+
+**This is enforced, not just documented.** UE5CEDumper shipped the
+comment alone; here the `_VerifyRenderStackMatchesAvalonia` target in
+[ui/Directory.Build.props](../ui/Directory.Build.props) reads Avalonia's
+own `.nuspec` out of the NuGet cache and **fails the build** if our pins
+have drifted from what it declares. Same philosophy as
+`_FailOnExplicitMtpPin` — the whole lesson of this incident is that
+nothing in the build could catch it, so the fix is not only to correct
+the versions but to make the next drift impossible to miss.
+
+Three checks run (`Avalonia.Skia`→`SkiaSharp`,
+`Avalonia.HarfBuzz`→`HarfBuzzSharp`, and `Avalonia.Skia`→`HarfBuzzSharp`,
+the third catching the two Avalonia packages disagreeing with each
+other), in all three projects, `BeforeTargets="Build"` so it fires even
+on an up-to-date incremental build.
+
+It was verified to **actually fire** — a guard that never fires is not a
+guard. `-p:SkiaSharpVersion=4.150.1` and `-p:HarfBuzzSharpVersion=14.2.1.1`
+(the exact versions this repo had drifted to) each fail with the correct
+target version named; `-p:AvaloniaVersion=12.1.1` still passes, because
+12.1.1 declares the same native deps. **Bumping Avalonia is not blocked —
+only bumping the native libraries away from it.**
+
+⚠ **The regression check is broad and needs a human.** Skia and HarfBuzz
+draw and shape *everything*, so a downgrade touches every pixel. Open
+each tab; look for missing glyphs, wrong metrics, clipped text, DataGrid
+rows that fail to paint — and check a 繁中 string renders, since
+HarfBuzz went back six majors and text shaping is where breakage shows
+first. A pass here is several quiet sessions of ordinary use, not one
+green run.
+
+**What a page-heap dump does and does not prove.** It proves libSkiaSharp
+accessed out of bounds. It does **not** prove the version gap *caused*
+it — there is no PDB for `libSkiaSharp`, so the faulting function is
+unknown. If crashes appear at the aligned versions, that hypothesis is
+refuted and the next step is a Skia-side bug, not another dependency
+change.
 
 ### AOT analyzers are strict — no reflection JSON
 
