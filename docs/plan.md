@@ -8,15 +8,18 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1413**(2026-08-13:DLL x64 **#1412** / x86 **#1413**,0 warning —— 含 `scanFieldValue` 可取消 + AOB 函式尾端截斷修正;`dist` UI = `0.1.0.1403+7e87105`)|
-| **Current phase** | 🐛 **Leak/bug audit #4 —— 修復完成 + live-smoke 收工(24/25,0 FAIL)**。詳見 [audit-2026-08-13-smoke.md](audit-2026-08-13-smoke.md);前:audit #3(2026-07-15)|
-| **Branches** | `dev` → 已 merge `main`(2026-08-13)|
-| **Tests** | **1130 UI tests green**(2026-08-13 重跑,0 failed —— 涵蓋本輪的 Lua/C++ 改動)|
+| **Current build** | **#1417**(2026-08-16:`build.cmd publish`,UI-only —— Skia/HarfBuzz 版本對齊後重建 `dist`。前:#1413,2026-08-13 DLL x64 **#1412** / x86 **#1413**)|
+| **Current phase** | 🎨 **Avalonia/Skia/HarfBuzz 版本綁定 + build-time guard(2026-08-16,UI 已實測)**。前:🐛 Leak/bug audit #4 —— 修復完成 + live-smoke 收工(24/25,0 FAIL),詳見 [audit-2026-08-13-smoke.md](audit-2026-08-13-smoke.md)|
+| **Branches** | `dev` → 已 merge `main`(2026-08-16)|
+| **Tests** | **1130 UI tests green**(2026-08-16 重跑,0 failed —— 版本對齊 + guard 後重驗)|
 | **Mid-flight** | 無 |
 
-**Last updated**: 2026-08-13
+**Last updated**: 2026-08-16
+
+> ✅ **`dist/` 已用對齊後的版本重建**(2026-08-16,`build.cmd publish` → build **#1417**):`libSkiaSharp` 12.25→**11.63 MB**、`libHarfBuzzSharp` 2.04→**1.82 MB**,即 Avalonia 12.1.0 實際依據的 SkiaSharp 3.119.4 / HarfBuzzSharp 8.3.1.3。使用者已用這份 build 實測 UI。
 
 **待 live-smoke(none blocking)**:
+- 🎨 **Skia/HarfBuzz 版本對齊(2026-08-16)—— 首輪 UI 實測 OK,持續觀察中** — 使用者已用 build #1417(對齊後的 dist)實測 UI,渲染無異常。**但這項的 PASS 定義是「連續幾次日常使用都沒事」而非單次跑綠**(UE5CEDumper 那邊在舊版本上也是跑了很多 session 才炸),所以**不關閉**:之後每次用 UI 時順便留意缺字 / 字距 / 文字裁切 / DataGrid 畫不出來 / 繁中字串;**一旦 crash 就是明確 FAIL**(抓 WER dump,回報 faulting module 是否仍為 `libSkiaSharp`)。見下方 🎨 批次。
 - ✅ **audit #4 的 live-smoke 已收工(2026-08-13,24/25、0 FAIL)** —— 見 [audit-2026-08-13-smoke.md](audit-2026-08-13-smoke.md)。唯一未驗的 I-1 是**原理上驗不出來**(`(long)value` 與 `ulong` 位元樣式相同,round-trip 不管修沒修都會過),以單元測試為準。A-1 由使用者實測 OK(Steam overlay)。整套 harness 留在 [tools/smoke/](../tools/smoke/)。**以下是 audit #4 之前就存在的 smoke backlog,仍未動:**
 - 🎮 **UE5-port wave(2026-07-12)待 live-smoke** — ① **Keep-Foreground**:Mono + IL2CPP(尤其 managed `runInBackground` 被 strip 的 IL2CPP 遊戲)勾選 → alt-tab → 遊戲持續執行 + 滑鼠釋放、取消 → 恢復暫停;reconnect 後 toggle 重新同步。② **通用變速/低重力**:`Time.timeScale`(0.25×/2× 等 + 0 暫停)即時生效、`Physics.gravity` scale(Moon 0.16× / Zero-G 0×)套用 + Reset 還原 base。詳見 [teleport.md](teleport.md)。**AOT publish 待跑**(全 source-gen/compiled-binding,AOT 風險低)。
 - 🧭 **Teleport wave 1(2026-07-02)待 live-smoke** — 需 inject 實機(Mono + IL2CPP)驗:set target→Refresh 顯示合理座標、Save→移動→Recall 回原點、Undo、座標貼上 round-trip、directional Forward/Back、**遊戲聚焦時全域熱鍵(NumLock on)**、recall 旋轉還原。詳見 [teleport.md](teleport.md) live-smoke 表。**AOT publish 0/0 + integrity hash 三槽注入待跑**(wave 收尾;程式全 source-gen/compiled-binding/BCL,AOT 風險低)。
@@ -36,6 +39,13 @@
 ## Open Backlog / TODO
 
 > 這是**唯一**的待辦清單。所有 open 項目集中於此;Phase Overview 表只記 ship 狀態,不重複放 todo。
+
+### 🎨 2026-08-16 Avalonia / SkiaSharp / HarfBuzzSharp 版本綁定(比照 UE5CEDumper)
+
+- [x] **把 `SkiaSharp` / `HarfBuzzSharp` 對回 Avalonia 實際編譯所依據的版本** ✅(2026-08-16,UI/Core-only,1130 tests green、Release 0 warning、AOT publish clean)。**背景**:sibling repo [UE5CEDumper](https://github.com/bbfox0703/UE5CEDumper) 的 `a2c02875` —— 它的 UI **14 分鐘內死兩次**,`0xC0000374` STATUS_HEAP_CORRUPTION;full page heap 當場抓到 `libSkiaSharp.dll` 越界存取(`0xC0000005`、WER `AutoVerifierV2`、目標位址是 guard page)。真因是例行 `chore(deps)` 把 SkiaSharp 拉到**超前一個 major**、HarfBuzzSharp **超前六個 major**。**本 repo 當時是同一個形狀**:Avalonia 12.1.0 要 `SkiaSharp 3.119.4` / `HarfBuzzSharp 8.3.1.3`,實際卻釘著 **4.150.1** / **14.2.1.1** —— 還沒炸,先對回去。**修法**:`$(AvaloniaVersion)` / `$(SkiaSharpVersion)` / `$(HarfBuzzSharpVersion)` 三個 property 集中在 [ui/Directory.Build.props](../ui/Directory.Build.props)(附 ⚠ 區塊寫明理由 + 重新推導指令),`UnityDumpUI` 與 `UnityDumpUI.Tests` 共 20 個 `PackageReference` 全部改讀 property —— **兩個專案各自釘死是最會潛伏的形狀**(測試會載到與 app 不同的 `libSkiaSharp.dll` 而沒人知道)。順手修掉 `Directory.Build.props` 裡的 **dead property**:`AvaloniaVersion` 寫 12.0.1 但沒有任何地方讀它(csproj 全部硬寫 12.1.0)—— 同一類陷阱,改到它的人會以為自己升級了 Avalonia。**NuGet 擋不住這件事**:Avalonia 宣告的是**開放下限**(`SkiaSharp >= 3.119.4`),跨 major 反而**滿足**約束 → 沒有 NU1608 / NU1605,`TreatWarningsAsErrors=true` 也無從失敗。**已驗**:restore 0 warning、Release build 0 warning、**1130 UI tests green**、AOT publish 乾淨(51.7 MB)、native 資產確實換掉(`libSkiaSharp` 12.25→**11.63 MB**、`libHarfBuzzSharp` 2.04→**1.82 MB**)、AOT exe 起得來且 init log 無 error(HarfBuzz 若不相容會在寫 log 前就 `0xC0000409` 死掉)。心得寫進 [lessons-learned.md](lessons-learned.md#skiasharp--harfbuzzsharp-must-match-what-avalonia-was-built-against--nuget-cannot-enforce-it)(含 page-heap 方法論:heap corruption 的第一份 dump 指的是**偵測者不是元凶**,要重跑 page heap)。
+- [ ] ⚠️ **rendering regression check(需人眼,範圍廣)—— 首輪 OK,但刻意不關閉** — 使用者已用 build **#1417** 實測 UI,**渲染無異常**。Skia / HarfBuzz 是畫**所有東西**的,降版等於動到每一個 pixel,所以要看的是:**缺字、字距/度量跑掉、文字被裁切、DataGrid 列畫不出來**,以及**繁中字串**(HarfBuzz 退了**六個 major**,text shaping 最先會壞)。**這項的 PASS 是「連續幾次日常使用都沒事」,不是單次跑綠** —— UE5CEDumper 在錯配版本上也跑了很多 session 才炸,所以單次 OK 不足以結案;維持 open,之後日常使用順便留意。只要出現一次 crash 就是明確 FAIL(抓 WER dump,回報 faulting module 還是不是 `libSkiaSharp`)。
+- [x] **build-time guard —— 讓下一次 drift 不可能被漏掉** ✅(2026-08-16)。UE5CEDumper 只留註解;這裡把它變成 build 失敗,理由正是這次事件的核心「**沒有任何東西擋得住**」。新增 `_VerifyRenderStackMatchesAvalonia` target([ui/Directory.Build.props](../ui/Directory.Build.props)),用 `XmlPeek` 直接讀 NuGet cache 裡 **Avalonia 自己的 `.nuspec`**(那是權威來源,且每次 restore 後必定在),比對三組:`Avalonia.Skia`→`SkiaSharp`、`Avalonia.HarfBuzz`→`HarfBuzzSharp`、`Avalonia.Skia`→`HarfBuzzSharp`(第三組抓「兩個 Avalonia 套件彼此不一致」)。XPath 用 `local-name()` 避開 nuspec schema URL 改版;`Distinct()` 收合 per-TFM 重複宣告(若哪天各 TFM 宣告不同版本,收合不了 → 比對失敗,**這正是期望行為**,要人來判斷)。`BeforeTargets="Build"` → **incremental build 也會跑**(只有 CoreCompile 會被跳過),手改版本躲不掉。三個專案都跑(pin 是 repo-wide,不讓任何專案繞過)。**已實測會 fire**(never-firing predicate 就是 defect):`-p:SkiaSharpVersion=4.150.1`、`-p:HarfBuzzSharpVersion=14.2.1.1`(= 本 repo 原本漂到的版本)各自 build FAILED 且錯誤訊息直接報出正確版本 + 修法;`-p:AvaloniaVersion=12.1.1` **仍然 PASS**(12.1.1 宣告相同 native deps)→ **升 Avalonia 不會被擋,只擋把 native lib 升離 Avalonia**。加了 guard 後重驗:Release 0 warning、1130 tests green、AOT publish 乾淨。
+- [ ] **未來升 Avalonia 時的固定動作** — 改 `$(AvaloniaVersion)` 之後**必須**重新從 resolved graph 推導這兩個版本,不可跟著「update all」升:`python -c "import json;d=json.load(open('ui/UnityDumpUI/obj/project.assets.json'));t=list(d['targets'].values())[0];print(t['Avalonia.Skia/<新版本>']['dependencies'])"`。**忘了也沒關係 —— guard 會用正確版本號直接讓 build 失敗**,上面那行是要「知道該填什麼」時用的。
 
 ### 🔴 2026-08-13 收尾補丁 + 第一輪 headless live-smoke
 

@@ -16,10 +16,131 @@
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
     <InvariantGlobalization>true</InvariantGlobalization>
 
-    <!-- Avalonia 12 -->
-    <AvaloniaVersion>12.0.1</AvaloniaVersion>
-
     <!-- xUnit v3 -->
     <XunitV3Version>3.0.0</XunitV3Version>
   </PropertyGroup>
+
+  <!-- =========================================================================
+       RENDERING STACK VERSIONS — Avalonia + the two native libraries it wraps.
+
+       These live here, ONCE, because they are referenced from BOTH UnityDumpUI
+       and UnityDumpUI.Tests. A bump applied to one project and not the other is
+       the shape that hides longest: the test host would load a different
+       libSkiaSharp.dll than the app it is testing, and nothing would say so.
+
+       ⚠ SkiaSharpVersion / HarfBuzzSharpVersion MUST MATCH WHAT
+         Avalonia.Skia / Avalonia.HarfBuzz WERE BUILT AGAINST.
+         Do NOT bump them to "latest" along with the rest of the dependencies.
+         Read the required versions out of the resolved graph after any Avalonia
+         change, and move these to match:
+
+           python -c "import json;d=json.load(open('UnityDumpUI/obj/project.assets.json'));
+                      t=list(d['targets'].values())[0];
+                      print(t['Avalonia.Skia/$(AvaloniaVersion)']['dependencies'])"
+
+       NuGet cannot protect this. Avalonia declares an open-ended minimum
+       (SkiaSharp >= 3.119.4), so a major-version jump SATISFIES the constraint —
+       no NU1608, no NU1605, nothing for TreatWarningsAsErrors above to catch.
+       The build stays green and the app starts; what breaks is native, later,
+       and elsewhere.
+
+       This is not hypothetical. On the sibling UE5CEDumper project, routine
+       dependency bumps had carried SkiaSharp one major ahead and HarfBuzzSharp
+       six majors ahead of Avalonia, and its UI died twice in 14 minutes with
+       STATUS_HEAP_CORRUPTION (0xC0000374). Full page heap named the culprit
+       outright: an out-of-bounds access inside libSkiaSharp.dll (0xC0000005,
+       WER event AutoVerifierV2). This repo had drifted exactly the same way
+       (SkiaSharp 4.150.1, HarfBuzzSharp 14.2.1.1) and was realigned before it
+       could produce its own crash. See docs/lessons-learned.md.
+       ========================================================================= -->
+  <PropertyGroup>
+    <AvaloniaVersion>12.1.0</AvaloniaVersion>
+    <SkiaSharpVersion>3.119.4</SkiaSharpVersion>
+    <HarfBuzzSharpVersion>8.3.1.3</HarfBuzzSharpVersion>
+  </PropertyGroup>
+
+  <!-- =========================================================================
+       ENFORCEMENT for the ⚠ block above. The comment alone is what UE5CEDumper
+       shipped; this repo already turns "do not do X" into a build failure
+       elsewhere (_FailOnExplicitMtpPin in UnityDumpUI.Tests.csproj), and the
+       whole point of the Skia incident is that NOTHING in the build could catch
+       it. So catch it here.
+
+       Avalonia's .nuspec states the exact versions it was built against as bare
+       (non-range) dependency versions — that is the authority, and it is on disk
+       for every restored build. Read it and fail if our pins have drifted. Three
+       checks, because HarfBuzzSharp is declared by BOTH Avalonia packages and
+       the third catches them disagreeing with each other:
+
+         1. Avalonia.Skia     -> SkiaSharp      vs $(SkiaSharpVersion)
+         2. Avalonia.HarfBuzz -> HarfBuzzSharp  vs $(HarfBuzzSharpVersion)
+         3. Avalonia.Skia     -> HarfBuzzSharp  vs $(HarfBuzzSharpVersion)
+
+       Runs BeforeTargets="Build", which executes even on an up-to-date
+       incremental build (only CoreCompile gets skipped), so a hand-edited
+       version cannot slip through without a full rebuild.
+
+       The XPath is namespace-agnostic (local-name()) because the nuspec schema
+       URL changes between NuGet versions. A nuspec lists its dependencies once
+       per target framework, so Distinct() collapses the identical per-TFM
+       copies to a single value; if Avalonia ever declared DIFFERENT versions
+       per TFM, the list would not collapse and the comparison would fail —
+       which is the correct outcome, since a human has to decide.
+
+       Skips silently when the .nuspec is absent (pre-restore, or a machine that
+       has never pulled Avalonia). That is not a hole worth closing: changing
+       these versions requires a restore, and after any restore the file is
+       there.
+
+       Deliberately runs in ALL THREE projects, including UnityDumpUI.Core which
+       references no Avalonia package: the pins are repo-wide, so no project
+       should be able to dodge the check. In practice Core builds first and the
+       mismatch fails there — the error names ui/Directory.Build.props regardless
+       of which project MSBuild attributes it to.
+
+       Verified to actually fire (a guard that never fires is not a guard):
+       -p:SkiaSharpVersion=4.150.1 and -p:HarfBuzzSharpVersion=14.2.1.1 — the two
+       versions this repo had drifted to — each fail the build with the correct
+       target version named. -p:AvaloniaVersion=12.1.1 still passes, because
+       12.1.1 declares the same native deps: bumping Avalonia is not blocked,
+       only bumping the native libraries away from it.
+       ========================================================================= -->
+  <Target Name="_VerifyRenderStackMatchesAvalonia" BeforeTargets="Build">
+    <PropertyGroup>
+      <_NuGetRoot>$([MSBuild]::EnsureTrailingSlash('$(NuGetPackageRoot)'))</_NuGetRoot>
+      <_AvaloniaSkiaNuspec>$(_NuGetRoot)avalonia.skia/$(AvaloniaVersion)/avalonia.skia.nuspec</_AvaloniaSkiaNuspec>
+      <_AvaloniaHarfBuzzNuspec>$(_NuGetRoot)avalonia.harfbuzz/$(AvaloniaVersion)/avalonia.harfbuzz.nuspec</_AvaloniaHarfBuzzNuspec>
+    </PropertyGroup>
+
+    <XmlPeek XmlInputPath="$(_AvaloniaSkiaNuspec)"
+             Query="//*[local-name()='dependency'][@id='SkiaSharp']/@version"
+             Condition="'$(NuGetPackageRoot)' != '' and Exists('$(_AvaloniaSkiaNuspec)')">
+      <Output TaskParameter="Result" ItemName="_SkiaDeclaredBySkia" />
+    </XmlPeek>
+    <XmlPeek XmlInputPath="$(_AvaloniaSkiaNuspec)"
+             Query="//*[local-name()='dependency'][@id='HarfBuzzSharp']/@version"
+             Condition="'$(NuGetPackageRoot)' != '' and Exists('$(_AvaloniaSkiaNuspec)')">
+      <Output TaskParameter="Result" ItemName="_HarfBuzzDeclaredBySkia" />
+    </XmlPeek>
+    <XmlPeek XmlInputPath="$(_AvaloniaHarfBuzzNuspec)"
+             Query="//*[local-name()='dependency'][@id='HarfBuzzSharp']/@version"
+             Condition="'$(NuGetPackageRoot)' != '' and Exists('$(_AvaloniaHarfBuzzNuspec)')">
+      <Output TaskParameter="Result" ItemName="_HarfBuzzDeclaredByHarfBuzz" />
+    </XmlPeek>
+
+    <PropertyGroup>
+      <_SkiaWanted>@(_SkiaDeclaredBySkia->Distinct())</_SkiaWanted>
+      <_HarfBuzzWantedBySkia>@(_HarfBuzzDeclaredBySkia->Distinct())</_HarfBuzzWantedBySkia>
+      <_HarfBuzzWanted>@(_HarfBuzzDeclaredByHarfBuzz->Distinct())</_HarfBuzzWanted>
+    </PropertyGroup>
+
+    <Error Condition="'$(_SkiaWanted)' != '' and '$(_SkiaWanted)' != '$(SkiaSharpVersion)'"
+           Text="SkiaSharp version mismatch: Avalonia.Skia $(AvaloniaVersion) was built against SkiaSharp $(_SkiaWanted), but ui/Directory.Build.props pins $(SkiaSharpVersion).%0ANuGet will NOT flag this — Avalonia declares an open-ended minimum, so even a major-version jump satisfies the constraint. What breaks is native and later: the sibling UE5CEDumper project hit STATUS_HEAP_CORRUPTION (0xC0000374) inside libSkiaSharp.dll this way.%0AFix: set &lt;SkiaSharpVersion&gt; to $(_SkiaWanted) in ui/Directory.Build.props (do not bump it to 'latest'). If you deliberately intend the mismatch, you must edit this guard and say why.%0ASee docs/lessons-learned.md -> 'SkiaSharp / HarfBuzzSharp must match what Avalonia was built against'." />
+
+    <Error Condition="'$(_HarfBuzzWanted)' != '' and '$(_HarfBuzzWanted)' != '$(HarfBuzzSharpVersion)'"
+           Text="HarfBuzzSharp version mismatch: Avalonia.HarfBuzz $(AvaloniaVersion) was built against HarfBuzzSharp $(_HarfBuzzWanted), but ui/Directory.Build.props pins $(HarfBuzzSharpVersion).%0ANuGet will NOT flag this (open-ended minimum). Text shaping is where a mismatch shows first — missing glyphs, wrong metrics, clipped text, and 繁中 strings failing to render.%0AFix: set &lt;HarfBuzzSharpVersion&gt; to $(_HarfBuzzWanted) in ui/Directory.Build.props.%0ASee docs/lessons-learned.md -> 'SkiaSharp / HarfBuzzSharp must match what Avalonia was built against'." />
+
+    <Error Condition="'$(_HarfBuzzWantedBySkia)' != '' and '$(_HarfBuzzWantedBySkia)' != '$(HarfBuzzSharpVersion)'"
+           Text="HarfBuzzSharp version mismatch (via Avalonia.Skia): Avalonia.Skia $(AvaloniaVersion) was built against HarfBuzzSharp $(_HarfBuzzWantedBySkia), but ui/Directory.Build.props pins $(HarfBuzzSharpVersion).%0AIf the Avalonia.HarfBuzz check above passed while this one failed, the two Avalonia packages disagree with each other — resolve that upstream before picking a pin.%0ASee docs/lessons-learned.md -> 'SkiaSharp / HarfBuzzSharp must match what Avalonia was built against'." />
+  </Target>
 </Project>
