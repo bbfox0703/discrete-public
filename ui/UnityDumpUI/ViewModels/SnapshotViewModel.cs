@@ -796,6 +796,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// <c>&lt;&gt;c</c>, <c>&lt;Start&gt;d__N</c>).</summary>
     [ObservableProperty] private bool _hideSyntheticTypes = true;
 
+    /// <summary>
+    /// Reveal toggles for the Snapshot tab's two secondary strips: the diff
+    /// filter set, and the DB store row (folder / settings / per-side save +
+    /// delete + their status hints). Both were permanently docked; gated
+    /// strips cost 0 px while off, which is most of the time.
+    /// See docs/ui-spec.md -> Chrome density.
+    /// </summary>
+    [ObservableProperty] private bool _showFiltersPanel;
+    [ObservableProperty] private bool _showStorePanel;
+
     // ── "Changed" trichotomy (Phase 29-polish, 2026-05-29) ─────────────
     // The single ShowChanged toggle was split into three independent
     // sub-toggles so the user can express direction-based filters

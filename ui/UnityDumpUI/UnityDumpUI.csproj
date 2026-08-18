@@ -98,7 +98,21 @@
     <PackageReference Include="Avalonia.HarfBuzz" Version="$(AvaloniaVersion)" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="$(AvaloniaVersion)" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="$(AvaloniaVersion)" />
-    <PackageReference Include="Avalonia.Controls.DataGrid" Version="$(AvaloniaVersion)" />
+    <!-- Avalonia.Controls.DataGrid is NOT part of $(AvaloniaVersion): it ships
+         from its own repo (AvaloniaUI/Avalonia.Controls.DataGrid) on its own
+         cadence, so its patch number legitimately runs ahead of Avalonia core
+         (12.1.2 vs core's newest 12.1.1 — core has no 12.1.2). Same carve-out
+         as Avalonia.Angle.Windows.Natives above.
+         Kept at 12.1.2 deliberately: 12.1.0 → 12.1.2 is three commits, two of
+         which are scrolling/layout fixes this app's grids depend on —
+         "vertical scrollbar LargeChange synchronization" and "scroll chaining
+         at layout-rounded boundaries". The 2026-08-18 density pass leans on
+         exactly that behaviour (Auto-width columns overflowing into horizontal
+         scroll, reveal strips re-laying the grid out on toggle).
+         It declares Avalonia >= 12.1.0, i.e. the same open-ended lower bound
+         that hid the SkiaSharp drift — so if core ever moves, re-check this
+         pin by hand; NuGet will not. -->
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.1.2" />
 
     <!-- AOT-friendly MVVM via source generators ([ObservableProperty], [RelayCommand]).
          Avalonia.ReactiveUI is NOT used: it has no v12 release and depends on reflection. -->
@@ -114,7 +128,7 @@
     <PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="$(SkiaSharpVersion)" />
     <PackageReference Include="SkiaSharp.NativeAssets.WebAssembly" Version="$(SkiaSharpVersion)" />
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="$(SkiaSharpVersion)" />
-    <PackageReference Include="SourceGear.sqlite3" Version="3.53.3" />
+    <PackageReference Include="SourceGear.sqlite3" Version="3.53.4" />
   </ItemGroup>
 
   <ItemGroup>

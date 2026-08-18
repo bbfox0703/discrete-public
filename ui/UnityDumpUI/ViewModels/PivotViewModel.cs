@@ -210,6 +210,27 @@ public sealed partial class PivotViewModel : ObservableObject
         "Type a class FQN, list key + value field name(s), pick 1+ snapshots, press Run.";
     [ObservableProperty] private string _errorMessage = string.Empty;
     [ObservableProperty] private string _modeBanner   = string.Empty;
+
+    /// <summary>
+    /// Gate for the merged status / error / mode banner. The three used to be
+    /// three stacked Borders, and the status one carried no IsVisible at all,
+    /// so it held ~27 px open even with nothing to say.
+    /// <para>
+    /// It has to be an OR over all three, not a status-only gate: the
+    /// "Pick at least 1 snapshot." preflight sets <see cref="ErrorMessage"/>
+    /// and CLEARS <see cref="StatusMessage"/> at the same moment, so gating on
+    /// status alone would hide that error entirely. XAML has no OR without a
+    /// MultiBinding + converter, and this project stays converter-free for AOT.
+    /// </para>
+    /// </summary>
+    public bool HasBanner =>
+        !string.IsNullOrEmpty(StatusMessage) ||
+        !string.IsNullOrEmpty(ErrorMessage)  ||
+        !string.IsNullOrEmpty(ModeBanner);
+
+    partial void OnStatusMessageChanged(string value) => OnPropertyChanged(nameof(HasBanner));
+    partial void OnErrorMessageChanged(string value)  => OnPropertyChanged(nameof(HasBanner));
+    partial void OnModeBannerChanged(string value)    => OnPropertyChanged(nameof(HasBanner));
     // Wave A — now that the engine compute runs off the UI thread (Task.Run),
     // the UI stays responsive DURING a run, so a second click could start a
     // concurrent run that races on Results. Notify every gated command's

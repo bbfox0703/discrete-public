@@ -281,6 +281,132 @@ The Inspector grid's Name/Type/Value floors were trimmed (220/160/320 →
 
 ---
 
+## Chrome density (2026-08-18)
+
+Column widths decide how a grid uses its width; this section is the other
+half — how much *height* the grid is left with after the tab's toolbars.
+
+### Global: `MainWindow.Styles` overrides FluentTheme's touch sizing
+
+FluentTheme sizes for touch: `TabItem` is **24 pt / 48 px** tall, and
+`Button` / `ToggleButton` / `TextBox` / `ComboBox` / `NumericUpDown` /
+`CheckBox` / `ToggleSwitch` all sit on a **32 px `MinHeight` floor**. In a
+tool whose tabs stack 3–7 toolbar rows above a DataGrid, that was eating
+roughly half the grid. The 24 pt tab strip also needed ~1100 px of width on
+its own, which is why the tab headers ran out of room at 1080p unless the
+Assemblies / Classes panes were collapsed first.
+
+`MainWindow.axaml` opens with a `<Window.Styles>` block that drops those
+floors to `MinHeight="0"` and lets `Padding` drive the height (~26 px), and
+takes `TabItem` to `FontSize="14"`.
+
+- **Precedence**: `Window.Styles` is applied after `Application.Styles`, so
+  these win over FluentTheme. They are *style* values, so any control that
+  sets the property **locally** keeps its own — the `FontSize="10"
+  MinHeight="20"` row-action buttons inside the grids are unaffected.
+- `NumericUpDown` needs three selectors, not one: it delegates its chrome to
+  `ButtonSpinner`, whose two `RepeatButton`s carry the floor. Shrink
+  `NumericUpDown`, `ButtonSpinner`, and
+  `ButtonSpinner /template/ RepeatButton` or the spinner keeps it tall.
+- **Scope is deliberate**: the block lives on `MainWindow`, not `App.axaml`.
+  The main window is a dense inspection tool; the 16 dialogs are short forms
+  that read better at FluentTheme's roomier default. Moving the block to
+  `Application.Styles` (after the `FluentTheme` + DataGrid `StyleInclude`, so
+  it still wins) would make it app-wide if that trade ever flips.
+
+### Per-tab: what belongs above the grid
+
+Only the **find → walk → read loop** earns a permanent docked row. Everything
+else costs 0 px until asked for:
+
+| Pattern | Use when | Cost while closed |
+|---|---|---|
+| `ToggleButton` on the toolbar + a docked strip bound to its `IsChecked` | a compound editor (several inputs + buttons) | **0 px** |
+| `Button.Flyout` + `MenuFlyout` | one-shot actions (hand-offs, exports) | **0 px** |
+| `Expander` | content that is genuinely read at a glance | ~34 px header |
+
+Prefer the ToggleButton strip over an `Expander` for anything advanced — a
+collapsed Expander still holds its header row open forever.
+
+### Toolbars must be `WrapPanel`, not horizontal `StackPanel`
+
+A horizontal `StackPanel` hands every child its full desired width and runs
+off the right edge — the controls are simply unreachable at narrow widths.
+A `WrapPanel` wraps instead. `WrapPanel` has no `Spacing`, so give the
+children a uniform gap with a scoped style (the pattern predates this and is
+also used by the Snapshot filter panel):
+
+```xml
+<WrapPanel.Styles>
+  <Style Selector="WrapPanel > :is(Control)">
+    <Setter Property="Margin" Value="0,0,6,3" />
+  </Style>
+</WrapPanel.Styles>
+```
+
+Fixed-column `Grid`s are acceptable too — they squeeze their `*` column
+rather than clipping — but a `Grid` cannot reflow onto a second line.
+
+**A label and its control must be one WrapPanel child, not two.** A
+`WrapPanel` breaks between any two children, so a bare `<TextBlock Text="Limit"/>`
+followed by a `<NumericUpDown/>` will happily strand the label at the end of one
+row and its control at the start of the next. Wrap each such pair (label +
+input, or input + its own action button) in an inner
+`<StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">`
+so it wraps as a unit — the StackPanel is the WrapPanel child that gets the
+scoped margin, and `Spacing` handles the gap inside.
+
+### Inspector tab — the worked example
+
+It went from **seven** docked rows (~300 px) to **two** (~62 px):
+
+| Was | Now |
+|---|---|
+| toolbar (11 controls, clipped when narrow) | one `WrapPanel` toolbar |
+| filter builder row | behind the `🔍 Filter` toggle |
+| field-filter JSON row | behind the `🔍 Filter` toggle |
+| auto-refresh row (3 buttons + `= N ms`) | one `ComboBox` on the toolbar → `AutoRefreshPresetIndex` |
+| 3-line target / class-ptr / walk-summary stack | one wrapping status line |
+| bookmarks row | behind the `★ Bookmarks` toggle |
+| related-objects `Expander` (Dock=Top) | behind the `🔗 Related` toggle, Dock=**Bottom** |
+| `→ Browser` / `→ Pivot` / `Copy CE XML` buttons | `⋯ Send` `MenuFlyout` |
+
+The reveal toggles are `ShowFilterPanel` / `ShowBookmarkPanel` /
+`ShowRelatedPanel` on `LiveInspectionViewModel`.
+
+### The rest of the tabs
+
+The same pass ran across every remaining tab. Docked chrome above the grid,
+at rest:
+
+| Tab | Before | After | How |
+|---|---|---|---|
+| Fields / Methods | 1 row | 1 row | already minimal — a filter box is primary; do **not** hide it behind a reveal |
+| Symbol Finder | 2 rows + 2 Expanders + status + busy | 3 rows | assembly picker merged into the search row; both "Auto-find" Expanders → `🎯 Auto fields` / `🎮 Auto methods` toggles; busy bar rides the toolbar; status folded into the result-filter row |
+| Address Lookup | 2 rows | 1 row | the backward-scan tunable → `⚙ Scan ▾` flyout |
+| Scene | toolbar + busy + status | 1 row | Focus-delay + "Enable runInBackground" → `⏱ Focus fix` toggle; status docked Bottom, gated |
+| Value Search | ~8 rows | 3 rows | mode `ToggleSwitch` inlined; Limit / Max / Parallel / Encoding / Match → `⚙ Options` toggle; status + error bands gated |
+| Snapshot | ~9 rows | 3 rows | mode toggle inlined; filters + DB store → `🔍 Filters` / `🗄 Store` toggles; every banner gated |
+| SPC Query | ~8 rows | 3 rows | mode toggle inlined; 4 stacked banners → 2 mutually-exclusive gated ones; the two static captions deleted |
+| Class Pivot | toolbar + 3 banners + caption | 2 rows | 5 of 7 launcher buttons → `🔭 Discover ▾` flyout; 3 banners → 1 gated banner (`HasBanner`) |
+| Teleport | ~1700 px, ~2 screens | ~600 px, 1 screen | set-once cards (global hotkeys, keep-foreground) → **collapsed Expanders** with their enable CheckBox hoisted into the header; prose → `ToolTip.Tip` / `PlaceholderText`; unbounded candidate list capped with a `ScrollViewer MaxHeight` |
+
+Teleport is the one place a collapsed `Expander` beats a ToggleButton strip:
+the card is configured once per game and its header can carry the enable
+CheckBox itself, so no reveal flag is needed in the ViewModel at all.
+
+Reveal-flag properties added by this pass: `ShowGameplayFieldsPanel` /
+`ShowGameplayMethodsPanel` (`SymbolFinderViewModel`), `ShowFocusFixPanel`
+(`SceneExplorerViewModel`), `ShowScanOptionsPanel` (`ValueSearchViewModel`),
+`ShowFiltersPanel` / `ShowStorePanel` (`SnapshotViewModel`). `PivotViewModel`
+gained `HasBanner` instead — a computed OR over its three message strings,
+because XAML has no OR without a MultiBinding + converter and this project
+stays converter-free for AOT. It must be an OR, not a status-only gate: the
+"Pick at least 1 snapshot." preflight sets `ErrorMessage` and clears
+`StatusMessage` in the same breath.
+
+---
+
 ## Windows
 
 | Window | Modal? | Purpose |

@@ -1433,6 +1433,58 @@ target version named; `-p:AvaloniaVersion=12.1.1` still passes, because
 12.1.1 declares the same native deps. **Bumping Avalonia is not blocked —
 only bumping the native libraries away from it.**
 
+#### Follow-up (2026-08-18): the guard went blind, and said nothing
+
+Two dependency-update cycles later the guard was silently checking
+nothing. A routine "update all" pass had rewritten
+`UnityDumpUI.csproj`'s `Version="$(AvaloniaVersion)"` references back to
+literal `12.1.1`, while `ui/Directory.Build.props` still said `12.1.0`.
+The guard reads `avalonia.skia/$(AvaloniaVersion)/…nuspec`, so it went
+looking in a folder for a version nothing referenced any more.
+
+It still reported success, for the *worst* reason: every `<Error>` was
+gated on `'$(_SkiaWanted)' != ''`, so an unreadable nuspec collapses the
+whole target into a pass. Locally it happened to find a stale `12.1.0`
+folder left in the NuGet cache; on CI or a clean clone it would have
+found nothing and passed just the same. Either way the pins had stopped
+being checked and **nothing in the build said so**.
+
+Two lessons, both generalisable beyond this repo:
+
+1. **A guard whose input can go missing must fail when it does.** "Can't
+   run the check" and "check passed" must never be the same outcome. The
+   target now errors when `avalonia.skia` is restored at *some* version
+   but not at `$(AvaloniaVersion)` — i.e. the pin no longer describes what
+   is being built. It stays quiet when the package is absent entirely,
+   which is the legitimate `UnityDumpUI.Core`-only build path.
+2. **Centralisation is not self-healing.** The 2026-08-16 fix moved the
+   versions into one property; an automated bump put the literals straight
+   back. The property survived — as a *dead* property, which is exactly the
+   trap that fix set out to remove. Assume any convention a tool can undo
+   silently *will* be undone, and give it a check.
+
+Verified to fire by reproducing the real shape: csproj literals at
+`12.1.1` with `-p:AvaloniaVersion=11.3.15` (restorable, not restored)
+→ hard error naming the mismatch. Fixing the wiring changed **nothing**
+in the resolved graph — `project.assets.json` is byte-identical before
+and after — which is the point: the bug was never in which DLLs shipped,
+only in whether anything was still watching.
+
+Unrelated to the pins, found in the same audit:
+`Avalonia.Controls.DataGrid` sits at **12.1.2** while Avalonia core is
+**12.1.1**. That one is *not* drift — DataGrid ships from its own repo
+(`AvaloniaUI/Avalonia.Controls.DataGrid`) on its own cadence, and core has
+no 12.1.2 at all. It is a deliberate carve-out, like
+`Avalonia.Angle.Windows.Natives`. Note though that it declares
+`Avalonia >= 12.1.0` — the same open-ended lower bound that hid the
+SkiaSharp drift — so it needs re-checking by hand whenever core moves.
+
+**Do not "fix" any of this with a floating range** (`12.1.*`). It makes
+the build non-reproducible (restore date picks the version) and lets a
+later 12.1.x change its native requirements while the pins below sit
+still. Exact pin + a guard that proves the pin is the shape that is both
+reproducible and self-checking.
+
 ⚠ **The regression check is broad and needs a human.** Skia and HarfBuzz
 draw and shape *everything*, so a downgrade touches every pixel. Open
 each tab; look for missing glyphs, wrong metrics, clipped text, DataGrid

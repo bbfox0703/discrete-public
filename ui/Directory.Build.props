@@ -53,8 +53,13 @@
        (SkiaSharp 4.150.1, HarfBuzzSharp 14.2.1.1) and was realigned before it
        could produce its own crash. See docs/lessons-learned.md.
        ========================================================================= -->
+  <!-- ⚠ Pin exactly, never a floating range (12.1.*). A range makes the build
+       non-reproducible — restore DATE picks the version — and, worse, a later
+       12.1.x can change which SkiaSharp / HarfBuzzSharp it was built against
+       while the two pins below silently stay put. Exact pin + the guard target
+       below is the shape that is both reproducible AND self-checking. -->
   <PropertyGroup>
-    <AvaloniaVersion>12.1.0</AvaloniaVersion>
+    <AvaloniaVersion>12.1.1</AvaloniaVersion>
     <SkiaSharpVersion>3.119.4</SkiaSharpVersion>
     <HarfBuzzSharpVersion>8.3.1.3</HarfBuzzSharpVersion>
   </PropertyGroup>
@@ -110,7 +115,33 @@
       <_NuGetRoot>$([MSBuild]::EnsureTrailingSlash('$(NuGetPackageRoot)'))</_NuGetRoot>
       <_AvaloniaSkiaNuspec>$(_NuGetRoot)avalonia.skia/$(AvaloniaVersion)/avalonia.skia.nuspec</_AvaloniaSkiaNuspec>
       <_AvaloniaHarfBuzzNuspec>$(_NuGetRoot)avalonia.harfbuzz/$(AvaloniaVersion)/avalonia.harfbuzz.nuspec</_AvaloniaHarfBuzzNuspec>
+      <!-- Has Avalonia.Skia been restored AT ALL on this machine, at any
+           version? Distinguishes "the pin is wrong" from "this is a Core-only
+           build that never pulls Avalonia". -->
+      <_AvaloniaSkiaAnyVersion>$([System.IO.Directory]::Exists('$(_NuGetRoot)avalonia.skia'))</_AvaloniaSkiaAnyVersion>
     </PropertyGroup>
+
+    <!-- =====================================================================
+         Self-check: the guard must fail LOUDLY when it cannot run.
+
+         Every <Error> below is gated on '$(_SkiaWanted)' != '', so an
+         unreadable nuspec turns the whole target into a silent pass. That is
+         not theoretical — it happened. A routine "update all" bump rewrote the
+         csproj's Version="$(AvaloniaVersion)" references back to literal
+         12.1.1 while this file still said 12.1.0, so the guard went looking in
+         avalonia.skia/12.1.0/ — a version nothing referenced any more. It
+         "passed" only because a stale 12.1.0 folder happened to survive in the
+         local NuGet cache; on CI or a clean clone it would have found nothing
+         and passed for the opposite reason. Either way the pins were no longer
+         being checked and nothing said so (2026-08-18).
+
+         So: if Avalonia.Skia is present at SOME version but not at
+         $(AvaloniaVersion), the pin does not describe what is actually being
+         built — stop. If it is absent entirely, stay quiet: that is the
+         UnityDumpUI.Core-only build path, which pulls no Avalonia package.
+         ===================================================================== -->
+    <Error Condition="'$(NuGetPackageRoot)' != '' and '$(_AvaloniaSkiaAnyVersion)' == 'true' and !Exists('$(_AvaloniaSkiaNuspec)')"
+           Text="Render-stack guard cannot run: ui/Directory.Build.props pins &lt;AvaloniaVersion&gt;$(AvaloniaVersion)&lt;/AvaloniaVersion&gt;, but no avalonia.skia/$(AvaloniaVersion) is restored — so the SkiaSharp / HarfBuzzSharp checks below would silently pass without checking anything.%0AThis means $(AvaloniaVersion) no longer matches the version the projects actually reference. Usually a dependency-update tool rewrote a csproj's Version=&quot;$(AvaloniaVersion)&quot; back to a literal.%0AFix: make every Avalonia PackageReference read Version=&quot;$(AvaloniaVersion)&quot; again, and set &lt;AvaloniaVersion&gt; to the version you actually want. (Avalonia.Controls.DataGrid is a deliberate exception — separate repo, separate cadence.)%0ASee docs/lessons-learned.md -> 'SkiaSharp / HarfBuzzSharp must match what Avalonia was built against'." />
 
     <XmlPeek XmlInputPath="$(_AvaloniaSkiaNuspec)"
              Query="//*[local-name()='dependency'][@id='SkiaSharp']/@version"

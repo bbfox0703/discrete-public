@@ -760,8 +760,42 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
 
     partial void OnAutoRefreshIntervalMsChanged(int value)
     {
+        // Keep the toolbar ComboBox in sync — it projects this int onto three
+        // presets, so a change made through the commands (or by the loop
+        // giving up and self-disabling) has to re-raise the projection.
+        OnPropertyChanged(nameof(AutoRefreshPresetIndex));
         _ = RestartAutoRefreshAsync();
     }
+
+    /// <summary>
+    /// Toolbar ComboBox selection for auto-refresh: 0 = Off, 1 = 250 ms,
+    /// 2 = 1 s. Replaces the three preset Buttons plus their "= N ms"
+    /// readout, which occupied a whole docked row above the walked-fields
+    /// grid for three mutually-exclusive states. The item labels live in
+    /// <c>en.axaml</c> (Inspector.AutoRefreshOff / 250 / 1000) — this side
+    /// only carries the index ↔ interval projection.
+    /// <para>
+    /// Any interval that is not one of the two presets (nothing sets one
+    /// today) reads back as Off rather than leaving the ComboBox unselected;
+    /// an out-of-range index likewise falls back to Off.
+    /// </para>
+    /// </summary>
+    public int AutoRefreshPresetIndex
+    {
+        get => AutoRefreshIntervalMs switch { 250 => 1, 1000 => 2, _ => 0 };
+        set => AutoRefreshIntervalMs = value switch { 1 => 250, 2 => 1000, _ => 0 };
+    }
+
+    /// <summary>
+    /// Reveal toggles for the Inspector's three secondary strips (field
+    /// filter, bookmarks, related objects). They are docked rows that stay
+    /// out of the layout entirely while off, so the walked-fields grid keeps
+    /// the height. ToggleButtons rather than Expanders: an Expander still
+    /// costs its ~40 px header while collapsed.
+    /// </summary>
+    [ObservableProperty] private bool _showFilterPanel;
+    [ObservableProperty] private bool _showBookmarkPanel;
+    [ObservableProperty] private bool _showRelatedPanel;
 
     // ---------- Status ----------------------------------------------------
 
@@ -858,9 +892,9 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         return string.Join('/', segs);
     }
 
-    [RelayCommand] private void AutoRefreshOff()  => AutoRefreshIntervalMs = 0;
-    [RelayCommand] private void AutoRefreshFast() => AutoRefreshIntervalMs = 250;
-    [RelayCommand] private void AutoRefreshSlow() => AutoRefreshIntervalMs = 1000;
+    // The Off / 250 ms / 1 s preset commands are gone — the Inspector toolbar
+    // drives AutoRefreshPresetIndex through a single ComboBox instead, and
+    // nothing else bound them. Set AutoRefreshIntervalMs directly from code.
 
     [RelayCommand]
     private void Clear()

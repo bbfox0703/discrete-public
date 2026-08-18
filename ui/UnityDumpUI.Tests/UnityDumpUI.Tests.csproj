@@ -43,7 +43,7 @@
     <PackageReference Include="HarfBuzzSharp.NativeAssets.WebAssembly" Version="$(HarfBuzzSharpVersion)" />
     <PackageReference Include="HarfBuzzSharp.NativeAssets.Win32" Version="$(HarfBuzzSharpVersion)" />
     <PackageReference Include="MicroCom.Runtime" Version="0.11.6" />
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.11" />
     <!-- Newtonsoft.Json kept explicit — bumped to a non-vulnerable
          version above the transitive default. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
@@ -52,7 +52,7 @@
     <PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="$(SkiaSharpVersion)" />
     <PackageReference Include="SkiaSharp.NativeAssets.WebAssembly" Version="$(SkiaSharpVersion)" />
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="$(SkiaSharpVersion)" />
-    <PackageReference Include="SourceGear.sqlite3" Version="3.53.3" />
+    <PackageReference Include="SourceGear.sqlite3" Version="3.53.4" />
     <!-- ===================================================================
          DO **NOT** add explicit Microsoft.Testing.* PackageReferences here.
          (A `_FailOnExplicitMtpPin` guard target below hard-fails the build if
