@@ -2526,6 +2526,24 @@ for the canonical inline-handshake pattern (12 lines of Lua;
 open pipe, write `{"cmd":"handshake"}`, read response, regex-extract
 two fields).
 
+### When Cheat Engine itself is the bug
+
+Not everything that misbehaves is ours. A version-pinned catalogue of
+undocumented CE defects — pinned to CE source `7.5-195` and binary
+`7.7.0.10568`, so treat it as evidence for those versions rather than as
+timeless — lives in the sibling repo:
+`D:\Github\UE5CEDumper\docs\CE-Bugs-Minesweeper.md`
+([public mirror](https://github.com/bbfox0703/UE5CEDumper/blob/main/docs/CE-Bugs-Minesweeper.md)).
+
+It covers, among others: `{` parsing as an unterminated colour escape in
+disassembler columns; `TVariableType` rather than the `cepluginsdk.h`
+comment being the real value-type numbering; `getAddress` returning `0`
+instead of raising because `errorOnLookupFailure` does not default the way
+the docs imply; and a re-embedded table lua file's globals surviving the
+re-load. The first two we already absorb in code — see `CeValueType` in
+[`AobMakerBridge.cs`](../ui/UnityDumpUI.Core/Services/AobMakerBridge.cs).
+Open it when CE misbehaves in a way the notes above do not explain.
+
 ## x86 / WOW64 portability (Phase 12d)
 
 ### Pointer-width-relative offsets, not hardcoded x64

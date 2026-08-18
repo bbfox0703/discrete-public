@@ -178,6 +178,52 @@ to resume, or just close the game to fully reclaim everything.
 
 ---
 
+## Navigation (nothing lands in the CT)
+
+Two of the bridge's seven commands only *move CE's view*: they create no
+memory record and leave the table untouched. Of the rest, four mutate the
+open table and `CheckAvailability` just probes the pipe. Six UI actions
+send these two.
+
+| Wire command | Moves | UI actions that send it |
+|---|---|---|
+| `NavigateHexView` | Memory View, hex pane | Inspector row → **HEX** (the field's own address) · **HEX (ptr)** (what the pointer points at) |
+| `NavigateDisassembler` | Memory View, disassembler pane | Browser Methods grid → *Go to method in CE* · Method Overloads window, per overload row · Field References → *Go to method head* · *Go to access address* |
+
+The two Field-References entries are separate commands over one helper
+(`GoToMethodHead` / `GoToAccessAddress` → `NavigateInCeAsync`): the first
+jumps to the method's entry point, the second to the exact instruction that
+touched the field.
+
+Request shape is the smallest of the whole protocol — `type` plus a bare
+hex address, no other fields:
+
+```json
+{"type": "NavigateDisassembler", "address": "7FF6A21C340"}
+```
+
+The address goes out as **bare hex**: `AobMakerBridge.StripHexPrefix` trims
+a leading `0x`, so callers may pass either form. An empty address
+short-circuits to `false` without touching the pipe.
+
+Both use the standard 5 s `ResponseTimeoutMs`, not the 15 s
+`InjectResponseTimeoutMs` that `InjectTableFile` needs.
+
+Two failure modes are distinct and the UI reports them differently:
+
+- **No address to go to.** Caught before the pipe. A Mono method that was
+  never JIT-compiled, an abstract method, or a generic definition has no
+  native entry — the caller says so ("no compiled body to jump to") and
+  never sends a request. For Mono this is expected on first sight of a
+  method; JIT it and the address appears.
+- **CE not reachable.** `IsAvailable` is false, or the exchange fails.
+  Every caller falls back to the same phrasing — "open CE with the AOBMaker
+  plugin loaded, then retry". Note that `IsAvailable` is a *cached* result
+  of the last exchange, so a stale true is possible; the request failing is
+  what flips it back.
+
+---
+
 ## Generated entry shapes
 
 ### Methods grid → "Create AA in CE" (Phase 18c)
@@ -464,3 +510,22 @@ not an exact replica of the current inject set.)
 - Per-feature generators:
   [`CallMethodAaScriptGenerator.cs`](../ui/UnityDumpUI.Core/Services/Export/CallMethodAaScriptGenerator.cs),
   [`AddressLookupAaScriptGenerator.cs`](../ui/UnityDumpUI.Core/Services/Export/AddressLookupAaScriptGenerator.cs)
+
+### CE plugin SDK — background reading only
+
+Discrete builds **no** CE plugin; it is a pipe client of AOBMaker's.
+These two cover the peer's side of the fence and are reference material,
+not something to implement against:
+
+- `D:\Github\UE5CEDumper\docs\ce-plugin-api-reference.md`
+  ([public mirror](https://github.com/bbfox0703/UE5CEDumper/blob/main/docs/ce-plugin-api-reference.md)) — plugin lifecycle,
+  the `pluginsync` main-thread marshaling model, and CE's internal
+  `TVariableType` ordinals. That last one is load-bearing here: it is where
+  the "NOT SDK header order" caveat on `CeValueType` in
+  [`AobMakerBridge.cs`](../ui/UnityDumpUI.Core/Services/AobMakerBridge.cs)
+  comes from.
+- `D:\Github\UE5CEDumper\docs\ce-plugin-sdk-notes.md`
+  ([public mirror](https://github.com/bbfox0703/UE5CEDumper/blob/main/docs/ce-plugin-sdk-notes.md)) — the same ground read
+  out of CE's Pascal rather than the C header, plus the `executeCodeEx`
+  traps behind the "prefer pipe RPC" rule in
+  [`lessons-learned.md`](lessons-learned.md).

@@ -257,6 +257,18 @@ calling out here for visibility:
   `System.Boolean` rows get an `AutoCompleteBox` suggesting
   true/false but accepting any text the existing `bool.TryParse`
   consumes.
+- **CE `{$CCODE}` / `{$LUACODE}` blocks** — evaluated and rejected, on
+  architectural grounds rather than performance. What our AA generators
+  emit is `{$lua}`, which runs in *CE's* process at assemble time; it is
+  **not** `{$LUACODE}`, which runs in the *game's* process on every hook
+  hit. Both `{$LUACODE}` and `{$CCODE}` need an injection hook site to
+  attach to, and discrete emits none — its generated AA is
+  symbol-registration plus a data `alloc()` only, never a code cave
+  (`newmem` / `originalcode` / `fullaccess` all appear zero times across
+  `Services/Export/` and `scripts/`). A CCODE block would be dead text.
+  Full decision record:
+  `D:\Github\UE5CEDumper\docs\ce-ccode-eval.md`
+  ([public mirror](https://github.com/bbfox0703/UE5CEDumper/blob/main/docs/ce-ccode-eval.md)).
 
 ---
 
