@@ -1,0 +1,60 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+> For detailed specs, implementation history, and debugging notes, see the **[docs/](docs/)** directory.
+>
+> **進度與待辦 (start here)**: [docs/plan.md](docs/plan.md) — 單一窗口:current state / open backlog / phase ledger / recent batches。完成 phase 的長篇寫作在 [docs/archive/](docs/archive/);舊批次摘要在 [docs/archive/status-history.md](docs/archive/status-history.md)。
+
+## Code Changes
+- When asked to rename, refactor, or restructure modules, ALWAYS modify the actual code files (rename files, update imports, change class names) — not just documentation or naming tables.
+
+-----
+
+## Debugging & Fixes
+- After implementing a fix, verify it against the actual runtime behavior or data format before declaring it done. For memory layout, address mapping, and binary protocol fixes, double-check byte offsets, pointer sizes, and data types (e.g., 32-bit vs 64-bit int, double vs float).
+- For container/nested data structures (arrays, custom structures, types), always trace the full indirection chain before implementing a fix.
+
+-----
+
+## Cheat Engine
+- When working with Cheat Engine Lua APIs, always verify that a function exists in the CE Lua documentation before using it. Do not assume methods like GotoAddressEx exist.
+
+-----
+
+## Communication
+- When the user reports a bug or says a fix isn't working, take it at face value and investigate — do not dismiss it as belonging to another project or assume it's already resolved.
+
+## Rules (MUST follow)
+
+> Canonical invariant list — platform abstraction, log layout, magic strings, Unity offsets, backend-agnostic UI, plus the SEH-leaf and Mono thread-attach rules that have broken builds before: [docs/Archiutecture.md](docs/Archiutecture.md) §Rules. Below are this file's own rule plus the ones most often broken.
+
+- **Keep this file small & clean**: lessons learnt, notes, and other long-form material must live in separate files under `docs/`. Keep this file to key information only.
+- **Language**: Code comments and UI strings in English
+- **Build / test only via `.\build.cmd`** (`dll` / `mono` / `il2cpp` / `ui` / `cli` / `test` / `publish` / `deploy` / `deploy-scripts`, plus `clean` to wipe first) — bare `cmake` / `dotnet` calls fail without the VS Developer Shell. Output lands in `dist\` (x86 in `dist\x86\`).
+- **Single Instance**: UI app uses Mutex to ensure only one instance runs
+- **Async everywhere**: Pipe/RPC and any long-running work must be async and must never block the UI thread. Small local settings/state files may use sync `File.*`.
+- **AOT compatible**: All C# code must be Native AOT / trimming compatible. No reflection-based APIs — use source generators instead (e.g. `[JsonSerializable]` context for `System.Text.Json`, `[ObservableProperty]` for MVVM). The UI ships as a self-contained trimmed binary. See [docs/aot-pitfalls.md](docs/aot-pitfalls.md) (§0 = day-one checklist) before touching `ui/` build config.
+- **DataGrid columns never star-sized**: Read-only result/data grids MUST size columns with `Width="Auto"` (or fixed) + `MinWidth`, NEVER `Width="*"`/`"2*"`. Star columns force the total to fit the window, so widening one column shrinks the others — the user must NOT have to resize neighbours first. Auto + MinWidth lets total width exceed the window and the grid scrolls horizontally (Avalonia default). Star-fill is allowed ONLY for the exceptions listed in [docs/ui-spec.md](docs/ui-spec.md) — record any new one there rather than here.
+- **Lua output is DEBUG-gated + closes the Lua Engine on success**: Every CE Lua surface (hand-written `scripts/*.lua` AND the `{$lua}` blocks emitted by the C# `*AaScriptGenerator`s) MUST follow [docs/lua-logging.md](docs/lua-logging.md). Informational `print()` only fires when the flag (`DISCRETE_DEBUG = 1`, or `U.DEBUG`) is on; errors ALWAYS print. On a clean, non-debug finish, close CE's Lua Engine so it stops covering CE's main window — `synchronize(function() local e=getLuaEngine(); if e then e.Close() end end)` — but leave it open on any error or debug run. `utils.lua` consumers get this via `U.log/dbg/warn/err` + `U.guard(body)`. Keep `scripts/*.lua` and `dist/*.lua` in sync.
+
+-----
+
+## Project Goal
+
+A **C++ DLL + Cheat Engine Lua Bridge** Unity dumper: build the live
+Assembly → Class/Struct → Field/Method hierarchy, walk instances, and hand the
+results (addresses, AA scripts, cheat tables) to CE.
+
+- **Backends**: Unity **Mono** x86/x64 (`mono-2.0-bdwgc.dll` / `mono.dll`) and
+  **IL2CPP** x64 (`GameAssembly.dll`; `global-metadata.dat` v16–v39 accepted,
+  v24/27/29/31/35–39 verified — `dll/src/il2cpp/MetadataParser.cpp`).
+- **Shape**: injected C++ DLL ⇄ Named-Pipe JSON-RPC ⇄ Avalonia UI, plus CE Lua
+  bridges in `scripts/`. The UI is backend-agnostic — every Mono / IL2CPP
+  difference lives behind the pipe protocol, never in the UI.
+
+The shipped feature set is large. **Check what exists before building anything
+new**, or you will rebuild it: [docs/plan.md](docs/plan.md) (phase ledger) ·
+`dll/src/shared/MagicStrings.h` (every wire command) ·
+[docs/pipe-protocol.md](docs/pipe-protocol.md) (wire contract) ·
+[README.md](README.md) (feature list + documentation map).

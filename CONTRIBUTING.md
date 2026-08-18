@@ -102,8 +102,9 @@ short version:
 - **CommunityToolkit.Mvvm only**. `[ObservableProperty]` /
   `[RelayCommand]` source generators — no hand-rolled `INotifyPropertyChanged`
   boilerplate. Compiled bindings on every XAML binding (`x:DataType=...`).
-- **Async everywhere**. All I/O, pipe operations, and alert actions
-  are async. Never block the UI thread on a `.Result` / `.Wait()`.
+- **Async everywhere**. Pipe/RPC and long-running work are async;
+  never block the UI thread on a `.Result` / `.Wait()`. Small local
+  settings/state files may use sync `File.*`.
 - **No reflection APIs**. `LibraryImport` (not `DllImport` for new
   P/Invokes), `[JsonSerializable]` source-gen, etc.
 - **Single instance**. The UI app uses a `Mutex` so only one
