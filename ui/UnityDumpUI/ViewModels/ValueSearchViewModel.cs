@@ -231,6 +231,15 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     /// process memory, so no GC/BDWGC interaction regardless of this setting.</summary>
     [ObservableProperty] private bool   _parallelScan   = true;
 
+    /// <summary>
+    /// Reveal toggle for the scan-tuning strip (Limit / Max candidates /
+    /// Parallel / string Encoding + Match). Those are set once per session and
+    /// used to occupy permanent rows above the results grid; the strip is out
+    /// of the layout entirely while this is false.
+    /// See docs/ui-spec.md -> Chrome density.
+    /// </summary>
+    [ObservableProperty] private bool _showScanOptionsPanel;
+
     /// <summary>Wire form of <see cref="ParallelScan"/> for the backend's optional
     /// <c>parallel</c> arg: <c>null</c> when ON (omitted from the request → the
     /// DLL's <c>args.value("parallel", true)</c> default applies = full parallel),

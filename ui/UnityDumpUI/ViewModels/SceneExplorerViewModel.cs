@@ -110,6 +110,15 @@ public sealed partial class SceneExplorerViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(EnableRunInBackgroundCommand))]
     private bool _isBusy;
 
+    /// <summary>
+    /// Reveal toggle for the Phase 20-MT focus-fix strip (Focus delay +
+    /// "Enable runInBackground"). It is a one-shot fix per session, so it no
+    /// longer holds a permanent slot on the search toolbar; a docked strip
+    /// gated on this bool costs 0 px while off.
+    /// See docs/ui-spec.md -> Chrome density.
+    /// </summary>
+    [ObservableProperty] private bool _showFocusFixPanel;
+
     [ObservableProperty]
     private string _statusMessage = "Type a name pattern (or leave blank for first N) and press Search.";
 

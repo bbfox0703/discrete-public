@@ -84,6 +84,15 @@ public sealed partial class SymbolFinderViewModel : ObservableObject
     [ObservableProperty] private bool _numericTypesOnly;
     partial void OnNumericTypesOnlyChanged(bool value) => RefilterMatches();
 
+    /// <summary>
+    /// Reveal toggles for the two "Auto-find gameplay …" strips. They replaced
+    /// a pair of Expanders whose collapsed headers cost ~40 px each on every
+    /// visit to the tab; a docked strip gated on a bool costs 0 px while off.
+    /// See docs/ui-spec.md -> Chrome density.
+    /// </summary>
+    [ObservableProperty] private bool _showGameplayFieldsPanel;
+    [ObservableProperty] private bool _showGameplayMethodsPanel;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCommand))]
     private AssemblyItem? _selectedAssembly;
