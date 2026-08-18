@@ -4,12 +4,14 @@
 
 Develop a **C++ DLL + Cheat Engine Lua Bridge** Unity Engine Dumper.
 Target backends: **Unity Mono** 32-bit + 64-bit (mono-2.0-bdwgc.dll) and
-**Unity IL2CPP** 64-bit (GameAssembly.dll, metadata v24/v27/v29/v31).
+**Unity IL2CPP** 64-bit (GameAssembly.dll; `global-metadata.dat` v16-v39
+accepted, v24/27/29/31/35-39 verified).
 Find runtime metadata entry points, build complete Assembly → Class →
 Field/Method hierarchy, integrate with CE for symbol registration, table
 building, and live structure inspection.
 
-Headline capabilities (single source of truth: [CLAUDE.md](../CLAUDE.md)):
+Headline capabilities (single source of truth: [README.md](../README.md#what-it-does)
+for the user-facing list, [plan.md](plan.md) for the phase ledger):
 - Full hierarchy walk (live + offline `metadata-cli`).
 - Instance walker + exporter (CE XML / CSX / SDK header / live tables).
 - **Find method instances by signature** — closed as Phase 18
@@ -19,9 +21,9 @@ Headline capabilities (single source of truth: [CLAUDE.md](../CLAUDE.md)):
 - Jump-to-disassembly via the AOBMaker bridge.
 - CE Auto-Assembler scaffolding for overload-correct injection
   (Phase 18 `aobscanmodule(name, MODULE, AOB)` script generator).
-- **Lua-callable Unity methods** (Mono JIT / IL2CPP AOT) — drafted as
-  Phase 19 with marshaled primitive + string args + boxed return
-  values + managed exception capture. Plan in [plan.md §Phase 19](plan.md#phase-19--lua-callable-unity-methods-lua--managed-invocation).
+- **Lua-callable Unity methods** (Mono JIT / IL2CPP AOT) — closed as
+  Phase 19 (all five sub-phases) with marshaled primitive + string args
+  + boxed return values + managed exception capture. Plan in [plan.md §Phase 19](plan.md#phase-19--lua-callable-unity-methods-lua--managed-invocation).
 - **Address finder (reverse lookup)** — closed as Phase 17. Given any
   CE-scanned address, identifies the containing managed instance +
   class + field. Inverse of `findInstances`. Design spec:
@@ -111,7 +113,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 
 * **Language**: Code comments and UI strings in English
 * **Single Instance**: UI app uses Mutex to ensure only one instance runs
-* **Async everywhere**: All I/O, pipe operations, and alert actions must be async
+* **Async everywhere**: Pipe/RPC and any long-running work must be async and must never block the UI thread. Small local settings/state files may use sync `File.*`
 * **Platform Abstraction**: Any system/OS-dependent call (P/Invoke, Registry, OS commands) MUST go through an interface in `Core` project. `Core` must NEVER contain direct platform-specific code
 * **Log output**: All logs go to `%LOCALAPPDATA%\Discrete_Dumper\Logs`, split by category into per-process subfolders. DLL: 5 files (init, scan, metadata, pipe, walk) under `<pid>\<category>\`. UI: 3 files (init, pipe, view) under `ui\<category>\`. UI rotates 5 files on every UI startup; DLL rotates 4 files on 8 MB size threshold per category. Per-PID DLL directories older than 15 days are pruned at UI startup. Root `Logs/` has no loose files — only subfolders
 * **Magic words management**: All magic strings kept in one file per project with proper comments

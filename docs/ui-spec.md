@@ -265,9 +265,21 @@ just widens the row; nothing else moves.
 
 - ✅ `Width="Auto" MinWidth="200"` / `Width="120"` — independent resize, scrolls.
 - ❌ `Width="*"` / `Width="2*"` — forces fit-to-window, couples columns.
-- **Exception**: small editable input / selection forms with a fixed handful
-  of columns (`MethodCallWindow` param-value cell; the SPC-Query snapshot
-  picker) may star-fill — there's no overflow to solve there.
+- **Exception (input / selection forms)**: small editable input or selection
+  forms with a fixed handful of columns may star-fill — there's no overflow to
+  solve there. Current members: the `MethodCallWindow` param-value cell
+  (`MethodCallWindow.axaml:184`), the SPC-Query snapshot picker
+  (`MainWindow.axaml:3390`), and the Class-Pivot capture picker
+  (`PivotSnapshotsWindow.axaml:36`).
+- **Exception (wrapping last column)**: a read-only grid's *final* column may
+  star-fill when it wraps and carries a ToolTip, so it absorbs the leftover
+  width instead of clipping. Current sole member: the Class Pivot results
+  **Trajectory** column (`MainWindow.axaml:3801`, `Width="5*"`) — kept
+  deliberately through the Auto-width pass, not an oversight. Every other
+  column in that grid is `Auto` + `MinWidth`.
+
+Any new star-sized column MUST be added to one of these two lists — CLAUDE.md
+delegates the exception list here and no longer restates it.
 
 Fixed by build #864 across the result grids: FieldReferencesWindow,
 FieldAcrossInstancesWindow, MethodOverloadsWindow, ProcessPickerWindow,
