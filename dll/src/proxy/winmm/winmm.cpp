@@ -75,120 +75,181 @@ using MMRESULT    = UINT;
 using MCIERROR    = DWORD;
 using MCIDEVICEID = UINT;
 
+// Documented failure values for the PRE-CRT REFUSAL path (see PROXY_THUNK).
+//
+// Verified against the Windows SDK 10.0.26100.0 headers, not from memory:
+//   MMSYSERR_ERROR           = MMSYSERR_BASE + 1 = 1    (mmsyscom.h)
+//   TIMERR_NOCANDO           = TIMERR_BASE   + 1 = 97   (timeapi.h)
+//   JOYERR_NOCANDO           = JOYERR_BASE   + 6 = 166  (joystickapi.h)
+//   MCIERR_INVALID_DEVICE_ID = MCIERR_BASE   + 1 = 257  (mmsystem.h)
+//
+// ⚠ Hard-coded rather than #include'd on purpose: mmsystem.h also declares
+// every one of these exports __declspec(dllimport), which is the exact C2375
+// clash this whole file exists to route around.
+//
+// ⚠ The one property that MUST hold is that none of them is the SUCCESS value.
+// MMSYSERR_NOERROR, TIMERR_NOERROR and JOYERR_NOERROR are all 0, so a blanket
+// "return 0 when unresolved" would report success for every refused call — for
+// timeBeginPeriod that means the host believes it got a 1 ms timer tick and
+// never finds out otherwise. MMSYSERR_* occupies the shared low range, so
+// kMmFail reads correctly in the wave / midi / mmio families alike.
+constexpr MMRESULT kMmFail   = 1;
+constexpr MMRESULT kTimeFail = 97;
+constexpr MMRESULT kJoyFail  = 166;
+constexpr MCIERROR kMciFail  = 257;
+
 }  // namespace
 
-#define PROXY_THUNK(ret, conv, name, params, args)                        \
+// Internal symbol Proxy_<name>; aliased to <name> by winmm.def. The alias
+// keeps the public export ABI identical while sidestepping the system
+// header's dllimport decl.
+//
+// `failval` is what the export answers when the PRE-CRT GATE refuses. It has to
+// be that export's own DOCUMENTED failure value, because the caller in that
+// window is Windows' loader and it will act on the answer.
+//
+// ⚠ The two null cases are NOT the same, and the macro keeps them apart:
+//
+//   CRT not up yet   → the resolver was never entered. Answer `failval` and do
+//                      NOT forward. Nothing is latched: `fn` stays null and the
+//                      host's own next call resolves for real.
+//   CRT up, fn null  → the resolver RAN and the name is genuinely absent from
+//                      the real DLL (or the real DLL would not load). Fall
+//                      through to `fn args` and crash loudly, ON PURPOSE — a
+//                      silent stub here would hide a broken proxy behind a
+//                      plausible return value.
+//
+// `static fn_t fn = nullptr` must stay a CONSTANT initialiser, never
+// `static auto fn = ResolveExport<fn_t>(...)`. A magic static evaluates its
+// initialiser exactly once and latches the result forever, so a pre-CRT first
+// call would latch null and leave the export dead for the life of the process —
+// worse than the crash the gate removes. It also drags in the CRT's
+// `_Init_thread_header` machinery, onto a path that must not need the CRT.
+#define PROXY_THUNK(ret, conv, name, params, args, failval)               \
     extern "C" ret conv Proxy_##name params {                             \
         using fn_t = ret (conv*) params;                                  \
         static fn_t fn = nullptr;                                         \
-        if (fn == nullptr) fn = ResolveExport<fn_t>(#name);               \
+        if (fn == nullptr) {                                              \
+            if (!Discrete::Proxy::Proxy_CrtReady()) {                     \
+                Discrete::Proxy::Proxy_NotePreCrtCall();                  \
+                return failval;                                           \
+            }                                                             \
+            fn = ResolveExport<fn_t>(#name);                              \
+        }                                                                 \
         return fn args;                                                   \
     }
 
 // time* — Unity uses timeGetTime + timeBeginPeriod for frame timing.
-PROXY_THUNK(DWORD,    WINAPI, timeGetTime,        (), ())
-PROXY_THUNK(MMRESULT, WINAPI, timeBeginPeriod,    (UINT a), (a))
-PROXY_THUNK(MMRESULT, WINAPI, timeEndPeriod,      (UINT a), (a))
-PROXY_THUNK(MMRESULT, WINAPI, timeGetDevCaps,
-    (void* a, UINT b), (a, b))
-PROXY_THUNK(MMRESULT, WINAPI, timeGetSystemTime,
-    (void* a, UINT b), (a, b))
-PROXY_THUNK(MMRESULT, WINAPI, timeKillEvent,      (UINT a), (a))
+//
+// ⚠ Read the failure values here before changing any of them. timeGetTime and
+// timeSetEvent answer 0, everything else answers kTimeFail, and that asymmetry
+// is not an oversight: TIMERR_NOERROR IS 0, so 0 means SUCCESS for the middle
+// five, while timeSetEvent returns a timer ID whose documented failure answer
+// IS 0 — the convention inverts inside one family.
+PROXY_THUNK(DWORD, WINAPI, timeGetTime, (), (), 0)
+PROXY_THUNK(MMRESULT, WINAPI, timeBeginPeriod, (UINT a), (a), kTimeFail)
+PROXY_THUNK(MMRESULT, WINAPI, timeEndPeriod, (UINT a), (a), kTimeFail)
+PROXY_THUNK(MMRESULT, WINAPI, timeGetDevCaps, (void* a, UINT b), (a, b), kTimeFail)
+PROXY_THUNK(MMRESULT, WINAPI, timeGetSystemTime, (void* a, UINT b), (a, b), kTimeFail)
+PROXY_THUNK(MMRESULT, WINAPI, timeKillEvent, (UINT a), (a), kTimeFail)
+// ⚠ 0, not kTimeFail — see the block comment above. This one returns an ID.
 PROXY_THUNK(MMRESULT, WINAPI, timeSetEvent,
-    (UINT a, UINT b, void* c, DWORD_PTR d, UINT e),
-    (a, b, c, d, e))
+    (UINT a, UINT b, void* c, DWORD_PTR d, UINT e), (a, b, c, d, e), 0)
 
 // mci* — MCI command interface.
 PROXY_THUNK(MCIERROR, WINAPI, mciSendStringA,
-    (LPCSTR a, LPSTR b, UINT c, HWND d), (a, b, c, d))
+    (LPCSTR a, LPSTR b, UINT c, HWND d), (a, b, c, d), kMciFail)
 PROXY_THUNK(MCIERROR, WINAPI, mciSendStringW,
-    (LPCWSTR a, LPWSTR b, UINT c, HWND d), (a, b, c, d))
+    (LPCWSTR a, LPWSTR b, UINT c, HWND d), (a, b, c, d), kMciFail)
 PROXY_THUNK(MCIERROR, WINAPI, mciSendCommandA,
-    (MCIDEVICEID a, UINT b, DWORD_PTR c, DWORD_PTR d), (a, b, c, d))
+    (MCIDEVICEID a, UINT b, DWORD_PTR c, DWORD_PTR d), (a, b, c, d), kMciFail)
 PROXY_THUNK(MCIERROR, WINAPI, mciSendCommandW,
-    (MCIDEVICEID a, UINT b, DWORD_PTR c, DWORD_PTR d), (a, b, c, d))
-PROXY_THUNK(MCIDEVICEID, WINAPI, mciGetDeviceIDA, (LPCSTR a),  (a))
-PROXY_THUNK(MCIDEVICEID, WINAPI, mciGetDeviceIDW, (LPCWSTR a), (a))
+    (MCIDEVICEID a, UINT b, DWORD_PTR c, DWORD_PTR d), (a, b, c, d), kMciFail)
+// 0 is what these two document for "no such device", so it is the honest
+// refusal answer — same for every *GetNumDevs below, where 0 means "none".
+PROXY_THUNK(MCIDEVICEID, WINAPI, mciGetDeviceIDA, (LPCSTR a), (a), 0)
+PROXY_THUNK(MCIDEVICEID, WINAPI, mciGetDeviceIDW, (LPCWSTR a), (a), 0)
 
 // waveOut* — WMM audio backend.
 PROXY_THUNK(MMRESULT, WINAPI, waveOutOpen,
     (HWAVEOUT* a, UINT b, const void* c, DWORD_PTR d, DWORD_PTR e, DWORD f),
-    (a, b, c, d, e, f))
-PROXY_THUNK(MMRESULT, WINAPI, waveOutClose,         (HWAVEOUT a), (a))
+    (a, b, c, d, e, f), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutClose, (HWAVEOUT a), (a), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutPrepareHeader,
-    (HWAVEOUT a, void* b, UINT c), (a, b, c))
+    (HWAVEOUT a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutUnprepareHeader,
-    (HWAVEOUT a, void* b, UINT c), (a, b, c))
+    (HWAVEOUT a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutWrite,
-    (HWAVEOUT a, void* b, UINT c), (a, b, c))
-PROXY_THUNK(MMRESULT, WINAPI, waveOutReset,         (HWAVEOUT a), (a))
-PROXY_THUNK(UINT,     WINAPI, waveOutGetNumDevs,    (), ())
+    (HWAVEOUT a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutReset, (HWAVEOUT a), (a), kMmFail)
+PROXY_THUNK(UINT, WINAPI, waveOutGetNumDevs, (), (), 0)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutGetDevCapsA,
-    (UINT_PTR a, void* b, UINT c), (a, b, c))
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutGetDevCapsW,
-    (UINT_PTR a, void* b, UINT c), (a, b, c))
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutGetPosition,
-    (HWAVEOUT a, void* b, UINT c), (a, b, c))
+    (HWAVEOUT a, void* b, UINT c), (a, b, c), kMmFail)
 // SDL2.dll (bundled by many Unity games) imports this one.
 PROXY_THUNK(MMRESULT, WINAPI, waveOutGetErrorTextW,
-    (MMRESULT a, LPWSTR b, UINT c), (a, b, c))
+    (MMRESULT a, LPWSTR b, UINT c), (a, b, c), kMmFail)
 
 // waveIn* — microphone capture. UnityPlayer.dll statically imports this whole
 // family (FMOD's recording path) even in games that never record, so omitting
 // any one of them blocks the process from starting.
-PROXY_THUNK(UINT,     WINAPI, waveInGetNumDevs,     (), ())
+PROXY_THUNK(UINT, WINAPI, waveInGetNumDevs, (), (), 0)
 PROXY_THUNK(MMRESULT, WINAPI, waveInGetDevCapsA,
-    (UINT_PTR a, void* b, UINT c), (a, b, c))
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveInGetDevCapsW,
-    (UINT_PTR a, void* b, UINT c), (a, b, c))
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveInOpen,
     (HWAVEIN* a, UINT b, const void* c, DWORD_PTR d, DWORD_PTR e, DWORD f),
-    (a, b, c, d, e, f))
-PROXY_THUNK(MMRESULT, WINAPI, waveInClose,          (HWAVEIN a), (a))
+    (a, b, c, d, e, f), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInClose, (HWAVEIN a), (a), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveInPrepareHeader,
-    (HWAVEIN a, void* b, UINT c), (a, b, c))
+    (HWAVEIN a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveInUnprepareHeader,
-    (HWAVEIN a, void* b, UINT c), (a, b, c))
+    (HWAVEIN a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveInAddBuffer,
-    (HWAVEIN a, void* b, UINT c), (a, b, c))
-PROXY_THUNK(MMRESULT, WINAPI, waveInStart,          (HWAVEIN a), (a))
-PROXY_THUNK(MMRESULT, WINAPI, waveInReset,          (HWAVEIN a), (a))
+    (HWAVEIN a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInStart, (HWAVEIN a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInReset, (HWAVEIN a), (a), kMmFail)
 
 // midiOut* — old MIDI playback path.
 PROXY_THUNK(MMRESULT, WINAPI, midiOutOpen,
-    (HMIDIOUT* a, UINT b, DWORD_PTR c, DWORD_PTR d, DWORD e),
-    (a, b, c, d, e))
-PROXY_THUNK(MMRESULT, WINAPI, midiOutClose,         (HMIDIOUT a), (a))
-PROXY_THUNK(MMRESULT, WINAPI, midiOutShortMsg,
-    (HMIDIOUT a, DWORD b), (a, b))
+    (HMIDIOUT* a, UINT b, DWORD_PTR c, DWORD_PTR d, DWORD e), (a, b, c, d, e), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiOutClose, (HMIDIOUT a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiOutShortMsg, (HMIDIOUT a, DWORD b), (a, b), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, midiOutLongMsg,
-    (HMIDIOUT a, void* b, UINT c), (a, b, c))
+    (HMIDIOUT a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, midiOutPrepareHeader,
-    (HMIDIOUT a, void* b, UINT c), (a, b, c))
+    (HMIDIOUT a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, midiOutUnprepareHeader,
-    (HMIDIOUT a, void* b, UINT c), (a, b, c))
-PROXY_THUNK(MMRESULT, WINAPI, midiOutReset,         (HMIDIOUT a), (a))
+    (HMIDIOUT a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiOutReset, (HMIDIOUT a), (a), kMmFail)
 
 // joy* — legacy joystick.
-PROXY_THUNK(UINT,     WINAPI, joyGetNumDevs,        (), ())
-PROXY_THUNK(MMRESULT, WINAPI, joyGetPosEx,
-    (UINT a, void* b), (a, b))
+PROXY_THUNK(UINT, WINAPI, joyGetNumDevs, (), (), 0)
+PROXY_THUNK(MMRESULT, WINAPI, joyGetPosEx, (UINT a, void* b), (a, b), kJoyFail)
 PROXY_THUNK(MMRESULT, WINAPI, joyGetDevCapsW,
-    (UINT_PTR a, void* b, UINT c), (a, b, c))
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kJoyFail)
 
 // mmio* — multimedia file IO.
-PROXY_THUNK(HMMIO,    WINAPI, mmioOpenW,
-    (LPWSTR a, void* b, DWORD c), (a, b, c))
-PROXY_THUNK(MMRESULT, WINAPI, mmioClose, (HMMIO a, UINT b), (a, b))
+PROXY_THUNK(HMMIO, WINAPI, mmioOpenW, (LPWSTR a, void* b, DWORD c), (a, b, c), nullptr)
+PROXY_THUNK(MMRESULT, WINAPI, mmioClose, (HMMIO a, UINT b), (a, b), kMmFail)
 
 // PlaySound — high-level audio.
-PROXY_THUNK(BOOL, WINAPI, PlaySoundA, (LPCSTR a, HMODULE b, DWORD c), (a, b, c))
-PROXY_THUNK(BOOL, WINAPI, PlaySoundW, (LPCWSTR a, HMODULE b, DWORD c), (a, b, c))
+PROXY_THUNK(BOOL, WINAPI, PlaySoundA, (LPCSTR a, HMODULE b, DWORD c), (a, b, c), FALSE)
+PROXY_THUNK(BOOL, WINAPI, PlaySoundW, (LPCWSTR a, HMODULE b, DWORD c), (a, b, c), FALSE)
 
 #undef PROXY_THUNK
 
 BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID /*reserved*/) {
     if (reason == DLL_PROCESS_ATTACH) {
+        // FIRST statement, before anything here can allocate. Reaching DllMain
+        // means _DllMainCRTStartup has already run __acrt_initialize, so the
+        // heap is real from this point on — which is exactly what every thunk's
+        // pre-CRT gate above is asking about. See loader.h.
+        Discrete::Proxy::Proxy_MarkCrtReady();
         ::DisableThreadLibraryCalls(self);
         // Deliberately NOT calling EnsureReal() here. That would LoadLibraryW
         // under the loader lock while the host .exe's own static imports are

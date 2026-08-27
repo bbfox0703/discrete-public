@@ -31,13 +31,14 @@ So: ship a same-named DLL that **forwards every export to the real
 system DLL** + **also loads the dumper backend on a worker thread**.
 Game runs as if nothing changed; backend gets loaded for free.
 
-## Status (2026-05-07)
+## Status (2026-08-27)
 
 | Variant | Phase | Status |
 |---|---|---|
 | `version.dll` | 12a | ✅ Shipped |
 | `winmm.dll`   | 12b | ✅ Shipped |
-| `dxgi.dll`    | 12  | ❌ Not yet shipped (planned but not started — `version`/`winmm` cover the test matrix) |
+| `dxgi.dll`    | 12  | ❌ Not yet shipped (planned but not started — `version`/`winmm` cover the test matrix). ⚠ See [§Pick which proxy](#pick-which-proxy) before starting one |
+| Pre-CRT gate  | 12f | ✅ Shipped (2026-08-27) — see [§Pre-CRT](#pre-crt--an-export-can-be-called-before-our-crt-exists) |
 | `ProxyDeployWindow` (UI) | 12c | ✅ Shipped — bulk install panel, scans Steam library |
 | 32-bit **Mono** support | 12e | ✅ Shipped (2026-06-04, UI/Core-only) — x86 build already produced dist/x86/ (proxy + Mono backend); installer now auto-picks it |
 | 32-bit **IL2CPP** support | — | ❌ N/A — no 32-bit IL2CPP backend exists (no shipping IL2CPP target is 32-bit) |
@@ -68,15 +69,17 @@ Unity-game.exe
                             │                          │
                             │  DllMain (DLL_PROCESS_   │
                             │   ATTACH):               │
-                            │  1. EnsureReal() — open  │
-                            │     System32\version.dll │
-                            │     once, cache HMODULE  │
+                            │  1. MarkCrtReady() —     │
+                            │     first statement      │
                             │  2. Spawn worker thread: │
                             │     • Detect Mono/IL2CPP │
                             │     • LoadLibrary the    │
                             │       sibling backend    │
                             │       DLL                │
                             │  3. Return TRUE          │
+                            │                          │
+                            │  NOTHING is resolved     │
+                            │  here — see §Pre-CRT     │
                             └──────────┬───────────────┘
                                        │
                        game's calls to GetFileVersionInfo* etc.
@@ -84,6 +87,7 @@ Unity-game.exe
                                        ▼
                             ┌──────────────────────────┐
                             │  Per-export thunks:      │
+                            │  pre-CRT gate, then      │
                             │  static fn cache +       │
                             │  GetProcAddress on       │
                             │  first call.             │
@@ -101,10 +105,19 @@ Unity-game.exe
 1. **Real-DLL forwarder**. Every export the system DLL ships is
    declared in our `.def` file (`version.def` / `winmm.def`) so the
    linker emits a same-named export. The implementation (in
-   `version.cpp` / `winmm.cpp`) is a `PROXY_THUNK(ret, conv, name, ...)`
-   macro that on first call resolves the real DLL's same-named export
-   via `GetProcAddress` and caches it in a static. Hot path is one
+   `version.cpp` / `winmm.cpp`) is a
+   `PROXY_THUNK(ret, conv, name, params, args, failval)` macro that on
+   first call resolves the real DLL's same-named export via
+   `GetProcAddress` and caches it in a static. Hot path is one
    indirect branch.
+   - **Resolution is lazy, never eager.** `DllMain` deliberately does
+     not resolve anything: that would `LoadLibraryW` under the loader
+     lock while the host .exe's own static imports are still
+     initialising. Each thunk resolves on its first call instead,
+     which happens on a game thread after `DllMain` has returned.
+   - **`failval`** is the export's own documented failure value,
+     returned when the pre-CRT gate refuses. It is per-export on
+     purpose — see [§Pre-CRT](#pre-crt--an-export-can-be-called-before-our-crt-exists).
    - **C2375 sidestep**: Windows headers declare every `version.dll`
      export with `__declspec(dllimport)`, which clashes with our
      `__declspec(dllexport)`. We name the C functions `Proxy_<symbol>`
@@ -123,9 +136,15 @@ Unity-game.exe
    - On failure (Unknown backend after 5 s, sibling DLL missing,
      `LoadLibrary` fails), the proxy stays silent — the game keeps
      running normally without the dumper.
+   - **`CreateThread` itself failing is the one exception**, and it
+     does log: this thread is the *only* thing the proxy does, so a
+     silent failure here makes every downstream symptom ("installed
+     but nothing attaches") point at the wrong place.
    - **Worker thread** is mandatory: `DllMain` holds the loader lock,
      so calling `LoadLibrary` directly there for a DLL that has its
      own `DllMain` would deadlock.
+   - It is also where the pre-CRT counter is reported, because that is
+     the first moment we are off the loader lock.
 
 3. **Real-DLL HMODULE cache**. `Proxy_LoadRealDll(name)` caches up to
    4 system-DLL handles in a `SRWLOCK`-guarded array. The cache
@@ -136,13 +155,120 @@ Unity-game.exe
 See [loader.h](../dll/src/proxy/loader.h) /
 [loader.cpp](../dll/src/proxy/loader.cpp) for the contract.
 
+## Pre-CRT — an export can be called before our CRT exists
+
+> Full write-up, evidence and the `dxgi.dll` checklist:
+> [lessons-learned.md §Proxy DLLs](lessons-learned.md#proxy-dlls--the-loader-can-call-our-exports-before-we-exist).
+> This section is the short version of what the code does and why.
+
+Windows' AppCompat shim engine (`apphelp.dll` + `AcGenral.dll`) loads *ahead of
+the CRT* on any game that carries a compat layer, and `apphelp!SE_DllLoaded`
+fires when a module is **MAPPED — before its init routine runs**. A proxy export
+entered in that window runs with `_DllMainCRTStartup` not yet executed. Our
+shipped proxies are `/MT` (they import `KERNEL32.dll` and nothing else), so
+`__acrt_heap` is still NULL and the first `malloc` becomes
+`HeapAlloc(NULL, ...)` → access violation before the EXE entry point.
+
+`version.dll` is one step from that window already: `AcGenral.dll` **statically
+imports** `GetFileVersionInfoSizeW` / `GetFileVersionInfoW` / `VerQueryValueW`,
+and `version.dll` is not a KnownDLL, so on a shimmed game the copy it binds to
+is ours. We survive today only because a static dependency is initialised before
+its dependent — an accident of load order, not a design.
+
+**The latch** ([loader.h](../dll/src/proxy/loader.h)):
+
+| symbol | what |
+|---|---|
+| `Proxy_MarkCrtReady()` | **First statement** of each proxy's `DLL_PROCESS_ATTACH` |
+| `Proxy_CrtReady()` | Read by every `PROXY_THUNK` and by `Proxy_LoadRealDll` |
+| `Proxy_NotePreCrtCall()` | `InterlockedIncrement` only — no allocation, no CRT |
+| `Proxy_PreCrtCallCount()` | Reported once from the backend-loader thread, off the loader lock |
+
+Both counters are plain `volatile LONG`s with **constant** initialisers so they
+live in zero-filled `.data` with no dynamic initialiser. A `std::atomic` that is
+not constant-initialised would be read before it was written.
+
+The gate **refuses outright** rather than doing a kernel32-only, allocation-free
+resolve: the pre-CRT caller *is* the loader, so a `LoadLibraryW` there is a
+recursive load under a lock it still holds. Nothing is latched — the cache stays
+empty, `fn` stays null, and the host's own next call resolves normally.
+
+### Two null cases, kept apart on purpose
+
+| state | meaning | answer |
+|---|---|---|
+| CRT not up | resolver never ran | the export's documented failure value, **do not forward** |
+| CRT up, `fn` still null | resolver ran; the name is genuinely absent from the real DLL | fall through and **crash loudly, on purpose** |
+
+⚠ `MMSYSERR_NOERROR`, `TIMERR_NOERROR` and `JOYERR_NOERROR` are **all `0`**, so a
+blanket "return 0 when unresolved" would report *success* for a refused
+`timeBeginPeriod` — the host would believe it got a 1 ms tick and never find out.
+`winmm.cpp` therefore carries `kMmFail` / `kTimeFail` / `kJoyFail` / `kMciFail`,
+and `timeSetEvent` inverts inside its own family (it returns a timer **ID**,
+whose failure answer *is* `0`).
+
+### What is deliberately NOT copied from UE5CEDumper
+
+Their follow-up fix removed the `SRWLOCK` from their resolver, because it was
+held **across `LoadLibraryW`** and the load re-entered their own thunk on the
+same thread — `SRWLOCK` is non-recursive, so it deadlocked the loader.
+
+`Proxy_LoadRealDll` never holds the lock across `LoadLibraryW` (shared scan →
+release → load → exclusive insert → release → `FreeLibrary` the duplicate), so
+it is structurally immune. **Keep the lock.** The transferable rule is the
+general one: *never hold a non-recursive lock across `LoadLibraryW` in a proxy.*
+
+### Regression rig
+
+```bash
+py tools/verify/proxy_precrt_gate.py --all
+```
+
+Maps each proxy with `LoadLibraryExW(..., DONT_RESOLVE_DLL_REFERENCES)` — image
+mapped, exports callable, `DllMain` never runs — and calls a thunk from a child
+process, so a fault is an exit code rather than a dead harness. Then repeats
+with a normal `LoadLibraryW` and checks the export actually reaches the real
+System32 DLL, which is what catches a gate that latched null.
+
+Pass `--baseline <dir>` with pre-gate binaries for the negative control; without
+it the run says so rather than implying the comparison happened.
+
+**x64 verified, build #1429 (2026-08-27), against a #1424 pre-gate control:**
+all 5 pre-gate probes fault
+`0xC0000005`, all 5 gated probes return cleanly, `timeBeginPeriod` answers `97`
+(`kTimeFail` — a value only the gate produces), and all 4 forward probes reach
+the real DLL. **x86 is verified by construction only** — the rig needs a
+same-bitness interpreter and there is no 32-bit Python here, so it reports x86
+as *not tested*. See
+[lessons-learned.md §Verifying it without a game](lessons-learned.md#verifying-it-without-a-game)
+for the full output and what it does and does not prove.
+
+### In-game
+
+⚠ **Testing this in a game needs the right target, and "the game has an AppCompat
+layer" is not the criterion.** A `/MT` build #1431 proxy ran end-to-end on
+Utawarerumono with zero pre-CRT refusals — and that game *does* carry
+`~ HIGHDPIAWARE`, the same layer as the crash in the audit, yet loaded
+`apphelp.dll` **without** `AcGenral.dll`, which is the module that actually calls
+into a mapped-but-uninitialised proxy.
+
+The check is one grep against our own `init` log, which already prints every
+loaded module:
+
+```bash
+grep -i acgenral "$LOCALAPPDATA/Discrete_Dumper/Logs/<pid>/init/current.log"
+```
+
+Details:
+[lessons-learned.md §In-game so far](lessons-learned.md#in-game-so-far--and-why-has-a-compat-layer-is-the-wrong-test-criterion).
+
 ## Pick which proxy
 
 | Variant | When to use |
 |---|---|
 | **`version.dll`** | Default — every Unity .exe imports it. First choice unless something else has already claimed `<game-dir>\version.dll`. |
 | **`winmm.dll`** | Fallback — when another tool (RTSS, ReShade injector, MelonLoader's loader) has already deployed `version.dll`. Most Unity .exes also import `winmm.dll`. |
-| **`dxgi.dll`** | Not shipped yet. Would cover D3D11/12 games where neither `version` nor `winmm` is imported. No game in the test matrix needs it yet. |
+| **`dxgi.dll`** | Not shipped yet. Would cover D3D11/12 games where neither `version` nor `winmm` is imported. No game in the test matrix needs it yet. ⚠ **Read [lessons-learned.md §If you add a `dxgi.dll` proxy](lessons-learned.md#if-you-add-a-dxgidll-proxy-this-stops-being-latent) first** — `dxgi.dll` is one of the three names the AppCompat shim engine searches for, so the pre-CRT window stops being latent and becomes a game that will not start. |
 
 When both `version` and `winmm` are unavailable, the user falls back
 to direct injection via `DiscreteUI.exe` Pick & Inject or
@@ -247,11 +373,11 @@ game directory.
 
 | File | What |
 |---|---|
-| [dll/src/proxy/loader.h](../dll/src/proxy/loader.h) | Public contract: `Proxy_LoadRealDll`, `Proxy_GetRealExport`, `Proxy_StartBackendLoader` |
-| [dll/src/proxy/loader.cpp](../dll/src/proxy/loader.cpp) | Implementation: HMODULE cache, system32 path resolution, worker-thread backend loader |
-| [dll/src/proxy/version/version.cpp](../dll/src/proxy/version/version.cpp) | Per-export `PROXY_THUNK` macros for `version.dll`'s 30+ exports |
+| [dll/src/proxy/loader.h](../dll/src/proxy/loader.h) | Public contract: the pre-CRT latch, `Proxy_LoadRealDll`, `Proxy_GetRealExport`, `Proxy_StartBackendLoader` |
+| [dll/src/proxy/loader.cpp](../dll/src/proxy/loader.cpp) | Implementation: pre-CRT gate + counter, HMODULE cache, system32 path resolution, worker-thread backend loader |
+| [dll/src/proxy/version/version.cpp](../dll/src/proxy/version/version.cpp) | Per-export `PROXY_THUNK` macros — the 12 `version.dll` exports Unity needs |
 | [dll/src/proxy/version/version.def](../dll/src/proxy/version/version.def) | Export aliasing (Proxy_name → name) |
-| [dll/src/proxy/winmm/winmm.cpp](../dll/src/proxy/winmm/winmm.cpp) | Per-export thunks for `winmm.dll`'s 100+ exports |
+| [dll/src/proxy/winmm/winmm.cpp](../dll/src/proxy/winmm/winmm.cpp) | Per-export thunks — the 48 `winmm.dll` exports Unity + SDL2 statically import |
 | [dll/src/proxy/winmm/winmm.def](../dll/src/proxy/winmm/winmm.def) | Export aliasing |
 | [ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs](../ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs) | UI VM — scan / install / uninstall / update commands |
 | [ui/UnityDumpUI/Views/ProxyDeployWindow.axaml](../ui/UnityDumpUI/Views/ProxyDeployWindow.axaml) | Bulk install panel |
