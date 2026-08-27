@@ -30,6 +30,15 @@
 - [PowerShell smoke testing](#powershell-smoke-testing) — pipe
   enveloping, single-element JSON array unwrap, Boolean parameter
   passing.
+- [Proxy DLLs — the loader can call our exports before we exist](#proxy-dlls--the-loader-can-call-our-exports-before-we-exist)
+  — the AppCompat shim engine (`apphelp` + `AcGenral`) calls a proxy
+  export **before `_DllMainCRTStartup` runs**, so `/MT` turns the first
+  `malloc` into `HeapAlloc(NULL, …)`; the pre-CRT latch; why the two
+  null cases must stay apart (`TIMERR_NOERROR == 0`); why magic statics
+  latch null; why our resolver’s SRWLOCK is safe and theirs was not;
+  **why “has a compat layer” is the wrong test criterion — grep the
+  init log for `AcGenral.dll` instead**;
+  **and the checklist to read before adding a `dxgi.dll` flavour**.
 - [Build / DLL development](#build--dll-development) — SEH-leaf
   helpers, mutex-based single-instance, linker LNK1104 with cached
   DLL handles, AOT trim warnings.
@@ -1860,6 +1869,299 @@ Korean) munges em-dashes (`—`) and other Unicode punctuation printed
 by `build.cmd`'s status banners. Routing through `Start-Transcript`
 fixes the encoding; `build.cmd` already does this so the user sees
 clean output regardless of console code page.
+
+---
+
+## Proxy DLLs — the loader can call our exports before we exist
+
+> Applies to [`version.cpp`](../dll/src/proxy/version/version.cpp),
+> [`winmm.cpp`](../dll/src/proxy/winmm/winmm.cpp) and
+> [`loader.cpp`](../dll/src/proxy/loader.cpp) — **and to any `dxgi.dll` /
+> `d3d9.dll` / `dinput8.dll` flavour we add later**, where the same defect stops
+> being latent and becomes a game that will not start. Read this section BEFORE
+> writing that proxy.
+
+### An export of ours can be entered before `_DllMainCRTStartup` has run
+
+**Symptom** (observed in the sibling UE5CEDumper repo, not here). OCTOPATH
+TRAVELER refused to start with a `dxgi.dll` proxy deployed. The *same binary*
+deployed as `winmm.dll` worked in the *same game*. No log line, no exception
+dialog — the process died before the EXE entry point.
+
+**Root cause.** The game carried a Windows AppCompat layer (`HIGHDPIAWARE` in
+`HKCU\...\AppCompatFlags\Layers`). That makes `apphelp.dll` + `AcGenral.dll`
+load at module **[4]/[5]** — *ahead of the CRT*. `AcGenral!NS_DXGICompat` then
+does:
+
+```asm
+lea  rcx, [L"dxgi.dll"]
+call [GetModuleHandleW]        ; -> resolves to the PROXY, not System32's
+lea  rdx, ["SetAppCompatStringPointer"]
+call [GetProcAddress]
+call rax                       ; <-- enters our code
+```
+
+driven by `apphelp!SE_DllLoaded`, which the loader raises when a module is
+**MAPPED — before its init routine runs**. So our export is entered with
+`_DllMainCRTStartup` not yet executed, i.e. **`__acrt_heap == NULL`**. The
+resolver behind that export allocated, `malloc` became `HeapAlloc(NULL, 0, ...)`,
+and it faulted in `ntdll!RtlAllocateHeap+0x54`.
+
+Full instruction-level forensics (two minidumps, the disassembled shim gate, the
+recovered crashing binary) live in the sibling repo:
+`UE5CEDumper/docs/audit-2026-08-26-dxgi-appcompat-crash.md`.
+
+**Why this is our problem too, even though we ship no `dxgi.dll`.** Three facts,
+each checked against *this* repo rather than inherited:
+
+1. **Our shipped proxies are `/MT`.** `build.ps1` sets `STATIC_CRT=ON` for
+   `Publish` ([build.ps1:271](../build.ps1)), and the shipped `dist/version.dll`,
+   `dist/winmm.dll` and `dist/x86/version.dll` import **`KERNEL32.dll` and
+   nothing else**. So `__acrt_heap` is a global of *our* module, NULL until our
+   own entry point runs — exactly the crashing premise. (A `/MD` build would
+   dodge it: the heap then lives in `ucrtbase.dll`, a static dependency the
+   loader initialises before us. Release builds are `/MD`; what ships is not.)
+2. **Our resolve path allocates.** `Proxy_LoadRealDll` builds a `std::wstring`
+   before it does anything else.
+3. **`version.dll` already has an early caller.** `AcGenral.dll` *statically
+   imports* `GetFileVersionInfoSizeW` / `GetFileVersionInfoW` / `VerQueryValueW`,
+   and `version.dll` is **not** a KnownDLL — so on any shimmed game the copy
+   AcGenral binds to is **ours**.
+
+We survive today only because a static dependency is initialised *before* its
+dependent, so our `DllMain` happens to have run by the time AcGenral calls in.
+That is an accident of load order, not a design.
+
+**The rule.**
+
+> **Do not present an export that something may call before your CRT is up — and
+> where you must, make that export survive it.**
+
+The rule is *not* "do less in DllMain". ReShade does **more** under the loader
+lock than we do (file I/O, 44+ hook installs) and boots this game fine. It
+survives because it **does not export `SetAppCompatStringPointer`** — nor
+`ApplyCompatResolutionQuirking`, `UpdateHMDEmulationStatus`, or
+`PIXBeginCapture` / `PIXEndCapture` / `PIXGetCaptureState`. AcGenral's
+`GetProcAddress` returns NULL and the shim skips the whole path.
+
+**What we implement.** A pre-CRT latch in [loader.h](../dll/src/proxy/loader.h):
+
+- `g_crtReady` / `g_preCrtCalls` are plain `volatile LONG`s with **constant**
+  initialisers, so they live in zero-filled `.data` with no dynamic initialiser
+  and are readable before the CRT exists. A `std::atomic` that is not
+  constant-initialised would be *read before it was written*.
+- `Proxy_MarkCrtReady()` is the **first statement** of each proxy's
+  `DLL_PROCESS_ATTACH`.
+- Every `PROXY_THUNK` gates on `Proxy_CrtReady()` and, when refused, answers its
+  export's **documented failure value without forwarding**. `Proxy_LoadRealDll`
+  gates again, as a public entry point in its own right.
+- The gate **refuses outright** rather than doing a kernel32-only,
+  allocation-free resolve. That would be allocation-safe but *not*
+  loader-lock-safe: the pre-CRT caller **is** the loader, so a `LoadLibraryW`
+  there is a recursive load under a lock it still holds.
+- **Nothing is latched.** The cache stays empty and `fn` stays null, so the
+  host's own next call — from a game thread, after `DllMain` — resolves for real.
+- The refusal is counted and reported once from the backend-loader thread, i.e.
+  off the loader lock. Without that counter the refusal is completely invisible:
+  no log, no crash, and nothing for the next person to go on.
+
+### The two null cases are not the same, and conflating them is silent
+
+Once a gate can make the resolver return null, `if (!fn) return 0;` becomes the
+obvious next step, and it is **wrong**:
+
+| state | meaning | correct answer |
+|---|---|---|
+| CRT not up | resolver never ran | the export's documented failure value, **do not forward** |
+| CRT up, `fn` still null | resolver ran; the name is genuinely absent | fall through and **crash loudly, on purpose** |
+
+Collapsing row 2 into row 1 hides a broken proxy behind a plausible return
+value.
+
+And the failure value in row 1 has to be per-export, because **`MMSYSERR_NOERROR`,
+`TIMERR_NOERROR` and `JOYERR_NOERROR` are all `0`**. A blanket "return 0" would
+tell the host that a refused `timeBeginPeriod` *succeeded* — it believes it got a
+1 ms timer tick and never finds out otherwise. `winmm.cpp` therefore carries
+`kMmFail` / `kTimeFail` / `kJoyFail` / `kMciFail`, verified against the SDK
+headers rather than memory. `timeSetEvent` inverts inside its own family: it
+returns a timer **ID**, whose documented failure answer *is* `0`.
+
+### `static auto fn = Resolve(...)` is a magic static, and it latches null
+
+Once the resolver can legitimately return null on a first call, a magic static
+(`static auto fn = reinterpret_cast<Fn>(Resolve("X"));`) evaluates its
+initialiser **exactly once** and keeps that null **for the life of the process**
+— the export is permanently dead, silently, which is worse than the crash the
+gate removes. It also drags in `_Init_thread_header` / `_Init_thread_footer`,
+i.e. CRT machinery, onto the one path that must not need the CRT.
+
+Our thunks have always used `static fn_t fn = nullptr; if (!fn) ...` — a
+constant initialiser, no guard variable, retry on null. Keep it that way.
+(UE5CEDumper had 23 magic statics and had to convert all of them when it added
+its gate.)
+
+### Our resolver's SRWLOCK is safe — because it is not held across `LoadLibraryW`
+
+UE5CEDumper's fix for the crash above exposed a **second** defect worth knowing
+about, and worth **not** copying the cure for. Their resolver held an `SRWLOCK`
+across `LoadLibraryW`; loading the real `dxgi.dll` made the loader raise
+`SE_DllLoaded` again; AcGenral's `GetModuleHandleW(L"dxgi.dll")` resolved **back
+to them**, because they were the module registered under that name; and their
+thunk was re-entered **on the same thread** while the resolver was still inside
+`LoadLibraryW`. `SRWLOCK` is documented **non-recursive**, so the second
+exclusive acquire deadlocked, the loader lock was never released, and the game
+hung with no window. They removed the lock.
+
+**Do not port that half.** [`Proxy_LoadRealDll`](../dll/src/proxy/loader.cpp)
+already has the safe shape:
+
+```
+AcquireSRWLockShared    -> scan -> Release
+LoadLibraryW(path)                              <-- NO lock held
+AcquireSRWLockExclusive -> recheck/insert -> Release
+FreeLibrary(duplicate)                          <-- after Release
+```
+
+The exclusive section contains only `wcscmp` and array stores — no call-out that
+could re-enter. A same-thread re-entrant call falls straight through, loads
+again (the loader returns the in-progress module without raising a fresh
+`SE_DllLoaded`, so recursion terminates at depth 2), and the outer call
+`FreeLibrary`s the duplicate. `LoadLibraryW` is refcounted, so the work is
+idempotent. **The lock is correct and cheap; removing it would buy nothing
+here.**
+
+The transferable rule is the general one, not their patch:
+
+> **Never hold a non-recursive lock across `LoadLibraryW` in a proxy.** The load
+> can re-enter your own exports on the same thread.
+
+### If you add a `dxgi.dll` proxy, this stops being latent
+
+`dxgi.dll` **is** one of the three names AcGenral searches for. UE5CEDumper's
+UTF-16 string search of `AcGenral.dll`:
+
+`dxgi.dll` ✓ · `ninput.dll` ✓ · `d3d9.dll` ✓ · `winmm.dll` ✗ · `version.dll` ✗ ·
+`dinput8.dll` ✗
+
+Before shipping one:
+
+1. **Do not export `SetAppCompatStringPointer`**, nor the other four compat /
+   PIX names listed above. This alone keeps the shim engine out of the code path
+   entirely, and it is cheaper and more certain than surviving the window.
+2. Keep the pre-CRT gate anyway — it is the defence for the names you *do* have
+   to export.
+3. Expect the shim to re-enter your resolver **on the same thread** while it is
+   inside `LoadLibraryW`.
+4. Verify offline with the `DONT_RESOLVE_DLL_REFERENCES` rig below before asking
+   anyone to launch a game.
+5. Note that a `dxgi.dll` proxy is a *different* deployment decision from
+   `version` / `winmm`: it collides with ReShade, ENB and most overlay
+   injectors, which claim the same filename. `WindowsProxyInstaller`'s ownership
+   check exists for exactly this reason.
+
+### In-game so far — and why "has a compat layer" is the wrong test criterion
+
+**Utawarerumono: Past and Present Rediscovered** (IL2CPP, Unity 6000.0.67f1,
+metadata v31), `version.dll` proxy, build **#1431** (`/MT`, imports
+`KERNEL32.dll` only, byte-identical to `dist/version.dll`; both new log strings
+are present in the deployed binary, so the gate is in the shipped machine code).
+Log: `%LOCALAPPDATA%\Discrete_Dumper\Logs\63444`.
+
+Everything downstream of the proxy worked: backend attached, pipe server up, 104
+assemblies, 18.6 MB of v31 metadata parsed, `findInstances` 3 matches over 1306
+scanned regions, `walkInstance` decoded 24 fields on `HaluStatusManager` through
+a 6-deep class chain, clean disconnect (GC drain 65 / 66 ms). `RTSSHooks64.dll`
+and `gameoverlayrenderer64.dll` were both loaded alongside our proxy with no
+conflict.
+
+**No `[PROXY] WARN` line — the pre-CRT counter was zero.** That is the right
+answer for this target, and the module list says why: `apphelp.dll` is loaded,
+**`AcGenral.dll` is not**. `AcGenral` is the module that carries the
+`NS_DXGICompat` hookset — the thing that does
+`GetModuleHandleW` → `GetProcAddress` → call into a mapped-but-uninitialised
+module. Without it in the process, nothing reaches the pre-CRT window at all.
+
+⚠ **And this game DOES have a compat layer registered.** `HKCU\...\AppCompatFlags\Layers`
+carries `~ HIGHDPIAWARE` for its exe — *the same layer* the Octopath crash was
+attributed to. So:
+
+> **"the game has an AppCompat layer" does NOT imply the shim engine's hooksets
+> are loaded.** The layer resolving to `AcGenral` is a separate step, and it did
+> not happen here.
+
+Why it differs between two `HIGHDPIAWARE` titles was not established — the shim
+database matches on more than the layer name, and the Windows build differs from
+the one in the audit. What matters is the testing consequence:
+
+> **The check is whether `AcGenral.dll` appears in the module list, not whether a
+> layer is registered.** Our own `init` log prints every loaded module at
+> `Discrete_Init`, so this costs nothing:
+>
+> ```bash
+> grep -i acgenral "$LOCALAPPDATA/Discrete_Dumper/Logs/<pid>/init/current.log"
+> ```
+
+**What this run does and does not close.** It is a genuine positive control for
+the risk the gate itself introduces — a gate that refused too eagerly, or that
+latched null, would have left the proxy inert or the game unable to read version
+info, and instead the whole pipeline ran. It is **not** the shimmed-game test.
+Still owed: a target where `AcGenral.dll` is actually in the module list.
+
+### Verifying it without a game
+
+`LoadLibraryExW(path, nullptr, DONT_RESOLVE_DLL_REFERENCES)` maps the image and
+makes its exports callable **without running `DllMain`** — the pre-CRT window,
+reproduced with no compat layer, no shim engine and no game. Call a thunk from a
+**child process** so a fault is an exit code instead of a dead harness. That is
+what [tools/verify/proxy_precrt_gate.py](../tools/verify/proxy_precrt_gate.py)
+does.
+
+What it proves and does not prove: under `DONT_RESOLVE_DLL_REFERENCES` the IAT is
+not snapped either, so an ungated binary faults on its **first imported call**
+rather than on `HeapAlloc(NULL, ...)`. Same place in our code, earlier
+instruction. The rig shows "ungated dies inside the resolver, gated returns
+cleanly" — which is the property we want — **not** a byte-for-byte replay of the
+game crash. Only a game proves that.
+
+Our gated path is import-free by construction (it reads a `volatile LONG` and
+does an `InterlockedIncrement` intrinsic), so the rig discriminates cleanly for
+both flavours.
+
+**Result, build #1429 (2026-08-27), x64.** The negative control was produced by
+reverting `dll/src/proxy/` to the pre-gate commit and rebuilding it as build
+#1424, so both sides are the same compiler, flags and sources apart from the
+gate:
+
+```
+=== dist\version.dll ===                       === dist\winmm.dll ===
+  [pre-CRT]                                      [pre-CRT]
+    GetFileVersionInfoSizeW  RETURNED CLEANLY      timeBeginPeriod    RETURNED CLEANLY (97)
+    VerLanguageNameW         RETURNED CLEANLY      timeGetTime        RETURNED CLEANLY
+  [forward]                                        waveOutGetNumDevs  RETURNED CLEANLY
+    GetFileVersionInfoSizeW  1844                [forward]
+    VerLanguageNameW         7  ("English")        timeGetTime        1951781
+  [control] PRE-GATE binary                        waveOutGetNumDevs  4
+    GetFileVersionInfoSizeW  FAULTED 0xC0000005 [control] PRE-GATE binary
+    VerLanguageNameW         FAULTED 0xC0000005   all three           FAULTED 0xC0000005
+```
+
+Three things worth reading rather than skimming:
+
+- **Every pre-gate probe faults; every gated probe returns.** The rig was shown
+  able to fail before it was believed.
+- **`timeBeginPeriod` answers `97`** — `kTimeFail`, which nothing but the gate
+  produces. That is a *positive* signal, not just an absence of a crash.
+- **The `[forward]` rows are the other half.** A gate that latched null would
+  leave the exports permanently dead and still pass the pre-CRT rows. `1844`
+  and `"English"` (7 chars) are the real `version.dll` answering.
+
+⚠ **x86 is verified by construction only.** The rig needs an interpreter of the
+target's bitness and there is no 32-bit Python on the build machine, so it
+reports x86 as *not tested* rather than printing a green tick. What was checked
+instead: `dist/x86/winmm.dll` and `dist/winmm.dll` contain the identical count
+of each refusal constant in their machine code (5 × `mov eax, 97`, 2 × `mov eax,
+166`, 4 × `mov eax, 257`), matching the thunk table exactly. That says the gate
+compiled into the x86 build; it does not say it was executed there.
 
 ---
 
