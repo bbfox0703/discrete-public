@@ -7,18 +7,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **進度與待辦 (start here)**: [docs/plan.md](docs/plan.md) — 單一窗口:current state / open backlog / phase ledger / recent batches。完成 phase 的長篇寫作在 [docs/archive/](docs/archive/);舊批次摘要在 [docs/archive/status-history.md](docs/archive/status-history.md)。
 
 ## Code Changes
-- When asked to rename, refactor, or restructure modules, ALWAYS modify the actual code files (rename files, update imports, change class names) — not just documentation or naming tables.
+- A rename, refactor, or restructure request means changing the code itself (files, imports, class names), not only the docs that describe it.
 
 -----
 
 ## Debugging & Fixes
-- After implementing a fix, verify it against the actual runtime behavior or data format before declaring it done. For memory layout, address mapping, and binary protocol fixes, double-check byte offsets, pointer sizes, and data types (e.g., 32-bit vs 64-bit int, double vs float).
+- In memory layout, address mapping, and binary protocol code, the usual mistakes are byte offsets, pointer sizes, and data types (32- vs 64-bit int, double vs float). The Mono DLL ships for both x64 and x86, so take these values from the real runtime data or format, not from a neighbouring case.
 - For container/nested data structures (arrays, custom structures, types), always trace the full indirection chain before implementing a fix.
 
 -----
 
 ## Cheat Engine
-- When working with Cheat Engine Lua APIs, always verify that a function exists in the CE Lua documentation before using it. Do not assume methods like GotoAddressEx exist.
+- Before calling a Cheat Engine Lua API, look up its name, signature, and return convention in CE's own reference: `celua.txt` for the core API and `autorun\monoscript.lua` for the `mono_*` layer (default install: `C:\Program Files\Cheat Engine\`). Calls that look plausible do not always exist (`GotoAddressEx`, `is32bitProcess`), and return conventions vary (`injectDLL` returns `false` on failure, not `nil`).
 
 -----
 
@@ -27,11 +27,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Rules (MUST follow)
 
-> Canonical invariant list — platform abstraction, log layout, magic strings, Unity offsets, backend-agnostic UI, plus the SEH-leaf and Mono thread-attach rules that have broken builds before: [docs/Archiutecture.md](docs/Archiutecture.md) §Rules. Below are this file's own rule plus the ones most often broken.
+> Canonical invariant list — platform abstraction, log layout, magic strings, Unity offsets, backend-agnostic UI, plus the SEH-leaf, pre-CRT proxy, and Mono thread-attach rules that have broken builds or crashed games before: [docs/Archiutecture.md](docs/Archiutecture.md) §Rules. Below are this file's own rule plus the ones most often broken.
 
 - **Keep this file small & clean**: lessons learnt, notes, and other long-form material must live in separate files under `docs/`. Keep this file to key information only.
 - **Language**: Code comments and UI strings in English
-- **Build / test only via `.\build.cmd`** (`dll` / `mono` / `il2cpp` / `ui` / `cli` / `test` / `publish` / `deploy` / `deploy-scripts`, plus `clean` to wipe first) — bare `cmake` / `dotnet` calls fail without the VS Developer Shell. Output lands in `dist\` (x86 in `dist\x86\`).
+- **Build / test only via `.\build.cmd`** (targets `dll` / `mono` / `il2cpp` / `ui` / `proxy` / `cli` / `test` / `deploy` / `deploy-scripts`; modes `debug` / `release` / `publish`; `clean` to wipe first; `.\build.cmd /?` is the authoritative list) — bare `cmake` / `dotnet` calls fail without the VS Developer Shell. Output lands in `dist\` (x86 in `dist\x86\`).
 - **Single Instance**: UI app uses Mutex to ensure only one instance runs
 - **Async everywhere**: Pipe/RPC and any long-running work must be async and must never block the UI thread. Small local settings/state files may use sync `File.*`.
 - **AOT compatible**: All C# code must be Native AOT / trimming compatible. No reflection-based APIs — use source generators instead (e.g. `[JsonSerializable]` context for `System.Text.Json`, `[ObservableProperty]` for MVVM). The UI ships as a self-contained trimmed binary. See [docs/aot-pitfalls.md](docs/aot-pitfalls.md) (§0 = day-one checklist) before touching `ui/` build config.
