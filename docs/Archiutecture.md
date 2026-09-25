@@ -84,31 +84,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 
 ---
 
-## Code Changes
-
-* When asked to refactor or rename modules/files, make actual code changes (move files, update imports, rename classes) — not just documentation updates. Confirm structural changes before proceeding to docs.
-
----
-
-## Debugging
-
-* When fixing bugs, verify the fix against the actual memory layout or data structure rather than assuming. If the first fix doesn't work, re-examine fundamental assumptions about the data format before iterating.
-* Unity version differences can change struct layouts. Always verify field offsets against the actual runtime before hardcoding.
-
----
-
-## Git Operations
-
-* When creating PRs, check for branch divergence and resolve merge conflicts before attempting `gh pr create`. Run `git status` and `git log --oneline -5` first.
-
----
-
-## Cheat Engine
-
-* When working with CE Lua APIs, verify that functions/methods actually exist in the Cheat Engine Lua API before using them. Do not invent API calls.
-
----
-
 ## Rules (MUST follow)
 
 * **Language**: Code comments and UI strings in English
