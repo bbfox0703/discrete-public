@@ -216,4 +216,4 @@ Quick checks specific to common workflow issues:
 
 ## Credits
 
-Built by **bbfox** — [opencheattables.com](https://opencheattables.com)
+Built by **bbfox0703** — [github.com/bbfox0703/discrete-public](https://github.com/bbfox0703/discrete-public)
