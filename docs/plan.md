@@ -163,7 +163,8 @@
 **2026-11-14 — Release CI(比照 UE5CEDumper)**(`.github/workflows/release.yml` + `build.ps1`):
 - 推 `v*` tag → GitHub runner(`windows-2025-vs2026`)跑 `build.ps1 -Mode Publish -Clean -NoBumpBuildNumber`(含 identity guard、x86 Mono、tests)→ `Discrete-<tag>-win.zip` + `.sha256`(zip 內加 LICENSE / USAGE.md)→ **draft** release,notes = 上個 tag 以來的非 merge commit。`vNNN` tag 會先寫進 `build_number.txt`。`workflow_dispatch` 只產 artifact。
 - 新增 `build.ps1 -NoBumpBuildNumber`(x86 子行程同步傳遞);本機驗過不會遞增。
-- vendor 依賴在 CI 以**固定 commit** 抓取(nlohmann `d10879b` / MinHook `05c06c5` / Zydis `17bc6fb` + Zycore `75a36c4`,= 目前本機版本);`sync_vendor.ps1` 更新後要同步表格(見 CONTRIBUTING.md → Releases)。
+- vendor 依賴在 CI 以**固定 commit** 抓取(nlohmann `d10879b` / MinHook `05c06c5` / Zydis `17bc6fb` + Zycore `75a36c4`,= 目前本機版本)。
+- **`sync_vendor.ps1` 改寫(比照 UE5CEDumper `sync_tools.ps1`)**:build deps 改為鎖定 `tools/vendor_pins.json`(本機與 CI 共用,CI 直接跑 `sync_vendor.ps1 -SkipReference`);預設只還原 pin + 用 `ls-remote` 回報上游是否前進(附 compare 連結),`-UpdatePins` 才移動並改寫 pins 檔;Zydis 巢狀 submodule 只跟 parent 的紀錄(不用 `--remote --recursive`);有本地修改的 dep 不覆蓋(除非 `-Force`);reference clones(`vendor/`)照舊追上游,`-SkipReference` 可略過;fetch 失敗一律紅字 + exit 1,不再落到舊的 `FETCH_HEAD`;訊息改英文;`CONTRIBUTING.md` / `technical-notes.md` 原本寫的 `tools\sync_vendor.ps1` 路徑錯誤一併修正。
 - **未驗**:尚未在 GitHub runner 上實際跑過(本機只驗 YAML 解析、pinned fetch、`-NoBumpBuildNumber`)。
 
 **2026-11-14 — Identity guard + 公開 repo 收尾**(build script + UI footer + README):

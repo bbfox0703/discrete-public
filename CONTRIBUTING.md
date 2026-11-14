@@ -12,7 +12,7 @@
 # Clone + sync vendor (nlohmann/json, libil2cpp metadata sources)
 git clone https://github.com/<you>/discrete.git
 cd discrete
-.\tools\sync_vendor.ps1
+.\sync_vendor.ps1
 
 # Point git at the in-tree hooks dir (one-shot per clone — see
 # "Git hooks" below for what it enforces).
@@ -250,11 +250,11 @@ with a `.sha256` and attached to a **draft** release with a changelog since
 the previous tag. Review the draft, then publish it. Manual runs
 (*Actions → Release → Run workflow*) build the zip as an artifact only.
 
-The workflow fetches nlohmann/json, MinHook and Zydis at **pinned commits**
-(table in the workflow's first step), unlike `sync_vendor.ps1`, which
-tracks upstream tips. After a `sync_vendor.ps1` refresh that builds
-cleanly, copy the new `git -C dll/vendor/<name> rev-parse HEAD` values
-into that table.
+The workflow fetches nlohmann/json, MinHook and Zydis at the commits
+pinned in [tools/vendor_pins.json](tools/vendor_pins.json), by running
+`sync_vendor.ps1 -SkipReference`, exactly as a local sync does. To bump
+them: `.\sync_vendor.ps1 -UpdatePins`, then `.\build.cmd dll` and
+`.\build.cmd test`, and commit the pins file only if both pass.
 
 ---
 

@@ -40,30 +40,11 @@ jobs:
 
       - name: Fetch pinned C++ dependencies into dll/vendor
         shell: pwsh
-        # Locally these come from sync_vendor.ps1, which tracks each upstream's
-        # tip. CI pins exact commits instead so a release cannot change because
-        # an upstream moved. When you run sync_vendor.ps1 and the new tips build
-        # fine, copy `git -C dll/vendor/<name> rev-parse HEAD` into this table.
-        run: |
-          $deps = @(
-            @{ Name = 'nlohmann'; Url = 'https://github.com/nlohmann/json.git';        Sha = 'd10879bca8f0aa790105446075a9525b34a3f718'; Recursive = $false },
-            @{ Name = 'minihook'; Url = 'https://github.com/TsudaKageyu/minhook.git'; Sha = '05c06c5bbca226b72ffb40fc0caaef33bcaf6f74'; Recursive = $false },
-            @{ Name = 'zydis';    Url = 'https://github.com/zyantific/zydis.git';     Sha = '17bc6fb1584bb31e1d595819aab7be57115750f7'; Recursive = $true  }  # bundles Zycore as a submodule
-          )
-          foreach ($d in $deps) {
-            $dir = "dll/vendor/$($d.Name)"
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            git -C $dir init -q
-            git -C $dir remote add origin $d.Url
-            git -C $dir fetch -q --depth 1 origin $d.Sha
-            if ($LASTEXITCODE -ne 0) { throw "fetch $($d.Name)@$($d.Sha) failed" }
-            git -C $dir checkout -q FETCH_HEAD
-            if ($d.Recursive) {
-              git -C $dir submodule update -q --init --recursive --depth 1
-              if ($LASTEXITCODE -ne 0) { throw "submodules of $($d.Name) failed" }
-            }
-            Write-Host "$($d.Name) @ $($d.Sha)"
-          }
+        # nlohmann/json, MinHook and Zydis (+ Zycore) at the commits recorded in
+        # tools/vendor_pins.json - the same pins a local `sync_vendor.ps1` uses,
+        # so a release cannot change because an upstream moved. Reference clones
+        # (vendor/) are documentation only and skipped here.
+        run: ./sync_vendor.ps1 -SkipReference
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v5
