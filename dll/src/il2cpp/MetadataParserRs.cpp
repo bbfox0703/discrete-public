@@ -2,8 +2,8 @@
 // (dll/rust/src/metadata, C ABI in dll/rust/include/discrete_core.h) to the
 // existing Discrete::IL2CPP::Metadata::Parser class, so no consumer changes.
 //
-// Compiled instead of MetadataParser.cpp when DISCRETE_METADATA_RUST is
-// defined. This file holds no parsing logic: every method marshals arguments,
+// The legacy C++ implementation (MetadataParser.cpp) was removed when R1
+// closed (git history, last in 5748299). This file holds no parsing logic: every method marshals arguments,
 // calls one dc_md_* function and copies the result into the C++ view types.
 // Parser::Get() / Load() stay in MetadataParserHostPath.cpp (they only call
 // LoadFromPath).

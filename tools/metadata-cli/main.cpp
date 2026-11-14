@@ -790,12 +790,12 @@ int CmdCodeModules(const std::wstring& path) {
 // out-of-range probes for every getter. Every row is walked except three
 // calls that are O(n^2) through the legacy parser and therefore sampled
 // (FindFieldDefault, FindTypeByName, FindImageContainingMethod — see the
-// comments at each). Not meant for humans: the R1
-// differential harness (tools/verify/metadata_rust_diff.py) runs it through
-// metadata-cli (Rust parser) and metadata-cli-legacy (C++ parser) and diffs
-// the output byte-for-byte, so any behavioural difference between the two
-// parser implementations surfaces — including string literals, which no
-// other subcommand prints. Keep it deterministic: no timestamps, no paths.
+// comments at each). Not meant for humans: tools/verify/metadata_golden.py
+// hashes its output and compares it with hashes recorded when the Rust parser
+// was proven byte-identical to the legacy C++ one (the R1 differential,
+// metadata_rust_diff.py, ran it through both), so any behavioural change
+// surfaces — including string literals, which no other subcommand prints.
+// Keep it deterministic: no timestamps, no paths.
 
 namespace {
 
@@ -1431,7 +1431,7 @@ void Usage(std::FILE* out) {
         "      (emits <prefix>.dd64 + <prefix>.ghidra.txt + <prefix>.idc)\n"
         "  metadata-cli resolve       <spec>       show what <spec> maps to\n"
         "  metadata-cli dump-parser   <spec>       full parser API walk (JSON lines) for\n"
-        "                                          tools/verify/metadata_rust_diff.py\n"
+        "                                          tools/verify/metadata_golden.py\n"
         "  metadata-cli steam-vdf                  list Steam VDF: name -> install folder\n"
         "  metadata-cli steam-games                same, as JSON lines (for scripts)\n"
         "  metadata-cli --help                     this text\n\n"

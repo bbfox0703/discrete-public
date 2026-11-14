@@ -3,14 +3,10 @@
 # adapter lives in MetadataParserHostPath.cpp which we intentionally don't pull
 # in here, since the CLI has no host process to detect).
 #
-# Phase R1 — two flavours from the same CLI sources:
-#   metadata-cli         parser per DISCRETE_RUST_METADATA (Rust by default).
-#                        This is the one that ships in dist\.
-#   metadata-cli-legacy  always the legacy C++ MetadataParser.cpp. Never
-#                        shipped; exists so tools/verify/metadata_rust_diff.py
-#                        can diff the two parsers' output byte-for-byte.
-#                        Delete together with MetadataParser.cpp once R1 is
-#                        live-verified (docs/rust-core.md).
+# Phase R1: the parser is the Rust port (MetadataParserRs.cpp over
+# discrete_core). Until R1 closed a second flavour, metadata-cli-legacy, linked
+# the legacy C++ MetadataParser.cpp for the byte-for-byte differential
+# (tools/verify/metadata_rust_diff.py; both last in 5748299).
 
 set(METADATA_CLI_SOURCES
     main.cpp
@@ -23,15 +19,11 @@ set(METADATA_CLI_SOURCES
     ../../dll/src/shared/Logger.cpp
 )
 
-function(add_metadata_cli TARGET_NAME PARSER_SOURCE USE_RUST)
-    add_executable(${TARGET_NAME} ${METADATA_CLI_SOURCES} ${PARSER_SOURCE})
+function(add_metadata_cli TARGET_NAME)
+    add_executable(${TARGET_NAME} ${METADATA_CLI_SOURCES} ${DISCRETE_METADATA_PARSER_SOURCE})
 
     # PathResolver reads HKCU/HKLM\Software\Valve\Steam via RegGetValueW.
-    target_link_libraries(${TARGET_NAME} PRIVATE Advapi32)
-    if(USE_RUST)
-        target_compile_definitions(${TARGET_NAME} PRIVATE DISCRETE_METADATA_RUST=1)
-        target_link_libraries(${TARGET_NAME} PRIVATE discrete_core)
-    endif()
+    target_link_libraries(${TARGET_NAME} PRIVATE Advapi32 discrete_core)
 
     target_include_directories(${TARGET_NAME} PRIVATE
         ../../dll/src
@@ -57,5 +49,4 @@ function(add_metadata_cli TARGET_NAME PARSER_SOURCE USE_RUST)
     )
 endfunction()
 
-add_metadata_cli(metadata-cli "${DISCRETE_METADATA_PARSER_SOURCE}" ${DISCRETE_RUST_METADATA})
-add_metadata_cli(metadata-cli-legacy "${DISCRETE_METADATA_PARSER_LEGACY}" OFF)
+add_metadata_cli(metadata-cli)

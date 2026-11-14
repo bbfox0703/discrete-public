@@ -296,6 +296,6 @@ every UI in the wild needs the matching DLL.
 | [Memory.cpp](../dll/src/shared/Memory.cpp) | SEH-protected reads + readability checks |
 | [Logger.cpp](../dll/src/shared/Logger.cpp) | Per-PID rotated logs |
 | [AobPattern.h](../dll/src/shared/AobPattern.h) + [AobPatternRs.cpp](../dll/src/shared/AobPatternRs.cpp) | Phase 18a-3 x64 length disassembler for AOB patterns — Rust since Phase R2 (`dll/rust/src/aob.rs`) |
-| [RustCore.cpp](../dll/src/shared/RustCore.cpp) + `*Rs.cpp` | Rust core glue: log sink, banner, `SafeReadShim`; `AobPatternRs` / `GroupMatchRs` / `ValueRefineRs` / `IL2CPPChainDetectorRs` / `IL2CPPFieldXrefScanRs` / `MetadataParserRs` wrap the Rust ports. `MetadataParser.cpp` is still the `DISCRETE_RUST_METADATA=OFF` fallback; the R2 legacy sources (git history, `aae48d3`) and the Zydis field-xref kernels (`987b20d`) were removed. See [rust-core.md](rust-core.md) |
+| [RustCore.cpp](../dll/src/shared/RustCore.cpp) + `*Rs.cpp` | Rust core glue: log sink, banner, `SafeReadShim`; `AobPatternRs` / `GroupMatchRs` / `ValueRefineRs` / `IL2CPPChainDetectorRs` / `IL2CPPFieldXrefScanRs` / `MetadataParserRs` wrap the Rust ports. The legacy C++ sources were removed: R2 modules (git history, `aae48d3`), the Zydis field-xref kernels (`987b20d`) and `MetadataParser.cpp` (`5748299`). See [rust-core.md](rust-core.md) |
 | [MagicStrings.h](../dll/src/shared/MagicStrings.h) | Single source of truth for command names + module names |
 | [BuildInfo.h.in](../dll/src/shared/BuildInfo.h.in) | CMake configure template for build metadata |

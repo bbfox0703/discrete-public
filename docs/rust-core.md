@@ -18,7 +18,7 @@ bug into an error return instead of a game crash.
 | Phase | Scope | Gate | Status |
 |---|---|---|---|
 | **R0** | Toolchain: cargo inside `build.cmd`/CMake, x64 + x86, /MD + /MT, Debug + Release; FFI conventions; log sink; panic guard | All arch × CRT combinations build and link; `cargo test` passes on x64 and i686; Rust banner in the init log | ✅ offline + IL2CPP x64 and Mono x64 live; x86 live pending |
-| **R1** | IL2CPP `global-metadata.dat` parser (`dll/rust/src/metadata`) behind `MetadataParserRs.cpp` | `tools/verify/metadata_rust_diff.py`: Rust and legacy C++ parsers byte-identical over the local fixture corpus | see [R1 gate](#r1-gate) |
+| **R1** | IL2CPP `global-metadata.dat` parser (`dll/rust/src/metadata`) behind `MetadataParserRs.cpp` | `tools/verify/metadata_rust_diff.py`: Rust and legacy C++ parsers byte-identical over the local fixture corpus (now golden hashes, `metadata_golden.py`) | see [R1 gate](#r1-gate) |
 | **R2** | Pure algorithms: `AobPattern` (`aob.rs`), `GroupMatch` (`group_match.rs`), the value-scan refine comparator (`value.rs`), `IL2CPPChainDetector` (`chain/`, Zydis → `iced-x86`); follow-up: `IL2CPPFieldXref`'s scan kernels (`xref/`), which retired Zydis; host-memory reads only through the SEH read shim | `tools/verify/r2_rust_diff.py` / `xref_rust_diff.py`: legacy vs Rust byte-identical over generated cases + every local `GameAssembly.dll` (now golden hashes, `r2_golden.py`) | see [R2 gate](#r2-gate), [FieldXref](#r2-follow-up-il2cppfieldxref-scan-kernels) |
 | R3 (opt.) | `PipeServer` framing; handlers stay C++ | wire-level replay | not started |
 | R4+ | Backend walkers / `ExportAPI` | only if R1–R3 show a real maintenance win | not planned |
@@ -51,7 +51,7 @@ dll/src/il2cpp/MetadataParserRs.cpp   Parser class -> dc_md_* wrapper
 dll/src/shared/{AobPattern,GroupMatch,ValueRefine}Rs.cpp,
 dll/src/il2cpp/IL2CPPChainDetectorRs.cpp   R2 wrappers (same C++ API)
 dll/src/il2cpp/IL2CPPFieldXrefScanRs.cpp   IL2CPPFieldXrefScan.h kernels -> dc_xref_*
-tools/verify/metadata_rust_diff.py    R1 differential harness
+tools/verify/metadata_golden.py       R1 regression gate (golden hashes of metadata-cli)
 tools/r2-diff/ + tools/verify/r2_golden.py   R2 regression gate (golden hashes;
                                r2-dump + xref-dump)
 tools/zydis-oracle/            decoder-fidelity oracle: iced adapter vs Zydis
@@ -209,8 +209,11 @@ the hardened harness.
 
 **Not in the corpus** (covered only by the synthetic-blob unit tests in
 `dll/rust/src/metadata/tests.rs`): v24.0 / v24.1 strides (R-Type Dimensions
-EX), v27 (Townscaper / Tianding), v35–v37. Re-run the harness when one of
-those games is installed.
+EX), v27 (Townscaper / Tianding), v35–v37. To add one of those games now
+that the legacy parser is gone: `metadata_golden.py --record` it from the
+Rust build, then run `build.cmd cli` in a checkout of `5748299` (the last
+commit with the legacy parser) and pass its `metadata-cli-legacy.exe` to
+`metadata_golden.py --exe <path> <fixture>` — it must match every hash.
 
 How the port was checked before the harness ran: one writer, then five
 area reviewers (header, type definitions, fields/strings, methods/images,
@@ -438,15 +441,27 @@ Worth a look if a live instance xref on a big game is slow.
 
 ## Fallback / removal
 
-- `-DDISCRETE_RUST_METADATA=OFF` rebuilds the DLL and metadata-cli on the
-  legacy C++ parser (`MetadataParser.cpp`). It is an **emergency switch, not a
-  `build.cmd` option**: add it to the `cmake -S … -B …` line of
-  `Build-DllForArch` in `build.ps1` for that build (the script wipes the CMake
-  cache on every run). Keep it until R1 has passed one in-game smoke on an
-  IL2CPP target (passed 2026-11-14 — removal is now unblocked). The harness refuses to run (exit 2) if `metadata-cli.exe`
-  does not contain the Rust parser, so an OFF build cannot fake a PASS.
-- `metadata-cli-legacy.exe` is built next to `metadata-cli.exe` by
-  `build.cmd cli` and never shipped; it exists only for the harness.
+- **R1 legacy removed (2026-11-14, after its in-game smoke).**
+  `MetadataParser.cpp`, the legacy half of `MetadataParser.h`, the
+  `DISCRETE_RUST_METADATA` option (and the `DISCRETE_METADATA_RUST` define),
+  `metadata-cli-legacy` and `metadata_rust_diff.py` are gone; all of it is in
+  git history (last in `5748299`). There is no parser fallback switch any
+  more. The regression gate is now `py -I tools/verify/metadata_golden.py`
+  (`build.cmd cli` first): the same 227 checks per fixture as the
+  differential, each one's exit code + stdout + stderr (or output file)
+  hashed and compared with `tools/verify/metadata_golden.json`. That file
+  was recorded right after the differential re-proved Rust == legacy
+  (7 fixtures, 1589 checks, 0 differences), and the legacy binary was then
+  checked against the recorded hashes too (1589/1589). Entries are keyed by
+  the SHA-256 of `global-metadata.dat` + `GameAssembly.dll`, and checks by
+  position (`type[017]`): the JSON holds no class / method / field names,
+  only each game's folder name as a hint (as `r2_golden.json` does). Every
+  path the CLI prints (metadata file, `GameAssembly.dll`, install root,
+  output prefix, also in canonical form) is masked before hashing, so the
+  same game build checks from any install location — verified through a
+  junction. A tampered hash reports FAIL with the local label; other game
+  builds report SKIP. The legacy binary rebuilt from `5748299` (the
+  procedure in "R1 gate") also matches the recorded hashes, 1589/1589.
 - **R2 legacy removed (2026-11-14, after the live A/B).** `AobPattern.cpp`,
   `ValueRefine.cpp`, the inline half of `GroupMatch.h`,
   `IL2CPPChainDetector.cpp`, the `DISCRETE_RUST_R2` option, `r2-dump-legacy`
@@ -469,7 +484,3 @@ Worth a look if a live instance xref on a big game is slow.
   `xref_rust_diff.py`, last in `987b20d`).
   `xref-dump`'s outputs joined `r2_golden.json` (recorded from the proven
   build and cross-checked against the legacy binary's own hashes).
-- After the in-game smoke: delete `MetadataParser.cpp`, the legacy half of
-  `MetadataParser.h`, the CMake option and `metadata-cli-legacy`. The harness
-  then becomes a Rust-vs-recorded-baseline check (record `dump-parser`
-  output first).

@@ -909,8 +909,9 @@ Mismatch indicates one of:
   — build target (links against the same `MetadataParser` source the
   DLL uses).
 - [dll/src/il2cpp/MetadataParser.h](../dll/src/il2cpp/MetadataParser.h)
-  / [.cpp](../dll/src/il2cpp/MetadataParser.cpp) — version dispatcher
-  + per-version type-table parsing.
+  / [MetadataParserRs.cpp](../dll/src/il2cpp/MetadataParserRs.cpp) over
+  [dll/rust/src/metadata](../dll/rust/src/metadata/) — version dispatcher
+  + per-version type-table parsing (Rust; the C++ class is a wrapper).
 - [dll/src/il2cpp/MetadataLayout.h](../dll/src/il2cpp/MetadataLayout.h)
   — per-version struct layouts (cross-checked vs upstream Unity in
   `vendor/libil2cpp/`).

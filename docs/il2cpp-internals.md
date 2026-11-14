@@ -22,7 +22,7 @@
 | [IL2CPPMethodFinder](../dll/src/il2cpp/IL2CPPMethodFinder.h) / [.cpp](../dll/src/il2cpp/IL2CPPMethodFinder.cpp) | Phase 18 — overload enumeration + AOT pointers + signature decode. |
 | [IL2CPPMethodInvoker](../dll/src/il2cpp/IL2CPPMethodInvoker.h) / [.cpp](../dll/src/il2cpp/IL2CPPMethodInvoker.cpp) | Phase 19 — `callMethod` RPC handler. |
 | [IL2CPPThreadAttach](../dll/src/il2cpp/IL2CPPThreadAttach.h) | RAII guard around `il2cpp_thread_attach` / `il2cpp_thread_detach`. |
-| [MetadataParser](../dll/src/il2cpp/MetadataParser.h) / [.cpp](../dll/src/il2cpp/MetadataParser.cpp) | `global-metadata.dat` parser — version dispatcher (v24/v27/v29/v31), type tables, string heap, field defaults. |
+| [MetadataParser](../dll/src/il2cpp/MetadataParser.h) / [Rs.cpp](../dll/src/il2cpp/MetadataParserRs.cpp) | `global-metadata.dat` parser — version dispatcher (v24/v27/v29/v31), type tables, string heap, field defaults. Implemented in Rust ([dll/rust/src/metadata](../dll/rust/src/metadata/)); the C++ class wraps it. |
 | [MetadataLayout](../dll/src/il2cpp/MetadataLayout.h) | Per-version struct layouts (cross-checked vs upstream Unity in `vendor/libil2cpp/`). |
 | [IL2CPPMetadataRegistration](../dll/src/il2cpp/IL2CPPMetadataRegistration.h) / [.cpp](../dll/src/il2cpp/IL2CPPMetadataRegistration.cpp) | Phase 5 segment 2d (partial) — `Il2CppMetadataRegistration` AOB scan for type-aware const literal decode. |
 
@@ -213,7 +213,7 @@ Header[4..7]   = uint32 version
 Versions we ship: **v24** (Unity 2018), **v27** (Unity 2020), **v29**
 (Unity 2021), **v31** (Unity 2022/2023).
 
-The dispatcher in [MetadataParser.cpp](../dll/src/il2cpp/MetadataParser.cpp)
+The dispatcher in [parser.rs](../dll/rust/src/metadata/parser.rs) (formerly MetadataParser.cpp)
 selects a per-version layout from
 [MetadataLayout.h](../dll/src/il2cpp/MetadataLayout.h). Each layout
 is a struct of byte offsets / field sizes for that version's

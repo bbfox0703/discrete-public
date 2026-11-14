@@ -25,7 +25,7 @@ this up across PCs.
 
 | Il2CppDumper feature | Status | Notes |
 |---|---|---|
-| Parse `global-metadata.dat` | ✅ Done | v24.0 / v24.1 / v24.2-v24.5 / v27 / v29 / v31 / v32-v34 / v35-v37 / v38-v39 — full coverage via [MetadataParser](../dll/src/il2cpp/MetadataParser.cpp). v24 sub-version auto-detected by `Parser::DetectV24Variant()`. |
+| Parse `global-metadata.dat` | ✅ Done | v24.0 / v24.1 / v24.2-v24.5 / v27 / v29 / v31 / v32-v34 / v35-v37 / v38-v39 — full coverage via [MetadataParser](../dll/rust/src/metadata/parser.rs). v24 sub-version auto-detected by `Parser::DetectV24Variant()`. |
 | Parse `GameAssembly.dll` (PE) offline | ✅ **Done build #506** | Full Phase D pipeline: PE parser → Il2CppMetadataRegistration finder → codeGenModules walker → method→RVA cross-link → 3 debugger formats. Runs entirely from file bytes, no game launch. |
 | Parse ELF / Mach-O / NSO / WebAssembly | ❌ Not planned | Android/iOS/Switch dump support — out of scope, no demand. |
 | TypeDefinition + Field tables | ✅ Done | `metadata-cli types` / `type` |

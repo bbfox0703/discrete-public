@@ -1,5 +1,6 @@
 //! The `global-metadata.dat` parser — a line-by-line port of the C++
-//! `Discrete::IL2CPP::Metadata::Parser` (dll/src/il2cpp/MetadataParser.cpp).
+//! `Discrete::IL2CPP::Metadata::Parser` (dll/src/il2cpp/MetadataParser.cpp,
+//! removed when R1 closed; git history last in 5748299).
 //!
 //! Behaviour contract: every accepted / rejected input, version dispatch,
 //! stride, bounds check, early-out, returned value and log line matches the

@@ -2,8 +2,9 @@
 
 Run once against a game with the default (Rust) DLLs and once with a legacy
 build, then diff the two JSON files with `compare`. R2's legacy sources are
-gone since R2 closed; a legacy build now means a checkout of aae48d3
-configured with -DDISCRETE_RUST_R2=OFF -DDISCRETE_RUST_METADATA=OFF. A plain
+gone since R2 closed and R1's since R1 closed; a legacy build now means a
+checkout of aae48d3 configured with -DDISCRETE_RUST_R2=OFF
+-DDISCRETE_RUST_METADATA=OFF. A plain
 `run` on its own still checks the live value-scan / group-scan behaviour. Everything recorded in the "ab" section is
 restart-stable (names, offsets, module-relative addresses), so the two runs
 must match exactly. The "live" section holds per-run PASS/FAIL checks of the

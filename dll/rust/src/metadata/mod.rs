@@ -2,7 +2,8 @@
 //!
 //! A behaviour-identical Rust port of the C++
 //! `Discrete::IL2CPP::Metadata::Parser` (dll/src/il2cpp/MetadataParser.cpp +
-//! MetadataLayout.h). The C++ class is kept as a thin wrapper over the C ABI
+//! MetadataLayout.h; the .cpp was removed when R1 closed, git history last in
+//! 5748299). The C++ class is kept as a thin wrapper over the C ABI
 //! in [`ffi`] (declared in `include/discrete_core.h`, "Phase R1" section), so
 //! every consumer — the IL2CPP backend, `ExportAPI`, `metadata-cli` — keeps
 //! its API.
