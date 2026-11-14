@@ -134,10 +134,15 @@ impl Reader {
     }
 }
 
-const VERSION: &str = concat!("discrete_core ", env!("CARGO_PKG_VERSION"), "\0");
+/// `DC_BUILD_BANNER` comes from build.rs: the C++ `DISCRETE_BUILD_BANNER`
+/// format, fed by the same CMake values (see build.rs).
+const VERSION: &str = concat!("discrete_core ", env!("DC_BUILD_BANNER"), "\0");
 
-/// Static, NUL-terminated version banner (`"discrete_core 0.1.0"`). Logged at
-/// DLL init so every per-PID log shows the Rust core actually ran.
+/// Static, NUL-terminated version banner, e.g.
+/// `"discrete_core 0.1.0.1469 9636b00 (Release, 2026-11-14T09:00:00Z)"` —
+/// `"discrete_core " + DISCRETE_BUILD_BANNER` of the build that compiled it
+/// (`"discrete_core 0.1.0 (cargo)"` outside CMake). Logged at DLL init so
+/// every per-PID log shows the Rust core ran and which build it came from.
 #[unsafe(no_mangle)]
 pub extern "C" fn dc_core_version() -> *const c_char {
     // Cannot panic, but stays inside guard so "every extern fn is guarded"
@@ -168,5 +173,15 @@ mod tests {
         // SAFETY: points at a static NUL-terminated string.
         let s = unsafe { std::ffi::CStr::from_ptr(p) };
         assert!(s.to_str().unwrap().starts_with("discrete_core "));
+    }
+
+    #[test]
+    fn version_tracks_the_package_version() {
+        // "discrete_core 0.1.0.<build> ..." under CMake, "discrete_core 0.1.0 (cargo)"
+        // otherwise; build.rs refuses a Cargo.toml / project(VERSION) mismatch.
+        let banner = VERSION.trim_end_matches('\0');
+        let ver = banner.strip_prefix("discrete_core ").unwrap();
+        let pkg = env!("CARGO_PKG_VERSION");
+        assert!(ver == format!("{pkg} (cargo)") || ver.starts_with(&format!("{pkg}.")), "{banner}");
     }
 }

@@ -37,7 +37,10 @@ typedef void (*dc_log_sink_fn)(uint32_t category, const char* msg, size_t len);
 // are dropped — same as Discrete::Log::Write before Log::Init().
 void dc_core_set_log_sink(dc_log_sink_fn sink);
 
-// Static NUL-terminated banner, e.g. "discrete_core 0.1.0".
+// Static NUL-terminated banner: "discrete_core " followed by the same text as
+// the C++ DISCRETE_BUILD_BANNER of the build that compiled it, e.g.
+// "discrete_core 0.1.0.1469 9636b00 (Release, 2026-11-14T09:00:00Z)"
+// ("discrete_core 0.1.0 (cargo)" when built by cargo outside CMake).
 const char* dc_core_version(void);
 
 // --- Phase R1: IL2CPP global-metadata.dat parser ---------------------------

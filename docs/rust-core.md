@@ -17,7 +17,7 @@ bug into an error return instead of a game crash.
 
 | Phase | Scope | Gate | Status |
 |---|---|---|---|
-| **R0** | Toolchain: cargo inside `build.cmd`/CMake, x64 + x86, /MD + /MT, Debug + Release; FFI conventions; log sink; panic guard | All arch × CRT combinations build and link; `cargo test` passes on x64 and i686; Rust banner in the init log | ✅ offline (see below); banner in a live game pending |
+| **R0** | Toolchain: cargo inside `build.cmd`/CMake, x64 + x86, /MD + /MT, Debug + Release; FFI conventions; log sink; panic guard | All arch × CRT combinations build and link; `cargo test` passes on x64 and i686; Rust banner in the init log | ✅ offline + IL2CPP x64 live; Mono live pending |
 | **R1** | IL2CPP `global-metadata.dat` parser (`dll/rust/src/metadata`) behind `MetadataParserRs.cpp` | `tools/verify/metadata_rust_diff.py`: Rust and legacy C++ parsers byte-identical over the local fixture corpus | see [R1 gate](#r1-gate) |
 | **R2** | Pure algorithms: `AobPattern` (`aob.rs`), `GroupMatch` (`group_match.rs`), the value-scan refine comparator (`value.rs`), `IL2CPPChainDetector` (`chain/`, Zydis → `iced-x86`); host-memory reads only through the SEH read shim | `tools/verify/r2_rust_diff.py`: legacy vs Rust byte-identical over generated cases + every local `GameAssembly.dll` | see [R2 gate](#r2-gate) |
 | R3 (opt.) | `PipeServer` framing; handlers stay C++ | wire-level replay | not started |
@@ -29,6 +29,7 @@ bug into an error return instead of a game crash.
 rust-toolchain.toml            pinned rustc + both targets (repo root)
 dll/rust/
   Cargo.toml / Cargo.lock      crate `discrete_core`; deps only as recorded below
+  build.rs                     version banner from the CMake build (C++ format)
   RustCore.cmake               cargo -> IMPORTED target `discrete_core`
   include/discrete_core.h      the C ABI (hand-maintained, no cbindgen)
   src/lib.rs                   FFI rules (read this first)
@@ -76,6 +77,17 @@ onto cargo so the two halves can never disagree:
 - Rust std always names the *release* CRT. C++ Debug links the debug CRT, so
   Debug adds `/NODEFAULTLIB:msvcrt.lib` (or `libcmt.lib`); the debug CRT
   exports everything Rust std needs.
+- **Version = the C++ DLL / UI version.** `RustCore.cmake` passes the
+  values `BuildInfo.h` is generated from (`project(VERSION)`,
+  `build_number.txt`, git short hash, config, configure timestamp) to cargo
+  as `DISCRETE_FILE_VERSION` / `DISCRETE_GIT_SHORT` / `DISCRETE_BUILD_CONFIG`
+  / `DISCRETE_BUILD_TIMESTAMP`; `build.rs` formats them like
+  `DISCRETE_BUILD_BANNER`, so `dc_core_version()` returns `discrete_core
+  0.1.0.1469 9636b00 (Release, …)`. `RustCore::Init` logs it and writes a
+  `WARN` line if it differs from the C++ banner (a stale
+  `discrete_core.lib`). `build.rs` fails the build when `Cargo.toml`'s
+  version is not the `project(VERSION)` major.minor.patch — bump both
+  together. Plain `cargo build` / `cargo test` reports `0.1.0 (cargo)`.
 - Native libs Rust std needs (from `--print native-static-libs`): `kernel32
   ntdll userenv ws2_32 dbghelp synchronization`. Re-check on toolchain bumps.
 - `build.cmd test` also runs `cargo test` for **both** triples — the i686 test
@@ -152,8 +164,8 @@ Verified 2026-11-14 (build #1440–1443):
 | `cargo test` x64, i686, i686 `+crt-static` | 3/3 pass, incl. panic → fallback |
 | proxy DLLs | do **not** contain the Rust core (checked) |
 
-Not covered offline: the `Rust core: discrete_core …` line in a live game's
-`init` log (first in-game run of any backend proves it).
+Live: the `Rust core: discrete_core …` banner line appeared in an IL2CPP x64
+game's `init` log (2026-11-14). Mono x64 / x86 not yet run live.
 
 Unrelated finding while testing: x64 **Debug** `Discrete-IL2CPP.dll` failed with
 `C2712` in `IL2CPPAddressFinder.cpp` — broken since before the Rust work.
@@ -217,10 +229,8 @@ stopped (string copies in `GetTypeDefinition` × `FindImageContainingMethod`),
 the Rust one finished the identical walk in ~8 min; `dump-parser` now samples
 that one O(methods × types) call.
 
-Live-DLL check still pending: one IL2CPP game with the new
-`Discrete-IL2CPP.dll` — `init` log shows `Rust core: discrete_core 0.1.0`,
-`metadata` log shows the usual `MetadataParser: loaded version=…` line, and a
-metadata-backed RPC (e.g. a class walk with field defaults) answers as before.
+Live-DLL check: ✅ passed 2026-11-14 together with R2 — see
+[Live A/B](#live-ab-r1--r2).
 
 ## R2 gate
 
@@ -278,12 +288,48 @@ Intentional differences (none observable in the harness):
 - **Speed.** The Rust chain scan is ~25–35 % slower than Zydis on images with
   few candidates and faster with many; seconds either way.
 
-Live-DLL check still pending: one IL2CPP game — a method AOB
-(`getMethodAobPattern`), a group scan (begin + refine), a value-scan refine
-pass, and a field xref on an IL2CPP field (`IL2CPPFieldXref.cpp` runs the
-chain detector; the `walk` log's `FieldXref: v2 scan complete —
-hopOneCandidates=…` line shows it ran) answer as before. AOB, group scan and
-refine are shared code, so a Mono game covers them too.
+Live-DLL check: ✅ passed 2026-11-14 — see [Live A/B](#live-ab-r1--r2).
+
+## Live A/B (R1 + R2)
+
+2026-11-14, Utawarerumono: Past and Present Rediscovered (IL2CPP, Unity
+6000.0.67f1, metadata v31), title screen, proxy auto-start.
+`tools/smoke/r2_live.py` ran against the shipping DLL (build #1466, `/MT`,
+Rust R1 + R2), then the game was restarted on a legacy build (#1467,
+`DISCRETE_RUST_R2=OFF DISCRETE_RUST_METADATA=OFF`) and the same script ran
+again; `r2_live.py compare` diffs the restart-stable parts.
+
+| Check | Rust | Legacy |
+|---|---|---|
+| `init` log `Rust core: discrete_core …` banner | ✅ | ✅ (R0 banner stays) |
+| `metadata` log `MetadataParser: loaded version=31 …` | ✅ (Rust parser) | ✅ |
+| 400 × `getClassInfo`; 41 × `getEnumValues`, 150 × `il2cppGetMetadataTypeFields`, 3 × `il2cppGetMetadataStrings` (19,327 literals) | identical | identical |
+| 150 methods × 2 × `getMethodAobPattern` (module-relative), each pattern matches its own bytes | identical, 300/300 | identical, 300/300 |
+| 40 static fields × `findFieldReferences` (chain detector; per-field `FieldXref: v2 scan complete — hopOneCandidates/chainBroken/chainsEmitted/bytesScanned/failedReads` log lines also identical) | identical | identical |
+| value scan: begin exact, refine increased / unchanged / decreased / exact / range keep, changed drops (field written with `WriteProcessMemory`, restored) | 7/7 | 7/7 |
+| group scan: begin finds the object, SDR assigns both fields, refine keeps / drops | 4/4 | 4/4 |
+
+`compare`: **0 sections differ** — once both games were in the same state.
+The first legacy pass ran on a freshly started game and missed the chain
+matches for 3 fields: `ClassPointerScanner` (C++, not ported) found 0 slots
+because IL2CPP fills a class-pointer slot lazily, when the class is first
+used, and the Rust pass had run on a game that had already been probed five
+times. A second legacy pass matched exactly. Lesson for future A/B runs:
+warm both games the same way (run the script once and discard it) before
+comparing xrefs.
+
+Side observations (not R2 regressions): both builds grow the game's private
+memory to ~6.4 GB over a run (whole-heap value-scan / walk machinery, same
+on legacy); the xref section took 2.3 s on Rust vs ~20 s on legacy for the
+same 40 fields (not profiled).
+
+Follow-up the same day: after the Rust banner switched to the C++ version
+scheme (build #1469), the game's `init` log showed `Discrete DLL attached
+0.1.0.1469 9636b00 (Release, …)` and `Rust core: discrete_core 0.1.0.1469
+9636b00 (Release, …)` — identical, no mismatch `WARN`.
+
+Not covered live: Mono x64 / x86 (the R0 banner and the shared AOB / scan
+code on a Mono game) and x86 in general.
 
 ## Fallback / removal
 
@@ -292,7 +338,7 @@ refine are shared code, so a Mono game covers them too.
   `build.cmd` option**: add it to the `cmake -S … -B …` line of
   `Build-DllForArch` in `build.ps1` for that build (the script wipes the CMake
   cache on every run). Keep it until R1 has passed one in-game smoke on an
-  IL2CPP target. The harness refuses to run (exit 2) if `metadata-cli.exe`
+  IL2CPP target (passed 2026-11-14 — removal is now unblocked). The harness refuses to run (exit 2) if `metadata-cli.exe`
   does not contain the Rust parser, so an OFF build cannot fake a PASS.
 - `metadata-cli-legacy.exe` is built next to `metadata-cli.exe` by
   `build.cmd cli` and never shipped; it exists only for the harness.

@@ -6,6 +6,8 @@
 #include "MagicStrings.h"
 #include "Memory.h"
 
+#include "BuildInfo.h"  // generated: DISCRETE_BUILD_BANNER
+
 #include <discrete_core.h>
 
 #include <cstddef>
@@ -50,7 +52,16 @@ extern "C" std::int32_t SafeReadShim(void* /*ctx*/, std::uintptr_t addr,
 
 void Init() {
     dc_core_set_log_sink(&RustLogSink);
-    Discrete::Log::Init(std::string("Rust core: ") + dc_core_version());
+    const std::string banner = dc_core_version();
+    Discrete::Log::Init("Rust core: " + banner);
+    // Both banners come from the same CMake configure (RustCore.cmake passes
+    // BuildInfo.h's values to cargo), so a mismatch means a stale
+    // discrete_core.lib got linked.
+    constexpr std::string_view expected = "discrete_core " DISCRETE_BUILD_BANNER;
+    if (banner != expected) {
+        Discrete::Log::Init("WARN: Rust core banner does not match this DLL build (" +
+                            std::string(expected) + ") - stale discrete_core.lib?");
+    }
 }
 
 }  // namespace Discrete::RustCore

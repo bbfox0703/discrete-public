@@ -62,6 +62,12 @@ add_custom_target(discrete_core_cargo
             --unset=RUSTFLAGS
             "CARGO_ENCODED_RUSTFLAGS=${_dc_rustflags}"
             "CARGO_TARGET_DIR=${_dc_target_dir}"
+            # Same values BuildInfo.h is generated from; build.rs folds them
+            # into the DISCRETE_BUILD_BANNER-format version banner.
+            "DISCRETE_FILE_VERSION=${VER_MAJOR}.${VER_MINOR}.${VER_PATCH}.${BUILD_NUMBER}"
+            "DISCRETE_GIT_SHORT=${GIT_COMMIT_SHORT}"
+            "DISCRETE_BUILD_CONFIG=${CMAKE_BUILD_TYPE}"
+            "DISCRETE_BUILD_TIMESTAMP=${BUILD_TIMESTAMP}"
             ${CARGO_EXECUTABLE} build --locked --lib
                 --manifest-path "${_dc_manifest}"
                 --target ${DISCRETE_RUST_TRIPLE}
