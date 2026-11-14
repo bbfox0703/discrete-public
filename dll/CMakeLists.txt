@@ -145,8 +145,8 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPClassWalker.cpp
     src/il2cpp/IL2CPPClassWalker.h
     src/il2cpp/MetadataLayout.h
-    # Phase R1: DISCRETE_METADATA_PARSER_SOURCE is MetadataParserRs.cpp (Rust
-    # core wrapper) or the legacy MetadataParser.cpp — see root CMakeLists.txt.
+    # Phase R1: DISCRETE_METADATA_PARSER_SOURCE is MetadataParserRs.cpp, the
+    # wrapper over the Rust parser — see root CMakeLists.txt.
     ${DISCRETE_METADATA_PARSER_SOURCE}
     src/il2cpp/MetadataParser.h
     src/il2cpp/MetadataParserHostPath.cpp  # DLL-only: BackendDetector adapter for Parser::Load()
@@ -219,18 +219,11 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
     # Phase 20-MT: link MinHook (vendored as `minhook` target — see
     # add_subdirectory above). Static C-only library, ~50 KB per backend.
+    # discrete_core is the Rust core: metadata parser, R2 algorithms and the
+    # x64 decoding the IL2CPP backend needs (chain detector, field xref; Zydis
+    # left the build when IL2CPPFieldXref's scan kernels were ported).
     target_link_libraries(${TARGET_NAME} PRIVATE minhook discrete_core)
     target_include_directories(${TARGET_NAME} PRIVATE vendor/minihook/include)
-    # The x64 decoding the IL2CPP backend needs (chain detector, field xref)
-    # is iced-x86 inside discrete_core; Zydis left the build when the last
-    # Zydis user (IL2CPPFieldXref's scan kernels) was ported.
-    if(BACKEND_DEFINE STREQUAL "DISCRETE_BACKEND_IL2CPP")
-        # Phase R1: every TU that includes MetadataParser.h must agree on
-        # this define (it changes the class layout), so it is target-wide.
-        if(DISCRETE_RUST_METADATA)
-            target_compile_definitions(${TARGET_NAME} PRIVATE DISCRETE_METADATA_RUST=1)
-        endif()
-    endif()
     set_target_properties(${TARGET_NAME} PROPERTIES
         OUTPUT_NAME "${TARGET_NAME}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

@@ -2,11 +2,10 @@
 // string-literal / string-heap queries. Cross-link to runtime Il2CppClass*
 // lands in a follow-up commit.
 //
-// Phase R1: with DISCRETE_METADATA_RUST defined (the default — CMake option
-// DISCRETE_RUST_METADATA) the parser is implemented in Rust (dll/rust,
-// src/metadata/) and MetadataParserRs.cpp adapts it to this class. Without
-// it, the legacy C++ implementation in MetadataParser.cpp is compiled.
-// The public API below is identical either way.
+// Phase R1: the parser is implemented in Rust (dll/rust, src/metadata/) and
+// MetadataParserRs.cpp adapts it to this class. The legacy C++
+// implementation (MetadataParser.cpp) was removed when R1 closed; it is in
+// git history (last in 5748299).
 #pragma once
 
 #include "MetadataLayout.h"
@@ -16,11 +15,9 @@
 #include <string>
 #include <vector>
 
-#if defined(DISCRETE_METADATA_RUST)
 // Opaque Rust handle (dll/rust/include/discrete_core.h); forward-declared so
 // consumers of this header don't need the Rust include path.
 struct DcMetadata;
-#endif
 
 namespace Discrete::IL2CPP::Metadata {
 
@@ -214,7 +211,6 @@ public:
     /// </summary>
     bool LoadFromPath(const std::wstring& path);
 
-#if defined(DISCRETE_METADATA_RUST)
     // Phase R1: the implementation lives in the Rust core (dll/rust,
     // dll/src/il2cpp/MetadataParserRs.cpp is the wrapper). The object owns a
     // Rust handle, so it is move-only; Get()'s singleton lambda returns by
@@ -232,135 +228,5 @@ private:
     std::int32_t  version_ = 0;
     ::DcMetadata* rs_      = nullptr;
 };
-
-#else  // legacy C++ implementation (MetadataParser.cpp) — kept for the
-       // differential harness (metadata-cli-legacy) and as a fallback via
-       // -DDISCRETE_RUST_METADATA=OFF until R1 is live-verified.
-private:
-    bool LoadHeader();
-    bool LoadTables();
-
-    // Post-LoadTables() sanity check: the first TypeDefinition in any
-    // well-formed IL2CPP metadata is `<Module>` with IL token 0x02000001.
-    // If our version dispatch picked the wrong stride (e.g. a Unity-2018.1
-    // v24 build whose TypeDefinition layout differs from the 2019.x v24
-    // we calibrated against), the name happens to still land at offset 0
-    // but token drifts — so checking token guarantees alignment. Returns
-    // true when the row looks sane, false when the stride is mis-matched.
-    bool ValidateTypeTable();
-
-    // v24 has 3 distinct strides (92 / 100 / 104 — see MetadataLayout.h
-    // §TypeDefinition_v24*). Called from LoadTables() for v24 only;
-    // probes which candidate stride lands TypeDef[0].token at the CLR
-    // canonical 0x02000001, and latches the matching variant. If none
-    // match (encrypted metadata, brand new sub-version) the variant
-    // stays at v24.5 and ValidateTypeTable() will demote to strings-only.
-    void DetectV24Variant();
-
-    // Which v24 TypeDefinition layout to use. Latched by DetectV24Variant()
-    // at load time. Defaults to v24.2-v24.5 (the most common shape).
-    enum class V24Variant {
-        V24_2_THROUGH_5 = 0,  // 92-byte stride; current TypeDefinition_v24
-        V24_1,                // 100-byte stride; adds rgctxStart/rgctxCount
-        V24_0,                // 104-byte stride; adds customAttributeIndex too
-    };
-    V24Variant v24Variant_ = V24Variant::V24_2_THROUGH_5;
-
-    // Returns sizeof(TypeDefinition) for the loaded metadata version.
-    // For v38+ this is computed from the runtime-variable index sizes
-    // (typeIndexSize, genericContainerIndexSize); for v24-v37 it's a fixed
-    // compile-time constant. 0 for unsupported versions.
-    std::size_t TypeDefSizeof() const noexcept;
-
-    // v38+ row strides depend on runtime-variable typeIndexSize.
-    // For v24-v37 these are fixed at 12 bytes (matches the legacy structs).
-    std::size_t FieldDefSizeof() const noexcept;
-    std::size_t FieldDefaultValueSizeof() const noexcept;
-
-    // Phase B — Method / Parameter row strides. Same dispatch story as
-    // TypeDefSizeof / FieldDefSizeof: v24 sub-variants pick from
-    // MethodDefinition_v24_0/_v24_1/_v29; v31-v37 use MethodDefinition_v31;
-    // v38+ computes from IndexSizes (typeIndexSize / typeDefinitionIndexSize
-    // / parameterIndexSize / genericContainerIndexSize). 0 for unsupported.
-    std::size_t MethodDefSizeof() const noexcept;
-    std::size_t ParameterDefSizeof() const noexcept;
-
-    // Phase D-5.1 — Image table row stride. Fixed 40 bytes for v24.2-v37
-    // (Min=24.1 customAttribute pair shipped by the time we care). v38+
-    // has variable-width typeStart/exportedTypeStart (TDIS bytes each).
-    std::size_t ImageDefSizeof() const noexcept;
-
-    bool                      loaded_  = false;
-    std::int32_t              version_ = 0;
-    std::vector<std::uint8_t> data_;  // owns the whole file
-
-    // Cached prefix offsets (v29 layout, also valid for v24 / v27 / v31 /
-    // v32-v37; for v38+ these are populated from the corresponding
-    // Il2CppSectionMetadata entries by LoadHeader so the rest of the
-    // parser can stay version-agnostic).
-    std::int32_t stringLiteralOffset_     = 0;
-    std::int32_t stringLiteralSize_       = 0;
-    std::int32_t stringLiteralDataOffset_ = 0;
-    std::int32_t stringLiteralDataSize_   = 0;
-    std::int32_t stringOffset_            = 0;
-    std::int32_t stringSize_              = 0;
-
-    // Segment 2 — populated for v24 / v29 / v31 / v32-v39.
-    // tablesLoaded_ goes true when the offsets are bound and the
-    // version-specific TypeDefinition layout is known.
-    bool         tablesLoaded_           = false;
-    std::int32_t typeDefinitionsOffset_  = 0;
-    std::int32_t typeDefinitionsSize_    = 0;
-    std::int32_t fieldsOffset_           = 0;
-    std::int32_t fieldsSize_             = 0;
-    std::int32_t fieldDefaultsOffset_    = 0;
-    std::int32_t fieldDefaultsSize_      = 0;
-    std::int32_t fieldDefaultDataOffset_ = 0;
-    std::int32_t fieldDefaultDataSize_   = 0;
-    // Phase B: methods / parameters table offsets (both v29 flat header
-    // and v38+ section header populate these in LoadTables).
-    std::int32_t methodsOffset_          = 0;
-    std::int32_t methodsSize_            = 0;
-    std::int32_t parametersOffset_       = 0;
-    std::int32_t parametersSize_         = 0;
-
-    // Phase D-5.1: images table offsets. 0/0 for v24.0/v24.1 (deferred —
-    // see ImageCount comment) and for any version where bounds checking
-    // rejected the field. Populated for v24.2-v37 (flat header) and
-    // v38+ (section header).
-    std::int32_t imagesOffset_           = 0;
-    std::int32_t imagesSize_             = 0;
-
-    // Phase D v0.2.2: nestedTypeIndices[] table — flat array of int32
-    // TypeDefinitionIndex values. Each TypeDef carries nestedTypesStart
-    // + nested_type_count pointing into this table; the entries are the
-    // global TypeDef indices of the children. Same gating as images
-    // (deferred for v24.0/v24.1).
-    std::int32_t nestedTypesOffset_      = 0;
-    std::int32_t nestedTypesSize_        = 0;
-
-    // Lazy-built child→parent map. -1 entries mean "top-level or not
-    // yet built". Mutable so const accessors can populate it on demand.
-    mutable std::vector<std::int32_t> declaringTypeMap_;
-    mutable bool                       declaringTypeMapBuilt_ = false;
-
-    // For v38+ derive the variable-width metadata-index sizes at load time
-    // from each table's row count (and the parameter row's TIS-inferred
-    // size). v24-v37 leave the defaults of 4 bytes each. See
-    // MetadataLayout.h §IndexSizes for the derivation.
-    Metadata::IndexSizes indexSizes_;
-
-    // Total parameters.count emitted by the v38 section header — the
-    // parameter row stride is `8 + typeIndexSize`, so the row reader
-    // (used by metadata-cli only today) needs this to walk the table.
-    std::int64_t parametersCount_       = 0;
-
-    // String-literal table entry size: 8 bytes for v24-v34 (length +
-    // dataIndex pair), 4 bytes for v35+ (just dataIndex; length comes
-    // from the delta to the next entry). Cached so StringLiteralCount
-    // doesn't repeat the version check.
-    std::int32_t stringLiteralEntryStride_ = 8;
-};
-#endif  // DISCRETE_METADATA_RUST
 
 }  // namespace Discrete::IL2CPP::Metadata

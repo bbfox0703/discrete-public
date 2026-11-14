@@ -573,7 +573,7 @@ Discrete/
 │   │   │
 │   │   ├── il2cpp/              ← IL2CPP backend
 │   │   │   ├── IL2CPPResolver.cpp/.h    ← Resolve il2cpp_* exports
-│   │   │   ├── MetadataParser.cpp/.h    ← global-metadata.dat reader
+│   │   │   ├── MetadataParser.h / MetadataParserRs.cpp ← global-metadata.dat reader (Rust core wrapper)
 │   │   │   ├── IL2CPPDomain.cpp/.h      ← Domain → Assembly → Image walk
 │   │   │   ├── IL2CPPClassWalker.cpp/.h ← Class → Field/Method iteration
 │   │   │   └── IL2CPPTypeParser.cpp/.h  ← Il2CppType → string conversion

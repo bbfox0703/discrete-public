@@ -359,7 +359,7 @@ Real test target now exists (Songs of Silence, v39). Updated estimate
 ### v35-v39 status — SHIPPED 2026-05-19 (build #336)
 
 The full v32-v39 dispatch landed in one session per the design above.
-[MetadataParser::LoadHeader](../dll/src/il2cpp/MetadataParser.cpp) now
+[MetadataParser::LoadHeader](https://github.com/bbfox0703/discrete-public/blob/5748299/dll/src/il2cpp/MetadataParser.cpp) now
 accepts `[16, 39]` inclusive; outside that range loads still fail loud
 with a clear log line.
 

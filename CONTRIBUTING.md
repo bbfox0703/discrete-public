@@ -169,7 +169,7 @@ short version:
 - **Rust regression gates** (after `.\build.cmd cli`; game files come from
   the git-ignored `tools/verify/fixtures.local.txt`, template
   `fixtures.example.txt`):
-  `tools/verify/metadata_rust_diff.py` (metadata parser vs the legacy C++)
+  `tools/verify/metadata_golden.py` (metadata-cli output vs recorded hashes)
   and `tools/verify/r2_golden.py` (AOB, group match, refine, chain
   detector and field-xref output vs recorded hashes).
 - **Zydis oracle** (`tools/zydis-oracle/build.ps1`): proves the Rust x86
@@ -265,7 +265,7 @@ Skip the body for trivial fixes (typo, dependency bump, etc.).
 If you touched the DLL, also rebuild it (`.\build.cmd il2cpp` /
 `.\build.cmd mono`). The game must be closed before rebuilding —
 the DLL stays mapped after injection. If you touched the Rust core, also
-run the matching gate above (`r2_golden.py`, `metadata_rust_diff.py`, and
+run the matching gate above (`r2_golden.py`, `metadata_golden.py`, and
 the Zydis oracle for decoder changes).
 
 ### Releases

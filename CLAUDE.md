@@ -50,7 +50,7 @@ results (addresses, AA scripts, cheat tables) to CE.
 
 - **Backends**: Unity **Mono** x86/x64 (`mono-2.0-bdwgc.dll` / `mono.dll`) and
   **IL2CPP** x64 (`GameAssembly.dll`; `global-metadata.dat` v16–v39 accepted,
-  v24/27/29/31/35–39 verified — `dll/src/il2cpp/MetadataParser.cpp`).
+  v24/27/29/31/35–39 verified — `dll/rust/src/metadata/parser.rs`).
 - **Shape**: injected C++ DLL ⇄ Named-Pipe JSON-RPC ⇄ Avalonia UI, plus CE Lua
   bridges in `scripts/`. The UI is backend-agnostic — every Mono / IL2CPP
   difference lives behind the pipe protocol, never in the UI.
