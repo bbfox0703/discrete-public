@@ -31,6 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **Keep this file small & clean**: lessons learnt, notes, and other long-form material must live in separate files under `docs/`. Keep this file to key information only.
 - **Language**: Code comments and UI strings in English
+- **Releases stay drafts with rewritten notes**: a `v<build>` tag makes `release.yml` build a DRAFT whose body is a raw commit list; replace it with user-readable notes and leave publishing to the maintainer. Procedure and note rules: [CONTRIBUTING.md → Releases](CONTRIBUTING.md#releases). Pipeline test runs are exempt.
 - **Build / test only via `.\build.cmd`** (targets `dll` / `mono` / `il2cpp` / `ui` / `proxy` / `cli` / `test` / `deploy` / `deploy-scripts`; modes `debug` / `release` / `publish`; `clean` to wipe first; `.\build.cmd /?` is the authoritative list) — bare `cmake` / `dotnet` calls fail without the VS Developer Shell. Output lands in `dist\` (x86 in `dist\x86\`).
 - **Single Instance**: UI app uses Mutex to ensure only one instance runs
 - **Async everywhere**: Pipe/RPC and any long-running work must be async and must never block the UI thread. Small local settings/state files may use sync `File.*`.
