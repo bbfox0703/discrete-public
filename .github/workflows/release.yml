@@ -96,7 +96,9 @@ jobs:
           Copy-Item LICENSE, USAGE.md -Destination dist -Force
           Compress-Archive -Path dist/* -DestinationPath $zip -Force
           $h = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          "$h  $zip" | Set-Content "$zip.sha256" -Encoding ascii
+          # LF, not Set-Content's CRLF: `sha256sum -c` would read the CR as part
+          # of the file name and fail.
+          [System.IO.File]::WriteAllText((Join-Path $PWD "$zip.sha256"), "$h  $zip`n")
           "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Packaged $zip (sha256 $h)"
 
