@@ -160,6 +160,11 @@
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
 
+**2026-11-14 — Identity guard + 公開 repo 收尾**(build script + UI footer + README):
+- **Identity guard**:移植 UE5CEDumper 的 `tools/check_no_local_paths.py`;`build.ps1` 在編譯前執行(Python),掃 tracked files + **尚未 push 的 commit message**,抓 `C:\Users\<實名>`、指向 `.claude\projects` 的磁碟絕對路徑,以及本機 `%USERNAME%` / `%COMPUTERNAME%` / `%USERDOMAIN%`(執行時讀取,不存進 repo,輸出時遮蔽)。命中就 BUILD FAILED;`build.cmd noidentitycheck` / `-NoIdentityCheck` 可略過(只供除錯 guard 本身)。x86 子行程自動略過(父行程已檢查)。限制:只認得**目前這台**機器的名稱。已驗:乾淨樹 PASS、假 `USERNAME` 會 FAIL 並遮蔽、略過參數有效。
+- Footer credit 改為 `bbfox0703 @ https://github.com/bbfox0703/discrete-public`,點擊開啟該頁;`USAGE.md` credit 同步。
+- README(英/中)加上 *Built with Claude Code* badge(與 UE5CEDumper 同款)。
+
 **2026-11-14 — 移除 Phase 26 anti-tamper(準備公開到 `discrete-public`)**(UI/Core + build script,`build.cmd ui` 0 warning、1130 tests green):
 - 刪除 `BuildArtifactToken` / `ExportFormatToken` / `WindowsRuntimeMetadata` / `SchemaConstants` / `TokenAggregator` / `LocalizedText` + `tools/inject-hash.ps1`;`build.ps1` Publish 不再呼叫注入。
 - `CeXmlExporter` / `CsxExporter` 直接輸出真實 offset;`LiveInspectionViewModel.MaybePerturbDisplay`、`SnapshotViewModel.MaybePerturbValue` 移除(dev build 本來就是 pass-through,行為不變)。
