@@ -1,0 +1,18 @@
+{
+  "_comment": "Commits of the C++ build dependencies compiled into the DLL. Read by sync_vendor.ps1 (local) and .github/workflows/release.yml (CI). Move a pin only with 'sync_vendor.ps1 -UpdatePins', then rebuild and run the tests before committing.",
+  "nlohmann": {
+    "url": "https://github.com/nlohmann/json.git",
+    "sha": "d10879bca8f0aa790105446075a9525b34a3f718",
+    "recursive": false
+  },
+  "minihook": {
+    "url": "https://github.com/TsudaKageyu/minhook.git",
+    "sha": "05c06c5bbca226b72ffb40fc0caaef33bcaf6f74",
+    "recursive": false
+  },
+  "zydis": {
+    "url": "https://github.com/zyantific/zydis.git",
+    "sha": "17bc6fb1584bb31e1d595819aab7be57115750f7",
+    "recursive": true
+  }
+}

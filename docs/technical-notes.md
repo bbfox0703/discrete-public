@@ -272,17 +272,24 @@ calling out here for visibility:
 
 ---
 
-## Vendor sync (`tools/sync_vendor.ps1`)
+## Vendor sync (`sync_vendor.ps1`)
 
-`dll/vendor/` is gitignored. The vendor sync script clones / refreshes:
+`dll/vendor/` and `vendor/` are gitignored. The script handles two kinds
+of tree differently:
 
-- `nlohmann/json` (DLL-side JSON) — single header.
-- `vendor/libil2cpp/<version>/il2cpp-metadata.h` — upstream Unity
-  metadata header sources, kept side-by-side for cross-checking
-  (see [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md)).
+- **Build deps** (`dll/vendor/`: nlohmann/json, MinHook, Zydis + Zycore)
+  are compiled into the DLL, so they are **pinned** to the commits in
+  `tools/vendor_pins.json`. A normal run restores those commits and only
+  *reports* whether upstream moved (with a compare link). `-UpdatePins`
+  moves them to upstream tip and rewrites the pins file; rebuild and run
+  the tests before committing it. The release workflow uses the same file.
+- **Reference clones** (`vendor/`: libil2cpp, Il2CppDumper, mono, ...) are
+  read-only oracles and follow upstream tip (see
+  [il2cpp-metadata-crosscheck.md](il2cpp-metadata-crosscheck.md)).
+  `-SkipReference` leaves them alone.
 
-Re-run after pulling a fresh checkout, or when adding a new metadata
-version.
+Re-run after a fresh checkout. A failed fetch is reported in red and makes
+the script exit 1, never a silent "up to date".
 
 ---
 
