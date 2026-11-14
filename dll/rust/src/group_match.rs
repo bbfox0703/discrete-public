@@ -1,5 +1,6 @@
 //! Group-scan SDR matcher (Phase R2) — behaviourally identical port of the
-//! legacy (non-`DISCRETE_RUST_R2`) half of `dll/src/shared/GroupMatch.h`.
+//! former header-only C++ in `dll/src/shared/GroupMatch.h` (removed when R2
+//! closed; git history, last in aae48d3).
 //!
 //! Given, per candidate object, each slot's list of matching leaf indices,
 //! decide whether every slot can be given a DISTINCT leaf (a System of

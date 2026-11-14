@@ -1,0 +1,9 @@
+# Copy to fixtures.local.txt (git-ignored) and list your own games.
+# One global-metadata.dat path per line; '#' starts a comment. Used by
+# tools/verify/metadata_rust_diff.py, r2_golden.py, xref_rust_diff.py and
+# `build.cmd test` (the Rust parser's real-file test) whenever the
+# DISCRETE_METADATA_FIXTURES environment variable is not set.
+# GameAssembly.dll is taken from <game root>/GameAssembly.dll, i.e. the path
+# must look like <root>/<Name>_Data/il2cpp_data/Metadata/global-metadata.dat.
+#
+# D:/SteamLibrary/steamapps/common/<Game>/<Game>_Data/il2cpp_data/Metadata/global-metadata.dat

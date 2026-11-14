@@ -106,9 +106,8 @@ endfunction()
 
 set(DLL_SHARED_SOURCES
     src/main.cpp
-    # Phase R2: AobPattern / GroupMatch / ValueRefine implementations come
-    # from DISCRETE_R2_SHARED_SOURCES (Rust wrappers or legacy C++ — see the
-    # root CMakeLists.txt option DISCRETE_RUST_R2).
+    # Phase R2: AobPattern / GroupMatch / ValueRefine — thin wrappers over
+    # the Rust core (DISCRETE_R2_SHARED_SOURCES, root CMakeLists.txt).
     ${DISCRETE_R2_SHARED_SOURCES}
     src/shared/AobPattern.h
     src/shared/ValueRefine.h
@@ -207,6 +206,10 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPMainThreadHook.h
     src/il2cpp/IL2CPPFieldXref.cpp
     src/il2cpp/IL2CPPFieldXref.h
+    # Its two pure scan kernels (static RIP scan + instance-field decode):
+    # legacy Zydis or Rust port, chosen in the root CMakeLists.txt.
+    ${DISCRETE_XREF_SCAN_SOURCE}
+    src/il2cpp/IL2CPPFieldXrefScan.h
     # Phase 28b-v2 — runtime-version-independent offsetof(Il2CppClass,
     # static_fields) discovery. Needed by the chain detector to recognise
     # the 2-hop class-pointer → static_fields → field-value access pattern.
@@ -217,10 +220,9 @@ set(DLL_IL2CPP_SOURCES
     # (runs against live mapped module instead of PE-on-disk).
     src/il2cpp/IL2CPPClassPointerScanner.cpp
     src/il2cpp/IL2CPPClassPointerScanner.h
-    # Phase 28b-v2 — chain detector. Forward-traces with Zydis to
-    # recognise the 2-hop class-pointer → static_fields → field-value
-    # access pattern IL2CPP AOT emits.
-    # Phase R2: Rust wrapper or legacy Zydis implementation (DISCRETE_RUST_R2).
+    # Phase 28b-v2 — chain detector. Forward-traces to recognise the 2-hop
+    # class-pointer → static_fields → field-value access pattern IL2CPP AOT
+    # emits. Phase R2: implemented in Rust (iced-x86) behind this wrapper.
     ${DISCRETE_R2_IL2CPP_SOURCES}
     src/il2cpp/IL2CPPChainDetector.h
     # Phase 28b-v3 — investigation helper. Reports every storage slot
@@ -259,11 +261,6 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
         ${DISCRETE_GENERATED_INCLUDE_DIR}
     )
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
-    # Phase R2: GroupMatch.h switches between the Rust-backed declarations and
-    # the legacy inline code on this define, so it must be target-wide.
-    if(DISCRETE_RUST_R2)
-        target_compile_definitions(${TARGET_NAME} PRIVATE DISCRETE_RUST_R2=1)
-    endif()
     # Phase 20-MT: link MinHook (vendored as `minhook` target — see
     # add_subdirectory above). Static C-only library, ~50 KB per backend.
     target_link_libraries(${TARGET_NAME} PRIVATE minhook discrete_core)

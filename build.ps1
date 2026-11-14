@@ -534,12 +534,21 @@ function Run-Tests {
 
 # Phase R0: the Rust core's unit tests, for both shipping architectures. The
 # i686 test exe runs natively under WOW64, so this exercises 32-bit codegen and
-# panic unwinding without a 32-bit game. Set DISCRETE_METADATA_FIXTURES
-# (semicolon-separated global-metadata.dat paths) to also run the real-file
-# parser test; it is a no-op without it.
+# panic unwinding without a 32-bit game. DISCRETE_METADATA_FIXTURES
+# (semicolon-separated global-metadata.dat paths) -- or, when it is unset, the
+# git-ignored tools\verify\fixtures.local.txt (one path per line) -- also runs
+# the real-file parser test; it is a no-op without either.
 function Run-RustTests {
     Write-Banner 'Rust core tests  |  cargo test (x64 + x86)'
     $manifest = Join-Path $RepoRoot 'dll\rust\Cargo.toml'
+    $localFixtures = Join-Path $RepoRoot 'tools\verify\fixtures.local.txt'
+    if (-not $env:DISCRETE_METADATA_FIXTURES -and (Test-Path $localFixtures)) {
+        $list = Get-Content $localFixtures | ForEach-Object { ($_ -split '#', 2)[0].Trim() } | Where-Object { $_ }
+        if ($list) {
+            $env:DISCRETE_METADATA_FIXTURES = ($list -join ';')
+            Write-Info "Fixtures from tools\verify\fixtures.local.txt ($(@($list).Count))"
+        }
+    }
     foreach ($triple in @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')) {
         Write-Step "cargo test --target $triple"
         & cargo test --locked --manifest-path $manifest --target $triple --quiet | Out-Host
@@ -588,10 +597,11 @@ function Build-MetadataCli {
     # Phase R1: metadata-cli-legacy (legacy C++ parser) is built next to the
     # shipping metadata-cli (Rust parser) for tools\verify\metadata_rust_diff.py.
     # It stays in build\cli-*\bin\ and is never copied to dist\.
-    # Phase R2: r2-dump / r2-dump-legacy likewise feed tools\verify\r2_rust_diff.py
-    # (also build-dir only, never shipped).
-    Write-Step "Building metadata-cli + differential harness binaries ($cfg)"
-    & cmake --build $cliBuildDir --target metadata-cli metadata-cli-legacy r2-dump r2-dump-legacy --parallel | Out-Host
+    # Phase R2: r2-dump feeds tools\verify\r2_golden.py (build-dir only,
+    # never shipped). R2 follow-up: xref-dump (Rust) + xref-dump-legacy
+    # (C++ + Zydis) feed tools\verify\xref_rust_diff.py (build-dir only).
+    Write-Step "Building metadata-cli + harness binaries ($cfg)"
+    & cmake --build $cliBuildDir --target metadata-cli metadata-cli-legacy r2-dump xref-dump xref-dump-legacy --parallel | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'metadata-cli build failed'; return $false }
 
     $exe = Join-Path $cliBuildDir 'bin\metadata-cli.exe'

@@ -272,6 +272,61 @@ int32_t dc_chain_result_get(const DcChainResult* r, size_t i, DcChainMatch* out)
 void    dc_chain_result_stats(const DcChainResult* r, DcChainStats* out);         // zeroes for NULL
 void    dc_chain_result_free(DcChainResult* r);                                    // NULL ok
 
+// --- Phase R2: IL2CPP field-xref scan kernels ---------------------------------
+// (port of il2cpp/IL2CPPFieldXrefScan.cpp; Zydis -> iced-x86 via the chain
+// detector's decoder adapter.) The two pure loops behind IL2CPPFieldXref: the
+// caller passes its own arrays (copied by Rust before the call returns); code
+// bytes are read only through `read`. Same chunking, skip distances, decode
+// stop rules and candidate order as the legacy functions — see
+// IL2CPPFieldXrefScan.h for the contract. Each scan returns a handle, or NULL
+// on an internal panic, a NULL `read`, or when its working buffer cannot be
+// allocated (callers treat NULL as "no candidates"). A NULL array is accepted
+// as empty. Read results with the accessors; every accessor accepts NULL.
+
+typedef struct DcXrefSection {
+    uintptr_t va;     // absolute VA of an executable section
+    size_t    size;   // VirtualSize
+} DcXrefSection;
+
+typedef struct DcXrefRipHit {
+    uintptr_t ip;      // instruction start
+    uint8_t   opcode;  // 0x8B MOV r,m / 0x8D LEA (read); 0x89 MOV m,r (write)
+} DcXrefRipHit;
+
+typedef struct DcXrefRange {
+    uintptr_t start;  // method body start
+    size_t    len;    // bytes to decode (already clamped by the caller)
+} DcXrefRange;
+
+typedef struct DcXrefInstHit {
+    size_t    method;  // index into the ranges array
+    uintptr_t ip;      // instruction start
+    uint8_t   write;   // 1 = write action, 0 = read (LEA counts as read)
+} DcXrefInstHit;
+
+typedef struct DcXrefRipResult  DcXrefRipResult;
+typedef struct DcXrefInstResult DcXrefInstResult;
+
+// ScanRipRelative: every REX? {8B,8D,89} ModRM(00,101) disp32 whose RIP-relative
+// target == `target`, all of them, in scan order (1 MiB chunks + 16-byte
+// overlap; an unreadable chunk skips 4 KiB).
+DcXrefRipResult* dc_xref_rip_scan(const DcXrefSection* sections, size_t n, uintptr_t target,
+                                  dc_read_fn read, void* read_ctx);
+size_t  dc_xref_rip_result_len(const DcXrefRipResult* r);                        // 0 for NULL
+int32_t dc_xref_rip_result_get(const DcXrefRipResult* r, size_t i, DcXrefRipHit* out);  // 1 / 0
+void    dc_xref_rip_result_free(DcXrefRipResult* r);                             // NULL ok
+
+// ScanInstanceAccesses: linear-decodes each range (stops at the first 0xCC or
+// decode failure; an unreadable range is skipped) and reports every visible
+// [gpr + field_offset] memory operand (no index, displacement present, base
+// not RIP/RSP/RBP), method by method, instruction by instruction, operand by
+// operand.
+DcXrefInstResult* dc_xref_inst_scan(const DcXrefRange* ranges, size_t n, size_t field_offset,
+                                    dc_read_fn read, void* read_ctx);
+size_t  dc_xref_inst_result_len(const DcXrefInstResult* r);                         // 0 for NULL
+int32_t dc_xref_inst_result_get(const DcXrefInstResult* r, size_t i, DcXrefInstHit* out);  // 1 / 0
+void    dc_xref_inst_result_free(DcXrefInstResult* r);                              // NULL ok
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

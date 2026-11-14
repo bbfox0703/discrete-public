@@ -14,8 +14,7 @@
 // ReverseLookupIndex, then ScanForValue per slot-value — so slot MEMBERSHIP
 // (which field matched which value) is already known from the scanner, and the
 // caller hands this matcher only the per-slot leaf-index lists. The matcher is
-// therefore pure combinatorics over ints: no memory reads, no Mono/IL2CPP API,
-// no dependency beyond <vector>. (The richer per-width predicate evaluation
+// therefore pure combinatorics over ints: no memory reads, no Mono/IL2CPP API. (The richer per-width predicate evaluation
 // lives where the data lives: ScanForValue + CompareCandidateForRefine on the
 // live side; the C# twin ui/.../GroupMatch.cs on the captured-snapshot side.)
 //
@@ -37,81 +36,25 @@ struct SlotMatches {
     std::vector<int> leafIdx;
 };
 
-#if defined(DISCRETE_RUST_R2)
-// Phase R2: implemented in Rust (dll/rust/src/group_match.rs) behind
-// GroupMatchRs.cpp. Same contract as the legacy inline versions below.
+// Implemented in Rust (dll/rust/src/group_match.rs) behind GroupMatchRs.cpp.
+// The original header-only C++ (Kuhn's augmenting path, recursive) was
+// removed when Phase R2 closed; it is in git history (last in aae48d3).
 
 // True when every slot can be assigned a DISTINCT leaf (a System of Distinct
 // Representatives exists). `nLeaves` bounds the leaf-index space; leaf
-// indices outside [0, nLeaves) are ignored. Returns false for an empty slot
-// set, a negative nLeaves, or any slot with an empty list.
+// indices outside [0, nLeaves) are ignored. Handles the duplicate-value case
+// ("24 AND 24" needs two different fields both holding 24) naturally via the
+// matching. Returns false for an empty slot set, a negative nLeaves, or any
+// slot with an empty list.
 bool HasDistinctAssignment(const std::vector<SlotMatches>& m, int nLeaves);
 
 // Recover the actual SDR after a true return: out[s] = the DISTINCT leaf
-// index assigned to slot s (or -1 if none). Returns false (and fills out
-// with -1) when no complete assignment exists.
+// index assigned to slot s (or -1 if none). Use this for each slot's
+// representative leaf instead of m[s].leafIdx[0] -- the first matching leaf
+// can be shared by two slots, which the SDR resolves to distinct
+// representatives. Returns false (and fills out with -1) when no complete
+// assignment exists.
 bool ResolveAssignment(const std::vector<SlotMatches>& m, int nLeaves,
                        std::vector<int>& out);
-
-#else  // legacy header-only implementation
-
-// Internal: Kuhn's augmenting path — try to assign `slot` a distinct leaf,
-// bumping already-assigned slots along an alternating path if needed.
-inline bool TryAssign_(int slot, const std::vector<SlotMatches>& m,
-                       std::vector<int>& leafToSlot, std::vector<char>& seen) {
-    for (int leaf : m[static_cast<std::size_t>(slot)].leafIdx) {
-        const std::size_t lf = static_cast<std::size_t>(leaf);
-        if (lf >= seen.size()) continue;          // defensive: out-of-range leaf index
-        if (seen[lf]) continue;
-        seen[lf] = 1;
-        if (leafToSlot[lf] == -1
-            || TryAssign_(leafToSlot[lf], m, leafToSlot, seen)) {
-            leafToSlot[lf] = slot;
-            return true;
-        }
-    }
-    return false;
-}
-
-// True when every slot can be assigned a DISTINCT leaf (a System of Distinct
-// Representatives exists). `nLeaves` bounds the leaf-index space. An empty slot
-// list means no SDR. Handles the duplicate-value case ("24 AND 24" needs two
-// different fields both holding 24) naturally via the matching. Returns false
-// for an empty slot set (a group scan needs >= 2 slots; the caller enforces the
-// 2..4 bound).
-inline bool HasDistinctAssignment(const std::vector<SlotMatches>& m, int nLeaves) {
-    if (m.empty() || nLeaves < 0) return false;
-    std::vector<int> leafToSlot(static_cast<std::size_t>(nLeaves), -1);
-    for (std::size_t s = 0; s < m.size(); ++s) {
-        if (m[s].leafIdx.empty()) return false;
-        std::vector<char> seen(static_cast<std::size_t>(nLeaves), 0);
-        if (!TryAssign_(static_cast<int>(s), m, leafToSlot, seen)) return false;
-    }
-    return true;
-}
-
-// Recover the actual SDR after a true return: out[s] = the DISTINCT leaf index
-// assigned to slot s (or -1 if none). Use this for each slot's representative
-// leaf instead of m[s].leafIdx[0] — the first matching leaf can be shared by
-// two slots, which the SDR resolves to distinct representatives. Returns false
-// (and fills out with -1) when no complete assignment exists.
-inline bool ResolveAssignment(const std::vector<SlotMatches>& m, int nLeaves,
-                              std::vector<int>& out) {
-    out.assign(m.size(), -1);
-    if (m.empty() || nLeaves < 0) return false;
-    std::vector<int> leafToSlot(static_cast<std::size_t>(nLeaves), -1);
-    for (std::size_t s = 0; s < m.size(); ++s) {
-        if (m[s].leafIdx.empty()) return false;
-        std::vector<char> seen(static_cast<std::size_t>(nLeaves), 0);
-        if (!TryAssign_(static_cast<int>(s), m, leafToSlot, seen)) return false;
-    }
-    for (int leaf = 0; leaf < nLeaves; ++leaf) {
-        const int s = leafToSlot[static_cast<std::size_t>(leaf)];
-        if (s >= 0) out[static_cast<std::size_t>(s)] = leaf;
-    }
-    return true;
-}
-
-#endif  // DISCRETE_RUST_R2
 
 }  // namespace Discrete::GroupMatch

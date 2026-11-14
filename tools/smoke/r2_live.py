@@ -1,8 +1,10 @@
 """Rust core R1 + R2 live A/B smoke (docs/rust-core.md "R2 gate").
 
 Run once against a game with the default (Rust) DLLs and once with a legacy
-build (-DDISCRETE_RUST_R2=OFF -DDISCRETE_RUST_METADATA=OFF), then diff the two
-JSON files with --compare. Everything recorded in the "ab" section is
+build, then diff the two JSON files with `compare`. R2's legacy sources are
+gone since R2 closed; a legacy build now means a checkout of aae48d3
+configured with -DDISCRETE_RUST_R2=OFF -DDISCRETE_RUST_METADATA=OFF. A plain
+`run` on its own still checks the live value-scan / group-scan behaviour. Everything recorded in the "ab" section is
 restart-stable (names, offsets, module-relative addresses), so the two runs
 must match exactly. The "live" section holds per-run PASS/FAIL checks of the
 value-scan refine comparator and the group-scan matcher, which work on heap
@@ -148,7 +150,7 @@ def run(game, out_path, asm_want):
         classes = r.call('getClasses', {'assembly': asm}).get('classes', [])
         classes = sorted(classes, key=lambda c: (c.get('namespace', ''), c.get('name', '')))
         out['ab']['class_count'] = len(classes)
-        md, statics, method_sites, enum_sites = [], [], [], []
+        md, statics, inst_fields, method_sites, enum_sites = [], [], [], [], []
         for c in classes[:N_CLASSES]:
             ns, nm = c.get('namespace', ''), c.get('name', '')
             try:
@@ -168,6 +170,8 @@ def run(game, out_path, asm_want):
                 for f in flds:
                     if is_static(f) and len(statics) < N_XREF_FIELDS * 3:
                         statics.append((ns, nm, f.get('name')))
+                    elif not is_static(f) and len(inst_fields) < N_XREF_FIELDS * 3:
+                        inst_fields.append((ns, nm, f.get('name')))
                 for m in meths[:6]:
                     mn = m.get('name') or ''
                     if mn and not mn.startswith('.'):
@@ -213,27 +217,40 @@ def run(game, out_path, asm_want):
                       % (ok_enum, len(enums), ok_tf, len(tfields), total, first.get('version')),
                       ok_enum > 0 and ok_tf > 0 and total > 0)
 
-        # ---- field xrefs (IL2CPP: R2 chain detector; Mono: IL scan) ---------
-        t0 = time.time()
-        xr, n_refs = [], 0
-        for ns, nm, fn in statics[:N_XREF_FIELDS]:
-            try:
-                res = r.call('findFieldReferences', {'assembly': asm, 'ns': ns, 'class': nm,
-                                                     'fieldName': fn, 'limit': 500})
-            except Exception as e:  # noqa: BLE001
-                xr.append({'f': '%s.%s::%s' % (ns, nm, fn), 'error': str(e)[:160]})
-                continue
-            refs = sorted([[x.get('namespace'), x.get('class'), x.get('method'), x.get('kind'),
-                            x.get('confidence'), rel(hx(x.get('address'))), rel(hx(x.get('hitAddress')))]
-                           for x in res.get('references') or []], key=json.dumps)
-            n_refs += len(refs)
-            xr.append({'f': '%s.%s::%s' % (ns, nm, fn), 'refs': refs,
-                       'scanned': res.get('scanned_methods'), 'truncated': res.get('truncated'),
-                       'error': res.get('error')})
-        out['ab']['xref'] = xr
-        out['timing']['xref_s'] = round(time.time() - t0, 1)
-        rep.check('xref: %d static fields scanned, %d references' % (len(xr), n_refs),
-                  len(xr) > 0 and not all('error' in x and x['error'] for x in xr))
+        # ---- field xrefs -----------------------------------------------------
+        # Static: IL2CPP = v1 RIP scan + R2 chain detector; Mono = IL scan.
+        # Instance: IL2CPP = declaring-class decode of [gpr + offset]
+        # (IL2CPPFieldXrefScan); Mono = IL scan. The first 5 fields of each
+        # list also run with kind=write / limit=2 to pin the filter + cut-off
+        # order.
+        def xref_list(fields, label):
+            t0 = time.time()
+            xr, n_refs = [], 0
+            for i, (ns, nm, fn) in enumerate(fields[:N_XREF_FIELDS]):
+                variants = [('any', 500)] + ([('write', 2)] if i < 5 else [])
+                for kind, limit in variants:
+                    tag = '%s.%s::%s [%s/%d]' % (ns, nm, fn, kind, limit)
+                    try:
+                        res = r.call('findFieldReferences', {'assembly': asm, 'ns': ns, 'class': nm,
+                                                             'fieldName': fn, 'kind': kind,
+                                                             'limit': limit})
+                    except Exception as e:  # noqa: BLE001
+                        xr.append({'f': tag, 'error': str(e)[:160]})
+                        continue
+                    refs = sorted([[x.get('namespace'), x.get('class'), x.get('method'), x.get('kind'),
+                                    x.get('confidence'), rel(hx(x.get('address'))),
+                                    rel(hx(x.get('hitAddress')))]
+                                   for x in res.get('references') or []], key=json.dumps)
+                    n_refs += len(refs)
+                    xr.append({'f': tag, 'refs': refs, 'scanned': res.get('scanned_methods'),
+                               'truncated': res.get('truncated'), 'error': res.get('error')})
+            out['timing'][label + '_s'] = round(time.time() - t0, 1)
+            rep.check('%s: %d queries, %d references' % (label, len(xr), n_refs),
+                      len(xr) > 0 and not all(x.get('error') for x in xr))
+            return xr
+
+        out['ab']['xref'] = xref_list(statics, 'xref')
+        out['ab']['xref_inst'] = xref_list(inst_fields, 'xref_inst')
 
         # ---- R2 aob ---------------------------------------------------------
         t0 = time.time()

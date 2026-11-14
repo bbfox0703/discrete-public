@@ -48,7 +48,7 @@ dll/src/il2cpp/MetadataParserRs.cpp   Parser class -> dc_md_* wrapper
 dll/src/shared/{AobPattern,GroupMatch,ValueRefine}Rs.cpp,
 dll/src/il2cpp/IL2CPPChainDetectorRs.cpp   R2 wrappers (same C++ API)
 tools/verify/metadata_rust_diff.py    R1 differential harness
-tools/r2-diff/ + tools/verify/r2_rust_diff.py   R2 differential harness
+tools/r2-diff/ + tools/verify/r2_golden.py   R2 regression gate (golden hashes)
 ```
 
 Linked into `Discrete-Mono.dll`, `Discrete-IL2CPP.dll` (x64 + x86) and
@@ -92,16 +92,20 @@ onto cargo so the two halves can never disagree:
   ntdll userenv ws2_32 dbghelp synchronization`. Re-check on toolchain bumps.
 - `build.cmd test` also runs `cargo test` for **both** triples — the i686 test
   exe runs under WOW64, which exercises 32-bit codegen and panic unwinding
-  without a 32-bit game. Set `DISCRETE_METADATA_FIXTURES` (semicolon-separated
-  `global-metadata.dat` paths) to include the real-file parser test.
+  without a 32-bit game. The real-file parser test (and every harness under
+  `tools/verify/`) takes its games from `DISCRETE_METADATA_FIXTURES`
+  (semicolon-separated `global-metadata.dat` paths) or, when that is unset,
+  from the git-ignored `tools/verify/fixtures.local.txt` (one path per line;
+  template `fixtures.example.txt`). Game files are never copied into the
+  repo — they stay in the game's install folder.
 - `build.ps1` requires rustup, runs `rustup toolchain install` (installs the
   pinned toolchain on a fresh clone / after a bump, tolerating rustup's stderr
   progress under Windows PowerShell 5.1), then checks both targets and prints
   the `rustup` command to fix a missing one.
 
 Toolchain bump: edit `rust-toolchain.toml`, rebuild all four combinations
-(`build.cmd dll`, `build.cmd dll publish`), rerun `build.cmd test` and the R1
-and R2 harnesses.
+(`build.cmd dll`, `build.cmd dll publish`), rerun `build.cmd test`, the R1
+harness and `r2_golden.py`.
 
 ## FFI rules (every `extern "C"` function)
 
@@ -246,17 +250,18 @@ Verified 2026-11-14 (build #1456–1468). Four modules moved; the C++ APIs
 | Refine comparator | `value.rs` | Only the per-candidate comparator. The value-scan hot loop (`Memory.cpp` `ScanChunk`) stays C++: it touches game memory under SEH on every byte |
 | IL2CPP chain detector | `chain/` | Zydis → `iced-x86` through `decode.rs`, which reduces each instruction to exactly the facts the legacy code read from Zydis. Every read of `GameAssembly.dll` goes through `SafeReadShim` (FFI rule 8). `msvc_sort.rs` transcribes MSVC `std::sort` because legacy dedup after an unstable sort depends on its exact element moves |
 
-**Differential harness** (`build.cmd cli` builds `r2-dump` + the unshipped
-`r2-dump-legacy`; `py -I tools/verify/r2_rust_diff.py -j 7`): **19 checks, 0
+**Differential harness** (at the time: `build.cmd cli` built `r2-dump` + the
+unshipped `r2-dump-legacy`; `tools/verify/r2_rust_diff.py`): **19 checks, 0
 differences**, both on the **Release** and the **Debug** builds (the Debug
 run proves no `overflow-checks` panic in the dev profile turns into a
 fallback). Each check compares exit code, stdout and stderr byte for byte
 and must succeed. Coverage: 50k synthetic AOB windows, 200k GM instances,
 500k refine cases, and per local `GameAssembly.dll` (the same 7 games as the
 R1 table) 10k real AOB windows plus 34 chain-detector runs (limits, empty /
-bogus / reversed slots, `sfo = 0`, NULL stats). The harness refuses to run if
-`r2-dump.exe` lacks the Rust marker or the legacy binary has it, or if the
-flags leave nothing to compare.
+bogus / reversed slots, `sfo = 0`, NULL stats). The harness refused to run if
+`r2-dump.exe` lacked the Rust marker or the legacy binary had it, or if the
+flags left nothing to compare. Since the legacy removal (below) the same
+outputs are guarded by golden hashes.
 
 Before the harness, each port was checked by its author against a private
 oracle (legacy C++ compiled verbatim): AOB 600k random cases × x64/x86 ×
@@ -320,8 +325,9 @@ comparing xrefs.
 
 Side observations (not R2 regressions): both builds grow the game's private
 memory to ~6.4 GB over a run (whole-heap value-scan / walk machinery, same
-on legacy); the xref section took 2.3 s on Rust vs ~20 s on legacy for the
-same 40 fields (not profiled).
+on legacy); the xref section's time varied between ~2 s and ~21 s across runs of
+the same build (warm-state dependent, e.g. lazy-init slot discovery), so it
+says nothing about Rust vs legacy.
 
 Follow-up the same day: after the Rust banner switched to the C++ version
 scheme (build #1469), the game's `init` log showed `Discrete DLL attached
@@ -356,14 +362,22 @@ to x64).
   does not contain the Rust parser, so an OFF build cannot fake a PASS.
 - `metadata-cli-legacy.exe` is built next to `metadata-cli.exe` by
   `build.cmd cli` and never shipped; it exists only for the harness.
-- `-DDISCRETE_RUST_R2=OFF` is the same kind of emergency switch for the four
-  R2 modules (legacy `AobPattern.cpp`, `ValueRefine.cpp`, the inline
-  `GroupMatch.h` matcher and the Zydis `IL2CPPChainDetector.cpp`). It also
-  defines `DISCRETE_RUST_R2` target-wide, because `GroupMatch.h` changes
-  shape on it. `r2-dump-legacy.exe` is the unshipped harness twin. Remove
-  the legacy sources, the option and `r2-dump-legacy` after R2's in-game
-  smoke; Zydis itself stays while `IL2CPPFieldXref.cpp`'s instance-field
-  scan uses it.
+- **R2 legacy removed (2026-11-14, after the live A/B).** `AobPattern.cpp`,
+  `ValueRefine.cpp`, the inline half of `GroupMatch.h`,
+  `IL2CPPChainDetector.cpp`, the `DISCRETE_RUST_R2` option, `r2-dump-legacy`
+  and `r2_rust_diff.py` are gone; all of it is in git history (last in
+  `aae48d3` — check that commit out to rebuild the legacy flavour). There
+  is no R2 fallback switch any more.
+  The regression gate is now `py -I tools/verify/r2_golden.py` (`build.cmd
+  cli` first): it runs `r2-dump` and compares each output's SHA-256 with
+  `tools/verify/r2_golden.json`, recorded right after the Rust build was
+  re-proven byte-identical to legacy (19/19). The synthetic checks hold on
+  any machine; image checks are keyed by the SHA-256 of the
+  `GameAssembly.dll` file, so the same game build checks anywhere and other
+  builds report SKIP. `--record` rewrites entries — only after proving a
+  behaviour change correct. Checked 17/17 on Release and Debug, and a
+  tampered hash reports FAIL.
+  Zydis stays while `IL2CPPFieldXref.cpp`'s instance-field scan uses it.
 - After the in-game smoke: delete `MetadataParser.cpp`, the legacy half of
   `MetadataParser.h`, the CMake option and `metadata-cli-legacy`. The harness
   then becomes a Rust-vs-recorded-baseline check (record `dump-parser`

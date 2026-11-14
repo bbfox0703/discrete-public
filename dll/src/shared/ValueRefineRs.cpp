@@ -1,7 +1,6 @@
 // ValueRefineRs.cpp — Phase R2. Implements the ValueRefine.h API over the
 // Rust port (dll/rust/src/value.rs, C ABI dc_value_refine_compare in
-// dll/rust/include/discrete_core.h). Compiled instead of ValueRefine.cpp
-// when DISCRETE_RUST_R2 is ON (root CMakeLists.txt).
+// dll/rust/include/discrete_core.h).
 //
 // This file holds no comparison logic: it only marshals arguments. The Rust
 // side catches its own panics (returns 0 = drop, prev untouched), so nothing

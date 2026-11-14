@@ -457,3 +457,6 @@ tools/diag/*.json
 # Rust core (dll/rust): `cargo test` run in-tree writes here. CMake builds use
 # build/<dir>/rust-target/ instead.
 /dll/rust/target/
+
+# Local fixture list for tools/verify (machine-specific game paths)
+tools/verify/fixtures.local.txt

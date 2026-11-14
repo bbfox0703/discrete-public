@@ -65,6 +65,38 @@
 //!
 //! iced is always run with `DecoderOptions::MPX | NO_WBNOINVD`, mirroring
 //! Zydis' MPX-on / WBNOINVD-off defaults.
+//!
+//! **Memory-operand facts** ([`InsnDecoder::decode_mem`], used by
+//! `crate::xref`'s instance-field scan — an on-demand addition: `decode` and
+//! [`Insn`] are computed exactly as before, the extra facts are only filled
+//! while `decode_mem` runs). For every *visible* memory operand the legacy
+//! `ScanInstanceAccesses` read `mem.disp.size != 0`, `mem.index != NONE`,
+//! `mem.disp.value`, `Canonical(mem.base)` and `actions & WRITE / READ`, plus
+//! `mnemonic == LEA`; [`MemFacts`] carries exactly that:
+//!
+//! * Displacement presence is iced's `memory_displ_size() != 0`; the value
+//!   follows the same mapping as `Operand::Mem` above (EVEX disp8*N scaled by
+//!   both decoders). Base / index use the same REX2 / EVEX B4 / X4 handling.
+//! * Access: iced `Write` / `CondWrite` / `ReadWrite` / `ReadCondWrite` =
+//!   Zydis WRITE, `Read` / `CondRead` = READ. iced reports *no* access for the
+//!   address-only operands (`NoMemAccess`: NOP Ev, PREFETCHh, INVLPG,
+//!   CLDEMOTE; `None`: NOP 0F 19-1F, UD0, UD1) where Zydis says READ — except
+//!   the MPX BNDMK / BNDCL / BNDCU / BNDCN / BNDLDX / BNDSTX operands, which
+//!   carry no action in Zydis either.
+//! * The encodings iced cannot decode are answered from the bytes: APX map 4
+//!   / EVEX-promoted VEX GPR memory forms (one visible operand, unscaled
+//!   displacement, access from the Zydis-generated `xref::apx_mem` table) and
+//!   the KNC VPREFETCH* / CLEVICT0/1 memory forms Zydis decodes from VEX (one
+//!   READ operand).
+//!
+//! Verified against the vendored Zydis with the scratch oracle (projection =
+//! the exact hit list `ScanInstanceAccesses` builds per instruction):
+//! exhaustive legacy maps 0 / 0F / 0F38 / 0F3A x 14 prefix sets x 9 REX x
+//! ModRM x 4 SIB tails (132 M), exhaustive VEX2 (33.5 M), VEX3 + XOP (84 M),
+//! REX2 (21 M), APX EVEX memory forms (21 M), sampled EVEX (1.6 M) and 99 M
+//! random strings over the R2 generator modes (two seeds) — 0 differences.
+//! `decode` itself was A/B-checked against its previous revision on 108 M
+//! random strings, interleaved with `decode_mem` calls: identical.
 
 use iced_x86::{
     Decoder, DecoderOptions, Instruction, InstructionInfoFactory, InstructionInfoOptions, Mnemonic, OpAccess, OpKind,
@@ -132,6 +164,60 @@ impl Insn {
             writes: [Reg::None; 5],
             n_writes: 0,
         }
+    }
+}
+
+/// Zydis' access to a memory operand, as `IL2CPPFieldXref`'s instance scan
+/// tests it: `actions & ACTION_MASK_WRITE` (write / conditional write /
+/// read-write), else `actions & ACTION_MASK_READ`, else neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemAct {
+    None,
+    Read,
+    Write,
+}
+
+/// One visible MEMORY operand in Zydis' terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemOperand {
+    /// `Canonical(mem.base)` (EIP -> RIP, r16..r31 as [`Reg::Egpr`]).
+    pub base: Reg,
+    /// `mem.index != NONE` (VSIB included).
+    pub has_index: bool,
+    /// `mem.disp.size != 0`: the encoding carries a displacement (even 0).
+    pub has_disp: bool,
+    /// `mem.disp.value`: sign-extended, already scaled for EVEX disp8*N.
+    pub disp: i64,
+    pub act: MemAct,
+}
+
+/// What the instance-field xref scan reads from one decoded instruction:
+/// `mnemonic == LEA` and the visible memory operands, in operand order.
+/// Filled by [`InsnDecoder::decode_mem`] only (additive to [`Insn`]: the
+/// chain detector's facts are untouched).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemFacts {
+    pub lea: bool,
+    pub n: usize,
+    pub ops: [MemOperand; 5],
+}
+
+impl MemFacts {
+    pub const EMPTY: MemFacts = MemFacts {
+        lea: false,
+        n: 0,
+        ops: [MemOperand { base: Reg::None, has_index: false, has_disp: false, disp: 0, act: MemAct::None }; 5],
+    };
+
+    fn push(&mut self, op: MemOperand) {
+        if self.n < self.ops.len() {
+            self.ops[self.n] = op;
+            self.n += 1;
+        }
+    }
+
+    pub fn operands(&self) -> &[MemOperand] {
+        &self.ops[..self.n]
     }
 }
 
@@ -377,6 +463,93 @@ fn decode_evex_apx_table(bytes: &[u8], pfx: Pfx) -> Option<Option<Insn>> {
     Some(decode_apx_row(bytes, pfx, row))
 }
 
+/// The memory operand encoded by the ModRM byte at `m` (+ SIB +
+/// displacement), Zydis style, for the encodings iced cannot answer. `b3` /
+/// `x3` / `b4` / `x4` are the (already un-inverted) register-extension bits
+/// of the prefix; the displacement is never scaled. `None` for a register
+/// form (mod = 3).
+fn modrm_mem_operand(bytes: &[u8], m: usize, (b3, x3, b4, x4): (u8, u8, u8, u8), act: MemAct) -> Option<MemOperand> {
+    let modrm = *bytes.get(m)?;
+    let md = modrm >> 6;
+    if md == 3 {
+        return None;
+    }
+    let rm = modrm & 7;
+    let gpr = |id: u8| if id >= 16 { Reg::Egpr(id) } else { canonical(gpr64(id)) };
+    let disp8 = |at: usize| bytes.get(at).map_or(0, |&b| i64::from(b as i8));
+    let disp32 = |at: usize| match bytes.get(at..at + 4) {
+        Some(d) => i64::from(i32::from_le_bytes([d[0], d[1], d[2], d[3]])),
+        None => 0,
+    };
+    let (base, has_index, disp_at, disp32_form) = if rm == 4 {
+        let sib = *bytes.get(m + 1)?;
+        let base_f = sib & 7;
+        let idx = (x4 << 4) | (x3 << 3) | ((sib >> 3) & 7);
+        let base = if base_f == 5 && md == 0 { Reg::None } else { gpr((b4 << 4) | (b3 << 3) | base_f) };
+        (base, idx != 4, m + 2, base_f == 5 && md == 0)
+    } else if rm == 5 && md == 0 {
+        (Reg::R(Register::RIP), false, m + 1, true)
+    } else {
+        (gpr((b4 << 4) | (b3 << 3) | rm), false, m + 1, false)
+    };
+    let (has_disp, disp) = match md {
+        1 => (true, disp8(disp_at)),
+        2 => (true, disp32(disp_at)),
+        _ if disp32_form => (true, disp32(disp_at)),
+        _ => (false, 0),
+    };
+    Some(MemOperand { base, has_index, has_disp, disp, act })
+}
+
+/// Memory-operand facts of an APX EVEX encoding answered by
+/// [`decode_evex_apx_table`] (only called once that decode succeeded, so the
+/// ModRM / SIB / displacement bytes are inside `bytes`). Register forms have
+/// no memory operand. Zydis decodes the single memory operand from ModRM /
+/// SIB extended by EVEX.B (inverted) + B4 (base) and EVEX.X (inverted) + X4
+/// (= !EVEX.U, index); the displacement is never scaled (disp8 * 1); the
+/// access comes from the table generated from Zydis (`xref::apx_mem`).
+fn apx_mem_facts(bytes: &[u8], pfx: Pfx) -> MemFacts {
+    let k = pfx.k;
+    let mut f = MemFacts::EMPTY;
+    let (Some(&p0), Some(&p1), Some(&p2), Some(&op), Some(&modrm)) =
+        (bytes.get(k + 1), bytes.get(k + 2), bytes.get(k + 3), bytes.get(k + 4), bytes.get(k + 5))
+    else {
+        return f;
+    };
+    let reg = (modrm >> 3) & 7;
+    let ext = ((!p0 >> 5) & 1, (!p0 >> 6) & 1, (p0 >> 3) & 1, (!p1 >> 2) & 1);
+    let sel = ((p1 & 3) << 3) | ((p1 >> 7) << 2) | (((p2 >> 4) & 1) << 1) | ((p2 >> 2) & 1);
+    let act = crate::xref::apx_mem::mem_act(p0 & 7, op, reg, sel);
+    if let Some(op) = modrm_mem_operand(bytes, k + 5, ext, act) {
+        f.push(op);
+    }
+    f
+}
+
+/// Memory-operand facts of an encoding answered by [`vex_quirks`] (only
+/// called once it succeeded). The only memory forms there are the Knights
+/// Corner VPREFETCH* (VEX map 1, 0x18) and CLEVICT0 / CLEVICT1 (map 1, 0xAE
+/// /7): one visible memory operand, READ, unscaled displacement, base / index
+/// extended by VEX.B / VEX.X (inverted; VEX2 has neither).
+fn vex_quirk_mem_facts(bytes: &[u8], pfx: Pfx) -> MemFacts {
+    let k = pfx.k;
+    let mut f = MemFacts::EMPTY;
+    let vex3 = bytes.get(k) == Some(&0xC4);
+    let Some(&b1) = bytes.get(k + 1) else { return f };
+    let (map, op_at, ext) = if vex3 {
+        (b1 & 0x1F, k + 3, ((!b1 >> 5) & 1, (!b1 >> 6) & 1, 0, 0))
+    } else {
+        (1, k + 2, (0, 0, 0, 0))
+    };
+    if map == 1
+        && matches!(bytes.get(op_at), Some(0x18 | 0xAE))
+        && let Some(op) = modrm_mem_operand(bytes, op_at + 1, ext, MemAct::Read)
+    {
+        f.push(op);
+    }
+    f
+}
+
 fn decode_apx_row(bytes: &[u8], pfx: Pfx, row: &[u8]) -> Option<Insn> {
     use super::apx_map4::PROFILES;
     let k = pfx.k;
@@ -492,11 +665,28 @@ fn iced_decode(bytes: &[u8]) -> Option<Instruction> {
 
 pub(crate) struct InsnDecoder {
     factory: InstructionInfoFactory,
+    /// Set only for the duration of [`InsnDecoder::decode_mem`]: the decode
+    /// paths then also fill `facts`. The chain detector never sets it, so
+    /// its [`Insn`] results are computed exactly as before.
+    collect: bool,
+    facts: MemFacts,
 }
 
 impl InsnDecoder {
     pub fn new() -> Self {
-        Self { factory: InstructionInfoFactory::new() }
+        Self { factory: InstructionInfoFactory::new(), collect: false, facts: MemFacts::EMPTY }
+    }
+
+    /// The instance-field xref scan's view of one instruction (see
+    /// [`MemFacts`]): `None` exactly when [`InsnDecoder::decode`] fails (=
+    /// `ZydisDecoderDecodeFull` fails), else the Zydis length and the
+    /// visible memory operands.
+    pub fn decode_mem(&mut self, bytes: &[u8]) -> Option<(usize, MemFacts)> {
+        self.collect = true;
+        self.facts = MemFacts::EMPTY;
+        let r = self.decode(bytes);
+        self.collect = false;
+        r.map(|i| (i.len, self.facts))
     }
 
     pub fn decode(&mut self, bytes: &[u8]) -> Option<Insn> {
@@ -511,6 +701,9 @@ impl InsnDecoder {
             && matches!(bytes[pfx.k], 0xC4 | 0xC5)
             && let Some(r) = vex_quirks(bytes, pfx)
         {
+            if self.collect && r.is_some() {
+                self.facts = vex_quirk_mem_facts(bytes, pfx);
+            }
             return r;
         }
         self.decode_legacy(bytes, pfx, 0, None)
@@ -592,6 +785,9 @@ impl InsnDecoder {
         let p0 = bytes[k + 1];
         let p1 = bytes[k + 2];
         if let Some(r) = decode_evex_apx_table(bytes, pfx) {
+            if self.collect && r.is_some() {
+                self.facts = apx_mem_facts(bytes, pfx);
+            }
             return r;
         }
         let b4 = p0 & 0x08 != 0;
@@ -901,6 +1097,52 @@ impl InsnDecoder {
         if add_rax_write && n_writes < writes.len() {
             writes[n_writes] = Reg::R(Register::RAX);
             n_writes += 1;
+        }
+        if self.collect {
+            // Every visible memory operand, with the same base / index /
+            // displacement mapping as `ops` above plus the presence of the
+            // displacement and the operand's access.
+            let mut f = MemFacts { lea: ins.mnemonic() == Mnemonic::Lea, ..MemFacts::EMPTY };
+            for i in 0..vis.min(5) {
+                if ins.op_kind(i as u32) != OpKind::Memory {
+                    continue;
+                }
+                let raw = ins.memory_displacement64();
+                let disp = if ins.memory_base().is_gpr32() { raw as u32 as i32 as i64 } else { raw as i64 };
+                let base = match (base_b, gpr_number(ins.memory_base())) {
+                    (true, Some(num)) => Reg::Egpr(16 + (num & 15)),
+                    _ => canonical(ins.memory_base()),
+                };
+                let act = match info.op_access(i as u32) {
+                    OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite => {
+                        MemAct::Write
+                    }
+                    OpAccess::Read | OpAccess::CondRead => MemAct::Read,
+                    // iced has no access for the "address only" operands
+                    // (NOP Ev, PREFETCHh, INVLPG, CLDEMOTE: NoMemAccess; NOP
+                    // 0F 19-1F, UD0 / UD1: None). Zydis marks every one READ
+                    // except its AGEN / MIB operands: LEA (handled by the
+                    // caller) and the MPX BNDMK / BNDCL / BNDCU / BNDCN /
+                    // BNDLDX / BNDSTX, which carry no action at all.
+                    OpAccess::NoMemAccess | OpAccess::None => match ins.mnemonic() {
+                        Mnemonic::Bndmk
+                        | Mnemonic::Bndcl
+                        | Mnemonic::Bndcu
+                        | Mnemonic::Bndcn
+                        | Mnemonic::Bndldx
+                        | Mnemonic::Bndstx => MemAct::None,
+                        _ => MemAct::Read,
+                    },
+                };
+                f.push(MemOperand {
+                    base,
+                    has_index: ins.memory_index() != Register::None || x4_index,
+                    has_disp: ins.memory_displ_size() != 0,
+                    disp,
+                    act,
+                });
+            }
+            self.facts = f;
         }
         Some(Insn { len, mn, cat, vis, ops, writes, n_writes })
     }
