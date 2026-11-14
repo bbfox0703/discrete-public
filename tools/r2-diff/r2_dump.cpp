@@ -1,17 +1,16 @@
-// r2_dump.cpp — Phase R2 differential harness driver.
+// r2_dump.cpp — Phase R2 regression driver (r2-dump.exe, never shipped).
 //
-// Built twice from this one source (tools/r2-diff/CMakeLists.txt):
-//   r2-dump.exe         against the Rust ports (the *Rs.cpp wrappers +
-//                       discrete_core, DISCRETE_RUST_R2=1)
-//   r2-dump-legacy.exe  against the legacy C++ implementations
-// It calls ONLY the public C++ APIs of the four R2 modules, so the two
-// binaries differ in nothing but the implementation under test:
+// Until R2 closed this source was built twice -- against the Rust ports and
+// against the legacy C++ -- and tools/verify/r2_rust_diff.py required
+// byte-identical output. The legacy flavour is gone (git history, last in
+// aae48d3); tools/verify/r2_golden.py now compares r2-dump's output with
+// hashes recorded from that proven output. It calls ONLY the public C++
+// APIs of the four R2 modules:
 //   Discrete::Aob::BuildPattern
 //   Discrete::GroupMatch::HasDistinctAssignment / ResolveAssignment
 //   Discrete::ValueRefine::CompareCandidateForRefine
 //   Discrete::IL2CPP::DetectFieldAccessChains
-// tools/verify/r2_rust_diff.py runs both and requires byte-identical
-// stdout / stderr / exit code.
+// tools/verify/r2_golden.py hashes stdout and checks exit codes.
 //
 // Output rules (what makes a byte compare meaningful):
 //   * Deterministic: a local splitmix64 PRNG with fixed seeds, no clock, no
@@ -211,8 +210,9 @@ bool ReadFileAt(HANDLE file, std::uint64_t offset, void* dst, std::uint32_t len)
 // Maps GameAssembly.dll without running any of its code, then NORMALISES every
 // executable section to the exact bytes stored in the file.
 //
-// Judgement call — why normalise: r2-dump and r2-dump-legacy are two separate
-// processes, and nothing guarantees that both see the image at the same base.
+// Judgement call — why normalise: separate runs (originally r2-dump vs the
+// legacy twin, now r2-dump vs a recorded hash) are separate processes, and
+// nothing guarantees that both see the image at the same base.
 // Base relocations (and any load-time dynamic relocations) patch code bytes as
 // a function of the load address, so the two runs could feed DIFFERENT bytes to
 // the code under test and report a "difference" that is not one. File bytes are

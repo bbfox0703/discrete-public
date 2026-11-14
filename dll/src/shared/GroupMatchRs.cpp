@@ -1,10 +1,10 @@
 // GroupMatchRs.cpp — Phase R2. Implements the Discrete::GroupMatch API declared
-// in the DISCRETE_RUST_R2 half of GroupMatch.h over the Rust port
+// in GroupMatch.h over the Rust port
 // (dll/rust/src/group_match.rs, C ABI "Phase R2: GroupMatch SDR" in
 // dll/rust/include/discrete_core.h).
 //
-// Compiled instead of the legacy header-only implementation when
-// DISCRETE_RUST_R2 is defined. No matching logic lives here: each function
+// The legacy header-only implementation was removed when R2 closed (git
+// history, last in aae48d3). No matching logic lives here: each function
 // flattens std::vector<SlotMatches> into the CSR arrays of the contract
 // (slot s = leaves[offsets[s] .. offsets[s+1])) and makes one dc_gm_* call.
 //

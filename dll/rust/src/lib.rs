@@ -8,6 +8,8 @@
 //! * Phase R2 — pure algorithms: the AOB pattern builder (`aob`), the group
 //!   scan SDR matcher (`group_match`), the value-scan refine comparator
 //!   (`value`) and the IL2CPP static-field chain detector (`chain`, iced-x86).
+//!   Follow-up: the IL2CPP field-xref scan kernels (`xref`, sharing the
+//!   chain detector's decoder adapter).
 //!   Host memory is only ever read through `ffi::Reader` (the SEH shim).
 //!
 //! FFI rules every `extern "C"` function in this crate follows:
@@ -30,3 +32,4 @@ pub mod ffi;
 pub mod group_match;
 pub mod metadata;
 pub mod value;
+pub mod xref;

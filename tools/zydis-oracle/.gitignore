@@ -1,0 +1,8 @@
+# Fetched by fetch_zydis.ps1 (own .git), and build outputs of build.ps1 / cargo.
+/vendor/
+/target/
+/build/
+*.exe
+*.obj
+*.lib
+*.pdb

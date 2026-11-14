@@ -830,7 +830,7 @@ methods).
 **Source**: [`IL2CPPFieldXref.cpp::FindStaticFieldReferences`](../dll/src/il2cpp/IL2CPPFieldXref.cpp)
 sets `result.note` when scan completes with 0 matches and target
 sits outside the GameAssembly.dll module. Phase 28b-v2 chain
-detector ([`IL2CPPChainDetector.cpp`](../dll/src/il2cpp/IL2CPPChainDetector.cpp))
+detector ([`IL2CPPChainDetector.cpp`](https://github.com/bbfox0703/discrete-public/blob/aae48d3/dll/src/il2cpp/IL2CPPChainDetector.cpp))
 fires as fallback before the advisory note is set; only fields the
 v2 chain detector ALSO can't find still trigger the banner (e.g.
 the deferred Phase 28b-v3 `<>c` lambda-cache codegen pattern).
@@ -918,7 +918,7 @@ Three independent issues, all surfaced by this single pattern:
    even though the calling convention's non-volatile registers
    (RBX/RBP/RSI/RDI/R12-R15) survive across the call.
 
-**Fix** ([`IL2CPPChainDetector.cpp`](../dll/src/il2cpp/IL2CPPChainDetector.cpp)
+**Fix** ([`IL2CPPChainDetector.cpp`](https://github.com/bbfox0703/discrete-public/blob/aae48d3/dll/src/il2cpp/IL2CPPChainDetector.cpp)
 build #565):
 
 * **Multi-register state** — replace single `classPtrReg` /
@@ -972,7 +972,7 @@ when the previous byte was a REX prefix. So a 7-byte instruction
 Both candidates would Zydis-decode + forward-trace + emit the
 same chain.
 
-**Fix** ([`IL2CPPChainDetector.cpp:512`](../dll/src/il2cpp/IL2CPPChainDetector.cpp)
+**Fix** ([`IL2CPPChainDetector.cpp:512`](https://github.com/bbfox0703/discrete-public/blob/aae48d3/dll/src/il2cpp/IL2CPPChainDetector.cpp)
 build #565):
 
 ```cpp
@@ -1123,7 +1123,8 @@ rebuild it):
 1. Find the v29 IL2CPP runtime's `il2cpp_codegen_initialize_runtime_metadata`
    function (frequency analysis: it's the single callTarget appearing
    thousands of times in the lazy-init pattern matches).
-2. Disassemble that function with Zydis (already vendored). Trace
+2. Disassemble that function (Zydis was vendored when this was written;
+   today the decoder is iced-x86 inside discrete_core, `chain::decode`). Trace
    what it reads from its `rcx` argument — that gives us the entry layout.
 3. Likely path: the function reads a `MetadataInitializerToken` structure
    (probably 4-8 bytes after the slot, or pointed to by it). The token
@@ -2241,7 +2242,7 @@ commits.
 ### AOB decoder bailout is by design
 
 Phase 18a-3's hand-rolled x64 length disassembler in
-[AobPattern.cpp](../dll/src/shared/AobPattern.cpp) bails (falls
+[AobPattern.cpp](https://github.com/bbfox0703/discrete-public/blob/aae48d3/dll/src/shared/AobPattern.cpp) bails (falls
 through with literal bytes, no wildcards) on any opcode it doesn't
 fully model. The bailout is reported in the wire response as
 `decoderBailed: true, bailedAt: N`. **Do not try to "fix" this by

@@ -3,8 +3,8 @@
 // dc_aob_build_pattern in dll/rust/include/discrete_core.h), so callers keep
 // the existing API.
 //
-// Compiled instead of AobPattern.cpp when DISCRETE_RUST_R2 is ON. This file
-// holds no decoding logic: it sizes the output buffers, makes one call and
+// The legacy C++ decoder (AobPattern.cpp) was removed when R2 closed; it is
+// in git history (last in aae48d3). This file holds no decoding logic: it sizes the output buffers, makes one call and
 // copies the result into PatternResult exactly as the legacy code filled it:
 //   * pattern       — the Rust pattern bytes (uppercase hex / "??", spaces);
 //   * bytes         — input[0 .. length), i.e. trimmed like the legacy resize;

@@ -8,7 +8,7 @@ global-metadata.dat files, and requires the exit code, stdout and stderr of
 every run to be byte-identical.
 
     py -I tools/verify/metadata_rust_diff.py <global-metadata.dat> [...]
-    py -I tools/verify/metadata_rust_diff.py            # uses DISCRETE_METADATA_FIXTURES
+    py -I tools/verify/metadata_rust_diff.py            # DISCRETE_METADATA_FIXTURES, else tools/verify/fixtures.local.txt
     py -I tools/verify/metadata_rust_diff.py --cli-dir build/cli-debug/bin <files...>
 
 Build both binaries first with `build.cmd cli` (they land in
@@ -198,6 +198,25 @@ def check_fixture(fixture: Path, rust_exe: Path, legacy_exe: Path, work: Path) -
     return res
 
 
+
+def load_fixtures() -> list[str]:
+    """$DISCRETE_METADATA_FIXTURES (';'-separated) if set, else the git-ignored
+    tools/verify/fixtures.local.txt (one path per line, '#' comments; template:
+    fixtures.example.txt). Inlined in each harness because `py -I` does not put
+    the script's directory on sys.path."""
+    env = os.environ.get("DISCRETE_METADATA_FIXTURES", "")
+    if env:
+        return [p for p in env.split(";") if p]
+    local = Path(__file__).resolve().parent / "fixtures.local.txt"
+    if not local.is_file():
+        return []
+    out = []
+    for line in local.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            out.append(line)
+    return out
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("fixtures", nargs="*", help="global-metadata.dat paths (default: $DISCRETE_METADATA_FIXTURES)")
@@ -207,9 +226,10 @@ def main() -> int:
     ap.add_argument("-j", "--jobs", type=int, default=max(1, min(4, os.cpu_count() or 1)))
     args = ap.parse_args()
 
-    fixtures = args.fixtures or [p for p in os.environ.get("DISCRETE_METADATA_FIXTURES", "").split(";") if p]
+    fixtures = args.fixtures or load_fixtures()
     if not fixtures:
-        print("no fixtures: pass global-metadata.dat paths or set DISCRETE_METADATA_FIXTURES", file=sys.stderr)
+        print("no fixtures: pass global-metadata.dat paths, set DISCRETE_METADATA_FIXTURES, "
+              "or list them in tools/verify/fixtures.local.txt", file=sys.stderr)
         return 2
     cli_dir = Path(args.cli_dir)
     rust_exe, legacy_exe = cli_dir / RUST_EXE, cli_dir / LEGACY_EXE

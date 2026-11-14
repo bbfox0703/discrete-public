@@ -1,15 +1,22 @@
 """Rust core R1 + R2 live A/B smoke (docs/rust-core.md "R2 gate").
 
 Run once against a game with the default (Rust) DLLs and once with a legacy
-build (-DDISCRETE_RUST_R2=OFF -DDISCRETE_RUST_METADATA=OFF), then diff the two
-JSON files with --compare. Everything recorded in the "ab" section is
+build, then diff the two JSON files with `compare`. R2's legacy sources are
+gone since R2 closed; a legacy build now means a checkout of aae48d3
+configured with -DDISCRETE_RUST_R2=OFF -DDISCRETE_RUST_METADATA=OFF. A plain
+`run` on its own still checks the live value-scan / group-scan behaviour. Everything recorded in the "ab" section is
 restart-stable (names, offsets, module-relative addresses), so the two runs
 must match exactly. The "live" section holds per-run PASS/FAIL checks of the
 value-scan refine comparator and the group-scan matcher, which work on heap
 addresses that change between runs.
 
-    python -u r2_live.py run <exe-substring> <out.json> [assembly]
+    python -u r2_live.py run <exe-substring> <out.json> [assembly] [--ab-only]
     python -u r2_live.py compare <a.json> <b.json>
+
+--ab-only records the restart-stable "ab" sections and skips the value/group
+part (no writes). Its target search runs a whole-heap scanFieldValue per
+candidate class, which can take hours when the first candidates fail the
+ownership check.
 
 What each part exercises:
   metadata (R1)   getClasses / getClassInfo over the first N classes (field
@@ -113,7 +120,7 @@ def tc(r, cmd, args=None):
 
 
 # --------------------------------------------------------------------------
-def run(game, out_path, asm_want):
+def run(game, out_path, asm_want, ab_only=False):
     pid, pname = dh.find_pid(game)
     if not pid:
         print('process not found: %s' % game)
@@ -148,7 +155,7 @@ def run(game, out_path, asm_want):
         classes = r.call('getClasses', {'assembly': asm}).get('classes', [])
         classes = sorted(classes, key=lambda c: (c.get('namespace', ''), c.get('name', '')))
         out['ab']['class_count'] = len(classes)
-        md, statics, method_sites, enum_sites = [], [], [], []
+        md, statics, inst_fields, method_sites, enum_sites = [], [], [], [], []
         for c in classes[:N_CLASSES]:
             ns, nm = c.get('namespace', ''), c.get('name', '')
             try:
@@ -168,6 +175,8 @@ def run(game, out_path, asm_want):
                 for f in flds:
                     if is_static(f) and len(statics) < N_XREF_FIELDS * 3:
                         statics.append((ns, nm, f.get('name')))
+                    elif not is_static(f) and len(inst_fields) < N_XREF_FIELDS * 3:
+                        inst_fields.append((ns, nm, f.get('name')))
                 for m in meths[:6]:
                     mn = m.get('name') or ''
                     if mn and not mn.startswith('.'):
@@ -213,27 +222,40 @@ def run(game, out_path, asm_want):
                       % (ok_enum, len(enums), ok_tf, len(tfields), total, first.get('version')),
                       ok_enum > 0 and ok_tf > 0 and total > 0)
 
-        # ---- field xrefs (IL2CPP: R2 chain detector; Mono: IL scan) ---------
-        t0 = time.time()
-        xr, n_refs = [], 0
-        for ns, nm, fn in statics[:N_XREF_FIELDS]:
-            try:
-                res = r.call('findFieldReferences', {'assembly': asm, 'ns': ns, 'class': nm,
-                                                     'fieldName': fn, 'limit': 500})
-            except Exception as e:  # noqa: BLE001
-                xr.append({'f': '%s.%s::%s' % (ns, nm, fn), 'error': str(e)[:160]})
-                continue
-            refs = sorted([[x.get('namespace'), x.get('class'), x.get('method'), x.get('kind'),
-                            x.get('confidence'), rel(hx(x.get('address'))), rel(hx(x.get('hitAddress')))]
-                           for x in res.get('references') or []], key=json.dumps)
-            n_refs += len(refs)
-            xr.append({'f': '%s.%s::%s' % (ns, nm, fn), 'refs': refs,
-                       'scanned': res.get('scanned_methods'), 'truncated': res.get('truncated'),
-                       'error': res.get('error')})
-        out['ab']['xref'] = xr
-        out['timing']['xref_s'] = round(time.time() - t0, 1)
-        rep.check('xref: %d static fields scanned, %d references' % (len(xr), n_refs),
-                  len(xr) > 0 and not all('error' in x and x['error'] for x in xr))
+        # ---- field xrefs -----------------------------------------------------
+        # Static: IL2CPP = v1 RIP scan + R2 chain detector; Mono = IL scan.
+        # Instance: IL2CPP = declaring-class decode of [gpr + offset]
+        # (IL2CPPFieldXrefScan); Mono = IL scan. The first 5 fields of each
+        # list also run with kind=write / limit=2 to pin the filter + cut-off
+        # order.
+        def xref_list(fields, label):
+            t0 = time.time()
+            xr, n_refs = [], 0
+            for i, (ns, nm, fn) in enumerate(fields[:N_XREF_FIELDS]):
+                variants = [('any', 500)] + ([('write', 2)] if i < 5 else [])
+                for kind, limit in variants:
+                    tag = '%s.%s::%s [%s/%d]' % (ns, nm, fn, kind, limit)
+                    try:
+                        res = r.call('findFieldReferences', {'assembly': asm, 'ns': ns, 'class': nm,
+                                                             'fieldName': fn, 'kind': kind,
+                                                             'limit': limit})
+                    except Exception as e:  # noqa: BLE001
+                        xr.append({'f': tag, 'error': str(e)[:160]})
+                        continue
+                    refs = sorted([[x.get('namespace'), x.get('class'), x.get('method'), x.get('kind'),
+                                    x.get('confidence'), rel(hx(x.get('address'))),
+                                    rel(hx(x.get('hitAddress')))]
+                                   for x in res.get('references') or []], key=json.dumps)
+                    n_refs += len(refs)
+                    xr.append({'f': tag, 'refs': refs, 'scanned': res.get('scanned_methods'),
+                               'truncated': res.get('truncated'), 'error': res.get('error')})
+            out['timing'][label + '_s'] = round(time.time() - t0, 1)
+            rep.check('%s: %d queries, %d references' % (label, len(xr), n_refs),
+                      len(xr) > 0 and not all(x.get('error') for x in xr))
+            return xr
+
+        out['ab']['xref'] = xref_list(statics, 'xref')
+        out['ab']['xref_inst'] = xref_list(inst_fields, 'xref_inst')
 
         # ---- R2 aob ---------------------------------------------------------
         t0 = time.time()
@@ -279,7 +301,7 @@ def run(game, out_path, asm_want):
 
         # ---- R2 value refine + group match (writes 2 fields, restores) ------
         tgt = None
-        for c in classes:
+        for c in ([] if ab_only else classes):
             if tgt:
                 break
             ns, nm = c.get('namespace', ''), c.get('name', '')
@@ -326,7 +348,9 @@ def run(game, out_path, asm_want):
                     break
             if owned:
                 tgt = (ns, nm, ia, ints[0], ints[1])
-        if not tgt:
+        if ab_only:
+            print('  SKIP  value/group (--ab-only)')
+        elif not tgt:
             rep.check('value/group: found an object with two int32 fields', False)
         else:
             ns, nm, ia, fa, fb = tgt
@@ -414,9 +438,20 @@ def run(game, out_path, asm_want):
     return rep.summary()
 
 
+def _strip_volatile(x):
+    """Drops values that legitimately change across a game restart: the AOB
+    responses carry the absolute moduleBase (ASLR), next to the
+    restart-stable moduleOffset that is compared."""
+    if isinstance(x, dict):
+        return {k: _strip_volatile(v) for k, v in x.items() if k != 'moduleBase'}
+    if isinstance(x, list):
+        return [_strip_volatile(v) for v in x]
+    return x
+
+
 def compare(pa, pb):
-    a = json.load(open(pa, encoding='utf-8'))['ab']
-    b = json.load(open(pb, encoding='utf-8'))['ab']
+    a = _strip_volatile(json.load(open(pa, encoding='utf-8'))['ab'])
+    b = _strip_volatile(json.load(open(pb, encoding='utf-8'))['ab'])
     bad = 0
     for k in sorted(set(a) | set(b)):
         if k not in a or k not in b:
@@ -443,7 +478,13 @@ def compare(pa, pb):
 
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == 'run':
-        sys.exit(run(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else 'Assembly-CSharp'))
+        flags = [a for a in sys.argv[2:] if a.startswith('--')]
+        pos = [a for a in sys.argv[2:] if not a.startswith('--')]
+        if set(flags) - {'--ab-only'} or len(pos) not in (2, 3):
+            print(__doc__)
+            sys.exit(1)
+        sys.exit(run(pos[0], pos[1], pos[2] if len(pos) > 2 else 'Assembly-CSharp',
+                     ab_only='--ab-only' in flags))
     if len(sys.argv) == 4 and sys.argv[1] == 'compare':
         sys.exit(compare(sys.argv[2], sys.argv[3]))
     print(__doc__)

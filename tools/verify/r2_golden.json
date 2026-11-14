@@ -1,0 +1,198 @@
+{
+ "about": "SHA-256 of r2-dump / xref-dump stdout per check. r2-dump entries (aob, chain, gm, refine) were recorded after r2_rust_diff.py proved the Rust build byte-identical to the legacy C++ (19/19; legacy last in aae48d3); xref-dump entries (rip, inst) after xref_rust_diff.py proved the same for the IL2CPPFieldXref kernels (19/19; legacy last in 987b20d). Image entries are keyed by the SHA-256 of the GameAssembly.dll file. Maintained by tools/verify/r2_golden.py --record.",
+ "entries": {
+  "aob-synthetic": {
+   "sha256": "c4cd0de22b31ee3f0f76b70096b14134040c415d664e34fa7e5879a0aa97c3b7",
+   "size": 54085711,
+   "lines": 50003
+  },
+  "aob@0029a22ed933aa3b6ea3b1290060502267f514d61ba6e6619308d844557f2ffd": {
+   "sha256": "f0fe82ea3517a1f34a475125aec0f55a4942ee9edb0fdfbb947c4b1a3ea0fd9f",
+   "size": 48076402,
+   "lines": 10002,
+   "image": "FINAL FANTASY VI PR"
+  },
+  "aob@a9423e94385f57270d5ec0c49d6eac64a852de6d10b2a00be1352188d3cee665": {
+   "sha256": "363b96d4112f3310ced360df78d4b9496d2ce61cdb9e856b7a07babb7b4bc8d1",
+   "size": 48213851,
+   "lines": 10002,
+   "image": "Songs Of Silence"
+  },
+  "aob@b798d63ba20741485f8e9b3a166111633f247bd7cae5d289344532d2f2393c19": {
+   "sha256": "ae42515ea6005d7f929da4533784187ee1e2cc3986b29a960d6d3c43baf527b9",
+   "size": 48390998,
+   "lines": 10002,
+   "image": "Utawarerumono Past and Present Rediscovered"
+  },
+  "aob@caadfd5a5b07afdde2c60b17082cbb3d29a11d84a2137932043335807c733ab6": {
+   "sha256": "7ffd2d116c5bf7306a1b40ab75825b8b891767d92e0cddcaab4ef35f8c0dda54",
+   "size": 48283497,
+   "lines": 10002,
+   "image": "Heroes of Might and Magic Olden Era"
+  },
+  "aob@d4c68a3699b5522817f6a425e278c52f8ca58dd97a438ec8f5b0e83a841a1495": {
+   "sha256": "dbace8243bbb458675b4399d1ace3b582d13d6b2e35181bbeed461b37e822778",
+   "size": 48377463,
+   "lines": 10002,
+   "image": "SaGa Frontier 2 Remastered"
+  },
+  "aob@f157541f60fbf9824464968fc2b1545d7a15f59a06e39aae9c573fd9cedaa1ce": {
+   "sha256": "26d1942f897d34ffefe59ef292b351d4e19ebf828ea5865f90d500140f07755b",
+   "size": 48483564,
+   "lines": 10002,
+   "image": "SaGa Frontier Remastered"
+  },
+  "aob@f503342f43731b232a9eba53f272ff7a87f96f63ca1ccd0390ddaa966b0e7448": {
+   "sha256": "3ec187cbf85fc308450dec5433af60cb0f7db7c7e0640a6779ae0b9463053aa4",
+   "size": 47672676,
+   "lines": 10002,
+   "image": "Iron Nest Heavy Turret Simulator"
+  },
+  "chain@0029a22ed933aa3b6ea3b1290060502267f514d61ba6e6619308d844557f2ffd": {
+   "sha256": "2c034138d69ee47b3214ba32b988080bc9f3da6633e203fc076e69b254508b01",
+   "size": 1130499,
+   "lines": 11675,
+   "image": "FINAL FANTASY VI PR"
+  },
+  "chain@a9423e94385f57270d5ec0c49d6eac64a852de6d10b2a00be1352188d3cee665": {
+   "sha256": "dbe42e7b3b1319525d004fdf647ed554ed6af354eff1f02c3f517fcef492aea3",
+   "size": 1313709,
+   "lines": 13371,
+   "image": "Songs Of Silence"
+  },
+  "chain@b798d63ba20741485f8e9b3a166111633f247bd7cae5d289344532d2f2393c19": {
+   "sha256": "c881ae50d7e17bf8ec98f1573b57af90dde0a1a3130ce58311ab48f3c898e5cc",
+   "size": 1340787,
+   "lines": 13625,
+   "image": "Utawarerumono Past and Present Rediscovered"
+  },
+  "chain@caadfd5a5b07afdde2c60b17082cbb3d29a11d84a2137932043335807c733ab6": {
+   "sha256": "576e00cfaca514bbf21f0a31c4465d9f7bc92f047407c3df012b9f06f0e81554",
+   "size": 2464389,
+   "lines": 25109,
+   "image": "Heroes of Might and Magic Olden Era"
+  },
+  "chain@d4c68a3699b5522817f6a425e278c52f8ca58dd97a438ec8f5b0e83a841a1495": {
+   "sha256": "384177f51342e60f823408e0e923d301afb95d8422f63c3bd692c032017c54f1",
+   "size": 1039224,
+   "lines": 10668,
+   "image": "SaGa Frontier 2 Remastered"
+  },
+  "chain@f157541f60fbf9824464968fc2b1545d7a15f59a06e39aae9c573fd9cedaa1ce": {
+   "sha256": "b73aba10c85beb6a07e5ee3b92cf7ff7af598a47ea6bcbaff0fab49db8e8878a",
+   "size": 355142,
+   "lines": 3595,
+   "image": "SaGa Frontier Remastered"
+  },
+  "chain@f503342f43731b232a9eba53f272ff7a87f96f63ca1ccd0390ddaa966b0e7448": {
+   "sha256": "83a3399b261250719d6aa08146db5c6b9d9b9b291582c0d27d64d674bcd0e6bf",
+   "size": 1119254,
+   "lines": 11399,
+   "image": "Iron Nest Heavy Turret Simulator"
+  },
+  "gm": {
+   "sha256": "898fff47951673a0fd7e4d1cfa6f659b013360af8504fd76a53cc2b958750de9",
+   "size": 20503428,
+   "lines": 200001
+  },
+  "inst-synthetic": {
+   "sha256": "c72a93a46cafc5cfe88c8f68b93916aa05f4ae3b2d7aa6d29011b18eceb0f616",
+   "size": 5109283,
+   "lines": 66025
+  },
+  "inst@0029a22ed933aa3b6ea3b1290060502267f514d61ba6e6619308d844557f2ffd": {
+   "sha256": "cd3d2c0d7d5d01b4ad5c3fc7c8f9a98486d2e80dc75d9fe7eeb0ee7160ea0e33",
+   "size": 80882,
+   "lines": 960,
+   "image": "FINAL FANTASY VI PR"
+  },
+  "inst@a9423e94385f57270d5ec0c49d6eac64a852de6d10b2a00be1352188d3cee665": {
+   "sha256": "85fe6ef726cec2e99267ecac4a2ec2a96f84b5946debcfab5f2ee8834789d470",
+   "size": 294335,
+   "lines": 3441,
+   "image": "Songs Of Silence"
+  },
+  "inst@b798d63ba20741485f8e9b3a166111633f247bd7cae5d289344532d2f2393c19": {
+   "sha256": "74e710ef433395c3af2af91a566708d973236b02c8073eb68e7727601734759a",
+   "size": 177364,
+   "lines": 2077,
+   "image": "Utawarerumono Past and Present Rediscovered"
+  },
+  "inst@caadfd5a5b07afdde2c60b17082cbb3d29a11d84a2137932043335807c733ab6": {
+   "sha256": "590436d364ebc2f6cce34d3615694fe9fddc768c0b9b14caed9bd5b9689b00e5",
+   "size": 199024,
+   "lines": 2331,
+   "image": "Heroes of Might and Magic Olden Era"
+  },
+  "inst@d4c68a3699b5522817f6a425e278c52f8ca58dd97a438ec8f5b0e83a841a1495": {
+   "sha256": "27405801d6f5a2f78caad8139979bef555140ab69387816eb6aa6c4990173ec2",
+   "size": 89048,
+   "lines": 1054,
+   "image": "SaGa Frontier 2 Remastered"
+  },
+  "inst@f157541f60fbf9824464968fc2b1545d7a15f59a06e39aae9c573fd9cedaa1ce": {
+   "sha256": "3c0ed0d7cb9337d2cd0524a83aec2e0ca13e96c3835a10091e97dc6dedb1c595",
+   "size": 49887,
+   "lines": 591,
+   "image": "SaGa Frontier Remastered"
+  },
+  "inst@f503342f43731b232a9eba53f272ff7a87f96f63ca1ccd0390ddaa966b0e7448": {
+   "sha256": "305d182d8b7e41a1cdbd91a4ca4c20ec735800d705ba6b9f5aab9ca48e81e269",
+   "size": 109103,
+   "lines": 1289,
+   "image": "Iron Nest Heavy Turret Simulator"
+  },
+  "refine": {
+   "sha256": "03a4636f322151ffaef1882a1a14631a9bf5ec168eef75bd4a99b1ac1f344bcc",
+   "size": 89365509,
+   "lines": 500001
+  },
+  "rip-synthetic": {
+   "sha256": "835e6f9475cb3080d80bdffdd74c7e7cf2e87359391b6f38351aafc1717ddec4",
+   "size": 1919997,
+   "lines": 863
+  },
+  "rip@0029a22ed933aa3b6ea3b1290060502267f514d61ba6e6619308d844557f2ffd": {
+   "sha256": "9961ef469a723053649233d097d3e1b7db10770f39717b02d07dcfcf8d1c2fb7",
+   "size": 1012033,
+   "lines": 50,
+   "image": "FINAL FANTASY VI PR"
+  },
+  "rip@a9423e94385f57270d5ec0c49d6eac64a852de6d10b2a00be1352188d3cee665": {
+   "sha256": "8eace521ace4b767d0467980e615b3701bd4276110e82be4a1b3204f74fcd3b6",
+   "size": 5491948,
+   "lines": 50,
+   "image": "Songs Of Silence"
+  },
+  "rip@b798d63ba20741485f8e9b3a166111633f247bd7cae5d289344532d2f2393c19": {
+   "sha256": "a6a356dff4d954b76682f38eaacc5999fa6f9c85b51e6a0dbd3d4a27d7f97b57",
+   "size": 6263231,
+   "lines": 50,
+   "image": "Utawarerumono Past and Present Rediscovered"
+  },
+  "rip@caadfd5a5b07afdde2c60b17082cbb3d29a11d84a2137932043335807c733ab6": {
+   "sha256": "ab1cff1eb196afde9f714f042fa97ca04942487e21c3d355ddfb2001bc125ed4",
+   "size": 6334928,
+   "lines": 50,
+   "image": "Heroes of Might and Magic Olden Era"
+  },
+  "rip@d4c68a3699b5522817f6a425e278c52f8ca58dd97a438ec8f5b0e83a841a1495": {
+   "sha256": "318060a140b71e828cd887efc8e8bd4d91a0ce6efa172e72ef30ff174dc9fd99",
+   "size": 2386956,
+   "lines": 50,
+   "image": "SaGa Frontier 2 Remastered"
+  },
+  "rip@f157541f60fbf9824464968fc2b1545d7a15f59a06e39aae9c573fd9cedaa1ce": {
+   "sha256": "aef39cba4d50d6b5ae298424e6f626243306b144f728b5fd1b38185337c21318",
+   "size": 3067027,
+   "lines": 44,
+   "image": "SaGa Frontier Remastered"
+  },
+  "rip@f503342f43731b232a9eba53f272ff7a87f96f63ca1ccd0390ddaa966b0e7448": {
+   "sha256": "64b1bd7bb84e66cb1cafe0cd296e779b17b5f19246fe25a2ddb91de3de5a6e57",
+   "size": 1785473,
+   "lines": 50,
+   "image": "Iron Nest Heavy Turret Simulator"
+  }
+ }
+}

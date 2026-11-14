@@ -1,7 +1,7 @@
 // IL2CPPChainDetectorRs.cpp — Phase R2. Implements the IL2CPPChainDetector.h
 // API over the Rust port (dll/rust/src/chain, C ABI dc_chain_* in
-// dll/rust/include/discrete_core.h). Compiled instead of
-// IL2CPPChainDetector.cpp when DISCRETE_RUST_R2 is ON (root CMakeLists.txt).
+// dll/rust/include/discrete_core.h). The legacy Zydis implementation
+// (IL2CPPChainDetector.cpp) was removed when R2 closed; it is in git history (last in aae48d3).
 //
 // This file holds no detection logic. It keeps the legacy function's early
 // returns and module lookup (so the C++ side decides *whether* to scan, with

@@ -2,10 +2,9 @@
 // "Next Scan": exact / range / newValue / changed / unchanged / increased /
 // decreased), shared by both backends' scanFieldValue + group-scan handlers.
 //
-// Phase R2: extracted from ExportAPI.cpp. Two interchangeable
-// implementations, picked by CMake (DISCRETE_RUST_R2):
-//   ValueRefineRs.cpp  — wrapper over the Rust port (dll/rust/src/value)
-//   ValueRefine.cpp    — the legacy C++ implementation
+// Phase R2: extracted from ExportAPI.cpp and implemented in Rust
+// (dll/rust/src/value.rs) behind ValueRefineRs.cpp. The legacy C++ body
+// (ValueRefine.cpp) was removed when R2 closed; it is in git history (last in aae48d3).
 #pragma once
 
 #include "Memory.h"

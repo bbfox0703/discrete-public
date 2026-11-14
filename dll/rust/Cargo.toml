@@ -25,8 +25,9 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-# Phase R2 — x86-64 decoder for the IL2CPP chain detector (replaces Zydis in
-# that one module). Decoder + instruction-info only: no encoder/formatters.
+# Phase R2 — x86-64 decoder for the IL2CPP chain detector (chain/) and the
+# field-xref scan kernels (xref/); replaced Zydis, which is no longer a DLL
+# dependency. Decoder + instruction-info only: no encoder/formatters.
 # MIT. `std` pulls lazy_static (MIT/Apache-2.0).
 iced-x86 = { version = "=1.22.0", default-features = false, features = ["std", "decoder", "instr_info"] }
 

@@ -277,7 +277,9 @@ calling out here for visibility:
 `dll/vendor/` and `vendor/` are gitignored. The script handles two kinds
 of tree differently:
 
-- **Build deps** (`dll/vendor/`: nlohmann/json, MinHook, Zydis + Zycore)
+- **Build deps** (`dll/vendor/`: nlohmann/json, MinHook; Zydis + Zycore
+  were here until the Rust core took over x64 decoding — `tools/zydis-oracle`
+  now fetches its own pinned copy)
   are compiled into the DLL, so they are **pinned** to the commits in
   `tools/vendor_pins.json`. A normal run restores those commits and only
   *reports* whether upstream moved (with a compare link). `-UpdatePins`

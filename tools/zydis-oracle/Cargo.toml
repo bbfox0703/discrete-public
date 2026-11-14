@@ -1,0 +1,37 @@
+# zydis-oracle — differential dev tool: the Rust decoder adapter
+# (dll/rust/src/chain/decode.rs, xref memory facts, the generated APX tables)
+# against the Zydis commit the legacy C++ DLL used. Never shipped, never
+# linked into anything; see README.md. Run it through build.ps1, which
+# fetches Zydis and compiles the C++ side first.
+#
+# The crate compiles the REAL dll/rust modules (src/lib.rs, #[path]), not
+# copies. iced-x86 must stay byte-for-byte the dependency dll/rust/Cargo.toml
+# declares (version and features) — the point is to test that exact decoder.
+
+[package]
+name = "zydis_oracle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "GPL-3.0-only"
+description = "Zydis differential oracle for the discrete_core decoder adapter (dev tool)"
+
+# Own workspace root: never picked up by, or attached to, another workspace.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+iced-x86 = { version = "=1.22.0", default-features = false, features = ["std", "decoder", "instr_info"] }
+
+# `cargo test` uses the test profile = dev: optimised (hundreds of millions of
+# decodes), with debug assertions and overflow checks kept so an arithmetic
+# slip in the repo code panics here instead of hiding.
+[profile.dev]
+opt-level = 3
+debug = "line-tables-only"
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"

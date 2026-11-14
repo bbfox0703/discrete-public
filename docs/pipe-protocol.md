@@ -677,7 +677,7 @@ single Unity field, returns every method that reads or writes it.
   scanner fallback for runtime-heap `static_fields`), then attribute each hit
   to its enclosing method via binary search against a sorted method-pointer
   index. `confidence: "exact"`.
-* **IL2CPP instance** fields: Zydis-decode the **declaring class's own
+* **IL2CPP instance** fields: decode the **declaring class's own
   methods** for `[gpReg + fieldOffset]` accesses (base ≠ `rip`/`rsp`/`rbp`,
   no index, `disp == field.offset`), classified read/write by the memory
   operand's action (`lea` → read). `confidence: "heuristic"` — the

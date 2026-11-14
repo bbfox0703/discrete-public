@@ -3,9 +3,10 @@ cmake_minimum_required(VERSION 3.25)
 project(Discrete
     VERSION 0.1.0
     DESCRIPTION "Unity Engine Dumper (Mono + IL2CPP) for Cheat Engine"
-    # Phase 28b-v2 needs C alongside CXX — Zydis is pure C. MinHook also C
-    # but its CMake auto-enabled it; declaring it here is cleaner + makes
-    # sure the C INCLUDE env path is consistently bootstrapped.
+    # C alongside CXX: MinHook is pure C (so was Zydis, vendored until the
+    # Rust core took over x64 decoding). Declaring it here is cleaner than
+    # relying on a vendor CMakeLists to enable it + makes sure the C INCLUDE
+    # env path is consistently bootstrapped.
     LANGUAGES C CXX
 )
 
@@ -159,31 +160,24 @@ else()
 endif()
 
 # Phase R2 — pure algorithms (AOB pattern builder, group-scan SDR matcher,
-# value-scan refine comparator, IL2CPP static-field chain detector). ON
-# (default): the Rust ports (dll/rust/src/{aob,group_match,value,chain}.rs)
-# behind the *Rs.cpp wrappers. OFF: the legacy C++ sources. Kept switchable
-# until R2 is live-verified; the R2 differential harness
-# (tools/verify/r2_rust_diff.py) always builds both flavours.
-option(DISCRETE_RUST_R2 "Use the Rust ports of the Phase R2 modules" ON)
+# value-scan refine comparator, IL2CPP static-field chain detector), all in
+# Rust (dll/rust/src/{aob,group_match,value}.rs, chain/) behind the *Rs.cpp
+# wrappers. The legacy C++ and its DISCRETE_RUST_R2 switch were removed when
+# R2 closed (offline differential + live A/B, docs/rust-core.md); they are in
+# git history (last in aae48d3). tools/verify/r2_golden.py guards behaviour.
 set(_r2src ${CMAKE_SOURCE_DIR}/dll/src)
-set(DISCRETE_R2_SHARED_RS
+set(DISCRETE_R2_SHARED_SOURCES
     ${_r2src}/shared/AobPatternRs.cpp
     ${_r2src}/shared/GroupMatchRs.cpp
     ${_r2src}/shared/ValueRefineRs.cpp
     CACHE INTERNAL "")
-set(DISCRETE_R2_SHARED_LEGACY
-    ${_r2src}/shared/AobPattern.cpp
-    ${_r2src}/shared/ValueRefine.cpp   # GroupMatch legacy is header-only
-    CACHE INTERNAL "")
-set(DISCRETE_R2_IL2CPP_RS     ${_r2src}/il2cpp/IL2CPPChainDetectorRs.cpp CACHE INTERNAL "")
-set(DISCRETE_R2_IL2CPP_LEGACY ${_r2src}/il2cpp/IL2CPPChainDetector.cpp   CACHE INTERNAL "")
-if(DISCRETE_RUST_R2)
-    set(DISCRETE_R2_SHARED_SOURCES ${DISCRETE_R2_SHARED_RS})
-    set(DISCRETE_R2_IL2CPP_SOURCES ${DISCRETE_R2_IL2CPP_RS})
-else()
-    set(DISCRETE_R2_SHARED_SOURCES ${DISCRETE_R2_SHARED_LEGACY})
-    set(DISCRETE_R2_IL2CPP_SOURCES ${DISCRETE_R2_IL2CPP_LEGACY})
-endif()
+set(DISCRETE_R2_IL2CPP_SOURCES ${_r2src}/il2cpp/IL2CPPChainDetectorRs.cpp CACHE INTERNAL "")
+
+# R2 follow-up — IL2CPPFieldXref's scan kernels (IL2CPPFieldXrefScan.h), over
+# the Rust port. Shared by the DLL and tools/r2-diff's xref-dump. The legacy
+# Zydis kernels were removed once proven byte-identical (git history:
+# IL2CPPFieldXrefScan.cpp, last in 987b20d).
+set(DISCRETE_XREF_SCAN_SOURCE ${_r2src}/il2cpp/IL2CPPFieldXrefScanRs.cpp CACHE INTERNAL "")
 
 add_subdirectory(dll)
 
@@ -192,8 +186,8 @@ add_subdirectory(dll)
 option(BUILD_CLI "Build the offline metadata-cli (Phase 13)" OFF)
 if(BUILD_CLI)
     add_subdirectory(tools/metadata-cli)
-    # Phase R2 differential harness: r2-dump (Rust ports) + r2-dump-legacy
-    # (legacy C++). Never shipped; driven by tools/verify/r2_rust_diff.py.
+    # Phase R2 regression driver r2-dump (never shipped); driven by
+    # tools/verify/r2_golden.py.
     add_subdirectory(tools/r2-diff)
 endif()
 
