@@ -28,8 +28,9 @@
 
     Zydis was a build dep until the Rust core took over x64 decoding; it is
     no longer compiled into anything shipped. tools/zydis-oracle fetches its
-    own pinned copy (fetch_zydis.ps1) for the decoder-fidelity oracle.
-    dll/vendor/zydis left over from older syncs is unused and safe to delete.
+    own pinned copy (fetch_zydis.ps1) for the decoder-fidelity oracle. Any
+    dll/vendor/<name> that is not in vendor_pins.json (such as a zydis left
+    over from older syncs) is reported as an unused leftover.
 
 .PARAMETER SkipReference
     Do not touch the reference clones; only restore / report the build deps.
@@ -217,9 +218,13 @@ if (Test-Path $jsonHeader) {
     Write-Host "  nlohmann/json version: $($parts -join '.') (from json.hpp)" -ForegroundColor DarkGray
 }
 
-# Leftover from the retired nlohmann submodule; CMake no longer looks there.
-if (Test-Path 'dll\vendor\nlohmann_json') {
-    Write-Host '  dll\vendor\nlohmann_json is an unused leftover of the old submodule - safe to delete by hand' -ForegroundColor DarkGray
+# Anything else under dll\vendor is a leftover of a retired dep (e.g.
+# nlohmann_json from the old submodule, zydis from before the Rust core):
+# nothing builds against it. Reported, never deleted automatically.
+$leftovers = @(Get-ChildItem 'dll\vendor' -Directory -ErrorAction SilentlyContinue |
+               Where-Object { $depNames -notcontains $_.Name })
+foreach ($d in $leftovers) {
+    Write-Host "  dll\vendor\$($d.Name) is not a pinned build dep (unused leftover) - safe to delete by hand" -ForegroundColor DarkGray
 }
 
 if ($UpdatePins) {
