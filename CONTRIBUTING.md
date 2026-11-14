@@ -246,9 +246,45 @@ the DLL stays mapped after injection.
 Pushing a `vNNN` tag (NNN = build number, on `main`) runs
 [.github/workflows/release.yml](.github/workflows/release.yml): a full
 `build.ps1 -Mode Publish` on a GitHub Windows runner, then `dist/` zipped
-with a `.sha256` and attached to a **draft** release with a changelog since
-the previous tag. Review the draft, then publish it. Manual runs
+with a `.sha256` and attached to a **draft** release whose body is a
+generated commit list since the previous tag. Manual runs
 (*Actions → Release → Run workflow*) build the zip as an artifact only.
+
+**Procedure** (same shape as UE5CEDumper's):
+
+1. Merge `dev` into `main` as a merge commit (`Merge dev: …`) and push both.
+2. Tag `v<build>` on `main`'s merge commit and push the tag.
+3. **Replace the generated body with prepared, user-readable notes.** The
+   commit list is raw material, not release notes. Use this shape: an intro
+   line, `## About this release`, an optional `## New`, `## Fixed`, an
+   optional `## After updating` (one-time steps such as re-deploying the
+   proxy DLL), the compare link, `## Setup` (copied from the last
+   **published** release, which may have been edited after publishing), and
+   the unsigned-binary note.
+4. Verify the draft: the `.sha256` matches the zip, `DiscreteUI.exe` is the
+   AOT-trimmed single file (~50 MB; a much larger exe means a non-AOT build
+   slipped in), and `build_number.txt` in the zip equals the tag.
+5. **Leave it a draft.** The maintainer tries the build and publishes it.
+
+Rules for the notes:
+
+- Written for people who only use the tool: English, concise, **one sentence
+  per item** (two at most), no sub-bullets, no internals or measurements.
+  Readers who want detail have the compare link.
+- Documentation, tooling, CI and refactors with no user-visible effect are
+  not release notes.
+- A defect introduced **and** fixed between the two tags never shipped, so
+  it is not a fix. Check the code at the old tag (`git show v<prev>:<file>`),
+  not the commit dates.
+- Low-severity fixes collapse into one line, "Minor bug fixes."; UI tweaks
+  into "UI tweaks and fixes.". Don't pad: twelve items means twelve lines.
+- Name a game only where the fix was actually verified on it.
+- An `@` before a word becomes a GitHub user mention; put such text in a
+  code span. The generated body folds in commit messages, so check it for
+  the same thing until it is replaced.
+
+**Exception:** a test of the pipeline itself (a manual run, or a throwaway
+tag whose draft will be deleted) does not need the notes rewritten.
 
 The workflow fetches nlohmann/json, MinHook and Zydis at the commits
 pinned in [tools/vendor_pins.json](tools/vendor_pins.json), by running
