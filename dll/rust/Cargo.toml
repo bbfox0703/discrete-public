@@ -6,8 +6,9 @@
 # right --target (x64 / x86), profile (Debug / Release) and CRT flavour
 # (/MD vs /MT via +crt-static). `cargo test` is fine to run directly.
 #
-# Zero third-party dependencies on purpose: nothing to vendor, pin or audit.
-# Adding one is a decision — record it in docs/rust-core.md first.
+# Dependencies are a decision, not a convenience: each one is recorded with
+# its reason in docs/rust-core.md ("Dependencies"), pinned to an exact version
+# here, and locked in Cargo.lock.
 
 [package]
 name = "discrete_core"
@@ -24,6 +25,10 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+# Phase R2 — x86-64 decoder for the IL2CPP chain detector (replaces Zydis in
+# that one module). Decoder + instruction-info only: no encoder/formatters.
+# MIT. `std` pulls lazy_static (MIT/Apache-2.0).
+iced-x86 = { version = "=1.22.0", default-features = false, features = ["std", "decoder", "instr_info"] }
 
 [profile.dev]
 # Unwinding stays ON in every profile: every extern "C" entry point catches

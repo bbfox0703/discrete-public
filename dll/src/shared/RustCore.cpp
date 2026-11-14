@@ -4,6 +4,7 @@
 
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "Memory.h"
 
 #include <discrete_core.h>
 
@@ -39,6 +40,13 @@ void RustLogSink(std::uint32_t category, const char* msg, std::size_t len) noexc
 }
 
 }  // namespace
+
+extern "C" std::int32_t SafeReadShim(void* /*ctx*/, std::uintptr_t addr,
+                                     std::uint8_t* dst, std::size_t len) noexcept {
+    if (dst == nullptr) return 0;
+    if (len == 0) return 1;
+    return Discrete::Memory::SafeReadBytes(reinterpret_cast<const void*>(addr), dst, len) ? 1 : 0;
+}
 
 void Init() {
     dc_core_set_log_sink(&RustLogSink);

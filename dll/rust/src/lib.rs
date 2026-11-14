@@ -5,6 +5,10 @@
 //!
 //! * Phase R0 — toolchain + FFI conventions (this crate's `ffi` module).
 //! * Phase R1 — the IL2CPP `global-metadata.dat` parser (`metadata`).
+//! * Phase R2 — pure algorithms: the AOB pattern builder (`aob`), the group
+//!   scan SDR matcher (`group_match`), the value-scan refine comparator
+//!   (`value`) and the IL2CPP static-field chain detector (`chain`, iced-x86).
+//!   Host memory is only ever read through `ffi::Reader` (the SEH shim).
 //!
 //! FFI rules every `extern "C"` function in this crate follows:
 //!
@@ -20,5 +24,9 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod aob;
+pub mod chain;
 pub mod ffi;
+pub mod group_match;
 pub mod metadata;
+pub mod value;

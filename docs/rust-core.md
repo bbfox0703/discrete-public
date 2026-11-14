@@ -19,7 +19,7 @@ bug into an error return instead of a game crash.
 |---|---|---|---|
 | **R0** | Toolchain: cargo inside `build.cmd`/CMake, x64 + x86, /MD + /MT, Debug + Release; FFI conventions; log sink; panic guard | All arch × CRT combinations build and link; `cargo test` passes on x64 and i686; Rust banner in the init log | ✅ offline (see below); banner in a live game pending |
 | **R1** | IL2CPP `global-metadata.dat` parser (`dll/rust/src/metadata`) behind `MetadataParserRs.cpp` | `tools/verify/metadata_rust_diff.py`: Rust and legacy C++ parsers byte-identical over the local fixture corpus | see [R1 gate](#r1-gate) |
-| R2 | Pure algorithms: `AobPattern`, `GroupMatch`, value decoders, `IL2CPPChainDetector` (Zydis → `iced-x86`), plus a C SEH shim for the reads they need | per-module byte-fixture diff | not started |
+| **R2** | Pure algorithms: `AobPattern` (`aob.rs`), `GroupMatch` (`group_match.rs`), the value-scan refine comparator (`value.rs`), `IL2CPPChainDetector` (`chain/`, Zydis → `iced-x86`); host-memory reads only through the SEH read shim | `tools/verify/r2_rust_diff.py`: legacy vs Rust byte-identical over generated cases + every local `GameAssembly.dll` | see [R2 gate](#r2-gate) |
 | R3 (opt.) | `PipeServer` framing; handlers stay C++ | wire-level replay | not started |
 | R4+ | Backend walkers / `ExportAPI` | only if R1–R3 show a real maintenance win | not planned |
 
@@ -28,15 +28,26 @@ bug into an error return instead of a game crash.
 ```
 rust-toolchain.toml            pinned rustc + both targets (repo root)
 dll/rust/
-  Cargo.toml / Cargo.lock      crate `discrete_core`, ZERO dependencies
+  Cargo.toml / Cargo.lock      crate `discrete_core`; deps only as recorded below
   RustCore.cmake               cargo -> IMPORTED target `discrete_core`
   include/discrete_core.h      the C ABI (hand-maintained, no cbindgen)
   src/lib.rs                   FFI rules (read this first)
   src/ffi.rs                   log sink, panic guard, version banner
   src/metadata/                R1 parser (layout.rs, parser.rs, ffi.rs, tests)
-dll/src/shared/RustCore.cpp    C++ log sink + banner (called from DllMain attach)
+  src/aob.rs                   R2 AOB pattern builder          (dc_aob_*)
+  src/group_match.rs           R2 group-scan SDR matcher       (dc_gm_*)
+  src/value.rs                 R2 value-scan refine comparator (dc_value_*)
+  src/chain/                   R2 IL2CPP chain detector        (dc_chain_*)
+    mod.rs                       the scan (legacy transcribed) + C ABI
+    decode.rs                    iced-x86 -> "what Zydis would have said" adapter
+    apx_map4.rs                  GENERATED: APX/EVEX map-4 table from vendored Zydis
+    msvc_sort.rs                 MSVC std::sort transcription (dedup order parity)
+dll/src/shared/RustCore.cpp    C++ log sink + banner + SafeReadShim (R2 read shim)
 dll/src/il2cpp/MetadataParserRs.cpp   Parser class -> dc_md_* wrapper
+dll/src/shared/{AobPattern,GroupMatch,ValueRefine}Rs.cpp,
+dll/src/il2cpp/IL2CPPChainDetectorRs.cpp   R2 wrappers (same C++ API)
 tools/verify/metadata_rust_diff.py    R1 differential harness
+tools/r2-diff/ + tools/verify/r2_rust_diff.py   R2 differential harness
 ```
 
 Linked into `Discrete-Mono.dll`, `Discrete-IL2CPP.dll` (x64 + x86) and
@@ -78,7 +89,7 @@ onto cargo so the two halves can never disagree:
 
 Toolchain bump: edit `rust-toolchain.toml`, rebuild all four combinations
 (`build.cmd dll`, `build.cmd dll publish`), rerun `build.cmd test` and the R1
-harness.
+and R2 harnesses.
 
 ## FFI rules (every `extern "C"` function)
 
@@ -103,9 +114,29 @@ harness.
    dropped — the same contract as `Log::Write` before `Log::Init()`.
 7. A C++ sink must not throw into Rust frames (`RustLogSink` is `noexcept`
    with a catch-all).
+8. **Rust never dereferences game memory.** An access violation unwinding
+   through Rust frames is UB, and `catch_unwind` cannot catch it. Reads of
+   host-process memory go through a `dc_read_fn` callback (`ffi::Reader`),
+   implemented by C++ `RustCore::SafeReadShim` on top of
+   `Memory::SafeReadBytes` (SEH, copies, reports failure). Buffers the C++
+   caller owns (its own stack, a vector it filled) may be passed as plain
+   `(ptr, len)` slices.
 
-Adding a crate dependency is a decision, not a convenience: record why here
-first (supply chain, vendoring, licence — the repo is GPL-3.0).
+## Dependencies
+
+Each crate dependency is a recorded decision: why, licence (the repo is
+GPL-3.0), exact pin in `Cargo.toml` (`=x.y.z`) and `Cargo.lock`. Cargo fetches
+them from crates.io at build time (the CI runner has network; offline builds
+need a warm `~/.cargo/registry`), the same model as `sync_vendor.ps1` for the
+C++ deps.
+
+| Crate | Pin | Licence | Why | Scope |
+|---|---|---|---|---|
+| `iced-x86` | `=1.22.0`, features `std` + `decoder` + `instr_info` only | MIT | R2 chain detector needs a full x86-64 decoder with per-operand read/write access; writing one is out of scope and Zydis is a C library the Rust side cannot call without a second FFI layer | `chain/` only (IL2CPP backend) |
+| `lazy_static` | via `iced-x86/std` | MIT / Apache-2.0 | transitive | — |
+
+Zydis stays vendored for now: `IL2CPPFieldXref.cpp`'s instance-field scan
+still uses it. Retiring Zydis entirely would mean porting that scan too.
 
 ## R0 gate
 
@@ -191,6 +222,69 @@ Live-DLL check still pending: one IL2CPP game with the new
 `metadata` log shows the usual `MetadataParser: loaded version=…` line, and a
 metadata-backed RPC (e.g. a class walk with field defaults) answers as before.
 
+## R2 gate
+
+Verified 2026-11-14 (build #1456–1468). Four modules moved; the C++ APIs
+(`Aob::BuildPattern`, `GroupMatch::HasDistinctAssignment` /
+`ResolveAssignment`, `ValueRefine::CompareCandidateForRefine`,
+`DetectFieldAccessChains`) are unchanged, so no caller changed.
+
+| Module | Rust | Notes |
+|---|---|---|
+| AOB pattern builder | `aob.rs` | Pure; input is a buffer C++ already read with `SafeReadBytes`. Legacy quirks kept on purpose (≤5 legacy prefixes, one REX, `A0..A3` always moffs64, disp8 never wildcarded) |
+| Group-scan SDR matcher | `group_match.rs` | Same Kuhn search order; the recursion is now an explicit stack (legacy could overflow the stack on a very deep augmenting path) |
+| Refine comparator | `value.rs` | Only the per-candidate comparator. The value-scan hot loop (`Memory.cpp` `ScanChunk`) stays C++: it touches game memory under SEH on every byte |
+| IL2CPP chain detector | `chain/` | Zydis → `iced-x86` through `decode.rs`, which reduces each instruction to exactly the facts the legacy code read from Zydis. Every read of `GameAssembly.dll` goes through `SafeReadShim` (FFI rule 8). `msvc_sort.rs` transcribes MSVC `std::sort` because legacy dedup after an unstable sort depends on its exact element moves |
+
+**Differential harness** (`build.cmd cli` builds `r2-dump` + the unshipped
+`r2-dump-legacy`; `py -I tools/verify/r2_rust_diff.py -j 7`): **19 checks, 0
+differences**, both on the **Release** and the **Debug** builds (the Debug
+run proves no `overflow-checks` panic in the dev profile turns into a
+fallback). Each check compares exit code, stdout and stderr byte for byte
+and must succeed. Coverage: 50k synthetic AOB windows, 200k GM instances,
+500k refine cases, and per local `GameAssembly.dll` (the same 7 games as the
+R1 table) 10k real AOB windows plus 34 chain-detector runs (limits, empty /
+bogus / reversed slots, `sfo = 0`, NULL stats). The harness refuses to run if
+`r2-dump.exe` lacks the Rust marker or the legacy binary has it, or if the
+flags leave nothing to compare.
+
+Before the harness, each port was checked by its author against a private
+oracle (legacy C++ compiled verbatim): AOB 600k random cases × x64/x86 ×
+pure-Rust/wrapper, MD5-identical; chain decoder 160M random instructions plus
+exhaustive legacy maps against the vendored Zydis, and 60k generated modules
+end to end; GM 220k cases against a recursive copy of the legacy code.
+
+Review: five area reviewers (ABI, AOB, chain, GM + value, build + harness),
+then a second round with three lenses the output diff cannot see (side effects
+such as logging or cancellation, in-process hazards, call sites); every
+finding went to an independent refuter. One survived — `--no-images --only
+chain` passed after comparing nothing — and is fixed. The second round found
+nothing.
+
+Also verified: x64 + x86 Release, x64 + x86 Debug, x64 Publish (`/MT`), and a
+full legacy build (`DISCRETE_RUST_R2=OFF DISCRETE_RUST_METADATA=OFF`) all
+build warning-free in the R2 code; `cargo test` 88 (x64) / 89 (i686) and
+`cargo clippy --all-targets` clean on both; 1130 UI tests green.
+
+Intentional differences (none observable in the harness):
+- **Allocation failure.** The chain detector's 1 MiB chunk buffer and every
+  GM buffer use `try_reserve`: failure means "no matches" / "no assignment"
+  instead of `bad_alloc`. Small hash-set / result-vector growth in the chain
+  detector still aborts on OOM like any Rust allocation — bounded by the
+  number of matches, so not a realistic risk.
+- **Defensive inputs.** NULL pointers that legacy would dereference (only
+  reachable through the C ABI, never from the wrappers) return the failure
+  value instead.
+- **Speed.** The Rust chain scan is ~25–35 % slower than Zydis on images with
+  few candidates and faster with many; seconds either way.
+
+Live-DLL check still pending: one IL2CPP game — a method AOB
+(`getMethodAobPattern`), a group scan (begin + refine), a value-scan refine
+pass, and a field xref on an IL2CPP field (`IL2CPPFieldXref.cpp` runs the
+chain detector; the `walk` log's `FieldXref: v2 scan complete —
+hopOneCandidates=…` line shows it ran) answer as before. AOB, group scan and
+refine are shared code, so a Mono game covers them too.
+
 ## Fallback / removal
 
 - `-DDISCRETE_RUST_METADATA=OFF` rebuilds the DLL and metadata-cli on the
@@ -202,6 +296,14 @@ metadata-backed RPC (e.g. a class walk with field defaults) answers as before.
   does not contain the Rust parser, so an OFF build cannot fake a PASS.
 - `metadata-cli-legacy.exe` is built next to `metadata-cli.exe` by
   `build.cmd cli` and never shipped; it exists only for the harness.
+- `-DDISCRETE_RUST_R2=OFF` is the same kind of emergency switch for the four
+  R2 modules (legacy `AobPattern.cpp`, `ValueRefine.cpp`, the inline
+  `GroupMatch.h` matcher and the Zydis `IL2CPPChainDetector.cpp`). It also
+  defines `DISCRETE_RUST_R2` target-wide, because `GroupMatch.h` changes
+  shape on it. `r2-dump-legacy.exe` is the unshipped harness twin. Remove
+  the legacy sources, the option and `r2-dump-legacy` after R2's in-game
+  smoke; Zydis itself stays while `IL2CPPFieldXref.cpp`'s instance-field
+  scan uses it.
 - After the in-game smoke: delete `MetadataParser.cpp`, the legacy half of
   `MetadataParser.h`, the CMake option and `metadata-cli-legacy`. The harness
   then becomes a Rust-vs-recorded-baseline check (record `dump-parser`

@@ -588,8 +588,10 @@ function Build-MetadataCli {
     # Phase R1: metadata-cli-legacy (legacy C++ parser) is built next to the
     # shipping metadata-cli (Rust parser) for tools\verify\metadata_rust_diff.py.
     # It stays in build\cli-*\bin\ and is never copied to dist\.
-    Write-Step "Building metadata-cli + metadata-cli-legacy ($cfg)"
-    & cmake --build $cliBuildDir --target metadata-cli metadata-cli-legacy --parallel | Out-Host
+    # Phase R2: r2-dump / r2-dump-legacy likewise feed tools\verify\r2_rust_diff.py
+    # (also build-dir only, never shipped).
+    Write-Step "Building metadata-cli + differential harness binaries ($cfg)"
+    & cmake --build $cliBuildDir --target metadata-cli metadata-cli-legacy r2-dump r2-dump-legacy --parallel | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'metadata-cli build failed'; return $false }
 
     $exe = Join-Path $cliBuildDir 'bin\metadata-cli.exe'

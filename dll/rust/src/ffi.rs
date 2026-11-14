@@ -2,7 +2,7 @@
 //! guard and the crate version string.
 
 use std::any::Any;
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -98,6 +98,40 @@ pub unsafe extern "C" fn dc_core_set_log_sink(sink: Option<LogSinkFn>) {
             }));
         });
     });
+}
+
+/// `int32_t (*)(void* ctx, uintptr_t addr, uint8_t* dst, size_t len)` — the
+/// Phase R2 SEH read shim (C++ `Discrete::RustCore::SafeReadShim`). Rust never
+/// dereferences foreign memory: an access violation unwinding through Rust
+/// frames is undefined behaviour, so every read of host-process memory goes
+/// through this callback, which copies under SEH and reports failure.
+pub type ReadFn = unsafe extern "C" fn(ctx: *mut c_void, addr: usize, dst: *mut u8, len: usize) -> i32;
+
+/// Safe wrapper around a [`ReadFn`] + its context.
+#[derive(Clone, Copy)]
+pub struct Reader {
+    read: ReadFn,
+    ctx: *mut c_void,
+}
+
+impl Reader {
+    /// # Safety
+    /// `read` must honour the `dc_read_fn` contract for every call, and `ctx`
+    /// must stay valid for as long as this `Reader` is used.
+    pub unsafe fn new(read: ReadFn, ctx: *mut c_void) -> Self {
+        Self { read, ctx }
+    }
+
+    /// Copies `dst.len()` bytes from host address `addr`. Returns false on any
+    /// fault (contents of `dst` are then unspecified).
+    pub fn read(&self, addr: usize, dst: &mut [u8]) -> bool {
+        if dst.is_empty() {
+            return true;
+        }
+        // SAFETY: dst is a valid writable buffer of dst.len() bytes; the
+        // callback contract (see `new`) covers the rest.
+        unsafe { (self.read)(self.ctx, addr, dst.as_mut_ptr(), dst.len()) == 1 }
+    }
 }
 
 const VERSION: &str = concat!("discrete_core ", env!("CARGO_PKG_VERSION"), "\0");

@@ -169,6 +169,106 @@ size_t   dc_md_enumerate_images(const DcMetadata* md, DcImageDef* out, size_t ca
 int32_t  dc_md_find_image_containing_method(const DcMetadata* md, int32_t global_method_idx,
                                             DcImageDef* out);
 
+// --- Phase R2: shared SEH read shim ------------------------------------------
+//
+// Rust never dereferences foreign (game) memory. When a Rust module needs
+// bytes from the host process it calls back into C++, which copies them under
+// SEH (Memory::SafeReadBytes — see Discrete::RustCore::SafeReadShim). Returns
+// 1 when all `len` bytes were copied into `dst`, 0 otherwise (dst contents
+// unspecified). `ctx` is passed through untouched.
+typedef int32_t (*dc_read_fn)(void* ctx, uintptr_t addr, uint8_t* dst, size_t len);
+
+// --- Phase R2: AOB pattern builder (port of shared/AobPattern.cpp) -----------
+
+typedef struct DcAobResult {
+    size_t  length;               // bytes the pattern covers (after terminal trim)
+    size_t  instruction_count;
+    size_t  rel_branch_count;     // CALL/JMP/Jcc relative immediates wildcarded
+    size_t  rip_rel_count;        // RIP-relative ModRM disp32 wildcarded
+    size_t  bailed_at;            // valid when decoder_bailed
+    size_t  requested_length;     // the `len` passed in
+    size_t  pattern_len;          // bytes written to pattern_out
+    uint8_t decoder_bailed;       // 0 / 1
+    uint8_t stopped_at_terminal;  // 0 / 1
+} DcAobResult;
+
+// Builds the CE-style pattern ("48 89 5C 24 ?? E8 ?? ?? ?? ??", uppercase hex,
+// single spaces, no trailing space, no NUL) for bytes[0..len). `bytes` may be
+// NULL only when len == 0. pattern_out needs >= 3*len bytes, mask_out >= len
+// (1 = wildcard, written for the first `length` bytes). The raw bytes of the
+// C++ PatternResult are bytes[0..length) of the input, so they are not copied
+// back. Returns 1 on success; 0 when a buffer is too small or on an internal
+// panic (then *out is zeroed).
+int32_t dc_aob_build_pattern(const uint8_t* bytes, size_t len, int32_t stop_at_terminal,
+                             char* pattern_out, size_t pattern_cap,
+                             uint8_t* mask_out, size_t mask_cap,
+                             DcAobResult* out);
+
+// --- Phase R2: GroupMatch SDR (port of shared/GroupMatch.h) ------------------
+//
+// Slots in CSR form: slot s's leaf-index list is
+// leaves[offsets[s] .. offsets[s+1]), so `offsets` has n_slots + 1 entries
+// (offsets may be NULL only when n_slots == 0; leaves may be NULL when no slot
+// has entries). Leaf indices outside [0, n_leaves) are ignored, exactly like
+// the legacy header. Panics fall back to 0.
+
+int32_t dc_gm_has_distinct_assignment(const size_t* offsets, const int32_t* leaves,
+                                      size_t n_slots, int32_t n_leaves);
+// out has n_slots entries. Returns 1 and fills out[s] with slot s's distinct
+// leaf, or returns 0 with every out[s] = -1.
+int32_t dc_gm_resolve_assignment(const size_t* offsets, const int32_t* leaves,
+                                 size_t n_slots, int32_t n_leaves, int32_t* out);
+
+// --- Phase R2: value-scan refine comparator (port of shared/ValueRefine.cpp) -
+
+// dt = numeric Discrete::Memory::ValueDataType (Int8=0 .. Double=9); any other
+// value drops. scan_type is ASCII (ptr, len). cur / prev / arg_lo / arg_hi are
+// 8-byte payloads; on keep, the first ValueDataTypeSize(dt) bytes of prev are
+// overwritten with cur. Returns 1 keep / 0 drop (0 on panic, prev untouched).
+int32_t dc_value_refine_compare(int32_t dt, const uint8_t* scan_type, size_t scan_type_len,
+                                const uint8_t* cur, uint8_t* prev,
+                                const uint8_t* arg_lo, const uint8_t* arg_hi,
+                                double tolerance);
+
+// --- Phase R2: IL2CPP static-field chain detector -----------------------------
+// (port of il2cpp/IL2CPPChainDetector.cpp; Zydis -> iced-x86)
+
+typedef struct DcChainMatch {
+    uintptr_t hit_ip;       // hop-3 instruction (the field read / write)
+    uintptr_t hop_one_ip;   // hop-1 RIP-relative class-pointer load
+    uint8_t   is_write;     // 0 = "read", 1 = "write"
+} DcChainMatch;
+
+typedef struct DcChainStats {
+    size_t  hop_one_candidates;
+    size_t  chain_broken;
+    size_t  chains_emitted;
+    size_t  bytes_scanned;
+    size_t  failed_reads;
+    // 1 when the scan ran to completion and the counters above are meaningful
+    // — the legacy function writes its ChainScanStats* ONLY then (it returns
+    // early, leaving the caller's stats untouched, on empty slots /
+    // static_fields_offset == 0 / module or sections not found).
+    uint8_t valid;
+} DcChainStats;
+
+typedef struct DcChainResult DcChainResult;
+
+// module_base = GameAssembly.dll base (0 = not loaded -> empty result). The PE
+// headers and every executable section are read through `read`. Same chunking,
+// dedup, ordering and match_limit semantics as the legacy function. Returns a
+// handle, or NULL on an internal panic or when the 1 MiB scan buffer cannot be
+// allocated (callers treat NULL as "no matches, stats untouched"); read it with
+// the accessors below.
+DcChainResult* dc_chain_detect(uintptr_t module_base, dc_read_fn read, void* read_ctx,
+                               const uintptr_t* slots, size_t n_slots,
+                               size_t static_fields_offset, size_t target_field_offset,
+                               size_t match_limit);
+size_t  dc_chain_result_len(const DcChainResult* r);                // 0 for NULL
+int32_t dc_chain_result_get(const DcChainResult* r, size_t i, DcChainMatch* out);  // 1 / 0
+void    dc_chain_result_stats(const DcChainResult* r, DcChainStats* out);         // zeroes for NULL
+void    dc_chain_result_free(DcChainResult* r);                                    // NULL ok
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

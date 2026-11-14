@@ -158,6 +158,33 @@ else()
     set(DISCRETE_METADATA_PARSER_SOURCE ${DISCRETE_METADATA_PARSER_LEGACY})
 endif()
 
+# Phase R2 — pure algorithms (AOB pattern builder, group-scan SDR matcher,
+# value-scan refine comparator, IL2CPP static-field chain detector). ON
+# (default): the Rust ports (dll/rust/src/{aob,group_match,value,chain}.rs)
+# behind the *Rs.cpp wrappers. OFF: the legacy C++ sources. Kept switchable
+# until R2 is live-verified; the R2 differential harness
+# (tools/verify/r2_rust_diff.py) always builds both flavours.
+option(DISCRETE_RUST_R2 "Use the Rust ports of the Phase R2 modules" ON)
+set(_r2src ${CMAKE_SOURCE_DIR}/dll/src)
+set(DISCRETE_R2_SHARED_RS
+    ${_r2src}/shared/AobPatternRs.cpp
+    ${_r2src}/shared/GroupMatchRs.cpp
+    ${_r2src}/shared/ValueRefineRs.cpp
+    CACHE INTERNAL "")
+set(DISCRETE_R2_SHARED_LEGACY
+    ${_r2src}/shared/AobPattern.cpp
+    ${_r2src}/shared/ValueRefine.cpp   # GroupMatch legacy is header-only
+    CACHE INTERNAL "")
+set(DISCRETE_R2_IL2CPP_RS     ${_r2src}/il2cpp/IL2CPPChainDetectorRs.cpp CACHE INTERNAL "")
+set(DISCRETE_R2_IL2CPP_LEGACY ${_r2src}/il2cpp/IL2CPPChainDetector.cpp   CACHE INTERNAL "")
+if(DISCRETE_RUST_R2)
+    set(DISCRETE_R2_SHARED_SOURCES ${DISCRETE_R2_SHARED_RS})
+    set(DISCRETE_R2_IL2CPP_SOURCES ${DISCRETE_R2_IL2CPP_RS})
+else()
+    set(DISCRETE_R2_SHARED_SOURCES ${DISCRETE_R2_SHARED_LEGACY})
+    set(DISCRETE_R2_IL2CPP_SOURCES ${DISCRETE_R2_IL2CPP_LEGACY})
+endif()
+
 add_subdirectory(dll)
 
 # Phase 13 — offline metadata-cli. Built only when -DBUILD_CLI=ON; gated
@@ -165,6 +192,9 @@ add_subdirectory(dll)
 option(BUILD_CLI "Build the offline metadata-cli (Phase 13)" OFF)
 if(BUILD_CLI)
     add_subdirectory(tools/metadata-cli)
+    # Phase R2 differential harness: r2-dump (Rust ports) + r2-dump-legacy
+    # (legacy C++). Never shipped; driven by tools/verify/r2_rust_diff.py.
+    add_subdirectory(tools/r2-diff)
 endif()
 
 # Phase 12d-5 — x86 inject helper. Only meaningful when building x86;

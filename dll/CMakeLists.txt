@@ -106,8 +106,12 @@ endfunction()
 
 set(DLL_SHARED_SOURCES
     src/main.cpp
-    src/shared/AobPattern.cpp
+    # Phase R2: AobPattern / GroupMatch / ValueRefine implementations come
+    # from DISCRETE_R2_SHARED_SOURCES (Rust wrappers or legacy C++ — see the
+    # root CMakeLists.txt option DISCRETE_RUST_R2).
+    ${DISCRETE_R2_SHARED_SOURCES}
     src/shared/AobPattern.h
+    src/shared/ValueRefine.h
     src/shared/BackendDetector.cpp
     src/shared/BackendDetector.h
     # Keep-foreground native hook (run-in-background). Pure Win32/user32 +
@@ -216,7 +220,8 @@ set(DLL_IL2CPP_SOURCES
     # Phase 28b-v2 — chain detector. Forward-traces with Zydis to
     # recognise the 2-hop class-pointer → static_fields → field-value
     # access pattern IL2CPP AOT emits.
-    src/il2cpp/IL2CPPChainDetector.cpp
+    # Phase R2: Rust wrapper or legacy Zydis implementation (DISCRETE_RUST_R2).
+    ${DISCRETE_R2_IL2CPP_SOURCES}
     src/il2cpp/IL2CPPChainDetector.h
     # Phase 28b-v3 — investigation helper. Reports every storage slot
     # (module + heap) holding a given Il2CppClass* / static_fields ptr,
@@ -254,6 +259,11 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
         ${DISCRETE_GENERATED_INCLUDE_DIR}
     )
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
+    # Phase R2: GroupMatch.h switches between the Rust-backed declarations and
+    # the legacy inline code on this define, so it must be target-wide.
+    if(DISCRETE_RUST_R2)
+        target_compile_definitions(${TARGET_NAME} PRIVATE DISCRETE_RUST_R2=1)
+    endif()
     # Phase 20-MT: link MinHook (vendored as `minhook` target — see
     # add_subdirectory above). Static C-only library, ~50 KB per backend.
     target_link_libraries(${TARGET_NAME} PRIVATE minhook discrete_core)
