@@ -28,6 +28,7 @@ set "MODE=Release"
 set "TARGET=All"
 set "BACKEND=Both"
 set "CLEAN="
+set "NOIDENT="
 set "HAS_ARGS=0"
 
 :parse_args
@@ -43,6 +44,7 @@ if "!UPPER!"=="DEBUG"   ( set "MODE=Debug"     & shift & goto :parse_args )
 if "!UPPER!"=="RELEASE" ( set "MODE=Release"   & shift & goto :parse_args )
 if "!UPPER!"=="PUBLISH" ( set "MODE=Publish"   & shift & goto :parse_args )
 if "!UPPER!"=="CLEAN"   ( set "CLEAN=-Clean"   & shift & goto :parse_args )
+if "!UPPER!"=="NOIDENTITYCHECK" ( set "NOIDENT=-NoIdentityCheck" & shift & goto :parse_args )
 if "!UPPER!"=="DLL"     ( set "TARGET=DLL"     & shift & goto :parse_args )
 if "!UPPER!"=="MONO"    ( set "TARGET=DLL"     & set "BACKEND=Mono"   & shift & goto :parse_args )
 if "!UPPER!"=="IL2CPP"  ( set "TARGET=DLL"     & set "BACKEND=IL2CPP" & shift & goto :parse_args )
@@ -85,7 +87,7 @@ echo.
 
 :: -File avoids encoding issues at the cmd.exe -^> PowerShell pipe boundary.
 :: build.ps1 owns the transcript via Start-Transcript so CJK output stays intact.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1" -Mode %MODE% -Target %TARGET% -Backend %BACKEND% %CLEAN% -LogFile "%LOG%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1" -Mode %MODE% -Target %TARGET% -Backend %BACKEND% %CLEAN% %NOIDENT% -LogFile "%LOG%"
 set "EC=%ERRORLEVEL%"
 
 if %EC% neq 0 (
@@ -131,6 +133,7 @@ echo    deploy-scripts   Copy scripts\*.lua + dist\DLLs (live iteration)
 echo.
 echo  Options:
 echo    clean       Wipe build/ + dist/ first
+echo    noidentitycheck  Skip the account/machine-name guard (debug the guard only)
 echo.
 echo  Examples:
 echo    build                   Release build, all targets

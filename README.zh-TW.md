@@ -4,6 +4,7 @@
 [![Backends](https://img.shields.io/badge/backends-Mono_x64_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
 [![AOT](https://img.shields.io/badge/UI-Avalonia_12_AOT_(0%2F0_warnings)-purple)]()
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+[![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-CC785C?logo=claude)](https://claude.ai/code)
 
 > 即時 Unity dumper + cheat-table 產生器 + 可從 Lua 呼叫 managed methods。
 > C++ DLL backend + Avalonia 12 AOT UI + Cheat Engine Lua bridge。

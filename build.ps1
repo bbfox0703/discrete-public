@@ -70,6 +70,10 @@ param(
 
     [switch]$Clean,
 
+    # Skip the identity guard (account / machine name in tracked files). For
+    # debugging the guard itself; do NOT use it to push past a real finding.
+    [switch]$NoIdentityCheck,
+
     [string]$LogFile = ''
 )
 
@@ -210,6 +214,31 @@ Write-Banner "Discrete Build  |  Mode: $Mode  |  Target: $Target  |  Backend: $B
 Write-Info "Root:   $RepoRoot"
 Write-Info "Clean:  $Clean"
 
+# ---------------------------------------------------------------------------
+# Identity guard - runs before anything compiles. A commit always precedes a
+# push, so the build is the last cheap moment to catch this machine's account
+# or computer name (or a C:\Users\<name> path) in a tracked file or an
+# unpushed commit message. tools\check_no_local_paths.py reads the names from
+# %USERNAME% / %COMPUTERNAME% at run time, stores nothing, and redacts them in
+# its own output. Ported from UE5CEDumper's build.ps1.
+# ---------------------------------------------------------------------------
+if (-not $NoIdentityCheck) {
+    Write-Step 'Identity guard (account / machine name in tracked files)'
+    $py = @('py','python','python3') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+    if (-not $py) {
+        Write-Fail 'no Python interpreter on PATH -- cannot run the identity guard (re-run with -NoIdentityCheck to skip deliberately)'
+        exit 1
+    }
+    Push-Location $RepoRoot
+    try     { & $py -I (Join-Path $RepoRoot 'tools\check_no_local_paths.py') }
+    finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail 'a tracked file or unpushed commit message carries a machine-local path or this machine''s account/computer name (redacted above). Fix it, or pass -NoIdentityCheck for a deliberate placeholder.'
+        exit 1
+    }
+    Write-Ok 'no machine-local paths or identifiers in tracked files'
+}
+
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     Write-Fail 'dotnet SDK not found in PATH'
     exit 1
@@ -323,7 +352,8 @@ function Build-Dll {
         Write-Banner 'Re-launching child process for x86 build'
         $childArgs = @('-NoProfile','-ExecutionPolicy','Bypass',
                        '-File',$PSCommandPath,
-                       '-Target','DLL','-Mode',$Mode,'-Arch','x86')
+                       '-Target','DLL','-Mode',$Mode,'-Arch','x86',
+                       '-NoIdentityCheck')  # parent already ran the guard
         & pwsh @childArgs
         $x86Ok = ($LASTEXITCODE -eq 0)
         return ($x64Ok -and $x86Ok)

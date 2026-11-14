@@ -367,7 +367,10 @@
         <TextBlock Text="{Binding CopyrightText}"
                    VerticalAlignment="Center"
                    Opacity="0.55"
-                   FontSize="11" />
+                   FontSize="11"
+                   Cursor="Hand"
+                   ToolTip.Tip="Open the project page"
+                   PointerPressed="OnCopyrightPointerPressed" />
       </StackPanel>
     </Border>
 

@@ -989,6 +989,25 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Footer credit click: open the project page in the default
+    /// browser. Same shell-execute pattern as the folder buttons.</summary>
+    private void OnCopyrightPointerPressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
+    {
+        try
+        {
+            using var _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName        = MainWindowViewModel.ProjectUrl,
+                UseShellExecute = true,
+            });
+        }
+        catch (System.Exception ex)
+        {
+            if (DataContext is MainWindowViewModel vm)
+                vm.ErrorMessage = $"Open project page failed: {ex.Message}";
+        }
+    }
+
     /// <summary>Open the log root (<c>%LOCALAPPDATA%\Discrete_Dumper\Logs</c>) in
     /// Explorer — the UI's <c>ui\</c> tree plus the DLL's per-PID folders. Created
     /// on demand so the shell call never sees a missing path. Mirrors

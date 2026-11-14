@@ -483,8 +483,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     public IAobMakerAppClient AobMakerApp => _aobMakerApp;
 
+    /// <summary>Project home page; the footer credit opens it on click.</summary>
+    public const string ProjectUrl = "https://github.com/bbfox0703/discrete-public";
+
     /// <summary>Footer credit line.</summary>
-    public string CopyrightText { get; } = "© bbfox @ https://opencheattables.com";
+    public string CopyrightText { get; } = $"bbfox0703 @ {ProjectUrl}";
 
     /// <summary>
     /// Selected index of the right-pane TabControl. The Address Lookup tab
