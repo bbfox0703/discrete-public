@@ -10,7 +10,7 @@ Find runtime metadata entry points, build complete Assembly → Class →
 Field/Method hierarchy, integrate with CE for symbol registration, table
 building, and live structure inspection.
 
-Headline capabilities (single source of truth: [README.md](../README.md#what-it-does)
+Headline capabilities (single source of truth: [README.md](../README.md#features)
 for the user-facing list, [plan.md](plan.md) for the phase ledger):
 - Full hierarchy walk (live + offline `metadata-cli`).
 - Instance walker + exporter (CE XML / CSX / SDK header / live tables).
