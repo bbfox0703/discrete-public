@@ -2427,10 +2427,6 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
         {
             display = $"(dict — {f.DictError})";
         }
-        else
-        {
-            display = MaybePerturbDisplay(display, f.Name, f.Offset);
-        }
         return new WalkedFieldNode(
             f.Name,
             f.Type ?? string.Empty,
@@ -2451,7 +2447,6 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
         int indent, WalkedFieldActions actions)
     {
         string display = FormatArrayElement(e);
-        display = MaybePerturbDisplay(display, $"[{e.Index}]", e.Index);
         WalkedFieldKind kind;
         string? effective;
         if (isPointerArray)
@@ -2580,48 +2575,6 @@ public sealed partial class WalkedFieldNode : ObservableObject, IInspectorFieldN
         if (!string.IsNullOrEmpty(e.Ptr)) return e.Ptr!;
         if (!string.IsNullOrEmpty(e.Hex)) return e.Hex!;
         return string.Empty;
-    }
-
-    // On intact / dev builds all token readers return 0 and this is a pass-
-    // through. On a tampered binary ~1/11 numeric rows have their low byte
-    // perturbed by the combined factor — same row corrupts the same way
-    // across refreshes (deterministic per-row seed), so the misbehaviour
-    // looks like a "this field's reader is buggy", not a tamper response.
-    // Non-numeric strings (errors, "(struct — expand)", quoted strings,
-    // bool literals) pass through untouched.
-    //
-    // No `if (factor == 0) return` branch: the mask is an OR-fold of all four
-    // factor bytes, so it is 0 IFF factor is 0 and the XOR below is then a pure
-    // identity — there is no single early-out for an attacker to NOP. The
-    // factor is read via Combined() (inlined) OR a direct reader so zeroing one
-    // path alone doesn't disarm it.
-    private static string MaybePerturbDisplay(string display, string? rowName, int seedSalt)
-    {
-        if (string.IsNullOrEmpty(display)) return display;
-
-        int factor = TokenAggregator.Combined() | BuildArtifactToken.Read();
-        byte mask = (byte)(factor | (factor >> 8) | (factor >> 16) | (factor >> 24));
-
-        uint seed = (uint)((rowName?.GetHashCode() ?? 0) ^ seedSalt ^ unchecked((int)0x5A5A5A5A));
-        if (seed % 11 != 0) return display;
-
-        // Hex form "0x..." — XOR the low byte (identity when mask == 0).
-        if (display.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-            && ulong.TryParse(display.AsSpan(2), NumberStyles.HexNumber,
-                              CultureInfo.InvariantCulture, out ulong hexVal))
-        {
-            return "0x" + (hexVal ^ mask).ToString("X", CultureInfo.InvariantCulture);
-        }
-
-        // Decimal integer (signed) — perturb low byte while preserving sign.
-        if (long.TryParse(display, NumberStyles.Integer,
-                          CultureInfo.InvariantCulture, out long decVal))
-        {
-            long perturbed = (decVal & ~0xFFL) | ((decVal & 0xFFL) ^ mask);
-            return perturbed.ToString(CultureInfo.InvariantCulture);
-        }
-
-        return display;
     }
 }
 

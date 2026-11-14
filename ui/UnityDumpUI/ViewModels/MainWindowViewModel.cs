@@ -483,12 +483,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     public IAobMakerAppClient AobMakerApp => _aobMakerApp;
 
-    /// <summary>
-    /// Footer credit line, decoded from the XOR-shielded blob in
-    /// <see cref="LocalizedText"/>. Built once at VM construction so the
-    /// plaintext never appears as a literal in the assembly.
-    /// </summary>
-    public string CopyrightText { get; } = $"© {LocalizedText.GetCopyright()}";
+    /// <summary>Footer credit line.</summary>
+    public string CopyrightText { get; } = "© bbfox @ https://opencheattables.com";
 
     /// <summary>
     /// Selected index of the right-pane TabControl. The Address Lookup tab

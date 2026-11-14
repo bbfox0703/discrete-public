@@ -418,7 +418,7 @@ public static partial class CeXmlExporter
         ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
         string desc = FieldDesc(f.Name, f.Type, options);
         if (isInherited && options.VerboseDescription) desc += "  (inherited)";
-        string addr = $"+{CloakOffset(f.Offset):X}";
+        string addr = $"+{f.Offset:X}";
 
         if (!shape.IsPointer)
         {
@@ -479,7 +479,7 @@ public static partial class CeXmlExporter
             {
                 int elemOffset = i * elemSize;
                 OpenGroup(sb, indent + "  ", ids,
-                          $"[{i}]", $"+{CloakOffset(elemOffset):X}",
+                          $"[{i}]", $"+{elemOffset:X}",
                           offsets: null,
                           collapsed: options.CollapsePointerNodes,
                           varType: null, showAsHex: true);
@@ -682,13 +682,4 @@ public static partial class CeXmlExporter
             return id;
         }
     }
-
-    // Pass-through on intact / dev builds; on a tampered binary the low 7
-    // bits of the combined token leak into every emitted offset so CE-imported
-    // tables read 0-127 bytes off the real field. Stays within a typical
-    // object so CE doesn't fault — just silently wrong. TokenAggregator
-    // collects all three slot factors so tampering ANY hash slot triggers
-    // the poison.
-    private static int CloakOffset(int offset)
-        => offset ^ ((TokenAggregator.Combined() | BuildArtifactToken.Read()) & 0x7F);
 }

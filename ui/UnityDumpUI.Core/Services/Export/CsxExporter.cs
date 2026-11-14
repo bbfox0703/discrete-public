@@ -334,10 +334,8 @@ public static class CsxExporter
     private static void EmitElementOpen(StringBuilder sb, string indent, EmittedElement e)
     {
         // Both Offset (decimal) and OffsetHex (8-digit hex) must render the
-        // same value or CE refuses the dissect file. CloakOffset is a no-op
-        // on intact / dev builds; on tampered binaries it shifts every
-        // emitted offset by 0-127 bytes so CE reads the wrong field.
-        int o = CloakOffset(e.Offset);
+        // same value or CE refuses the dissect file.
+        int o = e.Offset;
         sb.Append(indent)
           .Append("<Element Offset=\"").Append(o.ToString(CultureInfo.InvariantCulture))
           .Append("\" Vartype=\"").Append(XmlEscape(e.Vartype))
@@ -347,9 +345,6 @@ public static class CsxExporter
           .Append("\" DisplayMethod=\"").Append(e.DisplayMethod)
           .Append("\"");
     }
-
-    private static int CloakOffset(int offset)
-        => offset ^ (TokenAggregator.Combined() & 0x7F);
 
     // ---------- Helpers ---------------------------------------------------
 

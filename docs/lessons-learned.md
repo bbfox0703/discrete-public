@@ -1741,6 +1741,10 @@ Name + Type columns, Methods Name column).
 
 ## Native AOT + integrity-stamping (Phase 26)
 
+> **Phase 26 was removed on 2026-11-14** (the token slots, `inject-hash.ps1`
+> and every poison surface are gone). The AOT / trimming lessons below still
+> apply to any future code that relies on byte literals or `InternalsVisibleTo`.
+
 ### `InternalsVisibleTo` matches AssemblyName, not project name
 
 Phase 26 puts a third token guardian (`WindowsRuntimeMetadata`) in the

@@ -23,12 +23,6 @@ internal static class Program
             return 0;
         }
 
-        // Wire the UI-side runtime metadata token into Core's aggregator so
-        // Core consumers (CT export, etc.) can OR all three slot factors
-        // together. Without this, Core would only see slots A + B and slot C
-        // would only guard UI-side consumers.
-        TokenAggregator.RegisterExternal(WindowsRuntimeMetadata.Read);
-
         // Phase 29c — initialise the SQLitePCLRaw provider so
         // Microsoft.Data.Sqlite finds the bundled native sqlite3
         // implementation. Idempotent; safe to call multiple times.
