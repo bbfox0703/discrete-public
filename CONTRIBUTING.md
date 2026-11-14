@@ -65,7 +65,7 @@ discrete/
 └── scripts/                    <- CE Lua bridge — deployed to <CE>/discrete/ via build.cmd deploy
 ```
 
-For deeper structure see [README.md §Architecture](README.md#architecture)
+For deeper structure see [README.md §How it works](README.md#how-it-works)
 and [docs/dll-spec.md](docs/dll-spec.md) / [docs/ui-spec.md](docs/ui-spec.md).
 
 ---

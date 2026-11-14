@@ -1,219 +1,116 @@
 # discrete — Unity Cheat Engine Dumper
 
-[![Phase 30](https://img.shields.io/badge/phase-30_(memory_%26_speed)_shipped-success)](docs/plan.md)
-[![Backends](https://img.shields.io/badge/backends-Mono_x64_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
-[![AOT](https://img.shields.io/badge/UI-Avalonia_12_AOT_(0%2F0_warnings)-purple)]()
+[![Backends](https://img.shields.io/badge/backends-Mono_x64%2Fx86_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-CC785C?logo=claude)](https://claude.ai/code)
 
-> 即時 Unity dumper + cheat-table 產生器 + 可從 Lua 呼叫 managed methods。
-> C++ DLL backend + Avalonia 12 AOT UI + Cheat Engine Lua bridge。
->
-> **語言**: [English](README.md) · 繁體中文 (本檔)
+即時 Unity dumper 與 cheat-table 產生器:注入遊戲的 C++ DLL、Avalonia UI,以及
+Cheat Engine Lua bridge。
 
----
+**語言**: [English](README.md) · 繁體中文(本檔)
 
-## 它能做什麼
+## 功能
 
-把單一 backend DLL 注入 Unity 遊戲後,可以:
+- **Class browser** — assembly → class → field / method,即時讀取 Mono runtime
+  或 IL2CPP 的 `global-metadata.dat`(v24–v39,涵蓋到 Unity 6.1)。
+- **Instance inspector** — 找出 class 的即時 instance,就地展開 pointer 與陣列,
+  數值自動更新,也能寫回欄位。
+- **位址反查** — 貼上任一位址(例如 CE pointer scan 的結果),得到它所屬的
+  managed 物件、class 與欄位。
+- **Value search、snapshot、class pivot** — 可依 class 縮小範圍的 CE 式掃描、
+  snapshot 差異比對、跨 instance 欄位表。
+- **Methods** — 列出各 overload 的 native 位址、產生以 AOB 為基礎的
+  Auto-Assembler 腳本,或直接呼叫 managed method。
+- **匯出** — CE cheat-table XML、Structure Dissect 檔、C++ header;live 模式會
+  嵌入實際位址。
+- **CE Lua bridge** — 在 CE 的 Lua console 使用同一套 pipe API,不需開 UI。
+- **Proxy DLL** — 給不方便注入的遊戲用的 `version.dll` / `winmm.dll` loader,
+  附 Steam library 批次安裝。
+- **離線 metadata CLI** — `metadata-cli.exe` 不需啟動遊戲即可解析
+  `global-metadata.dat`。
 
-- **即時 class browser** — 列出每個 assembly → class → field/method,
-  從 Mono runtime tables 或 IL2CPP 的 `global-metadata.dat`
-  (metadata v24 → v39 — 涵蓋到 Unity 6.1 的每個版本,含 v38 的 section-header
-  改版) 解析。**完全不需要遊戲原始碼**。
-- **即時 instance walker** — 找到 heap 上某 class 的所有 live
-  instance,inline 展開 pointer / array 欄位,以 250 ms / 1 s
-  速度 watch 數值變化。
-- **反向 address lookup** (`whatIsAt`) — 把 CE pointer-scan 找出的
-  任意位址貼進來,辨識出它屬於哪個 managed instance + class +
-  declared field。`findInstances` 的反向操作。
-- **Method overload picker** (`findMethodInstances`) — 列出某方法名
-  的每個 overload,回傳其 native address (Mono JIT / IL2CPP AOT
-  pointer) + signature。
-- **AOB AA-script generator** — 給定一個 overload,產生 Cheat Engine
-  Auto-Assembler script,內含版本穩定的 AOB pattern + `registersymbol`
-  區塊。多 overload 方法會為每個 signature 各產生一個 symbol,同一份
-  script 可同時 handle 全部 overload。
-- **AOBMaker direct-push** — 當 AOBMaker CE plugin 已載入,UI 可把
-  產生的 AA script 直接推到 CE 的 address list 變成 memory record
-  (省掉剪貼簿來回)。
-- **`callMethod` RPC** (Phase 19) — 呼叫任意 managed method
-  (Mono JIT 或 IL2CPP AOT entry),含 marshal 過的 primitive / string
-  / null / address 參數 + typed return value + managed exception
-  捕獲。三種使用面:
-  1. **DLL pipe RPC** — `\\.\pipe\DiscreteBfx`,JSON over named pipe。
-  2. **UI Method Call dialog** — 在 Method Overloads 視窗右鍵任一
-     overload row → "Call method…"。
-  3. **CE Lua bridge** — `dofile [...]\discrete\unity_invoke.lua`
-     後 `callUnityMethod(asm, ns, class, method, args, opts)`。
-- **CE XML / CSX / SDK header export** — 把當前 class 匯出成 Cheat
-  Table structure、Structure Dissect entry,或 C++ header。
-  Live mode 會嵌入真實 instance 位址,所以 .CT 檔案可開箱即用。
-- **Proxy DLL deploy** — `version.dll` / `winmm.dll` / `dxgi.dll`
-  side-by-side 安裝器,給直接 inject 不方便的遊戲用。批次 install
-  panel 可掃 Steam 遊戲庫並選擇要 deploy 哪些。
-- **Offline metadata CLI** — `metadata-cli.exe` 可獨立 parse
-  `global-metadata.dat` (不需開遊戲),適合做 RE 探勘。給遊戲安裝
-  目錄、甚至只給 Steam 遊戲名稱即可,檔案位置它自己找。
+## 下載
 
-看 [docs/plan.md](docs/plan.md) — **單一窗口 / 唯一真相來源**:目前 build 狀態、目前 phase、**集中 Open Backlog / TODO**、最近批次、完整 phase ledger、cross-PC workflow。已完成 phase 的長篇寫作 + 舊批次摘要在 [docs/archive/](docs/archive/)。
+預先建置好的 Windows 版本放在
+[Releases](https://github.com/bbfox0703/discrete-public/releases) 頁面:
+self-contained,不需安裝 .NET runtime。執行檔未簽章,第一次執行時 Windows
+SmartScreen 或防毒軟體可能會警告。
 
-## 架構
+## 使用
 
-```
-                  ┌─────────────────────────┐
-                  │ Cheat Engine + AOBMaker │
-                  └──────────┬──────────────┘
-                             │  \\.\pipe\AOBMakerCEBridge
-                             ▼
-                  ┌─────────────────────────┐
-                  │  DiscreteUI.exe (AOT)   │  Avalonia 12,single-file
-                  │  • Assembly browser     │  Win-only (Skia + HarfBuzz)
-                  │  • Live inspector       │
-                  │  • Address Lookup tab   │
-                  │  • Method Overloads     │
-                  │  • Method Call dialog   │
-                  │  • Proxy Deploy panel   │
-                  └──────────┬──────────────┘
-                             │  \\.\pipe\DiscreteBfx (JSON over pipe)
-                             ▼
-                  ┌─────────────────────────┐
-                  │  Discrete-Mono.dll   │  ← 注入 Unity x64 遊戲
-                  │  / -IL2CPP.dll          │
-                  │                         │
-                  │  • backend detector     │
-                  │  • domain / class walk  │
-                  │  • method invoker       │  ← Phase 19 (callMethod)
-                  │  • AOB-pattern decoder  │  ← Phase 18 (手刻 x64 LDE)
-                  │  • address finder       │  ← Phase 17 (whatIsAt)
-                  └─────────────────────────┘
-                             ▲
-                             │ runtime / metadata APIs
-                             │ (mono_class_get_methods,
-                             │  il2cpp_class_get_field_at_index, ...)
-                  ┌─────────────────────────┐
-                  │   Unity 遊戲 (target)   │
-                  │  Mono.dll / GameAsm.dll │
-                  └─────────────────────────┘
+**透過 UI**
+
+1. 啟動 Unity 遊戲。
+2. 執行 `DiscreteUI.exe` → **Pick & inject…** → 選擇遊戲 → **Inject & Connect**。
+3. 瀏覽 assembly 與 class;在 class 上按右鍵 → **Inspect (find instances)…**。
+
+**只用 Cheat Engine**
+
+1. 把 `.lua` 腳本與 `Discrete-*.dll` 複製到 `<CE 安裝目錄>\discrete\`
+   (build 後執行 `.\build.cmd deploy` 會自動完成)。
+2. CE attach 到遊戲,開啟 Lua console(Ctrl+Alt+L)後執行:
+
+```lua
+dofile([[C:\Program Files\Cheat Engine\discrete\unity_dump.lua]])     -- 注入 DLL
+dofile([[C:\Program Files\Cheat Engine\discrete\unity_invoke.lua]])
+local r = callUnityMethod("Assembly-CSharp", "MainGame", "PLY_WORK",
+                          "AddGrowHpMax", { argInt32(10) })
+print(r.ok, r.returnValue)
 ```
 
-CE Lua bridge scripts (`unity_dump.lua`、`unity_symbols.lua`、
-`unity_invoke.lua`) 直接從 CE Lua console 對同一個
-`\\.\pipe\DiscreteBfx` 講話 — headless workflow 完全不需要 UI。
+CT 製作流程見 [USAGE.md](USAGE.md),Lua API 見
+[scripts/README.md](scripts/README.md)。
 
-## 快速開始
+## 從原始碼建置
 
-### 環境需求
-
-- **Windows 10 / 11** (x64)。Linux / macOS 不支援。
-- **.NET SDK 10** — build UI / tests 用。
-- **Visual Studio 2022 Build Tools** (或完整版 VS 的 C++ workload)
-  — build DLL 用。
-- **CMake 3.20+**、**Ninja** (有裝 VS 的話 build script 會自動找到)。
-- **Cheat Engine 7.5+** — Lua bridge 用。
-
-### Build
+需求:Windows 10/11 x64、Visual Studio(C++ workload,已內含 CMake 與
+Ninja)、.NET SDK 10、Python 3(建置時的檢查用),Lua bridge 需要
+Cheat Engine 7.5+。
 
 ```powershell
-# 完整 release publish (DLL + UI AOT + tests + metadata-cli) → dist/
-.\build.cmd publish clean
-
-# 只 build UI (快速 iteration; self-contained single-file)
-.\build.cmd ui
-
-# 只 build IL2CPP DLL / Mono DLL
-.\build.cmd il2cpp
-.\build.cmd mono
-
-# xUnit v3 tests
-.\build.cmd test
+.\sync_vendor.ps1            # 抓取鎖定版本的 C++ 依賴(nlohmann/json、MinHook、Zydis)
+.\build.cmd publish clean    # DLL + Native AOT UI + 測試 + metadata-cli -> dist\
+.\build.cmd /?               # 所有 target(ui、dll、mono、il2cpp、test、deploy……)
 ```
 
-產出落在 `dist/`:
+一律透過 `build.cmd` 建置;直接呼叫 `cmake` / `dotnet` 會缺少 VS 開發環境。
+x86 產出在 `dist\x86\`。
+
+## 運作方式
 
 ```
-DiscreteUI.exe                    38 MB (Native AOT, single-file)
-Discrete-Mono.dll              ~545 KB
-Discrete-IL2CPP.dll            ~570 KB
-metadata-cli.exe                  ~70 KB
-version.dll / winmm.dll           ~130 KB each (proxy DLLs)
-unity_*.lua / utils.lua           CE Lua bridge scripts
-libSkiaSharp.dll / ...            Avalonia native dependencies
+Cheat Engine (+ Lua bridge) ─┐
+                             ├─ \\.\pipe\DiscreteBfx (JSON) ─► Discrete-Mono.dll / Discrete-IL2CPP.dll
+DiscreteUI.exe ──────────────┘                                  注入 Unity 遊戲,
+                                                                讀取 Mono / IL2CPP runtime 資料
 ```
 
-### 使用 (UI 路徑)
-
-```
-1. 啟動目標 Unity 遊戲。
-2. 跑 dist\DiscreteUI.exe。
-3. 按 "Pick & inject…",依名稱或 PID 過濾,按 Inject & Connect。
-4. 瀏覽 assemblies → classes;右鍵 class → "Inspect (find instances)…"。
-5. 右鍵 method → "Call method… (pick overload)" 即可呼叫。
-```
-
-### 使用 (CE-only,不開 UI)
-
-```
-1. 啟動目標 Unity 遊戲。
-2. 開 Cheat Engine → File → Open Process → 選遊戲。
-3. 開 Lua console (Ctrl+Alt+L),執行:
-   dofile([[C:\Program Files\Cheat Engine\discrete\unity_dump.lua]])
-4. DLL 會被注入並啟動 pipe server。然後:
-   dofile([[...\discrete\unity_invoke.lua]])
-   local r = callUnityMethod("Assembly-CSharp", "MainGame", "PLY_WORK",
-                             "AddGrowHpMax", { argInt32(10) })
-   print(r.ok, r.returnValue)
-```
-
-Bridge script 安裝:`.\build.cmd deploy` (publish 後),或手動把
-`dist\unity_*.lua` + `dist\Discrete-*.dll` 複製到
-`<CE-install>\discrete\`。詳細 layout 看 [scripts/README.md](scripts/README.md)。
+UI 不直接接觸遊戲;Mono / IL2CPP 的所有差異都包在 pipe protocol 後面。
 
 ## 已驗證遊戲
 
-七款遊戲跨兩個 backend + 我們 ship 的所有 metadata version — 完整列表
-看 [docs/test-matrix.md](docs/test-matrix.md)。SaGa F2R (IL2CPP v29)、
-BongoCat (Mono bdwgc)、Farthest Frontier (IL2CPP v31)、Hollow Knight:
-Silksong (IL2CPP v31)、Songs of Silence (IL2CPP v39, Unity 6.1) 等。
+SaGa F2R、BongoCat、Farthest Frontier、Hollow Knight: Silksong、Songs of
+Silence 等,涵蓋兩種 backend 與所有支援的 metadata 版本。完整清單見
+[docs/test-matrix.md](docs/test-matrix.md)。
 
-## 文件對照
+## 文件
 
-| 檔案 | 內容 |
+| | |
 |---|---|
-| [plan.md](docs/plan.md) | **單一窗口** — 目前狀態、Open Backlog / TODO、最近批次、phase ledger (0 → 32)、cross-PC workflow — 從這裡開始 |
-| [archive/](docs/archive/) | 已完成 phase 的長篇寫作 + 舊 session hand-offs + 舊批次摘要 |
-| [Archiutecture.md](docs/Archiutecture.md) | 規則與不變量 (rule of one backend、AOT mandate、單一 instance、async everywhere…) |
-| [pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI 線上協議 (每個指令、每個 shape) |
-| [test-matrix.md](docs/test-matrix.md) | 已驗證遊戲 + 工具版本 |
-| [address-finder.md](docs/address-finder.md) | Phase 17 設計 — `whatIsAt` 反向 lookup spec |
-| [lua-invoke.md](docs/lua-invoke.md) | Phase 19 設計 — `callMethod` spec、marshaling 規則、error code 列表 |
-| [il2cpp-metadata-crosscheck.md](docs/il2cpp-metadata-crosscheck.md) | 我們的 IL2CPP layout 對 upstream Unity source 的 audit |
-| [lessons-learned.md](docs/lessons-learned.md) | 工程上踩過的雷 |
-| [proxy-dlls.md](docs/proxy-dlls.md) | `version.dll` / `winmm.dll` / `dxgi.dll` proxy + ProxyDeployWindow |
-| [metadata-cli.md](docs/metadata-cli.md) | `metadata-cli.exe` 獨立工具 |
-| [export-formats.md](docs/export-formats.md) | CE XML / CSX / SDK header 格式 |
-| [mono-internals.md](docs/mono-internals.md) | Mono backend 細節 |
-| [il2cpp-internals.md](docs/il2cpp-internals.md) | IL2CPP backend 細節 |
-| [dll-spec.md](docs/dll-spec.md) | DLL ABI + 模組對照 + lifecycle |
-| [ui-spec.md](docs/ui-spec.md) | UI 架構 (ViewModels、windows、bridges) |
-| [technical-notes.md](docs/technical-notes.md) | 雜項工程筆記 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Build / test / 寫碼慣例 / PR 風格 |
+| [USAGE.md](USAGE.md) | 給 cheat-table 製作者的使用指南 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 建置、測試、慣例、發布流程 |
+| [docs/plan.md](docs/plan.md) | 開發狀態、待辦與 phase 紀錄 |
+| [docs/Archiutecture.md](docs/Archiutecture.md) | 架構規則與不變條件 |
+| [docs/pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI 通訊協定 |
+| [docs/](docs/) | 其他:backend 內部、匯出格式、proxy DLL、lessons learned |
 
 ## 授權
 
-採用 **GNU General Public License v3.0**（GPL-3.0）授權。
-完整條款請見 [LICENSE](LICENSE)。
+[GNU General Public License v3.0](LICENSE)。
 
 ## 致謝
 
-- **Cheat Engine** — Eric "Dark Byte" Heijnen + 整個 CE 社群。
-- **Avalonia 12** — UI 框架 (Native AOT 支援的關鍵)。
-- **CommunityToolkit.Mvvm** — source-generator MVVM (零 reflection)。
-- **nlohmann/json** — DLL 端 JSON。
-- **xunit.v3** — UI test runner。
-- **BepInEx / MelonLoader / Il2CppInterop** 專案 — non-uniform
-  `runtime_invoke` marshaling 的參考實作 (詳見
-  [lessons-learned.md](docs/lessons-learned.md))。
-- `vendor/libil2cpp/` 下的四份 Unity metadata-version source — 並排
-  保留以便 offset cross-check (詳見
-  [il2cpp-metadata-crosscheck.md](docs/il2cpp-metadata-crosscheck.md))。
+Cheat Engine(Eric "Dark Byte" Heijnen 與社群)· Avalonia ·
+CommunityToolkit.Mvvm · nlohmann/json(MIT)· MinHook(BSD-2-Clause)·
+Zydis(MIT)· xunit.v3 · BepInEx、MelonLoader、Il2CppInterop 提供
+`runtime_invoke` marshaling 參考 · 上游 libil2cpp 原始碼供 layout 交叉比對。
