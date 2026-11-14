@@ -1081,29 +1081,68 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
 // residue don't pollute the result (they hold class-pointer values for
 // other legitimate reasons — RGCTX cache, stale locals).
 //
-// SEH-protected per-region scan: inner loop sits inside __try so an AV
-// inside an AC-stripped page only loses that region, not the whole walk.
+// SEH protection is page-granular: SweepRegionPaged copies the span one page
+// at a time through the SehCopySpan leaf and scans the local copy, so an AV
+// inside an AC-stripped page only loses the rest of that chunk, not the
+// whole walk. The scan loop itself (binary_search, map/vector growth) runs
+// outside any __try — in Debug those iterators and containers need object
+// unwinding, which __try forbids (C2712).
 
 namespace {
 
 #pragma warning(push)
 #pragma warning(disable: 4509)  // SEH in function with non-trivial dtor — none here.
 
-void SehSweepRegion(
+// Leaf: copy `n` bytes of foreign memory into a local buffer. False on AV.
+bool SehCopySpan(void* dst, const void* src, std::size_t n) noexcept {
+    __try { ::memcpy(dst, src, n); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+#pragma warning(pop)
+
+// Shared heap-sweep loop. Visits each pointer-sized slot in
+// [base, base + size), applies the class-pointer membership test and the
+// 8-aligned instance filter, and calls onHit(instAddr, qw) per match.
+//
+// Spans end on page boundaries, and access faults are page-granular, so a
+// fault hits the first slot of a span: every slot before the bad page has
+// already been visited and nothing after it is — exactly what the former
+// single-__try loop produced. The faulting slot still counts toward
+// `qwordsScanned`, as it did when the counter was bumped before the read.
+template <typename OnHit>
+void SweepRegionPaged(
     const std::uint8_t* base, std::size_t size,
     std::uintptr_t minKlass, std::uintptr_t maxKlass,
     const std::vector<std::uintptr_t>& classSet,
-    std::unordered_map<Il2CppClass*, std::vector<std::uintptr_t>>& byClass,
-    std::size_t perClassCap,
-    std::size_t& totalInstances,
-    std::size_t& qwordsScanned) noexcept
+    std::size_t& qwordsScanned,
+    OnHit&& onHit) noexcept
 {
-    __try {
-        const std::size_t count = size / sizeof(std::uintptr_t);
-        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
+    constexpr std::size_t kPage = 4096;
+    std::uintptr_t buf[kPage / sizeof(std::uintptr_t)];
+
+    const std::size_t total = size / sizeof(std::uintptr_t);
+    std::size_t done = 0;
+    while (done < total) {
+        const std::uintptr_t cur =
+            reinterpret_cast<std::uintptr_t>(base + done * sizeof(std::uintptr_t));
+        const std::size_t toBoundary =
+            static_cast<std::size_t>(((cur | (kPage - 1)) + 1) - cur);
+        std::size_t count = toBoundary / sizeof(std::uintptr_t);
+        if (count == 0) count = 1;   // misaligned base: never stall
+        if (count > total - done) count = total - done;
+
+        if (!SehCopySpan(buf, reinterpret_cast<const void*>(cur),
+                         count * sizeof(std::uintptr_t))) {
+            // Region had an unreadable page partway through; hits already
+            // reported stay recorded. Move on to the next region.
+            ++qwordsScanned;
+            return;
+        }
+
         for (std::size_t i = 0; i < count; ++i) {
             ++qwordsScanned;
-            std::uintptr_t qw = arr[i];
+            const std::uintptr_t qw = buf[i];
             if (qw == 0) continue;
             if (qw < minKlass || qw > maxKlass) continue;
             if ((qw & 7u) != 0) continue;
@@ -1117,10 +1156,26 @@ void SehSweepRegion(
             // qwords that happen to equal a class pointer — those are
             // structurally not object headers and would only add
             // noise to the per-class cap.
-            const std::uintptr_t instAddr =
-                reinterpret_cast<std::uintptr_t>(base + i * sizeof(std::uintptr_t));
+            const std::uintptr_t instAddr = cur + i * sizeof(std::uintptr_t);
             if ((instAddr & 7u) != 0) continue;
 
+            onHit(instAddr, qw);
+        }
+        done += count;
+    }
+}
+
+void SweepRegion(
+    const std::uint8_t* base, std::size_t size,
+    std::uintptr_t minKlass, std::uintptr_t maxKlass,
+    const std::vector<std::uintptr_t>& classSet,
+    std::unordered_map<Il2CppClass*, std::vector<std::uintptr_t>>& byClass,
+    std::size_t perClassCap,
+    std::size_t& totalInstances,
+    std::size_t& qwordsScanned) noexcept
+{
+    SweepRegionPaged(base, size, minKlass, maxKlass, classSet, qwordsScanned,
+        [&](std::uintptr_t instAddr, std::uintptr_t qw) {
             auto* k = reinterpret_cast<Il2CppClass*>(qw);
             auto& list = byClass[k];
             if (list.size() < perClassCap) {
@@ -1130,46 +1185,25 @@ void SehSweepRegion(
             // Else: cap hit for this class — count the qword as scanned
             // but don't grow the vector. The user-visible result is "this
             // class had at least `perClassCap` live instances".
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Region had an unreadable page partway through; the bytes
-        // already pushed stay in the map. Move on to the next region.
-    }
+        });
 }
 
-// Phase 30 P2 — flat (uncapped) variant of SehSweepRegion for the reverse-
+// Phase 30 P2 — flat (uncapped) variant of SweepRegion for the reverse-
 // lookup index. Same membership test + 8-aligned instance filter, but records
 // every hit as a flat (instanceAddr, klass) pair instead of a per-class map —
 // the index needs ALL instances (no cap) to answer "nearest base ≤ addr".
-#pragma warning(push)
-#pragma warning(disable: 4509)
-void SehSweepRegionFlat(
+void SweepRegionFlat(
     const std::uint8_t* base, std::size_t size,
     std::uintptr_t minKlass, std::uintptr_t maxKlass,
     const std::vector<std::uintptr_t>& classSet,
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& out,
     std::size_t& qwordsScanned) noexcept
 {
-    __try {
-        const std::size_t count = size / sizeof(std::uintptr_t);
-        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
-        for (std::size_t i = 0; i < count; ++i) {
-            ++qwordsScanned;
-            std::uintptr_t qw = arr[i];
-            if (qw == 0) continue;
-            if (qw < minKlass || qw > maxKlass) continue;
-            if ((qw & 7u) != 0) continue;
-            if (!std::binary_search(classSet.begin(), classSet.end(), qw)) continue;
-            const std::uintptr_t instAddr =
-                reinterpret_cast<std::uintptr_t>(base + i * sizeof(std::uintptr_t));
-            if ((instAddr & 7u) != 0) continue;
+    SweepRegionPaged(base, size, minKlass, maxKlass, classSet, qwordsScanned,
+        [&](std::uintptr_t instAddr, std::uintptr_t qw) {
             out.emplace_back(instAddr, qw);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Unreadable page partway through — keep what we have, move on.
-    }
+        });
 }
-#pragma warning(pop)
 
 }  // namespace
 
@@ -1269,7 +1303,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         for (;;) {
             std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
             if (idx >= chunks.size()) break;
-            SehSweepRegion(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
+            SweepRegion(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
                            classSet, map, perClassCap, dummyInstances, qs);
         }
         qScanned[tid] = qs;
@@ -1413,7 +1447,7 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
             if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
             std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
             if (idx >= chunks.size()) break;
-            SehSweepRegionFlat(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
+            SweepRegionFlat(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
                                classSet, vec, qs);
         }
         qScanned[tid] = qs;
