@@ -46,7 +46,7 @@
 - [ ] **R1 實機 smoke(IL2CPP)** — 用新 `Discrete-IL2CPP.dll` 注入任一 IL2CPP 遊戲:`init` log 有 `Rust core: discrete_core 0.1.0`、`metadata` log 有 `MetadataParser: loaded version=…`、metadata 相關 RPC(class walk 含 field default)行為同前。順便驗 R0 banner 在 Mono x64 / x86 也出現。
 - [ ] **R1 收尾** — 實機過後刪 `MetadataParser.cpp`、`MetadataParser.h` 的 legacy 半邊、CMake `DISCRETE_RUST_METADATA` 與 `metadata-cli-legacy`;刪之前先錄一份 `dump-parser` baseline,harness 改成 Rust vs baseline。
 - [ ] **補 corpus** — 裝到 v24.0/v24.1(R-Type Dimensions EX)、v27(Townscaper / 廖添丁)或 v35–37 的遊戲時重跑 `metadata_rust_diff.py`。
-- [ ] **x64 Debug IL2CPP `C2712`**(既有問題,非 Rust 造成)— `IL2CPPAddressFinder.cpp:1092/1146`,違反 SEH-leaf 規則的函式;Release 不受影響。
+- [x] **x64 Debug IL2CPP `C2712`**(既有問題,非 Rust 造成)✅ FIXED(2026-11-14,`ff2e3fc`,merge `42e5907`)— `IL2CPPAddressFinder.cpp` heap sweep 改成 SEH-leaf 形狀(`__try` 移進 `Seh*` helper);merge 後 `build.cmd il2cpp debug`(含 Rust core)build + link 乾淨。純重構,未實機。
 - [ ] **R2(未啟動)** — 純演算法(AobPattern / GroupMatch / value decoder / ChainDetector→`iced-x86`)+ C SEH shim;是否啟動看 R1 實機結果。
 
 ### 🎨 2026-08-16 Avalonia / SkiaSharp / HarfBuzzSharp 版本綁定(比照 UE5CEDumper)

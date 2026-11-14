@@ -117,16 +117,17 @@ Verified 2026-11-14 (build #1440–1443):
 | x86 Release `/MD` (Mono) | builds, links; banner string present |
 | x64 Publish `/MT` | builds; no `VCRUNTIME140` / `api-ms-win-crt` imports |
 | x86 Publish `/MT` | builds; no dynamic CRT imports |
-| x64 + x86 Debug (Mono) | builds, links, no LNK4098 |
+| x64 + x86 Debug (Mono), x64 Debug (IL2CPP, after `ff2e3fc`) | builds, links, no LNK4098 |
 | `cargo test` x64, i686, i686 `+crt-static` | 3/3 pass, incl. panic → fallback |
 | proxy DLLs | do **not** contain the Rust core (checked) |
 
 Not covered offline: the `Rust core: discrete_core …` line in a live game's
 `init` log (first in-game run of any backend proves it).
 
-Unrelated finding while testing: x64 **Debug** `Discrete-IL2CPP.dll` fails with
-`C2712` in `IL2CPPAddressFinder.cpp` (lines 1092 / 1146) — already broken at
-`dd1a97a` before any Rust change (reproduced in a clean worktree).
+Unrelated finding while testing: x64 **Debug** `Discrete-IL2CPP.dll` failed with
+`C2712` in `IL2CPPAddressFinder.cpp` — broken since before the Rust work.
+Fixed in `ff2e3fc` (SEH-leaf refactor); after the merge, x64 Debug IL2CPP with
+the Rust core builds and links cleanly too.
 
 ## R1 gate
 
