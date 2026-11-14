@@ -9,10 +9,5 @@
     "url": "https://github.com/TsudaKageyu/minhook.git",
     "sha": "05c06c5bbca226b72ffb40fc0caaef33bcaf6f74",
     "recursive": false
-  },
-  "zydis": {
-    "url": "https://github.com/zyantific/zydis.git",
-    "sha": "17bc6fb1584bb31e1d595819aab7be57115750f7",
-    "recursive": true
   }
 }

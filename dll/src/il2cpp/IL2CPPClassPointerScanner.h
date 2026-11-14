@@ -19,7 +19,7 @@
 //
 // The `Il2CppClass*` IS RIP-addressable because it lives in `.data` /
 // `.rdata`. This scanner finds every `.data` slot holding the target
-// pointer; the next phase (Zydis forward-trace) scans `.text` for
+// pointer; the next phase (the chain detector's forward-trace) scans `.text` for
 // RIP-relative loads of those slots and verifies the trailing
 // dereference chain.
 //

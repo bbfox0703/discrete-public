@@ -286,7 +286,7 @@ Rules for the notes:
 **Exception:** a test of the pipeline itself (a manual run, or a throwaway
 tag whose draft will be deleted) does not need the notes rewritten.
 
-The workflow fetches nlohmann/json, MinHook and Zydis at the commits
+The workflow fetches nlohmann/json and MinHook at the commits
 pinned in [tools/vendor_pins.json](tools/vendor_pins.json), by running
 `sync_vendor.ps1 -SkipReference`, exactly as a local sync does. To bump
 them: `.\sync_vendor.ps1 -UpdatePins`, then `.\build.cmd dll` and

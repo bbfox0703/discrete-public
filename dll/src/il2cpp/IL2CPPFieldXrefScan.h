@@ -1,11 +1,14 @@
 // IL2CPPFieldXrefScan.h — the two pure scan kernels behind IL2CPPFieldXref.
 //
-// Split out of IL2CPPFieldXref.cpp so they can be swapped for the Rust ports
-// and compared byte for byte (tools/r2-diff, Phase R2 follow-up). Everything
+// Split out of IL2CPPFieldXref.cpp for the Rust port (IL2CPPFieldXrefScanRs.cpp
+// over dll/rust/src/xref; regression driver tools/r2-diff/xref_dump.cpp, Phase
+// R2 follow-up). The legacy Zydis implementation was proven byte-identical
+// and removed (git history: IL2CPPFieldXrefScan.cpp, last in 987b20d).
+// Everything
 // that talks to the IL2CPP runtime (resolver, domain + thread attach, class /
 // method / field enumeration, static data, method index, logging) stays in
 // IL2CPPFieldXref.cpp; these functions only read GameAssembly.dll code through
-// Memory::SafeReadBytes (or, in the Rust port, the SEH read shim) and return
+// the SEH read shim (RustCore::SafeReadShim over Memory::SafeReadBytes) and return
 // raw candidates in scan order. Kind filtering, method attribution and the
 // `limit` cut-off are applied by the caller, in that order, exactly as the
 // original single-function loops did.

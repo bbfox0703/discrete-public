@@ -19,7 +19,7 @@ bug into an error return instead of a game crash.
 |---|---|---|---|
 | **R0** | Toolchain: cargo inside `build.cmd`/CMake, x64 + x86, /MD + /MT, Debug + Release; FFI conventions; log sink; panic guard | All arch × CRT combinations build and link; `cargo test` passes on x64 and i686; Rust banner in the init log | ✅ offline + IL2CPP x64 and Mono x64 live; x86 live pending |
 | **R1** | IL2CPP `global-metadata.dat` parser (`dll/rust/src/metadata`) behind `MetadataParserRs.cpp` | `tools/verify/metadata_rust_diff.py`: Rust and legacy C++ parsers byte-identical over the local fixture corpus | see [R1 gate](#r1-gate) |
-| **R2** | Pure algorithms: `AobPattern` (`aob.rs`), `GroupMatch` (`group_match.rs`), the value-scan refine comparator (`value.rs`), `IL2CPPChainDetector` (`chain/`, Zydis → `iced-x86`); host-memory reads only through the SEH read shim | `tools/verify/r2_rust_diff.py`: legacy vs Rust byte-identical over generated cases + every local `GameAssembly.dll` | see [R2 gate](#r2-gate) |
+| **R2** | Pure algorithms: `AobPattern` (`aob.rs`), `GroupMatch` (`group_match.rs`), the value-scan refine comparator (`value.rs`), `IL2CPPChainDetector` (`chain/`, Zydis → `iced-x86`); follow-up: `IL2CPPFieldXref`'s scan kernels (`xref/`), which retired Zydis; host-memory reads only through the SEH read shim | `tools/verify/r2_rust_diff.py` / `xref_rust_diff.py`: legacy vs Rust byte-identical over generated cases + every local `GameAssembly.dll` (now golden hashes, `r2_golden.py`) | see [R2 gate](#r2-gate), [FieldXref](#r2-follow-up-il2cppfieldxref-scan-kernels) |
 | R3 (opt.) | `PipeServer` framing; handlers stay C++ | wire-level replay | not started |
 | R4+ | Backend walkers / `ExportAPI` | only if R1–R3 show a real maintenance win | not planned |
 
@@ -41,14 +41,21 @@ dll/rust/
   src/chain/                   R2 IL2CPP chain detector        (dc_chain_*)
     mod.rs                       the scan (legacy transcribed) + C ABI
     decode.rs                    iced-x86 -> "what Zydis would have said" adapter
-    apx_map4.rs                  GENERATED: APX/EVEX map-4 table from vendored Zydis
+    apx_map4.rs                  GENERATED: APX/EVEX map-4 table from Zydis (tools/zydis-oracle)
     msvc_sort.rs                 MSVC std::sort transcription (dedup order parity)
+  src/xref/                    R2 follow-up: IL2CPPFieldXref scan kernels (dc_xref_*)
+    mod.rs                       static RIP scan + instance-field decode + C ABI
+    apx_mem.rs                   GENERATED: APX EVEX memory-operand access from Zydis
 dll/src/shared/RustCore.cpp    C++ log sink + banner + SafeReadShim (R2 read shim)
 dll/src/il2cpp/MetadataParserRs.cpp   Parser class -> dc_md_* wrapper
 dll/src/shared/{AobPattern,GroupMatch,ValueRefine}Rs.cpp,
 dll/src/il2cpp/IL2CPPChainDetectorRs.cpp   R2 wrappers (same C++ API)
+dll/src/il2cpp/IL2CPPFieldXrefScanRs.cpp   IL2CPPFieldXrefScan.h kernels -> dc_xref_*
 tools/verify/metadata_rust_diff.py    R1 differential harness
-tools/r2-diff/ + tools/verify/r2_golden.py   R2 regression gate (golden hashes)
+tools/r2-diff/ + tools/verify/r2_golden.py   R2 regression gate (golden hashes;
+                               r2-dump + xref-dump)
+tools/zydis-oracle/            decoder-fidelity oracle: iced adapter vs Zydis
+                               (own pinned Zydis; run after any decode.rs change)
 ```
 
 Linked into `Discrete-Mono.dll`, `Discrete-IL2CPP.dll` (x64 + x86) and
@@ -148,11 +155,13 @@ C++ deps.
 
 | Crate | Pin | Licence | Why | Scope |
 |---|---|---|---|---|
-| `iced-x86` | `=1.22.0`, features `std` + `decoder` + `instr_info` only | MIT | R2 chain detector needs a full x86-64 decoder with per-operand read/write access; writing one is out of scope and Zydis is a C library the Rust side cannot call without a second FFI layer | `chain/` only (IL2CPP backend) |
+| `iced-x86` | `=1.22.0`, features `std` + `decoder` + `instr_info` only | MIT | R2 chain detector needs a full x86-64 decoder with per-operand read/write access; writing one is out of scope and Zydis is a C library the Rust side cannot call without a second FFI layer | `chain/` + `xref/` (IL2CPP backend) |
 | `lazy_static` | via `iced-x86/std` | MIT / Apache-2.0 | transitive | — |
 
-Zydis stays vendored for now: `IL2CPPFieldXref.cpp`'s instance-field scan
-still uses it. Retiring Zydis entirely would mean porting that scan too.
+Zydis is no longer a build dependency: its last user, `IL2CPPFieldXref`'s
+scan kernels, moved to `xref/`. It survives only in `tools/zydis-oracle`,
+which fetches its own pinned copy (`17bc6fb`, the commit the legacy DLL used)
+to re-prove the decoder adapter.
 
 ## R0 gate
 
@@ -266,7 +275,8 @@ outputs are guarded by golden hashes.
 Before the harness, each port was checked by its author against a private
 oracle (legacy C++ compiled verbatim): AOB 600k random cases × x64/x86 ×
 pure-Rust/wrapper, MD5-identical; chain decoder 160M random instructions plus
-exhaustive legacy maps against the vendored Zydis, and 60k generated modules
+exhaustive legacy maps against the vendored Zydis (that oracle is now
+`tools/zydis-oracle`), and 60k generated modules
 end to end; GM 220k cases against a recursive copy of the legacy code.
 
 Review: five area reviewers (ABI, AOB, chain, GM + value, build + harness),
@@ -351,6 +361,81 @@ read-only `scanFieldValue` reverse lookup before writing anything.
 Not covered live: x86 (no 32-bit Mono game on the dev box now — 活俠傳 moved
 to x64).
 
+## R2 follow-up: IL2CPPFieldXref scan kernels
+
+2026-11-14 (builds #1490–1501). The last Zydis user. `IL2CPPFieldXref.cpp`
+keeps everything that talks to the IL2CPP runtime (resolver, class / method /
+field enumeration, kind filter, method attribution, `limit`); its two pure
+loops moved behind `IL2CPPFieldXrefScan.h` and then to `xref/`:
+
+| Kernel | Rust | Notes |
+|---|---|---|
+| v1 static RIP scan (`ScanRipRelative`) | `xref::scan_rip` | Byte-pattern scan for `REX? {8B,8D,89} ModRM(00,101) disp32`; no decoder. Legacy quirks kept: 1 MiB chunks + 16-byte overlap, `+4096` on an unreadable chunk, no REX look-back at a chunk start (so a REX byte on a chunk's last byte can report one instruction twice — real, seen in Songs Of Silence), wrapping arithmetic |
+| Instance `[gpr + offset]` scan (`ScanInstanceAccesses`) | `xref::scan_inst` | Linear decode per method range, stop at `0xCC` or a decode failure. Memory-operand facts (`InsnDecoder::decode_mem`, additive to `decode.rs`) reproduce the visible operands Zydis reported: displacement present, index, displacement value, canonical base, read / write action. `apx_mem.rs` (generated) covers the APX memory forms iced cannot decode |
+
+The kernels return every candidate in scan order; the caller applies the
+kind filter, attribution and the limit in the original order, so results
+and the logged counters are unchanged. One review finding, fixed: a
+truncated instance scan must log `declMethods` as the ordinal of the method
+that hit the limit, as the inline loop did.
+
+Intentional differences: buffer allocation failure returns "no
+candidates" instead of `bad_alloc` (as in R2), and the kernel scans every
+range before the caller cuts at `limit` (extra time only, no output change).
+Speed: the instance kernel is ~1.7–1.9× faster than the Zydis loop.
+
+Proof:
+- **Decoder facts:** `tools/zydis-oracle` against Zydis 17bc6fb — the xref
+  projection (the exact hit list per instruction) over ≈392M encodings
+  (exhaustive legacy maps / VEX2 / VEX3 + XOP / REX2 / APX memory forms,
+  sampled EVEX, 99M random): 0 differences; the chain projection over the
+  same sweeps (new) plus its 160M random: 0. Both generated tables
+  regenerate byte-identically.
+- **Kernels:** `xref_rust_diff.py` (in git history with the legacy kernels,
+  `987b20d`) ran `xref-dump` and `xref-dump-legacy` from the real CMake
+  build: 19/19 byte-identical — synthetic RIP sections (chunk boundaries,
+  NOACCESS / GUARD / reserved pages), 24k synthetic instance ranges at 23
+  offsets, RIP and instance passes over all 7 local `GameAssembly.dll`
+  images, error paths. It caught five deliberately broken legacy copies.
+  An independent kernel-level compare (both kernels in one process, every
+  `SafeReadBytes` call compared too) over 9,200 synthetic and 308 real-image
+  runs: 0 mismatches.
+- **Gate since the removal:** `xref-dump`'s outputs are in
+  `r2_golden.json` (16 entries), recorded from the proven build and
+  cross-checked against the legacy binary's own hashes. `r2_golden.py`:
+  33/33 on Release; the generated checks also pass on Debug.
+- **Review:** four reviewers (caller refactor, kernel transcription, decoder
+  facts, FFI + build) with an independent refuter per finding: the
+  `declMethods` log counter above, and stale docs. The kernel and decoder
+  reviewers found nothing.
+- `cargo test` 104 (x64) / 105 (i686), clippy clean; all builds
+  warning-free.
+
+Live A/B (same day, Utawarerumono, same procedure as R1 + R2: one warm-up
+run discarded, then the measured run): the pre-port baseline came from build
+#1469 (legacy Zydis kernels), the port from #1490 (Rust kernels). `r2_live.py
+compare` on the measured runs: **0 sections differ** — 45 static fields
+(365 refs), 45 instance fields (127 refs; the first five also with
+`kind=write` / `limit=2`, which exercises the filter and truncation path),
+150 × 2 AOB patterns, all metadata sections. The two warm-ups agree on the
+instance xrefs and AOB too; their static xrefs differ only by extra
+`chain-exact` rows on the Rust side (14 fields, none lost), the lazy
+class-pointer slot effect described above. Every static ref in this sample is
+a chain match, so the ported v1 RIP scan is proven offline only. The
+value/group part passed 7/7 and 4/4 on #1490's warm-up; the measured run used
+`r2_live.py --ab-only`, because its target search (a whole-heap
+`scanFieldValue` per candidate class) ran for 40 minutes without settling.
+`compare` now ignores the AOB responses' absolute `moduleBase`, which changes
+with ASLR when the game restarts.
+
+Size: with nothing referencing Zydis, `Discrete-IL2CPP.dll` (x64 Release,
+`/MD`) went from 2,099,200 to 1,714,176 bytes.
+
+Note for later (affects legacy and Rust equally): `Memory::SafeReadBytes`
+calls `VirtualQuery` per read, and on one large executable region that
+dominates the instance scan (an offline harness saw 8 s become 354 s).
+Worth a look if a live instance xref on a big game is slow.
+
 ## Fallback / removal
 
 - `-DDISCRETE_RUST_METADATA=OFF` rebuilds the DLL and metadata-cli on the
@@ -377,7 +462,13 @@ to x64).
   builds report SKIP. `--record` rewrites entries — only after proving a
   behaviour change correct. Checked 17/17 on Release and Debug, and a
   tampered hash reports FAIL.
-  Zydis stays while `IL2CPPFieldXref.cpp`'s instance-field scan uses it.
+- **FieldXref legacy removed (2026-11-14, after its live A/B).** The legacy
+  Zydis kernels, `xref-dump-legacy`, `xref_rust_diff.py` and the vendored
+  Zydis (CMake, `tools/vendor_pins.json`, CI) are gone; the legacy logic is in
+  git history (`IL2CPPFieldXrefScan.cpp`, `xref-dump-legacy` and
+  `xref_rust_diff.py`, last in `987b20d`).
+  `xref-dump`'s outputs joined `r2_golden.json` (recorded from the proven
+  build and cross-checked against the legacy binary's own hashes).
 - After the in-game smoke: delete `MetadataParser.cpp`, the legacy half of
   `MetadataParser.h`, the CMake option and `metadata-cli-legacy`. The harness
   then becomes a Rust-vs-recorded-baseline check (record `dump-parser`

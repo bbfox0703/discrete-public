@@ -9,7 +9,7 @@
 // every class in the searched assemblies' image.
 //
 // Instance fields use a separate scanner — FindInstanceFieldReferences —
-// which Zydis-decodes the DECLARING CLASS's own methods looking for
+// which decodes the DECLARING CLASS's own methods looking for
 // `[gpReg + fieldOffset]` accesses (base != rip/rsp/rbp). These are emitted
 // with confidence="heuristic" because the displacement alone (no taint of
 // `this`) can collide with unrelated objects touched in the same method.

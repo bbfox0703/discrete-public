@@ -6,7 +6,7 @@
     Two DIFFERENT kinds of third-party tree live here, and they must not be
     treated alike (lesson carried over from UE5CEDumper's sync_tools.ps1):
 
-      1. Build deps -> dll/vendor/<name>/   (nlohmann/json, MinHook, Zydis)
+      1. Build deps -> dll/vendor/<name>/   (nlohmann/json, MinHook)
          COMPILED INTO THE DLL. Each is PINNED to the commit recorded in
          tools/vendor_pins.json, which the release workflow reads too, so a
          local build and a CI release use the same sources. Moving a pin is a
@@ -25,6 +25,11 @@
     to upstream tip on every run, so a routine sync silently changed compiled
     code, and nothing recorded which commit a build had used. UE5CEDumper hit
     the same class of problem (a Zydis v4 -> v5 jump broke its decoder code).
+
+    Zydis was a build dep until the Rust core took over x64 decoding; it is
+    no longer compiled into anything shipped. tools/zydis-oracle fetches its
+    own pinned copy (fetch_zydis.ps1) for the decoder-fidelity oracle.
+    dll/vendor/zydis left over from older syncs is unused and safe to delete.
 
 .PARAMETER SkipReference
     Do not touch the reference clones; only restore / report the build deps.
@@ -201,17 +206,8 @@ foreach ($name in $depNames) {
     }
 }
 
-# 'git describe' is useless on these shallow clones, and for Zydis it would lie
-# anyway (master's ancestry only reaches the v4.0.0 tag while the header says
-# 5.x). The headers' own version macros are the fact.
-$zydisHeader = 'dll\vendor\zydis\include\Zydis\Zydis.h'
-if (Test-Path $zydisHeader) {
-    $m = Select-String -Path $zydisHeader -Pattern 'define\s+ZYDIS_VERSION\s+0x([0-9A-Fa-f]+)' | Select-Object -First 1
-    if ($m) {
-        $v = [Convert]::ToUInt64($m.Matches[0].Groups[1].Value, 16)
-        Write-Host ("  zydis version: {0}.{1}.{2} (from Zydis.h)" -f (($v -shr 48) -band 0xFFFF), (($v -shr 32) -band 0xFFFF), (($v -shr 16) -band 0xFFFF)) -ForegroundColor DarkGray
-    }
-}
+# 'git describe' is useless on these shallow clones. The headers' own version
+# macros are the fact.
 $jsonHeader = 'dll\vendor\nlohmann\single_include\nlohmann\json.hpp'
 if (Test-Path $jsonHeader) {
     $parts = foreach ($k in 'MAJOR', 'MINOR', 'PATCH') {

@@ -40,8 +40,9 @@
 //   will only match one path (the one we tracked). Unusual in practice
 //   — IL2CPP's translated C++ keeps the chain tight.
 // * Sub-register aliasing (rax / eax / ax / al all share storage) is
-//   handled via `ZydisRegisterGetLargestEnclosing` — we compare
-//   registers in their 64-bit canonical form.
+//   handled by comparing registers in their 64-bit canonical form
+//   (Zydis' ZydisRegisterGetLargestEnclosing in the legacy C++; the
+//   Rust port's decode adapter canonicalises the same way).
 // * The forward trace caps at 8 instructions per candidate. Compilers
 //   sometimes insert a null-check (`test rax, rax` / `jz null_path`)
 //   between hops — 8 is enough slack for that without admitting false

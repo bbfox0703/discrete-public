@@ -1123,7 +1123,8 @@ rebuild it):
 1. Find the v29 IL2CPP runtime's `il2cpp_codegen_initialize_runtime_metadata`
    function (frequency analysis: it's the single callTarget appearing
    thousands of times in the lazy-init pattern matches).
-2. Disassemble that function with Zydis (already vendored). Trace
+2. Disassemble that function (Zydis was vendored when this was written;
+   today the decoder is iced-x86 inside discrete_core, `chain::decode`). Trace
    what it reads from its `rcx` argument — that gives us the entry layout.
 3. Likely path: the function reads a `MetadataInitializerToken` structure
    (probably 4-8 bytes after the slot, or pointed to by it). The token

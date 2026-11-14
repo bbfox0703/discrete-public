@@ -1,8 +1,8 @@
 // IL2CPPFieldXrefScanRs.cpp — implements the IL2CPPFieldXrefScan.h kernels
 // over the Rust port (dll/rust/src/xref, C ABI dc_xref_* in
-// dll/rust/include/discrete_core.h). The legacy Zydis implementation is
-// IL2CPPFieldXrefScan.cpp; CMake picks one of the two
-// (DISCRETE_XREF_SCAN_SOURCE).
+// dll/rust/include/discrete_core.h). The legacy Zydis implementation was
+// removed once proven byte-identical; it is in git history as
+// IL2CPPFieldXrefScan.cpp (last in 987b20d).
 //
 // This file holds no scan logic: it copies the caller's ranges into the C ABI
 // structs, hands them plus the SEH read shim to Rust, and copies the

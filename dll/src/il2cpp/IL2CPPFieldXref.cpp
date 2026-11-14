@@ -518,8 +518,8 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     // Stage A (offline-ish): locate every `.data` / `.rdata` slot holding
     //   `(uintptr_t)target.klass` — these are the `[rip + DISP32]` targets
     //   we'll scan for in stage B.
-    // Stage B (executable scan + Zydis forward-trace): for each candidate
-    //   hop-1 load, decode forward via Zydis to confirm hops 2 + 3 with
+    // Stage B (executable scan + forward-trace, IL2CPPChainDetector): for
+    //   each candidate hop-1 load, decode forward to confirm hops 2 + 3 with
     //   the expected offsets.
     //
     // Only fires when v1 returned 0 — preserves backward compatibility

@@ -7369,7 +7369,7 @@ void RegisterCoreHandlers() {
     //     via il2cpp_class_get_static_data + offset, scan GameAssembly.dll's
     //     .text for `mov/lea reg, [rip+disp32]` (+ chain/lazy-init fallbacks)
     //     whose absolute target hits the field. confidence="exact".
-    //   * INSTANCE → FindInstanceFieldReferences: Zydis-decode the declaring
+    //   * INSTANCE → FindInstanceFieldReferences: decode the declaring
     //     class's own methods for `[gpReg + fieldOffset]` accesses (base !=
     //     rip/rsp/rbp). confidence="heuristic" (displacement match, no taint).
     // Each hit is attributed to its enclosing method via the sorted method-

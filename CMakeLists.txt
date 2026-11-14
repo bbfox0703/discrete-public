@@ -3,9 +3,10 @@ cmake_minimum_required(VERSION 3.25)
 project(Discrete
     VERSION 0.1.0
     DESCRIPTION "Unity Engine Dumper (Mono + IL2CPP) for Cheat Engine"
-    # Phase 28b-v2 needs C alongside CXX — Zydis is pure C. MinHook also C
-    # but its CMake auto-enabled it; declaring it here is cleaner + makes
-    # sure the C INCLUDE env path is consistently bootstrapped.
+    # C alongside CXX: MinHook is pure C (so was Zydis, vendored until the
+    # Rust core took over x64 decoding). Declaring it here is cleaner than
+    # relying on a vendor CMakeLists to enable it + makes sure the C INCLUDE
+    # env path is consistently bootstrapped.
     LANGUAGES C CXX
 )
 
@@ -172,13 +173,11 @@ set(DISCRETE_R2_SHARED_SOURCES
     CACHE INTERNAL "")
 set(DISCRETE_R2_IL2CPP_SOURCES ${_r2src}/il2cpp/IL2CPPChainDetectorRs.cpp CACHE INTERNAL "")
 
-# R2 follow-up — IL2CPPFieldXref's scan kernels (IL2CPPFieldXrefScan.h). While
-# the Rust port is being proven, both implementations exist: the DLL uses
-# DISCRETE_XREF_SCAN_SOURCE, and tools/r2-diff builds one harness binary per
-# implementation for the byte-for-byte differential.
-set(DISCRETE_XREF_SCAN_LEGACY ${_r2src}/il2cpp/IL2CPPFieldXrefScan.cpp   CACHE INTERNAL "")
-set(DISCRETE_XREF_SCAN_RS     ${_r2src}/il2cpp/IL2CPPFieldXrefScanRs.cpp CACHE INTERNAL "")
-set(DISCRETE_XREF_SCAN_SOURCE ${DISCRETE_XREF_SCAN_RS} CACHE INTERNAL "")
+# R2 follow-up — IL2CPPFieldXref's scan kernels (IL2CPPFieldXrefScan.h), over
+# the Rust port. Shared by the DLL and tools/r2-diff's xref-dump. The legacy
+# Zydis kernels were removed once proven byte-identical (git history:
+# IL2CPPFieldXrefScan.cpp, last in 987b20d).
+set(DISCRETE_XREF_SCAN_SOURCE ${_r2src}/il2cpp/IL2CPPFieldXrefScanRs.cpp CACHE INTERNAL "")
 
 add_subdirectory(dll)
 

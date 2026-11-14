@@ -40,7 +40,7 @@ jobs:
 
       - name: Fetch pinned C++ dependencies into dll/vendor
         shell: pwsh
-        # nlohmann/json, MinHook and Zydis (+ Zycore) at the commits recorded in
+        # nlohmann/json and MinHook at the commits recorded in
         # tools/vendor_pins.json - the same pins a local `sync_vendor.ps1` uses,
         # so a release cannot change because an upstream moved. Reference clones
         # (vendor/) are documentation only and skipped here.

@@ -1,6 +1,7 @@
 //! Zydis -> iced-x86 adapter.
 //!
-//! The legacy detector asked Zydis 5.0 (vendored at `dll/vendor/zydis`,
+//! The legacy detector asked Zydis 5.0 (commit 17bc6fb, vendored then at
+//! `dll/vendor/zydis`; tools/zydis-oracle now fetches that exact copy,
 //! decoder in `ZYDIS_MACHINE_MODE_LONG_64` with its default decoder modes —
 //! MPX, CET, LZCNT, TZCNT, CLDEMOTE, IPREFETCH and **APX** on; KNC, AMD
 //! branches, WBNOINVD, UD0-compat off) a handful of questions per
@@ -19,8 +20,8 @@
 //! | `mem.base` / `mem.index != NONE` / `DispOrZero`  | `Operand::Mem`                         |
 //! | visible REGISTER operands with ACTION_MASK_WRITE | `Insn::writes`                         |
 //!
-//! Mapping decisions (each one measured against the vendored Zydis with the
-//! scratch differential harness: exhaustive legacy map 0 / 0F / 0F38 / 0F3A x
+//! Mapping decisions (each one measured against that Zydis with the
+//! differential oracle, now tools/zydis-oracle: exhaustive legacy map 0 / 0F / 0F38 / 0F3A x
 //! prefix combinations x REX x ModRM, exhaustive VEX2, sampled VEX3 / EVEX /
 //! XOP / 3DNow! / REX2 spaces and 160 M random byte strings — 0 differences):
 //!
@@ -89,7 +90,7 @@
 //!   the KNC VPREFETCH* / CLEVICT0/1 memory forms Zydis decodes from VEX (one
 //!   READ operand).
 //!
-//! Verified against the vendored Zydis with the scratch oracle (projection =
+//! Verified against that Zydis with tools/zydis-oracle (projection =
 //! the exact hit list `ScanInstanceAccesses` builds per instruction):
 //! exhaustive legacy maps 0 / 0F / 0F38 / 0F3A x 14 prefix sets x 9 REX x
 //! ModRM x 4 SIB tails (132 M), exhaustive VEX2 (33.5 M), VEX3 + XOP (84 M),

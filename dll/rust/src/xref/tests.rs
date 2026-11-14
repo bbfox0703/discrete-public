@@ -1,7 +1,7 @@
 //! Unit tests: hand-assembled code in an in-memory "module", read through
 //! the chain detector's fake `dc_read_fn` (holes = unreadable ranges). The
 //! expected decoder facts of every instruction below were checked against
-//! the vendored Zydis (scratch oracle, see `chain::decode`).
+//! Zydis (tools/zydis-oracle, see `chain::decode`).
 
 use super::*;
 use crate::chain::tests::{FakeMem, fake_read};

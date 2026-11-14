@@ -10,7 +10,7 @@ so this script compares the Rust build against SHA-256 hashes of that proven
 output instead, stored in r2_golden.json next to this file. The IL2CPPFieldXref
 scan kernels followed the same path: xref-dump (tools/r2-diff/xref_dump.cpp)
 was proven byte-identical to the legacy Zydis kernels by
-tools/verify/xref_rust_diff.py (git history) before those were deleted.
+tools/verify/xref_rust_diff.py before those were deleted (both last in 987b20d).
 
   * r2-dump aob-synthetic / gm / refine and xref-dump rip-synthetic /
     inst-synthetic use fixed seeds and no input file, so their hashes hold on
@@ -30,8 +30,9 @@ tools/verify/xref_rust_diff.py (git history) before those were deleted.
 build whose output you have independently proven correct -- a changed hash
 means the behaviour changed, and recording it silently blesses the change.
 The legacy implementations are in git history (R2 modules last present in
-aae48d3; the xref kernels in the commit that removed IL2CPPFieldXrefScan.cpp)
-if a behaviour change ever needs re-proving against them.
+aae48d3; the xref kernels, IL2CPPFieldXrefScan.cpp, in 987b20d)
+if a behaviour change ever needs re-proving against them. Decoder-level
+changes are re-proven against Zydis with tools/zydis-oracle.
 
 Build both tools first with `build.cmd cli` (build/cli-release/bin/). Images
 default to <root>/GameAssembly.dll for every <root>/<X>_Data/il2cpp_data/

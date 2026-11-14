@@ -1,7 +1,7 @@
 //! APX EVEX decode facts (map 4 "promoted legacy" instructions and the
-//! EVEX-promoted VEX GPR instructions), GENERATED from the vendored Zydis
-//! 5.0 (dll/vendor/zydis) by the scratch differential harness
-//! (`map4_emit_rust`). iced-x86 1.22 has no APX support, so the chain
+//! EVEX-promoted VEX GPR instructions), GENERATED from Zydis 5.0 (commit
+//! 17bc6fb, the legacy DLL's pin) by tools/zydis-oracle
+//! (`build.ps1 -Mode tables`). iced-x86 1.22 has no APX support, so the chain
 //! detector answers these encodings from this table instead.
 //!
 //! `GROUP[op << 4 | mod3 << 3 | modrm.reg]` (map 4) or an `EXTRA` row

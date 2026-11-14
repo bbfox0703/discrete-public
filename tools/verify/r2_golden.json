@@ -1,5 +1,5 @@
 {
- "about": "SHA-256 of r2-dump stdout per check, recorded from the Rust build after r2_rust_diff.py proved it byte-identical to the legacy C++ (19/19). image entries are keyed by the SHA-256 of the GameAssembly.dll file. Maintained by tools/verify/r2_golden.py --record.",
+ "about": "SHA-256 of r2-dump / xref-dump stdout per check. r2-dump entries (aob, chain, gm, refine) were recorded after r2_rust_diff.py proved the Rust build byte-identical to the legacy C++ (19/19; legacy last in aae48d3); xref-dump entries (rip, inst) after xref_rust_diff.py proved the same for the IL2CPPFieldXref kernels (19/19; legacy last in 987b20d). Image entries are keyed by the SHA-256 of the GameAssembly.dll file. Maintained by tools/verify/r2_golden.py --record.",
  "entries": {
   "aob-synthetic": {
    "sha256": "c4cd0de22b31ee3f0f76b70096b14134040c415d664e34fa7e5879a0aa97c3b7",

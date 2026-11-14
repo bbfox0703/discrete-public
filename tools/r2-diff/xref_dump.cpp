@@ -1,16 +1,17 @@
-// xref_dump.cpp — differential driver for the IL2CPPFieldXref scan kernels
-// (xref-dump.exe / xref-dump-legacy.exe, never shipped).
+// xref_dump.cpp — regression driver for the IL2CPPFieldXref scan kernels
+// (xref-dump.exe, never shipped).
 //
-// Built twice from this one source (tools/r2-diff/CMakeLists.txt):
-//   xref-dump         IL2CPPFieldXrefScanRs.cpp -> the Rust port in discrete_core
-//   xref-dump-legacy  IL2CPPFieldXrefScan.cpp   -> the legacy C++ + Zydis
-// tools/verify/xref_rust_diff.py runs both and requires byte-identical exit
-// code, stdout and stderr. The driver calls ONLY the kernel API of
-// dll/src/il2cpp/IL2CPPFieldXrefScan.h:
+// Links IL2CPPFieldXrefScanRs.cpp -> the Rust port in discrete_core;
+// tools/verify/r2_golden.py compares its output with recorded SHA-256 hashes.
+// Until the port was proven, the same source also built xref-dump-legacy
+// (the legacy C++ kernels + Zydis) and tools/verify/xref_rust_diff.py
+// required byte-identical exit code, stdout and stderr from the two; the
+// golden hashes were recorded from that proven output. The driver calls ONLY
+// the kernel API of dll/src/il2cpp/IL2CPPFieldXrefScan.h:
 //   Discrete::IL2CPP::XrefScan::ScanRipRelative
 //   Discrete::IL2CPP::XrefScan::ScanInstanceAccesses
 //
-// Output rules (what makes a byte compare meaningful):
+// Output rules (what makes a hash compare meaningful):
 //   * Deterministic: a local splitmix64 PRNG with fixed seeds, no clock, no
 //     environment, no paths, no absolute addresses. Addresses are printed
 //     relative to the mapped module (image subcommands) or to the synthetic
@@ -261,8 +262,8 @@ bool ReadFileAt(HANDLE file, std::uint64_t offset, void* dst, std::uint32_t len)
 }
 
 // Maps GameAssembly.dll without running any of its code, then NORMALISES every
-// executable section to the exact bytes stored in the file, so the two
-// processes (Rust and legacy flavour) scan identical code wherever the loader
+// executable section to the exact bytes stored in the file, so every run
+// scans identical code wherever the loader
 // placed the module — base relocations patch code bytes as a function of the
 // load address; file bytes do not depend on it. RIP-relative displacements
 // never carry relocations, and every printed address is module-relative.
@@ -1251,7 +1252,7 @@ void GenInsn(SplitMix64& rng, std::vector<std::uint8_t>& v) {
 }
 
 // Hand-written edge cases (hex), one range each. Comments name the intent;
-// what each kernel reports is whatever the legacy decoder says.
+// what the kernel reports is whatever the legacy (Zydis) decoder said.
 constexpr std::string_view kInstEdges[] = {
     "488B4010",               // mov rax,[rax+0x10]          read
     "48894810",               // mov [rax+0x10],rcx          write

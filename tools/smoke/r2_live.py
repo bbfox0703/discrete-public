@@ -10,8 +10,13 @@ must match exactly. The "live" section holds per-run PASS/FAIL checks of the
 value-scan refine comparator and the group-scan matcher, which work on heap
 addresses that change between runs.
 
-    python -u r2_live.py run <exe-substring> <out.json> [assembly]
+    python -u r2_live.py run <exe-substring> <out.json> [assembly] [--ab-only]
     python -u r2_live.py compare <a.json> <b.json>
+
+--ab-only records the restart-stable "ab" sections and skips the value/group
+part (no writes). Its target search runs a whole-heap scanFieldValue per
+candidate class, which can take hours when the first candidates fail the
+ownership check.
 
 What each part exercises:
   metadata (R1)   getClasses / getClassInfo over the first N classes (field
@@ -115,7 +120,7 @@ def tc(r, cmd, args=None):
 
 
 # --------------------------------------------------------------------------
-def run(game, out_path, asm_want):
+def run(game, out_path, asm_want, ab_only=False):
     pid, pname = dh.find_pid(game)
     if not pid:
         print('process not found: %s' % game)
@@ -296,7 +301,7 @@ def run(game, out_path, asm_want):
 
         # ---- R2 value refine + group match (writes 2 fields, restores) ------
         tgt = None
-        for c in classes:
+        for c in ([] if ab_only else classes):
             if tgt:
                 break
             ns, nm = c.get('namespace', ''), c.get('name', '')
@@ -343,7 +348,9 @@ def run(game, out_path, asm_want):
                     break
             if owned:
                 tgt = (ns, nm, ia, ints[0], ints[1])
-        if not tgt:
+        if ab_only:
+            print('  SKIP  value/group (--ab-only)')
+        elif not tgt:
             rep.check('value/group: found an object with two int32 fields', False)
         else:
             ns, nm, ia, fa, fb = tgt
@@ -431,9 +438,20 @@ def run(game, out_path, asm_want):
     return rep.summary()
 
 
+def _strip_volatile(x):
+    """Drops values that legitimately change across a game restart: the AOB
+    responses carry the absolute moduleBase (ASLR), next to the
+    restart-stable moduleOffset that is compared."""
+    if isinstance(x, dict):
+        return {k: _strip_volatile(v) for k, v in x.items() if k != 'moduleBase'}
+    if isinstance(x, list):
+        return [_strip_volatile(v) for v in x]
+    return x
+
+
 def compare(pa, pb):
-    a = json.load(open(pa, encoding='utf-8'))['ab']
-    b = json.load(open(pb, encoding='utf-8'))['ab']
+    a = _strip_volatile(json.load(open(pa, encoding='utf-8'))['ab'])
+    b = _strip_volatile(json.load(open(pb, encoding='utf-8'))['ab'])
     bad = 0
     for k in sorted(set(a) | set(b)):
         if k not in a or k not in b:
@@ -460,7 +478,13 @@ def compare(pa, pb):
 
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == 'run':
-        sys.exit(run(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else 'Assembly-CSharp'))
+        flags = [a for a in sys.argv[2:] if a.startswith('--')]
+        pos = [a for a in sys.argv[2:] if not a.startswith('--')]
+        if set(flags) - {'--ab-only'} or len(pos) not in (2, 3):
+            print(__doc__)
+            sys.exit(1)
+        sys.exit(run(pos[0], pos[1], pos[2] if len(pos) > 2 else 'Assembly-CSharp',
+                     ab_only='--ab-only' in flags))
     if len(sys.argv) == 4 and sys.argv[1] == 'compare':
         sys.exit(compare(sys.argv[2], sys.argv[3]))
     print(__doc__)

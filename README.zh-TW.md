@@ -69,7 +69,7 @@ toolchain 與兩個 target 會依 `rust-toolchain.toml` 自動安裝)、Python 3
 檢查用),Lua bridge 需要 Cheat Engine 7.5+。
 
 ```powershell
-.\sync_vendor.ps1            # 抓取鎖定版本的 C++ 依賴(nlohmann/json、MinHook、Zydis)
+.\sync_vendor.ps1            # 抓取鎖定版本的 C++ 依賴(nlohmann/json、MinHook)
 .\build.cmd publish clean    # DLL + Native AOT UI + 測試 + metadata-cli -> dist\
 .\build.cmd /?               # 所有 target(ui、dll、mono、il2cpp、test、deploy……)
 ```
@@ -113,5 +113,5 @@ Silence 等,涵蓋兩種 backend 與所有支援的 metadata 版本。完整清�
 
 Cheat Engine(Eric "Dark Byte" Heijnen 與社群)· Avalonia ·
 CommunityToolkit.Mvvm · nlohmann/json(MIT)· MinHook(BSD-2-Clause)·
-Zydis(MIT)· xunit.v3 · BepInEx、MelonLoader、Il2CppInterop 提供
+iced-x86(MIT)· Zydis(MIT;oracle 的解碼參考)· xunit.v3 · BepInEx、MelonLoader、Il2CppInterop 提供
 `runtime_invoke` marshaling 參考 · 上游 libil2cpp 原始碼供 layout 交叉比對。

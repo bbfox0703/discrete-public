@@ -231,7 +231,7 @@ public class FindFieldReferencesTests
     public async Task FindFieldReferences_IL2CPPInstanceShape_DecodesHeuristicConfidence()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        // Phase 28b instance path: the DLL now Zydis-decodes the declaring
+        // Phase 28b instance path: the DLL now decodes the declaring
         // class's own methods for `[reg+fieldOffset]` accesses and returns
         // confidence="heuristic" rows (instead of the old v1 error). The
         // field header carries isStatic=false and NO staticAddress (instance

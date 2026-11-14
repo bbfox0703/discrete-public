@@ -2,9 +2,9 @@
 //! answers from `chain::apx_map4` (map 4 "promoted legacy" instructions and
 //! the EVEX-promoted VEX GPR instructions) — iced-x86 1.22 cannot decode
 //! them, so the instance-field scan needs Zydis' answer from a table too.
-//! GENERATED from the vendored Zydis 5.0 (dll/vendor/zydis, decoder
-//! LONG_64, default modes) by the scratch differential harness
-//! (`apx_mem_emit_rust`); do not edit by hand.
+//! GENERATED from Zydis 5.0 (commit 17bc6fb, the legacy DLL's pin; decoder
+//! LONG_64, default modes) by tools/zydis-oracle
+//! (`build.ps1 -Mode tables`); do not edit by hand.
 //!
 //! Every such memory form has exactly one memory operand, always visible,
 //! with an unscaled displacement (disp8 * 1). Its access depends only on

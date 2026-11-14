@@ -70,7 +70,7 @@ toolchain and both targets install from `rust-toolchain.toml`), Python 3
 (build-time checks), and Cheat Engine 7.5+ for the Lua bridge.
 
 ```powershell
-.\sync_vendor.ps1            # fetch pinned C++ deps (nlohmann/json, MinHook, Zydis)
+.\sync_vendor.ps1            # fetch pinned C++ deps (nlohmann/json, MinHook)
 .\build.cmd publish clean    # DLLs + Native AOT UI + tests + metadata-cli -> dist\
 .\build.cmd /?               # all targets (ui, dll, mono, il2cpp, test, deploy, ...)
 ```
@@ -115,6 +115,6 @@ Full list: [docs/test-matrix.md](docs/test-matrix.md).
 
 Cheat Engine (Eric "Dark Byte" Heijnen and community) · Avalonia ·
 CommunityToolkit.Mvvm · nlohmann/json (MIT) · MinHook (BSD-2-Clause) ·
-Zydis (MIT) · xunit.v3 · BepInEx, MelonLoader and Il2CppInterop for
+iced-x86 (MIT) · Zydis (MIT; decoder reference for the oracle) · xunit.v3 · BepInEx, MelonLoader and Il2CppInterop for
 `runtime_invoke` marshaling reference · upstream libil2cpp sources for layout
 cross-checks.
