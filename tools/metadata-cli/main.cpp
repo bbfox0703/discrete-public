@@ -784,6 +784,261 @@ int CmdCodeModules(const std::wstring& path) {
 // Produces three files: <prefix>.dd64, <prefix>.ghidra.txt, <prefix>.idc.
 // Stdout is a JSON stats summary so the caller can see resolution rate
 // (resolved / total methods) without having to count file rows.
+// --- Phase R1: dump-parser ---------------------------------------------------
+//
+// Walk of the whole public Parser API, one JSON line per record, plus
+// out-of-range probes for every getter. Every row is walked except three
+// calls that are O(n^2) through the legacy parser and therefore sampled
+// (FindFieldDefault, FindTypeByName, FindImageContainingMethod — see the
+// comments at each). Not meant for humans: the R1
+// differential harness (tools/verify/metadata_rust_diff.py) runs it through
+// metadata-cli (Rust parser) and metadata-cli-legacy (C++ parser) and diffs
+// the output byte-for-byte, so any behavioural difference between the two
+// parser implementations surfaces — including string literals, which no
+// other subcommand prints. Keep it deterministic: no timestamps, no paths.
+
+namespace {
+
+void PutHexBytes(const std::vector<std::uint8_t>& b) {
+    static const char kHex[] = "0123456789abcdef";
+    std::fputc('"', stdout);
+    for (std::uint8_t c : b) {
+        std::fputc(kHex[c >> 4], stdout);
+        std::fputc(kHex[c & 0xF], stdout);
+    }
+    std::fputc('"', stdout);
+}
+
+void PutOptString(const std::optional<std::string>& s) {
+    if (s) PutJsonString(*s); else std::fputs("null", stdout);
+}
+
+void PutTypeDef(const char* rec, const Parser::TypeDefView& t) {
+    std::printf("{\"rec\":\"%s\",\"index\":%d,\"ns\":", rec, t.index);
+    PutJsonString(t.ns);
+    std::fputs(",\"name\":", stdout);
+    PutJsonString(t.name);
+    std::printf(",\"decl\":%d,\"fs\":%d,\"fc\":%u,\"ms\":%d,\"mc\":%u,"
+                "\"flags\":%u,\"bits\":%u,\"token\":%u}\n",
+                t.declaringTypeIndex, t.fieldStart, t.fieldCount,
+                t.methodStart, t.methodCount, t.flags, t.bitfield, t.token);
+}
+
+void PutImage(const char* rec, const Parser::ImageDefView& im) {
+    std::printf("{\"rec\":\"%s\",\"index\":%d,\"name\":", rec, im.index);
+    PutJsonString(im.name);
+    std::printf(",\"ts\":%d,\"tc\":%u,\"token\":%u,\"ms\":%d,\"me\":%d}\n",
+                im.typeStart, im.typeCount, im.token, im.methodStart, im.methodEnd);
+}
+
+void PutFieldDefault(std::int32_t fieldIdx, const Parser& p) {
+    auto fd = p.FindFieldDefault(fieldIdx);
+    std::printf("{\"rec\":\"fdef\",\"field\":%d,\"found\":%s", fieldIdx, fd ? "true" : "false");
+    if (fd) {
+        std::printf(",\"fi\":%d,\"ti\":%d,\"di\":%d,\"data\":",
+                    fd->fieldIndex, fd->typeIndex, fd->dataIndex);
+        PutHexBytes(fd->data);
+        std::fputs(",\"str\":", stdout);
+        PutOptString(p.TryDecodeStringDefault(fd->dataIndex));
+    }
+    std::fputs("}\n", stdout);
+}
+
+}  // namespace
+
+int CmdDumpParser(const std::wstring& path) {
+    constexpr std::int32_t kI32Max = 0x7FFFFFFF;
+    constexpr std::int32_t kI32Min = -kI32Max - 1;
+
+    Parser p;
+    const bool ok = p.LoadFromPath(path);
+    const std::uint32_t nLit  = p.StringLiteralCount();
+    const std::uint32_t nType = p.TypeDefinitionCount();
+    const std::uint32_t nMeth = p.MethodDefinitionCount();
+    const std::uint32_t nPar  = p.ParameterCount();
+    const std::uint32_t nImg  = p.ImageCount();
+    std::printf("{\"rec\":\"load\",\"ok\":%s,\"loaded\":%s,\"version\":%d,\"v24\":",
+                ok ? "true" : "false", p.loaded() ? "true" : "false", p.version());
+    PutJsonString(p.v24SubVersionLabel());
+    std::printf(",\"lits\":%u,\"types\":%u,\"methods\":%u,\"params\":%u,\"images\":%u}\n",
+                nLit, nType, nMeth, nPar, nImg);
+    // No early return on a failed load: the getters' "not loaded" answers are
+    // part of the contract too.
+
+    // String literals: every entry, the enumerator, and out-of-range probes.
+    for (std::uint32_t i = 0; i < nLit; ++i) {
+        std::printf("{\"rec\":\"lit\",\"i\":%u,\"v\":", i);
+        PutOptString(p.GetStringLiteral(i));
+        std::fputs("}\n", stdout);
+    }
+    for (std::uint32_t probe : {nLit, nLit + 1u, 0xFFFFFFFFu}) {
+        std::printf("{\"rec\":\"lit-probe\",\"i\":%u,\"v\":", probe);
+        PutOptString(p.GetStringLiteral(probe));
+        std::fputs("}\n", stdout);
+    }
+    for (std::uint32_t maxCount : {0u, 1u, 7u, 0xFFFFFFFFu}) {
+        auto v = p.EnumerateStringLiterals(maxCount);
+        std::printf("{\"rec\":\"lit-enum\",\"max\":%u,\"n\":%zu,\"last\":", maxCount, v.size());
+        PutJsonString(v.empty() ? std::string{} : v.back());
+        std::fputs("}\n", stdout);
+    }
+
+    // Name-heap probes (every real heap read is covered through the names below).
+    for (std::int32_t idx : {kI32Min, -1, 0, 1, 2, 64, 4096, kI32Max}) {
+        std::printf("{\"rec\":\"heap-probe\",\"i\":%d,\"v\":", idx);
+        PutJsonString(p.GetHeapString(idx));
+        std::fputs("}\n", stdout);
+    }
+
+    // Type definitions + their fields / methods / nested-type parent.
+    std::vector<Parser::TypeDefView> types;
+    types.reserve(nType);
+    for (std::uint32_t t = 0; t < nType; ++t) {
+        auto td = p.GetTypeDefinition(static_cast<std::int32_t>(t));
+        if (!td) {
+            std::printf("{\"rec\":\"type-miss\",\"i\":%u}\n", t);
+            continue;
+        }
+        PutTypeDef("type", *td);
+        std::printf("{\"rec\":\"decl\",\"i\":%u,\"parent\":%d}\n",
+                    t, p.GetDeclaringTypeIndex(static_cast<std::int32_t>(t)));
+
+        const auto fields = p.EnumerateTypeFields(*td);
+        // Field defaults: FindFieldDefault is a linear scan, so walking it for
+        // every field would be O(fields x defaults). Enums (where nearly every
+        // field has a default) are walked fully, every 7th type otherwise.
+        const bool walkDefaults = td->IsEnum() || (t % 7u) == 0u;
+        for (const auto& f : fields) {
+            std::printf("{\"rec\":\"field\",\"t\":%u,\"index\":%d,\"name\":", t, f.index);
+            PutJsonString(f.name);
+            std::printf(",\"ti\":%d,\"token\":%u}\n", f.typeIndex, f.token);
+            if (walkDefaults) PutFieldDefault(f.index, p);
+        }
+
+        const auto methods = p.EnumerateTypeMethods(*td);
+        std::printf("{\"rec\":\"type-methods\",\"t\":%u,\"n\":%zu,\"idx\":[", t, methods.size());
+        for (std::size_t k = 0; k < methods.size(); ++k) {
+            std::printf(k ? ",%d" : "%d", methods[k].index);
+        }
+        std::fputs("]}\n", stdout);
+        // Enumerator vs getter: the enumerated rows must equal
+        // GetMethodDefinition(index) field-for-field. Printed only on a
+        // mismatch, so a parser whose two paths disagree diverges from one
+        // whose paths agree. (The method records below dump every row fully.)
+        for (const auto& em : methods) {
+            auto gm = p.GetMethodDefinition(em.index);
+            const bool same = gm && gm->name == em.name &&
+                gm->declaringTypeIndex == em.declaringTypeIndex &&
+                gm->returnTypeIndex == em.returnTypeIndex &&
+                gm->parameterStart == em.parameterStart &&
+                gm->parameterCount == em.parameterCount &&
+                gm->flags == em.flags && gm->token == em.token;
+            if (!same) std::printf("{\"rec\":\"enum-get-mismatch\",\"t\":%u,\"m\":%d}\n", t, em.index);
+        }
+        types.push_back(*td);
+    }
+    for (std::int32_t probe : {kI32Min, -1, static_cast<std::int32_t>(nType), kI32Max}) {
+        auto td = p.GetTypeDefinition(probe);
+        std::printf("{\"rec\":\"type-probe\",\"i\":%d,\"found\":%s,\"parent\":%d}\n",
+                    probe, td ? "true" : "false", p.GetDeclaringTypeIndex(probe));
+    }
+
+    // FindTypeByName: O(types) per call, so sample every 97th type plus
+    // misses (first-match semantics matter when names repeat).
+    for (std::size_t k = 0; k < types.size(); k += 97) {
+        auto hit = p.FindTypeByName(types[k].ns, types[k].name);
+        std::printf("{\"rec\":\"find\",\"q\":%zu,\"hit\":%d}\n", k, hit ? hit->index : -1);
+    }
+    for (const auto& q : std::vector<std::pair<std::string, std::string>>{
+             {"", ""}, {"System", "Int32"}, {"System", "String"}, {"", "<Module>"},
+             {"UnityEngine", "Vector3"}, {"No.Such", "Type"}}) {
+        auto hit = p.FindTypeByName(q.first, q.second);
+        std::fputs("{\"rec\":\"find-name\",\"q\":", stdout);
+        PutJsonString(q.first + "." + q.second);
+        std::printf(",\"hit\":%d}\n", hit ? hit->index : -1);
+    }
+
+    // Field-default / string-default probes.
+    for (std::int32_t idx : {kI32Min, -1, kI32Max}) PutFieldDefault(idx, p);
+    for (std::int32_t idx : {kI32Min, -1, 0, 1, kI32Max}) {
+        std::printf("{\"rec\":\"strdef-probe\",\"i\":%d,\"v\":", idx);
+        PutOptString(p.TryDecodeStringDefault(idx));
+        std::fputs("}\n", stdout);
+    }
+
+    // Methods + their parameters + owning image.
+    for (std::uint32_t m = 0; m < nMeth; ++m) {
+        auto md = p.GetMethodDefinition(static_cast<std::int32_t>(m));
+        if (!md) {
+            std::printf("{\"rec\":\"method-miss\",\"i\":%u}\n", m);
+            continue;
+        }
+        std::printf("{\"rec\":\"method\",\"index\":%d,\"name\":", md->index);
+        PutJsonString(md->name);
+        std::printf(",\"decl\":%d,\"ret\":%d,\"ps\":%d,\"pc\":%u,\"flags\":%u,\"token\":%u",
+                    md->declaringTypeIndex, md->returnTypeIndex, md->parameterStart,
+                    md->parameterCount, md->flags, md->token);
+        const auto params = p.EnumerateMethodParameters(*md);
+        std::printf(",\"params\":[");
+        for (std::size_t k = 0; k < params.size(); ++k) {
+            if (k) std::fputc(',', stdout);
+            std::printf("[%d,", params[k].index);
+            PutJsonString(params[k].name);
+            std::printf(",%d,%u]", params[k].typeIndex, params[k].token);
+        }
+        // FindImageContainingMethod re-walks every image's types per call
+        // (O(methods x types) — hours on a 40k-type v39 file through the
+        // legacy parser), so only every 61st method, plus the first/last of
+        // each image via the image records below, is resolved.
+        if (m % 61u == 0u || m + 1u == nMeth) {
+            auto img = p.FindImageContainingMethod(static_cast<std::int32_t>(m));
+            std::printf("],\"image\":%d}\n", img ? img->index : -1);
+        } else {
+            std::fputs("]}\n", stdout);
+        }
+    }
+    for (std::int32_t probe : {kI32Min, -1, static_cast<std::int32_t>(nMeth), kI32Max}) {
+        auto img = p.FindImageContainingMethod(probe);
+        std::printf("{\"rec\":\"method-probe\",\"i\":%d,\"found\":%s,\"image\":%d}\n",
+                    probe, p.GetMethodDefinition(probe) ? "true" : "false",
+                    img ? img->index : -1);
+    }
+
+    // Parameter table, directly (EnumerateMethodParameters above only reaches
+    // rows that some method points at).
+    for (std::uint32_t i = 0; i < nPar; ++i) {
+        auto pd = p.GetParameter(static_cast<std::int32_t>(i));
+        if (!pd) {
+            std::printf("{\"rec\":\"param-miss\",\"i\":%u}\n", i);
+            continue;
+        }
+        std::printf("{\"rec\":\"param\",\"index\":%d,\"name\":", pd->index);
+        PutJsonString(pd->name);
+        std::printf(",\"ti\":%d,\"token\":%u}\n", pd->typeIndex, pd->token);
+    }
+    for (std::int32_t probe : {kI32Min, -1, static_cast<std::int32_t>(nPar), kI32Max}) {
+        std::printf("{\"rec\":\"param-probe\",\"i\":%d,\"found\":%s}\n",
+                    probe, p.GetParameter(probe) ? "true" : "false");
+    }
+
+    // Images: the enumerator and the indexed getter (incl. one past the end).
+    for (const auto& im : p.EnumerateImages()) {
+        PutImage("image", im);
+        // Image boundaries are where an off-by-one in the [start, end) range
+        // check would show, so resolve both edges of every image.
+        for (std::int32_t m : {im.methodStart - 1, im.methodStart, im.methodEnd - 1, im.methodEnd}) {
+            auto hit = p.FindImageContainingMethod(m);
+            std::printf("{\"rec\":\"image-edge\",\"m\":%d,\"image\":%d}\n", m, hit ? hit->index : -1);
+        }
+    }
+    for (std::int32_t i = -1; i <= static_cast<std::int32_t>(nImg); ++i) {
+        if (auto im = p.GetImage(i)) PutImage("image-get", *im);
+        else std::printf("{\"rec\":\"image-get-miss\",\"i\":%d}\n", i);
+    }
+    std::fputs("{\"rec\":\"end\"}\n", stdout);
+    return 0;
+}
+
 int CmdSymbols(int argc, wchar_t** argv) {
     std::wstring gaPath, metadataPath, outPrefix;
 
@@ -1175,6 +1430,8 @@ void Usage(std::FILE* out) {
         "  metadata-cli symbols       <GameAssembly.dll> <global-metadata.dat> <output-prefix>\n"
         "      (emits <prefix>.dd64 + <prefix>.ghidra.txt + <prefix>.idc)\n"
         "  metadata-cli resolve       <spec>       show what <spec> maps to\n"
+        "  metadata-cli dump-parser   <spec>       full parser API walk (JSON lines) for\n"
+        "                                          tools/verify/metadata_rust_diff.py\n"
         "  metadata-cli steam-vdf                  list Steam VDF: name -> install folder\n"
         "  metadata-cli steam-games                same, as JSON lines (for scripts)\n"
         "  metadata-cli --help                     this text\n\n"
@@ -1337,6 +1594,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     else if (sub == L"methods") return run(kMeta, [](const std::wstring& p) { return CmdMethods(p); });
     else if (sub == L"images")  return run(kMeta, [](const std::wstring& p) { return CmdImages(p); });
+    else if (sub == L"dump-parser") return run(kMeta, [](const std::wstring& p) { return CmdDumpParser(p); });
     else if (sub == L"method") {
         if (argc < 6) { Usage(stderr); return 2; }
         std::string ns = Resolve::WideToUtf8(argv[3]);

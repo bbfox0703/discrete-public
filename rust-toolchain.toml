@@ -1,0 +1,11 @@
+# Pinned Rust toolchain for the Rust core (dll/rust, docs/rust-core.md).
+# rustup reads this for any cargo/rustc call under the repo root, locally and
+# in CI (release.yml and build.ps1 run `rustup toolchain install` to fetch it). Pinning an exact
+# version keeps release binaries reproducible — same policy as the pinned C++
+# vendor deps in tools/vendor_pins.json. Bump deliberately; see
+# docs/rust-core.md "Toolchain bump".
+[toolchain]
+channel = "1.100.0"
+targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]
+profile = "minimal"
+components = ["clippy"]

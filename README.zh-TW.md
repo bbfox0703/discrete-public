@@ -64,8 +64,9 @@ CT 製作流程見 [USAGE.md](USAGE.md),Lua API 見
 ## 從原始碼建置
 
 需求:Windows 10/11 x64、Visual Studio(C++ workload,已內含 CMake 與
-Ninja)、.NET SDK 10、Python 3(建置時的檢查用),Lua bridge 需要
-Cheat Engine 7.5+。
+Ninja)、.NET SDK 10、透過 [rustup](https://rustup.rs) 安裝的 Rust(固定版本的
+toolchain 與兩個 target 會依 `rust-toolchain.toml` 自動安裝)、Python 3(建置時的
+檢查用),Lua bridge 需要 Cheat Engine 7.5+。
 
 ```powershell
 .\sync_vendor.ps1            # 抓取鎖定版本的 C++ 依賴(nlohmann/json、MinHook、Zydis)

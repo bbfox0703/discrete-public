@@ -8,13 +8,13 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1429**(2026-08-27:`build.cmd dll`,proxy pre-CRT gate;x86 為 **#1430**。⚠️ **`dist/` 目前是 Release(/MD)**,出貨前需重跑 `build.cmd publish` 拿 /MT + AOT(hash 注入已隨 Phase 26 移除)。前:#1417,2026-08-16 `publish` UI-only)|
-| **Current phase** | 🛡️ **Proxy DLL pre-CRT gate(2026-08-27,x64 離線驗證含 negative control;x86 by construction;實機 live-smoke 待補)**。前:🎨 Avalonia/Skia/HarfBuzz 版本綁定 + build-time guard(2026-08-16,UI 已實測)|
+| **Current build** | **#1453**(2026-11-14:`build.cmd dll` + `build.cmd cli`,Rust core R0/R1。⚠️ **`dist/` 是 Release(/MD)**,出貨前需重跑 `build.cmd publish` 拿 /MT + AOT。前:#1429,2026-08-27 `build.cmd dll` proxy pre-CRT gate)|
+| **Current phase** | 🦀 **Rust core R0 + R1(2026-11-14)** — DLL 改寫成 Rust 的 strangler 第一步:R0 工具鏈(x64/x86 × /MD,/MT × Debug/Release 全過)+ R1 `global-metadata.dat` parser 移到 Rust(差分 harness 7 fixtures / 1589 checks / 0 差異)。**實機 IL2CPP smoke 待補**。詳見 [rust-core.md](rust-core.md)。前:🛡️ Proxy DLL pre-CRT gate(2026-08-27)|
 | **Branches** | `dev` → 已 merge `main`(2026-08-16)|
-| **Tests** | **1130 UI tests green**(2026-08-27 重跑,0 failed。本批是 DLL-only,C# 未動,跑來確認沒連帶弄壞東西)|
+| **Tests** | **1130 UI tests + 21 Rust tests(x64 與 i686 各一輪)green**(2026-11-14 `build.cmd test`;Rust tests 自本批起納入 `build.cmd test`)|
 | **Mid-flight** | 無 |
 
-**Last updated**: 2026-08-27
+**Last updated**: 2026-11-14
 
 > ✅ **`dist/` 已用對齊後的版本重建**(2026-08-16,`build.cmd publish` → build **#1417**):`libSkiaSharp` 12.25→**11.63 MB**、`libHarfBuzzSharp` 2.04→**1.82 MB**,即 Avalonia 12.1.0 實際依據的 SkiaSharp 3.119.4 / HarfBuzzSharp 8.3.1.3。使用者已用這份 build 實測 UI。
 
@@ -40,6 +40,14 @@
 ## Open Backlog / TODO
 
 > 這是**唯一**的待辦清單。所有 open 項目集中於此;Phase Overview 表只記 ship 狀態,不重複放 todo。
+
+### 🦀 Rust core(2026-11-14)— 詳見 [rust-core.md](rust-core.md)
+
+- [ ] **R1 實機 smoke(IL2CPP)** — 用新 `Discrete-IL2CPP.dll` 注入任一 IL2CPP 遊戲:`init` log 有 `Rust core: discrete_core 0.1.0`、`metadata` log 有 `MetadataParser: loaded version=…`、metadata 相關 RPC(class walk 含 field default)行為同前。順便驗 R0 banner 在 Mono x64 / x86 也出現。
+- [ ] **R1 收尾** — 實機過後刪 `MetadataParser.cpp`、`MetadataParser.h` 的 legacy 半邊、CMake `DISCRETE_RUST_METADATA` 與 `metadata-cli-legacy`;刪之前先錄一份 `dump-parser` baseline,harness 改成 Rust vs baseline。
+- [ ] **補 corpus** — 裝到 v24.0/v24.1(R-Type Dimensions EX)、v27(Townscaper / 廖添丁)或 v35–37 的遊戲時重跑 `metadata_rust_diff.py`。
+- [ ] **x64 Debug IL2CPP `C2712`**(既有問題,非 Rust 造成)— `IL2CPPAddressFinder.cpp:1092/1146`,違反 SEH-leaf 規則的函式;Release 不受影響。
+- [ ] **R2(未啟動)** — 純演算法(AobPattern / GroupMatch / value decoder / ChainDetector→`iced-x86`)+ C SEH shim;是否啟動看 R1 實機結果。
 
 ### 🎨 2026-08-16 Avalonia / SkiaSharp / HarfBuzzSharp 版本綁定(比照 UE5CEDumper)
 
@@ -159,6 +167,13 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-11-14 — 🦀 Rust core R0 + R1(DLL 局部改寫成 Rust,strangler)**(新 crate `dll/rust` + C++ wrapper,詳見 [rust-core.md](rust-core.md)):
+- **R0 工具鏈**:`discrete_core` static lib(0 dependency),`dll/rust/RustCore.cmake` 把 C++ 的 arch / Debug-Release / `STATIC_CRT` 一對一映射到 cargo `--target` / profile / `+crt-static`;`rust-toolchain.toml` 釘 rustc 1.100.0 + 兩個 target;`build.ps1` 先檢查 cargo/targets,`build.cmd test` 追加 `cargo test`(x64 + i686,i686 在 WOW64 下原生跑);release.yml 加 `rustup show`。FFI 規則:每個 `extern "C"` 包 `ffi::guard`(panic 轉成錯誤回傳,不 unwind 進 C++)、回傳指標只借用 handle 內記憶體、bytes 以 `(ptr,len)` 傳且不驗 UTF-8、log 經 C++ sink 進同一套 per-PID log。DllMain attach 寫 `Rust core: discrete_core 0.1.0` 到 init log。**proxy DLL 不連結 Rust**(pre-CRT 規則)。**已驗**:x64/x86 Release(/MD)、x64/x86 Publish(/MT,無 `VCRUNTIME140`/`api-ms-win-crt` import)、x64/x86 Debug Mono(無 LNK4098)全部 build + link;DLL export table 不變(仍是 6 個 `Discrete_*`,無 `dc_*` 外洩);`cargo test` x64 / i686 / i686+crt-static 全過。
+- **R1 metadata parser → Rust**:`MetadataParser.cpp` + `MetadataLayout.h` 移植到 `dll/rust/src/metadata/`;C++ `Parser` class 改為 `MetadataParserRs.cpp` 薄 wrapper,**所有 consumer(IL2CPP backend / ExportAPI / metadata-cli)API 不變**。CMake `DISCRETE_RUST_METADATA`(預設 ON)可切回舊 C++ parser。移植流程:1 writer → 5 個分區 reviewer 逐行比對 C++ → 每個 finding 2 個獨立反駁者;存活 2 個 minor(256 MiB 配置失敗會 abort、≥248 字元路徑被 std 改成 `\\?\` 形式)皆已修。
+- **差分 harness**:`tools/verify/metadata_rust_diff.py` + metadata-cli 新 `dump-parser` 子命令(走遍整個 public Parser API + 越界探針,含 string literals);`build.cmd cli` 同時編 `metadata-cli`(Rust)與不出貨的 `metadata-cli-legacy`(C++)。**結果:7 fixtures(v24×2 / v29 / v31×2 / v39×2)、1589 checks、0 差異**,exit code + stdout + stderr 逐 byte 一致,`symbols` 三個輸出檔亦一致。Rust 版同 API 走訪明顯較快。
+- **未驗**:實機 IL2CPP 遊戲(init log banner + metadata log + metadata RPC);v24.0/v24.1/v27/v35–37 不在本機 corpus(只有合成 blob unit test)。
+- 順帶發現(**非本批造成**,clean worktree 於 `dd1a97a` 重現):x64 **Debug** `Discrete-IL2CPP.dll` 編譯失敗 `C2712`(`IL2CPPAddressFinder.cpp:1092/1146`,SEH 函式內有需 unwind 的物件)。
 
 **2026-11-14 — Release CI(比照 UE5CEDumper)**(`.github/workflows/release.yml` + `build.ps1`):
 - 推 `v*` tag → GitHub runner(`windows-2025-vs2026`)跑 `build.ps1 -Mode Publish -Clean -NoBumpBuildNumber`(含 identity guard、x86 Mono、tests)→ `Discrete-<tag>-win.zip` + `.sha256`(zip 內加 LICENSE / USAGE.md)→ **draft** release,notes = 上個 tag 以來的非 merge commit。`vNNN` tag 會先寫進 `build_number.txt`。`workflow_dispatch` 只產 artifact。
@@ -438,6 +453,7 @@
 | 26 | Anti-tamper protection | 3-slot SHA256 self-check spread across two assemblies + 2 poison surfaces (CT export offsets + Inspector grid values) + XOR-shielded credit string + AOT-stamped hash via `tools/inject-hash.ps1`. Inspired by AOBMaker's pattern but redesigned for cross-assembly slot distribution (Slot A in Core/Services / Slot B in Core/Services/Export / **Slot C cross-assembly in ui/UnityDumpUI/Platform**). Dev-mode bypass (0xCC placeholders) keeps all factors at 0 in Debug/Release single-file builds — exports + Inspector + tests stay byte-identical to pre-Phase-26. Class names renamed to non-suggestive forms so binary metadata no longer leaks "Integrity" / "Guardian" / "Shield". | 🗑️ **Removed 2026-11-14** (before open-sourcing; see Recent batches). Originally ✅ shipped + AOT-verified 2026-05-20 (build #408). Two iterations: `ccaae6e` single-slot baseline + `348cbb6` 3-slot cross-assembly upgrade. `TokenAggregator.Combined() = A \| B \| C` ORs all three factors (UI registers `WindowsRuntimeMetadata.Read` into Core via `Program.Main`). Poison 1: `CloakOffset(off) => off ^ (factor & 0x7F)` in `CeXmlExporter` + `CsxExporter` shifts every emitted offset 0-127 bytes (CT loads cleanly in CE; reads wrong fields). Poison 2: `LiveInspectionViewModel.MaybePerturbDisplay` corrupts 1/11 numeric `DisplayValue` rows via per-row deterministic seed (string `GetHashCode` XOR offset XOR salt) — same row corrupts same way within session, different rows across sessions. Anti-trace: `Read()` returns 0 for first N calls (A:3 / B:2 / C:4) even when tampered. Anti-debug: `Debugger.IsAttached` on published binary returns poison code. AOT round-trip verified end-to-end: 3 sentinels at `0x02438F98` / `0x02438E80` / `0x0243ABF8` (C ~11 KB away from A/B). `inject-hash.ps1` 3-slot AOBMaker-style: zero all 3 slots → SHA256 once → write same hash into all 3. Footer credit `© bbfox @ https://opencheattables.com` decoded from XOR blob at VM construction. New [`USAGE.md`](../USAGE.md) end-user guide for CT makers. |
 | 30 | Snapshot memory & speed | Streaming decode + value compaction + UI stream-to-disk (bound game + UI RAM on huge snapshots) + scan P1/P2 accel | ✅ 30a / 30b (IL2CPP) / 30c SHIPPED 2026-05-29 (build #820); 30b-Mono + smaller chunk size deferred — see [Open Backlog](#open-backlog--todo) + [archive](archive/plan-archive-phases-29-30.md) |
 | 32 | findInstances false-positive reduction | Generic post-scan filter (backend-agnostic) + Mono live-object enumeration. **Driver**: Core Keeper `Pug.Other.PlayerController` returns ~82 raw hits where only #44 is the local player; offline field-dump (tools/diag) proved the rest are *live* pooled/prefab siblings (not dead/stack noise), so liveness/arena filters can't cut them — only field content can. | ✅ **SHIPPED + live-verified (Core Keeper Mono x64).** Shared `filterMatches`/`evalPredicate` in ExportAPI.cpp common scope, wired into BOTH findInstances handlers. New args: `validate` (default on, re-read +0==header), `aliveOnly` (m_CachedPtr!=0), `cachedPtrOffset`, `fieldFilter` (generic `{offset,type,op,value}` predicate engine — caller supplies per-class predicate, e.g. `playerIndex==1`), Mono-only `liveOnly` (`mono_gc_walk_heap`, exports bound in MonoResolver + `mono_object_get_size`). Response gains `filter{}` stats. Tools: `Test-FindInstances-Diag.ps1` + `diag/Analyze-FindInstancesFields.ps1` (offline characteriser), `Test-FindInstances.ps1` extended with filter flags. Protocol in [pipe-protocol.md](pipe-protocol.md#findinstances-both). **UI wired** (Inspector tab): `BackendAdapter.FindInstancesAsync` gains `aliveOnly`/`fieldFilterJson`; `LiveInspectionViewModel` `AliveOnly`/`FieldFilterJson` observables; MainWindow.axaml "Alive only" checkbox + "Field filter" JSON box. Class Pivot does NOT call findInstances (snapshot-driven) → nothing to wire. **Lua N/A** — `unity_scene.lua` uses `Object.FindObjectsOfTypeAll` (zero-FP Unity-native), no findInstances call exists. **Live-verified** (Core Keeper Mono x64): aliveOnly 84→79 (5 dead shells), fieldFilter `playerIndex==1`→exactly the local player. **liveOnly: `mono_gc_walk_heap` is a bdwgc no-op stub** (0 objects) → falls back to raw scan; real bdwgc liveness = unity-liveness API (deferred, version-sensitive struct ABI). IL2CPP keeps excludeArena (no live-walk). **`sane` layer SHIPPED + live-verified** (Core Keeper Mono x64: 82→77, sane dropped 5 / refFields=141; overlaps aliveOnly — dead shells often also carry garbage refs): reads class metadata for managed reference fields (non-static, non-value-type via ReadClassInfo chain walk) and requires each to be null or point to readable committed memory — drops stale/torn slots (e.g. `shadow=0x8800D300C75AB77B`) generically, no per-class config, no CTD. Wired through UI ("Sane" checkbox) + Test-FindInstances.ps1 `-Sane`. **unity-liveness `liveOnly` for bdwgc: WON'T DO** — version-sensitive struct ABI = game-CTD risk (user call), and unnecessary: the remaining ~77 are *live* pooled siblings that only `fieldFilter` can separate. `liveOnly` (gc_walk_heap) stays as an inert safe no-op (falls back to raw scan on bdwgc). |
+| R0–R1 | Rust core (strangler) | Move self-contained DLL pieces to a Rust static lib behind a C ABI; C++ classes become thin wrappers. R0 = toolchain/FFI conventions, R1 = `global-metadata.dat` parser. Plan + gates: [rust-core.md](rust-core.md) | ✅ **R0 + R1 SHIPPED 2026-11-14** (offline: all arch × CRT × config builds; differential harness 1589/1589 identical over 7 fixtures). In-game IL2CPP smoke pending; legacy C++ parser kept behind `DISCRETE_RUST_METADATA=OFF` until then. R2+ not started. |
 
 ---
 

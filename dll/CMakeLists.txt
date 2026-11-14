@@ -125,6 +125,10 @@ set(DLL_SHARED_SOURCES
     src/shared/ModuleHelper.h
     src/shared/PipeServer.cpp
     src/shared/PipeServer.h
+    # Phase R0 — Rust core glue (log sink + banner). The Rust static lib
+    # itself comes from dll/rust/RustCore.cmake (target `discrete_core`).
+    src/shared/RustCore.cpp
+    src/shared/RustCore.h
     src/shared/ExportAPI.cpp
     src/shared/ExportAPI.h
     src/shared/MethodSignatureFormat.h
@@ -182,7 +186,9 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPClassWalker.cpp
     src/il2cpp/IL2CPPClassWalker.h
     src/il2cpp/MetadataLayout.h
-    src/il2cpp/MetadataParser.cpp
+    # Phase R1: DISCRETE_METADATA_PARSER_SOURCE is MetadataParserRs.cpp (Rust
+    # core wrapper) or the legacy MetadataParser.cpp — see root CMakeLists.txt.
+    ${DISCRETE_METADATA_PARSER_SOURCE}
     src/il2cpp/MetadataParser.h
     src/il2cpp/MetadataParserHostPath.cpp  # DLL-only: BackendDetector adapter for Parser::Load()
     src/il2cpp/IL2CPPMetadataRegistration.cpp
@@ -250,12 +256,17 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
     # Phase 20-MT: link MinHook (vendored as `minhook` target — see
     # add_subdirectory above). Static C-only library, ~50 KB per backend.
-    target_link_libraries(${TARGET_NAME} PRIVATE minhook)
+    target_link_libraries(${TARGET_NAME} PRIVATE minhook discrete_core)
     target_include_directories(${TARGET_NAME} PRIVATE vendor/minihook/include)
     # Phase 28b-v2: link Zydis ONLY into IL2CPP backend — Mono path walks IL
     # bytecode directly (no native disassembly needed). Keeps Mono DLL size
     # unchanged. ~250 KB cost on the IL2CPP DLL.
     if(BACKEND_DEFINE STREQUAL "DISCRETE_BACKEND_IL2CPP")
+        # Phase R1: every TU that includes MetadataParser.h must agree on
+        # this define (it changes the class layout), so it is target-wide.
+        if(DISCRETE_RUST_METADATA)
+            target_compile_definitions(${TARGET_NAME} PRIVATE DISCRETE_METADATA_RUST=1)
+        endif()
         target_link_libraries(${TARGET_NAME} PRIVATE Zydis)
         target_include_directories(${TARGET_NAME} PRIVATE
             vendor/zydis/include

@@ -6,6 +6,7 @@
 #include "shared/Logger.h"
 #include "shared/MagicStrings.h"
 #include "shared/PipeServer.h"
+#include "shared/RustCore.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -100,6 +101,10 @@ void OnAttach(HMODULE self) {
        << " backend=" << BackendName()
        << " pid=" << ::GetCurrentProcessId();
     Discrete::Log::Init(os.str());
+
+    // Phase R0: route Rust-side log lines into the same per-PID logs and
+    // record the Rust core banner (proves the Rust half linked and ran).
+    Discrete::RustCore::Init();
 
     Discrete::Log::Write(L"init", "Loaded modules:");
     LogLoadedModules();

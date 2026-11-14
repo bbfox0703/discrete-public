@@ -139,6 +139,25 @@ set(DISCRETE_NLOHMANN_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/dll/vendor/nlohmann/single
 set(DISCRETE_GENERATED_INCLUDE_DIR ${CMAKE_BINARY_DIR}/generated
     CACHE INTERNAL "")
 
+# Phase R0 — Rust core (dll/rust). Defines the IMPORTED target `discrete_core`
+# used by the backend DLLs and metadata-cli; must precede add_subdirectory(dll).
+include(dll/rust/RustCore.cmake)
+
+# Phase R1 — global-metadata.dat parser implementation. ON (default): the Rust
+# port (dll/rust/src/metadata) behind MetadataParserRs.cpp. OFF: the legacy C++
+# MetadataParser.cpp. Kept switchable until R1 is live-verified in a game; the
+# differential harness (tools/verify/metadata_rust_diff.py) always builds both.
+option(DISCRETE_RUST_METADATA "Use the Rust metadata parser (Phase R1)" ON)
+set(DISCRETE_METADATA_PARSER_RS     ${CMAKE_SOURCE_DIR}/dll/src/il2cpp/MetadataParserRs.cpp
+    CACHE INTERNAL "")
+set(DISCRETE_METADATA_PARSER_LEGACY ${CMAKE_SOURCE_DIR}/dll/src/il2cpp/MetadataParser.cpp
+    CACHE INTERNAL "")
+if(DISCRETE_RUST_METADATA)
+    set(DISCRETE_METADATA_PARSER_SOURCE ${DISCRETE_METADATA_PARSER_RS})
+else()
+    set(DISCRETE_METADATA_PARSER_SOURCE ${DISCRETE_METADATA_PARSER_LEGACY})
+endif()
+
 add_subdirectory(dll)
 
 # Phase 13 — offline metadata-cli. Built only when -DBUILD_CLI=ON; gated

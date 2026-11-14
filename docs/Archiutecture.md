@@ -75,6 +75,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 | CMake | 3.25+ |
 | Ninja | any recent |
 | .NET SDK | 10.0 |
+| Rust (rustup) | pinned in `rust-toolchain.toml`; targets `x86_64-` + `i686-pc-windows-msvc` — see [rust-core.md](rust-core.md) |
 
 ### Runtime Requirements
 
@@ -581,6 +582,9 @@ Discrete/
 │   │       ├── ProxyMain.cpp
 │   │       └── version.def
 │   │
+│   ├── rust/                    ← Rust core `discrete_core` (static lib, C ABI) —
+│   │                              strangler migration, see docs/rust-core.md
+│   │                              (R1: global-metadata.dat parser)
 │   └── vendor/                  ← Third-party (nlohmann/json, etc.)
 │
 ├── scripts/                     ← CE Lua scripts

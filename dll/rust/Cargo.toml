@@ -1,0 +1,39 @@
+# discrete_core — the Rust half of the Discrete DLL (Phase R0 / R1).
+#
+# Built as a static library and linked into Discrete-Mono.dll,
+# Discrete-IL2CPP.dll and metadata-cli.exe through dll/rust/RustCore.cmake.
+# Never call cargo by hand for a shipping build: build.cmd drives it with the
+# right --target (x64 / x86), profile (Debug / Release) and CRT flavour
+# (/MD vs /MT via +crt-static). `cargo test` is fine to run directly.
+#
+# Zero third-party dependencies on purpose: nothing to vendor, pin or audit.
+# Adding one is a decision — record it in docs/rust-core.md first.
+
+[package]
+name = "discrete_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "GPL-3.0-only"
+description = "Rust core for the Discrete Unity dumper DLL"
+
+[lib]
+path = "src/lib.rs"
+# staticlib: what CMake links. rlib: what `cargo test` builds against.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+
+[profile.dev]
+# Unwinding stays ON in every profile: every extern "C" entry point catches
+# panics with catch_unwind and turns them into an error return. A panic that
+# aborted instead would take the host game down with it.
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+codegen-units = 1
+lto = true
+debug = false
