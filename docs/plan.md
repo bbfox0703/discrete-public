@@ -45,7 +45,8 @@
 
 - [x] **R1 實機 smoke(IL2CPP)** ✅(2026-11-14,Utawarerumono,見下方 R2 實機 smoke)— `init` log 有 banner、`metadata` log 有 `MetadataParser: loaded version=31 …`,parser-backed RPC 與 legacy 一致。
 - [x] **Rust core 版號與 C++ DLL / UI 同一套**(2026-11-14)— `dc_core_version()` = `discrete_core ` + C++ `DISCRETE_BUILD_BANNER`(`0.1.0.<build> <git> (<config>, <timestamp>)`),由 `RustCore.cmake` 把 `BuildInfo.h` 的同一組值傳給 cargo、`build.rs` 組字串;`RustCore::Init` 不一致時寫 WARN;`Cargo.toml` 版本與 `project(VERSION)` 不符時 build 失敗。實機(build #1469)兩行 banner 相同、無 WARN。
-- [ ] **R0 banner / 共用碼在 Mono x64 / x86 實機** — 尚未跑(Utawarerumono 只涵蓋 IL2CPP x64)。
+- [x] **Mono x64 實機** ✅(2026-11-14,活俠傳,已改為 x64 Mono,build #1469,`Mortal.Core`)— banner 兩行一致無 WARN、AOB 300/300 self-match、value scan 7/7、group scan 4/4。腳本兩個修正:開 `setKeepForeground`(遊戲失焦會暫停)、寫入前先用 `scanFieldValue` 反查確認欄位擁有者(`findInstances` 可能回傳失效物件)。⚠️ 遊戲資料夾原本的 x86 proxy 已無法載入,已換成 x64 dist,舊檔備份在 scratchpad。
+- [ ] **x86 實機** — 本機目前沒有 32-bit Mono 遊戲(活俠傳已轉 x64)。
 - [ ] **R1 收尾** — 實機過後刪 `MetadataParser.cpp`、`MetadataParser.h` 的 legacy 半邊、CMake `DISCRETE_RUST_METADATA` 與 `metadata-cli-legacy`;刪之前先錄一份 `dump-parser` baseline,harness 改成 Rust vs baseline。
 - [ ] **補 corpus** — 裝到 v24.0/v24.1(R-Type Dimensions EX)、v27(Townscaper / 廖添丁)或 v35–37 的遊戲時重跑 `metadata_rust_diff.py`。
 - [x] **x64 Debug IL2CPP `C2712`**(既有問題,非 Rust 造成)✅ FIXED(2026-11-14,`ff2e3fc`,merge `42e5907`)— `IL2CPPAddressFinder.cpp` heap sweep 改成 SEH-leaf 形狀(`__try` 移進 `Seh*` helper);merge 後 `build.cmd il2cpp debug`(含 Rust core)build + link 乾淨。純重構,未實機。

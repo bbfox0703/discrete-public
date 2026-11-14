@@ -15,7 +15,10 @@ What each part exercises:
   metadata (R1)   getClasses / getClassInfo over the first N classes (field
                   names, types, offsets, static flags, method names)
   xref (R2 chain) findFieldReferences on static fields -> IL2CPP chain
-                  detector (check the walk log for "FieldXref: v2 scan complete")
+                  detector (check the walk log for "FieldXref: v2 scan complete");
+                  on Mono this is the IL scan (not Rust), and the metadata-parser
+                  RPCs are skipped. Mono JIT method addresses are not
+                  restart-stable, so an A/B of Mono AOBs is not meaningful
   aob (R2 aob)    getMethodAobPattern on methods found via findMethodInstances,
                   both stopAtTerminal settings; plus a self-match check
   value (R2)      beginValueScan / refineValueScan on a field we set to a unique
@@ -128,6 +131,12 @@ def run(game, out_path, asm_want):
         hs = r.call('handshake')
         out['handshake'] = hs
         print('handshake:', json.dumps(hs)[:300])
+        # Many games pause when unfocused (runInBackground = false), which
+        # stalls every main-thread RPC while this script runs in the
+        # background. The DLL's keep-foreground hook keeps the game ticking;
+        # switched off again at the end.
+        kf = tc(r, 'setKeepForeground', {'enable': True})
+        print('keep-foreground:', kf)
         asms = sorted(a['name'] if isinstance(a, dict) else a
                       for a in r.call('getAssemblies').get('assemblies', []))
         out['ab']['assemblies'] = asms
@@ -170,36 +179,41 @@ def run(game, out_path, asm_want):
                   sum(1 for x in md if 'error' not in x) > 0)
 
         # ---- R1: RPCs backed by the global-metadata.dat parser -------------
-        # (getClassInfo goes through the il2cpp runtime API; these three call
-        # Metadata::Parser::Get(), which loads the Rust parser on first use.)
-        t0 = time.time()
-        enums, tfields = [], []
-        for ns, nm in enum_sites[:150]:
-            ev = tc(r, 'getEnumValues', {'assembly': asm, 'namespace': ns, 'name': nm})
-            enums.append({'c': ns + '.' + nm, 'r': ev})
-        for c in classes:
-            ns, nm = c.get('namespace', ''), c.get('name', '')
-            if len(tfields) < 150 and '<' not in nm:
-                tf = tc(r, 'il2cppGetMetadataTypeFields', {'namespace': ns, 'name': nm})
-                tfields.append({'c': ns + '.' + nm, 'r': tf})
-        strs = []
-        first = tc(r, 'il2cppGetMetadataStrings', {'offset': 0, 'limit': 2000}) or {}
-        total = first.get('count') or 0
-        strs.append(first)
-        if total > 4000:
-            strs.append(tc(r, 'il2cppGetMetadataStrings', {'offset': total // 2, 'limit': 2000}))
-            strs.append(tc(r, 'il2cppGetMetadataStrings', {'offset': total - 1000, 'limit': 2000}))
-        out['ab']['md_enums'] = enums
-        out['ab']['md_type_fields'] = tfields
-        out['ab']['md_strings'] = strs
-        out['timing']['md_parser_s'] = round(time.time() - t0, 1)
-        ok_enum = sum(1 for e in enums if isinstance(e['r'], dict) and not e['r'].get('error'))
-        ok_tf = sum(1 for e in tfields if isinstance(e['r'], dict) and not e['r'].get('error'))
-        rep.check('metadata parser: %d/%d enums, %d/%d type-field lists, %d string literals (v%s)'
-                  % (ok_enum, len(enums), ok_tf, len(tfields), total, first.get('version')),
-                  ok_enum > 0 and ok_tf > 0 and total > 0)
+        # IL2CPP only: Mono has no global-metadata.dat (and no chain detector;
+        # on Mono findFieldReferences is the IL scan, so only the shared AOB /
+        # value-refine / group-match code is Rust there).
+        il2cpp = hs.get('backend') == 'IL2CPP'
+        if il2cpp:
+            # (getClassInfo goes through the il2cpp runtime API; these three call
+            # Metadata::Parser::Get(), which loads the Rust parser on first use.)
+            t0 = time.time()
+            enums, tfields = [], []
+            for ns, nm in enum_sites[:150]:
+                ev = tc(r, 'getEnumValues', {'assembly': asm, 'namespace': ns, 'name': nm})
+                enums.append({'c': ns + '.' + nm, 'r': ev})
+            for c in classes:
+                ns, nm = c.get('namespace', ''), c.get('name', '')
+                if len(tfields) < 150 and '<' not in nm:
+                    tf = tc(r, 'il2cppGetMetadataTypeFields', {'namespace': ns, 'name': nm})
+                    tfields.append({'c': ns + '.' + nm, 'r': tf})
+            strs = []
+            first = tc(r, 'il2cppGetMetadataStrings', {'offset': 0, 'limit': 2000}) or {}
+            total = first.get('count') or 0
+            strs.append(first)
+            if total > 4000:
+                strs.append(tc(r, 'il2cppGetMetadataStrings', {'offset': total // 2, 'limit': 2000}))
+                strs.append(tc(r, 'il2cppGetMetadataStrings', {'offset': total - 1000, 'limit': 2000}))
+            out['ab']['md_enums'] = enums
+            out['ab']['md_type_fields'] = tfields
+            out['ab']['md_strings'] = strs
+            out['timing']['md_parser_s'] = round(time.time() - t0, 1)
+            ok_enum = sum(1 for e in enums if isinstance(e['r'], dict) and not e['r'].get('error'))
+            ok_tf = sum(1 for e in tfields if isinstance(e['r'], dict) and not e['r'].get('error'))
+            rep.check('metadata parser: %d/%d enums, %d/%d type-field lists, %d string literals (v%s)'
+                      % (ok_enum, len(enums), ok_tf, len(tfields), total, first.get('version')),
+                      ok_enum > 0 and ok_tf > 0 and total > 0)
 
-        # ---- R2 chain: field xrefs on static fields -------------------------
+        # ---- field xrefs (IL2CPP: R2 chain detector; Mono: IL scan) ---------
         t0 = time.time()
         xr, n_refs = [], 0
         for ns, nm, fn in statics[:N_XREF_FIELDS]:
@@ -295,7 +309,22 @@ def run(game, out_path, asm_want):
                     and isinstance(f.get('offset'), int) and f['offset'] >= 0x10
                     and isinstance(f.get('value'), int)
                     and read_i32(pid, ia + f['offset']) == f['value']]
-            if len(ints) >= 2:
+            if len(ints) < 2:
+                continue
+            # findInstances can return a stale object (seen on Mono: the
+            # memory now belongs to a different live object). Before writing
+            # anything, ask the DLL's own reverse lookup (read-only scan for
+            # the current value) who owns each field address; both must map
+            # back to this instance and class.
+            owned = True
+            for f in ints[:2]:
+                chk = tc(r, 'scanFieldValue', {'dataType': 'int32', 'value': f['value'], 'limit': 5000})
+                own = next((c for c in chk.get('candidates') or []
+                            if hx(c.get('addr')) == ia + f['offset']), None)
+                if not own or hx(own.get('instAddr')) != ia or own.get('class') != nm:
+                    owned = False
+                    break
+            if owned:
                 tgt = (ns, nm, ia, ints[0], ints[1])
         if not tgt:
             rep.check('value/group: found an object with two int32 fields', False)
@@ -345,12 +374,15 @@ def run(game, out_path, asm_want):
                 gsid = g0.get('sessionId')
 
                 def ghas(resp):
+                    # Match on the two slot addresses, not instAddr alone.
                     for c in resp.get('candidates') or []:
-                        if hx(c.get('instAddr')) == ia:
+                        addrs = {hx(s.get('addr')) for s in c.get('slots') or []}
+                        if {aa, ab_} <= addrs:
                             return c
                     return None
                 c0 = ghas(g0)
-                rep.check('group: begin finds the object (count=%s)' % g0.get('count'), c0 is not None)
+                rep.check('group: begin finds the object (count=%s)' % g0.get('count'),
+                          c0 is not None and hx(c0.get('instAddr')) == ia)
                 if c0:
                     offs = sorted(s.get('fieldOffset') for s in c0.get('slots') or [])
                     rep.check('group: SDR assigns the two fields', offs == sorted([fa['offset'], fb['offset']]),
@@ -372,6 +404,8 @@ def run(game, out_path, asm_want):
                     write_i32(pid, ab_, orig_b)
                 rep.check('restore: both fields back to original',
                           read_i32(pid, aa) == orig_a and read_i32(pid, ab_) == orig_b)
+
+        tc(r, 'setKeepForeground', {'enable': False})
 
     out['live']['checks'] = rep.rows if hasattr(rep, 'rows') else None
     with open(out_path, 'w', encoding='utf-8') as f:

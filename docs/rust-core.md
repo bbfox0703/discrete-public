@@ -17,7 +17,7 @@ bug into an error return instead of a game crash.
 
 | Phase | Scope | Gate | Status |
 |---|---|---|---|
-| **R0** | Toolchain: cargo inside `build.cmd`/CMake, x64 + x86, /MD + /MT, Debug + Release; FFI conventions; log sink; panic guard | All arch × CRT combinations build and link; `cargo test` passes on x64 and i686; Rust banner in the init log | ✅ offline + IL2CPP x64 live; Mono live pending |
+| **R0** | Toolchain: cargo inside `build.cmd`/CMake, x64 + x86, /MD + /MT, Debug + Release; FFI conventions; log sink; panic guard | All arch × CRT combinations build and link; `cargo test` passes on x64 and i686; Rust banner in the init log | ✅ offline + IL2CPP x64 and Mono x64 live; x86 live pending |
 | **R1** | IL2CPP `global-metadata.dat` parser (`dll/rust/src/metadata`) behind `MetadataParserRs.cpp` | `tools/verify/metadata_rust_diff.py`: Rust and legacy C++ parsers byte-identical over the local fixture corpus | see [R1 gate](#r1-gate) |
 | **R2** | Pure algorithms: `AobPattern` (`aob.rs`), `GroupMatch` (`group_match.rs`), the value-scan refine comparator (`value.rs`), `IL2CPPChainDetector` (`chain/`, Zydis → `iced-x86`); host-memory reads only through the SEH read shim | `tools/verify/r2_rust_diff.py`: legacy vs Rust byte-identical over generated cases + every local `GameAssembly.dll` | see [R2 gate](#r2-gate) |
 | R3 (opt.) | `PipeServer` framing; handlers stay C++ | wire-level replay | not started |
@@ -165,7 +165,7 @@ Verified 2026-11-14 (build #1440–1443):
 | proxy DLLs | do **not** contain the Rust core (checked) |
 
 Live: the `Rust core: discrete_core …` banner line appeared in an IL2CPP x64
-game's `init` log (2026-11-14). Mono x64 / x86 not yet run live.
+game's `init` log and a Mono x64 game's (2026-11-14). x86 not yet run live.
 
 Unrelated finding while testing: x64 **Debug** `Discrete-IL2CPP.dll` failed with
 `C2712` in `IL2CPPAddressFinder.cpp` — broken since before the Rust work.
@@ -328,8 +328,22 @@ scheme (build #1469), the game's `init` log showed `Discrete DLL attached
 0.1.0.1469 9636b00 (Release, …)` and `Rust core: discrete_core 0.1.0.1469
 9636b00 (Release, …)` — identical, no mismatch `WARN`.
 
-Not covered live: Mono x64 / x86 (the R0 banner and the shared AOB / scan
-code on a Mono game) and x86 in general.
+**Mono x64** (same day, 活俠傳 / Legend of Mortal, Unity Mono x64 since its
+2026-10 update, build #1469, assembly `Mortal.Core`): `init` log banner pair
+identical, no `WARN`; 150 methods × 2 `getMethodAobPattern` self-match
+300/300; value scan 7/7; group scan 4/4 (SDR assigns the two fields). Rust
+run only — Mono has no metadata parser or chain detector, and JIT addresses
+are not restart-stable, so there is nothing restart-stable to A/B beyond
+what the offline harness already proves for the shared code.
+
+Two harness lessons from the Mono run (both fixed in `r2_live.py`): the game
+pauses when unfocused, so the script turns on `setKeepForeground` for the
+run; and `findInstances` can return a stale object whose memory now belongs
+to another live object, so the script confirms field ownership with a
+read-only `scanFieldValue` reverse lookup before writing anything.
+
+Not covered live: x86 (no 32-bit Mono game on the dev box now — 活俠傳 moved
+to x64).
 
 ## Fallback / removal
 
