@@ -241,6 +241,21 @@ If you touched the DLL, also rebuild it (`.\build.cmd il2cpp` /
 `.\build.cmd mono`). The game must be closed before rebuilding —
 the DLL stays mapped after injection.
 
+### Releases
+
+Pushing a `vNNN` tag (NNN = build number, on `main`) runs
+[.github/workflows/release.yml](.github/workflows/release.yml): a full
+`build.ps1 -Mode Publish` on a GitHub Windows runner, then `dist/` zipped
+with a `.sha256` and attached to a **draft** release with a changelog since
+the previous tag. Review the draft, then publish it. Manual runs
+(*Actions → Release → Run workflow*) build the zip as an artifact only.
+
+The workflow fetches nlohmann/json, MinHook and Zydis at **pinned commits**
+(table in the workflow's first step), unlike `sync_vendor.ps1`, which
+tracks upstream tips. After a `sync_vendor.ps1` refresh that builds
+cleanly, copy the new `git -C dll/vendor/<name> rev-parse HEAD` values
+into that table.
+
 ---
 
 ## Working with Claude Code
