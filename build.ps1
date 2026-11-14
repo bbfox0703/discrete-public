@@ -212,6 +212,45 @@ function Enter-VsDevEnvironment {
     Write-Ok "MSVC $Arch environment loaded"
 }
 
+# Phase R0: fail fast with an actionable message instead of a CMake error
+# halfway through configure. Both triples are needed: x64 for every target,
+# i686 for the x86 Mono DLL and the x86 test run.
+function Assert-RustToolchain {
+    # rustup (not just cargo) is required: rust-toolchain.toml pins the exact
+    # toolchain + targets, and only rustup honours it.
+    if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+        Write-Fail 'rustup not found in PATH — install Rust via https://rustup.rs (a standalone Rust install cannot honour rust-toolchain.toml)'
+        return $false
+    }
+    # build.cmd runs Windows PowerShell 5.1, where any stderr line of a native
+    # command becomes a terminating error under EAP=Stop — and rustup reports
+    # progress ("info: syncing channel updates ...") on stderr. Relax EAP for
+    # these calls and judge success by exit code only.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        # No-arg install = whatever rust-toolchain.toml pins, incl. its targets.
+        # A no-op when already present; on a fresh clone / after a pin bump it
+        # downloads here, in a step that tolerates stderr.
+        & rustup toolchain install 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail 'rustup toolchain install (from rust-toolchain.toml) failed — run it by hand to see why'
+            return $false
+        }
+        $installed = & rustup target list --installed 2>$null
+        $rustc = & rustc --version 2>$null
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    $missing = @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc') | Where-Object { $installed -notcontains $_ }
+    if ($missing) {
+        Write-Fail "Rust target(s) missing: $($missing -join ', ') — run: rustup target add $($missing -join ' ')"
+        return $false
+    }
+    Write-Info "rust:   $rustc"
+    return $true
+}
+
 # ---------------------------------------------------------------------------
 # Preamble
 # ---------------------------------------------------------------------------
@@ -249,6 +288,10 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     exit 1
 }
 Write-Info "dotnet: $(dotnet --version)"
+
+if ($Target -in @('DLL','Test','MetadataCli','All')) {
+    if (-not (Assert-RustToolchain)) { exit 1 }
+}
 
 # ---------------------------------------------------------------------------
 # Clean
@@ -486,8 +529,26 @@ function Run-Tests {
     }
     if ($LASTEXITCODE -ne 0) { Write-Fail 'Tests failed'; return $false }
     Write-Ok 'All tests passed'
+    return (Run-RustTests)
+}
+
+# Phase R0: the Rust core's unit tests, for both shipping architectures. The
+# i686 test exe runs natively under WOW64, so this exercises 32-bit codegen and
+# panic unwinding without a 32-bit game. Set DISCRETE_METADATA_FIXTURES
+# (semicolon-separated global-metadata.dat paths) to also run the real-file
+# parser test; it is a no-op without it.
+function Run-RustTests {
+    Write-Banner 'Rust core tests  |  cargo test (x64 + x86)'
+    $manifest = Join-Path $RepoRoot 'dll\rust\Cargo.toml'
+    foreach ($triple in @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')) {
+        Write-Step "cargo test --target $triple"
+        & cargo test --locked --manifest-path $manifest --target $triple --quiet | Out-Host
+        if ($LASTEXITCODE -ne 0) { Write-Fail "Rust tests failed ($triple)"; return $false }
+    }
+    Write-Ok 'Rust tests passed (x64 + x86)'
     return $true
 }
+
 
 # ---------------------------------------------------------------------------
 # Phase 12 / 13 placeholders
@@ -524,8 +585,13 @@ function Build-MetadataCli {
         "-DSTATIC_CRT=$staticCrt" | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'cmake configure failed'; return $false }
 
-    Write-Step "Building metadata-cli ($cfg)"
-    & cmake --build $cliBuildDir --target metadata-cli --parallel | Out-Host
+    # Phase R1: metadata-cli-legacy (legacy C++ parser) is built next to the
+    # shipping metadata-cli (Rust parser) for tools\verify\metadata_rust_diff.py.
+    # It stays in build\cli-*\bin\ and is never copied to dist\.
+    # Phase R2: r2-dump / r2-dump-legacy likewise feed tools\verify\r2_rust_diff.py
+    # (also build-dir only, never shipped).
+    Write-Step "Building metadata-cli + differential harness binaries ($cfg)"
+    & cmake --build $cliBuildDir --target metadata-cli metadata-cli-legacy r2-dump r2-dump-legacy --parallel | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Fail 'metadata-cli build failed'; return $false }
 
     $exe = Join-Path $cliBuildDir 'bin\metadata-cli.exe'

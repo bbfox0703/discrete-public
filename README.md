@@ -65,8 +65,9 @@ See [USAGE.md](USAGE.md) for the CT-maker workflow and
 ## Building from source
 
 Requirements: Windows 10/11 x64, Visual Studio (C++ workload; CMake and Ninja
-come with it), .NET SDK 10, Python 3 (build-time checks), and Cheat Engine
-7.5+ for the Lua bridge.
+come with it), .NET SDK 10, Rust via [rustup](https://rustup.rs) (the pinned
+toolchain and both targets install from `rust-toolchain.toml`), Python 3
+(build-time checks), and Cheat Engine 7.5+ for the Lua bridge.
 
 ```powershell
 .\sync_vendor.ps1            # fetch pinned C++ deps (nlohmann/json, MinHook, Zydis)

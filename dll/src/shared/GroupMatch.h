@@ -37,6 +37,24 @@ struct SlotMatches {
     std::vector<int> leafIdx;
 };
 
+#if defined(DISCRETE_RUST_R2)
+// Phase R2: implemented in Rust (dll/rust/src/group_match.rs) behind
+// GroupMatchRs.cpp. Same contract as the legacy inline versions below.
+
+// True when every slot can be assigned a DISTINCT leaf (a System of Distinct
+// Representatives exists). `nLeaves` bounds the leaf-index space; leaf
+// indices outside [0, nLeaves) are ignored. Returns false for an empty slot
+// set, a negative nLeaves, or any slot with an empty list.
+bool HasDistinctAssignment(const std::vector<SlotMatches>& m, int nLeaves);
+
+// Recover the actual SDR after a true return: out[s] = the DISTINCT leaf
+// index assigned to slot s (or -1 if none). Returns false (and fills out
+// with -1) when no complete assignment exists.
+bool ResolveAssignment(const std::vector<SlotMatches>& m, int nLeaves,
+                       std::vector<int>& out);
+
+#else  // legacy header-only implementation
+
 // Internal: Kuhn's augmenting path — try to assign `slot` a distinct leaf,
 // bumping already-assigned slots along an alternating path if needed.
 inline bool TryAssign_(int slot, const std::vector<SlotMatches>& m,
@@ -93,5 +111,7 @@ inline bool ResolveAssignment(const std::vector<SlotMatches>& m, int nLeaves,
     }
     return true;
 }
+
+#endif  // DISCRETE_RUST_R2
 
 }  // namespace Discrete::GroupMatch

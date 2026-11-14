@@ -296,5 +296,6 @@ every UI in the wild needs the matching DLL.
 | [Memory.cpp](../dll/src/shared/Memory.cpp) | SEH-protected reads + readability checks |
 | [Logger.cpp](../dll/src/shared/Logger.cpp) | Per-PID rotated logs |
 | [AobPattern.cpp](../dll/src/shared/AobPattern.cpp) | Phase 18a-3 hand-rolled x64 length disassembler |
+| [RustCore.cpp](../dll/src/shared/RustCore.cpp) + `*Rs.cpp` | Rust core glue: log sink, banner, `SafeReadShim`; `AobPatternRs` / `GroupMatchRs` / `ValueRefineRs` / `IL2CPPChainDetectorRs` / `MetadataParserRs` wrap the Rust ports (default build) — the legacy `.cpp` next to each is the `DISCRETE_RUST_*=OFF` fallback. See [rust-core.md](rust-core.md) |
 | [MagicStrings.h](../dll/src/shared/MagicStrings.h) | Single source of truth for command names + module names |
 | [BuildInfo.h.in](../dll/src/shared/BuildInfo.h.in) | CMake configure template for build metadata |

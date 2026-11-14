@@ -1,6 +1,12 @@
 // MetadataParser.h — opens global-metadata.dat for the host game and exposes
 // string-literal / string-heap queries. Cross-link to runtime Il2CppClass*
 // lands in a follow-up commit.
+//
+// Phase R1: with DISCRETE_METADATA_RUST defined (the default — CMake option
+// DISCRETE_RUST_METADATA) the parser is implemented in Rust (dll/rust,
+// src/metadata/) and MetadataParserRs.cpp adapts it to this class. Without
+// it, the legacy C++ implementation in MetadataParser.cpp is compiled.
+// The public API below is identical either way.
 #pragma once
 
 #include "MetadataLayout.h"
@@ -9,6 +15,12 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+#if defined(DISCRETE_METADATA_RUST)
+// Opaque Rust handle (dll/rust/include/discrete_core.h); forward-declared so
+// consumers of this header don't need the Rust include path.
+struct DcMetadata;
+#endif
 
 namespace Discrete::IL2CPP::Metadata {
 
@@ -202,6 +214,28 @@ public:
     /// </summary>
     bool LoadFromPath(const std::wstring& path);
 
+#if defined(DISCRETE_METADATA_RUST)
+    // Phase R1: the implementation lives in the Rust core (dll/rust,
+    // dll/src/il2cpp/MetadataParserRs.cpp is the wrapper). The object owns a
+    // Rust handle, so it is move-only; Get()'s singleton lambda returns by
+    // move.
+    ~Parser();
+    Parser(Parser&& other) noexcept;
+    Parser& operator=(Parser&& other) noexcept;
+    Parser(const Parser&)            = delete;
+    Parser& operator=(const Parser&) = delete;
+
+private:
+    // Cached from the handle after each load so the inline accessors above
+    // stay inline.
+    bool          loaded_  = false;
+    std::int32_t  version_ = 0;
+    ::DcMetadata* rs_      = nullptr;
+};
+
+#else  // legacy C++ implementation (MetadataParser.cpp) — kept for the
+       // differential harness (metadata-cli-legacy) and as a fallback via
+       // -DDISCRETE_RUST_METADATA=OFF until R1 is live-verified.
 private:
     bool LoadHeader();
     bool LoadTables();
@@ -327,5 +361,6 @@ private:
     // doesn't repeat the version check.
     std::int32_t stringLiteralEntryStride_ = 8;
 };
+#endif  // DISCRETE_METADATA_RUST
 
 }  // namespace Discrete::IL2CPP::Metadata

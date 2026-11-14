@@ -46,6 +46,19 @@ jobs:
         # (vendor/) are documentation only and skipped here.
         run: ./sync_vendor.ps1 -SkipReference
 
+      - name: Install pinned Rust toolchain (Phase R0)
+        shell: pwsh
+        # rust-toolchain.toml (repo root) pins the exact rustc and lists both
+        # targets (x86_64 + i686-pc-windows-msvc); the argument-less
+        # `rustup toolchain install` (rustup >= 1.28) installs exactly that on
+        # the runner's preinstalled rustup, so a release cannot change because
+        # `stable` moved. build.ps1 re-checks both targets before building.
+        run: |
+          rustup self update
+          rustup toolchain install
+          rustup target list --installed
+          rustc --version
+
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v5
         with:

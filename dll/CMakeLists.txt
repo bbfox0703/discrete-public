@@ -106,8 +106,12 @@ endfunction()
 
 set(DLL_SHARED_SOURCES
     src/main.cpp
-    src/shared/AobPattern.cpp
+    # Phase R2: AobPattern / GroupMatch / ValueRefine implementations come
+    # from DISCRETE_R2_SHARED_SOURCES (Rust wrappers or legacy C++ — see the
+    # root CMakeLists.txt option DISCRETE_RUST_R2).
+    ${DISCRETE_R2_SHARED_SOURCES}
     src/shared/AobPattern.h
+    src/shared/ValueRefine.h
     src/shared/BackendDetector.cpp
     src/shared/BackendDetector.h
     # Keep-foreground native hook (run-in-background). Pure Win32/user32 +
@@ -125,6 +129,10 @@ set(DLL_SHARED_SOURCES
     src/shared/ModuleHelper.h
     src/shared/PipeServer.cpp
     src/shared/PipeServer.h
+    # Phase R0 — Rust core glue (log sink + banner). The Rust static lib
+    # itself comes from dll/rust/RustCore.cmake (target `discrete_core`).
+    src/shared/RustCore.cpp
+    src/shared/RustCore.h
     src/shared/ExportAPI.cpp
     src/shared/ExportAPI.h
     src/shared/MethodSignatureFormat.h
@@ -182,7 +190,9 @@ set(DLL_IL2CPP_SOURCES
     src/il2cpp/IL2CPPClassWalker.cpp
     src/il2cpp/IL2CPPClassWalker.h
     src/il2cpp/MetadataLayout.h
-    src/il2cpp/MetadataParser.cpp
+    # Phase R1: DISCRETE_METADATA_PARSER_SOURCE is MetadataParserRs.cpp (Rust
+    # core wrapper) or the legacy MetadataParser.cpp — see root CMakeLists.txt.
+    ${DISCRETE_METADATA_PARSER_SOURCE}
     src/il2cpp/MetadataParser.h
     src/il2cpp/MetadataParserHostPath.cpp  # DLL-only: BackendDetector adapter for Parser::Load()
     src/il2cpp/IL2CPPMetadataRegistration.cpp
@@ -210,7 +220,8 @@ set(DLL_IL2CPP_SOURCES
     # Phase 28b-v2 — chain detector. Forward-traces with Zydis to
     # recognise the 2-hop class-pointer → static_fields → field-value
     # access pattern IL2CPP AOT emits.
-    src/il2cpp/IL2CPPChainDetector.cpp
+    # Phase R2: Rust wrapper or legacy Zydis implementation (DISCRETE_RUST_R2).
+    ${DISCRETE_R2_IL2CPP_SOURCES}
     src/il2cpp/IL2CPPChainDetector.h
     # Phase 28b-v3 — investigation helper. Reports every storage slot
     # (module + heap) holding a given Il2CppClass* / static_fields ptr,
@@ -248,14 +259,24 @@ function(add_backend_dll TARGET_NAME BACKEND_DEFINE)
         ${DISCRETE_GENERATED_INCLUDE_DIR}
     )
     target_compile_definitions(${TARGET_NAME} PRIVATE ${BACKEND_DEFINE})
+    # Phase R2: GroupMatch.h switches between the Rust-backed declarations and
+    # the legacy inline code on this define, so it must be target-wide.
+    if(DISCRETE_RUST_R2)
+        target_compile_definitions(${TARGET_NAME} PRIVATE DISCRETE_RUST_R2=1)
+    endif()
     # Phase 20-MT: link MinHook (vendored as `minhook` target — see
     # add_subdirectory above). Static C-only library, ~50 KB per backend.
-    target_link_libraries(${TARGET_NAME} PRIVATE minhook)
+    target_link_libraries(${TARGET_NAME} PRIVATE minhook discrete_core)
     target_include_directories(${TARGET_NAME} PRIVATE vendor/minihook/include)
     # Phase 28b-v2: link Zydis ONLY into IL2CPP backend — Mono path walks IL
     # bytecode directly (no native disassembly needed). Keeps Mono DLL size
     # unchanged. ~250 KB cost on the IL2CPP DLL.
     if(BACKEND_DEFINE STREQUAL "DISCRETE_BACKEND_IL2CPP")
+        # Phase R1: every TU that includes MetadataParser.h must agree on
+        # this define (it changes the class layout), so it is target-wide.
+        if(DISCRETE_RUST_METADATA)
+            target_compile_definitions(${TARGET_NAME} PRIVATE DISCRETE_METADATA_RUST=1)
+        endif()
         target_link_libraries(${TARGET_NAME} PRIVATE Zydis)
         target_include_directories(${TARGET_NAME} PRIVATE
             vendor/zydis/include
