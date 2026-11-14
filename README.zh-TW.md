@@ -87,6 +87,8 @@ DiscreteUI.exe ──────────────┘                    
 ```
 
 UI 不直接接觸遊戲;Mono / IL2CPP 的所有差異都包在 pipe protocol 後面。
+backend DLL 以 C++ 撰寫並連結一個 Rust 核心(IL2CPP metadata parser、掃描演算法、
+x64 機器碼解碼),Rust 只透過 C++ 端的防當機讀取來存取遊戲記憶體。
 
 ## 已驗證遊戲
 
@@ -103,6 +105,7 @@ Silence 等,涵蓋兩種 backend 與所有支援的 metadata 版本。完整清�
 | [docs/plan.md](docs/plan.md) | 開發狀態、待辦與 phase 紀錄 |
 | [docs/Archiutecture.md](docs/Archiutecture.md) | 架構規則與不變條件 |
 | [docs/pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI 通訊協定 |
+| [docs/rust-core.md](docs/rust-core.md) | DLL 內的 Rust 核心:FFI 規則、建置、回歸驗證 |
 | [docs/](docs/) | 其他:backend 內部、匯出格式、proxy DLL、lessons learned |
 
 ## 授權

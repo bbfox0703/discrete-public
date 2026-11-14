@@ -88,7 +88,9 @@ DiscreteUI.exe ──────────────┘                    
 ```
 
 The UI never talks to the game directly; every Mono / IL2CPP difference lives
-behind the pipe protocol.
+behind the pipe protocol. The backend DLLs are C++ with a Rust core linked in
+(IL2CPP metadata parser, scan algorithms, x64 code decoding), which reads game
+memory only through the C++ side's crash-safe reads.
 
 ## Verified games
 
@@ -105,6 +107,7 @@ Full list: [docs/test-matrix.md](docs/test-matrix.md).
 | [docs/plan.md](docs/plan.md) | Development state, backlog and phase history |
 | [docs/Archiutecture.md](docs/Archiutecture.md) | Architecture rules and invariants |
 | [docs/pipe-protocol.md](docs/pipe-protocol.md) | DLL ↔ UI wire contract |
+| [docs/rust-core.md](docs/rust-core.md) | The Rust core inside the DLLs: FFI rules, build, regression gates |
 | [docs/](docs/) | Everything else: backend internals, export formats, proxy DLLs, lessons learned |
 
 ## License
