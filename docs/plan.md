@@ -160,6 +160,12 @@
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
 
+**2026-11-14 — Release CI(比照 UE5CEDumper)**(`.github/workflows/release.yml` + `build.ps1`):
+- 推 `v*` tag → GitHub runner(`windows-2025-vs2026`)跑 `build.ps1 -Mode Publish -Clean -NoBumpBuildNumber`(含 identity guard、x86 Mono、tests)→ `Discrete-<tag>-win.zip` + `.sha256`(zip 內加 LICENSE / USAGE.md)→ **draft** release,notes = 上個 tag 以來的非 merge commit。`vNNN` tag 會先寫進 `build_number.txt`。`workflow_dispatch` 只產 artifact。
+- 新增 `build.ps1 -NoBumpBuildNumber`(x86 子行程同步傳遞);本機驗過不會遞增。
+- vendor 依賴在 CI 以**固定 commit** 抓取(nlohmann `d10879b` / MinHook `05c06c5` / Zydis `17bc6fb` + Zycore `75a36c4`,= 目前本機版本);`sync_vendor.ps1` 更新後要同步表格(見 CONTRIBUTING.md → Releases)。
+- **未驗**:尚未在 GitHub runner 上實際跑過(本機只驗 YAML 解析、pinned fetch、`-NoBumpBuildNumber`)。
+
 **2026-11-14 — Identity guard + 公開 repo 收尾**(build script + UI footer + README):
 - **Identity guard**:移植 UE5CEDumper 的 `tools/check_no_local_paths.py`;`build.ps1` 在編譯前執行(Python),掃 tracked files + **尚未 push 的 commit message**,抓 `C:\Users\<實名>`、指向 `.claude\projects` 的磁碟絕對路徑,以及本機 `%USERNAME%` / `%COMPUTERNAME%` / `%USERDOMAIN%`(執行時讀取,不存進 repo,輸出時遮蔽)。命中就 BUILD FAILED;`build.cmd noidentitycheck` / `-NoIdentityCheck` 可略過(只供除錯 guard 本身)。x86 子行程自動略過(父行程已檢查)。限制:只認得**目前這台**機器的名稱。已驗:乾淨樹 PASS、假 `USERNAME` 會 FAIL 並遮蔽、略過參數有效。
 - Footer credit 改為 `bbfox0703 @ https://github.com/bbfox0703/discrete-public`,點擊開啟該頁;`USAGE.md` credit 同步。

@@ -1,0 +1,184 @@
+# Windows release workflow (modelled on UE5CEDumper's release.yml).
+#
+# Builds the full distribution via build.ps1 -Mode Publish: Mono + IL2CPP DLLs
+# (x64, plus the x86 Mono leg in dist/x86), proxy DLLs, metadata-cli, the
+# Native-AOT Avalonia UI and the CE Lua bridge scripts. It runs the test suite,
+# zips dist/ and attaches the zip to a **DRAFT** GitHub Release.
+#
+# Trigger: a pushed `v*` tag ONLY. Normal pushes and merges do NOT release.
+# (workflow_dispatch = build + artifact only, for testing the pipeline.)
+#
+# Verify-then-publish flow: the release is created as a DRAFT (not public). Pull
+# the .zip from the draft (or the run artifact), verify it, then either click
+# "Publish release" in the GitHub UI, or delete the draft + tag and re-tag.
+#
+# Tag convention: `vNNN` = build number (e.g. v1440). The numeric part is written
+# into build_number.txt before the build, so the binaries report the tag's number.
+name: Release (Windows)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:        # manual run = build + artifact only (no release)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build + package dist (AOT)
+    # Same pinned image as UE5CEDumper: windows-latest / windows-2025 redirect
+    # to windows-2025-vs2026, which ships VS2026 (C++ x64 + x86 tools), CMake
+    # and Ninja. build.ps1 finds VS via vswhere, so it is toolchain-agnostic.
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0          # full history + all tags, needed for the prev-tag changelog
+
+      - name: Fetch pinned C++ dependencies into dll/vendor
+        shell: pwsh
+        # Locally these come from sync_vendor.ps1, which tracks each upstream's
+        # tip. CI pins exact commits instead so a release cannot change because
+        # an upstream moved. When you run sync_vendor.ps1 and the new tips build
+        # fine, copy `git -C dll/vendor/<name> rev-parse HEAD` into this table.
+        run: |
+          $deps = @(
+            @{ Name = 'nlohmann'; Url = 'https://github.com/nlohmann/json.git';        Sha = 'd10879bca8f0aa790105446075a9525b34a3f718'; Recursive = $false },
+            @{ Name = 'minihook'; Url = 'https://github.com/TsudaKageyu/minhook.git'; Sha = '05c06c5bbca226b72ffb40fc0caaef33bcaf6f74'; Recursive = $false },
+            @{ Name = 'zydis';    Url = 'https://github.com/zyantific/zydis.git';     Sha = '17bc6fb1584bb31e1d595819aab7be57115750f7'; Recursive = $true  }  # bundles Zycore as a submodule
+          )
+          foreach ($d in $deps) {
+            $dir = "dll/vendor/$($d.Name)"
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            git -C $dir init -q
+            git -C $dir remote add origin $d.Url
+            git -C $dir fetch -q --depth 1 origin $d.Sha
+            if ($LASTEXITCODE -ne 0) { throw "fetch $($d.Name)@$($d.Sha) failed" }
+            git -C $dir checkout -q FETCH_HEAD
+            if ($d.Recursive) {
+              git -C $dir submodule update -q --init --recursive --depth 1
+              if ($LASTEXITCODE -ne 0) { throw "submodules of $($d.Name) failed" }
+            }
+            Write-Host "$($d.Name) @ $($d.Sha)"
+          }
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pin build number to the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        # For a numeric `vNNN` tag, write NNN into build_number.txt so the
+        # embedded build number == the release tag (build.ps1 runs with
+        # -NoBumpBuildNumber below, so it won't drift +1 on the runner). Non-
+        # numeric tags (e.g. v1.2.3) leave the committed build_number.txt as-is.
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -match '^v(\d+)$') {
+            [System.IO.File]::WriteAllText("$PWD/build_number.txt", "$($Matches[1])`n")
+            Write-Host "Pinned build_number.txt = $($Matches[1]) (from tag $tag)"
+          } else {
+            Write-Host "Tag $tag is not vNNN, using committed build_number.txt as-is."
+          }
+
+      - name: Build + test + publish dist (AOT)
+        shell: pwsh
+        # -Mode Publish, default -Target All: DLLs (x64 + x86 Mono), AOT UI,
+        # tests, proxy DLLs, metadata-cli. The identity guard runs first, as it
+        # does locally. -NoBumpBuildNumber keeps the number pinned to the tag.
+        run: ./build.ps1 -Mode Publish -Clean -NoBumpBuildNumber
+
+      - name: Package dist into a zip + sha256
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_NAME -and $env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { 'manual' }
+          $zip = "Discrete-$tag-win.zip"
+          if (-not (Test-Path 'dist/DiscreteUI.exe')) { throw 'dist/DiscreteUI.exe not found, build failed?' }
+          Copy-Item LICENSE, USAGE.md -Destination dist -Force
+          Compress-Archive -Path dist/* -DestinationPath $zip -Force
+          $h = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$h  $zip" | Set-Content "$zip.sha256" -Encoding ascii
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Packaged $zip (sha256 $h)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Discrete-windows
+          path: |
+            ${{ env.ZIP }}
+            ${{ env.ZIP }}.sha256
+          if-no-files-found: error
+
+      - name: Build release notes (changelog between the previous tag and this tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        # Previous v* tag -> this tag commit list, folded into fixed boilerplate.
+        # Merge commits are dropped (--no-merges) so the list shows the real dev
+        # commits, not the "Merge dev: ..." bubbles on main.
+        run: |
+          $cur = $env:GITHUB_REF_NAME
+          # Previous release tag = the newest v* tag reachable from this tag's
+          # parent. Tags are expected on main.
+          $prev = (git tag -l "v*" --merged "$cur^" --sort=-creatordate |
+                   Where-Object { $_ -ne $cur } | Select-Object -First 1)
+          if ($prev) {
+            $commits = git log --no-merges "--pretty=format:- %s (%h)" "$prev..$cur"
+            $header  = "## Changes since $prev"
+            $compare = "**Full Changelog**: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/compare/$prev...$cur"
+          } else {
+            $commits = @('- First public release.')
+            $header  = "## Changes"
+            $compare = $null
+          }
+          if (-not $commits) { $commits = @('- (no commits)') }
+
+          $notes = @(
+            'Discrete: Unity (Mono / IL2CPP) dumper with a C++ DLL backend, a Cheat Engine Lua bridge and an Avalonia UI.',
+            '',
+            'Self-contained Windows build (Native AOT). No .NET runtime install required.',
+            'x64 DLLs sit at the top level; the 32-bit Mono build is in x86\.',
+            '',
+            $header,
+            ''
+          )
+          $notes += $commits
+          if ($compare) { $notes += @('', $compare) }
+          $notes += @(
+            '',
+            '## Setup',
+            '- Unzip anywhere and run DiscreteUI.exe, then pick a running Unity game to inject into.',
+            '- For the Cheat Engine bridge, see README.html (bundled) and USAGE.md.',
+            '',
+            '> The binaries are unsigned. Windows SmartScreen / antivirus may warn on first run, and injector DLLs are often flagged heuristically. Verify the download with the included .sha256.'
+          )
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+          Write-Host "Built release notes ($header)."
+
+      - name: Create / update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          # Upsert: a tag pushed with `git push` has no release yet -> create a
+          # DRAFT; a tag created from the web release page already has one ->
+          # overwrite its notes and assets.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag --notes-file release-notes.md
+            gh release upload $tag "$env:ZIP" "$env:ZIP.sha256" --clobber
+            Write-Host "Release $tag already existed, overwrote notes + uploaded assets."
+          } else {
+            gh release create $tag "$env:ZIP" "$env:ZIP.sha256" `
+              --draft `
+              --title "Discrete $tag" `
+              --notes-file release-notes.md
+            Write-Host "Created DRAFT release $tag. Review the assets, then Publish (or delete + re-tag)."
+          }

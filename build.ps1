@@ -74,6 +74,11 @@ param(
     # debugging the guard itself; do NOT use it to push past a real finding.
     [switch]$NoIdentityCheck,
 
+    # Keep build_number.txt as-is instead of incrementing it. The release
+    # workflow pins it to the vNNN tag first, then builds with this flag so
+    # the embedded build number equals the tag.
+    [switch]$NoBumpBuildNumber,
+
     [string]$LogFile = ''
 )
 
@@ -258,8 +263,14 @@ if ($Clean) {
 New-Item -ItemType Directory -Path $DIST_DIR  -Force | Out-Null
 New-Item -ItemType Directory -Path $BUILD_DIR -Force | Out-Null
 
-$buildNum = Bump-BuildNumber
-Write-Info "Build#: $buildNum"
+if ($NoBumpBuildNumber) {
+    $bnPath   = Join-Path $RepoRoot 'build_number.txt'
+    $buildNum = if (Test-Path $bnPath) { [int](Get-Content -Path $bnPath -TotalCount 1) } else { 0 }
+    Write-Info "Build#: $buildNum (not bumped)"
+} else {
+    $buildNum = Bump-BuildNumber
+    Write-Info "Build#: $buildNum"
+}
 
 $exitCode = 0
 
@@ -354,6 +365,7 @@ function Build-Dll {
                        '-File',$PSCommandPath,
                        '-Target','DLL','-Mode',$Mode,'-Arch','x86',
                        '-NoIdentityCheck')  # parent already ran the guard
+        if ($NoBumpBuildNumber) { $childArgs += '-NoBumpBuildNumber' }
         & pwsh @childArgs
         $x86Ok = ($LASTEXITCODE -eq 0)
         return ($x64Ok -and $x86Ok)
