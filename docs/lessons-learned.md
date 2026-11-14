@@ -1375,8 +1375,7 @@ be added explicitly:
 `Program.cs` reads
 `AppBuilder.Configure<App>().UseWin32().UseSkia().UseHarfBuzz().WithInterFont()`.
 
-Documented in the [Avalonia 12 Win-only memory entry](../C:\Users\%USERNAME%\.claude\projects\D--Github-discrete\memory\feedback_avalonia12_winonly.md);
-the symptom-to-cause map is the load-bearing part for diagnosis.
+The symptom-to-cause map above is the load-bearing part for diagnosis.
 
 ### `SkiaSharp` / `HarfBuzzSharp` must match what Avalonia was built against — NuGet cannot enforce it
 
