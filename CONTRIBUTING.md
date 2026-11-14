@@ -8,8 +8,12 @@
 
 ## Quick start
 
+Prerequisites: Visual Studio (C++ workload), .NET SDK 10, Rust via
+[rustup](https://rustup.rs) (`rust-toolchain.toml` pins the toolchain and
+both targets) and Python 3 — see [README.md §Building from source](README.md#building-from-source).
+
 ```powershell
-# Clone + sync vendor (nlohmann/json, libil2cpp metadata sources)
+# Clone + sync vendor (pinned nlohmann/json + MinHook; reference clones)
 git clone https://github.com/<you>/discrete.git
 cd discrete
 .\sync_vendor.ps1
@@ -52,16 +56,19 @@ discrete/
 ├── docs/                       <- canonical specs (plan / STATUS / pipe-protocol / ...)
 ├── dll/                        <- C++ DLL backends
 │   ├── src/main.cpp
-│   ├── src/shared/             <- Logger / Memory / Pipe / ExportAPI / AobPattern / ...
+│   ├── src/shared/             <- Logger / Memory / Pipe / ExportAPI / *Rs.cpp wrappers / ...
 │   ├── src/mono/               <- Mono backend (Resolver / Domain / Walker / Invoker / ...)
 │   ├── src/il2cpp/             <- IL2CPP backend (mirrors Mono)
-│   ├── tests/                  <- C++-side unit tests
-│   └── vendor/                 <- nlohmann/json + libil2cpp source dumps
+│   ├── rust/                   <- Rust core (staticlib discrete_core: metadata parser,
+│   │                              AOB / group match / refine, chain detector, field xref)
+│   └── vendor/                 <- gitignored; pinned nlohmann/json + MinHook (sync_vendor.ps1)
 ├── ui/
 │   ├── UnityDumpUI/            <- Avalonia 12 AOT app (AssemblyName = DiscreteUI)
 │   ├── UnityDumpUI.Core/       <- protocol + services (AOT-safe, no reflection)
 │   └── UnityDumpUI.Tests/      <- xUnit v3
-├── tools/                      <- PowerShell smoke tests + metadata-cli + Install-CEScripts
+├── tools/                      <- PowerShell smoke tests, metadata-cli, Install-CEScripts,
+│                                  verify/ (Rust regression gates), r2-diff/, smoke/,
+│                                  zydis-oracle/ (decoder-fidelity oracle)
 └── scripts/                    <- CE Lua bridge — deployed to <CE>/discrete/ via build.cmd deploy
 ```
 
@@ -129,6 +136,11 @@ short version:
   mirror each other one-for-one — `*Resolver` / `*Domain` /
   `*ClassWalker` / `*MethodInvoker` / `*AddressFinder` /
   `*MethodFinder`. New behaviour goes in both backends.
+- **Rust core** (`dll/rust`): read the FFI rules in
+  [docs/rust-core.md](docs/rust-core.md) first — every `extern "C"` body
+  inside `ffi::guard`, game memory only through the SEH read shim, no new
+  crate without a recorded decision, `include/discrete_core.h` kept in sync
+  by hand.
 
 ### Lua bridge
 
@@ -152,6 +164,19 @@ short version:
 - **xUnit v3** for the C# side (`ui/UnityDumpUI.Tests/`). Run via
   `.\build.cmd test`. Covers protocol DTOs, exporters, pipe-client
   lifecycle, a few inspector helpers.
+- **`cargo test`** for the Rust core, x64 and i686 — also part of
+  `.\build.cmd test`.
+- **Rust regression gates** (after `.\build.cmd cli`; game files come from
+  the git-ignored `tools/verify/fixtures.local.txt`, template
+  `fixtures.example.txt`):
+  `tools/verify/metadata_rust_diff.py` (metadata parser vs the legacy C++)
+  and `tools/verify/r2_golden.py` (AOB, group match, refine, chain
+  detector and field-xref output vs recorded hashes).
+- **Zydis oracle** (`tools/zydis-oracle/build.ps1`): proves the Rust x86
+  decoder adapter still answers like Zydis did. Run it for any change
+  under `dll/rust/src/chain/` or `dll/rust/src/xref/`.
+- **Live smoke** (`tools/smoke/r2_live.py`): pipe RPCs against a running
+  game; `compare` diffs two runs (e.g. before / after a change).
 - **PowerShell smoke tests** in `tools/Test-*.ps1`. One-shot pipe RPC
   against the injected DLL — useful for headless verification without
   launching the UI.
@@ -178,9 +203,9 @@ short version:
 
 ### What we don't have (yet)
 
-- **End-to-end MetadataParser fixtures** per IL2CPP version — would
-  need a deterministic `global-metadata.dat` fixture per version.
-  Drip-feed candidate.
+- **Committed MetadataParser fixtures** per IL2CPP version — today the
+  parser is checked against games installed on the dev box (fixture
+  list above); game files cannot be committed.
 - **CE-XML live-mode rendering against a deterministic fixture**.
   Same drip-feed.
 - **AobMakerBridge happy + sad path** with a fake pipe server. Same.
@@ -239,7 +264,9 @@ Skip the body for trivial fixes (typo, dependency bump, etc.).
 
 If you touched the DLL, also rebuild it (`.\build.cmd il2cpp` /
 `.\build.cmd mono`). The game must be closed before rebuilding —
-the DLL stays mapped after injection.
+the DLL stays mapped after injection. If you touched the Rust core, also
+run the matching gate above (`r2_golden.py`, `metadata_rust_diff.py`, and
+the Zydis oracle for decoder changes).
 
 ### Releases
 
@@ -265,6 +292,10 @@ generated commit list since the previous tag. Manual runs
    AOT-trimmed single file (~50 MB; a much larger exe means a non-AOT build
    slipped in), and `build_number.txt` in the zip equals the tag.
 5. **Leave it a draft.** The maintainer tries the build and publishes it.
+
+The first release (`v1505`) had no previous tag: its notes are a feature
+list (one sentence per feature) instead of New / Fixed, and its `## Setup`
+is the one later releases copy.
 
 Rules for the notes:
 
