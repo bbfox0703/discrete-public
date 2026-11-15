@@ -245,12 +245,12 @@ function bootstrap()
     -- 3. Inject the backend DLL.
     if injectDLL ~= nil then
         if injectDLL(dllPath) == nil then
-            error("[bootstrap] injectDLL returned nil — check %LOCALAPPDATA%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
+            error("[bootstrap] injectDLL returned nil — check %LOCALAPPDATA%\\discrete\\Logs\\<pid>\\init\\current.log")
         end
     elseif loadLibrary ~= nil then
         local h = loadLibrary(dllPath)
         if h == nil or h == 0 then
-            error("[bootstrap] loadLibrary returned NULL — check %LOCALAPPDATA%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
+            error("[bootstrap] loadLibrary returned NULL — check %LOCALAPPDATA%\\discrete\\Logs\\<pid>\\init\\current.log")
         end
     else
         error("[bootstrap] neither injectDLL nor loadLibrary available in this CE build")

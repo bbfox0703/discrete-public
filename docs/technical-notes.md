@@ -110,7 +110,7 @@ shows the multi-grid case (3 grids in one window).
 
 ## Logger channels
 
-DLL writes to `%LOCALAPPDATA%\Discrete_Dumper\Logs\<host-pid>\<channel>\`
+DLL writes to `%LOCALAPPDATA%\discrete\Logs\<host-pid>\<channel>\`
 across five channels:
 
 | Channel | Used by | Volume (typical) |
@@ -125,8 +125,11 @@ UI writes to a separate per-PID directory under the same root, but
 to a single `view` channel: VM-level events (find instances, walk
 instance, copy XML, etc.).
 
-8 MB rotation with 4-file ring per channel. Old logs are clobbered;
-preserve a session by copying out before next launch.
+The live file is `current.log`; at 8 MB it is archived to
+`YYYYMMDD-HHMMSS.log`. Retention is by age: archives and per-PID folders
+untouched for 21 days are deleted (DLL on attach, UI on start), so a session
+survives three weeks regardless of how many games were launched since. Full
+policy: [Archiutecture.md](Archiutecture.md) §Rules "Log output".
 
 ---
 

@@ -40,7 +40,7 @@ param(
     [string]$ProcessName = 'DiscreteUI',
     [int]$TargetPid = 0,
     [string]$Label = '',
-    [string]$OutDir = "$env:LOCALAPPDATA\Discrete_Dumper\gcdump",
+    [string]$OutDir = "$env:LOCALAPPDATA\discrete\gcdump",
     [int]$Top = 40,
     [switch]$NoReport,
     [switch]$InstallTool

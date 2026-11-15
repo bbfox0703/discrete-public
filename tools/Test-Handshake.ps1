@@ -103,7 +103,7 @@ $client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'DiscreteBfx', '
 try {
     $client.Connect($PipeTimeoutMs)
 } catch {
-    throw "Pipe connect timed out after $PipeTimeoutMs ms. Is the DLL loaded? Check %LOCALAPPDATA%\Discrete_Dumper\Logs\$ProcessId\init\current.log"
+    throw "Pipe connect timed out after $PipeTimeoutMs ms. Is the DLL loaded? Check %LOCALAPPDATA%\discrete\Logs\$ProcessId\init\current.log"
 }
 
 $writer = New-Object System.IO.StreamWriter($client)

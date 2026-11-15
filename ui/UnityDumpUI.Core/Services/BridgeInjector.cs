@@ -155,7 +155,7 @@ public static class BridgeInjector
             return new BridgeInjectResult(
                 Ok: false, FilesInjected: injected, AaScriptCreated: false,
                 FailedStepDescription: finalDesc,
-                ErrorMessage: "AOBMaker CreateAAScript failed (see %LOCALAPPDATA%\\Discrete_Dumper\\Logs\\ui\\current.log for plugin-side detail)");
+                ErrorMessage: "AOBMaker CreateAAScript failed (see %LOCALAPPDATA%\\discrete\\Logs\\ui\\ for plugin-side detail)");
         }
 
         return new BridgeInjectResult(

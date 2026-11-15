@@ -1,59 +1,60 @@
 // FileLogger.cs — UI-side counterpart of dll/src/shared/Logger.{h,cpp}.
 //
-// Three categories per Architecture.md ("init" / "pipe" / "view") + 5-file
-// rotation. Logs land under
-// %LOCALAPPDATA%\Discrete_Dumper\Logs\ui\<category>\current.log.
+// Three categories per Architecture.md ("init" / "pipe" / "view", plus any
+// ad-hoc category a service passes, e.g. "snapshot"). Logs land under
+// %LOCALAPPDATA%\discrete\Logs\ui\<category>\current.log.
 //
-// Rotation policy (2026-05-20):
-//   * UI side rotates on EVERY UI startup — `current.log` → `current.1.log`
-//     → `current.2.log` → … → `current.5.log` (oldest drops). The size-
-//     based safety net is still present (defends against a runaway long-
-//     running UI session writing > LogMaxFileBytes between launches), but
-//     practical rotation is driven by the startup-time pass.
-//   * DLL per-PID side stays size-based (rare to fire — game session usually
-//     ends well under 8 MB per category). Implemented in C++ side.
-//   * Cleanup: only the most-recent `Constants.LogKeepRecentPidDirs` DLL
-//     per-PID directories are kept (count-based, not age-based); older ones
-//     are removed at UI startup via `PruneOldDllPidDirectories`.
+// Rotation + retention (2026-11, modelled on UE5CEDumper; same policy as the
+// DLL — see Constants.LogRetentionDays):
+//   * current.log is ALWAYS the live file.
+//   * At UI startup every category's previous current.log is archived to
+//     <YYYYMMDD-HHMMSS>.log, and the same happens mid-session when a file
+//     reaches Constants.LogMaxFileBytes (8 MB). The stamp is the file's OWN
+//     last-write time, never "now" — archiving must not reset a stale log's
+//     clock, or the age prune would keep it for another full window.
+//   * Retention is by AGE, not a file count (RunRetentionSweep, at UI start):
+//     archives older than LogRetentionDays are deleted, and so are DLL
+//     per-PID folders whose newest file is that old. The old count-based
+//     policies (5 rotated UI files, 15 newest PID folders) evicted by number,
+//     so a handful of short game launches discarded everything before them
+//     no matter how recent.
+//   * The pre-2026-11 log root (%LOCALAPPDATA%\Discrete_Dumper\Logs) gets the
+//     same age sweep and is deleted once empty (see AppDataMigration).
 //
 // AOT-safe: no reflection, just FileStream + UTF-8 writes. Thread-safe by a
 // per-category lock so concurrent writers don't interleave lines.
 
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Threading;
 
 namespace UnityDumpUI.Core.Services;
 
+/// <summary>What one <see cref="FileLogger.RunRetentionSweep"/> pass removed.</summary>
+public readonly record struct LogRetentionResult(int PidFoldersDeleted, int FilesDeleted, bool LegacyRootRemoved);
+
 public sealed class FileLogger : IDisposable
 {
     private readonly string _root;
     private readonly long   _maxFileBytes;
-    private readonly int    _rotationFiles;
     private readonly ConcurrentDictionary<string, Lazy<CategoryWriter>> _writers = new();
     private bool _disposed;
 
     public FileLogger(string? logRootOverride = null,
-                      long maxFileBytes = Constants.LogMaxFileBytes,
-                      int rotationFiles = Constants.LogRotationFileCount)
+                      long maxFileBytes = Constants.LogMaxFileBytes)
     {
         string root = logRootOverride ?? DefaultRoot();
         Directory.CreateDirectory(root);
         _root = root;
         _maxFileBytes = maxFileBytes;
-        _rotationFiles = rotationFiles;
 
-        // One-shot startup rotation: chain every existing category's
-        // current.log out to .1, .2, … so the new session writes a fresh
-        // current.log. Unlike size-based rotation this fires regardless
-        // of how big the previous log was. Safe to call on a fresh
-        // install — no-op when no files exist.
-        RotateAllOnStartup();
+        // One-shot startup archive: every existing category's current.log
+        // becomes a dated archive so this session writes a fresh file.
+        // No-op on a fresh install.
+        ArchiveAllOnStartup();
     }
 
     public string Root => _root;
@@ -71,7 +72,7 @@ public sealed class FileLogger : IDisposable
         // ExecutionAndPublication guarantees the writer is constructed exactly
         // once per category.
         var writer = _writers.GetOrAdd(category, c => new Lazy<CategoryWriter>(
-            () => new CategoryWriter(_root, c, _maxFileBytes, _rotationFiles),
+            () => new CategoryWriter(_root, c, _maxFileBytes),
             LazyThreadSafetyMode.ExecutionAndPublication));
         writer.Value.Write(message);
     }
@@ -88,65 +89,51 @@ public sealed class FileLogger : IDisposable
     }
 
     /// <summary>
-    /// At UI startup, rotate every existing category's `current.log` so
-    /// the new session starts with a fresh file. Scans <see cref="Root"/>
-    /// for subdirectories that hold a `current.log` and chains it out to
-    /// `current.1.log` etc. — same shape as the size-based <see cref="CategoryWriter.Rotate"/>
-    /// path but unconditional. No CategoryWriter is constructed for
-    /// categories that don't yet exist (those rotate naturally on first
-    /// Write next session).
+    /// At UI startup, archive every existing category's <c>current.log</c> so
+    /// the new session starts with a fresh file. No CategoryWriter is
+    /// constructed for categories that are not written this session.
     /// </summary>
-    private void RotateAllOnStartup()
+    private void ArchiveAllOnStartup()
     {
-        DirectoryInfo rootDir;
-        try { rootDir = new DirectoryInfo(_root); }
-        catch (Exception) { return; }
-        if (!rootDir.Exists) return;
-
-        foreach (DirectoryInfo catDir in rootDir.EnumerateDirectories())
+        try
         {
-            string current = Path.Combine(catDir.FullName, "current.log");
-            if (!File.Exists(current)) continue;
-            RotateChain(catDir.FullName, _rotationFiles);
+            foreach (string catDir in Directory.EnumerateDirectories(_root))
+                ArchiveByWriteTime(Path.Combine(catDir, Constants.LogCurrentFileName));
         }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* best-effort */ }
     }
 
     /// <summary>
-    /// Shared rotation helper. Cycles <c>current.log → current.1.log → …
-    /// → current.(N-1).log</c>, dropping <c>current.N.log</c> when it
-    /// exists. Called by both the startup pass (<see cref="RotateAllOnStartup"/>)
-    /// and the per-write size guard (<see cref="CategoryWriter.Rotate"/>).
-    /// Best-effort: IO failures swallowed so logger faults never block
-    /// the rest of the app.
+    /// Rename <paramref name="src"/> to <c>&lt;YYYYMMDD-HHMMSS&gt;.log</c> in the
+    /// same folder, stamped from the file's own last-write time (local), with a
+    /// <c>-N</c> suffix on a same-second clash. Best-effort: on failure the
+    /// file stays where it is and the next rotation retries.
     /// </summary>
-    private static void RotateChain(string dir, int rotationFiles)
+    /// <returns>The archive path, or null when nothing was archived.</returns>
+    internal static string? ArchiveByWriteTime(string src)
     {
-        string current = Path.Combine(dir, "current.log");
-        for (int i = rotationFiles - 1; i >= 1; --i)
+        try
         {
-            string from = i == 1 ? current : Path.Combine(dir, $"current.{i - 1}.log");
-            string to   = Path.Combine(dir, $"current.{i}.log");
-            if (!File.Exists(from)) continue;
-            try
+            if (!File.Exists(src)) return null;
+            string dir = Path.GetDirectoryName(src)!;
+            string stamp = File.GetLastWriteTime(src).ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+            for (int dup = 0; dup < 100; dup++)
             {
-                if (File.Exists(to)) File.Delete(to);
-                File.Move(from, to);
+                string name = dup == 0 ? $"{stamp}.log" : $"{stamp}-{dup}.log";
+                string dst = Path.Combine(dir, name);
+                if (File.Exists(dst)) continue;
+                File.Move(src, dst);
+                return dst;
             }
-            catch (IOException) { /* best-effort */ }
-            catch (UnauthorizedAccessException) { /* best-effort */ }
         }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* best-effort */ }
+        return null;
     }
 
-    private static string DefaultRoot()
-    {
-        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        // Match the DLL: %LOCALAPPDATA%\Discrete_Dumper\Logs\ui (Logs/<pid>/<cat> for the DLL,
-        // Logs/ui/<cat> for the UI — disjoint trees by design).
-        return Path.Combine(local, Constants.LogRootSubpath, "ui");
-    }
+    private static string DefaultRoot() => Path.Combine(LogRootDirectory(), "ui");
 
     /// <summary>
-    /// The log ROOT — <c>%LOCALAPPDATA%\Discrete_Dumper\Logs</c> — parent of the
+    /// The log ROOT — <c>%LOCALAPPDATA%\discrete\Logs</c> — parent of the
     /// UI's <c>ui\</c> tree and the DLL's per-PID folders. The "Open log folder"
     /// toolbar button opens this so the user can reach both. The directory is NOT
     /// created here; the caller lazy-creates it before opening.
@@ -157,62 +144,159 @@ public sealed class FileLogger : IDisposable
         return Path.Combine(local, Constants.LogRootSubpath);
     }
 
-    /// <summary>
-    /// Keep only the most-recent <paramref name="keepRecent"/> DLL-side
-    /// per-PID log directories (by last-write time); delete the older ones.
-    /// Each game injection (Pick &amp; inject or proxy auto-load) creates a new
-    /// PID folder under <c>%LOCALAPPDATA%\Discrete_Dumper\Logs\&lt;pid&gt;\</c>;
-    /// without cleanup these accumulate to hundreds of dead folders. Run on UI
-    /// startup.
-    ///
-    /// Count-based, not age-based: only the last <paramref name="keepRecent"/>
-    /// PID directories are retained regardless of age — keeping more around
-    /// serves no purpose. The <c>ui</c> directory is preserved (only numeric
-    /// PID folders are candidates); anything that isn't a numeric PID folder is
-    /// left alone. Best-effort: failures (file locked by another running game,
-    /// permission denied) are swallowed so logging itself never faults the UI
-    /// start path — a folder that fails to delete simply isn't counted toward
-    /// the kept set and gets retried next launch.
-    /// </summary>
-    /// <returns>Number of PID directories successfully removed.</returns>
-    public static int PruneOldDllPidDirectories(int keepRecent = Constants.LogKeepRecentPidDirs,
-                                                string? logRootOverride = null)
+    /// <summary>The pre-2026-11 log root, <c>%LOCALAPPDATA%\Discrete_Dumper\Logs</c>.</summary>
+    public static string LegacyLogRootDirectory()
     {
-        if (keepRecent < 0) keepRecent = 0;
-        string root = logRootOverride ?? Path.GetDirectoryName(DefaultRoot()) ?? string.Empty;
-        if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return 0;
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return Path.Combine(local, Constants.LegacyAppDataFolderName, "Logs");
+    }
 
-        List<DirectoryInfo> pidDirs;
+    /// <summary>
+    /// Age-based retention over the whole log root. Run once at UI startup,
+    /// OFF the UI thread (it walks every per-PID folder).
+    /// <list type="bullet">
+    /// <item><c>ui\&lt;category&gt;\</c>: archived <c>*.log</c> older than the window
+    /// are deleted; <c>current.log</c> is never touched.</item>
+    /// <item>Numeric per-PID folders: removed when EMPTY or when their newest
+    /// file is older than the window — judged by the files inside, not the
+    /// folder's own mtime (Windows does not bump it when an existing child is
+    /// written), so a running game's folder can never be selected. In a folder
+    /// that stays, aged archives are deleted like the UI's.</item>
+    /// <item>The legacy root gets the same treatment for every sub-folder
+    /// (none of its files are live for this build), and is deleted — with
+    /// its parent app-data folder — once empty.</item>
+    /// </list>
+    /// Never throws; a locked file or folder is skipped and retried next start.
+    /// The DLL runs the same sweep (minus <c>ui\</c> and the legacy root) on
+    /// attach, so proxy-only users get retention without ever opening the UI.
+    /// </summary>
+    public static LogRetentionResult RunRetentionSweep(string? logRootOverride = null,
+                                                       string? legacyLogRootOverride = null,
+                                                       DateTime? nowUtc = null,
+                                                       int retentionDays = Constants.LogRetentionDays)
+    {
+        DateTime cutoff = (nowUtc ?? DateTime.UtcNow).AddDays(-retentionDays);
+        int folders = 0, files = 0;
+
+        string root = logRootOverride ?? LogRootDirectory();
+        if (Directory.Exists(root))
+        {
+            foreach (string sub in SafeEnumerateDirectories(root))
+            {
+                string name = Path.GetFileName(sub);
+                if (string.Equals(name, "ui", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (string cat in SafeEnumerateDirectories(sub))
+                        files += PruneAgedArchives(cat, cutoff, skipCurrent: true);
+                }
+                else if (IsPidFolderName(name))
+                {
+                    SweepFolder(sub, cutoff, skipCurrent: true, ref folders, ref files);
+                }
+            }
+        }
+
+        bool legacyRemoved = false;
+        string legacy = legacyLogRootOverride ?? LegacyLogRootDirectory();
+        if (Directory.Exists(legacy))
+        {
+            foreach (string sub in SafeEnumerateDirectories(legacy))
+                SweepFolder(sub, cutoff, skipCurrent: false, ref folders, ref files);
+            files += PruneAgedArchives(legacy, cutoff, skipCurrent: false);
+            if (TryDeleteIfEmpty(legacy))
+            {
+                legacyRemoved = true;
+                string? legacyAppData = Path.GetDirectoryName(legacy);
+                if (legacyAppData is not null) TryDeleteIfEmpty(legacyAppData);
+            }
+        }
+
+        return new LogRetentionResult(folders, files, legacyRemoved);
+    }
+
+    private static bool IsPidFolderName(string name)
+    {
+        if (name.Length == 0) return false;
+        foreach (char c in name) if (c is < '0' or > '9') return false;
+        return true;
+    }
+
+    // Remove the whole folder when it is empty or its newest file is past the
+    // cutoff; otherwise prune aged archives in each of its sub-folders.
+    private static void SweepFolder(string folder, DateTime cutoff, bool skipCurrent,
+                                    ref int folders, ref int files)
+    {
+        DateTime? newest;
         try
         {
-            pidDirs = Directory.EnumerateDirectories(root)
-                .Select(p => new DirectoryInfo(p))
-                .Where(d => int.TryParse(d.Name, out _))   // numeric PID only — skips "ui"
-                .OrderByDescending(d => d.LastWriteTimeUtc) // newest first
-                .ToList();
+            newest = null;
+            foreach (string f in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
+            {
+                DateTime t = File.GetLastWriteTimeUtc(f);
+                if (newest is null || t > newest) newest = t;
+            }
         }
-        catch (Exception)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            return 0;
+            return;   // half-read folder: never guess it is empty or stale
         }
 
-        // Keep the newest `keepRecent`; everything past that is stale.
-        int deleted = 0;
-        foreach (DirectoryInfo d in pidDirs.Skip(keepRecent))
+        if (newest is null || newest < cutoff)
         {
+            try { Directory.Delete(folder, recursive: true); folders++; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* locked — retry next start */ }
+            return;
+        }
+
+        foreach (string cat in SafeEnumerateDirectories(folder))
+            files += PruneAgedArchives(cat, cutoff, skipCurrent);
+    }
+
+    /// <summary>
+    /// Delete <c>*.log</c> files in <paramref name="dir"/> (not recursive) whose
+    /// last-write time is before <paramref name="cutoffUtc"/>. With
+    /// <paramref name="skipCurrent"/>, <c>current.log</c> is never touched.
+    /// Per-file failures (a locked file) do not stop the sweep.
+    /// </summary>
+    internal static int PruneAgedArchives(string dir, DateTime cutoffUtc, bool skipCurrent)
+    {
+        int deleted = 0;
+        string[] candidates;
+        try { candidates = Directory.GetFiles(dir, "*.log"); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return 0; }
+
+        foreach (string f in candidates)
+        {
+            if (skipCurrent && string.Equals(Path.GetFileName(f), Constants.LogCurrentFileName,
+                                             StringComparison.OrdinalIgnoreCase))
+                continue;
             try
             {
-                d.Delete(recursive: true);
-                ++deleted;
+                if (File.GetLastWriteTimeUtc(f) >= cutoffUtc) continue;
+                File.Delete(f);
+                deleted++;
             }
-            catch (Exception)
-            {
-                // Best-effort. Stale PID might still be locked by a
-                // running game (proxy auto-loaded a sibling install at
-                // the same PID). Skip + retry next launch.
-            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* retry next start */ }
         }
         return deleted;
+    }
+
+    private static string[] SafeEnumerateDirectories(string dir)
+    {
+        try { return Directory.GetDirectories(dir); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return []; }
+    }
+
+    internal static bool TryDeleteIfEmpty(string dir)
+    {
+        try
+        {
+            using var it = Directory.EnumerateFileSystemEntries(dir).GetEnumerator();
+            if (it.MoveNext()) return false;
+            Directory.Delete(dir);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     private sealed class CategoryWriter : IDisposable
@@ -220,16 +304,14 @@ public sealed class FileLogger : IDisposable
         private readonly object       _gate = new();
         private readonly string       _dir;
         private readonly long         _maxFileBytes;
-        private readonly int          _rotationFiles;
         private FileStream?           _stream;
         private StreamWriter?         _writer;
         private long                  _bytesWritten;
 
-        public CategoryWriter(string root, string category, long maxFileBytes, int rotationFiles)
+        public CategoryWriter(string root, string category, long maxFileBytes)
         {
             _dir = Path.Combine(root, category);
             _maxFileBytes = maxFileBytes;
-            _rotationFiles = rotationFiles;
             Directory.CreateDirectory(_dir);
             Open();
         }
@@ -257,7 +339,7 @@ public sealed class FileLogger : IDisposable
 
         private void Open()
         {
-            string path = Path.Combine(_dir, "current.log");
+            string path = Path.Combine(_dir, Constants.LogCurrentFileName);
             _stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read,
                                      bufferSize: 4096, FileOptions.None);
             _writer = new StreamWriter(_stream, new UTF8Encoding(false))
@@ -280,9 +362,8 @@ public sealed class FileLogger : IDisposable
         private void Rotate()
         {
             Close();
-            RotateChain(_dir, _rotationFiles);
+            ArchiveByWriteTime(Path.Combine(_dir, Constants.LogCurrentFileName));
             Open();
-            _bytesWritten = 0;
         }
     }
 }

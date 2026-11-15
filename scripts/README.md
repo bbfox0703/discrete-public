@@ -200,7 +200,7 @@ this automatically (Mode A/B/C above).
 
 ### Where logs live
 
-All logs go under `%LOCALAPPDATA%\Discrete_Dumper\Logs\`.
+All logs go under `%LOCALAPPDATA%\discrete\Logs\`.
 
 | Path | What's logged |
 |---|---|
@@ -213,11 +213,15 @@ All logs go under `%LOCALAPPDATA%\Discrete_Dumper\Logs\`.
 
 Open the folder quickly:
 ```powershell
-explorer "$env:LOCALAPPDATA\Discrete_Dumper\Logs"
+explorer "$env:LOCALAPPDATA\discrete\Logs"
 ```
 
-Each log auto-rotates at 8 MB; older entries land under
-`current.log.1` / `current.log.2` etc.
+`current.log` is always the live file. At 8 MB it is archived next to it as
+`YYYYMMDD-HHMMSS.log` (the time of its last write); the UI also archives its
+own `current.log` files on every start. Retention is by age: archives, and
+per-PID folders with nothing written in the last 21 days, are deleted — by the
+DLL on attach and by the UI on start. Builds before 2026-11 logged to
+`%LOCALAPPDATA%\Discrete_Dumper\Logs`; the UI ages that folder out the same way.
 
 ### Running diagnostics from CE Lua
 

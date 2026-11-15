@@ -128,7 +128,7 @@ Discrete-Mono-x86.dll    ← Mono, 32-bit (renamed from dist/x86/Discrete-Mono.d
 ```
 
 `M.dllPath` searches the `.CT`'s own folder first (then the CE-install
-`discrete\` subfolder and `%LOCALAPPDATA%\Discrete_Dumper\`), checking
+`discrete\` subfolder and `%LOCALAPPDATA%\discrete\`, then the legacy `Discrete_Dumper\`), checking
 file existence at each, so a stale CE dialog path can't send it to the
 wrong copy.
 

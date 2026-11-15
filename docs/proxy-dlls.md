@@ -256,7 +256,7 @@ The check is one grep against our own `init` log, which already prints every
 loaded module:
 
 ```bash
-grep -i acgenral "$LOCALAPPDATA/Discrete_Dumper/Logs/<pid>/init/current.log"
+grep -i acgenral "$LOCALAPPDATA/discrete/Logs/<pid>/init/current.log"
 ```
 
 Details:

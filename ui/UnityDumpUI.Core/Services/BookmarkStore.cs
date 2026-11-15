@@ -2,7 +2,7 @@
 //
 // Pins a live instance you're inspecting (class + last-seen address + a label)
 // so you can jump back to it later, persisted per game across sessions. Mirrors
-// TeleportHotkeyStore: a small plaintext file under %LOCALAPPDATA%\Discrete_Dumper,
+// TeleportHotkeyStore: a small plaintext file under %LOCALAPPDATA%\discrete,
 // one bookmark per line, NO JSON / reflection so it's trivially Native-AOT safe
 // and loads synchronously. Corrupt / partial lines are skipped; a missing file
 // loads as an empty list.
@@ -58,12 +58,12 @@ public sealed class BookmarkStore
     /// <summary>Test seam: point the store at an explicit directory.</summary>
     public BookmarkStore(string dir) => _dir = dir;
 
-    /// <summary><c>%LOCALAPPDATA%\Discrete_Dumper</c> — same app-data root as
+    /// <summary><c>%LOCALAPPDATA%\discrete</c> — same app-data root as
     /// <see cref="TeleportHotkeyStore"/> / the FileLogger.</summary>
     public static string DefaultDir()
     {
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string subRoot = Constants.LogRootSubpath;          // "Discrete_Dumper\Logs"
+        string subRoot = Constants.LogRootSubpath;          // "discrete\Logs"
         int slash = subRoot.IndexOf('\\');
         string appRoot = slash > 0 ? subRoot[..slash] : subRoot;
         return Path.Combine(localAppData, appRoot);

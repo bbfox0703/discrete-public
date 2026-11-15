@@ -21,7 +21,7 @@ public sealed class UserSettings
 {
     /// <summary>Phase 29c: override directory for per-game snapshot DBs.
     /// <c>null</c> = use the platform default
-    /// (<c>%LOCALAPPDATA%\Discrete_Dumper\snapshots\</c> on Windows).</summary>
+    /// (<c>%LOCALAPPDATA%\discrete\snapshots\</c> on Windows).</summary>
     [JsonPropertyName("snapshot_db_directory")]
     public string? SnapshotDbDirectory { get; set; }
 

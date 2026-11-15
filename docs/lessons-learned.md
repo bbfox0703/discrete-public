@@ -243,7 +243,7 @@ through the same code path.
 **Symptom**: closing SaGa Frontier 2 Remastered (with our IL2CPP DLL
 injected) hung for ~10 seconds between the user clicking the window's
 close button and the process actually vanishing from Task Manager.
-The per-PID init log (`Discrete_Dumper\Logs\<pid>\init\current.log`)
+The per-PID init log (`discrete\Logs\<pid>\init\current.log`)
 stopped at the post-init "hook armed on il2cpp_runtime_invoke" line
 with no shutdown banner — meaning `Discrete_Shutdown` either never
 ran or was blocked before reaching its log line.
@@ -2102,7 +2102,7 @@ the one in the audit. What matters is the testing consequence:
 > `Discrete_Init`, so this costs nothing:
 >
 > ```bash
-> grep -i acgenral "$LOCALAPPDATA/Discrete_Dumper/Logs/<pid>/init/current.log"
+> grep -i acgenral "$LOCALAPPDATA/discrete/Logs/<pid>/init/current.log"
 > ```
 
 **What this run does and does not close.** It is a genuine positive control for
@@ -3090,7 +3090,7 @@ a single `Log::Write(LogCategoryWalk, ...)` call site. The `pipe\`
 log shows the connect succeeded; no other category gets data.
 
 **Diagnostic recipe** (30 seconds, no code changes needed):
-1. Grab `%LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\init\current.log`
+1. Grab `%LOCALAPPDATA%\discrete\Logs\<pid>\init\current.log`
 2. Look at the last 5 lines before `Init: main thread id = ...`
 3. If you see `required 0/16, optional 0/27 (resolved=no)` → symptom 1 confirmed
 4. `metadata\current.log` will show `magic mismatch` → symptom 2 confirmed

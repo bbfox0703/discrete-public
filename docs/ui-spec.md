@@ -42,7 +42,7 @@ ui/
 │   │   ├── ProtocolJson.cs        [JsonSerializable] context (source-gen)
 │   │   ├── CallArgFactory.cs      Phase 19d public seam over internal JsonContext
 │   │   ├── AobMakerBridge.cs      \\.\pipe\AOBMakerCEBridge client (3 verbs)
-│   │   ├── FileLogger.cs          Per-PID rotated UI logs
+│   │   ├── FileLogger.cs          UI logs + log-root retention sweep
 │   │   ├── VersionInfo.cs         Build number / git hash from assembly attrs
 │   │   └── Export/                CE XML / CSX / SDK header / AOB AA-script
 │   └── Platform/                  Cross-platform interfaces + Windows impls
@@ -483,7 +483,7 @@ Three responsibilities layered on one tab:
    Cross-session diff auto-applies Statics-only mode with a
    blue banner; cross-build adds a yellow warning.
 3. **Persistence** (Phase 29c): per-game SQLite under
-   `%LOCALAPPDATA%\Discrete_Dumper\snapshots\` (overridable in
+   `%LOCALAPPDATA%\discrete\snapshots\` (overridable in
    Settings). Filename `{exe_basename}_{build_id[0:8]}.db`. 💾 Save
    button per envelope; 🗑 Delete-from-DB removes both memory + disk.
    Auto-eviction after Diff drops every persisted envelope NOT
@@ -589,10 +589,17 @@ instance across all VMs.
 
 ### `FileLogger`
 
-Mirrors the DLL's per-PID rotated log layout, but for the UI:
-`%LOCALAPPDATA%\Discrete_Dumper\Logs\<UI-pid>\view\`. Channels: `view`
-(VM-side events). The DLL writes to `init` / `scan` / `metadata` /
-`pipe` / `walk` from inside the host process.
+Mirrors the DLL's log layout, but for the UI:
+`%LOCALAPPDATA%\discrete\Logs\ui\<category>\current.log` — `init` / `pipe` /
+`view`, plus ad-hoc categories such as `snapshot`. The DLL writes to `init` /
+`scan` / `metadata` / `pipe` / `walk` under `<pid>\` from inside the host
+process. Every start archives each category's previous `current.log` to
+`YYYYMMDD-HHMMSS.log` (its own last-write time); so does the 8 MB cap
+mid-session. `FileLogger.RunRetentionSweep()` (UI start, on a background task)
+deletes archives and DLL per-PID folders older than 21 days — age only, no
+count cap — and ages out the pre-2026-11 `Discrete_Dumper\Logs` root.
+`AppDataMigration` (Program.Main) moves the user-state files from
+`%LOCALAPPDATA%\Discrete_Dumper\` to `%LOCALAPPDATA%\discrete\` first.
 
 ---
 

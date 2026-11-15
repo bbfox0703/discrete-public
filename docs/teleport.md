@@ -297,7 +297,7 @@ Experimental-gated (flip the footer checkbox) until live-verified. Sections:
   is a row: click **Set**, then press the combo (e.g. `Ctrl+F5`). A tunnelling
   KeyDown handler captures the press; `HotkeyKeyMap` converts Avalonia
   `Key`+`KeyModifiers` → Win32 `(mask, vk)`; the combo is claimed via
-  `RegisterHotKey` and persisted to `%LOCALAPPDATA%\Discrete_Dumper\teleport-hotkeys.txt`
+  `RegisterHotKey` and persisted to `%LOCALAPPDATA%\discrete\teleport-hotkeys.txt`
   (`action=mods,vk`, AOT-safe plaintext). Defaults are the old numpad scheme
   (`Ctrl/Alt+Num1..3`, `Ctrl+Num0`; NumLock ON) — rebind to F-keys to drop the
   NumLock requirement. A combo already held by another app is reported and the

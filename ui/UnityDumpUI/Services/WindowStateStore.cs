@@ -17,7 +17,7 @@ public readonly record struct WindowStateRecord(int X, int Y, double Width, doub
 
 /// <summary>
 /// Persists the main window's position / size / maximized state to a small text
-/// file under <c>%LOCALAPPDATA%\Discrete_Dumper</c> (alongside <c>settings.json</c>
+/// file under <c>%LOCALAPPDATA%\discrete</c> (alongside <c>settings.json</c>
 /// and the <c>Logs</c> folder). Plain <c>key=value</c> lines — no JSON reflection,
 /// so it is trivially Native-AOT safe and loads synchronously, which the startup
 /// path needs (placement must be applied BEFORE the window is shown). Corrupt /
@@ -39,14 +39,14 @@ public sealed class WindowStateStore
     public string Path => _path;
 
     /// <summary>
-    /// <c>%LOCALAPPDATA%\Discrete_Dumper\window-state.txt</c>. Shares the app-data
+    /// <c>%LOCALAPPDATA%\discrete\window-state.txt</c>. Shares the app-data
     /// root with <see cref="UnityDumpUI.Core.Services.UserSettingsStore"/> and the
     /// FileLogger so a user inspecting one finds the others.
     /// </summary>
     public static string DefaultPath()
     {
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        // Constants.LogRootSubpath is "Discrete_Dumper\Logs"; strip the "Logs"
+        // Constants.LogRootSubpath is "discrete\Logs"; strip the "Logs"
         // tail to share the parent folder.
         string subRoot = Constants.LogRootSubpath;
         int slash = subRoot.IndexOf('\\');
