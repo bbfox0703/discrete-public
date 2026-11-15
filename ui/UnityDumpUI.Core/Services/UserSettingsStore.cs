@@ -1,7 +1,7 @@
 // UserSettingsStore.cs — Phase 29c-2.
 //
 // Atomic JSON persistence for UserSettings. Lives at
-// %LOCALAPPDATA%\Discrete_Dumper\settings.json by default; callers can
+// %LOCALAPPDATA%\discrete\settings.json by default; callers can
 // override the path for tests.
 //
 // Design choices:
@@ -42,13 +42,13 @@ public sealed class UserSettingsStore
     }
 
     /// <summary>Standard location used when no override is passed:
-    /// <c>%LOCALAPPDATA%\Discrete_Dumper\settings.json</c>. Sits in
+    /// <c>%LOCALAPPDATA%\discrete\settings.json</c>. Sits in
     /// the same root as the FileLogger so a user inspecting one finds
     /// the other.</summary>
     public static string DefaultSettingsPath()
     {
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        // Constants.LogRootSubpath is "Discrete_Dumper\Logs". Strip the
+        // Constants.LogRootSubpath is "discrete\Logs". Strip the
         // "Logs" tail to share the parent folder with the logger.
         string subRoot = Constants.LogRootSubpath;
         int slash = subRoot.IndexOf('\\');

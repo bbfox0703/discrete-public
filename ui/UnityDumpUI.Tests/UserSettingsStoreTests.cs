@@ -40,15 +40,13 @@ public class UserSettingsStoreTests : IDisposable
     // ─── DefaultSettingsPath ───────────────────────────────────────────
 
     [Fact]
-    public void DefaultSettingsPath_LivesUnderLocalAppDataDiscreteUEDumper()
+    public void DefaultSettingsPath_LivesUnderLocalAppDataDiscrete()
     {
         var p = UserSettingsStore.DefaultSettingsPath();
         // Verify the directory chain matches the FileLogger root so users
         // who open one folder find the other side-by-side.
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        Assert.StartsWith(local, p, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Discrete_Dumper", p);
-        Assert.EndsWith("settings.json", p);
+        Assert.Equal(Path.Combine(local, Constants.AppDataFolderName, "settings.json"), p);
     }
 
     // ─── Defaults ──────────────────────────────────────────────────────

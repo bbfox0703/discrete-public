@@ -215,26 +215,34 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         // Machine-static — evaluate once here, never reset.
         EvaluateMemoryWarning();
 
-        // One-shot housekeeping: each game injection creates a new
-        // %LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\ tree. They
-        // accumulate forever otherwise. Keep only the most-recent
-        // Constants.LogKeepRecentPidDirs (15) PID directories by last-write
-        // time; drop the rest. The `ui` directory is always preserved.
-        try
+        // Program.Main moved the user-state files out of the legacy
+        // Discrete_Dumper\ folder before the logger existed; record what it did.
+        foreach (string line in AppDataMigration.LastReport)
+            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit, line);
+
+        // One-shot age-based log retention (FileLogger.RunRetentionSweep):
+        // each game injection creates a new %LOCALAPPDATA%\discrete\Logs\<pid>\
+        // tree. Walks every per-PID folder, so it runs off the UI thread.
+        _ = Task.Run(() =>
         {
-            int pruned = FileLogger.PruneOldDllPidDirectories();
-            if (pruned > 0)
+            try
             {
-                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
-                    $"pruned {pruned} stale DLL log directories (kept newest {UnityDumpUI.Core.Constants.LogKeepRecentPidDirs})");
+                var r = FileLogger.RunRetentionSweep();
+                if (r.PidFoldersDeleted > 0 || r.FilesDeleted > 0 || r.LegacyRootRemoved)
+                {
+                    _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+                        $"log retention: removed {r.PidFoldersDeleted} PID folder(s) and {r.FilesDeleted} archive(s) " +
+                        $"older than {UnityDumpUI.Core.Constants.LogRetentionDays} days" +
+                        (r.LegacyRootRemoved ? "; legacy Discrete_Dumper\\Logs removed" : ""));
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            // Best-effort housekeeping must never block UI start.
-            _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
-                $"log prune failed: {ex.GetType().Name}: {ex.Message}");
-        }
+            catch (Exception ex)
+            {
+                // Best-effort housekeeping must never take the UI down.
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryInit,
+                    $"log retention failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        });
     }
 
     private void OnPipeDisconnected(object? sender, PipeDisconnectedInfo info)

@@ -41,6 +41,12 @@
 
 > 這是**唯一**的待辦清單。所有 open 項目集中於此;Phase Overview 表只記 ship 狀態,不重複放 todo。
 
+### 🪵 Log 路徑 + rotation / retention(2026-11-15)
+
+- [x] **Log root 改名** `%LOCALAPPDATA%\Discrete_Dumper\Logs` → `%LOCALAPPDATA%\discrete\Logs`(整個 app-data root 一起搬:settings.json / window-state / hotkeys / bookmarks / snapshots / crash.log)。`UnityCEDumper` 只剩舊註解,已清掉。`AppDataMigration`(Program.Main)把舊資料夾的 user-state 搬過來(新位置已有同名則保留新的);舊 `Logs\` 不搬,交給 retention 依同一規則老化,清空後刪掉 `Discrete_Dumper\`。`%TEMP%\Discrete_Dumper\<table-id>`(CT bootstrap 解壓位置)與 single-instance mutex 名稱**未改**。
+- [x] **Rotation / retention 對齊 UE5CEDumper** — live 檔仍是 `current.log`;8 MB(DLL + UI)與每次 UI 啟動(僅 UI)封存成 `YYYYMMDD-HHMMSS.log`(以檔案自身 mtime 命名)。保留期改為**依年齡 21 天、無數量上限**(取代 DLL 4 檔 ring、UI 5 檔 ring、UI「只留最新 15 個 PID 資料夾」)。DLL 在 attach 後用短命 thread 跑 `Log::RunRetentionSweep()`(離開 loader lock,持 module ref + `FreeLibraryAndExitThread`);UI 啟動時 `Task.Run(FileLogger.RunRetentionSweep)`。PID 資料夾以內部最新檔案判斷,不看資料夾 mtime。測試:`FileLoggerRetentionTests`(13)、`AppDataMigrationTests`(5);`build.cmd test` 1145 green。
+- [ ] **實機 smoke** — ① 舊 build 用過的機器啟動新 UI:settings / bookmarks / hotkeys 仍在、`Discrete_Dumper\Logs` 內 >21 天的資料夾被清、init log 有 `app-data migration:` 行;② inject 後 `<pid>\init\current.log` 有 `Log retention sweep: …` 行;③ 長 session 讓某 category 超過 8 MB,確認出現 `YYYYMMDD-HHMMSS.log` 且 `current.log` 續寫。
+
 ### 🦀 Rust core(2026-11-14)— 詳見 [rust-core.md](rust-core.md)
 
 - [x] **R1 實機 smoke(IL2CPP)** ✅(2026-11-14,Utawarerumono,見下方 R2 實機 smoke)— `init` log 有 banner、`metadata` log 有 `MetadataParser: loaded version=31 …`,parser-backed RPC 與 legacy 一致。

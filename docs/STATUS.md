@@ -1,4 +1,4 @@
-# UnityCEDumper — Status
+# Discrete — Status
 
 > **Deprecated 2026-06-05.** 進度狀態(current build / phase / branches / tests / open backlog / recent batches)已整合到單一窗口:
 >

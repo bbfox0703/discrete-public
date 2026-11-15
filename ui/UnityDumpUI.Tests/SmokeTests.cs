@@ -12,20 +12,20 @@ public class SmokeTests
     }
 
     [Fact]
-    public void Constants_LogRotationCountIsFive()
+    public void Constants_LogRetentionIsAgeBased21Days()
     {
-        // Bumped from 4 → 5 on 2026-05-20 alongside the "rotate on every
-        // UI startup" policy change. DLL side stays at 4 (separate
-        // constant in MagicStrings.h).
-        Assert.Equal(5, Constants.LogRotationFileCount);
+        // Age-based retention (2026-11, modelled on UE5CEDumper) replaced the
+        // 5-file UI rotation and the 15-newest PID-folder cap. DLL mirror:
+        // MagicStrings::LogRetentionDays.
+        Assert.Equal(21, Constants.LogRetentionDays);
     }
 
     [Fact]
-    public void Constants_LogRootSubpathPointsToDiscreteDumper()
+    public void Constants_LogRootSubpathPointsToDiscrete()
     {
-        // Log root is %LOCALAPPDATA%\Discrete_Dumper\Logs — matches the repo
-        // name (`discrete`). The C++ DLL mirror const is in MagicStrings.h
-        // and both sides must agree on the path.
-        Assert.Equal(@"Discrete_Dumper\Logs", Constants.LogRootSubpath);
+        // Log root is %LOCALAPPDATA%\discrete\Logs — matches the repo name.
+        // The C++ DLL mirror const is in MagicStrings.h and both sides must
+        // agree on the path.
+        Assert.Equal(@"discrete\Logs", Constants.LogRootSubpath);
     }
 }

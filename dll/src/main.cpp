@@ -77,6 +77,8 @@ bool TryClaimSingleInit() noexcept {
     return true;
 }
 
+void StartRetentionSweep();
+
 void OnAttach(HMODULE self) {
     Discrete::Log::Init();
 
@@ -120,6 +122,35 @@ void OnAttach(HMODULE self) {
     } else {
         Discrete::Log::Init("Pipe server failed to start");
     }
+
+    StartRetentionSweep();
+}
+
+// Age-based log retention (Logger.h) walks the log root, so it must not run
+// under the loader lock. A short-lived thread does it once per process. The
+// thread holds its own module reference and drops it with
+// FreeLibraryAndExitThread, so an eject while the sweep runs cannot unmap
+// the code under it.
+DWORD WINAPI RetentionSweepThread(LPVOID moduleRef) {
+    Discrete::Log::RunRetentionSweep();
+    ::FreeLibraryAndExitThread(static_cast<HMODULE>(moduleRef), 0);
+}
+
+void StartRetentionSweep() {
+    HMODULE ref = nullptr;
+    if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                              reinterpret_cast<LPCWSTR>(&RetentionSweepThread), &ref)) {
+        return;
+    }
+    HANDLE h = ::CreateThread(nullptr, 0, &RetentionSweepThread, ref, 0, nullptr);
+    if (h != nullptr) {
+        ::CloseHandle(h);
+        return;
+    }
+    // CreateThread failed: retention is skipped for this run (the UI's sweep
+    // still covers it). The extra module reference is deliberately kept —
+    // FreeLibrary from inside DllMain is the riskier of the two.
+    Discrete::Log::Init("Log retention sweep skipped: CreateThread failed");
 }
 
 void OnDetach() {

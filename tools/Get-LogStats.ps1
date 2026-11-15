@@ -1,58 +1,58 @@
 # Get-LogStats.ps1 — show per-PID log directory sizes for Discrete.
 #
-# Phase 14e: visual verification that the 4-file × 8 MB rotation cap is
-# being honoured. Run after a heavy session to confirm:
-#   - current.log <= 8 MB
-#   - at most 4 files per category (current.log + current.{1,2,3}.log)
-#   - per-category total <= ~32 MB
+# Visual check of the rotation + retention policy (dll/src/shared/MagicStrings.h,
+# ui/UnityDumpUI.Core/Constants.cs). Run after a heavy session to confirm:
+#   - current.log <= 8 MB (larger chunks are archived as YYYYMMDD-HHMMSS.log)
+#   - nothing older than the 21-day retention window survives a DLL attach /
+#     UI start (flagged "PAST RETENTION")
+# There is no file-count cap: retention is by age.
 #
 # Usage:
-#   .\tools\Get-LogStats.ps1                      # all PIDs under %LOCALAPPDATA%\Discrete_Dumper\Logs
+#   .\tools\Get-LogStats.ps1                      # all folders under %LOCALAPPDATA%\discrete\Logs
 #   .\tools\Get-LogStats.ps1 -Pid 57040           # one PID
 
 [CmdletBinding()]
 param(
-    [int]$Pid = 0
+    # Not "$Pid": that name collides with PowerShell's read-only $PID.
+    [Alias('Pid')]
+    [int]$ProcessId = 0
 )
 
 $ErrorActionPreference = 'Stop'
 
-$root = Join-Path $env:LOCALAPPDATA 'Discrete_Dumper\Logs'
+$root = Join-Path $env:LOCALAPPDATA 'discrete\Logs'
 if (-not (Test-Path $root)) {
     Write-Host "No log root: $root" -ForegroundColor Yellow
     exit 0
 }
 
-# 4 × 8 MB rotation per category — see dll/src/shared/MagicStrings.h.
-$kMaxFileBytes  = 8MB
-$kMaxFileCount  = 4
-$kCategoryCap   = $kMaxFileBytes * $kMaxFileCount
+$kMaxFileBytes    = 8MB
+$kRetentionDays   = 21
+$cutoff           = (Get-Date).AddDays(-$kRetentionDays)
 
-$pidDirs = if ($Pid -gt 0) {
-    @(Join-Path $root $Pid)
+$dirs = if ($ProcessId -gt 0) {
+    @(Get-Item (Join-Path $root $ProcessId))
 } else {
     Get-ChildItem -Path $root -Directory
 }
 
-foreach ($pidDir in $pidDirs) {
-    if (-not (Test-Path $pidDir)) { continue }
-    $pidName = Split-Path -Leaf $pidDir
+foreach ($dir in $dirs) {
     Write-Host ""
-    Write-Host "PID $pidName" -ForegroundColor Cyan
-    foreach ($catDir in Get-ChildItem -Path $pidDir -Directory) {
-        $files = Get-ChildItem -Path $catDir.FullName -File | Sort-Object Name
+    Write-Host "$($dir.Name)" -ForegroundColor Cyan
+    foreach ($catDir in Get-ChildItem -Path $dir.FullName -Directory) {
+        $files = @(Get-ChildItem -Path $catDir.FullName -File | Sort-Object Name)
         $totalBytes = ($files | Measure-Object -Property Length -Sum).Sum
-        $overCount  = if ($files.Count -gt $kMaxFileCount) { ' OVER FILE CAP' } else { '' }
-        $overBytes  = if ($totalBytes -gt $kCategoryCap)   { ' OVER BYTE CAP' } else { '' }
-        Write-Host ("  {0,-10} {1,3} file(s)  {2,8:N0} KB total{3}{4}" -f
-                    $catDir.Name, $files.Count, ($totalBytes / 1KB),
-                    $overCount, $overBytes)
+        Write-Host ("  {0,-10} {1,3} file(s)  {2,8:N0} KB total" -f
+                    $catDir.Name, $files.Count, ($totalBytes / 1KB))
         foreach ($f in $files) {
-            $rotMark = if ($f.Length -gt $kMaxFileBytes) { ' OVER FILE CAP' } else { '' }
-            Write-Host ("      {0,-18} {1,8:N0} KB{2}" -f $f.Name, ($f.Length / 1KB), $rotMark)
+            $mark = ''
+            if ($f.Name -eq 'current.log' -and $f.Length -gt $kMaxFileBytes) { $mark += ' OVER FILE CAP' }
+            if ($f.Name -ne 'current.log' -and $f.LastWriteTime -lt $cutoff) { $mark += ' PAST RETENTION' }
+            Write-Host ("      {0,-22} {1,8:N0} KB  {2:yyyy-MM-dd HH:mm}{3}" -f
+                        $f.Name, ($f.Length / 1KB), $f.LastWriteTime, $mark)
         }
     }
 }
 
 Write-Host ""
-Write-Host "Caps: $($kMaxFileBytes / 1MB) MB/file, $kMaxFileCount files/category, $($kCategoryCap / 1MB) MB/category total." -ForegroundColor Gray
+Write-Host "Policy: $($kMaxFileBytes / 1MB) MB/file then archive; archives + PID folders kept $kRetentionDays days (no count cap)." -ForegroundColor Gray

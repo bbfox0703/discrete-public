@@ -91,7 +91,7 @@ dll/src/
 │   ├── ExportAPI.{h,cpp}       C ABI + every pipe handler
 │   ├── BackendDetector.{h,cpp} Module-sniff Mono / IL2CPP / Unknown
 │   ├── BuildInfo.h.in          → BuildInfo.h (build number, commit hash)
-│   ├── Logger.{h,cpp}          Per-PID rotated log files (5 channels)
+│   ├── Logger.{h,cpp}          Per-PID log files (5 channels), age-based retention
 │   ├── MagicStrings.h          Pipe name + every command name + module names
 │   ├── Memory.{h,cpp}          SEH-protected SafeRead<T> / SafeReadBytes / IsReadable
 │   ├── ModuleHelper.{h,cpp}    GetModuleBase / ResolveExport / EnumerateModules
@@ -155,9 +155,16 @@ shape.
 [Logger.cpp](../dll/src/shared/Logger.cpp):
 
 - Five channels: `init`, `scan`, `metadata`, `pipe`, `walk`.
-- Per-PID subfolder under `%LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\<channel>\`.
-- 8 MB rotation, 4-file ring per channel.
-- Lock-free writer (per-thread buffer + atomic enqueue).
+- Per-PID subfolder under `%LOCALAPPDATA%\discrete\Logs\<pid>\<channel>\`;
+  the live file is always `current.log`.
+- At 8 MB, `current.log` is archived to `YYYYMMDD-HHMMSS.log` (stamped from
+  its own last-write time). No per-start rotation: a PID folder is one run.
+- Age-based retention (21 days, no count cap): `Log::RunRetentionSweep()`, run
+  once per process from a short-lived thread started by `main.cpp` (off the
+  loader lock), removes other PID folders whose newest file is older than the
+  window (or that are empty) and aged archives in the folders it keeps.
+- Mutex-guarded writer; each line opens/appends/closes, so the proxy and the
+  backend DLL can share a PID folder.
 
 Useful for post-mortem analysis when the pipe handler returns an
 error — the channel logs carry stack-context the wire response
@@ -219,10 +226,11 @@ DLL injected (via DiscreteUI Pick & Inject, proxy DLL, or Test-Handshake.ps1)
    │
    ▼
 DllMain (DLL_PROCESS_ATTACH):
-   1. Logger::EnsureRoot() — create %LOCALAPPDATA%\Discrete_Dumper\Logs\<pid>\
+   1. Log::Init() — create %LOCALAPPDATA%\discrete\Logs\<pid>\
    2. Discrete_Init() — initialize backend resolver singletons (lazy bind)
    3. Discrete_StartPipe() — spawn pipe server thread
-   4. Return TRUE
+   4. StartRetentionSweep() — spawn the one-shot log retention thread
+   5. Return TRUE
    │
    ▼
 Pipe server accepts connections at \\.\pipe\DiscreteBfx
@@ -294,7 +302,7 @@ every UI in the wild needs the matching DLL.
 | [PipeServer.cpp](../dll/src/shared/PipeServer.cpp) | Named-pipe server + dispatcher |
 | [BackendDetector.cpp](../dll/src/shared/BackendDetector.cpp) | Module-sniff Mono/IL2CPP/Unknown |
 | [Memory.cpp](../dll/src/shared/Memory.cpp) | SEH-protected reads + readability checks |
-| [Logger.cpp](../dll/src/shared/Logger.cpp) | Per-PID rotated logs |
+| [Logger.cpp](../dll/src/shared/Logger.cpp) | Per-PID logs, 8 MB archive, 21-day retention sweep |
 | [AobPattern.h](../dll/src/shared/AobPattern.h) + [AobPatternRs.cpp](../dll/src/shared/AobPatternRs.cpp) | Phase 18a-3 x64 length disassembler for AOB patterns — Rust since Phase R2 (`dll/rust/src/aob.rs`) |
 | [RustCore.cpp](../dll/src/shared/RustCore.cpp) + `*Rs.cpp` | Rust core glue: log sink, banner, `SafeReadShim`; `AobPatternRs` / `GroupMatchRs` / `ValueRefineRs` / `IL2CPPChainDetectorRs` / `IL2CPPFieldXrefScanRs` / `MetadataParserRs` wrap the Rust ports. The legacy C++ sources were removed: R2 modules (git history, `aae48d3`), the Zydis field-xref kernels (`987b20d`) and `MetadataParser.cpp` (`5748299`). See [rust-core.md](rust-core.md) |
 | [MagicStrings.h](../dll/src/shared/MagicStrings.h) | Single source of truth for command names + module names |

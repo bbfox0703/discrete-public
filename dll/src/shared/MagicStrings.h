@@ -10,10 +10,11 @@ inline constexpr const wchar_t* PipeName = L"\\\\.\\pipe\\DiscreteBfx";
 
 // Logging ------------------------------------------------------------------
 inline constexpr const wchar_t* LogRootEnvVar = L"LOCALAPPDATA";
-// Log root: %LOCALAPPDATA%\Discrete_Dumper\Logs\ — matches the repo name
-// (`discrete`); the original working-title was `UnityCEDumper`. Mirror const
-// in `ui/UnityDumpUI.Core/Constants.cs`.
-inline constexpr const wchar_t* LogRootSubpath = L"Discrete_Dumper\\Logs";
+// Log root: %LOCALAPPDATA%\discrete\Logs\ — matches the repo name. Until
+// 2026-11 it was `Discrete_Dumper\Logs`; the UI migrates the user-state files
+// from that folder and ages its old logs out (see AppDataMigration.cs). Mirror
+// const in `ui/UnityDumpUI.Core/Constants.cs`.
+inline constexpr const wchar_t* LogRootSubpath = L"discrete\\Logs";
 
 // DLL log categories (one subfolder each, per Architecture.md)
 inline constexpr const wchar_t* LogCategoryInit     = L"init";
@@ -22,9 +23,15 @@ inline constexpr const wchar_t* LogCategoryMetadata = L"metadata";
 inline constexpr const wchar_t* LogCategoryPipe     = L"pipe";
 inline constexpr const wchar_t* LogCategoryWalk     = L"walk";
 
-// Log rotation
+// Log rotation + retention (same policy as the UI — Constants.cs; modelled on
+// UE5CEDumper). The live file is always `current.log`. On reaching
+// LogMaxFileBytes it is archived to `<YYYYMMDD-HHMMSS>.log`, stamped from the
+// file's OWN last-write time. Retention is by AGE, not a file count: archives
+// and whole per-PID folders whose newest file is older than LogRetentionDays
+// are deleted.
+inline constexpr const wchar_t* LogCurrentFileName = L"current.log";
 inline constexpr unsigned long long LogMaxFileBytes = 8ull * 1024ull * 1024ull;  // 8 MB
-inline constexpr int LogRotationFileCount = 4;
+inline constexpr int LogRetentionDays = 21;
 
 // Unity module names (backend detection)
 inline constexpr const wchar_t* ModuleMonoBdwgc   = L"mono-2.0-bdwgc.dll";

@@ -1008,7 +1008,7 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>Open the log root (<c>%LOCALAPPDATA%\Discrete_Dumper\Logs</c>) in
+    /// <summary>Open the log root (<c>%LOCALAPPDATA%\discrete\Logs</c>) in
     /// Explorer — the UI's <c>ui\</c> tree plus the DLL's per-PID folders. Created
     /// on demand so the shell call never sees a missing path. Mirrors
     /// <see cref="OnOpenSnapshotDbFolderClicked"/>.</summary>

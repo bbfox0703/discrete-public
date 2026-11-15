@@ -169,14 +169,14 @@ local function main()
                       tostring(ok))
                 U.err("Looked for: %s", tostring(dll))
                 U.err("Put the backend DLL beside your .CT (or in <CE>\\discrete\\).")
-                U.err("Check %%LOCALAPPDATA%%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
+                U.err("Check %%LOCALAPPDATA%%\\discrete\\Logs\\<pid>\\init\\current.log")
                 return
             end
         elseif loadLibrary ~= nil then
             local handle = loadLibrary(dll)
             if handle == nil or handle == 0 then
                 U.err("loadLibrary returned NULL — DLL not found or LoadLibraryW failed.")
-                U.err("Check %%LOCALAPPDATA%%\\Discrete_Dumper\\Logs\\<pid>\\init\\current.log")
+                U.err("Check %%LOCALAPPDATA%%\\discrete\\Logs\\<pid>\\init\\current.log")
                 return
             end
         else

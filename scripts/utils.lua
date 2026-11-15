@@ -298,9 +298,11 @@ local function _dllCandidateDirs()
         add(ce)
     end
 
-    -- 3. Known app-data drop location.
+    -- 3. Known app-data drop location (current name first, then the
+    --    pre-2026-11 folder in case the UI has not migrated it yet).
     local appData = os.getenv("LOCALAPPDATA")
     if appData and #appData > 0 then
+        add(appData .. "\\discrete\\")
         add(appData .. "\\Discrete_Dumper\\")
     end
 

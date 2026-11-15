@@ -30,6 +30,11 @@ internal static class Program
         // in Program.Main ensures every UI startup is covered.
         SQLitePCL.Batteries_V2.Init();
 
+        // 2026-11 app-data rename (Discrete_Dumper -> discrete): move the user
+        // state files BEFORE any store reads them. Renames only, never throws;
+        // MainWindowViewModel writes the report to the init log.
+        AppDataMigration.Run();
+
         try
         {
             return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
@@ -48,7 +53,7 @@ internal static class Program
 
     /// <summary>
     /// Write an unhandled-startup-exception dump to
-    /// <c>%LOCALAPPDATA%\Discrete_Dumper\crash.log</c> (same app-data root as
+    /// <c>%LOCALAPPDATA%\discrete\crash.log</c> (same app-data root as
     /// window-state.txt / teleport-hotkeys.txt / the FileLogger). AOT-safe: no
     /// reflection, best-effort IO. See docs/aot-pitfalls.md §8.3.
     /// </summary>
@@ -57,7 +62,7 @@ internal static class Program
         try
         {
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            string subRoot = Constants.LogRootSubpath;      // "Discrete_Dumper\Logs"
+            string subRoot = Constants.LogRootSubpath;      // "discrete\Logs"
             int slash = subRoot.IndexOf('\\');
             string appRoot = slash > 0 ? subRoot[..slash] : subRoot;
             string dir = System.IO.Path.Combine(localAppData, appRoot);

@@ -1,6 +1,6 @@
 // TeleportHotkeyStore.cs — Teleport hotkey rebinding (wave 2). Persists the
 // user's per-action key bindings to a small plaintext file next to
-// window-state.txt under %LOCALAPPDATA%\Discrete_Dumper. Deliberately NO JSON /
+// window-state.txt under %LOCALAPPDATA%\discrete. Deliberately NO JSON /
 // reflection — one `action=mods,vk` line each — so it is trivially Native-AOT
 // safe and loads synchronously. Corrupt / partial lines are skipped; a missing
 // file loads as an empty set (the VM then seeds its defaults).
@@ -40,12 +40,12 @@ public sealed class TeleportHotkeyStore
         get { try { return File.Exists(_path); } catch { return false; } }
     }
 
-    /// <summary><c>%LOCALAPPDATA%\Discrete_Dumper\teleport-hotkeys.txt</c> — same
+    /// <summary><c>%LOCALAPPDATA%\discrete\teleport-hotkeys.txt</c> — same
     /// app-data root as <see cref="WindowStateStore"/> and the FileLogger.</summary>
     public static string DefaultPath()
     {
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string subRoot = Constants.LogRootSubpath;          // "Discrete_Dumper\Logs"
+        string subRoot = Constants.LogRootSubpath;          // "discrete\Logs"
         int slash = subRoot.IndexOf('\\');
         string appRoot = slash > 0 ? subRoot[..slash] : subRoot;
         return System.IO.Path.Combine(localAppData, appRoot, FileName);

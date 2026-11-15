@@ -137,7 +137,7 @@ if ($wow) {
     }
 
     # Verify the per-PID log appeared (same shape as the x64 path's tail).
-    $logFile = Join-Path $env:LOCALAPPDATA "Discrete_Dumper\Logs\$($proc.Id)\init\current.log"
+    $logFile = Join-Path $env:LOCALAPPDATA "discrete\Logs\$($proc.Id)\init\current.log"
     if (Test-Path $logFile) {
         Write-Host ''
         Write-Host "Log: $logFile" -ForegroundColor Green
@@ -226,7 +226,7 @@ try {
             # On x64 the thread exit code is the low 32 bits of LoadLibraryW's HMODULE.
             # Non-zero means the DLL loaded; zero means LoadLibrary returned NULL.
             if ($code -eq 0) {
-                throw "LoadLibraryW returned NULL — DLL failed to load. Check %LOCALAPPDATA%\Discrete_Dumper\Logs."
+                throw "LoadLibraryW returned NULL — DLL failed to load. Check %LOCALAPPDATA%\discrete\Logs."
             }
             Write-Host "Injected. LoadLibraryW returned 0x$($code.ToString('X8')) (truncated to 32-bit)" -ForegroundColor Green
         } finally {
@@ -242,7 +242,7 @@ try {
 # ---------------------------------------------------------------------------
 # Verify log file appeared
 # ---------------------------------------------------------------------------
-$logFile = Join-Path $env:LOCALAPPDATA "Discrete_Dumper\Logs\$($proc.Id)\init\current.log"
+$logFile = Join-Path $env:LOCALAPPDATA "discrete\Logs\$($proc.Id)\init\current.log"
 if (Test-Path $logFile) {
     Write-Host ""
     Write-Host "Log: $logFile" -ForegroundColor Green
