@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Unified build script for Discrete (DLL + UI + tests).
 
@@ -14,11 +14,11 @@
 
 .PARAMETER Target
     What to build. Default: All.
-        DLL        — C++ injected DLL (uses -Backend)
+        DLL        — C++ injected DLL (uses -Backend) plus the version.dll / winmm.dll proxies
         UI         — Avalonia UI app (publish)
-        Test       — xUnit v3 test suite
-        ProxyDLL   — Proxy DLLs (Phase 12 placeholder)
-        MetadataCli— Offline metadata CLI (Phase 13 placeholder)
+        Test       — xUnit v3 test suite + Rust core tests
+        ProxyDLL   — Same as DLL (the proxies are part of the DLL build)
+        MetadataCli— Offline metadata CLI (x64)
         All        — Everything
 
 .PARAMETER Backend
@@ -127,6 +127,17 @@ function Write-Ok  ([string]$Text) { Write-Host "   [OK] $Text" -ForegroundColor
 function Write-Fail([string]$Text) { Write-Host "   [FAIL] $Text" -ForegroundColor Red }
 function Write-Info([string]$Text) { Write-Host "   $Text" -ForegroundColor Gray }
 
+# Every vcvarsall prompt (x64, x86, arm64) sets Platform to its target
+# architecture, and some OEM Windows images set a machine-wide one. MSBuild
+# reads every environment variable as a property: Platform=x64 moves the C#
+# outputs into bin\x64\..., and x86 / arm64 conflict with the projects'
+# win-x64 RuntimeIdentifier. Nothing this script runs needs it (CMake uses
+# Ninja), so it goes before anything runs.
+if ($env:Platform) {
+    Write-Info "Platform=$($env:Platform) cleared: MSBuild would read it and move or break the C# builds"
+    Remove-Item Env:Platform
+}
+
 function Get-FileSize([string]$Path) {
     if (Test-Path $Path) {
         $size = (Get-Item $Path).Length
@@ -185,6 +196,41 @@ function Resolve-VsInstallPath {
     return $vsPath
 }
 
+# The loaded toolset's cl.exe / link.exe folder (VCToolsInstallDir,
+# bin\Host<host>\<target>), or $null when the environment names none that
+# holds both (no dev env, or one whose toolset a Visual Studio update removed).
+function Get-MsvcBinDir {
+    if (-not $env:VCToolsInstallDir -or -not $env:VSCMD_ARG_HOST_ARCH -or -not $env:VSCMD_ARG_TGT_ARCH) { return $null }
+    $bin = (Join-Path $env:VCToolsInstallDir "bin\Host$($env:VSCMD_ARG_HOST_ARCH)\$($env:VSCMD_ARG_TGT_ARCH)").TrimEnd('\')
+    if ((Test-Path -LiteralPath (Join-Path $bin 'cl.exe')) -and (Test-Path -LiteralPath (Join-Path $bin 'link.exe'))) { return $bin }
+    return $null
+}
+
+# Whether PATH lists $Dir (case-insensitive, trailing backslash ignored).
+function Test-OnPath([string]$Dir) {
+    return [bool]($env:PATH -split ';' | Where-Object { $_.TrimEnd('\') -eq $Dir } | Select-Object -First 1)
+}
+
+# Put the toolset's folder first on PATH when another cl.exe or link.exe
+# resolves before it. A shell started from a developer prompt (Git Bash,
+# MSYS2) may put its own folders in front, and their usr\bin holds a
+# coreutils link.exe that CMake, rustc and the AOT link would otherwise run.
+# CMake and Ninja are left where they are.
+function Repair-MsvcToolOrder([string]$Bin) {
+    $moved = $false
+    foreach ($tool in 'cl.exe', 'link.exe') {
+        $first = Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $first -or (Split-Path $first.Source -Parent).TrimEnd('\') -ne $Bin) {
+            $found = if ($first) { $first.Source } else { 'nothing' }
+            Write-Info "$tool resolved to $found; putting $Bin first on PATH"
+            $moved = $true
+        }
+    }
+    if ($moved) { $env:PATH = "$Bin;$env:PATH" }
+}
+
+$script:MsvcBin = $null   # set by Enter-VsDevEnvironment: the loaded toolset's cl / link folder
+
 function Enter-VsDevEnvironment {
     param(
         [ValidateSet('x64','x86')]
@@ -203,13 +249,33 @@ function Enter-VsDevEnvironment {
     # this same session) instead of stacking another layer onto PATH/INCLUDE/LIB.
     # Enter-VsDevShell PREPENDS the VC paths every time; re-entering overflows the
     # linker command line -> AOT link "input line too long", exit 123.
+    # Reuse it only while its toolset still exists and PATH still lists it;
+    # what a later shell put in front of PATH is repaired. A prompt left open
+    # across a Visual Studio update, or a shell that replaced PATH (MSYS2), is
+    # entered afresh instead.
     if ($env:VSCMD_ARG_TGT_ARCH -eq $Arch) {
-        $script:DevShellLoadedFor = $Arch
-        Write-Ok "MSVC $Arch environment already loaded (reusing inherited env)"
-        return
+        $bin = Get-MsvcBinDir
+        if ($bin -and (Test-OnPath $bin)) {
+            Repair-MsvcToolOrder $bin
+            $script:MsvcBin = $bin
+            $script:DevShellLoadedFor = $Arch
+            Write-Ok "MSVC $Arch environment already loaded (reusing inherited env)"
+            return
+        }
+        Write-Info "The inherited $Arch environment names no installed MSVC toolset on PATH; entering the DevShell"
     }
 
     $vsPath = Resolve-VsInstallPath
+
+    # VsDevCmd honours an inherited VCToolsVersion. A full three-part version
+    # must name an installed folder or it refuses to load ("Version ... is not
+    # valid"), e.g. in a prompt opened before an update removed that toolset;
+    # without it, VsDevCmd picks the installed toolset. Shorter (14.38) and
+    # side-by-side (14.38.17.8) pins it resolves itself, so they are kept.
+    if ($env:VCToolsVersion -match '^\d+\.\d+\.\d+$' -and -not (Test-Path -LiteralPath (Join-Path $vsPath "VC\Tools\MSVC\$($env:VCToolsVersion)"))) {
+        Write-Info "VCToolsVersion=$($env:VCToolsVersion) is not installed under $vsPath; the DevShell picks the installed toolset"
+        Remove-Item Env:VCToolsVersion
+    }
     $devShellDll = Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
     if (-not (Test-Path $devShellDll)) {
         throw "Microsoft.VisualStudio.DevShell.dll not found at $devShellDll."
@@ -219,8 +285,43 @@ function Enter-VsDevEnvironment {
     Import-Module $devShellDll
     Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=$Arch -host_arch=x64" | Out-Null
 
+    $bin = Get-MsvcBinDir
+    if (-not $bin) { throw "The VS DevShell ($Arch) named no MSVC toolset folder holding cl.exe and link.exe." }
+    Repair-MsvcToolOrder $bin
+    $script:MsvcBin = $bin
     $script:DevShellLoadedFor = $Arch
     Write-Ok "MSVC $Arch environment loaded"
+}
+
+# CMake arguments that name the loaded toolset's cl.exe for C and C++. A fresh
+# configure takes CC / CXX before any PATH search, and under Ninja it tries
+# c++ / g++ before cl, so a user's CXX or MSYS2's mingw64\bin ahead on PATH
+# would otherwise pick the compiler. Passed as -D, not as environment
+# variables, so the -Arch Both x86 child does not inherit the x64 cl.exe.
+function Get-MsvcCompilerArgs {
+    $cl = Join-Path $script:MsvcBin 'cl.exe'
+    foreach ($name in 'CC', 'CXX') {
+        $v = [Environment]::GetEnvironmentVariable($name)
+        if ($v -and $v -ne $cl) { Write-Info "$name names $v; this configure uses $cl" }
+    }
+    $fwd = $cl -replace '\\', '/'
+    return @("-DCMAKE_C_COMPILER=$fwd", "-DCMAKE_CXX_COMPILER=$fwd")
+}
+
+# The gitignored C++ dependencies under dll\vendor are restored by
+# sync_vendor.ps1; a fresh clone or a new worktree has none, and CMake would
+# then fail inside add_subdirectory with a message that reads like a
+# toolchain fault.
+function Assert-VendorDeps {
+    $missing = @('dll\vendor\minihook\CMakeLists.txt',
+                 'dll\vendor\nlohmann\single_include\nlohmann\json.hpp') |
+        Where-Object { -not (Test-Path (Join-Path $RepoRoot $_)) }
+    if ($missing) {
+        Write-Fail "Pinned C++ dependencies missing: $($missing -join ', ')"
+        Write-Info 'Restore them with: .\sync_vendor.ps1   (clones the pins in tools\vendor_pins.json)'
+        return $false
+    }
+    return $true
 }
 
 # Phase R0: fail fast with an actionable message instead of a CMake error
@@ -285,10 +386,17 @@ if (-not $NoIdentityCheck) {
         exit 1
     }
     Push-Location $RepoRoot
-    try     { & $py -I (Join-Path $RepoRoot 'tools\check_no_local_paths.py') }
+    try     { & $py -I (Join-Path $RepoRoot 'tools\check_no_local_paths.py'); $identityExit = $LASTEXITCODE }
     finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) {
+    # 1 is the checker's only "a name leaked" code. Anything else non-zero
+    # (its CANNOT RUN code 2, or a py launcher with no interpreter) means the
+    # tree was never checked, which is not a leak and not a pass.
+    if ($identityExit -eq 1) {
         Write-Fail 'a tracked file or unpushed commit message carries a machine-local path or this machine''s account/computer name (redacted above). Fix it, or pass -NoIdentityCheck for a deliberate placeholder.'
+        exit 1
+    }
+    if ($identityExit -ne 0) {
+        Write-Fail "the identity guard could not check the tree (exit $identityExit, reason above). Fix that, or pass -NoIdentityCheck to skip the guard deliberately."
         exit 1
     }
     Write-Ok 'no machine-local paths or identifiers in tracked files'
@@ -300,8 +408,11 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
 }
 Write-Info "dotnet: $(dotnet --version)"
 
-if ($Target -in @('DLL','Test','MetadataCli','All')) {
+if ($Target -in @('DLL','Test','ProxyDLL','MetadataCli','All')) {
     if (-not (Assert-RustToolchain)) { exit 1 }
+}
+if ($Target -in @('DLL','ProxyDLL','MetadataCli','All')) {
+    if (-not (Assert-VendorDeps)) { exit 1 }
 }
 
 # ---------------------------------------------------------------------------
@@ -365,7 +476,8 @@ function Build-DllForArch {
     $staticCrt = if ($Mode -eq 'Publish') { 'ON' } else { 'OFF' }
 
     Write-Step "Configuring CMake (Ninja + MSVC $Arch, static-CRT=$staticCrt)"
-    & cmake -S $RepoRoot -B $dllBuildDir -G Ninja `
+    $compilerArgs = Get-MsvcCompilerArgs
+    & cmake -S $RepoRoot -B $dllBuildDir -G Ninja @compilerArgs `
         "-DCMAKE_BUILD_TYPE=$cfg" `
         "-DBACKEND=$BackendForArch" `
         "-DSTATIC_CRT=$staticCrt" | Out-Host
@@ -415,12 +527,21 @@ function Build-Dll {
         # the second arch so it gets a fresh DevShell.
         $x64Ok = Build-DllForArch -Arch x64 -BackendForArch $Backend
         Write-Banner 'Re-launching child process for x86 build'
+        # The child runs in the console PowerShell of this script's own
+        # edition (build.cmd starts Windows PowerShell 5.1; pwsh need not be
+        # installed), not the host process, which may be an editor such as
+        # the ISE. The parent already ran the identity guard and bumped (or
+        # pinned) build_number.txt, so every x64 / x86 binary carries the
+        # same build number.
         $childArgs = @('-NoProfile','-ExecutionPolicy','Bypass',
                        '-File',$PSCommandPath,
                        '-Target','DLL','-Mode',$Mode,'-Arch','x86',
-                       '-NoIdentityCheck')  # parent already ran the guard
-        if ($NoBumpBuildNumber) { $childArgs += '-NoBumpBuildNumber' }
-        & pwsh @childArgs
+                       '-NoIdentityCheck','-NoBumpBuildNumber')
+        # Out-Host: without it the child's output would become part of this
+        # function's return value, and a non-empty array reads as success
+        # even when the x86 leg failed.
+        $psExe = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'powershell.exe' }
+        & $psExe @childArgs | Out-Host
         $x86Ok = ($LASTEXITCODE -eq 0)
         return ($x64Ok -and $x86Ok)
     }
@@ -458,12 +579,28 @@ function Build-Ui {
     if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
 
     if ($Mode -eq 'Publish') {
+        # Native AOT links with MSVC: `build ui publish` never ran the DLL
+        # build, so load the x64 environment here. An x86 environment loaded
+        # by `-Arch x86` cannot be swapped in this process.
+        if ($script:DevShellLoadedFor -eq 'x86') {
+            Write-Fail 'The Native AOT publish is win-x64, but this run loaded the x86 MSVC environment; publish the UI with -Arch x64 or Both.'
+            return $false
+        }
+        try { Enter-VsDevEnvironment -Arch x64 }
+        catch { Write-Fail "Native AOT needs the MSVC x64 linker; the VS DevShell could not be loaded: $_"; return $false }
+        $msvcLink = Join-Path $script:MsvcBin 'link.exe'
+
+        # IlcUseEnvironmentalTools makes ILCompiler take LIB from this
+        # environment instead of its own vcvars discovery, and run a bare
+        # `link`, which a coreutils link.exe ahead on PATH (Git's or MSYS2's
+        # usr\bin) would answer; CppLinker names MSVC's by full path.
         Write-Step 'Publishing UnityDumpUI (Native AOT, Release)'
         & dotnet publish $UI_PROJ `
             -c Release `
             -r win-x64 `
             -p:PublishAot=true `
             -p:IlcUseEnvironmentalTools=true `
+            "-p:CppLinker=$msvcLink" `
             -o $publishDir `
             --nologo | Out-Host
     }
@@ -521,8 +658,9 @@ function Build-Ui {
 function Run-Tests {
     Write-Banner 'Unit Tests  |  xUnit v3 (Microsoft.Testing.Platform)'
     if (-not (Test-Path $TEST_PROJ)) {
-        Write-Info 'Test project not found, skipping'
-        return $true
+        Write-Fail "C# test project not found at $TEST_PROJ - no C# tests ran (a failure, not a skip)"
+        $null = Run-RustTests
+        return $false
     }
     Write-Step 'Building + running tests'
     # `dotnet test` runs in MTP mode — enabled by the `test.runner` section in
@@ -538,9 +676,10 @@ function Run-Tests {
     } finally {
         Pop-Location
     }
-    if ($LASTEXITCODE -ne 0) { Write-Fail 'Tests failed'; return $false }
-    Write-Ok 'All tests passed'
-    return (Run-RustTests)
+    $csOk = ($LASTEXITCODE -eq 0)
+    if ($csOk) { Write-Ok 'All tests passed' } else { Write-Fail 'Tests failed' }
+    $rustOk = Run-RustTests
+    return ($csOk -and $rustOk)
 }
 
 # Phase R0: the Rust core's unit tests, for both shipping architectures. The
@@ -571,12 +710,11 @@ function Run-RustTests {
 
 
 # ---------------------------------------------------------------------------
-# Phase 12 / 13 placeholders
+# Proxy DLLs + metadata-cli
 # ---------------------------------------------------------------------------
 function Build-ProxyDll {
-    Write-Banner 'Proxy DLL (Phase 12 — not yet implemented)'
-    Write-Info 'Skipping: proxy targets land in Phase 12.'
-    return $true
+    Write-Info 'The version.dll / winmm.dll proxies are built by the DLL build (BUILD_PROXIES=ON); running it.'
+    return (Build-Dll)
 }
 function Build-MetadataCli {
     # metadata-cli is x64-only (only consumer is the offline-analysis flow;
@@ -598,7 +736,8 @@ function Build-MetadataCli {
 
     $staticCrt = if ($Mode -eq 'Publish') { 'ON' } else { 'OFF' }
     Write-Step "Configuring CMake (Ninja + MSVC, BUILD_CLI=ON, static-CRT=$staticCrt)"
-    & cmake -S $RepoRoot -B $cliBuildDir -G Ninja `
+    $compilerArgs = Get-MsvcCompilerArgs
+    & cmake -S $RepoRoot -B $cliBuildDir -G Ninja @compilerArgs `
         "-DCMAKE_BUILD_TYPE=$cfg" `
         "-DBUILD_CLI=ON" `
         "-DBACKEND=IL2CPP" `
@@ -702,7 +841,6 @@ switch ($Target) {
         if (-not (Build-Dll))         { $exitCode = 1 }
         if (-not (Build-Ui))          { $exitCode = 1 }
         if (-not (Run-Tests))         { $exitCode = 1 }
-        if (-not (Build-ProxyDll))    { $exitCode = 1 }
         if (-not (Build-MetadataCli)) { $exitCode = 1 }
     }
 }

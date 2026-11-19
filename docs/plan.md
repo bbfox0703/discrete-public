@@ -8,7 +8,7 @@
 
 | 項目 | 值 |
 |---|---|
-| **Current build** | **#1514**(2026-11-14:`build.cmd dll` / `debug dll` / `cli` / `debug cli`,R1 收尾後(legacy metadata parser 已刪)。⚠️ **`dist/` 是 Release(/MD)**,出貨前需重跑 `build.cmd publish` 拿 /MT + AOT。發佈:`v1505` draft。前:#1501)|
+| **Current build** | **#1526**(2026-11-19:`build.cmd` 全套 + `debug dll`,UE5CEDumper 修正移植後。⚠️ **`dist/` 是 Release(/MD)**,出貨前需重跑 `build.cmd publish` 拿 /MT + AOT。發佈:`v1505` draft。前:#1501)|
 | **Current phase** | 🦀 **Rust core R1 + R2 + FieldXref 收尾完成(2026-11-14)** — R2 四個純演算法模組(AOB pattern builder、group-scan SDR matcher、value-scan refine comparator、IL2CPP chain detector)與 follow-up 的 `IL2CPPFieldXref` 兩個 scan kernel 都在 Rust;**Zydis 已完全移出 DLL build**(只剩 `tools/zydis-oracle` 驗證用)。R1 與 R2 的 legacy 都已刪,回歸改用 golden hash(`metadata_golden.py` 1589 checks、`r2_golden.py` 33 項)。實機 A/B(Utawarerumono)R1 + R2 + FieldXref 與 legacy 一致;Mono x64 實機通過。R3 不在本次範圍。詳見 [rust-core.md](rust-core.md)。前:🛡️ Proxy DLL pre-CRT gate(2026-08-27)|
 | **Branches** | `dev` → 已 merge `main`(2026-08-16)|
 | **Tests** | **1130 UI tests + 104 / 105 Rust tests(x64 / i686)green**(2026-11-14 `build.cmd test`;`cargo clippy --all-targets` 兩個 target 皆乾淨;`r2_golden.py` 33/33;`tools/zydis-oracle` quick + full 0 差異)|
@@ -182,6 +182,14 @@
 ## Recent batches
 
 > 最近 ~1 週的 ship 摘要。再舊的 → [archive/status-history.md](archive/status-history.md)(2026-06-02 以前已 carve);所有時點的 commit 詳情 → `git log`。
+
+**2026-11-19 — 比照 UE5CEDumper 移植的修正(build #1526)**(38 個 agent 逐項 triage + 反駁,4 組實作各一 reviewer,整份 diff 再一輪 4 視角 review + 反駁;存活 8 個 finding 全修):
+- **Build 工具鏈(`build.ps1` / `CMakeLists.txt` / `tools/zydis-oracle/build.ps1`)**:沿用的 dev prompt 只在 toolset 還在且在 PATH 上才重用,否則重新進 DevShell;已不存在的三段式 `VCToolsVersion` 先丟掉;cl / link 不是 MSVC 那個時把 toolset 放到 PATH 最前(Git / MSYS2 `usr\bin` 有 coreutils `link.exe`);每個 configure 以 `-DCMAKE_C/CXX_COMPILER` 指定 cl.exe;CMake 拒絕非 MSVC 編譯器;清掉 vcvars 的 `Platform`;AOT publish 自行進 x64 環境並以 `CppLinker` 全路徑指定 link.exe(`build ui publish` 以前在乾淨 shell 會失敗)。7 個情境的 probe(hostile PATH、`CXX`、移除的 toolset、`Platform`、cmake guard、AOT)新版全過、舊版全部重現失敗。rustc 自己以全路徑找 link.exe,不受影響。
+- **Build 腳本其他**:`-Arch Both` 的 x86 子行程不再二次 bump build number、改用同版本的 console PowerShell(不需 pwsh)、輸出 `| Out-Host`(原本子行程失敗會被當成功);缺 `dll\vendor` 先提示 `sync_vendor.ps1`;找不到 C# 測試專案算失敗、Rust 測試一律跑;`ProxyDLL` = DLL build;非 ASCII 的 `.ps1` 加 UTF-8 BOM(5.1 依 ANSI code page 讀)。
+- **Identity guard**:`check_no_local_paths.py` exit 0 / 1(leak)/ 2(CANNOT RUN:git 不在、非 checkout、`git log` 失敗、讀不到的檔、crash),一律掃自己所在的 repo,`ls-files -z`(非 ASCII 檔名),session 路徑也遮蔽帳號,`--selftest` 11 cases;`build.ps1` 只把 exit 1 當 leak。
+- **Log**:DLL `Init` 封存 PID 重用留下的舊 `current.log`,sweep 也清自己 PID 資料夾內過期的封存;`LogLoadedModules` 一次寫入(loader lock 下不再每 module 開關檔);retention thread 包 try/catch。UI `FileLogger` 寫入失敗只丟該行、下次重開;single-instance mutex / SQLite init / migration 移進 crash.log 的 try,第二個實例 exit 1。
+- **其他**:`BridgeLuaResourcesTests` 的 byte-for-byte 測試原本一直提早 return,改為往上找 repo;`count_cloc.bat` 不再寫死本機路徑;文件斷鏈修正;`docs/proxy-dlls.md` 新增 Proton / Wine 說明(未實機驗證)。
+- **驗證**:Release(x64 + x86)、Debug DLL、`cli`、AOT publish;C# 1147、Rust 104 / 105 全過。**未做實機**(PID 重用封存、Proton)。
 
 **2026-11-14 — 🦀 Rust core R2(四個純演算法模組 → Rust)**(詳見 [rust-core.md → R2 gate](rust-core.md#r2-gate)):
 - **移植**:`aob.rs`(AOB pattern builder)、`group_match.rs`(group-scan SDR matcher,遞迴改顯式 stack)、`value.rs`(refine comparator;value-scan hot loop 留 C++)、`chain/`(IL2CPP static-field chain detector,Zydis → `iced-x86 =1.22.0`,`decode.rs` 把 iced 的結果還原成 legacy 從 Zydis 讀到的那幾個事實,`msvc_sort.rs` 照抄 MSVC `std::sort` 以保住 dedup 順序)。C++ API 不變,四個 `*Rs.cpp` 薄 wrapper;`ValueRefine` 從 `ExportAPI.cpp` 抽成獨立檔以便切換。CMake `DISCRETE_RUST_R2`(預設 ON)可切回 legacy。

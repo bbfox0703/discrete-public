@@ -4,8 +4,11 @@
 //
 // Rotation: on reaching MagicStrings::LogMaxFileBytes, current.log is archived
 // to <YYYYMMDD-HHMMSS>.log (stamped from its own last-write time) in the same
-// folder and a fresh current.log starts. There is no per-start rotation: the
-// per-PID folder already separates runs.
+// folder and a fresh current.log starts. A PID folder is not always one run:
+// Windows recycles PIDs, so Init() archives (the same way) any current.log
+// last written before this process was created — an earlier process that had
+// the same PID. Logs written by other copies in this process are kept, so
+// there is otherwise no per-start rotation.
 //
 // Retention: RunRetentionSweep() deletes other processes' per-PID folders whose
 // newest file is older than MagicStrings::LogRetentionDays (or that are empty),

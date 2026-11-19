@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Fetch the pinned Zydis the oracle compiles against (tools/zydis-oracle/vendor/zydis).
 

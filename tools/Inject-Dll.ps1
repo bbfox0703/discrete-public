@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Inject Discrete DLL into a target process via CreateRemoteThread + LoadLibraryW.
 

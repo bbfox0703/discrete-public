@@ -16,27 +16,27 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
-        _singleInstanceMutex = new Mutex(initiallyOwned: true, Constants.SingleInstanceMutexName, out bool createdNew);
-        if (!createdNew)
-        {
-            // Another instance already running. Exit silently — production version may bring it to front.
-            return 0;
-        }
-
-        // Phase 29c — initialise the SQLitePCLRaw provider so
-        // Microsoft.Data.Sqlite finds the bundled native sqlite3
-        // implementation. Idempotent; safe to call multiple times.
-        // Must happen BEFORE any SnapshotStore.OpenAsync — putting it
-        // in Program.Main ensures every UI startup is covered.
-        SQLitePCL.Batteries_V2.Init();
-
-        // 2026-11 app-data rename (Discrete_Dumper -> discrete): move the user
-        // state files BEFORE any store reads them. Renames only, never throws;
-        // MainWindowViewModel writes the report to the init log.
-        AppDataMigration.Run();
-
         try
         {
+            if (!TryTakeSingleInstanceMutex(out _singleInstanceMutex))
+            {
+                // Another instance is running; this launch is refused. Exit code
+                // 1 so a script does not read the refusal as success.
+                return 1;
+            }
+
+            // Phase 29c — initialise the SQLitePCLRaw provider so
+            // Microsoft.Data.Sqlite finds the bundled native sqlite3
+            // implementation. Idempotent; safe to call multiple times.
+            // Must happen BEFORE any SnapshotStore.OpenAsync — putting it
+            // in Program.Main ensures every UI startup is covered.
+            SQLitePCL.Batteries_V2.Init();
+
+            // 2026-11 app-data rename (Discrete_Dumper -> discrete): move the user
+            // state files BEFORE any store reads them. Renames only, never throws;
+            // MainWindowViewModel writes the report to the init log.
+            AppDataMigration.Run();
+
             return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         }
         catch (Exception ex)
@@ -48,6 +48,34 @@ internal static class Program
             // effort: never let the crash reporter throw over the real fault.
             WriteCrashLog(ex);
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// Take the machine-wide single-instance mutex. Returns false when another
+    /// instance holds it. A mutex this process may not open (an elevated first
+    /// instance seen from an unelevated launch) or a name owned by another kernel
+    /// object type also means "not first" — never a crash, so a refused launch
+    /// cannot overwrite the running instance's crash.log.
+    /// </summary>
+    private static bool TryTakeSingleInstanceMutex(out Mutex? held)
+    {
+        try
+        {
+            var m = new Mutex(initiallyOwned: true, Constants.SingleInstanceMutexName, out bool createdNew);
+            if (!createdNew)
+            {
+                m.Dispose();
+                held = null;
+                return false;
+            }
+            held = m;
+            return true;
+        }
+        catch (Exception e) when (e is UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
+            held = null;
+            return false;
         }
     }
 

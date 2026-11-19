@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 21a smoke — write a primitive field via setInstanceField and verify
     via readMemory roundtrip.

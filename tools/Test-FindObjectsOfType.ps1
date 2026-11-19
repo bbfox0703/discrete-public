@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 20a-2 verification — replay the Object.FindObjectsOfType(Type, bool)
     recipe end-to-end via raw pipe RPCs (no CE / Lua needed).

@@ -353,6 +353,32 @@ detected backend).
 To uninstall: delete `version.dll` + `Discrete-*.dll` from the
 game directory.
 
+## Running under Proton / Wine
+
+> **Best-effort, unverified.** Nothing in this section has been tested on
+> Linux. It follows from how Wine loads DLLs and scopes named pipes; report
+> what you find.
+
+1. **DLL override.** Wine loads its own builtin `version.dll` / `winmm.dll`
+   and ignores a same-name file next to the game unless told otherwise. Set
+   the game's Steam launch options to
+   `WINEDLLOVERRIDES="version=n,b" %command%` (or `winmm=n,b` for the
+   `winmm.dll` proxy). Without it the backend never loads and no Discrete
+   log appears.
+2. **Deploy by hand.** Copy the proxy and `Discrete-*.dll` as in
+   [Manual deploy](#manual-deploy-no-ui). The Proxy Deploy window's Steam
+   scan reads the prefix's stub Steam registry entry and
+   `steamapps\libraryfolders.vdf`, so it does not see the Linux Steam
+   library.
+3. **Same prefix for every client.** The pipe `\\.\pipe\DiscreteBfx` is only
+   visible inside one Wine prefix (one wineserver). Start `DiscreteUI.exe`
+   and Cheat Engine inside the game's prefix, e.g.
+   `protontricks-launch --appid <appid> DiscreteUI.exe`. The same applies to
+   direct injection and to `dist\x86\inject-x86.exe` for 32-bit Mono.
+4. **Native Linux builds.** If the game also ships a Linux build, force a
+   Proton compatibility tool in the game's Steam properties so the Windows
+   build (which the proxy and backend need) is the one that runs.
+
 ## Caveats
 
 - **Anti-cheat**: any anti-cheat that integrity-checks `version.dll`
@@ -368,6 +394,8 @@ game directory.
   the x86 proxy + `Discrete-Mono.dll` from `dist/x86/`. **32-bit IL2CPP**
   stays unsupported (no 32-bit IL2CPP backend) — those rows are hidden
   unless "Show unsupported" is on, and skipped in bulk ops.
+- **Proton / Wine**: needs a DLL override, and the UI / CE must run in the
+  game's prefix — see [Running under Proton / Wine](#running-under-proton--wine).
 
 ## Source map
 

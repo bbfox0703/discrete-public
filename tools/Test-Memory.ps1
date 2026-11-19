@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 6 segment A — exercise readMemory / writeMemory / resolvePointer.
     Backend-agnostic: works on Mono and IL2CPP variants.

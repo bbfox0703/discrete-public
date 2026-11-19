@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     List running processes that look like Unity games (Mono or IL2CPP).
 

@@ -58,7 +58,10 @@ if (-not $env:ZYDIS_ORACLE_CHILD) {
         if ($Dlls)    { $childArgs += @('-Dlls', $Dlls) }
         if ($Filter)  { $childArgs += @('-Filter', $Filter) }
         if ($Rebuild) { $childArgs += '-Rebuild' }
-        & (Get-Process -Id $PID).Path @childArgs
+        # The console PowerShell of this edition, not the host process (which
+        # may be an editor such as the ISE).
+        $psExe = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'powershell.exe' }
+        & $psExe @childArgs
         exit $LASTEXITCODE
     } finally {
         Remove-Item Env:ZYDIS_ORACLE_CHILD -ErrorAction SilentlyContinue
@@ -84,10 +87,39 @@ Write-Step 'fetch Zydis'
 if ($LASTEXITCODE -ne 0) { Fail 'fetch_zydis.ps1 failed' }
 
 # --- 2. MSVC environment -------------------------------------------------------
+# The x64 toolset folder of the loaded environment, or $null when it names
+# none that holds cl.exe and link.exe (e.g. a toolset a VS update removed).
+function Get-MsvcBin {
+    if (-not $env:VCToolsInstallDir) { return $null }
+    $bin = (Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64').TrimEnd('\')
+    if ((Test-Path -LiteralPath (Join-Path $bin 'cl.exe')) -and (Test-Path -LiteralPath (Join-Path $bin 'link.exe'))) { return $bin }
+    return $null
+}
+
+# Put the toolset first on PATH when another cl.exe / link.exe resolves
+# before it (Git's or MSYS2's usr\bin hold a coreutils link.exe that the
+# cargo link would otherwise run).
+function Repair-MsvcToolOrder([string]$Bin) {
+    foreach ($tool in 'cl.exe', 'link.exe') {
+        $first = Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $first -or (Split-Path $first.Source -Parent).TrimEnd('\') -ne $Bin) {
+            Write-Host "   $tool resolved to $(if ($first) { $first.Source } else { 'nothing' }); putting $Bin first on PATH"
+            $env:PATH = "$Bin;$env:PATH"
+            return
+        }
+    }
+}
+
 function Enter-Msvc {
-    if ($env:VSCMD_ARG_TGT_ARCH -eq 'x64' -and (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-        Write-Host '   MSVC x64 environment already loaded'
-        return
+    # Reuse an inherited x64 environment only while its toolset still exists
+    # and PATH still lists it.
+    if ($env:VSCMD_ARG_TGT_ARCH -eq 'x64') {
+        $bin = Get-MsvcBin
+        if ($bin -and ($env:PATH -split ';' | Where-Object { $_.TrimEnd('\') -eq $bin } | Select-Object -First 1)) {
+            Repair-MsvcToolOrder $bin
+            Write-Host '   MSVC x64 environment already loaded'
+            return
+        }
     }
     $candidates = @()
     $inPath = Get-Command vswhere -ErrorAction SilentlyContinue
@@ -101,8 +133,18 @@ function Enter-Msvc {
     if (-not $vs) { Fail 'no Visual Studio (or Build Tools) with the x64 C++ tools found' }
     $dll = Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
     if (-not (Test-Path $dll)) { Fail "Microsoft.VisualStudio.DevShell.dll not found under $vs" }
+    # VsDevCmd refuses to load when an inherited full three-part
+    # VCToolsVersion is not installed in this Visual Studio; without it, it
+    # picks the installed one. Shorter and side-by-side pins are kept.
+    if ($env:VCToolsVersion -match '^\d+\.\d+\.\d+$' -and -not (Test-Path -LiteralPath (Join-Path $vs "VC\Tools\MSVC\$($env:VCToolsVersion)"))) {
+        Write-Host "   VCToolsVersion=$($env:VCToolsVersion) is not installed under $vs; the DevShell picks the installed toolset"
+        Remove-Item Env:VCToolsVersion
+    }
     Import-Module $dll
     Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+    $bin = Get-MsvcBin
+    if (-not $bin) { Fail "the DevShell from $vs named no x64 toolset folder holding cl.exe and link.exe" }
+    Repair-MsvcToolOrder $bin
     Write-Host "   MSVC x64 environment loaded from $vs"
 }
 

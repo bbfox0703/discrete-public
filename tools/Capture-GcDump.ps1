@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Phase 29g — capture a managed-heap gcdump of the running DiscreteUI and
   print a type-level retained-size breakdown of the memory suspects

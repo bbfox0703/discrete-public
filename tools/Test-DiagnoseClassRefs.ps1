@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 28b-v3 investigation — dump every storage slot holding a class's
     Il2CppClass* and static_fields pointer.

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 17a + 17b — reverse address lookup smoke test.
 

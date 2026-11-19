@@ -158,7 +158,11 @@ shape.
 - Per-PID subfolder under `%LOCALAPPDATA%\discrete\Logs\<pid>\<channel>\`;
   the live file is always `current.log`.
 - At 8 MB, `current.log` is archived to `YYYYMMDD-HHMMSS.log` (stamped from
-  its own last-write time). No per-start rotation: a PID folder is one run.
+  its own last-write time). A PID folder is not always one run: Windows
+  recycles PIDs, so `Log::Init()` archives the same way any `current.log` last
+  written before this process was created. Files newer than that (the proxy,
+  the other backend, a re-injection in the same process) are left alone, so
+  there is otherwise no per-start rotation.
 - Age-based retention (21 days, no count cap): `Log::RunRetentionSweep()`, run
   once per process from a short-lived thread started by `main.cpp` (off the
   loader lock), removes other PID folders whose newest file is older than the

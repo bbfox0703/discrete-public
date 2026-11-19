@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Assemble a Cheat Engine .CT distribution folder — copy the backend
     DLLs (renaming the 32-bit Mono build) next to a .CT so the Discrete

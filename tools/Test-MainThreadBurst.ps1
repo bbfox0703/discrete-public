@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 20-MT stress smoke — sustained callMethod burst with both
     main_thread=false (legacy worker-thread path) and main_thread=true

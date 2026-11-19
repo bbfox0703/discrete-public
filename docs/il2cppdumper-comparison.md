@@ -47,7 +47,7 @@ while chasing parity**.
 | Feature | Where |
 |---|---|
 | Live process injection + IL2CPP runtime RPC pipe | [`dll/src/il2cpp/`](../dll/src/il2cpp/) + [`scripts/`](../scripts/) |
-| Phase 18 AOB pattern + CE AA-script generation | [`docs/aob.md`](aob.md) |
+| Phase 18 AOB pattern + CE AA-script generation | [`docs/ce-bridge-integration.md`](ce-bridge-integration.md) (Phase 18c) |
 | Phase 19 `callMethod` (Lua + PowerShell + UI) | [`docs/lua-invoke.md`](lua-invoke.md) |
 | CE XML / CSX live-mode export (real instance addresses) | [`docs/export-formats.md`](export-formats.md) |
 | Mono backend (bdwgc + legacy `mono.dll`) | [`dll/src/mono/`](../dll/src/mono/) |

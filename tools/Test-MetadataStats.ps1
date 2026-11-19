@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 5 segment 3 — call getMetadataStats and pretty-print the verdict.
 

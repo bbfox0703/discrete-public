@@ -35,19 +35,28 @@ std::string Utf8FromWide(const wchar_t* w) {
     return out;
 }
 
+// Runs under the loader lock, so the whole list goes out as ONE Write (one
+// file open/close) rather than one per module.
 void LogLoadedModules() {
     HMODULE mods[1024];
     DWORD cbNeeded = 0;
     HANDLE proc = ::GetCurrentProcess();
     if (!::EnumProcessModules(proc, mods, sizeof(mods), &cbNeeded)) return;
 
+    // cbNeeded is the full need even when the buffer was too small.
     DWORD count = cbNeeded / sizeof(HMODULE);
+    if (count > _countof(mods)) count = static_cast<DWORD>(_countof(mods));
+
+    std::string text = "Loaded modules:";
+    text.reserve(32 + static_cast<size_t>(count) * 40);
     for (DWORD i = 0; i < count; ++i) {
         wchar_t name[MAX_PATH];
         if (::GetModuleBaseNameW(proc, mods[i], name, MAX_PATH) > 0) {
-            Discrete::Log::Write(L"init", "  module: " + Utf8FromWide(name));
+            text += "\n  module: ";
+            text += Utf8FromWide(name);
         }
     }
+    Discrete::Log::Write(L"init", text);
 }
 
 // Phase 12b: per-process named mutex used as a "first injection wins"
@@ -108,7 +117,6 @@ void OnAttach(HMODULE self) {
     // record the Rust core banner (proves the Rust half linked and ran).
     Discrete::RustCore::Init();
 
-    Discrete::Log::Write(L"init", "Loaded modules:");
     LogLoadedModules();
 
     // Suppress DLL_THREAD_ATTACH/DETACH for performance.
@@ -132,7 +140,18 @@ void OnAttach(HMODULE self) {
 // FreeLibraryAndExitThread, so an eject while the sweep runs cannot unmap
 // the code under it.
 DWORD WINAPI RetentionSweepThread(LPVOID moduleRef) {
-    Discrete::Log::RunRetentionSweep();
+    // A C++ exception escaping a raw thread proc is unhandled and kills the
+    // host game; retention is best-effort housekeeping, so contain it. The
+    // note sits in its own try because the likely cause (bad_alloc) can hit
+    // Write() too. The module reference is released either way.
+    try {
+        Discrete::Log::RunRetentionSweep();
+    } catch (...) {
+        try {
+            Discrete::Log::Init("Log retention sweep aborted: exception contained");
+        } catch (...) {
+        }
+    }
     ::FreeLibraryAndExitThread(static_cast<HMODULE>(moduleRef), 0);
 }
 

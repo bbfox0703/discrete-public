@@ -38,7 +38,7 @@ Two compounding design facts produce that buffer:
 ### 1a. Decode-all-then-stream (`snapshotBegin` builds the whole thing)
 `snapshotBegin` decodes **every** class × instance × field into
 `Session::classes` — a `std::vector<nlohmann::json>` holding the *entire* snapshot
-([SnapshotSession.h:109](SnapshotSession.h)). `snapshotChunk` then just slices that
+([SnapshotSession.h:109](../dll/src/shared/SnapshotSession.h)). `snapshotChunk` then just slices that
 pre-built vector. So the game-side peak = the **whole** decoded snapshot, all at once.
 
 ### 1b. Field schema repeated per instance (the real bulk)

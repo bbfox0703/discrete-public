@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Drive the AOBMaker CE plugin pipe directly to verify Phase 22's
     bridge-inject pipeline. Doesn't require a Unity game — just CE 7.6+

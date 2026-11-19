@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 28b-v3.1 step 1 — sample lazy-init slots to discover the
     IL2CPP MetadataInitializerEntry layout.
