@@ -164,11 +164,22 @@ function Resolve-VsInstallPath {
     $vswhere = $candidates | Where-Object { $_ -and (Test-Path $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1
     if (-not $vswhere) { throw 'vswhere.exe not found. Install Visual Studio or Microsoft.VisualStudio.Locator.' }
 
-    $vsPath = & $vswhere -latest -prerelease -property installationPath
+    # Ask for the C++ toolset first: the newest Visual Studio is not always the
+    # one that has it (a fresh VS major can sit beside an older one that does).
+    # '-products *' also admits Build Tools, which vswhere's default product
+    # filter (Community / Professional / Enterprise) hides; Build Tools ship
+    # Microsoft.VisualStudio.DevShell.dll too. tools\zydis-oracle\build.ps1
+    # uses the same filter, so both pick the same toolset.
+    $vsFilter = @('-latest', '-products', '*', '-prerelease')
+    $vsPath = & $vswhere @vsFilter -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
     if (-not $vsPath) {
-        $vsPath = & $vswhere -latest -prerelease -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        # Tell "no Visual Studio" apart from "Visual Studio without the C++ toolset".
+        $anyVs = & $vswhere @vsFilter -property installationPath | Select-Object -First 1
+        if ($anyVs) {
+            throw "Visual Studio found at '$anyVs' but it has no C++ toolset. Add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 (Desktop development with C++) in the Visual Studio Installer."
+        }
+        throw 'No Visual Studio installation found (need the Desktop development with C++ workload).'
     }
-    if (-not $vsPath) { throw 'No Visual Studio installation found (need C++ Desktop workload).' }
 
     $script:VsInstallPath = $vsPath
     return $vsPath
