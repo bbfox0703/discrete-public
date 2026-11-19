@@ -19,9 +19,18 @@ namespace UnityDumpUI.Tests;
 
 public class BridgeLuaResourcesTests
 {
-    private static readonly string ScriptsDir =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-            "..", "..", "..", "..", "..", "scripts"));
+    // Walk up from the test output dir to the repo's scripts\ folder, so the
+    // depth of bin\<platform?>\<config>\<tfm>\<rid>\ does not matter.
+    private static string? FindScriptsDir()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            string candidate = Path.Combine(dir.FullName, "scripts");
+            if (File.Exists(Path.Combine(candidate, "unity_invoke.lua")))
+                return candidate;
+        }
+        return null;
+    }
 
     [Fact]
     public void LoadOrder_HasExpectedFiles_InDependencyOrder()
@@ -77,11 +86,11 @@ public class BridgeLuaResourcesTests
     [Fact]
     public void Read_RoundTripsPhysicalFile_ByteForByte()
     {
-        if (!Directory.Exists(ScriptsDir))
-            return; // tolerate running from a published dist
+        string? scriptsDir = FindScriptsDir();
+        if (scriptsDir is null)
+            Assert.Fail(@"scripts\unity_invoke.lua not found above " + AppContext.BaseDirectory);
 
-        string physical = Path.Combine(ScriptsDir, "unity_invoke.lua");
-        if (!File.Exists(physical)) return;
+        string physical = Path.Combine(scriptsDir!, "unity_invoke.lua");
 
         // EXACT byte equality also guards against CRLF sneaking in (AOBMaker's
         // CE-side InjectTableFile verifies pre-normalisation byte count).

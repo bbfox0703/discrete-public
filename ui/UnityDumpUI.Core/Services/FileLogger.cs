@@ -47,7 +47,10 @@ public sealed class FileLogger : IDisposable
                       long maxFileBytes = Constants.LogMaxFileBytes)
     {
         string root = logRootOverride ?? DefaultRoot();
-        Directory.CreateDirectory(root);
+        // Best-effort: an unwritable root must not abort UI startup. Each
+        // category writer recreates its folder on every open attempt.
+        try { Directory.CreateDirectory(root); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* retried on first write */ }
         _root = root;
         _maxFileBytes = maxFileBytes;
 
@@ -65,12 +68,11 @@ public sealed class FileLogger : IDisposable
         if (string.IsNullOrEmpty(category)) throw new ArgumentException("category required", nameof(category));
         // Lazy, not a bare factory: ConcurrentDictionary.GetOrAdd may invoke its
         // value factory MORE THAN ONCE for the same key under contention and
-        // keep only one result. CategoryWriter opens current.log in its
-        // constructor with FileShare.Read, so a losing factory call either threw
-        // a sharing violation straight out of this logging call, or (when it won
-        // the race to the file) leaked an undisposed FileStream. Lazy with
-        // ExecutionAndPublication guarantees the writer is constructed exactly
-        // once per category.
+        // keep only one result, and two writers would fight over current.log
+        // (opened with FileShare.Read). Lazy with ExecutionAndPublication
+        // guarantees the writer is constructed exactly once per category. The
+        // CategoryWriter constructor never throws, so the Lazy never caches an
+        // exception; the file is opened on the first Write.
         var writer = _writers.GetOrAdd(category, c => new Lazy<CategoryWriter>(
             () => new CategoryWriter(_root, c, _maxFileBytes),
             LazyThreadSafetyMode.ExecutionAndPublication));
@@ -299,6 +301,9 @@ public sealed class FileLogger : IDisposable
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
+    // Logging is best-effort: no member of this class throws into the caller.
+    // An IO failure drops the line and closes the file; the next Write retries
+    // the open.
     private sealed class CategoryWriter : IDisposable
     {
         private readonly object       _gate = new();
@@ -312,23 +317,31 @@ public sealed class FileLogger : IDisposable
         {
             _dir = Path.Combine(root, category);
             _maxFileBytes = maxFileBytes;
-            Directory.CreateDirectory(_dir);
-            Open();
         }
 
         public void Write(string message)
         {
             lock (_gate)
             {
-                if (_stream is null || _writer is null) Open();
-                if (_bytesWritten >= _maxFileBytes) Rotate();
+                try
+                {
+                    if (_stream is null || _writer is null) Open();
+                    if (_bytesWritten >= _maxFileBytes) Rotate();
 
-                string line = string.Format(CultureInfo.InvariantCulture,
-                    "{0:yyyy-MM-dd HH:mm:ss.fff} {1}",
-                    DateTimeOffset.Now, message);
-                _writer!.WriteLine(line);
-                _writer.Flush();
-                _bytesWritten = _stream!.Length;
+                    string line = string.Format(CultureInfo.InvariantCulture,
+                        "{0:yyyy-MM-dd HH:mm:ss.fff} {1}",
+                        DateTimeOffset.Now, message);
+                    _writer!.WriteLine(line);
+                    _writer.Flush();
+                    _bytesWritten = _stream!.Length;
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException
+                                              or ObjectDisposedException or NotSupportedException)
+                {
+                    // Full disk, locked or unreachable file: drop this line and
+                    // leave the fields null so the next Write reopens.
+                    Close();
+                }
             }
         }
 
@@ -339,6 +352,7 @@ public sealed class FileLogger : IDisposable
 
         private void Open()
         {
+            Directory.CreateDirectory(_dir);
             string path = Path.Combine(_dir, Constants.LogCurrentFileName);
             _stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read,
                                      bufferSize: 4096, FileOptions.None);
@@ -350,12 +364,15 @@ public sealed class FileLogger : IDisposable
             _bytesWritten = _stream.Length;
         }
 
+        // Never throws: Dispose re-flushes buffered data and can fail the same
+        // way the write did, so every step is guarded and the fields are
+        // always cleared.
         private void Close()
         {
             try { _writer?.Flush(); } catch { /* ignore */ }
-            _writer?.Dispose();
+            try { _writer?.Dispose(); } catch { /* ignore */ }
+            try { _stream?.Dispose(); } catch { /* ignore */ }
             _writer = null;
-            _stream?.Dispose();
             _stream = null;
         }
 

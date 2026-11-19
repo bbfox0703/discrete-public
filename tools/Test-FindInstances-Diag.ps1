@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Offline diagnostic dump for findInstances "fake instances" — by FIELD CONTENT.
 

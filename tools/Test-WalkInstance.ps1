@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 6 segment B — walk an instance and decode each field.
 

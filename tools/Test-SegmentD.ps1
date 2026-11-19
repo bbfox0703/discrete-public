@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 6 segment D — exercise registerSymbol / lookupSymbol / listSymbols /
     monoGetVTable / getEnumValues.

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 18a-3 — generate an AOB pattern from a method address.
 

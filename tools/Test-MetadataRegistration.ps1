@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Probe Il2CppMetadataRegistration discovery in isolation.
 

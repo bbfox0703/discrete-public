@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Convert scripts/README.md → dist/README.html with GitHub-style CSS.
 

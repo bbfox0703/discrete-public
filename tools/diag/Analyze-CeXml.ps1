@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Analyze a Copy-CE-XML export to find which (Unity/system) types bloat the
     tree, so they can be added to the live-export recursion exclusion.

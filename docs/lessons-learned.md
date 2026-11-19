@@ -4,7 +4,7 @@
 > a debugging session to figure out the first time and that we never
 > want to relearn from scratch. Each entry leads with the symptom, then
 > the root cause, then the rule. Cross-references to source live as
-> [file.ext:line](../path/file.ext) links.
+> `[file.ext:line](../path/file.ext)` links.
 
 ## Contents
 

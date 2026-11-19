@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Exercise Phase 3 segment 2 Mono pipe commands: getClasses / getClassInfo /
     getFieldInfo / getMethodInfo. Assumes the DLL is already injected and the

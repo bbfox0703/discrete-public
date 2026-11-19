@@ -91,7 +91,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "build.ps1" -Mode Publish -C
 * **Single Instance**: UI app uses Mutex to ensure only one instance runs
 * **Async everywhere**: Pipe/RPC and any long-running work must be async and must never block the UI thread. Small local settings/state files may use sync `File.*`
 * **Platform Abstraction**: Any system/OS-dependent call (P/Invoke, Registry, OS commands) MUST go through an interface in `Core` project. `Core` must NEVER contain direct platform-specific code
-* **Log output**: All logs go to `%LOCALAPPDATA%\discrete\Logs` (the app-data root `%LOCALAPPDATA%\discrete\` also holds the UI's user-state files), split by category into per-process subfolders. DLL: 5 files (init, scan, metadata, pipe, walk) under `<pid>\<category>\`. UI: 3 files (init, pipe, view) under `ui\<category>\`. The live file is always `current.log`; at 8 MB (both sides) and at every UI start (UI only — a DLL PID folder is already one run) it is archived to `YYYYMMDD-HHMMSS.log`, stamped from the file's **own** last-write time, never "now". **Retention is by age (21 days), not a file count** — `MagicStrings::LogRetentionDays` / `Constants.LogRetentionDays`: archives older than that, and per-PID folders that are empty or whose newest file *inside* is that old (never the folder's own mtime), are deleted by the DLL on attach (off the loader lock) and by the UI at start (background task). Root `Logs/` has no loose files — only subfolders. The pre-2026-11 root `%LOCALAPPDATA%\Discrete_Dumper\` is legacy: the UI moves its user-state files over at start, ages its `Logs\` out with the same rule and deletes it once empty
+* **Log output**: All logs go to `%LOCALAPPDATA%\discrete\Logs` (the app-data root `%LOCALAPPDATA%\discrete\` also holds the UI's user-state files), split by category into per-process subfolders. DLL: 5 files (init, scan, metadata, pipe, walk) under `<pid>\<category>\`. UI: 3 files (init, pipe, view) under `ui\<category>\`. The live file is always `current.log`; at 8 MB (both sides) and at every UI start (the DLL instead archives, at `Log::Init`, only a `current.log` last written before its process was created — a recycled PID's earlier run) it is archived to `YYYYMMDD-HHMMSS.log`, stamped from the file's **own** last-write time, never "now". **Retention is by age (21 days), not a file count** — `MagicStrings::LogRetentionDays` / `Constants.LogRetentionDays`: archives older than that, and per-PID folders that are empty or whose newest file *inside* is that old (never the folder's own mtime), are deleted by the DLL on attach (off the loader lock) and by the UI at start (background task). Root `Logs/` has no loose files — only subfolders. The pre-2026-11 root `%LOCALAPPDATA%\Discrete_Dumper\` is legacy: the UI moves its user-state files over at start, ages its `Logs\` out with the same rule and deletes it once empty
 * **Magic words management**: All magic strings kept in one file per project with proper comments
 * **UI Strings**: English only. All UI strings in `Resources/Strings/en.axaml`, referenced via `StaticResource` bindings
 * **Unity offsets**: All internal struct offsets (MonoClass, Il2CppClass, etc.) must be dynamically verified via OffsetFinder or API probing, never hardcoded for a single Unity version
@@ -655,16 +655,15 @@ Discrete/
 
 | Document | Contents |
 |----------|----------|
-| [docs/architecture.md](docs/architecture.md) | Directory structure, git submodules, build environment |
-| [docs/dll-spec.md](docs/dll-spec.md) | C++ DLL interface: C ABI exports, CE Lua bridge |
-| [docs/pipe-protocol.md](docs/pipe-protocol.md) | Named Pipe JSON-RPC protocol (all commands, Request/Response/Event) |
-| [docs/ui-spec.md](docs/ui-spec.md) | Avalonia UI tech stack, AOT compatibility, component specs |
-| [docs/export-formats.md](docs/export-formats.md) | CE XML, CSX, SDK Header export rules, type mappings |
-| [docs/mono-internals.md](docs/mono-internals.md) | Mono runtime internals, API reference, struct layouts by version |
-| [docs/il2cpp-internals.md](docs/il2cpp-internals.md) | IL2CPP internals, metadata format, version differences |
-| [docs/technical-notes.md](docs/technical-notes.md) | Unity version differences, backend detection, edge cases |
-| [docs/lessons-learned.md](docs/lessons-learned.md) | Hard-won lessons from cross-game debugging |
-| [docs/test-games.md](docs/test-games.md) | Test games with Unity versions, backend type, status |
+| [dll-spec.md](dll-spec.md) | C++ DLL interface: C ABI exports, CE Lua bridge |
+| [pipe-protocol.md](pipe-protocol.md) | Named Pipe JSON-RPC protocol (all commands, Request/Response/Event) |
+| [ui-spec.md](ui-spec.md) | Avalonia UI tech stack, AOT compatibility, component specs |
+| [export-formats.md](export-formats.md) | CE XML, CSX, SDK Header export rules, type mappings |
+| [mono-internals.md](mono-internals.md) | Mono runtime internals, API reference, struct layouts by version |
+| [il2cpp-internals.md](il2cpp-internals.md) | IL2CPP internals, metadata format, version differences |
+| [technical-notes.md](technical-notes.md) | Unity version differences, backend detection, edge cases |
+| [lessons-learned.md](lessons-learned.md) | Hard-won lessons from cross-game debugging |
+| [test-matrix.md](test-matrix.md) | Test games with Unity versions, backend type, status |
 
 ---
 
@@ -687,4 +686,4 @@ Discrete/
 
 ---
 
-**License**: [GPLv3](LICENSE) © 2026 bbfox0703
+**License**: [GPLv3](../LICENSE) © 2026 bbfox0703

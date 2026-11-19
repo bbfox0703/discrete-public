@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 19a — invoke a managed (IL2CPP) method via the DLL pipe and print
     the typed return value or the captured managed exception.

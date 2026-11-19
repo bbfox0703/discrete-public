@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 27a — Unity-aware value scan (scanFieldValue) smoke test.
 

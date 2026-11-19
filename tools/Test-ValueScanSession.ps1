@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 27b — Begin / Refine / End session workflow smoke test.
 

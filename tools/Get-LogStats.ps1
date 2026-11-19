@@ -1,4 +1,4 @@
-# Get-LogStats.ps1 — show per-PID log directory sizes for Discrete.
+﻿# Get-LogStats.ps1 — show per-PID log directory sizes for Discrete.
 #
 # Visual check of the rotation + retention policy (dll/src/shared/MagicStrings.h,
 # ui/UnityDumpUI.Core/Constants.cs). Run after a heavy session to confirm:

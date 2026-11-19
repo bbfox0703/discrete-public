@@ -211,6 +211,12 @@ Quick checks specific to common workflow issues:
   raise the result limit on the Value Search tab. The per-instance
   cap (3 candidates per instance) is hard-coded to prevent one large
   array from dominating results.
+- **Linux / Proton (best-effort, unverified)** — the proxy needs the Steam
+  launch option `WINEDLLOVERRIDES="version=n,b" %command%` (`winmm=n,b` for
+  the winmm proxy), and `DiscreteUI.exe` / CE must run in the game's Wine
+  prefix to see the pipe. See
+  [docs/proxy-dlls.md → Running under Proton / Wine](https://github.com/bbfox0703/discrete-public/blob/main/docs/proxy-dlls.md#running-under-proton--wine)
+  (this file also ships in the release zip, which has no `docs/` folder).
 
 ---
 

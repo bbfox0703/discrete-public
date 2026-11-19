@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Phase 29g — capture a full managed-heap dump of the running DiscreteUI with
   dotnet-dump and print a `dumpheap -stat` type histogram (NO object cap, unlike

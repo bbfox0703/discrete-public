@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Deploy Discrete Lua scripts + DLLs into Cheat Engine's discrete folder.
 

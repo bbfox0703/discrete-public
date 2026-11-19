@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 5 v32+ smoke — verify metadata-cli accepts synthetic
     global-metadata.dat fixtures for versions v29/v31/v35/v38/v39.

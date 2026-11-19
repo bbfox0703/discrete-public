@@ -6,7 +6,9 @@
 //   anything older than LogRetentionDays   deleted by RunRetentionSweep()
 //
 // The archive name is stamped from the file's OWN last-write time, never
-// "now", so the age prune keys on the real date of the content.
+// "now", so the age prune keys on the real date of the content. Init()
+// archives a current.log left by an earlier process with the same (recycled)
+// PID, judged by its last-write time against this process's creation time.
 //
 // Retention is by age, not a file count. The old fixed shuffle
 // (current.1 .. current.3, oldest dropped) and the UI's "keep the newest 15
@@ -170,6 +172,32 @@ void RotateIfNeeded(const fs::path& dir) {
     ArchiveByWriteTime(current, dir);
 }
 
+bool ProcessCreationTicks(ULONGLONG& out) {
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!::GetProcessTimes(::GetCurrentProcess(), &created, &exited, &kernel, &user)) return false;
+    out = AsU64(created);
+    return true;
+}
+
+// Windows recycles PIDs, and a PID folder lives up to LogRetentionDays, so a
+// new process can inherit an earlier process's folder. A current.log last
+// written before THIS process was created can only belong to that earlier
+// occupant: archive it so this run starts a fresh file. A current.log written
+// by another Logger copy in this same process (the proxy, the other backend,
+// a re-injection) is newer than the creation time and is left alone, so one
+// run is never split across two files. Caller holds g_mutex.
+void ArchivePreviousRun(const fs::path& pidDir) {
+    ULONGLONG created = 0;
+    if (!ProcessCreationTicks(created)) return;
+    for (const auto& cat : KnownCategories()) {
+        fs::path dir = pidDir / cat;
+        fs::path current = dir / MagicStrings::LogCurrentFileName;
+        ULONGLONG t = 0;
+        // FileWriteTime fails for a missing file, so no exists() check is needed.
+        if (FileWriteTime(current, t) && t < created) ArchiveByWriteTime(current, dir);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------
@@ -229,7 +257,18 @@ void SweepLogBase(const fs::path& base, const std::wstring& ownPid, SweepCounts&
         if (!entry.is_directory(ec)) return;
         const std::wstring name = entry.path().filename().wstring();
         // Only DLL per-PID folders. ui\ belongs to the UI's own sweep.
-        if (!IsPidFolderName(name) || name == ownPid) return;
+        if (!IsPidFolderName(name)) return;
+        // The live process's own folder is never removed, but its aged
+        // archives are pruned: a recycled PID's earlier run leaves archives
+        // there (Init's ArchivePreviousRun keeps their old mtime), and
+        // PruneAgedArchives never touches current.log.
+        if (name == ownPid) {
+            ForEachDirEntry(entry.path(), [&](const fs::directory_entry& cat) {
+                std::error_code catEc;
+                if (cat.is_directory(catEc)) PruneAgedArchives(cat.path(), now, maxAge, n);
+            });
+            return;
+        }
 
         ULONGLONG newest = 0;
         bool sawFile = false;
@@ -259,6 +298,7 @@ void Init() {
     g_logRoot = LogBaseDirectory() / std::to_wstring(::GetCurrentProcessId());
     std::error_code ec;
     fs::create_directories(g_logRoot, ec);
+    ArchivePreviousRun(g_logRoot);
     g_initialized = true;
 }
 

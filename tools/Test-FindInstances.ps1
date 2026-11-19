@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 6 segment C — heap scan for instances of a class (+ Phase 32 filters).
 

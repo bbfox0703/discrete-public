@@ -10,6 +10,21 @@ project(Discrete
     LANGUAGES C CXX
 )
 
+# The DLLs are MSVC code: SEH __try/__except, MSVC pragmas and link options,
+# and a *-pc-windows-msvc Rust staticlib. GCC would configure with every
+# if(MSVC) block skipped, and clang-cl (which CMake also marks MSVC) would get
+# those blocks applied to another compiler; both fail far from the cause. The
+# compiler IDs exist only once project() has enabled the languages.
+foreach(_lang C CXX)
+    if(NOT CMAKE_${_lang}_COMPILER_ID STREQUAL "MSVC")
+        message(FATAL_ERROR
+            "Discrete builds with MSVC (cl.exe) only, but this configure found "
+            "${CMAKE_${_lang}_COMPILER_ID} as the ${_lang} compiler at ${CMAKE_${_lang}_COMPILER}. "
+            "Build through build.cmd, which loads the MSVC environment and names cl.exe; "
+            "or delete this build directory and configure from a Visual Studio developer prompt.")
+    endif()
+endforeach()
+
 # ---------------------------------------------------------------------------
 # Global toolchain settings
 # ---------------------------------------------------------------------------

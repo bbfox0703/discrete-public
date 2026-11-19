@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     One-shot v32+ runtime sweep — proves what works on a v32+ IL2CPP target
     even when MetadataParser hard-rejects the on-disk metadata.dat.

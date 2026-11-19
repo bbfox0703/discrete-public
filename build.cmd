@@ -19,7 +19,7 @@ setlocal EnableDelayedExpansion
 ::   build il2cpp       Build IL2CPP DLL only
 ::   build ui           Build UI only
 ::   build test         Build + run xUnit v3 tests
-::   build proxy        Build Proxy DLLs (Phase 12 placeholder)
+::   build proxy        Same as dll (the proxies build with the DLLs)
 ::   build publish clean   Publish, clean first
 ::   build /?           Show full usage
 :: ============================================================
@@ -126,8 +126,8 @@ echo    mono             Mono DLL only
 echo    il2cpp           IL2CPP DLL only
 echo    ui               C# Avalonia UI only
 echo    test             Build + run xUnit tests
-echo    proxy            Proxy DLLs (Phase 12 placeholder)
-echo    cli              Offline metadata-cli (Phase 13)
+echo    proxy            Same as dll (the proxies build with the DLLs)
+echo    cli              Offline metadata-cli (x64)
 echo    deploy           Copy dist\*.lua + DLLs into CE\discrete\ (post-build)
 echo    deploy-scripts   Copy scripts\*.lua + dist\DLLs (live iteration)
 echo.

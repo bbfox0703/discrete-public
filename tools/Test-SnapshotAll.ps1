@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 29a — snapshotBegin / snapshotChunk / snapshotEnd smoke test.
 

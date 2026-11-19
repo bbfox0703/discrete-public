@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 18 — find every overload of a method on a class, with signatures
     and JIT/AOT native addresses.
