@@ -44,7 +44,7 @@ iced-x86 / toolchain bump.
 
 ## Prerequisites
 
-- Windows x64, Visual Studio with the C++ desktop workload (found via `vswhere`).
+- Windows x64, Visual Studio or Build Tools with the C++ desktop workload (found via `vswhere`). The lib is rebuilt whenever the MSVC toolset version changes (e.g. after a Visual Studio update).
 - rustup (the repo-root `rust-toolchain.toml` pins the toolchain; no separate one here).
 - git with network access on the first run (`fetch_zydis.ps1` clones Zydis at
   the pin into `vendor/zydis`, shallow, with its Zycore submodule). Zydis is

@@ -6,7 +6,8 @@
     1. fetch_zydis.ps1 - pinned Zydis into vendor/zydis (no-op when present).
     2. Loads the MSVC x64 environment (vswhere -> VS DevShell).
     3. Compiles Zydis + native/*.cpp into build/zydis_oracle.lib (only what is
-       out of date; -Rebuild forces it).
+       out of date; -Rebuild forces it). The lib is rebuilt when the MSVC
+       toolset version changes, and cargo links it in the same environment.
     4. Runs the crate's tests through cargo with the settings of -Mode.
 
     Nothing outside tools/zydis-oracle is written. The cargo target dir is
@@ -95,8 +96,9 @@ function Enter-Msvc {
     if ($env:ProgramFiles)        { $candidates += (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe') }
     $vswhere = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     if (-not $vswhere) { Fail 'vswhere.exe not found - install Visual Studio with the C++ desktop workload' }
-    $vs = & $vswhere -latest -prerelease -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (-not $vs) { Fail 'no Visual Studio with the x64 C++ tools found' }
+    # Same filter as the repo-root build.ps1: '-products *' admits Build Tools.
+    $vs = & $vswhere -latest -products * -prerelease -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+    if (-not $vs) { Fail 'no Visual Studio (or Build Tools) with the x64 C++ tools found' }
     $dll = Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
     if (-not (Test-Path $dll)) { Fail "Microsoft.VisualStudio.DevShell.dll not found under $vs" }
     Import-Module $dll
@@ -130,25 +132,28 @@ function Invoke-Cl([string]$OutDir, [string[]]$Sources, [string[]]$Extra) {
 }
 
 function Build-Native {
+    # The stamp names the Zydis commit AND the MSVC toolset the objects were
+    # compiled with: after a Visual Studio update the lib is rebuilt by the
+    # new toolset instead of being linked against libraries of another one.
     $stamp = Join-Path $BuildDir 'zydis.stamp'
+    $stampValue = "$ZydisSha $env:VCToolsVersion".Trim()
     $zydisObj = Join-Path $BuildDir 'obj\zydis'
     $zycoreObj = Join-Path $BuildDir 'obj\zycore'
     $nativeObj = Join-Path $BuildDir 'obj\native'
-    $haveZydis = (Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $ZydisSha)
+    $haveZydis = (Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $stampValue)
     $libTime = if (Test-Path $Lib) { (Get-Item $Lib).LastWriteTimeUtc } else { [datetime]::MinValue }
     $nativeNewer = @($Native | Where-Object { (Get-Item $_).LastWriteTimeUtc -gt $libTime }).Count -gt 0
     if (-not $Rebuild -and $haveZydis -and -not $nativeNewer -and (Test-Path $Lib)) {
         Write-Host "   $Lib is up to date"
         return
     }
-    Enter-Msvc
     if ($Rebuild -or -not $haveZydis) {
         Remove-Item -Recurse -Force (Join-Path $BuildDir 'obj') -ErrorAction SilentlyContinue
         Write-Host '   compiling Zydis + Zycore'
         # Vendor code: its own warnings are not ours to fix.
         Invoke-Cl $zydisObj $ZydisSrc @('/W0')
         Invoke-Cl $zycoreObj $ZycoreSrc @('/W0')
-        Set-Content -Path $stamp -Value $ZydisSha
+        Set-Content -Path $stamp -Value $stampValue
     }
     Write-Host '   compiling native/*.cpp'
     Invoke-Cl $nativeObj $Native @('/W3', '/EHsc', '/std:c++20')
@@ -162,6 +167,10 @@ function Build-Native {
 
 Write-Step 'native library'
 New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
+# Always load MSVC, also when the lib is up to date: the stamp check needs
+# VCToolsVersion, and cargo (this process's child) then links with the same
+# toolset that compiled the lib rather than whichever one rustc finds itself.
+Enter-Msvc
 Build-Native
 if ($Mode -eq 'build') { exit 0 }
 
