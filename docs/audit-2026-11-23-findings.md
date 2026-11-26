@@ -12,7 +12,7 @@
 
 ### High
 
-**A-H1 · FreeLibrary（`lpReserved == NULL`）收尾路徑在 loader lock 下必然卡住或在卸載後回跳進已 unmap 的程式碼**
+**A-H1 · FreeLibrary（`lpReserved == NULL`）收尾路徑在 loader lock 下必然卡住或在卸載後回跳進已 unmap 的程式碼 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/main.cpp:175-183`、`dll/src/main.cpp:214-221`；`dll/src/shared/PipeServer.cpp:174-201`、`:231-232`、`:342-394`、`:438-503`；`dll/src/mono/MonoMainThreadHook.cpp:166-185`；`dll/src/il2cpp/IL2CPPMainThreadHook.cpp:138-159`
 - 成因：
   1. `OnDetach → Discrete_Shutdown → PipeServer::Stop` 在 DllMain 內、持有 loader lock 時執行。執行緒結束（`LdrShutdownThread` 送 `DLL_THREAD_DETACH`）需要拿 loader lock，所以 `Stop()` 對 acceptor 的 `WaitForSingleObject(..., 2000)`（`:465`）在這條路徑上**一定**逾時，2 秒白等，再 `detach()`。
@@ -93,7 +93,7 @@
 
 ### Low
 
-**A-L1 · per-PID mutex 用 `bInitialOwner=TRUE`，`ReleaseMutex` 由別的 thread 呼叫必然失敗（確認 AUDIT 訊號 4：無害雜訊）**
+**A-L1 · per-PID mutex 用 `bInitialOwner=TRUE`，`ReleaseMutex` 由別的 thread 呼叫必然失敗（確認 AUDIT 訊號 4：無害雜訊） — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/main.cpp:77`、`:179`
 - 成因：mutex 的擁有者是 loader thread；`OnDetach` 通常在其他 thread 執行，`ReleaseMutex` 回傳 `ERROR_NOT_OWNER`。閘門只依賴 `ERROR_ALREADY_EXISTS`，所以功能不受影響；owner thread 結束後 mutex 變成 abandoned，也沒有人等它。
 - 修法：改用 `bInitialOwner=FALSE` 並刪掉 `ReleaseMutex`，只保留 `CloseHandle`。
@@ -157,7 +157,7 @@
 - 成因：proxy、backend 和「被跳過 init 的第二份 DLL」各有一份 Logger（各自的 `g_mutex`），卻寫同一個 `current.log`；CRT 的 append 是「seek 到檔尾 + write」，不是 atomic，跨模組可能互相覆寫；一方開著檔案時另一方 rotate 會遇到 sharing violation（程式已註明會留到下次重試）。`fs::temp_directory_path()` 用的是會丟例外的 overload，而且是在 DllMain 的 `Log::Init` 裡呼叫。
 - 修法：用 `CreateFileW(FILE_APPEND_DATA, FILE_SHARE_READ|WRITE|DELETE)` + `WriteFile` 取代 `ofstream`（核心保證 append 是 atomic，rename 也不會被擋）；改用 `temp_directory_path(ec)` 這個 overload。
 
-**A-L12 · Magic string：`LogLoadedModules` 直接寫 `L"init"`**
+**A-L12 · Magic string：`LogLoadedModules` 直接寫 `L"init"` — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/main.cpp:59`
 - 修法：改成 `MagicStrings::LogCategoryInit`。
 

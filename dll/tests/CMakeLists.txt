@@ -1,10 +1,29 @@
 # Offline C++ DLL self-tests (built and run for both x64 and x86 via build.ps1).
 # Never copied into dist\.
 
+add_library(discrete_pin_probe SHARED
+    pin_probe_dll.cpp
+)
+
+target_include_directories(discrete_pin_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/dll/src/shared
+)
+
+if(MSVC)
+    target_compile_options(discrete_pin_probe PRIVATE /W4 /WX)
+endif()
+
+set_target_properties(discrete_pin_probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 add_executable(discrete_dll_test
     dll_core_test.cpp
     ${CMAKE_SOURCE_DIR}/dll/src/shared/Memory.cpp
 )
+
+add_dependencies(discrete_dll_test discrete_pin_probe)
 
 target_include_directories(discrete_dll_test PRIVATE
     ${CMAKE_SOURCE_DIR}/dll/src/shared

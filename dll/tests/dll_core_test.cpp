@@ -15,6 +15,7 @@
 #include "ExportHelpers.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
+#include "ModuleLifecycle.h"
 #include "MonoVtableFilter.h"
 #include "ParallelScanDriver.h"
 
@@ -495,6 +496,103 @@ void Test_BH1_MonoVtableAlignment() {
     CHECK(!IsPlausibleMonoVtableCandidate(0x0000FFF8u));
 }
 
+// ============================================================================
+// A-H1 — Module pinning (GET_MODULE_HANDLE_EX_FLAG_PIN) & safe FreeLibrary
+// ============================================================================
+void Test_AH1_PinnedModuleSurvivesFreeLibrary() {
+    using Discrete::ModuleLifecycle::PinModuleContaining;
+    using Discrete::ModuleLifecycle::TryClaimProcessMutex;
+
+    // 1. Null / empty input guard checks.
+    CHECK(!PinModuleContaining(nullptr));
+    CHECK(TryClaimProcessMutex(nullptr) == nullptr);
+    CHECK(TryClaimProcessMutex(L"") == nullptr);
+
+    // 2. Single-init mutex gate: first claim succeeds, duplicate fails,
+    //    bInitialOwner=FALSE means another thread can acquire without
+    //    WAIT_ABANDONED, and closing releases the name cleanly.
+    {
+        wchar_t mutexName[96];
+        ::_snwprintf_s(mutexName, _countof(mutexName), _TRUNCATE,
+                       L"Local\\Discrete-AH1-SelfTest-%lu", ::GetCurrentProcessId());
+        HANDLE h1 = TryClaimProcessMutex(mutexName);
+        CHECK(h1 != nullptr);
+        HANDLE h2 = TryClaimProcessMutex(mutexName);
+        CHECK(h2 == nullptr);
+
+        // Because bInitialOwner is FALSE, another thread can immediately lock
+        // and unlock the mutex without seeing WAIT_ABANDONED or timeout.
+        DWORD waitResult = WAIT_FAILED;
+        std::thread checker([h1, &waitResult]() {
+            waitResult = ::WaitForSingleObject(h1, 200);
+            if (waitResult == WAIT_OBJECT_0) {
+                ::ReleaseMutex(h1);
+            }
+        });
+        checker.join();
+        CHECK(waitResult == WAIT_OBJECT_0);
+
+        if (h1 != nullptr) ::CloseHandle(h1);
+
+        // Once closed, the name is free to claim again.
+        HANDLE h3 = TryClaimProcessMutex(mutexName);
+        CHECK(h3 != nullptr);
+        if (h3 != nullptr) ::CloseHandle(h3);
+    }
+
+    // 3. Real OS loader test via discrete_pin_probe.dll (same directory as exe):
+    //    LoadLibraryW -> worker running -> 3x FreeLibrary() does not deadlock,
+    //    does not fire DLL_PROCESS_DETACH, and keeps the DLL mapped -> explicit
+    //    off-DllMain Probe_Shutdown() cleanly joins the worker thread.
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        DWORD len = ::GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        CHECK(len > 0 && len < MAX_PATH);
+        std::wstring probePath(exePath, len);
+        std::size_t slash = probePath.find_last_of(L"\\/");
+        CHECK(slash != std::wstring::npos);
+        probePath = probePath.substr(0, slash + 1) + L"discrete_pin_probe.dll";
+
+        HMODULE mod = ::LoadLibraryW(probePath.c_str());
+        CHECK(mod != nullptr);
+        if (mod == nullptr) return;
+
+        using fn_int_t = int (*)();
+        auto fnIsPinned      = reinterpret_cast<fn_int_t>(::GetProcAddress(mod, "Probe_IsPinned"));
+        auto fnWorkerRunning = reinterpret_cast<fn_int_t>(::GetProcAddress(mod, "Probe_IsWorkerRunning"));
+        auto fnDetachCount   = reinterpret_cast<fn_int_t>(::GetProcAddress(mod, "Probe_DetachCount"));
+        auto fnShutdown      = reinterpret_cast<fn_int_t>(::GetProcAddress(mod, "Probe_Shutdown"));
+        CHECK(fnIsPinned != nullptr);
+        CHECK(fnWorkerRunning != nullptr);
+        CHECK(fnDetachCount != nullptr);
+        CHECK(fnShutdown != nullptr);
+        if (!fnIsPinned || !fnWorkerRunning || !fnDetachCount || !fnShutdown) return;
+
+        // Wait up to 1s for the probe's worker thread to reach its wait loop.
+        for (int i = 0; i < 100 && fnWorkerRunning() == 0; ++i) {
+            ::Sleep(10);
+        }
+        CHECK(fnIsPinned() == 1);
+        CHECK(fnWorkerRunning() == 1);
+
+        // Simulate aggressive external FreeLibrary calls (CE / Process Hacker).
+        const ULONGLONG t0 = ::GetTickCount64();
+        CHECK(::FreeLibrary(mod) != 0);
+        CHECK(::FreeLibrary(mod) != 0);
+        CHECK(::FreeLibrary(mod) != 0);
+        const ULONGLONG elapsedMs = ::GetTickCount64() - t0;
+
+        CHECK(elapsedMs < 1000);
+        CHECK(::GetModuleHandleW(L"discrete_pin_probe.dll") == mod);
+        CHECK(fnDetachCount() == 0);
+        CHECK(fnWorkerRunning() == 1);
+
+        // Explicit off-DllMain teardown (mirrors Discrete_Shutdown) joins cleanly.
+        CHECK(fnShutdown() == 1);
+        CHECK(fnWorkerRunning() == 0);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -503,6 +601,7 @@ int main() {
     Test_CH3_Il2CppFieldDefaultDecoder();
     Test_AH2_ScannerExceptionSafety();
     Test_BH1_MonoVtableAlignment();
+    Test_AH1_PinnedModuleSurvivesFreeLibrary();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

@@ -12,6 +12,21 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1539) — Fix A-H1 (+ A-L1, A-L12) (pin backend module, make DllMain detach a no-op, add x64/x86 OS-loader probe tests)
+
+- **Bug fix (`A-H1`, plus `A-L1` and `A-L12` in `main.cpp`):** Previously `DllMain(DLL_PROCESS_DETACH)` with `lpReserved == NULL` (external `FreeLibrary` from CE "unload module", Process Hacker, or a third-party injector) ran `OnDetach() -> Discrete_Shutdown() -> PipeServer::Stop()` + `MainThreadHook::Uninstall()` under the OS loader lock. Because exiting worker/monitor threads block on `LdrShutdownThread` waiting for the same loader lock, the wait inevitably timed out and detached threads returned into unmapped code pages (access violation / game crash).
+  - Added shared header `dll/src/shared/ModuleLifecycle.h` with `PinModuleContaining()` (`GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)`) and `TryClaimProcessMutex()` (`CreateMutexW(..., bInitialOwner = FALSE, ...)`).
+  - Updated `dll/src/main.cpp`:
+    - `OnAttach` pins the active backend DLL via `PinModuleContaining(&OnAttach)` immediately after claiming the per-PID single-init mutex, so external `FreeLibrary` calls become safe no-ops and cannot unmap code under live pipe workers or MinHook detours.
+    - Removed `OnDetach()` and made `DllMain(DLL_PROCESS_DETACH)` an unconditional no-op returning `TRUE` on both `lpReserved != nullptr` and `lpReserved == nullptr`; explicit teardown remains exclusively the off-DllMain `Discrete_Shutdown()` export (`scripts/unity_dump.lua`).
+    - Fixed `A-L1` (`bInitialOwner = FALSE`, no cross-thread `ReleaseMutex`) and `A-L12` (`MagicStrings::LogCategoryInit` instead of raw `L"init"`).
+  - Updated stale `OnDetach()` comment in `dll/src/shared/PipeServer.cpp` while keeping the bounded `WaitForSingleObject` wait as defense-in-depth.
+  - Added test-only `dll/tests/pin_probe_dll.cpp` (built alongside `discrete_dll_test` in `build/cpp-tests-release-{x64,x86}/bin`, never copied to `dist\`) and `Test_AH1_PinnedModuleSurvivesFreeLibrary` in `dll/tests/dll_core_test.cpp`: verifies `TryClaimProcessMutex` duplicate-rejection & cross-thread acquire (no `WAIT_ABANDONED`), then loads `discrete_pin_probe.dll` with a live worker thread, invokes `FreeLibrary` 3×, asserts <1 s elapsed / module stays mapped / `DLL_PROCESS_DETACH` never fires / worker stays alive, and verifies explicit off-DllMain `Probe_Shutdown()` joins cleanly — on both x64 and x86 (WOW64).
+  - Marked `A-H1`, `A-L1`, and `A-L12` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1539) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1167 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 354 checks passed (x64) / 357 checks passed (x86) (+25 A-H1 checks on each arch).
+
+-----
+
 ## 2026-11-26 (build 1538) — Fix E-H2 (template CE XML & CSX enum/value-struct/collection layout + tests)
 
 - **Bug fix (`E-H2`):** Template-mode CE XML (`CeXmlExporter.cs`, the Assembly Browser default when `CeXmlBaseAddress` is `"INSTANCE_ADDRESS"`) and CE Structure Dissect (`CsxExporter.cs`) previously treated all unknown game types as dereferenced pointers (`Offsets=[0]` / `Vartype="Pointer"`) — causing enum and custom `System.ValueType` struct fields to dereference inline integers/bytes as addresses — and emitted broken collection layouts (missing the SZARRAY header `+0x20`/`+0x10`, omitting `List<T>._items` dereference `+0x10`/`+0x08`, striding reference-type arrays by `ComputeStructSize(child)` without per-slot deref, and expanding `HashSet`/`IList`/`IEnumerable` as flat arrays).

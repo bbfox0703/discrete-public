@@ -446,22 +446,12 @@ void Stop() {
     Discrete::ScanCancel::RequestCancel();
 
     if (g_worker.joinable()) {
-        // BOUNDED wait, never a bare join(). Stop() is reachable from DllMain:
-        // main.cpp OnDetach() -> Discrete_Shutdown() -> here, on the
-        // lpReserved == NULL (FreeLibrary) path — and DllMain runs holding the
-        // loader lock. The worker's own exit epilogue (_endthreadex ->
-        // ExitThread -> ntdll!LdrShutdownThread) must ACQUIRE that same lock to
-        // run DLL_THREAD_DETACH across every loaded module, so it can never
-        // finish while we hold it. An unconditional join() therefore wedges the
-        // calling thread forever *while still holding the loader lock*, which
-        // then blocks every LoadLibrary and every thread exit in the game —
-        // the whole process freezes, not just us. DisableThreadLibraryCalls on
-        // our own module (main.cpp) does not help: the walk still covers
-        // ucrtbase / UnityPlayer / mono-2.0-bdwgc / GameAssembly.
-        //
-        // g_stopEvent is already signalled above, so a worker that is free to
-        // run exits within milliseconds and the wait returns at once. Only the
-        // pathological case falls through to detach.
+        // BOUNDED wait, never a bare join(). Normally Stop() runs off-DllMain
+        // via Discrete_Shutdown() (the module is pinned in main.cpp and
+        // DLL_PROCESS_DETACH is a no-op), so g_stopEvent wakes the acceptor
+        // within milliseconds and WaitForSingleObject returns WAIT_OBJECT_0.
+        // Keeping the bounded wait defends against any caller that ever invokes
+        // Stop() while a thread is stalled in an OS call.
         const DWORD w = ::WaitForSingleObject(g_worker.native_handle(),
                                               kWorkerExitTimeoutMs);
         if (w == WAIT_OBJECT_0) {
