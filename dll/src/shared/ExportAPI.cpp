@@ -13,6 +13,7 @@
 #include "ManagedLayout.h"
 #include "Memory.h"
 #include "ModuleHelper.h"
+#include "ModuleLifecycle.h"
 #include "GroupMatch.h"
 #include "ValueRefine.h"
 #include "GroupScanSession.h"
@@ -10309,6 +10310,14 @@ void RegisterCoreHandlers() {
 extern "C" {
 
 int Discrete_Init() {
+    // A-M4: reject calls routed to a second, dormant DLL copy that lost the
+    // per-PID single-init mutex in DllMain so it can never spin up a second
+    // pipe server or stack duplicate MinHook detours.
+    if (!Discrete::ModuleLifecycle::OwnsInit()) {
+        Discrete::Log::Init(
+            "ExportAPI: Discrete_Init rejected — another Discrete DLL already owns this process");
+        return Discrete::ModuleLifecycle::kErrNotOwner;
+    }
     bool expected = false;
     if (!g_initialized.compare_exchange_strong(expected, true)) return 0;
     Discrete::Log::Init();
@@ -10438,7 +10447,15 @@ void Discrete_Shutdown() {
 }
 
 int Discrete_StartPipe() {
-    if (!g_initialized.load()) Discrete_Init();
+    if (!Discrete::ModuleLifecycle::OwnsInit()) {
+        Discrete::Log::Init(
+            "ExportAPI: Discrete_StartPipe rejected — another Discrete DLL already owns this process");
+        return Discrete::ModuleLifecycle::kErrNotOwner;
+    }
+    if (!g_initialized.load()) {
+        int rc = Discrete_Init();
+        if (rc != 0) return rc;
+    }
     if (Discrete::PipeServer::IsRunning()) return 0;
     return Discrete::PipeServer::Start() ? 0 : 1;
 }

@@ -61,13 +61,14 @@ void LogLoadedModules() {
 }
 
 // Phase 12b: per-process named mutex used as a "first injection wins"
-// gate. Both Discrete-Mono.dll and Discrete-IL2CPP.dll run this OnAttach.
+// gate. Both Discrete-Mono.dll and Discrete-IL2CPP.dll run this OnAttach
+// (proxy DLLs have their own DllMain and only load one backend DLL).
 // Without the gate, two concurrently-loaded backend DLLs would each try to
 // bind the named pipe and the second would fail noisily; or worse, a second
 // copy of the same DLL (loaded via proxy and also via the UI's Pick & inject)
-// would re-init handler tables. The mutex makes Init exactly-once per host
-// PID regardless of who loaded us. Held open for process lifetime (OS
-// reclaims on process exit).
+// would re-init handler tables or stack MinHook detours. The mutex makes Init
+// exactly-once per host PID regardless of who loaded us, and SetOwnsInit()
+// propagates that ownership to Discrete_Init / Discrete_StartPipe (A-M4).
 HANDLE g_initMutex = nullptr;
 
 bool TryClaimSingleInit() noexcept {
@@ -85,6 +86,7 @@ void OnAttach(HMODULE self) {
     Discrete::Log::Init();
 
     if (!TryClaimSingleInit()) {
+        Discrete::ModuleLifecycle::SetOwnsInit(false);
         std::ostringstream os;
         os << "Discrete DLL skipping init: another backend already "
               "claimed PID " << ::GetCurrentProcessId()
@@ -94,6 +96,7 @@ void OnAttach(HMODULE self) {
         ::DisableThreadLibraryCalls(self);
         return;
     }
+    Discrete::ModuleLifecycle::SetOwnsInit(true);
 
     // A-H1: pin this module for the host process lifetime so external
     // FreeLibrary() calls (CE "unload module", Process Hacker, third-party

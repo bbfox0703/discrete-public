@@ -39,12 +39,12 @@
 - 成因：遇到第一個 `'\n'` 就 `return true`，`buf` 裡剩下的資料（下一個 request 的前半或整段）沒有保留到下一次呼叫。byte-mode pipe 會合併寫入；只要 client 在上一個回應之前送出第二行（pipelining，或在同一條連線上送 `cancelScan`），第二個 request 就會靜默消失，client 永遠等不到它的回應。
 - 修法：每個連線維持一個跨呼叫的 receive buffer（例如 `ServeClient` 擁有的 `std::string pending`），`ReadLine` 先從 `pending` 切行，切不出來才再 `ReadFile`。
 
-**A-M3 · Named pipe 缺少遠端拒絕與 instance 擁有權保護，而且 pipe 名稱是全機共用**
+**A-M3 · Named pipe 缺少遠端拒絕與 instance 擁有權保護，而且 pipe 名稱是全機共用 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/PipeServer.cpp:263-268`；`dll/src/shared/MagicStrings.h:9`
 - 成因：`CreateNamedPipeW` 沒有帶 `PIPE_REJECT_REMOTE_CLIENTS`，安全描述子是 `nullptr`（default DACL）。這條 pipe 提供任意記憶體讀寫和 managed method 呼叫，在 SMB 可達的情況下，同帳號或系統管理員的認證就能從網路連進來。另外沒有 `FILE_FLAG_FIRST_PIPE_INSTANCE`，名稱又固定是 `\\.\pipe\DiscreteBfx`：同時注入兩個遊戲時，兩個行程會在同一個名稱下各建 instance，UI 連到哪一個不可預期；任何同使用者的行程也能搶先建立這個名稱來冒充 DLL。
 - 修法：flags 加上 `PIPE_REJECT_REMOTE_CLIENTS`；用明確的 SDDL（只允許目前使用者 + SYSTEM）建立 `SECURITY_ATTRIBUTES`；第一個 instance 加 `FILE_FLAG_FIRST_PIPE_INSTANCE`，失敗就記錄「名稱已被佔用」；長期考慮把 PID 放進 pipe 名稱（需要 UI / Lua 端配合，屬 Block C / E）。
 
-**A-M4 · 公開 export 繞過 per-PID single-init 閘門**
+**A-M4 · 公開 export 繞過 per-PID single-init 閘門 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/main.cpp:94-103`；`dll/src/shared/ExportAPI.cpp:10507-10509`、`:10628-10632`
 - 成因：`TryClaimSingleInit` 只在 DllMain 裡把關。第二份 DLL（例如 proxy 載入遊戲目錄那份，UI 又注入 `dist\` 那份；路徑不同，所以是兩個模組）雖然跳過 init，但它的 `Discrete_Init` / `Discrete_StartPipe` export 仍然可以呼叫（CE bridge 會明確呼叫 `Discrete_StartPipe`，CE 依符號名解析時可能解析到第二份）。結果是同一行程內有第二個 pipe server（同名 instance）、第二套 handler table，之後還可能有第二個 `runtime_invoke` MinHook detour（每個模組各帶一份 MinHook 狀態，會互相疊加）。
 - 修法：把 claim 結果存進模組層級的旗標（例如 `g_ownsInit`）；`Discrete_Init` / `Discrete_StartPipe` 在 `!g_ownsInit` 時直接回傳錯誤碼並寫 log。
@@ -128,7 +128,7 @@
 - 成因：client 只看到 broken pipe，分不出是 request 太大還是 DLL 掛了。
 - 修法：先回一個 `-32600 "request too large"` 再斷線，並寫 log。
 
-**A-L6 · Stop / Start 循環的邊界狀況**
+**A-L6 · Stop / Start 循環的邊界狀況 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/PipeServer.cpp:285`、`:276-281`、`:425-436`、`:470`
 - 成因：`ConnectNamedPipe` 用的 event 沒檢查 `CreateEventW` 失敗（NULL event 會導致 wait 立刻失敗、迴圈空轉）；4 個 slot 都滿時每 500 ms 寫一行 log；acceptor 被 `detach()` 之後若又 `Start()`，`g_running` 重新變成 true，舊 acceptor 也會繼續跑（同時有兩個 acceptor），洩漏的舊 `g_stopEvent` 被新的覆蓋後，舊 worker 會等在新 event 上；`std::thread` 建構失敗時 `g_running` 停在 true、event 洩漏，例外還可能從 DllMain 傳出去。
 - 修法：檢查 event 建立結果；log 加節流；`Start()` 在偵測到上一輪 acceptor 還活著時拒絕啟動；把 `std::thread` 建構放進 try 並回滾狀態。

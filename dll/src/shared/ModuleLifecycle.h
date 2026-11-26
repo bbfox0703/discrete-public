@@ -14,7 +14,29 @@
 
 #include <windows.h>
 
+#include <atomic>
+
 namespace Discrete::ModuleLifecycle {
+
+/// Non-zero error code returned by Discrete_Init / Discrete_StartPipe when
+/// invoked on a second, dormant copy of the DLL that lost the per-PID
+/// single-init mutex race (A-M4).
+constexpr int kErrNotOwner = 2;
+
+namespace detail {
+// Module-local ownership latch. Each loaded DLL binary gets its own copy,
+// set true exclusively by DllMain(DLL_PROCESS_ATTACH) after claiming the
+// per-PID single-init mutex.
+inline std::atomic<bool> g_ownsInit{false};
+}  // namespace detail
+
+inline bool OwnsInit() noexcept {
+    return detail::g_ownsInit.load(std::memory_order_acquire);
+}
+
+inline void SetOwnsInit(bool owns) noexcept {
+    detail::g_ownsInit.store(owns, std::memory_order_release);
+}
 
 /// Pin the module containing `addressInModule` in the current process so
 /// subsequent FreeLibrary() calls cannot decrement its load count to zero or

@@ -12,6 +12,24 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1555) — Fix A-M3 + A-M4 (+ A-L6) (named-pipe remote rejection, user+SYSTEM protected DACL, `FILE_FLAG_FIRST_PIPE_INSTANCE`, export single-init ownership gate, and PipeServer Stop/Start hardening + tests)
+
+- **Bug fixes (`A-M3`, `A-M4`, `A-L6`):**
+  - **`A-M3` (`PipeSecurity.h`, `PipeServer.cpp`):**
+    - Added `dll/src/shared/PipeSecurity.h` providing `BuildCurrentUserAndSystemSddl()`, `ScopedPipeSecurityAttributes`, `MakePipeOpenMode(firstInstance)`, and `MakePipeMode()`.
+    - Hardened `CreateNamedPipeW` in `PipeServer.cpp` with `PIPE_REJECT_REMOTE_CLIENTS` (blocking network/SMB access), an explicit protected DACL (`D:P(A;;GA;;;SY)(A;;GA;;;<current-user-sid>)`) granting access exclusively to `SYSTEM` and the current process user, and `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first created instance after `Start()` (stopping cleanly with an explicit log message on `ERROR_ACCESS_DENIED` if another process already owns the pipe name).
+  - **`A-M4` (`ModuleLifecycle.h`, `main.cpp`, `ExportAPI.cpp`):**
+    - Added module-local single-init ownership tracking (`ModuleLifecycle::OwnsInit()` / `SetOwnsInit()` / `kErrNotOwner = 2`) populated by `OnAttach` after `TryClaimSingleInit()`.
+    - Gated public exports `Discrete_Init()` and `Discrete_StartPipe()` on `ModuleLifecycle::OwnsInit()` so a second dormant DLL copy in the same process cannot bypass the per-PID mutex to spawn a competing pipe server or stack duplicate MinHook detours.
+  - **`A-L6` (`PipeServer.cpp`):**
+    - Added null check on `CreateEventW` before `ConnectNamedPipe` (avoiding `WAIT_FAILED` busy-spin), throttled repeated `CreateNamedPipeW` failure logs to once per 10 s, guarded `PipeServer::Start()` against restarting while a detached previous acceptor thread is still alive (`g_acceptorAlive`), and wrapped both acceptor and detached client `std::thread` launches in `try / catch (...)` with clean state rollback.
+  - **Tests:**
+    - Added `Test_AM3_AM4_PipeSecurityAndInitOwnership` (+19 checks on both x64 and x86, linking `advapi32`) to `dll/tests/dll_core_test.cpp` exercising `MakePipeMode`/`MakePipeOpenMode`, SDDL & `SE_DACL_PROTECTED` verification, live Windows kernel `CreateNamedPipeW` with `FILE_FLAG_FIRST_PIPE_INSTANCE` conflict (`ERROR_ACCESS_DENIED`), subsequent instance creation, local same-user client connection, and `ModuleLifecycle::OwnsInit()` gating.
+  - Marked `A-M3`, `A-M4`, and `A-L6` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1555) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 532 checks passed (x64) / 535 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1554) — Fix A-M7 + A-M8 (+ A-L3, A-L16) (wall-clock detour drain & retained trampoline, shutdown ordering with `AbortPending`, preserved disconnect hooks on `StopPipe`, inline main-thread guard + tests)
 
 - **Bug fixes (`A-M7`, `A-M8`, `A-L3`, `A-L16`):**

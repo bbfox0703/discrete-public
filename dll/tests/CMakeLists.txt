@@ -27,6 +27,8 @@ add_executable(discrete_dll_test
 
 add_dependencies(discrete_dll_test discrete_pin_probe)
 
+target_link_libraries(discrete_dll_test PRIVATE advapi32)
+
 target_include_directories(discrete_dll_test PRIVATE
     ${CMAKE_SOURCE_DIR}/dll/src/shared
     ${CMAKE_SOURCE_DIR}/dll/src/mono

@@ -21,6 +21,7 @@
 #include "MonoVtableFilter.h"
 #include "ParallelScanDriver.h"
 #include "PipeLineBuffer.h"
+#include "PipeSecurity.h"
 #include "ScanCancel.h"
 
 #include <windows.h>
@@ -1402,6 +1403,87 @@ void Test_AM7_AM8_AL16_TeardownAndMainThreadDispatcher() {
     }
 }
 
+// ============================================================================
+// A-M3 + A-M4 — Named-pipe security (PIPE_REJECT_REMOTE_CLIENTS, protected
+// user+SYSTEM DACL, FILE_FLAG_FIRST_PIPE_INSTANCE conflict) & module OwnsInit
+// ============================================================================
+void Test_AM3_AM4_PipeSecurityAndInitOwnership() {
+    using namespace Discrete::PipeSecurity;
+
+    // 1. A-M3: flags enforce remote rejection and first-instance ownership.
+    CHECK((MakePipeMode() & PIPE_REJECT_REMOTE_CLIENTS) != 0u);
+    CHECK((MakePipeOpenMode(true) & FILE_FLAG_FIRST_PIPE_INSTANCE) != 0u);
+    CHECK((MakePipeOpenMode(false) & FILE_FLAG_FIRST_PIPE_INSTANCE) == 0u);
+
+    // 2. A-M3: SDDL restricts access to SYSTEM + current user (protected DACL).
+    ScopedPipeSecurityAttributes pipeSec;
+    CHECK(pipeSec.IsValid());
+    CHECK(pipeSec.Get() != nullptr);
+    CHECK(pipeSec.Sddl().rfind(L"D:P(A;;GA;;;SY)(A;;GA;;;", 0) == 0);
+    CHECK(pipeSec.Sddl().find(L";;;WD)") == std::wstring::npos);
+    CHECK(pipeSec.Sddl().find(L";;;AU)") == std::wstring::npos);
+
+    // Verify protected DACL bit is set on the parsed SECURITY_DESCRIPTOR.
+    SECURITY_DESCRIPTOR_CONTROL sdCtrl = 0;
+    DWORD sdRev = 0;
+    CHECK(::GetSecurityDescriptorControl(pipeSec.Get()->lpSecurityDescriptor, &sdCtrl, &sdRev) != FALSE);
+    CHECK((sdCtrl & SE_DACL_PROTECTED) != 0);
+
+    // 3. A-M3: real kernel pipe creation — first instance succeeds, duplicate
+    //    FIRST_PIPE_INSTANCE fails with ERROR_ACCESS_DENIED, second regular
+    //    instance succeeds, and a local same-user client connects cleanly.
+    wchar_t pipeName[128];
+    ::_snwprintf_s(pipeName, _countof(pipeName), _TRUNCATE,
+                   L"\\\\.\\pipe\\DiscreteSecurityTest_%lu_%llu",
+                   ::GetCurrentProcessId(),
+                   static_cast<unsigned long long>(::GetTickCount64()));
+
+    HANDLE hFirst = ::CreateNamedPipeW(
+        pipeName,
+        MakePipeOpenMode(/*firstInstance=*/true),
+        MakePipeMode(),
+        2, 4096, 4096, 0, pipeSec.Get());
+    CHECK(hFirst != INVALID_HANDLE_VALUE);
+
+    if (hFirst != INVALID_HANDLE_VALUE) {
+        // Attempting another FIRST_PIPE_INSTANCE on the same name MUST fail with ERROR_ACCESS_DENIED.
+        HANDLE hConflict = ::CreateNamedPipeW(
+            pipeName,
+            MakePipeOpenMode(/*firstInstance=*/true),
+            MakePipeMode(),
+            2, 4096, 4096, 0, pipeSec.Get());
+        const DWORD conflictErr = ::GetLastError();
+        CHECK(hConflict == INVALID_HANDLE_VALUE);
+        CHECK(conflictErr == ERROR_ACCESS_DENIED);
+        if (hConflict != INVALID_HANDLE_VALUE) ::CloseHandle(hConflict);
+
+        // Subsequent instance without FIRST_PIPE_INSTANCE succeeds.
+        HANDLE hSecond = ::CreateNamedPipeW(
+            pipeName,
+            MakePipeOpenMode(/*firstInstance=*/false),
+            MakePipeMode(),
+            2, 4096, 4096, 0, pipeSec.Get());
+        CHECK(hSecond != INVALID_HANDLE_VALUE);
+
+        // Same-user local client can connect to the secured pipe.
+        HANDLE hClient = ::CreateFileW(
+            pipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(hClient != INVALID_HANDLE_VALUE);
+        if (hClient != INVALID_HANDLE_VALUE) ::CloseHandle(hClient);
+
+        if (hSecond != INVALID_HANDLE_VALUE) ::CloseHandle(hSecond);
+        ::CloseHandle(hFirst);
+    }
+
+    // 4. A-M4: module single-init ownership gate defaults false and toggles cleanly.
+    CHECK(Discrete::ModuleLifecycle::kErrNotOwner != 0);
+    CHECK(!Discrete::ModuleLifecycle::OwnsInit());
+    Discrete::ModuleLifecycle::SetOwnsInit(true);
+    CHECK(Discrete::ModuleLifecycle::OwnsInit());
+    Discrete::ModuleLifecycle::SetOwnsInit(false);
+    CHECK(!Discrete::ModuleLifecycle::OwnsInit());
+}
+
 }  // namespace
 
 int main() {
@@ -1418,6 +1500,7 @@ int main() {
     Test_CM3_ClampMainThreadTimeoutMs();
     Test_BM10_AL15_CM1_IndexedPoolThreadCapAndCancel();
     Test_AM7_AM8_AL16_TeardownAndMainThreadDispatcher();
+    Test_AM3_AM4_PipeSecurityAndInitOwnership();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {
