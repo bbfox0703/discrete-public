@@ -12,6 +12,26 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1554) — Fix A-M7 + A-M8 (+ A-L3, A-L16) (wall-clock detour drain & retained trampoline, shutdown ordering with `AbortPending`, preserved disconnect hooks on `StopPipe`, inline main-thread guard + tests)
+
+- **Bug fixes (`A-M7`, `A-M8`, `A-L3`, `A-L16`):**
+  - **`A-M7` (`MonoMainThreadHook.cpp`, `IL2CPPMainThreadHook.cpp`, `MainThreadDispatcher.{h,cpp}`):**
+    - Made `g_orig_runtime_invoke` `std::atomic<fn_runtime_invoke_t>` and stopped calling `MH_RemoveHook` / nulling `g_orig_runtime_invoke` in `Uninstall()` (reusing `g_hookTarget` with `MH_EnableHook` on subsequent `Install()`), eliminating the entry race where a thread entered `HookedRuntimeInvoke` just before `MH_DisableHook` patched the prologue and before `g_inDetour.fetch_add(1)` (safe because the backend DLL is pinned via `A-H1`).
+    - Added shared `Discrete::MainThreadDispatcher::WaitUntilZeroWithDeadline(counter, timeoutMs, pollSleepMs)` using `GetTickCount64()` real wall-clock deadlines instead of iteration-counted `2000 × Sleep(1)` loops (which stretched up to ~31 s under the default 15.6 ms timer tick), and logged a clear `WARN` if in-flight detours outlive the 2 s drain window.
+  - **`A-M8` (`MainThreadDispatcher.{h,cpp}`, `PipeServer.cpp`, `ExportAPI.cpp`):**
+    - Added `MainThreadDispatcher::AbortPending()` to wake and abort queued `Pending` items without disabling the dispatcher, flipped `g_initialized = false` under `g_mutex` in `Shutdown()`, and added a locked `g_initialized` re-check before `g_queue.push_back(item)` in `SubmitAndWait()` to close the TOCTOU window between `Shutdown()` and enqueue.
+    - Updated `Discrete_Shutdown()` to call `MainThreadDispatcher::Shutdown()` BEFORE `PipeServer::Stop()`, and updated `PipeServer::Stop()` to call `MainThreadDispatcher::AbortPending()` and use `WaitUntilZeroWithDeadline` before draining active client workers — preventing workers blocked in `SubmitAndWait` from stalling the 2 s drain and leaking `g_stopEvent`.
+  - **`A-L3` (`PipeServer.cpp`, `ExportAPI.cpp`):**
+    - Moved `PipeServer::ClearDisconnectHooks()` out of `PipeServer::Stop()` and into `Discrete_Shutdown()` so a `Discrete_StopPipe` → `Discrete_StartPipe` cycle preserves hooks registered by `Discrete_Init()` while `Discrete_Shutdown` → `Discrete_Init` still prevents duplicate hook registration.
+  - **`A-L16` (`MainThreadDispatcher.{h,cpp}`):**
+    - Added RAII `InsideWorkItemGuard` used by both `Drain()` and `SubmitAndWait()`'s inline main-thread path so `IsCurrentlyDrainingOnMainThread()` is set during inline main-thread closures and always restored even if a closure throws; refreshed stale header comments in `MainThreadDispatcher.h`.
+  - **Tests:**
+    - Linked `MainThreadDispatcher.cpp` and `Logger.cpp` into `discrete_dll_test` (`dll/tests/CMakeLists.txt`) and added `Test_AM7_AM8_AL16_TeardownAndMainThreadDispatcher` (+32 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp` covering `WaitUntilZeroWithDeadline` (immediate zero, async drain, bounded wall-clock timeout), `SubmitAndWait` inline main-thread `IsCurrentlyDrainingOnMainThread` flag (normal + throwing), `AbortPending()` waking a 30 s stalled worker while keeping the dispatcher initialized, and `Shutdown()` waking a stalled worker + rejecting subsequent submits.
+  - Marked `A-M7`, `A-M8`, `A-L3`, and `A-L16` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1554) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 513 checks passed (x64) / 516 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1553) — Fix B-M10 + C-M1 (+ A-L15) (exception-safe IL2CPP worker pool, cancellable `FindAllInstances` & long-running RPCs, thread-local `ScanThreadCap`, UI cancel flow + tests)
 
 - **Bug fixes (`B-M10`, `C-M1`, `A-L15`):**

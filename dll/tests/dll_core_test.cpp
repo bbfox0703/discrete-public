@@ -1283,6 +1283,125 @@ void Test_BM10_AL15_CM1_IndexedPoolThreadCapAndCancel() {
     }
 }
 
+// ============================================================================
+// A-M7 + A-M8 + A-L16 — Wall-clock detour/client drain deadline, AbortPending
+// & Shutdown waking stalled SubmitAndWait workers, and inline main-thread flag
+// ============================================================================
+void Test_AM7_AM8_AL16_TeardownAndMainThreadDispatcher() {
+    using namespace Discrete::MainThreadDispatcher;
+
+    // 1. A-M7: WaitUntilZeroWithDeadline returns true immediately on zero,
+    //    drains when a side thread decrements to 0, and respects real wall-clock
+    //    timeout when stuck (never 15x timer-tick iteration inflation).
+    {
+        std::atomic<int> zero{0};
+        CHECK(WaitUntilZeroWithDeadline(zero, 2000, 1));
+
+        std::atomic<int> busy{1};
+        std::thread releaser([&busy]() {
+            ::Sleep(30);
+            busy.fetch_sub(1, std::memory_order_release);
+        });
+        const std::uint64_t t0 = ::GetTickCount64();
+        CHECK(WaitUntilZeroWithDeadline(busy, 2000, 1));
+        CHECK((::GetTickCount64() - t0) < 1000u);
+        releaser.join();
+
+        std::atomic<int> stuck{1};
+        const std::uint64_t t1 = ::GetTickCount64();
+        CHECK(!WaitUntilZeroWithDeadline(stuck, 80, 1));
+        const std::uint64_t elapsed = ::GetTickCount64() - t1;
+        CHECK(elapsed >= 60u && elapsed < 500u);
+    }
+
+    // 2. A-L16: inline main-thread SubmitAndWait sets and restores
+    //    IsCurrentlyDrainingOnMainThread() on both normal return and exception.
+    CHECK(Init());
+    CHECK(IsInitialized());
+    CHECK(GetMainThreadId() == ::GetCurrentThreadId());
+    CHECK(!IsCurrentlyDrainingOnMainThread());
+    {
+        bool sawInside = false;
+        DispatchResult dr = SubmitAndWait([&sawInside]() {
+            sawInside = IsCurrentlyDrainingOnMainThread();
+        }, 5000);
+        CHECK(dr.ok);
+        CHECK(dr.diagnostic_path == "inline_main_thread");
+        CHECK(sawInside);
+        CHECK(!IsCurrentlyDrainingOnMainThread());
+    }
+    {
+        bool sawInside = false;
+        DispatchResult dr = SubmitAndWait([&sawInside]() {
+            sawInside = IsCurrentlyDrainingOnMainThread();
+            throw std::runtime_error("boom");
+        }, 5000);
+        CHECK(!dr.ok);
+        CHECK(dr.diagnostic_path == "inline_threw");
+        CHECK(sawInside);
+        CHECK(!IsCurrentlyDrainingOnMainThread());
+    }
+
+    // 3. A-M8: AbortPending() wakes a worker blocked in SubmitAndWait(30000)
+    //    immediately without disabling the dispatcher.
+    {
+        std::atomic<bool> workRan{false};
+        DispatchResult workerResult{};
+        std::uint64_t workerElapsed = 0;
+        std::thread worker([&]() {
+            const std::uint64_t start = ::GetTickCount64();
+            workerResult = SubmitAndWait([&workRan]() { workRan.store(true); }, 30000);
+            workerElapsed = ::GetTickCount64() - start;
+        });
+
+        const std::uint64_t waitStart = ::GetTickCount64();
+        while (GetStats().queue_depth == 0 && (::GetTickCount64() - waitStart) < 2000u) {
+            ::Sleep(1);
+        }
+        CHECK(GetStats().queue_depth == 1u);
+        AbortPending();
+        worker.join();
+
+        CHECK(!workerResult.ok);
+        CHECK(workerResult.timed_out);
+        CHECK(!workRan.load());
+        CHECK(workerElapsed < 2000u);
+        CHECK(IsInitialized());
+        CHECK(GetStats().queue_depth == 0u);
+    }
+
+    // 4. A-M8: Shutdown() wakes a stalled worker immediately and rejects any
+    //    subsequent SubmitAndWait with uninitialized; Init() can re-arm it.
+    {
+        std::atomic<bool> workRan{false};
+        DispatchResult workerResult{};
+        std::uint64_t workerElapsed = 0;
+        std::thread worker([&]() {
+            const std::uint64_t start = ::GetTickCount64();
+            workerResult = SubmitAndWait([&workRan]() { workRan.store(true); }, 30000);
+            workerElapsed = ::GetTickCount64() - start;
+        });
+
+        const std::uint64_t waitStart = ::GetTickCount64();
+        while (GetStats().queue_depth == 0 && (::GetTickCount64() - waitStart) < 2000u) {
+            ::Sleep(1);
+        }
+        CHECK(GetStats().queue_depth == 1u);
+        Shutdown();
+        worker.join();
+
+        CHECK(!workerResult.ok);
+        CHECK(workerResult.timed_out);
+        CHECK(!workRan.load());
+        CHECK(workerElapsed < 2000u);
+        CHECK(!IsInitialized());
+
+        DispatchResult afterShutdown = SubmitAndWait([]() {}, 5000);
+        CHECK(!afterShutdown.ok);
+        CHECK(afterShutdown.diagnostic_path == "uninitialized");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1298,6 +1417,7 @@ int main() {
     Test_AM11_StringScanAvx2TailAlignment();
     Test_CM3_ClampMainThreadTimeoutMs();
     Test_BM10_AL15_CM1_IndexedPoolThreadCapAndCancel();
+    Test_AM7_AM8_AL16_TeardownAndMainThreadDispatcher();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

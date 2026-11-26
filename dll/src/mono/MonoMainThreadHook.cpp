@@ -65,13 +65,21 @@ using fn_runtime_invoke_t = Discrete::Mono::MonoObject* (*)(
     void*,
     void**,
     Discrete::Mono::MonoObject**);
-fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
+// Atomic so HookedRuntimeInvoke and Install never race, and NEVER cleared back
+// to nullptr once created (A-M7): a thread that jumped into the detour just
+// before MH_DisableHook patched the prologue can still enter before hitting
+// g_inDetour.fetch_add(1). Keeping the trampoline intact (the DLL is pinned
+// via ModuleLifecycle::PinModuleContaining anyway) guarantees that straggler
+// threads always forward safely to Unity instead of crashing or returning NULL.
+std::atomic<fn_runtime_invoke_t> g_orig_runtime_invoke{nullptr};
+void* g_hookTarget = nullptr;  // target pointer already registered with MH_CreateHook
 
 // Threads currently executing inside HookedRuntimeInvoke. Uninstall() drains
-// this to zero (after MH_DisableHook stops new entries) BEFORE MH_RemoveHook
-// frees the trampoline and before the DLL can be unloaded — otherwise a
-// thread inside the detour at unload time would run/return into unmapped code.
+// this to zero (after MH_DisableHook stops new entries) with a real wall-clock
+// deadline via GetTickCount64() (A-M7).
 std::atomic<int> g_inDetour{0};
+
+constexpr std::uint64_t kUninstallDrainTimeoutMs = 2000;
 
 // Our detour. C-style function (no captures) so MinHook can route control
 // flow into it via a near-jump. NO `WINAPI` — see comment above.
@@ -82,8 +90,7 @@ Discrete::Mono::MonoObject* HookedRuntimeInvoke(
     Discrete::Mono::MonoObject** exc)
 {
     using namespace Discrete::MainThreadDispatcher;
-    // Mark presence FIRST so Uninstall's drain can't miss us. After
-    // MH_DisableHook no new caller reaches here, so the count only falls.
+    // Mark presence FIRST so Uninstall's drain observes us.
     g_inDetour.fetch_add(1, std::memory_order_acquire);
     // Cheap thread-id check first — main thread id is a fixed std::atomic<uint32_t>.
     const DWORD tid = ::GetCurrentThreadId();
@@ -91,12 +98,10 @@ Discrete::Mono::MonoObject* HookedRuntimeInvoke(
         NotifyMainThreadTick();  // also calls Drain() under the recursion guard
     }
     Discrete::Mono::MonoObject* ret = nullptr;
-    if (g_orig_runtime_invoke != nullptr) {
-        ret = g_orig_runtime_invoke(method, obj, params, exc);
+    fn_runtime_invoke_t orig = g_orig_runtime_invoke.load(std::memory_order_acquire);
+    if (orig != nullptr) {
+        ret = orig(method, obj, params, exc);
     } else if (exc) {
-        // Defensive: if somehow the trampoline got cleared (Uninstall race),
-        // we have nothing to delegate to. Returning NULL would corrupt
-        // managed callers — better to bail with no exception sentinel.
         *exc = nullptr;
     }
     g_inDetour.fetch_sub(1, std::memory_order_release);
@@ -141,20 +146,25 @@ bool Install() {
     }
 
     void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
-    MH_STATUS hs = ::MH_CreateHook(
-        target,
-        reinterpret_cast<void*>(&HookedRuntimeInvoke),
-        reinterpret_cast<void**>(&g_orig_runtime_invoke));
-    if (hs != MH_OK) {
-        LogF("[MonoMainThreadHook] MH_CreateHook(mono_runtime_invoke) failed: status=%d", static_cast<int>(hs));
-        g_installed.store(false);
-        return false;
+    if (g_hookTarget != target) {
+        void* orig = nullptr;
+        MH_STATUS hs = ::MH_CreateHook(
+            target,
+            reinterpret_cast<void*>(&HookedRuntimeInvoke),
+            &orig);
+        if (hs != MH_OK && hs != MH_ERROR_ALREADY_CREATED) {
+            LogF("[MonoMainThreadHook] MH_CreateHook(mono_runtime_invoke) failed: status=%d", static_cast<int>(hs));
+            g_installed.store(false);
+            return false;
+        }
+        if (orig != nullptr) {
+            g_orig_runtime_invoke.store(reinterpret_cast<fn_runtime_invoke_t>(orig), std::memory_order_release);
+        }
+        g_hookTarget = target;
     }
-    hs = ::MH_EnableHook(target);
+    MH_STATUS hs = ::MH_EnableHook(target);
     if (hs != MH_OK) {
         LogF("[MonoMainThreadHook] MH_EnableHook failed: status=%d", static_cast<int>(hs));
-        ::MH_RemoveHook(target);
-        g_orig_runtime_invoke = nullptr;
         g_installed.store(false);
         return false;
     }
@@ -164,24 +174,33 @@ bool Install() {
 }
 
 void Uninstall() {
-    if (!g_installed.load()) return;
+    if (!g_installed.exchange(false)) return;
     const auto& resolver = Discrete::Mono::GetResolver();
     if (resolver.runtime_invoke != nullptr) {
         void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
         // 1. Stop NEW calls reaching the detour (restores original bytes).
         ::MH_DisableHook(target);
-        // 2. Drain threads still INSIDE HookedRuntimeInvoke before we free the
-        //    trampoline / let the DLL be unmapped. New callers bypass the
-        //    detour now, so g_inDetour only decreases. Cap is a safety bound.
-        for (int i = 0; i < 2000 && g_inDetour.load(std::memory_order_acquire) > 0; ++i) {
-            ::Sleep(1);
+        // 2. Drain threads still inside HookedRuntimeInvoke using a real
+        //    wall-clock deadline (A-M7 — 2000 x Sleep(1) took up to ~31 s on
+        //    the 15.6 ms timer tick). Never call MH_RemoveHook or null
+        //    g_orig_runtime_invoke: the DLL is pinned and retaining the
+        //    trampoline closes the pre-fetch_add entry race completely.
+        const std::uint64_t startMs = ::GetTickCount64();
+        const bool drained = Discrete::MainThreadDispatcher::WaitUntilZeroWithDeadline(
+            g_inDetour, kUninstallDrainTimeoutMs, /*pollSleepMs=*/1);
+        const int remaining = g_inDetour.load(std::memory_order_acquire);
+        const std::uint64_t elapsedMs = ::GetTickCount64() - startMs;
+        if (!drained) {
+            LogF("[MonoMainThreadHook] Uninstall: WARN detour drain timed out after %llums "
+                 "(inDetour=%d) — hook disabled, trampoline retained",
+                 static_cast<unsigned long long>(elapsedMs), remaining);
+        } else {
+            LogF("[MonoMainThreadHook] Uninstall: hook disabled (drained in %llums, trampoline retained)",
+                 static_cast<unsigned long long>(elapsedMs));
         }
-        // 3. Now safe to free the trampoline.
-        ::MH_RemoveHook(target);
+    } else {
+        LogF("[MonoMainThreadHook] Uninstall: runtime_invoke unavailable");
     }
-    g_orig_runtime_invoke = nullptr;
-    g_installed.store(false);
-    LogF("[MonoMainThreadHook] Uninstall: hook removed");
 }
 
 bool IsInstalled() {

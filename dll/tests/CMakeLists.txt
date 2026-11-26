@@ -20,6 +20,8 @@ set_target_properties(discrete_pin_probe PROPERTIES
 
 add_executable(discrete_dll_test
     dll_core_test.cpp
+    ${CMAKE_SOURCE_DIR}/dll/src/shared/Logger.cpp
+    ${CMAKE_SOURCE_DIR}/dll/src/shared/MainThreadDispatcher.cpp
     ${CMAKE_SOURCE_DIR}/dll/src/shared/Memory.cpp
 )
 

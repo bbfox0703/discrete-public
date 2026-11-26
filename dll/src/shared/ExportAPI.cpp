@@ -10411,20 +10411,28 @@ int Discrete_Init() {
 
 void Discrete_Shutdown() {
     if (!g_initialized.exchange(false)) return;
+    // A-M8: disable the main-thread dispatcher and abort all pending queued
+    // work BEFORE PipeServer::Stop() drains client workers. Otherwise a worker
+    // blocked in SubmitAndWait (e.g. paused/loading game) cannot wake up until
+    // its RPC timeout, forcing PipeServer::Stop() to time out and leak g_stopEvent.
+    // Backend MinHook detours stay armed until after Stop() so any work item
+    // already Running on the main thread finishes and signals its event cleanly.
+    Discrete::MainThreadDispatcher::Shutdown();
     Discrete::PipeServer::Stop();
+    // A-L3: clear disconnect hooks only on full Shutdown (not in PipeServer::Stop),
+    // so Discrete_StopPipe -> Discrete_StartPipe preserves them while
+    // Discrete_Shutdown -> Discrete_Init never duplicates them.
+    Discrete::PipeServer::ClearDisconnectHooks();
     // Keep-foreground: soft-disable + release cursor + MH_DisableHook our user32
     // targets. Done after PipeServer::Stop() so no setKeepForeground can race in.
     // Safe when the feature was never enabled (guarded no-op).
     Discrete::ForegroundHook::Shutdown();
-    // Phase 20-MT: tear down the main-thread hook + dispatcher so we don't
-    // leave the runtime_invoke detour pointing at our soon-to-be-unloaded
-    // code. Safe to call when never installed (atomic-guarded no-op).
+    // Phase 20-MT: disable the runtime_invoke detour and drain in-flight calls.
 #if defined(DISCRETE_BACKEND_MONO)
     Discrete::Mono::MainThreadHook::Uninstall();
 #elif defined(DISCRETE_BACKEND_IL2CPP)
     Discrete::IL2CPP::MainThreadHook::Uninstall();
 #endif
-    Discrete::MainThreadDispatcher::Shutdown();
     Discrete::Log::Init("ExportAPI: Discrete_Shutdown");
     Discrete::Log::Shutdown();
 }

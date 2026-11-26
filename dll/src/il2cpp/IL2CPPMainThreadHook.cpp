@@ -44,14 +44,18 @@ using fn_runtime_invoke_t = Discrete::IL2CPP::Il2CppObject* (*)(
     void*,
     void**,
     Discrete::IL2CPP::Il2CppException**);
-fn_runtime_invoke_t g_orig_runtime_invoke = nullptr;
+// Atomic so HookedRuntimeInvoke and Install never race, and NEVER cleared back
+// to nullptr once created (A-M7): retaining the trampoline closes the entry
+// race where a thread entered HookedRuntimeInvoke before MH_DisableHook patched
+// the prologue and before g_inDetour.fetch_add(1).
+std::atomic<fn_runtime_invoke_t> g_orig_runtime_invoke{nullptr};
+void* g_hookTarget = nullptr;
 
 // Threads currently executing inside HookedRuntimeInvoke. Uninstall() drains
-// this to zero (after MH_DisableHook stops new entries) BEFORE MH_RemoveHook
-// frees the trampoline and before the DLL can be unloaded — otherwise the
-// game main thread (which calls il2cpp_runtime_invoke every frame) is almost
-// always inside the detour at unload time, and unmapping it crashes the game.
+// this to zero with a real wall-clock deadline via GetTickCount64() (A-M7).
 std::atomic<int> g_inDetour{0};
+
+constexpr std::uint64_t kUninstallDrainTimeoutMs = 2000;
 
 Discrete::IL2CPP::Il2CppObject* HookedRuntimeInvoke(
     const Discrete::IL2CPP::MethodInfo* method,
@@ -60,16 +64,16 @@ Discrete::IL2CPP::Il2CppObject* HookedRuntimeInvoke(
     Discrete::IL2CPP::Il2CppException** exc)
 {
     using namespace Discrete::MainThreadDispatcher;
-    // Mark presence FIRST so Uninstall's drain can't miss us. After
-    // MH_DisableHook no new caller reaches here, so the count only falls.
+    // Mark presence FIRST so Uninstall's drain observes us.
     g_inDetour.fetch_add(1, std::memory_order_acquire);
     const DWORD tid = ::GetCurrentThreadId();
     if (tid == GetMainThreadId()) {
         NotifyMainThreadTick();
     }
     Discrete::IL2CPP::Il2CppObject* ret = nullptr;
-    if (g_orig_runtime_invoke != nullptr) {
-        ret = g_orig_runtime_invoke(method, obj, params, exc);
+    fn_runtime_invoke_t orig = g_orig_runtime_invoke.load(std::memory_order_acquire);
+    if (orig != nullptr) {
+        ret = orig(method, obj, params, exc);
     } else if (exc) {
         *exc = nullptr;
     }
@@ -113,20 +117,25 @@ bool Install() {
     }
 
     void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
-    MH_STATUS hs = ::MH_CreateHook(
-        target,
-        reinterpret_cast<void*>(&HookedRuntimeInvoke),
-        reinterpret_cast<void**>(&g_orig_runtime_invoke));
-    if (hs != MH_OK) {
-        LogF("[IL2CPPMainThreadHook] MH_CreateHook(il2cpp_runtime_invoke) failed: status=%d", static_cast<int>(hs));
-        g_installed.store(false);
-        return false;
+    if (g_hookTarget != target) {
+        void* orig = nullptr;
+        MH_STATUS hs = ::MH_CreateHook(
+            target,
+            reinterpret_cast<void*>(&HookedRuntimeInvoke),
+            &orig);
+        if (hs != MH_OK && hs != MH_ERROR_ALREADY_CREATED) {
+            LogF("[IL2CPPMainThreadHook] MH_CreateHook(il2cpp_runtime_invoke) failed: status=%d", static_cast<int>(hs));
+            g_installed.store(false);
+            return false;
+        }
+        if (orig != nullptr) {
+            g_orig_runtime_invoke.store(reinterpret_cast<fn_runtime_invoke_t>(orig), std::memory_order_release);
+        }
+        g_hookTarget = target;
     }
-    hs = ::MH_EnableHook(target);
+    MH_STATUS hs = ::MH_EnableHook(target);
     if (hs != MH_OK) {
         LogF("[IL2CPPMainThreadHook] MH_EnableHook failed: status=%d", static_cast<int>(hs));
-        ::MH_RemoveHook(target);
-        g_orig_runtime_invoke = nullptr;
         g_installed.store(false);
         return false;
     }
@@ -136,26 +145,33 @@ bool Install() {
 }
 
 void Uninstall() {
-    if (!g_installed.load()) return;
+    if (!g_installed.exchange(false)) return;
     const auto& resolver = Discrete::IL2CPP::GetResolver();
     if (resolver.runtime_invoke != nullptr) {
         void* target = reinterpret_cast<void*>(resolver.runtime_invoke);
         // 1. Stop NEW calls reaching the detour (restores original bytes).
         ::MH_DisableHook(target);
-        // 2. Drain threads still INSIDE HookedRuntimeInvoke before we free
-        //    the trampoline / let the DLL be unmapped. New callers bypass the
-        //    detour now, so g_inDetour only decreases. Cap is a safety bound
-        //    (a single in-flight managed invoke that runs long); the common
-        //    per-frame case drains in well under a frame.
-        for (int i = 0; i < 2000 && g_inDetour.load(std::memory_order_acquire) > 0; ++i) {
-            ::Sleep(1);
+        // 2. Drain threads still inside HookedRuntimeInvoke using a real
+        //    wall-clock deadline (A-M7 — 2000 x Sleep(1) took up to ~31 s on
+        //    the 15.6 ms timer tick). Never call MH_RemoveHook or null
+        //    g_orig_runtime_invoke: the DLL is pinned and retaining the
+        //    trampoline closes the pre-fetch_add entry race completely.
+        const std::uint64_t startMs = ::GetTickCount64();
+        const bool drained = Discrete::MainThreadDispatcher::WaitUntilZeroWithDeadline(
+            g_inDetour, kUninstallDrainTimeoutMs, /*pollSleepMs=*/1);
+        const int remaining = g_inDetour.load(std::memory_order_acquire);
+        const std::uint64_t elapsedMs = ::GetTickCount64() - startMs;
+        if (!drained) {
+            LogF("[IL2CPPMainThreadHook] Uninstall: WARN detour drain timed out after %llums "
+                 "(inDetour=%d) — hook disabled, trampoline retained",
+                 static_cast<unsigned long long>(elapsedMs), remaining);
+        } else {
+            LogF("[IL2CPPMainThreadHook] Uninstall: hook disabled (drained in %llums, trampoline retained)",
+                 static_cast<unsigned long long>(elapsedMs));
         }
-        // 3. Now safe to free the trampoline.
-        ::MH_RemoveHook(target);
+    } else {
+        LogF("[IL2CPPMainThreadHook] Uninstall: runtime_invoke unavailable");
     }
-    g_orig_runtime_invoke = nullptr;
-    g_installed.store(false);
-    LogF("[IL2CPPMainThreadHook] Uninstall: hook removed");
 }
 
 bool IsInstalled() {

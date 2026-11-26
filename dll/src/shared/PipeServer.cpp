@@ -4,6 +4,7 @@
 
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "MainThreadDispatcher.h"
 #include "PipeLineBuffer.h"
 #include "ScanCancel.h"
 
@@ -458,12 +459,10 @@ bool Start() {
 void Stop() {
     if (!g_running.exchange(false)) return;
     if (g_stopEvent) ::SetEvent(g_stopEvent);
-    // Arm the cooperative scan cancel. A client worker sitting in a multi-minute
-    // value scan polls this and bails within milliseconds; without it the drain
-    // below simply burns its full 2 s and gives up while the scan grinds on,
-    // which is the case that then trips the g_stopEvent lifetime problem handled
-    // at the end of this function.
+    // Arm cooperative scan cancel AND wake any worker blocked in
+    // MainThreadDispatcher::SubmitAndWait (A-M8) before draining clients.
     Discrete::ScanCancel::RequestCancel();
+    Discrete::MainThreadDispatcher::AbortPending();
 
     if (g_worker.joinable()) {
         // BOUNDED wait, never a bare join(). Normally Stop() runs off-DllMain
@@ -483,16 +482,12 @@ void Stop() {
         }
     }
 
-    // The acceptor has stopped — no new client threads will be created, so
-    // g_activeClients can now only decrease. Wait for in-flight ServeClient
-    // workers to finish running DLL code before returning. Without this, the
-    // "Unload Discrete DLL" path's FreeLibrary could unmap the module while a
-    // detached worker is still executing it → CTD. The g_stopEvent we just
-    // signalled breaks any worker blocked in ReadLine, so they exit promptly;
-    // the cap is a safety bound, not the expected wait.
-    for (int i = 0; i < 400 && g_activeClients.load(std::memory_order_relaxed) > 0; ++i) {
-        ::Sleep(5); // up to ~2 s worst case
-    }
+    // Re-abort any item queued by a worker in the brief window while the
+    // acceptor was exiting, then drain in-flight ServeClient workers with a
+    // real wall-clock deadline (2 s).
+    Discrete::MainThreadDispatcher::AbortPending();
+    Discrete::MainThreadDispatcher::WaitUntilZeroWithDeadline(
+        g_activeClients, kWorkerExitTimeoutMs, /*pollSleepMs=*/5);
 
     // Only reclaim the event once the drain actually succeeded. Client workers
     // and their disconnect monitors read g_stopEvent without synchronisation, so
@@ -511,12 +506,9 @@ void Stop() {
         LogPipe("PipeServer::Stop: clients still active after drain — "
                 "leaking the stop event rather than closing it under them");
     }
-
-    // Registered by Discrete_Init, which can run again after Discrete_Shutdown
-    // clears the init latch. The hook list is append-only, so without this a
-    // Shutdown -> Init cycle leaves two copies of each backend hook and every
-    // later client disconnect runs that many full GC drains (~100 ms each).
-    ClearDisconnectHooks();
+    // Note (A-L3): do NOT ClearDisconnectHooks() here — Discrete_StopPipe ->
+    // Discrete_StartPipe must preserve hooks registered by Discrete_Init().
+    // Discrete_Shutdown() owns ClearDisconnectHooks().
 }
 
 bool IsRunning() noexcept {

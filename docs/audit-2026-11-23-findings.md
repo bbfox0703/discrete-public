@@ -59,14 +59,14 @@
 - 成因：`docs/Archiutecture.md` §Rules 規定 `__try` 本體只能是單一 call / 單一記憶體存取。這三處的 `__except(EXCEPTION_EXECUTE_HANDLER)` 會連 C++ 例外（`0xE06D7363`，例如 32-bit 下 vector 擴容的 `bad_alloc`）一起攔下：結果被靜默截斷、算成 `readFailureBytes`（`ScanForPointer` 甚至不計），例外物件也不會被釋放。
 - 修法：讓 `__try` 只包「讀一段遊戲記憶體到本地 buffer」這個 leaf（例如每次 `memcpy` 一個 4–64 KB 視窗到 stack/thread-local buffer），比對與 `push_back` 移到 `__try` 外；或者改用 exception filter，只對 `EXCEPTION_ACCESS_VIOLATION` / `EXCEPTION_IN_PAGE_ERROR` 回傳 `EXECUTE_HANDLER`，其他一律 `CONTINUE_SEARCH`。
 
-**A-M7 · `MainThreadHook::Uninstall` 的 detour drain 有進入競態，而且實際上限是約 31 秒而不是 2 秒**
+**A-M7 · `MainThreadHook::Uninstall` 的 detour drain 有進入競態，而且實際上限是約 31 秒而不是 2 秒 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/mono/MonoMainThreadHook.cpp:87`、`:94-101`、`:166-185`；`dll/src/il2cpp/IL2CPPMainThreadHook.cpp:65`、`:71-75`、`:138-159`
 - 成因：
   1. 執行緒已經跳進 `HookedRuntimeInvoke`、但還沒執行 `g_inDetour.fetch_add`（`:87`）時，`Uninstall` 若剛好看到 0，就會 `MH_RemoveHook` 釋放 trampoline，並把 `g_orig_runtime_invoke` 設成 `nullptr`（非 atomic 讀寫）。該執行緒接著不是呼叫已釋放的 trampoline，就是走 `nullptr` 分支、回傳 NULL 卻沒有真正呼叫 Unity（`:94-101`）。窗口很小，但結果是崩潰或靜默吃掉一次 managed 呼叫。
   2. 2000 × `Sleep(1)` 在預設 15.6 ms 計時器解析度下最長約 31 秒；`scripts/utils.lua` 對 `Discrete_Shutdown` 只給 10 秒。逾時後照樣 remove，而且 log 仍寫「hook removed」，看不出逾時。
 - 修法：用 `GetTickCount64()` 做真正的時間上限，逾時時寫 WARN 並**跳過** `MH_RemoveHook`（只 disable、保留 trampoline，模組本來就不卸載）；`g_orig_runtime_invoke` 改成 `std::atomic` 並且不要清成 `nullptr`（trampoline 洩漏遠比 NULL 路徑安全）。
 
-**A-M8 · `Discrete_Shutdown` 的收尾順序讓卡在 `SubmitAndWait` 的 worker 拖垮 pipe drain**
+**A-M8 · `Discrete_Shutdown` 的收尾順序讓卡在 `SubmitAndWait` 的 worker 拖垮 pipe drain — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/ExportAPI.cpp:10608-10626`（邊界）；`dll/src/shared/PipeServer.cpp:483-503`；`dll/src/shared/MainThreadDispatcher.cpp:190-206`、`:337-338`
 - 成因：`PipeServer::Stop()` 先 drain client worker（上限 2 秒），`MainThreadDispatcher::Shutdown()`（會 abort 排隊中的工作）卻在最後才跑。若 worker 正在 `SubmitAndWait`（遊戲失焦暫停、loading 中，或 `timeout_ms < 0` 時是 INFINITE），drain 必定逾時 → `g_stopEvent` 被洩漏 → 之後重新 `Start()` 時，舊 worker 會讀到新的 event（見 A-L6）。
 - 修法：`Stop()` 設好 `g_running = false` 並 signal 之後，在 drain 之前先呼叫 `MainThreadDispatcher::Shutdown()`（或拆出一個只負責 abort pending 的 `AbortPending()`）；`Discrete_Shutdown` 中 hook 的 uninstall 順序維持不變。
@@ -113,7 +113,7 @@
   - `Memory.h:183-185`：說掃描是「single-threaded」、用 `SafeReadBytes`，實際是平行 + `__try` chunk。
 - 修法：逐條改註解；`RegisterDisconnectHook` 若要 idempotent，就改成回傳 token / 以字串 key 註冊。
 
-**A-L3 · `Discrete_StopPipe` → `Discrete_StartPipe` 會讓 disconnect hooks 永久消失**
+**A-L3 · `Discrete_StopPipe` → `Discrete_StartPipe` 會讓 disconnect hooks 永久消失 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/PipeServer.cpp:505-509`；`dll/src/shared/ExportAPI.cpp:10628-10636`
 - 成因：`Stop()` 一律 `ClearDisconnectHooks()`，但 `Discrete_StopPipe` 不會清掉 `g_initialized`，之後的 `StartPipe` 也就不會重新 `Discrete_Init`，GC drain 與「最後一個 client 離開時丟棄 session」的 hook 都不會再註冊。repo 內沒有人呼叫 `Discrete_StopPipe`（dead export），所以列為 Low。
 - 修法：把 `ClearDisconnectHooks()` 從 `Stop()` 移到 `Discrete_Shutdown`；或者直接移除 `Discrete_StopPipe` export。
@@ -176,7 +176,7 @@
 - 成因：註解假設「scans are serialized in practice」，但 pipe 允許 4 個 client 並行；一個 scope 結束時把 cap 歸零，另一個「強制單執行緒」的 scan 中途就變回全平行（正好違背這個開關要對付 anti-tamper 的目的）。
 - 修法：把 cap 存在 thread-local，或作為 `RunParallelScan` 的參數傳入。
 
-**A-L16 · `SubmitAndWait` 的 inline main-thread 路徑沒有設定 `t_inside_work_item`**
+**A-L16 · `SubmitAndWait` 的 inline main-thread 路徑沒有設定 `t_inside_work_item` — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/MainThreadDispatcher.cpp:289-301`
 - 成因：在主執行緒上 inline 執行的 closure 裡，`ThreadAttachGuard` 會判斷「不在 drain 中」而照樣做 attach / detach，正是 build #54 的問題型態；目前沒有實際會走到的路徑。
 - 修法：inline 執行期間比照 `Drain()` 設定並還原 `t_inside_work_item`。
