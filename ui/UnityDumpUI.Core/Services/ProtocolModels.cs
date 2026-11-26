@@ -160,7 +160,8 @@ public sealed class FieldEntry
 {
     [JsonPropertyName("name")]   public string  Name   { get; set; } = string.Empty;
     [JsonPropertyName("type")]   public string? Type   { get; set; }
-    [JsonPropertyName("offset")] public int     Offset { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("flags")]  public uint    Flags  { get; set; }
     [JsonPropertyName("static")] public bool    Static { get; set; }
 }
@@ -224,7 +225,8 @@ public sealed class WalkedField
 {
     [JsonPropertyName("name")]          public string       Name         { get; set; } = string.Empty;
     [JsonPropertyName("type")]          public string?      Type         { get; set; }
-    [JsonPropertyName("offset")]        public int          Offset       { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("from")]          public string?      From         { get; set; }
     [JsonPropertyName("address")]       public string?      Address      { get; set; }
 
@@ -276,7 +278,8 @@ public sealed class GetStaticFieldDataResult
 {
     [JsonPropertyName("field")]   public string? Field   { get; set; }
     [JsonPropertyName("type")]    public string? Type    { get; set; }
-    [JsonPropertyName("offset")]  public int     Offset  { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("flags")]   public uint    Flags   { get; set; }
     [JsonPropertyName("address")] public string? Address { get; set; }
     [JsonPropertyName("error")]   public string? Error   { get; set; }
@@ -455,7 +458,8 @@ public sealed class WhatIsAtField
 {
     [JsonPropertyName("name")]            public string  Name             { get; set; } = string.Empty;
     [JsonPropertyName("type")]            public string? Type             { get; set; }
-    [JsonPropertyName("offset")]          public int     Offset           { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("size")]            public int     Size             { get; set; }
     [JsonPropertyName("isStatic")]        public bool    IsStatic         { get; set; }
     [JsonPropertyName("isValueType")]     public bool    IsValueType      { get; set; }
@@ -584,7 +588,8 @@ public sealed class SearchSymbolMatch
     /// full method signatures).</summary>
     [JsonPropertyName("type")]      public string? Type      { get; set; }
     /// <summary>Field offset in bytes from instance base (for "field" rows).</summary>
-    [JsonPropertyName("offset")]    public int?    Offset    { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(NullableFieldOffsetJsonConverter))]
+    public int? Offset { get; set; }
     /// <summary>AOT method address (IL2CPP "method" rows only). Mono methods
     /// land here as null because Mono JIT is deferred to the user-driven
     /// findMethodInstances / Call method flow.</summary>
@@ -715,7 +720,8 @@ public sealed class FieldReferenceFieldInfo
 {
     [JsonPropertyName("name")]          public string  Name          { get; set; } = string.Empty;
     [JsonPropertyName("type")]          public string? Type          { get; set; }
-    [JsonPropertyName("offset")]        public long?   Offset        { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(NullableLongFieldOffsetJsonConverter))]
+    public long? Offset { get; set; }
     [JsonPropertyName("isStatic")]      public bool    IsStatic      { get; set; }
     /// <summary>Mono only — the field's FieldDef metadata token (0x04xxxxxx)
     /// used to identify the field while walking IL operand immediates.</summary>

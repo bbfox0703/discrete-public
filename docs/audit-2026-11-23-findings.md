@@ -440,7 +440,7 @@
 
 ### High
 
-**C-H1 · `[ThreadStatic]` 欄位的 offset 以 `SIZE_MAX` 傳到 UI 的 `int` 欄位，整個 `getClassInfo` / `dumpClassInfo` / `searchSymbols` 回應反序列化失敗（待驗證）**
+**C-H1 · `[ThreadStatic]` 欄位的 offset 以 `SIZE_MAX` 傳到 UI 的 `int` 欄位，整個 `getClassInfo` / `dumpClassInfo` / `searchSymbols` 回應反序列化失敗（待驗證） — ✅ FIXED (2026-11-26)**
 - 位置：DLL 端 `dll/src/shared/ExportAPI.cpp:3819`（Mono `getClassInfo`）、`:3935`（Mono `dumpClassInfo`）、`:5016`（Mono `searchSymbols`）、`:7190`（IL2CPP `getClassInfo`）、`:7319`（IL2CPP `searchSymbols`），以及 IL2CPP `dumpClassInfo` 的同一寫法；型別來源 `dll/src/il2cpp/IL2CPPClassWalker.h:24`（`std::size_t offset`）、`dll/src/il2cpp/IL2CPPResolver.h:37`（`il2cpp_field_get_offset` 回傳 `size_t`）、`dll/src/mono/MonoResolver.h:43`（`mono_field_get_offset` 回傳 `int`，存進 `size_t` 時會做 sign-extend）；UI 端 `ui/UnityDumpUI.Core/Services/ProtocolModels.cs:163`（`FieldEntry.Offset` 是 `int`）、`:587`（`SearchSymbolMatch.Offset` 是 `int?`）、`:458`（`WhatIsAtField.Offset`）
 - 成因：IL2CPP 的 thread-static 欄位 offset 是 `THREAD_STATIC_FIELD_OFFSET = -1`（int32），`il2cpp_field_get_offset` 轉成 `size_t` 後變成 `0xFFFFFFFFFFFFFFFF`。Mono 的 special-static 欄位在 class layout 時也被設成 `offset = -1`，經 `int → size_t` 變成 `SIZE_MAX`（x86 上是 `4294967295`）。這些 handler 都直接輸出 `{"offset", f.offset}`，JSON 裡就是 `18446744073709551615`；System.Text.Json 把它塞進 `int` 時會丟 `JsonException`，整個 envelope 無法解析。後果：
   1. 瀏覽任何含 `[ThreadStatic]` 欄位的類別都會失敗（mscorlib 的 `System.Threading.Thread`、UniTask、Newtonsoft 等常見函式庫都有）。

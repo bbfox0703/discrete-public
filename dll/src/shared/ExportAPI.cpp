@@ -62,6 +62,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 using nlohmann::json;
@@ -95,6 +96,26 @@ static int SehValueSize(Fn fn, K cur) {
 namespace {
 
 std::atomic<bool> g_initialized{false};
+
+// Normalize a runtime field offset before emitting it to JSON (C-H1).
+// IL2CPP encodes [ThreadStatic] fields with THREAD_STATIC_FIELD_OFFSET = -1
+// inside std::size_t (18446744073709551615 on x64, 4294967295 on x86);
+// Mono uses signed int (-1) for FieldEntry and std::size_t for FieldHit.
+// Normalize any negative value or unsigned value exceeding INT32_MAX to -1
+// so signed-integer JSON consumers never fail on [ThreadStatic] fields.
+template <typename T>
+std::int64_t NormalizeFieldOffset(T raw) noexcept {
+    if constexpr (std::is_signed_v<T>) {
+        if (raw < 0) return -1;
+        if constexpr (sizeof(T) > 4) {
+            if (static_cast<std::int64_t>(raw) > 0x7FFFFFFFLL) return -1;
+        }
+        return static_cast<std::int64_t>(raw);
+    } else {
+        if (raw > static_cast<T>(0x7FFFFFFFu)) return -1;
+        return static_cast<std::int64_t>(raw);
+    }
+}
 
 // Game-process memory snapshot used both by the handshake (so UI can
 // auto-clamp snapshot caps on x86 targets) and by snapshotBegin's
@@ -3816,7 +3837,7 @@ void RegisterCoreHandlers() {
             fields.push_back({
                 {"name", f.name},
                 {"type", f.typeName},
-                {"offset", f.offset},
+                {"offset", NormalizeFieldOffset(f.offset)},
                 {"flags", f.flags},
                 {"static", (f.flags & 0x10u) != 0},
             });
@@ -3932,7 +3953,7 @@ void RegisterCoreHandlers() {
                 for (const auto& f : res.info.fields) {
                     fields.push_back({
                         {"name", f.name}, {"type", f.typeName},
-                        {"offset", f.offset}, {"flags", f.flags},
+                        {"offset", NormalizeFieldOffset(f.offset)}, {"flags", f.flags},
                         {"static", (f.flags & 0x10u) != 0},
                     });
                 }
@@ -5013,7 +5034,7 @@ void RegisterCoreHandlers() {
                             {"name",      f.name},
                             {"kind",      "field"},
                             {"type",      f.typeName},
-                            {"offset",    f.offset},
+                            {"offset",    NormalizeFieldOffset(f.offset)},
                             {"static",    isStatic},
                         });
                         if (isAsmCapped())              { thisAsmCapped = true; break; }
@@ -5110,7 +5131,7 @@ void RegisterCoreHandlers() {
             if (info.ok) {
                 for (const auto& f : info.info.fields) {
                     if (f.name == fieldNm) {
-                        fieldInfo["offset"]   = f.offset;
+                        fieldInfo["offset"]   = NormalizeFieldOffset(f.offset);
                         fieldInfo["type"]     = f.typeName;
                         fieldInfo["isStatic"] = (f.flags & 0x10u) != 0;
                         break;
@@ -5164,7 +5185,7 @@ void RegisterCoreHandlers() {
                 return json{
                     {"name", f.name},
                     {"type", f.typeName},
-                    {"offset", f.offset},
+                    {"offset", NormalizeFieldOffset(f.offset)},
                     {"flags", f.flags},
                     {"static", (f.flags & 0x10u) != 0},
                 };
@@ -5216,7 +5237,7 @@ void RegisterCoreHandlers() {
         return json{
             {"field",   fieldName},
             {"type",    sa.typeName},
-            {"offset",  sa.offset},
+            {"offset",  NormalizeFieldOffset(sa.offset)},
             {"flags",   sa.flags},
             {"address", formatHex(reinterpret_cast<std::uintptr_t>(sa.address))},
         };
@@ -6702,7 +6723,7 @@ void RegisterCoreHandlers() {
             json out = {
                 {"name",         f.name},
                 {"type",         f.typeName},
-                {"offset",       f.offset},
+                {"offset",       NormalizeFieldOffset(f.offset)},
                 {"size",         f.size},
                 {"isStatic",     f.isStatic},
                 {"isValueType",  f.isValueType},
@@ -7187,7 +7208,7 @@ void RegisterCoreHandlers() {
         for (const auto& f : res.info.fields) {
             fields.push_back({
                 {"name", f.name}, {"type", f.typeName},
-                {"offset", f.offset}, {"flags", f.flags},
+                {"offset", NormalizeFieldOffset(f.offset)}, {"flags", f.flags},
                 {"static", (f.flags & 0x10u) != 0},
             });
         }
@@ -7316,7 +7337,7 @@ void RegisterCoreHandlers() {
                             {"name",      f.name},
                             {"kind",      "field"},
                             {"type",      f.typeName},
-                            {"offset",    f.offset},
+                            {"offset",    NormalizeFieldOffset(f.offset)},
                             {"static",    isStatic},
                         });
                         if (isAsmCapped())              { thisAsmCapped = true; break; }
@@ -7450,7 +7471,7 @@ void RegisterCoreHandlers() {
             if (info.ok) {
                 for (const auto& f : info.info.fields) {
                     if (f.name == fieldNm) {
-                        fieldInfo["offset"]   = f.offset;
+                        fieldInfo["offset"]   = NormalizeFieldOffset(f.offset);
                         fieldInfo["type"]     = f.typeName;
                         break;
                     }
@@ -7994,7 +8015,7 @@ void RegisterCoreHandlers() {
                 for (const auto& f : res.info.fields) {
                     fields.push_back({
                         {"name", f.name}, {"type", f.typeName},
-                        {"offset", f.offset}, {"flags", f.flags},
+                        {"offset", NormalizeFieldOffset(f.offset)}, {"flags", f.flags},
                         {"static", (f.flags & 0x10u) != 0},
                     });
                 }
@@ -8447,7 +8468,7 @@ void RegisterCoreHandlers() {
             if (f.name == fieldName) {
                 return json{
                     {"name", f.name}, {"type", f.typeName},
-                    {"offset", f.offset}, {"flags", f.flags},
+                    {"offset", NormalizeFieldOffset(f.offset)}, {"flags", f.flags},
                     {"static", (f.flags & 0x10u) != 0},
                 };
             }
@@ -8493,7 +8514,7 @@ void RegisterCoreHandlers() {
         if (!sa.ok) return json{{"error", "static field not resolvable: " + fieldName}};
         return json{
             {"field", fieldName}, {"type", sa.typeName},
-            {"offset", sa.offset}, {"flags", sa.flags},
+            {"offset", NormalizeFieldOffset(sa.offset)}, {"flags", sa.flags},
             {"address", formatHex(reinterpret_cast<std::uintptr_t>(sa.address))},
         };
     });
@@ -10169,7 +10190,7 @@ void RegisterCoreHandlers() {
             json out = {
                 {"name",         f.name},
                 {"type",         f.typeName},
-                {"offset",       f.offset},
+                {"offset",       NormalizeFieldOffset(f.offset)},
                 {"size",         f.size},
                 {"isStatic",     f.isStatic},
                 {"isValueType",  f.isValueType},

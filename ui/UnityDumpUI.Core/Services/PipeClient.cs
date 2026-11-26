@@ -221,8 +221,15 @@ public sealed class PipeClient : IAsyncDisposable
             LastReadMs        = readSw.ElapsedMilliseconds;
             LastResponseChars = responseLine.Length;
             var parseSw = Stopwatch.StartNew();
-            RpcEnvelope<TResult>? envelope =
-                JsonSerializer.Deserialize(responseLine, envelopeType);
+            RpcEnvelope<TResult>? envelope;
+            try
+            {
+                envelope = JsonSerializer.Deserialize(responseLine, envelopeType);
+            }
+            catch (JsonException ex)
+            {
+                throw new PipeProtocolException("Invalid JSON response: " + ex.Message, ex);
+            }
             parseSw.Stop();
             LastParseMs = parseSw.ElapsedMilliseconds;
             if (envelope is null)

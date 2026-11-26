@@ -12,6 +12,18 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1530) — Fix C-H1 (`[ThreadStatic]` `SIZE_MAX` field offsets breaking JSON deserialization)
+
+- **Bug fix (`C-H1`):** IL2CPP encodes `[ThreadStatic]` fields with `THREAD_STATIC_FIELD_OFFSET = (size_t)-1` (`18446744073709551615` on x64, `4294967295` on x86). Emitting raw unsigned offsets broke `System.Text.Json` deserialization into `int` / `int?` / `long?` DTO fields on `getClassInfo`, `dumpClassInfo`, `searchSymbols`, `whatIsAt`, `getStaticFieldData`, and `findFieldReferences`, aborting browsing/batch exports for any class or assembly with `[ThreadStatic]` fields (e.g. `System.Threading.Thread`, `UniTask`, `Newtonsoft`).
+  - **DLL (`dll/src/shared/ExportAPI.cpp`):** Added `NormalizeFieldOffset<T>` (mapping negative values and unsigned values `> INT32_MAX` to `-1`) and applied it across all Mono and IL2CPP field-offset JSON serialization sites (`getClassInfo`, `dumpClassInfo`, `searchSymbols`, `findFieldReferences`, `getFieldInfo`, `getStaticFieldData`, `whatIsAt`).
+  - **UI (`ui/UnityDumpUI.Core/Services/`):** Added AOT-safe [FieldOffsetJsonConverter.cs](../ui/UnityDumpUI.Core/Services/FieldOffsetJsonConverter.cs) (`FieldOffsetJsonConverter`, `NullableFieldOffsetJsonConverter`, `NullableLongFieldOffsetJsonConverter`) on `FieldEntry.Offset`, `WalkedField.Offset`, `GetStaticFieldDataResult.Offset`, `WhatIsAtField.Offset`, `SearchSymbolMatch.Offset`, and `FieldReferenceFieldInfo.Offset` in `ProtocolModels.cs` as defense in depth against older DLLs or corrupt offsets.
+  - **PipeClient (`ui/UnityDumpUI.Core/Services/PipeClient.cs`):** Wrapped `JsonSerializer.Deserialize` `JsonException` into `PipeProtocolException` so callers receive a consistent protocol exception.
+  - **Tests:** Added 5 regression tests in `ui/UnityDumpUI.Tests/FieldOffsetProtocolTests.cs` covering x64/x86 unsigned `SIZE_MAX` sentinels across all affected DTOs and malformed-JSON `PipeProtocolException` wrapping.
+  - **Docs:** Marked `C-H1` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1530) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1154 passed (0 failed, 0 skipped); Rust core tests 104 passed (x64) / 105 passed (i686).
+
+-----
+
 ## 2026-11-26 (build 1528) — Fix E-H1 (x86 `List<T>._items` pointer read in live CE XML export), add `GEMINI.md` & badge, rename audit docs
 
 - **Bug fix (`E-H1`):** `CeXmlExporter.Live.cs` (`EmitCollectionLiveAsync`) previously read a hardcoded 8 bytes for `List<T>._items` and parsed them with `ParseLeQword` (which required 16 hex chars). On 32-bit Mono targets (`PointerSize == 4`), that swept the adjacent `_size` field at `+0xC` into the upper 32 bits (`_items | (_size << 32)`), causing `WalkArrayAsync` to fail on every non-empty `List<T>`.
