@@ -133,11 +133,17 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// element class's metadata so every array slot carries data. Off by default.</summary>
     [ObservableProperty] private bool _fillEmptyArraySlots;
 
+    /// <summary>Game-process pointer size (4 = x86/WOW64, 8 = x64, 0 = unknown →
+    /// defaults to 8). Set by <see cref="MainWindowViewModel"/> after handshake so
+    /// template CE XML and CSX exports use the target's true pointer layout.</summary>
+    public int GamePointerSize { get; set; }
+
     internal ExportOptions CurrentExportOptions => new(
         DrilldownDepth: Math.Max(0, DrilldownDepth),
         ArrayLimit:     Math.Max(0, ArrayLimit),
         CollapsePointerNodes: CollapsePointerNodes,
         LiveData: UseLiveData,
+        PointerSize: GamePointerSize == 4 ? 4 : 8,
         VerboseDescription: VerboseCeXmlDescription,
         DescShowOffset:       DescShowOffset,
         FlattenValueStructs:  FlattenValueStructs,

@@ -12,6 +12,20 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1538) — Fix E-H2 (template CE XML & CSX enum/value-struct/collection layout + tests)
+
+- **Bug fix (`E-H2`):** Template-mode CE XML (`CeXmlExporter.cs`, the Assembly Browser default when `CeXmlBaseAddress` is `"INSTANCE_ADDRESS"`) and CE Structure Dissect (`CsxExporter.cs`) previously treated all unknown game types as dereferenced pointers (`Offsets=[0]` / `Vartype="Pointer"`) — causing enum and custom `System.ValueType` struct fields to dereference inline integers/bytes as addresses — and emitted broken collection layouts (missing the SZARRAY header `+0x20`/`+0x10`, omitting `List<T>._items` dereference `+0x10`/`+0x08`, striding reference-type arrays by `ComputeStructSize(child)` without per-slot deref, and expanding `HashSet`/`IList`/`IEnumerable` as flat arrays).
+  - Added shared internal `ui/UnityDumpUI.Core/Services/Export/TemplateExportHelpers.cs`: `IsEnumClass`, `IsValueTypeClass`, `ResolveEnumUnderlyingType` (reads `value__` underlying integer type with `System.Int32` fallback), `ComputeValueTypeHeaderAdjust` (strips Mono/IL2CPP boxed `2*ptr` header offsets when structs are emitted inline), `ComputeInlineStructSizeAsync` (natural-aligned inline struct stride), `IsNonArrayCollectionType`, and pointer-size helpers.
+  - Updated `CeXmlExporter.cs` template mode: resolves game field types via `IClassInfoLookup` even at depth cap so `System.Enum` emits an inline scalar leaf (using its underlying type) and `System.ValueType` emits an inline group with `offsets: null` (or inline leaf at depth cap); contiguous `T[]` and `List<T>` use `4*ptr` SZARRAY data start, `List._items` (`2*ptr`) deref, pointer-strided reference slots with `Offsets=[0]`, and inline contiguous slots for primitive/enum/value-struct elements; non-array collections (`HashSet`, `IList`, `IEnumerable`, `Dictionary`, …) emit watchable pointer leaves; root template header annotates `(x64 layout)` / `(x86 layout)` and uses `PointerVartype(options)`.
+  - Updated `CsxExporter.cs` in sync: enums emit flat scalar `<Element>`s; `System.ValueType` structs flatten inline at `parentOffset + (memberOffset - headerAdjust)` (or `Array of byte` at depth cap, never `Pointer`); `T[]` and `List<T>` emit `List` (`_items` + `_size`) and SZARRAY structures at exact `ptr`-dependent offsets with accurate `AutoCreateStructsize`.
+  - Updated `CeXmlExporter.Live.cs` (`EmitMetadataFieldAsync`) to reuse `ResolveEnumUnderlyingType` so non-`Int32` enums in metadata-filled null slots also emit their true width/signedness.
+  - Wired `Browser.GamePointerSize = hs.GamePointerSize ?? 0` in `MainWindowViewModel.cs` and passed `PointerSize` through `AssemblyBrowserViewModel.CurrentExportOptions`.
+  - Added 13 regression test cases in `ui/UnityDumpUI.Tests/CeXmlAndCsxTemplateExporterTests.cs` covering enums (Int32, Byte, depth 0), custom boxed-offset ValueType structs, x64 + x86 `T[]` & `List<T>` reference arrays, inline struct/enum/primitive arrays, non-array collections, and layout tags across both `CeXmlExporter` and `CsxExporter`.
+  - Marked `E-H2` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1538) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1167 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 329 passed (x64) / 332 passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1537) — Fix D-H1 (32-bit x86 ISA mode for Rust AOB pattern builder + tests)
 
 - **Bug fix (`D-H1`):** `dll/rust/src/aob.rs` previously decoded every method byte window strictly in x86-64 mode regardless of target architecture. On 32-bit Mono JIT code, `0x40..0x4F` (`INC`/`DEC r32`) were consumed as REX prefixes (desynchronizing all subsequent instructions), `0xA0..0xA3` (`MOV AL/EAX, moffs32`) consumed 8 bytes instead of 4 and left absolute static addresses un-wildcarded, and `mod=00 SIB base=5` absolute jump-table displacements stayed literal.

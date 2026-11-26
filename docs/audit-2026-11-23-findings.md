@@ -763,7 +763,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`itemsOff` 已經依 `options.PointerSize` 算成 `2*ptr`（x86 為 +0x8），但讀取長度仍寫死 8。x86 的 `List<T>` 在 +0x8 是 4-byte 的 `_items`，+0xC 是 `_size`，所以 `ParseLeQword` 得到 `_items | (_size << 32)`。只要 list 非空，`arrayAbs` 就是一個超過 4 GiB 的假位址，`WalkArrayAsync` 失敗，整個 list 只剩下標著 `(walk failed)` 的空群組（`walk is null` 分支）。`_size == 0` 時剛好正確，所以小型測試抓不到。Inspector 修過這個 bug，exporter 這份雙胞胎程式碼沒有跟著修。
 - 修法：讀取長度改成 `ptr`，解析改成依實際 byte 數做 little-endian 組合（可直接共用 `LiveInspectionViewModel.ParseLittleEndianHexQword` 的語意，或讓 `ParseLeQword` 接受 4 / 8 bytes）；`CeXmlExporterLiveTests` 補一個 `PointerSize = 4`、`_size != 0` 的案例。
 
-**E-H2 · Template 模式（Assembly Browser 的預設路徑）把 enum / 自訂 value struct 欄位當成 pointer 解參照，collection 的元素位址也是錯的**
+**E-H2 · Template 模式（Assembly Browser 的預設路徑）把 enum / 自訂 value struct 欄位當成 pointer 解參照，collection 的元素位址也是錯的 — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI.Core/Services/Export/UnityTypeMap.cs:81-85`（未知型別一律 `Pointer`）；`CeXmlExporter.cs:418-503`（`!shape.IsPointer` 以外全部走 `Offsets=[0]` 群組）、`:474-492`（collection 元素 `+i*elemSize`、不跳過 array header、不解參照）；`CsxExporter.cs:283-318`（同一個元素模型）；觸發條件 `CeXmlExporter.cs:69-71` + `ui/UnityDumpUI/ViewModels/AssemblyBrowserViewModel.cs:104`（`CeXmlBaseAddress` 預設是 `"INSTANCE_ADDRESS"`，不是 hex → 一律退回 template 模式）
 - 成因：
   1. getClassInfo 給的 enum 欄位型別是 `Game.WeaponType` 這類名稱，`UnityTypeMap.Resolve` 不認得就回傳 pointer shape，於是 enum / 自訂 struct 欄位被輸出成 `<Offsets><Offset>0</Offset></Offsets>` 的群組。CE 會把欄位裡的整數值當成指標去解參照，drilldown 後的 `value__` 子節點顯示的是不可讀的位址。遊戲 class 中 enum 欄位非常常見。

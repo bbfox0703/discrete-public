@@ -23,11 +23,19 @@
 // DisplayMethod. We deliberately omit the <?xml ?> prolog and any
 // <!-- comments -->: stock CE output has neither.
 //
-// Drilldown: for class-typed pointer fields and arrays, RenderAsync
-// recursively pulls child class info via IClassInfoLookup and emits the
-// nested <Structure> child. Cycle detection via a visited-fullnames set;
-// depth bounded by ExportOptions.DrilldownDepth.
+// Drilldown: for class-typed pointer fields, value structs, enums, and
+// contiguous collections (T[] / List<T>), RenderAsync resolves metadata via
+// IClassInfoLookup:
+//   * System.Enum      → flat inline scalar element using the enum's underlying type
+//   * System.ValueType → flattened inline child elements at parentOffset + memberOffset
+//                        (never Vartype="Pointer", which CE would dereference)
+//   * Reference class  → Vartype="Pointer" element with nested <Structure>
+//   * T[] / List<T>    → Pointer → (List: _items @ 2*ptr + _size @ 3*ptr) →
+//                        SZARRAY data starting at 4*ptr with element-accurate stride
+//   * Non-array collections (HashSet, Dictionary, IList, IEnumerable, ...) →
+//                        flat Pointer element (no fabricated array layout)
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -51,19 +59,19 @@ public static class CsxExporter
     {
         var sb = new StringBuilder(2048);
         sb.Append("<Structures>\n");
-        var visited = new HashSet<string>();
-        RenderRoot(sb, self, ancestors, assemblyName,
-                   ExportOptions.Defaults with { DrilldownDepth = 0 },
-                   lookup: null, visited);
+        RenderRootSync(sb, self, ancestors, assemblyName,
+                       ExportOptions.Defaults with { DrilldownDepth = 0 });
         sb.Append("</Structures>\n");
         return sb.ToString();
     }
 
     /// <summary>
-    /// Drilldown render: recursively pulls child class info via
-    /// <paramref name="lookup"/> for pointer / array fields. Honors
-    /// <see cref="ExportOptions.DrilldownDepth"/> and
-    /// <see cref="ExportOptions.ArrayLimit"/>.
+    /// Drilldown render: recursively resolves field classes via
+    /// <paramref name="lookup"/> for enums, inline value structs, pointer
+    /// classes, and contiguous collections (<c>T[]</c> / <c>List&lt;T&gt;</c>).
+    /// Honors <see cref="ExportOptions.DrilldownDepth"/>,
+    /// <see cref="ExportOptions.ArrayLimit"/>, and
+    /// <see cref="ExportOptions.PointerSize"/>.
     /// </summary>
     public static async Task<string> RenderAsync(
         GetClassInfoResult self,
@@ -84,18 +92,29 @@ public static class CsxExporter
 
     // ---------- Root structure -------------------------------------------
 
-    private static void RenderRoot(
+    private static void RenderRootSync(
         StringBuilder sb, GetClassInfoResult self,
         IReadOnlyList<GetClassInfoResult>? ancestors, string? assemblyName,
-        ExportOptions options, IClassInfoLookup? lookup,
-        HashSet<string> visited)
+        ExportOptions options)
     {
+        int ptr = TemplateExportHelpers.NormalizePointerSize(options.PointerSize);
         string structName = StructName(self, assemblyName);
-        var (elements, totalSize) = CollectElementsSync(self, ancestors);
+        var elements = new List<EmittedElement>();
+        int totalSize = 0;
+
+        if (ancestors is { Count: > 0 })
+        {
+            foreach (GetClassInfoResult anc in ancestors)
+                CollectFlatFieldsSync(elements, ref totalSize, anc, isInherited: true, ptr);
+        }
+        CollectFlatFieldsSync(elements, ref totalSize, self, isInherited: false, ptr);
 
         OpenStructure(sb, "  ", structName, totalSize);
-        EmitElements(sb, "      ", elements,
-                     childRenderer: null, options, lookup, visited);
+        foreach (EmittedElement e in elements)
+        {
+            EmitElementOpen(sb, "      ", e);
+            sb.Append("/>\n");
+        }
         CloseStructure(sb, "  ");
     }
 
@@ -105,230 +124,429 @@ public static class CsxExporter
         ExportOptions options, IClassInfoLookup? lookup,
         HashSet<string> visited, CancellationToken ct)
     {
+        int ptr = TemplateExportHelpers.NormalizePointerSize(options.PointerSize);
         string structName = StructName(self, assemblyName);
         visited.Add(structName);
 
-        var elements = new List<EmittedElement>();
+        var body = new StringBuilder(2048);
         int totalSize = 0;
 
         if (ancestors is { Count: > 0 })
         {
             foreach (GetClassInfoResult anc in ancestors)
-                AddFields(elements, ref totalSize, anc, isInherited: true);
+            {
+                int end = await EmitClassFieldsAsync(
+                    body, "      ", anc, isInherited: true,
+                    baseOffset: 0, offsetAdjust: 0, namePrefix: null,
+                    assemblyName, options, lookup, visited,
+                    currentDepth: 0, ptr, ct).ConfigureAwait(false);
+                if (end > totalSize) totalSize = end;
+            }
         }
-        AddFields(elements, ref totalSize, self, isInherited: false);
+        int selfEnd = await EmitClassFieldsAsync(
+            body, "      ", self, isInherited: false,
+            baseOffset: 0, offsetAdjust: 0, namePrefix: null,
+            assemblyName, options, lookup, visited,
+            currentDepth: 0, ptr, ct).ConfigureAwait(false);
+        if (selfEnd > totalSize) totalSize = selfEnd;
 
         OpenStructure(sb, "  ", structName, totalSize);
-        await EmitElementsAsync(sb, "      ", elements,
-                                assemblyName, options, lookup, visited,
-                                currentDepth: 0, ct).ConfigureAwait(false);
+        sb.Append(body);
         CloseStructure(sb, "  ");
     }
 
-    // ---------- Element collection ---------------------------------------
+    // ---------- Element models & sync fallback ---------------------------
 
-    /// <summary>One emitted CSX element + the metadata needed to decide if it
-    /// should grow a nested child Structure.</summary>
     private readonly record struct EmittedElement(
         int     Offset,
         string  Vartype,
         int     Bytesize,
         string  Description,
-        string  DisplayMethod,
-        // Drilldown source: the original field type so we can recurse later.
-        string? FieldTypeRaw,
-        bool    IsPointer);
+        string  DisplayMethod);
 
-    private static (List<EmittedElement> elements, int totalSize) CollectElementsSync(
-        GetClassInfoResult self,
-        IReadOnlyList<GetClassInfoResult>? ancestors)
-    {
-        var list = new List<EmittedElement>();
-        int total = 0;
-        if (ancestors is { Count: > 0 })
-            foreach (var anc in ancestors)
-                AddFields(list, ref total, anc, isInherited: true);
-        AddFields(list, ref total, self, isInherited: false);
-        return (list, total);
-    }
-
-    private static void AddFields(
+    private static void CollectFlatFieldsSync(
         List<EmittedElement> sink, ref int totalSize,
-        GetClassInfoResult info, bool isInherited)
+        GetClassInfoResult info, bool isInherited, int ptr)
     {
         if (info.Fields is not { Count: > 0 } fields) return;
-        string declaredIn = string.IsNullOrEmpty(info.Namespace)
-            ? (info.Name ?? "?")
-            : $"{info.Namespace}.{info.Name}";
+        string declaredIn = DeclaredInLabel(info);
 
         foreach (FieldEntry f in fields.Where(x => !x.Static))
         {
             ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
+            bool isNativeInt = TemplateExportHelpers.IsNativeIntType(f.Type);
+            string vt = shape.IsPointer
+                ? "Pointer"
+                : (isNativeInt ? TemplateExportHelpers.PointerVartype(ptr) : shape.CeTypeKeyword);
+            int sz = (shape.IsPointer || isNativeInt) ? ptr : shape.SizeBytes;
             string desc = isInherited
                 ? $"{f.Name} : {f.Type ?? "?"}  (inherited from {declaredIn})"
                 : $"{f.Name} : {f.Type ?? "?"}";
 
             sink.Add(new EmittedElement(
                 Offset: f.Offset,
-                Vartype: shape.CeTypeKeyword,
-                Bytesize: shape.SizeBytes,
+                Vartype: vt,
+                Bytesize: sz,
                 Description: desc,
-                DisplayMethod: DisplayMethodFor(shape.CeTypeKeyword),
-                FieldTypeRaw: f.Type,
-                IsPointer: shape.IsPointer));
-            int end = f.Offset + shape.SizeBytes;
+                DisplayMethod: DisplayMethodForType(f.Type, vt)));
+            int end = f.Offset + sz;
             if (end > totalSize) totalSize = end;
         }
     }
 
-    // ---------- Element emission -----------------------------------------
+    // ---------- Async drilldown emission ---------------------------------
 
-    /// <summary>
-    /// Sync emission, no drilldown. Used by the legacy Render() path and
-    /// (internally) when the async path bottoms out.
-    /// </summary>
-    private static void EmitElements(
+    private static async Task<int> EmitClassFieldsAsync(
         StringBuilder sb, string indent,
-        List<EmittedElement> elements,
-        System.Action<StringBuilder, string, EmittedElement>? childRenderer,
-        ExportOptions options, IClassInfoLookup? lookup,
-        HashSet<string> visited)
+        GetClassInfoResult info, bool isInherited,
+        int baseOffset, int offsetAdjust, string? namePrefix,
+        string? assemblyName, ExportOptions options,
+        IClassInfoLookup? lookup, HashSet<string> visited,
+        int currentDepth, int ptr, CancellationToken ct)
     {
-        foreach (var e in elements)
+        if (info.Fields is not { Count: > 0 } fields) return baseOffset;
+        string declaredIn = DeclaredInLabel(info);
+        int maxEnd = baseOffset;
+
+        foreach (FieldEntry f in fields.Where(x => !x.Static))
         {
-            EmitElementOpen(sb, indent, e);
-            sb.Append("/>\n");
-        }
-    }
+            int fieldOffset = baseOffset + Math.Max(0, f.Offset - offsetAdjust);
+            string fieldName = string.IsNullOrEmpty(namePrefix) ? f.Name : namePrefix + f.Name;
+            string desc = isInherited
+                ? $"{fieldName} : {f.Type ?? "?"}  (inherited from {declaredIn})"
+                : $"{fieldName} : {f.Type ?? "?"}";
 
-    private static async Task EmitElementsAsync(
-        StringBuilder sb, string indent,
-        List<EmittedElement> elements,
-        string? assemblyName,
-        ExportOptions options, IClassInfoLookup? lookup,
-        HashSet<string> visited, int currentDepth,
-        CancellationToken ct)
-    {
-        foreach (var e in elements)
-        {
-            // Decide whether to grow a nested <Structure> child.
-            bool shouldDrill =
-                lookup is not null
-                && currentDepth < options.DrilldownDepth
-                && e.IsPointer
-                && !string.IsNullOrEmpty(e.FieldTypeRaw);
+            ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
 
-            if (!shouldDrill)
+            // 1. Known primitive / non-pointer scalar.
+            if (!shape.IsPointer)
             {
-                EmitElementOpen(sb, indent, e);
-                sb.Append("/>\n");
+                bool isNativeInt = TemplateExportHelpers.IsNativeIntType(f.Type);
+                string vt = isNativeInt ? TemplateExportHelpers.PointerVartype(ptr) : shape.CeTypeKeyword;
+                int sz = isNativeInt ? ptr : shape.SizeBytes;
+                EmitFlat(sb, indent, fieldOffset, vt, sz, desc, DisplayMethodForType(f.Type, vt));
+                if (fieldOffset + sz > maxEnd) maxEnd = fieldOffset + sz;
                 continue;
             }
 
-            // Resolve target class for drilldown.
-            var target = UnityTypeMap.ExtractElementClass(e.FieldTypeRaw);
-            if (target is null)
+            // 2. Contiguous collection: T[] or List<T>.
+            if (!string.IsNullOrEmpty(f.Type)
+                && InstanceFieldClassifier.TryParseCollectionType(f.Type, out string elementType, out bool isList))
             {
-                EmitElementOpen(sb, indent, e);
-                sb.Append("/>\n");
-                continue;
-            }
-
-            // Cycle check on (assembly!ns.name) so the same class doesn't
-            // reappear in its own descendants forever.
-            string cycleKey = $"{assemblyName ?? "?"}!{target.Value.Namespace}.{target.Value.Name}";
-            if (!visited.Add(cycleKey))
-            {
-                EmitElementOpen(sb, indent, e);
-                sb.Append("/>\n");
-                continue;
-            }
-
-            GetClassInfoResult? child = null;
-            try
-            {
-                child = await lookup!.GetClassInfoAsync(
-                    assemblyName ?? string.Empty,
-                    target.Value.Namespace, target.Value.Name, ct).ConfigureAwait(false);
-            }
-            catch { /* tolerate pipe failures — fall through to flat element */ }
-
-            if (child is null || !string.IsNullOrEmpty(child.Error))
-            {
-                visited.Remove(cycleKey);
-                EmitElementOpen(sb, indent, e);
-                sb.Append("/>\n");
-                continue;
-            }
-
-            // Open element with a child Structure inside.
-            EmitElementOpen(sb, indent, e);
-            sb.Append(">\n");
-
-            string childIndent = indent + "  ";
-            string childStructIndent = indent + "  ";
-            string childElementsIndent = indent + "      ";
-
-            // Build the child's own element list (no inherited chain — that
-            // would explode quickly; user can recurse from a top-level export).
-            var childElements = new List<EmittedElement>();
-            int childTotal = 0;
-            AddFields(childElements, ref childTotal, child, isInherited: false);
-
-            string childName = StructName(child, assemblyName);
-            // Collection-typed fields: emit ArrayLimit synthetic entries so
-            // the user gets a per-index breakdown instead of a single struct
-            // header. Each entry sits at index*elemSize within the child
-            // structure (CE will add the dereferenced data pointer).
-            bool isCollection = UnityTypeMap.IsCollectionType(e.FieldTypeRaw);
-            if (isCollection && options.ArrayLimit > 0)
-            {
-                // Build per-index elements that wrap the child class. The
-                // outer Structure becomes a flat array; each <Element> at
-                // offset i*size points to a nested Structure for the element
-                // class. We treat the element class as if it had been the
-                // child target.
-                int elemSize = childTotal > 0 ? childTotal : 8;
-                OpenStructure(sb, childStructIndent,
-                              $"{childName}[{options.ArrayLimit}]", elemSize * options.ArrayLimit);
-                for (int i = 0; i < options.ArrayLimit; ++i)
+                if (fieldOffset + ptr > maxEnd) maxEnd = fieldOffset + ptr;
+                if (currentDepth < options.DrilldownDepth && options.ArrayLimit > 0)
                 {
-                    int slotOffset = i * elemSize;
-                    var slot = new EmittedElement(
-                        Offset: slotOffset,
-                        Vartype: "Pointer",
-                        Bytesize: 8,
-                        Description: $"[{i}] {childName}",
-                        DisplayMethod: "hexadecimal",
-                        FieldTypeRaw: e.FieldTypeRaw, // recurse into element class on next level
-                        IsPointer: true);
-
-                    // Each slot becomes a nested element with the resolved struct.
-                    EmitElementOpen(sb, childElementsIndent, slot);
-                    sb.Append(">\n");
-                    OpenStructure(sb, childElementsIndent + "  ", childName, childTotal);
-                    await EmitElementsAsync(sb, childElementsIndent + "      ",
-                                            childElements, assemblyName, options,
-                                            lookup, visited, currentDepth + 1, ct)
-                        .ConfigureAwait(false);
-                    CloseStructure(sb, childElementsIndent + "  ");
-                    sb.Append(childElementsIndent).Append("</Element>\n");
+                    await EmitCollectionElementAsync(
+                        sb, indent, fieldOffset, desc, elementType, isList,
+                        assemblyName, options, lookup, visited,
+                        currentDepth, ptr, ct).ConfigureAwait(false);
                 }
-                CloseStructure(sb, childStructIndent);
+                else
+                {
+                    EmitFlat(sb, indent, fieldOffset, "Pointer", ptr, desc, "hexadecimal");
+                }
+                continue;
+            }
+
+            // 3. Non-array collection (HashSet, Dictionary, IList, IEnumerable, ...):
+            //    flat Pointer element — never fabricate an array layout.
+            if (TemplateExportHelpers.IsNonArrayCollectionType(f.Type))
+            {
+                EmitFlat(sb, indent, fieldOffset, "Pointer", ptr, desc, "hexadecimal");
+                if (fieldOffset + ptr > maxEnd) maxEnd = fieldOffset + ptr;
+                continue;
+            }
+
+            // 4. Ambiguous game type: resolve via lookup even at depth cap so
+            //    enums and ValueType structs never emit Vartype="Pointer".
+            GetClassInfoResult? child = null;
+            string? cycleKey = null;
+            if (lookup is not null
+                && !string.IsNullOrEmpty(f.Type)
+                && !TemplateExportHelpers.IsFrameworkOrEngineNamespace(f.Type)
+                && InstanceFieldClassifier.TryParseClassName(f.Type, out string cns, out string cname))
+            {
+                string key = $"{assemblyName ?? "?"}!{cns}.{cname}";
+                if (!visited.Contains(key))
+                {
+                    child = await TemplateExportHelpers.TryLookupClassAsync(
+                        lookup, assemblyName, cns, cname, ct).ConfigureAwait(false);
+                    if (child is not null) cycleKey = key;
+                }
+            }
+
+            if (child is not null && TemplateExportHelpers.IsEnumClass(child))
+            {
+                string underlying = TemplateExportHelpers.ResolveEnumUnderlyingType(child);
+                ManagedTypeShape es = UnityTypeMap.Resolve(underlying);
+                EmitFlat(sb, indent, fieldOffset, es.CeTypeKeyword, es.SizeBytes, desc,
+                         DisplayMethodForType(underlying, es.CeTypeKeyword));
+                if (fieldOffset + es.SizeBytes > maxEnd) maxEnd = fieldOffset + es.SizeBytes;
+                continue;
+            }
+
+            if (child is not null && TemplateExportHelpers.IsValueTypeClass(child))
+            {
+                int headerAdj = TemplateExportHelpers.ComputeValueTypeHeaderAdjust(child, ptr);
+                if (currentDepth < options.DrilldownDepth && cycleKey is not null && visited.Add(cycleKey))
+                {
+                    int inlineEnd;
+                    try
+                    {
+                        inlineEnd = await EmitClassFieldsAsync(
+                            sb, indent, child, isInherited: false,
+                            baseOffset: fieldOffset, offsetAdjust: headerAdj,
+                            namePrefix: fieldName + ".",
+                            assemblyName, options, lookup, visited,
+                            currentDepth + 1, ptr, ct).ConfigureAwait(false);
+                    }
+                    finally { visited.Remove(cycleKey); }
+
+                    if (inlineEnd > fieldOffset)
+                    {
+                        if (inlineEnd > maxEnd) maxEnd = inlineEnd;
+                    }
+                    else
+                    {
+                        // Empty value struct: emit 1-byte inline placeholder (never Pointer).
+                        EmitFlat(sb, indent, fieldOffset, "Array of byte", 1, desc, "hexadecimal");
+                        if (fieldOffset + 1 > maxEnd) maxEnd = fieldOffset + 1;
+                    }
+                }
+                else
+                {
+                    int sz = await TemplateExportHelpers.ComputeInlineStructSizeAsync(
+                        child, assemblyName, ptr, lookup, visited, ct).ConfigureAwait(false);
+                    if (sz <= 0) sz = ptr;
+                    EmitFlat(sb, indent, fieldOffset, "Array of byte", sz, desc, "hexadecimal");
+                    if (fieldOffset + sz > maxEnd) maxEnd = fieldOffset + sz;
+                }
+                continue;
+            }
+
+            // 5. Reference class (resolved or unresolved).
+            if (fieldOffset + ptr > maxEnd) maxEnd = fieldOffset + ptr;
+            if (child is not null
+                && currentDepth < options.DrilldownDepth
+                && cycleKey is not null
+                && visited.Add(cycleKey))
+            {
+                try
+                {
+                    var elem = new EmittedElement(fieldOffset, "Pointer", ptr, desc, "hexadecimal");
+                    EmitElementOpen(sb, indent, elem);
+                    sb.Append(">\n");
+
+                    string childStructIndent = indent + "  ";
+                    string childElemsIndent  = indent + "      ";
+                    var childBody = new StringBuilder(512);
+                    int childTotal = await EmitClassFieldsAsync(
+                        childBody, childElemsIndent, child, isInherited: false,
+                        baseOffset: 0, offsetAdjust: 0, namePrefix: null,
+                        assemblyName, options, lookup, visited,
+                        currentDepth + 1, ptr, ct).ConfigureAwait(false);
+
+                    OpenStructure(sb, childStructIndent, StructName(child, assemblyName), childTotal);
+                    sb.Append(childBody);
+                    CloseStructure(sb, childStructIndent);
+                    sb.Append(indent).Append("</Element>\n");
+                }
+                finally { visited.Remove(cycleKey); }
             }
             else
             {
-                OpenStructure(sb, childStructIndent, childName, childTotal);
-                await EmitElementsAsync(sb, childElementsIndent,
-                                        childElements, assemblyName, options,
-                                        lookup, visited, currentDepth + 1, ct)
-                    .ConfigureAwait(false);
-                CloseStructure(sb, childStructIndent);
+                EmitFlat(sb, indent, fieldOffset, "Pointer", ptr, desc, "hexadecimal");
+            }
+        }
+
+        return maxEnd;
+    }
+
+    private static async Task EmitCollectionElementAsync(
+        StringBuilder sb, string indent, int fieldOffset, string desc,
+        string elementType, bool isList,
+        string? assemblyName, ExportOptions options,
+        IClassInfoLookup? lookup, HashSet<string> visited,
+        int currentDepth, int ptr, CancellationToken ct)
+    {
+        int itemsOff = 2 * ptr; // List<T>._items: +0x10 (x64) / +0x08 (x86)
+        int sizeOff  = 3 * ptr; // List<T>._size:  +0x18 (x64) / +0x0C (x86)
+        int dataOff  = 4 * ptr; // SZARRAY data:   +0x20 (x64) / +0x10 (x86)
+
+        var outer = new EmittedElement(fieldOffset, "Pointer", ptr, desc, "hexadecimal");
+        EmitElementOpen(sb, indent, outer);
+        sb.Append(">\n");
+
+        string arrStructIndent = indent + "  ";
+        if (isList)
+        {
+            string listStructIndent = indent + "  ";
+            string listElemsIndent  = indent + "      ";
+            OpenStructure(sb, listStructIndent, $"List<{elementType}>", sizeOff + 4);
+
+            var itemsElem = new EmittedElement(
+                itemsOff, "Pointer", ptr, $"_items : {elementType}[]", "hexadecimal");
+            EmitElementOpen(sb, listElemsIndent, itemsElem);
+            sb.Append(">\n");
+
+            arrStructIndent = listElemsIndent + "  ";
+            await EmitSzArrayStructureAsync(
+                sb, arrStructIndent, elementType, dataOff,
+                assemblyName, options, lookup, visited,
+                currentDepth, ptr, ct).ConfigureAwait(false);
+
+            sb.Append(listElemsIndent).Append("</Element>\n");
+            EmitFlat(sb, listElemsIndent, sizeOff, "4 Bytes", 4, "_size : System.Int32", "signed integer");
+            CloseStructure(sb, listStructIndent);
+        }
+        else
+        {
+            await EmitSzArrayStructureAsync(
+                sb, arrStructIndent, elementType, dataOff,
+                assemblyName, options, lookup, visited,
+                currentDepth, ptr, ct).ConfigureAwait(false);
+        }
+
+        sb.Append(indent).Append("</Element>\n");
+    }
+
+    private static async Task EmitSzArrayStructureAsync(
+        StringBuilder sb, string structIndent, string elementType, int dataOff,
+        string? assemblyName, ExportOptions options,
+        IClassInfoLookup? lookup, HashSet<string> visited,
+        int currentDepth, int ptr, CancellationToken ct)
+    {
+        string elemsIndent = structIndent + "    ";
+        var body = new StringBuilder(1024);
+        int totalSize = dataOff;
+        string arrLabel = $"{elementType}[{options.ArrayLimit}]";
+
+        ManagedTypeShape elemShape = UnityTypeMap.Resolve(elementType);
+        if (!elemShape.IsPointer)
+        {
+            bool isNativeInt = TemplateExportHelpers.IsNativeIntType(elementType);
+            int stride = isNativeInt ? ptr : elemShape.SizeBytes;
+            string vt  = isNativeInt ? TemplateExportHelpers.PointerVartype(ptr) : elemShape.CeTypeKeyword;
+            string dm  = DisplayMethodForType(elementType, vt);
+            for (int i = 0; i < options.ArrayLimit; ++i)
+            {
+                int off = dataOff + i * stride;
+                EmitFlat(body, elemsIndent, off, vt, stride, $"[{i}] {elementType}", dm);
+                totalSize = off + stride;
+            }
+        }
+        else
+        {
+            GetClassInfoResult? elemClass = null;
+            string? cycleKey = null;
+            if (lookup is not null
+                && !TemplateExportHelpers.IsFrameworkOrEngineNamespace(elementType)
+                && InstanceFieldClassifier.TryParseClassName(elementType, out string ens, out string ename))
+            {
+                string key = $"{assemblyName ?? "?"}!{ens}.{ename}";
+                if (!visited.Contains(key))
+                {
+                    elemClass = await TemplateExportHelpers.TryLookupClassAsync(
+                        lookup, assemblyName, ens, ename, ct).ConfigureAwait(false);
+                    if (elemClass is not null) cycleKey = key;
+                }
             }
 
-            sb.Append(indent).Append("</Element>\n");
-            visited.Remove(cycleKey);
+            if (elemClass is not null && TemplateExportHelpers.IsEnumClass(elemClass))
+            {
+                arrLabel = $"{StructName(elemClass, assemblyName)}[{options.ArrayLimit}]";
+                string underlying = TemplateExportHelpers.ResolveEnumUnderlyingType(elemClass);
+                ManagedTypeShape es = UnityTypeMap.Resolve(underlying);
+                string dm = DisplayMethodForType(underlying, es.CeTypeKeyword);
+                for (int i = 0; i < options.ArrayLimit; ++i)
+                {
+                    int off = dataOff + i * es.SizeBytes;
+                    EmitFlat(body, elemsIndent, off, es.CeTypeKeyword, es.SizeBytes,
+                             $"[{i}] {StructName(elemClass, assemblyName)}", dm);
+                    totalSize = off + es.SizeBytes;
+                }
+            }
+            else if (elemClass is not null && TemplateExportHelpers.IsValueTypeClass(elemClass))
+            {
+                string elemName = StructName(elemClass, assemblyName);
+                arrLabel = $"{elemName}[{options.ArrayLimit}]";
+                int headerAdj = TemplateExportHelpers.ComputeValueTypeHeaderAdjust(elemClass, ptr);
+                int elemSize  = await TemplateExportHelpers.ComputeInlineStructSizeAsync(
+                    elemClass, assemblyName, ptr, lookup, visited, ct).ConfigureAwait(false);
+                if (elemSize > 0 && cycleKey is not null && visited.Add(cycleKey))
+                {
+                    try
+                    {
+                        for (int i = 0; i < options.ArrayLimit; ++i)
+                        {
+                            int slotOff = dataOff + i * elemSize;
+                            int slotEnd = await EmitClassFieldsAsync(
+                                body, elemsIndent, elemClass, isInherited: false,
+                                baseOffset: slotOff, offsetAdjust: headerAdj,
+                                namePrefix: $"[{i}].",
+                                assemblyName, options, lookup, visited,
+                                currentDepth + 1, ptr, ct).ConfigureAwait(false);
+                            totalSize = Math.Max(totalSize, Math.Max(slotOff + elemSize, slotEnd));
+                        }
+                    }
+                    finally { visited.Remove(cycleKey); }
+                }
+            }
+            else if (elemClass is not null && cycleKey is not null && visited.Add(cycleKey))
+            {
+                // Reference-type element slots: pointer stride at dataOff + i*ptr,
+                // each Pointer element dereferences into the element's <Structure>.
+                string childName = StructName(elemClass, assemblyName);
+                arrLabel = $"{childName}[{options.ArrayLimit}]";
+                try
+                {
+                    for (int i = 0; i < options.ArrayLimit; ++i)
+                    {
+                        int slotOff = dataOff + i * ptr;
+                        var slot = new EmittedElement(slotOff, "Pointer", ptr, $"[{i}] {childName}", "hexadecimal");
+                        EmitElementOpen(body, elemsIndent, slot);
+                        body.Append(">\n");
+
+                        var childBody = new StringBuilder(512);
+                        int childTotal = await EmitClassFieldsAsync(
+                            childBody, elemsIndent + "      ", elemClass, isInherited: false,
+                            baseOffset: 0, offsetAdjust: 0, namePrefix: null,
+                            assemblyName, options, lookup, visited,
+                            currentDepth + 1, ptr, ct).ConfigureAwait(false);
+
+                        OpenStructure(body, elemsIndent + "  ", childName, childTotal);
+                        body.Append(childBody);
+                        CloseStructure(body, elemsIndent + "  ");
+                        body.Append(elemsIndent).Append("</Element>\n");
+                        totalSize = slotOff + ptr;
+                    }
+                }
+                finally { visited.Remove(cycleKey); }
+            }
+            else
+            {
+                for (int i = 0; i < options.ArrayLimit; ++i)
+                {
+                    int off = dataOff + i * ptr;
+                    EmitFlat(body, elemsIndent, off, "Pointer", ptr, $"[{i}] {elementType}", "hexadecimal");
+                    totalSize = off + ptr;
+                }
+            }
         }
+
+        OpenStructure(sb, structIndent, arrLabel, totalSize);
+        sb.Append(body);
+        CloseStructure(sb, structIndent);
+    }
+
+    // ---------- Emission primitives --------------------------------------
+
+    private static void EmitFlat(
+        StringBuilder sb, string indent, int offset,
+        string vartype, int bytesize, string description, string displayMethod)
+    {
+        EmitElementOpen(sb, indent, new EmittedElement(offset, vartype, bytesize, description, displayMethod));
+        sb.Append("/>\n");
     }
 
     private static void EmitElementOpen(StringBuilder sb, string indent, EmittedElement e)
@@ -347,6 +565,11 @@ public static class CsxExporter
     }
 
     // ---------- Helpers ---------------------------------------------------
+
+    private static string DeclaredInLabel(GetClassInfoResult info)
+        => string.IsNullOrEmpty(info.Namespace)
+            ? (info.Name ?? "?")
+            : $"{info.Namespace}.{info.Name}";
 
     private static void OpenStructure(StringBuilder sb, string indent,
                                       string name, int autoCreateStructsize)
@@ -381,13 +604,17 @@ public static class CsxExporter
         return string.IsNullOrEmpty(assemblyName) ? full : $"{assemblyName}!{full}";
     }
 
-    private static string DisplayMethodFor(string vartype) => vartype switch
+    private static string DisplayMethodForType(string? unityType, string vartype)
     {
-        "Float"   => "float",
-        "Double"  => "double",
-        "Pointer" => "hexadecimal",
-        _         => "unsigned integer",
-    };
+        if (vartype == "Float") return "float";
+        if (vartype == "Double") return "double";
+        if (vartype is "Pointer" or "Array of byte") return "hexadecimal";
+        return unityType switch
+        {
+            "System.SByte" or "System.Int16" or "System.Int32" or "System.Int64" => "signed integer",
+            _ => "unsigned integer",
+        };
+    }
 
     private static string XmlEscape(string s)
     {

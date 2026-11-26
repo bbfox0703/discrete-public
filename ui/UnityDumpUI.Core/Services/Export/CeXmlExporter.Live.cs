@@ -1430,12 +1430,15 @@ public static partial class CeXmlExporter
                      showAsHex: true, address: rel, offsets: null);
             return;
         }
-        // Enum is terminal — inline 4-byte signed leaf regardless of depth
-        // (matches the live Leaf/enum emit).
+        // Enum is terminal — inline scalar leaf matching the enum's underlying
+        // integer width/signedness regardless of depth.
         if (IsEnumClass(mi))
         {
-            EmitLeaf(sb, indent, ids, desc, vartype: "4 Bytes",
-                     showAsHex: false, showAsSigned: true, address: rel, offsets: null);
+            string underlying = TemplateExportHelpers.ResolveEnumUnderlyingType(mi);
+            ManagedTypeShape es = UnityTypeMap.Resolve(underlying);
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(underlying);
+            EmitLeaf(sb, indent, ids, desc, vartype: es.CeTypeKeyword,
+                     showAsHex: hex, showAsSigned: signed, address: rel, offsets: null);
             return;
         }
         bool valueStruct = IsValueTypeClass(mi);

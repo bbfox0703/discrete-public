@@ -83,10 +83,12 @@ public static partial class CeXmlExporter
         sb.Append("<CheatTable>\n");
         sb.Append("  <CheatEntries>\n");
 
-        string rootName  = StructLabel(self, assemblyName, nameMap);
+        int ptr = TemplateExportHelpers.NormalizePointerSize(options.PointerSize);
+        string layoutTag = ptr == 4 ? "x86 layout" : "x64 layout";
+        string rootName  = $"{StructLabel(self, assemblyName, nameMap)} ({layoutTag})";
         OpenGroup(sb, "    ", idGen, rootName, baseAddress,
                   offsets: null, collapsed: options.CollapsePointerNodes,
-                  varType: "8 Bytes", showAsHex: true);
+                  varType: PointerVartype(options), showAsHex: true);
 
         // Inherited fields first, then self's declared fields.
         if (ancestors is { Count: > 0 })
@@ -372,7 +374,7 @@ public static partial class CeXmlExporter
         // Wrap in a base-address group so each field's relative +0xNN address
         // resolves correctly without polluting the user's existing CE table.
         OpenGroup(sb, "    ", idGen, rootName, baseAddress,
-                  offsets: null, collapsed: false, varType: "8 Bytes", showAsHex: true);
+                  offsets: null, collapsed: false, varType: PointerVartype(options), showAsHex: true);
         foreach (FieldEntry field in fields)
         {
             await EmitOneFieldAsync(sb, "      ", idGen, field,
@@ -394,116 +396,332 @@ public static partial class CeXmlExporter
         GetClassInfoResult info, bool isInherited,
         string? assemblyName, ExportOptions options,
         IClassInfoLookup? lookup, HashSet<string> visited,
-        int currentDepth, CancellationToken ct)
+        int currentDepth, CancellationToken ct, int offsetAdjust = 0)
     {
         if (info.Fields is not { Count: > 0 } fields) return;
         foreach (FieldEntry f in fields.Where(x => !x.Static))
         {
             await EmitOneFieldAsync(sb, indent, ids, f, isInherited,
                                     assemblyName, options, lookup, visited,
-                                    currentDepth, ct).ConfigureAwait(false);
+                                    currentDepth, ct, offsetAdjust).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// Per-field emit. Shared between <see cref="EmitFieldsAsync"/> (which
-    /// loops a class's fields) and <see cref="RenderFieldAsync"/> (which
-    /// emits exactly one). Handles scalar leaves, pointer GroupHeaders with
-    /// <c>Offsets=[0]</c> dereference, optional drilldown into the resolved
-    /// element class, and per-index expansion for collection-typed fields.
+    /// Per-field template emit. Shared between <see cref="EmitFieldsAsync"/>
+    /// and <see cref="RenderFieldsAsync"/>. Resolves unknown game types via
+    /// <paramref name="lookup"/> to distinguish <c>System.Enum</c> (inline
+    /// scalar leaf), <c>System.ValueType</c> (inline non-deref group), and
+    /// reference classes (<c>Offsets=[0]</c> deref group). Contiguous
+    /// collections (<c>T[]</c> and <c>List&lt;T&gt;</c>) emit proper
+    /// SZARRAY (<c>4*ptr</c>) and <c>_items</c> (<c>2*ptr</c>) pointer chains.
     /// </summary>
     private static async Task EmitOneFieldAsync(
         StringBuilder sb, string indent, IdGen ids,
         FieldEntry f, bool isInherited,
         string? assemblyName, ExportOptions options,
         IClassInfoLookup? lookup, HashSet<string> visited,
-        int currentDepth, CancellationToken ct)
+        int currentDepth, CancellationToken ct, int offsetAdjust = 0)
     {
+        int ptr = TemplateExportHelpers.NormalizePointerSize(options.PointerSize);
+        int fieldOffset = Math.Max(0, f.Offset - offsetAdjust);
         ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
-        string desc = FieldDesc(f.Name, f.Type, options);
+        string desc = FieldDesc(f.Name, f.Type, options, options.DescShowOffset ? fieldOffset : null);
         if (isInherited && options.VerboseDescription) desc += "  (inherited)";
-        string addr = $"+{f.Offset:X}";
+        string addr = RelAddr(fieldOffset);
 
         if (!shape.IsPointer)
         {
             (bool hex, bool signed) = UnityTypeMap.CeDisplay(f.Type);
+            string vartype = TemplateExportHelpers.IsNativeIntType(f.Type)
+                ? PointerVartype(options)
+                : shape.CeTypeKeyword;
             EmitLeaf(sb, indent, ids, desc,
-                     vartype: shape.CeTypeKeyword,
+                     vartype: vartype,
                      showAsHex: hex, showAsSigned: signed,
                      address: addr, offsets: null);
             return;
         }
 
-        // Pointer field — GroupHeader with Offsets=[0] dereference.
-        bool isCollection = UnityTypeMap.IsCollectionType(f.Type);
-        bool canDrill = lookup is not null
-                        && currentDepth < options.DrilldownDepth
-                        && !string.IsNullOrEmpty(f.Type);
-
-        (string ns, string name)? target = canDrill
-            ? UnityTypeMap.ExtractElementClass(f.Type)
-            : null;
-
-        GetClassInfoResult? child = null;
-        string? cycleKey = null;
-        if (target is not null)
+        // Contiguous collection: T[] or List<T> (known SZARRAY / _items layout).
+        if (!string.IsNullOrEmpty(f.Type)
+            && InstanceFieldClassifier.TryParseCollectionType(f.Type, out string elementType, out bool isList))
         {
-            cycleKey = $"{assemblyName ?? "?"}!{target.Value.ns}.{target.Value.name}";
-            if (visited.Add(cycleKey))
+            await EmitTemplateCollectionAsync(
+                sb, indent, ids, desc, addr, elementType, isList, ptr,
+                assemblyName, options, lookup, visited, currentDepth, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Non-array collections (HashSet, IList, IEnumerable, Dictionary, ...)
+        // do NOT have a flat SZARRAY layout — emit a watchable pointer leaf
+        // instead of fabricating array slots or treating the container as T.
+        if (TemplateExportHelpers.IsNonArrayCollectionType(f.Type))
+        {
+            EmitLeaf(sb, indent, ids, desc,
+                     vartype: PointerVartype(options),
+                     showAsHex: true, showAsSigned: false,
+                     address: addr, offsets: null);
+            return;
+        }
+
+        // Managed System.String: expand into length/chars deref group when
+        // depth allows; at depth 0 keep a single-entry group for compact
+        // single/multi-field copy parity.
+        if (IsManagedString(f.Type))
+        {
+            if (currentDepth < options.DrilldownDepth)
             {
-                try
-                {
-                    child = await lookup!.GetClassInfoAsync(
-                        assemblyName ?? string.Empty,
-                        target.Value.ns, target.Value.name, ct).ConfigureAwait(false);
-                }
-                catch { /* tolerate */ }
-                if (child is null || !string.IsNullOrEmpty(child.Error))
-                {
-                    visited.Remove(cycleKey);
-                    child = null;
-                }
+                EmitStringDerefGroup(sb, indent, ids, desc, addr, charLength: null, ptr,
+                                     minChars: options.MinStringChars);
             }
             else
             {
-                cycleKey = null;
+                OpenGroup(sb, indent, ids, desc, addr,
+                          offsets: new[] { 0 },
+                          collapsed: options.CollapsePointerNodes,
+                          varType: null, showAsHex: true);
+                CloseGroup(sb, indent);
+            }
+            return;
+        }
+
+        // Ambiguous game type: resolve via lookup even at depth cap so enums
+        // and custom ValueType structs are never mis-emitted as deref pointers.
+        GetClassInfoResult? child = null;
+        string? cycleKey = null;
+        if (lookup is not null
+            && !string.IsNullOrEmpty(f.Type)
+            && !TemplateExportHelpers.IsFrameworkOrEngineNamespace(f.Type)
+            && InstanceFieldClassifier.TryParseClassName(f.Type, out string cns, out string cname))
+        {
+            string key = $"{assemblyName ?? "?"}!{cns}.{cname}";
+            if (!visited.Contains(key))
+            {
+                child = await TemplateExportHelpers.TryLookupClassAsync(
+                    lookup, assemblyName, cns, cname, ct).ConfigureAwait(false);
+                if (child is not null) cycleKey = key;
             }
         }
+
+        if (child is not null && TemplateExportHelpers.IsEnumClass(child))
+        {
+            string underlying = TemplateExportHelpers.ResolveEnumUnderlyingType(child);
+            ManagedTypeShape es = UnityTypeMap.Resolve(underlying);
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(underlying);
+            EmitLeaf(sb, indent, ids, desc,
+                     vartype: es.CeTypeKeyword,
+                     showAsHex: hex, showAsSigned: signed,
+                     address: addr, offsets: null);
+            return;
+        }
+
+        if (child is not null && TemplateExportHelpers.IsValueTypeClass(child))
+        {
+            if (currentDepth < options.DrilldownDepth && cycleKey is not null && visited.Add(cycleKey))
+            {
+                try
+                {
+                    int headerAdj = TemplateExportHelpers.ComputeValueTypeHeaderAdjust(child, ptr);
+                    OpenGroup(sb, indent, ids, desc, addr,
+                              offsets: null,
+                              collapsed: options.CollapsePointerNodes,
+                              varType: null, showAsHex: true);
+                    await EmitFieldsAsync(sb, indent + "  ", ids, child,
+                                          isInherited: false, assemblyName,
+                                          options, lookup, visited,
+                                          currentDepth + 1, ct, offsetAdjust: headerAdj).ConfigureAwait(false);
+                    CloseGroup(sb, indent);
+                }
+                finally { visited.Remove(cycleKey); }
+            }
+            else
+            {
+                // Depth-capped inline struct: emit an inline leaf (NO Offsets=[0]).
+                EmitLeaf(sb, indent, ids, desc,
+                         vartype: PointerVartype(options),
+                         showAsHex: true, showAsSigned: false,
+                         address: addr, offsets: null);
+            }
+            return;
+        }
+
+        // Reference class (resolved or unresolved) — pointer deref group.
+        OpenGroup(sb, indent, ids, desc, addr,
+                  offsets: new[] { 0 },
+                  collapsed: options.CollapsePointerNodes,
+                  varType: null, showAsHex: true);
+
+        if (child is not null
+            && currentDepth < options.DrilldownDepth
+            && cycleKey is not null
+            && visited.Add(cycleKey))
+        {
+            try
+            {
+                await EmitFieldsAsync(sb, indent + "  ", ids, child,
+                                      isInherited: false, assemblyName,
+                                      options, lookup, visited,
+                                      currentDepth + 1, ct, offsetAdjust: 0).ConfigureAwait(false);
+            }
+            finally { visited.Remove(cycleKey); }
+        }
+
+        CloseGroup(sb, indent);
+    }
+
+    private static async Task EmitTemplateCollectionAsync(
+        StringBuilder sb, string indent, IdGen ids,
+        string desc, string addr, string elementType, bool isList, int ptr,
+        string? assemblyName, ExportOptions options,
+        IClassInfoLookup? lookup, HashSet<string> visited,
+        int currentDepth, CancellationToken ct)
+    {
+        int itemsOff = 2 * ptr; // List<T>._items: +0x10 (x64) / +0x08 (x86)
+        int dataOff  = 4 * ptr; // SZARRAY data:   +0x20 (x64) / +0x10 (x86)
 
         OpenGroup(sb, indent, ids, desc, addr,
                   offsets: new[] { 0 },
                   collapsed: options.CollapsePointerNodes,
                   varType: null, showAsHex: true);
 
-        if (child is not null && isCollection && options.ArrayLimit > 0)
+        if (options.ArrayLimit > 0 && currentDepth < options.DrilldownDepth)
         {
-            int elemSize = ComputeStructSize(child);
-            if (elemSize <= 0) elemSize = 8;
-            for (int i = 0; i < options.ArrayLimit; ++i)
+            string elemIndent = indent + "  ";
+            if (isList)
             {
-                int elemOffset = i * elemSize;
-                OpenGroup(sb, indent + "  ", ids,
-                          $"[{i}]", $"+{elemOffset:X}",
-                          offsets: null,
+                OpenGroup(sb, elemIndent, ids,
+                          FieldDesc("_items", elementType + "[]", options),
+                          RelAddr(itemsOff),
+                          offsets: new[] { 0 },
                           collapsed: options.CollapsePointerNodes,
                           varType: null, showAsHex: true);
-                await EmitFieldsAsync(sb, indent + "    ", ids, child,
-                                      isInherited: false, assemblyName,
-                                      options, lookup, visited,
-                                      currentDepth + 1, ct).ConfigureAwait(false);
-                CloseGroup(sb, indent + "  ");
+                elemIndent += "  ";
             }
-        }
-        else if (child is not null)
-        {
-            await EmitFieldsAsync(sb, indent + "  ", ids, child,
-                                  isInherited: false, assemblyName,
-                                  options, lookup, visited,
-                                  currentDepth + 1, ct).ConfigureAwait(false);
+
+            ManagedTypeShape elemShape = UnityTypeMap.Resolve(elementType);
+            if (!elemShape.IsPointer)
+            {
+                int stride = TemplateExportHelpers.IsNativeIntType(elementType) ? ptr : elemShape.SizeBytes;
+                string vt  = TemplateExportHelpers.IsNativeIntType(elementType)
+                    ? PointerVartype(options)
+                    : elemShape.CeTypeKeyword;
+                (bool hex, bool signed) = UnityTypeMap.CeDisplay(elementType);
+                for (int i = 0; i < options.ArrayLimit; ++i)
+                {
+                    EmitLeaf(sb, elemIndent, ids, $"[{i}]",
+                             vartype: vt, showAsHex: hex, showAsSigned: signed,
+                             address: RelAddr(dataOff + i * stride), offsets: null,
+                             color: RecordColorFor(options, i));
+                }
+            }
+            else if (IsManagedString(elementType))
+            {
+                for (int i = 0; i < options.ArrayLimit; ++i)
+                {
+                    EmitStringDerefGroup(sb, elemIndent, ids, $"[{i}]",
+                                         RelAddr(dataOff + i * ptr), charLength: null, ptr,
+                                         minChars: options.MinStringChars,
+                                         color: RecordColorFor(options, i));
+                }
+            }
+            else
+            {
+                GetClassInfoResult? elemClass = null;
+                string? cycleKey = null;
+                if (lookup is not null
+                    && !TemplateExportHelpers.IsFrameworkOrEngineNamespace(elementType)
+                    && InstanceFieldClassifier.TryParseClassName(elementType, out string ens, out string ename))
+                {
+                    string key = $"{assemblyName ?? "?"}!{ens}.{ename}";
+                    if (!visited.Contains(key))
+                    {
+                        elemClass = await TemplateExportHelpers.TryLookupClassAsync(
+                            lookup, assemblyName, ens, ename, ct).ConfigureAwait(false);
+                        if (elemClass is not null) cycleKey = key;
+                    }
+                }
+
+                if (elemClass is not null && TemplateExportHelpers.IsEnumClass(elemClass))
+                {
+                    string underlying = TemplateExportHelpers.ResolveEnumUnderlyingType(elemClass);
+                    ManagedTypeShape es = UnityTypeMap.Resolve(underlying);
+                    (bool hex, bool signed) = UnityTypeMap.CeDisplay(underlying);
+                    for (int i = 0; i < options.ArrayLimit; ++i)
+                    {
+                        EmitLeaf(sb, elemIndent, ids, $"[{i}]",
+                                 vartype: es.CeTypeKeyword, showAsHex: hex, showAsSigned: signed,
+                                 address: RelAddr(dataOff + i * es.SizeBytes), offsets: null,
+                                 color: RecordColorFor(options, i));
+                    }
+                }
+                else if (elemClass is not null && TemplateExportHelpers.IsValueTypeClass(elemClass))
+                {
+                    int headerAdj = TemplateExportHelpers.ComputeValueTypeHeaderAdjust(elemClass, ptr);
+                    int elemSize  = await TemplateExportHelpers.ComputeInlineStructSizeAsync(
+                        elemClass, assemblyName, ptr, lookup, visited, ct).ConfigureAwait(false);
+                    if (elemSize > 0 && cycleKey is not null && visited.Add(cycleKey))
+                    {
+                        try
+                        {
+                            for (int i = 0; i < options.ArrayLimit; ++i)
+                            {
+                                OpenGroup(sb, elemIndent, ids, $"[{i}]",
+                                          RelAddr(dataOff + i * elemSize),
+                                          offsets: null,
+                                          collapsed: options.CollapsePointerNodes,
+                                          varType: null, showAsHex: true,
+                                          color: RecordColorFor(options, i));
+                                await EmitFieldsAsync(sb, elemIndent + "  ", ids, elemClass,
+                                                      isInherited: false, assemblyName,
+                                                      options, lookup, visited,
+                                                      currentDepth + 1, ct, offsetAdjust: headerAdj).ConfigureAwait(false);
+                                CloseGroup(sb, elemIndent);
+                            }
+                        }
+                        finally { visited.Remove(cycleKey); }
+                    }
+                }
+                else if (elemClass is not null && cycleKey is not null && visited.Add(cycleKey))
+                {
+                    // Reference-type element slots: pointer stride at dataOff + i*ptr,
+                    // each slot dereferenced with Offsets=[0].
+                    try
+                    {
+                        for (int i = 0; i < options.ArrayLimit; ++i)
+                        {
+                            OpenGroup(sb, elemIndent, ids, $"[{i}]",
+                                      RelAddr(dataOff + i * ptr),
+                                      offsets: new[] { 0 },
+                                      collapsed: options.CollapsePointerNodes,
+                                      varType: null, showAsHex: true,
+                                      color: RecordColorFor(options, i));
+                            await EmitFieldsAsync(sb, elemIndent + "  ", ids, elemClass,
+                                                  isInherited: false, assemblyName,
+                                                  options, lookup, visited,
+                                                  currentDepth + 1, ct, offsetAdjust: 0).ConfigureAwait(false);
+                            CloseGroup(sb, elemIndent);
+                        }
+                    }
+                    finally { visited.Remove(cycleKey); }
+                }
+                else
+                {
+                    // Unresolved / framework ref / cycle: emit pointer-strided leaves.
+                    for (int i = 0; i < options.ArrayLimit; ++i)
+                    {
+                        EmitLeaf(sb, elemIndent, ids, $"[{i}]",
+                                 vartype: PointerVartype(options), showAsHex: true, showAsSigned: false,
+                                 address: RelAddr(dataOff + i * ptr), offsets: null,
+                                 color: RecordColorFor(options, i));
+                    }
+                }
+            }
+
+            if (isList) CloseGroup(sb, indent + "  ");
         }
 
         CloseGroup(sb, indent);
-        if (cycleKey is not null) visited.Remove(cycleKey);
     }
 
     // ---------- Emission primitives --------------------------------------
@@ -572,20 +790,6 @@ public static partial class CeXmlExporter
     }
 
     // ---------- Helpers ---------------------------------------------------
-
-    /// <summary>Total bytes covered by the largest non-static field (offset+size).</summary>
-    private static int ComputeStructSize(GetClassInfoResult info)
-    {
-        if (info.Fields is null) return 0;
-        int max = 0;
-        foreach (FieldEntry f in info.Fields)
-        {
-            if (f.Static) continue;
-            int end = f.Offset + UnityTypeMap.Resolve(f.Type).SizeBytes;
-            if (end > max) max = end;
-        }
-        return max;
-    }
 
     private static string StructLabel(GetClassInfoResult info, string? assemblyName,
                                       ExportNameMap? nameMap = null)
