@@ -9,6 +9,7 @@
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
+#include "../shared/SehFilter.h"
 
 #include <windows.h>
 
@@ -29,7 +30,7 @@ namespace {
 #pragma warning(push)
 #pragma warning(disable: 4509)
 void* SehStaticDataProbe(fn_class_get_static_data fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 

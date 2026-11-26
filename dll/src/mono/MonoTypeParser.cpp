@@ -2,6 +2,7 @@
 
 #include "MonoTypeParser.h"
 
+#include "../shared/SehFilter.h"
 #include "MonoResolver.h"
 
 #include <windows.h>
@@ -15,7 +16,7 @@ namespace {
 char* SehTypeGetName(fn_type_get_name fn, MonoType* type) {
     __try {
         return fn(type);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {
         return nullptr;
     }
 }

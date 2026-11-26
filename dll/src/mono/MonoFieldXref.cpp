@@ -25,7 +25,9 @@
 #include "MonoThreadAttach.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/ScanCancel.h"
+#include "../shared/SehFilter.h"
 
 #include <windows.h>
 
@@ -138,30 +140,36 @@ std::size_t IlOpAdvance(const std::uint8_t* p, std::size_t remaining,
 #pragma warning(push)
 #pragma warning(disable: 4509)
 MonoMethod* SehNextMethod(fn_class_get_methods fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoMethodHeader* SehGetHeader(fn_method_get_header fn, MonoMethod* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const std::uint8_t* SehGetCode(fn_method_header_get_code fn,
                                MonoMethodHeader* h,
                                std::uint32_t* size, std::uint32_t* stack) {
     __try {
         return reinterpret_cast<const std::uint8_t*>(fn(h, size, stack));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {
         if (size  != nullptr) *size  = 0;
         if (stack != nullptr) *stack = 0;
         return nullptr;
     }
 }
 void SehFreeHeader(fn_metadata_free_mh fn, MonoMethodHeader* h) {
-    __try { fn(h); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try { fn(h); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {}
 }
 MonoClassField* SehNextField(fn_class_get_fields fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("mono_class_get_fields", code);
+        return nullptr;
+    }
 }
 std::uint32_t SehGetFieldToken(fn_class_get_field_token fn, MonoClassField* f) {
-    __try { return fn(f); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(f); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 #pragma warning(pop)
 

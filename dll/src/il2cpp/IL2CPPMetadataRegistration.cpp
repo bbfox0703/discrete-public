@@ -27,12 +27,10 @@
 //   offset  0x70  size_t metadataUsagesCount     (8 bytes — no padding)
 //   offset  0x78  ptr    metadataUsages
 //
-// Detection heuristic:
-//   * Each of the first 7 pairs has a plausible nonzero int32 count, a zero
-//     padding word, and a non-null 8-aligned pointer.
-//   * The 8th pair has a plausible 64-bit count and a non-null pointer.
-//   * Final verification: deref types[0] and check the type-tag byte at
-//     offset 10 is a valid `Il2CppTypeEnum` value (0x01..0x20).
+// B-M7 — every module read (PE headers, section scan chunks, types[] entries)
+// goes through Memory::SafeRead / SafeReadBytes (1 MiB chunks with 128 B
+// overlap and 4 KiB page-by-page fallback on AC-stripped pages) so PAGE_NOACCESS
+// or PAGE_GUARD pages inside GameAssembly.dll never AV the game process.
 
 #include "IL2CPPMetadataRegistration.h"
 
@@ -40,6 +38,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
 #include "../shared/ModuleHelper.h"
+#include "../shared/SafeChunkRead.h"
 
 #include <windows.h>
 
@@ -53,49 +52,25 @@ namespace {
 
 std::once_flag g_once;
 struct State {
-    bool                    found            = false;
-    const std::uint8_t*     reg              = nullptr;
-    const void* const*      types            = nullptr;
-    std::size_t             typesCount       = 0;
+    bool                    found               = false;
+    const std::uint8_t*     reg                 = nullptr;
+    const void* const*      types               = nullptr;
+    std::size_t             typesCount          = 0;
     // Phase 28b-v3.1 — metadataUsages array (registration + 0x78,
     // count at +0x70).
-    const void* const*      metadataUsages   = nullptr;
+    const void* const*      metadataUsages      = nullptr;
     std::size_t             metadataUsagesCount = 0;
 } g_state;
 
-constexpr std::uint32_t kMaxCount32   = 1u << 27;        // 134M, generous
-constexpr std::uint64_t kMaxCount64   = 1ull << 32;
-constexpr std::size_t   kRegBytes     = 0x80;
+constexpr std::uint32_t kMaxCount32    = 1u << 27;        // 134M, generous
+constexpr std::uint64_t kMaxCount64    = 1ull << 32;
+constexpr std::size_t   kRegBytes      = 0x80;
+constexpr std::size_t   kScanChunkBytes = 1024u * 1024u;  // 1 MiB
 // Real Unity games always have a substantial type system. SaGa F2R's
 // metadata references type#15031+, so 100 is a comfortable lower bound that
 // still kills the structural false positives observed in build #48
 // (typesCount=1).
 constexpr std::uint32_t kMinTypesCount = 100;
-
-struct Section { const std::uint8_t* base; std::size_t size; };
-
-std::vector<Section> ListInitDataSections(const std::uint8_t* moduleBase) {
-    std::vector<Section> out;
-    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(moduleBase);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return out;
-    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(moduleBase + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return out;
-    auto* sec = IMAGE_FIRST_SECTION(nt);
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
-        const DWORD ch = sec->Characteristics;
-        if (!(ch & IMAGE_SCN_MEM_READ)) continue;
-        if (ch & IMAGE_SCN_MEM_EXECUTE) continue;
-        // Initialized or uninitialized data only — skip rsrc / reloc.
-        constexpr DWORD kDataMask =
-            IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_CNT_UNINITIALIZED_DATA;
-        if (!(ch & kDataMask)) continue;
-        Section s{};
-        s.base = moduleBase + sec->VirtualAddress;
-        s.size = sec->Misc.VirtualSize;
-        out.push_back(s);
-    }
-    return out;
-}
 
 // Validate one types[] entry. Returns:
 //   1 = non-null pointer to a readable Il2CppType with a valid tag (good)
@@ -114,7 +89,9 @@ int ValidateTypeEntry(const void* const* arr, std::size_t idx) {
     return (tag >= 0x01 && tag <= 0x20) ? 1 : -1;
 }
 
-bool TestCandidate(const std::uint8_t* p, std::string* whyNot = nullptr) {
+// `localBuf` points into our SEH-copied local scratch buffer (at least
+// kRegBytes readable), never directly into module memory.
+bool TestCandidate(const std::uint8_t* localBuf, std::string* whyNot = nullptr) {
     auto reject = [&](const char* msg) {
         if (whyNot) *whyNot = msg;
         return false;
@@ -122,7 +99,7 @@ bool TestCandidate(const std::uint8_t* p, std::string* whyNot = nullptr) {
     // First 7 pairs: int32 count, int32 zero pad, ptr. Allow count=0 paired
     // with null ptr (some small games have no generic classes / generic insts).
     for (int i = 0; i < 7; ++i) {
-        const std::uint8_t* slot = p + i * 16;
+        const std::uint8_t* slot = localBuf + i * 16;
         std::uint32_t count = 0; std::memcpy(&count, slot,     4);
         std::uint32_t pad   = 0; std::memcpy(&pad,   slot + 4, 4);
         std::uintptr_t ptr  = 0; std::memcpy(&ptr,   slot + 8, 8);
@@ -139,7 +116,7 @@ bool TestCandidate(const std::uint8_t* p, std::string* whyNot = nullptr) {
     }
     // 8th pair: u64 count, ptr.
     {
-        const std::uint8_t* slot = p + 7 * 16;
+        const std::uint8_t* slot = localBuf + 7 * 16;
         std::uint64_t count = 0; std::memcpy(&count, slot,     8);
         std::uintptr_t ptr  = 0; std::memcpy(&ptr,   slot + 8, 8);
         if (count >= kMaxCount64)  return reject("usages count too large");
@@ -154,14 +131,14 @@ bool TestCandidate(const std::uint8_t* p, std::string* whyNot = nullptr) {
     }
     // Real Unity games have a sizeable type system.
     std::uint32_t typesCount = 0;
-    std::memcpy(&typesCount, p + 0x30, 4);
+    std::memcpy(&typesCount, localBuf + 0x30, 4);
     if (typesCount < kMinTypesCount) return reject("typesCount < kMin");
 
     // Sample 5 spread indices in types[]. A real registration has at least
     // 3 of them pointing at valid Il2CppType structs; null entries are OK
     // (deferred init), but no entry should be unreadable / malformed.
     std::uintptr_t typesPtr = 0;
-    std::memcpy(&typesPtr, p + 0x38, 8);
+    std::memcpy(&typesPtr, localBuf + 0x38, 8);
     auto* types = reinterpret_cast<const void* const*>(typesPtr);
     const std::size_t indices[] = {
         0,
@@ -190,75 +167,97 @@ void DoFind() {
         return;
     }
 
-    auto sections = ListInitDataSections(base);
+    auto sections = SafePeScan::ListInitDataSectionsSafe(base);
     std::size_t scanBytes = 0;
     for (const auto& s : sections) scanBytes += s.size;
 
     // Diagnostic: log up to N near-misses where typesCount looks plausible.
     constexpr int kMaxNearMissLogs = 8;
     int nearMisses = 0;
+    std::vector<std::uint8_t> scratch;
+    scratch.reserve(kScanChunkBytes);
 
     for (const auto& sec : sections) {
         if (sec.size < kRegBytes) continue;
-        const std::uint8_t* end = sec.base + sec.size - kRegBytes;
-        for (const std::uint8_t* p = sec.base; p <= end; p += 8) {
-            // Cheap rejector first: padding zero at offset 4. Don't reject
-            // count==0 anymore — handled inside TestCandidate.
-            std::uint32_t firstPad = 0;
-            std::memcpy(&firstPad, p + 4, 4);
-            if (firstPad != 0) continue;
-            std::uint32_t firstCount = 0;
-            std::memcpy(&firstCount, p, 4);
-            if (firstCount >= kMaxCount32) continue;
+        bool hitFound = false;
 
-            std::string why;
-            if (!TestCandidate(p, &why)) {
-                // Log near-misses: candidate where typesCount is plausible.
-                std::uint32_t tc = 0;
-                std::memcpy(&tc, p + 0x30, 4);
-                if (tc >= kMinTypesCount && nearMisses < kMaxNearMissLogs) {
+        SafePeScan::ScanReadableSpans(
+            sec.base, sec.size, kScanChunkBytes, kRegBytes, scratch,
+            [&](const std::uint8_t* localSpan,
+                const std::uint8_t* realSpanBase,
+                std::size_t spanLen) -> bool {
+                if (spanLen < kRegBytes) return true;
+                // Align first candidate offset to an 8-byte boundary in the
+                // module's address space.
+                const std::uintptr_t realAddr0 = reinterpret_cast<std::uintptr_t>(realSpanBase);
+                const std::size_t alignPad = (8u - (realAddr0 & 7u)) & 7u;
+                if (alignPad + kRegBytes > spanLen) return true;
+
+                const std::size_t maxOff = spanLen - kRegBytes;
+                for (std::size_t off = alignPad; off <= maxOff; off += 8) {
+                    const std::uint8_t* pLocal = localSpan + off;
+                    const std::uint8_t* pReal  = realSpanBase + off;
+
+                    // Cheap rejector first: padding zero at offset 4.
+                    std::uint32_t firstPad = 0;
+                    std::memcpy(&firstPad, pLocal + 4, 4);
+                    if (firstPad != 0) continue;
+                    std::uint32_t firstCount = 0;
+                    std::memcpy(&firstCount, pLocal, 4);
+                    if (firstCount >= kMaxCount32) continue;
+
+                    std::string why;
+                    if (!TestCandidate(pLocal, &why)) {
+                        std::uint32_t tc = 0;
+                        std::memcpy(&tc, pLocal + 0x30, 4);
+                        if (tc >= kMinTypesCount && nearMisses < kMaxNearMissLogs) {
+                            char line[256];
+                            ::_snprintf_s(line, sizeof(line), _TRUNCATE,
+                                "MetadataRegistration: near-miss @0x%p typesCount=%u: %s",
+                                static_cast<const void*>(pReal), tc, why.c_str());
+                            Log::Write(MagicStrings::LogCategoryInit, line);
+                            ++nearMisses;
+                        }
+                        continue;
+                    }
+
+                    g_state.found = true;
+                    g_state.reg   = pReal;
+                    std::uint32_t typesCnt = 0;
+                    std::memcpy(&typesCnt, pLocal + 0x30, 4);
+                    std::uintptr_t typesPtr = 0;
+                    std::memcpy(&typesPtr, pLocal + 0x38, 8);
+                    g_state.typesCount = typesCnt;
+                    g_state.types = reinterpret_cast<const void* const*>(typesPtr);
+
+                    // Phase 28b-v3.1 — pull metadataUsages too (offsets 0x70/0x78).
+                    std::uint64_t usagesCnt = 0;
+                    std::memcpy(&usagesCnt, pLocal + 0x70, 8);
+                    std::uintptr_t usagesPtr = 0;
+                    std::memcpy(&usagesPtr, pLocal + 0x78, 8);
+                    g_state.metadataUsagesCount = static_cast<std::size_t>(usagesCnt);
+                    g_state.metadataUsages =
+                        reinterpret_cast<const void* const*>(usagesPtr);
+
                     char line[256];
                     ::_snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "MetadataRegistration: near-miss @0x%p typesCount=%u: %s",
-                        static_cast<const void*>(p), tc, why.c_str());
+                        "MetadataRegistration: hit at 0x%p, types=0x%p count=%u, "
+                        "metadataUsages=0x%p count=%llu "
+                        "(scanned %zu bytes across %zu sections)",
+                        static_cast<const void*>(pReal),
+                        reinterpret_cast<const void*>(typesPtr),
+                        typesCnt,
+                        reinterpret_cast<const void*>(usagesPtr),
+                        static_cast<unsigned long long>(usagesCnt),
+                        scanBytes, sections.size());
                     Log::Write(MagicStrings::LogCategoryInit, line);
-                    ++nearMisses;
+                    hitFound = true;
+                    return false;  // stop scanning
                 }
-                continue;
-            }
+                return true;
+            });
 
-            g_state.found = true;
-            g_state.reg   = p;
-            std::uint32_t typesCnt = 0;
-            std::memcpy(&typesCnt, p + 0x30, 4);
-            std::uintptr_t typesPtr = 0;
-            std::memcpy(&typesPtr, p + 0x38, 8);
-            g_state.typesCount = typesCnt;
-            g_state.types = reinterpret_cast<const void* const*>(typesPtr);
-
-            // Phase 28b-v3.1 — pull metadataUsages too (offsets 0x70/0x78).
-            std::uint64_t usagesCnt = 0;
-            std::memcpy(&usagesCnt, p + 0x70, 8);
-            std::uintptr_t usagesPtr = 0;
-            std::memcpy(&usagesPtr, p + 0x78, 8);
-            g_state.metadataUsagesCount = static_cast<std::size_t>(usagesCnt);
-            g_state.metadataUsages =
-                reinterpret_cast<const void* const*>(usagesPtr);
-
-            char line[256];
-            ::_snprintf_s(line, sizeof(line), _TRUNCATE,
-                "MetadataRegistration: hit at 0x%p, types=0x%p count=%u, "
-                "metadataUsages=0x%p count=%llu "
-                "(scanned %zu bytes across %zu sections)",
-                static_cast<const void*>(p),
-                reinterpret_cast<const void*>(typesPtr),
-                typesCnt,
-                reinterpret_cast<const void*>(usagesPtr),
-                static_cast<unsigned long long>(usagesCnt),
-                scanBytes, sections.size());
-            Log::Write(MagicStrings::LogCategoryInit, line);
-            return;
-        }
+        if (hitFound) return;
     }
 
     char line[256];
@@ -284,9 +283,14 @@ std::size_t        MetadataUsagesCount()    { Find(); return g_state.metadataUsa
 
 std::uint8_t GetTypeTag(std::int32_t typeIndex) {
     if (!Find()) return 0;
-    if (typeIndex < 0 ||
-        static_cast<std::size_t>(typeIndex) >= g_state.typesCount) return 0;
-    const void* type = g_state.types[typeIndex];
+    if (g_state.types == nullptr || typeIndex < 0 ||
+        static_cast<std::size_t>(typeIndex) >= g_state.typesCount) {
+        return 0;
+    }
+    const void* type = nullptr;
+    if (!Memory::SafeReadBytes(g_state.types + typeIndex, &type, sizeof(type))) {
+        return 0;
+    }
     if (type == nullptr) return 0;
     std::uint8_t tag = 0;
     if (!Memory::SafeReadBytes(

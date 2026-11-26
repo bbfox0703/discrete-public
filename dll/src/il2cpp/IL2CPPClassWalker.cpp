@@ -7,6 +7,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
 #include "../shared/MethodSignatureFormat.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/SehFilter.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
@@ -37,17 +38,17 @@ template <typename Fn, typename Arg>
 auto SehCall(Fn fn, Arg a) -> decltype(fn(a)) {
     using R = decltype(fn(a));
     __try { return fn(a); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return R{}; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return R{}; }
 }
 #pragma warning(pop)
 
 #pragma warning(push)
 #pragma warning(disable: 4509)
 Il2CppClass* SehDeclaring(fn_class_get_declaring fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehNextNested(fn_class_get_nested_types fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 
@@ -99,63 +100,69 @@ Il2CppClass* FindNestedByName(Il2CppClass* outer, const std::string& nestedName)
 #pragma warning(push)
 #pragma warning(disable: 4509)
 std::size_t SehClassCount(fn_image_get_class_count fn, const Il2CppImage* img) {
-    __try { return fn(img); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(img); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 Il2CppClass* SehClassByIdx(fn_image_get_class fn, const Il2CppImage* img, std::size_t i) {
-    __try { return fn(img, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, i); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehClassFromName(fn_class_from_name fn, const Il2CppImage* img,
                               const char* ns, const char* nm) {
-    __try { return fn(img, ns, nm); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, ns, nm); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehParent(fn_class_get_parent fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 FieldInfo* SehNextField(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("il2cpp_class_get_fields", code);
+        return nullptr;
+    }
 }
 const MethodInfo* SehNextMethod(fn_class_get_methods fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehStaticData(fn_class_get_static_data fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtr(fn_method_get_pointer fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // MethodInfo's first qword (`methodPointer` field) is the AOT native entry
 // point. Reading it directly is the only path on Unity 2021.3+ where
 // il2cpp_method_get_pointer is no longer exported.
 void* SehMethodPtrFromStruct(const MethodInfo* m) {
     __try { return *reinterpret_cast<void* const*>(m); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassName(fn_class_get_name fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehClassFromIl2CppType(fn_class_from_il2cpp_type fn, const Il2CppType* t) {
-    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(t); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehClassIsValueType(fn_class_is_valuetype fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 std::uint32_t SehParamCount(fn_method_get_param_count fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 const Il2CppType* SehParamType(fn_method_get_param fn, const MethodInfo* m, std::uint32_t i) {
-    __try { return fn(m, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m, i); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehMethodName(fn_method_get_name fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::uint32_t SehMethodToken(fn_method_get_token fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::uint32_t* iflags) {
-    __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m, iflags); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
-    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(o); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // Copy a NUL-terminated runtime name into a bounded local buffer under SEH so
 // garbage pointers never AV off mapped memory, then validate as printable ASCII

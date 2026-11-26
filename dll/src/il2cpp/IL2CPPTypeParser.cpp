@@ -2,6 +2,7 @@
 
 #include "IL2CPPTypeParser.h"
 
+#include "../shared/SehFilter.h"
 #include "IL2CPPResolver.h"
 
 #include <windows.h>
@@ -14,7 +15,7 @@ namespace {
 #pragma warning(disable: 4509)
 char* SehTypeGetName(fn_type_get_name fn, const Il2CppType* type) {
     __try { return fn(type); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 

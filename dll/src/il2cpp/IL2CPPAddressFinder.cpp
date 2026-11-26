@@ -8,7 +8,9 @@
 #include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
 #include "../shared/ParallelScanDriver.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/ScanCancel.h"
+#include "../shared/SehFilter.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
@@ -71,79 +73,84 @@ Discrete::AddressBounds::KlassFieldOffsets g_klassOffsets;
 #pragma warning(disable: 4509)
 const char* SehClassNameProbe(fn_class_get_name fn, Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassNamespaceProbe(fn_class_get_namespace fn, Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // Phase 27d follow-up — walk declaring-type chain to support nested
 // classes (Outer/Inner). Returns the outer class via `out`. Used to
 // build the slash-form name that FindClass + walkInstance expect.
 Il2CppClass* SehClassDeclaringProbe(fn_class_get_declaring fn, Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const Il2CppImage* SehClassImageProbe(fn_class_get_image fn, Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehImageNameProbe(fn_image_get_name fn, const Il2CppImage* img) {
     __try { return fn(img); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // Phase 17b — SEH-protected field-walk primitives. Used by ResolveFieldAt
 // to enumerate a class's instance fields and compute each field's storage
 // size without crashing on ill-formed metadata.
 Il2CppClass* SehParentLookup(fn_class_get_parent fn, Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 FieldInfo* SehNextFieldProbe(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
+    unsigned long code = 0;
     __try { return fn(k, iter); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("il2cpp_class_get_fields", code);
+        return nullptr;
+    }
 }
 const char* SehFieldNameProbe(fn_field_get_name fn, FieldInfo* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::size_t SehFieldOffsetProbe(fn_field_get_offset fn, FieldInfo* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 int SehFieldFlagsProbe(fn_field_get_flags fn, FieldInfo* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 const Il2CppType* SehFieldTypeProbe(fn_field_get_type fn, FieldInfo* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehClassFromTypeProbe(fn_class_from_il2cpp_type fn, const Il2CppType* t) {
     __try { return fn(t); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehIsValueTypeProbe(fn_class_is_valuetype fn, Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 int SehValueSizeProbe(fn_class_value_size fn, Il2CppClass* k) {
     __try { std::uint32_t a = 0; return fn(k, &a); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 std::int32_t SehClassInstanceSizeProbe(fn_class_instance_size fn, const Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 std::uint32_t SehObjectGetSizeProbe(fn_object_get_size fn, Il2CppObject* o) {
     __try { return fn(o); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 // Phase 27c — array element class lookup. Non-null result means klass is
 // an array type.
 Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 
@@ -1422,7 +1429,7 @@ namespace {
 // Leaf: copy `n` bytes of foreign memory into a local buffer. False on AV.
 bool SehCopySpan(void* dst, const void* src, std::size_t n) noexcept {
     __try { ::memcpy(dst, src, n); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return false; }
 }
 
 #pragma warning(pop)

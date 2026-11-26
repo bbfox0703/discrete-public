@@ -6,6 +6,7 @@
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/SehFilter.h"
 #include "MonoDomain.h"
 #include "MonoResolver.h"
@@ -23,10 +24,10 @@ const char* SafeStr(const char* s) { return s ? s : ""; }
 #pragma warning(push)
 #pragma warning(disable: 4509)
 MonoClass* SehNesting(fn_class_get_nesting_type fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehNextNested(fn_class_get_nested_types fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 
@@ -79,58 +80,70 @@ MonoClass* FindNestedByName(MonoClass* outer, const std::string& nestedName) {
 // Each *_Seh helper wraps a single Mono call; SEH cannot cohabit a frame with
 // destructors, so the helpers stay leaf-only.
 const MonoTableInfo* SehGetTable(fn_image_get_table_info fn, MonoImage* img, int idx) {
-    __try { return fn(img, idx); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, idx); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehGetRows(fn_table_info_get_rows fn, const MonoTableInfo* t) {
-    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    __try { return fn(t); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return -1; }
 }
 MonoClass* SehClassGet(fn_class_get fn, MonoImage* img, std::uint32_t tok) {
-    __try { return fn(img, tok); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, tok); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehClassFromName(fn_class_from_name fn, MonoImage* img, const char* ns, const char* nm) {
-    __try { return fn(img, ns, nm); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, ns, nm); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehParent(fn_class_get_parent fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClassField* SehNextField(fn_class_get_fields fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("mono_class_get_fields", code);
+        return nullptr;
+    }
 }
 MonoMethod* SehNextMethod(fn_class_get_methods fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehClassFromMonoType(fn_class_from_mono_type fn, MonoType* t) {
-    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(t); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehClassIsEnum(fn_class_is_enum fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 int SehClassIsValueType(fn_class_is_valuetype fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 MonoType* SehEnumBasetype(fn_class_enum_basetype fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehObjectGetClass(fn_object_get_class fn, MonoObject* o) {
-    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(o); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassNameProbe(fn_class_get_name fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoVTable* SehVTable(fn_class_vtable fn, MonoDomain* d, MonoClass* k) {
-    __try { return fn(d, k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(d, k); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("mono_class_vtable", code);
+        return nullptr;
+    }
 }
 void* SehStaticData(fn_vtable_get_static_data fn, MonoVTable* v) {
-    __try { return fn(v); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(v); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehCompile(fn_compile_method fn, MonoMethod* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoImage* SehClassImageProbe(fn_class_get_image fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehImageNameProbe(fn_image_get_name fn, MonoImage* img) {
-    __try { return fn(img); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // Copy a NUL-terminated runtime name into a bounded local buffer under SEH so
 // arbitrary garbage pointers never AV off mapped memory, then validate as
@@ -543,7 +556,7 @@ namespace {
 #pragma warning(push)
 #pragma warning(disable: 4509)
 const char* SehFieldData(fn_field_get_data fn, MonoClassField* f) {
-    __try { return fn(f); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(f); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 }  // namespace

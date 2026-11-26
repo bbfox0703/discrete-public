@@ -23,6 +23,8 @@
 #include "ParallelScanDriver.h"
 #include "PipeLineBuffer.h"
 #include "PipeSecurity.h"
+#include "RuntimeHealth.h"
+#include "SafeChunkRead.h"
 #include "ScanCancel.h"
 #include "SehFilter.h"
 
@@ -1864,6 +1866,135 @@ void Test_BM1_BM2_BM3_MethodInvokeValidationAndGcRoots() {
     }
 }
 
+// ============================================================================
+// B-M6 + B-M7 + B-M11 — RuntimeHealth poison latch, SEH-safe PE / stripped-page
+// chunked scanning, and unified MonoVTable domain header validation
+// ============================================================================
+void Test_BM6_BM7_BM11_RuntimeHealthSafePeScanAndVtableValidation() {
+    // 1. B-M6: RuntimeHealth poison latch preserves first root-cause op, counts
+    //    subsequent faults, formats actionable restart message, and resets cleanly.
+    {
+        using namespace Discrete::RuntimeHealth;
+        ResetForTests();
+        CHECK(!IsPoisoned());
+        CHECK(FormatReason().empty());
+
+        MarkRuntimeFault("mono_class_vtable", EXCEPTION_ACCESS_VIOLATION);
+        CHECK(IsPoisoned());
+        auto s1 = GetSnapshot();
+        CHECK(s1.poisoned);
+        CHECK(std::strcmp(s1.operation, "mono_class_vtable") == 0);
+        CHECK(s1.exceptionCode == EXCEPTION_ACCESS_VIOLATION);
+        CHECK(s1.faultCount == 1ul);
+        std::string reason = FormatReason();
+        CHECK(reason.find("mono_class_vtable") != std::string::npos);
+        CHECK(reason.find("restart the game") != std::string::npos);
+
+        // Second fault increments count without clobbering original root cause.
+        MarkRuntimeFault("mono_runtime_invoke", EXCEPTION_IN_PAGE_ERROR);
+        auto s2 = GetSnapshot();
+        CHECK(std::strcmp(s2.operation, "mono_class_vtable") == 0);
+        CHECK(s2.exceptionCode == EXCEPTION_ACCESS_VIOLATION);
+        CHECK(s2.faultCount == 2ul);
+
+        ResetForTests();
+        CHECK(!IsPoisoned());
+    }
+
+    // 2. B-M7: SafePeScan reads current process PE header safely, rejects
+    //    corrupt/unmapped bases without AV, and scans across PAGE_NOACCESS
+    //    anti-cheat stripped pages without losing readable neighbor pages.
+    {
+        using namespace Discrete::SafePeScan;
+        // Null and invalid/unmapped bases return empty without crashing.
+        CHECK(ListInitDataSectionsSafe(nullptr).empty());
+        CHECK(ListInitDataSectionsSafe(reinterpret_cast<const std::uint8_t*>(0x1000u)).empty());
+
+        // Current test exe's own module base has readable data sections.
+        auto* selfBase = reinterpret_cast<const std::uint8_t*>(::GetModuleHandleW(nullptr));
+        auto selfSecs = ListInitDataSectionsSafe(selfBase);
+        CHECK(!selfSecs.empty());
+
+        // Allocate 3 pages: [RW page 0][PAGE_NOACCESS page 1][RW page 2].
+        // Place markers on page 0 and page 2; verify ScanReadableSpans skips
+        // page 1 cleanly (zero AV) and delivers BOTH readable pages.
+        constexpr std::size_t kPage = 4096u;
+        void* region = ::VirtualAlloc(nullptr, 3 * kPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        CHECK(region != nullptr);
+        if (region != nullptr) {
+            auto* base = static_cast<std::uint8_t*>(region);
+            std::memset(base, 0x11, kPage);
+            std::memset(base + 2 * kPage, 0x22, kPage);
+            const std::uint64_t marker0 = 0xCAFEBABE11223344ull;
+            const std::uint64_t marker2 = 0xDEADBEEF55667788ull;
+            std::memcpy(base + 0x200, &marker0, sizeof(marker0));
+            std::memcpy(base + 2 * kPage + 0x300, &marker2, sizeof(marker2));
+
+            DWORD oldProt = 0;
+            BOOL stripped = ::VirtualProtect(base + kPage, kPage, PAGE_NOACCESS, &oldProt);
+            CHECK(stripped != 0);
+
+            std::vector<std::uint8_t> scratch;
+            bool sawMarker0 = false;
+            bool sawMarker2 = false;
+            std::size_t spanCount = 0;
+            std::size_t totalReadable = 0;
+            ScanReadableSpans(
+                base, 3 * kPage, 3 * kPage, 128u, scratch,
+                [&](const std::uint8_t* local, const std::uint8_t* real, std::size_t len) -> bool {
+                    ++spanCount;
+                    totalReadable += len;
+                    if (real == base && len == kPage) {
+                        std::uint64_t v = 0;
+                        std::memcpy(&v, local + 0x200, sizeof(v));
+                        if (v == marker0) sawMarker0 = true;
+                    }
+                    if (real == base + 2 * kPage && len == kPage) {
+                        std::uint64_t v = 0;
+                        std::memcpy(&v, local + 0x300, sizeof(v));
+                        if (v == marker2) sawMarker2 = true;
+                    }
+                    return true;
+                });
+            CHECK(spanCount == 2u);
+            CHECK(totalReadable == 2 * kPage);
+            CHECK(sawMarker0);
+            CHECK(sawMarker2);
+
+            ::VirtualProtect(base + kPage, kPage, PAGE_READWRITE, &oldProt);
+            ::VirtualFree(region, 0, MEM_RELEASE);
+        }
+    }
+
+    // 3. B-M11: ValidateMonoVtableHeader enforces identical domain + alignment
+    //    validation across WhatIsAt, FindAllInstances, and ReverseLookupIndex.
+    {
+        using namespace Discrete::Mono;
+        const std::uintptr_t kDomain = 0x20000000u;
+        const std::uintptr_t kKlass  = 0x20001000u;  // 8-byte aligned
+        const std::uintptr_t kVt8    = 0x20002000u;  // 8-byte aligned
+        const std::uintptr_t kVt4    = 0x20002004u;  // 4 mod 8 (x86 IMT-prefixed)
+
+        // Valid vtable with matching rootDomain passes
+        CHECK(ValidateMonoVtableHeader(kVt8, kKlass, kDomain, kDomain));
+        // Wrong domain (e.g. MonoType or RuntimeTypeHandle whose +0 is MonoClass*
+        // but +2*ptr is NOT rootDomain) MUST be rejected!
+        CHECK(!ValidateMonoVtableHeader(kVt8, kKlass, 0u, kDomain));
+        CHECK(!ValidateMonoVtableHeader(kVt8, kKlass, 0x12345678u, kDomain));
+        // Null rootDomain rejected
+        CHECK(!ValidateMonoVtableHeader(kVt8, kKlass, 0u, 0u));
+        // Unaligned / low klass rejected
+        CHECK(!ValidateMonoVtableHeader(kVt8, kKlass + 4u, kDomain, kDomain));
+        CHECK(!ValidateMonoVtableHeader(kVt8, 0x1000u, kDomain, kDomain));
+        // Architecture-specific vtable alignment (4 mod 8 valid on x86, rejected on x64)
+        if constexpr (sizeof(void*) == 4) {
+            CHECK(ValidateMonoVtableHeader(kVt4, kKlass, kDomain, kDomain));
+        } else {
+            CHECK(!ValidateMonoVtableHeader(kVt4, kKlass, kDomain, kDomain));
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1884,6 +2015,7 @@ int main() {
     Test_AM6_AL14_SehFilterGuardPageAndWindowStraddle();
     Test_BM4_BM5_StaticFieldStorageAndUtf8Names();
     Test_BM1_BM2_BM3_MethodInvokeValidationAndGcRoots();
+    Test_BM6_BM7_BM11_RuntimeHealthSafePeScanAndVtableValidation();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

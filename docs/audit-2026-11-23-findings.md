@@ -281,14 +281,14 @@
 - 成因：`c < 0x20 || c > 0x7E` 一律判為 garbage。runtime 回傳的類別名稱與 image 名稱是 UTF-8，混淆器（ConfuserEx 一類會產生 Unicode 名稱）、使用中文或日文識別字的遊戲、全形字元的 assembly 名稱，都會讓 `ReadClassInfo` 回 `ok = false`。結果 Inspector / walkInstance 對這些類別完全不能用，而且呼叫端看到的是「class invalid」，不是「名稱含特殊字元」。
 - 修法：接受合法的 UTF-8 multibyte 序列（≥ 0x80 的 byte 依 UTF-8 規則驗證 lead / continuation），只拒絕 C0 控制字元與不合法的序列；512 bytes 的上限與「讀取時受 SEH 保護」都保留。（待驗證：找一款名稱經混淆或含 CJK 字元的遊戲實測。）
 
-**B-M6 · SEH leaf 在 runtime 呼叫內吞掉例外：持有中的 runtime lock 不會被釋放，C++ 例外也會被當成 AV 吞掉**
+**B-M6 · SEH leaf 在 runtime 呼叫內吞掉例外：持有中的 runtime lock 不會被釋放，C++ 例外也會被當成 AV 吞掉 — ✅ FIXED (2026-11-26)**
 - 位置：代表案例 `dll/src/mono/MonoDomain.cpp:30-37` + `:40-66`；同一種模式出現在所有 `Seh*` leaf（例如 `MonoClassWalker.cpp:78-131`、`IL2CPPClassWalker.cpp:33-38`、`:98-156`、`MonoMethodInvoker.cpp:81-98`、`IL2CPPMethodInvoker.cpp:77-94`）
 - 成因：
   1. `mono_assembly_foreach` 會在持有 `mono_assemblies_lock` 的狀態下呼叫 `OnAssembly`，而 `OnAssembly` 裡有 `std::string` 建構與 `push_back`（可能丟 `bad_alloc`，x86 下尤其容易）。`__except(EXECUTE_HANDLER)` 會把 C++ 例外（`0xE06D7363`）一起攔下，從 runtime frame 中直接 unwind 出來，assemblies lock 永遠不會被釋放。之後遊戲本身的 `Assembly.Load`（或下一次 `EnumerateAssemblies`）就會永久卡住，症狀是遊戲凍結而不是崩潰，更難診斷。
   2. 同理，`class_get_fields` / `class_vtable` / `runtime_invoke` 在 runtime 內部持有 loader lock / class init lock / GC lock 時發生 AV，被 leaf 接住之後 lock 同樣會洩漏。這個 SEH 設計的前提「出錯就回 null、繼續執行」只對不持鎖的 accessor 成立。
 - 修法：(a) `OnAssembly` 改成 `noexcept`，在 lambda 內 `try { … } catch (...) { 設旗標 }`，不要讓任何 C++ 例外穿過 runtime frame；(b) 所有 leaf 的 filter 改成只接受 `EXCEPTION_ACCESS_VIOLATION` / `EXCEPTION_IN_PAGE_ERROR`（與 A-M6 / A-L14 共用同一個 filter helper）；(c) 對會取得 runtime lock 的呼叫（`class_get_fields`、`class_vtable`、`assembly_foreach`、`runtime_invoke`）在 SEH 命中後設定全域的「runtime 可能已損壞」旗標並寫 WARN，之後拒絕 heavy RPC，提示使用者重啟遊戲，而不是靜默繼續。
 
-**B-M7 · `IL2CPPMetadataRegistration` 直接解參考模組記憶體，沒有任何 SEH 保護**
+**B-M7 · `IL2CPPMetadataRegistration` 直接解參考模組記憶體，沒有任何 SEH 保護 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/il2cpp/IL2CPPMetadataRegistration.cpp:77-98`（`ListInitDataSections` 直接讀 PE header）、`:201-213`（掃描迴圈對 section 做 raw `memcpy`）、`:117-157`（`TestCandidate` 讀 `p` 時沒有保護）、`:289`（`GetTypeTag` 直接讀 `g_state.types[typeIndex]`）
 - 成因：同一個 backend 中，`ClassPointerScanner`、`LazyInitSlotScanner`、`FieldXref` 都已經用 `SafeRead*` 防範 anti-cheat 把頁面拔掉（註解反覆提到「AC page-strip」），只有這個 scanner 直接讀 `.data` / `.rdata`（可能上百 MB）。只要有一頁被設成 `PAGE_NOACCESS` / guard，pipe worker 就會 AV，遊戲崩潰。
 - 修法：比照 `IL2CPPClassPointerScanner.cpp:112-150`，以 1 MB 的 `SafeReadBytes` chunk 複製到本地 buffer 再比對（chunk 之間保留 `kRegBytes` 的重疊）；PE header 改用 `Memory::SafeRead`；`GetTypeTag` 改用 `SafeReadBytes(types + idx)`。
@@ -308,7 +308,7 @@
 - 成因：(1) 與 A-H2 相同的模式：第 N 條 thread 建立時丟出 `std::system_error`，已經 joinable 的 `std::thread` 在 `pool` 解構時會 `std::terminate`，直接殺掉遊戲。(2) `FindAllInstances`（snapshot 的 heap walk，GB 級）兩個 backend 都不檢查 `ScanCancel`；UI 取消或斷線後，worker 仍會跑到結束，期間持續佔用記憶體頻寬。(3) IL2CPP 的 `FindAllInstances` 使用 `ScanThreadCount()`，使用者為了避開 anti-tamper 而關掉 Parallel 時，snapshot 路徑仍然是全平行。
 - 修法：建立 thread 的迴圈加上 try/catch，失敗時先 join 已啟動的 thread，再在目前的 thread 上 inline 跑 `worker`；兩個 backend 的 `FindAllInstances` 在 chunk / region 迴圈內檢查 `ScanCancel::IsCancelRequested()`，並在結果中標記 `cancelled`；IL2CPP 改用 `EffectiveScanThreads()`。
 
-**B-M11 · Mono `WhatIsAt` 與 `ReverseLookupIndex` / `FindAllInstances` 的驗證規則不同，「byte-identical」的宣稱不成立**
+**B-M11 · Mono `WhatIsAt` 與 `ReverseLookupIndex` / `FindAllInstances` 的驗證規則不同，「byte-identical」的宣稱不成立 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/mono/MonoAddressFinder.cpp:708-735`（backward scan：只做 `vtable[0] ∈ classSet` + 名稱 probe，**沒有** domain 檢查）、`:1248-1253`（index：有 `vtable+2*ptr == rootDomain` 檢查）、`:745-758`（把未經 domain 驗證的配對寫進全域 memo）；文件 `MonoAddressFinder.h:120-124`
 - 成因：任何「第一個 qword 指向『開頭是 MonoClass*』之結構」的指標都會通過 `WhatIsAt`。例如指向 `MonoType`（`MONO_TYPE_CLASS` 的 `data.klass` 就在 offset 0）、`RuntimeTypeHandle` 等。同一個位址，value scan 走 index 時查不到，fallback 到 `WhatIsAt` 時卻得到一個假的 instance。全域 `vtableToKlass` memo 因此混入未驗證的條目（`FindAllInstances` 有刻意避開，見 `:912-916`，但 `WhatIsAt` 自己會繼續使用這些條目）。
 - 修法：把 domain 結構檢查抽成共用的 `IsPlausibleVTable(qw, &klass)`，三條路徑都呼叫它；memo 只存放通過完整驗證的配對。

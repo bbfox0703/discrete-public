@@ -12,6 +12,26 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1561) — Fix B-M6 + B-M7 + B-M11 (noexcept `OnAssembly` & global targeted SEH filter + `RuntimeHealth` poison gate, SEH-protected chunked `IL2CPPMetadataRegistration` scan with page fallback, unified Mono `IsPlausibleVTable` domain validation + tests)
+
+- **Bug fixes (`B-M6`, `B-M7`, `B-M11`):**
+  - **`B-M6` (`dll/src/shared/RuntimeHealth.h`, `MonoDomain.cpp`, `MonoAddressFinder.cpp`, `MonoClassWalker.cpp`, `IL2CPPClassWalker.cpp`, `MonoMethodInvoker.cpp`, `IL2CPPMethodInvoker.cpp`, `ExportAPI.cpp`, and all remaining Mono/IL2CPP SEH leaves):**
+    - Made `MonoDomain.cpp`'s `OnAssembly` callback `noexcept` with a local `try / catch (...)` setting `ctx->callbackFailed` so C++ exceptions (e.g. `std::bad_alloc` under 32-bit Mono memory pressure) can never unwind across Mono's `mono_assemblies_lock` frame and permanently deadlock the game.
+    - Replaced every remaining raw `__except (EXCEPTION_EXECUTE_HANDLER)` across all 17 `.cpp` files in `dll/src/{mono,il2cpp,shared}` with `Discrete::Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())`, and refactored `MonoAddressFinder.cpp`'s `SehSweepRegionLoad` to copy 64 KiB windows through a leaf `SehCopyRegionWindow` so vector allocations never run inside `__try`.
+    - Added `dll/src/shared/RuntimeHealth.h` (`MarkRuntimeFault`, `IsPoisoned`, `GetSnapshot`, `FormatReason`): SEH faults inside lock-acquiring runtime calls (`mono_assembly_foreach`, `mono_class_vtable`, `*_class_get_fields`, `*_runtime_invoke`) latch the poison flag and log a `WARN`; `ExportAPI.cpp` rejects subsequent heavy RPCs (`snapshotBegin`, `findInstances`, `callMethod`, `findFieldReferences`, `beginValueScan`, `diagnoseClassReferences`) with `runtime_corrupted_restart_game` and surfaces `runtime_poisoned` in `handshake`.
+  - **`B-M7` (`dll/src/shared/SafeChunkRead.h`, `dll/src/il2cpp/IL2CPPMetadataRegistration.cpp`):**
+    - Added `dll/src/shared/SafeChunkRead.h` providing `ListInitDataSectionsSafe` (reads PE DOS/NT/section headers via `Memory::SafeReadBytes`) and `ScanReadableSpans` (copies 1 MiB chunks with 128 B overlap via `Memory::SafeReadBytes` and falls back to 4 KiB page-by-page coalesced reads when an anti-cheat strips a page to `PAGE_NOACCESS` / `PAGE_GUARD`, preserving adjacent readable pages).
+    - Migrated `IL2CPPMetadataRegistration.cpp` (`ListInitDataSections`, `DoFind`, `TestCandidate`, and `GetTypeTag`) to zero raw dereferences into `GameAssembly.dll`.
+  - **`B-M11` (`dll/src/mono/MonoVtableFilter.h`, `dll/src/mono/MonoAddressFinder.cpp`):**
+    - Added `ValidateMonoVtableHeader` in `MonoVtableFilter.h` and extracted a single shared `IsPlausibleVTable` helper in `MonoAddressFinder.cpp` called by all three paths (`WhatIsAt`, `FindAllInstances`, `ReverseLookupIndex::Build`).
+    - `WhatIsAt` now enforces `MonoVTable::domain == rootDomainAddr` on static `classSet` hits as well as dynamic generic/array klasses, eliminating false positives from `MonoType` / `RuntimeTypeHandle` structs and preventing unvalidated pairs from polluting the global `vtableToKlass` memo. Also unified `g_minVtable` update in `FindAllInstances`.
+  - **Tests:**
+    - Added `Test_BM6_BM7_BM11_RuntimeHealthSafePeScanAndVtableValidation` (+29 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp` verifying `RuntimeHealth` root-cause preservation & reset, `ListInitDataSectionsSafe` on null/invalid/live PE bases, `ScanReadableSpans` over a live 3-page `VirtualAlloc` region with a `PAGE_NOACCESS` middle page, and `ValidateMonoVtableHeader` across x64/x86 domain & alignment rules.
+  - Marked `B-M6`, `B-M7`, and `B-M11` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1561) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 672 checks passed (x64) / 675 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1559) — Fix B-M1 + B-M2 + B-M3 (formal-type CallMethod arg validation, GC-root pinning for allocated string args, safe value-type/enum/bool return decoding + MethodInvoker parity cleanups + tests)
 
 - **Bug fixes (`B-M1`, `B-M2`, `B-M3` + MethodInvoker parts of `B-L8`, `B-L9`, `B-L11`):**

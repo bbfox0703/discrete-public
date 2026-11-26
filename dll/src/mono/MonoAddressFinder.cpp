@@ -7,7 +7,9 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/ScanCancel.h"
+#include "../shared/SehFilter.h"
 #include "MonoClassWalker.h"
 #include "MonoDomain.h"
 #include "MonoResolver.h"
@@ -77,87 +79,115 @@ Discrete::AddressBounds::KlassFieldOffsets g_klassOffsets;
 #pragma warning(disable: 4509)
 const char* SehClassNameProbe(fn_class_get_name fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassNamespaceProbe(fn_class_get_namespace fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoImage* SehClassImageProbe(fn_class_get_image fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehImageNameProbe(fn_image_get_name fn, MonoImage* img) {
     __try { return fn(img); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoVTable* SehGetVtable(fn_class_vtable fn, MonoDomain* d, MonoClass* k) {
+    unsigned long code = 0;
     __try { return fn(d, k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("mono_class_vtable", code);
+        return nullptr;
+    }
 }
 // Phase 17b — SEH-protected field-walk primitives.
 MonoClass* SehParentLookup(fn_class_get_parent fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClassField* SehNextFieldProbe(fn_class_get_fields fn, MonoClass* k, void** iter) {
+    unsigned long code = 0;
     __try { return fn(k, iter); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("mono_class_get_fields", code);
+        return nullptr;
+    }
 }
 const char* SehFieldNameProbe(fn_field_get_name fn, MonoClassField* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehFieldOffsetProbe(fn_field_get_offset fn, MonoClassField* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 std::uint32_t SehFieldFlagsProbe(fn_field_get_flags fn, MonoClassField* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 MonoType* SehFieldTypeProbe(fn_field_get_type fn, MonoClassField* f) {
     __try { return fn(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehClassFromMonoType(fn_class_from_mono_type fn, MonoType* t) {
     __try { return fn(t); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehIsValueTypeProbe(fn_class_is_valuetype fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 int SehIsEnumProbe(fn_class_is_enum fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 MonoType* SehEnumBasetypeProbe(fn_class_enum_basetype fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehValueSizeProbe(fn_class_value_size fn, MonoClass* k) {
     __try { std::uint32_t a = 0; return fn(k, &a); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 std::int32_t SehClassInstanceSizeProbe(fn_class_instance_size fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 std::uint32_t SehObjectGetSizeProbe(fn_object_get_size fn, MonoObject* o) {
     __try { return fn(o); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 // Phase 27c — array element class lookup. Non-null result means klass is
 // an array type (System.Object[], int[], etc).
 MonoClass* SehElementClassProbe(fn_class_get_element_class fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // Phase 27d follow-up — walk nesting chain for nested-class name resolution.
 MonoClass* SehNestingProbe(fn_class_get_nesting_type fn, MonoClass* k) {
     __try { return fn(k); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+// Leaf SEH for dereferencing a pointer-sized word (vtable[0] / vtable+2*ptr).
+bool SehReadKlassAt(std::uintptr_t addr, std::uintptr_t& outWord) noexcept {
+    __try {
+        outWord = *reinterpret_cast<const std::uintptr_t*>(addr);
+        return true;
+    } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {
+        return false;
+    }
+}
+// Strict SEH-leaf window copy (zero C++ destructors/allocations inside __try).
+bool SehCopyRegionWindow(const std::uint8_t* src, void* dst, std::size_t n) noexcept {
+    __try {
+        std::memcpy(dst, src, n);
+        return true;
+    } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {
+        return false;
+    }
 }
 #pragma warning(pop)
 
@@ -832,6 +862,41 @@ ClassRangeStats GetClassRangeStats() {
     return s;
 }
 
+// B-M11 — unified MonoVTable structural + class validation shared across
+// WhatIsAt, FindAllInstances, and ReverseLookupIndex::Build so all three paths
+// enforce identical rules (including MonoVTable::domain == rootDomainAddr on
+// BOTH static classSet hits and dynamic generic/array klasses) and the global
+// vtableToKlass memo never caches unvalidated non-vtable structs (MonoType,
+// RuntimeTypeHandle, etc.).
+bool IsPlausibleVTable(std::uintptr_t vtCandidate,
+                       std::uintptr_t rootDomainAddr,
+                       const std::vector<std::uintptr_t>& classSet,
+                       std::uintptr_t minKlass,
+                       std::uintptr_t maxKlass,
+                       const std::vector<std::uintptr_t>& imageSet,
+                       std::uintptr_t& outKlass) {
+    if (!IsPlausibleMonoVtableCandidate(vtCandidate)) return false;
+
+    std::uintptr_t klassMaybe = 0;
+    if (!SehReadKlassAt(vtCandidate, klassMaybe)) return false;
+
+    std::uintptr_t domainAt = 0;
+    if (!SehReadKlassAt(vtCandidate + kMonoVtableDomainOffset, domainAt)) return false;
+
+    if (!ValidateMonoVtableHeader(vtCandidate, klassMaybe, domainAt, rootDomainAddr)) {
+        return false;
+    }
+
+    const bool inClassSet = (klassMaybe >= minKlass && klassMaybe <= maxKlass) &&
+        std::binary_search(classSet.begin(), classSet.end(), klassMaybe);
+    if (!inClassSet && !TryAcceptDynamicMonoKlass(klassMaybe, imageSet, classSet)) {
+        return false;
+    }
+
+    outKlass = klassMaybe;
+    return true;
+}
+
 AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     AddressLookup out;
     out.queriedAddr = addr;
@@ -889,11 +954,6 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         return out;
     }
 
-    auto klassInSet = [&](std::uintptr_t kp) {
-        if (kp < minK || kp > maxK) return false;
-        return std::binary_search(classSetSnap.begin(), classSetSnap.end(), kp);
-    };
-
     // Track newly-discovered (vtable, klass) pairs to merge into the
     // global memo at the end of this WhatIsAt call.
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> newlyMemoized;
@@ -931,41 +991,22 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         std::memcpy(&vtCandidate, bulkBuf.data() + bufIdx, sizeof(vtCandidate));
         if (!IsAlignedMonoVtablePtr(vtCandidate)) continue;
 
-        // Fast path: already-seen vtable.
+        // Fast path: already-seen domain-verified vtable.
         std::uintptr_t klassCandidate = 0;
         auto memoIt = vtMemoSnap.find(vtCandidate);
         if (memoIt != vtMemoSnap.end()) {
             klassCandidate = memoIt->second;
         } else {
-            // Slow path: deref the candidate vtable's first qword to read
-            // MonoVTable::klass (which is at offset 0 on every Mono build).
-            // This is one extra SafeReadBytes per backward step on first
-            // sight of a vtable — cheap, no runtime call, no GC lock.
-            std::uintptr_t klassMaybe = 0;
-            if (!Memory::SafeReadBytes(reinterpret_cast<void*>(vtCandidate),
-                                       &klassMaybe, sizeof(klassMaybe))) {
+            // Slow path (B-M11): shared IsPlausibleVTable enforces vtable[0]
+            // klass alignment, vtable+2*ptr == rootDomain, and classSet /
+            // dynamic-klass membership — byte-identical to FindAllInstances
+            // and ReverseLookupIndex::Build.
+            if (!IsPlausibleVTable(vtCandidate, rootDomainAddr,
+                                   classSetSnap, minK, maxK, imageSetSnap,
+                                   klassCandidate)) {
                 continue;
             }
-            if (klassMaybe == 0 || (klassMaybe & 7u) != 0) continue;
-            bool accepted = klassInSet(klassMaybe);
-            if (!accepted) {
-                // B-H2: generic instantiations (List<T>, Dictionary<K,V>) and
-                // arrays (T[]) are absent from TypeDef-only classSet. Require
-                // MonoVTable::domain == rootDomain plus pure-memory klass
-                // validation before accepting.
-                std::uintptr_t domainAt = 0;
-                if (Memory::SafeReadBytes(
-                        reinterpret_cast<void*>(vtCandidate + 2 * sizeof(std::uintptr_t)),
-                        &domainAt, sizeof(domainAt)) &&
-                    domainAt == rootDomainAddr &&
-                    TryAcceptDynamicMonoKlass(klassMaybe, imageSetSnap, classSetSnap)) {
-                    accepted = true;
-                }
-            }
-            if (!accepted) continue;
-            klassCandidate = klassMaybe;
-            // Memoize so future iterations of this loop (and future
-            // WhatIsAt calls) skip the deref.
+            // Memoize only fully verified (vtable, klass) pairs.
             vtMemoSnap[vtCandidate] = klassCandidate;
             newlyMemoized.emplace_back(vtCandidate, klassCandidate);
         }
@@ -1046,67 +1087,47 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
 
 namespace {
 
-#pragma warning(push)
-#pragma warning(disable: 4509)  // SEH in function with non-trivial dtor — none here.
-
-// Inner SEH leaf: scan one region, calling Visit() for each qword. Visit
-// takes the qword's payload (the supposed vtable) and the slot's address.
-// Returns true to keep going, false to stop. SEH catches an AV inside
-// the inner read so a single bad page only loses that region.
-//
-// For Mono we don't get to do a cheap range filter on the qword itself —
-// it might be ANY vtable, not a class. So we capture the qword, check
-// cheap filters (non-null, aligned), then defer the heavy check to the
-// caller via the visit lambda. The visit lambda holds the unordered_maps
-// (with destructors), which means we can't __try around it; SEH must
-// wrap only the inner read of the qword from process memory.
-//
-// Result: we __try around `for(i) load(arr[i])`. Visit (out-of-__try)
-// then validates the loaded value. Costs one extra ld + br vs IL2CPP's
-// single-__try path but stays SEH-safe.
+// Strict SEH-leaf region sweeper (B-M6): copies 64 KiB windows through
+// SehCopyRegionWindow into a local stack buffer, then filters and pushes
+// candidates strictly outside __try so std::bad_alloc / vector growth never
+// executes inside an SEH frame.
 void SehSweepRegionLoad(const std::uint8_t* base, std::size_t size,
                          std::vector<std::uintptr_t>& outQwords,
-                         std::vector<const std::uint8_t*>& outAddrs) noexcept
+                         std::vector<const std::uint8_t*>& outAddrs)
 {
-    __try {
-        const std::size_t count = size / sizeof(std::uintptr_t);
-        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
-        // Reserve a BOUNDED amount, not the whole worst case. `count` is one
-        // entry per qword in the region, and both vectors were reserved to that
-        // — so a 1 GB region committed 2 GB up front, inside the game's own
-        // address space, before a single qword was examined. Instantly fatal on
-        // the 32-bit Mono build's 2 GB user space. The loop below filters hard
-        // (zero, unaligned, below 0x10000), so the kept fraction is small;
-        // reserving a cap and letting push_back grow geometrically keeps almost
-        // all of the anti-realloc benefit at a fixed, sane cost.
-        constexpr std::size_t kMaxReservePerRegion = 1u << 20;   // 1M entries = 8 MB
-        const std::size_t want = count < kMaxReservePerRegion ? count : kMaxReservePerRegion;
+    constexpr std::size_t kWindowBytes = 64u * 1024u;
+    constexpr std::size_t kWordBytes   = sizeof(std::uintptr_t);
+    constexpr std::size_t kWindowWords = kWindowBytes / kWordBytes;
+    const std::size_t totalWords = size / kWordBytes;
+    constexpr std::size_t kMaxReservePerRegion = 1u << 20;
+    const std::size_t want = totalWords < kMaxReservePerRegion ? totalWords : kMaxReservePerRegion;
+
+    try {
         outQwords.reserve(outQwords.size() + want);
         outAddrs.reserve(outAddrs.size() + want);
-        for (std::size_t i = 0; i < count; ++i) {
-            std::uintptr_t qw = arr[i];
-            if (!IsPlausibleMonoVtableCandidate(qw)) continue;
-            outQwords.push_back(qw);
-            outAddrs.push_back(base + i * sizeof(std::uintptr_t));
+
+        std::uintptr_t windowBuf[kWindowWords];
+        std::size_t off = 0;
+        while (off + kWordBytes <= size) {
+            const std::size_t avail = size - off;
+            const std::size_t chunkBytes = (avail < kWindowBytes ? avail : kWindowBytes) & ~(kWordBytes - 1u);
+            if (chunkBytes == 0) break;
+            if (!SehCopyRegionWindow(base + off, windowBuf, chunkBytes)) {
+                break;  // unreadable page partway through region
+            }
+            const std::size_t words = chunkBytes / kWordBytes;
+            for (std::size_t i = 0; i < words; ++i) {
+                const std::uintptr_t qw = windowBuf[i];
+                if (!IsPlausibleMonoVtableCandidate(qw)) continue;
+                outQwords.push_back(qw);
+                outAddrs.push_back(base + off + i * kWordBytes);
+            }
+            off += chunkBytes;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Region had an unreadable page partway through; bail out with
-        // what we collected so far.
+    } catch (const std::bad_alloc&) {
+        // Keep whatever was collected so far rather than crashing/terminating.
     }
 }
-
-// Leaf SEH for dereferencing a candidate vtable. The deref might AV if
-// the qword wasn't actually a vtable; we silently drop those.
-bool SehReadKlassAt(std::uintptr_t vtable, std::uintptr_t& outKlass) noexcept {
-    __try {
-        outKlass = *reinterpret_cast<const std::uintptr_t*>(vtable);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-#pragma warning(pop)
 
 // Cap for NEGATIVE vtable-memo entries. A positive memo is bounded by the
 // number of real vtables, but a negative is recorded for every DISTINCT
@@ -1274,32 +1295,12 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                 klass = memoIt->second;
                 if (klass == 0) continue;   // memoised negative (not a vtable)
             } else {
-                std::uintptr_t derefed = 0;
-                if (!SehReadKlassAt(qw, derefed)) {
-                    memoNegative(qw);  // memo negative
-                    continue;
-                }
-                if (derefed < 0x10000u || (derefed & 7u) != 0) {
+                if (!IsPlausibleVTable(qw, rootDomainAddr,
+                                       classSet, minKlass, maxKlass, imageSet,
+                                       klass)) {
                     memoNegative(qw);
                     continue;
                 }
-                // 2026-05-28 vtable structural validation (checked before
-                // dynamic-klass fallback so non-vtable qwords drop in 2 reads):
-                //   +0           MonoClass*
-                //   +2*ptr_size  MonoDomain*  ← must equal root domain
-                std::uintptr_t domainAt = 0;
-                if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
-                    domainAt != rootDomainAddr) {
-                    memoNegative(qw);  // structurally not a vtable
-                    continue;
-                }
-                bool inClassSet = (derefed >= minKlass && derefed <= maxKlass) &&
-                    std::binary_search(classSet.begin(), classSet.end(), derefed);
-                if (!inClassSet && !TryAcceptDynamicMonoKlass(derefed, imageSet, classSet)) {
-                    memoNegative(qw);
-                    continue;
-                }
-                klass = derefed;
                 vtMemo[qw] = klass;
                 out.vtablesResolved++;
             }
@@ -1351,7 +1352,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                 !std::binary_search(cache().vtableSet.begin(),
                                     cache().vtableSet.end(), vt)) {
                 cache().vtableSet.push_back(vt);
-                if (vt < g_minVtable) g_minVtable = vt;
+                if (g_minVtable == 0 || vt < g_minVtable) g_minVtable = vt;
                 if (vt > g_maxVtable) g_maxVtable = vt;
             }
         }
@@ -1500,21 +1501,12 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
                 klass = memoIt->second;
                 if (klass == 0) continue;   // memoised negative
             } else {
-                std::uintptr_t derefed = 0;
-                if (!SehReadKlassAt(qw, derefed)) { memoNegative(qw); continue; }
-                if (derefed < 0x10000u || (derefed & 7u) != 0) { memoNegative(qw); continue; }
-                // MonoVTable structural validation: +2*ptr is MonoDomain*.
-                std::uintptr_t domainAt = 0;
-                if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
-                    domainAt != rootDomainAddr) {
-                    memoNegative(qw); continue;
+                if (!IsPlausibleVTable(qw, rootDomainAddr,
+                                       classSet, minKlass, maxKlass, imageSet,
+                                       klass)) {
+                    memoNegative(qw);
+                    continue;
                 }
-                const bool inClassSet = (derefed >= minKlass && derefed <= maxKlass) &&
-                    std::binary_search(classSet.begin(), classSet.end(), derefed);
-                if (!inClassSet && !TryAcceptDynamicMonoKlass(derefed, imageSet, classSet)) {
-                    memoNegative(qw); continue;
-                }
-                klass = derefed;
                 vtMemo[qw] = klass;
             }
 

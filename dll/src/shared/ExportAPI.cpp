@@ -18,7 +18,9 @@
 #include "ValueRefine.h"
 #include "GroupScanSession.h"
 #include "PipeServer.h"
+#include "RuntimeHealth.h"
 #include "ScanCancel.h"
+#include "SehFilter.h"
 #include "SnapshotSession.h"
 #include "ValueScanSession.h"
 
@@ -83,7 +85,7 @@ using nlohmann::json;
 template <typename Fn, typename K>
 static K SehGetParent(Fn fn, K cur) {
     __try { return fn(cur); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Discrete::Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // SEH-guarded class_value_size (two-arg: class + out-align). Returns the
 // value-type instance size used as the inline array-element stride for the
@@ -91,9 +93,22 @@ static K SehGetParent(Fn fn, K cur) {
 template <typename Fn, typename K>
 static int SehValueSize(Fn fn, K cur) {
     __try { std::uint32_t align = 0; return fn(cur, &align); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (Discrete::Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 #pragma warning(pop)
+
+// B-M6: fail-fast response when a prior SEH memory fault unwound out of a
+// lock-acquiring runtime call (assemblies / loader / GC / runtime_invoke).
+static json RuntimePoisonedErrorJson() {
+    const std::string reason = Discrete::RuntimeHealth::FormatReason();
+    Discrete::Log::Write(Discrete::MagicStrings::LogCategoryWalk,
+                         "WARN RPC rejected (runtime poisoned): " + reason);
+    return json{
+        {"ok",     false},
+        {"error",  "runtime_corrupted_restart_game"},
+        {"reason", reason},
+    };
+}
 
 namespace {
 
@@ -2018,6 +2033,10 @@ void RegisterCoreHandlers() {
     });
     PipeServer::RegisterHandler(MagicStrings::CmdHandshake, [](const json&) -> json {
         json j = BuildHandshakeJson();
+        if (RuntimeHealth::IsPoisoned()) {
+            j["runtime_poisoned"]     = true;
+            j["runtime_fault_reason"] = RuntimeHealth::FormatReason();
+        }
         // Phase 20-MT: piggyback hook install on handshake so the dispatcher
         // is live by the time the user's first callMethod arrives. Adds a
         // `main_thread` sub-object to the response for UI visibility.
@@ -3996,6 +4015,7 @@ void RegisterCoreHandlers() {
     // ------------------------------------------------------------------------
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
         [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
 
         // Parse args ----------------------------------------------------------
@@ -5083,6 +5103,7 @@ void RegisterCoreHandlers() {
     // MemberRef tokens deferred to v2).
     PipeServer::RegisterHandler(MagicStrings::CmdFindFieldReferences,
         [formatHex](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
 
         std::string assembly = args.value("assembly", std::string{});
@@ -5270,6 +5291,7 @@ void RegisterCoreHandlers() {
     // VTable for the root domain and scan committed RW pages for that pointer.
     PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
         [resolveClassFromArgs, formatHex, filterMatches](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
         std::string err;
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
@@ -5950,6 +5972,7 @@ void RegisterCoreHandlers() {
     // the client can later `refineValueScan(sessionId, scanType)`.
     PipeServer::RegisterHandler(MagicStrings::CmdBeginValueScan,
         [formatHex](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
         // Cancellation scope (see the IL2CPP twin): covers raw scan + index build
         // + candidate loop so Cancel / disconnect aborts mid-flight.
@@ -6860,6 +6883,7 @@ void RegisterCoreHandlers() {
     // so the wire shape matches IL2CPP exactly.
     PipeServer::RegisterHandler(MagicStrings::CmdCallMethod,
         [resolveClassFromArgs, parseAddr, formatHex](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
 
         // Value-struct arg/return codec: bytes as a hex string ("0x…"/"…") or
@@ -7423,6 +7447,7 @@ void RegisterCoreHandlers() {
     // pointer index built from the target image.
     PipeServer::RegisterHandler(MagicStrings::CmdFindFieldReferences,
         [formatHex](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
         std::string assembly = args.value("assembly", std::string{});
@@ -7551,6 +7576,7 @@ void RegisterCoreHandlers() {
     // 0 module slots (so we can design the v3 chain detector).
     PipeServer::RegisterHandler(MagicStrings::CmdDiagnoseClassReferences,
         [formatHex](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
         std::string assembly = args.value("assembly", std::string{});
@@ -8102,6 +8128,7 @@ void RegisterCoreHandlers() {
     // ------------------------------------------------------------------------
     PipeServer::RegisterHandler(MagicStrings::CmdSnapshotBegin,
         [formatHex, decodeField, walkArrayElementsInline](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
         // Hard-caps mirror the Mono handler — see 2026-05-27 raise note above.
@@ -8735,6 +8762,7 @@ void RegisterCoreHandlers() {
     // and scan committed RW pages for that pointer.
     PipeServer::RegisterHandler(MagicStrings::CmdFindInstances,
         [resolveClassFromArgs, formatHex, computeArenaExclude, filterMatches](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -9321,6 +9349,7 @@ void RegisterCoreHandlers() {
     // container).
     PipeServer::RegisterHandler(MagicStrings::CmdBeginValueScan,
         [formatHex](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         // Cancellation scope: clears any stale flag + marks a scan active for the
         // whole of this handler (raw scan, index build, candidate loop), so the
@@ -10101,6 +10130,7 @@ void RegisterCoreHandlers() {
     // tight so the wire shape is locked in before instance dispatch lands.
     PipeServer::RegisterHandler(MagicStrings::CmdCallMethod,
         [resolveClassFromArgs, parseAddr, formatHex](const json& args) -> json {
+        if (RuntimeHealth::IsPoisoned()) return RuntimePoisonedErrorJson();
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
 
         // Value-struct arg/return codec: bytes as a hex string ("0x…"/"…") or

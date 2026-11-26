@@ -8,6 +8,7 @@
 #include "../shared/Memory.h"
 #include "../shared/MethodInvokeValidation.h"
 #include "../shared/MethodSignatureFormat.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/SehFilter.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
@@ -141,16 +142,20 @@ bool SehRuntimeInvoke(fn_runtime_invoke fn,
                       void* obj,
                       void** params,
                       Il2CppException** outExc,
-                      Il2CppObject** outRet) {
+                      Il2CppObject** outRet,
+                      unsigned long* outFaultCode) {
+    unsigned long code = 0;
     __try {
         Il2CppException* exc = nullptr;
         Il2CppObject* ret = fn(m, obj, params, &exc);
         if (outExc) *outExc = exc;
         if (outRet) *outRet = ret;
         return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except ((code = GetExceptionCode()),
+                Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
         if (outExc) *outExc = nullptr;
         if (outRet) *outRet = nullptr;
+        if (outFaultCode) *outFaultCode = code;
         return false;
     }
 }
@@ -886,14 +891,19 @@ CallMethodResult CallMethod(Il2CppClass* klass,
 
     Il2CppException* exc = nullptr;
     Il2CppObject*    ret = nullptr;
+    unsigned long faultCode = 0;
     const bool invoked = SehRuntimeInvoke(r.runtime_invoke,
                                           m.method,
                                           invokeObj,
                                           paramPtrs.empty() ? nullptr : paramPtrs.data(),
                                           &exc,
-                                          &ret);
+                                          &ret,
+                                          &faultCode);
     gcPins.KeepAlive();
     if (!invoked) {
+        RuntimeHealth::MarkRuntimeFault("il2cpp_runtime_invoke", faultCode);
+        Log::Write(MagicStrings::LogCategoryWalk,
+                   "WARN callMethod: " + RuntimeHealth::FormatReason());
         result.error = "native_crash_in_runtime_invoke";
         return finish();
     }

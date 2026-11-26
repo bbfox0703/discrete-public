@@ -34,7 +34,9 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/ScanCancel.h"
+#include "../shared/SehFilter.h"
 #include "../shared/ModuleHelper.h"
 
 #include <windows.h>
@@ -77,29 +79,35 @@ struct MethodIndexEntry {
 #pragma warning(push)
 #pragma warning(disable: 4509)
 const MethodInfo* SehNextMethod(fn_class_get_methods fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 FieldInfo* SehNextField(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("il2cpp_class_get_fields", code);
+        return nullptr;
+    }
 }
 void* SehStaticData(fn_class_get_static_data fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtr(fn_method_get_pointer fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtrFromStruct(const MethodInfo* m) {
     __try { return *reinterpret_cast<void* const*>(m); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::uint32_t* iflags) {
-    __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m, iflags); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 std::uint32_t SehMethodToken(fn_method_get_token fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 const char* SehMethodName(fn_method_get_name fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 

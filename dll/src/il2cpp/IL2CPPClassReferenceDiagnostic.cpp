@@ -8,7 +8,9 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
 #include "../shared/ModuleHelper.h"
+#include "../shared/RuntimeHealth.h"
 #include "../shared/ScanCancel.h"
+#include "../shared/SehFilter.h"
 
 #include <windows.h>
 
@@ -22,10 +24,16 @@ namespace {
 #pragma warning(push)
 #pragma warning(disable: 4509)
 void* SehStaticData(fn_class_get_static_data fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 FieldInfo* SehNextField(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("il2cpp_class_get_fields", code);
+        return nullptr;
+    }
 }
 #pragma warning(pop)
 

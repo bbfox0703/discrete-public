@@ -5,6 +5,7 @@
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/MethodSignatureFormat.h"
+#include "../shared/SehFilter.h"
 #include "MonoClassWalker.h"
 #include "MonoDomain.h"
 #include "MonoResolver.h"
@@ -27,40 +28,40 @@ const char* SafeStr(const char* s) { return s ? s : ""; }
 #pragma warning(push)
 #pragma warning(disable: 4509)
 MonoMethod* SehNextMethod(fn_class_get_methods fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehMethodName(fn_method_get_name fn, MonoMethod* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::uint32_t SehMethodToken(fn_method_get_token fn, MonoMethod* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 std::uint32_t SehMethodFlags(fn_method_get_flags fn, MonoMethod* m, std::uint32_t* iflags) {
-    __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m, iflags); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 MonoMethodSignature* SehMethodSig(fn_method_signature fn, MonoMethod* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::uint32_t SehSigParamCount(fn_signature_get_param_count fn, MonoMethodSignature* s) {
-    __try { return fn(s); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(s); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 MonoType* SehSigNextParam(fn_signature_get_params fn, MonoMethodSignature* s, void** iter) {
-    __try { return fn(s, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(s, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoType* SehSigReturnType(fn_signature_get_return_type fn, MonoMethodSignature* s) {
-    __try { return fn(s); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(s); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void SehMethodParamNames(fn_method_get_param_names fn, MonoMethod* m, const char** out) {
-    __try { fn(m, out); } __except (EXCEPTION_EXECUTE_HANDLER) { /* leave out[] zero */ }
+    __try { fn(m, out); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { /* leave out[] zero */ }
 }
 void* SehCompile(fn_compile_method fn, MonoMethod* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassName(fn_class_get_name fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassNs(fn_class_get_namespace fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 
