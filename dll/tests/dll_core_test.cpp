@@ -23,6 +23,7 @@
 #include "PipeLineBuffer.h"
 #include "PipeSecurity.h"
 #include "ScanCancel.h"
+#include "SehFilter.h"
 
 #include <windows.h>
 
@@ -1484,6 +1485,134 @@ void Test_AM3_AM4_PipeSecurityAndInitOwnership() {
     CHECK(!Discrete::ModuleLifecycle::OwnsInit());
 }
 
+// Helper for A-M6/A-L14 test: raw SEH read leaf using our MemoryAccessExceptionFilter
+// directly (without IsReadable pre-check, simulating a TOCTOU / stale-cache hit
+// on a PAGE_GUARD page or C++ exception inside a guarded call).
+#pragma warning(push)
+#pragma warning(disable: 4509)
+bool TestRawReadWithFilter(const void* src, void* dst, std::size_t n) noexcept {
+    __try {
+        std::memcpy(dst, src, n);
+        return true;
+    } __except (Discrete::Seh::MemoryAccessExceptionFilter(
+                    GetExceptionCode(), GetExceptionInformation())) {
+        return false;
+    }
+}
+
+void TestThrowInsideSehFilter() {
+    __try {
+        throw std::bad_alloc();
+    } __except (Discrete::Seh::MemoryAccessExceptionFilter(
+                    GetExceptionCode(), GetExceptionInformation())) {
+        // Must NEVER execute for C++ exceptions (0xE06D7363).
+    }
+}
+#pragma warning(pop)
+
+// ============================================================================
+// A-M6 + A-L14 — Targeted SEH filter (never swallows C++ bad_alloc, preserves
+// PAGE_GUARD on TOCTOU hit) & 64 KiB window-boundary straddle scan parity
+// ============================================================================
+void Test_AM6_AL14_SehFilterGuardPageAndWindowStraddle() {
+    using namespace Discrete::Memory;
+
+    // 1. A-M6: filter classification.
+    CHECK(Discrete::Seh::MemoryAccessExceptionFilter(EXCEPTION_ACCESS_VIOLATION, nullptr)
+          == EXCEPTION_EXECUTE_HANDLER);
+    CHECK(Discrete::Seh::MemoryAccessExceptionFilter(EXCEPTION_IN_PAGE_ERROR, nullptr)
+          == EXCEPTION_EXECUTE_HANDLER);
+    CHECK(Discrete::Seh::MemoryAccessExceptionFilter(0xE06D7363u /*MSVC C++*/, nullptr)
+          == EXCEPTION_CONTINUE_SEARCH);
+    CHECK(Discrete::Seh::MemoryAccessExceptionFilter(EXCEPTION_BREAKPOINT, nullptr)
+          == EXCEPTION_CONTINUE_SEARCH);
+
+    // 2. A-M6: real C++ std::bad_alloc propagates cleanly through the SEH filter.
+    bool caughtBadAlloc = false;
+    try {
+        TestThrowInsideSehFilter();
+    } catch (const std::bad_alloc&) {
+        caughtBadAlloc = true;
+    }
+    CHECK(caughtBadAlloc);
+
+    // 3. A-L14: touching a PAGE_GUARD page via our SEH filter returns false AND
+    //    restores PAGE_GUARD on that exact page so guard semantics survive.
+    {
+        void* guardPage = ::VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE,
+                                         PAGE_READWRITE | PAGE_GUARD);
+        CHECK(guardPage != nullptr);
+        if (guardPage != nullptr) {
+            std::uint32_t out = 0;
+            CHECK(!TestRawReadWithFilter(guardPage, &out, sizeof(out)));
+
+            MEMORY_BASIC_INFORMATION mbi{};
+            CHECK(::VirtualQuery(guardPage, &mbi, sizeof(mbi)) != 0);
+            CHECK((mbi.Protect & PAGE_GUARD) != 0);
+
+            ::VirtualFree(guardPage, 0, MEM_RELEASE);
+        }
+    }
+
+    // 4. A-M6: multi-window ScanForValue & ScanForString (>128 KiB region) catch
+    //    values and strings straddling the 64 KiB window seam with exact addresses
+    //    and zero duplicates.
+    {
+        constexpr std::size_t kBufSize = 200u * 1024u;
+        void* region = ::VirtualAlloc(nullptr, kBufSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        CHECK(region != nullptr);
+        if (region != nullptr) {
+            auto* bytes = static_cast<std::uint8_t*>(region);
+            std::memset(bytes, 0x11, kBufSize);
+
+            // Place a unique Int64 straddling the 64 KiB boundary (offset 65533,
+            // stride=1) and another straddling the 128 KiB boundary (offset 131070).
+            const std::int64_t magicVal = 0x5A3C6E91B2D47F05ll;
+            const std::size_t valOff1 = 65533u;
+            const std::size_t valOff2 = 131070u;
+            std::memcpy(bytes + valOff1, &magicVal, sizeof(magicVal));
+            std::memcpy(bytes + valOff2, &magicVal, sizeof(magicVal));
+
+            ValueScanRequest vreq{};
+            vreq.dataType  = ValueDataType::Int64;
+            vreq.scanType  = ValueScanType::Exact;
+            vreq.alignment = 1;
+            vreq.limit     = 64;
+            std::memcpy(vreq.lo, &magicVal, sizeof(magicVal));
+
+            auto vhits = ScanForValue(vreq, nullptr);
+            int found1 = 0, found2 = 0;
+            for (const auto& h : vhits) {
+                if (h.addr == bytes + valOff1) ++found1;
+                if (h.addr == bytes + valOff2) ++found2;
+            }
+            CHECK(found1 == 1);
+            CHECK(found2 == 1);
+
+            // Place a unique 12-byte string straddling the 64 KiB boundary with
+            // non-dividing stride=3 (65532 % 3 == 0, spans [65532, 65544) across 65536!).
+            const char needleStr[] = "STRADDLE_64K";
+            const std::size_t strOff = 65532u;
+            std::memcpy(bytes + strOff, needleStr, 12u);
+
+            StringScanRequest sreq{};
+            sreq.needle.assign(reinterpret_cast<const std::uint8_t*>(needleStr),
+                               reinterpret_cast<const std::uint8_t*>(needleStr) + 12u);
+            sreq.alignment = 3;
+            sreq.limit     = 64;
+
+            auto shits = ScanForString(sreq, nullptr);
+            int foundStr = 0;
+            for (const auto& h : shits) {
+                if (h.addr == bytes + strOff) ++foundStr;
+            }
+            CHECK(foundStr == 1);
+
+            ::VirtualFree(region, 0, MEM_RELEASE);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1501,6 +1630,7 @@ int main() {
     Test_BM10_AL15_CM1_IndexedPoolThreadCapAndCancel();
     Test_AM7_AM8_AL16_TeardownAndMainThreadDispatcher();
     Test_AM3_AM4_PipeSecurityAndInitOwnership();
+    Test_AM6_AL14_SehFilterGuardPageAndWindowStraddle();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

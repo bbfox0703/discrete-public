@@ -4,6 +4,7 @@
 
 #include "ParallelScanDriver.h"
 #include "ScanCancel.h"
+#include "SehFilter.h"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -68,7 +69,8 @@ bool ReadSeh(const void* addr, void* dst, std::size_t size) noexcept {
     __try {
         ::memcpy(dst, addr, size);
         return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (Discrete::Seh::MemoryAccessExceptionFilter(
+                    GetExceptionCode(), GetExceptionInformation())) {
         return false;
     }
 }
@@ -77,7 +79,8 @@ bool WriteSeh(void* addr, const void* src, std::size_t size) noexcept {
     __try {
         ::memcpy(addr, src, size);
         return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (Discrete::Seh::MemoryAccessExceptionFilter(
+                    GetExceptionCode(), GetExceptionInformation())) {
         return false;
     }
 }
@@ -156,36 +159,6 @@ bool SafeWriteBytes(void* addr, const void* src, std::size_t size) noexcept {
     return WriteSeh(addr, src, size);
 }
 
-const std::uint8_t* AOBScan(const std::uint8_t* base, std::size_t size,
-                            const std::uint8_t* pattern, std::string_view mask) noexcept {
-    if (!base || !pattern || mask.empty() || size < mask.size()) return nullptr;
-    const std::size_t patLen = mask.size();
-    const std::uint8_t* end = base + size - patLen;
-    for (const std::uint8_t* p = base; p <= end; ++p) {
-        bool matched = true;
-        for (std::size_t i = 0; i < patLen; ++i) {
-            if (mask[i] == 'x' && p[i] != pattern[i]) { matched = false; break; }
-        }
-        if (matched) return p;
-    }
-    return nullptr;
-}
-
-const std::uint8_t* AOBScanModule(const wchar_t* moduleName,
-                                  const std::uint8_t* pattern, std::string_view mask) noexcept {
-    HMODULE mod = ::GetModuleHandleW(moduleName);
-    if (!mod) return nullptr;
-
-    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<std::uint8_t*>(mod) + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
-
-    const std::uint8_t* base = reinterpret_cast<const std::uint8_t*>(mod);
-    const std::size_t size = nt->OptionalHeader.SizeOfImage;
-    return AOBScan(base, size, pattern, mask);
-}
-
 std::vector<CommittedRegion> EnumerateCommittedRegions() {
     std::vector<CommittedRegion> out;
     SYSTEM_INFO si{};
@@ -218,25 +191,53 @@ std::vector<CommittedRegion> EnumerateCommittedRegions() {
     return out;
 }
 
-#pragma warning(push)
-#pragma warning(disable: 4509)
 namespace {
-// Inner SEH helper: scans one memory region for an aligned pointer match.
-// Out parameter `matches` is appended to. Returns false on AV (region skipped).
+// Window size for SEH-leaf copy-then-scan (A-M6). Copying game memory into a
+// thread-local 64 KiB scratch buffer via leaf `ReadSeh` keeps EVERY `__try` in
+// this file strictly leaf-shaped (single memcpy) so `matches.push_back()` and
+// all C++ container growth run outside SEH and never get swallowed as read
+// failures on `std::bad_alloc`. 64 KiB stays hot in L1/L2 cache.
+constexpr std::size_t kScanWindowBytes = 64u * 1024u;
+
+std::vector<std::uint8_t>& ThreadLocalScanWindow(std::size_t minBytes) {
+    thread_local std::vector<std::uint8_t> tlBuf;
+    if (tlBuf.size() < minBytes) {
+        tlBuf.resize(minBytes);
+    }
+    return tlBuf;
+}
+
+// Compute a stride-aligned window advance step near `kScanWindowBytes`.
+inline std::size_t AlignedWindowStep(std::size_t stride) noexcept {
+    if (stride == 0u) stride = 1u;
+    return (stride >= kScanWindowBytes) ? stride : ((kScanWindowBytes / stride) * stride);
+}
+
+// Scans one memory region for an aligned pointer match. Copies 64 KiB windows
+// through leaf `ReadSeh` and performs comparison + `matches.push_back` strictly
+// outside SEH (A-M6). Returns false on memory fault (region skipped).
 // A match whose address lands in [excludeLow, excludeHigh) (when the range is
 // non-empty) is dropped without counting toward `limit`; such hits are tallied
 // into `excludedMatches` so callers can report how much arena residue was
 // filtered.
-bool SehScanRegion(const std::uint8_t* base, std::size_t size,
-                   std::uintptr_t target,
-                   std::vector<const void*>& matches,
-                   std::size_t limit,
-                   std::uintptr_t excludeLow, std::uintptr_t excludeHigh,
-                   std::size_t& excludedMatches) {
-    __try {
-        const bool hasExclude = excludeHigh > excludeLow;
-        const std::size_t count = size / sizeof(std::uintptr_t);
-        const std::uintptr_t* arr = reinterpret_cast<const std::uintptr_t*>(base);
+bool ScanPointerChunkSafe(const std::uint8_t* base, std::size_t size,
+                          std::uintptr_t target,
+                          std::vector<const void*>& matches,
+                          std::size_t limit,
+                          std::uintptr_t excludeLow, std::uintptr_t excludeHigh,
+                          std::size_t& excludedMatches) {
+    const bool hasExclude = excludeHigh > excludeLow;
+    auto& scratch = ThreadLocalScanWindow(kScanWindowBytes);
+
+    for (std::size_t off = 0; off < size; off += kScanWindowBytes) {
+        if (matches.size() >= limit) return true;
+        const std::size_t winBytes = std::min<std::size_t>(kScanWindowBytes, size - off);
+        if (!ReadSeh(base + off, scratch.data(), winBytes)) {
+            return false;
+        }
+        const std::size_t count = winBytes / sizeof(std::uintptr_t);
+        const auto* arr = reinterpret_cast<const std::uintptr_t*>(scratch.data());
+        const std::uint8_t* origBase = base + off;
         std::size_t i = 0;
 #if defined(_M_X64)
         // Phase 30 P2 SIMD — AVX2 4-qword (32-byte) compare. _mm256_cmpeq_epi64
@@ -255,7 +256,7 @@ bool SehScanRegion(const std::uint8_t* base, std::size_t size,
                     unsigned long lane;
                     _BitScanForward(&lane, static_cast<unsigned long>(mask));
                     auto addr = reinterpret_cast<std::uintptr_t>(
-                        base + (i + lane) * sizeof(std::uintptr_t));
+                        origBase + (i + lane) * sizeof(std::uintptr_t));
                     if (hasExclude && addr >= excludeLow && addr < excludeHigh) {
                         ++excludedMatches;
                     } else {
@@ -269,7 +270,7 @@ bool SehScanRegion(const std::uint8_t* base, std::size_t size,
 #endif
         for (; i < count; ++i) {
             if (arr[i] == target) {
-                auto addr = reinterpret_cast<std::uintptr_t>(base + i * sizeof(std::uintptr_t));
+                auto addr = reinterpret_cast<std::uintptr_t>(origBase + i * sizeof(std::uintptr_t));
                 if (hasExclude && addr >= excludeLow && addr < excludeHigh) {
                     ++excludedMatches;
                     continue;
@@ -278,13 +279,10 @@ bool SehScanRegion(const std::uint8_t* base, std::size_t size,
                 if (matches.size() >= limit) return true;
             }
         }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
     }
+    return true;
 }
 }  // namespace
-#pragma warning(pop)
 
 // ---------- Thread-stack enumeration ----------------------------------------
 //
@@ -636,8 +634,8 @@ std::vector<const void*> ScanForPointer(std::uintptr_t target, std::size_t limit
             const std::uint8_t* base, std::size_t scanSize,
             std::vector<const void*>& local, std::size_t cap) -> bool {
             std::size_t exc = 0;   // per-call (per-thread) — no shared-state race
-            bool ok = SehScanRegion(base, scanSize, target, local, cap,
-                                    excludeLow, excludeHigh, exc);
+            bool ok = ScanPointerChunkSafe(base, scanSize, target, local, cap,
+                                           excludeLow, excludeHigh, exc);
             if (exc) excludedMatches.fetch_add(exc, std::memory_order_relaxed);
             return ok;
         });
@@ -701,10 +699,11 @@ inline bool MatchRangeFloat(const std::uint8_t* p, const std::uint8_t* lo, const
     return candidate >= tlo && candidate <= thi;
 }
 
-// Per-dataType inner loop. Walks [base, base+size) at `stride` and appends
-// matches with their raw value bytes. Bounded by `limit`.
+// Per-dataType inner loop. Walks local copied buffer [buf, buf+size) at
+// `stride` and records original game addresses [origBase + i]. Bounded by `limit`.
 template <typename T, bool IsRange, bool IsFloat>
-void ScanChunk(const std::uint8_t* base,
+void ScanChunk(const std::uint8_t* buf,
+               const std::uint8_t* origBase,
                std::size_t          size,
                const ValueScanRequest& req,
                std::vector<ValueScanCandidate>& matches,
@@ -712,7 +711,7 @@ void ScanChunk(const std::uint8_t* base,
     const std::size_t stride = req.alignment ? req.alignment : sizeof(T);
     if (size < sizeof(T)) return;
     for (std::size_t i = 0; i + sizeof(T) <= size; i += stride) {
-        const std::uint8_t* p = base + i;
+        const std::uint8_t* p = buf + i;
         bool hit = false;
         if constexpr (IsFloat) {
             if constexpr (IsRange) hit = MatchRangeFloat<T>(p, req.lo, req.hi);
@@ -723,7 +722,7 @@ void ScanChunk(const std::uint8_t* base,
         }
         if (hit) {
             ValueScanCandidate c{};
-            c.addr = p;
+            c.addr = origBase + i;
             ::memcpy(c.value, p, sizeof(T));
             matches.push_back(c);
             if (matches.size() >= limit) return;
@@ -733,9 +732,8 @@ void ScanChunk(const std::uint8_t* base,
 
 // Dispatch on dataType + scanType. Range/Exact and Int/Float branches are
 // resolved at template-time so the hot loop has zero per-byte branching.
-// Non-noexcept: the caller wraps this in __try and we don't want noexcept
-// fighting with the SEH unwind.
-void DispatchScanChunk(const std::uint8_t* base,
+void DispatchScanChunk(const std::uint8_t* buf,
+                       const std::uint8_t* origBase,
                        std::size_t          size,
                        const ValueScanRequest& req,
                        std::vector<ValueScanCandidate>& matches,
@@ -743,65 +741,76 @@ void DispatchScanChunk(const std::uint8_t* base,
     const bool isRange = (req.scanType == ValueScanType::Range);
     switch (req.dataType) {
         case ValueDataType::Int8:
-            isRange ? ScanChunk<std::int8_t,   true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::int8_t,   false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::int8_t,   true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::int8_t,   false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::Int16:
-            isRange ? ScanChunk<std::int16_t,  true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::int16_t,  false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::int16_t,  true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::int16_t,  false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::Int32:
-            isRange ? ScanChunk<std::int32_t,  true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::int32_t,  false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::int32_t,  true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::int32_t,  false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::Int64:
-            isRange ? ScanChunk<std::int64_t,  true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::int64_t,  false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::int64_t,  true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::int64_t,  false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::UInt8:
-            isRange ? ScanChunk<std::uint8_t,  true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::uint8_t,  false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::uint8_t,  true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::uint8_t,  false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::UInt16:
-            isRange ? ScanChunk<std::uint16_t, true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::uint16_t, false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::uint16_t, true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::uint16_t, false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::UInt32:
-            isRange ? ScanChunk<std::uint32_t, true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::uint32_t, false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::uint32_t, true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::uint32_t, false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::UInt64:
-            isRange ? ScanChunk<std::uint64_t, true,  false>(base, size, req, matches, limit)
-                    : ScanChunk<std::uint64_t, false, false>(base, size, req, matches, limit);
+            isRange ? ScanChunk<std::uint64_t, true,  false>(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<std::uint64_t, false, false>(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::Float:
-            isRange ? ScanChunk<float,         true,  true >(base, size, req, matches, limit)
-                    : ScanChunk<float,         false, true >(base, size, req, matches, limit);
+            isRange ? ScanChunk<float,         true,  true >(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<float,         false, true >(buf, origBase, size, req, matches, limit);
             break;
         case ValueDataType::Double:
-            isRange ? ScanChunk<double,        true,  true >(base, size, req, matches, limit)
-                    : ScanChunk<double,        false, true >(base, size, req, matches, limit);
+            isRange ? ScanChunk<double,        true,  true >(buf, origBase, size, req, matches, limit)
+                    : ScanChunk<double,        false, true >(buf, origBase, size, req, matches, limit);
             break;
     }
 }
 
-// SEH wrapper around DispatchScanChunk. Lives in its own function so __try
-// doesn't sit in the same frame as `std::vector` destructors (C4509).
-#pragma warning(push)
-#pragma warning(disable: 4509)
-bool SehDispatchScanChunk(const std::uint8_t* base,
-                          std::size_t          size,
-                          const ValueScanRequest& req,
-                          std::vector<ValueScanCandidate>& matches,
-                          std::size_t          limit) {
-    __try {
-        DispatchScanChunk(base, size, req, matches, limit);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+// SEH-leaf window copier + value scanner (A-M6). Copies stride-aligned 64 KiB
+// windows (+ `typeSize - 1` overlap so straddling values are owned by exactly
+// one window) through leaf `ReadSeh`, keeping all `matches.push_back()` outside
+// `__try` so `std::bad_alloc` unwinds cleanly instead of being swallowed.
+bool ScanValueChunkSafe(const std::uint8_t* base,
+                        std::size_t          size,
+                        const ValueScanRequest& req,
+                        std::vector<ValueScanCandidate>& matches,
+                        std::size_t          limit) {
+    const std::size_t typeSize = ValueDataTypeSize(req.dataType);
+    if (typeSize == 0u || size < typeSize) return true;
+    const std::size_t stride  = req.alignment ? req.alignment : typeSize;
+    const std::size_t step    = AlignedWindowStep(stride);
+    const std::size_t maxCopy = step + typeSize - 1u;
+    auto& scratch = ThreadLocalScanWindow(maxCopy);
+
+    for (std::size_t off = 0; off < size; off += step) {
+        if (matches.size() >= limit) return true;
+        const std::size_t rem = size - off;
+        if (rem < typeSize) break;
+        const std::size_t copyLen = std::min<std::size_t>(rem, maxCopy);
+        if (!ReadSeh(base + off, scratch.data(), copyLen)) {
+            return false;
+        }
+        DispatchScanChunk(scratch.data(), base + off, copyLen, req, matches, limit);
     }
+    return true;
 }
-#pragma warning(pop)
 
 }  // namespace
 
@@ -831,10 +840,8 @@ std::vector<ValueScanCandidate> ScanForValue(const ValueScanRequest& req,
         chunks, req.limit, &readFailureBytes,
         [&req](const std::uint8_t* base, std::size_t scanSize,
                std::vector<ValueScanCandidate>& local, std::size_t cap) -> bool {
-            // __try-wrapped typed inner loop; a rare AC-stripped page only
-            // loses this 1 MB chunk (no IsReadable pre-probe — the region list
-            // already excludes guard/no-access pages).
-            return SehDispatchScanChunk(base, scanSize, req, local, cap);
+            // Leaf ReadSeh window copy + outside-SEH typed scan (A-M6).
+            return ScanValueChunkSafe(base, scanSize, req, local, cap);
         });
     if (stats) stats->readFailureBytes = readFailureBytes.load();
     return matches;
@@ -848,11 +855,12 @@ std::vector<ValueScanCandidate> ScanForValue(const ValueScanRequest& req,
 
 namespace {
 
-bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
-                    const std::uint8_t* needle, std::size_t needleSize,
-                    std::size_t stride,
-                    std::vector<StringScanCandidate>& matches,
-                    std::size_t limit) {
+bool ScanStringWindow(const std::uint8_t* buf, const std::uint8_t* origBase,
+                      std::size_t size,
+                      const std::uint8_t* needle, std::size_t needleSize,
+                      std::size_t stride,
+                      std::vector<StringScanCandidate>& matches,
+                      std::size_t limit) {
     if (size < needleSize) return true;
     const std::size_t end = size - needleSize;
     std::size_t i = 0;
@@ -868,7 +876,7 @@ bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
     if (g_useAvx2) {
         const __m256i first = _mm256_set1_epi8(static_cast<char>(needle[0]));
         for (; i + 32 <= size; i += 32) {
-            __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(base + i));
+            __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buf + i));
             unsigned int mask = static_cast<unsigned int>(
                 _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, first)));
             while (mask) {
@@ -877,9 +885,9 @@ bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
                 const std::size_t cand = i + lane;
                 // cand <= end ⇒ cand + needleSize <= size (end = size - needleSize).
                 if (cand % stride == 0 && cand <= end &&
-                    std::memcmp(base + cand, needle, needleSize) == 0) {
+                    std::memcmp(buf + cand, needle, needleSize) == 0) {
                     StringScanCandidate c{};
-                    c.addr   = base + cand;
+                    c.addr   = origBase + cand;
                     c.length = needleSize;
                     matches.push_back(c);
                     if (matches.size() >= limit) return true;
@@ -901,9 +909,9 @@ bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
     }
 #endif
     for (; i <= end; i += stride) {
-        if (std::memcmp(base + i, needle, needleSize) == 0) {
+        if (std::memcmp(buf + i, needle, needleSize) == 0) {
             StringScanCandidate c{};
-            c.addr   = base + i;
+            c.addr   = origBase + i;
             c.length = needleSize;
             matches.push_back(c);
             if (matches.size() >= limit) return true;
@@ -912,20 +920,31 @@ bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
     return true;
 }
 
-#pragma warning(push)
-#pragma warning(disable: 4509)
-bool SehScanStringChunk(const std::uint8_t* base, std::size_t size,
-                        const std::uint8_t* needle, std::size_t needleSize,
-                        std::size_t stride,
-                        std::vector<StringScanCandidate>& matches,
-                        std::size_t limit) {
-    __try {
-        return SehMemcmpProbe(base, size, needle, needleSize, stride, matches, limit);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+// SEH-leaf window copier + string scanner (A-M6). Copies stride-aligned 64 KiB
+// windows (+ `needleSize - 1` overlap) through leaf `ReadSeh`, keeping all
+// `matches.push_back()` outside `__try`.
+bool ScanStringChunkSafe(const std::uint8_t* base, std::size_t size,
+                         const std::uint8_t* needle, std::size_t needleSize,
+                         std::size_t stride,
+                         std::vector<StringScanCandidate>& matches,
+                         std::size_t limit) {
+    if (needleSize == 0u || size < needleSize) return true;
+    const std::size_t step    = AlignedWindowStep(stride);
+    const std::size_t maxCopy = step + needleSize - 1u;
+    auto& scratch = ThreadLocalScanWindow(maxCopy);
+
+    for (std::size_t off = 0; off < size; off += step) {
+        if (matches.size() >= limit) return true;
+        const std::size_t rem = size - off;
+        if (rem < needleSize) break;
+        const std::size_t copyLen = std::min<std::size_t>(rem, maxCopy);
+        if (!ReadSeh(base + off, scratch.data(), copyLen)) {
+            return false;
+        }
+        ScanStringWindow(scratch.data(), base + off, copyLen, needle, needleSize, stride, matches, limit);
     }
+    return true;
 }
-#pragma warning(pop)
 
 }  // namespace
 
@@ -939,7 +958,7 @@ bool ScanStringSpan(const std::uint8_t* base, std::size_t size,
     }
     if (stride == 0u) stride = 1u;
     if (matches.size() >= limit) return true;
-    return SehMemcmpProbe(base, size, needle, needleSize, stride, matches, limit);
+    return ScanStringWindow(base, base, size, needle, needleSize, stride, matches, limit);
 }
 
 std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
@@ -974,7 +993,7 @@ std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
         [needle, needleSize, stride](
             const std::uint8_t* base, std::size_t scanSize,
             std::vector<StringScanCandidate>& local, std::size_t cap) -> bool {
-            return SehScanStringChunk(base, scanSize, needle, needleSize, stride, local, cap);
+            return ScanStringChunkSafe(base, scanSize, needle, needleSize, stride, local, cap);
         });
     if (stats) stats->readFailureBytes = readFailureBytes.load();
     return matches;

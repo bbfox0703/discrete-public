@@ -49,12 +49,12 @@
 - 成因：`TryClaimSingleInit` 只在 DllMain 裡把關。第二份 DLL（例如 proxy 載入遊戲目錄那份，UI 又注入 `dist\` 那份；路徑不同，所以是兩個模組）雖然跳過 init，但它的 `Discrete_Init` / `Discrete_StartPipe` export 仍然可以呼叫（CE bridge 會明確呼叫 `Discrete_StartPipe`，CE 依符號名解析時可能解析到第二份）。結果是同一行程內有第二個 pipe server（同名 instance）、第二套 handler table，之後還可能有第二個 `runtime_invoke` MinHook detour（每個模組各帶一份 MinHook 狀態，會互相疊加）。
 - 修法：把 claim 結果存進模組層級的旗標（例如 `g_ownsInit`）；`Discrete_Init` / `Discrete_StartPipe` 在 `!g_ownsInit` 時直接回傳錯誤碼並寫 log。
 
-**A-M5 · Proxy 的 backend 偵測 5 秒就放棄，而且不留任何 log**
+**A-M5 · Proxy 的 backend 偵測 5 秒就放棄，而且不留任何 log — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/proxy/loader.cpp:108-123`、`:101-131`
 - 成因：proxy 在行程啟動的極早期就被載入，只輪詢 50 × 100 ms。舊版 Unity 啟動時有「Screen resolution dialog」，dialog 在 mono / GameAssembly 載入**之前**出現、等使用者操作；慢速磁碟或啟動器也常超過 5 秒。逾時後執行緒回傳 2 就結束，什麼都沒記錄，使用者看到的症狀是「proxy 裝好了但永遠連不上」。回傳 1 / 3（找不到目錄、`LoadLibraryW` 失敗，包含 x86 IL2CPP 遊戲找不到 `Discrete-IL2CPP.dll`）也一樣沒有 log。
 - 修法：改用 `LdrRegisterDllNotification`（ntdll，動態解析）在 mono / GameAssembly 載入時觸發，或改成無上限、指數退避的輪詢；三種失敗回傳前都 `Log::Init()` 並寫一行原因。
 
-**A-M6 · Memory.cpp 的掃描 helper 違反 SEH-leaf rule，把 `bad_alloc` 當成「讀取失敗」吞掉**
+**A-M6 · Memory.cpp 的掃描 helper 違反 SEH-leaf rule，把 `bad_alloc` 當成「讀取失敗」吞掉 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/Memory.cpp:229-284`（`SehScanRegion` 的 `__try` 內有迴圈和 `matches.push_back`）、`:791-802`（`SehDispatchScanChunk` → `ScanChunk` 的 `push_back`）、`:905-915`（`SehScanStringChunk` → `SehMemcmpProbe` 的 `push_back`）
 - 成因：`docs/Archiutecture.md` §Rules 規定 `__try` 本體只能是單一 call / 單一記憶體存取。這三處的 `__except(EXCEPTION_EXECUTE_HANDLER)` 會連 C++ 例外（`0xE06D7363`，例如 32-bit 下 vector 擴容的 `bad_alloc`）一起攔下：結果被靜默截斷、算成 `readFailureBytes`（`ScanForPointer` 甚至不計），例外物件也不會被釋放。
 - 修法：讓 `__try` 只包「讀一段遊戲記憶體到本地 buffer」這個 leaf（例如每次 `memcpy` 一個 4–64 KB 視窗到 stack/thread-local buffer），比對與 `push_back` 移到 `__try` 外；或者改用 exception filter，只對 `EXCEPTION_ACCESS_VIOLATION` / `EXCEPTION_IN_PAGE_ERROR` 回傳 `EXECUTE_HANDLER`，其他一律 `CONTINUE_SEARCH`。
@@ -161,12 +161,12 @@
 - 位置：`dll/src/main.cpp:59`
 - 修法：改成 `MagicStrings::LogCategoryInit`。
 
-**A-L13 · `AOBScan` / `AOBScanModule` 是 dead code，而且沒有 SEH 保護**
+**A-L13 · `AOBScan` / `AOBScanModule` 是 dead code，而且沒有 SEH 保護 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/Memory.cpp:158-186`；`Memory.h:49-57`
 - 成因：repo 內沒有任何呼叫者；`AOBScanModule` 直接讀整個 `SizeOfImage`，遇到 `PAGE_NOACCESS` 的 section（packer / anti-tamper）會讓遊戲崩潰。之後若有人重新啟用，就是現成的地雷。
 - 修法：刪除，或改成透過 Rust `aob` + `SafeReadBytes` 的版本。
 
-**A-L14 · SEH 讀取會吞掉 `STATUS_GUARD_PAGE_VIOLATION`**
+**A-L14 · SEH 讀取會吞掉 `STATUS_GUARD_PAGE_VIOLATION` — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/Memory.cpp:66-82`、`:118-143`
 - 成因：`IsReadableSeq` 的 thread-local region cache 和 `VirtualQuery` 之後的 TOCTOU，都可能讓 `memcpy` 碰到新出現的 guard page。`EXCEPTION_EXECUTE_HANDLER` 會吃掉一次性的 guard 例外，guard 屬性因此被移除；若那是其他 thread 的 stack guard，該 thread 之後就無法擴充 stack。
 - 修法：exception filter 只接受 `EXCEPTION_ACCESS_VIOLATION` / `EXCEPTION_IN_PAGE_ERROR`；遇到 guard page 時用 `VirtualProtect` 把 `PAGE_GUARD` 補回去再回傳失敗。

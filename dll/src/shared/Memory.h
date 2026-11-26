@@ -46,16 +46,6 @@ bool SafeWrite(void* addr, const T& value) noexcept {
     return SafeWriteBytes(addr, &value, sizeof(T));
 }
 
-// AOB scan in [base, base+size). `pattern` is the bytes; `mask` is one char per pattern byte:
-// 'x' = match, '?' = wildcard. Returns first match or nullptr.
-// Pattern and mask must have equal length.
-const std::uint8_t* AOBScan(const std::uint8_t* base, std::size_t size,
-                            const std::uint8_t* pattern, std::string_view mask) noexcept;
-
-// Convenience: scan an entire module's image for a pattern.
-const std::uint8_t* AOBScanModule(const wchar_t* moduleName,
-                                  const std::uint8_t* pattern, std::string_view mask) noexcept;
-
 // One committed memory region as reported by VirtualQueryEx.
 struct CommittedRegion {
     const std::uint8_t* base;

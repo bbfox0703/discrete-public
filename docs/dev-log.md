@@ -12,6 +12,26 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1556) — Fix A-M5 + A-M6 (+ A-L13, A-L14) (event-driven proxy backend loader with logging, strict SEH-leaf window scans, targeted SEH filter preserving `PAGE_GUARD` & C++ exceptions, remove dead `AOBScan` + tests)
+
+- **Bug fixes (`A-M5`, `A-M6`, `A-L13`, `A-L14` — completes 100% of Block A High & Medium findings, 2/2 High + 12/12 Medium):**
+  - **`A-M5` (`dll/src/proxy/loader.{h,cpp}`):**
+    - Replaced the brittle 5-second `50 × 100 ms` silent timeout in `BackendLoaderThread` with event-driven `LdrRegisterDllNotification` (dynamically resolved from `ntdll.dll`) backed by capped exponential backoff (`100 ms` → `5000 ms`) so games sitting at a Unity resolution dialog, launcher splash, or slow cold start wake and attach immediately the moment `mono*` / `GameAssembly.dll` loads.
+    - Added diagnostic logging (`LogProxyLine` → init log) for `DirOfSelf` failure, >5 s waiting advisory, and `LoadLibraryW` failure (including backend DLL name, `GetLastError`, and architecture).
+    - Replaced `std::wstring SystemDllPath` with an allocation-free stack buffer `BuildSystemDllPath` inside `noexcept` `Proxy_LoadRealDll` (eliminating `std::bad_alloc` → `std::terminate` hazard) and updated the stale x86 comment in `loader.h`.
+  - **`A-M6` + `A-L14` (`dll/src/shared/SehFilter.h`, `dll/src/shared/Memory.cpp`):**
+    - Added `dll/src/shared/SehFilter.h` with `MemoryAccessExceptionFilter`: handles ONLY `EXCEPTION_ACCESS_VIOLATION`, `EXCEPTION_IN_PAGE_ERROR`, and `STATUS_GUARD_PAGE_VIOLATION` — returning `EXCEPTION_CONTINUE_SEARCH` for C++ exceptions (`0xE06D7363` / `std::bad_alloc`) so they unwind properly instead of being swallowed as read failures, and restoring `PAGE_GUARD` on the exact faulted page via `VirtualProtect(faultAddr, 1, ...)` before handling `STATUS_GUARD_PAGE_VIOLATION` so TOCTOU hits never strip another thread's stack guard page.
+    - Refactored `Memory.cpp` pointer (`ScanPointerChunkSafe`), value (`ScanValueChunkSafe`), and string (`ScanStringChunkSafe`) chunk scanners to copy stride-aligned 64 KiB windows (with `elemSize - 1` overlap) through leaf `ReadSeh` into a `thread_local` scratch buffer and run all comparison + `matches.push_back` strictly outside `__try`, bringing every `__try` in `Memory.cpp` into strict SEH-leaf compliance.
+  - **`A-L13` (`dll/src/shared/Memory.{h,cpp}`):**
+    - Removed unreferenced, un-SEH-guarded dead functions `AOBScan` and `AOBScanModule`.
+  - **Tests:**
+    - Added `Test_AM6_AL14_SehFilterGuardPageAndWindowStraddle` (+13 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp` verifying `MemoryAccessExceptionFilter` classification, real `throw std::bad_alloc()` propagation through SEH, live `PAGE_GUARD` preservation across a raw SEH read fault, and multi-window (>128 KiB) `ScanForValue` / `ScanForString` 64 KiB boundary straddle accuracy with non-dividing stride.
+    - Ran `python tools/verify/proxy_precrt_gate.py --all` — PASS on both `dist\version.dll` and `dist\winmm.dll`.
+  - Marked `A-M5`, `A-M6`, `A-L13`, and `A-L14` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1556) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; `proxy_precrt_gate.py --all` passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 545 checks passed (x64) / 548 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1555) — Fix A-M3 + A-M4 (+ A-L6) (named-pipe remote rejection, user+SYSTEM protected DACL, `FILE_FLAG_FIRST_PIPE_INSTANCE`, export single-init ownership gate, and PipeServer Stop/Start hardening + tests)
 
 - **Bug fixes (`A-M3`, `A-M4`, `A-L6`):**
