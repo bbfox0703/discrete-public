@@ -12,6 +12,22 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1547) — Fix E-M7 + E-L4 (layout-accurate C/C++ SDK header exporter with padding/static_assert/math PODs/dedup + `UnityTypeMap` pointerSize + tests)
+
+- **Bug fixes (`E-M7`, `E-L4`):**
+  - **`E-M7` (`SdkHeaderExporter.cs`, `AssemblyBrowserViewModel.cs`):**
+    - Rewrote `SdkHeaderExporter` to emit compile-ready, memory-layout-accurate C/C++ headers (`#pragma once`, `#include <cstddef>`, `#include <cstdint>`): collects all non-static instance fields across ancestors + self, sorts by runtime byte offset, inserts explicit `uint8_t _pad_XXXX[0xNN]` from offset `0` (covering both the managed object header `0x10`/`0x08` and inter-field gaps), skips invalid negative offsets (e.g. normalized ThreadStatic `-1`) as comments, and emits overlapping explicit-layout fields as comments without shifting subsequent members.
+    - Added guarded `#ifndef DISCRETE_UNITY_MATH_TYPES` POD definitions (`Vector2`, `Vector3`, `Vector4`, `Quaternion`, `Color`, `Color32`, `Rect`, `Bounds`) whenever any emitted field references a built-in Unity math type.
+    - Added `SdkHeaderExporter.RenderAsync(..., options, lookup, ct)` and wired `AssemblyBrowserViewModel.ExportSdkHeaderAsync` to use it so custom enums unwrap to their underlying integer C type (`uint8_t`/`int16_t`/`int32_t`/etc.), custom ValueType structs emit `uint8_t name[0xNN]` (or comment-only when size is unknown so padding preserves alignment), and offline fallback infers small non-pointer gaps `< ptr` as `uint8_t name[0xNN]` to avoid overlapping the next field.
+    - Disambiguated shadowed/duplicate member names across inheritance with `_<DeclaringClass>` (and `_0x<Offset>` if still colliding), escaped C++ reserved keywords (`class_`, `default_`, etc.), and appended `static_assert(offsetof(Struct, member) == 0xNN, ...)` checks after `#pragma pack(pop)`.
+  - **`E-L4` (`UnityTypeMap.cs`, `CeXmlExporter.Live.cs`):**
+    - Added optional `int pointerSize = 8` parameter to `UnityTypeMap.Resolve` so `System.IntPtr`, `System.UIntPtr`, and pointer fallbacks return 4-byte widths (`4 Bytes`, `int32_t`/`uint32_t`, `SizeBytes = 4`) on x86 targets; passed `options.PointerSize` in `CeXmlExporter.Live` flattened struct & collapsed leaf-pointer paths. (Together with `E-H2` and `E-M2`, all hardcoded 8-byte pointer sites listed in `E-L4` are now resolved.)
+  - Added 14 new xUnit v3 test cases in `ui/UnityDumpUI.Tests/SdkHeaderExporterTests.cs` including a packed-struct layout verifier checking every member's computed offset against both its `// +0xNN` comment and `static_assert(offsetof(...))`, covering sorting/padding, Unity math PODs, inherited shadowing & C++ keywords, async enum/ValueType/unknown-struct/class lookup, offline small-field gap inference, overlapping explicit layout, x86 4-byte layout, `UnityTypeMap.Resolve(type, 4)`, and cancellation propagation.
+  - Marked `E-M7` and `E-L4` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1547) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1199 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 451 checks passed (x64) / 454 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1546) — Fix E-M2 + E-M3 (+ E-L9) (Address Lookup String dereference & x86 pointer width, Mode-B `ce_table_bootstrap.lua` `injectDLL`/backend/logging fixes + tests)
 
 - **Bug fixes (`E-M2`, `E-M3`, `E-L9`):**

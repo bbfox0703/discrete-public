@@ -548,8 +548,8 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     [RelayCommand(CanExecute = nameof(CanExport))]
     private Task ExportSdkHeaderAsync() =>
-        ExportAsync("h", "C/C++ header", (self, ancestors, assembly, _, _, _) =>
-            Task.FromResult(SdkHeaderExporter.Render(self, ancestors, assembly)));
+        ExportAsync("h", "C/C++ header", (self, ancestors, assembly, options, lookup, ct) =>
+            SdkHeaderExporter.RenderAsync(self, ancestors, assembly, options, lookup, ct));
 
     [RelayCommand(CanExecute = nameof(CanExport))]
     private Task ExportCsxAsync() =>

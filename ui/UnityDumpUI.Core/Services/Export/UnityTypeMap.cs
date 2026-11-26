@@ -29,12 +29,14 @@ public static class UnityTypeMap
     /// Resolve a Unity managed type name (the format `getClassInfo` returns,
     /// e.g. <c>"System.Single"</c>, <c>"UnityEngine.Vector3"</c>,
     /// <c>"System.Collections.Generic.List`1"</c>) into a structured shape.
-    /// Unknown / blank inputs degrade to an opaque 8-byte pointer.
+    /// Unknown / blank inputs degrade to an opaque pointer of width
+    /// <paramref name="pointerSize"/> (8 on x64, 4 on x86).
     /// </summary>
-    public static ManagedTypeShape Resolve(string? unityType)
+    public static ManagedTypeShape Resolve(string? unityType, int pointerSize = 8)
     {
+        int ptr = pointerSize == 4 ? 4 : 8;
         if (string.IsNullOrWhiteSpace(unityType))
-            return Pointer("void*");
+            return Pointer("void*", ptr);
 
         // Trim generic instantiation suffix `<...>` so List`1<int> matches List`1.
         int lt = unityType.IndexOf('<');
@@ -42,7 +44,7 @@ public static class UnityTypeMap
 
         // Array suffix `[]` → pointer to managed array header.
         if (root.EndsWith("[]", StringComparison.Ordinal))
-            return Pointer("void*  /* managed array */");
+            return Pointer("void*  /* managed array */", ptr);
 
         return root switch
         {
@@ -58,8 +60,8 @@ public static class UnityTypeMap
             "System.UInt64"            => Value(8, "8 Bytes",  "uint64_t"),
             "System.Single"            => Value(4, "Float",    "float"),
             "System.Double"            => Value(8, "Double",   "double"),
-            "System.IntPtr"            => Value(8, "8 Bytes",  "intptr_t"),
-            "System.UIntPtr"           => Value(8, "8 Bytes",  "uintptr_t"),
+            "System.IntPtr"            => Value(ptr, ptr == 4 ? "4 Bytes" : "8 Bytes", ptr == 4 ? "int32_t"  : "intptr_t"),
+            "System.UIntPtr"           => Value(ptr, ptr == 4 ? "4 Bytes" : "8 Bytes", ptr == 4 ? "uint32_t" : "uintptr_t"),
 
             "UnityEngine.Vector2"      => Value(8,  "8 Bytes",  "Vector2"),
             "UnityEngine.Vector3"      => Value(12, "12 Bytes", "Vector3"),
@@ -70,26 +72,24 @@ public static class UnityTypeMap
             "UnityEngine.Rect"         => Value(16, "16 Bytes", "Rect"),
             "UnityEngine.Bounds"       => Value(24, "24 Bytes", "Bounds"),
 
-            "System.String"            => Pointer("void* /* MonoString / Il2CppString */"),
+            "System.String"            => Pointer("void* /* MonoString / Il2CppString */", ptr),
             "System.Collections.Generic.List`1"
-                                       => Pointer("void* /* List<T> */"),
+                                       => Pointer("void* /* List<T> */", ptr),
             "System.Collections.Generic.Dictionary`2"
-                                       => Pointer("void* /* Dictionary<K,V> */"),
+                                       => Pointer("void* /* Dictionary<K,V> */", ptr),
             "System.Collections.Generic.HashSet`1"
-                                       => Pointer("void* /* HashSet<T> */"),
+                                       => Pointer("void* /* HashSet<T> */", ptr),
 
-            // Anything else is *probably* a class / interface / delegate (8 byte pointer).
-            // Custom value-type structs would need full layout introspection (Phase 10
-            // follow-up). For now we still emit a pointer-shaped entry but tag the type
-            // name so the user can fix it up in CE / their header.
-            _ => Pointer($"void* /* {root} */"),
+            // Anything else is *probably* a class / interface / delegate (pointer-sized).
+            // Custom value-type structs would need full layout introspection.
+            _ => Pointer($"void* /* {root} */", ptr),
         };
     }
 
     private static ManagedTypeShape Value(int size, string ce, string c)
         => new(size, false, ce, c);
-    private static ManagedTypeShape Pointer(string c)
-        => new(8, true, "Pointer", c);
+    private static ManagedTypeShape Pointer(string c, int pointerSize = 8)
+        => new(pointerSize, true, "Pointer", c);
 
     // ---------- Drilldown helpers ----------------------------------------
 

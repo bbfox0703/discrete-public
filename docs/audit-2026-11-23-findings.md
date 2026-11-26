@@ -805,7 +805,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`OnSelectedClassChanged` 之後 export 指令立即可用，但 `_currentChain` 仍是舊 class 的資料。在 RPC 往返期間（大型 class 加上 ShowInherited 可能需要數秒），或新 class 的 `getClassInfo` 回傳錯誤時，`Export CE XML` / `Copy CE XML` / `Export .h` 匯出的都是舊 class，檔名也會用舊 class 的名稱，使用者只看得到新的 selection。註解（`:685-689`）把這個情況描述成「rare race window、no-op safely」，但實際上不是 no-op，而是輸出錯誤的 class。
 - 修法：`OnSelectedClassChanged` 中立即把 `_currentChain` 清成空 list，並通知各 export 指令的 `CanExecute`；`CanExport` 改成 `_currentChain.Count > 0 && 最後一筆是 SelectedClass`。
 
-**E-M7 · SDK header 的 struct 內容與它自己的 offset 註解不一致，無法直接拿來存取記憶體**
+**E-M7 · SDK header 的 struct 內容與它自己的 offset 註解不一致，無法直接拿來存取記憶體 — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI.Core/Services/Export/SdkHeaderExporter.cs:53-97`；`UnityTypeMap.cs:61-85`
 - 成因：在 `#pragma pack(push, 1)` 下依序輸出欄位，但 (a) 沒有輸出物件 header（第一個欄位實際位於 +0x10 / +0x8），也沒有在欄位之間補 padding，所以 C struct 中的 offset 是「前面欄位大小的累加」，不是 `// +0xNN` 註解寫的值；(b) enum / 自訂 struct 一律寫成 `void*`（8 bytes），Vector3 等型別使用了沒有定義的型別名稱；(c) 繼承鏈上的同名欄位（`ShowInherited` 時很常見）會產生重複 member，編譯失敗。
 - 修法：依 `f.Offset` 排序，在欄位之間插入 `uint8_t _pad_XXXX[n]`，並從 header 大小開始；未知 value type 輸出 `uint8_t name[size]`，size 不明時只輸出註解。重複的名稱加上 `_<Declaring>` 後綴；可以再輸出 `static_assert(offsetof(...) == 0x..)`，讓問題在編譯期就被發現。
@@ -827,7 +827,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：(a) Lua 的 `\ddd` 會讀取最多 3 位十進位數字，NUL 後面若緊接數字字元（例如 `"a\0" + "12"`），就會變成 `\012`（換行字元）；(b) `double.TryParse` 接受 `NaN` / `Infinity`，`ToString("R")` 輸出的 `NaN` / `Infinity` 在 Lua 中是未定義的全域變數，會變成 `argFloat(nil)`；(c) 數值解析失敗時靜默代入 0，例如使用者在 Int32 欄位輸入 `abc`，產生的腳本會以 0 呼叫 method。
 - 修法：NUL 改成 `\000`；非有限值輸出 `0/0`、`1/0`、`-1/0`；解析失敗時 `Build` 直接丟出例外（或回傳錯誤）給 VM 顯示，不要產生腳本。
 
-**E-L4 · x86 目標上多處仍寫死 8-byte pointer**
+**E-L4 · x86 目標上多處仍寫死 8-byte pointer — ✅ FIXED (2026-11-26)**
 - 位置：`UnityTypeMap.cs:61-62`、`:91-92`（`IntPtr` / pointer = 8）；`CeXmlExporter.cs:89`、`:371`（root 群組 `"8 Bytes"`）、`:580`（`ComputeStructSize`）；`CsxExporter.cs:179-180`、`:300`（`Bytesize: 8`、`AutoCreateStructsize`）；`AddressLookupAaScriptGenerator.cs:209-214`（`IntPtr` / 預設 `Qword`）；`ExportOptions.cs:18`（預設 8）與 `AssemblyBrowserViewModel.cs:136-152`（`CurrentExportOptions` 沒有帶入 `PointerSize`，只能靠 `RenderLiveAsync` 用 root walk 修正）
 - 成因：live 模式已經在 leaf 層級修正（`Live.cs:122-129`），template / CSX / SDK / AddressLookup 沒有。x86 遊戲上，`IntPtr` 欄位以 8 bytes 讀取會與下一個欄位重疊，CSX 的結構大小也會被高估。
 - 修法：`UnityTypeMap.Resolve` 加上 `pointerSize` 參數；Browser 的 `CurrentExportOptions` 帶入 `GamePointerSize`（與 Inspector 的 `ResolveExportOptions` 一致）。

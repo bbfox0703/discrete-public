@@ -636,7 +636,7 @@ public static partial class CeXmlExporter
             {
                 (bool hex, bool signed) = UnityTypeMap.CeDisplay(child.Type);
                 EmitLeaf(sb, indent, ids, label,
-                         vartype: UnityTypeMap.Resolve(child.Type).CeTypeKeyword,
+                         vartype: UnityTypeMap.Resolve(child.Type, options.PointerSize).CeTypeKeyword,
                          showAsHex: hex, showAsSigned: signed, address: rel, offsets: null);
             }
         }
@@ -669,7 +669,7 @@ public static partial class CeXmlExporter
         {
             (bool hex, bool signed) = UnityTypeMap.CeDisplay(child.Type);
             EmitLeaf(sb, indent, ids, label,
-                     vartype: UnityTypeMap.Resolve(child.Type).CeTypeKeyword,
+                     vartype: UnityTypeMap.Resolve(child.Type, options.PointerSize).CeTypeKeyword,
                      showAsHex: hex, showAsSigned: signed, address: rel, offsets: offsets);
         }
     }
