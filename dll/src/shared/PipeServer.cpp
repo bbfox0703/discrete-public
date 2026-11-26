@@ -242,7 +242,8 @@ void ServeClient(HANDLE pipe) {
             serialized = response.dump(-1, ' ', false, json::error_handler_t::replace);
         } catch (const std::exception& ex) {
             LogPipe(std::string("response dump failed: ") + ex.what());
-            serialized = BuildError(nullptr, -32603,
+            const json reqId = request.contains("id") ? request["id"] : json(nullptr);
+            serialized = BuildError(reqId, -32603,
                                     std::string("response serialization failed: ") + ex.what()).dump();
         }
         if (!WriteLine(pipe, serialized)) break;

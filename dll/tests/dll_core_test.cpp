@@ -14,6 +14,7 @@
 
 #include "AddressBounds.h"
 #include "ExportHelpers.h"
+#include "MainThreadDispatcher.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
 #include "ModuleLifecycle.h"
@@ -1087,6 +1088,19 @@ void Test_AM11_StringScanAvx2TailAlignment() {
     }
 }
 
+void Test_CM3_ClampMainThreadTimeoutMs() {
+    using namespace Discrete::MainThreadDispatcher;
+    CHECK(ClampMainThreadTimeoutMs((std::numeric_limits<std::int32_t>::min)()) == kMinMainThreadTimeoutMs);
+    CHECK(ClampMainThreadTimeoutMs(-500)      == kMinMainThreadTimeoutMs);
+    CHECK(ClampMainThreadTimeoutMs(-1)        == kMinMainThreadTimeoutMs);
+    CHECK(ClampMainThreadTimeoutMs(0)         == kMinMainThreadTimeoutMs);
+    CHECK(ClampMainThreadTimeoutMs(1)         == 1);
+    CHECK(ClampMainThreadTimeoutMs(5000)      == 5000);
+    CHECK(ClampMainThreadTimeoutMs(60000)     == kMaxMainThreadTimeoutMs);
+    CHECK(ClampMainThreadTimeoutMs(60001)     == kMaxMainThreadTimeoutMs);
+    CHECK(ClampMainThreadTimeoutMs((std::numeric_limits<std::int32_t>::max)()) == kMaxMainThreadTimeoutMs);
+}
+
 }  // namespace
 
 int main() {
@@ -1100,6 +1114,7 @@ int main() {
     Test_AM1_PerClientScanCancelAndAtomicState();
     Test_AM2_PipeLineBufferPreservesPipelinedBytes();
     Test_AM11_StringScanAvx2TailAlignment();
+    Test_CM3_ClampMainThreadTimeoutMs();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

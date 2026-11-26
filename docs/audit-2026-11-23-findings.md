@@ -470,12 +470,12 @@
   2. 如果另一個 client（CE bridge 或 UI 的另一條 pipe）同時在做 value scan，而那個 scan 被取消，旗標就會讓這些沒有 Scope 的 heap walk 中途 `break`，回傳**被截斷、卻標示為完整**的結果（snapshot 少了一批 instance、`findInstances` 少了一批 match）。這直接違反 `ScanCancel.h:19-20`「沒有 Scope 的 poll 端絕不能發布部分結果」。
 - 修法：替 `snapshotBegin`（兩個 backend）、`findInstances`、`listFieldValuesAcrossInstances`、`findFieldReferences`、`diagnoseClassReferences` 開 Scope，並在回傳前檢查 `IsCancelRequested()`，取消時回 `{"ok":false,"cancelled":true}`。長期做法是把 cancel 改成 per-client token（Scope 記錄 owner，`RequestCancel(owner)`），和 A-M1 一起處理。
 
-**C-M2 · DLL 會送出 `"id": null` 的錯誤 envelope，但 UI 的 `RpcEnvelope.Id` 是不可為 null 的 `int`，錯誤訊息會變成 `JsonException`**
+**C-M2 · DLL 會送出 `"id": null` 的錯誤 envelope，但 UI 的 `RpcEnvelope.Id` 是不可為 null 的 `int`，錯誤訊息會變成 `JsonException` — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/PipeServer.cpp:212`（JSON 解析失敗）、`:226`（`response.dump` 失敗，例如 32-bit 下的超大 snapshot chunk 遇到 `bad_alloc`）；`ui/UnityDumpUI.Core/Services/ProtocolModels.cs:21`；`ui/UnityDumpUI.Core/Services/PipeClient.cs:224-236`
 - 成因：`BuildError(nullptr, …)` 輸出 `"id":null`，STJ 無法把 null 轉成 `int`，於是丟 `JsonException`，DLL 特地準備的 `-32603 response serialization failed: …` 訊息完全看不到；`SendAsync` 也沒有把 `JsonException` 轉成文件宣稱的 `PipeProtocolException`。附帶問題：`id` 不一致時只丟例外、不做重新同步，如果真的發生（例如 A-M2 的資料遺失），這條連線之後的每個請求都會不一致。
 - 修法：UI 端把 `RpcEnvelope.Id` 改成 `int?`；`Id == null && Error != null` 時視為「這個請求的錯誤」，直接拋出包含 `Error.Message` 的 `PipeProtocolException`；`Deserialize` 外包 `try/catch (JsonException)` 並轉成 `PipeProtocolException`；`id` 不一致時呼叫 `DisposeStreamsAsync()` 並觸發 `Disconnected`，強制重新連線。DLL 端的 `:226` 應該回填原始請求的 `id`，因為 `Dispatch` 已經知道它。
 
-**C-M3 · `PipeClient` 沒有任何逾時；請求卡住時 `DisconnectAsync` / `DisposeAsync` 也會被 `_gate` 卡住**
+**C-M3 · `PipeClient` 沒有任何逾時；請求卡住時 `DisconnectAsync` / `DisposeAsync` 也會被 `_gate` 卡住 — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI.Core/Services/PipeClient.cs:203`（`ReadLineAsync()` 不帶 token、不設逾時）、`:272-277`、`:279-284`（Disconnect / Dispose 都要先 `_gate.WaitAsync()`）、`:3-6`（過時註解：「one client at a time / one-at-a-time on the server」）；DLL 端可能無限期卡住的路徑：`dll/src/shared/ExportAPI.cpp:6960-6961`（`main_thread_timeout_ms` 不做 clamp，負值就是 INFINITE）、C-M1 中不能取消的 handler
 - 成因：`SendAsync` 為了避免 response 錯位，刻意在寫入後不再理會取消，這個設計本身合理；但這也代表一個卡住的 handler 會讓 `_gate` 永遠被佔住。使用者按 Disconnect 會等 `_gate`，結果什麼都不會發生；如果 app 關閉時同步等待 `DisposeAsync`，整個 UI 會停在那裡。interactive pipe 上的 `callMethod`（mainThread）、`whatIsAt`、`getMetadataStats` 都走這條路。
 - 修法：`DisconnectAsync` / `DisposeAsync` 不要等 `_gate`，改成直接 `_pipe.Dispose()`（讓進行中的 `ReadLineAsync` 丟 `ObjectDisposedException` / `IOException`，現有的 catch 會轉成 `PipeDisconnectedException`），再取 gate 清掉欄位；`SendAsync` 加上可設定的「每個指令的讀取逾時」，逾時就拆掉連線，而不是放棄讀取（重新連線可以避免 response 錯位）。DLL 端 `callMethod` 要 clamp `main_thread_timeout_ms`，例如限制在 [1, 60000]。更新 `:3-6` 的註解。

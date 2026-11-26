@@ -18,7 +18,7 @@ namespace UnityDumpUI.Core.Services;
 /// </summary>
 public sealed class RpcEnvelope<TResult> where TResult : class
 {
-    [JsonPropertyName("id")]      public int       Id     { get; set; }
+    [JsonPropertyName("id")]      public int?      Id     { get; set; }
     [JsonPropertyName("result")]  public TResult?  Result { get; set; }
     [JsonPropertyName("error")]   public RpcError? Error  { get; set; }
 }

@@ -6948,8 +6948,9 @@ void RegisterCoreHandlers() {
         // the worker thread. Required for any method that touches Unity
         // scene-graph / lifecycle (Transform.parent, GameObject.name, etc.).
         const bool mainThread = args.value("main_thread", false);
-        const std::int32_t mtTimeoutMs = args.value("main_thread_timeout_ms",
-                                                    std::int32_t{5000});
+        const std::int32_t mtTimeoutMs = Discrete::MainThreadDispatcher::ClampMainThreadTimeoutMs(
+            args.value("main_thread_timeout_ms",
+                       Discrete::MainThreadDispatcher::kDefaultMainThreadTimeoutMs));
         // Value-struct return decode is opt-in (get_position et al know their
         // return is a struct); off by default keeps the legacy Unsupported+note
         // shape for callers that don't ask.
@@ -10142,8 +10143,9 @@ void RegisterCoreHandlers() {
         // Phase 20-MT: optional main-thread marshaling — mirror of the Mono
         // handler above. See that branch for the full comment.
         const bool mainThread = args.value("main_thread", false);
-        const std::int32_t mtTimeoutMs = args.value("main_thread_timeout_ms",
-                                                    std::int32_t{5000});
+        const std::int32_t mtTimeoutMs = Discrete::MainThreadDispatcher::ClampMainThreadTimeoutMs(
+            args.value("main_thread_timeout_ms",
+                       Discrete::MainThreadDispatcher::kDefaultMainThreadTimeoutMs));
         // Value-struct return decode is opt-in (get_position et al know their
         // return is a struct); off by default keeps the legacy Unsupported+note
         // shape for callers that don't ask.

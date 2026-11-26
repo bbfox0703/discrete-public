@@ -12,6 +12,25 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1550) — Fix C-M2 + C-M3 (nullable RPC error `id`, id-mismatch teardown, `PipeClient` read timeout & non-deadlocking Disconnect/Dispose, DLL `main_thread_timeout_ms` clamp + tests)
+
+- **Bug fixes (`C-M2`, `C-M3`):**
+  - **`C-M2` (`ProtocolModels.cs`, `PipeClient.cs`, `PipeServer.cpp`):**
+    - Changed `RpcEnvelope<TResult>.Id` from `int` to `int?` so JSON-RPC error envelopes carrying `"id": null` (e.g. `-32700`, `-32600`, `-32603`) deserialize cleanly instead of throwing `JsonException`.
+    - Updated `PipeClient.SendAsync` to surface `Id == null && Error != null` as `PipeProtocolException("Pipe error <code>: <message>")`, and on real response `id` mismatch to tear down streams (`DisposeStreamsAsync()`) and fire `Disconnected` off-gate before throwing `PipeProtocolException` so subsequent callers reconnect cleanly instead of drifting permanently out of sync.
+    - Updated `dll/src/shared/PipeServer.cpp` to echo the original request's `id` (`request.contains("id") ? request["id"] : json(nullptr)`) when `response.dump(...)` throws `-32603 response serialization failed`.
+  - **`C-M3` (`PipeClient.cs`, `MainThreadDispatcher.h`, `ExportAPI.cpp`):**
+    - Updated outdated single-client header comment in `PipeClient.cs`, added configurable `PipeClient.ReadTimeout` (and per-call `readTimeout` parameter on `SendAsync`) that tears down the pipe, fires `Disconnected`, and throws `PipeDisconnectedException` on read stall.
+    - Fixed `PipeClient.DisconnectAsync()` and `DisposeAsync()` deadlocking behind `_gate` when a `SendAsync()` call is blocked on a stalled server: both now call `AbortUnderlyingPipe()` (atomically exchanging & disposing `_pipe`) BEFORE acquiring `_gate`, waking the blocked `ReadLineAsync` immediately; made `DisposeAsync()` idempotent via `_disposed`.
+    - Added `Discrete::MainThreadDispatcher::ClampMainThreadTimeoutMs` (`[1, 60000]` ms) in `MainThreadDispatcher.h` and applied it in both Mono and IL2CPP `callMethod` handlers in `ExportAPI.cpp` so negative or unbounded `main_thread_timeout_ms` values can never turn `SubmitAndWait` into an `INFINITE` wait.
+  - **Tests:**
+    - Added 6 real in-process `NamedPipeServerStream` + `PipeClient` tests in `ui/UnityDumpUI.Tests/PipeClientReliabilityTests.cs` (`"id": null` error envelope, malformed JSON, id-mismatch teardown & `Disconnected`, per-request `ReadTimeout` stall recovery, non-deadlocking `DisconnectAsync` mid-stall, non-deadlocking & idempotent `DisposeAsync` mid-stall).
+    - Added `Test_CM3_ClampMainThreadTimeoutMs` (9 boundary checks on both x64 and x86) to `dll/tests/dll_core_test.cpp`.
+  - Marked `C-M2` and `C-M3` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1550) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1214 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 460 checks passed (x64) / 463 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1549) — Fix A-M9 + A-M10 (proxy coexistence detection with `ForeignProxyPresent` and ProxyDeploy Refresh/bulk race protection + tests)
 
 - **Bug fixes (`A-M9`, `A-M10`):**

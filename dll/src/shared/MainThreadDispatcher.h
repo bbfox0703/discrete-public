@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace Discrete::MainThreadDispatcher {
 
@@ -52,6 +53,19 @@ constexpr std::size_t kMaxQueuedItems = 256;
 // 32 ms covers even a 30 FPS game with one stutter frame. Lower would
 // false-alarm; higher would let frozen games go undetected.
 constexpr std::int64_t kHealthyWindowMs = 1000;
+
+// Bounds for client-supplied `main_thread_timeout_ms` on pipe RPCs (C-M3).
+// Clamping prevents negative values from turning SubmitAndWait into INFINITE
+// or oversized values from wedging a pipe worker indefinitely.
+constexpr std::int32_t kMinMainThreadTimeoutMs     = 1;
+constexpr std::int32_t kDefaultMainThreadTimeoutMs = 5000;
+constexpr std::int32_t kMaxMainThreadTimeoutMs     = 60000;
+
+constexpr std::int32_t ClampMainThreadTimeoutMs(std::int32_t raw) noexcept {
+    if (raw < kMinMainThreadTimeoutMs) return kMinMainThreadTimeoutMs;
+    if (raw > kMaxMainThreadTimeoutMs) return kMaxMainThreadTimeoutMs;
+    return raw;
+}
 
 /// Opaque handle returned by SubmitAndWait — the dispatcher owns the
 /// underlying buffers, the caller just reads `ok`, `error`, and `result`.
