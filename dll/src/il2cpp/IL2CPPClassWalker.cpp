@@ -2,9 +2,12 @@
 
 #include "IL2CPPClassWalker.h"
 
+#include "../shared/AddressBounds.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/MethodSignatureFormat.h"
+#include "../shared/SehFilter.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPThreadAttach.h"
@@ -154,29 +157,29 @@ std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::u
 Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
     __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
-// A real managed type / image name is a short printable-ASCII string. The
-// runtime accessors (class_get_name / image_get_name) only SEH-guard the FIELD
-// read that fetches the name pointer — they hand back whatever pointer sits in
-// that struct slot. For a garbage class (a managed-object pointer misread as an
-// Il2CppClass*) that slot holds an arbitrary value, and building a std::string
-// from it runs an UNBOUNDED strlen that AVs off the end of mapped memory — the
-// Copy-CE-field CTD. Validate the returned pointer here, reading each byte under
-// SEH so the validation itself can't fault, and reject anything that isn't a
-// non-empty printable string NUL-terminated within a sane bound.
+// Copy a NUL-terminated runtime name into a bounded local buffer under SEH so
+// garbage pointers never AV off mapped memory, then validate as printable ASCII
+// or strict UTF-8 (B-M5: supports CJK / Unicode obfuscated names while still
+// rejecting control bytes, invalid UTF-8, empty or unterminated garbage).
+bool SehCopyNameBounded(const char* s, char* out, std::size_t cap) noexcept {
+    __try {
+        for (std::size_t i = 0; i < cap; ++i) {
+            char ch = s[i];
+            out[i] = ch;
+            if (ch == '\0') return i > 0;
+        }
+        return false;  // no NUL within cap bytes → garbage
+    } __except (Discrete::Seh::MemoryAccessExceptionFilter(
+                    GetExceptionCode(), GetExceptionInformation())) {
+        return false;
+    }
+}
+
 bool SehNameLooksSane(const char* s) {
     if (s == nullptr) return false;
-    __try {
-        std::size_t i = 0;
-        for (; i < 512; ++i) {
-            unsigned char c = static_cast<unsigned char>(s[i]);
-            if (c == 0) return i > 0;                 // non-empty, NUL within bound
-            if (c < 0x20 || c > 0x7E) return false;   // non-printable → garbage
-        }
-        return false;                                 // no NUL in 512 bytes → garbage
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;                                 // faulted while reading → garbage
-    }
+    char buf[512];
+    if (!SehCopyNameBounded(s, buf, sizeof(buf))) return false;
+    return Discrete::AddressBounds::LooksLikePlausibleClassName(buf, sizeof(buf));
 }
 #pragma warning(pop)
 
@@ -385,7 +388,7 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
             if (f == nullptr) break;
             FieldEntry fe;
             if (r.field_get_name != nullptr)   fe.name   = SafeStr(SehCall(r.field_get_name, f));
-            if (r.field_get_offset != nullptr) fe.offset = SehCall(r.field_get_offset, f);
+            if (r.field_get_offset != nullptr) fe.offset = Discrete::ManagedLayout::NormalizeFieldOffset32(SehCall(r.field_get_offset, f));
             if (r.field_get_flags != nullptr)  fe.flags  = static_cast<std::uint32_t>(SehCall(r.field_get_flags, f));
             const Il2CppType* ft = (r.field_get_type != nullptr) ? SehCall(r.field_get_type, f) : nullptr;
             if (ft != nullptr) fe.typeName = TypeName(ft);
@@ -403,7 +406,12 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
                         Il2CppClass* parent = SehParent(r.class_get_parent, fc);
                         if (parent != nullptr) {
                             const char* pn = SehClassName(r.class_get_name, parent);
-                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0) {
+                            const char* pns = (r.class_get_namespace != nullptr)
+                                ? SehCall(r.class_get_namespace, parent) : nullptr;
+                            // B-L6: require System.Enum (not a user-defined Enum in another namespace).
+                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0 &&
+                                (r.class_get_namespace == nullptr ||
+                                 (pns != nullptr && std::strcmp(pns, "System") == 0))) {
                                 fe.isEnum = true;
                                 // Underlying type lives in the enum's `value__`
                                 // instance field — same trick getEnumValues uses.
@@ -490,26 +498,35 @@ StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::stri
 
     std::uint32_t flags = (r.field_get_flags != nullptr)
                           ? static_cast<std::uint32_t>(r.field_get_flags(match)) : 0u;
-    if ((flags & 0x10u) == 0) {
+    std::int32_t offset = (r.field_get_offset != nullptr)
+                          ? Discrete::ManagedLayout::NormalizeFieldOffset32(r.field_get_offset(match))
+                          : -1;
+    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
+    out.offset   = offset;
+    out.flags    = flags;
+    out.typeName = typeName;
+
+    // B-M4: reject non-static, const/literal (0x40), and [ThreadStatic] (-1 /
+    // SIZE_MAX) fields before touching static storage so we never return base-1
+    // or alias offset 0.
+    const auto kind = Discrete::ManagedLayout::ClassifyStaticFieldStorage(flags, offset);
+    if (kind != Discrete::ManagedLayout::StaticFieldStorageKind::Regular) {
+        out.reason = Discrete::ManagedLayout::StaticFieldStorageReason(kind);
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-            "IL2CPP::ResolveStaticFieldAddress: field is not static");
+            std::string("IL2CPP::ResolveStaticFieldAddress: rejected (") + out.reason + ")");
         return out;
     }
-    std::size_t offset = (r.field_get_offset != nullptr) ? r.field_get_offset(match) : 0u;
-    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
 
     void* base = SehStaticData(r.class_get_static_data, klass);
     if (base == nullptr) {
+        out.reason = "static_data_null";
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::ResolveStaticFieldAddress: class_get_static_field_data returned null");
         return out;
     }
 
     out.ok       = true;
-    out.address  = static_cast<std::uint8_t*>(base) + offset;
-    out.offset   = offset;
-    out.flags    = flags;
-    out.typeName = std::move(typeName);
+    out.address  = static_cast<std::uint8_t*>(base) + static_cast<std::size_t>(offset);
     return out;
 }
 

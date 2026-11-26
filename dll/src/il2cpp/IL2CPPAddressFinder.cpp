@@ -502,7 +502,12 @@ std::vector<ResolvedField> EnumerateInstanceFields(Il2CppClass* klass) {
                         Il2CppClass* parent = SehParentLookup(r.class_get_parent, fc);
                         if (parent != nullptr) {
                             const char* pn = SehClassNameProbe(r.class_get_name, parent);
-                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0) {
+                            const char* pns = (r.class_get_namespace != nullptr)
+                                ? SehClassNameProbe(r.class_get_namespace, parent) : nullptr;
+                            // B-L6: require System.Enum (not a user-defined Enum in another namespace).
+                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0 &&
+                                (r.class_get_namespace == nullptr ||
+                                 (pns != nullptr && std::strcmp(pns, "System") == 0))) {
                                 rf.isEnum = true;
                                 // Underlying type lives in the enum's
                                 // `value__` instance field.

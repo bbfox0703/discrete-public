@@ -19,8 +19,8 @@ struct ClassEntry {
 struct FieldEntry {
     std::string   name;
     std::string   typeName;
-    int           offset = 0;          // offset from MonoObject start (raw)
-    std::uint32_t flags  = 0;          // FieldAttributes (Static = 0x10, etc.)
+    std::int32_t  offset = 0;          // normalized offset (-1 sentinel for thread-static/invalid)
+    std::uint32_t flags  = 0;          // FieldAttributes (Static = 0x10, Literal = 0x40, etc.)
     // Phase 11.5 follow-up: enum / value-type detection so the inspector can
     // classify a field as Leaf (enum/primitive) vs ValueStruct (Vector3 etc.)
     // vs PointerToClass without re-parsing the runtime metadata. Both default
@@ -101,9 +101,10 @@ bool ProbeKlassValid(MonoClass* klass);
 struct StaticFieldAddress {
     bool          ok      = false;
     void*         address = nullptr;   // base + field offset, ready to dereference
-    int           offset  = 0;         // raw offset reported by mono_field_get_offset
+    std::int32_t  offset  = -1;        // normalized offset (-1 for thread-static / unresolved)
     std::string   typeName;
     std::uint32_t flags   = 0;
+    std::string   reason;              // populated when !ok ("not_static" / "literal" / "thread_static" / ...)
 };
 
 // Resolves the in-process address of a static field. Returns ok=false if the

@@ -271,12 +271,12 @@
 - 成因：`DecodeReturnValue` 只認得 primitive 名稱與 `System.String`。enum（`returnType` 是 `MyNs.MyEnum`）、`DateTime`、`Nullable<T>`、所有 struct，在 `wantStructReturn == false` 時都會走到「reference type」分支，回傳 boxed 暫存物件的位址。這個物件在 guard detach 之後隨時可能被 GC 回收，UI / Lua 卻可能把它當成可以 walk 的 instance。
 - 修法：先用 `object_get_class(boxed)` + `class_is_valuetype` 判斷；值型別而且沒有 opt-in 時回 `Unsupported`（與文件一致）；enum 用 `class_enum_basetype`（Mono）或 `value__` 欄位型別（IL2CPP）解碼成整數；`Kind::Bool` 要嘛使用，要嘛刪除。
 
-**B-M4 · `ResolveStaticFieldAddress` 對 const（literal）與 thread-static 欄位回傳 `ok = true` 和錯誤的位址；兩個 backend 的 offset 型別不一致**
+**B-M4 · `ResolveStaticFieldAddress` 對 const（literal）與 thread-static 欄位回傳 `ok = true` 和錯誤的位址；兩個 backend 的 offset 型別不一致 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/mono/MonoClassWalker.cpp:437-463`；`dll/src/il2cpp/IL2CPPClassWalker.cpp:491-513`；型別在 `MonoClassWalker.h:22`（`int offset`）與 `IL2CPPClassWalker.h:24`（`std::size_t offset`）；同樣的計算也出現在 `IL2CPPFieldXref.cpp:224`、`:283`
 - 成因：只檢查 `Static (0x10)`。`const` 欄位的旗標是 `Static|Literal`，但沒有 static storage：Mono 的 offset 是 -1 或 0，IL2CPP 是 0，所以結果不是 `base - 1`，就是與第一個真正的 static 欄位重疊（讀到別的欄位的值）。`[ThreadStatic]` 欄位在兩個 runtime 的 offset 都是 -1（IL2CPP 的 `THREAD_STATIC_FIELD_OFFSET`）：Mono 回 `base + (-1)`，IL2CPP 經 `size_t` sign-extend 後同樣是 `base - 1`。同一個值在兩邊的 `FieldEntry.offset` 會是 `-1` 與 `0xFFFFFFFFFFFFFFFF`，上層若做 `base + f.offset`，兩個 backend 的行為不同。
 - 修法：Literal（`0x40`）一律回 `ok = false, reason = "literal"`（值改用 `EnumerateLiteralFields` / `field_get_data` 取得）；offset 為 -1（或 `>= 0x7FFFFFFF`）時回 `reason = "thread_static"`；兩邊的 `FieldEntry.offset` 統一成 `std::int32_t`（runtime 本來就是 int32），並約定 -1 是 sentinel。
 
-**B-M5 · `SehNameLooksSane` 只接受可列印 ASCII，名稱含非 ASCII 字元的類別會讓 `ReadClassInfo` / `ProbeKlassValid` 整個失敗**
+**B-M5 · `SehNameLooksSane` 只接受可列印 ASCII，名稱含非 ASCII 字元的類別會讓 `ReadClassInfo` / `ProbeKlassValid` 整個失敗 — ✅ FIXED (2026-11-26)**
 - 位置：`MonoClassWalker.cpp:139-153`（`:146`）、`:290`、`:399-408`；`IL2CPPClassWalker.cpp:166-180`（`:173`）、`:372`、`:219-228`
 - 成因：`c < 0x20 || c > 0x7E` 一律判為 garbage。runtime 回傳的類別名稱與 image 名稱是 UTF-8，混淆器（ConfuserEx 一類會產生 Unicode 名稱）、使用中文或日文識別字的遊戲、全形字元的 assembly 名稱，都會讓 `ReadClassInfo` 回 `ok = false`。結果 Inspector / walkInstance 對這些類別完全不能用，而且呼叫端看到的是「class invalid」，不是「名稱含特殊字元」。
 - 修法：接受合法的 UTF-8 multibyte 序列（≥ 0x80 的 byte 依 UTF-8 規則驗證 lead / continuation），只拒絕 C0 控制字元與不合法的序列；512 bytes 的上限與「讀取時受 SEH 保護」都保留。（待驗證：找一款名稱經混淆或含 CJK 字元的遊戲實測。）
@@ -342,7 +342,7 @@
 - 成因：`SafeReadBytes` 一次讀 1 MB，只要其中任何一頁不可讀就整段失敗；`pos += 4096` 之後再讀 1 MB 仍然包含同一個壞頁。壞頁之前（最多將近 1 MB）的正常頁永遠不會被掃到，而且會白白重試約 256 次。
 - 修法：失敗時把這個 chunk 改成逐頁（4 KB）讀取，只跳過真正讀不到的頁。
 
-**B-L6 · IL2CPP 判斷 enum 只看 parent 的簡單名稱是否為 `"Enum"`**
+**B-L6 · IL2CPP 判斷 enum 只看 parent 的簡單名稱是否為 `"Enum"` — ✅ FIXED (2026-11-26)**
 - 位置：`IL2CPPClassWalker.cpp:402-407`；`IL2CPPAddressFinder.cpp:253-258`
 - 成因：沒有檢查 namespace，使用者自己定義在其他 namespace、名為 `Enum` 的類別的子類別會被誤判；Mono 端則用 `class_is_enum`（雙胞胎行為不同）。
 - 修法：加上 `class_get_namespace(parent) == "System"`，或綁定 `il2cpp_class_is_enum`（v24 以後的 runtime 都有 export）。

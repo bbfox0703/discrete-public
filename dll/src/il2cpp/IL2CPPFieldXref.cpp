@@ -32,6 +32,7 @@
 #include "IL2CPPThreadAttach.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
 #include "../shared/ScanCancel.h"
 #include "../shared/ModuleHelper.h"
@@ -262,6 +263,13 @@ ResolvedStaticField ResolveStaticField(const Il2CppImage* image,
             "there's nothing for Phase 28 to match against. "
             "This is a semantic limitation of inlined constants, not a "
             "backend bug.";
+        return out;
+    }
+    if (Discrete::ManagedLayout::NormalizeFieldOffset32(out.offset) < 0) {
+        out.error =
+            "thread-static field ([ThreadStatic]) — stored per thread in TLS "
+            "rather than in the class's shared static_fields block (offset=-1), "
+            "so there is no single static address for Phase 28 to scan.";
         return out;
     }
     void* staticBase = SehStaticData(r.class_get_static_data, out.klass);

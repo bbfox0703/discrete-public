@@ -948,6 +948,7 @@ private:
             for (const auto& f : pr.info.fields) {
                 if (produced >= fcap) break;
                 if (f.flags & 0x10u) continue;   // skip statics
+                if (f.offset < 0) continue;
                 std::uintptr_t fieldAddr = elemPtr + static_cast<std::uintptr_t>(f.offset);
                 json fe = {
                     {"name",   f.name},
@@ -1044,7 +1045,10 @@ private:
                 {"type",   f.typeName},
                 {"offset", f.offset},
             };
-            if (!captureStaticValues_) {
+            const auto skind = Discrete::ManagedLayout::ClassifyStaticFieldStorage(f.flags, f.offset);
+            if (skind != Discrete::ManagedLayout::StaticFieldStorageKind::Regular) {
+                srow["error"] = Discrete::ManagedLayout::StaticFieldStorageReason(skind);
+            } else if (!captureStaticValues_) {
                 srow["error"] = "static_value_not_captured";
             } else {
                 if (!staticBaseResolved) {
@@ -1087,6 +1091,7 @@ private:
             if (!pr.ok) continue;
             for (const auto& f : pr.info.fields) {
                 if (f.flags & 0x10u) continue;   // skip statics
+                if (f.offset < 0) continue;
                 if (fieldDescs.size() >= 4096) break;
                 FieldDesc fd;
                 fd.name        = &f.name;
@@ -1094,7 +1099,7 @@ private:
                 fd.from        = &pr.info.self.name;
                 fd.decodeType  = (f.isEnum && !f.underlyingTypeName.empty())
                                     ? &f.underlyingTypeName : &f.typeName;
-                fd.offset      = f.offset;
+                fd.offset      = static_cast<std::size_t>(f.offset);
                 fd.isEnum      = f.isEnum;
                 fd.isValueType = f.isValueType;
                 fd.isArrayShape = f.typeName.size() >= 2 &&
@@ -4395,6 +4400,7 @@ void RegisterCoreHandlers() {
                     for (const auto& f : pr.info.fields) {
                         if (produced >= fcap) break;
                         if (f.flags & 0x10u) continue;   // skip statics
+                        if (f.offset < 0) continue;
                         std::uintptr_t fieldAddr = elemPtr + static_cast<std::uintptr_t>(f.offset);
                         json fe = {
                             {"name",   f.name},
@@ -4553,6 +4559,7 @@ void RegisterCoreHandlers() {
                     if (!pr.ok) continue;
                     for (const auto& f : pr.info.fields) {
                         if (f.flags & 0x10u) continue;   // skip statics
+                        if (f.offset < 0) continue;
                         if (fieldDescs.size() >= 4096) break;
                         FieldDesc fd;
                         fd.name        = &f.name;
@@ -4560,7 +4567,7 @@ void RegisterCoreHandlers() {
                         fd.from        = &pr.info.self.name;
                         fd.decodeType  = (f.isEnum && !f.underlyingTypeName.empty())
                                             ? &f.underlyingTypeName : &f.typeName;
-                        fd.offset      = f.offset;
+                        fd.offset      = static_cast<std::size_t>(f.offset);
                         fd.isEnum      = f.isEnum;
                         fd.isValueType = f.isValueType;
                         fd.isArrayShape = f.typeName.size() >= 2 &&
@@ -5226,7 +5233,11 @@ void RegisterCoreHandlers() {
         if (k == nullptr) return json{{"error", err}};
 
         auto sa = Mono::ResolveStaticFieldAddress(k, fieldName);
-        if (!sa.ok) return json{{"error", "static field not resolvable: " + fieldName}};
+        if (!sa.ok) {
+            std::string msg = "static field not resolvable: " + fieldName;
+            if (!sa.reason.empty()) msg += " (" + sa.reason + ")";
+            return json{{"error", msg}, {"reason", sa.reason}};
+        }
         return json{
             {"field",   fieldName},
             {"type",    sa.typeName},
@@ -5353,6 +5364,7 @@ void RegisterCoreHandlers() {
                     if (!res.ok) continue;
                     for (const auto& f : res.info.fields) {
                         if (f.flags & 0x10u) continue;   // static
+                        if (f.offset < 0) continue;
                         // System.Boolean is a value type — capture its offset for
                         // the 0/1 sanity probe BEFORE the value-type skip below.
                         if (f.typeName == "System.Boolean") { boolOffsets.push_back(static_cast<std::uint64_t>(f.offset)); continue; }
@@ -5764,6 +5776,7 @@ void RegisterCoreHandlers() {
                 std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
                 for (const auto& f : info.fields) {
                     if ((f.flags & kFieldAttrStatic) != 0) continue;
+                    if (f.offset < 0) continue;
                     if (f.typeName != expectedClrName) continue;
                     fieldsConsidered++;
                     std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(f.offset);
@@ -8547,7 +8560,11 @@ void RegisterCoreHandlers() {
         if (k == nullptr) return json{{"error", err}};
 
         auto sa = IL2CPP::ResolveStaticFieldAddress(k, fieldName);
-        if (!sa.ok) return json{{"error", "static field not resolvable: " + fieldName}};
+        if (!sa.ok) {
+            std::string msg = "static field not resolvable: " + fieldName;
+            if (!sa.reason.empty()) msg += " (" + sa.reason + ")";
+            return json{{"error", msg}, {"reason", sa.reason}};
+        }
         return json{
             {"field", fieldName}, {"type", sa.typeName},
             {"offset", NormalizeFieldOffset(sa.offset)}, {"flags", sa.flags},
@@ -8769,6 +8786,7 @@ void RegisterCoreHandlers() {
                     if (!res.ok) continue;
                     for (const auto& f : res.info.fields) {
                         if (f.flags & 0x10u) continue;   // static
+                        if (f.offset < 0) continue;
                         // System.Boolean is a value type — capture its offset for
                         // the 0/1 sanity probe BEFORE the value-type skip below.
                         if (f.typeName == "System.Boolean") { boolOffsets.push_back(static_cast<std::uint64_t>(f.offset)); continue; }
@@ -9126,6 +9144,7 @@ void RegisterCoreHandlers() {
                 std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
                 for (const auto& f : info.fields) {
                     if ((f.flags & kFieldAttrStatic) != 0) continue;
+                    if (f.offset < 0) continue;
                     if (f.typeName != expectedClrName) continue;
                     fieldsConsidered++;
                     std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(f.offset);

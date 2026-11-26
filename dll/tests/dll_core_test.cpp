@@ -1613,6 +1613,82 @@ void Test_AM6_AL14_SehFilterGuardPageAndWindowStraddle() {
     }
 }
 
+// ============================================================================
+// B-M4 + B-M5 — Static field storage classification (const/literal &
+// thread-static rejection, unified int32 offset) & strict UTF-8 class names
+// ============================================================================
+void Test_BM4_BM5_StaticFieldStorageAndUtf8Names() {
+    using namespace Discrete::ManagedLayout;
+    using namespace Discrete::AddressBounds;
+
+    // 1. B-M4: NormalizeFieldOffset32 produces identical int32_t sentinels on
+    //    both signed Mono int and unsigned IL2CPP size_t inputs.
+    CHECK(NormalizeFieldOffset32<int>(0) == 0);
+    CHECK(NormalizeFieldOffset32<int>(0x18) == 0x18);
+    CHECK(NormalizeFieldOffset32<int>(-1) == -1);
+    CHECK(NormalizeFieldOffset32<std::size_t>(0u) == 0);
+    CHECK(NormalizeFieldOffset32<std::size_t>(0x7FFFFFFFu) == 0x7FFFFFFF);
+    CHECK(NormalizeFieldOffset32<std::size_t>(0x80000000u) == -1);
+    CHECK(NormalizeFieldOffset32<std::size_t>(static_cast<std::size_t>(-1)) == -1);
+
+    // 2. B-M4: ClassifyStaticFieldStorage rejects non-static, literal (0x40),
+    //    and thread-static (-1) while accepting normal static fields (incl. offset 0).
+    CHECK(ClassifyStaticFieldStorage(0x00u, 0x10) == StaticFieldStorageKind::NotStatic);
+    CHECK(std::strcmp(StaticFieldStorageReason(StaticFieldStorageKind::NotStatic), "not_static") == 0);
+
+    CHECK(ClassifyStaticFieldStorage(kFieldAttrStatic | kFieldAttrLiteral, 0)
+          == StaticFieldStorageKind::Literal);
+    CHECK(ClassifyStaticFieldStorage(kFieldAttrStatic | kFieldAttrLiteral, -1)
+          == StaticFieldStorageKind::Literal);
+    CHECK(std::strcmp(StaticFieldStorageReason(StaticFieldStorageKind::Literal), "literal") == 0);
+
+    CHECK(ClassifyStaticFieldStorage(kFieldAttrStatic, -1)
+          == StaticFieldStorageKind::ThreadStatic);
+    CHECK(ClassifyStaticFieldStorage(
+              kFieldAttrStatic,
+              NormalizeFieldOffset32(static_cast<std::size_t>(-1)))
+          == StaticFieldStorageKind::ThreadStatic);
+    CHECK(std::strcmp(StaticFieldStorageReason(StaticFieldStorageKind::ThreadStatic), "thread_static") == 0);
+
+    CHECK(ClassifyStaticFieldStorage(kFieldAttrStatic, 0) == StaticFieldStorageKind::Regular);
+    CHECK(ClassifyStaticFieldStorage(kFieldAttrStatic, 0x24) == StaticFieldStorageKind::Regular);
+    CHECK(std::strcmp(StaticFieldStorageReason(StaticFieldStorageKind::Regular), "") == 0);
+
+    // 3. B-M5: LooksLikePlausibleClassName accepts printable ASCII + valid
+    //    multibyte UTF-8 (CJK, full-width, ConfuserEx Unicode, 4-byte emoji)
+    //    and rejects control chars, malformed/overlong/surrogate UTF-8, and
+    //    empty / unterminated buffers.
+    CHECK(LooksLikePlausibleClassName("PlayerController", 64));
+    CHECK(LooksLikePlausibleClassName("List`1<System.Int32>", 64));
+    // UTF-8 CJK ("主角資料" = E4 B8 BB E8 A7 92 E8 B3 87 E6 96 99)
+    const char cjkName[] = "\xE4\xB8\xBB\xE8\xA7\x92\xE8\xB3\x87\xE6\x96\x99";
+    CHECK(LooksLikePlausibleClassName(cjkName, sizeof(cjkName)));
+    // UTF-8 Japanese + ASCII ("プレイヤー_Mgr")
+    const char jpName[] = "\xE3\x83\x97\xE3\x83\xAC\xE3\x82\xA4\xE3\x83\xA4\xE3\x83\xBC_Mgr";
+    CHECK(LooksLikePlausibleClassName(jpName, sizeof(jpName)));
+    // 2-byte UTF-8 ("Café")
+    const char latin2[] = "Caf\xC3\xA9";
+    CHECK(LooksLikePlausibleClassName(latin2, sizeof(latin2)));
+    // 4-byte UTF-8 (U+1F600 = F0 9F 98 80)
+    const char utf8Four[] = "Sym_\xF0\x9F\x98\x80";
+    CHECK(LooksLikePlausibleClassName(utf8Four, sizeof(utf8Four)));
+
+    // Rejections:
+    CHECK(!LooksLikePlausibleClassName("", 1));
+    const char noNul[4] = {'A', 'B', 'C', 'D'};
+    CHECK(!LooksLikePlausibleClassName(noNul, 4));
+    CHECK(!LooksLikePlausibleClassName("Bad\x01Name", 16));
+    CHECK(!LooksLikePlausibleClassName("Bad\nName", 16));
+    CHECK(!LooksLikePlausibleClassName("Bad\x7FName", 16));
+    CHECK(!LooksLikePlausibleClassName("\x80" "bareCont", 16));        // stray continuation
+    CHECK(!LooksLikePlausibleClassName("\xC0\xAF", 8));                // overlong 2-byte
+    CHECK(!LooksLikePlausibleClassName("\xE0\x80\xAF", 8));            // overlong 3-byte
+    CHECK(!LooksLikePlausibleClassName("\xED\xA0\x80", 8));            // UTF-16 surrogate U+D800
+    CHECK(!LooksLikePlausibleClassName("\xF0\x80\x80\xAF", 8));        // overlong 4-byte
+    CHECK(!LooksLikePlausibleClassName("\xF4\x90\x80\x80", 8));        // > U+10FFFF
+    CHECK(!LooksLikePlausibleClassName("trunc\xE4\xB8", 16));          // truncated 3-byte
+}
+
 }  // namespace
 
 int main() {
@@ -1631,6 +1707,7 @@ int main() {
     Test_AM7_AM8_AL16_TeardownAndMainThreadDispatcher();
     Test_AM3_AM4_PipeSecurityAndInitOwnership();
     Test_AM6_AL14_SehFilterGuardPageAndWindowStraddle();
+    Test_BM4_BM5_StaticFieldStorageAndUtf8Names();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

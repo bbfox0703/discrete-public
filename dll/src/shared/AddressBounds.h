@@ -146,7 +146,9 @@ inline bool LooksLikePlausibleClassName(const char* buf, std::size_t maxLen) noe
             ++i;
             continue;
         }
-        // Valid UTF-8 multibyte sequence (2..4 bytes).
+        // Strict RFC 3629 UTF-8 multibyte sequence (2..4 bytes): rejects
+        // overlong encodings, UTF-16 surrogates (U+D800..U+DFFF), and code
+        // points above U+10FFFF while accepting CJK / Unicode identifiers (B-M5).
         std::size_t need = 0u;
         if ((b0 & 0xE0u) == 0xC0u && b0 >= 0xC2u)      need = 2u;
         else if ((b0 & 0xF0u) == 0xE0u)                need = 3u;
@@ -154,7 +156,16 @@ inline bool LooksLikePlausibleClassName(const char* buf, std::size_t maxLen) noe
         else return false;
 
         if (i + need > len) return false;
-        for (std::size_t k = 1u; k < need; ++k) {
+        const auto b1 = static_cast<unsigned char>(buf[i + 1u]);
+        if ((b1 & 0xC0u) != 0x80u) return false;
+        if (need == 3u) {
+            if (b0 == 0xE0u && b1 < 0xA0u)  return false;  // overlong 3-byte
+            if (b0 == 0xEDu && b1 >= 0xA0u) return false;  // UTF-16 surrogate
+        } else if (need == 4u) {
+            if (b0 == 0xF0u && b1 < 0x90u)  return false;  // overlong 4-byte
+            if (b0 == 0xF4u && b1 >= 0x90u) return false;  // > U+10FFFF
+        }
+        for (std::size_t k = 2u; k < need; ++k) {
             const auto bk = static_cast<unsigned char>(buf[i + k]);
             if ((bk & 0xC0u) != 0x80u) return false;
         }

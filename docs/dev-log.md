@@ -12,6 +12,26 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1557) — Fix B-M4 + B-M5 (+ B-L6) (reject literal/thread-static static-field addresses & unify `int32_t` field offsets, strict RFC 3629 UTF-8 class/image names in walkers, `System.Enum` namespace check + tests)
+
+- **Bug fixes (`B-M4`, `B-M5`, `B-L6`):**
+  - **`B-M4` (`dll/src/shared/ManagedLayout.h`, `MonoClassWalker.{h,cpp}`, `IL2CPPClassWalker.{h,cpp}`, `IL2CPPFieldXref.cpp`, `ExportAPI.cpp`):**
+    - Added `kFieldAttrStatic`, `kFieldAttrLiteral`, `NormalizeFieldOffset32<T>`, `StaticFieldStorageKind` (`Normal`, `NonStatic`, `Literal`, `ThreadStatic`), `ClassifyStaticFieldStorage`, and `StaticFieldStorageReason` in `ManagedLayout.h`.
+    - Unified `FieldEntry::offset` and `StaticFieldAddress::offset` to signed `std::int32_t` across both Mono and IL2CPP walkers (previously `std::size_t` in IL2CPP, where a `-1` thread-static sentinel sign-extended to `0xFFFFFFFFFFFFFFFF` on x64 and wrapped `staticBase + offset` to `staticBase - 1`), and added `StaticFieldAddress::reason`.
+    - Gated `ResolveStaticFieldAddress` (Mono & IL2CPP), `IL2CPPFieldXref::ResolveStaticField`, IL2CPP snapshot static capture, and `CmdGetStaticFieldData` (surfacing `reason`) so `FIELD_ATTRIBUTE_LITERAL` (`const`, no runtime storage) and thread-static fields (`offset < 0` / `THREAD_STATIC_FIELD_OFFSET == -1`) are cleanly rejected instead of silently reading offset 0 or `staticBase - 1`.
+    - Guarded instance field-offset sites in `ExportAPI.cpp` (Mono/IL2CPP snapshot schema & element walks, `findInstances` `sane` probes, and class-scoped `scanFieldValue`) against negative offsets before casting to `std::size_t` / `std::uintptr_t`.
+  - **`B-M5` (`dll/src/shared/AddressBounds.h`, `MonoClassWalker.cpp`, `IL2CPPClassWalker.cpp`):**
+    - Tightened `LooksLikePlausibleClassName` to enforce strict RFC 3629 UTF-8 validation (rejecting 3-byte overlong sequences, UTF-16 surrogates `U+D800..U+DFFF`, 4-byte overlongs, and code points `> U+10FFFF`) alongside printable ASCII checks.
+    - Replaced the ASCII-only `SehNameLooksSane` (`0x20..0x7E`) in both `MonoClassWalker.cpp` and `IL2CPPClassWalker.cpp` with `SehCopyNameBounded` (using `MemoryAccessExceptionFilter`) followed by `LooksLikePlausibleClassName`, so valid UTF-8 CJK/Cyrillic/Unicode class, namespace, and image names from obfuscated or localized Unity games are accepted while corrupt pointers and invalid byte sequences are still rejected.
+  - **`B-L6` (`IL2CPPClassWalker.cpp`, `IL2CPPAddressFinder.cpp`):**
+    - Qualified IL2CPP enum parent detection with `ns == "System"` (`parentName == "Enum" && parentNs == "System"`), preventing user-defined classes named `Enum` in another namespace from being misclassified as CLR enums.
+  - **Tests:**
+    - Added `Test_BM4_BM5_StaticFieldStorageAndUtf8Names` (+36 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp` verifying `NormalizeFieldOffset32` (`-1`, `0xFFFFFFFF`, `0xFFFFFFFFFFFFFFFF`), `ClassifyStaticFieldStorage` (`Normal` / `NonStatic` / `Literal` / `ThreadStatic`), `StaticFieldStorageReason`, and `LooksLikePlausibleClassName` across ASCII, valid 2/3/4-byte UTF-8 (Cyrillic, CJK, emoji), and malformed UTF-8 (overlongs, surrogates, truncated sequences, `> U+10FFFF`, control chars).
+  - Marked `B-M4`, `B-M5`, and `B-L6` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1557) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 581 checks passed (x64) / 584 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1556) — Fix A-M5 + A-M6 (+ A-L13, A-L14) (event-driven proxy backend loader with logging, strict SEH-leaf window scans, targeted SEH filter preserving `PAGE_GUARD` & C++ exceptions, remove dead `AOBScan` + tests)
 
 - **Bug fixes (`A-M5`, `A-M6`, `A-L13`, `A-L14` — completes 100% of Block A High & Medium findings, 2/2 High + 12/12 Medium):**

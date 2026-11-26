@@ -32,6 +32,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace Discrete::ManagedLayout {
 
@@ -52,5 +53,55 @@ inline constexpr std::size_t kArrayDataOffset      = kObjectHeader + 2 * kPointe
 // System.Exception._message (the field we decode for managed-exception
 // reporting in Phase 19c's invoker). Skips _className.
 inline constexpr std::size_t kExceptionMessageOffset = kObjectHeader + kPointerSize;
+
+// ECMA-335 FieldAttributes flags used across both Mono and IL2CPP walkers.
+inline constexpr std::uint32_t kFieldAttrStatic  = 0x10u;
+inline constexpr std::uint32_t kFieldAttrLiteral = 0x40u;
+
+// Normalize any runtime field offset (int on Mono, size_t on IL2CPP where
+// THREAD_STATIC_FIELD_OFFSET is (size_t)-1) into a unified int32_t with -1 as
+// the sentinel for thread-static / invalid offsets (B-M4).
+template <typename T>
+inline constexpr std::int32_t NormalizeFieldOffset32(T raw) noexcept {
+    if constexpr (std::is_signed_v<T>) {
+        if (raw < 0) return -1;
+        if constexpr (sizeof(T) > 4) {
+            if (static_cast<std::int64_t>(raw) > 0x7FFFFFFFLL) return -1;
+        }
+        return static_cast<std::int32_t>(raw);
+    } else {
+        if (raw > static_cast<T>(0x7FFFFFFFu)) return -1;
+        return static_cast<std::int32_t>(raw);
+    }
+}
+
+enum class StaticFieldStorageKind : int {
+    Regular = 0,
+    NotStatic,
+    Literal,
+    ThreadStatic,
+};
+
+// Classify whether a field has addressable per-domain/per-class static storage
+// (B-M4). Rejects non-static fields, ECMA-335 Literal (const) fields which have
+// no static storage (offset 0 or -1 would alias slot 0 or underflow base-1),
+// and [ThreadStatic] fields whose offset sentinel is -1 / (size_t)-1.
+inline constexpr StaticFieldStorageKind ClassifyStaticFieldStorage(
+    std::uint32_t flags, std::int32_t normalizedOffset) noexcept {
+    if ((flags & kFieldAttrStatic) == 0u) return StaticFieldStorageKind::NotStatic;
+    if ((flags & kFieldAttrLiteral) != 0u) return StaticFieldStorageKind::Literal;
+    if (normalizedOffset < 0) return StaticFieldStorageKind::ThreadStatic;
+    return StaticFieldStorageKind::Regular;
+}
+
+inline constexpr const char* StaticFieldStorageReason(StaticFieldStorageKind kind) noexcept {
+    switch (kind) {
+        case StaticFieldStorageKind::Regular:      return "";
+        case StaticFieldStorageKind::NotStatic:    return "not_static";
+        case StaticFieldStorageKind::Literal:      return "literal";
+        case StaticFieldStorageKind::ThreadStatic: return "thread_static";
+    }
+    return "unknown";
+}
 
 }  // namespace Discrete::ManagedLayout

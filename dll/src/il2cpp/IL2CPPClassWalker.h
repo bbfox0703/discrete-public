@@ -21,7 +21,7 @@ struct ClassEntry {
 struct FieldEntry {
     std::string   name;
     std::string   typeName;
-    std::size_t   offset = 0;
+    std::int32_t  offset = 0;          // normalized offset (-1 sentinel for thread-static/invalid)
     std::uint32_t flags  = 0;
     // Phase 11.5 follow-up: enum / value-type detection — see Mono walker
     // for the full rationale. Defaults to false; populated only when the
@@ -78,9 +78,10 @@ bool ProbeKlassValid(Il2CppClass* klass);
 struct StaticFieldAddress {
     bool          ok      = false;
     void*         address = nullptr;
-    std::size_t   offset  = 0;
+    std::int32_t  offset  = -1;        // normalized offset (-1 for thread-static / unresolved)
     std::string   typeName;
     std::uint32_t flags   = 0;
+    std::string   reason;              // populated when !ok ("not_static" / "literal" / "thread_static" / ...)
 };
 StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::string& fieldName);
 
