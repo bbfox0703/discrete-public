@@ -12,6 +12,18 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1537) — Fix D-H1 (32-bit x86 ISA mode for Rust AOB pattern builder + tests)
+
+- **Bug fix (`D-H1`):** `dll/rust/src/aob.rs` previously decoded every method byte window strictly in x86-64 mode regardless of target architecture. On 32-bit Mono JIT code, `0x40..0x4F` (`INC`/`DEC r32`) were consumed as REX prefixes (desynchronizing all subsequent instructions), `0xA0..0xA3` (`MOV AL/EAX, moffs32`) consumed 8 bytes instead of 4 and left absolute static addresses un-wildcarded, and `mod=00 SIB base=5` absolute jump-table displacements stayed literal.
+  - Added 32-bit protected-mode decoding (`build_pattern_for_mode(..., bitness)` and C ABI `dc_aob_build_pattern_mode` in `dll/rust/src/aob.rs` + `dll/rust/include/discrete_core.h`), while keeping `dc_aob_build_pattern` / `build_pattern` 100% byte-identical in 64-bit mode.
+  - In 32-bit mode: `0x40..0x4F` decode as 1-byte `INC`/`DEC r32`; `0xA0..0xA3` decode as 4-byte wildcarded `moffs32` (preserving width under `0x66` operand-size prefix); `mod=00 rm=5` and `mod=00 SIB base=5` wildcard 32-bit absolute `disp32`; 32-bit-only opcodes (`PUSHAD`/`POPAD`, `0x82`, segment push/pop, BCD ops) decode cleanly.
+  - Updated `AobPattern.h` and `AobPatternRs.cpp` to pass `bitness` (defaulting to `sizeof(void*) * 8` — 32 on x86 Mono DLL, 64 on x64 Mono/IL2CPP DLLs).
+  - Added 6 Rust unit / FFI / small-window invariant tests in `dll/rust/src/aob.rs` (running on both x86_64 and i686).
+  - Marked `D-H1` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1537) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1154 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 329 passed (x64) / 332 passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1536) — Add offline C++ DLL self-test suite (`discrete_dll_test`, x64 + x86) for C-H1 / C-H2 / C-H3 / A-H2 / B-H1
 
 - **What changes:** Added the repository's first offline C++ DLL unit test executable (`dll/tests/dll_core_test.cpp`), compiled with `/W4 /WX` and executed on **both x64 and x86 (WOW64)** by `.\build.cmd test` and `.\build.cmd publish` (never copied into `dist\`).

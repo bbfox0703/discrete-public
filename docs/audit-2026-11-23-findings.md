@@ -613,7 +613,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### High
 
-**D-H1 · AOB pattern builder 是 x86-64 解碼器，卻直接套用在 32-bit Mono 遊戲的 JIT 程式碼上，產生錯誤的 pattern**
+**D-H1 · AOB pattern builder 是 x86-64 解碼器，卻直接套用在 32-bit Mono 遊戲的 JIT 程式碼上，產生錯誤的 pattern — ✅ FIXED (2026-11-26)**
 - 位置：`dll/rust/src/aob.rs:22-24`（模組說明宣稱 x64 / x86 DLL 結果一致）、`:83-86`、`:350-357`（`0x40-0x4F` 一律當 REX）、`:131-135`（`A0-A3` moffs 固定 8 bytes）、`:148-150`（`B8+r` imm32 不萬用）、`:414-423`（`mod=00 rm=101` 當 RIP-relative）；`dll/src/shared/AobPatternRs.cpp:59-70`；呼叫端 `dll/src/shared/ExportAPI.cpp:3223-3258`（共用區段，Mono x86 DLL 也會註冊這個 handler）
 - 成因：解碼器寫死 64-bit mode，C ABI 也沒有 mode 參數，所以 x86 Mono DLL 會把 32-bit 指令當成 64-bit 解碼：
   1. 在 32-bit mode 中，`0x40-0x4F` 是單一 byte 的 `INC` / `DEC r32`，這裡被當成 REX 吃掉，和下一條指令黏成一條，後續的長度與萬用位置全部錯位。

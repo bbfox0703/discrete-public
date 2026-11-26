@@ -42,6 +42,8 @@ struct OpcodeInfo {
     imm_size: i32,
     /// The immediate is a relative branch target, to be wildcarded.
     rel_imm: bool,
+    /// The immediate is an absolute memory address (32-bit moffs32), to be wildcarded.
+    abs_imm: bool,
     /// The decoder does not know this opcode: bail.
     unknown: bool,
     /// RET / RETF / IRET / unconditional JMP: ends the flow.
@@ -50,26 +52,38 @@ struct OpcodeInfo {
 
 impl OpcodeInfo {
     const fn imm(n: i32) -> Self {
-        Self { has_modrm: false, imm_size: n, rel_imm: false, unknown: false, terminal: false }
+        Self { has_modrm: false, imm_size: n, rel_imm: false, abs_imm: false, unknown: false, terminal: false }
+    }
+    const fn abs_imm(n: i32) -> Self {
+        Self { has_modrm: false, imm_size: n, rel_imm: false, abs_imm: true, unknown: false, terminal: false }
     }
     const fn modrm(n: i32) -> Self {
-        Self { has_modrm: true, imm_size: n, rel_imm: false, unknown: false, terminal: false }
+        Self { has_modrm: true, imm_size: n, rel_imm: false, abs_imm: false, unknown: false, terminal: false }
     }
     const fn rel(n: i32) -> Self {
-        Self { has_modrm: false, imm_size: n, rel_imm: true, unknown: false, terminal: false }
+        Self { has_modrm: false, imm_size: n, rel_imm: true, abs_imm: false, unknown: false, terminal: false }
     }
     const fn unknown() -> Self {
-        Self { has_modrm: false, imm_size: 0, rel_imm: false, unknown: true, terminal: false }
+        Self { has_modrm: false, imm_size: 0, rel_imm: false, abs_imm: false, unknown: true, terminal: false }
     }
     const fn terminal(self) -> Self {
         Self { terminal: true, ..self }
     }
 }
 
-/// One-byte opcode map. The `if` chain keeps the C++ order exactly, because
-/// several tests overlap (e.g. 0xA8/0xA9 are checked before the 0xA4..0xAF
-/// range) and the first match wins.
-fn lookup_1b(op: u8) -> OpcodeInfo {
+/// One-byte opcode map. The `if` chain keeps the C++ order exactly in 64-bit
+/// mode, because several tests overlap (e.g. 0xA8/0xA9 are checked before the
+/// 0xA4..0xAF range) and the first match wins.
+fn lookup_1b(op: u8, is_64bit: bool) -> OpcodeInfo {
+    // 32-bit-only 1-byte opcodes in 0x00..=0x3F (PUSH/POP ES/CS/SS/DS, DAA/DAS/AAA/AAS).
+    if !is_64bit
+        && matches!(
+            op,
+            0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x27 | 0x2F | 0x37 | 0x3F
+        )
+    {
+        return OpcodeInfo::default();
+    }
     // 0x00..0x3F arithmetic rows: lo 4 = AL,imm8; lo 5 = eAX,imm32; else r/m.
     // (0x0F never gets here; 0x26/2E/36/3E only reach this as the 6th+
     // prefix byte, and then decode as ModRM forms, exactly like the C++.)
@@ -80,12 +94,17 @@ fn lookup_1b(op: u8) -> OpcodeInfo {
             _ => OpcodeInfo::modrm(0),
         };
     }
-    // Standalone REX (a second REX byte) is unknown.
+    // 0x40..0x4F: standalone REX is unknown in 64-bit mode; in 32-bit mode
+    // these are single-byte INC/DEC r32 instructions (D-H1).
     if (0x40..=0x4F).contains(&op) {
-        return OpcodeInfo::unknown();
+        return if is_64bit { OpcodeInfo::unknown() } else { OpcodeInfo::default() };
     }
-    // PUSH / POP r64.
+    // PUSH / POP r32/r64.
     if (0x50..=0x5F).contains(&op) {
+        return OpcodeInfo::default();
+    }
+    // 32-bit PUSHAD / POPAD.
+    if !is_64bit && (op == 0x60 || op == 0x61) {
         return OpcodeInfo::default();
     }
     if op == 0x68 {
@@ -115,7 +134,7 @@ fn lookup_1b(op: u8) -> OpcodeInfo {
         return OpcodeInfo::modrm(4);
     }
     if op == 0x82 {
-        return OpcodeInfo::unknown(); // invalid in 64-bit mode
+        return if is_64bit { OpcodeInfo::unknown() } else { OpcodeInfo::modrm(1) };
     }
     if op == 0x83 {
         return OpcodeInfo::modrm(1);
@@ -128,10 +147,10 @@ fn lookup_1b(op: u8) -> OpcodeInfo {
     if (0x90..=0x9F).contains(&op) {
         return OpcodeInfo::default();
     }
-    // MOV moffs: 8-byte offset in 64-bit mode (prefixes are not consulted,
-    // same as the C++).
+    // MOV moffs: 8-byte offset in 64-bit mode; 4-byte absolute address
+    // (wildcarded) in 32-bit mode (D-H1).
     if (0xA0..=0xA3).contains(&op) {
-        return OpcodeInfo::imm(8);
+        return if is_64bit { OpcodeInfo::imm(8) } else { OpcodeInfo::abs_imm(4) };
     }
     if op == 0xA8 {
         return OpcodeInfo::imm(1);
@@ -279,6 +298,7 @@ struct Decoded {
     disp_offset: i32,
     disp_size: i32,
     rel_imm: bool,
+    abs_imm: bool,
     rel_disp: bool,
     valid: bool,
     terminal: bool,
@@ -293,6 +313,7 @@ impl Default for Decoded {
             disp_offset: -1,
             disp_size: 0,
             rel_imm: false,
+            abs_imm: false,
             rel_disp: false,
             valid: true,
             terminal: false,
@@ -307,9 +328,9 @@ impl Decoded {
     }
 }
 
-/// Decodes the instruction at the start of `p` (the C++ `DecodeOne(p, avail)`
-/// with `avail == p.len()`).
-fn decode_one(p: &[u8]) -> Decoded {
+/// Decodes the instruction at the start of `p` in either 64-bit (`is_64bit = true`)
+/// or 32-bit protected (`is_64bit = false`) mode.
+fn decode_one_mode(p: &[u8], is_64bit: bool) -> Decoded {
     let d = Decoded::default();
     if p.is_empty() {
         return d.invalid();
@@ -347,8 +368,8 @@ fn decode_one(p: &[u8]) -> Decoded {
         return d.invalid();
     }
 
-    // One REX prefix.
-    if (byte(pos) & 0xF0) == 0x40 {
+    // One REX prefix (64-bit mode only; in 32-bit mode 0x40..=0x4F are INC/DEC).
+    if is_64bit && (byte(pos) & 0xF0) == 0x40 {
         rex = byte(pos);
         pos += 1;
         if pos >= avail {
@@ -378,7 +399,7 @@ fn decode_one(p: &[u8]) -> Decoded {
             op_len = 2;
         }
     } else {
-        info = lookup_1b(op);
+        info = lookup_1b(op, is_64bit);
         op_len = 1;
     }
     pos += op_len;
@@ -416,8 +437,8 @@ fn decode_one(p: &[u8]) -> Decoded {
                 if rm == 4 {
                     sib = true;
                 } else if rm == 5 {
-                    // RIP-relative (or disp32 absolute under 0x67 — wildcarded
-                    // either way, as in the C++).
+                    // 64-bit: RIP-relative disp32; 32-bit: absolute disp32.
+                    // Wildcarded in both modes.
                     disp_size = 4;
                     rip_rel = true;
                 }
@@ -439,10 +460,14 @@ fn decode_one(p: &[u8]) -> Decoded {
             }
             let base = byte(pos) & 0x7;
             pos += 1;
-            // mod=00 + SIB base=101: disp32, no base. Not RIP-relative, so
-            // not wildcarded.
+            // mod=00 + SIB base=101: disp32, no base. Not RIP-relative in 64-bit
+            // mode (kept literal); in 32-bit mode it encodes [index*scale + abs32]
+            // (e.g. jump tables) whose absolute address moves across runs.
             if md == 0 && base == 5 {
                 disp_size = 4;
+                if !is_64bit {
+                    rip_rel = true;
+                }
             }
         }
 
@@ -457,13 +482,13 @@ fn decode_one(p: &[u8]) -> Decoded {
         }
     }
 
-    // REX.W + B8..BF: MOV r64, imm64.
-    if (0xB8..=0xBF).contains(&op) && op_len == 1 && (rex & 0x08) != 0 {
+    // REX.W + B8..BF: MOV r64, imm64 (64-bit mode only; rex == 0 in 32-bit).
+    if is_64bit && (0xB8..=0xBF).contains(&op) && op_len == 1 && (rex & 0x08) != 0 {
         info.imm_size = 8;
     }
 
-    // 0x66 demotes 32-bit (non-branch) immediates to 16-bit.
-    if has_op_size && info.imm_size == 4 && !info.rel_imm {
+    // 0x66 demotes 32-bit data immediates (never branch rel32 or moffs32) to 16-bit.
+    if has_op_size && info.imm_size == 4 && !info.rel_imm && !info.abs_imm {
         info.imm_size = 2;
     }
 
@@ -474,6 +499,7 @@ fn decode_one(p: &[u8]) -> Decoded {
         d.imm_offset = pos;
         d.imm_size = info.imm_size;
         d.rel_imm = info.rel_imm;
+        d.abs_imm = info.abs_imm;
         pos += info.imm_size;
     }
 
@@ -506,10 +532,18 @@ pub struct PatternResult {
 
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
-/// Builds the AOB pattern for `bytes` (the C++ `BuildPattern`). With
-/// `stop_at_terminal`, the pattern ends at the first RET / RETF / IRET /
-/// unconditional JMP (incl. `FF /4`, `FF /5`) that is followed by more bytes.
+/// Builds the AOB pattern for `bytes` in 64-bit mode (backward-compatible entry
+/// point used by `r2-dump` and the golden gate).
 pub fn build_pattern(bytes: &[u8], stop_at_terminal: bool) -> PatternResult {
+    build_pattern_for_mode(bytes, stop_at_terminal, 64)
+}
+
+/// Builds the AOB pattern for `bytes` in either 32-bit (`bitness == 32`) or
+/// 64-bit (`bitness == 64`) ISA mode (D-H1). With `stop_at_terminal`, the
+/// pattern ends at the first RET / RETF / IRET / unconditional JMP (incl.
+/// `FF /4`, `FF /5`) that is followed by more bytes.
+pub fn build_pattern_for_mode(bytes: &[u8], stop_at_terminal: bool, bitness: u32) -> PatternResult {
+    let is_64bit = bitness != 32;
     let mut len = bytes.len();
     let mut r = PatternResult {
         length: len,
@@ -520,7 +554,7 @@ pub fn build_pattern(bytes: &[u8], stop_at_terminal: bool) -> PatternResult {
 
     let mut cursor = 0usize;
     while cursor < len {
-        let d = decode_one(&bytes[cursor..len]);
+        let d = decode_one_mode(&bytes[cursor..len], is_64bit);
         if !d.valid || d.length == 0 {
             r.decoder_bailed = true;
             r.bailed_at = cursor;
@@ -534,6 +568,15 @@ pub fn build_pattern(bytes: &[u8], stop_at_terminal: bool) -> PatternResult {
                 }
             }
             r.rel_branch_count += 1;
+        }
+        if d.abs_imm && d.imm_offset >= 0 && d.imm_size > 0 {
+            for i in 0..d.imm_size {
+                let idx = cursor + (d.imm_offset + i) as usize;
+                if idx < len {
+                    r.wildcard_mask[idx] = true;
+                }
+            }
+            r.rip_rel_count += 1;
         }
         if d.rel_disp && d.disp_offset >= 0 && d.disp_size > 0 {
             for i in 0..d.disp_size {
@@ -606,23 +649,30 @@ pub struct DcAobResult {
 /// and `out` to a writable `DcAobResult`. `bytes` is a caller-owned buffer
 /// (the only consumer passes a `Memory::SafeReadBytes` copy), never live game
 /// memory.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dc_aob_build_pattern(
+/// Shared FFI body for `dc_aob_build_pattern` (64-bit) and
+/// `dc_aob_build_pattern_mode` (32- or 64-bit).
+unsafe fn build_pattern_ffi_impl(
+    name: &'static str,
     bytes: *const u8,
     len: usize,
     stop_at_terminal: i32,
+    bitness: u32,
     pattern_out: *mut c_char,
     pattern_cap: usize,
     mask_out: *mut u8,
     mask_cap: usize,
     out: *mut DcAobResult,
 ) -> i32 {
-    guard("dc_aob_build_pattern", 0, || {
+    guard(name, 0, || {
         if out.is_null() {
             return 0;
         }
         // SAFETY: `out` is non-null and writable per the contract.
         unsafe { out.write(DcAobResult::default()) };
+
+        if bitness != 32 && bitness != 64 {
+            return 0;
+        }
 
         // The header asks for >= 3*len pattern bytes (one more than the
         // 3*len-1 a full pattern needs) and >= len mask bytes.
@@ -645,7 +695,7 @@ pub unsafe extern "C" fn dc_aob_build_pattern(
             unsafe { std::slice::from_raw_parts(bytes, len) }
         };
 
-        let r = build_pattern(input, stop_at_terminal != 0);
+        let r = build_pattern_for_mode(input, stop_at_terminal != 0, bitness);
 
         // pattern.len() <= 3*length - 1 <= pattern_cap; length <= len <= mask_cap.
         let pat = r.pattern.as_bytes();
@@ -674,6 +724,56 @@ pub unsafe extern "C" fn dc_aob_build_pattern(
         unsafe { out.write(res) };
         1
     })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_aob_build_pattern(
+    bytes: *const u8,
+    len: usize,
+    stop_at_terminal: i32,
+    pattern_out: *mut c_char,
+    pattern_cap: usize,
+    mask_out: *mut u8,
+    mask_cap: usize,
+    out: *mut DcAobResult,
+) -> i32 {
+    // SAFETY: forwards caller contract verbatim to the shared helper.
+    unsafe {
+        build_pattern_ffi_impl(
+            "dc_aob_build_pattern",
+            bytes, len, stop_at_terminal, 64,
+            pattern_out, pattern_cap, mask_out, mask_cap, out,
+        )
+    }
+}
+
+/// `int32_t dc_aob_build_pattern_mode(...)` — see `include/discrete_core.h`.
+///
+/// Same as [`dc_aob_build_pattern`] with an explicit ISA mode (`bitness`: 32 or 64).
+/// Any other `bitness` value zeroes `*out` and returns 0.
+///
+/// # Safety
+/// Same pointer and length requirements as [`dc_aob_build_pattern`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_aob_build_pattern_mode(
+    bytes: *const u8,
+    len: usize,
+    stop_at_terminal: i32,
+    bitness: u32,
+    pattern_out: *mut c_char,
+    pattern_cap: usize,
+    mask_out: *mut u8,
+    mask_cap: usize,
+    out: *mut DcAobResult,
+) -> i32 {
+    // SAFETY: forwards caller contract verbatim to the shared helper.
+    unsafe {
+        build_pattern_ffi_impl(
+            "dc_aob_build_pattern_mode",
+            bytes, len, stop_at_terminal, bitness,
+            pattern_out, pattern_cap, mask_out, mask_cap, out,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1227,6 +1327,136 @@ mod tests {
                     for n in 0..=buf.len() {
                         for stop in [false, true] {
                             let r = build_pattern(&buf[..n], stop);
+                            assert!(r.length <= n);
+                            assert_eq!(r.wildcard_mask.len(), r.length);
+                            assert_eq!(r.requested_length, n);
+                            let expect_len = if r.length == 0 { 0 } else { 3 * r.length - 1 };
+                            assert_eq!(r.pattern.len(), expect_len);
+                            if r.stopped_at_terminal {
+                                assert!(stop && r.length < n && !r.decoder_bailed);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- D-H1: 32-bit x86 ISA mode tests ------------------------------------
+
+    #[test]
+    fn x86_mode_inc_dec_are_1byte_opcodes_not_rex() {
+        // `inc eax; dec eax; call rel32; ret` — in 64-bit mode `40 48` bails
+        // as a second REX byte; in 32-bit mode both are valid 1-byte opcodes.
+        let b = hx("40 48 E8 11 22 33 44 C3");
+        let r32 = build_pattern_for_mode(&b, true, 32);
+        assert!(!r32.decoder_bailed, "{r32:?}");
+        assert_eq!(r32.instruction_count, 4);
+        assert_eq!(r32.rel_branch_count, 1);
+        assert_eq!(r32.pattern, "40 48 E8 ?? ?? ?? ?? C3");
+
+        let r64 = build_pattern_for_mode(&b, true, 64);
+        assert!(r64.decoder_bailed);
+        assert_eq!(r64.bailed_at, 0);
+    }
+
+    #[test]
+    fn x86_mode_moffs_is_4_bytes_and_wildcarded() {
+        // `mov eax, [0x12345678]; mov [0x30201000], eax; mov ax, [0x11223344]; ret`
+        // In 64-bit mode `A1` eats 8 bytes and corrupts the next instruction.
+        // Note 0x66 + A1 changes data width (AX), NOT the 4-byte moffs32 width.
+        let b = hx("A1 78 56 34 12 A3 00 10 20 30 66 A1 44 33 22 11 C3");
+        let r = build_pattern_for_mode(&b, true, 32);
+        assert!(!r.decoder_bailed, "{r:?}");
+        assert_eq!(r.instruction_count, 4);
+        assert_eq!(r.rip_rel_count, 3);
+        assert_eq!(r.pattern, "A1 ?? ?? ?? ?? A3 ?? ?? ?? ?? 66 A1 ?? ?? ?? ?? C3");
+    }
+
+    #[test]
+    fn x86_mode_modrm_disp32_and_sib_base5_wildcarded() {
+        // `mov eax, [0x12345678]; jmp dword ptr [eax*4 + 0x40302010]`
+        let b = hx("8B 05 78 56 34 12 FF 24 85 10 20 30 40 90 90");
+        let r = build_pattern_for_mode(&b, true, 32);
+        assert!(!r.decoder_bailed, "{r:?}");
+        assert!(r.stopped_at_terminal);
+        assert_eq!(r.instruction_count, 2);
+        assert_eq!(r.rip_rel_count, 2);
+        assert_eq!(r.pattern, "8B 05 ?? ?? ?? ?? FF 24 85 ?? ?? ?? ??");
+    }
+
+    #[test]
+    fn x86_mode_mono_jit_prologue_and_32bit_opcodes() {
+        // Typical 32-bit Mono JIT prologue with `inc eax`, `mov eax, [static]`,
+        // `call rel32`, `ret`, followed by trailing padding.
+        let b = hx("55 8B EC 53 56 57 83 EC 18 40 A1 10 20 30 40 E8 01 02 03 04 C3 90 90");
+        let r = build_pattern_for_mode(&b, true, 32);
+        assert!(!r.decoder_bailed, "{r:?}");
+        assert!(r.stopped_at_terminal);
+        assert_eq!(r.length, 21);
+        assert_eq!(r.requested_length, 23);
+        assert_eq!(r.rel_branch_count, 1);
+        assert_eq!(r.rip_rel_count, 1);
+        assert_eq!(
+            r.pattern,
+            "55 8B EC 53 56 57 83 EC 18 40 A1 ?? ?? ?? ?? E8 ?? ?? ?? ?? C3"
+        );
+
+        // PUSHAD (0x60), Group-1 alias 0x82, POPAD (0x61), RET.
+        let b2 = hx("60 82 45 08 01 61 C3");
+        let r2 = build_pattern_for_mode(&b2, true, 32);
+        assert!(!r2.decoder_bailed, "{r2:?}");
+        assert_eq!(r2.instruction_count, 4);
+    }
+
+    #[test]
+    fn ffi_build_pattern_mode_validates_bitness_and_matches_rust() {
+        let input = hx("40 A1 78 56 34 12 C3");
+        let mut pat_buf = vec![0u8; input.len() * 3];
+        let mut mask_buf = vec![0u8; input.len()];
+        let mut out = DcAobResult::default();
+
+        // Invalid bitness (16) -> returns 0 and zeroes *out.
+        out.length = 99;
+        // SAFETY: buffers sized per contract.
+        let rc_bad = unsafe {
+            dc_aob_build_pattern_mode(
+                input.as_ptr(), input.len(), 1, 16,
+                pat_buf.as_mut_ptr().cast(), pat_buf.len(),
+                mask_buf.as_mut_ptr(), mask_buf.len(), &mut out,
+            )
+        };
+        assert_eq!(rc_bad, 0);
+        assert_eq!(out, DcAobResult::default());
+
+        // Valid 32-bit mode -> succeeds and wildcards A1's 4-byte moffs32.
+        // SAFETY: buffers sized per contract.
+        let rc32 = unsafe {
+            dc_aob_build_pattern_mode(
+                input.as_ptr(), input.len(), 1, 32,
+                pat_buf.as_mut_ptr().cast(), pat_buf.len(),
+                mask_buf.as_mut_ptr(), mask_buf.len(), &mut out,
+            )
+        };
+        assert_eq!(rc32, 1);
+        assert_eq!(out.decoder_bailed, 0);
+        assert_eq!(out.instruction_count, 3);
+        assert_eq!(out.rip_rel_count, 1);
+        let pat_str = std::str::from_utf8(&pat_buf[..out.pattern_len]).unwrap();
+        assert_eq!(pat_str, "40 A1 ?? ?? ?? ?? C3");
+    }
+
+    #[test]
+    fn invariants_small_windows_x86() {
+        let mut buf = Vec::new();
+        for a in 0u16..256 {
+            for b in (0u16..256).step_by(11) {
+                for c in [0u8, 0x05, 0x24, 0x45, 0xC0, 0xFF] {
+                    buf.clear();
+                    buf.extend_from_slice(&[a as u8, b as u8, c, 0x11, 0x22, 0x33, 0x44, 0x55]);
+                    for n in 0..=buf.len() {
+                        for stop in [false, true] {
+                            let r = build_pattern_for_mode(&buf[..n], stop, 32);
                             assert!(r.length <= n);
                             assert_eq!(r.wildcard_mask.len(), r.length);
                             assert_eq!(r.requested_length, n);
