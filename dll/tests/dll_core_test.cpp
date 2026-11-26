@@ -17,6 +17,7 @@
 #include "MainThreadDispatcher.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
+#include "MethodInvokeValidation.h"
 #include "ModuleLifecycle.h"
 #include "MonoVtableFilter.h"
 #include "ParallelScanDriver.h"
@@ -1689,6 +1690,180 @@ void Test_BM4_BM5_StaticFieldStorageAndUtf8Names() {
     CHECK(!LooksLikePlausibleClassName("trunc\xE4\xB8", 16));          // truncated 3-byte
 }
 
+// ============================================================================
+// B-M1 + B-M2 + B-M3 — MethodInvoker formal-type arg validation, RAII GC-root
+// pinning for string args, and safe return classification (Bool / Enum /
+// non-opt-in ValueType -> Unsupported)
+// ============================================================================
+void Test_BM1_BM2_BM3_MethodInvokeValidationAndGcRoots() {
+    using namespace Discrete::Shared;
+    constexpr std::uint32_t kMaxStruct = 128u;
+
+    // --- 1. B-M1: Primitive exact-width matching ---
+    {
+        FormalParamDescriptor pInt32{"System.Int32", true, false, {}, 4, true};
+        auto rOk = ValidateCallArg(InvokeArgKind::Int32, 0, kMaxStruct, pInt32);
+        CHECK(rOk.ok && rOk.route == MarshalRoute::ValueSlot);
+
+        CHECK(!ValidateCallArg(InvokeArgKind::Int64, 0, kMaxStruct, pInt32).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::UInt32, 0, kMaxStruct, pInt32).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Float, 0, kMaxStruct, pInt32).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pInt32).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Null, 0, kMaxStruct, pInt32).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::String, 0, kMaxStruct, pInt32).ok);
+
+        FormalParamDescriptor pBool{"System.Boolean", true, false, {}, 1, true};
+        auto rBool = ValidateCallArg(InvokeArgKind::Bool, 0, kMaxStruct, pBool);
+        CHECK(rBool.ok && rBool.route == MarshalRoute::ValueSlot);
+        CHECK(!ValidateCallArg(InvokeArgKind::Byte, 0, kMaxStruct, pBool).ok);
+
+        // IntPtr / UIntPtr are CLR value types -> ValueSlot (never DirectPointer)
+        FormalParamDescriptor pIntPtr{"System.IntPtr", true, false, {}, static_cast<std::uint32_t>(sizeof(void*)), true};
+        auto rPtrAddr = ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pIntPtr);
+        CHECK(rPtrAddr.ok && rPtrAddr.route == MarshalRoute::ValueSlot);
+        auto rPtrNull = ValidateCallArg(InvokeArgKind::Null, 0, kMaxStruct, pIntPtr);
+        CHECK(rPtrNull.ok && rPtrNull.route == MarshalRoute::ValueSlot);
+        CHECK(!ValidateCallArg(InvokeArgKind::Int64, 0, kMaxStruct, pIntPtr).ok);
+
+        // Unmanaged pointer (*) -> ValueSlot for Address/Null
+        FormalParamDescriptor pRawPtr{"System.Byte*", false, false, {}, 0, false};
+        auto rRaw = ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pRawPtr);
+        CHECK(rRaw.ok && rRaw.route == MarshalRoute::ValueSlot);
+        CHECK(!ValidateCallArg(InvokeArgKind::Int32, 0, kMaxStruct, pRawPtr).ok);
+
+        // By-ref (&) -> always rejected
+        FormalParamDescriptor pByRef{"System.Int32&", false, false, {}, 0, false};
+        CHECK(!ValidateCallArg(InvokeArgKind::Int32, 0, kMaxStruct, pByRef).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pByRef).ok);
+    }
+
+    // --- 2. B-M1: System.String, System.Object, and reference types ---
+    {
+        FormalParamDescriptor pStr{"System.String", false, false, {}, 0, true};
+        auto rStr = ValidateCallArg(InvokeArgKind::String, 0, kMaxStruct, pStr);
+        CHECK(rStr.ok && rStr.route == MarshalRoute::ManagedString);
+        auto rStrNull = ValidateCallArg(InvokeArgKind::Null, 0, kMaxStruct, pStr);
+        CHECK(rStrNull.ok && rStrNull.route == MarshalRoute::DirectPointer);
+        CHECK(!ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pStr).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Int32, 0, kMaxStruct, pStr).ok);
+
+        FormalParamDescriptor pObj{"System.Object", false, false, {}, 0, true};
+        CHECK(ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pObj).route == MarshalRoute::DirectPointer);
+        CHECK(ValidateCallArg(InvokeArgKind::Null, 0, kMaxStruct, pObj).route == MarshalRoute::DirectPointer);
+        CHECK(ValidateCallArg(InvokeArgKind::String, 0, kMaxStruct, pObj).route == MarshalRoute::ManagedString);
+        // Crucial B-M1 guard: scalar to System.Object must be rejected (would pass &slot as MonoObject*)
+        auto rBadScalar = ValidateCallArg(InvokeArgKind::Int32, 0, kMaxStruct, pObj);
+        CHECK(!rBadScalar.ok && rBadScalar.error == "arg_type_mismatch");
+        CHECK(!ValidateCallArg(InvokeArgKind::ValueStruct, 12, kMaxStruct, pObj).ok);
+
+        FormalParamDescriptor pTransform{"UnityEngine.Transform", false, false, {}, 0, true};
+        CHECK(ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pTransform).route == MarshalRoute::DirectPointer);
+        CHECK(ValidateCallArg(InvokeArgKind::Null, 0, kMaxStruct, pTransform).route == MarshalRoute::DirectPointer);
+        CHECK(!ValidateCallArg(InvokeArgKind::Int32, 0, kMaxStruct, pTransform).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::String, 0, kMaxStruct, pTransform).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::ValueStruct, 12, kMaxStruct, pTransform).ok);
+    }
+
+    // --- 3. B-M1: Enum & ValueStruct formal parameters ---
+    {
+        FormalParamDescriptor pEnum{"UnityEngine.FindObjectsInactive", true, true, "System.Int32", 4, true};
+        auto rEnumOk = ValidateCallArg(InvokeArgKind::Int32, 0, kMaxStruct, pEnum);
+        CHECK(rEnumOk.ok && rEnumOk.route == MarshalRoute::ValueSlot);
+        auto rEnumStructOk = ValidateCallArg(InvokeArgKind::ValueStruct, 4, kMaxStruct, pEnum);
+        CHECK(rEnumStructOk.ok && rEnumStructOk.route == MarshalRoute::ValueStructBuf);
+        CHECK(!ValidateCallArg(InvokeArgKind::Byte, 0, kMaxStruct, pEnum).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pEnum).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Null, 0, kMaxStruct, pEnum).ok);
+
+        FormalParamDescriptor pVec3{"UnityEngine.Vector3", true, false, {}, 12, true};
+        auto rVecOk = ValidateCallArg(InvokeArgKind::ValueStruct, 12, kMaxStruct, pVec3);
+        CHECK(rVecOk.ok && rVecOk.route == MarshalRoute::ValueStructBuf);
+        auto rVecWrongSize = ValidateCallArg(InvokeArgKind::ValueStruct, 8, kMaxStruct, pVec3);
+        CHECK(!rVecWrongSize.ok && rVecWrongSize.error == "arg_type_mismatch");
+        auto rVecZero = ValidateCallArg(InvokeArgKind::ValueStruct, 0, kMaxStruct, pVec3);
+        CHECK(!rVecZero.ok && rVecZero.error == "value_struct_arg_bad_size");
+        auto rVecTooBig = ValidateCallArg(InvokeArgKind::ValueStruct, 256, kMaxStruct, pVec3);
+        CHECK(!rVecTooBig.ok && rVecTooBig.error == "value_struct_arg_bad_size");
+        // Crucial B-M1 guard: Address / scalar to struct must be rejected
+        CHECK(!ValidateCallArg(InvokeArgKind::Address, 0, kMaxStruct, pVec3).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Float, 0, kMaxStruct, pVec3).ok);
+        CHECK(!ValidateCallArg(InvokeArgKind::Null, 0, kMaxStruct, pVec3).ok);
+    }
+
+    // --- 4. B-M2: ScopedGcPinList pins & LIFO-releases handles + stack fallback ---
+    {
+        static std::vector<std::uint32_t> sFreed;
+        static std::uint32_t sNextHandle = 100u;
+        sFreed.clear();
+        sNextHandle = 100u;
+
+        auto mockPin = [](void*) -> std::uint32_t { return ++sNextHandle; };
+        auto mockFree = [](std::uint32_t h) { sFreed.push_back(h); };
+
+        int dummy1 = 1, dummy2 = 2, dummy3 = 3;
+        {
+            ScopedGcPinList<std::uint32_t, decltype(mockPin), decltype(mockFree)> pins(mockPin, mockFree);
+            CHECK(pins.Pin(&dummy1));
+            CHECK(pins.Pin(&dummy2));
+            CHECK(pins.Pin(&dummy3));
+            CHECK(pins.HandleCount() == 3u);
+            CHECK(pins.StackRootCount() == 3u);
+            pins.KeepAlive();
+        }
+        // Released automatically in LIFO order on scope exit
+        CHECK(sFreed.size() == 3u);
+        CHECK(sFreed[0] == 103u && sFreed[1] == 102u && sFreed[2] == 101u);
+
+        // Fallback mode (gchandle exports unbound): stack roots hold up to kMaxStackRoots
+        using NullPin  = std::uint32_t (*)(void*);
+        using NullFree = void (*)(std::uint32_t);
+        ScopedGcPinList<std::uint32_t, NullPin, NullFree> stackOnly(nullptr, nullptr);
+        int dummies[40] = {};
+        bool all32Ok = true;
+        for (std::size_t i = 0; i < ScopedGcPinList<std::uint32_t, NullPin, NullFree>::kMaxStackRoots; ++i) {
+            if (!stackOnly.Pin(&dummies[i])) all32Ok = false;
+        }
+        CHECK(all32Ok);
+        CHECK(stackOnly.HandleCount() == 0u);
+        CHECK(stackOnly.StackRootCount() == 32u);
+        // 33rd object without gchandle API must fail cleanly
+        CHECK(!stackOnly.Pin(&dummies[33]));
+    }
+
+    // --- 5. B-M3: Return classification (Void, Bool/Primitive, Enum, ValueType, Ref) ---
+    {
+        auto pVoid = ClassifyReturnObject("System.Void", true, false, {}, false, false);
+        CHECK(pVoid.action == ReturnDecodeAction::Void);
+
+        auto pBool = ClassifyReturnObject("System.Boolean", false, false, {}, true, false);
+        CHECK(pBool.action == ReturnDecodeAction::Primitive && pBool.primitiveType == "System.Boolean");
+
+        auto pStr = ClassifyReturnObject("System.String", false, false, {}, false, false);
+        CHECK(pStr.action == ReturnDecodeAction::String);
+
+        // Enum return decodes via underlying integer even when wantStructReturn == false!
+        auto pEnum = ClassifyReturnObject("MyNs.MyFlags", false, true, "System.UInt16", true, false);
+        CHECK(pEnum.action == ReturnDecodeAction::Primitive && pEnum.primitiveType == "System.UInt16");
+
+        auto pEnumFallback = ClassifyReturnObject("MyNs.MyEnum", false, true, "", true, false);
+        CHECK(pEnumFallback.action == ReturnDecodeAction::Primitive && pEnumFallback.primitiveType == "System.Int32");
+
+        // Crucial B-M3 guard: non-opted-in struct/DateTime/Nullable MUST be Unsupported (never ReferenceAddr)
+        auto pStructNoOptIn = ClassifyReturnObject("UnityEngine.Vector3", false, false, {}, true, false);
+        CHECK(pStructNoOptIn.action == ReturnDecodeAction::Unsupported);
+
+        auto pStructOptIn = ClassifyReturnObject("UnityEngine.Vector3", false, false, {}, true, true);
+        CHECK(pStructOptIn.action == ReturnDecodeAction::ValueStruct);
+
+        // Genuine reference type returns ReferenceAddr; null returns NullReference
+        auto pRef = ClassifyReturnObject("UnityEngine.Transform", false, false, {}, false, false);
+        CHECK(pRef.action == ReturnDecodeAction::ReferenceAddr);
+
+        auto pNullRef = ClassifyReturnObject("UnityEngine.Transform", true, false, {}, false, false);
+        CHECK(pNullRef.action == ReturnDecodeAction::NullReference);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1708,6 +1883,7 @@ int main() {
     Test_AM3_AM4_PipeSecurityAndInitOwnership();
     Test_AM6_AL14_SehFilterGuardPageAndWindowStraddle();
     Test_BM4_BM5_StaticFieldStorageAndUtf8Names();
+    Test_BM1_BM2_BM3_MethodInvokeValidationAndGcRoots();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

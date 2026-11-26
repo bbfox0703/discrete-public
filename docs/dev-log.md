@@ -12,6 +12,33 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1559) — Fix B-M1 + B-M2 + B-M3 (formal-type CallMethod arg validation, GC-root pinning for allocated string args, safe value-type/enum/bool return decoding + MethodInvoker parity cleanups + tests)
+
+- **Bug fixes (`B-M1`, `B-M2`, `B-M3` + MethodInvoker parts of `B-L8`, `B-L9`, `B-L11`):**
+  - **`B-M1` (`dll/src/shared/MethodInvokeValidation.h`, `MonoMethodInvoker.cpp`, `IL2CPPMethodInvoker.cpp`):**
+    - Created shared header-only `dll/src/shared/MethodInvokeValidation.h` defining `FormalParamDescriptor`, `MarshalRoute`, and strict allowlist validator `ValidateCallArg`.
+    - Captured per-parameter runtime metadata (`class_from_*_type`, `class_is_valuetype`, `class_is_enum`, `class_enum_basetype` / `value__` field fallback, `class_value_size`) in `ResolveOverload` on both Mono and IL2CPP.
+    - Enforced exact formal-type matching before marshaling: scalar primitives must match exact width/kind (`arg_type_mismatch` otherwise); `System.IntPtr`/`System.UIntPtr`/unsafe `*` pointers accept `Address`/`Null` and route through `ValueSlot` (`&slot`, fixing value-type indirection); `System.String` accepts `String`/`Null` only; `System.Object` accepts `Address`/`Null`/`String` (rejecting raw scalars/structs so native stack/heap slot pointers can never be passed as `MonoObject*`/`Il2CppObject*`); other reference types accept `Address`/`Null` only; enums accept their underlying integer kind (or exact-size `ValueStruct`); non-enum structs accept `ValueStruct` ONLY with exact `class_value_size` match; by-ref (`&`) parameters are rejected cleanly.
+  - **`B-M2` (`MethodInvokeValidation.h`, `MonoResolver.{h,cpp}`, `IL2CPPResolver.{h,cpp}`, `MonoMethodInvoker.cpp`, `IL2CPPMethodInvoker.cpp`):**
+    - Added optional bindings for `mono_gchandle_new` / `mono_gchandle_free` (`uint32_t`) and `il2cpp_gchandle_new` / `il2cpp_gchandle_free` (`uintptr_t`, ABI-compatible with both legacy `uint32_t` handles and Unity 2023+/6.0 pointer-sized `Il2CppGCHandle`), plus `il2cpp_class_is_enum` and `il2cpp_class_enum_basetype`.
+    - Added RAII `ScopedGcPinList` that both pins allocated managed string arguments via `gchandle_new` (freeing in LIFO order on normal exit or early error) AND retains a volatile stack-resident root array (`kMaxStackRoots = 32`) kept live across `runtime_invoke` for conservative BDWGC stack scanning when `gchandle` exports are unavailable.
+  - **`B-M3` (`MethodInvokeValidation.h`, `MonoMethodInvoker.cpp`, `IL2CPPMethodInvoker.cpp`, `ExportAPI.cpp`, `docs/lua-invoke.md`, `docs/pipe-protocol.md`):**
+    - Added `ClassifyReturnObject` and runtime `object_get_class(boxed)` + formal return inspection in `DecodeReturnValue` on both backends:
+      - `System.Boolean` now produces `CallReturn::Kind::Bool`, serialized as JSON `true`/`false` in `ExportAPI.cpp` (resolving dead `Kind::Bool` and Lua's truthy-`0` footgun).
+      - Enum returns are decoded via `class_enum_basetype` (or `value__` field fallback) into `SignedInt`/`UnsignedInt` instead of leaking a transient boxed address.
+      - Non-enum value types (`Vector3`, `DateTime`, `Nullable<T>`, custom structs) without `wantStructReturn == true` now return `CallReturn::Kind::Unsupported` (matching header documentation and never leaking an ephemeral GC-collectable boxed address).
+  - **Adjacent MethodInvoker cleanups:**
+    - Replaced hardcoded `0x10`/`0x14`/`0x18` string/exception offsets in `IL2CPPMethodInvoker.cpp` with `ManagedLayout` constants (`B-L8` partial).
+    - Deferred Mono `SehCompile` (and IL2CPP `ReadMethodPointer`) in `ResolveOverload` until after confirming `matchCount == 1` so ambiguous lookups never trigger side-effectful JIT compilation (`B-L9` partial).
+    - Unified `CallMethod` exit via `finish()` so early-return error paths also populate `elapsedMs` and write diagnostic log lines (`B-L11` partial).
+    - Switched metadata-accessor SEH leaves in both MethodInvoker files to `Seh::MemoryAccessExceptionFilter`.
+  - **Tests:**
+    - Added `Test_BM1_BM2_BM3_MethodInvokeValidationAndGcRoots` (+62 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp` covering primitive/IntPtr/byref/String/Object/reference/enum/ValueStruct `ValidateCallArg` rules, `ScopedGcPinList` LIFO handle release & stack-root fallback, and `ClassifyReturnObject` for Void/Bool/String/Enum/ValueType/Reference returns.
+  - Marked `B-M1`, `B-M2`, and `B-M3` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1559) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 643 checks passed (x64) / 646 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1557) — Fix B-M4 + B-M5 (+ B-L6) (reject literal/thread-static static-field addresses & unify `int32_t` field offsets, strict RFC 3629 UTF-8 class/image names in walkers, `System.Enum` namespace check + tests)
 
 - **Bug fixes (`B-M4`, `B-M5`, `B-L6`):**

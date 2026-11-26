@@ -150,6 +150,8 @@ void DoResolve() {
     optBind("mono_string_new",                  g_resolver.string_new);
     optBind("mono_string_chars",                g_resolver.string_chars);
     optBind("mono_string_length",               g_resolver.string_length);
+    optBind("mono_gchandle_new",                g_resolver.gchandle_new);
+    optBind("mono_gchandle_free",               g_resolver.gchandle_free);
 
     // Phase 28 — IL body access. Optional: missing exports just disable
     // findFieldReferences on this backend; the rest of the runtime stays up.

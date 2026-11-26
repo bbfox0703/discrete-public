@@ -1213,8 +1213,10 @@ rules, GC-root caveats: [lua-invoke.md](lua-invoke.md).
 | `returnType` | `returnValue` shape |
 | --- | --- |
 | `System.Void` | `null` |
-| `System.Boolean` / unsigned ints / `Char` | unsigned int |
+| `System.Boolean` | `true` / `false` |
+| unsigned ints / `Char` | unsigned int |
 | signed ints | signed int |
+| Enum types | underlying signed/unsigned int |
 | `System.Single` / `Double` | float |
 | `System.IntPtr` / `UIntPtr` / any reference type | hex string `"0x..."` |
 | `System.String` | UTF-8 string (decoded from the managed UTF-16 buffer) |

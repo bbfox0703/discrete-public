@@ -92,6 +92,11 @@ using fn_object_get_class       = MonoClass*     (*)(MonoObject*);
 using fn_string_new             = MonoString*    (*)(MonoDomain*, const char* /*utf8*/);
 using fn_string_chars           = std::uint16_t* (*)(MonoString*);
 using fn_string_length          = std::int32_t   (*)(MonoString*);
+// B-M2 — GC handle pinning for managed objects allocated during callMethod
+// argument marshaling (e.g. mono_string_new). Optional: falls back to stack
+// rooting when unbound.
+using fn_gchandle_new           = std::uint32_t  (*)(MonoObject*, int /*pinned*/);
+using fn_gchandle_free          = void           (*)(std::uint32_t /*gchandle*/);
 
 // --- Phase 28 — IL body access for findFieldReferences --------------------
 // `mono_method_get_header` returns the per-method IL header (callable on
@@ -207,6 +212,8 @@ struct Resolver {
     fn_string_new             string_new             = nullptr;
     fn_string_chars           string_chars           = nullptr;
     fn_string_length          string_length          = nullptr;
+    fn_gchandle_new           gchandle_new           = nullptr;
+    fn_gchandle_free          gchandle_free          = nullptr;
 
     // Phase 28 — IL body access for findFieldReferences.
     fn_method_get_header      method_get_header      = nullptr;

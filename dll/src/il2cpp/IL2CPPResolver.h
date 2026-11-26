@@ -34,6 +34,8 @@ using fn_class_value_size       = int             (*)(Il2CppClass*, std::uint32_
 using fn_class_instance_size    = std::int32_t    (*)(const Il2CppClass*);
 using fn_object_get_size        = std::uint32_t   (*)(Il2CppObject*);
 using fn_class_is_valuetype     = int             (*)(Il2CppClass*);
+using fn_class_is_enum          = bool            (*)(const Il2CppClass*);
+using fn_class_enum_basetype    = const Il2CppType* (*)(Il2CppClass*);
 using fn_field_get_name         = const char*     (*)(FieldInfo*);
 using fn_field_get_type         = const Il2CppType* (*)(FieldInfo*);
 using fn_field_get_offset       = std::size_t     (*)(FieldInfo*);
@@ -69,6 +71,12 @@ using fn_object_get_class       = Il2CppClass*   (*)(Il2CppObject*);
 using fn_string_new             = Il2CppString*  (*)(const char* /*utf8*/);
 using fn_string_chars           = std::uint16_t* (*)(Il2CppString*);
 using fn_string_length          = std::int32_t   (*)(Il2CppString*);
+// B-M2 — GC handle pinning for managed objects allocated during callMethod
+// argument marshaling (e.g. il2cpp_string_new). Using std::uintptr_t is ABI-
+// compatible with both legacy uint32_t handles (zero-extended in RAX / low 32
+// bits in ECX) and Unity 2023+/6.0 pointer-sized Il2CppGCHandle (void*).
+using fn_gchandle_new           = std::uintptr_t (*)(Il2CppObject*, bool /*pinned*/);
+using fn_gchandle_free          = void           (*)(std::uintptr_t /*gchandle*/);
 
 // Disconnect-time GC drain (build #547 follow-up). `il2cpp_gc_collect`
 // takes a generation arg; passing 0 means "any generation". Used by the
@@ -106,6 +114,8 @@ struct Resolver {
     fn_class_instance_size    class_instance_size    = nullptr;
     fn_object_get_size        object_get_size        = nullptr;
     fn_class_is_valuetype     class_is_valuetype     = nullptr;
+    fn_class_is_enum          class_is_enum          = nullptr;
+    fn_class_enum_basetype    class_enum_basetype    = nullptr;
     fn_field_get_name         field_get_name         = nullptr;
     fn_field_get_type         field_get_type         = nullptr;
     fn_field_get_offset       field_get_offset       = nullptr;
@@ -129,6 +139,8 @@ struct Resolver {
     fn_string_new             string_new             = nullptr;
     fn_string_chars           string_chars           = nullptr;
     fn_string_length          string_length          = nullptr;
+    fn_gchandle_new           gchandle_new           = nullptr;
+    fn_gchandle_free          gchandle_free          = nullptr;
 
     // Disconnect-time GC drain — see header comment on fn_gc_collect.
     fn_gc_collect             gc_collect             = nullptr;

@@ -97,6 +97,8 @@ void DoResolve() {
     bindOpt("il2cpp_class_instance_size",       g_resolver.class_instance_size);
     bindOpt("il2cpp_object_get_size",           g_resolver.object_get_size);
     bindOpt("il2cpp_class_is_valuetype",        g_resolver.class_is_valuetype);
+    bindOpt("il2cpp_class_is_enum",             g_resolver.class_is_enum);
+    bindOpt("il2cpp_class_enum_basetype",       g_resolver.class_enum_basetype);
     bindOpt("il2cpp_field_get_flags",           g_resolver.field_get_flags);
     bindOpt("il2cpp_method_get_token",          g_resolver.method_get_token);
     bindOpt("il2cpp_method_get_flags",          g_resolver.method_get_flags);
@@ -119,6 +121,8 @@ void DoResolve() {
     bindOpt("il2cpp_string_new",                g_resolver.string_new);
     bindOpt("il2cpp_string_chars",              g_resolver.string_chars);
     bindOpt("il2cpp_string_length",             g_resolver.string_length);
+    bindOpt("il2cpp_gchandle_new",              g_resolver.gchandle_new);
+    bindOpt("il2cpp_gchandle_free",             g_resolver.gchandle_free);
 
     // Disconnect-time GC drain — closes the "game shutdown is slow after
     // a Phase 28 IL walker / value-scan run" complaint. Exported by every

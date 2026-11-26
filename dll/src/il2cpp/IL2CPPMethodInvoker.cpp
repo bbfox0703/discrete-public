@@ -4,8 +4,11 @@
 
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
+#include "../shared/MethodInvokeValidation.h"
 #include "../shared/MethodSignatureFormat.h"
+#include "../shared/SehFilter.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPThreadAttach.h"
@@ -29,47 +32,106 @@ const char* SafeStr(const char* s) { return s ? s : ""; }
 #pragma warning(push)
 #pragma warning(disable: 4509)
 const MethodInfo* SehNextMethod(fn_class_get_methods fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehMethodName(fn_method_get_name fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::uint32_t* iflags) {
-    __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m, iflags); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 std::uint32_t SehParamCount(fn_method_get_param_count fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 const Il2CppType* SehParamType(fn_method_get_param fn, const MethodInfo* m, std::uint32_t i) {
-    __try { return fn(m, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m, i); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const Il2CppType* SehReturnType(fn_method_get_return_type fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtr(fn_method_get_pointer fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtrFromStruct(const MethodInfo* m) {
     __try { return *reinterpret_cast<void* const*>(m); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassName(fn_class_get_name fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassNs(fn_class_get_namespace fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+Il2CppClass* SehClassGetParent(fn_class_get_parent fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+Il2CppClass* SehClassFromType(fn_class_from_il2cpp_type fn, const Il2CppType* t) {
+    __try { return fn(t); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+bool SehClassIsValueType(fn_class_is_valuetype fn, Il2CppClass* k) {
+    // il2cpp_class_is_valuetype returns C++ bool (low byte in AL); mask to
+    // 0xFF so upper garbage bytes in EAX cannot produce a false positive.
+    __try { return (fn(k) & 0xFF) != 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return false; }
+}
+bool SehClassIsEnum(fn_class_is_enum fn, const Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return false; }
+}
+const Il2CppType* SehClassEnumBasetype(fn_class_enum_basetype fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+FieldInfo* SehNextField(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
+    __try { return fn(k, iter); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+const char* SehFieldName(fn_field_get_name fn, FieldInfo* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+const Il2CppType* SehFieldType(fn_field_get_type fn, FieldInfo* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+int SehFieldFlags(fn_field_get_flags fn, FieldInfo* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
-    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(o); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehObjectUnbox(fn_object_unbox fn, Il2CppObject* o) {
-    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(o); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehClassValueSize(fn_class_value_size fn, Il2CppClass* k, std::uint32_t* align) {
-    __try { return fn(k, align); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(k, align); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 Il2CppString* SehStringNew(fn_string_new fn, const char* utf8) {
-    __try { return fn(utf8); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(utf8); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+std::uintptr_t SehGcHandleNew(fn_gchandle_new fn, Il2CppObject* obj, bool pinned) {
+    __try { return fn(obj, pinned); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
+}
+void SehGcHandleFree(fn_gchandle_free fn, std::uintptr_t handle) {
+    __try { fn(handle); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {}
 }
 // runtime_invoke is the throwing call — we wrap the whole call in SEH so a
 // native crash inside the JIT/AOT entry point becomes "exception captured"
@@ -116,26 +178,145 @@ void* ReadMethodPointer(const MethodInfo* m) {
     return SehMethodPtrFromStruct(m);
 }
 
+bool IsEnumClass(Il2CppClass* k) {
+    if (k == nullptr) return false;
+    const auto& r = GetResolver();
+    if (r.class_is_enum != nullptr) {
+        return SehClassIsEnum(r.class_is_enum, k);
+    }
+    if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
+        Il2CppClass* parent = SehClassGetParent(r.class_get_parent, k);
+        if (parent != nullptr) {
+            const char* pName = SehClassName(r.class_get_name, parent);
+            const char* pNs   = r.class_get_namespace ? SehClassNs(r.class_get_namespace, parent) : nullptr;
+            if (pName != nullptr && std::strcmp(pName, "Enum") == 0 &&
+                pNs != nullptr && std::strcmp(pNs, "System") == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool IsValueTypeClass(Il2CppClass* k) {
+    if (k == nullptr) return false;
+    if (IsEnumClass(k)) return true;
+    const auto& r = GetResolver();
+    if (r.class_is_valuetype != nullptr) {
+        return SehClassIsValueType(r.class_is_valuetype, k);
+    }
+    if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
+        Il2CppClass* parent = SehClassGetParent(r.class_get_parent, k);
+        if (parent != nullptr) {
+            const char* pName = SehClassName(r.class_get_name, parent);
+            const char* pNs   = r.class_get_namespace ? SehClassNs(r.class_get_namespace, parent) : nullptr;
+            if (pName != nullptr && pNs != nullptr && std::strcmp(pNs, "System") == 0 &&
+                (std::strcmp(pName, "ValueType") == 0 || std::strcmp(pName, "Enum") == 0)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::string ResolveEnumBaseType(Il2CppClass* k) {
+    if (k == nullptr) return {};
+    const auto& r = GetResolver();
+    if (r.class_enum_basetype != nullptr) {
+        if (const Il2CppType* bt = SehClassEnumBasetype(r.class_enum_basetype, k)) {
+            std::string name = TypeName(bt);
+            if (!name.empty()) return name;
+        }
+    }
+    if (r.class_get_fields != nullptr && r.field_get_type != nullptr) {
+        void* iter = nullptr;
+        for (int guard = 0; guard < 256; ++guard) {
+            FieldInfo* f = SehNextField(r.class_get_fields, k, &iter);
+            if (f == nullptr) break;
+            if (r.field_get_flags != nullptr) {
+                const std::uint32_t flags = static_cast<std::uint32_t>(SehFieldFlags(r.field_get_flags, f));
+                if ((flags & ManagedLayout::kFieldAttrStatic) != 0u) continue;
+            }
+            if (r.field_get_name != nullptr) {
+                const char* fn = SehFieldName(r.field_get_name, f);
+                if (fn != nullptr && std::strcmp(fn, "value__") != 0) continue;
+            }
+            if (const Il2CppType* ft = SehFieldType(r.field_get_type, f)) {
+                std::string name = TypeName(ft);
+                if (!name.empty()) return name;
+            }
+            break;
+        }
+    }
+    return {};
+}
+
+Shared::FormalParamDescriptor BuildParamDescriptor(const Il2CppType* pt) {
+    Shared::FormalParamDescriptor desc;
+    if (pt == nullptr) return desc;
+    desc.typeName = TypeName(pt);
+    if (desc.typeName.empty() || desc.typeName.back() == '&' || desc.typeName.back() == '*') {
+        return desc;
+    }
+    const auto& r = GetResolver();
+    if (r.class_from_il2cpp_type != nullptr) {
+        if (Il2CppClass* pk = SehClassFromType(r.class_from_il2cpp_type, pt)) {
+            desc.metaKnown   = true;
+            desc.isEnum      = IsEnumClass(pk);
+            desc.isValueType = desc.isEnum || IsValueTypeClass(pk);
+            if (desc.isEnum) {
+                desc.enumBaseType = ResolveEnumBaseType(pk);
+            }
+            if (desc.isValueType && r.class_value_size != nullptr) {
+                std::uint32_t align = 0;
+                int vs = SehClassValueSize(r.class_value_size, pk, &align);
+                if (vs > 0) desc.valueSize = static_cast<std::uint32_t>(vs);
+            }
+        }
+    }
+    return desc;
+}
+
+Shared::InvokeArgKind ToSharedArgKind(CallArgKind k) {
+    switch (k) {
+    case CallArgKind::Null:        return Shared::InvokeArgKind::Null;
+    case CallArgKind::Bool:        return Shared::InvokeArgKind::Bool;
+    case CallArgKind::Byte:        return Shared::InvokeArgKind::Byte;
+    case CallArgKind::SByte:       return Shared::InvokeArgKind::SByte;
+    case CallArgKind::Int16:       return Shared::InvokeArgKind::Int16;
+    case CallArgKind::UInt16:      return Shared::InvokeArgKind::UInt16;
+    case CallArgKind::Int32:       return Shared::InvokeArgKind::Int32;
+    case CallArgKind::UInt32:      return Shared::InvokeArgKind::UInt32;
+    case CallArgKind::Int64:       return Shared::InvokeArgKind::Int64;
+    case CallArgKind::UInt64:      return Shared::InvokeArgKind::UInt64;
+    case CallArgKind::Float:       return Shared::InvokeArgKind::Float;
+    case CallArgKind::Double:      return Shared::InvokeArgKind::Double;
+    case CallArgKind::Char:        return Shared::InvokeArgKind::Char;
+    case CallArgKind::String:      return Shared::InvokeArgKind::String;
+    case CallArgKind::Address:     return Shared::InvokeArgKind::Address;
+    case CallArgKind::ValueStruct: return Shared::InvokeArgKind::ValueStruct;
+    }
+    return Shared::InvokeArgKind::Null;
+}
+
 struct ResolvedMethod {
-    const MethodInfo*        method        = nullptr;
-    bool                     isStatic      = false;
-    bool                     isAbstract    = false;
-    std::vector<std::string> paramTypes;
-    std::string              returnType;
-    std::string              signatureString;
-    std::string              humanSuffix;
-    void*                    address       = nullptr;
+    const MethodInfo*                           method        = nullptr;
+    bool                                        isStatic      = false;
+    bool                                        isAbstract    = false;
+    std::vector<std::string>                    paramTypes;
+    std::vector<Shared::FormalParamDescriptor>  params;
+    std::string                                 returnType;
+    bool                                        returnIsValueType = false;
+    bool                                        returnIsEnum      = false;
+    std::string                                 returnEnumBaseType;
+    std::string                                 signatureString;
+    std::string                                 humanSuffix;
+    void*                                       address       = nullptr;
 };
 
 // Method resolver — single pass, returns the unique MethodInfo* for
 // (klass, methodName) optionally narrowed by signature substring. Caller
-// must already hold a ThreadAttachGuard (we don't take one here so the
-// invoker can keep the same scope across resolve + invoke).
-//
-// Result codes via outErr:
-//   ""                    → ok, exactly one match
-//   "method_not_found"    → no method with that name + signature filter
-//   "ambiguous_method"    → multiple matches; caller should pass tighter signatureMatch
+// must already hold a ThreadAttachGuard.
 bool ResolveOverload(Il2CppClass* klass,
                      const std::string& methodName,
                      const std::string& signatureMatch,
@@ -174,14 +355,21 @@ bool ResolveOverload(Il2CppClass* klass,
         }
         if (paramCount > 0 && r.method_get_param != nullptr) {
             cand.paramTypes.reserve(paramCount);
+            cand.params.reserve(paramCount);
             for (std::uint32_t i = 0; i < paramCount; ++i) {
                 const Il2CppType* pt = SehParamType(r.method_get_param, m, i);
-                cand.paramTypes.push_back(pt ? TypeName(pt) : std::string{});
+                Shared::FormalParamDescriptor pd = BuildParamDescriptor(pt);
+                cand.paramTypes.push_back(pd.typeName);
+                cand.params.push_back(std::move(pd));
             }
         }
         if (r.method_get_return_type != nullptr) {
             if (const Il2CppType* rt = SehReturnType(r.method_get_return_type, m)) {
-                cand.returnType = TypeName(rt);
+                Shared::FormalParamDescriptor rd = BuildParamDescriptor(rt);
+                cand.returnType         = std::move(rd.typeName);
+                cand.returnIsValueType  = rd.isValueType;
+                cand.returnIsEnum       = rd.isEnum;
+                cand.returnEnumBaseType = std::move(rd.enumBaseType);
             }
         }
         cand.signatureString = Shared::MakeSignatureString(cand.paramTypes);
@@ -192,8 +380,6 @@ bool ResolveOverload(Il2CppClass* klass,
             continue;
         }
 
-        cand.address = cand.isAbstract ? nullptr : ReadMethodPointer(m);
-
         if (matchCount == 0) first = std::move(cand);
         ++matchCount;
         if (matchCount >= 2) break;  // ambiguity bail-out
@@ -202,24 +388,25 @@ bool ResolveOverload(Il2CppClass* klass,
     if (matchCount == 0) { outErr = "method_not_found"; return false; }
     if (matchCount  > 1) { outErr = "ambiguous_method";  return false; }
 
+    first.address = first.isAbstract ? nullptr : ReadMethodPointer(first.method);
+
     out = std::move(first);
     return true;
 }
 
 // Decode the System.String at `strPtr` (a managed Il2CppString*) into UTF-8.
-// Layout is shared between Mono bdwgc and IL2CPP at +0x10 length, +0x14 chars.
-// Returns "" for null pointers and best-effort on partial reads.
+// Uses ManagedLayout pointer-scaled offsets (B-L8 symmetry with Mono).
 std::string DecodeManagedString(std::uintptr_t strPtr) {
     if (strPtr == 0) return {};
     auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
         return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
     };
     std::int32_t len = 0;
-    if (!rd(strPtr + 0x10, &len, 4)) return {};
+    if (!rd(strPtr + ManagedLayout::kStringLengthOffset, &len, 4)) return {};
     if (len <= 0 || len > 65536) return {};
 
     std::vector<std::uint16_t> chars(static_cast<std::size_t>(len));
-    if (!rd(strPtr + 0x14, chars.data(),
+    if (!rd(strPtr + ManagedLayout::kStringCharsOffset, chars.data(),
             static_cast<std::size_t>(len) * sizeof(std::uint16_t))) {
         return {};
     }
@@ -261,18 +448,6 @@ std::string DecodeManagedString(std::uintptr_t strPtr) {
 }
 
 // Format `Type: message` for a captured Il2CppException.
-//
-// IL2CPP's Il2CppException mirrors System.Exception's managed layout. On
-// x64 the relevant offsets are:
-//   +0x00  Il2CppObject (klass*, monitor)         16 bytes
-//   +0x10  _className   (Il2CppString*)           legacy, often null
-//   +0x18  _message     (Il2CppString*)           ← the message we want
-//   +0x20  _data        (IDictionary*)
-//   +0x28  _innerException
-//   ...
-// The 0x18 message offset has been stable across Mono bdwgc + IL2CPP for
-// the entire Unity 2018+ lifecycle. If the decode fails we still emit the
-// exception type so the caller knows the call faulted.
 std::string FormatException(Il2CppException* exc) {
     if (exc == nullptr) return {};
 
@@ -280,7 +455,7 @@ std::string FormatException(Il2CppException* exc) {
     std::string typeName = "System.Exception";
     if (r.object_get_class != nullptr) {
         Il2CppClass* k = SehObjectGetClass(r.object_get_class,
-                                            reinterpret_cast<Il2CppObject*>(exc));
+                                           reinterpret_cast<Il2CppObject*>(exc));
         if (k != nullptr) {
             std::string ns;
             std::string nm;
@@ -290,12 +465,12 @@ std::string FormatException(Il2CppException* exc) {
         }
     }
 
-    // Read message string pointer at exc + 0x18.
     std::uintptr_t msgPtr = 0;
     auto rd = [](std::uintptr_t a, void* dst, std::size_t n) {
         return Memory::SafeReadBytes(reinterpret_cast<void*>(a), dst, n);
     };
-    if (rd(reinterpret_cast<std::uintptr_t>(exc) + 0x18, &msgPtr, sizeof(msgPtr)) &&
+    if (rd(reinterpret_cast<std::uintptr_t>(exc) + ManagedLayout::kExceptionMessageOffset,
+           &msgPtr, sizeof(msgPtr)) &&
         msgPtr != 0) {
         std::string msg = DecodeManagedString(msgPtr);
         if (!msg.empty()) return typeName + ": " + msg;
@@ -303,38 +478,112 @@ std::string FormatException(Il2CppException* exc) {
     return typeName;
 }
 
-// Map a formal parameter type name to a CallReturn-decoder for unboxing.
-// Returns false when the formal type is something 19a doesn't decode into a
-// JSON-friendly scalar (multi-field value type, etc.) — caller should
-// surface kind=Unsupported instead.
-void DecodeReturnValue(const std::string& returnType,
+// Decode a boxed primitive (or boxed enum via its underlying integer type).
+template <typename UnboxFn>
+void DecodePrimitiveUnbox(const std::string& primType, UnboxFn&& unbox, CallReturn& out) {
+    if (primType == "System.Boolean") {
+        std::uint8_t v = 0;
+        if (unbox(1, &v)) { out.kind = CallReturn::Kind::Bool; out.i64 = (v != 0) ? 1 : 0; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.Byte") {
+        std::uint8_t v = 0;
+        if (unbox(1, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.SByte") {
+        std::int8_t v = 0;
+        if (unbox(1, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.Int16") {
+        std::int16_t v = 0;
+        if (unbox(2, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.UInt16" || primType == "System.Char") {
+        std::uint16_t v = 0;
+        if (unbox(2, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.Int32") {
+        std::int32_t v = 0;
+        if (unbox(4, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.UInt32") {
+        std::uint32_t v = 0;
+        if (unbox(4, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.Int64") {
+        std::int64_t v = 0;
+        if (unbox(8, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.UInt64") {
+        std::uint64_t v = 0;
+        if (unbox(8, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.Single") {
+        float v = 0.f;
+        if (unbox(4, &v)) { out.kind = CallReturn::Kind::Float; out.f = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.Double") {
+        double v = 0.0;
+        if (unbox(8, &v)) { out.kind = CallReturn::Kind::Float; out.f = v; }
+        else              { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    if (primType == "System.IntPtr" || primType == "System.UIntPtr") {
+        std::uintptr_t v = 0;
+        if (unbox(sizeof(v), &v)) { out.kind = CallReturn::Kind::Address; out.u64 = v; }
+        else                      { out.kind = CallReturn::Kind::Unsupported; }
+        return;
+    }
+    out.kind = CallReturn::Kind::Unsupported;
+}
+
+// B-M3 — classify and decode the return value from il2cpp_runtime_invoke:
+//   * System.Boolean → CallReturn::Kind::Bool
+//   * Primitives → unboxed scalar
+//   * Enums → unboxed underlying integer (never a transient boxed address)
+//   * Non-enum value types → ValueStruct when opted in (wantStructReturn),
+//     otherwise Unsupported (never a transient boxed address)
+//   * Reference types → CallReturn::Kind::Address
+void DecodeReturnValue(const ResolvedMethod& m,
                        Il2CppObject* boxed,
                        bool wantStructReturn,
                        std::uint32_t sizeHint,
                        CallReturn& out) {
-    out.typeName = returnType;
+    out.typeName = m.returnType;
 
-    if (returnType.empty() || returnType == "System.Void") {
-        out.kind = CallReturn::Kind::Void;
-        return;
-    }
-
-    if (boxed == nullptr) {
-        // Reference-type return that came back null.
-        if (returnType == "System.String") {
-            out.kind = CallReturn::Kind::Address;
-            out.u64  = 0;
-            return;
-        }
-        // Treat any non-void null return as Address(0) — caller can tell from
-        // typeName that this is a reference type.
-        out.kind = CallReturn::Kind::Address;
-        out.u64  = 0;
-        return;
-    }
-
-    // Primitive returns are boxed; unbox to access bytes.
     const auto& r = GetResolver();
+    Il2CppClass* vk = (boxed != nullptr && r.object_get_class != nullptr)
+        ? SehObjectGetClass(r.object_get_class, boxed)
+        : nullptr;
+
+    const bool objIsEnum = (vk != nullptr) ? IsEnumClass(vk) : m.returnIsEnum;
+    const std::string enumBase = objIsEnum
+        ? ((vk != nullptr) ? ResolveEnumBaseType(vk) : m.returnEnumBaseType)
+        : std::string{};
+    const bool objIsValueType = objIsEnum || ((vk != nullptr) ? IsValueTypeClass(vk) : m.returnIsValueType);
+
+    const Shared::ReturnDecodePlan plan = Shared::ClassifyReturnObject(
+        m.returnType, boxed == nullptr, objIsEnum, enumBase, objIsValueType, wantStructReturn);
+
     auto unbox = [&](std::size_t n, void* dst) -> bool {
         if (r.object_unbox == nullptr) return false;
         void* p = SehObjectUnbox(r.object_unbox, boxed);
@@ -342,103 +591,28 @@ void DecodeReturnValue(const std::string& returnType,
         return Memory::SafeReadBytes(p, dst, n);
     };
 
-    if (returnType == "System.Boolean") {
-        std::uint8_t v = 0;
-        if (unbox(1, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = (v != 0) ? 1 : 0; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
+    switch (plan.action) {
+    case Shared::ReturnDecodeAction::Void:
+        out.kind = CallReturn::Kind::Void;
         return;
-    }
-    if (returnType == "System.Byte") {
-        std::uint8_t v = 0;
-        if (unbox(1, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
+    case Shared::ReturnDecodeAction::NullReference:
+        out.kind = CallReturn::Kind::Address;
+        out.u64  = 0;
         return;
-    }
-    if (returnType == "System.SByte") {
-        std::int8_t v = 0;
-        if (unbox(1, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
+    case Shared::ReturnDecodeAction::Primitive:
+        DecodePrimitiveUnbox(plan.primitiveType, unbox, out);
         return;
-    }
-    if (returnType == "System.Int16") {
-        std::int16_t v = 0;
-        if (unbox(2, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.UInt16" || returnType == "System.Char") {
-        std::uint16_t v = 0;
-        if (unbox(2, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.Int32") {
-        std::int32_t v = 0;
-        if (unbox(4, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.UInt32") {
-        std::uint32_t v = 0;
-        if (unbox(4, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.Int64") {
-        std::int64_t v = 0;
-        if (unbox(8, &v)) { out.kind = CallReturn::Kind::SignedInt; out.i64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.UInt64") {
-        std::uint64_t v = 0;
-        if (unbox(8, &v)) { out.kind = CallReturn::Kind::UnsignedInt; out.u64 = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.Single") {
-        float v = 0.f;
-        if (unbox(4, &v)) { out.kind = CallReturn::Kind::Float; out.f = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.Double") {
-        double v = 0.0;
-        if (unbox(8, &v)) { out.kind = CallReturn::Kind::Float; out.f = v; }
-        else              { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-    if (returnType == "System.IntPtr" || returnType == "System.UIntPtr") {
-        std::uintptr_t v = 0;
-        if (unbox(sizeof(v), &v)) { out.kind = CallReturn::Kind::Address; out.u64 = v; }
-        else                      { out.kind = CallReturn::Kind::Unsupported; }
-        return;
-    }
-
-    // 19c — decode managed string return into UTF-8. Boxed is the raw
-    // Il2CppString* itself (strings are reference types — no unbox). Null
-    // managed string returns surface as the empty string with the address
-    // stashed in u64=0 so callers can distinguish via a separate field if
-    // they care; the wire shape just renders returnValue:"".
-    if (returnType == "System.String") {
+    case Shared::ReturnDecodeAction::String:
         out.kind = CallReturn::Kind::String;
         out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
         out.s    = DecodeManagedString(reinterpret_cast<std::uintptr_t>(boxed));
         return;
-    }
-
-    // Value-type-by-value return (Vector3/Quaternion/…) — only when the
-    // caller opted in via wantStructReturn (get_position et al know their
-    // return is a struct). Unbox and copy `class_value_size` bytes, falling
-    // back to the caller's sizeHint when the export is unbound / bogus.
-    if (wantStructReturn) {
+    case Shared::ReturnDecodeAction::ValueStruct: {
         std::uint32_t size = sizeHint;
-        if (r.object_get_class != nullptr && r.class_value_size != nullptr) {
-            if (Il2CppClass* vk = SehObjectGetClass(r.object_get_class, boxed)) {
-                std::uint32_t align = 0;
-                int vs = SehClassValueSize(r.class_value_size, vk, &align);
-                if (vs > 0) size = static_cast<std::uint32_t>(vs);
-            }
+        if (vk != nullptr && r.class_value_size != nullptr) {
+            std::uint32_t align = 0;
+            int vs = SehClassValueSize(r.class_value_size, vk, &align);
+            if (vs > 0) size = static_cast<std::uint32_t>(vs);
         }
         if (size > 0 && size <= kValueStructMaxBytes && r.object_unbox != nullptr) {
             void* p = SehObjectUnbox(r.object_unbox, boxed);
@@ -452,40 +626,30 @@ void DecodeReturnValue(const std::string& returnType,
         out.kind = CallReturn::Kind::Unsupported;
         return;
     }
-
-    // Reference type — `boxed` is the object pointer itself, no unbox.
-    out.kind = CallReturn::Kind::Address;
-    out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
+    case Shared::ReturnDecodeAction::Unsupported:
+        out.kind = CallReturn::Kind::Unsupported;
+        return;
+    case Shared::ReturnDecodeAction::ReferenceAddr:
+        out.kind = CallReturn::Kind::Address;
+        out.u64  = reinterpret_cast<std::uintptr_t>(boxed);
+        return;
+    }
 }
 
-// Marshal one CallArg into its 8-byte slot AND set the params-array entry
-// the runtime sees. IL2CPP's runtime_invoke uses a non-uniform convention:
-//   * value types  → params[i] = &slot, slot holds the value bytes
-//   * reference types (Null / String / Address) → params[i] = the object
-//     pointer DIRECTLY (one less level of indirection than value types)
-//
-// This split is what the popular IL2CPP mod loaders (BepInEx,
-// MelonLoader, Il2CppInterop) use. The "uniform" convention from
-// upstream Mono docs (params[i] always = &slot, even for refs) is a
-// historical mismatch — the trampoline IL2CPP generates dereferences
-// once for value types and zero times for reference types. Passing
-// &(MonoString*) where a MonoString* is expected was reading the address
-// of our slot as if it were a managed string, hence Parse("42") seeing
-// garbage bytes and throwing FormatException.
-bool MarshalArg(const CallArg& arg,
-                const std::string& formalType,
-                std::uint64_t* slot,
-                void*& paramPtr,
-                std::string& outErr) {
+// Write one already-validated value-slot arg into its 8-byte backing slot
+// and point paramPtr at `&slot`.
+bool WriteValueSlotArg(const CallArg& arg,
+                       std::uint64_t* slot,
+                       void*& paramPtr,
+                       std::string& outErr) {
     auto write = [slot](const void* src, std::size_t n) {
         std::memcpy(slot, src, n);
     };
 
     switch (arg.kind) {
     case CallArgKind::Null:
-        // Reference-type null — pass NULL directly as the param pointer.
-        *slot = 0;
-        paramPtr = nullptr;
+        *slot = 0u;
+        paramPtr = slot;
         return true;
     case CallArgKind::Bool: {
         std::uint8_t v = (arg.i64 != 0 || arg.u64 != 0) ? 1u : 0u;
@@ -559,41 +723,17 @@ bool MarshalArg(const CallArg& arg,
         paramPtr = slot;
         return true;
     }
-    case CallArgKind::Address:
-        // Reference-shaped — pass the pre-resolved managed pointer / IntPtr
-        // directly as the param. Slot is unused for routing but kept set so
-        // the address shows up in any debug log of slots[].
-        *slot = arg.u64;
-        paramPtr = reinterpret_cast<void*>(arg.u64);
-        return true;
-    case CallArgKind::String: {
-        // 19c — alloc Il2CppString* via il2cpp_string_new and pass the
-        // managed pointer DIRECTLY in params[i] (non-uniform convention —
-        // see big comment on MarshalArg). Slot stores the pointer too for
-        // diagnostic visibility.
-        const auto& r = GetResolver();
-        if (r.string_new == nullptr) {
-            outErr = "il2cpp_string_new unbound";
-            (void)formalType;
-            return false;
-        }
-        // Empty string is valid — il2cpp_string_new("") returns a non-null
-        // empty MonoString. Null wire value would arrive as Kind::Null, not
-        // here.
-        Il2CppString* s = SehStringNew(r.string_new, arg.s.c_str());
-        if (s == nullptr) {
-            outErr = "il2cpp_string_new returned null";
-            (void)formalType;
-            return false;
-        }
-        *slot   = reinterpret_cast<std::uintptr_t>(s);
-        paramPtr = s;
+    case CallArgKind::Address: {
+        // System.IntPtr / System.UIntPtr / unmanaged pointer — value type, so
+        // store pointer-sized value in slot and pass &slot.
+        std::uintptr_t v = static_cast<std::uintptr_t>(arg.u64);
+        write(&v, sizeof(v));
+        paramPtr = slot;
         return true;
     }
+    case CallArgKind::String:
     case CallArgKind::ValueStruct:
-        // Handled in the CallMethod marshaling loop (needs a >8-byte backing
-        // buffer); never routed through MarshalArg's 8-byte slot.
-        outErr = "value_struct_not_marshaled_here";
+        outErr = "arg_type_mismatch";
         return false;
     }
     outErr = "unknown_arg_kind";
@@ -611,125 +751,164 @@ CallMethodResult CallMethod(Il2CppClass* klass,
                             std::uint32_t structReturnSizeHint) {
     CallMethodResult result;
     auto t0 = std::chrono::steady_clock::now();
+    auto finish = [&]() -> CallMethodResult {
+        auto t1 = std::chrono::steady_clock::now();
+        result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        Log::Write(MagicStrings::LogCategoryWalk,
+                   std::string{"callMethod: "} + methodName + result.methodSignature +
+                   (result.ok ? " ok" :
+                    (result.exception.empty() ? " err=" + result.error
+                                              : " exc=" + result.exception)));
+        return result;
+    };
 
-    if (klass == nullptr)        { result.error = "klass_is_null"; return result; }
-    if (methodName.empty())      { result.error = "method_name_empty"; return result; }
+    if (klass == nullptr)   { result.error = "klass_is_null";     return finish(); }
+    if (methodName.empty()) { result.error = "method_name_empty"; return finish(); }
 
     const auto& r = GetResolver();
-    if (!r.resolved) { result.error = "il2cpp runtime not resolved"; return result; }
-    if (r.runtime_invoke == nullptr) {
-        result.error = "il2cpp_runtime_invoke unbound";
-        return result;
-    }
+    if (!r.resolved)                 { result.error = "il2cpp runtime not resolved";   return finish(); }
+    if (r.runtime_invoke == nullptr) { result.error = "il2cpp_runtime_invoke unbound"; return finish(); }
 
     Il2CppDomain* domain = GetDomain();
-    if (domain == nullptr) { result.error = "no il2cpp domain"; return result; }
+    if (domain == nullptr) { result.error = "no il2cpp domain"; return finish(); }
 
     ThreadAttachGuard guard(domain);
-    if (!guard.Attached()) { result.error = "il2cpp_thread_attach failed"; return result; }
+    if (!guard.Attached()) { result.error = "il2cpp_thread_attach failed"; return finish(); }
 
     ResolvedMethod m;
     std::string resolveErr;
     if (!ResolveOverload(klass, methodName, signatureMatch, m, resolveErr)) {
         result.error = resolveErr;
-        return result;
+        return finish();
     }
-    result.addressCalled  = m.address;
+    result.addressCalled   = m.address;
     result.methodSignature = m.signatureString;
     result.humanSuffix     = m.humanSuffix;
     result.ret.typeName    = m.returnType;
 
     if (m.isAbstract) {
         result.error = "method_is_abstract";
-        return result;
+        return finish();
     }
 
-    // 19c — instance dispatch supported. Validate the instance arg vs the
-    // resolved method's static-ness:
-    //  * static  + instance != 0 → ignore instance (callers may always send
-    //    one for safety; we don't reject so the same Lua snippet works for
-    //    both static and instance overloads of a given method).
-    //  * !static + instance == 0 → reject (needs a `this` pointer).
-    //  * !static + instance != 0 → forward as obj to runtime_invoke.
+    // 19c — instance dispatch supported.
     void* invokeObj = nullptr;
-    if (m.isStatic) {
-        // instance silently ignored on static methods.
-    } else {
+    if (!m.isStatic) {
         if (instance == 0) {
             result.error = "instance_required_for_non_static";
-            return result;
+            return finish();
         }
         invokeObj = reinterpret_cast<void*>(instance);
     }
 
-    if (args.size() != m.paramTypes.size()) {
+    if (args.size() != m.params.size()) {
         result.error = "arg_count_mismatch";
-        return result;
+        return finish();
     }
 
-    // Build the params array. Each arg gets one 8-byte backing slot; the
-    // slot holds the value bytes for value types and stores the object
-    // pointer (for diagnostic visibility) for ref types. paramPtrs[i] is
-    // set per-arg by MarshalArg per the non-uniform convention:
-    //   * value types → paramPtrs[i] = &slot
-    //   * ref types   → paramPtrs[i] = the object pointer directly
+    // B-M2 — RAII GC-root pin list keeps every allocated Il2CppString* alive
+    // across subsequent allocations and through il2cpp_runtime_invoke.
+    using PinFn  = std::uintptr_t (*)(void*);
+    using FreeFn = void (*)(std::uintptr_t);
+    PinFn pinFn = (r.gchandle_new != nullptr && r.gchandle_free != nullptr)
+        ? +[](void* obj) -> std::uintptr_t {
+            const auto& rr = GetResolver();
+            return SehGcHandleNew(rr.gchandle_new, reinterpret_cast<Il2CppObject*>(obj), true);
+          }
+        : nullptr;
+    FreeFn freeFn = (r.gchandle_new != nullptr && r.gchandle_free != nullptr)
+        ? +[](std::uintptr_t h) {
+            const auto& rr = GetResolver();
+            SehGcHandleFree(rr.gchandle_free, h);
+          }
+        : nullptr;
+    Shared::ScopedGcPinList<std::uintptr_t, PinFn, FreeFn> gcPins(pinFn, freeFn);
+
+    // Build the params array with B-M1 formal-type validation.
     std::vector<std::uint64_t> slots(args.size(), 0u);
     std::vector<void*>         paramPtrs(args.size(), nullptr);
-    // Value-struct args need a >8-byte backing buffer. Reserve so the vector
-    // never reallocates mid-loop (which would dangle earlier paramPtrs).
     std::vector<std::vector<std::uint8_t>> structBackings;
     structBackings.reserve(args.size());
     for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i].kind == CallArgKind::ValueStruct) {
-            std::size_t n = args[i].bytes.size();
-            if (n == 0 || n > kValueStructMaxBytes) {
-                result.error = "value_struct_arg_bad_size";
-                return result;
-            }
-            // Always pad to the cap so a size-mismatched struct can't OOB-read.
+        const Shared::ArgValidationResult val = Shared::ValidateCallArg(
+            ToSharedArgKind(args[i].kind),
+            args[i].bytes.size(),
+            kValueStructMaxBytes,
+            m.params[i]);
+        if (!val.ok) {
+            result.error = val.error.empty() ? "arg_type_mismatch" : val.error;
+            return finish();
+        }
+
+        switch (val.route) {
+        case Shared::MarshalRoute::ValueStructBuf: {
+            const std::size_t n = args[i].bytes.size();
             structBackings.emplace_back(kValueStructMaxBytes, std::uint8_t{0});
             std::memcpy(structBackings.back().data(), args[i].bytes.data(), n);
             paramPtrs[i] = structBackings.back().data();
-            continue;
+            break;
         }
-        std::string err;
-        if (!MarshalArg(args[i], m.paramTypes[i], &slots[i], paramPtrs[i], err)) {
-            result.error = err.empty() ? "arg_marshal_failed" : err;
-            return result;
+        case Shared::MarshalRoute::ValueSlot: {
+            std::string err;
+            if (!WriteValueSlotArg(args[i], &slots[i], paramPtrs[i], err)) {
+                result.error = err.empty() ? "arg_marshal_failed" : err;
+                return finish();
+            }
+            break;
+        }
+        case Shared::MarshalRoute::DirectPointer:
+            slots[i]     = (args[i].kind == CallArgKind::Null) ? 0u : args[i].u64;
+            paramPtrs[i] = reinterpret_cast<void*>(static_cast<std::uintptr_t>(slots[i]));
+            break;
+        case Shared::MarshalRoute::ManagedString: {
+            if (r.string_new == nullptr) {
+                result.error = "il2cpp_string_new unbound";
+                return finish();
+            }
+            Il2CppString* s = SehStringNew(r.string_new, args[i].s.c_str());
+            if (s == nullptr) {
+                result.error = "il2cpp_string_new returned null";
+                return finish();
+            }
+            if (!gcPins.Pin(s)) {
+                result.error = "string_arg_gc_pin_failed";
+                return finish();
+            }
+            slots[i]     = reinterpret_cast<std::uintptr_t>(s);
+            paramPtrs[i] = s;
+            break;
+        }
+        case Shared::MarshalRoute::Reject:
+            result.error = "arg_type_mismatch";
+            return finish();
         }
     }
 
     Il2CppException* exc = nullptr;
     Il2CppObject*    ret = nullptr;
-    if (!SehRuntimeInvoke(r.runtime_invoke,
-                          m.method,
-                          invokeObj,                           // 19c: instance dispatch
-                          paramPtrs.empty() ? nullptr : paramPtrs.data(),
-                          &exc,
-                          &ret)) {
+    const bool invoked = SehRuntimeInvoke(r.runtime_invoke,
+                                          m.method,
+                                          invokeObj,
+                                          paramPtrs.empty() ? nullptr : paramPtrs.data(),
+                                          &exc,
+                                          &ret);
+    gcPins.KeepAlive();
+    if (!invoked) {
         result.error = "native_crash_in_runtime_invoke";
-        return result;
+        return finish();
     }
 
     if (exc != nullptr) {
-        result.exception = FormatException(exc);
+        result.exception    = FormatException(exc);
         if (result.exception.empty()) result.exception = "managed exception (no message)";
-        result.ret.kind  = CallReturn::Kind::Void;
+        result.ret.kind     = CallReturn::Kind::Void;
         result.ret.typeName = m.returnType;
     } else {
-        DecodeReturnValue(m.returnType, ret, wantStructReturn, structReturnSizeHint, result.ret);
+        DecodeReturnValue(m, ret, wantStructReturn, structReturnSizeHint, result.ret);
         result.ok = true;
     }
 
-    auto t1 = std::chrono::steady_clock::now();
-    result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-    Log::Write(MagicStrings::LogCategoryWalk,
-               std::string{"callMethod: "} + methodName + m.signatureString +
-               (result.ok ? " ok" :
-                (result.exception.empty() ? " err=" + result.error
-                                          : " exc=" + result.exception)));
-    return result;
+    return finish();
 }
 
 }  // namespace Discrete::IL2CPP

@@ -7043,6 +7043,7 @@ void RegisterCoreHandlers() {
         json returnValue = nullptr;
         switch (cr.ret.kind) {
         case Mono::CallReturn::Kind::Void:        returnValue = nullptr; break;
+        case Mono::CallReturn::Kind::Bool:        returnValue = (cr.ret.i64 != 0); break;
         case Mono::CallReturn::Kind::SignedInt:   returnValue = cr.ret.i64; break;
         case Mono::CallReturn::Kind::UnsignedInt: returnValue = cr.ret.u64; break;
         case Mono::CallReturn::Kind::Float:       returnValue = cr.ret.f; break;
@@ -10282,6 +10283,7 @@ void RegisterCoreHandlers() {
         json returnValue = nullptr;
         switch (cr.ret.kind) {
         case IL2CPP::CallReturn::Kind::Void:        returnValue = nullptr; break;
+        case IL2CPP::CallReturn::Kind::Bool:        returnValue = (cr.ret.i64 != 0); break;
         case IL2CPP::CallReturn::Kind::SignedInt:   returnValue = cr.ret.i64; break;
         case IL2CPP::CallReturn::Kind::UnsignedInt: returnValue = cr.ret.u64; break;
         case IL2CPP::CallReturn::Kind::Float:       returnValue = cr.ret.f; break;

@@ -256,17 +256,17 @@
 
 ### Medium
 
-**B-M1 · `CallMethod` 不比對 arg kind 與形式參數型別，型別錯配時會讓 runtime 把 native 位址當成 managed object 使用（Mono / IL2CPP 共通）**
+**B-M1 · `CallMethod` 不比對 arg kind 與形式參數型別，型別錯配時會讓 runtime 把 native 位址當成 managed object 使用（Mono / IL2CPP 共通） — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/mono/MonoMethodInvoker.cpp:470-591`（`formalType` 只在錯誤分支被 `(void)`，`:570`、`:576`）、`:667-685`；`dll/src/il2cpp/IL2CPPMethodInvoker.cpp:475-601`、`:682-700`
 - 成因：`MarshalArg` 只看 `arg.kind` 決定 `params[i]`。例如形式參數是 reference type（`System.Object`、`Foo`），呼叫端卻送 Int32：`params[i] = &slots[i]`，runtime 會把 C++ heap 上的 8-byte slot 當成 MonoObject / Il2CppObject，去讀它的 vtable，或在 managed code 裡 write barrier / 寫入欄位。反過來，形式參數是 struct、送的卻是 `Address`，runtime 會從任意位址複製 struct。形式參數是 >8 bytes 的 struct、卻送 scalar kind 時，trampoline 會讀出 8-byte slot 之外的記憶體。外層的 SEH 只能接住 AV，接不住靜默的記憶體破壞；而且 AV 是在 runtime frame 內被吞掉的（見 B-M6）。
 - 修法：用已經解析出的 `m.paramTypes[i]` 做白名單比對：primitive 名稱必須對應同寬度的 kind；`System.String` 只接受 `String` / `Null`；reference type 只接受 `Address` / `Null`；值型別（用 `class_is_valuetype(class_from_type(param))` 判斷）只接受 scalar 或 `ValueStruct`，並檢查 `bytes.size()` 是否等於 `class_value_size`。不符合就回 `arg_type_mismatch`。
 
-**B-M2 · 呼叫前配置的 managed string 參數沒有 GC root，可能在 `runtime_invoke` 之前就被回收（Mono / IL2CPP 共通）**
+**B-M2 · 呼叫前配置的 managed string 參數沒有 GC root，可能在 `runtime_invoke` 之前就被回收（Mono / IL2CPP 共通） — ✅ FIXED (2026-11-26)**
 - 位置：`MonoMethodInvoker.cpp:573-581`、`:661-662`；`IL2CPPMethodInvoker.cpp:583-591`、`:676-677`
 - 成因：`mono_string_new` / `il2cpp_string_new` 回傳的指標只存在 `std::vector`（C++ heap）裡。BDWGC 只掃描已 attach thread 的 stack 與暫存器，不掃 CRT heap。有兩個以上的 string 參數時，第二次 `string_new` 就可能觸發 GC，把第一個 string 回收掉；遊戲其他 thread 觸發的 GC 也一樣。之後 `runtime_invoke` 傳入的就是 dangling pointer。
 - 修法：每個 string 都用 `mono_gchandle_new(obj, TRUE)` / `il2cpp_gchandle_new(obj, true)` 取得 handle，invoke 完再 `*_gchandle_free`（需要在 Resolver 加 optional bind）；或者把指標陣列放在 stack 上（固定上限的 local array），而不是 `std::vector`。
 
-**B-M3 · 沒有 opt-in 的值型別回傳會被回報成「暫時性 boxed 物件的位址」；enum 回傳完全沒有解碼；與標頭文件不一致**
+**B-M3 · 沒有 opt-in 的值型別回傳會被回報成「暫時性 boxed 物件的位址」；enum 回傳完全沒有解碼；與標頭文件不一致 — ✅ FIXED (2026-11-26)**
 - 位置：`MonoMethodInvoker.cpp:456-458`、`IL2CPPMethodInvoker.cpp:456-458`（fallthrough → `Kind::Address`）；文件 `MonoMethodInvoker.h:90-94`、`IL2CPPMethodInvoker.h:94`（寫的是「legacy shape (Unsupported + note)」）；`CallReturn::Kind::Bool`（`MonoMethodInvoker.h:58`）從未被產生（`Boolean` 回傳的是 `SignedInt`）
 - 成因：`DecodeReturnValue` 只認得 primitive 名稱與 `System.String`。enum（`returnType` 是 `MyNs.MyEnum`）、`DateTime`、`Nullable<T>`、所有 struct，在 `wantStructReturn == false` 時都會走到「reference type」分支，回傳 boxed 暫存物件的位址。這個物件在 guard detach 之後隨時可能被 GC 回收，UI / Lua 卻可能把它當成可以 walk 的 instance。
 - 修法：先用 `object_get_class(boxed)` + `class_is_valuetype` 判斷；值型別而且沒有 opt-in 時回 `Unsupported`（與文件一致）；enum 用 `class_enum_basetype`（Mono）或 `value__` 欄位型別（IL2CPP）解碼成整數；`Kind::Bool` 要嘛使用，要嘛刪除。
