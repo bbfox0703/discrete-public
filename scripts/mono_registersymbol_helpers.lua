@@ -346,32 +346,184 @@ local function _discrete_ensure_attached()
   return monopipe ~= nil
 end
 
+-- Primitive / BCL alias table so Mono's mono_signature_get_desc shorthands
+-- ("int", "single", "string", "bool", ...) match CLR full names
+-- ("System.Int32", "System.Single", "System.String", "System.Boolean", ...)
+-- in both typename and signature-string matching.
+local _DISCRETE_PRIMITIVE_ALIASES = {
+  ["bool"]            = "System.Boolean",
+  ["boolean"]         = "System.Boolean",
+  ["system.boolean"]  = "System.Boolean",
+  ["byte"]            = "System.Byte",
+  ["uint8"]           = "System.Byte",
+  ["system.byte"]     = "System.Byte",
+  ["sbyte"]           = "System.SByte",
+  ["int8"]            = "System.SByte",
+  ["system.sbyte"]    = "System.SByte",
+  ["char"]            = "System.Char",
+  ["system.char"]     = "System.Char",
+  ["short"]           = "System.Int16",
+  ["int16"]           = "System.Int16",
+  ["system.int16"]    = "System.Int16",
+  ["ushort"]          = "System.UInt16",
+  ["uint16"]          = "System.UInt16",
+  ["system.uint16"]   = "System.UInt16",
+  ["int"]             = "System.Int32",
+  ["int32"]           = "System.Int32",
+  ["system.int32"]    = "System.Int32",
+  ["uint"]            = "System.UInt32",
+  ["uint32"]          = "System.UInt32",
+  ["system.uint32"]   = "System.UInt32",
+  ["long"]            = "System.Int64",
+  ["int64"]           = "System.Int64",
+  ["system.int64"]    = "System.Int64",
+  ["ulong"]           = "System.UInt64",
+  ["uint64"]          = "System.UInt64",
+  ["system.uint64"]   = "System.UInt64",
+  ["single"]          = "System.Single",
+  ["float"]           = "System.Single",
+  ["system.single"]   = "System.Single",
+  ["double"]          = "System.Double",
+  ["system.double"]   = "System.Double",
+  ["string"]          = "System.String",
+  ["system.string"]   = "System.String",
+  ["object"]          = "System.Object",
+  ["system.object"]   = "System.Object",
+  ["void"]            = "System.Void",
+  ["system.void"]     = "System.Void",
+  ["intptr"]          = "System.IntPtr",
+  ["native int"]      = "System.IntPtr",
+  ["system.intptr"]   = "System.IntPtr",
+  ["uintptr"]         = "System.UIntPtr",
+  ["native uint"]     = "System.UIntPtr",
+  ["system.uintptr"]  = "System.UIntPtr",
+  ["decimal"]         = "System.Decimal",
+  ["system.decimal"]  = "System.Decimal",
+}
+
+local function _discrete_trim(s)
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Split a parameter type string into canonical (base, suffix), where suffix
+-- preserves array ranks (`[]`, `[,]`), byref (`&`), and pointer (`*`) modifiers
+-- verbatim so `System.Int32` never matches `System.Int32[]` or `System.Int32&`,
+-- while `int[]` canonicalizes to `System.Int32` + `[]`.
+local function _discrete_canonical_type(raw)
+  local s = _discrete_trim(raw)
+  local suffixes = {}
+  while true do
+    local arr = s:match("(%[%,*%])%s*$")
+    if arr then
+      table.insert(suffixes, 1, arr)
+      s = _discrete_trim(s:sub(1, #s - #arr))
+    elseif s:sub(-1) == "&" or s:sub(-1) == "*" then
+      table.insert(suffixes, 1, s:sub(-1))
+      s = _discrete_trim(s:sub(1, -2))
+    else
+      break
+    end
+  end
+  local canon = _DISCRETE_PRIMITIVE_ALIASES[s:lower()] or s
+  return canon, table.concat(suffixes)
+end
+
 -- Symmetric type-name match. CE's `mono_method_get_parameters` reports
 -- `typename` with inconsistent namespace prefixes — `System.Int32`
--- keeps `System.`, but `UnityEngine.FindObjectsInactive` may come back
--- as just `FindObjectsInactive` (CE strips the assembly's "primary"
--- namespace in some versions). Plain substring would either over- or
--- under-match. Tail-match rule:
---   * exact string equality, OR
---   * one side ends with "." .. (the other) — i.e. the shorter form
---     is the basename of the longer form.
--- Crucially, "System.Int32" tail-matches neither "UInt32" nor
--- "System.UInt32", so the long-standing Int32/UInt32 substring trap
--- (memory: feedback_signaturematch_substring) is preserved.
+-- keeps `System.`, Mono's `mono_signature_get_desc` uses `int`/`single`/
+-- `string`, and `UnityEngine.FindObjectsInactive` may come back as bare
+-- `FindObjectsInactive`. Matching rule:
+--   * trailing modifiers (`[]`, `[,]`, `&`, `*`) must match identically, AND
+--   * after primitive alias normalization, base names are equal OR one
+--     side ends with "." .. (the other).
+-- Crucially, "System.Int32" matches "int", never "UInt32", "System.UInt32",
+-- or "System.Int32[]".
 local function _discrete_typename_match(pname, needle)
   if type(pname) ~= "string" or type(needle) ~= "string" then return false end
-  if pname == needle then return true end
-  -- pname ends with ".needle" → pname is namespaced, needle is bare
-  if #pname > #needle then
-    local tail = pname:sub(-#needle - 1)
-    if tail == "." .. needle then return true end
+  local pBase, pSuf = _discrete_canonical_type(pname)
+  local nBase, nSuf = _discrete_canonical_type(needle)
+  if pBase == "" or nBase == "" then return false end
+  if pSuf ~= nSuf then return false end
+  if pBase == nBase then return true end
+  -- pBase ends with ".nBase" → pBase is namespaced, nBase is bare
+  if #pBase > #nBase then
+    local tail = pBase:sub(-#nBase - 1)
+    if tail == "." .. nBase then return true end
   end
-  -- needle ends with ".pname" → needle is namespaced, pname is bare
-  if #needle > #pname then
-    local tail = needle:sub(-#pname - 1)
-    if tail == "." .. pname then return true end
+  -- nBase ends with ".pBase" → nBase is namespaced, pBase is bare
+  if #nBase > #pBase then
+    local tail = nBase:sub(-#pBase - 1)
+    if tail == "." .. pBase then return true end
   end
   return false
+end
+
+-- Parse a rendered signature from `mono_method_getSignature` into an ordered
+-- list of parameter type strings. Handles bare comma lists (`int,string`),
+-- parenthesised forms (`(int, string)` or `void (int, string)`), generic
+-- commas (`Dictionary<string,int>,bool`), multi-dimensional arrays (`int[,]`),
+-- and optional trailing parameter names (`System.Int32 amount`).
+local function _discrete_split_sig_params(sig)
+  if type(sig) ~= "string" then return nil end
+  local inner = _discrete_trim(sig)
+  local lp = inner:find("(", 1, true)
+  local rp = inner:match(".*()%)")
+  if lp and rp and rp > lp then
+    inner = _discrete_trim(inner:sub(lp + 1, rp - 1))
+  end
+  if inner == "" then return {} end
+
+  local params = {}
+  local angleDepth, bracketDepth = 0, 0
+  local startIdx = 1
+  for i = 1, #inner do
+    local ch = inner:sub(i, i)
+    if ch == "<" then
+      angleDepth = angleDepth + 1
+    elseif ch == ">" and angleDepth > 0 then
+      angleDepth = angleDepth - 1
+    elseif ch == "[" then
+      bracketDepth = bracketDepth + 1
+    elseif ch == "]" and bracketDepth > 0 then
+      bracketDepth = bracketDepth - 1
+    elseif ch == "," and angleDepth == 0 and bracketDepth == 0 then
+      params[#params + 1] = _discrete_trim(inner:sub(startIdx, i - 1))
+      startIdx = i + 1
+    end
+  end
+  params[#params + 1] = _discrete_trim(inner:sub(startIdx))
+
+  local out = {}
+  for i = 1, #params do
+    local tok = params[i]
+    if tok ~= "" then
+      -- Strip optional leading C# parameter modifier (`ref`/`out`/`in`).
+      local mod, rest = tok:match("^(%a+)%s+(.+)$")
+      if mod == "ref" or mod == "out" then
+        tok = _discrete_trim(rest)
+        if tok:sub(-1) ~= "&" then tok = tok .. "&" end
+      elseif mod == "in" then
+        tok = _discrete_trim(rest)
+      end
+      -- Strip optional trailing parameter identifier (`System.Int32 amount`),
+      -- preserving multi-word Mono type names (`native int`, `native uint`).
+      local low = tok:lower()
+      if low ~= "native int" and low ~= "native uint" then
+        local lastSpace = tok:match(".*()%s+")
+        if lastSpace then
+          local head = _discrete_trim(tok:sub(1, lastSpace - 1))
+          local tail = _discrete_trim(tok:sub(lastSpace + 1))
+          local headLow = head:lower()
+          if head ~= "" and tail:match("^[A-Za-z_][A-Za-z0-9_]*$")
+              and headLow ~= "native" and headLow ~= "unsigned" then
+            tok = head
+          end
+        end
+      end
+      out[#out + 1] = tok
+    end
+  end
+  return out
 end
 
 local function _discrete_find_class(namespace, classname)
@@ -462,51 +614,55 @@ _G.discrete_mono_registerSymbolEx = function(symbolname, namespace, classname, m
   paramTypes = paramTypes or {}
   local candidates = 0          -- name-matched overloads we considered
   local diag = {}               -- shape strings for the post-mortem log
+  local matches = {}            -- all matching overloads (ambiguity check)
+
   for _, m in ipairs(methods) do
     if m.name == methodname then
       candidates = candidates + 1
-      -- pcall — some uncompiled / generic methods throw inside
-      -- mono_method_get_parameters. Treat any failure as "skip this
-      -- overload, try the next" rather than letting the whole AA die.
+      local matched = false
+      local via = nil
+      local paramSummary = nil
+
+      -- Primary path: positional typename check via mono_method_get_parameters.
       local ok, p = pcall(mono_method_get_parameters, m.method)
-      if not ok or not p or type(p.parameters) ~= "table" then
-        diag[#diag+1] = "  (introspection unavailable — likely generic / uncompiled)"
-      elseif #p.parameters ~= #paramTypes then
-        -- Count mismatch — won't match regardless of which path. Log
-        -- and continue.
+      local haveParams = ok and type(p) == "table" and type(p.parameters) == "table"
+      if haveParams then
         local parts = {}
         for i, e in ipairs(p.parameters) do
           parts[i] = string.format("%s %s", tostring(e.typename or "<nil>"),
                                             tostring(e.name or "?"))
         end
-        diag[#diag+1] = string.format("  (%d) %s",
-                                      #p.parameters, table.concat(parts, ", "))
-      else
-        -- Count matches. Try the typename path first; on failure,
-        -- fall back to signature-string substring matching. The
-        -- typename field on `parameters[i]` is unreliable across CE
-        -- versions / Mono targets — Unity 2022+ Mono returns it as
-        -- nil for every parameter on some builds, even though
-        -- `mono_method_getSignature` renders the full type info
-        -- cleanly. Signature fallback handles that case.
-        local matched = true
-        for i = 1, #paramTypes do
-          local entry = p.parameters[i]
-          local pname = entry and entry.typename
-          if not _discrete_typename_match(pname, paramTypes[i]) then
-            matched = false
-            break
-          end
-        end
+        paramSummary = string.format("(%d) %s", #p.parameters, table.concat(parts, ", "))
 
-        local via = "typename"
-        if not matched then
-          local okS, sig = pcall(mono_method_getSignature, m.method)
-          if okS and type(sig) == "string" then
+        if #p.parameters == #paramTypes then
+          matched = true
+          for i = 1, #paramTypes do
+            local entry = p.parameters[i]
+            local pname = entry and entry.typename
+            if not _discrete_typename_match(pname, paramTypes[i]) then
+              matched = false
+              break
+            end
+          end
+          if matched then via = "typename" end
+        end
+      end
+
+      -- Fallback path: positional signature parse via mono_method_getSignature.
+      -- Needed when Unity 2022+ Mono returns nil `typename` entries or throws
+      -- inside `mono_method_get_parameters`, and on Mono builds where
+      -- `mono_signature_get_desc` emits shorthand names ("int", "single", "string").
+      -- Always checks EXACT parameter count and EXACT parameter order.
+      local sigStr = nil
+      if not matched and (not haveParams or #p.parameters == #paramTypes) then
+        local okS, sig = pcall(mono_method_getSignature, m.method)
+        if okS and type(sig) == "string" then
+          sigStr = sig
+          local sigParams = _discrete_split_sig_params(sig)
+          if sigParams and #sigParams == #paramTypes then
             matched = true
             for i = 1, #paramTypes do
-              if type(paramTypes[i]) ~= "string"
-                  or not string.find(sig, paramTypes[i], 1, true) then
+              if not _discrete_typename_match(sigParams[i], paramTypes[i]) then
                 matched = false
                 break
               end
@@ -514,35 +670,49 @@ _G.discrete_mono_registerSymbolEx = function(symbolname, namespace, classname, m
             if matched then via = "signature" end
           end
         end
+      end
 
-        if matched then
-          local addr = mono_compile_method(m.method)
-          if addr == 0 then
-            eprint(string.format("[discrete] matched but failed to compile - %s.%s.%s",
-                                namespace, classname, methodname))
-            return false
-          end
-          registerSymbol(symbolname, addr)
-          print(string.format("[discrete] registered %s = %X  (matched via %s)",
-                              symbolname, addr, via))
-          return true
+      if matched then
+        matches[#matches + 1] = {
+          method = m.method,
+          via    = via,
+          desc   = paramSummary or (sigStr and ("sig: " .. sigStr) or "<matched>"),
+        }
+      else
+        if not sigStr then
+          local okS, sig = pcall(mono_method_getSignature, m.method)
+          sigStr = (okS and type(sig) == "string") and sig or "<unavailable>"
         end
-
-        -- Both paths failed for this overload — log its shape so the
-        -- user can see why neither typename nor signature substring
-        -- match landed.
-        local parts = {}
-        for i, e in ipairs(p.parameters) do
-          parts[i] = string.format("%s %s", tostring(e.typename or "<nil>"),
-                                            tostring(e.name or "?"))
+        if paramSummary then
+          diag[#diag + 1] = string.format("  %s  -- sig: %s", paramSummary, sigStr)
+        else
+          diag[#diag + 1] = string.format("  (introspection unavailable)  -- sig: %s", sigStr)
         end
-        local okS, sig = pcall(mono_method_getSignature, m.method)
-        local sigStr = (okS and type(sig) == "string") and sig or "<unavailable>"
-        diag[#diag+1] = string.format("  (%d) %s  -- sig: %s",
-                                      #p.parameters, table.concat(parts, ", "),
-                                      sigStr)
       end
     end
+  end
+
+  if #matches == 1 then
+    local hit = matches[1]
+    local addr = mono_compile_method(hit.method)
+    if addr == 0 then
+      eprint(string.format("[discrete] matched but failed to compile - %s.%s.%s",
+                          namespace, classname, methodname))
+      return false
+    end
+    registerSymbol(symbolname, addr)
+    print(string.format("[discrete] registered %s = %X  (matched via %s)",
+                        symbolname, addr, hit.via))
+    return true
+  end
+
+  if #matches > 1 then
+    eprint(string.format("[discrete] ambiguous overload match (%d hits) - %s.%s.%s",
+                        #matches, namespace, classname, methodname))
+    for _, hit in ipairs(matches) do
+      eprint("[discrete]   hit: " .. tostring(hit.desc))
+    end
+    return false
   end
 
   -- Reaching here means: class found, methods enumerated, ≥0 named matches
@@ -552,12 +722,32 @@ _G.discrete_mono_registerSymbolEx = function(symbolname, namespace, classname, m
                       namespace, classname, methodname))
   eprint(string.format("[discrete]   looked at %d candidate(s); expected (%d): %s",
                       candidates, #paramTypes, table.concat(paramTypes, ", ")))
-  for i, line in ipairs(diag) do eprint("[discrete] " .. line) end
+  for _, line in ipairs(diag) do eprint("[discrete] " .. line) end
   return false
 end
 
--- discrete_mono_registerSymbolBySignatureMatch — substring match against
--- mono_method_getSignature's rendered string, with optional excludes.
+-- Check whether a rendered signature matches a single token in sigContains /
+-- sigExcludes. Prefers token-wise canonical matching against the parsed
+-- parameter list (so "System.Int32" matches Mono's "int" and NEVER matches
+-- "System.Int32[]" or "System.UInt32"); falls back to literal substring only
+-- if the signature could not be split into parameter tokens.
+local function _discrete_sig_has_token(sig, sigParams, token)
+  if type(token) ~= "string" or token == "" then return false end
+  if sigParams and #sigParams > 0 then
+    for i = 1, #sigParams do
+      if _discrete_typename_match(sigParams[i], token) then
+        return true
+      end
+    end
+    return false
+  end
+  return string.find(sig, token, 1, true) ~= nil
+end
+
+-- discrete_mono_registerSymbolBySignatureMatch — token-aware signature match
+-- against mono_method_getSignature's rendered string, with optional excludes.
+-- Kept as a fallback / backwards-compatibility helper for legacy CTs; refuses
+-- ambiguous multi-overload matches instead of silently registering the first.
 _G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace, classname,
                                                            methodname, sigContains, sigExcludes)
   if not _discrete_ensure_attached() then return false end
@@ -576,18 +766,16 @@ _G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace
     return false
   end
 
+  local matches = {}
   for _, m in ipairs(methods) do
     if m.name == methodname then
-      -- pcall — same defensive shape as registerSymbolEx above.
-      -- mono_method_getSignature can throw or return nil for
-      -- generic / uncompiled methods; skip past those rather
-      -- than crashing the AA.
       local ok, sig = pcall(mono_method_getSignature, m.method)
       if ok and type(sig) == "string" then
+        local sigParams = _discrete_split_sig_params(sig)
         local matched = true
 
         for _, kw in ipairs(sigContains or {}) do
-          if type(kw) ~= "string" or not string.find(sig, kw, 1, true) then
+          if not _discrete_sig_has_token(sig, sigParams, kw) then
             matched = false
             break
           end
@@ -595,7 +783,7 @@ _G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace
 
         if matched and sigExcludes then
           for _, ex in ipairs(sigExcludes) do
-            if type(ex) == "string" and string.find(sig, ex, 1, true) then
+            if _discrete_sig_has_token(sig, sigParams, ex) then
               matched = false
               break
             end
@@ -603,19 +791,33 @@ _G.discrete_mono_registerSymbolBySignatureMatch = function(symbolname, namespace
         end
 
         if matched then
-          local addr = mono_compile_method(m.method)
-          if addr == 0 then
-            eprint(string.format("[discrete] matched but failed to compile - %s.%s.%s",
-                                namespace, classname, methodname))
-            return false
-          end
-          registerSymbol(symbolname, addr)
-          print(string.format("[discrete] registered %s = %X (sig=%s)",
-                              symbolname, addr, sig))
-          return true
+          matches[#matches + 1] = { method = m.method, sig = sig }
         end
       end
     end
+  end
+
+  if #matches == 1 then
+    local hit = matches[1]
+    local addr = mono_compile_method(hit.method)
+    if addr == 0 then
+      eprint(string.format("[discrete] matched but failed to compile - %s.%s.%s",
+                          namespace, classname, methodname))
+      return false
+    end
+    registerSymbol(symbolname, addr)
+    print(string.format("[discrete] registered %s = %X (sig=%s)",
+                        symbolname, addr, hit.sig))
+    return true
+  end
+
+  if #matches > 1 then
+    eprint(string.format("[discrete] ambiguous signature match (%d hits) - %s.%s.%s",
+                        #matches, namespace, classname, methodname))
+    for _, hit in ipairs(matches) do
+      eprint("[discrete]   hit sig: " .. tostring(hit.sig))
+    end
+    return false
   end
 
   eprint(string.format("[discrete] no matching signature - %s.%s.%s",

@@ -12,6 +12,24 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1548) — Fix E-M5 (DLL-free Mono overload registration: positional `registerSymbolEx`, primitive alias normalization, ambiguity rejection + Lua/C# tests)
+
+- **Bug fix (`E-M5`):**
+  - **`scripts/mono_registersymbol_helpers.lua`:**
+    - Added `_DISCRETE_PRIMITIVE_ALIASES` + `_discrete_canonical_type()` normalizing Mono `mono_signature_get_desc` shorthands (`int`, `single`, `float`, `string`, `bool`, `uint`, `long`, `ulong`, `short`, `ushort`, `byte`, `sbyte`, `char`, `double`, `object`, `void`, `intptr`/`native int`, `uintptr`/`native uint`, `decimal`) to canonical `System.*` names while preserving exact trailing modifiers (`[]`, `[,]`, `&`, `*`) so `System.Int32` matches `int` and NEVER matches `System.Int32[]`, `int[]`, `int&`, or `System.UInt32`.
+    - Added `_discrete_split_sig_params()` to parse rendered signature strings (bare lists, parenthesised forms, generic commas `<...>`, multi-dimensional array ranks `[,]`, `ref`/`out`/`in`, and trailing parameter identifiers) into ordered positional parameter tokens.
+    - Upgraded `_G.discrete_mono_registerSymbolEx` to check exact parameter count and exact positional match on BOTH the `mono_method_get_parameters` typename path and the `mono_method_getSignature` fallback path (including when `mono_method_get_parameters` throws or returns nil typenames), and to collect all matching overloads and fail via `eprint` (setting `_G.DISCRETE_HAD_ERROR = true`) on ambiguity instead of silently taking the first hit.
+    - Upgraded `_G.discrete_mono_registerSymbolBySignatureMatch` (kept for legacy CTs / fallback) to use token-wise alias-aware matching and reject multi-overload ambiguity via `eprint` instead of registering the first match.
+  - **`ui/UnityDumpUI.Core/Services/Export/MonoRegisterSymbolAaScriptGenerator.cs`:**
+    - Switched all generated overloads (both zero-arg `{}` and N-arg ordered `{ ... }`) to call `_G.discrete_mono_registerSymbolEx` (updating the lazy-load guard to `_G.discrete_mono_registerSymbolEx == nil`), cleanly distinguishing swapped-order overloads like `(Int32, String)` vs `(String, Int32)` and repeated-type overloads like `(Int32)` vs `(Int32, Int32)`.
+  - **Tests:**
+    - Updated `ui/UnityDumpUI.Tests/MonoRegisterSymbolAaScriptGeneratorTests.cs` (including swapped/repeated parameter order/count assertions) and added embedded-helper contract checks in `ui/UnityDumpUI.Tests/BridgeLuaResourcesTests.cs`.
+    - Added live Lua execution harness `tools/verify/test_mono_registersymbol_helpers.py` (29 Lua assertions running `scripts/mono_registersymbol_helpers.lua` under mocked CE `mono_*` APIs).
+  - Marked `E-M5` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1548) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; `python tools/verify/test_mono_registersymbol_helpers.py` passed (29 Lua checks + `luac -p` syntax check); C# xUnit v3 tests 1200 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 451 checks passed (x64) / 454 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1547) — Fix E-M7 + E-L4 (layout-accurate C/C++ SDK header exporter with padding/static_assert/math PODs/dedup + `UnityTypeMap` pointerSize + tests)
 
 - **Bug fixes (`E-M7`, `E-L4`):**

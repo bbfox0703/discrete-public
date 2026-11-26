@@ -208,4 +208,24 @@ public class BridgeLuaResourcesTests
         Assert.Contains("rawset(_G, \"DISCRETE_HAD_ERROR\", false)", teardownBody);
         Assert.DoesNotContain("_ensureDir(", teardownBody);
     }
+
+    [Fact]
+    public void MonoRegisterSymbolHelpers_HasPrimitiveAliases_PositionalSigSplit_AndAmbiguityReject()
+    {
+        // E-M5 regression check on the embedded mono_registersymbol_helpers.lua:
+        // - Primitive alias table maps Mono shorthands (int/single/string/bool) to System.*.
+        // - Positional signature parser splits parameter lists instead of unordered substring matching.
+        // - Both discrete_mono_registerSymbolEx and discrete_mono_registerSymbolBySignatureMatch
+        //   reject ambiguous multi-overload hits via eprint rather than silently picking the first.
+        string content = BridgeLuaResources.Read("mono_registersymbol_helpers.lua");
+
+        Assert.DoesNotContain("\r", content);
+        Assert.Contains("_DISCRETE_PRIMITIVE_ALIASES", content);
+        Assert.Contains("[\"int\"]", content);
+        Assert.Contains("[\"single\"]", content);
+        Assert.Contains("[\"string\"]", content);
+        Assert.Contains("_discrete_split_sig_params", content);
+        Assert.Contains("ambiguous overload match", content);
+        Assert.Contains("ambiguous signature match", content);
+    }
 }

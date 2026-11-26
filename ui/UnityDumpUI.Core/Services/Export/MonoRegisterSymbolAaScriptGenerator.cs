@@ -7,11 +7,13 @@
 // / mono_compile_method) via the helper layer shipped in
 // scripts/mono_registersymbol_helpers.lua.
 //
-// Emits the discrete-namespaced helpers — `discrete_mono_registerSymbolBy
-// SignatureMatch` for overloads with params (sigContains = param types,
-// sigExcludes = sibling-exclusive tokens) and `discrete_mono_registerSymbolEx`
-// with an empty table for the zero-arg overload (an empty sigContains would
-// match any overload). Both JIT-resolve the live method and registerSymbol()
+// Emits the discrete-namespaced `discrete_mono_registerSymbolEx` helper for
+// every overload (both zero-arg `{}` and N-arg ordered `{ 'System.Int32', ... }`).
+// `discrete_mono_registerSymbolEx` checks exact parameter count and exact
+// parameter order via typename + positional signature fallback with primitive
+// alias normalization (`System.Int32` ↔ `int`, `System.Single` ↔ `single`,
+// `System.String` ↔ `string`, exact array/byref suffixes) and refuses ambiguous
+// multi-overload matches. Both JIT-resolve the live method and registerSymbol()
 // its REAL address, so the symbol survives a game relaunch — no hardcoded
 // address, no fragile prologue AOB. NOT the public `mono_*` versions: those names
 // share a namespace with hand-written CE-forums autorun scripts that
@@ -100,7 +102,7 @@ public static class MonoRegisterSymbolAaScriptGenerator
         // no-op (the worst failure mode from Phase 22 live smoke).
         sb.AppendLine("-- Lazy-load DLL-free Mono helpers from the cheat table.");
         sb.AppendLine("-- Idempotent across multiple register AAs on the same CT.");
-        sb.AppendLine("if _G.discrete_mono_registerSymbolBySignatureMatch == nil then");
+        sb.AppendLine("if _G.discrete_mono_registerSymbolEx == nil then");
         sb.Append("  local f = findTableFile('").Append(HelpersFileName).AppendLine("')");
         sb.AppendLine("  if not f then");
         sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
@@ -121,21 +123,14 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.AppendLine("end");
         sb.AppendLine();
 
-        // One register call per overload. Both helpers JIT-compile the live
-        // method and registerSymbol() its real address, so the symbol survives
-        // a game relaunch (unlike a hardcoded address) and doesn't depend on a
-        // near-duplicate method-prologue AOB. The helper auto-calls
-        // _discrete_ensure_attached() and uses an image-iteration fallback for
-        // class lookup (Unity 2022+ split-module workaround).
-        //
-        // Per overload:
-        //   * params present → registerSymbolBySignatureMatch with the param
-        //     types as sigContains (full names dodge the Int32/UInt32 substring
-        //     trap) + sibling-exclusive tokens as sigExcludes (so a 1-param
-        //     overload isn't matched against a 2-param sibling).
-        //   * zero-arg → registerSymbolEx with {} — an empty sigContains would
-        //     match ANY overload, so the param-COUNT check is the only precise
-        //     way to pin the no-arg overload.
+        // One register call per overload. `discrete_mono_registerSymbolEx`
+        // JIT-compiles the live method and registerSymbol()s its real address,
+        // checking exact parameter count AND exact parameter order via
+        // typename + positional signature fallback (with primitive alias
+        // normalization for Mono's `int`/`single`/`string` shorthands). This
+        // cleanly distinguishes swapped-order overloads like (Int32, String)
+        // vs (String, Int32), repeated-type overloads like (Int32) vs
+        // (Int32, Int32), and array suffixes like Int32 vs Int32[].
         sb.AppendLine("-- Register one symbol per overload (JIT-resolved at enable, relaunch-safe).");
         for (int i = 0; i < overloads.Count; ++i)
         {
@@ -149,23 +144,11 @@ public static class MonoRegisterSymbolAaScriptGenerator
               .Append(ov.Signature)
               .Append("   (last-seen address ").Append(ov.Address ?? "?").AppendLine(")");
 
-            bool hasParams = ov.ParamTypes is { Count: > 0 };
-            if (hasParams)
-            {
-                sb.Append("_G.discrete_mono_registerSymbolBySignatureMatch('").Append(LuaSqEscape(symbols[i])).Append("', ")
-                  .Append('\'').Append(LuaSqEscape(ov.Namespace ?? "")).Append("', ")
-                  .Append('\'').Append(LuaSqEscape(ov.ClassName)).Append("', ")
-                  .Append('\'').Append(LuaSqEscape(ov.MethodName)).Append("', ")
-                  .Append(RenderParamTypesTable(ov.ParamTypes)).Append(", ")
-                  .Append(RenderParamTypesTable(ov.SigExcludes)).AppendLine(")");
-            }
-            else
-            {
-                sb.Append("_G.discrete_mono_registerSymbolEx('").Append(LuaSqEscape(symbols[i])).Append("', ")
-                  .Append('\'').Append(LuaSqEscape(ov.Namespace ?? "")).Append("', ")
-                  .Append('\'').Append(LuaSqEscape(ov.ClassName)).Append("', ")
-                  .Append('\'').Append(LuaSqEscape(ov.MethodName)).Append("', {})").AppendLine();
-            }
+            sb.Append("_G.discrete_mono_registerSymbolEx('").Append(LuaSqEscape(symbols[i])).Append("', ")
+              .Append('\'').Append(LuaSqEscape(ov.Namespace ?? "")).Append("', ")
+              .Append('\'').Append(LuaSqEscape(ov.ClassName)).Append("', ")
+              .Append('\'').Append(LuaSqEscape(ov.MethodName)).Append("', ")
+              .Append(RenderParamTypesTable(ov.ParamTypes)).AppendLine(")");
             sb.AppendLine();
         }
 

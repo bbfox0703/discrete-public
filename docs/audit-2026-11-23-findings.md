@@ -793,7 +793,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：AA `{$lua}` 區塊在 CE 的 GUI thread 上執行。`io.open` 的開檔失敗有 15×200 ms 的重試加 pump，但開檔成功之後 `f:read("*l")` 沒有任何逾時。DLL 的 handler 卡住（例如 `callMethod` 的 `main_thread=true` 遇到遊戲暫停或最小化、`findMethodInstances` 觸發 JIT、game thread 在 loader lock 中）時，Cheat Engine 會整個凍結，使用者沒有任何方法恢復。`utils.lua:161-171` 對 `executeCodeEx` 已經明確寫出「timeout 必須有限，否則 CE 會凍結」這條規則，但 pipe 路徑沒有套用。
 - 修法：pipe I/O 改成在 `createThread` 中執行，主執行緒以 `sleep + pump` 輪詢，並設上限（例如 10 s，`callMethod` 依 `main_thread_timeout_ms` 加上餘裕）。逾時就 `error()`，並讓 DLL 端 `CancelIo`（關閉 handle）。至少 bootstrap 的 smoke handshake 可以直接改成 `pcall` 包住一個有逾時的版本。
 
-**E-M5 · DLL-free 的 signature-match 註冊不檢查參數順序與個數，而且在 Mono 上可能永遠比對不到 primitive 參數（後者待驗證）**
+**E-M5 · DLL-free 的 signature-match 註冊不檢查參數順序與個數，而且在 Mono 上可能永遠比對不到 primitive 參數（後者待驗證） — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI.Core/Services/Export/MonoRegisterSymbolAaScriptGenerator.cs:152-160`（有參數一律走 `BySignatureMatch`）；`scripts/mono_registersymbol_helpers.lua:585-603`（`string.find(sig, kw, 1, true)` 逐一做子字串比對）；參數來源 `ui/UnityDumpUI/ViewModels/MethodOverloadsViewModel.cs:382-390`
 - 成因：
   1. `sigContains` 只檢查「每個 token 都出現在 signature 裡」。`(Int32, String)` 與 `(String, Int32)` 這兩個 overload 的 token 集合相同，`SigExcludes`（只收「別的 overload 有、這個沒有」的 token）也無法區分，結果會註冊第一個列舉到的 overload，而且不會報錯。`Foo(Int32)` 與 `Foo(Int32, Int32)` 同理，`SigExcludes` 是空的。子字串比對也會讓 `System.Int32` 命中 `System.Int32[]`。
