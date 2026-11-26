@@ -33,7 +33,8 @@ public sealed class ProxyInstallStatus
                               bool hasMonoBackend, bool hasIl2cppBackend,
                               string? errorMessage,
                               string? installedProxyVersion = null,
-                              string? sourceProxyVersion    = null)
+                              string? sourceProxyVersion    = null,
+                              string? foreignProxyPresent   = null)
     {
         GameExePath           = gameExePath;
         Kind                  = kind;
@@ -42,6 +43,7 @@ public sealed class ProxyInstallStatus
         ErrorMessage          = errorMessage;
         InstalledProxyVersion = installedProxyVersion;
         SourceProxyVersion    = sourceProxyVersion;
+        ForeignProxyPresent   = foreignProxyPresent;
     }
 
     public string    GameExePath      { get; }
@@ -60,6 +62,11 @@ public sealed class ProxyInstallStatus
     /// <c>null</c> when the source DLL is missing — should never happen in
     /// a normal build but covers the dev-side "DLL not yet built" case.</summary>
     public string?   SourceProxyVersion { get; }
+
+    /// <summary>Comma-separated third-party proxy DLL filename(s) present next
+    /// to the game .exe (e.g. <c>"version.dll"</c> from ReShade/ENB/SpecialK),
+    /// or <c>null</c> when no non-Discrete proxy DLL occupies either slot.</summary>
+    public string?   ForeignProxyPresent { get; }
 
     /// <summary>True when at least one proxy file lives next to the .exe.</summary>
     public bool IsInstalled => Kind != ProxyKind.None;

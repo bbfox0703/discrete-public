@@ -12,6 +12,22 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1549) — Fix A-M9 + A-M10 (proxy coexistence detection with `ForeignProxyPresent` and ProxyDeploy Refresh/bulk race protection + tests)
+
+- **Bug fixes (`A-M9`, `A-M10`):**
+  - **`A-M9` (`IProxyInstaller.cs`, `IUnityGameScanner.cs`, `WindowsProxyInstaller.cs`, `SteamGameScanner.cs`, `ProxyGameRow.cs`, `ProxyDeployViewModel.cs`):**
+    - Updated `WindowsProxyInstaller.DetectSync` to check `IsOurDll` on both `version.dll` and `winmm.dll`: only Discrete-owned DLLs count toward `ProxyInstallStatus.Kind` and the mutual-exclusion error (`ourVersion && ourWinmm`), while third-party DLLs (ReShade/ENB/SpecialK/mod loaders) are reported separately via the new `ForeignProxyPresent` property.
+    - Eliminated the contradiction with `InstallSync`: installing Discrete `winmm.dll` alongside a third-party `version.dll` (or vice versa) now detects cleanly as `Kind = Winmm` with `ErrorMessage = null` and `ForeignProxyPresent = "version.dll"`, and a standalone third-party proxy is no longer misclassified as an outdated Discrete install or targeted by `UpdateAllDeployed`.
+    - Surfaced `ForeignProxyPresent` through `UnityGameEntry`, `SteamGameScanner`, and `ProxyGameRow.DeployStatusLabel` (`[other: version.dll]`), and added an internal constructor seam on `WindowsProxyInstaller` for isolated filesystem unit testing.
+  - **`A-M10` (`ProxyDeployViewModel.cs`, `ProxyDeployWindow.axaml`):**
+    - Added `CanRefresh => !IsScanning && !IsBusy` and `CanRunBulk => !IsBusy && !IsScanning`, wired `CanExecute` + `NotifyCanExecuteChangedFor` on `RefreshCommand` and all three bulk commands, and bound `ProxyDeployWindow.axaml` buttons to `CanRefresh` / `CanRunBulk`.
+    - Added `if (IsBusy) return;` + CTS ownership/disposal guards to `RefreshAsync`, and changed `RunBulkAsync` to iterate a snapshot (`Games.ToList()`) so collection mutations can never raise `InvalidOperationException` mid-batch.
+  - Added 8 xUnit v3 tests in `ui/UnityDumpUI.Tests/ProxyInstallerAndDeployViewModelTests.cs` covering standalone foreign proxy detection, `winmm.dll` + foreign `version.dll` coexistence install/detect/uninstall, refusing overwrite of foreign `version.dll`, both-Discrete mutex error, `UpdateAllDeployed` skipping foreign-only rows while updating coexisting rows, Refresh gating & snapshot safety mid-bulk, and bulk gating mid-scan.
+  - Marked `A-M9` and `A-M10` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1549) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1208 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 451 checks passed (x64) / 454 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1548) — Fix E-M5 (DLL-free Mono overload registration: positional `registerSymbolEx`, primitive alias normalization, ambiguity rejection + Lua/C# tests)
 
 - **Bug fix (`E-M5`):**

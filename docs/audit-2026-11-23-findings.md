@@ -71,12 +71,12 @@
 - 成因：`PipeServer::Stop()` 先 drain client worker（上限 2 秒），`MainThreadDispatcher::Shutdown()`（會 abort 排隊中的工作）卻在最後才跑。若 worker 正在 `SubmitAndWait`（遊戲失焦暫停、loading 中，或 `timeout_ms < 0` 時是 INFINITE），drain 必定逾時 → `g_stopEvent` 被洩漏 → 之後重新 `Start()` 時，舊 worker 會讀到新的 event（見 A-L6）。
 - 修法：`Stop()` 設好 `g_running = false` 並 signal 之後，在 drain 之前先呼叫 `MainThreadDispatcher::Shutdown()`（或拆出一個只負責 abort pending 的 `AbortPending()`）；`Discrete_Shutdown` 中 hook 的 uninstall 順序維持不變。
 
-**A-M9 · Proxy installer 的 Detect 與 Install 對「第三方 proxy 共存」的判斷互相矛盾**
+**A-M9 · Proxy installer 的 Detect 與 Install 對「第三方 proxy 共存」的判斷互相矛盾 — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI/Platform/WindowsProxyInstaller.cs:58-73`、`:86-88`、`:207-212`；`ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs:164-170`
 - 成因：`InstallSync` 刻意允許「別人的 `version.dll` + 我們的 `winmm.dll`」共存（`:207-210`），但 `DetectSync` 只要兩個檔案同時存在就回報錯誤、`Kind = None`（`:65-70`）；而且 Detect 判斷 kind 時只看 `File.Exists`，沒有用 `IsOurDll`，所以第三方的 `version.dll` 會被當成「已安裝、版本過舊」。後果：剛安裝成功的遊戲立刻顯示錯誤或未安裝；「Update all deployed」會對第三方 proxy 執行 Install，然後被拒絕，回報失敗。
 - 修法：Detect 對兩個檔案都先做 `IsOurDll`，只把「我們的」算進 `Kind`；兩個都是我們的才回報錯誤；第三方檔案另外放進 `ForeignProxyPresent` 之類的欄位給 UI 顯示。
 
-**A-M10 · ProxyDeploy 視窗：批次作業進行中仍然可以按 Refresh，會在 `foreach` 中途改動集合**
+**A-M10 · ProxyDeploy 視窗：批次作業進行中仍然可以按 Refresh，會在 `foreach` 中途改動集合 — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs:101-110`（`Games.Clear()` / `Add`）、`:207`（`foreach (… in Games)` 中間有 `await`）；`ui/UnityDumpUI/Views/ProxyDeployWindow.axaml:26-27`（Refresh 只綁 `!IsScanning`）
 - 成因：`RunBulkAsync` 在 `await` 之間列舉 `Games`；使用者在批次期間按 Refresh（或批次開始時 scan 剛好完成），`Games` 被清空重建 → 下一次 `MoveNext` 丟 `InvalidOperationException`。這個例外在 `RunBulkAsync` 內沒有 catch，會一路傳到 `AsyncRelayCommand`，預設會在 UI thread 重新拋出。
 - 修法：Refresh 的 `IsEnabled` 改綁 `!IsScanning && !IsBusy`，`RefreshAsync` 開頭也檢查 `IsBusy`；`RunBulkAsync` 改成列舉快照（`foreach (var row in Games.ToList())`）。

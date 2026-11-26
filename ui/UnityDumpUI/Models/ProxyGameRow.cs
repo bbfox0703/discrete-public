@@ -44,7 +44,8 @@ public sealed partial class ProxyGameRow : ObservableObject
         Game = game;
         ApplyStatusForGame(game,
             installedProxyVersion: game.InstalledProxyVersion,
-            sourceProxyVersion:    game.SourceProxyVersion);
+            sourceProxyVersion:    game.SourceProxyVersion,
+            foreignProxyPresent:   game.ForeignProxyPresent);
     }
 
     public UnityGameEntry Game { get; private set; }
@@ -70,6 +71,10 @@ public sealed partial class ProxyGameRow : ObservableObject
     /// so the comparison is visible directly in the grid.</summary>
     [ObservableProperty] private string? _sourceVersion;
 
+    /// <summary>Third-party proxy DLL filename(s) present alongside this game
+    /// (e.g. ReShade's <c>version.dll</c>), or null when none.</summary>
+    [ObservableProperty] private string? _foreignProxyPresent;
+
     // Pass-through display fields. The DataGrid binds to the row, not the
     // wrapped game, so we forward these for compiled-bindings to find them.
     public string DisplayName  => Game.DisplayName;
@@ -80,14 +85,23 @@ public sealed partial class ProxyGameRow : ObservableObject
     public bool   IsSupported  => Game.IsSupported;
     public bool   Is32BitMono  => Game.Is32BitMono;
 
-    public string DeployStatusLabel => DeployStatus switch
+    public string DeployStatusLabel
     {
-        ProxyDeployStatus.DeployedCurrent  => $"Deployed ({Game.ProxyLabel}, current)",
-        ProxyDeployStatus.DeployedOutdated => $"Deployed ({Game.ProxyLabel}, OUTDATED)",
-        ProxyDeployStatus.Deployed         => $"Deployed ({Game.ProxyLabel})",
-        ProxyDeployStatus.NotDeployed      => "Not deployed",
-        _                                  => "Unsupported",
-    };
+        get
+        {
+            string core = DeployStatus switch
+            {
+                ProxyDeployStatus.DeployedCurrent  => $"Deployed ({Game.ProxyLabel}, current)",
+                ProxyDeployStatus.DeployedOutdated => $"Deployed ({Game.ProxyLabel}, OUTDATED)",
+                ProxyDeployStatus.Deployed         => $"Deployed ({Game.ProxyLabel})",
+                ProxyDeployStatus.NotDeployed      => "Not deployed",
+                _                                  => "Unsupported",
+            };
+            return string.IsNullOrEmpty(ForeignProxyPresent)
+                ? core
+                : $"{core} [other: {ForeignProxyPresent}]";
+        }
+    }
 
     /// <summary>"0.1.0.135 → 0.1.0.140" when outdated; just "0.1.0.140" when
     /// current; bare source version when not deployed; "unknown → 0.1.0.140"
@@ -115,16 +129,19 @@ public sealed partial class ProxyGameRow : ObservableObject
         Game = fresh;
         ApplyStatusForGame(fresh,
             installedProxyVersion: status?.InstalledProxyVersion,
-            sourceProxyVersion:    status?.SourceProxyVersion);
+            sourceProxyVersion:    status?.SourceProxyVersion,
+            foreignProxyPresent:   status is not null ? status.ForeignProxyPresent : fresh.ForeignProxyPresent);
         OnPropertyChanged(nameof(ProxyLabel));
     }
 
     private void ApplyStatusForGame(UnityGameEntry game,
                                     string? installedProxyVersion,
-                                    string? sourceProxyVersion)
+                                    string? sourceProxyVersion,
+                                    string? foreignProxyPresent)
     {
-        InstalledVersion = installedProxyVersion;
-        SourceVersion    = sourceProxyVersion;
+        InstalledVersion    = installedProxyVersion;
+        SourceVersion       = sourceProxyVersion;
+        ForeignProxyPresent = foreignProxyPresent;
 
         if (!game.IsSupported)
         {
