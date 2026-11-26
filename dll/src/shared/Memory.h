@@ -180,15 +180,17 @@ struct ValueScanStats {
 // `ScanForPointer` so module .data / stack residue don't pollute results.
 // Returns at most `req.limit` matches.
 //
-// The scan is in-process and single-threaded. SEH-protected SafeReadBytes
-// covers each region so AC-stripped pages don't crash the host. Failed
-// regions count toward `stats->readFailureBytes` but don't abort the scan.
+// The scan runs in-process across a bounded worker pool (or single-threaded
+// when capped / on thread-creation fallback), with SEH protection covering each
+// 1 MB chunk so AC-stripped pages don't crash the host. Failed chunks count
+// toward `stats->readFailureBytes` without aborting the scan.
+// May throw std::bad_alloc under severe memory pressure (caught by PipeServer).
 //
 // For float / double, comparison uses `std::fabs(value - target) <= tolerance`.
 // For integers, exact bitwise comparison.
 // For range, comparison is typed (lo and hi reinterpreted as the dataType).
 std::vector<ValueScanCandidate> ScanForValue(const ValueScanRequest& req,
-                                              ValueScanStats*         stats = nullptr) noexcept;
+                                              ValueScanStats*         stats = nullptr);
 
 // Convenience helpers — pack a typed value into the request's `lo` or `hi`
 // bytes without the caller having to memcpy by hand.
@@ -238,12 +240,9 @@ struct StringScanCandidate {
 
 // Scans committed RW pages (with the same MEM_IMAGE + thread-stack
 // filtering as ScanForValue) for the needle byte sequence at the
-// requested alignment. Boyer–Moore-Horspool would be faster for Contains
-// on long needles, but Unity targets typically search short strings
-// (< 64 chars) — the naive O(N*M) loop is fast enough at < 100 MB/s
-// and avoids the cache footprint of a skip table.
+// requested alignment. May throw std::bad_alloc under severe memory pressure.
 std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
-                                                ValueScanStats* stats = nullptr) noexcept;
+                                                ValueScanStats* stats = nullptr);
 
 // Scans heap-like RW memory for pointer-sized values equal to `target`, at
 // 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an

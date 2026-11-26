@@ -12,6 +12,16 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1533) — Fix A-H2 (`ScanForValue` / `ScanForString` `noexcept` & `RunParallelScan` thread-pool `std::terminate`)
+
+- **Bug fix (`A-H2`):** `Memory::ScanForValue` and `Memory::ScanForString` were declared `noexcept` despite allocating region/chunk/result vectors and spawning worker threads via `RunParallelScan`; on 32-bit hosts under address-space pressure, any `std::bad_alloc` or `std::system_error` invoked `std::terminate()` and killed the host game. Additionally, if `pool.emplace_back(worker)` threw after earlier threads had started, `pool`'s destructor destroyed joinable `std::thread` objects (triggering `std::terminate` even for non-`noexcept` `ScanForPointer`), and uncaught exceptions inside a worker thread would also terminate the host.
+  - Removed `noexcept` from `ScanForValue` and `ScanForString` in `dll/src/shared/Memory.h` and `dll/src/shared/Memory.cpp` (so allocations failing under memory pressure propagate cleanly to `PipeServer::Dispatch` as JSON-RPC errors), and updated the stale single-threaded doc comment in `Memory.h`.
+  - Wrapped `RunParallelScan`'s worker lambda in `try / catch (...)` (`noexcept`) and guarded `pool.emplace_back(worker)` so thread-creation failure joins any already-started workers before finishing remaining chunks inline on the calling thread.
+  - Marked `A-H2` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1533) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe` (including `r2-dump` / `xref-dump` harnesses); identity guard passed; C# xUnit v3 tests 1154 passed (0 failed, 0 skipped); Rust core tests 104 passed (x64) / 105 passed (i686).
+
+-----
+
 ## 2026-11-26 (build 1532) — Fix C-H3 (IL2CPP `getEnumValues` FieldDefault decoder unified with `il2cppGetMetadataTypeFields`)
 
 - **Bug fix (`C-H3`):** In `dll/src/shared/ExportAPI.cpp`, IL2CPP `getEnumValues` previously carried its own older `decodeCompressedSigned` / `decodeTyped` lambdas that decoded every `<=32-bit` enum FieldDefault as an ECMA-335 compressed signed integer without checking metadata version or v29+ `0xFE`/`0xFF` min/max sentinels. On v24/v27 (Unity 2018–2020) games where FieldDefaults are raw little-endian, every `<=32-bit` enum value decoded wrong (e.g. `01 00 00 00` → `-64`), and on v29+ games `int.MaxValue`/`int.MinValue` members failed with `decode_error`.
