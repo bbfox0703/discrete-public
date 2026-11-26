@@ -243,7 +243,7 @@
 - 修法：vtable 的對齊檢查改成 `qw & (alignof(void*) - 1)`（x86 為 `& 3`）。只放寬 vtable 這一項；instance slot 的 `instAddr & 7`（BDWGC granule 在 32-bit 也是 8 bytes）維持不變。後面已經有 `vtable[0] ∈ classSet` 與 `vtable+2*ptr == rootDomain` 兩道結構驗證，false positive 不會因此明顯增加。
 - 驗證：在 x86 Mono 遊戲中以 `whatIsAt` 查一個已知的 `List<T>` instance，印出它的 header qword，確認其 `% 8 == 4`。
 
-**B-H2 · classSet 只有 TypeDef（沒有 generic instance、沒有 array），而且命中範圍不受 instance 大小限制：`WhatIsAt` / `ReverseLookupIndex` 會把 hit 歸到「隔壁的物件」**
+**B-H2 · classSet 只有 TypeDef（沒有 generic instance、沒有 array），而且命中範圍不受 instance 大小限制：`WhatIsAt` / `ReverseLookupIndex` 會把 hit 歸到「隔壁的物件」 — ✅ FIXED (2026-11-26)**
 - 位置：classSet 來源為 `MonoAddressFinder.cpp:562-573` + `MonoClassWalker.cpp:204-211`（只對 `0x02xxxxxx` TypeDef token 呼叫 `mono_class_get`），以及 `IL2CPPAddressFinder.cpp:709-720` + `IL2CPPClassWalker.cpp:245-254`（`il2cpp_image_get_class` 只回傳 TypeDef）；backward scan 在 `MonoAddressFinder.cpp:696-760`、`IL2CPPAddressFinder.cpp:947-975`；index lookup 在 `MonoAddressFinder.cpp:1331-1352`、`IL2CPPAddressFinder.cpp:1542-1565`；`ResolveFieldAt` 的 nearest 分支在 `MonoAddressFinder.cpp:386-399`、`IL2CPPAddressFinder.cpp:437-450`
 - 成因：
   1. `List<Foo>`、`Dictionary<K,V>`、`Foo[]` 等物件，header 指向的是 runtime 產生的 inflated / array class，不在 classSet 裡。backward scan 會跳過它們的 header，繼續往回找 4 KB（上限 16 KB），直到碰到前面某個非泛型物件，然後回報 `found = true`，`instance` 與 `className` 都是那個鄰居。`fieldOffset` 超出鄰居的實際大小時，`ResolveFieldAt` 仍會填 `nearestField` + 很大的 delta。interval-tree index 取的也是「≤ addr 的最近 base」，症狀相同。整條路徑都沒有用 instance size 驗證命中範圍（`mono_object_get_size` 已經綁定，但沒有被使用，見 `MonoResolver.h:129-136`）。

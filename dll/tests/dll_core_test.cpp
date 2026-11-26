@@ -12,6 +12,7 @@
 //            + live ScanForValue / ScanForString over VirtualAlloc RW pages
 //   * B-H1 — MonoVtableFilter x86 4-mod-8 IMT-prefixed vtable acceptance vs x64 8-byte alignment
 
+#include "AddressBounds.h"
 #include "ExportHelpers.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
@@ -593,6 +594,230 @@ void Test_AH1_PinnedModuleSurvivesFreeLibrary() {
     }
 }
 
+// ============================================================================
+// B-H2 — Object-extent bounds checking & pure-memory dynamic klass validation
+// ============================================================================
+void Test_BH2_AddressBoundsAndDynamicKlass() {
+    using namespace Discrete::AddressBounds;
+
+    // 1. ComputeObjectExtent + IsOffsetWithinExtent (regular, array, string).
+    {
+        ObjectExtentSpec reg64;
+        reg64.instanceSize = 0x30;
+        reg64.pointerSize  = 8;
+        CHECK(ComputeObjectExtent(reg64) == 0x30u);
+        CHECK(IsOffsetWithinExtent(0, 0x30u));
+        CHECK(IsOffsetWithinExtent(0x2F, 0x30u));
+        CHECK(!IsOffsetWithinExtent(0x30, 0x30u));
+        CHECK(!IsOffsetWithinExtent(0x100, 0x30u));
+        CHECK(!IsOffsetWithinExtent(-4, 0x30u));
+
+        // Tiny instanceSize clamps up to object header (2*ptr); 0 stays unknown.
+        ObjectExtentSpec tiny64;
+        tiny64.instanceSize = 4;
+        tiny64.pointerSize  = 8;
+        CHECK(ComputeObjectExtent(tiny64) == 16u);
+
+        ObjectExtentSpec unknown;
+        unknown.instanceSize = 0;
+        CHECK(ComputeObjectExtent(unknown) == 0u);
+        CHECK(IsOffsetWithinExtent(0x120, 0u));
+        CHECK(!IsOffsetWithinExtent(-1, 0u));
+
+        // SZARRAY: int[10] on x64 (0x20 + 40 = 0x48) and x86 (0x10 + 40 = 0x38).
+        ObjectExtentSpec arr64;
+        arr64.isArray       = true;
+        arr64.arrayLength   = 10;
+        arr64.arrayElemSize = 4;
+        arr64.pointerSize   = 8;
+        CHECK(ComputeObjectExtent(arr64) == 0x48u);
+
+        ObjectExtentSpec arr32 = arr64;
+        arr32.pointerSize = 4;
+        CHECK(ComputeObjectExtent(arr32) == 0x38u);
+
+        // Corrupted huge array length bounds strictly to dataOff (header only).
+        ObjectExtentSpec badArr;
+        badArr.isArray       = true;
+        badArr.arrayLength   = kMaxPlausibleArrayLen + 1u;
+        badArr.arrayElemSize = 8;
+        badArr.pointerSize   = 8;
+        CHECK(ComputeObjectExtent(badArr) == 0x20u);
+
+        // System.String: "Hello" (5 UTF-16 chars + NUL = 12 bytes).
+        ObjectExtentSpec str64;
+        str64.isString    = true;
+        str64.stringChars = 5;
+        str64.pointerSize = 8;
+        CHECK(ComputeObjectExtent(str64) == 0x14u + 12u);
+
+        ObjectExtentSpec str32 = str64;
+        str32.pointerSize = 4;
+        CHECK(ComputeObjectExtent(str32) == 0x0Cu + 12u);
+    }
+
+    // 2. IntersectCandidateOffsets convergence across samples.
+    {
+        std::vector<std::size_t> cand;
+        bool seeded = false;
+        IntersectCandidateOffsets(cand, seeded, {0, 16, 40});
+        CHECK(cand.size() == 3u);
+        IntersectCandidateOffsets(cand, seeded, {16, 40, 80});
+        CHECK(cand.size() == 2u && cand[0] == 16u && cand[1] == 40u);
+        IntersectCandidateOffsets(cand, seeded, {40});
+        CHECK(cand.size() == 1u && cand[0] == 40u);
+    }
+
+    // 3. LooksLikePlausibleClassName (ASCII, UTF-8, and invalid inputs).
+    {
+        const char ascii[] = "List`1";
+        CHECK(LooksLikePlausibleClassName(ascii, sizeof(ascii)));
+        const char arr[] = "Enemy[]";
+        CHECK(LooksLikePlausibleClassName(arr, sizeof(arr)));
+        // Valid UTF-8 CJK class name ("\xE8\xA7\x92\xE8\x89\xB2" = "角色").
+        const char utf8[] = "\xE8\xA7\x92\xE8\x89\xB2";
+        CHECK(LooksLikePlausibleClassName(utf8, sizeof(utf8)));
+
+        const char empty[] = "";
+        CHECK(!LooksLikePlausibleClassName(empty, sizeof(empty)));
+        const char noNul[4] = {'A', 'B', 'C', 'D'};
+        CHECK(!LooksLikePlausibleClassName(noNul, sizeof(noNul)));
+        const char ctrl[] = "Foo\x01" "Bar";
+        CHECK(!LooksLikePlausibleClassName(ctrl, sizeof(ctrl)));
+        const char badUtf8[] = "Foo\xFF\xFE";
+        CHECK(!LooksLikePlausibleClassName(badUtf8, sizeof(badUtf8)));
+    }
+
+    // 4. ValidateDynamicKlassMemory against real in-memory fake klass layouts.
+    {
+        struct alignas(8) FakeKlass {
+            std::uintptr_t image;
+            std::uintptr_t elementClass;
+            std::uintptr_t name;
+            std::uintptr_t reserved;
+        };
+        KlassFieldOffsets offs;
+        offs.imageOffset     = offsetof(FakeKlass, image);
+        offs.hasImageOffset  = true;
+        offs.elemClassOffset = offsetof(FakeKlass, elementClass);
+        offs.hasElemOffset   = true;
+        offs.nameOffset      = offsetof(FakeKlass, name);
+        offs.hasNameOffset   = true;
+
+        int fakeImageObj = 0;
+        const auto knownImage = reinterpret_cast<std::uintptr_t>(&fakeImageObj);
+        const char listName[64] = "List`1";
+        const char arrName[64]  = "Enemy[]";
+        const char elemName[64] = "Enemy";
+        const char badName[64]  = "\x01\x02";
+
+        FakeKlass elemKlass{knownImage, 0, reinterpret_cast<std::uintptr_t>(elemName), 0};
+        elemKlass.elementClass = reinterpret_cast<std::uintptr_t>(&elemKlass);
+
+        FakeKlass genericKlass{knownImage, 0, reinterpret_cast<std::uintptr_t>(listName), 0};
+        genericKlass.elementClass = reinterpret_cast<std::uintptr_t>(&genericKlass);
+
+        FakeKlass arrayKlass{knownImage, reinterpret_cast<std::uintptr_t>(&elemKlass),
+                             reinterpret_cast<std::uintptr_t>(arrName), 0};
+
+        // Jagged / generic array: List<T>[] whose element is genericKlass (not in TypeDef set,
+        // but carries knownImage).
+        FakeKlass genericArrayKlass{knownImage, reinterpret_cast<std::uintptr_t>(&genericKlass),
+                                    reinterpret_cast<std::uintptr_t>(arrName), 0};
+
+        FakeKlass badImageKlass{0xDEADBEEFu, 0, reinterpret_cast<std::uintptr_t>(listName), 0};
+        badImageKlass.elementClass = reinterpret_cast<std::uintptr_t>(&badImageKlass);
+
+        FakeKlass badNameKlass{knownImage, 0, reinterpret_cast<std::uintptr_t>(badName), 0};
+        badNameKlass.elementClass = reinterpret_cast<std::uintptr_t>(&badNameKlass);
+
+        auto readPtr = [](std::uintptr_t a, std::uintptr_t& out) -> bool {
+            return Discrete::Memory::SafeReadBytes(reinterpret_cast<const void*>(a), &out, sizeof(out));
+        };
+        auto readBytes = [](std::uintptr_t a, void* dst, std::size_t n) -> bool {
+            return Discrete::Memory::SafeReadBytes(reinterpret_cast<const void*>(a), dst, n);
+        };
+        auto containsImage = [knownImage](std::uintptr_t img) -> bool {
+            return img == knownImage;
+        };
+        const auto elemAddr = reinterpret_cast<std::uintptr_t>(&elemKlass);
+        auto containsClass = [elemAddr](std::uintptr_t k) -> bool {
+            return k == elemAddr;
+        };
+
+        bool isArr = false;
+        std::uintptr_t outElem = 0;
+
+        // Generic instantiation (List<T>): accepted, isArray == false.
+        CHECK(ValidateDynamicKlassMemory(
+            reinterpret_cast<std::uintptr_t>(&genericKlass), offs,
+            readPtr, readBytes, containsImage, containsClass, isArr, outElem));
+        CHECK(!isArr);
+        CHECK(outElem == reinterpret_cast<std::uintptr_t>(&genericKlass));
+
+        // Array of TypeDef class (Enemy[]): accepted, isArray == true.
+        CHECK(ValidateDynamicKlassMemory(
+            reinterpret_cast<std::uintptr_t>(&arrayKlass), offs,
+            readPtr, readBytes, containsImage, containsClass, isArr, outElem));
+        CHECK(isArr);
+        CHECK(outElem == elemAddr);
+
+        // Array of generic class (List<T>[]): accepted, isArray == true.
+        CHECK(ValidateDynamicKlassMemory(
+            reinterpret_cast<std::uintptr_t>(&genericArrayKlass), offs,
+            readPtr, readBytes, containsImage, containsClass, isArr, outElem));
+        CHECK(isArr);
+        CHECK(outElem == reinterpret_cast<std::uintptr_t>(&genericKlass));
+
+        // Invalid image, control-char name, misaligned ptr, null ptr: all rejected.
+        CHECK(!ValidateDynamicKlassMemory(
+            reinterpret_cast<std::uintptr_t>(&badImageKlass), offs,
+            readPtr, readBytes, containsImage, containsClass, isArr, outElem));
+        CHECK(!ValidateDynamicKlassMemory(
+            reinterpret_cast<std::uintptr_t>(&badNameKlass), offs,
+            readPtr, readBytes, containsImage, containsClass, isArr, outElem));
+        CHECK(!ValidateDynamicKlassMemory(
+            reinterpret_cast<std::uintptr_t>(&genericKlass) + 4u, offs,
+            readPtr, readBytes, containsImage, containsClass, isArr, outElem));
+        CHECK(!ValidateDynamicKlassMemory(
+            0u, offs, readPtr, readBytes, containsImage, containsClass, isArr, outElem));
+    }
+
+    // 5. SelectContainingEntry: rejects neighbor hits, backtracks over embedded headers.
+    {
+        struct FakeEntry {
+            std::uintptr_t base;
+            std::size_t    extent;
+        };
+        std::vector<FakeEntry> bases = {
+            {0x1000u, 0x20u},   // small object A: [0x1000, 0x1020)
+            {0x2000u, 0x200u},  // large object Q: [0x2000, 0x2200)
+            {0x2080u, 0x18u},   // embedded false-positive header inside Q: [0x2080, 0x2098)
+            {0x3000u, 0u},      // object with unknown extent (0)
+        };
+        auto extFn = [](const FakeEntry& e) { return e.extent; };
+
+        // Exact B-H2 repro: addr=0x1038 sits past object A's end (0x1020) -> MUST NOT match A!
+        auto missNeighbor = SelectContainingEntry(bases, 0x1038u, 0x1038u, 0x0100u, extFn);
+        CHECK(!missNeighbor.found);
+
+        // Exact boundary of A: 0x101F hits A, 0x1020 misses A.
+        auto hitEdge = SelectContainingEntry(bases, 0x101Fu, 0x1018u, 0x0100u, extFn);
+        CHECK(hitEdge.found && hitEdge.entry.base == 0x1000u && hitEdge.nextBase == 0x2000u);
+        auto missEdge = SelectContainingEntry(bases, 0x1020u, 0x1020u, 0x0100u, extFn);
+        CHECK(!missEdge.found);
+
+        // Embedded false-positive at 0x2080 (extent 0x18) does NOT hide enclosing Q at 0x2000
+        // when querying 0x2100 -> backtracks to Q!
+        auto hitEnclosing = SelectContainingEntry(bases, 0x2100u, 0x2100u, 0x1100u, extFn);
+        CHECK(hitEnclosing.found && hitEnclosing.entry.base == 0x2000u && hitEnclosing.extent == 0x200u);
+
+        // Unknown extent (0) still matches within the backward window.
+        auto hitUnknown = SelectContainingEntry(bases, 0x3040u, 0x3040u, 0x2100u, extFn);
+        CHECK(hitUnknown.found && hitUnknown.entry.base == 0x3000u);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -602,6 +827,7 @@ int main() {
     Test_AH2_ScannerExceptionSafety();
     Test_BH1_MonoVtableAlignment();
     Test_AH1_PinnedModuleSurvivesFreeLibrary();
+    Test_BH2_AddressBoundsAndDynamicKlass();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

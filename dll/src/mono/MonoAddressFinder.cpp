@@ -2,6 +2,7 @@
 
 #include "MonoAddressFinder.h"
 
+#include "../shared/AddressBounds.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Discrete::Mono {
@@ -36,11 +38,25 @@ namespace {
 // one OS sweep at process exit instead of iterating destructors.
 //
 // POD scalars stay direct — their "destructor" is a no-op.
+struct ClassExtentInfo {
+    bool        isArray       = false;
+    bool        isString      = false;
+    std::size_t instanceSize  = 0;
+    std::size_t arrayElemSize = 0;
+};
+
+constexpr std::size_t kNotDynamicCap = (sizeof(void*) == 8) ? (1u << 19) : (1u << 16);
+constexpr std::size_t kExtentInfoCap = 262144u;
+
 struct Cache {
     std::mutex                                          mu;
-    std::vector<std::uintptr_t>                         vtableSet;     // sorted
-    std::unordered_map<std::uintptr_t, std::uintptr_t>  vtableToKlass; // vtable → klass
-    std::vector<std::uintptr_t>                         classSet;      // sorted
+    std::vector<std::uintptr_t>                         vtableSet;       // sorted
+    std::unordered_map<std::uintptr_t, std::uintptr_t>  vtableToKlass;   // vtable → klass
+    std::vector<std::uintptr_t>                         classSet;        // sorted (TypeDef)
+    std::vector<std::uintptr_t>                         imageSet;        // sorted (loaded MonoImage*)
+    std::unordered_set<std::uintptr_t>                  dynamicClassSet; // validated generic/array klasses
+    std::unordered_set<std::uintptr_t>                  notDynamicClass; // negative memo (capped)
+    std::unordered_map<std::uintptr_t, ClassExtentInfo> extentInfo;      // klass → static size info
 };
 Cache& cache() {
     static Cache* p = new Cache();  // intentional leak
@@ -53,6 +69,9 @@ std::uintptr_t                                   g_maxKlass  = 0;
 std::uintptr_t                                   g_minVtable = 0;
 std::uintptr_t                                   g_maxVtable = 0;
 bool                                             g_built     = false;
+
+std::once_flag                        g_klassOffsetsOnce;
+Discrete::AddressBounds::KlassFieldOffsets g_klassOffsets;
 
 #pragma warning(push)
 #pragma warning(disable: 4509)
@@ -121,6 +140,14 @@ int SehValueSizeProbe(fn_class_value_size fn, MonoClass* k) {
     __try { std::uint32_t a = 0; return fn(k, &a); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+std::int32_t SehClassInstanceSizeProbe(fn_class_instance_size fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+std::uint32_t SehObjectGetSizeProbe(fn_object_get_size fn, MonoObject* o) {
+    __try { return fn(o); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+}
 // Phase 27c — array element class lookup. Non-null result means klass is
 // an array type (System.Object[], int[], etc).
 MonoClass* SehElementClassProbe(fn_class_get_element_class fn, MonoClass* k) {
@@ -133,6 +160,210 @@ MonoClass* SehNestingProbe(fn_class_get_nesting_type fn, MonoClass* k) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 #pragma warning(pop)
+
+// B-H2: calibrate MonoClass::{image, element_class, name} offsets from known
+// TypeDef classes so dynamic generic/array klasses can be validated purely via
+// SafeReadBytes (zero runtime API calls on unvalidated memory).
+void CalibrateMonoKlassOffsets() {
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_image == nullptr ||
+        r.class_get_element_class == nullptr || r.class_get_name == nullptr) {
+        return;
+    }
+    MonoDomain* domain = GetRootDomain();
+    if (domain == nullptr) return;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return;
+
+    constexpr std::size_t kScanLimit     = 512u;
+    constexpr std::size_t kStep          = sizeof(void*);
+    constexpr std::size_t kSamplesWanted = 16u;
+
+    std::vector<std::size_t> imgCand, elemCand, nameCand;
+    bool imgSeeded = false, elemSeeded = false, nameSeeded = false;
+    std::size_t sampled = 0u;
+
+    auto assemblies = EnumerateAssemblies();
+    for (const auto& a : assemblies) {
+        if (a.image == nullptr) continue;
+        auto classes = EnumerateClasses(a.image);
+        std::size_t perAsm = 0u;
+        for (const auto& ce : classes) {
+            if (ce.klass == nullptr) continue;
+            if (SehElementClassProbe(r.class_get_element_class, ce.klass) != ce.klass) continue;
+            MonoImage* img = SehClassImageProbe(r.class_get_image, ce.klass);
+            const char* nm = SehClassNameProbe(r.class_get_name, ce.klass);
+            if (img == nullptr || nm == nullptr || *nm == '\0') continue;
+
+            const auto selfPtr = reinterpret_cast<std::uintptr_t>(ce.klass);
+            const auto imgPtr  = reinterpret_cast<std::uintptr_t>(img);
+            const auto namePtr = reinterpret_cast<std::uintptr_t>(nm);
+            const auto* bytes  = reinterpret_cast<const std::uint8_t*>(ce.klass);
+
+            std::vector<std::size_t> imgHits, elemHits, nameHits;
+            for (std::size_t off = 0u; off + kStep <= kScanLimit; off += kStep) {
+                std::uintptr_t v = 0u;
+                if (!Memory::SafeReadBytes(bytes + off, &v, sizeof(v))) break;
+                if (v == imgPtr)  imgHits.push_back(off);
+                if (v == selfPtr) elemHits.push_back(off);
+                if (v == namePtr) nameHits.push_back(off);
+            }
+            Discrete::AddressBounds::IntersectCandidateOffsets(imgCand,  imgSeeded,  imgHits);
+            Discrete::AddressBounds::IntersectCandidateOffsets(elemCand, elemSeeded, elemHits);
+            Discrete::AddressBounds::IntersectCandidateOffsets(nameCand, nameSeeded, nameHits);
+
+            ++sampled;
+            ++perAsm;
+            if (sampled >= kSamplesWanted || perAsm >= 4u) break;
+        }
+        if (sampled >= kSamplesWanted) break;
+    }
+
+    if (!imgCand.empty())  { g_klassOffsets.imageOffset     = imgCand.front();  g_klassOffsets.hasImageOffset = true; }
+    if (!elemCand.empty()) { g_klassOffsets.elemClassOffset = elemCand.front(); g_klassOffsets.hasElemOffset  = true; }
+    if (!nameCand.empty()) { g_klassOffsets.nameOffset      = nameCand.front(); g_klassOffsets.hasNameOffset  = true; }
+
+    if (g_klassOffsets.Ready()) {
+        Log::Write(MagicStrings::LogCategoryWalk,
+            "AddrFinder(Mono): calibrated klass offsets image=" +
+            std::to_string(g_klassOffsets.imageOffset) +
+            " elem=" + std::to_string(g_klassOffsets.elemClassOffset) +
+            " name=" + std::to_string(g_klassOffsets.nameOffset) +
+            " (from " + std::to_string(sampled) + " samples)");
+    } else {
+        Log::Write(MagicStrings::LogCategoryWalk,
+            "AddrFinder(Mono): klass offset calibration incomplete — dynamic generic/array discovery disabled");
+    }
+}
+
+void EnsureMonoKlassOffsetsCalibrated() {
+    std::call_once(g_klassOffsetsOnce, CalibrateMonoKlassOffsets);
+}
+
+bool TryAcceptDynamicMonoKlass(
+    std::uintptr_t candidate,
+    const std::vector<std::uintptr_t>& imageSetSnap,
+    const std::vector<std::uintptr_t>& classSetSnap)
+{
+    if (!g_klassOffsets.Ready() || imageSetSnap.empty()) return false;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (cache().dynamicClassSet.find(candidate) != cache().dynamicClassSet.end()) return true;
+        if (cache().notDynamicClass.find(candidate) != cache().notDynamicClass.end()) return false;
+    }
+
+    auto readPtr = [](std::uintptr_t addr, std::uintptr_t& out) -> bool {
+        return Memory::SafeReadBytes(reinterpret_cast<const void*>(addr), &out, sizeof(out));
+    };
+    auto readBytes = [](std::uintptr_t addr, void* dst, std::size_t n) -> bool {
+        return Memory::SafeReadBytes(reinterpret_cast<const void*>(addr), dst, n);
+    };
+    auto containsImage = [&imageSetSnap](std::uintptr_t img) -> bool {
+        return std::binary_search(imageSetSnap.begin(), imageSetSnap.end(), img);
+    };
+    auto containsClass = [&classSetSnap](std::uintptr_t k) -> bool {
+        return std::binary_search(classSetSnap.begin(), classSetSnap.end(), k);
+    };
+
+    bool isArray = false;
+    std::uintptr_t elemClass = 0u;
+    const bool ok = Discrete::AddressBounds::ValidateDynamicKlassMemory(
+        candidate, g_klassOffsets, readPtr, readBytes,
+        containsImage, containsClass, isArray, elemClass);
+
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (ok) {
+            cache().dynamicClassSet.insert(candidate);
+        } else if (cache().notDynamicClass.size() < kNotDynamicCap) {
+            cache().notDynamicClass.insert(candidate);
+        }
+    }
+    return ok;
+}
+
+// Compute (and cache per-class) the byte extent of a confirmed Mono object
+// so WhatIsAt and ReverseLookupIndex reject out-of-bounds neighbor hits.
+// Caller holds a ThreadAttachGuard.
+ClassExtentInfo GetMonoClassExtentInfo(MonoClass* k) {
+    const auto kp = reinterpret_cast<std::uintptr_t>(k);
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        auto it = cache().extentInfo.find(kp);
+        if (it != cache().extentInfo.end()) return it->second;
+    }
+
+    ClassExtentInfo info;
+    const auto& r = GetResolver();
+    if (r.class_get_element_class != nullptr) {
+        MonoClass* elem = SehElementClassProbe(r.class_get_element_class, k);
+        if (elem != nullptr && elem != k) {
+            info.isArray = true;
+            info.arrayElemSize = ManagedLayout::kPointerSize;
+            if (r.class_is_valuetype != nullptr &&
+                SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
+                r.class_value_size != nullptr) {
+                int sz = SehValueSizeProbe(r.class_value_size, elem);
+                if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
+            }
+        }
+    }
+    if (!info.isArray) {
+        const char* nm = (r.class_get_name != nullptr)
+            ? SehClassNameProbe(r.class_get_name, k) : nullptr;
+        const char* ns = (r.class_get_namespace != nullptr)
+            ? SehClassNamespaceProbe(r.class_get_namespace, k) : nullptr;
+        if (nm != nullptr && ns != nullptr &&
+            std::strcmp(nm, "String") == 0 && std::strcmp(ns, "System") == 0) {
+            info.isString = true;
+        }
+        if (r.class_instance_size != nullptr) {
+            std::int32_t sz = SehClassInstanceSizeProbe(r.class_instance_size, k);
+            if (sz > 0) info.instanceSize = static_cast<std::size_t>(sz);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (cache().extentInfo.size() < kExtentInfoCap) {
+            cache().extentInfo.emplace(kp, info);
+        }
+    }
+    return info;
+}
+
+std::size_t ComputeMonoInstanceExtent(std::uintptr_t instanceAddr, MonoClass* k) {
+    const ClassExtentInfo ci = GetMonoClassExtentInfo(k);
+    Discrete::AddressBounds::ObjectExtentSpec spec;
+    spec.isArray       = ci.isArray;
+    spec.isString      = ci.isString;
+    spec.instanceSize  = ci.instanceSize;
+    spec.arrayElemSize = ci.arrayElemSize;
+
+    if (ci.isArray) {
+        std::uintptr_t len = 0u;
+        if (Memory::SafeReadBytes(
+                reinterpret_cast<const void*>(instanceAddr + ManagedLayout::kArrayMaxLengthOffset),
+                &len, sizeof(len))) {
+            spec.arrayLength = static_cast<std::size_t>(len);
+        }
+    } else if (ci.isString) {
+        std::int32_t clen = -1;
+        if (Memory::SafeReadBytes(
+                reinterpret_cast<const void*>(instanceAddr + ManagedLayout::kStringLengthOffset),
+                &clen, sizeof(clen))) {
+            spec.stringChars = clen;
+        }
+    } else if (spec.instanceSize == 0u) {
+        const auto& r = GetResolver();
+        if (r.object_get_size != nullptr) {
+            std::uint32_t osz = SehObjectGetSizeProbe(
+                r.object_get_size, reinterpret_cast<MonoObject*>(instanceAddr));
+            if (osz > 0u) spec.instanceSize = static_cast<std::size_t>(osz);
+        }
+    }
+    return Discrete::AddressBounds::ComputeObjectExtent(spec);
+}
 
 bool ContainsKlass(std::uintptr_t p) {
     if (cache().classSet.empty()) return false;
@@ -517,78 +748,70 @@ void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
 }
 
 bool BuildClassRangeCache() {
-    std::lock_guard<std::mutex> lk(cache().mu);
-    if (g_built) return !cache().classSet.empty();
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (g_built) return !cache().classSet.empty();
 
-    if (!IsResolved()) {
-        Log::Write(MagicStrings::LogCategoryWalk,
-                   "AddrFinder: BuildClassRangeCache: mono not resolved");
-        return false;
-    }
-
-    cache().classSet.clear();
-    cache().vtableSet.clear();
-    cache().vtableToKlass.clear();
-    g_minKlass  = static_cast<std::uintptr_t>(-1);
-    g_maxKlass  = 0;
-    g_minVtable = static_cast<std::uintptr_t>(-1);
-    g_maxVtable = 0;
-
-    // Phase 27a follow-up (2026-05-20): the old design pre-computed every
-    // class's MonoVTable* via `mono_class_vtable` in a 17K-call batch
-    // under a single ThreadAttachGuard. On legacy 32-bit Mono (活俠傳 /
-    // Unity 2020.3.49) with the game's main thread focus-paused, that
-    // mass forced-vtable-init wedged the BDWGC heap badly enough that
-    // the game stayed hung after focus returned — even though our worker
-    // thread had long since disconnected. The 17K runtime calls touch
-    // a global GC lock and trigger per-class vtable allocation; whatever
-    // bookkeeping the runtime expects from the main thread to acknowledge
-    // those allocations never gets to happen while focus is lost.
-    //
-    // The fix is to drop the eager vtable batch entirely. `WhatIsAt` now
-    // resolves vtable→klass lazily: when it finds a candidate qword in
-    // process memory (the supposed object header), it does a single SEH-
-    // protected SafeReadBytes(*qword) to get vtable[0] = MonoClass*, and
-    // checks THAT against `cache().classSet`. The vtable→klass map below is
-    // populated lazily as WhatIsAt validates each new vtable it sees, so
-    // repeat hits are still O(log N) without any runtime calls.
-    //
-    // Cost shifts: BuildClassRangeCache goes from ~5s + 17K runtime calls
-    // to ~500ms + 0 runtime calls (just enumeration). WhatIsAt pays one
-    // extra SafeReadBytes per backward step, which is cheap (no SEH on
-    // committed RW pages, fast on PAGE_NOACCESS gaps). Net win for
-    // single-shot lookups; cumulative cost of N scans pays off after the
-    // first ~few scans because the lazy memo skips the deref for known
-    // vtables.
-    auto assemblies = EnumerateAssemblies();
-    for (const auto& a : assemblies) {
-        if (a.image == nullptr) continue;
-        auto cs = EnumerateClasses(a.image);
-        for (const auto& c : cs) {
-            if (c.klass == nullptr) continue;
-            auto kp = reinterpret_cast<std::uintptr_t>(c.klass);
-            cache().classSet.push_back(kp);
-            if (kp < g_minKlass) g_minKlass = kp;
-            if (kp > g_maxKlass) g_maxKlass = kp;
+        if (!IsResolved()) {
+            Log::Write(MagicStrings::LogCategoryWalk,
+                       "AddrFinder: BuildClassRangeCache: mono not resolved");
+            return false;
         }
+
+        cache().classSet.clear();
+        cache().imageSet.clear();
+        cache().dynamicClassSet.clear();
+        cache().notDynamicClass.clear();
+        cache().extentInfo.clear();
+        cache().vtableSet.clear();
+        cache().vtableToKlass.clear();
+        g_minKlass  = static_cast<std::uintptr_t>(-1);
+        g_maxKlass  = 0;
+        g_minVtable = static_cast<std::uintptr_t>(-1);
+        g_maxVtable = 0;
+
+        auto assemblies = EnumerateAssemblies();
+        for (const auto& a : assemblies) {
+            if (a.image == nullptr) continue;
+            cache().imageSet.push_back(reinterpret_cast<std::uintptr_t>(a.image));
+            auto cs = EnumerateClasses(a.image);
+            for (const auto& c : cs) {
+                if (c.klass == nullptr) continue;
+                auto kp = reinterpret_cast<std::uintptr_t>(c.klass);
+                cache().classSet.push_back(kp);
+                if (kp < g_minKlass) g_minKlass = kp;
+                if (kp > g_maxKlass) g_maxKlass = kp;
+            }
+        }
+
+        std::sort(cache().classSet.begin(), cache().classSet.end());
+        cache().classSet.erase(std::unique(cache().classSet.begin(), cache().classSet.end()),
+                         cache().classSet.end());
+        std::sort(cache().imageSet.begin(), cache().imageSet.end());
+        cache().imageSet.erase(std::unique(cache().imageSet.begin(), cache().imageSet.end()),
+                         cache().imageSet.end());
+
+        if (cache().classSet.empty()) { g_minKlass = 0; g_maxKlass = 0; }
+        g_built = true;
+        ok = !cache().classSet.empty();
+
+        Log::Write(MagicStrings::LogCategoryWalk,
+                   "AddrFinder: cached " + std::to_string(cache().classSet.size()) +
+                   " MonoClass* across " + std::to_string(cache().imageSet.size()) +
+                   " images (root domain, lazy vtable)");
     }
-
-    std::sort(cache().classSet.begin(), cache().classSet.end());
-    cache().classSet.erase(std::unique(cache().classSet.begin(), cache().classSet.end()),
-                     cache().classSet.end());
-
-    if (cache().classSet.empty()) { g_minKlass = 0; g_maxKlass = 0; }
-    g_built = true;
-
-    Log::Write(MagicStrings::LogCategoryWalk,
-               "AddrFinder: cached " + std::to_string(cache().classSet.size()) +
-               " MonoClass* (root domain, lazy vtable)");
-    return !cache().classSet.empty();
+    if (ok) EnsureMonoKlassOffsetsCalibrated();
+    return ok;
 }
 
 void InvalidateClassRangeCache() {
     std::lock_guard<std::mutex> lk(cache().mu);
     cache().classSet.clear();
+    cache().imageSet.clear();
+    cache().dynamicClassSet.clear();
+    cache().notDynamicClass.clear();
+    cache().extentInfo.clear();
     cache().vtableSet.clear();
     cache().vtableToKlass.clear();
     g_minKlass  = 0; g_maxKlass  = 0;
@@ -648,12 +871,15 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     // doesn't hold cache().mu while doing SEH-protected probes. Any new
     // (vtable, klass) pair we discover gets written back at the end of
     // the call under the mutex so future scans skip the deref+lookup.
+    const std::uintptr_t rootDomainAddr = reinterpret_cast<std::uintptr_t>(domain);
     std::vector<std::uintptr_t>                        classSetSnap;
+    std::vector<std::uintptr_t>                        imageSetSnap;
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemoSnap;
     std::uintptr_t minK = 0, maxK = 0;
     {
         std::lock_guard<std::mutex> lk(cache().mu);
         classSetSnap = cache().classSet;
+        imageSetSnap = cache().imageSet;
         vtMemoSnap   = cache().vtableToKlass;
         minK = g_minKlass;
         maxK = g_maxKlass;
@@ -721,7 +947,22 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
                 continue;
             }
             if (klassMaybe == 0 || (klassMaybe & 7u) != 0) continue;
-            if (!klassInSet(klassMaybe)) continue;
+            bool accepted = klassInSet(klassMaybe);
+            if (!accepted) {
+                // B-H2: generic instantiations (List<T>, Dictionary<K,V>) and
+                // arrays (T[]) are absent from TypeDef-only classSet. Require
+                // MonoVTable::domain == rootDomain plus pure-memory klass
+                // validation before accepting.
+                std::uintptr_t domainAt = 0;
+                if (Memory::SafeReadBytes(
+                        reinterpret_cast<void*>(vtCandidate + 2 * sizeof(std::uintptr_t)),
+                        &domainAt, sizeof(domainAt)) &&
+                    domainAt == rootDomainAddr &&
+                    TryAcceptDynamicMonoKlass(klassMaybe, imageSetSnap, classSetSnap)) {
+                    accepted = true;
+                }
+            }
+            if (!accepted) continue;
             klassCandidate = klassMaybe;
             // Memoize so future iterations of this loop (and future
             // WhatIsAt calls) skip the deref.
@@ -733,6 +974,15 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         const char* name = (r.class_get_name != nullptr)
             ? SehClassNameProbe(r.class_get_name, k) : nullptr;
         if (name == nullptr || *name == '\0') continue;
+
+        // B-H2: enforce object byte-extent so an address sitting past the end
+        // of an earlier neighbor object (e.g. inside an unmanaged gap or a
+        // subsequent object) is never misattributed to that neighbor.
+        const std::size_t objExtent = ComputeMonoInstanceExtent(p, k);
+        if (!Discrete::AddressBounds::IsOffsetWithinExtent(
+                static_cast<std::ptrdiff_t>(addr - p), objExtent)) {
+            continue;
+        }
 
         // Got it — instance base `p`, vtable `vtCandidate`, validated klass
         // `klassCandidate`. Identity + field/array resolution (steps 5-8) is
@@ -910,6 +1160,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     // memoised some non-vtable structures as vtables. Start fresh so
     // the validation runs on every qw value we encounter.
     std::vector<std::uintptr_t> classSet;
+    std::vector<std::uintptr_t> imageSet;
     std::uintptr_t minKlass = 0, maxKlass = 0;
     std::unordered_map<std::uintptr_t, std::uintptr_t> vtMemo;
 
@@ -923,6 +1174,7 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     {
         std::lock_guard<std::mutex> lk(cache().mu);
         classSet = cache().classSet;
+        imageSet = cache().imageSet;
         minKlass = g_minKlass;
         maxKlass = g_maxKlass;
     }
@@ -1019,30 +1271,24 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                     memoNegative(qw);  // memo negative
                     continue;
                 }
-                // Klass candidate range filter (cheap reject).
-                if (derefed < minKlass || derefed > maxKlass) {
+                if (derefed < 0x10000u || (derefed & 7u) != 0) {
                     memoNegative(qw);
                     continue;
                 }
-                if ((derefed & 7u) != 0) { memoNegative(qw); continue; }
-                if (!std::binary_search(classSet.begin(), classSet.end(), derefed)) {
-                    memoNegative(qw);
-                    continue;
-                }
-                // 2026-05-28 vtable structural validation. MonoVTable
-                // layout (mono/metadata/class-internals.h):
-                //   +0           MonoClass*   ← already in classSet
-                //   +ptr_size    MonoGCDescriptor gc_descr
+                // 2026-05-28 vtable structural validation (checked before
+                // dynamic-klass fallback so non-vtable qwords drop in 2 reads):
+                //   +0           MonoClass*
                 //   +2*ptr_size  MonoDomain*  ← must equal root domain
-                //   +3*ptr_size  MonoType*
-                //   ...
-                // Reading the domain field of a non-vtable structure
-                // returns ~arbitrary memory. Only real vtables have the
-                // domain pointer at that offset.
                 std::uintptr_t domainAt = 0;
                 if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
                     domainAt != rootDomainAddr) {
                     memoNegative(qw);  // structurally not a vtable
+                    continue;
+                }
+                bool inClassSet = (derefed >= minKlass && derefed <= maxKlass) &&
+                    std::binary_search(classSet.begin(), classSet.end(), derefed);
+                if (!inClassSet && !TryAcceptDynamicMonoKlass(derefed, imageSet, classSet)) {
+                    memoNegative(qw);
                     continue;
                 }
                 klass = derefed;
@@ -1135,6 +1381,7 @@ RevIndexCache& revIndexCache() {
 bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
     bases_.clear();
     lastBase_ = lastVtable_ = lastKlass_ = lastNextBase_ = 0;
+    lastExtent_ = 0;
     hits_ = localityHits_ = 0;
 
     // Reuse fast-path: copy a recent build's bases if still inside the window.
@@ -1163,10 +1410,12 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
         reinterpret_cast<std::uintptr_t>(GetRootDomain());
 
     std::vector<std::uintptr_t> classSet;
+    std::vector<std::uintptr_t> imageSet;
     std::uintptr_t minKlass = 0, maxKlass = 0;
     {
         std::lock_guard<std::mutex> lk(cache().mu);
         classSet = cache().classSet;
+        imageSet = cache().imageSet;
         minKlass = g_minKlass;
         maxKlass = g_maxKlass;
     }
@@ -1235,15 +1484,16 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
             } else {
                 std::uintptr_t derefed = 0;
                 if (!SehReadKlassAt(qw, derefed)) { memoNegative(qw); continue; }
-                if (derefed < minKlass || derefed > maxKlass) { memoNegative(qw); continue; }
-                if ((derefed & 7u) != 0) { memoNegative(qw); continue; }
-                if (!std::binary_search(classSet.begin(), classSet.end(), derefed)) {
-                    memoNegative(qw); continue;
-                }
+                if (derefed < 0x10000u || (derefed & 7u) != 0) { memoNegative(qw); continue; }
                 // MonoVTable structural validation: +2*ptr is MonoDomain*.
                 std::uintptr_t domainAt = 0;
                 if (!SehReadKlassAt(qw + 2 * sizeof(std::uintptr_t), domainAt) ||
                     domainAt != rootDomainAddr) {
+                    memoNegative(qw); continue;
+                }
+                const bool inClassSet = (derefed >= minKlass && derefed <= maxKlass) &&
+                    std::binary_search(classSet.begin(), classSet.end(), derefed);
+                if (!inClassSet && !TryAcceptDynamicMonoKlass(derefed, imageSet, classSet)) {
                     memoNegative(qw); continue;
                 }
                 klass = derefed;
@@ -1307,12 +1557,14 @@ AddressLookup ReverseLookupIndex::Lookup(std::uintptr_t addr, std::size_t maxBac
     out.scannedFrom = lowest;
     out.scannedTo   = start + kStride;
 
-    // Locality fast-path: when `start` lies in [lastBase_, lastNextBase_),
-    // lastBase_ is PROVABLY the greatest base ≤ start (next base up is
-    // lastNextBase_ > start), so skip the binary search. Still subject to the
-    // backward-window check.
+    // Locality fast-path: when `start` lies in [lastBase_, lastNextBase_) AND
+    // `addr` lies inside lastBase_'s cached byte extent (B-H2), lastBase_ is
+    // provably the containing instance — skip the binary search.
     if (lastBase_ != 0 && start >= lastBase_ &&
-        (lastNextBase_ == 0 || start < lastNextBase_)) {
+        (lastNextBase_ == 0 || start < lastNextBase_) &&
+        addr >= lastBase_ &&
+        Discrete::AddressBounds::IsOffsetWithinExtent(
+            static_cast<std::ptrdiff_t>(addr - lastBase_), lastExtent_)) {
         if (lastBase_ < lowest) {
             out.reason = "no_klass_in_range";
             return out;
@@ -1323,27 +1575,26 @@ AddressLookup ReverseLookupIndex::Lookup(std::uintptr_t addr, std::size_t maxBac
         return out;
     }
 
-    // Binary search for the greatest base ≤ start.
-    Entry probe{start, 0, 0};
-    auto it = std::upper_bound(bases_.begin(), bases_.end(), probe,
-        [](const Entry& a, const Entry& b) { return a.base < b.base; });
-    std::uintptr_t nextBase = (it != bases_.end()) ? it->base : 0;
-    if (it == bases_.begin()) {
-        out.reason = "no_klass_in_range";
-        return out;
-    }
-    --it;   // greatest base ≤ start
-    if (it->base < lowest) {
+    // Binary search for the nearest entry ≤ start whose object byte-extent
+    // actually contains `addr` (B-H2: prevents neighbor-object misattribution
+    // while backtracking over embedded klass/vtable pointers).
+    auto sel = Discrete::AddressBounds::SelectContainingEntry(
+        bases_, addr, start, lowest,
+        [](const Entry& e) -> std::size_t {
+            return ComputeMonoInstanceExtent(e.base, reinterpret_cast<MonoClass*>(e.klass));
+        });
+    if (!sel.found) {
         out.reason = "no_klass_in_range";
         return out;
     }
 
-    lastBase_     = it->base;
-    lastVtable_   = it->vtable;
-    lastKlass_    = it->klass;
-    lastNextBase_ = nextBase;
+    lastBase_     = sel.entry.base;
+    lastVtable_   = sel.entry.vtable;
+    lastKlass_    = sel.entry.klass;
+    lastNextBase_ = sel.nextBase;
+    lastExtent_   = sel.extent;
     ++hits_;
-    ResolveInstanceLookup(addr, it->base, it->vtable, it->klass, out);
+    ResolveInstanceLookup(addr, sel.entry.base, sel.entry.vtable, sel.entry.klass, out);
     return out;
 }
 

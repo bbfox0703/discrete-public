@@ -2,6 +2,7 @@
 
 #include "IL2CPPAddressFinder.h"
 
+#include "../shared/AddressBounds.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
@@ -32,9 +33,23 @@ namespace {
 // Phase 27 follow-up — heap-leaked Cache so process-exit doesn't iterate
 // 10K class-pointer destructors. Mirror of the same pattern in
 // MonoAddressFinder.cpp. Scalars stay direct (trivial destruction).
+struct ClassExtentInfo {
+    bool        isArray       = false;
+    bool        isString      = false;
+    std::size_t instanceSize  = 0;
+    std::size_t arrayElemSize = 0;
+};
+
+constexpr std::size_t kNotDynamicCap = 1u << 19;
+constexpr std::size_t kExtentInfoCap = 262144u;
+
 struct Cache {
-    std::mutex                   mu;
-    std::vector<std::uintptr_t>  classSet;
+    std::mutex                                          mu;
+    std::vector<std::uintptr_t>                         classSet;        // sorted (TypeDef)
+    std::vector<std::uintptr_t>                         imageSet;        // sorted (loaded Il2CppImage*)
+    std::unordered_set<std::uintptr_t>                  dynamicClassSet; // validated generic/array klasses
+    std::unordered_set<std::uintptr_t>                  notDynamicClass; // negative memo (capped)
+    std::unordered_map<std::uintptr_t, ClassExtentInfo> extentInfo;      // klass → static size info
 };
 Cache& cache() {
     static Cache* p = new Cache();   // intentional leak; Windows reclaims at exit
@@ -43,6 +58,9 @@ Cache& cache() {
 std::uintptr_t               g_minKlass = 0;
 std::uintptr_t               g_maxKlass = 0;
 bool                         g_built    = false;
+
+std::once_flag                             g_klassOffsetsOnce;
+Discrete::AddressBounds::KlassFieldOffsets g_klassOffsets;
 
 // SEH-protected name probe. il2cpp_class_get_name dereferences several layers
 // of pointer state — when the candidate isn't a real Il2CppClass*, the chain
@@ -112,6 +130,14 @@ int SehValueSizeProbe(fn_class_value_size fn, Il2CppClass* k) {
     __try { std::uint32_t a = 0; return fn(k, &a); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+std::int32_t SehClassInstanceSizeProbe(fn_class_instance_size fn, const Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+std::uint32_t SehObjectGetSizeProbe(fn_object_get_size fn, Il2CppObject* o) {
+    __try { return fn(o); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+}
 // Phase 27c — array element class lookup. Non-null result means klass is
 // an array type.
 Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k) {
@@ -119,6 +145,227 @@ Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k)
     __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 #pragma warning(pop)
+
+// B-H2: calibrate Il2CppClass::{image, element_class, name} offsets from known
+// TypeDef classes so dynamic generic/array klasses can be validated purely via
+// SafeReadBytes (zero runtime API calls on unvalidated pointers).
+void CalibrateIl2CppKlassOffsets() {
+    const auto& r = GetResolver();
+    if (!r.resolved || r.class_get_image == nullptr ||
+        r.class_get_element_class == nullptr || r.class_get_name == nullptr) {
+        return;
+    }
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return;
+
+    constexpr std::size_t kScanLimit     = 512u;
+    constexpr std::size_t kStep          = sizeof(void*);
+    constexpr std::size_t kSamplesWanted = 16u;
+
+    std::vector<std::size_t> imgCand, elemCand, nameCand;
+    bool imgSeeded = false, elemSeeded = false, nameSeeded = false;
+    std::size_t sampled = 0u;
+
+    auto assemblies = EnumerateAssemblies();
+    for (const auto& a : assemblies) {
+        if (a.image == nullptr) continue;
+        auto classes = EnumerateClasses(a.image);
+        std::size_t perAsm = 0u;
+        for (const auto& ce : classes) {
+            if (ce.klass == nullptr) continue;
+            if (SehElementClassProbe(r.class_get_element_class, ce.klass) != ce.klass) continue;
+            const Il2CppImage* img = SehClassImageProbe(r.class_get_image, ce.klass);
+            const char* nm = SehClassNameProbe(r.class_get_name, ce.klass);
+            if (img == nullptr || nm == nullptr || *nm == '\0') continue;
+
+            const auto selfPtr = reinterpret_cast<std::uintptr_t>(ce.klass);
+            const auto imgPtr  = reinterpret_cast<std::uintptr_t>(img);
+            const auto namePtr = reinterpret_cast<std::uintptr_t>(nm);
+            const auto* bytes  = reinterpret_cast<const std::uint8_t*>(ce.klass);
+
+            std::vector<std::size_t> imgHits, elemHits, nameHits;
+            for (std::size_t off = 0u; off + kStep <= kScanLimit; off += kStep) {
+                std::uintptr_t v = 0u;
+                if (!Memory::SafeReadBytes(bytes + off, &v, sizeof(v))) break;
+                if (v == imgPtr)  imgHits.push_back(off);
+                if (v == selfPtr) elemHits.push_back(off);
+                if (v == namePtr) nameHits.push_back(off);
+            }
+            Discrete::AddressBounds::IntersectCandidateOffsets(imgCand,  imgSeeded,  imgHits);
+            Discrete::AddressBounds::IntersectCandidateOffsets(elemCand, elemSeeded, elemHits);
+            Discrete::AddressBounds::IntersectCandidateOffsets(nameCand, nameSeeded, nameHits);
+
+            ++sampled;
+            ++perAsm;
+            if (sampled >= kSamplesWanted || perAsm >= 4u) break;
+        }
+        if (sampled >= kSamplesWanted) break;
+    }
+
+    if (!imgCand.empty())  { g_klassOffsets.imageOffset     = imgCand.front();  g_klassOffsets.hasImageOffset = true; }
+    if (!elemCand.empty()) { g_klassOffsets.elemClassOffset = elemCand.front(); g_klassOffsets.hasElemOffset  = true; }
+    if (!nameCand.empty()) { g_klassOffsets.nameOffset      = nameCand.front(); g_klassOffsets.hasNameOffset  = true; }
+
+    if (g_klassOffsets.Ready()) {
+        Log::Write(MagicStrings::LogCategoryWalk,
+            "AddrFinder(IL2CPP): calibrated klass offsets image=" +
+            std::to_string(g_klassOffsets.imageOffset) +
+            " elem=" + std::to_string(g_klassOffsets.elemClassOffset) +
+            " name=" + std::to_string(g_klassOffsets.nameOffset) +
+            " (from " + std::to_string(sampled) + " samples)");
+    } else {
+        Log::Write(MagicStrings::LogCategoryWalk,
+            "AddrFinder(IL2CPP): klass offset calibration incomplete — dynamic generic/array discovery disabled");
+    }
+}
+
+void EnsureIl2CppKlassOffsetsCalibrated() {
+    std::call_once(g_klassOffsetsOnce, CalibrateIl2CppKlassOffsets);
+}
+
+bool TryAcceptDynamicIl2CppKlass(
+    std::uintptr_t candidate,
+    const std::vector<std::uintptr_t>& imageSetSnap,
+    const std::vector<std::uintptr_t>& classSetSnap)
+{
+    if (!g_klassOffsets.Ready() || imageSetSnap.empty()) return false;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (cache().dynamicClassSet.find(candidate) != cache().dynamicClassSet.end()) return true;
+        if (cache().notDynamicClass.find(candidate) != cache().notDynamicClass.end()) return false;
+    }
+
+    auto readPtr = [](std::uintptr_t addr, std::uintptr_t& out) -> bool {
+        return Memory::SafeReadBytes(reinterpret_cast<const void*>(addr), &out, sizeof(out));
+    };
+    auto readBytes = [](std::uintptr_t addr, void* dst, std::size_t n) -> bool {
+        return Memory::SafeReadBytes(reinterpret_cast<const void*>(addr), dst, n);
+    };
+    auto containsImage = [&imageSetSnap](std::uintptr_t img) -> bool {
+        return std::binary_search(imageSetSnap.begin(), imageSetSnap.end(), img);
+    };
+    auto containsClass = [&classSetSnap](std::uintptr_t k) -> bool {
+        return std::binary_search(classSetSnap.begin(), classSetSnap.end(), k);
+    };
+
+    bool isArray = false;
+    std::uintptr_t elemClass = 0u;
+    const bool ok = Discrete::AddressBounds::ValidateDynamicKlassMemory(
+        candidate, g_klassOffsets, readPtr, readBytes,
+        containsImage, containsClass, isArray, elemClass);
+
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (ok) {
+            cache().dynamicClassSet.insert(candidate);
+        } else if (cache().notDynamicClass.size() < kNotDynamicCap) {
+            cache().notDynamicClass.insert(candidate);
+        }
+    }
+    return ok;
+}
+
+ClassExtentInfo GetIl2CppClassExtentInfo(Il2CppClass* k) {
+    const auto kp = reinterpret_cast<std::uintptr_t>(k);
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        auto it = cache().extentInfo.find(kp);
+        if (it != cache().extentInfo.end()) return it->second;
+    }
+
+    ClassExtentInfo info;
+    const auto& r = GetResolver();
+    if (r.class_get_element_class != nullptr) {
+        Il2CppClass* elem = SehElementClassProbe(r.class_get_element_class, k);
+        if (elem != nullptr && elem != k) {
+            info.isArray = true;
+            info.arrayElemSize = ManagedLayout::kPointerSize;
+            if (r.class_is_valuetype != nullptr &&
+                SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
+                r.class_value_size != nullptr) {
+                int sz = SehValueSizeProbe(r.class_value_size, elem);
+                if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
+            }
+        }
+    }
+    if (!info.isArray) {
+        const char* nm = (r.class_get_name != nullptr)
+            ? SehClassNameProbe(r.class_get_name, k) : nullptr;
+        const char* ns = (r.class_get_namespace != nullptr)
+            ? SehClassNamespaceProbe(r.class_get_namespace, k) : nullptr;
+        if (nm != nullptr && ns != nullptr &&
+            std::strcmp(nm, "String") == 0 && std::strcmp(ns, "System") == 0) {
+            info.isString = true;
+        }
+        if (r.class_instance_size != nullptr) {
+            std::int32_t sz = SehClassInstanceSizeProbe(r.class_instance_size, k);
+            if (sz > 0) info.instanceSize = static_cast<std::size_t>(sz);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (cache().extentInfo.size() < kExtentInfoCap) {
+            cache().extentInfo.emplace(kp, info);
+        }
+    }
+    return info;
+}
+
+std::size_t ComputeIl2CppInstanceExtent(std::uintptr_t instanceAddr, Il2CppClass* k) {
+    const ClassExtentInfo ci = GetIl2CppClassExtentInfo(k);
+    Discrete::AddressBounds::ObjectExtentSpec spec;
+    spec.isArray       = ci.isArray;
+    spec.isString      = ci.isString;
+    spec.instanceSize  = ci.instanceSize;
+    spec.arrayElemSize = ci.arrayElemSize;
+
+    if (ci.isArray) {
+        std::uintptr_t len = 0u;
+        if (Memory::SafeReadBytes(
+                reinterpret_cast<const void*>(instanceAddr + ManagedLayout::kArrayMaxLengthOffset),
+                &len, sizeof(len))) {
+            spec.arrayLength = static_cast<std::size_t>(len);
+        }
+    } else if (ci.isString) {
+        std::int32_t clen = -1;
+        if (Memory::SafeReadBytes(
+                reinterpret_cast<const void*>(instanceAddr + ManagedLayout::kStringLengthOffset),
+                &clen, sizeof(clen))) {
+            spec.stringChars = clen;
+        }
+    } else if (spec.instanceSize == 0u) {
+        const auto& r = GetResolver();
+        if (r.object_get_size != nullptr) {
+            std::uint32_t osz = SehObjectGetSizeProbe(
+                r.object_get_size, reinterpret_cast<Il2CppObject*>(instanceAddr));
+            if (osz > 0u) spec.instanceSize = static_cast<std::size_t>(osz);
+        }
+    }
+    return Discrete::AddressBounds::ComputeObjectExtent(spec);
+}
+
+void SnapshotMergedClassSet(std::vector<std::uintptr_t>& outSet,
+                            std::uintptr_t& outMin,
+                            std::uintptr_t& outMax) {
+    std::lock_guard<std::mutex> lk(cache().mu);
+    outSet = cache().classSet;
+    if (!cache().dynamicClassSet.empty()) {
+        outSet.reserve(outSet.size() + cache().dynamicClassSet.size());
+        for (std::uintptr_t dk : cache().dynamicClassSet) outSet.push_back(dk);
+        std::sort(outSet.begin(), outSet.end());
+        outSet.erase(std::unique(outSet.begin(), outSet.end()), outSet.end());
+    }
+    if (outSet.empty()) {
+        outMin = 0;
+        outMax = 0;
+    } else {
+        outMin = outSet.front();
+        outMax = outSet.back();
+    }
+}
 
 bool ContainsClass(std::uintptr_t p) {
     // MUST hold the lock. classSet is rebuilt (clear + push_back + sort + erase)
@@ -693,50 +940,68 @@ void ResolveArrayElementSafe(std::uintptr_t addr, std::uintptr_t p,
 }  // namespace
 
 bool BuildClassRangeCache() {
-    std::lock_guard<std::mutex> lk(cache().mu);
-    if (g_built) return !cache().classSet.empty();
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        if (g_built) return !cache().classSet.empty();
 
-    if (!IsResolved()) {
-        Log::Write(MagicStrings::LogCategoryWalk,
-                   "AddrFinder: BuildClassRangeCache: il2cpp not resolved");
-        return false;
-    }
-
-    cache().classSet.clear();
-    g_minKlass = static_cast<std::uintptr_t>(-1);
-    g_maxKlass = 0;
-
-    auto assemblies = EnumerateAssemblies();
-    for (const auto& a : assemblies) {
-        if (a.image == nullptr) continue;
-        auto classes = EnumerateClasses(a.image);
-        for (const auto& c : classes) {
-            if (c.klass == nullptr) continue;
-            auto p = reinterpret_cast<std::uintptr_t>(c.klass);
-            cache().classSet.push_back(p);
-            if (p < g_minKlass) g_minKlass = p;
-            if (p > g_maxKlass) g_maxKlass = p;
+        if (!IsResolved()) {
+            Log::Write(MagicStrings::LogCategoryWalk,
+                       "AddrFinder: BuildClassRangeCache: il2cpp not resolved");
+            return false;
         }
-    }
-    std::sort(cache().classSet.begin(), cache().classSet.end());
-    cache().classSet.erase(std::unique(cache().classSet.begin(), cache().classSet.end()),
-                     cache().classSet.end());
-    if (cache().classSet.empty()) {
-        g_minKlass = 0;
-        g_maxKlass = 0;
-    }
-    g_built = true;
 
-    Log::Write(MagicStrings::LogCategoryWalk,
-               "AddrFinder: cached " + std::to_string(cache().classSet.size()) +
-               " Il2CppClass* pointers, range [" +
-               std::to_string(g_minKlass) + ", " + std::to_string(g_maxKlass) + "]");
-    return !cache().classSet.empty();
+        cache().classSet.clear();
+        cache().imageSet.clear();
+        cache().dynamicClassSet.clear();
+        cache().notDynamicClass.clear();
+        cache().extentInfo.clear();
+        g_minKlass = static_cast<std::uintptr_t>(-1);
+        g_maxKlass = 0;
+
+        auto assemblies = EnumerateAssemblies();
+        for (const auto& a : assemblies) {
+            if (a.image == nullptr) continue;
+            cache().imageSet.push_back(reinterpret_cast<std::uintptr_t>(a.image));
+            auto classes = EnumerateClasses(a.image);
+            for (const auto& c : classes) {
+                if (c.klass == nullptr) continue;
+                auto p = reinterpret_cast<std::uintptr_t>(c.klass);
+                cache().classSet.push_back(p);
+                if (p < g_minKlass) g_minKlass = p;
+                if (p > g_maxKlass) g_maxKlass = p;
+            }
+        }
+        std::sort(cache().classSet.begin(), cache().classSet.end());
+        cache().classSet.erase(std::unique(cache().classSet.begin(), cache().classSet.end()),
+                         cache().classSet.end());
+        std::sort(cache().imageSet.begin(), cache().imageSet.end());
+        cache().imageSet.erase(std::unique(cache().imageSet.begin(), cache().imageSet.end()),
+                         cache().imageSet.end());
+        if (cache().classSet.empty()) {
+            g_minKlass = 0;
+            g_maxKlass = 0;
+        }
+        g_built = true;
+        ok = !cache().classSet.empty();
+
+        Log::Write(MagicStrings::LogCategoryWalk,
+                   "AddrFinder: cached " + std::to_string(cache().classSet.size()) +
+                   " Il2CppClass* pointers across " + std::to_string(cache().imageSet.size()) +
+                   " images, range [" +
+                   std::to_string(g_minKlass) + ", " + std::to_string(g_maxKlass) + "]");
+    }
+    if (ok) EnsureIl2CppKlassOffsetsCalibrated();
+    return ok;
 }
 
 void InvalidateClassRangeCache() {
     std::lock_guard<std::mutex> lk(cache().mu);
     cache().classSet.clear();
+    cache().imageSet.clear();
+    cache().dynamicClassSet.clear();
+    cache().notDynamicClass.clear();
+    cache().extentInfo.clear();
     g_minKlass = 0;
     g_maxKlass = 0;
     g_built    = false;
@@ -944,6 +1209,14 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         }
     }
 
+    std::vector<std::uintptr_t> classSetSnap;
+    std::vector<std::uintptr_t> imageSetSnap;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        classSetSnap = cache().classSet;
+        imageSetSnap = cache().imageSet;
+    }
+
     for (std::size_t i = 0; i < maxSteps; ++i) {
         std::uintptr_t p = start - i * kStride;
         out.scannedSteps = i + 1;
@@ -956,7 +1229,11 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         std::memcpy(&klassCandidate, bulkBuf.data() + bufIdx, sizeof(klassCandidate));
         if (klassCandidate == 0) continue;
         if ((klassCandidate & 7u) != 0) continue;  // klass pointers are 8-aligned
-        if (!ContainsClass(klassCandidate))  continue;
+        bool accepted = std::binary_search(classSetSnap.begin(), classSetSnap.end(), klassCandidate);
+        if (!accepted) {
+            accepted = TryAcceptDynamicIl2CppKlass(klassCandidate, imageSetSnap, classSetSnap);
+        }
+        if (!accepted) continue;
 
         // Range hit + alignment OK. Final filter: make sure the class object
         // still looks alive. il2cpp_class_get_name dereferences a chain of
@@ -965,6 +1242,14 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         const char* name = (r.class_get_name != nullptr)
             ? SehClassNameProbe(r.class_get_name, k) : nullptr;
         if (name == nullptr || *name == '\0') continue;
+
+        // B-H2: enforce object byte-extent so an address past the end of an
+        // earlier neighbor object is never misattributed to that neighbor.
+        const std::size_t objExtent = ComputeIl2CppInstanceExtent(p, k);
+        if (!Discrete::AddressBounds::IsOffsetWithinExtent(
+                static_cast<std::ptrdiff_t>(addr - p), objExtent)) {
+            continue;
+        }
 
         // Got it — instance base `p` + validated klass `klassCandidate`.
         // Identity + field/array resolution (steps 5-8) is shared with the
@@ -1027,6 +1312,14 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
         }
     }
 
+    std::vector<std::uintptr_t> classSetSnap;
+    std::vector<std::uintptr_t> imageSetSnap;
+    {
+        std::lock_guard<std::mutex> lk(cache().mu);
+        classSetSnap = cache().classSet;
+        imageSetSnap = cache().imageSet;
+    }
+
     for (std::size_t i = 0; i < maxSteps; ++i) {
         std::uintptr_t p = start - i * kStride;
         out.scannedSteps = i + 1;
@@ -1037,12 +1330,22 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
         if (klassCandidate == 0) continue;
         if ((klassCandidate & 7u) != 0) continue;
 
-        if (ContainsClass(klassCandidate)) {
-            // Known metadata class — identical to WhatIsAt.
+        bool knownOrDynamic = std::binary_search(classSetSnap.begin(), classSetSnap.end(), klassCandidate);
+        if (!knownOrDynamic) {
+            knownOrDynamic = TryAcceptDynamicIl2CppKlass(klassCandidate, imageSetSnap, classSetSnap);
+        }
+        if (knownOrDynamic) {
+            // Known metadata or validated dynamic (generic/array) class —
+            // identical to WhatIsAt, including object-extent bounds check.
             Il2CppClass* k = reinterpret_cast<Il2CppClass*>(klassCandidate);
             const char* name = (r.class_get_name != nullptr)
                 ? SehClassNameProbe(r.class_get_name, k) : nullptr;
             if (name == nullptr || *name == '\0') continue;
+            const std::size_t objExtent = ComputeIl2CppInstanceExtent(p, k);
+            if (!Discrete::AddressBounds::IsOffsetWithinExtent(
+                    static_cast<std::ptrdiff_t>(addr - p), objExtent)) {
+                continue;
+            }
             ResolveInstanceLookup(addr, p, klassCandidate, out);
             return out;
         }
@@ -1059,6 +1362,23 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
 
         Il2CppClass* elem = nullptr;
         if (!LooksLikeValueTypeElementArray(klassCandidate, elem)) continue;
+
+        // B-H2: verify `addr` falls within this array's actual byte extent.
+        std::size_t elemSize = ManagedLayout::kPointerSize;
+        if (r.class_value_size != nullptr) {
+            int sz = SehValueSizeProbe(r.class_value_size, elem);
+            if (sz > 0) elemSize = static_cast<std::size_t>(sz);
+        }
+        Discrete::AddressBounds::ObjectExtentSpec arrSpec;
+        arrSpec.isArray       = true;
+        arrSpec.arrayLength   = static_cast<std::size_t>(arrLen);
+        arrSpec.arrayElemSize = elemSize;
+        const std::size_t arrExtent = Discrete::AddressBounds::ComputeObjectExtent(arrSpec);
+        if (!Discrete::AddressBounds::IsOffsetWithinExtent(
+                static_cast<std::ptrdiff_t>(addr - p), arrExtent)) {
+            continue;
+        }
+
         ResolveArrayElementSafe(addr, p, elem, out);
         return out;
     }
@@ -1222,18 +1542,13 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         return out;
     }
 
-    // Snapshot the class set under the cache lock, then release. The
-    // wide heap walk takes seconds; we don't want to hold the cache
-    // mutex across it (would block any concurrent WhatIsAt).
+    // Snapshot the TypeDef + dynamic class sets under the cache lock, then
+    // release. The wide heap walk takes seconds; we don't want to hold the
+    // cache mutex across it (would block any concurrent WhatIsAt).
     std::vector<std::uintptr_t> classSet;
     std::uintptr_t minKlass = 0;
     std::uintptr_t maxKlass = 0;
-    {
-        std::lock_guard<std::mutex> lk(cache().mu);
-        classSet = cache().classSet;   // copy — typically ~10K entries × 8 B = 80 KB
-        minKlass = g_minKlass;
-        maxKlass = g_maxKlass;
-    }
+    SnapshotMergedClassSet(classSet, minKlass, maxKlass);
     if (classSet.empty()) return out;
 
     constexpr DWORD kRW =
@@ -1365,6 +1680,7 @@ RevIndexCache& revIndexCache() {
 bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
     bases_.clear();
     lastBase_ = lastKlass_ = lastNextBase_ = 0;
+    lastExtent_ = 0;
     hits_ = localityHits_ = 0;
 
     // Reuse fast-path: copy a recent build's bases if still inside the window.
@@ -1388,12 +1704,7 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
 
     std::vector<std::uintptr_t> classSet;
     std::uintptr_t minKlass = 0, maxKlass = 0;
-    {
-        std::lock_guard<std::mutex> lk(cache().mu);
-        classSet = cache().classSet;
-        minKlass = g_minKlass;
-        maxKlass = g_maxKlass;
-    }
+    SnapshotMergedClassSet(classSet, minKlass, maxKlass);
     if (classSet.empty()) return false;
 
     constexpr DWORD kRW =
@@ -1523,12 +1834,14 @@ AddressLookup ReverseLookupIndex::Lookup(std::uintptr_t addr, std::size_t maxBac
     out.scannedFrom = lowest;
     out.scannedTo   = start + kStride;
 
-    // Locality fast-path: when `start` lies in [lastBase_, lastNextBase_),
-    // lastBase_ is PROVABLY the greatest base ≤ start (the next base up is
-    // lastNextBase_ > start), so we can skip the binary search. Still subject
-    // to the backward-window check (lastBase_ must be ≥ lowest).
+    // Locality fast-path: when `start` lies in [lastBase_, lastNextBase_) AND
+    // `addr` lies inside lastBase_'s cached byte extent (B-H2), lastBase_ is
+    // provably the containing instance — skip the binary search.
     if (lastBase_ != 0 && start >= lastBase_ &&
-        (lastNextBase_ == 0 || start < lastNextBase_)) {
+        (lastNextBase_ == 0 || start < lastNextBase_) &&
+        addr >= lastBase_ &&
+        Discrete::AddressBounds::IsOffsetWithinExtent(
+            static_cast<std::ptrdiff_t>(addr - lastBase_), lastExtent_)) {
         if (lastBase_ < lowest) {
             out.reason = "no_klass_in_range";
             return out;
@@ -1539,29 +1852,25 @@ AddressLookup ReverseLookupIndex::Lookup(std::uintptr_t addr, std::size_t maxBac
         return out;
     }
 
-    // Binary search for the greatest base ≤ start.
-    Entry probe{start, 0};
-    auto it = std::upper_bound(bases_.begin(), bases_.end(), probe,
-        [](const Entry& a, const Entry& b) { return a.base < b.base; });
-    // `it` now points at the first base > start; the entry before it (if any)
-    // is the greatest base ≤ start, and `it` itself is the next base above it.
-    std::uintptr_t nextBase = (it != bases_.end()) ? it->base : 0;
-    if (it == bases_.begin()) {
-        out.reason = "no_klass_in_range";
-        return out;
-    }
-    --it;   // greatest base ≤ start
-    if (it->base < lowest) {
-        // Nearest base is outside the backward window → not contained.
+    // Binary search for the nearest entry ≤ start whose object byte-extent
+    // actually contains `addr` (B-H2: prevents neighbor-object misattribution
+    // while backtracking over embedded klass pointers).
+    auto sel = Discrete::AddressBounds::SelectContainingEntry(
+        bases_, addr, start, lowest,
+        [](const Entry& e) -> std::size_t {
+            return ComputeIl2CppInstanceExtent(e.base, reinterpret_cast<Il2CppClass*>(e.klass));
+        });
+    if (!sel.found) {
         out.reason = "no_klass_in_range";
         return out;
     }
 
-    lastBase_     = it->base;
-    lastKlass_    = it->klass;
-    lastNextBase_ = nextBase;
+    lastBase_     = sel.entry.base;
+    lastKlass_    = sel.entry.klass;
+    lastNextBase_ = sel.nextBase;
+    lastExtent_   = sel.extent;
     ++hits_;
-    ResolveInstanceLookup(addr, it->base, it->klass, out);
+    ResolveInstanceLookup(addr, sel.entry.base, sel.entry.klass, out);
     return out;
 }
 

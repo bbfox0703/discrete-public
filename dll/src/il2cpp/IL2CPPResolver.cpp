@@ -94,6 +94,8 @@ void DoResolve() {
     // Phase 10 follow-up: array element-class metadata for walkArray.
     bindOpt("il2cpp_class_get_element_class",   g_resolver.class_get_element_class);
     bindOpt("il2cpp_class_value_size",          g_resolver.class_value_size);
+    bindOpt("il2cpp_class_instance_size",       g_resolver.class_instance_size);
+    bindOpt("il2cpp_object_get_size",           g_resolver.object_get_size);
     bindOpt("il2cpp_class_is_valuetype",        g_resolver.class_is_valuetype);
     bindOpt("il2cpp_field_get_flags",           g_resolver.field_get_flags);
     bindOpt("il2cpp_method_get_token",          g_resolver.method_get_token);

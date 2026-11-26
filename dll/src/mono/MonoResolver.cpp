@@ -123,6 +123,7 @@ void DoResolve() {
     // Phase 10 follow-up: array element-class metadata for walkArray.
     optBind("mono_class_get_element_class",     g_resolver.class_get_element_class);
     optBind("mono_class_value_size",            g_resolver.class_value_size);
+    optBind("mono_class_instance_size",         g_resolver.class_instance_size);
     optBind("mono_class_is_valuetype",          g_resolver.class_is_valuetype);
 
     // Nested-type support — required to resolve `Outer/Inner` style names

@@ -12,6 +12,25 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1541) — Fix B-H2 (object-extent bounds check & pure-memory generic/array klass recognition on Mono + IL2CPP + tests)
+
+- **Bug fix (`B-H2` — final High-severity audit finding, 10/10 High complete):** `BuildClassRangeCache` only enumerated TypeDef rows (`0x02xxxxxx` on Mono, `il2cpp_image_get_class` on IL2CPP), omitting runtime-synthesized generic instantiations (`List<T>`, `Dictionary<K,V>`) and arrays (`T[]`), and neither `WhatIsAt` nor `ReverseLookupIndex::Lookup` verified that `addr - instance < objectSize`. As a result, addresses inside generic instances, arrays, or gaps were falsely attributed to the nearest preceding TypeDef neighbor object with huge `nearestFieldDelta`, and Mono lacked IL2CPP's array fallback parity.
+  - Added shared pure header `dll/src/shared/AddressBounds.h`:
+    - `ComputeObjectExtent` & `IsOffsetWithinExtent` for regular objects (`class_instance_size` / `object_get_size`, clamped to `>= 2*ptr`), SZARRAYs (`4*ptr + max_length * elemSize`, capped at 64M with overflow protection), and `System.String` (`2*ptr + 4 + (charLen + 1) * 2`).
+    - `IntersectCandidateOffsets`, `LooksLikePlausibleClassName` (ASCII + valid UTF-8), and `ValidateDynamicKlassMemory` — pure-memory structural validation of dynamic generic/array klasses using self-calibrated `(image, element_class, name)` offsets with zero runtime API calls on unvalidated memory.
+    - `SelectContainingEntry` — bounded `ReverseLookupIndex` interval lookup that rejects out-of-bounds neighbor hits and backtracks up to 16 entries past embedded false-positive header pointers inside larger enclosing objects.
+  - Added optional runtime bindings: `mono_class_instance_size` (`MonoResolver.{h,cpp}`) and `il2cpp_class_instance_size` + `il2cpp_object_get_size` (`IL2CPPResolver.{h,cpp}`).
+  - Updated `MonoAddressFinder.{h,cpp}` and `IL2CPPAddressFinder.{h,cpp}` symmetrically:
+    - Cached sorted loaded `imageSet`, per-class static `extentInfo`, and `dynamicClassSet` + capped negative memo `notDynamicClass`; calibrated `(image, element_class, name)` offsets once across up to 16 TypeDef samples.
+    - Enforced `IsOffsetWithinExtent` in `WhatIsAt`, `WhatIsAtAcceptingArrays`, and `ReverseLookupIndex::Lookup` (including `lastExtent_` on the locality fast-path).
+    - Accepted validated dynamic generic & array klasses in Mono `WhatIsAt`, `FindAllInstances`, and `ReverseLookupIndex::Build` (gated by `vtable->domain == rootDomain` + pure-memory validation) and in IL2CPP `WhatIsAt` / `WhatIsAtAcceptingArrays` (feeding the shared `dynamicClassSet` merged into `FindAllInstances` / `ReverseLookupIndex::Build`).
+  - Documented object-extent bounds and generic/array coverage in [address-finder.md](address-finder.md).
+  - Added `Test_BH2_AddressBoundsAndDynamicKlass` (+43 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp`.
+  - Marked `B-H2` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1541) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1167 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 397 checks passed (x64) / 400 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1539) — Fix A-H1 (+ A-L1, A-L12) (pin backend module, make DllMain detach a no-op, add x64/x86 OS-loader probe tests)
 
 - **Bug fix (`A-H1`, plus `A-L1` and `A-L12` in `main.cpp`):** Previously `DllMain(DLL_PROCESS_DETACH)` with `lpReserved == NULL` (external `FreeLibrary` from CE "unload module", Process Hacker, or a third-party injector) ran `OnDetach() -> Discrete_Shutdown() -> PipeServer::Stop()` + `MainThreadHook::Uninstall()` under the OS loader lock. Because exiting worker/monitor threads block on `LdrShutdownThread` waiting for the same loader lock, the wait inevitably timed out and detached threads returned into unmapped code pages (access violation / game crash).

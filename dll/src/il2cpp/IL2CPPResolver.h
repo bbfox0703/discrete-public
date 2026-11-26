@@ -31,6 +31,8 @@ using fn_class_get_methods      = const MethodInfo* (*)(Il2CppClass*, void** /*i
 using fn_class_get_static_data  = void*           (*)(Il2CppClass*);
 using fn_class_get_element_class = Il2CppClass*  (*)(Il2CppClass*);
 using fn_class_value_size       = int             (*)(Il2CppClass*, std::uint32_t* /*align*/);
+using fn_class_instance_size    = std::int32_t    (*)(const Il2CppClass*);
+using fn_object_get_size        = std::uint32_t   (*)(Il2CppObject*);
 using fn_class_is_valuetype     = int             (*)(Il2CppClass*);
 using fn_field_get_name         = const char*     (*)(FieldInfo*);
 using fn_field_get_type         = const Il2CppType* (*)(FieldInfo*);
@@ -101,6 +103,8 @@ struct Resolver {
     fn_class_get_static_data  class_get_static_data  = nullptr;
     fn_class_get_element_class class_get_element_class = nullptr;
     fn_class_value_size       class_value_size       = nullptr;
+    fn_class_instance_size    class_instance_size    = nullptr;
+    fn_object_get_size        object_get_size        = nullptr;
     fn_class_is_valuetype     class_is_valuetype     = nullptr;
     fn_field_get_name         field_get_name         = nullptr;
     fn_field_get_type         field_get_type         = nullptr;

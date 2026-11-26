@@ -179,6 +179,7 @@ private:
     std::uintptr_t lastVtable_   = 0;
     std::uintptr_t lastKlass_    = 0;
     std::uintptr_t lastNextBase_ = 0;    // base of the next instance above lastBase_
+    std::size_t    lastExtent_   = 0;    // byte extent of lastBase_ (0 = unknown)
     std::size_t    hits_         = 0;
     std::size_t    localityHits_ = 0;
 };
