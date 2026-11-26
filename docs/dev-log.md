@@ -12,6 +12,17 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1544) — Fix A-M11 + A-M12 (AVX2 string-scan scalar tail alignment & identity-guard regex ReDoS + tests)
+
+- **Bug fixes (`A-M11`, `A-M12`):**
+  - **`A-M11` (`dll/src/shared/Memory.{h,cpp}`):** After the 32-byte AVX2 loop in `SehMemcmpProbe` exited, the scalar tail resumed directly at `i` (a multiple of 32). When `stride` did not divide 32 (e.g. `3, 5, 6, 7, 12, 64`), the tail stepped on an off-grid sequence (`32, 32+s, ...`), missing aligned hits and reporting unaligned false positives. Fixed by rounding `i` up to the next multiple of `stride` (with overflow guard) before entering the scalar tail, and exposed `Discrete::Memory::ScanStringSpan` for direct unit testing.
+  - **`A-M12` (`tools/check_no_local_paths.py`):** `SESSION_DIR_PATTERN`'s intermediate segment class `[^\s:*?"<>|]{0,120}` did not exclude path separators (`/` and `\`), causing exponential backtracking ($O(2^N)$) on long non-matching paths with many separators. Excluded `/` and `\` (`_NO_SEP`) so every path decomposes uniquely in linear time.
+  - Added `Test_AM11_StringScanAvx2TailAlignment` to `dll/tests/dll_core_test.cpp` (targeted stride=6 off-grid decoy test + exhaustive scalar-oracle parity across 13 strides `1..64` and varied tail lengths on both x64 and x86) and `tools/verify/test_check_no_local_paths.py` (positive/negative cases + 50-separator ReDoS timing assertions `< 0.1s`).
+  - Marked `A-M11` and `A-M12` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1544) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; `python tools/verify/test_check_no_local_paths.py` passed (4 positive, 3 negative, 3 ReDoS checks); C# xUnit v3 tests 1167 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 451 checks passed (x64) / 454 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1542) — Fix A-M1 + A-M2 (+ A-L5, A-L7) (per-client disconnect monitor, pipelined ReadLine buffer, atomic ScanCancel + tests)
 
 - **Bug fixes (`A-M1`, `A-M2`, plus `A-L5` and `A-L7` in `PipeServer` / `ScanCancel`):**

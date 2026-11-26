@@ -81,12 +81,12 @@
 - 成因：`RunBulkAsync` 在 `await` 之間列舉 `Games`；使用者在批次期間按 Refresh（或批次開始時 scan 剛好完成），`Games` 被清空重建 → 下一次 `MoveNext` 丟 `InvalidOperationException`。這個例外在 `RunBulkAsync` 內沒有 catch，會一路傳到 `AsyncRelayCommand`，預設會在 UI thread 重新拋出。
 - 修法：Refresh 的 `IsEnabled` 改綁 `!IsScanning && !IsBusy`，`RefreshAsync` 開頭也檢查 `IsBusy`；`RunBulkAsync` 改成列舉快照（`foreach (var row in Games.ToList())`）。
 
-**A-M11 · 字串掃描的 AVX2 fast-path 在 alignment 不整除 32 時，scalar tail 會偏離掃描格點**
+**A-M11 · 字串掃描的 AVX2 fast-path 在 alignment 不整除 32 時，scalar tail 會偏離掃描格點 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/Memory.cpp:867-891`（`SehMemcmpProbe`）；`:924-927`
 - 成因：AVX2 迴圈結束時 `i` 是 32 的倍數，scalar 迴圈直接從這個 `i` 開始、每次加 `stride`。`req.alignment` 是 3、5、6、7、64… 這類不整除 32 的值時，tail 掃的是 `32, 32+s, …`，不在 `0, s, 2s…` 的格點上 → 漏掉格點上的命中，同時回報格點外的假命中；結果還會隨 CPU 有沒有 AVX2 而不同。
 - 修法：SIMD 迴圈結束後先把 `i` 進位到下一個 `stride` 的倍數（`i = (i + stride - 1) / stride * stride`），再進 scalar 迴圈；或者 `32 % stride != 0` 時直接停用 SIMD 路徑。
 
-**A-M12 · `check_no_local_paths.py` 的 `SESSION_DIR_PATTERN` 有災難性回溯風險，可能讓每次 build 卡住（待驗證）**
+**A-M12 · `check_no_local_paths.py` 的 `SESSION_DIR_PATTERN` 有災難性回溯風險，可能讓每次 build 卡住（待驗證） — ✅ FIXED (2026-11-26)**
 - 位置：`tools/check_no_local_paths.py:83-84`；呼叫端 `build.ps1:389`
 - 成因：`(?:[^\s:*?"<>|]{0,120}SEP)*?` 中的字元類別**沒有排除路徑分隔字元**，所以一段「X:/」後面跟著很多 `/`、又沒有 `.claude/projects` 的字串，可以用指數多種方式切成各次重複；比對失敗時 Python `re` 會全部試過一遍。identity guard 在每次 `build.cmd` 開頭都會跑，任何被追蹤的檔案只要有一行這種長路徑（log fixture、minified JSON），就可能讓 build 卡死。（這次無法在環境中實際計時，請用 `"C:/" + "a/"*25 + "x"` 驗證。）
 - 修法：把字元類別改成 `[^\s:*?"<>|\\/]{0,120}`（排除分隔字元），讓每次重複的切法唯一，複雜度回到線性。

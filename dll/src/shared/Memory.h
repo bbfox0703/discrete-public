@@ -244,6 +244,15 @@ struct StringScanCandidate {
 std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
                                                 ValueScanStats* stats = nullptr);
 
+// Pure in-memory span scan used by ScanForString (and offline unit tests).
+// Scans `[base, base + size)` for `needle[0..needleSize)` at offsets
+// `0, stride, 2*stride, ...` up to `limit` matches, appending to `matches`.
+bool ScanStringSpan(const std::uint8_t* base, std::size_t size,
+                    const std::uint8_t* needle, std::size_t needleSize,
+                    std::size_t stride,
+                    std::vector<StringScanCandidate>& matches,
+                    std::size_t limit);
+
 // Scans heap-like RW memory for pointer-sized values equal to `target`, at
 // 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an
 // object is its Il2CppClass*; in Mono it's a MonoVTable*. Returns at most

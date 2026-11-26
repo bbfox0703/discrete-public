@@ -989,6 +989,104 @@ void Test_AM2_PipeLineBufferPreservesPipelinedBytes() {
     }
 }
 
+// ============================================================================
+// A-M11 — AVX2 string-scan scalar tail preserves non-dividing stride grid
+// ============================================================================
+void Test_AM11_StringScanAvx2TailAlignment() {
+    using namespace Discrete::Memory;
+
+    // 1. Targeted regression: buffer of 60 bytes with stride=6 and needle="XY".
+    //    AVX2 covers [0, 32) -> hits at 0, 6, 12, 18, 24, 30.
+    //    Scalar tail MUST resume at 36 (NOT 32!), so:
+    //      - unaligned decoy at 32 is NOT matched,
+    //      - aligned hit at 36 and 48 ARE matched.
+    {
+        std::vector<std::uint8_t> buf(60, static_cast<std::uint8_t>('.'));
+        const std::uint8_t needle[2] = {'X', 'Y'};
+        // Place decoy at 32 (off stride=6 grid) and real hits at 30, 36, 48.
+        buf[30] = 'X'; buf[31] = 'Y';
+        buf[32] = 'X'; buf[33] = 'Y';  // off-grid!
+        buf[36] = 'X'; buf[37] = 'Y';
+        buf[48] = 'X'; buf[49] = 'Y';
+
+        std::vector<StringScanCandidate> hits;
+        CHECK(ScanStringSpan(buf.data(), buf.size(), needle, 2, /*stride=*/6, hits, 64));
+        CHECK(hits.size() == 3u);
+        if (hits.size() == 3u) {
+            CHECK(static_cast<std::size_t>(
+                static_cast<const std::uint8_t*>(hits[0].addr) - buf.data()) == 30u);
+            CHECK(static_cast<std::size_t>(
+                static_cast<const std::uint8_t*>(hits[1].addr) - buf.data()) == 36u);
+            CHECK(static_cast<std::size_t>(
+                static_cast<const std::uint8_t*>(hits[2].addr) - buf.data()) == 48u);
+        }
+    }
+
+    // 2. Exhaustive oracle comparison across non-dividing and >32 strides
+    //    and varied tail lengths (sizes 33..95).
+    {
+        const std::uint8_t needle[3] = {'A', 'B', 'C'};
+        const std::size_t strides[] = {1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 32, 33, 64};
+
+        // Construct a dense buffer where "ABC" occurs at every possible offset
+        // via overlapping/non-overlapping placements using a 1-byte needle and
+        // 3-byte needle.
+        std::vector<std::uint8_t> dense(96);
+        for (std::size_t k = 0; k < dense.size(); ++k) {
+            dense[k] = static_cast<std::uint8_t>((k % 3 == 0) ? 'A' : ((k % 3 == 1) ? 'B' : 'C'));
+        }
+        // Also test a buffer of all 'A's with needle "AA" so EVERY offset matches
+        // the byte pattern — any grid drift immediately shows up!
+        std::vector<std::uint8_t> allA(96, static_cast<std::uint8_t>('A'));
+        const std::uint8_t aa[2] = {'A', 'A'};
+
+        bool allMatchedOracle = true;
+        for (std::size_t stride : strides) {
+            for (std::size_t sz = 33; sz <= 95; sz += 7) {
+                // Compare against scalar reference on `allA` with needle "AA".
+                std::vector<std::size_t> expected;
+                for (std::size_t i = 0; i + 2 <= sz; i += stride) expected.push_back(i);
+
+                std::vector<StringScanCandidate> got;
+                ScanStringSpan(allA.data(), sz, aa, 2, stride, got, 1024);
+                if (got.size() != expected.size()) {
+                    allMatchedOracle = false;
+                } else {
+                    for (std::size_t j = 0; j < got.size(); ++j) {
+                        const auto off = static_cast<std::size_t>(
+                            static_cast<const std::uint8_t*>(got[j].addr) - allA.data());
+                        if (off != expected[j]) {
+                            allMatchedOracle = false;
+                            break;
+                        }
+                    }
+                }
+
+                // Compare against scalar reference on `dense` with needle "ABC".
+                std::vector<std::size_t> exp3;
+                for (std::size_t i = 0; i + 3 <= sz; i += stride) {
+                    if (std::memcmp(dense.data() + i, needle, 3) == 0) exp3.push_back(i);
+                }
+                std::vector<StringScanCandidate> got3;
+                ScanStringSpan(dense.data(), sz, needle, 3, stride, got3, 1024);
+                if (got3.size() != exp3.size()) {
+                    allMatchedOracle = false;
+                } else {
+                    for (std::size_t j = 0; j < got3.size(); ++j) {
+                        const auto off = static_cast<std::size_t>(
+                            static_cast<const std::uint8_t*>(got3[j].addr) - dense.data());
+                        if (off != exp3[j]) {
+                            allMatchedOracle = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        CHECK(allMatchedOracle);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1001,6 +1099,7 @@ int main() {
     Test_BH2_AddressBoundsAndDynamicKlass();
     Test_AM1_PerClientScanCancelAndAtomicState();
     Test_AM2_PipeLineBufferPreservesPipelinedBytes();
+    Test_AM11_StringScanAvx2TailAlignment();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

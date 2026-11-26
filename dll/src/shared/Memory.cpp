@@ -880,6 +880,17 @@ bool SehMemcmpProbe(const std::uint8_t* base, std::size_t size,
                 mask &= mask - 1;   // clear lowest set bit
             }
         }
+        // A-M11: advance `i` to the next multiple of `stride` so the scalar
+        // tail stays on the `0, stride, 2*stride, ...` alignment grid when
+        // `stride` does not divide 32 (e.g. 3, 5, 6, 7, 64).
+        if (stride > 1u) {
+            const std::size_t rem = i % stride;
+            if (rem != 0u) {
+                const std::size_t delta = stride - rem;
+                if (delta > end || i > end - delta) return true;
+                i += delta;
+            }
+        }
     }
 #endif
     for (; i <= end; i += stride) {
@@ -910,6 +921,19 @@ bool SehScanStringChunk(const std::uint8_t* base, std::size_t size,
 #pragma warning(pop)
 
 }  // namespace
+
+bool ScanStringSpan(const std::uint8_t* base, std::size_t size,
+                    const std::uint8_t* needle, std::size_t needleSize,
+                    std::size_t stride,
+                    std::vector<StringScanCandidate>& matches,
+                    std::size_t limit) {
+    if (base == nullptr || needle == nullptr || needleSize == 0u || limit == 0u) {
+        return true;
+    }
+    if (stride == 0u) stride = 1u;
+    if (matches.size() >= limit) return true;
+    return SehMemcmpProbe(base, size, needle, needleSize, stride, matches, limit);
+}
 
 std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
                                                 ValueScanStats* stats) {
