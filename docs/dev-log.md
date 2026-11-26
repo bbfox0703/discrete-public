@@ -12,6 +12,15 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1532) — Fix C-H3 (IL2CPP `getEnumValues` FieldDefault decoder unified with `il2cppGetMetadataTypeFields`)
+
+- **Bug fix (`C-H3`):** In `dll/src/shared/ExportAPI.cpp`, IL2CPP `getEnumValues` previously carried its own older `decodeCompressedSigned` / `decodeTyped` lambdas that decoded every `<=32-bit` enum FieldDefault as an ECMA-335 compressed signed integer without checking metadata version or v29+ `0xFE`/`0xFF` min/max sentinels. On v24/v27 (Unity 2018–2020) games where FieldDefaults are raw little-endian, every `<=32-bit` enum value decoded wrong (e.g. `01 00 00 00` → `-64`), and on v29+ games `int.MaxValue`/`int.MinValue` members failed with `decode_error`.
+  - Extracted `DecodeCompressedSignedInt`, `ClrTypeNameToIl2CppTag`, and `DecodeIl2CppFieldDefaultByTag` into file-scope `#if defined(DISCRETE_BACKEND_IL2CPP)` helpers and routed both `il2cppGetMetadataTypeFields` and `getEnumValues` through them (net -62 lines in `ExportAPI.cpp`).
+  - Marked `C-H3` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1532) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1154 passed (0 failed, 0 skipped); Rust core tests 104 passed (x64) / 105 passed (i686).
+
+-----
+
 ## 2026-11-26 (build 1531) — Fix C-H2 (`walkArray` reference-type element stride overwritten by `class_value_size`)
 
 - **Bug fix (`C-H2`):** In `dll/src/shared/ExportAPI.cpp` (`CmdWalkArray`), when the caller passed an element class (`elementAssembly` / `elementNamespace` / `elementName`), both the IL2CPP and Mono branches unconditionally called `class_value_size(k)` and overwrote `elemSize`. For reference-type elements (e.g. `UserClass[]`), `class_value_size` returns `instance_size - sizeof(ObjectHeader)` rather than pointer size, causing every array element after `[0]` to step by the wrong stride and breaking both Inspector array expansion and live CE XML export.

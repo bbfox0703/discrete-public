@@ -117,6 +117,210 @@ std::int64_t NormalizeFieldOffset(T raw) noexcept {
     }
 }
 
+#if defined(DISCRETE_BACKEND_IL2CPP)
+// Shared IL2CPP FieldDefault blob decoder (C-H3): used by both
+// `il2cppGetMetadataTypeFields` and `getEnumValues` so the two handlers never
+// drift on metadata-version integer encoding or v29+ min/max sentinels.
+//
+// Per-version integer encoding (<=32-bit I1..U4):
+//   * v24 / v27 (Unity 2018-2020): raw little-endian, exactly sizeof(T) bytes.
+//   * v29+ (Unity 2021+): 0xFE (type_max) / 0xFF (type_min) sentinels plus
+//     ECMA-335 §II.23.2 compressed signed int (1/2/4 bytes).
+// I8 / U8 / R4 / R8 / Boolean / Char are raw little-endian across all versions.
+bool DecodeCompressedSignedInt(const std::uint8_t* p, std::size_t avail,
+                               std::int64_t& outValue,
+                               std::size_t&  outBytes) noexcept {
+    if (avail < 1) return false;
+    std::uint8_t b0 = p[0];
+    std::uint32_t enc = 0;
+    std::size_t w = 0;
+    std::int64_t bias = 0;
+    if ((b0 & 0x80u) == 0u) {
+        enc = b0; w = 1; bias = 0x40;
+    } else if ((b0 & 0xC0u) == 0x80u) {
+        if (avail < 2) return false;
+        enc = (static_cast<std::uint32_t>(b0 & 0x3Fu) << 8) | p[1];
+        w = 2; bias = 0x2000;
+    } else if ((b0 & 0xE0u) == 0xC0u) {
+        if (avail < 4) return false;
+        enc = (static_cast<std::uint32_t>(b0 & 0x1Fu) << 24)
+            | (static_cast<std::uint32_t>(p[1])       << 16)
+            | (static_cast<std::uint32_t>(p[2])       <<  8)
+            |  static_cast<std::uint32_t>(p[3]);
+        w = 4; bias = 0x10000000;
+    } else {
+        return false;  // 0xE0..0xFF reserved (0xFE/0xFF handled as sentinels)
+    }
+    std::int64_t mag = static_cast<std::int64_t>(enc >> 1);
+    outValue = (enc & 1u) ? (mag - bias) : mag;
+    outBytes = w;
+    return true;
+}
+
+std::uint8_t ClrTypeNameToIl2CppTag(const std::string& typeName) noexcept {
+    if (typeName == "System.Boolean") return 0x02;
+    if (typeName == "System.Char")    return 0x03;
+    if (typeName == "System.SByte")   return 0x04;
+    if (typeName == "System.Byte")    return 0x05;
+    if (typeName == "System.Int16")   return 0x06;
+    if (typeName == "System.UInt16")  return 0x07;
+    if (typeName == "System.Int32")   return 0x08;
+    if (typeName == "System.UInt32")  return 0x09;
+    if (typeName == "System.Int64")   return 0x0A;
+    if (typeName == "System.UInt64")  return 0x0B;
+    if (typeName == "System.Single")  return 0x0C;
+    if (typeName == "System.Double")  return 0x0D;
+    return 0;
+}
+
+bool DecodeIl2CppFieldDefaultByTag(std::int32_t metadataVersion,
+                                   std::uint8_t tag,
+                                   const std::uint8_t* p,
+                                   std::size_t avail,
+                                   json& out) {
+    const bool useRawLE = (metadataVersion <= 27);
+    auto cmp = [&](auto&& cast1, auto&& cast2,
+                   std::int64_t maxVal, std::int64_t minVal,
+                   std::size_t typeSize) -> bool {
+        if (useRawLE) {
+            // v24 / v27 path: read exactly typeSize bytes as little-endian.
+            // cast1/cast2 handle truncation + sign-extension.
+            if (avail < typeSize) return false;
+            std::int64_t raw = 0;
+            std::memcpy(&raw, p, typeSize);
+            out["value"] = cast2(cast1(raw));
+            out["enc_bytes"] = typeSize;
+            out["encoding"] = "raw_le";
+            return true;
+        }
+        // v29+ path: sentinels + compressed-int.
+        if (avail >= 1) {
+            if (p[0] == 0xFE) {
+                out["value"] = cast2(cast1(maxVal));
+                out["enc_bytes"] = 1;
+                out["sentinel"] = "type_max";
+                out["encoding"] = "sentinel_compressed";
+                return true;
+            }
+            if (p[0] == 0xFF) {
+                out["value"] = cast2(cast1(minVal));
+                out["enc_bytes"] = 1;
+                out["sentinel"] = "type_min";
+                out["encoding"] = "sentinel_compressed";
+                return true;
+            }
+        }
+        std::int64_t raw = 0;
+        std::size_t w = 0;
+        if (!DecodeCompressedSignedInt(p, avail, raw, w)) return false;
+        out["value"] = cast2(cast1(raw));
+        out["enc_bytes"] = w;
+        out["encoding"] = "sentinel_compressed";
+        return true;
+    };
+    switch (tag) {
+        case 0x02:  // Boolean
+            if (avail < 1) return false;
+            out["value"] = (p[0] != 0);
+            out["enc_bytes"] = 1;
+            return true;
+        case 0x03:  // Char
+            if (avail < 2) return false;
+            {
+                std::uint16_t v = 0;
+                std::memcpy(&v, p, 2);
+                out["value"] = v;
+                out["enc_bytes"] = 2;
+            }
+            return true;
+        case 0x04:  // I1
+            return cmp([](std::int64_t x){ return static_cast<std::int8_t>(x); },
+                       [](std::int8_t x){ return static_cast<std::int64_t>(x); },
+                       0x7F, -0x80, 1);
+        case 0x05:  // U1
+            return cmp([](std::int64_t x){ return static_cast<std::uint8_t>(x); },
+                       [](std::uint8_t x){ return static_cast<std::uint64_t>(x); },
+                       0xFF, 0, 1);
+        case 0x06:  // I2
+            return cmp([](std::int64_t x){ return static_cast<std::int16_t>(x); },
+                       [](std::int16_t x){ return static_cast<std::int64_t>(x); },
+                       0x7FFF, -0x8000, 2);
+        case 0x07:  // U2
+            return cmp([](std::int64_t x){ return static_cast<std::uint16_t>(x); },
+                       [](std::uint16_t x){ return static_cast<std::uint64_t>(x); },
+                       0xFFFF, 0, 2);
+        case 0x08:  // I4
+            return cmp([](std::int64_t x){ return static_cast<std::int32_t>(x); },
+                       [](std::int32_t x){ return static_cast<std::int64_t>(x); },
+                       0x7FFFFFFFLL, -0x80000000LL, 4);
+        case 0x09:  // U4
+            return cmp([](std::int64_t x){ return static_cast<std::uint32_t>(x); },
+                       [](std::uint32_t x){ return static_cast<std::uint64_t>(x); },
+                       0xFFFFFFFFLL, 0, 4);
+        case 0x0A:  // I8
+            if (avail < 8) return false;
+            {
+                std::int64_t v = 0;
+                std::memcpy(&v, p, 8);
+                out["value"] = v;
+                out["enc_bytes"] = 8;
+            }
+            return true;
+        case 0x0B:  // U8
+            if (avail < 8) return false;
+            {
+                std::uint64_t v = 0;
+                std::memcpy(&v, p, 8);
+                out["value"] = v;
+                out["enc_bytes"] = 8;
+            }
+            return true;
+        case 0x0C:  // R4
+            if (avail < 4) return false;
+            {
+                float v = 0.f;
+                std::memcpy(&v, p, 4);
+                out["enc_bytes"] = 4;
+                // JSON spec disallows Infinity / -Infinity / NaN as numeric
+                // literals; nlohmann/json silently coerces those to null.
+                if (std::isnan(v)) {
+                    out["value"] = nullptr;
+                    out["value_kind"] = "nan";
+                } else if (std::isinf(v)) {
+                    out["value"] = nullptr;
+                    out["value_kind"] = (v > 0.f) ? "infinity" : "-infinity";
+                } else {
+                    out["value"] = v;
+                    out["value_kind"] = "normal";
+                }
+            }
+            return true;
+        case 0x0D:  // R8
+            if (avail < 8) return false;
+            {
+                double v = 0.0;
+                std::memcpy(&v, p, 8);
+                out["enc_bytes"] = 8;
+                if (std::isnan(v)) {
+                    out["value"] = nullptr;
+                    out["value_kind"] = "nan";
+                } else if (std::isinf(v)) {
+                    out["value"] = nullptr;
+                    out["value_kind"] = (v > 0.0) ? "infinity" : "-infinity";
+                } else {
+                    out["value"] = v;
+                    out["value_kind"] = "normal";
+                }
+            }
+            return true;
+        case 0x0E:  // String — handled separately via TryDecodeStringDefault
+            return false;
+        default:
+            return false;
+    }
+}
+#endif  // DISCRETE_BACKEND_IL2CPP
+
 // Game-process memory snapshot used both by the handshake (so UI can
 // auto-clamp snapshot caps on x86 targets) and by snapshotBegin's
 // pre-check that refuses to run when the game is already near the
@@ -8539,185 +8743,7 @@ void RegisterCoreHandlers() {
         auto td = mp.FindTypeByName(ns, name);
         if (!td) return json{{"error", "type not found in metadata: " + ns + "." + name}};
 
-        // Local: ECMA-335 §II.23.2 compressed signed int decoder (same logic
-        // as in getEnumValues; duplicated to keep handlers self-contained).
-        auto decodeCompressedSigned = [](const std::uint8_t* p, std::size_t avail,
-                                          std::int64_t& outValue,
-                                          std::size_t&  outBytes) -> bool {
-            if (avail < 1) return false;
-            std::uint8_t b0 = p[0];
-            std::uint32_t enc = 0; std::size_t w = 0; std::int64_t bias = 0;
-            if ((b0 & 0x80u) == 0u) { enc = b0; w = 1; bias = 0x40; }
-            else if ((b0 & 0xC0u) == 0x80u) {
-                if (avail < 2) return false;
-                enc = (static_cast<std::uint32_t>(b0 & 0x3Fu) << 8) | p[1];
-                w = 2; bias = 0x2000;
-            } else if ((b0 & 0xE0u) == 0xC0u) {
-                if (avail < 4) return false;
-                enc = (static_cast<std::uint32_t>(b0 & 0x1Fu) << 24)
-                    | (static_cast<std::uint32_t>(p[1])       << 16)
-                    | (static_cast<std::uint32_t>(p[2])       <<  8)
-                    |  static_cast<std::uint32_t>(p[3]);
-                w = 4; bias = 0x10000000;
-            } else { return false; }
-            std::int64_t mag = static_cast<std::int64_t>(enc >> 1);
-            outValue = (enc & 1u) ? (mag - bias) : mag;
-            outBytes = w;
-            return true;
-        };
-        // Decode a FieldDefault blob given the IL2CPP type-tag byte
-        // (from MetadataRegistration::GetTypeTag). Returns true on success
-        // and fills `out` with `value` + `enc_bytes`.
-        //
-        // **Per-version dispatch on integer encoding**:
-        //   * v24 / v27 (Unity 2018 / 2019 / 2020 IL2CPP): raw little-endian,
-        //     exactly sizeof(T) bytes — no sentinels, no compressed-int.
-        //     Surfaced 2026-05-07 against FF VI (Unity 2019.4): byte sequence
-        //     `FFFFFF7F` is `Int32.MaxValue` (2147483647) under raw LE, but
-        //     was mis-decoded as the type-min sentinel under the v29+ rules.
-        //   * v29+ (Unity 2021+ IL2CPP): sentinels + §II.23.2 compressed
-        //     signed int (zigzag-style, 1/2/4 bytes; ±2^28 range, hence the
-        //     sentinels for values outside).
-        //
-        // R4 / R8 (and Boolean / Char) are unaffected — they're always raw LE
-        // regardless of metadata version.
         const std::int32_t metadataVersion = mp.version();
-        auto decodeByTag = [&decodeCompressedSigned, metadataVersion]
-            (std::uint8_t tag, const std::uint8_t* p, std::size_t avail,
-             json& out) -> bool {
-            const bool useRawLE = (metadataVersion <= 27);
-            auto cmp = [&](auto&& cast1, auto&& cast2,
-                           std::int64_t maxVal, std::int64_t minVal,
-                           std::size_t typeSize) -> bool {
-                if (useRawLE) {
-                    // v24 / v27 path: read exactly typeSize bytes as little-
-                    // endian. cast1/cast2 handle truncation + sign-extension.
-                    if (avail < typeSize) return false;
-                    std::int64_t raw = 0;
-                    std::memcpy(&raw, p, typeSize);
-                    out["value"] = cast2(cast1(raw));
-                    out["enc_bytes"] = typeSize;
-                    out["encoding"] = "raw_le";
-                    return true;
-                }
-                // v29+ path: sentinels + compressed-int.
-                if (avail >= 1) {
-                    if (p[0] == 0xFE) {
-                        out["value"] = cast2(cast1(maxVal));
-                        out["enc_bytes"] = 1;
-                        out["sentinel"] = "type_max";
-                        out["encoding"] = "sentinel_compressed";
-                        return true;
-                    }
-                    if (p[0] == 0xFF) {
-                        out["value"] = cast2(cast1(minVal));
-                        out["enc_bytes"] = 1;
-                        out["sentinel"] = "type_min";
-                        out["encoding"] = "sentinel_compressed";
-                        return true;
-                    }
-                }
-                std::int64_t raw = 0; std::size_t w = 0;
-                if (!decodeCompressedSigned(p, avail, raw, w)) return false;
-                out["value"] = cast2(cast1(raw));
-                out["enc_bytes"] = w;
-                out["encoding"] = "sentinel_compressed";
-                return true;
-            };
-            switch (tag) {
-                case 0x02:  // Boolean
-                    if (avail < 1) return false;
-                    out["value"] = (p[0] != 0); out["enc_bytes"] = 1; return true;
-                case 0x03:  // Char
-                    if (avail < 2) return false;
-                    {
-                        std::uint16_t v = 0; std::memcpy(&v, p, 2);
-                        out["value"] = v; out["enc_bytes"] = 2;
-                    }
-                    return true;
-                case 0x04:  // I1
-                    return cmp([](std::int64_t x){ return static_cast<std::int8_t>(x); },
-                               [](std::int8_t x){ return static_cast<std::int64_t>(x); },
-                               0x7F, -0x80, 1);
-                case 0x05:  // U1
-                    return cmp([](std::int64_t x){ return static_cast<std::uint8_t>(x); },
-                               [](std::uint8_t x){ return static_cast<std::uint64_t>(x); },
-                               0xFF, 0, 1);
-                case 0x06:  // I2
-                    return cmp([](std::int64_t x){ return static_cast<std::int16_t>(x); },
-                               [](std::int16_t x){ return static_cast<std::int64_t>(x); },
-                               0x7FFF, -0x8000, 2);
-                case 0x07:  // U2
-                    return cmp([](std::int64_t x){ return static_cast<std::uint16_t>(x); },
-                               [](std::uint16_t x){ return static_cast<std::uint64_t>(x); },
-                               0xFFFF, 0, 2);
-                case 0x08:  // I4
-                    return cmp([](std::int64_t x){ return static_cast<std::int32_t>(x); },
-                               [](std::int32_t x){ return static_cast<std::int64_t>(x); },
-                               0x7FFFFFFFLL, -0x80000000LL, 4);
-                case 0x09:  // U4
-                    return cmp([](std::int64_t x){ return static_cast<std::uint32_t>(x); },
-                               [](std::uint32_t x){ return static_cast<std::uint64_t>(x); },
-                               0xFFFFFFFFLL, 0, 4);
-                case 0x0A:  // I8
-                    if (avail < 8) return false;
-                    {
-                        std::int64_t v = 0; std::memcpy(&v, p, 8);
-                        out["value"] = v; out["enc_bytes"] = 8;
-                    }
-                    return true;
-                case 0x0B:  // U8
-                    if (avail < 8) return false;
-                    {
-                        std::uint64_t v = 0; std::memcpy(&v, p, 8);
-                        out["value"] = v; out["enc_bytes"] = 8;
-                    }
-                    return true;
-                case 0x0C:  // R4
-                    if (avail < 4) return false;
-                    {
-                        float v = 0.f; std::memcpy(&v, p, 4);
-                        out["enc_bytes"] = 4;
-                        // JSON spec disallows Infinity / -Infinity / NaN as
-                        // numeric literals; nlohmann/json silently coerces
-                        // those to null. Emit a `value_kind` tag so consumers
-                        // can recover the original float-special-case meaning.
-                        if (std::isnan(v)) {
-                            out["value"] = nullptr;
-                            out["value_kind"] = "nan";
-                        } else if (std::isinf(v)) {
-                            out["value"] = nullptr;
-                            out["value_kind"] = (v > 0.f) ? "infinity" : "-infinity";
-                        } else {
-                            out["value"] = v;
-                            out["value_kind"] = "normal";
-                        }
-                    }
-                    return true;
-                case 0x0D:  // R8
-                    if (avail < 8) return false;
-                    {
-                        double v = 0.0; std::memcpy(&v, p, 8);
-                        out["enc_bytes"] = 8;
-                        if (std::isnan(v)) {
-                            out["value"] = nullptr;
-                            out["value_kind"] = "nan";
-                        } else if (std::isinf(v)) {
-                            out["value"] = nullptr;
-                            out["value_kind"] = (v > 0.0) ? "infinity" : "-infinity";
-                        } else {
-                            out["value"] = v;
-                            out["value_kind"] = "normal";
-                        }
-                    }
-                    return true;
-                case 0x0E:  // String — handled separately via TryDecodeStringDefault
-                    return false;
-                default:
-                    return false;
-            }
-        };
-
         const bool regOk = IL2CPP::MetadataRegistration::Find();
 
         auto fields = mp.EnumerateTypeFields(*td);
@@ -8757,8 +8783,10 @@ void RegisterCoreHandlers() {
                     if (tag != 0) {
                         defaultJson["type_tag"] = tag;
                         json decoded;
-                        if (decodeByTag(tag, def->data.data(), def->data.size(),
-                                        decoded)) {
+                        if (DecodeIl2CppFieldDefaultByTag(
+                                metadataVersion, tag,
+                                def->data.data(), def->data.size(),
+                                decoded)) {
                             for (auto kv = decoded.begin(); kv != decoded.end();
                                  ++kv) {
                                 defaultJson[kv.key()] = kv.value();
@@ -10031,100 +10059,8 @@ void RegisterCoreHandlers() {
         auto td = mp.FindTypeByName(ns, name);
         if (!td) return json{{"error", "type not found in metadata: " + ns + "." + name}};
 
-        // Decode one ECMA-335 §II.23.2 compressed signed int. Used for I1..U4
-        // FieldDefaults (IL2CPP packs all integer literals ≤32-bit this way).
-        auto decodeCompressedSigned = [](const std::uint8_t* p, std::size_t avail,
-                                          std::int64_t& outValue,
-                                          std::size_t&  outBytes) -> bool {
-            if (avail < 1) return false;
-            std::uint8_t b0 = p[0];
-            std::uint32_t enc = 0;
-            std::size_t   width = 0;
-            std::int64_t  bias = 0;
-            if ((b0 & 0x80u) == 0u) {
-                enc = b0; width = 1; bias = 0x40;
-            } else if ((b0 & 0xC0u) == 0x80u) {
-                if (avail < 2) return false;
-                enc = (static_cast<std::uint32_t>(b0 & 0x3Fu) << 8) | p[1];
-                width = 2; bias = 0x2000;
-            } else if ((b0 & 0xE0u) == 0xC0u) {
-                if (avail < 4) return false;
-                enc = (static_cast<std::uint32_t>(b0 & 0x1Fu) << 24)
-                    | (static_cast<std::uint32_t>(p[1])       << 16)
-                    | (static_cast<std::uint32_t>(p[2])       <<  8)
-                    |  static_cast<std::uint32_t>(p[3]);
-                width = 4; bias = 0x10000000;
-            } else {
-                return false;  // 0xE0–0xFF reserved
-            }
-            std::int64_t magnitude = static_cast<std::int64_t>(enc >> 1);
-            outValue = (enc & 1u) ? (magnitude - bias) : magnitude;
-            outBytes = width;
-            return true;
-        };
-
-        // Type-aware decode: takes the underlying enum type name and a
-        // FieldDefault blob, fills `entry` with `value` (typed) +
-        // `enc_bytes`. Returns false on shape mismatch.
-        auto decodeTyped = [&decodeCompressedSigned]
-            (const std::string& typeName, const std::uint8_t* p, std::size_t avail,
-             json& entry) -> bool {
-            auto compressed = [&](auto&& signCast, auto&& finalCast) -> bool {
-                std::int64_t raw = 0; std::size_t w = 0;
-                if (!decodeCompressedSigned(p, avail, raw, w)) return false;
-                entry["value"]     = finalCast(signCast(raw));
-                entry["enc_bytes"] = w;
-                return true;
-            };
-            if (typeName == "System.SByte")
-                return compressed([](std::int64_t x){ return static_cast<std::int8_t>(x);  },
-                                  [](std::int8_t x){ return static_cast<std::int64_t>(x); });
-            if (typeName == "System.Byte")
-                return compressed([](std::int64_t x){ return static_cast<std::uint8_t>(x); },
-                                  [](std::uint8_t x){ return static_cast<std::uint64_t>(x); });
-            if (typeName == "System.Int16")
-                return compressed([](std::int64_t x){ return static_cast<std::int16_t>(x); },
-                                  [](std::int16_t x){ return static_cast<std::int64_t>(x); });
-            if (typeName == "System.UInt16")
-                return compressed([](std::int64_t x){ return static_cast<std::uint16_t>(x); },
-                                  [](std::uint16_t x){ return static_cast<std::uint64_t>(x); });
-            if (typeName == "System.Int32")
-                return compressed([](std::int64_t x){ return static_cast<std::int32_t>(x); },
-                                  [](std::int32_t x){ return static_cast<std::int64_t>(x); });
-            if (typeName == "System.UInt32")
-                return compressed([](std::int64_t x){ return static_cast<std::uint32_t>(x); },
-                                  [](std::uint32_t x){ return static_cast<std::uint64_t>(x); });
-            if (typeName == "System.Int64") {
-                if (avail < 8) return false;
-                std::int64_t v = 0; std::memcpy(&v, p, 8);
-                entry["value"] = v; entry["enc_bytes"] = 8; return true;
-            }
-            if (typeName == "System.UInt64") {
-                if (avail < 8) return false;
-                std::uint64_t v = 0; std::memcpy(&v, p, 8);
-                entry["value"] = v; entry["enc_bytes"] = 8; return true;
-            }
-            if (typeName == "System.Single") {
-                if (avail < 4) return false;
-                float v = 0.f; std::memcpy(&v, p, 4);
-                entry["value"] = v; entry["enc_bytes"] = 4; return true;
-            }
-            if (typeName == "System.Double") {
-                if (avail < 8) return false;
-                double v = 0.0; std::memcpy(&v, p, 8);
-                entry["value"] = v; entry["enc_bytes"] = 8; return true;
-            }
-            if (typeName == "System.Boolean") {
-                if (avail < 1) return false;
-                entry["value"] = (p[0] != 0); entry["enc_bytes"] = 1; return true;
-            }
-            if (typeName == "System.Char") {
-                if (avail < 2) return false;
-                std::uint16_t v = 0; std::memcpy(&v, p, 2);
-                entry["value"] = v; entry["enc_bytes"] = 2; return true;
-            }
-            return false;
-        };
+        const std::int32_t metadataVersion = mp.version();
+        const std::uint8_t underlyingTag   = ClrTypeNameToIl2CppTag(underlying);
 
         json values = json::array();
         auto fields = mp.EnumerateTypeFields(*td);
@@ -10139,8 +10075,10 @@ void RegisterCoreHandlers() {
                 {"name", f.name},
                 {"field_index", f.index},
             };
-            if (def->data.empty() ||
-                !decodeTyped(underlying, def->data.data(), def->data.size(), entry)) {
+            if (underlyingTag == 0 || def->data.empty() ||
+                !DecodeIl2CppFieldDefaultByTag(
+                    metadataVersion, underlyingTag,
+                    def->data.data(), def->data.size(), entry)) {
                 entry["decode_error"] = "type-aware decode failed for " + underlying;
             }
             std::string hex;

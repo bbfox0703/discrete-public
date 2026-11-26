@@ -456,7 +456,7 @@
 - 修法：只在 `elemIsValueType == true` 時採用 `class_value_size`；參考型別一律用 `ManagedLayout::kPointerSize`。也就是把 `:2957-2961` / `:2984-2988` 改成 `if (elemIsValueType && r.class_value_size) …`，並把判斷移到 `class_is_valuetype` 之後。
 - 驗證：在 Inspector 中展開一個 `SomeUserClass[]` 欄位，比較 `walkArray` 回傳的 `element_size` 與第 2、3 個元素的 `ptr` 是否和 CE 看到的一致。
 
-**C-H3 · IL2CPP `getEnumValues` 的 FieldDefault 解碼和 `il2cppGetMetadataTypeFields` 不一致：在 v24/v27（Unity 2018–2020）的遊戲上，所有 ≤32-bit enum 的值都會解錯**
+**C-H3 · IL2CPP `getEnumValues` 的 FieldDefault 解碼和 `il2cppGetMetadataTypeFields` 不一致：在 v24/v27（Unity 2018–2020）的遊戲上，所有 ≤32-bit enum 的值都會解錯 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/ExportAPI.cpp:10041-10068`（`getEnumValues` 的 `decodeTyped` 一律用 compressed-signed）；對照 `:8544-8598`（`il2cppGetMetadataTypeFields`：`metadataVersion <= 27` 用 raw LE，v29+ 才用 0xFE/0xFF sentinel + compressed）
 - 成因：雙胞胎漂移。`:8544-8553` 的註解已記錄 FF VI（Unity 2019.4）的實際證據：v24/v27 的整數 literal 是 raw little-endian，但這個修正只套用到 `il2cppGetMetadataTypeFields`。`getEnumValues` 仍然對 raw LE 的 blob 做 ECMA compressed 解碼，例如 `01 00 00 00` 會被解成 `enc=1 → 0 - 0x40 = -64`。在 v29+ 上，又因為沒有處理 `0xFE` / `0xFF` sentinel，值為 `int.MaxValue` / `MinValue` 的成員會回報 `decode_error`。`MethodCallWindow` 會用這份清單產生 enum ComboBox，使用者選了某個名稱，實際送進 `callMethod` 的卻是錯誤的整數，而且畫面上看不出來。
 - 修法：把 `:8556-8691` 的 `decodeByTag`（含版本分支與 sentinel 處理）抽成檔案層級的函式，讓兩個 handler 共用；`getEnumValues` 依底層型別對應到 type tag（I1=0x04 … U4=0x09）後呼叫它。順便刪除 `:10006-10036` 重複的 `decodeCompressedSigned`。
