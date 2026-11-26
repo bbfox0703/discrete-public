@@ -4619,7 +4619,7 @@ void RegisterCoreHandlers() {
                                 std::uintptr_t arrPtr = 0;
                                 const std::string& ps = entry["ptr"].get_ref<const std::string&>();
                                 if (ps.size() > 2 && ps[0] == '0' && (ps[1] == 'x' || ps[1] == 'X')) {
-                                    arrPtr = std::strtoull(ps.c_str() + 2, nullptr, 16);
+                                    arrPtr = static_cast<std::uintptr_t>(std::strtoull(ps.c_str() + 2, nullptr, 16));
                                 }
                                 if (arrPtr != 0) {
                                     json elems = walkArrayElementsInline(

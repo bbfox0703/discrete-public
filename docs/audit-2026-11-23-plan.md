@@ -1,4 +1,4 @@
-# AUDIT_PLAN.md — Discrete 全 repo 稽核盤點
+# Discrete 全 repo 稽核盤點（2026-11-23）
 
 > 產出日期：2026-11-23 · 基準：`dev` @ `6bea633`（working tree clean）
 > 性質：**盤點與規劃**，不是稽核結果。本次只做了目錄、建置設定與核心模組的結構掃描，沒有修改任何程式碼，也刻意**不參考**先前的 audit 文件（`docs/audit-2026-08-13*.md`）。

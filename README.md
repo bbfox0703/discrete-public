@@ -3,6 +3,7 @@
 [![Backends](https://img.shields.io/badge/backends-Mono_x64%2Fx86_%2B_IL2CPP_x64-blue)](docs/test-matrix.md)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-CC785C?logo=claude)](https://claude.ai/code)
+[![Built with Gemini](https://img.shields.io/badge/Built%20with-Gemini-4285F4?logo=googlegemini&logoColor=white)](https://gemini.google.com/)
 
 Live Unity dumper and cheat-table generator: a C++ DLL injected into the game,
 an Avalonia UI, and a Cheat Engine Lua bridge.

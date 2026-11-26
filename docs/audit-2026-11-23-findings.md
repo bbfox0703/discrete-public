@@ -19,12 +19,12 @@
   2. 更嚴重的是每個連線中的 client worker：`ServeClient` 結尾的 `monitor.join()`（`:232`）要等 monitor thread 結束，而 monitor thread 結束同樣卡在 loader lock → worker 永遠到不了 `g_activeClients.fetch_sub`（`:393`）→ `Stop()` 的 drain（`:483-485`）逾時、刻意洩漏 `g_stopEvent` 後返回 → DllMain 返回、模組被 unmap → loader lock 釋放後 monitor 結束，worker 的 `join()` 返回到**已 unmap 的 `ServeClient`** → access violation，遊戲崩潰。只要 FreeLibrary 當下有任何 client 連著（例如 UI 開著）就會發生。
   3. 即使沒有 loader lock，`fetch_sub`（`:393`）之後 worker 仍在執行本模組的程式碼（lambda epilogue、`std::thread` 的 `_Invoke` trampoline），`Stop()` 一看到 0 就可能讓 FreeLibrary 繼續，存在一段卸載競態窗口。
   4. `MainThreadHook::Uninstall` 在 loader lock 下 `MH_DisableHook`（SuspendThread 所有執行緒）並 Sleep 等 `g_inDetour` 歸零；若主執行緒正在 detour 內等 loader lock，2000 次後照樣 `MH_RemoveHook` 並卸載，主執行緒回到已 unmap 的 detour。
-  5. `PipeServer.cpp:323-328` 的註解宣稱「DLL unload only happens at game exit」，與 `main.cpp:187-208` 明確處理 FreeLibrary 路徑、`Stop()` 自己的註解（`:476-482`）互相矛盾 —— 這正是 AUDIT_PLAN §2 訊號 1。出貨的 Lua bridge 已經刻意不做 FreeLibrary（`scripts/unity_dump.lua:84-91`），但 CE 的「unload module」、Process Hacker、第三方 injector 都能觸發這條路徑。
+  5. `PipeServer.cpp:323-328` 的註解宣稱「DLL unload only happens at game exit」，與 `main.cpp:187-208` 明確處理 FreeLibrary 路徑、`Stop()` 自己的註解（`:476-482`）互相矛盾 —— 這正是 audit-2026-11-23-plan.md §2 訊號 1。出貨的 Lua bridge 已經刻意不做 FreeLibrary（`scripts/unity_dump.lua:84-91`），但 CE 的「unload module」、Process Hacker、第三方 injector 都能觸發這條路徑。
 - 修法：既然唯一支援的 teardown 是 `Discrete_Shutdown`（模組保持 mapped），就在 `OnAttach` 成功 claim 後用 `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | ..._FROM_ADDRESS)` 把模組 pin 住，讓外部 FreeLibrary 不能真的卸載；`DLL_PROCESS_DETACH` 一律直接 `return TRUE`，不要在 DllMain 內做任何 join / drain / MinHook 操作。若日後確實需要 eject，改成提供 `Discrete_Unload` export：在 remote thread 上（不持 loader lock）先跑 `Discrete_Shutdown`，再以 `FreeLibraryAndExitThread` 結束；每個 client worker / monitor 建立時各自持一份 `GetModuleHandleEx` 參考，並以 `FreeLibraryAndExitThread` 收尾（比照 `main.cpp:142-156` 的 retention thread 作法），讓「計數歸零」和「離開模組程式碼」成為同一個動作。
 
 **A-H2 · `ScanForValue` / `ScanForString` 宣告 `noexcept`，但內部會配置記憶體、開 thread；在 32-bit 遊戲中失敗會 `std::terminate` 直接殺掉遊戲**
 - 位置：`dll/src/shared/Memory.cpp:807-808`、`:920-921`（`noexcept`）；`dll/src/shared/Memory.cpp:503`、`:525-528`（`RunParallelScan`）；`dll/src/shared/Memory.h:190-191`、`:245-246`
-- 成因：`FilterScanRegions`、`BuildScanChunks`、`perChunk(chunks.size())`、`out.reserve` 都可能丟 `bad_alloc`；`pool.emplace_back(worker)` 在位址空間吃緊時（x86 下最多 `hc-2`、上限 16 條 thread，每條預留 1 MB stack）會丟 `std::system_error`。例外一旦離開 `noexcept` 函式就是 `std::terminate`。另外，`RunParallelScan` 第 N 條 thread 建立失敗時，前面已經 joinable 的 `std::thread` 在 `pool` 解構時也會觸發 `std::terminate`，`ScanForPointer` 雖然沒有 `noexcept` 也一樣逃不掉。AUDIT_PLAN 提到的「32-bit 遊戲 2 GB 位址空間 `bad_alloc`」就落在這裡。
+- 成因：`FilterScanRegions`、`BuildScanChunks`、`perChunk(chunks.size())`、`out.reserve` 都可能丟 `bad_alloc`；`pool.emplace_back(worker)` 在位址空間吃緊時（x86 下最多 `hc-2`、上限 16 條 thread，每條預留 1 MB stack）會丟 `std::system_error`。例外一旦離開 `noexcept` 函式就是 `std::terminate`。另外，`RunParallelScan` 第 N 條 thread 建立失敗時，前面已經 joinable 的 `std::thread` 在 `pool` 解構時也會觸發 `std::terminate`，`ScanForPointer` 雖然沒有 `noexcept` 也一樣逃不掉。audit-2026-11-23-plan.md 提到的「32-bit 遊戲 2 GB 位址空間 `bad_alloc`」就落在這裡。
 - 修法：拿掉兩個函式的 `noexcept`，或在函式本體外包 `try { … } catch (...) { 回傳空結果 + 在 stats 標記失敗 }`；`RunParallelScan` 的建 thread 迴圈要捕捉例外，先 join 已經啟動的 thread，再退回單執行緒（`worker()` inline）繼續掃描。
 
 ### Medium
@@ -205,7 +205,7 @@
 - 成因：CE bridge 的設計是「短連線 burst」，每次 burst 斷線都會在遊戲裡跑一次 `mono_gc_collect(-1)` / `il2cpp_gc_collect(0)`（log 顯示約 50–200 ms），也就是每次 bridge 操作都造成一次可感知的卡頓。
 - 修法：GC drain 只在 `ActiveClientCount() == 1`（最後一個 client 離開）時執行，或者只在該 client 跑過標記為「重量級」的 RPC 後才執行。
 
-### AUDIT_PLAN §2「觀察到的訊號」結案
+### audit-2026-11-23-plan.md §2「觀察到的訊號」結案
 
 | # | 訊號 | 結論 |
 |---|---|---|
@@ -403,7 +403,7 @@
 | `EnumerateInstanceFields` / struct 成員命名 | `NameStructComponent`（舊結構） | 抽出 `NameValueStructMember`，與 array 共用 | 行為等價；Mono 沒有 array 版本 |
 | Field xref | IL walk，只比對 FieldDef token | RIP v1 + chain v2 + lazy-slot v3 + instance 啟發式 | → B-M8、B-M9、B-L7、B-L3 |
 
-### AUDIT_PLAN §3「觀察到的訊號」結案
+### audit-2026-11-23-plan.md §3「觀察到的訊號」結案
 
 | # | 訊號 | 結論 |
 |---|---|---|
@@ -569,7 +569,7 @@
 - Handshake 沒有 capability 清單（`ExportAPI.cpp:1904-1950`），UI 只能用 `backend` 字串判斷 `dumpIl2cppSymbols` / `diagnoseClassReferences` / `monoCompileMethod` 等只有單一 backend 才有的指令，這和「UI 必須 backend-agnostic」的規則相衝突（Block E 的訊號 1 部分源自這裡）。修法：handshake 加上 `"commands": [...]`，內容就是 `g_handlers` 的 key。
 - `SnapshotFieldEntry.Offset` 是 `ulong`（`ProtocolModels.cs:1248`），但 struct member 的 `offset` 是有號的 `relOff`（`ExportAPI.cpp:302`、`:543`）。遇到 torn class 而算出負值時，整個 chunk 會反序列化失敗（待驗證，正常 class 不會出現負值）。修法：DLL 端在 `relOff < 0` 時跳過該 member，或 UI 端改成 `long`。
 
-### AUDIT_PLAN §4「觀察到的訊號」結案
+### audit-2026-11-23-plan.md §4「觀察到的訊號」結案
 
 | # | 訊號 | 結論 |
 |---|---|---|
@@ -629,7 +629,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：每個 chunk 用一次 `reader.read(sec_va+pos, 1 MiB+overlap)` 整塊讀取，任何一頁讀取失敗就整塊失敗，接著 `pos += 4096` 再讀一次「新的」1 MiB。只要壞頁還落在新的 chunk 裡，讀取就會繼續失敗；每失敗一次，`pos` 推進的那 4 KiB 都沒有被掃描。所以單一壞頁（anti-cheat 把 `.text` 部分頁面設成 `PAGE_NOACCESS`，正是註解「AC-stripped page」描述的情境）會讓壞頁之前、同一個 chunk 範圍內的所有可讀程式碼都被跳過，而不只是壞頁本身。每個壞頁還會觸發最多 256 次、每次接近 1 MiB 的 SEH 讀取。這個行為和 legacy C++ 一樣（逐行移植），所以 golden 檢查抓不到。
 - 修法：整塊讀取失敗時，改成在同一個 chunk 內以 4 KiB 為單位逐頁讀取：可讀的頁照常掃描（頁與頁之間保留 overlap），只跳過真正讀不到的頁，`failed_reads` 改成以頁為單位計數。也可以先用 `VirtualQuery` 把 section 切成可讀的區段再掃描。改完之後要重新錄製 `r2_golden.json`。
 
-**D-M2 · `discrete_core.h` 與 Rust `#[repr(C)]` 沒有任何編譯期對照，struct layout 漂移不會被抓到（AUDIT_PLAN 訊號 1）**
+**D-M2 · `discrete_core.h` 與 Rust `#[repr(C)]` 沒有任何編譯期對照，struct layout 漂移不會被抓到（audit-2026-11-23-plan.md 訊號 1）**
 - 位置：`dll/rust/include/discrete_core.h:68-127`、`:186-196`、`:239-305`；`dll/rust/src/metadata/ffi.rs:41-133`；`dll/rust/src/chain/mod.rs:68-90`；唯一的 layout 測試在 `aob.rs:1206-1214`、`xref/tests.rs:326-329`
 - 成因：`lib.rs:24-25` 明訂「手動同步、不用 cbindgen」，但兩邊都沒有補上檢查：C++ 端完全沒有 `static_assert(sizeof/offsetof(Dc*))`；Rust 端只測了 `DcAobResult` 和 4 個 `DcXref*`，其餘 metadata 的 7 個 row struct（`DcTypeDef` 中 `uint16_t` 與 `int32_t` 交錯，靠隱含 padding 對齊）、`DcChainMatch`、`DcChainStats` 都沒有測試。這次逐欄位人工比對了 14 個 struct 與約 40 個函式簽章，x86 / x64 **目前都一致**；但只要任何一邊加了欄位或調換順序，就會在執行期靜默讀到錯誤資料，i686 的 padding 又和 x64 不同。
 - 修法：Rust 端對每個 `#[repr(C)]` 用 `const _: () = assert!(offset_of!(..) == ..)` 寫死 x86 / x64 兩組數值；C++ 端在對應的 `*Rs.cpp` 加上同一組 `static_assert(offsetof(DcTypeDef, field_count) == ...)`。成本更低的作法是讓 Rust 匯出一個 `dc_layout_probe(DcLayout* out)`，回傳各 struct 的 size / offset，`RustCore::Init()` 再和 C++ 的 `sizeof` / `offsetof` 比對，不一致就寫 log 並停用 Rust 路徑。
@@ -639,7 +639,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：v38 的 TypeDefinition stride 是 `68 + 3·TIS + GCIS`，MethodDefinition 是 `24/20 + TDIS + TIS (+PIS) + GCIS`，Image 是 `32 + 2·TDIS`，各自依賴不同的寬度組合。`validate_type_table` 只能抓到 TIS / GCIS 錯誤；TDIS / PIS 錯了（例如某張表的 row count 剛好等於 255 / 65535，而 `get_index_size` 的 `<=` 和 runtime 實際規則差一，或 IL2CPP 未來調整規則），method 名稱、參數、image 範圍就會整批錯位，`loaded()` / `tables_loaded` 卻仍然是 true。`metadata-cli` 的符號輸出、`il2cppGetMetadata*` 系列 RPC 會照單全收。v38 header 中每個 section 都有 `count` 欄位，可以直接驗證，但目前只有 parameters 讀了它。
 - 修法：v38+ 載入時，對每張表檢查 `section.size == section.count * stride`，再加上 `size % stride == 0`；不一致就把該表的 count 設成 0、寫 log，並在 `getMetadataStats` 回報 `tablesDegraded`。`type_index_size` 推不出來（`inferred ∉ {1,2,4}`）時也要寫 log，不能靜默沿用 4。
 
-**D-M4 · Golden-hash 閘門沒有接進 build 或 CI；`cargo test` 也不是在出貨的編譯設定下執行（AUDIT_PLAN 訊號 3）**
+**D-M4 · Golden-hash 閘門沒有接進 build 或 CI；`cargo test` 也不是在出貨的編譯設定下執行（audit-2026-11-23-plan.md 訊號 3）**
 - 位置：`build.ps1:685-709`（`Run-RustTests` 只跑 `cargo test`）、`:840-845`（`All` 的順序是 DLL → UI → Test → MetadataCli，跑測試時 `r2-dump` / `xref-dump` 還沒建置）；`.github/workflows/release.yml:83-88`；`dll/rust/src/metadata/tests.rs:1288-1294`（沒有 fixture 時直接 `return`，沒有任何輸出）；`dll/rust/src/ffi.rs:162-168`；`dll/rust/RustCore.cmake:38-50`
 - 成因：
   1. `metadata_golden.py` / `r2_golden.py` 只能手動執行，`build.ps1` 和 `release.yml` 都沒有呼叫。CI 也沒有 fixture，所以 R1 / R2「行為不變」的保證在發行流程中從來沒有被檢查過。
@@ -669,7 +669,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：MSRV 宣告過時。實際建置有 `rust-toolchain.toml`（1.100.0）保護，但 `rust-version` 會誤導 `cargo` 的 MSRV 檢查和讀者。
 - 修法：改成實際的最低版本（≥ 1.88），或直接和 toolchain pin 保持一致。
 
-**D-L2 · 「v16–v39 accepted」的實際語意是「只有 24/27/29/31–39 能解析型別表」；log 訊息誤導，還有 dead 分支（AUDIT_PLAN 訊號 2）**
+**D-L2 · 「v16–v39 accepted」的實際語意是「只有 24/27/29/31–39 能解析型別表」；log 訊息誤導，還有 dead 分支（audit-2026-11-23-plan.md 訊號 2）**
 - 位置：`dll/rust/src/metadata/parser.rs:521-531`（`type_def_sizeof` 只涵蓋 24/27/29/31–39）、`:564`、`:1212`（method 的 `30` 分支，因為 type 表永遠不會載入而成為 dead code）、`:630-641`、`:673-684`（v16–23/25/26/28/30/32–34 都印「shares v31's layout … accepting」）
 - 成因：v16–v23、v25、v26、v28、v30 會 `loaded()==true`，但 `tables_loaded==false`（只有字串），log 卻說「與 v31 共用 layout，已接受」，使用者看到的是「metadata 載入成功、0 個 type」。v32–v34 走 v29 / v31 的 layout，從未用實際檔案驗證過。CLAUDE.md 的「v16–v39 accepted」也沒有說清楚這一點。
 - 修法：soft warning 分成兩種：「strings-only（不支援型別表）」與「未驗證、比照 v31 解析」。`getMetadataStats` 加上 `typeTablesSupported`。刪掉 `30` 分支，或者有意支援 v30 時同時把它加進 `type_def_sizeof`。CLAUDE.md 的描述改成「v16–v39 accepted (strings); type tables for v24/27/29/31–39」。
@@ -725,7 +725,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：每個欄位都要掃一次整張 FieldDefaults 表（大型遊戲有數萬列）；`FindImageContainingMethod` 每次都要重新走訪每個 image 的所有 type。`metadata-cli/main.cpp:989-992` 自己就記錄了這會跑上數小時。
 - 修法：仿照 `declaring_type_map`，用 `OnceLock` 延遲建立 `fieldIndex → row`、`(ns,name) → typeIdx`、`methodIdx → imageIdx` 三個索引；回傳值不變，golden 也不受影響。
 
-### AUDIT_PLAN §5「觀察到的訊號」結案
+### audit-2026-11-23-plan.md §5「觀察到的訊號」結案
 
 | # | 訊號 | 結論 |
 |---|---|---|
@@ -758,7 +758,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### High
 
-**E-H1 · Live CE XML export 在 x86 讀 `List<T>._items` 固定讀 8 bytes，32-bit Mono 遊戲上每個非空的 `List<T>` 都匯出成「walk failed」的空群組**
+**E-H1 · Live CE XML export 在 x86 讀 `List<T>._items` 固定讀 8 bytes，32-bit Mono 遊戲上每個非空的 `List<T>` 都匯出成「walk failed」的空群組 — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI.Core/Services/Export/CeXmlExporter.Live.cs:906-918`（`ReadMemoryAsync(..., 8, ct)` + `ParseLeQword`）、`CeXmlExporter.cs:222-235`（`ParseLeQword` 要求剛好 16 個 hex 字元、組成 64-bit 值）；對照 `ui/UnityDumpUI/ViewModels/LiveInspectionViewModel.cs:1458-1479`（Inspector 已改成讀 `ptrSize` bytes，註解記錄了同一個 bug：活俠傳 Mono x86 `StatConvertCollectionData._list`）
 - 成因：`itemsOff` 已經依 `options.PointerSize` 算成 `2*ptr`（x86 為 +0x8），但讀取長度仍寫死 8。x86 的 `List<T>` 在 +0x8 是 4-byte 的 `_items`，+0xC 是 `_size`，所以 `ParseLeQword` 得到 `_items | (_size << 32)`。只要 list 非空，`arrayAbs` 就是一個超過 4 GiB 的假位址，`WalkArrayAsync` 失敗，整個 list 只剩下標著 `(walk failed)` 的空群組（`walk is null` 分支）。`_size == 0` 時剛好正確，所以小型測試抓不到。Inspector 修過這個 bug，exporter 這份雙胞胎程式碼沒有跟著修。
 - 修法：讀取長度改成 `ptr`，解析改成依實際 byte 數做 little-endian 組合（可直接共用 `LiveInspectionViewModel.ParseLittleEndianHexQword` 的語意，或讓 `ParseLeQword` 接受 4 / 8 bytes）；`CeXmlExporterLiveTests` 補一個 `PointerSize = 4`、`_size != 0` 的案例。
@@ -857,7 +857,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`bootstrap()` / `teardown()` 開頭沒有重設 `DISCRETE_HAD_ERROR`，同一個 CE session 中只要之前有一次失敗，之後就永遠不會關閉 Lua Engine；`os.execute('mkdir ...')` 每次都會閃出一個 console 視窗。
 - 修法：入口呼叫 `rawset(_G, "DISCRETE_HAD_ERROR", false)`；建立目錄改用 CE 的 `createDir`（如果 `celua.txt` 有）或 `pcall(io.open)` 探測。
 
-**E-L10 · Backend-agnostic 規則的破口（AUDIT_PLAN 訊號 1）**
+**E-L10 · Backend-agnostic 規則的破口（audit-2026-11-23-plan.md 訊號 1）**
 - 位置：`ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs:1480`（symbol export 以 `Backend2 == "IL2CPP"` 控制）；`ui/UnityDumpUI/Views/MainWindow.axaml.cs:1378-1380`（以 backend 字首判斷 `supportsSignatureMatch`，實際效果等同「有連線」）；`ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs:1845-1860`（`GuessBackend` 優先採用 handshake 的值，但 fallback 仍先比對 `mono` 子字串，正是註解自承的誤判來源）
 - 成因：UI 直接依 backend 字串做功能分支，與「所有 Mono / IL2CPP 差異都藏在 pipe 協定之後」的規則不符。三處都只影響功能可用性或標籤，不影響資料正確性，所以列為 Low。
 - 修法：handshake 加上 capability 旗標（例如 `stableModuleRelativeMethods`），UI 改以旗標控制；`supportsSignatureMatch` 改成 `IsConnected`；`GuessBackend` 的 fallback 先比對 `gameassembly`，或只採用 handshake / DB 中記錄的值。
@@ -872,7 +872,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - `docs/ui-spec.md:277`：Trajectory 星號欄位的行號寫的是 `MainWindow.axaml:3801`，實際在 `:3804`。
 - 修法：刪除 dead 參數與重複的 loader，改成共用 `AaLuaLoader`；修正文件連結與行號；`ExtractElementClass` 遇到多參數泛型時回傳 null。
 
-### AUDIT_PLAN §6「觀察到的訊號」結案
+### audit-2026-11-23-plan.md §6「觀察到的訊號」結案
 
 | # | 訊號 | 結論 |
 |---|---|---|

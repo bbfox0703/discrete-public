@@ -909,10 +909,13 @@ public static partial class CeXmlExporter
         {
             try
             {
+                // List<T>._items is pointer-sized (4 bytes on x86, 8 on x64).
+                // Reading 8 bytes on x86 sweeps in the adjacent _size field at +0xC,
+                // turning any non-empty List into a bogus >4 GiB address.
                 ReadMemoryResult itemsMem = await live.ReadMemoryAsync(
-                    $"0x{(fieldPtr + (ulong)itemsOff):X16}", 8, ct).ConfigureAwait(false);
+                    $"0x{(fieldPtr + (ulong)itemsOff):X16}", ptr, ct).ConfigureAwait(false);
                 arrayAbs = (string.IsNullOrEmpty(itemsMem.Error) && !string.IsNullOrEmpty(itemsMem.Hex))
-                    ? ParseLeQword(itemsMem.Hex!) : 0;
+                    ? ParseLePointer(itemsMem.Hex!, ptr) : 0;
             }
             catch { arrayAbs = 0; }
         }

@@ -218,19 +218,23 @@ public static partial class CeXmlExporter
         return ulong.TryParse(t, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong v) ? v : 0;
     }
 
-    /// <summary>Reorder an 8-byte little-endian hex blob into a host-order qword.</summary>
-    private static ulong ParseLeQword(string leHex)
+    /// <summary>Reorder a little-endian hex blob (<paramref name="byteCount"/> bytes:
+    /// 4 on x86 or 8 on x64) into a host-order pointer value. Returns 0 on truncated
+    /// or invalid hex input.</summary>
+    private static ulong ParseLePointer(string leHex, int byteCount)
     {
-        if (leHex.Length < 16) return 0;
+        if (byteCount is < 1 or > 8) return 0;
+        int hexLen = byteCount * 2;
+        if (leHex.Length < hexLen) return 0;
         Span<byte> bytes = stackalloc byte[8];
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < byteCount; ++i)
         {
             if (!byte.TryParse(leHex.AsSpan(i * 2, 2), NumberStyles.HexNumber,
                                CultureInfo.InvariantCulture, out bytes[i]))
                 return 0;
         }
         ulong v = 0;
-        for (int i = 7; i >= 0; --i) v = (v << 8) | bytes[i];
+        for (int i = byteCount - 1; i >= 0; --i) v = (v << 8) | bytes[i];
         return v;
     }
 
