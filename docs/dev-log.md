@@ -12,6 +12,21 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1542) — Fix A-M1 + A-M2 (+ A-L5, A-L7) (per-client disconnect monitor, pipelined ReadLine buffer, atomic ScanCancel + tests)
+
+- **Bug fixes (`A-M1`, `A-M2`, plus `A-L5` and `A-L7` in `PipeServer` / `ScanCancel`):**
+  - **`A-M1` + `A-L7` (`dll/src/shared/ScanCancel.h`, `dll/src/shared/PipeServer.cpp`):**
+    - Packed global `activeCount` and `cancelBit` into a single `std::atomic<std::uint64_t>` (`(activeCount << 1) | cancelBit`), eliminating the check-then-store TOCTOU between `RequestCancel()` and `Scope::~Scope()` (`A-L7`).
+    - Added per-worker `ClientSlotGuard` binding a stack-local `std::atomic<int> clientScanDepth` in `ServeClient`, incremented/decremented by `ScanCancel::Scope` on that thread. Each client's disconnect monitor now checks ONLY its own `clientScanDepth > 0` instead of the global scan count, so a second client (e.g. a CE Lua bridge burst) disconnecting during a non-scan RPC never probes or cancels another client's active scan (`A-M1`) and never races its own overlapped `ReadFile`.
+  - **`A-M2` + `A-L5` (`dll/src/shared/PipeLineBuffer.h`, `dll/src/shared/PipeServer.cpp`):**
+    - Added persistent per-connection `Discrete::PipeFraming::LineBuffer` so bytes arriving after `'\n'` in the same `ReadFile()` chunk are preserved for subsequent pipelined requests instead of being silently dropped (`A-M2`).
+    - Returned explicit `ReadLineResult::TooLarge` when a request exceeds the 1 MiB line cap and sent a `-32600 "request too large"` JSON-RPC error + log entry before closing (`A-L5`); removed duplicate `#include <thread>`.
+  - Added `Test_AM1_PerClientScanCancelAndAtomicState` (including a 20,000-iteration concurrent `Scope` vs `RequestCancel` race test) and `Test_AM2_PipeLineBufferPreservesPipelinedBytes` (+48 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp`.
+  - Marked `A-M1`, `A-M2`, `A-L5`, and `A-L7` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1542) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1167 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 445 checks passed (x64) / 448 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1541) — Fix B-H2 (object-extent bounds check & pure-memory generic/array klass recognition on Mono + IL2CPP + tests)
 
 - **Bug fix (`B-H2` — final High-severity audit finding, 10/10 High complete):** `BuildClassRangeCache` only enumerated TypeDef rows (`0x02xxxxxx` on Mono, `il2cpp_image_get_class` on IL2CPP), omitting runtime-synthesized generic instantiations (`List<T>`, `Dictionary<K,V>`) and arrays (`T[]`), and neither `WhatIsAt` nor `ReverseLookupIndex::Lookup` verified that `addr - instance < objectSize`. As a result, addresses inside generic instances, arrays, or gaps were falsely attributed to the nearest preceding TypeDef neighbor object with huge `nearestFieldDelta`, and Mono lacked IL2CPP's array fallback parity.

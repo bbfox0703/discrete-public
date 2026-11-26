@@ -19,6 +19,8 @@
 #include "ModuleLifecycle.h"
 #include "MonoVtableFilter.h"
 #include "ParallelScanDriver.h"
+#include "PipeLineBuffer.h"
+#include "ScanCancel.h"
 
 #include <windows.h>
 
@@ -818,6 +820,175 @@ void Test_BH2_AddressBoundsAndDynamicKlass() {
     }
 }
 
+// ============================================================================
+// A-M1 + A-L7 — Per-client scan-monitor slot & atomic ScanCancel state
+// ============================================================================
+void Test_AM1_PerClientScanCancelAndAtomicState() {
+    namespace SC = Discrete::ScanCancel;
+
+    CHECK(SC::ActiveCount() == 0ull);
+    CHECK(!SC::IsCancelRequested());
+
+    // Stray RequestCancel with no active scope must NOT arm the cancel flag.
+    SC::RequestCancel();
+    CHECK(!SC::IsCancelRequested());
+
+    // Simulate two concurrent pipe clients: Client A enters a scan Scope while
+    // Client B stays in a non-scan RPC. Client B's monitor checks depthB (0)
+    // instead of global ActiveCount (1), so Client B never cancels Client A.
+    std::atomic<int>  depthA{0};
+    std::atomic<int>  depthB{0};
+    std::atomic<bool> aEntered{false};
+    std::atomic<bool> bChecked{false};
+
+    std::thread clientA([&]() {
+        SC::ClientSlotGuard slotA(depthA);
+        CHECK(depthA.load() == 0);
+        {
+            SC::Scope outer;
+            CHECK(depthA.load() == 1);
+            CHECK(SC::ActiveCount() == 1ull);
+            CHECK(!SC::IsCancelRequested());
+            aEntered.store(true, std::memory_order_release);
+            while (!bChecked.load(std::memory_order_acquire)) {
+                ::Sleep(1);
+            }
+            // Client B disconnected without holding a Scope -> A stays uncancelled.
+            CHECK(!SC::IsCancelRequested());
+            {
+                SC::Scope inner;
+                CHECK(depthA.load() == 2);
+                CHECK(SC::ActiveCount() == 2ull);
+                SC::RequestCancel();
+                CHECK(SC::IsCancelRequested());
+            }
+            // Inner scope left, outer still active -> cancel remains armed.
+            CHECK(depthA.load() == 1);
+            CHECK(SC::ActiveCount() == 1ull);
+            CHECK(SC::IsCancelRequested());
+        }
+        // Outermost scope left -> both counters zero and cancel cleared.
+        CHECK(depthA.load() == 0);
+    });
+
+    std::thread clientB([&]() {
+        SC::ClientSlotGuard slotB(depthB);
+        while (!aEntered.load(std::memory_order_acquire)) {
+            ::Sleep(1);
+        }
+        // Global scan is active, but Client B's own depth is 0 -> monitor MUST NOT probe/cancel.
+        CHECK(SC::ActiveCount() == 1ull);
+        CHECK(depthB.load(std::memory_order_acquire) == 0);
+        bChecked.store(true, std::memory_order_release);
+    });
+
+    clientA.join();
+    clientB.join();
+
+    CHECK(SC::ActiveCount() == 0ull);
+    CHECK(!SC::IsCancelRequested());
+
+    // A-L7 race test: concurrent Scope enter/exit vs RequestCancel must never
+    // leave a leaked armed cancel flag once all scopes have exited.
+    std::atomic<bool> done{false};
+    std::thread canceller([&]() {
+        while (!done.load(std::memory_order_relaxed)) {
+            SC::RequestCancel();
+        }
+    });
+    for (int i = 0; i < 20000; ++i) {
+        SC::Scope s;
+    }
+    done.store(true, std::memory_order_relaxed);
+    canceller.join();
+    CHECK(SC::ActiveCount() == 0ull);
+    CHECK(!SC::IsCancelRequested());
+}
+
+// ============================================================================
+// A-M2 + A-L5 — PipeLineBuffer preserves pipelined bytes & caps line size
+// ============================================================================
+void Test_AM2_PipeLineBufferPreservesPipelinedBytes() {
+    using Discrete::PipeFraming::LineBuffer;
+
+    // 1. Two pipelined JSON-RPC lines delivered in a single ReadFile chunk.
+    {
+        LineBuffer lb;
+        const char chunk[] = "{\"id\":1,\"cmd\":\"a\"}\n{\"id\":2,\"cmd\":\"b\"}\n";
+        lb.Append(chunk, sizeof(chunk) - 1u);
+
+        std::string line;
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line == "{\"id\":1,\"cmd\":\"a\"}");
+        CHECK(lb.PendingBytes() > 0u);
+
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line == "{\"id\":2,\"cmd\":\"b\"}");
+        CHECK(lb.PendingBytes() == 0u);
+
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::NeedMore);
+    }
+
+    // 2. Lines split arbitrarily across multiple ReadFile chunks + CRLF stripping.
+    {
+        LineBuffer lb;
+        std::string line;
+
+        const char p1[] = "{\"id\":1";
+        lb.Append(p1, sizeof(p1) - 1u);
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::NeedMore);
+
+        const char p2[] = ",\"x\":10}\r\n{\"id\":2";
+        lb.Append(p2, sizeof(p2) - 1u);
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line == "{\"id\":1,\"x\":10}");
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::NeedMore);
+
+        const char p3[] = ",\"x\":20}\r\n";
+        lb.Append(p3, sizeof(p3) - 1u);
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line == "{\"id\":2,\"x\":20}");
+        CHECK(lb.PendingBytes() == 0u);
+    }
+
+    // 3. Empty lines interspersed with real lines do not swallow following lines.
+    {
+        LineBuffer lb;
+        const char chunk[] = "\n\r\n{\"id\":3}\n";
+        lb.Append(chunk, sizeof(chunk) - 1u);
+
+        std::string line;
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line.empty());
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line.empty());
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line == "{\"id\":3}");
+        CHECK(lb.PendingBytes() == 0u);
+    }
+
+    // 4. Max-size cap (A-L5): exact cap succeeds; cap + 1 reports TooLarge.
+    {
+        LineBuffer lb(16u);
+        std::string line;
+        const std::string exact = std::string(16u, 'A') + "\n";
+        lb.Append(exact.data(), exact.size());
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line.size() == 16u);
+
+        const std::string overNoNl(17u, 'B');
+        lb.Append(overNoNl.data(), overNoNl.size());
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::TooLarge);
+
+        const std::string overWithNl = std::string(17u, 'C') + "\n{\"ok\":1}\n";
+        lb.Append(overWithNl.data(), overWithNl.size());
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::TooLarge);
+        // Subsequent line after an oversized line still decodes cleanly if caller continues.
+        CHECK(lb.TryPopLine(line) == LineBuffer::ExtractStatus::LineReady);
+        CHECK(line == "{\"ok\":1}");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -828,6 +999,8 @@ int main() {
     Test_BH1_MonoVtableAlignment();
     Test_AH1_PinnedModuleSurvivesFreeLibrary();
     Test_BH2_AddressBoundsAndDynamicKlass();
+    Test_AM1_PerClientScanCancelAndAtomicState();
+    Test_AM2_PipeLineBufferPreservesPipelinedBytes();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

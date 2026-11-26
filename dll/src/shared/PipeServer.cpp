@@ -4,6 +4,7 @@
 
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "PipeLineBuffer.h"
 #include "ScanCancel.h"
 
 #include <windows.h>
@@ -12,7 +13,6 @@
 #include <mutex>
 #include <string>
 #include <thread>  // Phase 22f: detached worker thread per client
-#include <thread>
 #include <vector>
 
 using nlohmann::json;
@@ -80,22 +80,36 @@ bool WriteLine(HANDLE pipe, const std::string& data) {
     return ok;
 }
 
-// Read until '\n' or disconnect. Returns false if the connection closed before a line arrived
-// or the server is being stopped.
-bool ReadLine(HANDLE pipe, std::string& out) {
-    out.clear();
+enum class ReadLineResult {
+    Ok,
+    Closed,
+    TooLarge,
+};
+
+// Read until '\n' or disconnect, preserving bytes after '\n' in `rxBuf` for
+// subsequent pipelined requests (A-M2). Reports TooLarge explicitly so the
+// caller can emit a -32600 JSON-RPC error before closing (A-L5).
+ReadLineResult ReadLine(HANDLE pipe, Discrete::PipeFraming::LineBuffer& rxBuf, std::string& out) {
+    using Discrete::PipeFraming::LineBuffer;
+
+    // Fast path: a pipelined request is already buffered from the previous ReadFile.
+    {
+        auto st = rxBuf.TryPopLine(out);
+        if (st == LineBuffer::ExtractStatus::LineReady) return ReadLineResult::Ok;
+        if (st == LineBuffer::ExtractStatus::TooLarge)  return ReadLineResult::TooLarge;
+    }
+
     char buf[1024];
     OVERLAPPED ov{};
     ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!ov.hEvent) return false;
+    if (!ov.hEvent) return ReadLineResult::Closed;
 
-    bool ok = true;
-    while (ok) {
+    ReadLineResult result = ReadLineResult::Closed;
+    for (;;) {
         ::ResetEvent(ov.hEvent);
         DWORD read = 0;
         BOOL r = ::ReadFile(pipe, buf, sizeof(buf), &read, &ov);
         if (!r && ::GetLastError() != ERROR_IO_PENDING) {
-            ok = false;
             break;
         }
         HANDLE waits[2] = { ov.hEvent, g_stopEvent };
@@ -106,27 +120,24 @@ bool ReadLine(HANDLE pipe, std::string& out) {
             // CancelIoEx is async, so the kernel may still write into the
             // stack-resident OVERLAPPED / read buffer after it returns.
             ::GetOverlappedResult(pipe, &ov, &read, TRUE);
-            ok = false;
             break;
         }
         if (!::GetOverlappedResult(pipe, &ov, &read, FALSE) || read == 0) {
-            ok = false;
             break;
         }
-        for (DWORD i = 0; i < read; ++i) {
-            if (buf[i] == '\n') {
-                ::CloseHandle(ov.hEvent);
-                return true;
-            }
-            if (buf[i] != '\r') out.push_back(buf[i]);
+        rxBuf.Append(buf, read);
+        auto st = rxBuf.TryPopLine(out);
+        if (st == LineBuffer::ExtractStatus::LineReady) {
+            result = ReadLineResult::Ok;
+            break;
         }
-        if (out.size() > 1024 * 1024) {  // 1 MiB sanity cap
-            ok = false;
+        if (st == LineBuffer::ExtractStatus::TooLarge) {
+            result = ReadLineResult::TooLarge;
             break;
         }
     }
     ::CloseHandle(ov.hEvent);
-    return false;
+    return result;
 }
 
 json BuildError(json id, int code, const std::string& message) {
@@ -163,19 +174,20 @@ json Dispatch(const json& request) {
 
 void ServeClient(HANDLE pipe) {
     LogPipe("client connected");
-    // Disconnect monitor. A long scan handler runs SYNCHRONOUSLY on this thread,
-    // so while it's running we can't notice the pipe breaking until it returns
-    // (could be minutes). A side thread polls the pipe; if the client vanished
-    // (UI force-quit) it arms the cooperative scan-cancel so the DLL stops
-    // promptly + frees its work instead of churning to completion. It only
-    // probes WHILE a scan is active — then the main thread does no pipe IO, so
-    // PeekNamedPipe can't race the overlapped ReadFile on the same handle.
+    // Per-client disconnect monitor (A-M1). A long scan handler runs
+    // SYNCHRONOUSLY on this thread, so while it's running we can't notice the
+    // pipe breaking until it returns (could be minutes). A side thread polls
+    // THIS client's pipe ONLY while THIS client's worker owns a ScanCancel::Scope
+    // (`clientScanDepth > 0`) — never on global scan activity. That guarantees:
+    //   1. A second client (e.g. a CE bridge burst) disconnecting during a
+    //      non-scan RPC never cancels another client's active scan.
+    //   2. PeekNamedPipe never races this worker's own overlapped ReadFile.
+    std::atomic<int> clientScanDepth{0};
+    Discrete::ScanCancel::ClientSlotGuard clientSlotGuard(clientScanDepth);
     std::atomic<bool> monitorStop{false};
-    std::thread monitor([pipe, &monitorStop]() {
+    std::thread monitor([pipe, &monitorStop, &clientScanDepth]() {
         while (!monitorStop.load(std::memory_order_relaxed)) {
-            // g_scanActive is a COUNT of live scan Scopes (see ScanCancel.h), so
-            // "a scan is running" is > 0 — including while several overlap.
-            if (Discrete::ScanCancel::g_scanActive.load(std::memory_order_relaxed) > 0) {
+            if (clientScanDepth.load(std::memory_order_acquire) > 0) {
                 DWORD avail = 0;
                 if (!::PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr)) {
                     DWORD e = ::GetLastError();
@@ -199,9 +211,16 @@ void ServeClient(HANDLE pipe) {
             if (w != WAIT_TIMEOUT) ::Sleep(150);   // never busy-wait
         }
     });
+    Discrete::PipeFraming::LineBuffer rxBuf;
     while (g_running.load()) {
         std::string line;
-        if (!ReadLine(pipe, line)) break;
+        ReadLineResult rl = ReadLine(pipe, rxBuf, line);
+        if (rl == ReadLineResult::TooLarge) {
+            LogPipe("request exceeded 1 MiB line cap — sending -32600 and closing");
+            WriteLine(pipe, BuildError(nullptr, -32600, "request too large").dump());
+            break;
+        }
+        if (rl != ReadLineResult::Ok) break;
         if (line.empty()) continue;
 
         json request;

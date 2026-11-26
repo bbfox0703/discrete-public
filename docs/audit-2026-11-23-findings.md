@@ -29,12 +29,12 @@
 
 ### Medium
 
-**A-M1 · 某個 client 斷線時，可能取消**另一個** client 正在跑的 scan**
+**A-M1 · 某個 client 斷線時，可能取消**另一個** client 正在跑的 scan — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/PipeServer.cpp:166-201`（特別是 `:171-172`、`:178-186`）；`dll/src/shared/ScanCancel.h:55-58`
 - 成因：每個 client 的 disconnect monitor 都用全域的 `g_scanActive > 0` 當「該不該 probe」的條件，而不是「**本 client** 是否有 scan 在跑」。client A（UI）在 value scan 時，client B（CE bridge）只要正在跑一個非 scan 的長 handler（例如 `findFieldReferences`、經 MainThreadDispatcher 的 `callMethod`），主迴圈就不會讀 pipe，於是 B 斷線只能由 B 的 monitor 發現 → `RequestCancel()` → A 的 scan 被取消，必然發生。即使 B 閒置，monitor 剛醒來、主迴圈還沒設 `monitorStop` 的短暫窗口內也可能誤觸。`:171-172` 的註解（「scan 進行中主執行緒不做 pipe IO」）在多 client 下不成立。
 - 修法：monitor 只在「本 worker thread 持有 `ScanCancel::Scope`」時才 probe（由 Scope 設一個 per-thread / per-client 旗標，monitor 讀它）；或者把 cancel 改成 per-client token（Scope 記錄擁有者，`RequestCancel(owner)` 只對同一個 owner 生效）。
 
-**A-M2 · `ReadLine` 會丟掉同一次 `ReadFile` 中 `'\n'` 之後的位元組**
+**A-M2 · `ReadLine` 會丟掉同一次 `ReadFile` 中 `'\n'` 之後的位元組 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/PipeServer.cpp:85-130`（`:116-122`）
 - 成因：遇到第一個 `'\n'` 就 `return true`，`buf` 裡剩下的資料（下一個 request 的前半或整段）沒有保留到下一次呼叫。byte-mode pipe 會合併寫入；只要 client 在上一個回應之前送出第二行（pipelining，或在同一條連線上送 `cancelScan`），第二個 request 就會靜默消失，client 永遠等不到它的回應。
 - 修法：每個連線維持一個跨呼叫的 receive buffer（例如 `ServeClient` 擁有的 `std::string pending`），`ReadLine` 先從 `pending` 切行，切不出來才再 `ReadFile`。
@@ -123,7 +123,7 @@
 - 成因：大型回應（snapshot / scan）的尖峰記憶體變成兩倍，在 32-bit 下更容易 `bad_alloc`（會被 worker 的 catch 吃掉，client 被斷線）。
 - 修法：讓 `serialized` 直接 `push_back('\n')` 後以 move 傳入，或分成兩次 `WriteFile`。
 
-**A-L5 · `ReadLine` 超過 1 MiB 時直接斷線，不回錯誤**
+**A-L5 · `ReadLine` 超過 1 MiB 時直接斷線，不回錯誤 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/PipeServer.cpp:123-126`
 - 成因：client 只看到 broken pipe，分不出是 request 太大還是 DLL 掛了。
 - 修法：先回一個 `-32600 "request too large"` 再斷線，並寫 log。
@@ -133,7 +133,7 @@
 - 成因：`ConnectNamedPipe` 用的 event 沒檢查 `CreateEventW` 失敗（NULL event 會導致 wait 立刻失敗、迴圈空轉）；4 個 slot 都滿時每 500 ms 寫一行 log；acceptor 被 `detach()` 之後若又 `Start()`，`g_running` 重新變成 true，舊 acceptor 也會繼續跑（同時有兩個 acceptor），洩漏的舊 `g_stopEvent` 被新的覆蓋後，舊 worker 會等在新 event 上；`std::thread` 建構失敗時 `g_running` 停在 true、event 洩漏，例外還可能從 DllMain 傳出去。
 - 修法：檢查 event 建立結果；log 加節流；`Start()` 在偵測到上一輪 acceptor 還活著時拒絕啟動；把 `std::thread` 建構放進 try 並回滾狀態。
 
-**A-L7 · `ScanCancel::RequestCancel` 的 check-then-store 有 TOCTOU**
+**A-L7 · `ScanCancel::RequestCancel` 的 check-then-store 有 TOCTOU — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/ScanCancel.h:55-58`
 - 成因：讀到 `g_scanActive > 0` 之後、`store(true)` 之前，最後一個 Scope 可能已經離開並清掉旗標，結果留下一個「已 arm」的旗標。下一個 outermost Scope 進場時會清掉，所以只影響沒有持有 Scope 的 polling 端（註解說這種情況只是 advisory）。
 - 修法：用 CAS 迴圈，或在 Scope dtor 最後一位離開時再清一次（先 store false、再檢查 count）。
