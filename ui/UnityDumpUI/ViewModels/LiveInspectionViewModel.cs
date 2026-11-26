@@ -1738,7 +1738,10 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
     /// exporter's next pipe RPC throws OperationCanceledException and the command
     /// surfaces "export cancelled".</summary>
     [RelayCommand(CanExecute = nameof(IsExporting))]
-    private void CancelExport() => _exportCts?.Cancel();
+    private void CancelExport()
+    {
+        try { _exportCts?.Cancel(); } catch (ObjectDisposedException) { }
+    }
 
     private static int CountLines(string s)
     {
@@ -1766,9 +1769,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         string ns   = TargetNamespace ?? string.Empty;
         string name = TargetName!;
 
-        _exportCts?.Cancel();
-        _exportCts = new CancellationTokenSource();
-        CancellationToken ct = _exportCts.Token;
+        CancellationTokenSource? prev = _exportCts;
+        var myCts = new CancellationTokenSource();
+        _exportCts = myCts;
+        try { prev?.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationToken ct = myCts.Token;
         IsExporting = true;
         try
         {
@@ -1780,41 +1785,59 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             string usedAssembly = TargetAssembly ?? "Assembly";
             foreach (string asm in candidates)
             {
+                ct.ThrowIfCancellationRequested();
                 GetClassInfoResult attempt = await _backend
                     .GetClassInfoAsync(asm, ns, name, ct).ConfigureAwait(true);
                 if (string.IsNullOrEmpty(attempt.Error)) { info = attempt; usedAssembly = asm; break; }
             }
             if (info is null)
             {
-                ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
+                if (ReferenceEquals(_exportCts, myCts))
+                    ErrorMessage = $"getClassInfo({ns}.{name}): not found in {string.Join(", ", candidates)}";
                 return;
             }
             ExportOptions options = ResolveExportOptions();
             CopyCeXmlProgress = "exporting…";
-            var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
+            var progress = new Progress<int>(n =>
+            {
+                if (ReferenceEquals(_exportCts, myCts))
+                    CopyCeXmlProgress = $"exporting… {n:N0} entries";
+            });
             string xml = await CeXmlExporter.RenderAsync(
                 SelectedInstance.Address, info, ancestors: null,
                 usedAssembly, options, _backend, ct, progress)
                 .ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE XML instance {TargetLabel} @ {SelectedInstance.Address} ({xml.Length} bytes)");
         }
         catch (OperationCanceledException)
         {
-            CopyCeXmlProgress = "export cancelled";
+            if (ReferenceEquals(_exportCts, myCts))
+                CopyCeXmlProgress = "export cancelled";
         }
         catch (Exception ex)
         {
-            CopyCeXmlProgress = "export failed";
-            ErrorMessage = $"copy CE XML failed: {ex.Message}";
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                CopyCeXmlProgress = "export failed";
+                ErrorMessage = $"copy CE XML failed: {ex.Message}";
+            }
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE XML instance failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
-            IsExporting = false;
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                IsExporting = false;
+                _exportCts = null;
+            }
+            myCts.Dispose();
         }
     }
 
@@ -1846,9 +1869,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             nodes = new[] { SelectedNode };
         if (nodes.Count == 0) return;
 
-        _exportCts?.Cancel();
-        _exportCts = new CancellationTokenSource();
-        CancellationToken ct = _exportCts.Token;
+        CancellationTokenSource? prev = _exportCts;
+        var myCts = new CancellationTokenSource();
+        _exportCts = myCts;
+        try { prev?.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationToken ct = myCts.Token;
         IsExporting = true;
         try
         {
@@ -1864,11 +1889,18 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
             if (built.Count == 0) return;
 
             CopyCeXmlProgress = "exporting…";
-            var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
+            var progress = new Progress<int>(n =>
+            {
+                if (ReferenceEquals(_exportCts, myCts))
+                    CopyCeXmlProgress = $"exporting… {n:N0} entries";
+            });
             string xml = await CeXmlExporter.RenderFieldNodesLiveAsync(
                 built, TargetAssembly, options, _backend, ct, progress, rootAsOffset)
                 .ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             CopyCeXmlProgress = $"copied {CountLines(xml):N0} lines";
             string summary = built.Count == 1
                 ? $"{nodes[0].Name} @ {(rootAsOffset ? "+" + nodes[0].Offset.ToString("X") : built[0].absoluteAddress)}"
@@ -1878,18 +1910,27 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
         }
         catch (OperationCanceledException)
         {
-            CopyCeXmlProgress = "export cancelled";
+            if (ReferenceEquals(_exportCts, myCts))
+                CopyCeXmlProgress = "export cancelled";
         }
         catch (Exception ex)
         {
-            CopyCeXmlProgress = "export failed";
-            ErrorMessage = $"copy CE field failed: {ex.Message}";
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                CopyCeXmlProgress = "export failed";
+                ErrorMessage = $"copy CE field failed: {ex.Message}";
+            }
             _logger.Write(Constants.LogCategoryView,
                 $"copy CE field node failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
-            IsExporting = false;
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                IsExporting = false;
+                _exportCts = null;
+            }
+            myCts.Dispose();
         }
     }
 

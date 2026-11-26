@@ -81,6 +81,7 @@ public static class CsxExporter
         IClassInfoLookup? lookup,
         CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var sb = new StringBuilder(4096);
         sb.Append("<Structures>\n");
         var visited = new HashSet<string>();
@@ -210,6 +211,7 @@ public static class CsxExporter
 
         foreach (FieldEntry f in fields.Where(x => !x.Static))
         {
+            ct.ThrowIfCancellationRequested();
             int fieldOffset = baseOffset + Math.Max(0, f.Offset - offsetAdjust);
             string fieldName = string.IsNullOrEmpty(namePrefix) ? f.Name : namePrefix + f.Name;
             string desc = isInherited

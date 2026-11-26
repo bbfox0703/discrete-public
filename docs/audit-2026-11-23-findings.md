@@ -773,7 +773,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### Medium
 
-**E-M1 · CE XML / CSX exporter 吞掉所有例外（包括取消），按 Cancel 或被新的 export 取代時，會把截斷的表格當成成功結果複製到剪貼簿**
+**E-M1 · CE XML / CSX exporter 吞掉所有例外（包括取消），按 Cancel 或被新的 export 取代時，會把截斷的表格當成成功結果複製到剪貼簿 — ✅ FIXED (2026-11-26)**
 - 位置：`CeXmlExporter.cs:169-172`、`:456`；`CeXmlExporter.Live.cs:277`、`:431`、`:451`、`:531`、`:917`、`:946`、`:1251`、`:1286`；`CsxExporter.cs:254`（全部是 bare `catch { }`，`Export/` 底下只有 `Il2cppHeaderBatchExporter` 會檢查 `ct`）；呼叫端 `AssemblyBrowserViewModel.cs:81`、`:544-578`、`:650-683`，`LiveInspectionViewModel.cs:1741`、`:1769-1819`、`:1849-1894`
 - 成因：`CancelExport()` 或下一次 export 的 `_exportCts?.Cancel()` 取消 token 之後，後續每一個 RPC 都會在 `PipeClient._gate.WaitAsync(ct)`（`PipeClient.cs:104`、`:163`）立刻丟出 `OperationCanceledException`，但 exporter 的 bare catch 把它當成「這個節點解析失敗」吞掉，繼續遞迴。結果是 exporter 很快跑完並回傳一份只剩空群組的 XML。呼叫端的 `catch (OperationCanceledException)` 永遠收不到，所以會執行 `CopyToClipboardAsync(xml)`，並顯示 `copied N lines`。被取代的舊 export 也可能比新的那個晚寫入剪貼簿，覆蓋掉正確的結果。另外 `finally { IsExporting = false; }` 不分新舊，舊 export 結束時會把新 export 的忙碌狀態清掉（`AssemblyBrowserViewModel.cs:574-577`），被取代的 CTS 也從來沒有 `Dispose`。
 - 修法：所有 `catch { }` 改成 `catch (Exception ex) when (ex is not OperationCanceledException)`，並在每次遞迴 / 迴圈開頭 `ct.ThrowIfCancellationRequested()`。呼叫端在 `await` 之後比對自己的 CTS 是否仍是 `_exportCts`，不是就不要寫剪貼簿，也不要動 `IsExporting`；被取代的 CTS 要 `Dispose`。
@@ -800,7 +800,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
   2. （待驗證）CE 的 Mono 分支由 MonoDataCollector 以 `mono_signature_get_desc` 產生 signature 字串，Mono 對 primitive 輸出的是 `int` / `single` / `string` 這類簡稱。`ParamTypes` 傳的是 `System.Int32`，所以凡是含有 primitive / string 參數的 overload，在 Mono 上都比對不到（`monoscript.lua:4387-4432` 只有 IL2CPP 分支會逐一讀取完整 typename）。`discrete_mono_registerSymbolEx` 有 typename → signature 的 fallback，但 generator 在有參數時並不呼叫它。
 - 修法：有參數時改呼叫 `discrete_mono_registerSymbolEx`（逐位、比對個數與尾段名稱，`_discrete_typename_match`），再補一張 `System.Int32 ↔ int` 等 primitive 別名表。`BySignatureMatch` 只當最後的 fallback，命中多個 overload 時要 `eprint`，不能取第一個。
 
-**E-M6 · Assembly Browser 切換 class 後沒有清掉 `_currentChain`，載入完成前或載入失敗時，export 輸出的是上一個 class**
+**E-M6 · Assembly Browser 切換 class 後沒有清掉 `_currentChain`，載入完成前或載入失敗時，export 輸出的是上一個 class — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI/ViewModels/AssemblyBrowserViewModel.cs:282-291`（只清 Fields / Methods）、`:436-442`（第一層 `getClassInfo` 失敗直接 `return`）、`:458`（只有成功時才指派）、`:690-691`（`CanExport` 只看 `SelectedClass`）、`:702`、`:537`、`:618`
 - 成因：`OnSelectedClassChanged` 之後 export 指令立即可用，但 `_currentChain` 仍是舊 class 的資料。在 RPC 往返期間（大型 class 加上 ShowInherited 可能需要數秒），或新 class 的 `getClassInfo` 回傳錯誤時，`Export CE XML` / `Copy CE XML` / `Export .h` 匯出的都是舊 class，檔名也會用舊 class 的名稱，使用者只看得到新的 selection。註解（`:685-689`）把這個情況描述成「rare race window、no-op safely」，但實際上不是 no-op，而是輸出錯誤的 class。
 - 修法：`OnSelectedClassChanged` 中立即把 `_currentChain` 清成空 list，並通知各 export 指令的 `CanExecute`；`CanExport` 改成 `_currentChain.Count > 0 && 最後一筆是 SelectedClass`。

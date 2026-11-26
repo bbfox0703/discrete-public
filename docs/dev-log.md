@@ -12,6 +12,21 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1545) — Fix E-M1 + E-M6 (exporter cancellation propagation, CTS ownership, and Browser stale `_currentChain` + tests)
+
+- **Bug fixes (`E-M1`, `E-M6`):**
+  - **`E-M1` (`CeXmlExporter.cs`, `CeXmlExporter.Live.cs`, `CsxExporter.cs`, `AssemblyBrowserViewModel.cs`, `LiveInspectionViewModel.cs`):**
+    - Replaced all 9 remaining bare `catch { ... }` blocks across `CeXmlExporter.cs` and `CeXmlExporter.Live.cs` with `catch (Exception ex) when (ex is not OperationCanceledException)` and added `ct.ThrowIfCancellationRequested()` checks at recursive entry points and element loops in `CeXmlExporter` and `CsxExporter`, so cancelling or superseding an export aborts cleanly instead of returning truncated XML/CSX.
+    - Hardened export CTS ownership in `AssemblyBrowserViewModel` (`CopyCeXmlAsync`, `CopyCeFieldAsync`, `ExportAsync`) and `LiveInspectionViewModel` (`CopyCeXmlInstanceAsync`, `CopyCeFieldNodeCoreAsync`): each invocation owns and disposes its own `CancellationTokenSource` in `finally`, and checks `ReferenceEquals(_exportCts, myCts)` before writing to the clipboard/file, updating progress/errors, or clearing `IsExporting` — preventing a superseded export from clobbering the newer export's clipboard or busy indicator.
+  - **`E-M6` (`AssemblyBrowserViewModel.cs`):**
+    - Cleared `_currentChain` and cancelled `_detailCts` immediately in `OnSelectedClassChanged`, and notified `CanExecuteChanged` on all export commands.
+    - Updated `CanExport()` to require `_currentChain.Count > 0` with `_currentChain[^1]` matching `SelectedClass.Name` and `SelectedClass.Namespace`, and guarded `LoadClassDetailAsync` against stale CTS completion so switching classes (or a failed `getClassInfo`) can never export the previously selected class.
+  - Added 8 regression tests in `ui/UnityDumpUI.Tests/ExportCancellationAndBrowserChainTests.cs` covering live/template CE XML & CSX cancellation propagation, non-cancellation fault tolerance, and `AssemblyBrowserViewModel` selection/chain synchronization.
+  - Marked `E-M1` and `E-M6` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1545) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1175 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 451 checks passed (x64) / 454 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1544) — Fix A-M11 + A-M12 (AVX2 string-scan scalar tail alignment & identity-guard regex ReDoS + tests)
 
 - **Bug fixes (`A-M11`, `A-M12`):**

@@ -64,6 +64,8 @@ public static partial class CeXmlExporter
         CancellationToken  ct = default,
         IProgress<int>?    progress = null)
     {
+        ct.ThrowIfCancellationRequested();
+
         // Live mode: real instance address + ILiveExportSource hookup.
         // Falls through to template mode if either pre-condition is missing.
         if (options.LiveData
@@ -164,11 +166,12 @@ public static partial class CeXmlExporter
         WalkInstanceResult root;
         try
         {
+            ct.ThrowIfCancellationRequested();
             root = await live.WalkInstanceAsync(
                 $"0x{baseAbs:X16}", assemblyName ?? string.Empty,
                 self.Namespace, self.Name ?? string.Empty, ct).ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             root = new WalkInstanceResult();
         }
@@ -355,6 +358,7 @@ public static partial class CeXmlExporter
     {
         if (fields is null || fields.Count == 0)
             throw new ArgumentException("at least one field required", nameof(fields));
+        ct.ThrowIfCancellationRequested();
 
         var sb = new StringBuilder(1024);
         var idGen = new IdGen();
@@ -401,6 +405,7 @@ public static partial class CeXmlExporter
         if (info.Fields is not { Count: > 0 } fields) return;
         foreach (FieldEntry f in fields.Where(x => !x.Static))
         {
+            ct.ThrowIfCancellationRequested();
             await EmitOneFieldAsync(sb, indent, ids, f, isInherited,
                                     assemblyName, options, lookup, visited,
                                     currentDepth, ct, offsetAdjust).ConfigureAwait(false);
@@ -666,6 +671,7 @@ public static partial class CeXmlExporter
                         {
                             for (int i = 0; i < options.ArrayLimit; ++i)
                             {
+                                ct.ThrowIfCancellationRequested();
                                 OpenGroup(sb, elemIndent, ids, $"[{i}]",
                                           RelAddr(dataOff + i * elemSize),
                                           offsets: null,
@@ -690,6 +696,7 @@ public static partial class CeXmlExporter
                     {
                         for (int i = 0; i < options.ArrayLimit; ++i)
                         {
+                            ct.ThrowIfCancellationRequested();
                             OpenGroup(sb, elemIndent, ids, $"[{i}]",
                                       RelAddr(dataOff + i * ptr),
                                       offsets: new[] { 0 },
