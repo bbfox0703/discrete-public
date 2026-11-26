@@ -12,6 +12,22 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1546) — Fix E-M2 + E-M3 (+ E-L9) (Address Lookup String dereference & x86 pointer width, Mode-B `ce_table_bootstrap.lua` `injectDLL`/backend/logging fixes + tests)
+
+- **Bug fixes (`E-M2`, `E-M3`, `E-L9`):**
+  - **`E-M2` (`AddressLookupAaScriptGenerator.cs`, `AobMakerBridge.cs`, `AddressLookupViewModel.cs`, `MainWindowViewModel.cs`):**
+    - Added `PointerSize` (default `8`) to `AddressLookupRequest`, wired `AddressLookup.GamePointerSize = hs.GamePointerSize ?? 0` in `MainWindowViewModel` alongside `Inspector` and `Browser`, and updated `MapClrToCe` so `System.IntPtr`, `System.UIntPtr`, and unknown reference-type fallbacks map to `CeValueType.Dword` on x86 and `CeValueType.Qword` on x64.
+    - Fixed `System.String` child records in `AddressLookupAaScriptGenerator.BuildChild` to dereference the managed `String` object pointer before reading UTF-16 `_firstChar` (`2 * ptr + 4`: `+0x14` on x64, `+0x0C` on x86), emitting `Offsets = [charsOffset, f.Offset]` in Cheat Engine's `.CT` / `MemoryRecord.Offset[0..n-1]` order (`Offsets[0]` applied last, `Offsets[n-1]` applied first after dereferencing `Address`). Clarified `AaScriptChildRecord.Offsets` XML docs to match AOBMaker's `CreateAAScriptWithRecords` mapping.
+  - **`E-M3` + `E-L9` (`scripts/ce_table_bootstrap.lua`):**
+    - Replaced `if injectDLL(dllPath) == nil then` with `if not injectDLL(dllPath) then` so `false` returns from CE's `injectDLL` properly raise an error instead of silently continuing.
+    - Synchronized `_detectBackendInTarget()` with `scripts/utils.lua`'s `M.detectBackend()` (calling `reinitializeSymbolhandler`, normalizing full-path module names via basename extraction, recognizing `userassembly.dll` / `mono-2.0-sgen.dll` / `mono-2.0-boehm.dll`, and adding `getModule` fallback).
+    - Reset `rawset(_G, "DISCRETE_HAD_ERROR", false)` at the start of both `bootstrap()` and `teardown()`, and split `_extractDirPath()` / `_ensureDir()` so `teardown()` never runs `mkdir` and `bootstrap()` skips `os.execute('mkdir ...')` when the extract directory already exists or CE's `createDir` succeeds (`E-L9`).
+  - Added 10 new xUnit v3 test cases across `ui/UnityDumpUI.Tests/AddressLookupAaScriptGeneratorTests.cs` (9 cases covering x64/x86 `System.String` 2-level pointer offsets, nearest-field String, and x86/x64 `IntPtr`/`UIntPtr`/reference mapping) and `ui/UnityDumpUI.Tests/BridgeLuaResourcesTests.cs` (regression checks for `ce_table_bootstrap.lua` boolean `injectDLL`, backend parity, `DISCRETE_HAD_ERROR` reset, teardown dir behavior, and LF-only endings).
+  - Marked `E-M2`, `E-M3`, and `E-L9` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1546) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1185 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 451 checks passed (x64) / 454 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1545) — Fix E-M1 + E-M6 (exporter cancellation propagation, CTS ownership, and Browser stale `_currentChain` + tests)
 
 - **Bug fixes (`E-M1`, `E-M6`):**

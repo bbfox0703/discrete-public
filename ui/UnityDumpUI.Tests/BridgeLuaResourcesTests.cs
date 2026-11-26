@@ -171,4 +171,41 @@ public class BridgeLuaResourcesTests
         Assert.Throws<ArgumentException>(
             () => BridgeLuaResources.Read("UNITY_DUMP.LUA"));
     }
+
+    [Fact]
+    public void CeTableBootstrap_ChecksInjectDllAsBoolean_AndMatchesUtilsBackendDetection()
+    {
+        // E-M3 + E-L9 regression test for scripts/ce_table_bootstrap.lua (Mode-B CT template):
+        // - Must NOT check `injectDLL(...) == nil` (CE returns boolean `false` on failure).
+        // - Must use basename extraction + full IL2CPP/Mono module list matching utils.lua.
+        // - Must reset DISCRETE_HAD_ERROR on bootstrap() and teardown() entry.
+        // - Must stay LF-only (pre-commit hook / CE TableFile safety).
+        string? scriptsDir = FindScriptsDir();
+        if (scriptsDir is null)
+            Assert.Fail(@"scripts\ directory not found above " + AppContext.BaseDirectory);
+
+        string content = File.ReadAllText(Path.Combine(scriptsDir!, "ce_table_bootstrap.lua"));
+
+        Assert.DoesNotContain("\r", content);
+        Assert.DoesNotContain("injectDLL(dllPath) == nil", content);
+        Assert.Contains("if not injectDLL(dllPath) then", content);
+
+        // Backend detection parity with utils.lua M.detectBackend()
+        Assert.Contains("userassembly.dll", content);
+        Assert.Contains("mono-2.0-sgen.dll", content);
+        Assert.Contains("mono-2.0-boehm.dll", content);
+        Assert.Contains("reinitializeSymbolhandler", content);
+        Assert.Contains("raw:match(\"([^\\\\/]+)$\")", content);
+
+        // E-L9: both public entry points reset DISCRETE_HAD_ERROR; teardown does not call _ensureDir
+        int bootstrapIdx = content.IndexOf("function bootstrap()", StringComparison.Ordinal);
+        int teardownIdx  = content.IndexOf("function teardown()",  StringComparison.Ordinal);
+        Assert.True(bootstrapIdx >= 0 && teardownIdx > bootstrapIdx);
+
+        string bootstrapBody = content.Substring(bootstrapIdx, teardownIdx - bootstrapIdx);
+        string teardownBody  = content.Substring(teardownIdx);
+        Assert.Contains("rawset(_G, \"DISCRETE_HAD_ERROR\", false)", bootstrapBody);
+        Assert.Contains("rawset(_G, \"DISCRETE_HAD_ERROR\", false)", teardownBody);
+        Assert.DoesNotContain("_ensureDir(", teardownBody);
+    }
 }

@@ -91,8 +91,11 @@ public sealed class AaScriptChildRecord
     public bool IsSigned { get; init; }
 
     /// <summary>
-    /// Pointer-chain offsets in bytes, applied left-to-right (offsets[0]
-    /// is the innermost dereference). Empty / null → no pointer walk.
+    /// Pointer-chain offsets in bytes, in Cheat Engine <c>.CT</c> /
+    /// <c>MemoryRecord.Offset[0..n-1]</c> order: <c>Offsets[0]</c> is
+    /// assigned to <c>child.Offset[0]</c> (applied LAST, closest to the
+    /// target value) and <c>Offsets[n-1]</c> is applied FIRST right after
+    /// dereferencing <see cref="Address"/>. Empty / null → no pointer walk.
     /// </summary>
     public IReadOnlyList<int>? Offsets { get; init; }
 

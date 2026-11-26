@@ -778,12 +778,12 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`CancelExport()` 或下一次 export 的 `_exportCts?.Cancel()` 取消 token 之後，後續每一個 RPC 都會在 `PipeClient._gate.WaitAsync(ct)`（`PipeClient.cs:104`、`:163`）立刻丟出 `OperationCanceledException`，但 exporter 的 bare catch 把它當成「這個節點解析失敗」吞掉，繼續遞迴。結果是 exporter 很快跑完並回傳一份只剩空群組的 XML。呼叫端的 `catch (OperationCanceledException)` 永遠收不到，所以會執行 `CopyToClipboardAsync(xml)`，並顯示 `copied N lines`。被取代的舊 export 也可能比新的那個晚寫入剪貼簿，覆蓋掉正確的結果。另外 `finally { IsExporting = false; }` 不分新舊，舊 export 結束時會把新 export 的忙碌狀態清掉（`AssemblyBrowserViewModel.cs:574-577`），被取代的 CTS 也從來沒有 `Dispose`。
 - 修法：所有 `catch { }` 改成 `catch (Exception ex) when (ex is not OperationCanceledException)`，並在每次遞迴 / 迴圈開頭 `ct.ThrowIfCancellationRequested()`。呼叫端在 `await` 之後比對自己的 CTS 是否仍是 `_exportCts`，不是就不要寫剪貼簿，也不要動 `IsExporting`；被取代的 CTS 要 `Dispose`。
 
-**E-M2 · Address Lookup AA 把 `System.String` 欄位當成 inline UTF-16 讀，沒有解參照**
+**E-M2 · Address Lookup AA 把 `System.String` 欄位當成 inline UTF-16 讀，沒有解參照 — ✅ FIXED (2026-11-26)**
 - 位置：`ui/UnityDumpUI.Core/Services/Export/AddressLookupAaScriptGenerator.cs:177-184`（`Offsets = new[] { f.Offset }`）、`:213`（`"System.String" => CeValueType.UnicodeString`）
 - 成因：managed string 欄位存的是指向 `String` 物件的指標。child record 解析到的是欄位本身的位址（`[symbol] + offset`），CE 會把指標的 8 個 byte 當成 UTF-16 文字顯示成亂碼。正確的位置是 `[[symbol]+offset] + 2*ptr + 4`。
 - 修法：String 欄位改成兩層 offset `{ f.Offset, charsOff }`（CE 的 offset 是最內層放最後，要依 `AaScriptChildRecord` 的順序慣例排列），`charsOff` 依 pointer size 取 0x14 / 0xC。同一處的 `_ => Qword` fallback 在 x86 也應該是 4 bytes（併入 E-L4）。
 
-**E-M3 · `ce_table_bootstrap.lua` 仍用 `injectDLL(...) == nil` 判斷失敗，與 CLAUDE.md 明列的 CE 回傳慣例相反**
+**E-M3 · `ce_table_bootstrap.lua` 仍用 `injectDLL(...) == nil` 判斷失敗，與 CLAUDE.md 明列的 CE 回傳慣例相反 — ✅ FIXED (2026-11-26)**
 - 位置：`scripts/ce_table_bootstrap.lua:257-260`；對照 `scripts/unity_dump.lua:159-174`（已修正並寫明原因）；backend 偵測 `ce_table_bootstrap.lua:196-205`
 - 成因：`injectDLL` 失敗時回傳 `false`，不是 `nil`（`celua.txt`、CLAUDE.md §Cheat Engine）。這個 Mode-B 範本是給 CT 發布者複製的，失敗時不會 `error()`，而是繼續 `dofile` bridge，最後由 `unity_dump.lua` 從 CE 目錄再嘗試注入一次，錯誤訊息會指向錯誤的檔案位置。同一個檔案的 backend 偵測只認 `gameassembly.dll` / `mono-2.0-bdwgc.dll` / 完整等於 `mono.dll`，少了 `utils.lua:196-205` 支援的 `userassembly.dll`、`mono-2.0-sgen.dll`、`mono-2.0-boehm.dll`；而且 `name == "mono.dll"` 碰到 `enumModules` 回傳完整路徑時永遠不成立。
 - 修法：改成 `if not injectDLL(dllPath) then error(...) end`；backend 偵測直接沿用 `utils.lua` 的 `M.detectBackend()`（basename + 同一份名單）。
@@ -852,7 +852,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`Discrete_Shutdown` 逾時或失敗時，[DISABLE] 會清掉 `discrete_bridgeLoaded` 並靜默關閉 Lua Engine，使用者以為 pipe 已經停止；選錯 overload 也不會有任何提示。
 - 修法：這兩處都改用 `U.err` / `err`；bootstrap 的 [DISABLE] 檢查 `discreteShutdown()` 的回傳值，失敗時設定 `DISCRETE_HAD_ERROR`。
 
-**E-L9 · `ce_table_bootstrap.lua` 的 lua-logging 細節**
+**E-L9 · `ce_table_bootstrap.lua` 的 lua-logging 細節 — ✅ FIXED (2026-11-26)**
 - 位置：`scripts/ce_table_bootstrap.lua:112-120`、`:218`、`:130`
 - 成因：`bootstrap()` / `teardown()` 開頭沒有重設 `DISCRETE_HAD_ERROR`，同一個 CE session 中只要之前有一次失敗，之後就永遠不會關閉 Lua Engine；`os.execute('mkdir ...')` 每次都會閃出一個 console 視窗。
 - 修法：入口呼叫 `rawset(_G, "DISCRETE_HAD_ERROR", false)`；建立目錄改用 CE 的 `createDir`（如果 `celua.txt` 有）或 `pcall(io.open)` 探測。

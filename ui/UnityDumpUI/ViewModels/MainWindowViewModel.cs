@@ -923,11 +923,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 hs.GamePrivateUsage ?? 0UL,
                 hs.Backend ?? string.Empty);
 
-            // Hand the game-process bitness to the Inspector and Browser too —
-            // managed-String header offsets and template CE XML / CSX layouts
-            // depend on pointer size (x64 +0x10/+0x20, x86 +0x8/+0x10).
-            Inspector.GamePointerSize = hs.GamePointerSize ?? 0;
-            Browser.GamePointerSize   = hs.GamePointerSize ?? 0;
+            // Hand the game-process bitness to Inspector, Browser, and AddressLookup —
+            // managed-String header offsets and template/AA layouts depend on
+            // pointer size (x64 +0x10/+0x14/+0x20, x86 +0x8/+0xC/+0x10).
+            Inspector.GamePointerSize     = hs.GamePointerSize ?? 0;
+            Browser.GamePointerSize       = hs.GamePointerSize ?? 0;
+            AddressLookup.GamePointerSize = hs.GamePointerSize ?? 0;
 
             // Phase 29c-3 — open (or switch to) the per-game SQLite DB.
             // Lazy-loads metadata from disk into Snapshot.Snapshots so
