@@ -12,6 +12,7 @@
 #include "MonoResolver.h"
 #include "MonoThreadAttach.h"
 #include "MonoTypeParser.h"
+#include "MonoVtableFilter.h"
 
 #include <windows.h>
 
@@ -702,8 +703,7 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
         const std::size_t bufIdx = (maxSteps - 1 - i) * kStride;
         std::uintptr_t vtCandidate = 0;
         std::memcpy(&vtCandidate, bulkBuf.data() + bufIdx, sizeof(vtCandidate));
-        if (vtCandidate == 0) continue;
-        if ((vtCandidate & 7u) != 0) continue;
+        if (!IsAlignedMonoVtablePtr(vtCandidate)) continue;
 
         // Fast path: already-seen vtable.
         std::uintptr_t klassCandidate = 0;
@@ -835,12 +835,7 @@ void SehSweepRegionLoad(const std::uint8_t* base, std::size_t size,
         outAddrs.reserve(outAddrs.size() + want);
         for (std::size_t i = 0; i < count; ++i) {
             std::uintptr_t qw = arr[i];
-            if (qw == 0) continue;
-            if ((qw & 7u) != 0) continue;
-            // Quick range sanity — typical user-mode ptrs sit in
-            // [0x10000, 0x7FFFFFFFFFFF] on x64; we want to throw away
-            // obvious garbage before paying the deref cost in the caller.
-            if (qw < 0x10000u) continue;
+            if (!IsPlausibleMonoVtableCandidate(qw)) continue;
             outQwords.push_back(qw);
             outAddrs.push_back(base + i * sizeof(std::uintptr_t));
         }

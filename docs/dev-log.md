@@ -12,6 +12,33 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1536) — Add offline C++ DLL self-test suite (`discrete_dll_test`, x64 + x86) for C-H1 / C-H2 / C-H3 / A-H2 / B-H1
+
+- **What changes:** Added the repository's first offline C++ DLL unit test executable (`dll/tests/dll_core_test.cpp`), compiled with `/W4 /WX` and executed on **both x64 and x86 (WOW64)** by `.\build.cmd test` and `.\build.cmd publish` (never copied into `dist\`).
+  - Extracted pure, runtime-independent helpers into shared headers included by both the production DLLs and the test suite (zero code duplication):
+    - `dll/src/shared/ExportHelpers.h` — `NormalizeFieldOffset` (`C-H1`), `ResolveArrayElementLayout` (`C-H2`), and `DecodeCompressedSignedInt` / `ClrTypeNameToIl2CppTag` / `DecodeIl2CppFieldDefaultByTag` (`C-H3`), replacing inline copies in `ExportAPI.cpp`.
+    - `dll/src/shared/ParallelScanDriver.h` — `RunWorkerPool` (`A-H2`), used by `Memory.cpp::RunParallelScan`.
+    - `dll/src/mono/MonoVtableFilter.h` — `IsAlignedMonoVtablePtr` / `IsPlausibleMonoVtableCandidate` (`B-H1`), used by `MonoAddressFinder.cpp`.
+  - **Covered (`329` checks on x64, `332` checks on x86):**
+    - `C-H1`: normal offsets, x64/x86 unsigned `SIZE_MAX` (`0xFFFFFFFFFFFFFFFF` / `0xFFFFFFFF`), `> INT32_MAX`, and negative signed offsets → `-1`.
+    - `C-H2`: resolved reference types ignoring `class_value_size` and caller hints (returning pointer width 8 on x64 / 4 on x86), inline value structs (`Vector3`), enums, primitives, and unresolved fallbacks.
+    - `C-H3`: v24/v27 raw little-endian (`01 00 00 00` → `1`, `FF FF FF 7F` → `Int32.MaxValue`, signed `-1` vs unsigned max, truncated blobs), v29/v31/v39 `0xFE`/`0xFF` sentinels + 1-/2-byte compressed signed ints, `I8`, `R4` `+Infinity`, and `ClrTypeNameToIl2CppTag`.
+    - `A-H2`: compile-time `static_assert(!noexcept(...))` on `ScanForValue` and `ScanForString`; `RunWorkerPool` normal parallel run, mid-pool `std::system_error` spawn failure with join + inline drain, first-thread `std::bad_alloc` fallback, worker-body `std::bad_alloc` containment; and live `ScanForValue` / `ScanForString` over a `VirtualAlloc` RW page.
+    - `B-H1`: `0 mod 8` and `19 * sizeof(void*)` IMT-prefixed vtable pointers (`4 mod 8` accepted on x86, rejected on x64), unaligned/null/`< 0x10000` rejection.
+  - Wired `-DBUILD_TESTS=ON` in `CMakeLists.txt` and `Run-CppTests` (`-Target CppTest` + integrated into `-Target Test` / `All`) in `build.ps1`.
+- **Tests & build:** `.\build.cmd publish` (build #1536) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1154 passed (0 failed, 0 skipped); Rust core tests 104 passed (x64) / 105 passed (i686); C++ `discrete_dll_test` 329 passed (x64) / 332 passed (x86).
+
+-----
+
+## 2026-11-26 (build 1534) — Fix B-H1 (x86 Mono vtable `& 7` filter dropping interface-implementing classes)
+
+- **Bug fix (`B-H1`):** In `dll/src/mono/MonoAddressFinder.cpp`, both `WhatIsAt` (`:706`) and `SehSweepRegionLoad` (`:839`, shared by `FindAllInstances` and `ReverseLookupIndex::Build`) filtered candidate `MonoVTable*` pointers with `& 7u`. On 32-bit Mono, classes implementing any interface prepend a 19-slot IMT (`19 * 4 = 76` bytes, `4 mod 8`) ahead of the `MonoVTable` in an 8-byte-aligned mempool, so every array (`T[]`), `List<T>`, `Dictionary<K,V>`, and interface-implementing game class had a `4 mod 8` vtable address and was silently dropped.
+  - Changed both vtable alignment checks to `alignof(void*) - 1` (`& 3u` on x86, `& 7u` on x64), while preserving the 8-byte alignment checks for `instAddr` (BDWGC 8-byte granule) and `MonoClass*` (mempool-allocated).
+  - Marked `B-H1` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1534) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1154 passed (0 failed, 0 skipped); Rust core tests 104 passed (x64) / 105 passed (i686).
+
+-----
+
 ## 2026-11-26 (build 1533) — Fix A-H2 (`ScanForValue` / `ScanForString` `noexcept` & `RunParallelScan` thread-pool `std::terminate`)
 
 - **Bug fix (`A-H2`):** `Memory::ScanForValue` and `Memory::ScanForString` were declared `noexcept` despite allocating region/chunk/result vectors and spawning worker threads via `RunParallelScan`; on 32-bit hosts under address-space pressure, any `std::bad_alloc` or `std::system_error` invoked `std::terminate()` and killed the host game. Additionally, if `pool.emplace_back(worker)` threw after earlier threads had started, `pool`'s destructor destroyed joinable `std::thread` objects (triggering `std::terminate` even for non-`noexcept` `ScanForPointer`), and uncaught exceptions inside a worker thread would also terminate the host.

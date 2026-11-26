@@ -80,6 +80,7 @@ set(DLL_SHARED_SOURCES
     src/shared/MainThreadDispatcher.h
     src/shared/Memory.cpp
     src/shared/Memory.h
+    src/shared/ParallelScanDriver.h
     src/shared/ModuleHelper.cpp
     src/shared/ModuleHelper.h
     src/shared/PipeServer.cpp
@@ -90,6 +91,7 @@ set(DLL_SHARED_SOURCES
     src/shared/RustCore.h
     src/shared/ExportAPI.cpp
     src/shared/ExportAPI.h
+    src/shared/ExportHelpers.h
     src/shared/MethodSignatureFormat.h
     src/shared/ValueScanSession.cpp
     src/shared/ValueScanSession.h
@@ -118,6 +120,7 @@ set(DLL_MONO_SOURCES
     src/mono/MonoDomain.h
     src/mono/MonoTypeParser.cpp
     src/mono/MonoTypeParser.h
+    src/mono/MonoVtableFilter.h
     src/mono/MonoClassWalker.cpp
     src/mono/MonoClassWalker.h
     src/mono/MonoAddressFinder.cpp

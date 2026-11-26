@@ -237,7 +237,7 @@
 
 ### High
 
-**B-H1 · x86 Mono：heap walker 與 `WhatIsAt` 用 `& 7` 過濾 vtable 指標，會丟掉所有「有實作 interface 的類別」的 instance（待驗證）**
+**B-H1 · x86 Mono：heap walker 與 `WhatIsAt` 用 `& 7` 過濾 vtable 指標，會丟掉所有「有實作 interface 的類別」的 instance（待驗證） — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/mono/MonoAddressFinder.cpp:706`（`WhatIsAt`：`(vtCandidate & 7u) != 0`）、`:839`（`SehSweepRegionLoad`：`(qw & 7u) != 0`，`FindAllInstances` `:1007` 與 `ReverseLookupIndex::Build` `:1229` 共用）
 - 成因：這個過濾假設「MonoVTable* 一定 8-byte 對齊」，但這個假設只在 x64 成立。Mono 的 `mono_class_create_runtime_vtable` 對有 interface 的類別（`interface_offsets_count > 0`）會在 vtable **前面**放一張 IMT：`imt_table_bytes = sizeof(gpointer) * MONO_IMT_SIZE`（`MONO_IMT_SIZE = 19`），`vt = (MonoVTable*)((char*)alloc + imt_table_bytes)`。mempool 的配置是 8-byte 對齊（`MEM_ALIGN 8`）；在 x86 上 `19 × 4 = 76`，76 ≡ 4 (mod 8)，所以這些類別的 vtable 位址一定是 4 mod 8。x64 則是 `19 × 8 = 152` ≡ 0，因此不受影響。結果是在 32-bit Mono 遊戲（例如 活俠傳）上，所有陣列（`T[]` 都實作 `IList<T>`）、`List<T>`、`Dictionary<K,V>`，以及實作任何 interface 的遊戲類別（`ISerializationCallbackReceiver`、`IPointerClickHandler`、`IComparable`…），在 snapshot / findInstances liveOnly 以外的路徑 / value scan 的 reverse lookup 中都會消失，而且不會有任何錯誤訊息。這也可能是 x86 上「false positive 減少」的部分原因：真正的 instance 被一起濾掉了。（`klass & 7` 的檢查沒有問題，MonoClass 由 mempool 配置，本身是 8-byte 對齊。）
 - 修法：vtable 的對齊檢查改成 `qw & (alignof(void*) - 1)`（x86 為 `& 3`）。只放寬 vtable 這一項；instance slot 的 `instAddr & 7`（BDWGC granule 在 32-bit 也是 8 bytes）維持不變。後面已經有 `vtable[0] ∈ classSet` 與 `vtable+2*ptr == rootDomain` 兩道結構驗證，false positive 不會因此明顯增加。

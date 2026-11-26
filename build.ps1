@@ -46,7 +46,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('DLL','UI','Test','ProxyDLL','MetadataCli','Deploy','DeployScripts','All')]
+    [ValidateSet('DLL','UI','Test','CppTest','ProxyDLL','MetadataCli','Deploy','DeployScripts','All')]
     [string]$Target = 'All',
 
     [ValidateSet('Mono','IL2CPP','Both')]
@@ -679,7 +679,65 @@ function Run-Tests {
     $csOk = ($LASTEXITCODE -eq 0)
     if ($csOk) { Write-Ok 'All tests passed' } else { Write-Fail 'Tests failed' }
     $rustOk = Run-RustTests
-    return ($csOk -and $rustOk)
+    $cppOk  = Run-CppTests
+    return ($csOk -and $rustOk -and $cppOk)
+}
+
+# Offline C++ DLL self-tests (dll/tests/dll_core_test.cpp), built and run on
+# BOTH x64 and x86 (WOW64) so arch-sensitive fixes (B-H1, C-H1, C-H2, A-H2)
+# are verified on real 32-bit and 64-bit builds. Never copied to dist\.
+function Run-CppTestsForArch {
+    param([string]$TestArch)
+    Enter-VsDevEnvironment -Arch $TestArch
+
+    $cfg = if ($Mode -eq 'Debug') { 'Debug' } else { 'Release' }
+    $testBuildDir = Join-Path $BUILD_DIR "cpp-tests-$($cfg.ToLower())-$TestArch"
+    if (Test-Path $testBuildDir) {
+        Remove-Item $testBuildDir -Recurse -Force
+    }
+
+    $staticCrt = if ($Mode -eq 'Publish') { 'ON' } else { 'OFF' }
+    Write-Step "Configuring C++ tests ($cfg / $TestArch, static-CRT=$staticCrt)"
+    $compilerArgs = Get-MsvcCompilerArgs
+    $backendArg   = if ($TestArch -eq 'x86') { 'Mono' } else { 'Both' }
+    & cmake -S $RepoRoot -B $testBuildDir -G Ninja @compilerArgs `
+        "-DCMAKE_BUILD_TYPE=$cfg" `
+        "-DBACKEND=$backendArg" `
+        "-DBUILD_TESTS=ON" `
+        "-DSTATIC_CRT=$staticCrt" | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Fail "C++ test cmake configure failed ($TestArch)"; return $false }
+
+    Write-Step "Building + running discrete_dll_test ($TestArch)"
+    & cmake --build $testBuildDir --target discrete_dll_test --parallel | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Fail "C++ test build failed ($TestArch)"; return $false }
+
+    $exe = Join-Path $testBuildDir 'bin\discrete_dll_test.exe'
+    if (-not (Test-Path $exe)) { Write-Fail "discrete_dll_test.exe not found at $exe"; return $false }
+    & $exe | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Fail "discrete_dll_test failed ($TestArch)"; return $false }
+    Write-Ok "C++ tests passed ($TestArch)"
+    return $true
+}
+
+function Run-CppTests {
+    if ($Arch -eq 'x86') {
+        Write-Banner 'C++ DLL self-tests  |  discrete_dll_test (x86)'
+        return (Run-CppTestsForArch -TestArch 'x86')
+    }
+    if ($Arch -eq 'x64') {
+        Write-Banner 'C++ DLL self-tests  |  discrete_dll_test (x64)'
+        return (Run-CppTestsForArch -TestArch 'x64')
+    }
+    Write-Banner 'C++ DLL self-tests  |  discrete_dll_test (x64 + x86)'
+    $x64Ok = Run-CppTestsForArch -TestArch 'x64'
+    $childArgs = @('-NoProfile','-ExecutionPolicy','Bypass',
+                   '-File',$PSCommandPath,
+                   '-Target','CppTest','-Mode',$Mode,'-Arch','x86',
+                   '-NoIdentityCheck','-NoBumpBuildNumber')
+    $psExe = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'powershell.exe' }
+    & $psExe @childArgs | Out-Host
+    $x86Ok = ($LASTEXITCODE -eq 0)
+    return ($x64Ok -and $x86Ok)
 }
 
 # Phase R0: the Rust core's unit tests, for both shipping architectures. The
@@ -833,6 +891,7 @@ switch ($Target) {
     'DLL'           { if (-not (Build-Dll))         { $exitCode = 1 } }
     'UI'            { if (-not (Build-Ui))          { $exitCode = 1 } }
     'Test'          { if (-not (Run-Tests))         { $exitCode = 1 } }
+    'CppTest'       { if (-not (Run-CppTests))      { $exitCode = 1 } }
     'ProxyDLL'      { if (-not (Build-ProxyDll))    { $exitCode = 1 } }
     'MetadataCli'   { if (-not (Build-MetadataCli)) { $exitCode = 1 } }
     'Deploy'        { if (-not (Invoke-Deploy 'release')) { $exitCode = 1 } }

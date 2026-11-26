@@ -2,6 +2,7 @@
 
 #include "Memory.h"
 
+#include "ParallelScanDriver.h"
 #include "ScanCancel.h"
 
 #include <windows.h>
@@ -504,49 +505,22 @@ std::vector<ResultT> RunParallelScan(
     std::atomic<std::size_t> nextChunk{0};
     std::atomic<std::size_t> totalMatches{0};
 
-    auto worker = [&]() noexcept {
-        try {
-            for (;;) {
-                if (totalMatches.load(std::memory_order_relaxed) >= limit) break;
-                if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
-                std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
-                if (idx >= chunks.size()) break;
-                auto& local = perChunk[idx];
-                bool ok = chunkScan(chunks[idx].base, chunks[idx].scanSize, local, limit);
-                if (!ok && readFailureBytes)
-                    readFailureBytes->fetch_add(chunks[idx].scanSize, std::memory_order_relaxed);
-                if (!local.empty())
-                    totalMatches.fetch_add(local.size(), std::memory_order_relaxed);
-            }
-        } catch (...) {
-            // Never allow an exception (e.g. bad_alloc on a 32-bit host) to
-            // escape a std::thread entry point and invoke std::terminate (A-H2).
+    auto worker = [&]() {
+        for (;;) {
+            if (totalMatches.load(std::memory_order_relaxed) >= limit) break;
+            if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected
+            std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= chunks.size()) break;
+            auto& local = perChunk[idx];
+            bool ok = chunkScan(chunks[idx].base, chunks[idx].scanSize, local, limit);
+            if (!ok && readFailureBytes)
+                readFailureBytes->fetch_add(chunks[idx].scanSize, std::memory_order_relaxed);
+            if (!local.empty())
+                totalMatches.fetch_add(local.size(), std::memory_order_relaxed);
         }
     };
 
-    if (nthreads <= 1) {
-        worker();
-    } else {
-        std::vector<std::thread> pool;
-        try {
-            pool.reserve(nthreads);
-            for (unsigned int t = 0; t < nthreads; ++t) {
-                pool.emplace_back(worker);
-            }
-        } catch (...) {
-            // Thread creation failed (e.g. x86 address-space pressure). Join
-            // any workers already started so pool destruction never hits
-            // std::terminate, then drain any remaining chunks inline (A-H2).
-            for (auto& th : pool) {
-                if (th.joinable()) th.join();
-            }
-            pool.clear();
-            worker();
-        }
-        for (auto& th : pool) {
-            if (th.joinable()) th.join();
-        }
-    }
+    Detail::RunWorkerPool(nthreads, worker, [](auto fn) { return std::thread(fn); });
 
     out.reserve(std::min<std::size_t>(totalMatches.load(), limit));
     for (auto& l : perChunk) {
