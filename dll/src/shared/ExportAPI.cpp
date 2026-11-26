@@ -2975,9 +2975,12 @@ void RegisterCoreHandlers() {
                     if (r.class_get_name      != nullptr) elemClassName = r.class_get_name(k)      ? r.class_get_name(k)      : "";
                     if (r.class_get_namespace != nullptr) elemClassNs   = r.class_get_namespace(k) ? r.class_get_namespace(k) : "";
                     if (r.class_is_valuetype != nullptr) elemIsValueType = r.class_is_valuetype(k) != 0;
-                    if (r.class_value_size != nullptr) {
-                        std::uint32_t align = 0;
-                        int sz = r.class_value_size(k, &align);
+                    // Only value types sit inline in the array; reference types
+                    // are pointer slots (kPointerSize). Calling class_value_size
+                    // on a reference type returns instance_size - header, which
+                    // would mis-stride every element past [0] (C-H2).
+                    if (elemIsValueType && r.class_value_size != nullptr) {
+                        int sz = SehValueSize(r.class_value_size, k);
                         if (sz > 0) elemSize = static_cast<std::size_t>(sz);
                     }
                 }
@@ -3002,19 +3005,23 @@ void RegisterCoreHandlers() {
                         if (r.class_get_name      != nullptr) elemClassName = r.class_get_name(k)      ? r.class_get_name(k)      : "";
                         if (r.class_get_namespace != nullptr) elemClassNs   = r.class_get_namespace(k) ? r.class_get_namespace(k) : "";
                         if (r.class_is_valuetype != nullptr) elemIsValueType = r.class_is_valuetype(k) != 0;
-                        if (r.class_value_size != nullptr) {
-                            std::uint32_t align = 0;
-                            int sz = r.class_value_size(k, &align);
+                        // Only value types sit inline; reference types are pointer slots (C-H2).
+                        if (elemIsValueType && r.class_value_size != nullptr) {
+                            int sz = SehValueSize(r.class_value_size, k);
                             if (sz > 0) elemSize = static_cast<std::size_t>(sz);
                         }
                     }
                 }
             }
 #endif
-            // If resolver bound + class found + we got a value-type, leave
-            // is_pointer=false. Otherwise treat as ref by default below.
+            // Value-type elements sit inline (is_pointer=false, stride from
+            // class_value_size or knownElemSize); reference-type elements are
+            // always pointer-sized slots regardless of the class's instance size.
             if (elemClassResolved) {
                 isPointer = !elemIsValueType;
+                if (isPointer) {
+                    elemSize = ManagedLayout::kPointerSize;
+                }
                 if (elementType.empty()) {
                     elementType = elemClassNs.empty()
                         ? elemClassName

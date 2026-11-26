@@ -450,7 +450,7 @@
 - 修法：DLL 端在輸出 offset 前統一正規化：`static` 欄位的 offset 若是 `(size_t)-1`（Mono 是 `(int)-1`）就輸出 `-1`，或者省略 `offset` 並加上 `"threadStatic": true`；最好集中成一個 `FieldOffsetToJson()` helper，讓兩個 backend 共用。UI 端把 `FieldEntry.Offset` / `SearchSymbolMatch.Offset` / `WhatIsAtField.Offset` 改成 `long`，作為第二道防線。
 - 驗證：對 mscorlib 的 `System.Threading.Thread` 呼叫 `getClassInfo`，查看原始回應中的 `offset` 值。
 
-**C-H2 · `walkArray` 指定 element class 時，用 `class_value_size` 覆寫了**參考型別**的 stride，第 1 個以後的元素全部讀錯位址（待驗證）**
+**C-H2 · `walkArray` 指定 element class 時，用 `class_value_size` 覆寫了**參考型別**的 stride，第 1 個以後的元素全部讀錯位址（待驗證） — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/ExportAPI.cpp:2957-2961`（IL2CPP）、`:2984-2988`（Mono）、`:2995-2996`、`:3012-3019`、`:3049`；呼叫端 `ui/UnityDumpUI/ViewModels/LiveInspectionViewModel.cs:1482-1491`、`ui/UnityDumpUI.Core/Services/Export/CeXmlExporter.Live.cs:939-943`
 - 成因：只要 element class 解析成功，就無條件執行 `elemSize = class_value_size(k)`。Mono 的 `mono_class_value_size` 實作是 `instance_size - sizeof(MonoObject)`，**不檢查**是否為 value type（原始碼中的 `g_assert(klass->valuetype)` 已被註解掉）；IL2CPP 的 `Class::GetValueSize` 也是同樣的公式。因此對參考型別（例如 `Enemy[]`），`isPointer = !elemIsValueType = true`，但 `elemSize` 是物件欄位的總大小（例如 0x30），而不是 pointer size。`:3012` 的 pointer-size fallback 只在 `elemSize == 0` 時才會生效，所以 `slotAddr = dataAddr + i * 0x30` 只有 `[0]` 正確，其餘的元素都讀到別的指標中間。Inspector 展開陣列時一律會帶入 element triple（`elemSpec` 只要型別名稱可以拆就有值），所以只要 element class 剛好在 `TargetAssembly` 中解析得到，就會觸發。CE XML live export 用同一份結果產生 pointer chain，輸出的 cheat table 也會是錯的。
 - 修法：只在 `elemIsValueType == true` 時採用 `class_value_size`；參考型別一律用 `ManagedLayout::kPointerSize`。也就是把 `:2957-2961` / `:2984-2988` 改成 `if (elemIsValueType && r.class_value_size) …`，並把判斷移到 `class_is_valuetype` 之後。
