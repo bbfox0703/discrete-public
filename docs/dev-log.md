@@ -12,6 +12,27 @@ this file grows too large.
 
 -----
 
+## 2026-11-26 (build 1553) — Fix B-M10 + C-M1 (+ A-L15) (exception-safe IL2CPP worker pool, cancellable `FindAllInstances` & long-running RPCs, thread-local `ScanThreadCap`, UI cancel flow + tests)
+
+- **Bug fixes (`B-M10`, `C-M1`, `A-L15`):**
+  - **`B-M10` (`ParallelScanDriver.h`, `IL2CPPAddressFinder.{h,cpp}`, `MonoAddressFinder.{h,cpp}`):**
+    - Added `RunIndexedWorkerPool` to `dll/src/shared/ParallelScanDriver.h` so per-thread indexed pools (`IL2CPP::FindAllInstances` and `IL2CPP::ReverseLookupIndex::Build`) catch thread-spawn failures (`std::system_error` / `std::bad_alloc`), join any already-started workers without hitting `std::terminate`, and drain remaining work inline on slot `0` (accumulating `qScanned[tid] += qs` instead of overwriting).
+    - Switched `IL2CPP::FindAllInstances` from `Memory::ScanThreadCount()` to `Memory::EffectiveScanThreads()` so the serial/anti-tamper thread cap applies to IL2CPP snapshot walks as well as value/reverse-lookup scans.
+    - Added cooperative `ScanCancel::IsCancelRequested()` checks and `bool cancelled` to both `IL2CPP::BulkInstancesResult` and `Mono::BulkInstancesResult`, discarding partial `byClass` maps on cancellation so truncated heap walks are never returned as complete snapshots.
+  - **`A-L15` (`Memory.{h,cpp}`):**
+    - Changed `ScanThreadCap` from a process-global `std::atomic<unsigned int>` to `thread_local unsigned int t_scanThreadCap` with save/restore in `ScanThreadCapScope`, preventing concurrent pipe clients from clobbering each other's thread cap.
+  - **`C-M1` (`ExportAPI.cpp`, `MonoFieldXref.{h,cpp}`, `IL2CPPFieldXref.{h,cpp}`, `IL2CPPClassReferenceDiagnostic.{h,cpp}`, `PipeClient.cs`, `BackendAdapter.cs`, `ProtocolModels.cs`, `SnapshotViewModel.cs`, `LiveInspectionViewModel.cs`, `FieldReferencesViewModel.cs`, `FieldAcrossInstancesViewModel.cs`):**
+    - Opened `ScanCancel::Scope` and checked `ScanCancel::IsCancelRequested()` before returning across all remaining long-running handlers on both backends (`snapshotBegin`, `findInstances`, `listFieldValuesAcrossInstances`, `findFieldReferences`, and IL2CPP `diagnoseClassReferences`), returning `{"ok": false, "cancelled": true, "error": "cancelled"}` on cancel instead of silently returning truncated results or ignoring cancel/disconnect.
+    - Added cooperative `ScanCancel` polling and `bool cancelled` propagation inside `Mono::FindFieldReferences`, `IL2CPP::FindStaticFieldReferences` / `FindInstanceFieldReferences`, and `IL2CPP::DiagnoseClassReferences`.
+    - Exposed `PipeClient.PipeName` and updated `BackendAdapter.CancelScanAsync` to connect to `_pipe.PipeName` instead of the hardcoded default pipe name; wired `SnapshotViewModel.CancelCaptureAsync` to call `_backend.CancelScanAsync()` alongside `_cts?.Cancel()`; added `[JsonPropertyName("cancelled")]` to `SnapshotBeginResult`, `FindInstancesResult`, `ListFieldValuesResult`, and `FindFieldReferencesResult`, and handled cancelled responses cleanly in `SnapshotViewModel`, `LiveInspectionViewModel`, `FieldReferencesViewModel`, and `FieldAcrossInstancesViewModel`.
+  - **Tests:**
+    - Added `Test_BM10_AL15_CM1_IndexedPoolThreadCapAndCancel` (+21 checks on both x64 and x86) to `dll/tests/dll_core_test.cpp` covering `RunIndexedWorkerPool` parallel partition, mid-pool `std::system_error` inline drain, first-thread `std::bad_alloc` fallback, worker-body exception containment, cross-thread & nested `ScanThreadCapScope` isolation, and `ScanForPointer` cancel + recovery.
+    - Added `ui/UnityDumpUI.Tests/ScanCancellationProtocolTests.cs` (3 xUnit v3 tests covering AOT `ProtocolJsonContext` deserialization across all 4 DTOs, real in-process `NamedPipeServerStream` out-of-band `cancelScan` cancelling `snapshotBegin`, and ViewModel cancelled-response handling).
+  - Marked `B-M10`, `C-M1`, and `A-L15` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1553) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 481 checks passed (x64) / 484 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1550) — Fix C-M2 + C-M3 (nullable RPC error `id`, id-mismatch teardown, `PipeClient` read timeout & non-deadlocking Disconnect/Dispose, DLL `main_thread_timeout_ms` clamp + tests)
 
 - **Bug fixes (`C-M2`, `C-M3`):**

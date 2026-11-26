@@ -7,6 +7,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
+#include "../shared/ParallelScanDriver.h"
 #include "../shared/ScanCancel.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
@@ -1603,7 +1604,9 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     // threads only touch process memory + the (read-only) classSet snapshot;
     // no Unity runtime calls happen here (name resolution is the caller's job,
     // under ThreadAttachGuard), so no per-thread attach is needed. ---
-    unsigned int nthreads = Memory::ScanThreadCount();
+    // EffectiveScanThreads() honours the serial / anti-tamper thread cap
+    // (B-M10) while defaulting to ScanThreadCount() (full parallel).
+    unsigned int nthreads = Memory::EffectiveScanThreads();
     if (nthreads > chunks.size()) nthreads = static_cast<unsigned int>(chunks.size());
     if (nthreads < 1) nthreads = 1;
 
@@ -1616,21 +1619,27 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
         std::size_t qs = 0;
         std::size_t dummyInstances = 0;   // per-thread; real count recomputed at merge
         for (;;) {
+            if (ScanCancel::IsCancelRequested()) break;   // UI cancelled / disconnected (B-M10)
             std::size_t idx = nextChunk.fetch_add(1, std::memory_order_relaxed);
             if (idx >= chunks.size()) break;
             SweepRegion(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
                            classSet, map, perClassCap, dummyInstances, qs);
         }
-        qScanned[tid] = qs;
+        qScanned[tid] += qs;
     };
 
-    if (nthreads <= 1) {
-        worker(0);
-    } else {
-        std::vector<std::thread> pool;
-        pool.reserve(nthreads);
-        for (unsigned int t = 0; t < nthreads; ++t) pool.emplace_back(worker, t);
-        for (auto& th : pool) th.join();
+    // Exception-safe worker pool (B-M10): joins started workers and drains
+    // remaining chunks inline on slot 0 if thread creation throws, instead of
+    // terminating the host process.
+    Memory::Detail::RunIndexedWorkerPool(nthreads, worker);
+
+    if (ScanCancel::IsCancelRequested()) {
+        out.cancelled = true;
+        out.byClass.clear();
+        out.totalInstances = 0;
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "Snapshot: FindAllInstances(IL2CPP) cancelled — partial results discarded");
+        return out;
     }
 
     // --- Merge per-thread maps → out.byClass; sort each class by address and
@@ -1761,16 +1770,9 @@ bool ReverseLookupIndex::Build(std::uint32_t reuseWindowMs) {
             SweepRegionFlat(chunks[idx].base, chunks[idx].size, minKlass, maxKlass,
                                classSet, vec, qs);
         }
-        qScanned[tid] = qs;
+        qScanned[tid] += qs;
     };
-    if (nthreads <= 1) {
-        worker(0);
-    } else {
-        std::vector<std::thread> pool;
-        pool.reserve(nthreads);
-        for (unsigned int t = 0; t < nthreads; ++t) pool.emplace_back(worker, t);
-        for (auto& th : pool) th.join();
-    }
+    Memory::Detail::RunIndexedWorkerPool(nthreads, worker);
 
     // A cancelled sweep left each worker's slice partial (the workers break on
     // cancel). Publishing the concatenation would stamp a truncated index as

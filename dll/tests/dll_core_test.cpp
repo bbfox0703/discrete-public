@@ -1101,6 +1101,188 @@ void Test_CM3_ClampMainThreadTimeoutMs() {
     CHECK(ClampMainThreadTimeoutMs((std::numeric_limits<std::int32_t>::max)()) == kMaxMainThreadTimeoutMs);
 }
 
+// ============================================================================
+// B-M10 + A-L15 + C-M1 — Indexed worker pool exception safety, thread-local
+// ScanThreadCapScope isolation, and cooperative ScanCancel abort on pointer scan
+// ============================================================================
+void Test_BM10_AL15_CM1_IndexedPoolThreadCapAndCancel() {
+    using namespace Discrete::Memory;
+    using namespace Discrete::Memory::Detail;
+
+    // 1. RunIndexedWorkerPool: normal parallel run partitions all 200 items cleanly.
+    {
+        constexpr std::size_t kItems = 200;
+        constexpr unsigned int kThreads = 4;
+        std::vector<std::vector<std::size_t>> perThread(kThreads);
+        std::vector<std::size_t> qScanned(kThreads, 0);
+        std::atomic<std::size_t> next{0};
+
+        RunIndexedWorkerPool(kThreads, [&](unsigned int tid) {
+            std::size_t localCount = 0;
+            for (;;) {
+                const std::size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= kItems) break;
+                perThread[tid].push_back(idx);
+                ++localCount;
+            }
+            qScanned[tid] += localCount;
+        });
+
+        std::size_t totalQ = 0;
+        std::vector<std::size_t> merged;
+        for (unsigned int t = 0; t < kThreads; ++t) {
+            totalQ += qScanned[t];
+            merged.insert(merged.end(), perThread[t].begin(), perThread[t].end());
+        }
+        std::sort(merged.begin(), merged.end());
+        CHECK(totalQ == kItems);
+        CHECK(merged.size() == kItems);
+        bool allExact = (merged.size() == kItems);
+        for (std::size_t i = 0; allExact && i < kItems; ++i) {
+            if (merged[i] != i) allExact = false;
+        }
+        CHECK(allExact);
+    }
+
+    // 2. RunIndexedWorkerPool: mid-pool std::system_error joins started workers
+    //    and drains remaining items inline on slot 0 without overwriting slot 0's
+    //    earlier counts or calling std::terminate.
+    {
+        constexpr std::size_t kItems = 200;
+        constexpr unsigned int kThreads = 4;
+        std::vector<std::vector<std::size_t>> perThread(kThreads);
+        std::vector<std::size_t> qScanned(kThreads, 0);
+        std::atomic<std::size_t> next{0};
+        unsigned int spawnCount = 0;
+
+        RunIndexedWorkerPool(
+            kThreads,
+            [&](unsigned int tid) {
+                std::size_t localCount = 0;
+                for (;;) {
+                    const std::size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+                    if (idx >= kItems) break;
+                    perThread[tid].push_back(idx);
+                    ++localCount;
+                    // Give earlier threads a tiny window so slot 0 collects some
+                    // items before fallback also drains into slot 0.
+                    if (localCount == 10 && tid == 0) break;
+                }
+                qScanned[tid] += localCount;
+            },
+            [&](auto&& fn) -> std::thread {
+                if (spawnCount++ == 2) {
+                    throw std::system_error(
+                        std::make_error_code(std::errc::resource_unavailable_try_again),
+                        "simulated x86 thread exhaustion");
+                }
+                return std::thread(std::forward<decltype(fn)>(fn));
+            });
+
+        std::size_t totalQ = 0;
+        std::vector<std::size_t> merged;
+        for (unsigned int t = 0; t < kThreads; ++t) {
+            totalQ += qScanned[t];
+            merged.insert(merged.end(), perThread[t].begin(), perThread[t].end());
+        }
+        std::sort(merged.begin(), merged.end());
+        CHECK(totalQ == kItems);
+        CHECK(merged.size() == kItems);
+        CHECK(qScanned[0] >= 10u);
+    }
+
+    // 3. RunIndexedWorkerPool: first-thread std::bad_alloc falls back inline on slot 0.
+    {
+        std::vector<std::size_t> qScanned(4, 0);
+        std::atomic<std::size_t> next{0};
+        RunIndexedWorkerPool(
+            4,
+            [&](unsigned int tid) {
+                std::size_t c = 0;
+                while (next.fetch_add(1, std::memory_order_relaxed) < 50) ++c;
+                qScanned[tid] += c;
+            },
+            [](auto&&) -> std::thread { throw std::bad_alloc(); });
+        CHECK(qScanned[0] == 50u);
+    }
+
+    // 4. RunIndexedWorkerPool: worker-body exception is contained (no std::terminate).
+    {
+        std::atomic<int> completed{0};
+        RunIndexedWorkerPool(3, [&](unsigned int tid) {
+            if (tid == 1) throw std::bad_alloc();
+            completed.fetch_add(1, std::memory_order_relaxed);
+        });
+        CHECK(completed.load() == 2);
+    }
+
+    // 5. A-L15: ScanThreadCapScope is strictly thread-local and nests cleanly.
+    {
+        CHECK(GetScanThreadCap() == 0u);
+        ScanThreadCapScope mainCap(1u);
+        CHECK(GetScanThreadCap() == 1u);
+        CHECK(EffectiveScanThreads() == 1u);
+
+        bool otherSawUncapped = false;
+        bool otherNestedOk    = false;
+        std::thread other([&]() {
+            otherSawUncapped = (GetScanThreadCap() == 0u) &&
+                               (EffectiveScanThreads() == ScanThreadCount());
+            {
+                ScanThreadCapScope outer(2u);
+                const bool s1 = (GetScanThreadCap() == 2u);
+                {
+                    ScanThreadCapScope inner(1u);
+                    otherNestedOk = s1 && (GetScanThreadCap() == 1u) && (EffectiveScanThreads() == 1u);
+                }
+                otherNestedOk = otherNestedOk && (GetScanThreadCap() == 2u);
+            }
+            otherNestedOk = otherNestedOk && (GetScanThreadCap() == 0u);
+        });
+        other.join();
+
+        CHECK(otherSawUncapped);
+        CHECK(otherNestedOk);
+        // Main thread's cap was untouched by the other thread's scopes.
+        CHECK(GetScanThreadCap() == 1u);
+        CHECK(EffectiveScanThreads() == 1u);
+    }
+    CHECK(GetScanThreadCap() == 0u);
+
+    // 6. C-M1: ScanForPointer honours ScanCancel::Scope + RequestCancel and
+    //    recovers cleanly after the scope exits.
+    {
+        void* page = ::VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        CHECK(page != nullptr);
+        if (page != nullptr) {
+            const std::uintptr_t sentinel =
+                static_cast<std::uintptr_t>(sizeof(void*) == 8 ? 0x13579BDF2468ACE0ull : 0x2468ACE0u);
+            auto* slot = reinterpret_cast<std::uintptr_t*>(static_cast<std::uint8_t*>(page) + 64);
+            *slot = sentinel;
+
+            {
+                Discrete::ScanCancel::Scope scope;
+                Discrete::ScanCancel::RequestCancel();
+                CHECK(Discrete::ScanCancel::IsCancelRequested());
+                auto cancelledMatches = ScanForPointer(sentinel, 16, nullptr, 0, 0, true);
+                CHECK(cancelledMatches.empty());
+            }
+            // Scope exit atomically clears cancel bit; subsequent uncancelled scan finds it.
+            CHECK(!Discrete::ScanCancel::IsCancelRequested());
+            {
+                Discrete::ScanCancel::Scope scope;
+                auto liveMatches = ScanForPointer(sentinel, 16, nullptr, 0, 0, true);
+                bool foundOurSlot = false;
+                for (const void* p : liveMatches) {
+                    if (p == static_cast<const void*>(slot)) { foundOurSlot = true; break; }
+                }
+                CHECK(foundOurSlot);
+            }
+            ::VirtualFree(page, 0, MEM_RELEASE);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1115,6 +1297,7 @@ int main() {
     Test_AM2_PipeLineBufferPreservesPipelinedBytes();
     Test_AM11_StringScanAvx2TailAlignment();
     Test_CM3_ClampMainThreadTimeoutMs();
+    Test_BM10_AL15_CM1_IndexedPoolThreadCapAndCancel();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

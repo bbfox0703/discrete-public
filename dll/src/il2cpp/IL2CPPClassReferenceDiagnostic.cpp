@@ -8,6 +8,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
 #include "../shared/ModuleHelper.h"
+#include "../shared/ScanCancel.h"
 
 #include <windows.h>
 
@@ -144,6 +145,7 @@ void ScanRangeForPointer(std::uintptr_t base, std::size_t size,
 
     std::size_t pos = 0;
     while (pos < size) {
+        if (ScanCancel::IsCancelRequested()) return;
         std::size_t want = (size - pos) < kChunkSize ? (size - pos) : kChunkSize;
         want = (want / sizeof(std::uintptr_t)) * sizeof(std::uintptr_t);
         if (want == 0) break;
@@ -243,6 +245,11 @@ DiagnosticResult DiagnoseClassReferences(Il2CppClass*       klass,
     // ------------------------------------------------------------------
     constexpr std::size_t kModulePerPointerLimit = 4096;
     for (const auto& sec : out.sections) {
+        if (ScanCancel::IsCancelRequested()) {
+            out.cancelled = true;
+            out.ok = false;
+            return out;
+        }
         if (sec.isExecutable) continue;
         if (sec.size == 0) continue;
         const std::uintptr_t low  = sec.va;
@@ -279,6 +286,11 @@ DiagnosticResult DiagnoseClassReferences(Il2CppClass*       klass,
         const std::uintptr_t gaHi = gaLo + out.moduleSize;
         auto regions = Memory::EnumerateCommittedRegions();
         for (const auto& reg : regions) {
+            if (ScanCancel::IsCancelRequested()) {
+                out.cancelled = true;
+                out.ok = false;
+                return out;
+            }
             const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(reg.base);
             const std::uintptr_t end  = base + reg.size;
             // Skip MEM_IMAGE inside GameAssembly.dll (already scanned via
@@ -424,6 +436,12 @@ DiagnosticResult DiagnoseClassReferences(Il2CppClass*       klass,
         " heapRegionsScanned=" + std::to_string(out.heapRegionsScanned) +
         " heapRegionsSkipped=" + std::to_string(out.heapRegionsSkipped) +
         " heapBytesScanned=" + std::to_string(out.heapBytesScanned));
+
+    if (ScanCancel::IsCancelRequested()) {
+        out.cancelled = true;
+        out.ok = false;
+        return out;
+    }
 
     out.ok = true;
     return out;

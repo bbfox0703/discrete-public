@@ -80,6 +80,7 @@ struct NavigationCandidate {
 
 struct DiagnosticResult {
     bool        ok = false;
+    bool        cancelled = false;
     std::string error;
 
     /// Resolved class pointer + static-fields pointer.

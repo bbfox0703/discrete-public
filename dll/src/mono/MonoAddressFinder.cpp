@@ -1216,6 +1216,10 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     std::size_t bytesSinceYield = 0;
 
     for (const auto& r : regions) {
+        if (ScanCancel::IsCancelRequested()) {
+            out.cancelled = true;
+            break;
+        }
         if ((r.protect & kRW) == 0) continue;
         out.regionsTotal++;
 
@@ -1256,6 +1260,10 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
 
         // Phase: classify each qword as a vtable → instance.
         for (std::size_t i = 0; i < qwords.size(); ++i) {
+            if ((i & 4095u) == 0u && ScanCancel::IsCancelRequested()) {
+                out.cancelled = true;
+                break;
+            }
             std::uintptr_t qw = qwords[i];
 
             // Cache hit path. Most qwords after the first few thousand
@@ -1318,6 +1326,16 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
                 ++out.totalInstances;
             }
         }
+        if (out.cancelled) break;
+    }
+
+    if (out.cancelled || ScanCancel::IsCancelRequested()) {
+        out.cancelled = true;
+        out.byClass.clear();
+        out.totalInstances = 0;
+        Log::Write(MagicStrings::LogCategoryScan,
+                   "Snapshot: FindAllInstances(Mono) cancelled — partial results discarded");
+        return out;
     }
 
     // Merge new discoveries back into the global vtable→klass cache so

@@ -1037,7 +1037,7 @@ public sealed class BackendAdapter : ILiveExportSource
     {
         try
         {
-            await using var cancelPipe = new PipeClient();
+            await using var cancelPipe = new PipeClient(_pipe.PipeName);
             await cancelPipe.ConnectAsync(2000, ct).ConfigureAwait(false);
             await cancelPipe.SendAsync(
                 "cancelScan", null,

@@ -139,6 +139,7 @@ struct BulkInstancesResult {
     std::size_t                          regionsSkipImage   = 0;
     std::size_t                          regionsSkipStack   = 0;
     std::size_t                          bytesScanned       = 0;
+    bool                                 cancelled          = false;
 };
 BulkInstancesResult FindAllInstances(std::size_t perClassCap);
 

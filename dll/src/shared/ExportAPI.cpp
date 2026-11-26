@@ -4099,6 +4099,12 @@ void RegisterCoreHandlers() {
             return json{{"error", "no assemblies visible (default exclude removed every assembly; try includeSystemAssemblies=true)"}};
         }
 
+        // C-M1: own a ScanCancel::Scope across the entire Mono snapshot heap
+        // walk + decode so UI Cancel / client disconnect can abort cleanly and
+        // an overlapping cancel can never return a silently-truncated snapshot.
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
+        ScanCancel::Scope scanCancelScope;
+
         // Build klass → (assembly, ns, name) index by enumerating each
         // requested assembly's classes ONCE — much cheaper than per-instance
         // resolver calls. Built BEFORE the heap walk (2026-06-08) so a narrow
@@ -4161,6 +4167,7 @@ void RegisterCoreHandlers() {
                     usedFastScan = true;
                     std::size_t fsInstances = 0;
                     for (const auto& d : descs) {
+                        if (ScanCancel::IsCancelRequested()) break;
                         if (d.klass == nullptr) continue;
                         Mono::MonoVTable* vt = r.class_vtable(fsDomain, d.klass);
                         if (vt == nullptr) continue;
@@ -4173,6 +4180,7 @@ void RegisterCoreHandlers() {
                         auto m = Memory::ScanForPointer(
                             reinterpret_cast<std::uintptr_t>(vt), instanceCap, nullptr,
                             /*excludeLow=*/0, /*excludeHigh=*/0, /*skipMapped=*/true);
+                        if (ScanCancel::IsCancelRequested()) break;
                         if (!m.empty()) {
                             auto& vec = bulk.byClass[d.klass];
                             vec.reserve(m.size());
@@ -4197,6 +4205,9 @@ void RegisterCoreHandlers() {
         }
         if (!usedFastScan) {
             bulk = Mono::FindAllInstances(instanceCap);
+        }
+        if (bulk.cancelled || ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
 
         // Build the plan: one row per class. Statics are always captured
@@ -4584,6 +4595,7 @@ void RegisterCoreHandlers() {
                 // chainInfo + fieldDescs, no Mono calls inside the loop.
                 Snapshot::ClassPayload instArr = Snapshot::ClassPayload::array();
                 for (std::uintptr_t instAddr : item.instances) {
+                    if (ScanCancel::IsCancelRequested()) break;
                     // Total-instance budget + process-memory watchdog —
                     // stop adding instances once either trips.
                     if (instanceDecodeBudget > 0 && decodedInstances >= instanceDecodeBudget)
@@ -4671,6 +4683,7 @@ void RegisterCoreHandlers() {
             Mono::ThreadAttachGuard guard(domain);
             if (guard.Attached()) {
                 for (auto& item : session->plan) {
+                    if (ScanCancel::IsCancelRequested()) break;
                     decodeOneClass(item);
                 }
             } else {
@@ -4692,6 +4705,10 @@ void RegisterCoreHandlers() {
             // ResolveStaticBaseAddress to avoid mono_class_vtable
             // allocations entirely. If wedge persists, more drastic
             // changes needed.)
+        }
+
+        if (ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
 
         // Preserve assembly order in the response.
@@ -5082,8 +5099,13 @@ void RegisterCoreHandlers() {
         Mono::MonoImage* img = Mono::FindImageByName(assembly);
         if (img == nullptr) return json{{"error", "assembly not found: " + assembly}};
 
+        // C-M1: own a ScanCancel::Scope across the IL walk.
+        ScanCancel::Scope scanCancelScope;
         auto fr = Mono::FindFieldReferences(img, ns, klassNm, fieldNm, kind,
                                             static_cast<std::size_t>(limit));
+        if (fr.cancelled || ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
         if (!fr.ok && !fr.error.empty()) {
             return json{{"error", fr.error}};
         }
@@ -5259,6 +5281,9 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
+        // C-M1: own a ScanCancel::Scope across the Mono instance scan.
+        ScanCancel::Scope scanCancelScope;
+
         // Phase 32 — opt-in `liveOnly`: enumerate ONLY live managed objects via
         // mono_gc_walk_heap (stops the world, visits each live object + its
         // MonoClass*). This skips dead/uncollected shells and runtime-bookkeeping
@@ -5274,6 +5299,7 @@ void RegisterCoreHandlers() {
             Mono::fn_gc_references_cb cb =
                 [](Mono::MonoObject* obj, Mono::MonoClass* klass, std::uintptr_t, std::uintptr_t,
                    Mono::MonoObject**, std::uintptr_t*, void* data) -> int {
+                    if (ScanCancel::IsCancelRequested()) return 1;
                     auto* c = static_cast<WalkCtx*>(data);
                     if (klass == c->target && c->out->size() < c->limit) {
                         c->out->push_back(reinterpret_cast<const void*>(obj));
@@ -5286,6 +5312,9 @@ void RegisterCoreHandlers() {
                 usedLiveWalk = true;
             }
         }
+        if (ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
         // mono_gc_walk_heap is a no-op STUB on Unity's bdwgc (Boehm) builds —
         // the export exists but visits nothing (verified on Core Keeper: 0
         // objects, 7ms). The functional live-enumeration path on bdwgc is the
@@ -5296,6 +5325,9 @@ void RegisterCoreHandlers() {
         if (usedLiveWalk && matches.empty()) { usedLiveWalk = false; liveWalkEmpty = true; }
         if (!usedLiveWalk) {
             matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, &stats);
+        }
+        if (ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
         // Phase 32 — `sane` layer needs this class's managed reference-field
         // offsets (non-static, non-value-type). Built from class metadata only
@@ -5414,10 +5446,18 @@ void RegisterCoreHandlers() {
         if (args.contains("limit") && args["limit"].is_number_unsigned()) {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
+        // C-M1: own a ScanCancel::Scope across the heap scan + row decode.
+        ScanCancel::Scope scanCancelScope;
         auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, nullptr);
+        if (ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
 
         json rows = json::array();
         for (const void* p : matches) {
+            if (ScanCancel::IsCancelRequested()) {
+                return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+            }
             std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
             std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(fieldOffset);
             json row = {
@@ -7418,11 +7458,16 @@ void RegisterCoreHandlers() {
             return json{{"error", "field not found: " + fieldNm}};
         }
 
+        // C-M1: own a ScanCancel::Scope across the IL2CPP xref scan.
+        ScanCancel::Scope scanCancelScope;
         auto fr = fieldIsStatic
             ? IL2CPP::FindStaticFieldReferences(img, ns, klassNm, fieldNm, kind,
                                                 static_cast<std::size_t>(limit))
             : IL2CPP::FindInstanceFieldReferences(img, ns, klassNm, fieldNm, kind,
                                                   static_cast<std::size_t>(limit));
+        if (fr.cancelled || ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
         if (!fr.ok && !fr.error.empty()) {
             return json{{"error", fr.error}};
         }
@@ -7519,8 +7564,13 @@ void RegisterCoreHandlers() {
                          (ns.empty() ? klassNm : ns + "." + klassNm)}};
         }
 
+        // C-M1: own a ScanCancel::Scope across the module + heap diagnostic scan.
+        ScanCancel::Scope scanCancelScope;
         auto d = IL2CPP::DiagnoseClassReferences(
             klass, fieldNm, heapScan, static_cast<std::size_t>(heapLimit));
+        if (d.cancelled || ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
         if (!d.ok) return json{{"error", d.error}};
 
         // Hex-encode byte buffers for the wire (no base64 — keeps the
@@ -8130,8 +8180,16 @@ void RegisterCoreHandlers() {
             return json{{"error", "no assemblies visible (default exclude removed every assembly; try includeSystemAssemblies=true)"}};
         }
 
+        // C-M1 + B-M10: own a ScanCancel::Scope (and honor optional serial
+        // thread cap) across the IL2CPP snapshot wide heap walk + plan build.
+        Memory::ScanThreadCapScope scanThreadCap(args.value("parallel", true) ? 0u : 1u);
+        ScanCancel::Scope scanCancelScope;
+
         // Wide heap walk first — groups instances by Il2CppClass*.
         auto bulk = IL2CPP::FindAllInstances(instanceCap);
+        if (bulk.cancelled || ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
 
         struct ClassDesc {
             std::string         assembly;
@@ -8147,6 +8205,9 @@ void RegisterCoreHandlers() {
         // reach the field walk and crash the game (the x64 IL2CPP CTD).
         std::unordered_map<IL2CPP::Il2CppClass*, char> knownIlKlasses;
         for (const auto& assemblyName : requestedAssemblies) {
+            if (ScanCancel::IsCancelRequested()) {
+                return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+            }
             const IL2CPP::Il2CppImage* img = IL2CPP::FindImageByName(assemblyName);
             if (img == nullptr) continue;
             auto classes = IL2CPP::EnumerateClasses(img);
@@ -8266,6 +8327,9 @@ void RegisterCoreHandlers() {
             });
         }
 
+        if (ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
         std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
 
         json scanStats = {
@@ -8672,9 +8736,14 @@ void RegisterCoreHandlers() {
         std::uintptr_t exLow = 0, exHigh = 0;
         computeArenaExclude(excludeArena, exLow, exHigh);
 
+        // C-M1: own a ScanCancel::Scope across the IL2CPP instance scan.
+        ScanCancel::Scope scanCancelScope;
         Memory::ScanStats stats{};
         auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
                                               limit, &stats, exLow, exHigh, skipMapped);
+        if (ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
         // Phase 32 — `sane` layer needs this class's managed reference-field
         // offsets (non-static, non-value-type). Mirrors walkInstance's chain walk.
         std::vector<std::uint64_t> refOffsets;
@@ -8782,12 +8851,20 @@ void RegisterCoreHandlers() {
         std::uintptr_t exLow = 0, exHigh = 0;
         computeArenaExclude(excludeArena, exLow, exHigh);
 
+        // C-M1: own a ScanCancel::Scope across the IL2CPP heap scan + decode.
+        ScanCancel::Scope scanCancelScope;
         Memory::ScanStats stats{};
         auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(k),
                                               limit, &stats, exLow, exHigh, skipMapped);
+        if (ScanCancel::IsCancelRequested()) {
+            return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+        }
 
         json rows = json::array();
         for (const void* p : matches) {
+            if (ScanCancel::IsCancelRequested()) {
+                return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
+            }
             std::uintptr_t inst = reinterpret_cast<std::uintptr_t>(p);
             std::uintptr_t fieldAddr = inst + static_cast<std::uintptr_t>(fieldOffset);
             json row = {

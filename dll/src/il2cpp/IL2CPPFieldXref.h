@@ -52,6 +52,7 @@ struct FieldRefMatch {
 
 struct FindFieldRefsResult {
     bool          ok = false;
+    bool          cancelled = false;
     std::string   error;
     void*         staticAddress = nullptr;  // resolved target absolute address
     std::vector<FieldRefMatch> matches;

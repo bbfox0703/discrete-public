@@ -42,6 +42,7 @@ struct FieldRefMatch {
 
 struct FindFieldRefsResult {
     bool          ok = false;
+    bool          cancelled = false;
     std::string   error;
     std::uint32_t fieldToken = 0;     // target field's metadata token (0x04xxxxxx)
     std::vector<FieldRefMatch> matches;

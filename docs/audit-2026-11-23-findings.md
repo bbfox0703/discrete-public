@@ -171,7 +171,7 @@
 - 成因：`IsReadableSeq` 的 thread-local region cache 和 `VirtualQuery` 之後的 TOCTOU，都可能讓 `memcpy` 碰到新出現的 guard page。`EXCEPTION_EXECUTE_HANDLER` 會吃掉一次性的 guard 例外，guard 屬性因此被移除；若那是其他 thread 的 stack guard，該 thread 之後就無法擴充 stack。
 - 修法：exception filter 只接受 `EXCEPTION_ACCESS_VIOLATION` / `EXCEPTION_IN_PAGE_ERROR`；遇到 guard page 時用 `VirtualProtect` 把 `PAGE_GUARD` 補回去再回傳失敗。
 
-**A-L15 · `g_scanThreadCap` 是全域狀態，多個 client 同時掃描時互相覆寫**
+**A-L15 · `g_scanThreadCap` 是全域狀態，多個 client 同時掃描時互相覆寫 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/Memory.cpp:597-607`；`Memory.h:97-108`
 - 成因：註解假設「scans are serialized in practice」，但 pipe 允許 4 個 client 並行；一個 scope 結束時把 cap 歸零，另一個「強制單執行緒」的 scan 中途就變回全平行（正好違背這個開關要對付 anti-tamper 的目的）。
 - 修法：把 cap 存在 thread-local，或作為 `RunParallelScan` 的參數傳入。
@@ -303,7 +303,7 @@
 - 成因：method index 只收錄目標 image 的方法。`upper_bound - 1` 會回傳「位址 ≤ ip 的最後一個目標方法」，只要 ip 大於目標 image 的最小方法位址就一定有結果。AOT 碼在 `GameAssembly.dll` 中並不是依 assembly 連續排列（泛型共享碼、其他 assembly 的方法都可能夾在中間），所以跨 image 的命中幾乎都會被安插到一個不相干的目標方法上。`droppedNoEnclose` 只會計到「位址低於最小方法」的那一小部分。
 - 修法：用 `RtlLookupFunctionEntry`（x64 `.pdata`）取得命中點所在函式的精確起點，再以「起點 == 某個 index entry 的 address」做精確比對，不相等就算 not enclosed；或者把 method index 擴大到所有 image，並保留每筆 entry 的 image，最後再過濾。
 
-**B-M10 · IL2CPP heap walker 的 thread pool：建立失敗會 `std::terminate`；`FindAllInstances` 不能取消，也不尊重「Parallel」開關**
+**B-M10 · IL2CPP heap walker 的 thread pool：建立失敗會 `std::terminate`；`FindAllInstances` 不能取消，也不尊重「Parallel」開關 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/il2cpp/IL2CPPAddressFinder.cpp:1291`（`ScanThreadCount()`，與 `:1436` 的 `EffectiveScanThreads()` 不一致）、`:1312-1319`、`:1455-1462`（`pool.emplace_back` 沒有 try）、`:1299-1310`（worker 不檢查 `ScanCancel`）；Mono 端 `MonoAddressFinder.cpp:971-1080`（同樣沒有 cancel 檢查）
 - 成因：(1) 與 A-H2 相同的模式：第 N 條 thread 建立時丟出 `std::system_error`，已經 joinable 的 `std::thread` 在 `pool` 解構時會 `std::terminate`，直接殺掉遊戲。(2) `FindAllInstances`（snapshot 的 heap walk，GB 級）兩個 backend 都不檢查 `ScanCancel`；UI 取消或斷線後，worker 仍會跑到結束，期間持續佔用記憶體頻寬。(3) IL2CPP 的 `FindAllInstances` 使用 `ScanThreadCount()`，使用者為了避開 anti-tamper 而關掉 Parallel 時，snapshot 路徑仍然是全平行。
 - 修法：建立 thread 的迴圈加上 try/catch，失敗時先 join 已啟動的 thread，再在目前的 thread 上 inline 跑 `worker`；兩個 backend 的 `FindAllInstances` 在 chunk / region 迴圈內檢查 `ScanCancel::IsCancelRequested()`，並在結果中標記 `cancelled`；IL2CPP 改用 `EffectiveScanThreads()`。
@@ -463,7 +463,7 @@
 
 ### Medium
 
-**C-M1 · 長時間執行的 handler 沒有 `ScanCancel::Scope`：既不能取消，又會被其他 client 的 cancel 靜默截斷**
+**C-M1 · 長時間執行的 handler 沒有 `ScanCancel::Scope`：既不能取消，又會被其他 client 的 cancel 靜默截斷 — ✅ FIXED (2026-11-26)**
 - 位置：`dll/src/shared/ExportAPI.cpp:4000`、`:4182`、`:4208`（Mono `snapshotBegin`：fast path 用 `ScanForPointer`、全抓用 `FindAllInstances` + 數分鐘的 decode）、`:8142`（IL2CPP `snapshotBegin`）、`:5307` / `:8860`（`findInstances`）、`:5426` / `:8970`（`listFieldValuesAcrossInstances`）；poll 點在 `dll/src/shared/Memory.cpp:510`（`RunParallelScan`）、`dll/src/il2cpp/IL2CPPAddressFinder.cpp:1447`、`dll/src/mono/MonoAddressFinder.cpp:1210`；規範在 `dll/src/shared/ScanCancel.h:19-20`
 - 成因：整個檔案只有 6 個 handler 開了 Scope（`scanFieldValue` / `beginValueScan` / `beginGroupScan` × 2 個 backend）。其他 heap walk 共用 `RunParallelScan` / `FindAllInstances`，而它們會 poll **全域**的 `g_scanCancel`。結果：
   1. 這些 handler 單獨執行時 `g_scanActive == 0`，`RequestCancel()` 是 no-op，所以 UI 的 Cancel 和 disconnect monitor 都停不住（Mono `snapshotBegin` 可能跑數分鐘）。

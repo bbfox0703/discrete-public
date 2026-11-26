@@ -587,16 +587,23 @@ unsigned int ScanThreadCount() noexcept {
     return t;
 }
 
-// Per-scan thread cap (Value Search "Parallel" toggle). 0 = no cap. See Memory.h.
-static std::atomic<unsigned int> g_scanThreadCap{0};
+// Per-scan thread cap (Value Search "Parallel" toggle). 0 = no cap.
+// Thread-local (A-L15) so concurrent pipe clients never overwrite each other's
+// cap; parallel drivers read EffectiveScanThreads() on the calling worker
+// thread before spawning sub-threads.
+static thread_local unsigned int t_scanThreadCap = 0;
 
 void SetScanThreadCap(unsigned int cap) noexcept {
-    g_scanThreadCap.store(cap, std::memory_order_relaxed);
+    t_scanThreadCap = cap;
+}
+
+unsigned int GetScanThreadCap() noexcept {
+    return t_scanThreadCap;
 }
 
 unsigned int EffectiveScanThreads() noexcept {
     const unsigned int base = ScanThreadCount();
-    const unsigned int cap  = g_scanThreadCap.load(std::memory_order_relaxed);
+    const unsigned int cap  = t_scanThreadCap;
     return (cap != 0 && cap < base) ? cap : base;
 }
 

@@ -836,6 +836,11 @@ public sealed partial class LiveInspectionViewModel : ObservableObject, IAsyncDi
                                     Sane, ct)
                 .ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
+            if (result.Cancelled || string.Equals(result.Error, "cancelled", StringComparison.Ordinal))
+            {
+                ErrorMessage = "Instance search cancelled.";
+                return;
+            }
             if (!string.IsNullOrEmpty(result.Error))
             {
                 ErrorMessage = $"findInstances: {result.Error}";

@@ -64,6 +64,9 @@ public sealed class PipeClient : IAsyncDisposable
         _pipeName = pipeName;
     }
 
+    /// <summary>The named-pipe endpoint name this client connects to.</summary>
+    public string PipeName => _pipeName;
+
     public bool IsConnected => _pipe is { IsConnected: true };
 
     /// <summary>Phase 30d telemetry — split of the most recent <see cref="SendAsync"/>

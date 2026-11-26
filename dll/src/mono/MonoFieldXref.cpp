@@ -25,6 +25,7 @@
 #include "MonoThreadAttach.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ScanCancel.h"
 
 #include <windows.h>
 
@@ -347,10 +348,22 @@ FindFieldRefsResult FindFieldReferences(MonoImage*         image,
     auto classes = EnumerateClasses(image);
     for (const auto& ce : classes) {
         if (ce.klass == nullptr) continue;
+        if (ScanCancel::IsCancelRequested()) {
+            result.cancelled = true;
+            result.ok = false;
+            result.matches.clear();
+            return result;
+        }
         if (result.truncated) break;
 
         void* methIter = nullptr;
         for (;;) {
+            if (ScanCancel::IsCancelRequested()) {
+                result.cancelled = true;
+                result.ok = false;
+                result.matches.clear();
+                return result;
+            }
             MonoMethod* m = SehNextMethod(r.class_get_methods, ce.klass, &methIter);
             if (m == nullptr) break;
             ++result.scannedMethods;

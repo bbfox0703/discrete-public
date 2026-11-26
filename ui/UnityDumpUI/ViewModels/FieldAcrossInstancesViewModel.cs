@@ -143,6 +143,14 @@ public sealed partial class FieldAcrossInstancesViewModel : ObservableObject
                     FieldOffset, FieldType, InstanceLimit, ct)
                 .ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
+            if (result.Cancelled || string.Equals(result.Error, "cancelled", StringComparison.Ordinal))
+            {
+                ErrorMessage = "Field scan cancelled.";
+                Rows.Clear();
+                FilteredRows.Clear();
+                MatchCount = 0;
+                return;
+            }
             if (!string.IsNullOrEmpty(result.Error))
             {
                 ErrorMessage = result.Error;

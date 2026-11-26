@@ -33,6 +33,7 @@
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
+#include "../shared/ScanCancel.h"
 #include "../shared/ModuleHelper.h"
 
 #include <windows.h>
@@ -436,6 +437,12 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     // reused for every hit.
     std::vector<MethodIndexEntry> methodIndex = BuildMethodIndex(image,
                                                                  &result.scannedMethods);
+    if (ScanCancel::IsCancelRequested()) {
+        result.cancelled = true;
+        result.ok = false;
+        result.matches.clear();
+        return result;
+    }
 
     Log::Write(MagicStrings::LogCategoryWalk,
                "FieldXref: methodIndex built — " +
@@ -489,10 +496,22 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     // cut-off are applied here in that same order, so the result (and the
     // counters logged below) match the original inline loop exactly.
     for (const auto& c : XrefScan::ScanRipRelative(sections, targetAddr)) {
+        if (ScanCancel::IsCancelRequested()) {
+            result.cancelled = true;
+            result.ok = false;
+            result.matches.clear();
+            return result;
+        }
         if (emitHit(c.ip, c.opcode) && result.matches.size() >= limit) {
             result.truncated = true;
             break;
         }
+    }
+    if (ScanCancel::IsCancelRequested()) {
+        result.cancelled = true;
+        result.ok = false;
+        result.matches.clear();
+        return result;
     }
 
     Log::Write(MagicStrings::LogCategoryWalk,
@@ -585,6 +604,12 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     };
 
                     for (const auto& ls : lazySlots) {
+                        if (ScanCancel::IsCancelRequested()) {
+                            result.cancelled = true;
+                            result.ok = false;
+                            result.matches.clear();
+                            return result;
+                        }
                         if (slotAlreadyKnown(ls.slotAddress)) continue;
 
                         bool matched     = false;
@@ -638,9 +663,21 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     " totalSlots=" + std::to_string(slots.size()));
 
                 if (!slots.empty()) {
+                    if (ScanCancel::IsCancelRequested()) {
+                        result.cancelled = true;
+                        result.ok = false;
+                        result.matches.clear();
+                        return result;
+                    }
                     ChainScanStats v2stats{};
                     auto chains = DetectFieldAccessChains(
                         slots, sfo, target.offset, limit, &v2stats);
+                    if (ScanCancel::IsCancelRequested()) {
+                        result.cancelled = true;
+                        result.ok = false;
+                        result.matches.clear();
+                        return result;
+                    }
                     Log::Write(MagicStrings::LogCategoryWalk,
                         "FieldXref: v2 scan complete — hopOneCandidates=" +
                         std::to_string(v2stats.hopOneCandidates) +
@@ -883,6 +920,12 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     // and the scanned-method count).
     std::vector<MethodIndexEntry> methodIndex = BuildMethodIndex(image,
                                                                  &result.scannedMethods);
+    if (ScanCancel::IsCancelRequested()) {
+        result.cancelled = true;
+        result.ok = false;
+        result.matches.clear();
+        return result;
+    }
 
     Log::Write(MagicStrings::LogCategoryWalk,
                "FieldXref(instance): target " +
@@ -936,6 +979,12 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     // operand in those ranges, in decode order. Kind filter and limit apply
     // here in the same order as the original inline loop.
     for (const auto& h : XrefScan::ScanInstanceAccesses(ranges, fieldOffset)) {
+        if (ScanCancel::IsCancelRequested()) {
+            result.cancelled = true;
+            result.ok = false;
+            result.matches.clear();
+            return result;
+        }
         const char* k = h.write ? "write" : "read";
         ++candidateHits;
         if (kindFilter == FieldRefKind::Read  && std::strcmp(k, "read")  != 0) {

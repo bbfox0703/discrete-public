@@ -191,8 +191,9 @@ public sealed class FindInstancesResult
     [JsonPropertyName("vtable")]    public string?       VTable   { get; set; }
     [JsonPropertyName("count")]     public int           Count    { get; set; }
     [JsonPropertyName("limit")]     public int           Limit    { get; set; }
-    [JsonPropertyName("matches")]   public List<string>  Matches  { get; set; } = new();
-    [JsonPropertyName("error")]     public string?       Error    { get; set; }
+    [JsonPropertyName("matches")]   public List<string>  Matches   { get; set; } = new();
+    [JsonPropertyName("cancelled")] public bool          Cancelled { get; set; }
+    [JsonPropertyName("error")]     public string?       Error     { get; set; }
 }
 
 /// <summary>
@@ -398,6 +399,7 @@ public sealed class ListFieldValuesResult
     [JsonPropertyName("fieldOffset")] public long                       FieldOffset { get; set; }
     [JsonPropertyName("fieldType")]   public string?                    FieldType   { get; set; }
     [JsonPropertyName("rows")]        public List<ListFieldValueRow>?   Rows        { get; set; }
+    [JsonPropertyName("cancelled")]   public bool                       Cancelled   { get; set; }
     [JsonPropertyName("error")]       public string?                    Error       { get; set; }
 }
 
@@ -704,6 +706,7 @@ public sealed class FindFieldReferencesResult
     [JsonPropertyName("references")]      public List<FieldReferenceRow>    References     { get; set; } = new();
     [JsonPropertyName("scanned_methods")] public int                        ScannedMethods { get; set; }
     [JsonPropertyName("truncated")]       public bool                       Truncated      { get; set; }
+    [JsonPropertyName("cancelled")]       public bool                       Cancelled      { get; set; }
     [JsonPropertyName("error")]           public string?                    Error          { get; set; }
     /// <summary>Build #555 — IL2CPP advisory. Set when the backend scan ran
     /// successfully but returned 0 matches AND the static-storage address
@@ -1193,6 +1196,7 @@ public sealed class SnapshotBeginResult
     [JsonPropertyName("decodeStats")]     public SnapshotDecodeStats?    DecodeStats { get; set; }
     [JsonPropertyName("excludedSystemAssemblies")] public int            ExcludedSystemAssemblies { get; set; }
     [JsonPropertyName("includeSystemAssemblies")]  public bool           IncludeSystemAssemblies  { get; set; }
+    [JsonPropertyName("cancelled")]       public bool                    Cancelled   { get; set; }
     [JsonPropertyName("error")]           public string?                 Error       { get; set; }
 
     /// <summary>Phase P1-fix — true when the decode stopped early because the
