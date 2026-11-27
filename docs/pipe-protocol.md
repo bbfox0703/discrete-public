@@ -11,7 +11,7 @@ script that talks to it.
 | Pipe name | `\\.\pipe\DiscreteBfx` |
 | Direction | duplex (`InOut`) |
 | Framing | line-delimited UTF-8 JSON; each request and each response is one line terminated with `\n` |
-| Concurrency | one client at a time; the server queues additional connect attempts |
+| Concurrency | up to 4 concurrent client connections (`kMaxPipeInstances = 4`), each served on its own worker thread; sessions (`snapshot*`, `beginValueScan`, `beginGroupScan`) are isolated per connection (`ownerClientId`) |
 | Lifetime | created by `Discrete_StartPipe` after `Discrete_Init`; torn down by `Discrete_StopPipe` or DLL unload |
 
 Open from PowerShell:
@@ -61,19 +61,17 @@ Error codes raised by the dispatcher itself:
 | Code | Reason |
 | --- | --- |
 | `-32700` | request line was not valid JSON |
-| `-32600` | request had no `cmd` field |
+| `-32600` | request had no `cmd` field or exceeded max frame size |
 | `-32601` | `cmd` not registered (unknown command) |
-
-**Handler-level errors (`result.error`):** Once a command dispatches to its handler,
-business/runtime failures (e.g. runtime not resolved, class not found, bad arg
-value, runtime poisoned) are returned inside `result` with an `"error": "<message>"`
-string field. Every typed result DTO in `ProtocolModels.cs` exposes `Error` so
-callers can always inspect handler-level failures alongside envelope errors.
 | `-32000` | handler threw a C++ exception (message is `what()`) |
 | `-32603` | internal: response failed to serialize (rare; should not happen with `error_handler_t::replace`) |
 
-**Handler-level errors** are different — most handlers report soft failures
-inside `result` itself rather than as an `error` envelope. The convention is:
+**Handler-level errors (`result.error`):** Once a command dispatches to its
+handler, business/runtime failures (e.g. runtime not resolved, class not found,
+bad arg value, runtime poisoned) are returned inside `result` with an
+`"error": "<message>"` string field rather than an envelope `error`. Every
+typed result DTO in `ProtocolModels.cs` exposes `Error` so callers can always
+inspect handler-level failures alongside envelope errors:
 
 ```jsonc
 { "id": 1, "result": { "error": "class not found: Foo.Bar" } }
@@ -87,14 +85,13 @@ context (e.g. `step`, `address`, `trace` for `resolvePointer`).
 ### Addresses
 
 Anywhere an `address`, `base`, or similar pointer-sized integer is accepted,
-the DLL will parse:
+the DLL parses strictly via `ExportHelpers::ParseAddressStrict`:
 
-* hex string with or without `0x` prefix — `"0x7FF6CAFEBABE"` / `"7FF6CAFEBABE"`
-* unsigned integer — `140711840456894`
-* signed integer — same shape, sign respected
+* **hex string** with or without `0x`/`0X` prefix — `"0x7FF6CAFEBABE"` / `"7FF6CAFEBABE"` (must consume the entire string; leading spaces/signs, trailing garbage, decimal strings, and overflow are rejected)
+* **non-negative JSON integer** — `140711840456894` (negative integers and floating-point numbers are rejected)
+* values exceeding `UINTPTR_MAX` (e.g. `> 0xFFFFFFFF` on 32-bit x86 Mono targets) are rejected rather than silently truncated
 
-Returned addresses are always uppercase 16-digit hex strings, e.g.
-`"0x00007FF6CAFEBABE"`.
+Returned addresses are always uppercase hex strings (`"0x..."`).
 
 ### Class specs
 
@@ -148,15 +145,57 @@ Identifies the runtime, the DLL build, and the backend it's compiled for.
   "unity_version": "2021.3.39f1",
   "metadata_version": 29,
   "assemblies_count": 57,
-  "build": 44,
-  "protocol": 1
+  "build": 1579,
+  "protocol": 1,
+  "stable_module_relative_methods": true,
+  "commands": ["beginGroupScan", "beginValueScan", "..."]
 }
 ```
 
+`commands` lists every sorted RPC command name registered on the active DLL
+variant so clients can probe optional capabilities without switching on the
+`backend` string.
+
 ### `scan` *(Both)*
 
-Same shape as `handshake`. Re-runs backend detection — useful after a domain
-reload (Mono) or assembly load.
+Same shape as `handshake`. Re-runs backend detection and invalidates cached
+class ranges — useful after a domain reload (Mono) or assembly load.
+
+### `getDispatcherStats` *(Both)*
+
+Diagnostic snapshot of the main-thread dispatcher (`MainThreadDispatcher`)
+used by `callMethod(..., main_thread: true)`. Takes no arguments.
+
+```jsonc
+// result:
+{
+  "initialized": true,
+  "hook_installed": true,
+  "main_thread_id": 12340,
+  "tick_count": 4820,
+  "submit_count": 12,
+  "drain_count": 12,
+  "timeout_count": 0,
+  "reject_count": 0,
+  "last_tick_age_ms": 8,
+  "queue_depth": 0,
+  "is_healthy": true
+}
+```
+
+### `setKeepForeground` / `getKeepForeground` *(Both)*
+
+Toggle or query the native Win32 run-in-background hook (`ForegroundHook`),
+keeping Unity ticking when unfocused even when IL2CPP strips
+`UnityEngine.Application.set_runInBackground`.
+
+```jsonc
+// setKeepForeground request: { "enable": true }
+// response:                  { "state": 1 }    // 1 = enabled, 0 = disabled, < 0 = hook install error
+
+// getKeepForeground request: {}
+// response:                  { "state": 1 }    // 1 = enabled, 0 = disabled
+```
 
 ---
 
@@ -328,6 +367,47 @@ static field's storage so callers can `readMemory` it directly.
 ```jsonc
 // → { "field": "...", "type": "...", "offset": <int>, "flags": <uint>,
 //      "address": "0x..." }
+```
+
+### `getMetadataStats` *(Both)*
+
+Summarizes type-name / namespace character-set statistics across all loaded
+assemblies (Mono) or `global-metadata.dat` type definitions (IL2CPP) to help
+the UI detect obfuscated / non-ASCII builds and unsupported metadata tables.
+Takes no arguments.
+
+```jsonc
+// → {
+//   "total": 12480, "ascii": 12450, "non_ascii": 30, "obfuscated_pct": 0.24,
+//   "scope": "metadata_all" | "all_assemblies",
+//   "assemblies_scanned": 57,     // Mono only
+//   "tablesDegraded": false,      // IL2CPP only (true if v38+ stride validation failed)
+//   "typeTablesSupported": true   // false for strings-only IL2CPP metadata versions
+// }
+```
+
+### `dumpClassInfo` *(Both)*
+
+Bulk `getClassInfo` across every class in the requested assemblies in a single
+pipe RPC (used by batch SDK header / symbol exporters).
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assemblies` | string[] | required; short assembly names (e.g. `["Assembly-CSharp"]`) |
+| `limit` | uint | optional; max classes returned (0 / omitted = unlimited) |
+
+```jsonc
+// → {
+//   "rows": [
+//     { "assembly": "Assembly-CSharp", "namespace": "Game", "name": "Player",
+//       "parent": { "namespace": "UnityEngine", "name": "MonoBehaviour" },
+//       "fields": [...], "methods": [...], "error": null }
+//   ],
+//   "count": 1503,
+//   "scanned": 1503,
+//   "truncated": false,
+//   "missing_assemblies": []   // omitted when empty
+// }
 ```
 
 ### `monoCompileMethod` *(Mono)*
@@ -967,6 +1047,153 @@ Dump the string-literal pool.
 
 `null` entries mean a string failed bounds validation (extremely rare).
 
+### `il2cppGetMetadataRegistration` *(IL2CPP)*
+
+Diagnostic probe for the runtime `Il2CppMetadataRegistration` AOB scan used
+by `il2cppGetMetadataTypeFields` for type-aware const-literal decoding. Takes
+no arguments.
+
+```jsonc
+// → {
+//   "found": true,
+//   "address":     "0x00007FF6A8123400",   // omitted when found == false
+//   "types_array": "0x00007FF6A8200000",
+//   "types_count": 48120
+// }
+```
+
+### `diagnoseClassReferences` *(IL2CPP)*
+
+Diagnostic probe that scans `GameAssembly.dll` non-executable sections and
+(optionally) committed RW heap regions for slots holding a class's
+`Il2CppClass*` and `static_fields` pointers, returning surrounding raw bytes
+for investigating lazy-initialized or compiler-generated static classes.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `assembly` | string | required |
+| `ns` | string | optional, default `""` |
+| `class` | string | required |
+| `heapScan` | bool | optional, default `true` |
+| `heapLimit` | uint | optional, default `64` per pointer |
+
+```jsonc
+// → {
+//   "ok": true, "classFqn": "...",
+//   "classPtr": "0x...", "staticFieldsPtr": "0x...", "staticFieldsOffsetInClass": 184,
+//   "module": { "base": "0x...", "size": 47968256, "sections": [...] },
+//   "classStructDump": "...",
+//   "moduleClassPtrSlots": [...], "moduleStaticFieldsSlots": [...],
+//   "heapClassPtrSlots": [...], "heapStaticFieldsSlots": [...],
+//   "stats": { "moduleBytesScanned": ..., "heapRegionsScanned": ..., "heapBytesScanned": ...,
+//              "heapRegionsSkipped": ..., "heapCapHit": false }
+// }
+```
+
+### `dumpLazyInitSlots` *(IL2CPP)*
+
+Diagnostic probe that dumps sample IL2CPP lazy-init metadata slots
+(`lea reg, [rip+SLOT]; call rel32`) with surrounding raw bytes.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `limit` | uint | optional, default `32` |
+| `bytesBefore` | uint | optional, default `16` |
+| `bytesAfter` | uint | optional, default `48` |
+| `onlyNonZero` | bool | optional, default `false` |
+
+```jsonc
+// → {
+//   "ok": true, "totalSlots": 4120, "returned": 32,
+//   "slots": [
+//     { "slotAddress": "0x...", "leaIP": "0x...", "callIP": "0x...",
+//       "callTarget": "0x...", "currentValue": "0x...",
+//       "currentValueClassName": "...",
+//       "contextHex": "...", "contextSlotOffset": 16 }
+//   ]
+// }
+```
+
+---
+
+## Value & group scanning *(Both)*
+
+Unity-aware CE-style memory scanning. Raw value hits are resolved back to
+owning managed instances and fields via `ReverseLookupIndex` / `whatIsAt`.
+Stateful scan sessions (`beginValueScan`, `beginGroupScan`) are scoped to the
+creating pipe connection (`ownerClientId`), drop automatically when that client
+disconnects, and auto-expire after 5 minutes of inactivity.
+
+### `scanFieldValue`
+
+Stateless single-shot scan for primitive or string values across the managed
+heap (`classScope: false`) or across live instances of one class
+(`classScope: true`).
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `dataType` | string | required; `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64`/`float`/`double`/`string` |
+| `scanType` | string | `exact` (default) or `range` (for numeric types); `matchMode` (`contains`/`exact`/`prefix`) for `string` |
+| `value` | number / string | required; exact value or range lower bound (integer types also accept decimal strings for full 64-bit precision) |
+| `valueTo` | number / string | required when `scanType == "range"` (inclusive upper bound) |
+| `tolerance` | number | optional float/double epsilon (default `0.0001`) |
+| `classScope` | bool | optional, default `false`; when `true`, requires `assembly`, `namespace`, `name` |
+| `assembly`, `namespace`, `name` | class spec | required when `classScope == true` |
+| `alignment` | uint | optional byte alignment (`0` = `sizeof(dataType)`, `1` = unaligned) |
+| `limit` | uint | optional, default `50000`, clamped to `50000` |
+| `maxBackwardScan` | uint | optional, default `16384`, capped at `16384` |
+| `parallel` | bool | optional, default `true` |
+
+```jsonc
+// → {
+//   "ok": true, "mode": "global" | "class-scoped",
+//   "count": 12, "scannedBytes": 268435456, "droppedNonManaged": 4102, "truncated": false,
+//   "candidates": [
+//     { "addr": "0x...", "instAddr": "0x...", "asm": "Assembly-CSharp",
+//       "ns": "Game", "class": "Player", "field": "hp",
+//       "fieldOffset": 32, "fieldKind": "leaf", "currentValue": 100 }
+//   ]
+// }
+```
+
+### `beginValueScan` / `refineValueScan` / `endValueScan`
+
+Stateful CE-style First Scan / Next Scan workflow.
+
+- **`beginValueScan`** accepts the same scan arguments as `scanFieldValue`
+  plus optional `retainCap` / `rawCap` / `limit` (clamped to `50000`), stores
+  surviving candidates server-side, and returns `sessionId` (decimal uint64
+  string), `totalCandidates`, `count`, `truncated`, and the first page of
+  `candidates`.
+- **`refineValueScan`** takes `{ sessionId, scanType, value?, valueTo?, tolerance?, limit? }`
+  where `scanType` is one of `exact` / `range` / `newValue` / `changed` /
+  `unchanged` / `increased` / `decreased` (`limit` default `5000`, clamped to
+  `50000`), prunes the session in place, and returns
+  `{ ok, sessionId, scanType, dataType, count, totalCandidates, removed, truncated, candidates }`.
+- **`endValueScan`** takes `{ sessionId }` and releases the session, returning
+  `{ ok, sessionId, dropped }`.
+
+### `cancelScan`
+
+Cooperative cancellation for an in-flight value scan, group scan, heap scan,
+or Rust xref/chain scan. Takes no arguments and returns `{ ok: true }`. Sent
+from an idle connection (in dual-pipe mode, the UI's interactive pipe) so the
+long-running scan loop on the bulk pipe aborts promptly.
+
+### `beginGroupScan` / `refineGroupScan` / `queryGroupCandidates` / `endGroupScan`
+
+Object-aware multi-value group scan (2–4 slots per object, matched via System
+of Distinct Representatives so each slot maps to a distinct field on the same
+managed instance).
+
+- **`beginGroupScan`**: `{ slots: [{ dataType, scanType ("exact"|"range"), value, valueTo?, tolerance?, alignment? }], parallel?, retainCap?, rawCap?, limit? (default 200, max 50000), maxBackwardScan? }`
+  → `{ ok, sessionId, mode: "group", count, totalCandidates, truncated, candidates: [{ instAddr, asm, ns, class, slots: [...] }] }`.
+- **`refineGroupScan`**: `{ sessionId, slots: [{ scanType, value?, valueTo?, tolerance? }], limit? (default 200, max 50000) }`
+  → `{ ok, sessionId, count, totalCandidates, removed, truncated, candidates }`.
+- **`queryGroupCandidates`**: `{ sessionId, offset? (non-negative int, default 0), limit? (default 200, max 50000) }`
+  → `{ ok, sessionId, offset, count, totalCandidates, truncated, candidates }`.
+- **`endGroupScan`**: `{ sessionId }` → `{ ok, sessionId, dropped }`.
+
 ---
 
 ## Address finder *(Both)*
@@ -1386,12 +1613,14 @@ Response:
 }
 ```
 
-On x86 targets with PrivateUsage ≥ 3 GB the server **refuses** the
-snapshot with `{ "ok": false, "error": "Game process at X.X GB
-private memory — refusing snapshot to avoid OOM crash on this 32-bit
-Mono target. Lower InstanceCap (try 128) and ArrayCap (try 32) then
-retry, or restart the game to free memory before snapshotting." }`.
-This is the 32-bit OOM mitigation from build #645 — see lessons-learned.
+On x86 targets whose `PrivateUsage` reaches **75% of the process virtual
+address space** (`GlobalMemoryStatusEx().ullTotalVirtual`, i.e. 1.5 GB for
+2 GB non-LAA games and 3.0 GB for 4 GB WOW64 LAA games), the server **refuses**
+the snapshot with `{ "ok": false, "error": "Game process at X.X GB ..." }` to
+prevent an OOM crash. Hard caps are `instanceCap <= 8192`, `arrayCap <= 4096`,
+`elementFieldCap <= 64`, `structMemberCap <= 256`. Snapshot sessions are scoped
+to the creating pipe connection (`ownerClientId`), drop on that client's
+disconnect, and auto-expire after 5 minutes of inactivity.
 
 ### `snapshotChunk`
 
@@ -1463,7 +1692,10 @@ The DLL allows multiple concurrent snapshot sessions (per
 | Generate a CE AOB pattern from a method's native address | `getMethodAobPattern` |
 | Invoke a managed method with marshaled args (IL2CPP + Mono, static + instance) | `callMethod` |
 | Dump every class + method as debugger labels (IL2CPP) | `dumpIl2cppSymbols` |
+| Dump full class metadata across assemblies in one RPC | `dumpClassInfo` / `getMetadataStats` |
+| CE-style Unity-aware value or multi-slot group scan | `beginValueScan` → `refineValueScan` → `endValueScan` (`beginGroupScan` / `cancelScan`) |
 | Capture managed-state snapshot of the game (Phase 29a) | `snapshotBegin` → `snapshotChunk` loop → `snapshotEnd` |
+| Keep game ticking while unfocused / check main-thread hook | `setKeepForeground` / `getKeepForeground` / `getDispatcherStats` |
 
 ---
 

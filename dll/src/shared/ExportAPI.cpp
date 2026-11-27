@@ -2072,7 +2072,7 @@ void TryInstallMainThreadHookAndReport(json& j) {
 
 void RegisterCoreHandlers() {
     using namespace Discrete;
-    PipeServer::RegisterHandler("ping", [](const json&) -> json {
+    PipeServer::RegisterHandler(MagicStrings::CmdPing, [](const json&) -> json {
         return json{{"pong", true}};
     });
     PipeServer::RegisterHandler(MagicStrings::CmdHandshake, [](const json&) -> json {
@@ -3165,7 +3165,7 @@ void RegisterCoreHandlers() {
         return json{{"name", name}, {"address", formatHex(addr)}, {"set", true}};
     });
 
-    PipeServer::RegisterHandler("lookupSymbol",
+    PipeServer::RegisterHandler(MagicStrings::CmdLookupSymbol,
         [formatHex](const json& args) -> json {
         std::string name = args.value("name", std::string{});
         if (name.empty()) return json{{"error", "missing 'name'"}};
@@ -3175,7 +3175,7 @@ void RegisterCoreHandlers() {
         return json{{"name", name}, {"address", formatHex(it->second)}};
     });
 
-    PipeServer::RegisterHandler("listSymbols",
+    PipeServer::RegisterHandler(MagicStrings::CmdListSymbols,
         [formatHex](const json&) -> json {
         std::lock_guard<std::mutex> lk(g_symbolMutex);
         json arr = json::array();
@@ -6676,7 +6676,7 @@ void RegisterCoreHandlers() {
     // walk (matching searchSymbols / dumpClassInfo / snapshot) so nested
     // Mono helpers reuse the thread attachment via ThreadAttachGuard's
     // thread-local depth counter instead of attach/detaching once per assembly.
-    PipeServer::RegisterHandler("getMetadataStats",
+    PipeServer::RegisterHandler(MagicStrings::CmdGetMetadataStats,
         [updateStats, buildStatsJson](const json&) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
         Mono::MonoDomain* domain = Mono::GetRootDomain();
@@ -8719,7 +8719,7 @@ void RegisterCoreHandlers() {
 
     // Phase 5 segment 2: list metadata fields (including const literals stripped
     // from the runtime field iterator) for a given type.
-    PipeServer::RegisterHandler("il2cppGetMetadataTypeFields",
+    PipeServer::RegisterHandler(MagicStrings::CmdIL2CPPGetMetadataTypeFields,
         [formatHex](const json& args) -> json {
         const auto& mp = IL2CPP::Metadata::Parser::Get();
         if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
@@ -8802,7 +8802,7 @@ void RegisterCoreHandlers() {
     // Reads from global-metadata.dat directly — faster than the runtime path
     // and includes literal-only types stripped from the runtime field
     // iterator.
-    PipeServer::RegisterHandler("getMetadataStats",
+    PipeServer::RegisterHandler(MagicStrings::CmdGetMetadataStats,
         [updateStats, buildStatsJson](const json&) -> json {
         const auto& mp = IL2CPP::Metadata::Parser::Get();
         if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
@@ -8822,7 +8822,7 @@ void RegisterCoreHandlers() {
 
     // Phase 5 segment 2d follow-up — diagnostics for the runtime
     // Il2CppMetadataRegistration AOB scan.
-    PipeServer::RegisterHandler("il2cppGetMetadataRegistration",
+    PipeServer::RegisterHandler(MagicStrings::CmdIL2CPPGetMetadataRegistration,
         [formatHex](const json&) -> json {
         const bool ok = IL2CPP::MetadataRegistration::Find();
         json result = {{"found", ok}};

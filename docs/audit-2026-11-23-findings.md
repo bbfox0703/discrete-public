@@ -510,11 +510,11 @@
 
 ### Low
 
-**C-L1 · Magic string 規則破口（確認 AUDIT 訊號 2）與 dead 常數**
+**C-L1 · Magic string 規則破口（確認 AUDIT 訊號 2）與 dead 常數 — ✅ FIXED (2026-11-27)**
 - 位置：字面值 `"ping"`（`ExportAPI.cpp:2002`）、`"lookupSymbol"`（`:3127`）、`"listSymbols"`（`:3137`）、`"getMetadataStats"`（`:6534`、`:8762`）、`"il2cppGetMetadataTypeFields"`（`:8503`）、`"il2cppGetMetadataRegistration"`（`:8780`）；`MagicStrings.h:54-56`、`:64` 的 `CmdExportCeXml` / `CmdExportCsx` / `CmdExportSdkHeader` / `CmdIL2CPPGetGenericInstances` 沒有任何 handler，repo 中也沒有引用（只剩 `docs/Archiutecture.md:365-384` 還在描述）；`MagicStrings.h:3`、`:41` 說「mirror in C# UI/Constants.cs」，但 UI 端沒有任何指令常數，`BackendAdapter` 全部用字面值（`:127`、`:180`、`:1024` 等），而 `PipeFor` 的路由表（`:49-56`）也是用字串比對。
 - 修法：補上 `CmdPing` / `CmdLookupSymbol` / `CmdListSymbols` / `CmdGetMetadataStats` / `CmdIL2CPPGetMetadataTypeFields` / `CmdIL2CPPGetMetadataRegistration`；刪除 4 個 dead 常數，並同步更新 `Archiutecture.md`；UI 端新增 `PipeCommands` 靜態類別，讓 `BackendAdapter` 和 `BulkCommands` 都引用它。
 
-**C-L2 · `pipe-protocol.md` 與程式碼的覆蓋率落差，以及其他文件 / 註解漂移**
+**C-L2 · `pipe-protocol.md` 與程式碼的覆蓋率落差，以及其他文件 / 註解漂移 — ✅ FIXED (2026-11-27)**
 - 位置與內容：
   - `docs/pipe-protocol.md` 完全沒有出現（grep 0 筆）的已註冊指令：`scanFieldValue`、`beginValueScan`、`refineValueScan`、`endValueScan`、`cancelScan`、`beginGroupScan`、`refineGroupScan`、`queryGroupCandidates`、`endGroupScan`、`getDispatcherStats`、`dumpClassInfo`、`setKeepForeground`、`getKeepForeground`、`diagnoseClassReferences`、`dumpLazyInitSlots`、`il2cppGetMetadataRegistration`、`getMetadataStats`（共 17 個；它們的契約目前只寫在 `MagicStrings.h` 的註解裡）。
   - `MagicStrings.h:233-237` 說 class-scoped `scanFieldValue` 要傳 `ns` / `class`，但 `resolveClassFromArgs`（`ExportAPI.cpp:3773-3775`、`:7152-7154`）讀的是 `namespace` / `name`（`tools/Test-ScanFieldValue.ps1:143-145` 也用後者）。照文件呼叫一定得到「missing 'assembly' or 'name' arg」。

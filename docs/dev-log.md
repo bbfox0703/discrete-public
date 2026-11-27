@@ -12,6 +12,22 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1580) — Fix C-L1 + C-L2 (completes 100% of Block C: eliminate literal command names & dead `MagicStrings`, add UI `PipeCommands`, document all 17 missing RPCs in `pipe-protocol.md`)
+
+- **Bug fixes (`C-L1`, `C-L2` — completes 100% of Block C Critical/High/Medium/Low findings):**
+  - **`C-L1` (`dll/src/shared/MagicStrings.h`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/PipeCommands.cs`, `ui/UnityDumpUI.Core/Services/BackendAdapter.cs`, `docs/Archiutecture.md`):**
+    - Added `CmdPing`, `CmdLookupSymbol`, `CmdListSymbols`, `CmdGetMetadataStats`, `CmdIL2CPPGetMetadataTypeFields`, and `CmdIL2CPPGetMetadataRegistration` to `MagicStrings.h` and migrated all 7 literal `PipeServer::RegisterHandler("...")` calls in `ExportAPI.cpp` (0 literal registrations remaining).
+    - Removed the 4 unimplemented dead constants (`CmdExportCeXml`, `CmdExportCsx`, `CmdExportSdkHeader`, `CmdIL2CPPGetGenericInstances`) from `MagicStrings.h` and updated `docs/Archiutecture.md` to reflect actual commands + client-side exporters.
+    - Added `UnityDumpUI.Core.PipeCommands` (53 constants mirroring `MagicStrings.h` 1-to-1) and migrated `BackendAdapter.BulkCommands` plus all 41 RPC dispatch sites in `BackendAdapter.cs` off raw string literals.
+  - **`C-L2` (`docs/pipe-protocol.md`, `dll/src/shared/MagicStrings.h`, `ui/UnityDumpUI.Core/Services/BackendAdapter.cs`):**
+    - Documented all 17 previously missing registered commands in `docs/pipe-protocol.md` (`scanFieldValue`, `beginValueScan`, `refineValueScan`, `endValueScan`, `cancelScan`, `beginGroupScan`, `refineGroupScan`, `queryGroupCandidates`, `endGroupScan`, `getDispatcherStats`, `dumpClassInfo`, `setKeepForeground`, `getKeepForeground`, `diagnoseClassReferences`, `dumpLazyInitSlots`, `il2cppGetMetadataRegistration`, `getMetadataStats`), fixed the broken dispatcher error table, and synced concurrency / strict address / `handshake.commands` / snapshot cap & OOM threshold specs.
+    - Fixed stale comments & XML docs in `MagicStrings.h` (`scanFieldValue` class-scoped `namespace`/`name`, `callMethod` full Mono+IL2CPP scope, per-client disconnect cleanup) and `BackendAdapter.cs` (`WalkInstanceAsync` strict hex address note, `SnapshotBeginAsync` 8192 / 4096 hard caps).
+  - Added C# unit test `PipeCommands_HasNoDuplicateOrEmptyCommandNames` in `ui/UnityDumpUI.Tests/PipeClientReliabilityTests.cs`.
+  - Marked `C-L1` and `C-L2` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1580) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 853 passed (x64) / 853 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1579) — Fix C-L3 + C-L6 + C-L8 (twin-handler alignment, per-client session ownership/off-lock snapshot slicing, atomic RPC telemetry, handshake `commands` list, dual-pipe `cancelScan` reuse)
 
 - **Bug fixes (`C-L3`, `C-L6`, `C-L8`):**

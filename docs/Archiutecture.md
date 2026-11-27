@@ -362,12 +362,18 @@ Pipe name: `\\.\pipe\DiscreteBfx`
 | `readMemory` | Read bytes at address (for LiveWalker) |
 | `writeMemory` | Write bytes at address |
 | `registerSymbol` | Register a CE symbol (name → address mapping) |
-| `exportCeXml` | Generate CE XML for a class/struct |
-| `exportCsx` | Generate CE Structure Dissect for a class |
-| `exportSdkHeader` | Generate C/C++ header for a class |
+| `lookupSymbol` / `listSymbols` | Query registered CE symbols |
 | `getEnumValues` | Get enum member names and values |
 | `resolvePointer` | Follow pointer chain, return final address + type info |
-| `walkInstance` | Read instance fields with live values (for LiveWalker) |
+| `walkInstance` / `walkArray` | Read instance fields or array elements with live values (for LiveWalker) |
+| `setInstanceField` | Write a primitive or address field on a live instance |
+| `whatIsAt` / `searchSymbols` / `findFieldReferences` | Reverse address lookup, cross-class symbol search, and field-reference analysis |
+| `scanFieldValue` / `beginValueScan` / `beginGroupScan` | Unity-aware value & group scanning (`refine*` / `end*` / `cancelScan`) |
+| `snapshotBegin` / `snapshotChunk` / `snapshotEnd` | Streaming managed-state snapshot & diff |
+| `dumpClassInfo` / `getMetadataStats` | Bulk class metadata dump and assembly/metadata name stats |
+| `setKeepForeground` / `getKeepForeground` / `getDispatcherStats` | Native run-in-background hook and main-thread dispatcher diagnostics |
+
+> Note: CE XML, CSX, and C/C++ SDK header generation are performed client-side in the UI (`UnityDumpUI.Core/Services/Export/`); see [pipe-protocol.md](pipe-protocol.md) for the complete authoritative command list.
 
 ### Mono-Only Commands
 
@@ -380,8 +386,11 @@ Pipe name: `\\.\pipe\DiscreteBfx`
 
 | Command | Description |
 |---------|-------------|
-| `il2cppGetMetadataStrings` | Read string literals from metadata |
-| `il2cppGetGenericInstances` | List generic instantiations of a class |
+| `dumpIl2cppSymbols` | Bulk export of IL2CPP class pointers and AOT method entries |
+| `il2cppGetMetadataStrings` | Read string literals from `global-metadata.dat` |
+| `il2cppGetMetadataTypeFields` | Read metadata fields + const literal defaults for a type |
+| `il2cppGetMetadataRegistration` | Diagnostics for the runtime `Il2CppMetadataRegistration` AOB scan |
+| `diagnoseClassReferences` / `dumpLazyInitSlots` | IL2CPP static-reference / lazy-init slot diagnostics |
 
 ---
 

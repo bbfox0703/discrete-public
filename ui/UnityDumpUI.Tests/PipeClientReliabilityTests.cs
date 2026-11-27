@@ -325,4 +325,22 @@ public class PipeClientReliabilityTests
         Assert.False(env.Result.SupportsCommand("dumpIl2cppSymbols"));
         Assert.False(env.Result.SupportsCommand(""));
     }
+
+    [Fact]
+    public void PipeCommands_HasNoDuplicateOrEmptyCommandNames()
+    {
+        var fields = typeof(UnityDumpUI.Core.PipeCommands).GetFields(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Assert.True(fields.Length >= 48);
+        var seen = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in fields)
+        {
+            var val = Assert.IsType<string>(f.GetRawConstantValue());
+            Assert.False(string.IsNullOrWhiteSpace(val));
+            Assert.True(seen.Add(val), $"Duplicate command constant: {val}");
+        }
+        Assert.Contains(UnityDumpUI.Core.PipeCommands.Ping, seen);
+        Assert.Contains(UnityDumpUI.Core.PipeCommands.SnapshotBegin, seen);
+        Assert.Contains(UnityDumpUI.Core.PipeCommands.Il2cppGetMetadataRegistration, seen);
+    }
 }

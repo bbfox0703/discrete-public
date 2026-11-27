@@ -48,11 +48,11 @@ public sealed class BackendAdapter : ILiveExportSource
     /// </summary>
     private static readonly HashSet<string> BulkCommands = new(System.StringComparer.Ordinal)
     {
-        "snapshotBegin", "snapshotChunk", "snapshotEnd",
-        "beginValueScan", "refineValueScan", "endValueScan", "scanFieldValue",
-        "beginGroupScan", "refineGroupScan", "queryGroupCandidates", "endGroupScan",
-        "findInstances", "listFieldValuesAcrossInstances",
-        "dumpIl2cppSymbols", "dumpClassInfo", "findFieldReferences",
+        PipeCommands.SnapshotBegin, PipeCommands.SnapshotChunk, PipeCommands.SnapshotEnd,
+        PipeCommands.BeginValueScan, PipeCommands.RefineValueScan, PipeCommands.EndValueScan, PipeCommands.ScanFieldValue,
+        PipeCommands.BeginGroupScan, PipeCommands.RefineGroupScan, PipeCommands.QueryGroupCandidates, PipeCommands.EndGroupScan,
+        PipeCommands.FindInstances, PipeCommands.ListFieldValuesAcrossInstances,
+        PipeCommands.DumpIl2cppSymbols, PipeCommands.DumpClassInfo, PipeCommands.FindFieldReferences,
     };
 
     /// <param name="pipe">Interactive connection (light browse RPCs).</param>
@@ -124,7 +124,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<bool> PingAsync(CancellationToken ct = default)
     {
         var env = await Send(
-            "ping", args: null,
+            PipeCommands.Ping, args: null,
             ProtocolJsonContext.Default.RpcEnvelopePingResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result?.Pong == true;
@@ -144,7 +144,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["enable"] = Bool(enable),
         };
         var env = await Send(
-            "setKeepForeground", args,
+            PipeCommands.SetKeepForeground, args,
             ProtocolJsonContext.Default.RpcEnvelopeKeepForegroundResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("setKeepForeground returned no result");
@@ -160,7 +160,7 @@ public sealed class BackendAdapter : ILiveExportSource
         try
         {
             var env = await Send(
-                "getKeepForeground", args: null,
+                PipeCommands.GetKeepForeground, args: null,
                 ProtocolJsonContext.Default.RpcEnvelopeKeepForegroundResult, ct).ConfigureAwait(false);
             if (env.Error is not null) return null;
             return env.Result;
@@ -177,7 +177,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<HandshakeResult> HandshakeAsync(CancellationToken ct = default)
     {
         var env = await Send(
-            "handshake", args: null,
+            PipeCommands.Handshake, args: null,
             ProtocolJsonContext.Default.RpcEnvelopeHandshakeResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("handshake returned no result");
@@ -194,7 +194,7 @@ public sealed class BackendAdapter : ILiveExportSource
         try
         {
             var env = await Send(
-                "getMetadataStats", args: null,
+                PipeCommands.GetMetadataStats, args: null,
                 ProtocolJsonContext.Default.RpcEnvelopeMetadataStatsResult, ct)
                 .ConfigureAwait(false);
             if (env.Error is not null) return null;
@@ -212,7 +212,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<GetAssembliesResult> GetAssembliesAsync(CancellationToken ct = default)
     {
         var env = await Send(
-            "getAssemblies", args: null,
+            PipeCommands.GetAssemblies, args: null,
             ProtocolJsonContext.Default.RpcEnvelopeGetAssembliesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getAssemblies returned no result");
@@ -228,7 +228,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["assembly"] = Str(assembly),
         };
         var env = await Send(
-            "getClasses", args,
+            PipeCommands.GetClasses, args,
             ProtocolJsonContext.Default.RpcEnvelopeGetClassesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getClasses returned no result");
@@ -266,7 +266,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["name"]      = Str(name),
         };
         var env = await Send(
-            "getClassInfo", args,
+            PipeCommands.GetClassInfo, args,
             ProtocolJsonContext.Default.RpcEnvelopeGetClassInfoResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getClassInfo returned no result");
@@ -345,7 +345,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (staticOnly)     args["staticOnly"] = Bool(true);
 
         var env = await Send(
-            "searchSymbols", args,
+            PipeCommands.SearchSymbols, args,
             ProtocolJsonContext.Default.RpcEnvelopeSearchSymbolsResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("searchSymbols returned no result");
@@ -362,7 +362,7 @@ public sealed class BackendAdapter : ILiveExportSource
     public async Task<DispatcherStatsResult> GetDispatcherStatsAsync(CancellationToken ct = default)
     {
         var env = await Send(
-            "getDispatcherStats", new Dictionary<string, JsonElement>(),
+            PipeCommands.GetDispatcherStats, new Dictionary<string, JsonElement>(),
             ProtocolJsonContext.Default.RpcEnvelopeDispatcherStatsResult, ct)
             .ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -411,7 +411,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
         var env = await Send(
-            "findFieldReferences", args,
+            PipeCommands.FindFieldReferences, args,
             ProtocolJsonContext.Default.RpcEnvelopeFindFieldReferencesResult, ct)
             .ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -480,7 +480,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
         var env = await Send(
-            "dumpIl2cppSymbols", args,
+            PipeCommands.DumpIl2cppSymbols, args,
             ProtocolJsonContext.Default.RpcEnvelopeDumpIl2cppSymbolsResult, ct)
             .ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -520,7 +520,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
         var env = await Send(
-            "dumpClassInfo", args,
+            PipeCommands.DumpClassInfo, args,
             ProtocolJsonContext.Default.RpcEnvelopeDumpClassInfoResult, ct)
             .ConfigureAwait(false);
         ThrowIfError(env.Error);
@@ -573,7 +573,7 @@ public sealed class BackendAdapter : ILiveExportSource
         }
 
         var env = await Send(
-            "findInstances", args,
+            PipeCommands.FindInstances, args,
             ProtocolJsonContext.Default.RpcEnvelopeFindInstancesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("findInstances returned no result");
@@ -582,8 +582,9 @@ public sealed class BackendAdapter : ILiveExportSource
     /// <summary>
     /// `walkInstance` — decode every managed instance field at
     /// <paramref name="address"/> for the given class spec.
-    /// <paramref name="address"/> is passed through verbatim; protocol accepts
-    /// hex with or without `0x` prefix or a decimal integer.
+    /// <paramref name="address"/> is passed through verbatim; string addresses
+    /// are strictly hexadecimal (with or without `0x` prefix; non-negative JSON
+    /// integers are also accepted on the wire — see C-L4 / docs/pipe-protocol.md).
     /// </summary>
     public async Task<WalkInstanceResult> WalkInstanceAsync(
         string address, string assembly, string? @namespace, string name,
@@ -597,7 +598,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["name"]      = Str(name),
         };
         var env = await Send(
-            "walkInstance", args,
+            PipeCommands.WalkInstance, args,
             ProtocolJsonContext.Default.RpcEnvelopeWalkInstanceResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("walkInstance returned no result");
@@ -623,7 +624,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["klass_from_header_addr"] = Str(address),
         };
         var env = await Send(
-            "walkInstance", args,
+            PipeCommands.WalkInstance, args,
             ProtocolJsonContext.Default.RpcEnvelopeWalkInstanceResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("walkInstance returned no result");
@@ -645,7 +646,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["field"]     = Str(field),
         };
         var env = await Send(
-            "getStaticFieldData", args,
+            PipeCommands.GetStaticFieldData, args,
             ProtocolJsonContext.Default.RpcEnvelopeGetStaticFieldDataResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getStaticFieldData returned no result");
@@ -678,7 +679,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (!string.IsNullOrEmpty(elementName))      args["elementName"]      = Str(elementName);
 
         var env = await Send(
-            "walkArray", args,
+            PipeCommands.WalkArray, args,
             ProtocolJsonContext.Default.RpcEnvelopeWalkArrayResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("walkArray returned no result");
@@ -704,7 +705,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (maxBackwardScan is int n) args["maxBackwardScan"] = Int(n);
 
         var env = await Send(
-            "whatIsAt", args,
+            PipeCommands.WhatIsAt, args,
             ProtocolJsonContext.Default.RpcEnvelopeWhatIsAtResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("whatIsAt returned no result");
@@ -726,7 +727,7 @@ public sealed class BackendAdapter : ILiveExportSource
               }
             : null;
         var env = await Send(
-            "getClassRangeStats", args,
+            PipeCommands.GetClassRangeStats, args,
             ProtocolJsonContext.Default.RpcEnvelopeClassRangeStatsResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getClassRangeStats returned no result");
@@ -753,7 +754,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (!string.IsNullOrEmpty(signatureMatch))
             args["signatureMatch"] = Str(signatureMatch);
         var env = await Send(
-            "findMethodInstances", args,
+            PipeCommands.FindMethodInstances, args,
             ProtocolJsonContext.Default.RpcEnvelopeFindMethodInstancesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("findMethodInstances returned no result");
@@ -776,7 +777,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["length"]  = Int(length),
         };
         var env = await Send(
-            "getMethodAobPattern", args,
+            PipeCommands.GetMethodAobPattern, args,
             ProtocolJsonContext.Default.RpcEnvelopeGetMethodAobPatternResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getMethodAobPattern returned no result");
@@ -811,7 +812,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit is int l) args["limit"] = Int(l);
 
         var env = await Send(
-            "listFieldValuesAcrossInstances", args,
+            PipeCommands.ListFieldValuesAcrossInstances, args,
             ProtocolJsonContext.Default.RpcEnvelopeListFieldValuesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("listFieldValuesAcrossInstances returned no result");
@@ -840,7 +841,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["value"]       = value,
         };
         var env = await Send(
-            "setInstanceField", args,
+            PipeCommands.SetInstanceField, args,
             ProtocolJsonContext.Default.RpcEnvelopeSetInstanceFieldResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("setInstanceField returned no result");
@@ -859,7 +860,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["size"]    = Int(size),
         };
         var env = await Send(
-            "readMemory", args,
+            PipeCommands.ReadMemory, args,
             ProtocolJsonContext.Default.RpcEnvelopeReadMemoryResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("readMemory returned no result");
@@ -931,7 +932,7 @@ public sealed class BackendAdapter : ILiveExportSource
             if (returnStructSize > 0) d["returnStructSize"] = Int(returnStructSize);
         }
         var env = await Send(
-            "callMethod", d,
+            PipeCommands.CallMethod, d,
             ProtocolJsonContext.Default.RpcEnvelopeCallMethodResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("callMethod returned no result");
@@ -956,7 +957,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["name"]      = Str(className),
         };
         var env = await Send(
-            "getEnumValues", d,
+            PipeCommands.GetEnumValues, d,
             ProtocolJsonContext.Default.RpcEnvelopeGetEnumValuesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("getEnumValues returned no result");
@@ -1013,7 +1014,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (reuseIndexMs.HasValue) args["reuseIndexMs"] = Int(reuseIndexMs.Value);
 
         var env = await Send(
-            "beginValueScan", args,
+            PipeCommands.BeginValueScan, args,
             ProtocolJsonContext.Default.RpcEnvelopeBeginValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("beginValueScan returned no result");
@@ -1050,7 +1051,7 @@ public sealed class BackendAdapter : ILiveExportSource
                 using var gateCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 gateCts.CancelAfter(500);
                 await _pipe.SendAsync(
-                    "cancelScan", null,
+                    PipeCommands.CancelScan, null,
                     ProtocolJsonContext.Default.RpcEnvelopeCancelScanResult, gateCts.Token)
                     .ConfigureAwait(false);
                 return;
@@ -1062,7 +1063,7 @@ public sealed class BackendAdapter : ILiveExportSource
             await using var cancelPipe = new PipeClient(_pipe.PipeName);
             await cancelPipe.ConnectAsync(2000, ct).ConfigureAwait(false);
             await cancelPipe.SendAsync(
-                "cancelScan", null,
+                PipeCommands.CancelScan, null,
                 ProtocolJsonContext.Default.RpcEnvelopeCancelScanResult, ct).ConfigureAwait(false);
         }
         catch { /* best-effort: the scan will still time out / disconnect-abort */ }
@@ -1092,7 +1093,7 @@ public sealed class BackendAdapter : ILiveExportSource
         // into BeginValueScanResult — the SessionId field stays empty
         // for string scans.
         var env = await Send(
-            "scanFieldValue", args,
+            PipeCommands.ScanFieldValue, args,
             ProtocolJsonContext.Default.RpcEnvelopeBeginValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("scanFieldValue (string) returned no result");
@@ -1117,7 +1118,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit.HasValue)   args["limit"]   = Int(limit.Value);
 
         var env = await Send(
-            "refineValueScan", args,
+            PipeCommands.RefineValueScan, args,
             ProtocolJsonContext.Default.RpcEnvelopeRefineValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("refineValueScan returned no result");
@@ -1143,7 +1144,7 @@ public sealed class BackendAdapter : ILiveExportSource
     {
         var args = new Dictionary<string, JsonElement> { ["sessionId"] = Str(sessionId) };
         var env = await Send(
-            "endValueScan", args,
+            PipeCommands.EndValueScan, args,
             ProtocolJsonContext.Default.RpcEnvelopeEndValueScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("endValueScan returned no result");
@@ -1175,7 +1176,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (parallel.HasValue)  args["parallel"]  = Bool(parallel.Value);
 
         var env = await Send(
-            "beginGroupScan", args,
+            PipeCommands.BeginGroupScan, args,
             ProtocolJsonContext.Default.RpcEnvelopeBeginGroupScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("beginGroupScan returned no result");
@@ -1199,7 +1200,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
         var env = await Send(
-            "refineGroupScan", args,
+            PipeCommands.RefineGroupScan, args,
             ProtocolJsonContext.Default.RpcEnvelopeRefineGroupScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("refineGroupScan returned no result");
@@ -1216,7 +1217,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (limit.HasValue)  args["limit"]  = Int(limit.Value);
 
         var env = await Send(
-            "queryGroupCandidates", args,
+            PipeCommands.QueryGroupCandidates, args,
             ProtocolJsonContext.Default.RpcEnvelopeQueryGroupCandidatesResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("queryGroupCandidates returned no result");
@@ -1228,7 +1229,7 @@ public sealed class BackendAdapter : ILiveExportSource
     {
         var args = new Dictionary<string, JsonElement> { ["sessionId"] = Str(sessionId) };
         var env = await Send(
-            "endGroupScan", args,
+            PipeCommands.EndGroupScan, args,
             ProtocolJsonContext.Default.RpcEnvelopeEndGroupScanResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("endGroupScan returned no result");
@@ -1247,9 +1248,9 @@ public sealed class BackendAdapter : ILiveExportSource
     /// <param name="assemblies">Optional narrowing list. <c>null</c> or
     /// empty → server defaults to every visible assembly ("全抓").</param>
     /// <param name="instanceCap">Max instances captured per class. Default
-    /// 100; hard-cap 1024 server-side.</param>
+    /// 100; hard-cap 8192 server-side.</param>
     /// <param name="arrayCap">Max elements per <c>T[]</c> / <c>List&lt;T&gt;</c>
-    /// field. Default 50; hard-cap 256 server-side.</param>
+    /// field. Default 50; hard-cap 4096 server-side.</param>
     /// <param name="instanceDecodeBudget">Total decoded-instance budget across
     /// all classes (0 = unlimited; server default 50000, hard-cap 2,000,000).
     /// Bounds decode time + memory; the server decodes low-population classes
@@ -1290,7 +1291,7 @@ public sealed class BackendAdapter : ILiveExportSource
         if (captureStaticValues) args["captureStaticValues"] = Bool(true);
 
         var env = await Send(
-            "snapshotBegin", args,
+            PipeCommands.SnapshotBegin, args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotBeginResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("snapshotBegin returned no result");
@@ -1314,8 +1315,8 @@ public sealed class BackendAdapter : ILiveExportSource
         // C-L8: Capture per-call telemetry atomically inside PipeClient's
         // single-flight gate rather than reading mutable instance properties
         // after the call returns (prevents interleaving races on shared pipes).
-        var (env, telemetry) = await PipeFor("snapshotChunk").SendWithTelemetryAsync(
-            "snapshotChunk", args,
+        var (env, telemetry) = await PipeFor(PipeCommands.SnapshotChunk).SendWithTelemetryAsync(
+            PipeCommands.SnapshotChunk, args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotChunkResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         var result = env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
@@ -1342,7 +1343,7 @@ public sealed class BackendAdapter : ILiveExportSource
             ["snapshotId"] = Str(snapshotId),
         };
         var env = await Send(
-            "snapshotEnd", args,
+            PipeCommands.SnapshotEnd, args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotEndResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("snapshotEnd returned no result");
