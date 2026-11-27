@@ -30,7 +30,7 @@ use super::layout::{
     parameter_definition_v38, section, string_literal, string_literal_v35, type_definition_tail,
     type_definition_v38,
 };
-use crate::ffi::{LogCategory, log};
+use crate::ffi::{LogCategory, log, try_push};
 
 /// Upper bound on the file size `ReadEntireFile` accepts (256 MiB).
 const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
@@ -1296,9 +1296,16 @@ impl Parser {
         } else {
             max_count.min(total)
         };
-        (0..limit)
-            .map(|i| self.get_string_literal(i).unwrap_or(&[]))
-            .collect()
+        let mut out = Vec::new();
+        if out.try_reserve(limit as usize).is_err() {
+            return out;
+        }
+        for i in 0..limit {
+            if !try_push(&mut out, self.get_string_literal(i).unwrap_or(&[])) {
+                break;
+            }
+        }
+        out
     }
 
     /// C++ `GetHeapString`: the ASCIIZ entry at `name_index`, bounded by the
@@ -1453,7 +1460,7 @@ impl Parser {
         let field_row_count = (self.fields_size as u32) / (row_size as u32);
         let variable_layout = self.version >= 38;
 
-        out.reserve(usize::from(field_count));
+        let _ = out.try_reserve(usize::from(field_count));
         for k in 0..field_count {
             // C++ `type.fieldStart + k` is int32 arithmetic (UB on overflow).
             // Overflow needs fieldStart > INT32_MAX - 65535, which already
@@ -1484,12 +1491,17 @@ impl Parser {
                     rd_u32(row, field_definition_v29::TOKEN),
                 )
             };
-            out.push(FieldDefView {
-                index: global_idx,
-                name: self.get_heap_string(name_index),
-                type_index,
-                token,
-            });
+            if !try_push(
+                &mut out,
+                FieldDefView {
+                    index: global_idx,
+                    name: self.get_heap_string(name_index),
+                    type_index,
+                    token,
+                },
+            ) {
+                break;
+            }
         }
         out
     }
@@ -1595,7 +1607,7 @@ impl Parser {
             return out;
         }
         let total = self.method_definition_count();
-        out.reserve(usize::from(method_count));
+        let _ = out.try_reserve(usize::from(method_count));
         for k in 0..method_count {
             // C++ int32 `methodStart + k` (UB on overflow): unreachable past
             // the k = 0 bounds check, wrapping keeps it safe regardless.
@@ -1603,8 +1615,10 @@ impl Parser {
             if global_idx < 0 || global_idx as u32 >= total {
                 break;
             }
-            if let Some(md) = self.get_method_definition(global_idx) {
-                out.push(md);
+            if let Some(md) = self.get_method_definition(global_idx)
+                && !try_push(&mut out, md)
+            {
+                break;
             }
         }
         out
@@ -1679,7 +1693,7 @@ impl Parser {
             return out;
         }
         let total = self.parameter_count();
-        out.reserve(usize::from(parameter_count));
+        let _ = out.try_reserve(usize::from(parameter_count));
         for k in 0..parameter_count {
             // C++ int32 `parameterStart + k` (UB on overflow): unreachable
             // past the k = 0 bounds check, wrapping keeps it safe regardless.
@@ -1687,8 +1701,10 @@ impl Parser {
             if global_idx < 0 || global_idx as u32 >= total {
                 break;
             }
-            if let Some(p) = self.get_parameter(global_idx) {
-                out.push(p);
+            if let Some(p) = self.get_parameter(global_idx)
+                && !try_push(&mut out, p)
+            {
+                break;
             }
         }
         out
@@ -1784,7 +1800,9 @@ impl Parser {
             let _ = ranges.try_reserve(count as usize);
             for i in 0..count {
                 let (_, type_start, type_count, _) = self.image_row_fields(i as i32);
-                ranges.push(self.compute_image_method_range(type_start, type_count));
+                if !try_push(&mut ranges, self.compute_image_method_range(type_start, type_count)) {
+                    break;
+                }
             }
             ranges
         })
@@ -1800,7 +1818,11 @@ impl Parser {
             return None;
         }
         let (name_index, type_start, type_count, token) = self.image_row_fields(idx);
-        let (method_start, method_end) = self.cached_image_method_ranges()[idx as usize];
+        let (method_start, method_end) = self
+            .cached_image_method_ranges()
+            .get(idx as usize)
+            .copied()
+            .unwrap_or((0, 0));
         Some(ImageDefView {
             index: idx,
             name: self.get_heap_string(name_index as i32),
@@ -1815,9 +1837,16 @@ impl Parser {
     /// C++ `EnumerateImages`.
     pub fn enumerate_images(&self) -> Vec<ImageDefView<'_>> {
         let count = self.image_count();
-        (0..count)
-            .filter_map(|i| self.get_image(i as i32))
-            .collect()
+        let mut out = Vec::new();
+        let _ = out.try_reserve(count as usize);
+        for i in 0..count {
+            if let Some(img) = self.get_image(i as i32)
+                && !try_push(&mut out, img)
+            {
+                break;
+            }
+        }
+        out
     }
 
     /// C++ `FindImageContainingMethod`: first image whose
@@ -1851,11 +1880,15 @@ impl Parser {
         let map = self
             .declaring_type_map
             .get_or_init(|| self.build_declaring_type_map(total));
-        map[type_def_idx as usize]
+        map.get(type_def_idx as usize).copied().unwrap_or(-1)
     }
 
     fn build_declaring_type_map(&self, total: u32) -> Vec<i32> {
-        let mut map = vec![-1i32; total as usize];
+        let mut map = Vec::new();
+        if map.try_reserve_exact(total as usize).is_err() {
+            return map;
+        }
+        map.resize(total as usize, -1i32);
         let nto = self.nested_types_offset;
         let nts = self.nested_types_size;
         if !(nto > 0 && nts > 0 && nto as u64 + nts as u64 <= self.data.len() as u64) {

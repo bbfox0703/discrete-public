@@ -540,17 +540,24 @@ pub unsafe extern "C" fn dc_md_try_decode_string_default(
         let v = h
             .parser
             .try_decode_string_default(data_index)
-            .map(|cow| match cow {
-                std::borrow::Cow::Borrowed(s) => DcBytes::from_slice(s),
+            .and_then(|cow| match cow {
+                std::borrow::Cow::Borrowed(s) => Some(DcBytes::from_slice(s)),
                 std::borrow::Cow::Owned(v) => {
                     let mut cache = h.decoded_strings.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(existing) = cache.get(&data_index) {
+                        return Some(DcBytes::from_slice(existing));
+                    }
+                    // D-L3: fallible reserve so OOM returns 0 instead of aborting the host.
+                    if cache.try_reserve(1).is_err() {
+                        return None;
+                    }
                     let entry = cache
                         .entry(data_index)
                         .or_insert_with(|| v.into_boxed_slice());
                     // The boxed bytes are owned by the handle and never removed
                     // or mutated until dc_md_free, so the pointer outlives the
                     // lock guard.
-                    DcBytes::from_slice(entry)
+                    Some(DcBytes::from_slice(entry))
                 }
             });
         // SAFETY: caller contract on `out`.

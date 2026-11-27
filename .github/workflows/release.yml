@@ -23,20 +23,24 @@ on:
   workflow_dispatch:        # manual run = build + artifact only (no release)
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: Build + package dist (AOT)
+    permissions:
+      contents: read
     # Same pinned image as UE5CEDumper: windows-latest / windows-2025 redirect
     # to windows-2025-vs2026, which ships VS2026 (C++ x64 + x86 tools), CMake
     # and Ninja. build.ps1 finds VS via vswhere, so it is toolchain-agnostic.
     runs-on: windows-2025-vs2026
+    outputs:
+      zip: ${{ steps.package.outputs.zip }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0          # full history + all tags, needed for the prev-tag changelog
+          fetch-depth: 0          # full history + all tags, needed for version banner
 
       - name: Fetch pinned C++ dependencies into dll/vendor
         shell: pwsh
@@ -52,15 +56,23 @@ jobs:
         # targets (x86_64 + i686-pc-windows-msvc); the argument-less
         # `rustup toolchain install` (rustup >= 1.28) installs exactly that on
         # the runner's preinstalled rustup, so a release cannot change because
-        # `stable` moved. build.ps1 re-checks both targets before building.
+        # `stable` moved. Only self-update rustup when the runner ships < 1.28.
         run: |
-          rustup self update
+          $verLine = (rustup --version) | Select-Object -First 1
+          Write-Host "Preinstalled: $verLine"
+          if ($verLine -match 'rustup\s+(\d+)\.(\d+)\.(\d+)') {
+            $cur = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+            if ($cur -lt [version]'1.28.0') {
+              Write-Host "rustup $cur < 1.28.0; updating rustup for argument-less toolchain install."
+              rustup self update
+            }
+          }
           rustup toolchain install
           rustup target list --installed
           rustc --version
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           global-json-file: ui/global.json
 
@@ -88,6 +100,7 @@ jobs:
         run: ./build.ps1 -Mode Publish -Clean -NoBumpBuildNumber
 
       - name: Package dist into a zip + sha256
+        id: package
         shell: pwsh
         run: |
           $tag = if ($env:GITHUB_REF_NAME -and $env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { 'manual' }
@@ -99,20 +112,55 @@ jobs:
           # LF, not Set-Content's CRLF: `sha256sum -c` would read the CR as part
           # of the file name and fail.
           [System.IO.File]::WriteAllText((Join-Path $PWD "$zip.sha256"), "$h  $zip`n")
-          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "zip=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Packaged $zip (sha256 $h)"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: Discrete-windows
           path: |
-            ${{ env.ZIP }}
-            ${{ env.ZIP }}.sha256
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.zip }}.sha256
           if-no-files-found: error
 
+  release:
+    name: Create / update draft GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout tags for changelog
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0          # full history + all tags, needed for the prev-tag changelog
+
+      - name: Download packaged build artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: Discrete-windows
+          path: release-assets
+
+      - name: Verify artifact checksum
+        shell: pwsh
+        env:
+          ZIP: ${{ needs.build.outputs.zip }}
+        run: |
+          $zipPath = Join-Path 'release-assets' $env:ZIP
+          $shaPath = "$zipPath.sha256"
+          if (-not (Test-Path $zipPath) -or -not (Test-Path $shaPath)) {
+            throw "Expected artifact files missing: $zipPath / $shaPath"
+          }
+          $expected = ((Get-Content $shaPath -Raw).Trim() -split '\s+')[0].ToLower()
+          $actual   = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "Artifact SHA-256 mismatch: expected $expected, got $actual"
+          }
+          Write-Host "Verified $zipPath (sha256 $actual)"
+
       - name: Build release notes (changelog between the previous tag and this tag)
-        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         # Previous v* tag -> this tag commit list, folded into fixed boilerplate.
         # Merge commits are dropped (--no-merges) so the list shows the real dev
@@ -157,12 +205,14 @@ jobs:
           Write-Host "Built release notes ($header)."
 
       - name: Create / update GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          ZIP: ${{ needs.build.outputs.zip }}
         run: |
           $tag = $env:GITHUB_REF_NAME
+          $zipPath = Join-Path 'release-assets' $env:ZIP
+          $shaPath = "$zipPath.sha256"
           # D-M5: Inspect any existing release before editing or uploading.
           # Never clobber an already-published release (assets or notes), and
           # never overwrite maintainer-rewritten notes on an existing draft.
@@ -183,11 +233,11 @@ jobs:
             } else {
               Write-Host "Draft release $tag has custom maintainer notes; preserving notes and uploading assets only."
             }
-            gh release upload $tag "$env:ZIP" "$env:ZIP.sha256" --clobber
+            gh release upload $tag $zipPath $shaPath --clobber
             if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for draft $tag" }
             Write-Host "Uploaded assets to draft release $tag."
           } else {
-            gh release create $tag "$env:ZIP" "$env:ZIP.sha256" `
+            gh release create $tag $zipPath $shaPath `
               --draft `
               --title "Discrete $tag" `
               --notes-file release-notes.md

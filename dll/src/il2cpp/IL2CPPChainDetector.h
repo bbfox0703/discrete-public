@@ -94,11 +94,14 @@ struct ChainScanStats {
 ///
 /// Returns 0-N matches. Caps internally at `matchLimit`. The `stats`
 /// out-param (optional) reports diagnostic counters for the log line.
+/// When `cancelled` is non-null, receives true iff cooperative cancellation
+/// stopped the scan early (D-L6).
 std::vector<ChainMatch> DetectFieldAccessChains(
     const std::vector<ClassPointerSlot>& classPointerSlots,
     std::size_t                          staticFieldsOffset,
     std::size_t                          targetFieldOffset,
     std::size_t                          matchLimit,
-    ChainScanStats*                      stats);
+    ChainScanStats*                      stats,
+    bool*                                cancelled = nullptr);
 
 }  // namespace Discrete::IL2CPP

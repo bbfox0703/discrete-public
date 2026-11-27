@@ -87,6 +87,88 @@ fn rip_chunk_boundary_and_overlap() {
 }
 
 #[test]
+fn rip_rex_at_chunk_boundary_is_not_duplicated_in_next_chunk() {
+    // D-L5: When a 7-byte REX instruction starts on the very last byte of chunk 0
+    // (CHUNK_SIZE - 1), chunk 0 emits it via overlap, and chunk 1 (p == 0) must
+    // remember the preceding contiguous REX byte and NOT re-emit the 6-byte form.
+    let size = CHUNK_SIZE + 0x100;
+    let t = BASE + 0x50;
+    let mut b = vec![0x90u8; size];
+    put_rip(&mut b, CHUNK_SIZE - 1, &[0x48, 0x8B, 0x05], t);
+    let m = mem(b, vec![]);
+    let s = [DcXrefSection { va: BASE, size }];
+    assert_eq!(rip(&m, &s, t), vec![(CHUNK_SIZE - 1, 0x8B)]);
+}
+
+#[test]
+fn rip_and_inst_support_cooperative_cancellation() {
+    // D-L6: cancel callback polled across chunks (scan_rip) and methods (scan_inst).
+    unsafe extern "C" fn cancel_after_first(ctx: *mut c_void) -> i32 {
+        // SAFETY: points to a local AtomicUsize below.
+        let n = unsafe { &*(ctx as *const std::sync::atomic::AtomicUsize) };
+        i32::from(n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1)
+    }
+
+    let size = CHUNK_SIZE + 0x100;
+    let t = BASE + 0x50;
+    let mut b = vec![0x90u8; size];
+    put_rip(&mut b, 0x10, &[0x48, 0x8B, 0x05], t);
+    put_rip(&mut b, CHUNK_SIZE + 0x20, &[0x48, 0x8B, 0x05], t);
+    let m = mem(b, vec![]);
+    let ctx = &m as *const FakeMem as *mut c_void;
+    let secs = [DcXrefSection { va: BASE, size }];
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    // SAFETY: valid pointers; handle freed below.
+    unsafe {
+        let r = dc_xref_rip_scan_cancellable(
+            secs.as_ptr(),
+            secs.len(),
+            t,
+            Some(fake_read),
+            ctx,
+            Some(cancel_after_first),
+            &polls as *const std::sync::atomic::AtomicUsize as *mut c_void,
+        );
+        assert!(!r.is_null());
+        assert_eq!(dc_xref_rip_result_cancelled(r), 1);
+        assert_eq!(dc_xref_rip_result_truncated(r), 0);
+        // Only chunk 0's hit should be present; chunk 1 was skipped after cancel.
+        assert_eq!(dc_xref_rip_result_len(r), 1);
+        dc_xref_rip_result_free(r);
+        assert_eq!(dc_xref_rip_result_cancelled(std::ptr::null()), 0);
+        assert_eq!(dc_xref_rip_result_truncated(std::ptr::null()), 0);
+    }
+
+    let code = body(&["48 8B 41 10", "48 89 42 10"]);
+    let mi = mem(code, vec![]);
+    let ctx_i = &mi as *const FakeMem as *mut c_void;
+    let ranges = [
+        DcXrefRange { start: BASE, len: 4 },
+        DcXrefRange { start: BASE + 4, len: 4 },
+    ];
+    let polls_i = std::sync::atomic::AtomicUsize::new(0);
+    // SAFETY: valid pointers; handle freed below.
+    unsafe {
+        let r = dc_xref_inst_scan_cancellable(
+            ranges.as_ptr(),
+            ranges.len(),
+            0x10,
+            Some(fake_read),
+            ctx_i,
+            Some(cancel_after_first),
+            &polls_i as *const std::sync::atomic::AtomicUsize as *mut c_void,
+        );
+        assert!(!r.is_null());
+        assert_eq!(dc_xref_inst_result_cancelled(r), 1);
+        assert_eq!(dc_xref_inst_result_truncated(r), 0);
+        assert_eq!(dc_xref_inst_result_len(r), 1);
+        dc_xref_inst_result_free(r);
+        assert_eq!(dc_xref_inst_result_cancelled(std::ptr::null()), 0);
+        assert_eq!(dc_xref_inst_result_truncated(std::ptr::null()), 0);
+    }
+}
+
+#[test]
 fn rip_section_end_cuts_the_tail() {
     // Legacy quirk kept: a candidate must start at least 7 bytes before the
     // end of the bytes read, even for the 6-byte form.

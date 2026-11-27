@@ -2,7 +2,10 @@
 //! guard and the crate version string.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
+use std::fmt::Write as _;
+use std::hash::Hash;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,6 +58,62 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
     }
 }
 
+/// Fixed-capacity stack string buffer for OOM-safe logging on panic paths (D-L3).
+/// Truncates cleanly on UTF-8 character boundaries and never allocates on the heap.
+pub(crate) struct StackBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> StackBuf<N> {
+    pub(crate) fn new() -> Self {
+        Self { buf: [0u8; N], len: 0 }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        // SAFETY: only valid UTF-8 chunks are pushed via write_str.
+        unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
+impl<const N: usize> std::fmt::Write for StackBuf<N> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let avail = N - self.len;
+        if avail == 0 {
+            return Ok(());
+        }
+        let mut take = s.len().min(avail);
+        while take > 0 && !s.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.buf[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
+/// Fallible `Vec::push` (D-L3): reserves 1 slot via `try_reserve` before pushing
+/// so OOM truncates gracefully instead of aborting the host game process.
+pub(crate) fn try_push<T>(vec: &mut Vec<T>, item: T) -> bool {
+    if vec.len() == vec.capacity() && vec.try_reserve(1).is_err() {
+        return false;
+    }
+    vec.push(item);
+    true
+}
+
+/// Fallible `HashSet::insert` (D-L3): returns `None` on OOM instead of aborting,
+/// `Some(true)` if newly inserted, `Some(false)` if already present.
+pub(crate) fn try_insert<T: Eq + Hash>(set: &mut HashSet<T>, item: T) -> Option<bool> {
+    if set.contains(&item) {
+        return Some(false);
+    }
+    if set.len() == set.capacity() && set.try_reserve(1).is_err() {
+        return None;
+    }
+    Some(set.insert(item))
+}
+
 /// Runs `f`, converting a panic into `fallback`. Every `extern "C"` function
 /// wraps its body in this: a panic must never unwind across the FFI boundary.
 /// `name` identifies the entry point in the log line.
@@ -64,10 +123,9 @@ pub fn guard<R>(name: &str, fallback: R, f: impl FnOnce() -> R) -> R {
     match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(payload) => {
-            log(
-                LogCategory::Init,
-                &format!("discrete_core: panic caught in {name}: {}", panic_message(&*payload)),
-            );
+            let mut msg = StackBuf::<512>::new();
+            let _ = write!(msg, "discrete_core: panic caught in {name}: {}", panic_message(&*payload));
+            log(LogCategory::Init, msg.as_str());
             fallback
         }
     }
@@ -87,14 +145,12 @@ pub unsafe extern "C" fn dc_core_set_log_sink(sink: Option<LogSinkFn>) {
         LOG_SINK.store(sink.map_or(0, |f| f as usize), Ordering::Release);
         PANIC_HOOK.call_once(|| {
             panic::set_hook(Box::new(|info| {
-                let loc = info
-                    .location()
-                    .map(|l| format!(" at {}:{}", l.file(), l.line()))
-                    .unwrap_or_default();
-                log(
-                    LogCategory::Init,
-                    &format!("discrete_core: panic: {}{loc}", panic_message(info.payload())),
-                );
+                let mut msg = StackBuf::<512>::new();
+                let _ = write!(msg, "discrete_core: panic: {}", panic_message(info.payload()));
+                if let Some(l) = info.location() {
+                    let _ = write!(msg, " at {}:{}", l.file(), l.line());
+                }
+                log(LogCategory::Init, msg.as_str());
             }));
         });
     });
@@ -106,6 +162,45 @@ pub unsafe extern "C" fn dc_core_set_log_sink(sink: Option<LogSinkFn>) {
 /// frames is undefined behaviour, so every read of host-process memory goes
 /// through this callback, which copies under SEH and reports failure.
 pub type ReadFn = unsafe extern "C" fn(ctx: *mut c_void, addr: usize, dst: *mut u8, len: usize) -> i32;
+
+/// `int32_t (*)(void* ctx)` — optional cooperative cancellation callback (D-L6).
+/// Returns non-zero when the enclosing scan should stop early.
+pub type CancelFn = unsafe extern "C" fn(ctx: *mut c_void) -> i32;
+
+/// Safe wrapper around an optional [`CancelFn`] + its context (D-L6).
+#[derive(Clone, Copy)]
+pub struct CancelCheck {
+    cancel: Option<CancelFn>,
+    ctx: *mut c_void,
+}
+
+impl Default for CancelCheck {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl CancelCheck {
+    pub const fn none() -> Self {
+        Self { cancel: None, ctx: std::ptr::null_mut() }
+    }
+
+    /// # Safety
+    /// If `cancel` is `Some`, it must be callable with `ctx` for the duration
+    /// of the scan without unwinding.
+    pub unsafe fn new(cancel: Option<CancelFn>, ctx: *mut c_void) -> Self {
+        Self { cancel, ctx }
+    }
+
+    #[inline]
+    pub fn is_cancelled(&self) -> bool {
+        match self.cancel {
+            // SAFETY: caller contract in `new`.
+            Some(f) => unsafe { f(self.ctx) != 0 },
+            None => false,
+        }
+    }
+}
 
 /// Safe wrapper around a [`ReadFn`] + its context.
 #[derive(Clone, Copy)]
@@ -148,8 +243,11 @@ impl Reader {
     /// overlap tail into the next chunk when readable) so NO readable pages before
     /// or after a `PAGE_NOACCESS` page are lost. Increments `*failed_pages` once per
     /// unreadable page.
+    /// Cancellation (D-L6): polls `cancel` at every chunk start and inside the
+    /// page-by-page fallback loop; sets `*cancelled = true` and stops early.
     ///
     /// `on_span` returns `true` to keep scanning or `false` to stop early.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn scan_readable_spans<F>(
         &self,
         sec_va: usize,
@@ -158,6 +256,8 @@ impl Reader {
         overlap: usize,
         buf: &mut [u8],
         failed_pages: &mut usize,
+        cancel: CancelCheck,
+        cancelled: &mut bool,
         mut on_span: F,
     ) -> bool
     where
@@ -166,6 +266,10 @@ impl Reader {
         debug_assert!(buf.len() >= chunk_size + overlap);
         let mut pos = 0usize;
         while pos < sec_size {
+            if cancel.is_cancelled() {
+                *cancelled = true;
+                return false;
+            }
             let want = (sec_size - pos).min(chunk_size);
             let read_want = (want + overlap).min(sec_size - pos);
 
@@ -187,6 +291,10 @@ impl Reader {
             let mut span_len = 0usize;
 
             while cursor < chunk_end {
+                if cancel.is_cancelled() {
+                    *cancelled = true;
+                    return false;
+                }
                 let va = sec_va.wrapping_add(cursor);
                 let page_rem = PAGE_SIZE - (va & (PAGE_SIZE - 1));
                 let step = (chunk_end - cursor).min(page_rem);
@@ -290,5 +398,19 @@ mod tests {
         let ver = banner.strip_prefix("discrete_core ").unwrap();
         let pkg = env!("CARGO_PKG_VERSION");
         assert!(ver == format!("{pkg} (cargo)") || ver.starts_with(&format!("{pkg}.")), "{banner}");
+    }
+
+    #[test]
+    fn stack_buf_truncates_on_utf8_boundary_without_alloc() {
+        // D-L3: panic log formatting uses StackBuf and never overflows or splits
+        // a multi-byte UTF-8 sequence.
+        let mut s = StackBuf::<8>::new();
+        let _ = write!(s, "abcde😀xyz");
+        assert_eq!(s.as_str(), "abcde");
+        assert!(s.as_str().len() <= 8);
+
+        let mut s2 = StackBuf::<16>::new();
+        let _ = write!(s2, "ok: {}", 42);
+        assert_eq!(s2.as_str(), "ok: 42");
     }
 }

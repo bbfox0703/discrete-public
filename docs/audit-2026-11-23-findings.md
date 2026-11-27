@@ -674,7 +674,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：v16–v23、v25、v26、v28、v30 會 `loaded()==true`，但 `tables_loaded==false`（只有字串），log 卻說「與 v31 共用 layout，已接受」，使用者看到的是「metadata 載入成功、0 個 type」。v32–v34 走 v29 / v31 的 layout，從未用實際檔案驗證過。CLAUDE.md 的「v16–v39 accepted」也沒有說清楚這一點。
 - 修法：soft warning 分成兩種：「strings-only（不支援型別表）」與「未驗證、比照 v31 解析」。`getMetadataStats` 加上 `typeTablesSupported`。刪掉 `30` 分支，或者有意支援 v30 時同時把它加進 `type_def_sizeof`。CLAUDE.md 的描述改成「v16–v39 accepted (strings); type tables for v24/27/29/31–39」。
 
-**D-L3 · Rust 端大部分配置是 infallible，OOM 時會 abort 整個遊戲；legacy C++ 在這裡會丟 `bad_alloc`，可以被 pipe server 接住**
+**D-L3 · Rust 端大部分配置是 infallible，OOM 時會 abort 整個遊戲；legacy C++ 在這裡會丟 `bad_alloc`，可以被 pipe server 接住 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/chain/mod.rs:378`、`:388`、`:468`；`dll/rust/src/xref/mod.rs:172`、`:190`、`:255`；`dll/rust/src/metadata/parser.rs:1129`、`:1271`、`:1355`、`:988-990`；`dll/rust/src/metadata/ffi.rs:519-522`；`dll/rust/src/ffi.rs:67-70`（`format!`）
 - 成因：Rust 配置失敗會走 `handle_alloc_error` → abort，`catch_unwind` 接不住。只有 1 MiB 掃描 buffer、metadata 檔案 buffer 和 `group_match` 有用 `try_reserve`；結果向量、`HashSet`、`format!` 都沒有。x64 IL2CPP 遊戲碰到的機率很低（所以列為 Low），但這和 `group_match.rs:21-26`「never aborts the host on OOM」的設計精神不一致。
 - 修法：結果向量改用 `try_reserve` 逐步成長，失敗時截斷並在結果中標記 `truncated`；`ffi::log` 中的 `format!` 在 panic 路徑上改用固定大小的 stack buffer。
@@ -684,12 +684,12 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：magic static 第一次呼叫時如果 `BackendDetector` 還解析不到 data dir，或檔案暫時被鎖住，之後所有 metadata RPC 都會永遠回「not loaded」，直到遊戲重啟。成功時則把整個 `global-metadata.dat`（上限 256 MiB）複製一份放在遊戲 process 裡，另外 `decoded_strings` 會快取所有 sanitize 過的字串，直到 process 結束。C++ wrapper 拿到字串後會立即複製（`MetadataParserRs.cpp:259-263`），所以這個快取只是為了讓指標在「回傳到複製之間」保持有效。
 - 修法：`Get()` 改成「失敗後允許在下次呼叫時重試」（用 mutex 保護的 `std::optional<Parser>`，不要用 magic static）；檔案改用 `CreateFileMapping` 唯讀映射，不要整份複製。如果維持複製，`try_decode_string_default` 可以改成由呼叫端提供 buffer 的 API，省掉這個永久快取。
 
-**D-L5 · `scan_rip` 在 chunk 邊界會重複回報，REX 前綴之後的 6-byte 形式會被歸到前一個 byte（待驗證呼叫端是否去重）**
+**D-L5 · `scan_rip` 在 chunk 邊界會重複回報，REX 前綴之後的 6-byte 形式會被歸到前一個 byte（待驗證呼叫端是否去重） — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/xref/mod.rs:159-193`
 - 成因：(a) chunk 的最後一個 byte 如果是 REX，前一個 chunk 會靠 overlap 回報 7-byte 形式（ip = p−1）；下一個 chunk 的 `p == 0` 不檢查 `buf[p-1]`，又會回報一次 6-byte 形式（ip = p），兩筆指向同一個 target。(b) 任何 6-byte 候選只要前一個 byte 剛好是 `0x40-0x4F`（上一條指令的 imm / disp），就會被跳過，改成以 ip−1 的 7-byte 形式回報，而 ip−1 可能落在前一個 method 的範圍內。行為和 legacy 相同，所以 golden 檢查抓不到。
 - 修法：確認 `IL2CPPFieldXref` 的歸屬與去重邏輯；如果沒有去重，就以 `(ip, opcode)` 去重，並在 7-byte 形式命中時，額外驗證 `buf[p]` 是否確實在前一條指令的結尾之後（實際上無法得知時，兩種 ip 都保留，交給 method 歸屬去判斷）。
 
-**D-L6 · Rust 的長時間掃描無法取消**
+**D-L6 · Rust 的長時間掃描無法取消 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/chain/mod.rs:390-478`；`dll/rust/src/xref/mod.rs:138-196`、`:211-260`；`include/discrete_core.h:266-269`、`:313-325`
 - 成因：chain detector 與 RIP xref 會逐 MiB 掃描整個 `GameAssembly.dll`（可達數百 MB），C ABI 沒有 cancel 參數，`ScanCancel::RequestCancel()` 或 client 斷線都停不下來，worker thread 會一直佔著直到掃描完成。
 - 修法：C ABI 加一個 `const volatile int32_t* cancel` 參數（或 `dc_cancel_fn` callback），每個 chunk 開始時檢查一次；取消時回傳的 handle 帶 `cancelled=1`，C++ 端再對應到既有的 `ScanCancel` 語意。
@@ -705,7 +705,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - `tools/metadata-cli/SymbolPipeline.h:11-15`：描述「每個 method 呼叫 `FindImageContainingMethod`」，實作（`SymbolPipeline.cpp:202-219`）改成以 image 為主走訪。修法：同步註解。
 - `dll/rust/src/metadata/layout.rs:40-43`：宣稱 `vendor/Il2CppDumperV35plus` 「pinned at bbd9c0c2」，並引用 `MetadataClass.cs` 的行號，但 `sync_vendor.ps1:80-89` 讓 reference clone 跟著上游 tip 更新，行號會漂移。修法：在 `sync_vendor.ps1` 把這個 clone 釘在 `bbd9c0c2`，或在註解中說明行號以該 commit 為準。
 
-**D-L9 · `release.yml` 的供應鏈與權限強化**
+**D-L9 · `release.yml` 的供應鏈與權限強化 — ✅ FIXED (2026-11-27)**
 - 位置：`.github/workflows/release.yml:25-26`（整個 job 都有 `contents: write`）、`:37`、`:63`、`:106`（`actions/*@vN` 浮動 tag）、`:57`（`rustup self update` 沒有釘版）
 - 成因：build 步驟會執行 repo 腳本、clone 第三方 repo、下載 crate，這些步驟都持有可寫 release 的 token；actions 使用可移動的 major tag。這和專案其他地方「精確釘版」的政策不一致。
 - 修法：actions 改用 commit SHA 釘版；拆成兩個 job：`build`（`contents: read`，產出 artifact）與 `release`（`contents: write`，只下載 artifact 並呼叫 `gh`）。`rustup self update` 改成檢查版本，不足時才更新。

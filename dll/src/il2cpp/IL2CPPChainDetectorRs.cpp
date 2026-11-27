@@ -22,6 +22,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/ModuleHelper.h"
 #include "../shared/RustCore.h"
+#include "../shared/ScanCancel.h"
 
 #include <discrete_core.h>
 
@@ -34,6 +35,10 @@
 namespace Discrete::IL2CPP {
 
 namespace {
+
+extern "C" std::int32_t ChainCancelShim(void*) noexcept {
+    return Discrete::ScanCancel::IsCancelRequested() ? 1 : 0;
+}
 
 // Frees the Rust result handle on every exit path (NULL is accepted).
 class ChainResultHandle {
@@ -55,8 +60,10 @@ std::vector<ChainMatch> DetectFieldAccessChains(
     std::size_t                          staticFieldsOffset,
     std::size_t                          targetFieldOffset,
     std::size_t                          matchLimit,
-    ChainScanStats*                      stats) {
+    ChainScanStats*                      stats,
+    bool*                                cancelled) {
 
+    if (cancelled != nullptr) *cancelled = false;
     std::vector<ChainMatch> result;
     // Same early returns as the legacy implementation, before the module
     // lookup; *stats is left untouched on these paths.
@@ -73,14 +80,20 @@ std::vector<ChainMatch> DetectFieldAccessChains(
     slots.reserve(classPointerSlots.size());
     for (const auto& s : classPointerSlots) slots.push_back(s.address);
 
-    const ChainResultHandle r(dc_chain_detect(reinterpret_cast<std::uintptr_t>(gaBase),
-                                              &Discrete::RustCore::SafeReadShim, nullptr,
-                                              slots.data(), slots.size(),
-                                              staticFieldsOffset, targetFieldOffset, matchLimit));
+    const ChainResultHandle r(dc_chain_detect_cancellable(
+        reinterpret_cast<std::uintptr_t>(gaBase),
+        &Discrete::RustCore::SafeReadShim, nullptr,
+        slots.data(), slots.size(),
+        staticFieldsOffset, targetFieldOffset, matchLimit,
+        &ChainCancelShim, nullptr));
     // NULL = internal panic or the 1 MiB chunk buffer could not be allocated
     // (where the legacy std::vector would have thrown): no matches, stats
     // untouched.
     if (r.get() == nullptr) return result;
+
+    if (cancelled != nullptr) {
+        *cancelled = dc_chain_result_cancelled(r.get()) != 0;
+    }
 
     const std::size_t n = dc_chain_result_len(r.get());
     result.reserve(n);

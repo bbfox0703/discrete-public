@@ -562,8 +562,9 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     // candidate, in scan order. The kind filter, method attribution and limit
     // cut-off are applied here in that same order, so the result (and the
     // counters logged below) match the original inline loop exactly.
-    for (const auto& c : XrefScan::ScanRipRelative(sections, targetAddr)) {
-        if (ScanCancel::IsCancelRequested()) {
+    bool ripCancelled = false;
+    for (const auto& c : XrefScan::ScanRipRelative(sections, targetAddr, &ripCancelled)) {
+        if (ripCancelled || ScanCancel::IsCancelRequested()) {
             result.cancelled = true;
             result.ok = false;
             result.matches.clear();
@@ -574,7 +575,7 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
             break;
         }
     }
-    if (ScanCancel::IsCancelRequested()) {
+    if (ripCancelled || ScanCancel::IsCancelRequested()) {
         result.cancelled = true;
         result.ok = false;
         result.matches.clear();
@@ -737,9 +738,10 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         return result;
                     }
                     ChainScanStats v2stats{};
+                    bool chainCancelled = false;
                     auto chains = DetectFieldAccessChains(
-                        slots, sfo, target.offset, limit, &v2stats);
-                    if (ScanCancel::IsCancelRequested()) {
+                        slots, sfo, target.offset, limit, &v2stats, &chainCancelled);
+                    if (chainCancelled || ScanCancel::IsCancelRequested()) {
                         result.cancelled = true;
                         result.ok = false;
                         result.matches.clear();
@@ -1060,8 +1062,9 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     // Scan kernel (IL2CPPFieldXrefScan): every `[gpr + fieldOffset]` memory
     // operand in those ranges, in decode order. Kind filter and limit apply
     // here in the same order as the original inline loop.
-    for (const auto& h : XrefScan::ScanInstanceAccesses(ranges, fieldOffset)) {
-        if (ScanCancel::IsCancelRequested()) {
+    bool instCancelled = false;
+    for (const auto& h : XrefScan::ScanInstanceAccesses(ranges, fieldOffset, &instCancelled)) {
+        if (instCancelled || ScanCancel::IsCancelRequested()) {
             result.cancelled = true;
             result.ok = false;
             result.matches.clear();

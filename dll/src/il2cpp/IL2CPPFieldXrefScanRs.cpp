@@ -18,6 +18,7 @@
 #include "IL2CPPFieldXrefScan.h"
 
 #include "../shared/RustCore.h"
+#include "../shared/ScanCancel.h"
 
 #include <discrete_core.h>
 
@@ -28,6 +29,10 @@
 namespace Discrete::IL2CPP::XrefScan {
 
 namespace {
+
+extern "C" std::int32_t XrefCancelShim(void*) noexcept {
+    return Discrete::ScanCancel::IsCancelRequested() ? 1 : 0;
+}
 
 // Frees a Rust result handle on every exit path (NULL is accepted by the
 // free functions).
@@ -50,18 +55,24 @@ using InstHandle = ResultHandle<DcXrefInstResult, &dc_xref_inst_result_free>;
 }  // namespace
 
 std::vector<RipCandidate> ScanRipRelative(const std::vector<ExecSection>& sections,
-                                          std::uintptr_t target) {
+                                          std::uintptr_t target,
+                                          bool* cancelled) {
+    if (cancelled != nullptr) *cancelled = false;
     std::vector<RipCandidate> out;
 
     std::vector<DcXrefSection> secs;
     secs.reserve(sections.size());
     for (const auto& s : sections) secs.push_back(DcXrefSection{s.va, s.size});
 
-    const RipHandle r(dc_xref_rip_scan(secs.data(), secs.size(), target,
-                                       &Discrete::RustCore::SafeReadShim, nullptr));
+    const RipHandle r(dc_xref_rip_scan_cancellable(secs.data(), secs.size(), target,
+                                                   &Discrete::RustCore::SafeReadShim, nullptr,
+                                                   &XrefCancelShim, nullptr));
     // NULL = internal panic or the 1 MiB chunk buffer could not be allocated
     // (where the legacy std::vector would have thrown): no candidates.
     if (r.get() == nullptr) return out;
+    if (cancelled != nullptr) {
+        *cancelled = dc_xref_rip_result_cancelled(r.get()) != 0;
+    }
 
     const std::size_t n = dc_xref_rip_result_len(r.get());
     out.reserve(n);
@@ -74,17 +85,23 @@ std::vector<RipCandidate> ScanRipRelative(const std::vector<ExecSection>& sectio
 }
 
 std::vector<InstanceHit> ScanInstanceAccesses(const std::vector<MethodRange>& methods,
-                                              std::size_t fieldOffset) {
+                                              std::size_t fieldOffset,
+                                              bool* cancelled) {
+    if (cancelled != nullptr) *cancelled = false;
     std::vector<InstanceHit> out;
 
     std::vector<DcXrefRange> ranges;
     ranges.reserve(methods.size());
     for (const auto& m : methods) ranges.push_back(DcXrefRange{m.start, m.len});
 
-    const InstHandle r(dc_xref_inst_scan(ranges.data(), ranges.size(), fieldOffset,
-                                         &Discrete::RustCore::SafeReadShim, nullptr));
+    const InstHandle r(dc_xref_inst_scan_cancellable(ranges.data(), ranges.size(), fieldOffset,
+                                                     &Discrete::RustCore::SafeReadShim, nullptr,
+                                                     &XrefCancelShim, nullptr));
     // NULL = internal panic or the read buffer could not be allocated: no hits.
     if (r.get() == nullptr) return out;
+    if (cancelled != nullptr) {
+        *cancelled = dc_xref_inst_result_cancelled(r.get()) != 0;
+    }
 
     const std::size_t n = dc_xref_inst_result_len(r.get());
     out.reserve(n);

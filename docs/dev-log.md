@@ -12,6 +12,26 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1577) — Fix D-L3 + D-L5 + D-L6 + D-L9 (completes 100% of Block D: Rust fallible allocation & stack panic log, `scan_rip` chunk-boundary dedup, Rust cooperative scan cancellation, `release.yml` SHA-pinned split build/release jobs)
+
+- **Bug fixes (`D-L3`, `D-L5`, `D-L6`, `D-L9` — completes 100% of Block D Critical/High/Medium/Low findings):**
+  - **`D-L3` (`dll/rust/src/{ffi,chain/mod,xref/mod,metadata/parser,metadata/ffi}.rs`, `dll/rust/include/discrete_core.h`):**
+    - Replaced heap-allocating `format!` in `ffi::guard` and the Rust panic hook with a zero-alloc fixed-capacity UTF-8-safe `StackBuf<512>`.
+    - Added fallible `try_push` / `try_insert` helpers and converted result vectors / sets in `chain::detect_cancellable`, `xref::scan_rip_cancellable`, `xref::scan_inst_cancellable`, `metadata::Parser` enumerators & lazy maps, and `dc_md_try_decode_string_default` to use fallible reservations so OOM truncates gracefully instead of aborting the host game process; exposed `dc_*_result_truncated()` accessors.
+  - **`D-L5` (`dll/rust/src/xref/mod.rs`, `tools/verify/r2_golden.json`):**
+    - Carried the last owned byte `(end_va, last_byte)` across contiguous spans in `scan_rip_cancellable` so `p == 0` at a chunk boundary still sees a trailing REX prefix at `CHUNK_SIZE - 1` and suppresses the duplicate 6-byte hit; rebaselined `rip-synthetic` in `tools/verify/r2_golden.json` via `r2_golden.py --record --rebaseline --no-images` (`1970913 -> 1970879` bytes, removing the 2 boundary duplicates).
+  - **`D-L6` (`dll/rust/src/{ffi,chain/mod,xref/mod}.rs`, `dll/rust/include/discrete_core.h`, `dll/src/il2cpp/{IL2CPPChainDetector.h,IL2CPPChainDetectorRs.cpp,IL2CPPFieldXrefScan.h,IL2CPPFieldXrefScanRs.cpp,IL2CPPFieldXref.cpp}`):**
+    - Added optional `dc_cancel_fn` cooperative cancellation callback polled at every chunk start, page-fallback step, and instance-scan method; exported `dc_chain_detect_cancellable`, `dc_xref_rip_scan_cancellable`, `dc_xref_inst_scan_cancellable`, and `dc_*_result_cancelled()` accessors.
+    - Wired `Discrete::ScanCancel::IsCancelRequested()` into all three Rust scan kernels through C++ wrappers and surfaced `bool* cancelled` to `IL2CPPFieldXref.cpp`.
+  - **`D-L9` (`.github/workflows/release.yml`):**
+    - Pinned all GitHub Actions (`actions/checkout`, `actions/setup-dotnet`, `actions/upload-artifact`, `actions/download-artifact`) to full commit SHAs.
+    - Split the workflow into `build` (`permissions: contents: read`) and `release` (`needs: build`, `permissions: contents: write`, verifies artifact `.sha256` before creating/updating the draft release), and guarded `rustup self update` behind a `< 1.28.0` version check.
+  - Added Rust unit tests (`stack_buf_truncates_on_utf8_boundary_without_alloc`, `rip_rex_at_chunk_boundary_is_not_duplicated_in_next_chunk`, `rip_and_inst_support_cooperative_cancellation`, and chain cancellation FFI test).
+  - Marked `D-L3`, `D-L5`, `D-L6`, and `D-L9` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1577) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1255 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1575) — Fix D-L2 + D-L4 + D-L12 (metadata version warnings & `typeTablesSupported`, `Parser::Get()` retry + Windows read-only file mapping, lazy `OnceLock` metadata lookup indices)
 
 - **Bug fixes (`D-L2`, `D-L4`, `D-L12`):**

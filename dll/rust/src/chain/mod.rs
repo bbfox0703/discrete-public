@@ -37,7 +37,7 @@ pub(crate) mod tests;
 use std::collections::HashSet;
 use std::ffi::c_void;
 
-use crate::ffi::{ReadFn, Reader, guard};
+use crate::ffi::{CancelCheck, CancelFn, ReadFn, Reader, guard, try_insert, try_push};
 use decode::{Cat, Insn, InsnDecoder, Mn, Operand, Reg};
 
 /// Code is scanned in 1 MiB chunks (bounds the working set on 200 MB images).
@@ -94,6 +94,8 @@ pub struct DcChainStats {
 pub struct DcChainResult {
     matches: Vec<DcChainMatch>,
     stats: DcChainStats,
+    cancelled: bool,
+    truncated: bool,
 }
 
 #[cfg(test)]
@@ -156,7 +158,9 @@ fn executable_sections(base: usize, reader: &Reader) -> Vec<(usize, usize)> {
             continue;
         }
         let va = base.wrapping_add(u32_at(&sh, SECTION_VIRTUAL_ADDRESS) as usize);
-        out.push((va, u32_at(&sh, SECTION_VIRTUAL_SIZE) as usize));
+        if !try_push(&mut out, (va, u32_at(&sh, SECTION_VIRTUAL_SIZE) as usize)) {
+            break;
+        }
     }
     out
 }
@@ -354,8 +358,9 @@ fn is_rip_relative_modrm(m: u8) -> bool {
 // --- the scan ----------------------------------------------------------------
 
 /// `DetectFieldAccessChains` minus the module lookup (the caller passes the
-/// GameAssembly.dll base). Returns None only when the 1 MiB chunk buffer
-/// cannot be allocated (the C++ `std::vector` would have thrown).
+/// GameAssembly.dll base). Returns None only when the 1 MiB chunk buffer or
+/// initial slot set cannot be allocated (the C++ `std::vector` would have thrown).
+#[cfg(test)]
 pub(crate) fn detect(
     module_base: usize,
     reader: Option<&Reader>,
@@ -363,6 +368,18 @@ pub(crate) fn detect(
     sfo: usize,
     tfo: usize,
     match_limit: usize,
+) -> Option<DcChainResult> {
+    detect_cancellable(module_base, reader, slots, sfo, tfo, match_limit, CancelCheck::none())
+}
+
+pub(crate) fn detect_cancellable(
+    module_base: usize,
+    reader: Option<&Reader>,
+    slots: &[usize],
+    sfo: usize,
+    tfo: usize,
+    match_limit: usize,
+    cancel: CancelCheck,
 ) -> Option<DcChainResult> {
     let mut result = DcChainResult::default();
     // Same early returns, same order: these leave the stats "not written".
@@ -375,7 +392,11 @@ pub(crate) fn detect(
         return Some(result);
     }
 
-    let slot_set: HashSet<usize> = slots.iter().copied().collect();
+    let mut slot_set: HashSet<usize> = HashSet::new();
+    slot_set.try_reserve(slots.len()).ok()?;
+    for &s in slots {
+        slot_set.insert(s);
+    }
     let mut dec = InsnDecoder::new();
     let mut buf: Vec<u8> = Vec::new();
     buf.try_reserve_exact(CHUNK_SIZE + TAIL_OVERLAP).ok()?;
@@ -383,12 +404,14 @@ pub(crate) fn detect(
 
     let mut stats = DcChainStats::default();
     let mut truncated = false;
+    let mut oom_truncated = false;
+    let mut cancelled = false;
     // (resolved target, hit IP) pairs already emitted: collapses the REX /
     // non-REX double match of one instruction across the whole scan.
     let mut emitted: HashSet<(usize, usize)> = HashSet::new();
 
     for &(sec_va, sec_size) in &sections {
-        if truncated {
+        if truncated || cancelled {
             break;
         }
         reader.scan_readable_spans(
@@ -398,6 +421,8 @@ pub(crate) fn detect(
             TAIL_OVERLAP,
             &mut buf,
             &mut stats.failed_reads,
+            cancel,
+            &mut cancelled,
             |span_va, span, owned_len| {
                 let read_want = span.len();
                 if read_want < 6 {
@@ -459,14 +484,27 @@ pub(crate) fn detect(
                         stats.chain_broken += 1;
                         continue;
                     };
-                    if !emitted.insert((target, hit_ip)) {
-                        continue;
+                    match try_insert(&mut emitted, (target, hit_ip)) {
+                        Some(true) => {}
+                        Some(false) => continue,
+                        None => {
+                            truncated = true;
+                            oom_truncated = true;
+                            break;
+                        }
                     }
-                    result.matches.push(DcChainMatch {
-                        hit_ip,
-                        hop_one_ip: insn_ip,
-                        is_write: u8::from(is_write),
-                    });
+                    if !try_push(
+                        &mut result.matches,
+                        DcChainMatch {
+                            hit_ip,
+                            hop_one_ip: insn_ip,
+                            is_write: u8::from(is_write),
+                        },
+                    ) {
+                        truncated = true;
+                        oom_truncated = true;
+                        break;
+                    }
                     // Checked after the push: match_limit 0 still yields one match.
                     if result.matches.len() >= match_limit {
                         truncated = true;
@@ -490,6 +528,8 @@ pub(crate) fn detect(
     stats.chains_emitted = result.matches.len();
     stats.valid = 1;
     result.stats = stats;
+    result.cancelled = cancelled;
+    result.truncated = truncated || oom_truncated;
     Some(result)
 }
 
@@ -514,7 +554,42 @@ pub unsafe extern "C" fn dc_chain_detect(
     target_field_offset: usize,
     match_limit: usize,
 ) -> *mut DcChainResult {
-    guard("dc_chain_detect", std::ptr::null_mut(), || {
+    // SAFETY: forwarded caller contract; NULL cancel callback is a no-op.
+    unsafe {
+        dc_chain_detect_cancellable(
+            module_base,
+            read,
+            read_ctx,
+            slots,
+            n_slots,
+            static_fields_offset,
+            target_field_offset,
+            match_limit,
+            None,
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// D-L6: Runs the chain detector with an optional cooperative cancel callback.
+///
+/// # Safety
+/// Same as [`dc_chain_detect`], plus `cancel` / `cancel_ctx` must stay valid
+/// for the duration of the call when `cancel` is `Some`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_chain_detect_cancellable(
+    module_base: usize,
+    read: Option<ReadFn>,
+    read_ctx: *mut c_void,
+    slots: *const usize,
+    n_slots: usize,
+    static_fields_offset: usize,
+    target_field_offset: usize,
+    match_limit: usize,
+    cancel: Option<CancelFn>,
+    cancel_ctx: *mut c_void,
+) -> *mut DcChainResult {
+    guard("dc_chain_detect_cancellable", std::ptr::null_mut(), || {
         let slots: &[usize] = if slots.is_null() || n_slots == 0 {
             &[]
         } else {
@@ -523,7 +598,17 @@ pub unsafe extern "C" fn dc_chain_detect(
         };
         // SAFETY: caller contract on `read` / `read_ctx`.
         let reader = read.map(|f| unsafe { Reader::new(f, read_ctx) });
-        match detect(module_base, reader.as_ref(), slots, static_fields_offset, target_field_offset, match_limit) {
+        // SAFETY: caller contract on `cancel` / `cancel_ctx`.
+        let cancel_check = unsafe { CancelCheck::new(cancel, cancel_ctx) };
+        match detect_cancellable(
+            module_base,
+            reader.as_ref(),
+            slots,
+            static_fields_offset,
+            target_field_offset,
+            match_limit,
+            cancel_check,
+        ) {
             Some(r) => Box::into_raw(Box::new(r)),
             None => std::ptr::null_mut(),
         }
@@ -577,6 +662,30 @@ pub unsafe extern "C" fn dc_chain_result_stats(r: *const DcChainResult, out: *mu
         let stats = unsafe { r.as_ref() }.map_or_else(DcChainStats::default, |r| r.stats);
         // SAFETY: out is non-null and writable (caller contract).
         unsafe { out.write(stats) };
+    })
+}
+
+/// D-L6: returns 1 when the chain scan stopped early due to cancellation (0 for NULL).
+///
+/// # Safety
+/// `r` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_chain_result_cancelled(r: *const DcChainResult) -> i32 {
+    guard("dc_chain_result_cancelled", 0, || {
+        // SAFETY: caller contract.
+        unsafe { r.as_ref() }.map_or(0, |r| i32::from(r.cancelled))
+    })
+}
+
+/// D-L3: returns 1 when the chain scan stopped at `match_limit` or truncated due to OOM (0 for NULL).
+///
+/// # Safety
+/// `r` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_chain_result_truncated(r: *const DcChainResult) -> i32 {
+    guard("dc_chain_result_truncated", 0, || {
+        // SAFETY: caller contract.
+        unsafe { r.as_ref() }.map_or(0, |r| i32::from(r.truncated))
     })
 }
 
