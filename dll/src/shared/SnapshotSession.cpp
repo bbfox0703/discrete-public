@@ -97,10 +97,12 @@ std::string ComputeGameBuildId(const wchar_t* moduleName) {
     // Resolve module → on-disk path → (size, write_time). FNV-1a over the
     // path+metadata triple gives us a stable per-build hash without paying
     // SHA256 cost.
-    HMODULE mod = (moduleName != nullptr) ? ::GetModuleHandleW(moduleName) : nullptr;
+    // C-L7: When an explicit moduleName is requested and not loaded, return an
+    // empty string so callers can fall through to a secondary module (e.g.
+    // legacy mono.dll) before explicitly requesting the host EXE (nullptr).
+    HMODULE mod = ::GetModuleHandleW(moduleName);
     if (mod == nullptr) {
-        // Fallback to host EXE so we still emit something usable.
-        mod = ::GetModuleHandleW(nullptr);
+        return {};
     }
 
     wchar_t pathBuf[MAX_PATH] = {};

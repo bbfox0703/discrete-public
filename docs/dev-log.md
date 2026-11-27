@@ -12,6 +12,24 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1578) — Fix C-L4 + C-L5 + C-L7 (strict `ParseAddress`, RPC parameter bounds/UTF-16 char/null args hardening, dynamic 32-bit OOM threshold & `ComputeGameBuildId` module fallback)
+
+- **Bug fixes (`C-L4`, `C-L5`, `C-L7`):**
+  - **`C-L4` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`):**
+    - Replaced `_strtoui64`-based `parseAddr` with `ExportHelpers::ParseAddressStrict` / `ParseAddress`: requires full hex string consumption via `std::from_chars(..., 16)` (rejecting trailing garbage, empty/sign/whitespace strings, and 64-bit overflow), rejects negative signed JSON integers and floats, and rejects values exceeding `UINTPTR_MAX` (preventing silent x86 truncation).
+  - **`C-L5` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`, `dll/src/shared/PipeServer.cpp`):**
+    - Normalized omitted, `null`, or non-object `"args"` to `json::object()` in `PipeServer::Dispatch` so handlers never throw `nlohmann::json::type_error 306` (`-32000`).
+    - Added `ClampRpcLimit` so `refineValueScan` / `refineGroupScan` / `queryGroupCandidates` / `beginGroupScan` clamp `limit > 50000` to `50000` (instead of resetting to default), `walkInstance` clamps `dictLimit` to `4096`, `snapshotBegin` clamps `structMemberCap` to `256`, and `walkArray` clamps `elementSize` to `4096`.
+    - Rejected negative `offset` in `queryGroupCandidates` with overflow-safe `[offset, end)` bounds; rejected negative values in `setInstanceField`'s `asU64` and `snapshotBegin`'s `memHeadroomMB`; removed unreachable integer branches in `setInstanceField` float/double; decoded `char` / `System.Char` via UTF-8 -> first UTF-16 code unit (`DecodeFirstUtf16CodeUnit`) in both `setInstanceField` and `callMethod` (Mono + IL2CPP).
+  - **`C-L7` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`, `dll/src/shared/SnapshotSession.{h,cpp}`):**
+    - Replaced fixed 3 GB `kX86PrivateUsageRefuseThreshold` with `QueryX86PrivateUsageRefuseThreshold()` (`75%` of `GlobalMemoryStatusEx().ullTotalVirtual`, protecting both 2 GB non-LAA and 4 GB WOW64 LAA 32-bit games).
+    - Changed `ComputeGameBuildId(moduleName)` to return empty when an explicit `moduleName` is not loaded (host EXE is hashed only when `moduleName == nullptr`), unifying handshake and `snapshotBegin` on `CurrentGameBuildId()` so legacy `mono.dll` fallback works on Unity < 5.4.
+  - Added C++ unit test suite `Test_CL4_CL5_CL7_ValidationAndBuildId` in `dll/tests/dll_core_test.cpp` (+38 checks on x64 and x86).
+  - Marked `C-L4`, `C-L5`, and `C-L7` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1578) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1255 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 827 passed (x64) / 827 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1577) — Fix D-L3 + D-L5 + D-L6 + D-L9 (completes 100% of Block D: Rust fallible allocation & stack panic log, `scan_rip` chunk-boundary dedup, Rust cooperative scan cancellation, `release.yml` SHA-pinned split build/release jobs)
 
 - **Bug fixes (`D-L3`, `D-L5`, `D-L6`, `D-L9` — completes 100% of Block D Critical/High/Medium/Low findings):**

@@ -2432,6 +2432,93 @@ void Test_DM6_MethodTokenPointerIndex() {
     }
 }
 
+// ============================================================================
+// C-L4 + C-L5 + C-L7 — Strict address parser, UTF-16 char decode, RPC limit
+// clamp, 32-bit dynamic OOM threshold, and ComputeGameBuildId missing-module
+// empty return
+// ============================================================================
+void Test_CL4_CL5_CL7_ValidationAndBuildId() {
+    using Discrete::ExportHelpers::ClampRpcLimit;
+    using Discrete::ExportHelpers::ComputeX86PrivateUsageRefuseThreshold;
+    using Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit;
+    using Discrete::ExportHelpers::ParseAddress;
+    using Discrete::ExportHelpers::ParseAddressStrict;
+
+    // 1. C-L4: Strict address parsing (hex strings + non-negative integers)
+    {
+        std::uint64_t out = 0;
+        CHECK(ParseAddressStrict(nlohmann::json("0x1234ABCD"), out, 0xFFFFFFFFULL) && out == 0x1234ABCDULL);
+        CHECK(ParseAddressStrict(nlohmann::json("0Xdeadbeef"), out, 0xFFFFFFFFULL) && out == 0xDEADBEEFULL);
+        CHECK(ParseAddressStrict(nlohmann::json("CAFE"), out, 0xFFFFFFFFULL) && out == 0xCAFEULL);
+        CHECK(ParseAddressStrict(nlohmann::json(0), out, 0xFFFFFFFFULL) && out == 0ULL);
+        CHECK(ParseAddressStrict(nlohmann::json(4096), out, 0xFFFFFFFFULL) && out == 4096ULL);
+
+        // Trailing garbage, empty, prefix-only, leading sign/space, overflow, x86 truncation, negative int
+        CHECK(!ParseAddressStrict(nlohmann::json("0x1234zz"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("1234 "), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(" 0x1234"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(""), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("0x"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("-0x10"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("+0x10"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("0x10000000000000000"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("0x123456789"), out, 0xFFFFFFFFULL));  // x86 ceiling
+        CHECK(!ParseAddressStrict(nlohmann::json(-1), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(1.5), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(true), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(nullptr), out, 0xFFFFFFFFFFFFFFFFULL));
+
+        std::uintptr_t nativeOut = 0;
+        CHECK(ParseAddress(nlohmann::json("0x1000"), nativeOut) && nativeOut == 0x1000u);
+        if constexpr (sizeof(std::uintptr_t) == 4) {
+            CHECK(!ParseAddress(nlohmann::json("0x100000000"), nativeOut));
+        } else {
+            CHECK(ParseAddress(nlohmann::json("0x100000000"), nativeOut) && nativeOut == 0x100000000ULL);
+        }
+    }
+
+    // 2. C-L5: UTF-8 -> first UTF-16 code unit (System.Char)
+    {
+        std::uint16_t ch = 0;
+        CHECK(DecodeFirstUtf16CodeUnit("A", ch) && ch == 0x0041u);
+        // 2-byte UTF-8: U+00E9 ('é') = C3 A9
+        CHECK(DecodeFirstUtf16CodeUnit("\xC3\xA9", ch) && ch == 0x00E9u);
+        // 3-byte UTF-8: U+4E2D ('中') = E4 B8 AD
+        CHECK(DecodeFirstUtf16CodeUnit("\xE4\xB8\xAD", ch) && ch == 0x4E2Du);
+        // 4-byte UTF-8: U+1F600 ('😀') = F0 9F 98 80 -> high surrogate 0xD83D
+        CHECK(DecodeFirstUtf16CodeUnit("\xF0\x9F\x98\x80", ch) && ch == 0xD83Du);
+        // Reject empty, truncated, overlong, and surrogate code points
+        CHECK(!DecodeFirstUtf16CodeUnit("", ch));
+        CHECK(!DecodeFirstUtf16CodeUnit("\xC3", ch));
+        CHECK(!DecodeFirstUtf16CodeUnit("\xC0\xAF", ch));
+        CHECK(!DecodeFirstUtf16CodeUnit("\xED\xA0\x80", ch));
+    }
+
+    // 3. C-L5: ClampRpcLimit clamps above max to max (not reset to default)
+    {
+        CHECK(ClampRpcLimit(0, 5000u, 50000u) == 5000u);
+        CHECK(ClampRpcLimit(-10, 5000u, 50000u) == 5000u);
+        CHECK(ClampRpcLimit(1234, 5000u, 50000u) == 1234u);
+        CHECK(ClampRpcLimit(50000, 5000u, 50000u) == 50000u);
+        CHECK(ClampRpcLimit(99999, 5000u, 50000u) == 50000u);
+    }
+
+    // 4. C-L7: 32-bit OOM threshold scales with total virtual address space
+    {
+        constexpr std::uint64_t kGiB = 1024ULL * 1024 * 1024;
+        CHECK(ComputeX86PrivateUsageRefuseThreshold(2ULL * kGiB) == (1536ULL * 1024 * 1024));
+        CHECK(ComputeX86PrivateUsageRefuseThreshold(4ULL * kGiB) == (3ULL * kGiB));
+        CHECK(ComputeX86PrivateUsageRefuseThreshold(0ULL) == (1536ULL * 1024 * 1024));
+    }
+
+    // 5. C-L7: ComputeGameBuildId returns empty for a non-loaded module, non-empty for nullptr (host EXE)
+    {
+        CHECK(Discrete::Snapshot::ComputeGameBuildId(L"definitely_not_loaded_discrete_probe_12345.dll").empty());
+        const std::string hostId = Discrete::Snapshot::ComputeGameBuildId(nullptr);
+        CHECK(hostId.size() == 16u);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2457,6 +2544,7 @@ int main() {
     Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics();
     Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety();
     Test_DM6_MethodTokenPointerIndex();
+    Test_CL4_CL5_CL7_ValidationAndBuildId();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

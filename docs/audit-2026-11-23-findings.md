@@ -533,12 +533,12 @@
 - Mono `getMetadataStats`（`:6530-6550`）仍然遵循「刻意不開 outer guard」的舊說法，每次連線都對每個 assembly 做一次 attach / detach；`searchSymbols` / `dumpClassInfo` / snapshot 已經改成「一個 outer guard」才是正確作法（`:4946-4956`）。這個 handler 在每次 connect 時都會執行（`BackendAdapter.cs:192-207`）。
 - 修法：Mono `findInstances` / `listFieldValuesAcrossInstances` 傳入 `skipMapped=true`；`listFieldValuesAcrossInstances` 呼叫 `filterMatches`（至少做 validate）；IL2CPP `liveOnly` 回 `live_walk_unavailable:true`；`snapshotBegin` 在 domain 為 null 時回錯誤；把 `class_is_valuetype` 移進現有的 guard；`getMetadataStats` 外層加一個 `ThreadAttachGuard`，並更新註解。
 
-**C-L4 · `parseAddr` 太寬鬆：接受尾端垃圾字元、在 x86 上靜默截斷、十進位字串會被當成 16 進位**
+**C-L4 · `parseAddr` 太寬鬆：接受尾端垃圾字元、在 x86 上靜默截斷、十進位字串會被當成 16 進位 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ExportAPI.cpp:2405-2425`
 - 成因：`_strtoui64` 遇到第一個非 hex 字元就停，`"0x1234zz"` 會被當成 `0x1234`；超過 64 bit 時飽和成 `ULLONG_MAX`；`static_cast<uintptr_t>` 在 x86 Mono 上會把 `0x1_2345_6789` 截成 `0x23456789`。`writeMemory` / `setInstanceField` 因此可能寫到使用者沒有輸入的位址。負的 JSON 整數也會被直接 cast。
 - 修法：要求整個字串都被吃完（`*end == '\0'`），檢查 `errno == ERANGE`，並在 `val > UINTPTR_MAX` 時回 false；只接受非負整數；文件寫明「字串一律是 hex」。
 
-**C-L5 · 參數驗證的邊界**
+**C-L5 · 參數驗證的邊界 — ✅ FIXED (2026-11-27)**
 - `refineValueScan`：`limit > 50000` 時被**重設成 5000**，而不是 clamp 到 50000（`ExportAPI.cpp:2098-2099`）；`refineGroupScan` / `queryGroupCandidates` / `beginGroupScan` 的 limit 處理方式相同（`:2208-2209`、`:2347-2348`、`:6160-6161`）。
 - `queryGroupCandidates`：負的 `offset` 經 `static_cast<size_t>` 變成極大值，`offset + limit` 會溢位，`truncated` 的計算也跟著錯（`:2346`、`:2357`、`:2368`）。
 - `walkArray`：`elementSize` 沒有上限，`std::vector<std::uint8_t> buf(elemSize)` 最多會配置 4096 次（`:3013-3014`、`:3065`）；32-bit 遊戲中可能造成 `bad_alloc` 或大量記憶體壓力。
@@ -556,7 +556,7 @@
   3. Mono snapshot session 同時保留 `plan`（全部 instance 位址）和 `classes`（全部已解碼的 JSON）直到 End；chunk 是 `classes.push_back(s.classes[i])` 深複製，而且在全域 mutex 內進行。32-bit 遊戲中的尖峰記憶體因此是「完整 snapshot × 2 個 chunk」再加上 plan。
 - 修法：session 記錄建立者的 client id（由 PipeServer 傳入 handler context），refine / end 時驗證；可以加一個背景 timer，或在每次 RPC 時順便檢查過期；Mono session 在 decode 完成後 `plan.clear(); plan.shrink_to_fit();`，chunk 改成先在鎖內取出 shared payload 的參考，再到鎖外複製。
 
-**C-L7 · 32-bit OOM 閘門與 build id 的小問題**
+**C-L7 · 32-bit OOM 閘門與 build id 的小問題 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ExportAPI.cpp:125-132`、`:4052-4053`、`:8088-8089`；`dll/src/shared/SnapshotSession.cpp:100-104`；`ExportAPI.cpp:1873-1874`、`:4217-4221`
 - 成因：
   1. 拒絕門檻是固定的 3 GB private usage，只適用於「WOW64 + LARGEADDRESSAWARE」；非 LAA 的舊 32-bit 遊戲上限是 2 GB，這個閘門永遠不會觸發。

@@ -146,14 +146,18 @@ ProcessMemorySnapshot QueryProcessMemory() noexcept {
     return out;
 }
 
-// 32-bit guard threshold. Process user-space ceiling on 32-bit
-// Windows is 2 GB by default, 3 GB with /3GB-aware OS, 4 GB on
-// WOW64-with-LARGEADDRESSAWARE (the common case for modern Unity
-// 32-bit builds). Snapshot capture adds 300-500 MB of DLL-side
-// JSON cache, so 3.0 GB current private-usage is the danger line —
-// past it we're one bad allocation away from the game CTD that
-// build #646 hit on 活俠傳.
-constexpr std::uint64_t kX86PrivateUsageRefuseThreshold = 3ULL * 1024 * 1024 * 1024;
+// C-L7: Dynamic 32-bit guard threshold — 75% of the process's actual virtual
+// address space (`ullTotalVirtual` = 2 GB on non-LAA x86, 3 GB on /3GB, 4 GB
+// on WOW64 + LARGEADDRESSAWARE). Protects both 2 GB legacy Unity builds and
+// 4 GB WOW64 builds against snapshot OOM CTDs.
+std::uint64_t QueryX86PrivateUsageRefuseThreshold() noexcept {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    const std::uint64_t totalVirtual = ::GlobalMemoryStatusEx(&ms)
+        ? static_cast<std::uint64_t>(ms.ullTotalVirtual)
+        : 0ULL;
+    return Discrete::ExportHelpers::ComputeX86PrivateUsageRefuseThreshold(totalVirtual);
+}
 
 // Phase P1-fix — available physical RAM right now. The snapshot decode builds
 // the ENTIRE snapshot in the game process before streaming, so a huge game
@@ -1925,15 +1929,16 @@ static int g_detectCacheRev = -1;
 // is safe to compute on every handshake as the detection cache key.
 static std::string CurrentGameBuildId() {
     using namespace Discrete;
+    std::string id;
 #if defined(DISCRETE_BACKEND_MONO)
-    std::string id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
+    id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
     if (id.empty()) id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
-    return id;
 #elif defined(DISCRETE_BACKEND_IL2CPP)
-    return Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
-#else
-    return std::string();
+    id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
 #endif
+    // C-L7: Explicit host EXE fallback when none of the runtime modules matched.
+    if (id.empty()) id = Snapshot::ComputeGameBuildId(nullptr);
+    return id;
 }
 
 // BackendDetector::Detect(), memoized per game_build_id (see g_detectCache). A
@@ -2162,8 +2167,8 @@ void RegisterCoreHandlers() {
         for (const auto& v : kValidScanTypes) if (stStr == v) { stOk = true; break; }
         if (!stOk) return json{{"error", "unknown 'scanType'"}};
 
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 5000));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 5000;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{5000}), 5000u, 50000u);
         double tolerance = args.value("tolerance", 0.0001);
 
         json rows = json::array();
@@ -2272,8 +2277,8 @@ void RegisterCoreHandlers() {
         if (!args.contains("slots") || !args["slots"].is_array())
             return json{{"error", "missing 'slots' array"}};
         const json& refineSlots = args["slots"];
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
 
         json rows = json::array();
         std::size_t totalCands = 0, removed = 0;
@@ -2410,9 +2415,11 @@ void RegisterCoreHandlers() {
         std::uint64_t sessionId = 0;
         try { sessionId = std::stoull(args["sessionId"].get<std::string>()); }
         catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
-        std::size_t offset = static_cast<std::size_t>(args.value("offset", 0));
-        std::size_t limit  = static_cast<std::size_t>(args.value("limit", 200));
-        if (limit == 0 || limit > 50000) limit = 200;
+        const std::int64_t rawOffset = args.value("offset", std::int64_t{0});
+        if (rawOffset < 0) return json{{"error", "'offset' must be non-negative"}};
+        const std::size_t offset = static_cast<std::size_t>(rawOffset);
+        const std::size_t limit  = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
 
         json rows = json::array();
         std::size_t totalCands = 0;
@@ -2421,7 +2428,9 @@ void RegisterCoreHandlers() {
             [&](std::vector<GroupScan::SlotSpec>& slots,
                 std::vector<GroupScan::Candidate>& cands) {
             totalCands = cands.size();
-            std::size_t end = std::min(totalCands, offset + limit);
+            const std::size_t end = (offset >= totalCands)
+                ? totalCands
+                : (offset + std::min(totalCands - offset, limit));
             for (std::size_t i = offset; i < end; ++i)
                 rows.push_back(EmitGroupCandidateRow(cands[i], slots, fmtHex));
         });
@@ -2432,7 +2441,7 @@ void RegisterCoreHandlers() {
             {"offset",          offset},
             {"count",           rows.size()},
             {"totalCandidates", totalCands},
-            {"truncated",       totalCands > offset + rows.size()},
+            {"truncated",       offset < totalCands && (totalCands - offset) > rows.size()},
             {"candidates",      std::move(rows)},
         };
     });
@@ -2469,26 +2478,10 @@ void RegisterCoreHandlers() {
     // bad pointer returns an error envelope instead of crashing the game.
     // ----------------------------------------------------------------------
 
+    // C-L4: Strict hex-string / non-negative-integer address parser (no trailing
+    // garbage, no silent x86 truncation, no overflow or negative integers).
     auto parseAddr = [](const json& v, std::uintptr_t& out) -> bool {
-        if (v.is_string()) {
-            const std::string s = v.get<std::string>();
-            const char* p = s.c_str();
-            if (s.size() >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
-            char* end = nullptr;
-            unsigned long long val = ::_strtoui64(p, &end, 16);
-            if (end == p) return false;
-            out = static_cast<std::uintptr_t>(val);
-            return true;
-        }
-        if (v.is_number_unsigned()) {
-            out = static_cast<std::uintptr_t>(v.get<std::uint64_t>());
-            return true;
-        }
-        if (v.is_number_integer()) {
-            out = static_cast<std::uintptr_t>(v.get<std::int64_t>());
-            return true;
-        }
-        return false;
+        return Discrete::ExportHelpers::ParseAddress(v, out);
     };
 
     auto bytesToHex = [](const std::uint8_t* data, std::size_t n) {
@@ -3049,14 +3042,16 @@ void RegisterCoreHandlers() {
             }
         }
 
+        constexpr std::size_t kMaxWalkArrayElementSize = 4096u;
         const bool hasCallerElemSize =
             args.contains("elementSize") && args["elementSize"].is_number_unsigned();
-        const std::size_t callerElemSize =
-            hasCallerElemSize ? args["elementSize"].get<std::size_t>() : 0;
+        const std::size_t callerElemSize = hasCallerElemSize
+            ? std::min<std::size_t>(args["elementSize"].get<std::size_t>(), kMaxWalkArrayElementSize)
+            : 0u;
         const auto elemLayout = Discrete::ExportHelpers::ResolveArrayElementLayout(
             knownPrimSize, elemClassResolved, elemIsValueType, classValueSize,
             hasCallerElemSize, callerElemSize);
-        const std::size_t elemSize  = elemLayout.elemSize;
+        const std::size_t elemSize  = std::min<std::size_t>(elemLayout.elemSize, kMaxWalkArrayElementSize);
         const bool        isPointer = elemLayout.isPointer;
 
         // Read array header — bounds (validate SZARRAY) + max_length. Both
@@ -3433,8 +3428,18 @@ void RegisterCoreHandlers() {
         };
         auto asU64 = [&](std::uint64_t& out) -> bool {
             if (jv.is_number_unsigned())     { out = jv.get<std::uint64_t>(); return true; }
-            if (jv.is_number_integer())      { out = static_cast<std::uint64_t>(jv.get<std::int64_t>()); return true; }
-            if (jv.is_number_float())        { out = static_cast<std::uint64_t>(jv.get<double>()); return true; }
+            if (jv.is_number_integer()) {
+                const std::int64_t iv = jv.get<std::int64_t>();
+                if (iv < 0) return false;  // C-L5: reject negative values for unsigned fields
+                out = static_cast<std::uint64_t>(iv);
+                return true;
+            }
+            if (jv.is_number_float()) {
+                const double dv = jv.get<double>();
+                if (!std::isfinite(dv) || dv < 0.0) return false;
+                out = static_cast<std::uint64_t>(dv);
+                return true;
+            }
             if (jv.is_boolean())             { out = jv.get<bool>() ? 1 : 0; return true; }
             return false;
         };
@@ -3467,8 +3472,13 @@ void RegisterCoreHandlers() {
                    ty == "System.UInt16" || ty == "System.Char") {
             std::uint64_t v = 0;
             if (ty == "char" || ty == "System.Char") {
-                if (jv.is_string() && !jv.get<std::string>().empty()) {
-                    v = static_cast<std::uint8_t>(jv.get<std::string>()[0]);
+                if (jv.is_string()) {
+                    std::uint16_t ch = 0;
+                    if (!Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit(
+                            jv.get_ref<const std::string&>(), ch)) {
+                        return json{{"error", "'value' not a valid UTF-8 char"}};
+                    }
+                    v = ch;
                 } else if (!asU64(v)) {
                     return json{{"error", "'value' not a char or number"}};
                 }
@@ -3499,19 +3509,12 @@ void RegisterCoreHandlers() {
             if (!asU64(v)) return json{{"error", "'value' not a number"}};
             std::memcpy(buf, &v, 8); size = 8;
         } else if (ty == "float" || ty == "single" || ty == "System.Single") {
-            double d = 0.0;
-            if      (jv.is_number())          d = jv.get<double>();
-            else if (jv.is_number_integer())  d = static_cast<double>(jv.get<std::int64_t>());
-            else if (jv.is_number_unsigned()) d = static_cast<double>(jv.get<std::uint64_t>());
-            else return json{{"error", "'value' not a number"}};
-            float w = static_cast<float>(d);
+            if (!jv.is_number()) return json{{"error", "'value' not a number"}};
+            float w = static_cast<float>(jv.get<double>());
             std::memcpy(buf, &w, 4); size = 4;
         } else if (ty == "double" || ty == "System.Double") {
-            double w = 0.0;
-            if      (jv.is_number())          w = jv.get<double>();
-            else if (jv.is_number_integer())  w = static_cast<double>(jv.get<std::int64_t>());
-            else if (jv.is_number_unsigned()) w = static_cast<double>(jv.get<std::uint64_t>());
-            else return json{{"error", "'value' not a number"}};
+            if (!jv.is_number()) return json{{"error", "'value' not a number"}};
+            double w = jv.get<double>();
             std::memcpy(buf, &w, 8); size = 8;
         } else if (ty == "address" || ty == "intptr" || ty == "uintptr" || ty == "ptr" ||
                    ty == "System.IntPtr" || ty == "System.UIntPtr") {
@@ -4092,7 +4095,7 @@ void RegisterCoreHandlers() {
         // at the cost of asking the user to lower caps + retry.
         const ProcessMemorySnapshot memBefore = QueryProcessMemory();
         if (memBefore.pointerSize == 4 &&
-            memBefore.privateUsage >= kX86PrivateUsageRefuseThreshold) {
+            memBefore.privateUsage >= QueryX86PrivateUsageRefuseThreshold()) {
             const double gb = memBefore.privateUsage / (1024.0 * 1024.0 * 1024.0);
             return json{
                 {"error",
@@ -4109,9 +4112,10 @@ void RegisterCoreHandlers() {
         // Snapshot memory budget (mirror of the IL2CPP handler) — stop the
         // decode before the game OOMs. budget = pre-snapshot private usage +
         // headroom, headroom clamped to a fraction of free RAM.
-        std::uint64_t memHeadroomMono =
-            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
-        if (memHeadroomMono == 0) memHeadroomMono = kSnapshotDefaultHeadroomBytes;
+        const std::int64_t reqHeadroomMonoMB = args.value("memHeadroomMB", std::int64_t{0});
+        std::uint64_t memHeadroomMono = (reqHeadroomMonoMB > 0)
+            ? static_cast<std::uint64_t>(reqHeadroomMonoMB) * 1024ull * 1024ull
+            : kSnapshotDefaultHeadroomBytes;
         if (const std::uint64_t availMono = QueryAvailablePhysBytes(); availMono > 0) {
             const auto cap = static_cast<std::uint64_t>(availMono * kSnapshotAvailPhysFraction);
             if (memHeadroomMono > cap) memHeadroomMono = cap;
@@ -4267,11 +4271,7 @@ void RegisterCoreHandlers() {
         // wide-scan result.
         auto session = std::make_unique<Snapshot::Session>();
         session->capturedAt    = Snapshot::CapturedAtUtcNow();
-        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
-        // Fallback to legacy mono.dll for Unity < 5.4 builds.
-        if (session->gameBuildId.empty()) {
-            session->gameBuildId = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
-        }
+        session->gameBuildId   = CurrentGameBuildId();
         session->gameSessionId = Snapshot::SessionManager::GameSessionId();
         session->instanceCap   = instanceCap;
         session->arrayCap      = arrayCap;
@@ -4294,8 +4294,8 @@ void RegisterCoreHandlers() {
         // session is std::move'd into the SessionManager before the Begin
         // response is built (echoing session->… there would be use-after-move).
         const bool        effValueStructFields = args.value("valueStructFields", true);
-        const std::size_t effStructMemberCap   = args.value("structMemberCap",
-                                                            static_cast<std::size_t>(32));
+        const std::size_t effStructMemberCap   = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("structMemberCap", std::int64_t{32}), 32u, 256u);
         session->valueStructFields = effValueStructFields;
         session->structMemberCap   = effStructMemberCap;
         session->plan.reserve(descs.size());
@@ -6261,8 +6261,8 @@ void RegisterCoreHandlers() {
             ValueScanDefaultRetain(), hardCap);
         const std::size_t rawCapPerSlot = ClampCap(
             static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
         const std::size_t perInstanceLeafCap = 256;
 
         // Phase 1 — raw scan every task (pure SafeReadBytes; no mono_* APIs).
@@ -6391,11 +6391,11 @@ void RegisterCoreHandlers() {
         if (!args.contains("address") || !parseAddr(args["address"], addr)) {
             return json{{"error", "missing/invalid 'address'"}};
         }
-        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256).
+        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256, max 4096, C-L5).
         std::size_t dictPairCap = kDictDefaultPairCap;
         if (args.contains("dictLimit") && args["dictLimit"].is_number()) {
-            const long long dl = args["dictLimit"].get<long long>();
-            if (dl > 0) dictPairCap = static_cast<std::size_t>(dl);
+            dictPairCap = Discrete::ExportHelpers::ClampRpcLimit(
+                args["dictLimit"].get<std::int64_t>(), kDictDefaultPairCap, 4096u);
         }
         std::string err;
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
@@ -7024,9 +7024,22 @@ void RegisterCoreHandlers() {
               }
               else if (ty == "char")   { out.kind = CallArgKind::Char;
                   if (a.contains("value")) {
-                      if      (a["value"].is_string() && !a["value"].get<std::string>().empty())
-                                                          out.u64 = static_cast<std::uint8_t>(a["value"].get<std::string>()[0]);
-                      else if (a["value"].is_number())     out.u64 = a["value"].get<std::uint64_t>();
+                      if (a["value"].is_string()) {
+                          std::uint16_t ch = 0;
+                          if (!Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit(
+                                  a["value"].get_ref<const std::string&>(), ch)) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value not a valid UTF-8 char"}};
+                          }
+                          out.u64 = ch;
+                      } else if (a["value"].is_number_unsigned()) {
+                          out.u64 = a["value"].get<std::uint64_t>();
+                      } else if (a["value"].is_number_integer()) {
+                          const std::int64_t iv = a["value"].get<std::int64_t>();
+                          if (iv < 0 || iv > 0xFFFF) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value out of range for char"}};
+                          }
+                          out.u64 = static_cast<std::uint64_t>(iv);
+                      }
                   }
               }
               else if (ty == "string") {
@@ -8208,7 +8221,7 @@ void RegisterCoreHandlers() {
         // build appears.
         const ProcessMemorySnapshot memBeforeIl = QueryProcessMemory();
         if (memBeforeIl.pointerSize == 4 &&
-            memBeforeIl.privateUsage >= kX86PrivateUsageRefuseThreshold) {
+            memBeforeIl.privateUsage >= QueryX86PrivateUsageRefuseThreshold()) {
             const double gb = memBeforeIl.privateUsage / (1024.0 * 1024.0 * 1024.0);
             return json{
                 {"error",
@@ -8226,9 +8239,10 @@ void RegisterCoreHandlers() {
         // budget = pre-snapshot private usage + headroom, headroom clamped to
         // a fraction of free RAM. When the game's private usage crosses it the
         // decode stops and the response reports truncatedByMemory.
-        std::uint64_t memHeadroomIl =
-            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
-        if (memHeadroomIl == 0) memHeadroomIl = kSnapshotDefaultHeadroomBytes;
+        const std::int64_t reqHeadroomIlMB = args.value("memHeadroomMB", std::int64_t{0});
+        std::uint64_t memHeadroomIl = (reqHeadroomIlMB > 0)
+            ? static_cast<std::uint64_t>(reqHeadroomIlMB) * 1024ull * 1024ull
+            : kSnapshotDefaultHeadroomBytes;
         if (const std::uint64_t availIl = QueryAvailablePhysBytes(); availIl > 0) {
             const auto cap = static_cast<std::uint64_t>(availIl * kSnapshotAvailPhysFraction);
             if (memHeadroomIl > cap) memHeadroomIl = cap;
@@ -8305,7 +8319,7 @@ void RegisterCoreHandlers() {
 
         auto session = std::make_unique<Snapshot::Session>();
         session->capturedAt    = Snapshot::CapturedAtUtcNow();
-        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
+        session->gameBuildId   = CurrentGameBuildId();
         session->gameSessionId = Snapshot::SessionManager::GameSessionId();
         session->instanceCap   = instanceCap;
         session->arrayCap      = arrayCap;
@@ -8320,8 +8334,8 @@ void RegisterCoreHandlers() {
         // Phase 31-2 (Phase B) — generic value-type struct fan-out (see Mono path).
         // Locals because session is moved before the Begin response is built.
         const bool        effValueStructFields = args.value("valueStructFields", true);
-        const std::size_t effStructMemberCap   = args.value("structMemberCap",
-                                                            static_cast<std::size_t>(32));
+        const std::size_t effStructMemberCap   = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("structMemberCap", std::int64_t{32}), 32u, 256u);
         session->valueStructFields = effValueStructFields;
         session->structMemberCap   = effStructMemberCap;
         session->plan.reserve(descs.size());
@@ -9648,8 +9662,8 @@ void RegisterCoreHandlers() {
             ValueScanDefaultRetain(), hardCap);
         const std::size_t rawCapPerSlot = ClampCap(
             static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
         const std::size_t perInstanceLeafCap = 256;
 
         // Phase 1 — raw scan every task (pure SafeReadBytes; no runtime APIs).
@@ -9772,11 +9786,11 @@ void RegisterCoreHandlers() {
         if (!args.contains("address") || !parseAddr(args["address"], addr)) {
             return json{{"error", "missing/invalid 'address'"}};
         }
-        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256).
+        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256, max 4096, C-L5).
         std::size_t dictPairCap = kDictDefaultPairCap;
         if (args.contains("dictLimit") && args["dictLimit"].is_number()) {
-            const long long dl = args["dictLimit"].get<long long>();
-            if (dl > 0) dictPairCap = static_cast<std::size_t>(dl);
+            dictPairCap = Discrete::ExportHelpers::ClampRpcLimit(
+                args["dictLimit"].get<std::int64_t>(), kDictDefaultPairCap, 4096u);
         }
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -10281,9 +10295,22 @@ void RegisterCoreHandlers() {
               }
               else if (ty == "char")   { out.kind = CallArgKind::Char;
                   if (a.contains("value")) {
-                      if      (a["value"].is_string() && !a["value"].get<std::string>().empty())
-                                                          out.u64 = static_cast<std::uint8_t>(a["value"].get<std::string>()[0]);
-                      else if (a["value"].is_number())     out.u64 = a["value"].get<std::uint64_t>();
+                      if (a["value"].is_string()) {
+                          std::uint16_t ch = 0;
+                          if (!Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit(
+                                  a["value"].get_ref<const std::string&>(), ch)) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value not a valid UTF-8 char"}};
+                          }
+                          out.u64 = ch;
+                      } else if (a["value"].is_number_unsigned()) {
+                          out.u64 = a["value"].get<std::uint64_t>();
+                      } else if (a["value"].is_number_integer()) {
+                          const std::int64_t iv = a["value"].get<std::int64_t>();
+                          if (iv < 0 || iv > 0xFFFF) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value out of range for char"}};
+                          }
+                          out.u64 = static_cast<std::uint64_t>(iv);
+                      }
                   }
               }
               else if (ty == "string") {

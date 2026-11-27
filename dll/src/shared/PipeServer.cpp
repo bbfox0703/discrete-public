@@ -165,7 +165,11 @@ json Dispatch(const json& request) {
     }
     if (!handler) return BuildError(id, -32601, "unknown cmd: " + cmd);
 
-    json args = request.contains("args") ? request["args"] : json::object();
+    // C-L5: Treat omitted, null, or non-object "args" as an empty JSON object
+    // instead of passing null into handlers (where args.value(...) throws 306).
+    json args = (request.contains("args") && request["args"].is_object())
+        ? request["args"]
+        : json::object();
     try {
         json result = handler(args);
         return json{{"id", std::move(id)}, {"result", std::move(result)}};

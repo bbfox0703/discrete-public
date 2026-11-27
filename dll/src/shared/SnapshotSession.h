@@ -228,8 +228,10 @@ private:
 // may not match" without paying SHA256 cost on every snapshot. Returns
 // hex string from FNV-1a hash of (module path + size + last-write-time).
 // `moduleName` is the OS module name (e.g. "GameAssembly.dll" for IL2CPP,
-// "mono-2.0-bdwgc.dll" / "mono.dll" for Mono); falls back to host EXE
-// name when the module isn't loaded.
+// "mono-2.0-bdwgc.dll" / "mono.dll" for Mono). Returns an empty string when a
+// non-null `moduleName` is not loaded so callers can try secondary module names
+// (e.g. legacy mono.dll) before explicitly requesting the host EXE with nullptr
+// (C-L7).
 std::string ComputeGameBuildId(const wchar_t* moduleName);
 
 // Compute / cached: the current ISO-8601 UTC timestamp string. Called
