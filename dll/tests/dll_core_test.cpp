@@ -31,6 +31,7 @@
 #include "ScanCancel.h"
 #include "SehFilter.h"
 #include "SnapshotSession.h"
+#include "ThrottledRetry.h"
 #include "ValueScanSession.h"
 
 #include <windows.h>
@@ -2613,6 +2614,78 @@ void Test_CL6_SessionOwnershipAndSharedClasses() {
     }
 }
 
+// ============================================================================
+// B-L1 + B-L5 — RetryPolicy throttle & SafePeScan::ScanReadableSpans page
+// fallback preserving readable pages before AND after a PAGE_NOACCESS page
+// ============================================================================
+void Test_BL1_BL5_RetryThrottleAndPageFallback() {
+    // 1. B-L1: RetryPolicy::CanRetryNow & NonZeroTick
+    {
+        using Discrete::RetryPolicy::CanRetryNow;
+        using Discrete::RetryPolicy::NonZeroTick;
+        CHECK(NonZeroTick(0u) == 1u);
+        CHECK(NonZeroTick(42u) == 42u);
+        CHECK(CanRetryNow(0u, 100u, 1000u));
+        CHECK(!CanRetryNow(1000u, 1000u, 1000u));
+        CHECK(!CanRetryNow(1000u, 1999u, 1000u));
+        CHECK(CanRetryNow(1000u, 2000u, 1000u));
+        // Unsigned wraparound safety
+        const std::uint64_t nearMax = (std::numeric_limits<std::uint64_t>::max)() - 100u;
+        CHECK(!CanRetryNow(nearMax, 500u, 1000u));
+        CHECK(CanRetryNow(nearMax, 950u, 1000u));
+    }
+
+    // 2. B-L5: 4-page region with page 2 set to PAGE_NOACCESS; single 16 KiB
+    //    chunk fails whole-chunk read, falls back to 4 KiB pages, visits
+    //    pages 0+1 (8 KiB coalesced BEFORE bad page) and page 3 (4 KiB AFTER),
+    //    and reports failedPages == 1.
+    {
+        constexpr std::size_t kPage = 4096u;
+        constexpr std::size_t kTotal = 4u * kPage;
+        auto* mem = static_cast<std::uint8_t*>(
+            ::VirtualAlloc(nullptr, kTotal, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        CHECK(mem != nullptr);
+        if (mem != nullptr) {
+            std::memset(mem, 0, kTotal);
+            const std::uintptr_t needle = static_cast<std::uintptr_t>(0x12345678u);
+            // Place needle in page 0, page 1 (before bad page), and page 3 (after bad page)
+            std::memcpy(mem + 64u, &needle, sizeof(needle));
+            std::memcpy(mem + kPage + 128u, &needle, sizeof(needle));
+            std::memcpy(mem + 3u * kPage + 256u, &needle, sizeof(needle));
+
+            DWORD oldProt = 0;
+            CHECK(::VirtualProtect(mem + 2u * kPage, kPage, PAGE_NOACCESS, &oldProt) != FALSE);
+
+            std::vector<std::uint8_t> scratch;
+            std::size_t failedPages = 0;
+            std::size_t spanCount = 0;
+            std::size_t totalReadBytes = 0;
+            std::size_t needleHits = 0;
+            Discrete::SafePeScan::ScanReadableSpans(
+                mem, kTotal, /*chunkBytes=*/kTotal, /*overlapBytes=*/0u, scratch,
+                [&](const std::uint8_t* local, const std::uint8_t*, std::size_t len) -> bool {
+                    ++spanCount;
+                    totalReadBytes += len;
+                    for (std::size_t i = 0; i + sizeof(needle) <= len; i += sizeof(needle)) {
+                        std::uintptr_t v = 0;
+                        std::memcpy(&v, local + i, sizeof(v));
+                        if (v == needle) ++needleHits;
+                    }
+                    return true;
+                },
+                &failedPages);
+
+            CHECK(failedPages == 1u);
+            CHECK(spanCount == 2u);
+            CHECK(totalReadBytes == 3u * kPage);
+            CHECK(needleHits == 3u);
+
+            ::VirtualProtect(mem + 2u * kPage, kPage, PAGE_READWRITE, &oldProt);
+            ::VirtualFree(mem, 0, MEM_RELEASE);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2640,6 +2713,7 @@ int main() {
     Test_DM6_MethodTokenPointerIndex();
     Test_CL4_CL5_CL7_ValidationAndBuildId();
     Test_CL6_SessionOwnershipAndSharedClasses();
+    Test_BL1_BL5_RetryThrottleAndPageFallback();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

@@ -75,7 +75,8 @@ inline void ScanReadableSpans(const std::uint8_t* base,
                               std::size_t chunkBytes,
                               std::size_t overlapBytes,
                               std::vector<std::uint8_t>& scratch,
-                              OnSpanFn&& onSpan) {
+                              OnSpanFn&& onSpan,
+                              std::size_t* outFailedPages = nullptr) {
     if (base == nullptr || size == 0 || chunkBytes == 0) return;
     if (overlapBytes >= chunkBytes) overlapBytes = 0;
     if (scratch.size() < chunkBytes) scratch.resize(chunkBytes);
@@ -106,13 +107,16 @@ inline void ScanReadableSpans(const std::uint8_t* base,
                         spanStart = pos;
                         inSpan = true;
                     }
-                } else if (inSpan) {
-                    if (!onSpan(scratch.data() + spanStart,
-                                chunkAddr + spanStart,
-                                pos - spanStart)) {
-                        return;
+                } else {
+                    if (outFailedPages != nullptr) ++(*outFailedPages);
+                    if (inSpan) {
+                        if (!onSpan(scratch.data() + spanStart,
+                                    chunkAddr + spanStart,
+                                    pos - spanStart)) {
+                            return;
+                        }
+                        inSpan = false;
                     }
-                    inSpan = false;
                 }
                 pos += step;
             }

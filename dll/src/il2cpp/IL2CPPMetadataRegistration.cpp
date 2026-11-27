@@ -39,9 +39,12 @@
 #include "../shared/Memory.h"
 #include "../shared/ModuleHelper.h"
 #include "../shared/SafeChunkRead.h"
+#include "../shared/ThrottledRetry.h"
 
 #include <windows.h>
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -50,7 +53,6 @@ namespace Discrete::IL2CPP::MetadataRegistration {
 
 namespace {
 
-std::once_flag g_once;
 struct State {
     bool                    found               = false;
     const std::uint8_t*     reg                 = nullptr;
@@ -60,7 +62,12 @@ struct State {
     // count at +0x70).
     const void* const*      metadataUsages      = nullptr;
     std::size_t             metadataUsagesCount = 0;
-} g_state;
+};
+
+// B-L1: Lock-free publish-once on success; 1s throttled retry on failure.
+std::atomic<const State*> g_foundState{nullptr};
+std::mutex                g_findMu;
+std::uint64_t             g_lastFailTickMs = 0;
 
 constexpr std::uint32_t kMaxCount32    = 1u << 27;        // 134M, generous
 constexpr std::uint64_t kMaxCount64    = 1ull << 32;
@@ -158,13 +165,13 @@ bool TestCandidate(const std::uint8_t* localBuf, std::string* whyNot = nullptr) 
     return true;
 }
 
-void DoFind() {
+bool DoFind(State& outState) {
     auto* base = reinterpret_cast<const std::uint8_t*>(
         ModuleHelper::GetModuleBase(MagicStrings::ModuleIL2CPP));
     if (base == nullptr) {
         Log::Write(MagicStrings::LogCategoryInit,
             "MetadataRegistration: GameAssembly.dll not loaded");
-        return;
+        return false;
     }
 
     auto sections = SafePeScan::ListInitDataSectionsSafe(base);
@@ -221,22 +228,22 @@ void DoFind() {
                         continue;
                     }
 
-                    g_state.found = true;
-                    g_state.reg   = pReal;
+                    outState.found = true;
+                    outState.reg   = pReal;
                     std::uint32_t typesCnt = 0;
                     std::memcpy(&typesCnt, pLocal + 0x30, 4);
                     std::uintptr_t typesPtr = 0;
                     std::memcpy(&typesPtr, pLocal + 0x38, 8);
-                    g_state.typesCount = typesCnt;
-                    g_state.types = reinterpret_cast<const void* const*>(typesPtr);
+                    outState.typesCount = typesCnt;
+                    outState.types = reinterpret_cast<const void* const*>(typesPtr);
 
                     // Phase 28b-v3.1 — pull metadataUsages too (offsets 0x70/0x78).
                     std::uint64_t usagesCnt = 0;
                     std::memcpy(&usagesCnt, pLocal + 0x70, 8);
                     std::uintptr_t usagesPtr = 0;
                     std::memcpy(&usagesPtr, pLocal + 0x78, 8);
-                    g_state.metadataUsagesCount = static_cast<std::size_t>(usagesCnt);
-                    g_state.metadataUsages =
+                    outState.metadataUsagesCount = static_cast<std::size_t>(usagesCnt);
+                    outState.metadataUsages =
                         reinterpret_cast<const void* const*>(usagesPtr);
 
                     char line[256];
@@ -257,7 +264,7 @@ void DoFind() {
                 return true;
             });
 
-        if (hitFound) return;
+        if (hitFound) return true;
     }
 
     char line[256];
@@ -266,29 +273,52 @@ void DoFind() {
         "%d near-misses logged)",
         scanBytes, sections.size(), nearMisses);
     Log::Write(MagicStrings::LogCategoryInit, line);
+    return false;
+}
+
+const State* EnsureFound() {
+    if (const State* p = g_foundState.load(std::memory_order_acquire)) {
+        return p;
+    }
+    std::lock_guard<std::mutex> lk(g_findMu);
+    if (const State* p = g_foundState.load(std::memory_order_relaxed)) {
+        return p;
+    }
+    const std::uint64_t now = ::GetTickCount64();
+    if (!RetryPolicy::CanRetryNow(g_lastFailTickMs, now)) {
+        return nullptr;
+    }
+    State local;
+    if (DoFind(local) && local.found) {
+        auto* published = new State(local);
+        g_foundState.store(published, std::memory_order_release);
+        return published;
+    }
+    g_lastFailTickMs = RetryPolicy::NonZeroTick(::GetTickCount64());
+    return nullptr;
 }
 
 }  // namespace
 
 bool Find() {
-    std::call_once(g_once, DoFind);
-    return g_state.found;
+    return EnsureFound() != nullptr;
 }
 
-const void*        GetBase()                { Find(); return g_state.reg; }
-const void* const* TypesArray()             { Find(); return g_state.types; }
-std::size_t        TypesCount()             { Find(); return g_state.typesCount; }
-const void* const* MetadataUsagesArray()    { Find(); return g_state.metadataUsages; }
-std::size_t        MetadataUsagesCount()    { Find(); return g_state.metadataUsagesCount; }
+const void*        GetBase()                { const State* s = EnsureFound(); return s ? s->reg                 : nullptr; }
+const void* const* TypesArray()             { const State* s = EnsureFound(); return s ? s->types               : nullptr; }
+std::size_t        TypesCount()             { const State* s = EnsureFound(); return s ? s->typesCount          : 0u; }
+const void* const* MetadataUsagesArray()    { const State* s = EnsureFound(); return s ? s->metadataUsages      : nullptr; }
+std::size_t        MetadataUsagesCount()    { const State* s = EnsureFound(); return s ? s->metadataUsagesCount : 0u; }
 
 std::uint8_t GetTypeTag(std::int32_t typeIndex) {
-    if (!Find()) return 0;
-    if (g_state.types == nullptr || typeIndex < 0 ||
-        static_cast<std::size_t>(typeIndex) >= g_state.typesCount) {
+    const State* s = EnsureFound();
+    if (s == nullptr) return 0;
+    if (s->types == nullptr || typeIndex < 0 ||
+        static_cast<std::size_t>(typeIndex) >= s->typesCount) {
         return 0;
     }
     const void* type = nullptr;
-    if (!Memory::SafeReadBytes(g_state.types + typeIndex, &type, sizeof(type))) {
+    if (!Memory::SafeReadBytes(s->types + typeIndex, &type, sizeof(type))) {
         return 0;
     }
     if (type == nullptr) return 0;

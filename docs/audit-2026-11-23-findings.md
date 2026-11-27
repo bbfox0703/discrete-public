@@ -315,7 +315,7 @@
 
 ### Low
 
-**B-L1 · resolver / offset discovery 的「失敗即永久」與「無限重試」兩種極端並存（雙胞胎漂移）**
+**B-L1 · resolver / offset discovery 的「失敗即永久」與「無限重試」兩種極端並存（雙胞胎漂移） — ✅ FIXED (2026-11-27)**
 - 位置：`IL2CPPResolver.cpp:18`、`:138-141`（`std::call_once`）；`IL2CPPStaticFieldsOffset.cpp:36`、`:167-169`；`IL2CPPAddressFinder.cpp:468-543`（`g_ecOnce`）；`IL2CPPMetadataRegistration.cpp:54`、`:274-277`；`IL2CPPLazyInitSlotScanner.cpp:28`、`:370-373`；對照 `MonoResolver.cpp:192-206`
 - 成因：Mono 端特地修掉了「`call_once` 在第一次**呼叫**就鎖定結果」的 bug（註解寫得很清楚），IL2CPP 端的 resolver 與四個 discovery 仍然是 `call_once`：如果在 runtime 還沒初始化完成時被觸發（static_fields 都還是 null、class cache 還是空的），失敗結果會保留到行程結束，`scan` RPC 也救不回來。反過來，Mono 只要缺少任何一個 required export，**每一次** `GetResolver()` 都會重跑 `DoResolve`：重寫 `g_resolver`（包含 `std::wstring moduleName`），而其他 thread 正在沒有鎖的狀態下讀它（data race），同時每次都寫「missing export」log（log 洪水）。
 - 修法：統一成「成功才鎖定，失敗時以節流的方式重試」（例如記錄上次嘗試的 tick，間隔 ≥ 1 秒才重試）；Mono 的 `DoResolve` 先在 local `Resolver` 上完成，再在鎖內整體 swap，讀取端也改成拿一份 snapshot（或 `std::shared_ptr<const Resolver>`）。
@@ -332,12 +332,12 @@
 - Resolver 綁定了但從未使用：`mono_domain_get`（而且是 **required**，`MonoResolver.cpp:69`，缺少它會讓整個 Mono backend 停擺）、`string_chars` / `string_length`（兩邊都是）、`mono_object_get_size`（B-H2 的修法可以用上）。
 - 修法：刪除或接上；`mono_domain_get` 改用 `optBind`。
 
-**B-L4 · `IsKnownNotArray` 的上限語意與註解相反，而且容器沒有比照 heap-leak 模式**
+**B-L4 · `IsKnownNotArray` 的上限語意與註解相反，而且容器沒有比照 heap-leak 模式 — ✅ FIXED (2026-11-27)**
 - 位置：`IL2CPPAddressFinder.cpp:565-588`、`:628`
 - 成因：註解說「滿了之後，未知值一律視為 non-array（never hangs）」，實作卻是 `RememberNotArray` 回 false 後呼叫端直接忽略，下一次遇到同一個值又會重新 probe（VirtualQuery），正是註解想避免的 300 秒情境。`g_notArrayKlass`（最多 524K 個 node）是一般的 static 物件，行程結束時會逐一解構，也就是 Cache 註解中提到的 shutdown 卡頓。
 - 修法：加一個 `std::atomic<bool> g_notArrayFull`，滿了之後 `LooksLikeValueTypeElementArray` 對未知值直接回 false；容器改成 heap-leaked。
 
-**B-L5 · chunk 讀取失敗時只前進 4 KB，會跳過壞頁**之前**的正常頁**
+**B-L5 · chunk 讀取失敗時只前進 4 KB，會跳過壞頁**之前**的正常頁 — ✅ FIXED (2026-11-27)**
 - 位置：`IL2CPPClassPointerScanner.cpp:126-135`；`IL2CPPLazyInitSlotScanner.cpp:233-237`；`IL2CPPClassReferenceDiagnostic.cpp:150-155`
 - 成因：`SafeReadBytes` 一次讀 1 MB，只要其中任何一頁不可讀就整段失敗；`pos += 4096` 之後再讀 1 MB 仍然包含同一個壞頁。壞頁之前（最多將近 1 MB）的正常頁永遠不會被掃到，而且會白白重試約 256 次。
 - 修法：失敗時把這個 chunk 改成逐頁（4 KB）讀取，只跳過真正讀不到的頁。

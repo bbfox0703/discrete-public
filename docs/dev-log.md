@@ -12,6 +12,22 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1581) — Fix B-L1 + B-L4 + B-L5 (race-free throttled-retry resolvers & discoveries, `IsKnownNotArray` cap enforcement & heap-leaked memos, 4 KiB page-fallback chunk scanning)
+
+- **Bug fixes (`B-L1`, `B-L4`, `B-L5`):**
+  - **`B-L1` (`dll/src/shared/ThrottledRetry.h`, `dll/src/mono/MonoResolver.cpp`, `dll/src/il2cpp/{IL2CPPResolver,IL2CPPStaticFieldsOffset,IL2CPPMetadataRegistration,IL2CPPLazyInitSlotScanner,IL2CPPAddressFinder}.cpp`):**
+    - Added shared `RetryPolicy::CanRetryNow` / `NonZeroTick` (`1000 ms` failure retry throttle) and unified both resolvers (`MonoResolver`, `IL2CPPResolver`) and all four IL2CPP lazy discoveries (`IL2CPPStaticFieldsOffset`, `IL2CPPAddressFinder::GetElementClassOffset`, `IL2CPPMetadataRegistration`, `IL2CPPLazyInitSlotScanner`) on the same "latch permanently on success via atomic acquire/release publication, throttled retry on failure" contract.
+    - Eliminated the `MonoResolver` data race (where failed retries mutated `g_resolver.moduleName` and slots in place while concurrent threads read them) by resolving into a local `Resolver`, returning an immutable `g_unresolved` fallback on failure, and publishing an immutable heap-leaked singleton on success.
+  - **`B-L4` (`dll/src/il2cpp/IL2CPPAddressFinder.cpp`):**
+    - Moved `arrayKlassSet` and `notArrayKlass` into a heap-leaked `ArrayMemoState` singleton (avoiding process-exit teardown over up to 524K `unordered_set` nodes) and added `std::atomic<bool> notArrayFull` enforced in `LooksLikeValueTypeElementArray` so hitting `kNotArrayCap` genuinely stops probing unknown values (and resets cleanly in `ResetArrayKlassMemos`).
+  - **`B-L5` (`dll/src/shared/SafeChunkRead.h`, `dll/src/il2cpp/{IL2CPPClassPointerScanner,IL2CPPLazyInitSlotScanner,IL2CPPClassReferenceDiagnostic}.cpp`):**
+    - Extended `SafePeScan::ScanReadableSpans` with optional `std::size_t* outFailedPages` tracking and migrated `IL2CPPClassPointerScanner`, `IL2CPPLazyInitSlotScanner`, and `IL2CPPClassReferenceDiagnostic::ScanRangeForPointer` off `pos += 4096` whole-chunk-retry loops so a single `PAGE_NOACCESS` / `PAGE_GUARD` page inside a 1 MiB chunk falls back to 4 KiB page reads without skipping up to ~1 MiB of readable pages ahead of it.
+  - Added C++ unit test suite `Test_BL1_BL5_RetryThrottleAndPageFallback` in `dll/tests/dll_core_test.cpp` (+14 checks on x64 and x86, including a live `VirtualAlloc` + `PAGE_NOACCESS` middle-page test).
+  - Marked `B-L1`, `B-L4`, and `B-L5` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1581) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 867 passed (x64) / 867 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1580) — Fix C-L1 + C-L2 (completes 100% of Block C: eliminate literal command names & dead `MagicStrings`, add UI `PipeCommands`, document all 17 missing RPCs in `pipe-protocol.md`)
 
 - **Bug fixes (`C-L1`, `C-L2` — completes 100% of Block C Critical/High/Medium/Low findings):**

@@ -10,9 +10,11 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
 #include "../shared/SehFilter.h"
+#include "../shared/ThrottledRetry.h"
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -34,8 +36,12 @@ void* SehStaticDataProbe(fn_class_get_static_data fn, Il2CppClass* k) {
 }
 #pragma warning(pop)
 
-std::once_flag g_once;
-std::size_t    g_offset = 0;  // 0 = unset / discovery failed
+// B-L1: Latch permanently on first discovered non-zero offset; on failure
+// (e.g. runtime still booting, no classes have static_fields yet), retry at
+// most once per second instead of freezing at 0 for the process lifetime.
+std::atomic<std::size_t> g_offset{0};
+std::mutex               g_discoverMu;
+std::uint64_t            g_lastFailTickMs = 0;
 
 // Search window. Empirical bounds: Il2CppClass is ~232 bytes on v29
 // (Unity 2021.3), ~280 bytes on v39 (Unity 6.1). 1024 bytes gives us
@@ -61,27 +67,27 @@ std::string Hex(std::uintptr_t v) {
     return buf;
 }
 
-void DiscoverOffset() {
+std::size_t DiscoverOffset() {
     const auto& r = GetResolver();
     if (!r.resolved || r.class_get_static_data == nullptr) {
         Log::Write(MagicStrings::LogCategoryInit,
             "IL2CPPStaticFieldsOffset: il2cpp_class_get_static_data unbound — "
             "Phase 28b-v2 chain detection unavailable");
-        return;
+        return 0;
     }
 
     Il2CppDomain* domain = GetDomain();
     if (domain == nullptr) {
         Log::Write(MagicStrings::LogCategoryInit,
             "IL2CPPStaticFieldsOffset: il2cpp domain unavailable");
-        return;
+        return 0;
     }
 
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) {
         Log::Write(MagicStrings::LogCategoryInit,
             "IL2CPPStaticFieldsOffset: il2cpp thread_attach failed");
-        return;
+        return 0;
     }
 
     auto assemblies = EnumerateAssemblies();
@@ -98,7 +104,7 @@ void DiscoverOffset() {
                     std::to_string(kMaxClassesToProbe) +
                     " classes, none had non-null static_fields — "
                     "giving up (Phase 28b-v2 unavailable on this target)");
-                return;
+                return 0;
             }
 
             void* staticData = SehStaticDataProbe(r.class_get_static_data, ce.klass);
@@ -127,14 +133,13 @@ void DiscoverOffset() {
                     break;
                 }
                 if (probedVal == targetVal) {
-                    g_offset = off;
                     Log::Write(MagicStrings::LogCategoryInit,
                         "IL2CPPStaticFieldsOffset: discovered offsetof(static_fields)=" +
                         Hex(off) + " (probed via " +
                         (ce.ns.empty() ? ce.name : ce.ns + "." + ce.name) +
                         ", class " + std::to_string(classesProbed) +
                         " in scan, static_fields=" + Hex(targetVal) + ")");
-                    return;
+                    return off;
                 }
             }
 
@@ -153,7 +158,7 @@ void DiscoverOffset() {
                 " bytes of class struct — discovery failed (Phase "
                 "28b-v2 unavailable; report this Unity version + IL2CPP "
                 "metadata version for investigation)");
-            return;
+            return 0;
         }
     }
     Log::Write(MagicStrings::LogCategoryInit,
@@ -161,13 +166,30 @@ void DiscoverOffset() {
         std::to_string(classesProbed) +
         " classes across " + std::to_string(assemblies.size()) +
         " assemblies, none had non-null static_fields — discovery failed");
+    return 0;
 }
 
 }  // namespace
 
 std::size_t GetStaticFieldsOffsetInClass() {
-    std::call_once(g_once, DiscoverOffset);
-    return g_offset;
+    if (const std::size_t cached = g_offset.load(std::memory_order_acquire); cached != 0) {
+        return cached;
+    }
+    std::lock_guard<std::mutex> lk(g_discoverMu);
+    if (const std::size_t cached = g_offset.load(std::memory_order_relaxed); cached != 0) {
+        return cached;
+    }
+    const std::uint64_t now = ::GetTickCount64();
+    if (!RetryPolicy::CanRetryNow(g_lastFailTickMs, now)) {
+        return 0;
+    }
+    const std::size_t off = DiscoverOffset();
+    if (off != 0) {
+        g_offset.store(off, std::memory_order_release);
+        return off;
+    }
+    g_lastFailTickMs = RetryPolicy::NonZeroTick(::GetTickCount64());
+    return 0;
 }
 
 }  // namespace Discrete::IL2CPP

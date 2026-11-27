@@ -11,10 +11,13 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
 #include "../shared/ModuleHelper.h"
+#include "../shared/SafeChunkRead.h"
+#include "../shared/ThrottledRetry.h"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -25,8 +28,12 @@ namespace Discrete::IL2CPP {
 
 namespace {
 
-std::once_flag                 g_once;
-std::vector<LazyInitSlot>      g_slots;
+// B-L1: Publish-once on successful scan; immutable empty fallback with 1s
+// throttled retry if GameAssembly.dll / sections were not ready on first call.
+std::atomic<const std::vector<LazyInitSlot>*> g_slotsPtr{nullptr};
+const std::vector<LazyInitSlot>               g_emptySlots{};
+std::mutex                                    g_scanMu;
+std::uint64_t                                 g_lastFailTickMs = 0;
 
 // Section ranges discovered at scan time. Both ranges are absolute VAs
 // (NOT RVAs); empty vector means no matching section found.
@@ -129,12 +136,12 @@ inline std::int32_t ReadInt32LE(const std::uint8_t* p) noexcept {
           | (static_cast<std::uint32_t>(p[3]) << 24));
 }
 
-void DoScan() {
+bool DoScan(std::vector<LazyInitSlot>& outSlots) {
     void* gaBase = ModuleHelper::GetModuleBase(MagicStrings::ModuleIL2CPP);
     if (gaBase == nullptr) {
         Log::Write(MagicStrings::LogCategoryWalk,
             "LazyInitSlotScanner: GameAssembly.dll not loaded");
-        return;
+        return false;
     }
 
     // ---- Source sections: ONLY the `il2cpp` section ----
@@ -150,7 +157,7 @@ void DoScan() {
     if (allExecSections.empty()) {
         Log::Write(MagicStrings::LogCategoryWalk,
             "LazyInitSlotScanner: no exec sections in GameAssembly.dll");
-        return;
+        return false;
     }
     std::vector<NamedSection> scanSections;
     for (const auto& s : allExecSections) {
@@ -166,7 +173,7 @@ void DoScan() {
         Log::Write(MagicStrings::LogCategoryWalk,
             "LazyInitSlotScanner: no `il2cpp` section in GameAssembly.dll "
             "(this likely means a non-IL2CPP target; v3 scan unavailable)");
-        return;
+        return false;
     }
 
     // ---- Call-target destinations: ANY exec section of the module ----
@@ -184,7 +191,7 @@ void DoScan() {
     if (dataSections.empty()) {
         Log::Write(MagicStrings::LogCategoryWalk,
             "LazyInitSlotScanner: no data sections in GameAssembly.dll");
-        return;
+        return false;
     }
 
     // 1 MB chunk + tail overlap. Signature length is 24 bytes (lea 7 +
@@ -192,7 +199,8 @@ void DoScan() {
     // plenty of margin.
     constexpr std::size_t kChunkSize    = 1024u * 1024u;
     constexpr std::size_t kTailOverlap  = 32u;
-    std::vector<std::uint8_t> buf(kChunkSize + kTailOverlap);
+    std::vector<std::uint8_t> buf;
+    buf.reserve(kChunkSize);
 
     // Post-call IL2CPP class-init signature bytes (15 bytes total, including
     // disp32 wildcards via the mov-byte instruction).
@@ -220,156 +228,167 @@ void DoScan() {
 
     for (const auto& sec : scanSections) {
         const std::size_t size = sec.hi - sec.lo;
-        std::size_t pos = 0;
-        while (pos < size) {
-            std::size_t want     = (size - pos) < kChunkSize
-                ? (size - pos) : kChunkSize;
-            std::size_t readWant = want + kTailOverlap;
-            if (pos + readWant > size) readWant = size - pos;
-            if (readWant < 24) break;
+        // B-L5: Use SafePeScan::ScanReadableSpans so an AC-stripped page inside
+        // a 1 MiB chunk falls back to 4 KiB page-by-page reads instead of
+        // dropping readable code before the bad page.
+        SafePeScan::ScanReadableSpans(
+            reinterpret_cast<const std::uint8_t*>(sec.lo),
+            size,
+            kChunkSize,
+            kTailOverlap,
+            buf,
+            [&](const std::uint8_t* localSpan,
+                const std::uint8_t* realSpanBase,
+                std::size_t spanLen) -> bool {
+                bytesScanned += spanLen;
+                if (spanLen < 24u) return true;
+                const std::uintptr_t spanVa = reinterpret_cast<std::uintptr_t>(realSpanBase);
+                const std::size_t scanEnd = spanLen - 24u + 1u;
 
-            const std::uint8_t* secBase =
-                reinterpret_cast<const std::uint8_t*>(sec.lo);
-            if (!Memory::SafeReadBytes(secBase + pos, buf.data(), readWant)) {
-                ++failedReads;
-                pos += 4096u;
-                continue;
-            }
+                for (std::size_t p = 0; p < scanEnd; ++p) {
+                    // ---- 1. lea reg, [rip+disp32] ----------------------------
+                    std::size_t leaLen = 0;
+                    std::int32_t leaDisp = 0;
+                    {
+                        std::size_t off = 0;
+                        if (IsRexByte(localSpan[p])) ++off;
+                        if (p + off + 6 > spanLen) continue;
+                        if (localSpan[p + off] != 0x8D) continue;
+                        if (!IsRipRelativeModrm(localSpan[p + off + 1])) continue;
+                        leaDisp = ReadInt32LE(localSpan + p + off + 2);
+                        leaLen  = off + 2 + 4;
+                    }
 
-            const std::size_t emitEnd = want;
-            const std::size_t scanEnd = (readWant >= 24)
-                ? std::min(emitEnd, readWant - 24 + 1u)
-                : 0u;
+                    // REX-skip dedup.
+                    if (leaLen == 6 && p > 0 && IsRexByte(localSpan[p - 1])) continue;
 
-            for (std::size_t p = 0; p < scanEnd; ++p) {
-                // ---- 1. lea reg, [rip+disp32] ----------------------------
-                std::size_t leaLen = 0;
-                std::int32_t leaDisp = 0;
-                {
-                    std::size_t off = 0;
-                    if (IsRexByte(buf[p])) ++off;
-                    if (p + off + 6 > readWant) continue;
-                    if (buf[p + off] != 0x8D) continue;
-                    if (!IsRipRelativeModrm(buf[p + off + 1])) continue;
-                    leaDisp = ReadInt32LE(buf.data() + p + off + 2);
-                    leaLen  = off + 2 + 4;
-                }
+                    const std::uintptr_t leaIP    = spanVa + p;
+                    const std::uintptr_t leaAfter = leaIP + leaLen;
+                    const std::uintptr_t leaTarget =
+                        leaAfter + static_cast<std::intptr_t>(leaDisp);
 
-                // REX-skip dedup.
-                if (leaLen == 6 && p > 0 && IsRexByte(buf[p - 1])) continue;
+                    if (!InRanges(dataSections, leaTarget)) continue;
+                    ++leaCandidates;
 
-                const std::uintptr_t leaIP    = sec.lo + pos + p;
-                const std::uintptr_t leaAfter = leaIP + leaLen;
-                const std::uintptr_t leaTarget =
-                    leaAfter + static_cast<std::intptr_t>(leaDisp);
+                    // ---- 2. call rel32 (immediately after lea) ---------------
+                    const std::size_t callPos = p + leaLen;
+                    if (callPos + 5 > spanLen) continue;
+                    if (localSpan[callPos] != 0xE8) continue;
 
-                if (!InRanges(dataSections, leaTarget)) continue;
-                ++leaCandidates;
+                    const std::int32_t callDisp = ReadInt32LE(localSpan + callPos + 1);
+                    const std::uintptr_t callIP    = spanVa + callPos;
+                    const std::uintptr_t callAfter = callIP + 5;
+                    const std::uintptr_t callTarget =
+                        callAfter + static_cast<std::intptr_t>(callDisp);
 
-                // ---- 2. call rel32 (immediately after lea) ---------------
-                const std::size_t callPos = p + leaLen;
-                if (callPos + 5 > readWant) continue;
-                if (buf[callPos] != 0xE8) continue;
+                    if (!InRanges(execRanges, callTarget)) continue;
 
-                const std::int32_t callDisp = ReadInt32LE(buf.data() + callPos + 1);
-                const std::uintptr_t callIP    = sec.lo + pos + callPos;
-                const std::uintptr_t callAfter = callIP + 5;
-                const std::uintptr_t callTarget =
-                    callAfter + static_cast<std::intptr_t>(callDisp);
+                    // ---- 3. Required: `lock or [rsp], 0` within next 4 bytes ----
+                    // Allow tiny gap (0-3 bytes) for compiler scheduling.
+                    const std::size_t afterCall = callPos + 5;
+                    bool sigOk = false;
+                    for (std::size_t gap = 0; gap <= 3; ++gap) {
+                        const std::size_t cand = afterCall + gap;
+                        if (cand + 5 + 7 > spanLen) break;
+                        if (std::memcmp(localSpan + cand,
+                                        kLockOrPattern, 5) != 0) continue;
+                        // Check the trailing `mov byte [rip+disp32], 1`.
+                        const std::size_t movPos = cand + 5;
+                        if (localSpan[movPos] != 0xC6) continue;
+                        if (localSpan[movPos + 1] != 0x05) continue;
+                        if (localSpan[movPos + 6] != 0x01) continue;
+                        sigOk = true;
+                        break;
+                    }
+                    if (!sigOk) { ++signatureMisses; continue; }
 
-                if (!InRanges(execRanges, callTarget)) continue;
+                    LazyInitSlot s;
+                    s.slotAddress = leaTarget;
+                    s.leaIP       = leaIP;
+                    s.callIP      = callIP;
+                    s.callTarget  = callTarget;
 
-                // ---- 3. Required: `lock or [rsp], 0` within next 4 bytes ----
-                // Allow tiny gap (0-3 bytes) for compiler scheduling.
-                const std::size_t afterCall = callPos + 5;
-                bool sigOk = false;
-                std::size_t lockOrPos = 0;
-                for (std::size_t gap = 0; gap <= 3; ++gap) {
-                    const std::size_t cand = afterCall + gap;
-                    if (cand + 5 + 7 > readWant) break;
-                    if (std::memcmp(buf.data() + cand,
-                                    kLockOrPattern, 5) != 0) continue;
-                    // Check the trailing `mov byte [rip+disp32], 1`.
-                    const std::size_t movPos = cand + 5;
-                    if (buf[movPos] != 0xC6) continue;
-                    if (buf[movPos + 1] != 0x05) continue;
-                    if (buf[movPos + 6] != 0x01) continue;
-                    sigOk = true;
-                    lockOrPos = cand;
-                    break;
-                }
-                (void)lockOrPos;
-                if (!sigOk) { ++signatureMisses; continue; }
-
-                LazyInitSlot s;
-                s.slotAddress = leaTarget;
-                s.leaIP       = leaIP;
-                s.callIP      = callIP;
-                s.callTarget  = callTarget;
-
-                // Phase 28b-v3.1 — read slot value at scan time. If high
-                // 32 bits are zero AND low 32 bits decode to a valid
-                // metadata-usage token (kind in 1..6), capture the
-                // token + decoded kind/index for later static mapping.
-                std::uint64_t slotVal = 0;
-                if (Memory::SafeReadBytes(
-                        reinterpret_cast<const void*>(leaTarget),
-                        &slotVal, sizeof(slotVal))) {
-                    const std::uint32_t hi32 =
-                        static_cast<std::uint32_t>(slotVal >> 32);
-                    const std::uint32_t lo32 =
-                        static_cast<std::uint32_t>(slotVal & 0xFFFFFFFFu);
-                    if (hi32 == 0 && lo32 != 0) {
-                        // Token-shaped. Decode kind = top 3 bits of lo32,
-                        // index = bottom 29 bits.
-                        const std::uint8_t  kind  =
-                            static_cast<std::uint8_t>((lo32 >> 29) & 0x7u);
-                        const std::uint32_t index = lo32 & 0x1FFFFFFFu;
-                        if (kind >= 1 && kind <= 6 && index != 0) {
-                            s.tokenAtScan = lo32;
-                            s.tokenKind   = kind;
-                            s.tokenIndex  = index;
+                    // Phase 28b-v3.1 — read slot value at scan time. If high
+                    // 32 bits are zero AND low 32 bits decode to a valid
+                    // metadata-usage token (kind in 1..6), capture the
+                    // token + decoded kind/index for later static mapping.
+                    std::uint64_t slotVal = 0;
+                    if (Memory::SafeReadBytes(
+                            reinterpret_cast<const void*>(leaTarget),
+                            &slotVal, sizeof(slotVal))) {
+                        const std::uint32_t hi32 =
+                            static_cast<std::uint32_t>(slotVal >> 32);
+                        const std::uint32_t lo32 =
+                            static_cast<std::uint32_t>(slotVal & 0xFFFFFFFFu);
+                        if (hi32 == 0 && lo32 != 0) {
+                            // Token-shaped. Decode kind = top 3 bits of lo32,
+                            // index = bottom 29 bits.
+                            const std::uint8_t  kind  =
+                                static_cast<std::uint8_t>((lo32 >> 29) & 0x7u);
+                            const std::uint32_t index = lo32 & 0x1FFFFFFFu;
+                            if (kind >= 1 && kind <= 6 && index != 0) {
+                                s.tokenAtScan = lo32;
+                                s.tokenKind   = kind;
+                                s.tokenIndex  = index;
+                            }
                         }
                     }
-                }
 
-                g_slots.push_back(s);
-                ++matchedPairs;
-            }
-            bytesScanned += want;
-            pos += want;
-        }
+                    outSlots.push_back(s);
+                    ++matchedPairs;
+                }
+                return true;
+            },
+            &failedReads);
     }
 
     // Dedup by slotAddress — many methods reference the same slot, but
     // for v3's purposes we only need one entry per slot (the lookup is
     // "does the slot's current value match the target class ptr"
     // regardless of which method's init-call wrote it).
-    std::sort(g_slots.begin(), g_slots.end(),
+    std::sort(outSlots.begin(), outSlots.end(),
         [](const LazyInitSlot& a, const LazyInitSlot& b) {
             return a.slotAddress < b.slotAddress;
         });
-    g_slots.erase(
-        std::unique(g_slots.begin(), g_slots.end(),
+    outSlots.erase(
+        std::unique(outSlots.begin(), outSlots.end(),
             [](const LazyInitSlot& a, const LazyInitSlot& b) {
                 return a.slotAddress == b.slotAddress;
             }),
-        g_slots.end());
+        outSlots.end());
 
     Log::Write(MagicStrings::LogCategoryWalk,
         "LazyInitSlotScanner: scanned " + std::to_string(bytesScanned) +
         " bytes (.il2cpp only); leaCandidates=" + std::to_string(leaCandidates) +
         " matchedPairs=" + std::to_string(matchedPairs) +
         " signatureMisses=" + std::to_string(signatureMisses) +
-        " uniqueSlots=" + std::to_string(g_slots.size()) +
+        " uniqueSlots=" + std::to_string(outSlots.size()) +
         " failedReads=" + std::to_string(failedReads));
+    return true;
 }
 
 }  // namespace
 
 const std::vector<LazyInitSlot>& EnumerateLazyInitSlots() {
-    std::call_once(g_once, DoScan);
-    return g_slots;
+    if (const auto* p = g_slotsPtr.load(std::memory_order_acquire)) {
+        return *p;
+    }
+    std::lock_guard<std::mutex> lk(g_scanMu);
+    if (const auto* p = g_slotsPtr.load(std::memory_order_relaxed)) {
+        return *p;
+    }
+    const std::uint64_t now = ::GetTickCount64();
+    if (!RetryPolicy::CanRetryNow(g_lastFailTickMs, now)) {
+        return g_emptySlots;
+    }
+    std::vector<LazyInitSlot> local;
+    if (DoScan(local)) {
+        auto* published = new std::vector<LazyInitSlot>(std::move(local));
+        g_slotsPtr.store(published, std::memory_order_release);
+        return *published;
+    }
+    g_lastFailTickMs = RetryPolicy::NonZeroTick(::GetTickCount64());
+    return g_emptySlots;
 }
 
 // --- Phase 28b-v3.1 typeDef → Il2CppClass* global map -------------------
