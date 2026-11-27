@@ -12,6 +12,23 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1567) — Fix E-M4 (bounded-timeout CE Lua bridge pipe RPC via `connectToPipe` + `createThread`/`pump` + tests)
+
+- **Bug fixes (`E-M4` — completes 100% of Block E High & Medium findings, 2/2 High + 7/7 Medium):**
+  - **`E-M4` (`scripts/utils.lua`, `scripts/unity_symbols.lua`, `scripts/unity_invoke.lua`, `ui/UnityDumpUI.Core/Services/Export/BootstrapAaScriptGenerator.cs`):**
+    - Replaced unbounded blocking `io.open([[\\.\pipe\DiscreteBfx]], "r+b")` + `f:read("*l")` on CE's GUI thread with a bounded-timeout pipe transaction (`M.pipeRpcRaw` in `utils.lua`, mirrored standalone in `unity_symbols.lua` and `unity_invoke.lua`):
+      - Prefers Cheat Engine's native `connectToPipe("DiscreteBfx", timeoutMs)` (`LuaPipeClient`, `FILE_FLAG_OVERLAPPED` + `CancelIo` + `OnTimeout`) inside `createThread`, while the calling GUI thread polls with `sleep(20); pump()` and enforces a wall-clock deadline that tears down the pipe handle once (`_closePipeOnce`) on expiry.
+      - Falls back cleanly to `io.open` when running outside CE (or on old CE builds without `connectToPipe`), and rejects truncated EOF responses before `\n` (also preventing `unity_symbols.lua`'s `parseValue(nil)` crash).
+    - Scaled `unity_invoke.lua`'s `callUnityMethod` RPC timeout dynamically when `opts.mainThread = true` (`math.max(10000, clamp(mainThreadTimeoutMs, 1, 60000) + 5000)`, plus optional `opts.rpcTimeoutMs`).
+    - Switched `BootstrapAaScriptGenerator.cs`'s `[ENABLE]` smoke handshake to `pcall(U.pipeRpcRaw, ..., 5000)` so a stalled DLL cannot freeze CE on table enable.
+  - **Tests:**
+    - Added `PipeRpcScripts_UseBoundedTimeout_ConnectToPipe_AndWorkerThreadPump` (3 theory cases), `UnityInvoke_ScalesRpcTimeout_WithMainThreadTimeoutMs` to `ui/UnityDumpUI.Tests/BridgeLuaResourcesTests.cs`, and `Build_SmokeHandshake_UsesBoundedTimeoutPipeRpcRawUnderPcall` to `ui/UnityDumpUI.Tests/BootstrapAaScriptGeneratorTests.cs`.
+    - Verified all 3 modified Lua files parse cleanly (`lua.EXE` exit 0) and pass 5/5 behavioral mock tests (normal CRLF read, `OnTimeout` single-destroy timeout, truncated EOF rejection, `callUnityMethod` `mainThreadTimeoutMs` scaling, and `unity_symbols.lua` timeout error).
+  - Marked `E-M4` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1567) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1229 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 778 checks passed (x64) / 778 checks passed (x86).
+
+-----
+
 ## 2026-11-27 (build 1566) — Fix C-M4 + C-M5 (snapshot array struct/enum element layout resolution, IL2CPP streaming instance header revalidation, idempotent cursor replay & lock-free SessionManager decode + tests)
 
 - **Bug fixes (`C-M4`, `C-M5` — completes 100% of Block C High & Medium findings, 3/3 High + 8/8 Medium):**

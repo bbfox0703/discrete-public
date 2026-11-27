@@ -228,4 +228,40 @@ public class BridgeLuaResourcesTests
         Assert.Contains("ambiguous overload match", content);
         Assert.Contains("ambiguous signature match", content);
     }
+
+    [Theory]
+    [InlineData("utils.lua")]
+    [InlineData("unity_symbols.lua")]
+    [InlineData("unity_invoke.lua")]
+    public void PipeRpcScripts_UseBoundedTimeout_ConnectToPipe_AndWorkerThreadPump(string fileName)
+    {
+        // E-M4 regression check: CE Lua bridge pipe RPC must never block CE's GUI
+        // thread without a finite timeout. Verify all three pipe-speaking scripts
+        // use CE's connectToPipe (native overlapped timeout + OnTimeout + destroy),
+        // createThread + pump polling, and explicit timeout errors.
+        string content = BridgeLuaResources.Read(fileName);
+
+        Assert.DoesNotContain("\r", content);
+        Assert.Contains("connectToPipe", content);
+        Assert.Contains("createThread", content);
+        Assert.Contains("OnTimeout", content);
+        Assert.Contains("_closePipeOnce", content);
+        Assert.Contains("p.destroy()", content);
+        Assert.Contains("pipe RPC timed out after", content);
+        Assert.Contains("kDefaultRpcTimeoutMs", content);
+    }
+
+    [Fact]
+    public void UnityInvoke_ScalesRpcTimeout_WithMainThreadTimeoutMs()
+    {
+        // E-M4: callMethod with main_thread=true must grant mainThreadTimeoutMs + headroom
+        // (and clamp main_thread_timeout_ms to [1, 60000]) so legitimate main-thread
+        // waits don't spuriously time out on the Lua side while stalled games still abort.
+        string content = BridgeLuaResources.Read("unity_invoke.lua");
+
+        Assert.Contains("opts.rpcTimeoutMs", content);
+        Assert.Contains("if mt < 1 then mt = 1 elseif mt > 60000 then mt = 60000 end", content);
+        Assert.Contains("math.max(kDefaultRpcTimeoutMs, (mt or 5000) + 5000)", content);
+        Assert.Contains("rpc(\"callMethod\", body, rpcTimeoutMs)", content);
+    }
 }

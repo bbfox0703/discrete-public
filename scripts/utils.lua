@@ -37,6 +37,17 @@ M.debugOn = debugOn
 -- See M.callDLL for why this must never be nil.
 local kDllCallTimeoutMs = 10000
 
+-- Named-pipe RPC defaults (E-M4). Same finite-timeout discipline as callDLL:
+-- AA {$lua} blocks run on CE's GUI thread, so pipe I/O must never block
+-- indefinitely if the DLL handler stalls.
+local PIPE_NAME             = "DiscreteBfx"
+local PIPE_PATH             = [[\\.\pipe\DiscreteBfx]]
+local kDefaultRpcTimeoutMs  = 10000
+local kConnectRetryBudgetMs = 3000
+M.PIPE_NAME            = PIPE_NAME
+M.PIPE_PATH            = PIPE_PATH
+M.kDefaultRpcTimeoutMs = kDefaultRpcTimeoutMs
+
 --- Keep CE's window responsive while we block.
 ---
 --- CE's Lua `sleep` is a bare Win32 Sleep — it pumps NOTHING. Any retry loop
@@ -179,6 +190,185 @@ function M.callDLL(funcName, retType, ...)
     end
     if retType == "bool" then return ret ~= 0 end
     return ret
+end
+
+-- ---------- Bounded-timeout named-pipe RPC (E-M4) ----------------------
+--
+-- Sends one NDJSON request line to `\\.\pipe\DiscreteBfx` and reads back one
+-- newline-terminated JSON response line with a finite wall-clock ceiling.
+--
+-- Prefers CE's built-in `connectToPipe(name, timeoutMs)` (LuaPipeClient:
+-- FILE_FLAG_OVERLAPPED + WaitForSingleObject + CancelIo + OnTimeout) inside
+-- `createThread`, while the calling GUI thread polls with `sleep(20); pump()`
+-- so Cheat Engine stays responsive and never freezes indefinitely if the DLL
+-- handler stalls. Falls back to `io.open` only when `connectToPipe` is absent.
+local function _nowMs()
+    local tc = rawget(_G, "getTickCount")
+    if type(tc) == "function" then
+        local ok, v = pcall(tc)
+        if ok and type(v) == "number" then return v end
+    end
+    return math.floor(os.clock() * 1000)
+end
+
+local function _elapsedMs(startMs, fallbackMs)
+    local cur = _nowMs()
+    if cur >= startMs then return cur - startMs end
+    return fallbackMs
+end
+
+local function _closePipeOnce(state)
+    local p = state.pipe
+    state.pipe = nil
+    if p ~= nil then
+        pcall(function() p.destroy() end)
+    end
+end
+
+--- Send one raw JSON line over the Discrete pipe and return `(respLine, nil)`
+--- or `(nil, errMsg)` on connect failure, timeout, or truncated read.
+--- @param line      string
+--- @param timeoutMs number|nil  Finite timeout in ms (default 10000, clamped [500, 120000])
+function M.pipeRpcRaw(line, timeoutMs)
+    local budget = tonumber(timeoutMs) or kDefaultRpcTimeoutMs
+    if budget < 500 then budget = 500 elseif budget > 120000 then budget = 120000 end
+    local payload = tostring(line) .. "\n"
+
+    local ceConnect = rawget(_G, "connectToPipe")
+    local ceThread  = rawget(_G, "createThread")
+    local ceSleep   = rawget(_G, "sleep")
+
+    local function transactCePipe(state)
+        local pipe = nil
+        local cStart = _nowMs()
+        local cElapsed = 0
+        while not state.aborted do
+            local okC, p = pcall(ceConnect, PIPE_NAME, budget)
+            if okC and p ~= nil then
+                pipe = p
+                break
+            end
+            if _elapsedMs(cStart, cElapsed) >= kConnectRetryBudgetMs then break end
+            if type(ceSleep) == "function" then ceSleep(200) end
+            cElapsed = cElapsed + 200
+            if not state.inWorker then M.pump() end
+        end
+        if pipe == nil then
+            return nil, "cannot open pipe " .. PIPE_PATH
+        end
+        state.pipe = pipe
+        if state.aborted then
+            _closePipeOnce(state)
+            return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+        end
+
+        local timedOut = false
+        pcall(function()
+            pipe.OnTimeout = function() timedOut = true end
+        end)
+
+        local okW, written = pcall(function() return pipe.writeString(payload, false) end)
+        if not okW or written == nil then
+            _closePipeOnce(state)
+            if timedOut or state.aborted then
+                return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+            end
+            return nil, "pipe write failed"
+        end
+
+        local bytes = {}
+        local n = 0
+        local gotNewline = false
+        while not state.aborted do
+            local okR, b = pcall(function() return pipe.readByte() end)
+            if not okR or b == nil then
+                break
+            end
+            if b == 10 then
+                gotNewline = true
+                break
+            end
+            if b ~= 13 then
+                n = n + 1
+                bytes[n] = string.char(b)
+            end
+        end
+
+        _closePipeOnce(state)
+        if timedOut or state.aborted then
+            return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+        end
+        if not gotNewline or n == 0 then
+            return nil, "empty or truncated pipe response"
+        end
+        return table.concat(bytes), nil
+    end
+
+    local function transactStdIo(state)
+        local f, fe
+        local cStart = _nowMs()
+        local cElapsed = 0
+        while not state.aborted do
+            f, fe = io.open(PIPE_PATH, "r+b")
+            if f ~= nil then break end
+            if _elapsedMs(cStart, cElapsed) >= kConnectRetryBudgetMs then break end
+            if type(ceSleep) == "function" then ceSleep(200) end
+            cElapsed = cElapsed + 200
+            if not state.inWorker then M.pump() end
+        end
+        if f == nil then
+            return nil, "cannot open pipe " .. PIPE_PATH .. ": " .. tostring(fe)
+        end
+        local okW, wErr = f:write(payload)
+        if not okW then
+            pcall(function() f:close() end)
+            return nil, "pipe write failed: " .. tostring(wErr)
+        end
+        f:flush()
+        local resp = f:read("*l")
+        pcall(function() f:close() end)
+        if resp == nil then
+            return nil, "empty pipe response"
+        end
+        return resp, nil
+    end
+
+    local runner = (type(ceConnect) == "function") and transactCePipe or transactStdIo
+
+    if type(ceThread) == "function" and type(ceSleep) == "function" then
+        local state = { done = false, aborted = false, inWorker = true,
+                        resp = nil, err = nil, pipe = nil }
+        local okT, th = pcall(ceThread, function()
+            local okCall, r, e = pcall(runner, state)
+            if okCall then
+                state.resp = r
+                state.err  = e
+            else
+                state.err  = tostring(r)
+            end
+            state.done = true
+        end)
+        if okT and th ~= nil then
+            local totalDeadline = budget + kConnectRetryBudgetMs
+            local tStart = _nowMs()
+            local tElapsed = 0
+            while not state.done do
+                if _elapsedMs(tStart, tElapsed) >= totalDeadline then
+                    state.aborted = true
+                    _closePipeOnce(state)
+                    pcall(function() th.terminate() end)
+                    return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+                end
+                ceSleep(20)
+                tElapsed = tElapsed + 20
+                M.pump()
+            end
+            return state.resp, state.err
+        end
+    end
+
+    local state = { done = false, aborted = false, inWorker = false, pipe = nil }
+    return runner(state)
 end
 
 -- ---------- Backend detection (which DLL to inject) -------------------

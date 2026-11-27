@@ -788,7 +788,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`injectDLL` 失敗時回傳 `false`，不是 `nil`（`celua.txt`、CLAUDE.md §Cheat Engine）。這個 Mode-B 範本是給 CT 發布者複製的，失敗時不會 `error()`，而是繼續 `dofile` bridge，最後由 `unity_dump.lua` 從 CE 目錄再嘗試注入一次，錯誤訊息會指向錯誤的檔案位置。同一個檔案的 backend 偵測只認 `gameassembly.dll` / `mono-2.0-bdwgc.dll` / 完整等於 `mono.dll`，少了 `utils.lua:196-205` 支援的 `userassembly.dll`、`mono-2.0-sgen.dll`、`mono-2.0-boehm.dll`；而且 `name == "mono.dll"` 碰到 `enumModules` 回傳完整路徑時永遠不成立。
 - 修法：改成 `if not injectDLL(dllPath) then error(...) end`；backend 偵測直接沿用 `utils.lua` 的 `M.detectBackend()`（basename + 同一份名單）。
 
-**E-M4 · CE Lua bridge 的 pipe RPC 在 CE 主執行緒上無逾時地阻塞讀取**
+**E-M4 · CE Lua bridge 的 pipe RPC 在 CE 主執行緒上無逾時地阻塞讀取 — ✅ FIXED (2026-11-27)**
 - 位置：`scripts/unity_symbols.lua:159-161`、`scripts/unity_invoke.lua:302-307`、`ui/UnityDumpUI.Core/Services/Export/BootstrapAaScriptGenerator.cs:192-196`（bootstrap 的 handshake）
 - 成因：AA `{$lua}` 區塊在 CE 的 GUI thread 上執行。`io.open` 的開檔失敗有 15×200 ms 的重試加 pump，但開檔成功之後 `f:read("*l")` 沒有任何逾時。DLL 的 handler 卡住（例如 `callMethod` 的 `main_thread=true` 遇到遊戲暫停或最小化、`findMethodInstances` 觸發 JIT、game thread 在 loader lock 中）時，Cheat Engine 會整個凍結，使用者沒有任何方法恢復。`utils.lua:161-171` 對 `executeCodeEx` 已經明確寫出「timeout 必須有限，否則 CE 會凍結」這條規則，但 pipe 路徑沒有套用。
 - 修法：pipe I/O 改成在 `createThread` 中執行，主執行緒以 `sleep + pump` 輪詢，並設上限（例如 10 s，`callMethod` 依 `main_thread_timeout_ms` 加上餘裕）。逾時就 `error()`，並讓 DLL 端 `CancelIo`（關閉 handle）。至少 bootstrap 的 smoke handshake 可以直接改成 `pcall` 包住一個有逾時的版本。
