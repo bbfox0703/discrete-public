@@ -12,6 +12,22 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1588) — Fix A-L18 + A-L19 (completes 100% of Block A and 118/118 of the entire 2026-11-23 audit: identity guard deny-list / `--staged` / unpushed diff scan / `--list` semantics, pre-commit hook wiring, `proxy_precrt_gate.py` zero-target non-zero exit)
+
+- **Bug fixes (`A-L18`, `A-L19` — completes 100% of Block A and all 118/118 Critical/High/Medium/Low findings in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md)):**
+  - **`A-L18` (`tools/check_no_local_paths.py`, `.githooks/pre-commit`):**
+    - Added `COMMON_WORDS` deny-list (preventing false positives on CI runner usernames/hostnames such as `runner`, `admin`, `build`, `corp`) plus `DISCRETE_IDENTITY_ALLOW` env-var opt-out in `runtime_identifiers()`.
+    - Fixed `--list` semantics so it prints every finding group (commit messages, unpushed diffs, AND tracked files — never early-returning on `msg_hits`) and always returns `EXIT_OK (0)`.
+    - Added `unpushed_commit_added_lines()` (`git log --branches --not --remotes --format=COMMIT:%H -p --no-color --unified=0`) so leaks committed locally and later overwritten before push are caught prior to `git push`.
+    - Added `--staged` mode (`git diff --cached --name-only -z --diff-filter=ACMR` + `git show :<path>`) and expanded `selftest()` from 11 to 16 cases covering unpushed diff leaks, `--list` multi-category output, `--staged` pass/fail, and `COMMON_WORDS` / `DISCRETE_IDENTITY_ALLOW`.
+    - Updated `.githooks/pre-commit` (`#!/usr/bin/env bash`, LF-only) to iterate staged `*.lua` files via NUL-delimited `git diff -z` + `while IFS= read -r -d ''` (safe for filenames with spaces) and run `tools/check_no_local_paths.py --staged` on every commit.
+  - **`A-L19` (`tools/verify/proxy_precrt_gate.py`):**
+    - Tracked `tested` count in `run_all()`; when zero proxy DLLs are found/tested in `--dist`, prints `NOTHING TESTED - no proxy DLLs found in <dist>` and exits with code `2` instead of reporting `PASS` (exit `0`).
+  - Marked `A-L18` and `A-L19` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md) (`118/118` fixed, `0` remaining).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1588) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, `inject-x86.exe`, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; `check_no_local_paths.py --selftest` 16/16 OK, full & `--staged` CHECK OK; `proxy_precrt_gate.py --all` PASS (exit 0 on `dist/`, exit 2 `NOTHING TESTED` on empty dir); C# xUnit v3 tests 1262 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 964 passed (x64) / 964 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1587) — Fix A-L8 + A-L9 + A-L17 (least-privilege injector with PE-arch & loaded-module fallback, `inject-x86` `IsWow64Process` & UTF-8 fixes, filtered-only proxy bulk ops & atomic staged proxy install)
 
 - **Bug fixes (`A-L8`, `A-L9`, `A-L17`):**

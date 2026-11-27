@@ -186,7 +186,7 @@
 - 成因：選取狀態跨 filter 保留，Install / Uninstall 列舉的是 `Games` 而不是 `FilteredGames`；複製到一半失敗（例如遊戲在執行、檔案被鎖）會留下新舊版本混雜的 DLL，而另一個 proxy 已經先被刪除；`_scanCts` 從未 Dispose。
 - 修法：批次作業只處理 `FilteredGames`（或在確認對話框中列出隱藏的列）；先複製到 `*.tmp`，全部成功後再 `File.Move(overwrite)`；替換 `_scanCts` 前先 Dispose 舊的。
 
-**A-L18 · Identity guard 的覆蓋與語意**
+**A-L18 · Identity guard 的覆蓋與語意 — ✅ FIXED (2026-11-27)**
 - 位置：`tools/check_no_local_paths.py:113-124`、`:249`、`:307-317`、`:330`；`.githooks/pre-commit:21-26`；`build.ps1:389-401`
 - 成因：
   1. `runtime_identifiers()` 用 word-bounded 比對 `USERNAME` / `COMPUTERNAME` / `USERDOMAIN` / home 目錄名稱；遇到常見字（例如 Linux runner 的 home 名稱 `runner` 會命中 `xunit.runner.visualstudio`，或 `admin`、`build`、網域名 `CORP`）就產生假的 exit 1，而且整個 build 會被擋下。
@@ -195,7 +195,7 @@
   4. 確認 AUDIT §7 的訊號：exit code 語意在 `build.ps1:394-401` 是一致的（1 = 洩漏、其他非 0 = 無法執行）；但 `.githooks/pre-commit` 只檢查 Lua 的 CRLF，**沒有**跑 identity guard，所以 hook 端不存在一致性問題，也就不存在 commit 時的防線。另外 hook 的 `for f in $files` 遇到含空白的檔名會拆錯。
 - 修法：identifier 加上最短長度 / 常見字 deny-list，並允許用環境變數 opt-out 單一 identifier；`--list` 在所有分支都回傳 0；加掃 `git diff @{push}..HEAD`（或 `--branches --not --remotes -p`）的新增行；在 pre-commit 中以 `--staged` 模式呼叫 checker（掃 index 內容）；hook 改用 `git diff -z` + `while IFS= read -r -d ''`。
 
-**A-L19 · `proxy_precrt_gate.py --all` 在兩個 proxy 都沒 build 時回報 PASS**
+**A-L19 · `proxy_precrt_gate.py --all` 在兩個 proxy 都沒 build 時回報 PASS — ✅ FIXED (2026-11-27)**
 - 位置：`tools/verify/proxy_precrt_gate.py:330-334`、`:370-375`
 - 成因：「not built」只印 `[SKIP]`，不計入 failures，最後印 `PASS` 並 exit 0；一個什麼都沒測的閘門看起來跟通過一樣（同檔對 bitness 不符的處理反而有計為失敗，兩者不一致）。
 - 修法：沒有任何 proxy 被測到時回傳非 0，或至少印「NOTHING TESTED」並 exit 2。
