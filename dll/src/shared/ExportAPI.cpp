@@ -10525,6 +10525,25 @@ int Discrete_Init() {
     Discrete::Log::Init("ExportAPI: Discrete_Init");
     RegisterCoreHandlers();
 
+    // A-L20: Mark batch / scan / xref / snapshot commands that allocate heavy
+    // runtime metadata or finalizer garbage so the disconnect GC-drain hook
+    // runs ONLY after clients that actually executed heavy work — preventing
+    // 50-200 ms full-GC stalls on every short CE-bridge burst.
+    Discrete::PipeServer::MarkHeavyCommands({
+        Discrete::MagicStrings::CmdFindFieldReferences,
+        Discrete::MagicStrings::CmdSearchSymbols,
+        Discrete::MagicStrings::CmdSnapshotBegin,
+        Discrete::MagicStrings::CmdDumpClassInfo,
+        Discrete::MagicStrings::CmdDumpIl2cppSymbols,
+        Discrete::MagicStrings::CmdBeginValueScan,
+        Discrete::MagicStrings::CmdBeginGroupScan,
+        Discrete::MagicStrings::CmdScanFieldValue,
+        Discrete::MagicStrings::CmdFindInstances,
+        Discrete::MagicStrings::CmdListFieldValuesAcrossInstances,
+        Discrete::MagicStrings::CmdDiagnoseClassReferences,
+        Discrete::MagicStrings::CmdDumpLazyInitSlots,
+    });
+
     // Build #547 follow-up — disconnect-time GC drain.
     // Long-running batch RPCs (Phase 28 findFieldReferences walking 2000+
     // method headers, Phase 27 value scans, Phase 25 multi-asm searchSymbols)
@@ -10533,21 +10552,20 @@ int Discrete_Init() {
     // queue at process shutdown rather than incrementally — observed live:
     // BongoCat post-findFieldReferences game-shutdown latency tens of
     // seconds (user reported 2026-05-25). Draining at the disconnect
-    // boundary (after EVERY client disconnects, while DiscreteUI / the
-    // bridge is still attached) keeps the user-perceptible game shutdown
-    // back at ~1s.
+    // boundary (gated on CurrentClientRanHeavyRpc() so lightweight short
+    // bursts pay zero stall — A-L20) keeps game shutdown back at ~1s.
     //
     // The hook runs on the per-client worker thread that's about to exit,
     // AFTER ::DisconnectNamedPipe + ::CloseHandle — so the pipe slot is
     // already returned to the OS and the next client can connect
-    // concurrently with this drain. Safe to be slow (~50-200ms on
-    // BongoCat-sized images).
+    // concurrently with this drain.
     //
     // Bound under both compile branches — the resolver `gc_collect` slot
     // is optional, so a runtime that doesn't export `mono_gc_collect` /
     // `il2cpp_gc_collect` (legacy / stripped) silently no-ops.
 #if defined(DISCRETE_BACKEND_MONO)
-    Discrete::PipeServer::RegisterDisconnectHook([]() {
+    Discrete::PipeServer::RegisterDisconnectHook("gc-drain", []() {
+        if (!Discrete::PipeServer::CurrentClientRanHeavyRpc()) return;
         const auto& r = Discrete::Mono::GetResolver();
         if (!r.resolved || r.gc_collect == nullptr) return;
         Discrete::Mono::MonoDomain* domain =
@@ -10571,7 +10589,8 @@ int Discrete_Init() {
     Discrete::Log::Init(
         "ExportAPI: registered Mono GC-drain disconnect hook");
 #elif defined(DISCRETE_BACKEND_IL2CPP)
-    Discrete::PipeServer::RegisterDisconnectHook([]() {
+    Discrete::PipeServer::RegisterDisconnectHook("gc-drain", []() {
+        if (!Discrete::PipeServer::CurrentClientRanHeavyRpc()) return;
         const auto& r = Discrete::IL2CPP::GetResolver();
         if (!r.resolved || r.gc_collect == nullptr) return;
         Discrete::IL2CPP::Il2CppDomain* domain =
@@ -10593,25 +10612,11 @@ int Discrete_Init() {
         "ExportAPI: registered IL2CPP GC-drain disconnect hook");
 #endif
 
-    // Release retained scan/snapshot state when the LAST client goes away.
-    // Sessions are only pruned by ExpireOldSessions(), which runs from Begin()
-    // — so if a client disconnects (or force-quits) and nothing ever begins
-    // another session, whatever it had live at that moment stays resident in
-    // the game's address space until the process exits. A snapshot plan is tens
-    // of MB, which is a lot to hold in a 32-bit game for nothing.
-    //
-    // Gated on being the last client because sessions carry no owner id: with
-    // up to kMaxPipeInstances clients, dropping unconditionally would destroy a
-    // concurrent client's session. Inside a disconnect hook the calling worker
-    // still counts itself, so 1 == "I am the last". A client that connects and
-    // begins a session inside the resulting window would lose it and have to
-    // re-run — the same collateral-cancel trade ScanCancel already documents,
-    // and far cheaper than the retention it prevents.
     // C-L6: Drop ONLY sessions owned by the disconnecting client (eliminating
     // the concurrent-disconnect ActiveClientCount() > 1 race and preventing one
     // client from wiping another client's active sessions), and run a lazy
     // expiry sweep across all three session managers.
-    Discrete::PipeServer::RegisterDisconnectHook([]() {
+    Discrete::PipeServer::RegisterDisconnectHook("session-cleanup", []() {
         const std::uint64_t cid = Discrete::PipeServer::CurrentClientId();
         const std::size_t dSnap = Discrete::Snapshot::SessionManager::Instance().DropForOwner(cid);
         const std::size_t dVal  = Discrete::ValueScan::SessionManager::Instance().DropForOwner(cid);

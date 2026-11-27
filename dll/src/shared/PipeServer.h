@@ -5,14 +5,16 @@
 // Response shape : {"id": <int>, "result": <any>}
 //                  or {"id": <int>, "error": {"code": <int>, "message": <string>}}
 //
-// Phase 1: single in-flight client, overlapped IO with stop event for clean shutdown.
-// Multi-client / per-connection thread is deferred to Phase 6 hardening.
+// Multi-client concurrent server (up to kMaxPipeInstances = 4): overlapped IO
+// on the acceptor + one detached worker thread per accepted client, with a
+// stop event and bounded drain on Stop() (A-L2).
 #pragma once
 
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -25,6 +27,13 @@ using Handler = std::function<nlohmann::json(const nlohmann::json& args)>;
 // Register a command handler. Overwrites any previous handler for the same name.
 void RegisterHandler(std::string name, Handler handler);
 
+// A-L20: Mark command names whose execution generates heavy managed/metadata
+// allocations (batch scans, IL/AOT xref walks, snapshots, symbol dumps). A
+// client worker's CurrentClientRanHeavyRpc() latches true once it dispatches
+// any marked command, allowing disconnect hooks (e.g. GC drain) to skip
+// lightweight short-lived bridge bursts.
+void MarkHeavyCommands(std::initializer_list<const char*> names);
+
 // C-L8: Sorted list of all currently registered command names (emitted in
 // handshake `"commands"` so the UI can query capabilities without branching
 // on backend strings).
@@ -34,34 +43,32 @@ std::vector<std::string> RegisteredCommands();
 // RPC handlers and disconnect hooks; 0 outside PipeServer workers).
 std::uint64_t CurrentClientId() noexcept;
 
+// A-L20: True inside a client worker (including its disconnect hooks) iff
+// that client dispatched at least one command marked via MarkHeavyCommands().
+bool CurrentClientRanHeavyRpc() noexcept;
+
 /// Per-client cleanup hook. Fired after EVERY accepted client disconnects
 /// (clean exit OR pipe error), on the per-client worker thread, after
 /// `DisconnectNamedPipe` + `CloseHandle` but before the worker exits.
 ///
 /// Used by backends to drain Mono / IL2CPP GC finalizer queues that piled
-/// up during a long-running batch RPC. The classic symptom: a Phase 28
-/// `findFieldReferences` walks 2000+ method headers, each leaving a tiny
-/// metadata-cache entry; even though every entry is individually freed,
-/// BDWGC processes the resulting finalizer queue at process shutdown
-/// instead of incrementally, hanging the game's exit by tens of seconds.
-/// Forcing a `mono_gc_collect(-1)` at the disconnect boundary drains the
-/// queue while DiscreteUI / the bridge is still attached, so the user-
-/// perceptible game-shutdown cost drops back to ~1s.
+/// up during a long-running batch RPC (gated on CurrentClientRanHeavyRpc()
+/// so short bridge bursts do not stall the game — A-L20), and to drop
+/// sessions owned by the disconnecting client (C-L6).
 ///
 /// Hooks may be called concurrently from multiple per-client worker
 /// threads (up to `kMaxPipeInstances`). Implementations must be
 /// thread-safe.
 ///
-/// Idempotent: registering a hook that's already in the list is a no-op
-/// (compared by std::function target address).
+/// Idempotent by `key` (A-L2): re-registering an existing key replaces its
+/// hook in place rather than appending a duplicate.
 using DisconnectHook = std::function<void()>;
-void RegisterDisconnectHook(DisconnectHook hook);
+void RegisterDisconnectHook(std::string key, DisconnectHook hook);
 
 /// Drop every registered disconnect hook. MUST be called on the teardown that
-/// pairs with whatever registered them: the hook list is append-only, and
-/// Discrete_Shutdown clears the g_initialized latch, so a Shutdown -> Init
-/// cycle would otherwise register a SECOND copy of each backend hook and every
-/// later client disconnect would run N full GC drains instead of one.
+/// pairs with whatever registered them: Discrete_Shutdown clears the
+/// g_initialized latch, so a Shutdown -> Init cycle clears and re-registers
+/// cleanly.
 void ClearDisconnectHooks();
 
 /// Number of per-client worker threads currently inside DLL-owned work.
@@ -73,7 +80,9 @@ int ActiveClientCount();
 // Start the server thread (idempotent). Returns false if already running or failed to start.
 bool Start();
 
-// Stop the server thread and disconnect any client. Idempotent and blocks until stopped.
+// Stop the server thread and disconnect active clients. Idempotent; waits up
+// to a bounded deadline (2 s) for the acceptor and active client workers to
+// exit (detaching on timeout rather than deadlocking — A-L2).
 void Stop();
 
 // True if the server thread is currently running.

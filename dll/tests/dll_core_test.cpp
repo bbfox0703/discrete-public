@@ -16,6 +16,7 @@
 #include "ExportHelpers.h"
 #include "FieldXrefHelpers.h"
 #include "GroupScanSession.h"
+#include "Logger.h"
 #include "MainThreadDispatcher.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
@@ -2763,6 +2764,86 @@ void Test_BL10_BL11_MethodSignatureAndScanRange() {
     }
 }
 
+// ============================================================================
+// A-L11 — Logger atomic FILE_APPEND_DATA writes + FILE_SHARE_DELETE rotation
+// ============================================================================
+void Test_AL11_LoggerAtomicAppendAndConcurrentRename() {
+    wchar_t prevLocalAppData[MAX_PATH * 2] = {};
+    const DWORD prevLen = ::GetEnvironmentVariableW(
+        L"LOCALAPPDATA", prevLocalAppData, static_cast<DWORD>(std::size(prevLocalAppData)));
+
+    wchar_t tempDir[MAX_PATH] = {};
+    const DWORD tmpLen = ::GetTempPathW(static_cast<DWORD>(std::size(tempDir)), tempDir);
+    CHECK(tmpLen > 0 && tmpLen < std::size(tempDir));
+    if (tmpLen == 0) return;
+
+    const std::wstring pidStr = std::to_wstring(::GetCurrentProcessId());
+    const std::wstring sandboxRoot = std::wstring(tempDir) + L"discrete_al11_test_" + pidStr;
+    ::CreateDirectoryW(sandboxRoot.c_str(), nullptr);
+    CHECK(::SetEnvironmentVariableW(L"LOCALAPPDATA", sandboxRoot.c_str()) != FALSE);
+
+    Discrete::Log::Init();
+    Discrete::Log::Write(L"init", "al11-line-alpha");
+    Discrete::Log::Write(L"init", "al11-line-beta");
+
+    const std::wstring logDir = sandboxRoot + L"\\discrete\\Logs\\" + pidStr + L"\\init";
+    const std::wstring currentPath = logDir + L"\\current.log";
+    const std::wstring rotatedPath = logDir + L"\\rotated.log";
+
+    auto readAllUtf8 = [](const std::wstring& path) -> std::string {
+        HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return {};
+        std::string out;
+        char buf[1024];
+        DWORD got = 0;
+        while (::ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) {
+            out.append(buf, got);
+        }
+        ::CloseHandle(h);
+        return out;
+    };
+
+    const std::string beforeRotate = readAllUtf8(currentPath);
+    CHECK(beforeRotate.find("al11-line-alpha\n") != std::string::npos);
+    CHECK(beforeRotate.find("al11-line-beta\n") != std::string::npos);
+
+    // Simulate a second module holding an append handle with FILE_SHARE_DELETE
+    // while another module rotates current.log -> rotated.log.
+    HANDLE secondWriter = ::CreateFileW(
+        currentPath.c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    CHECK(secondWriter != INVALID_HANDLE_VALUE);
+    if (secondWriter != INVALID_HANDLE_VALUE) {
+        CHECK(::MoveFileExW(currentPath.c_str(), rotatedPath.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE);
+        // Subsequent Log::Write must create a fresh current.log without failing.
+        Discrete::Log::Write(L"init", "al11-line-gamma");
+        ::CloseHandle(secondWriter);
+    }
+
+    const std::string afterRotate = readAllUtf8(currentPath);
+    CHECK(afterRotate.find("al11-line-gamma\n") != std::string::npos);
+    CHECK(afterRotate.find("al11-line-alpha\n") == std::string::npos);
+
+    Discrete::Log::Shutdown();
+
+    // Restore environment & clean up sandbox files/directories.
+    ::SetEnvironmentVariableW(L"LOCALAPPDATA", prevLen > 0 ? prevLocalAppData : nullptr);
+    ::DeleteFileW(currentPath.c_str());
+    ::DeleteFileW(rotatedPath.c_str());
+    ::RemoveDirectoryW(logDir.c_str());
+    ::RemoveDirectoryW((sandboxRoot + L"\\discrete\\Logs\\" + pidStr).c_str());
+    ::RemoveDirectoryW((sandboxRoot + L"\\discrete\\Logs").c_str());
+    ::RemoveDirectoryW((sandboxRoot + L"\\discrete").c_str());
+    ::RemoveDirectoryW(sandboxRoot.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -2792,6 +2873,7 @@ int main() {
     Test_CL6_SessionOwnershipAndSharedClasses();
     Test_BL1_BL5_RetryThrottleAndPageFallback();
     Test_BL10_BL11_MethodSignatureAndScanRange();
+    Test_AL11_LoggerAtomicAppendAndConcurrentRename();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

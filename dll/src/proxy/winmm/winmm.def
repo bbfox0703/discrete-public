@@ -30,7 +30,14 @@ EXPORTS
     waveOutGetDevCapsA       = Proxy_waveOutGetDevCapsA
     waveOutGetDevCapsW       = Proxy_waveOutGetDevCapsW
     waveOutGetPosition       = Proxy_waveOutGetPosition
+    waveOutGetErrorTextA     = Proxy_waveOutGetErrorTextA
     waveOutGetErrorTextW     = Proxy_waveOutGetErrorTextW
+    waveOutPause             = Proxy_waveOutPause
+    waveOutRestart           = Proxy_waveOutRestart
+    waveOutGetVolume         = Proxy_waveOutGetVolume
+    waveOutSetVolume         = Proxy_waveOutSetVolume
+    waveOutGetID             = Proxy_waveOutGetID
+    waveOutMessage           = Proxy_waveOutMessage
 
     ; waveIn* — UnityPlayer.dll statically imports all of these; missing any
     ; one of them stops the game from starting at all.
@@ -43,8 +50,16 @@ EXPORTS
     waveInUnprepareHeader    = Proxy_waveInUnprepareHeader
     waveInAddBuffer          = Proxy_waveInAddBuffer
     waveInStart              = Proxy_waveInStart
+    waveInStop               = Proxy_waveInStop
     waveInReset              = Proxy_waveInReset
+    waveInGetPosition        = Proxy_waveInGetPosition
+    waveInGetErrorTextA      = Proxy_waveInGetErrorTextA
+    waveInGetErrorTextW      = Proxy_waveInGetErrorTextW
+    waveInMessage            = Proxy_waveInMessage
 
+    midiOutGetNumDevs        = Proxy_midiOutGetNumDevs
+    midiOutGetDevCapsA       = Proxy_midiOutGetDevCapsA
+    midiOutGetDevCapsW       = Proxy_midiOutGetDevCapsW
     midiOutOpen              = Proxy_midiOutOpen
     midiOutClose             = Proxy_midiOutClose
     midiOutShortMsg          = Proxy_midiOutShortMsg
@@ -53,12 +68,49 @@ EXPORTS
     midiOutUnprepareHeader   = Proxy_midiOutUnprepareHeader
     midiOutReset             = Proxy_midiOutReset
 
+    midiInGetNumDevs         = Proxy_midiInGetNumDevs
+    midiInGetDevCapsA        = Proxy_midiInGetDevCapsA
+    midiInGetDevCapsW        = Proxy_midiInGetDevCapsW
+    midiInOpen               = Proxy_midiInOpen
+    midiInClose              = Proxy_midiInClose
+    midiInStart              = Proxy_midiInStart
+    midiInStop               = Proxy_midiInStop
+    midiInReset              = Proxy_midiInReset
+
+    midiStreamOpen           = Proxy_midiStreamOpen
+    midiStreamClose          = Proxy_midiStreamClose
+    midiStreamOut            = Proxy_midiStreamOut
+    midiStreamPause          = Proxy_midiStreamPause
+    midiStreamRestart        = Proxy_midiStreamRestart
+    midiStreamStop           = Proxy_midiStreamStop
+    midiStreamProperty       = Proxy_midiStreamProperty
+    midiStreamPosition       = Proxy_midiStreamPosition
+
     joyGetNumDevs            = Proxy_joyGetNumDevs
+    joyGetPos                = Proxy_joyGetPos
     joyGetPosEx              = Proxy_joyGetPosEx
+    joyGetDevCapsA           = Proxy_joyGetDevCapsA
     joyGetDevCapsW           = Proxy_joyGetDevCapsW
 
+    mixerGetNumDevs          = Proxy_mixerGetNumDevs
+    mixerOpen                = Proxy_mixerOpen
+    mixerClose               = Proxy_mixerClose
+    mixerGetLineInfoA        = Proxy_mixerGetLineInfoA
+    mixerGetLineInfoW        = Proxy_mixerGetLineInfoW
+    mixerGetLineControlsA    = Proxy_mixerGetLineControlsA
+    mixerGetLineControlsW    = Proxy_mixerGetLineControlsW
+    mixerGetControlDetailsA  = Proxy_mixerGetControlDetailsA
+    mixerGetControlDetailsW  = Proxy_mixerGetControlDetailsW
+    mixerSetControlDetails   = Proxy_mixerSetControlDetails
+
+    mmioOpenA                = Proxy_mmioOpenA
     mmioOpenW                = Proxy_mmioOpenW
     mmioClose                = Proxy_mmioClose
+    mmioRead                 = Proxy_mmioRead
+    mmioWrite                = Proxy_mmioWrite
+    mmioSeek                 = Proxy_mmioSeek
+    mmioDescend              = Proxy_mmioDescend
+    mmioAscend               = Proxy_mmioAscend
 
     PlaySoundA               = Proxy_PlaySoundA
     PlaySoundW               = Proxy_PlaySoundW

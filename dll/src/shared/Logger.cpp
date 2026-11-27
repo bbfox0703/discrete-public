@@ -26,7 +26,6 @@
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -57,7 +56,18 @@ const std::unordered_set<std::wstring>& KnownCategories() {
 fs::path LogBaseDirectory() {
     wchar_t buf[MAX_PATH];
     DWORD n = ::GetEnvironmentVariableW(MagicStrings::LogRootEnvVar, buf, MAX_PATH);
-    fs::path base = (n > 0 && n < MAX_PATH) ? fs::path(buf) : fs::temp_directory_path();
+    if (n > 0 && n < MAX_PATH) {
+        return fs::path(buf) / MagicStrings::LogRootSubpath;
+    }
+    // A-L11: use non-throwing temp_directory_path(ec) so Log::Init() inside
+    // DllMain can never throw std::filesystem::filesystem_error.
+    std::error_code ec;
+    fs::path base = fs::temp_directory_path(ec);
+    if (ec || base.empty()) {
+        wchar_t tmp[MAX_PATH];
+        DWORD tn = ::GetTempPathW(MAX_PATH, tmp);
+        if (tn > 0 && tn < MAX_PATH) base = fs::path(tmp);
+    }
     return base / MagicStrings::LogRootSubpath;
 }
 
@@ -293,34 +303,69 @@ void SweepLogBase(const fs::path& base, const std::wstring& ownPid, SweepCounts&
 }  // namespace
 
 void Init() {
-    std::lock_guard lock(g_mutex);
-    if (g_initialized) return;
-    g_logRoot = LogBaseDirectory() / std::to_wstring(::GetCurrentProcessId());
-    std::error_code ec;
-    fs::create_directories(g_logRoot, ec);
-    ArchivePreviousRun(g_logRoot);
-    g_initialized = true;
+    try {
+        std::lock_guard lock(g_mutex);
+        if (g_initialized) return;
+        g_logRoot = LogBaseDirectory() / std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        fs::create_directories(g_logRoot, ec);
+        ArchivePreviousRun(g_logRoot);
+        g_initialized = true;
+    } catch (...) {
+        // Never allow exceptions to escape Log::Init (callable from DllMain).
+    }
 }
 
 void Write(std::wstring_view category, std::string_view message) {
-    std::lock_guard lock(g_mutex);
-    if (!g_initialized) return;
+    try {
+        std::lock_guard lock(g_mutex);
+        if (!g_initialized) return;
 
-    std::wstring cat(category);
-    if (!KnownCategories().contains(cat)) {
-        cat = MagicStrings::LogCategoryInit;
+        std::wstring cat(category);
+        if (!KnownCategories().contains(cat)) {
+            cat = MagicStrings::LogCategoryInit;
+        }
+
+        fs::path dir = g_logRoot / cat;
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+
+        RotateIfNeeded(dir);
+
+        // A-L11: Open with FILE_APPEND_DATA + full sharing (including DELETE)
+        // and emit the full formatted line in a single WriteFile call. The
+        // kernel guarantees FILE_APPEND_DATA writes land atomically at EOF
+        // across separate Logger copies (proxy / backend / second DLL) and
+        // FILE_SHARE_DELETE allows concurrent rotation without sharing errors.
+        fs::path file = dir / MagicStrings::LogCurrentFileName;
+        std::string line = Timestamp();
+        line.append(message.data(), message.size());
+        line.push_back('\n');
+
+        HANDLE h = ::CreateFileW(
+            file.c_str(),
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+
+        std::size_t off = 0;
+        while (off < line.size()) {
+            const std::size_t rem = line.size() - off;
+            const DWORD chunk = static_cast<DWORD>(rem < 0x10000000u ? rem : 0x10000000u);
+            DWORD written = 0;
+            if (!::WriteFile(h, line.data() + off, chunk, &written, nullptr) || written == 0) {
+                break;
+            }
+            off += written;
+        }
+        ::CloseHandle(h);
+    } catch (...) {
+        // Never allow logging failures / OOM to crash the host process.
     }
-
-    fs::path dir = g_logRoot / cat;
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-
-    RotateIfNeeded(dir);
-
-    fs::path file = dir / MagicStrings::LogCurrentFileName;
-    std::ofstream out(file, std::ios::app | std::ios::binary);
-    if (!out) return;
-    out << Timestamp() << message << '\n';
 }
 
 void Init(std::string_view message) {

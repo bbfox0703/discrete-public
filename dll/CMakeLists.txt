@@ -251,18 +251,16 @@ if(BACKEND STREQUAL "IL2CPP" OR BACKEND STREQUAL "Both")
 endif()
 
 # ---------------------------------------------------------------------------
-# Proxy DLLs (Phase 12a — x64). The proxy gets implicitly loaded by the
-# host game (because the .exe statically imports version.dll / winmm.dll),
-# runs a tiny DllMain shim, then loads the matching Discrete-{Backend}.dll
-# from the same directory on a worker thread (DllMain holds the loader
-# lock, so the actual LoadLibraryW happens off-thread).
+# Proxy DLLs (Phase 12a x64 + Phase 12d x86). The proxy gets implicitly loaded
+# by the host game (because the .exe statically imports version.dll /
+# winmm.dll), runs a tiny DllMain shim, then loads the matching
+# Discrete-{Backend}.dll from the same directory on a worker thread (DllMain
+# holds the loader lock, so the actual LoadLibraryW happens off-thread).
 #
 # Each proxy is a separate shared-library target; both link the shared
 # loader.cpp + a minimal slice of the main DLL tree (BackendDetector +
 # ModuleHelper + Logger + MagicStrings) so we avoid rebuilding those
-# files multiple times.
-#
-# 32-bit (x86) variants are NOT yet built — Phase 12d.
+# files multiple times. Built for both x64 (dist/) and x86 (dist/x86/).
 # ---------------------------------------------------------------------------
 set(PROXY_SHARED_SOURCES
     src/proxy/loader.cpp

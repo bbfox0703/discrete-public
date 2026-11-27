@@ -226,9 +226,8 @@ LONG Proxy_PreCrtCallCount() noexcept { return g_preCrtCalls; }
 HMODULE Proxy_LoadRealDll(const wchar_t* dllName) noexcept {
     if (dllName == nullptr) return nullptr;
 
-    // ⛔ PRE-CRT GATE. Must precede BOTH the std::wstring below (which mallocs
-    // on a heap that may not exist yet) and LoadLibraryW (which would be a
-    // recursive load under a loader lock the pre-CRT caller is still holding).
+    // ⛔ PRE-CRT GATE. Must precede LoadLibraryW (which would be a recursive
+    // load under a loader lock the pre-CRT caller is still holding).
     // Nothing is latched — the cache stays empty, so the next call retries.
     // The thunks gate themselves too and answer a documented failure value;
     // this one guards Proxy_LoadRealDll as a public entry point in its own

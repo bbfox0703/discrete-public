@@ -15,9 +15,10 @@
 // and archived *.log files past that age inside the folders it keeps. The UI
 // runs the same sweep at its startup (FileLogger.RunRetentionSweep).
 //
-// Linked into the proxy DLLs too — they only call Init/Write, and only from
-// their worker thread (post-CRT, off the loader lock). Nothing here may be
-// called from a proxy before Proxy_CrtReady().
+// Linked into the proxy DLLs too — they normally call Init/Write from their
+// worker thread (post-CRT, off the loader lock), with a one-shot fallback log
+// from DllMain only if spawning that worker thread fails (post-Proxy_MarkCrtReady).
+// Nothing here may be called from a proxy before Proxy_CrtReady().
 #pragma once
 
 #include <string>

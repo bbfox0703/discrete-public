@@ -12,6 +12,28 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1586) — Fix A-L2 + A-L4 + A-L10 + A-L11 + A-L20 (keyed idempotent disconnect hooks & doc sync, zero-copy `WriteLine`, atomic proxy thunks & middleware `winmm` exports, atomic `FILE_APPEND_DATA` Logger, heavy-RPC-gated disconnect GC drain)
+
+- **Bug fixes (`A-L2`, `A-L4`, `A-L10`, `A-L11`, `A-L20`):**
+  - **`A-L2` (`dll/src/shared/{PipeServer.{h,cpp},Logger.h,ForegroundHook.h}`, `dll/CMakeLists.txt`, `dll/src/proxy/loader.cpp`, `dll/src/shared/ExportAPI.cpp`):**
+    - Made `PipeServer::RegisterDisconnectHook(std::string key, DisconnectHook hook)` genuinely idempotent by key (updating an existing key in place rather than appending duplicates) and updated callers (`"gc-drain"`, `"session-cleanup"`).
+    - Synced stale comments across `PipeServer.h` (multi-client `kMaxPipeInstances = 4` + bounded `Stop()` drain), `PipeServer.cpp` (bounded worker drain), `dll/CMakeLists.txt` (x86 proxy builds), `Logger.h` (DllMain fallback on `CreateThread` failure), `ForegroundHook.h` (`UnsubclassAllGameWindows` on `Shutdown()`), and `loader.cpp`.
+  - **`A-L4` (`dll/src/shared/PipeServer.cpp`):**
+    - Changed `WriteLine` to take `std::string` by value (`std::move(serialized)`), append `'\n'` in place without duplicating large response buffers (halving 32-bit peak memory on large snapshots/scans), and write in 16 MiB overlapped chunks.
+  - **`A-L10` (`dll/src/proxy/{version/version.cpp,winmm/winmm.cpp,winmm/winmm.def}`):**
+    - Replaced non-atomic `static fn_t fn` in `PROXY_THUNK` with constant-initialized `static std::atomic<fn_t> fn{nullptr}` (acquire/release load/store), eliminating formal UB while preserving pre-CRT zero-init safety (verified via `tools/verify/proxy_precrt_gate.py --all`).
+    - Added 48 common middleware `winmm.dll` forwarding thunks + `.def` exports (`waveOutPause/Restart/GetVolume/SetVolume/GetErrorTextA/GetID/Message`, `waveInStop/GetPosition/GetErrorTextA/W/Message`, `midiOutGetNumDevs/GetDevCapsA/W`, `midiIn*`, `midiStream*`, `joyGetPos/GetDevCapsA`, `mixer*`, `mmioOpenA/Read/Write/Seek/Descend/Ascend`) with arities verified against Windows SDK `10.0.26100.0` headers.
+  - **`A-L11` (`dll/src/shared/Logger.cpp`):**
+    - Replaced `std::ofstream` appends with `CreateFileW(FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, ...)` + single-buffer `WriteFile` so cross-module writes (proxy + backend) land atomically at EOF and never block concurrent rotation with sharing violations.
+    - Switched `LogBaseDirectory()` from throwing `fs::temp_directory_path()` to non-throwing `fs::temp_directory_path(ec)` + `GetTempPathW` fallback, and wrapped `Init()` / `Write()` in `try/catch` guards.
+  - **`A-L20` (`dll/src/shared/{PipeServer.{h,cpp},ExportAPI.cpp}`):**
+    - Added `PipeServer::MarkHeavyCommands(...)` and per-worker `CurrentClientRanHeavyRpc()` tracking (`findFieldReferences`, `searchSymbols`, `snapshotBegin`, `dumpClassInfo`, `dumpIl2cppSymbols`, `beginValueScan`, `beginGroupScan`, `scanFieldValue`, `findInstances`, `listFieldValuesAcrossInstances`, `diagnoseClassReferences`, `dumpLazyInitSlots`), gating both Mono and IL2CPP disconnect GC-drain hooks so lightweight short-lived CE bridge bursts incur zero full-GC stall on disconnect.
+  - Added C++ unit test `Test_AL11_LoggerAtomicAppendAndConcurrentRename` in `dll/tests/dll_core_test.cpp` (+8 checks on x64 and x86).
+  - Marked `A-L2`, `A-L4`, `A-L10`, `A-L11`, and `A-L20` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1586) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; `proxy_precrt_gate.py --all` PASS; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 964 passed (x64) / 964 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1584) — Fix B-L9 + B-L10 + B-L11 + B-L12 (completes 100% of Block B: ambiguity & open-generic guards before JIT, collision-free `MethodSignatureFormat` suffixes, near-zero backward-scan clamping, `Outer/Inner` `declaringClass` & doc sync)
 
 - **Bug fixes (`B-L9`, `B-L10`, `B-L11`, `B-L12` — completes 100% of Block B Critical/High/Medium/Low findings):**

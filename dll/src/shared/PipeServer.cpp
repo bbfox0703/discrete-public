@@ -16,6 +16,8 @@
 #include <mutex>
 #include <string>
 #include <thread>  // Phase 22f: detached worker thread per client
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 using nlohmann::json;
@@ -26,10 +28,12 @@ namespace {
 
 std::mutex g_mutex;
 std::unordered_map<std::string, Handler> g_handlers;
-// Per-client disconnect hooks. Fires once per accepted-client lifetime.
-// Read-mostly: written at init (backends register one hook each), read on
-// every disconnect. Snapshotted under the same g_mutex as the handler map.
-std::vector<DisconnectHook> g_disconnectHooks;
+// A-L20: Command names marked as heavy batch/scan/xref/snapshot RPCs.
+std::unordered_set<std::string> g_heavyCommands;
+// Per-client disconnect hooks keyed by name (idempotent by key — A-L2).
+// Fires once per accepted-client lifetime. Read-mostly: written at init,
+// snapshotted under g_mutex on every disconnect.
+std::vector<std::pair<std::string, DisconnectHook>> g_disconnectHooks;
 std::thread g_worker;
 std::atomic<bool> g_running{false};
 HANDLE g_stopEvent = nullptr;
@@ -41,6 +45,8 @@ HANDLE g_stopEvent = nullptr;
 std::atomic<int> g_activeClients{0};
 // C-L6: Per-worker connection id (0 off-worker / in unit tests).
 thread_local std::uint64_t t_currentClientId = 0;
+// A-L20: True once this client worker has dispatched any heavy command.
+thread_local bool t_clientRanHeavyRpc = false;
 
 constexpr DWORD kPipeBufferSize = 64 * 1024;
 
@@ -54,32 +60,48 @@ void LogPipe(const std::string& msg) {
     Log::Write(MagicStrings::LogCategoryPipe, msg);
 }
 
-// Write `data` then a newline. Returns false on failure / disconnect.
-bool WriteLine(HANDLE pipe, const std::string& data) {
-    std::string framed = data;
-    framed.push_back('\n');
-    DWORD written = 0;
+// Write `data` then a newline without copying large response buffers (A-L4).
+// Mutates the moved `data` in-place to append '\n' and writes in bounded chunks
+// so peak memory stays 1x (critical on 32-bit targets) and buffers > 2 GiB
+// never truncate DWORD counts. Returns false on failure / disconnect.
+bool WriteLine(HANDLE pipe, std::string data) {
+    data.push_back('\n');
     OVERLAPPED ov{};
     ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!ov.hEvent) return false;
 
-    bool ok = false;
-    BOOL result = ::WriteFile(pipe, framed.data(), static_cast<DWORD>(framed.size()), &written, &ov);
-    if (!result && ::GetLastError() != ERROR_IO_PENDING) {
-        ::CloseHandle(ov.hEvent);
-        return false;
-    }
-    HANDLE waits[2] = { ov.hEvent, g_stopEvent };
-    DWORD which = ::WaitForMultipleObjects(2, waits, FALSE, INFINITE);
-    if (which == WAIT_OBJECT_0) {
-        ok = ::GetOverlappedResult(pipe, &ov, &written, FALSE) && written == framed.size();
-    } else {
-        ::CancelIoEx(pipe, &ov);
-        // Wait (bWait=TRUE) for the cancellation to actually complete before
-        // ov leaves scope — CancelIoEx is async, and the kernel may still
-        // write the completion status into the stack-resident OVERLAPPED
-        // after CancelIoEx returns. Ignore the result; we're tearing down.
-        ::GetOverlappedResult(pipe, &ov, &written, TRUE);
+    bool ok = true;
+    std::size_t offset = 0;
+    constexpr std::size_t kMaxChunkBytes = 16u * 1024u * 1024u;
+    while (offset < data.size()) {
+        ::ResetEvent(ov.hEvent);
+        const std::size_t remaining = data.size() - offset;
+        const DWORD toWrite = static_cast<DWORD>(
+            remaining < kMaxChunkBytes ? remaining : kMaxChunkBytes);
+        DWORD written = 0;
+        BOOL result = ::WriteFile(pipe, data.data() + offset, toWrite, &written, &ov);
+        if (!result && ::GetLastError() != ERROR_IO_PENDING) {
+            ok = false;
+            break;
+        }
+        HANDLE waits[2] = { ov.hEvent, g_stopEvent };
+        DWORD which = ::WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        if (which == WAIT_OBJECT_0) {
+            if (!::GetOverlappedResult(pipe, &ov, &written, FALSE) || written == 0) {
+                ok = false;
+                break;
+            }
+            offset += written;
+        } else {
+            ::CancelIoEx(pipe, &ov);
+            // Wait (bWait=TRUE) for the cancellation to actually complete before
+            // ov leaves scope — CancelIoEx is async, and the kernel may still
+            // write the completion status into the stack-resident OVERLAPPED
+            // after CancelIoEx returns. Ignore the result; we're tearing down.
+            ::GetOverlappedResult(pipe, &ov, &written, TRUE);
+            ok = false;
+            break;
+        }
     }
     ::CloseHandle(ov.hEvent);
     return ok;
@@ -161,12 +183,15 @@ json Dispatch(const json& request) {
     std::string cmd = request["cmd"].get<std::string>();
 
     Handler handler;
+    bool isHeavy = false;
     {
         std::lock_guard lock(g_mutex);
         auto it = g_handlers.find(cmd);
         if (it != g_handlers.end()) handler = it->second;
+        isHeavy = g_heavyCommands.contains(cmd);
     }
     if (!handler) return BuildError(id, -32601, "unknown cmd: " + cmd);
+    if (isHeavy) t_clientRanHeavyRpc = true;
 
     // C-L5: Treat omitted, null, or non-object "args" as an empty JSON object
     // instead of passing null into handlers (where args.value(...) throws 306).
@@ -255,7 +280,7 @@ void ServeClient(HANDLE pipe) {
             serialized = BuildError(reqId, -32603,
                                     std::string("response serialization failed: ") + ex.what()).dump();
         }
-        if (!WriteLine(pipe, serialized)) break;
+        if (!WriteLine(pipe, std::move(serialized))) break;
     }
     monitorStop.store(true, std::memory_order_relaxed);
     if (monitor.joinable()) monitor.join();
@@ -397,21 +422,19 @@ void WorkerThread() {
             // CreateNamedPipeW for the next client — concurrent
             // DiscreteUI + bridge slot in cleanly.
             //
-            // Lifetime / cleanup: on g_running=false the per-client
-            // ReadLine bails (it polls g_running each iteration), the
-            // worker exits, captures clean up. We do NOT join detached
-            // threads on shutdown — DLL unload only happens at game
-            // exit and any in-flight ServeClient pipe handle gets
-            // forcibly closed when the process tears down.
+            // Lifetime / cleanup (A-L2): on Stop(), g_running becomes false,
+            // g_stopEvent is signalled, in-flight scans are cancelled and
+            // pending main-thread work is aborted, and Stop() waits up to
+            // kWorkerExitTimeoutMs (2 s) for g_activeClients to drain to 0
+            // before closing g_stopEvent.
             //
             // Disconnect hooks fire AFTER ::DisconnectNamedPipe so the
             // OS-side pipe object is already torn down — backends are
             // free to take their time inside the hook (e.g. a Mono GC
-            // drain on a 60K-class image is ~100 ms) without holding
-            // the pipe slot open against the next ::CreateNamedPipeW
-            // in the main loop. Hooks run on the per-client worker
-            // thread which is about to exit anyway, so no extra
-            // thread cost.
+            // drain after a heavy RPC) without holding the pipe slot open
+            // against the next ::CreateNamedPipeW in the main loop. Hooks
+            // run on the per-client worker thread which is about to exit
+            // anyway, so no extra thread cost.
             // Count this worker BEFORE detaching (synchronously, on the
             // acceptor thread) so that once Stop() has joined the acceptor,
             // g_activeClients reflects every live worker — no spawn can slip
@@ -421,24 +444,29 @@ void WorkerThread() {
             const std::uint64_t workerClientId = g_nextClientId.fetch_add(1, std::memory_order_relaxed);
             try {
               std::thread([pipe, workerClientId]() {
-                // C-L6: Bind this worker's unique connection id for the full
-                // lifetime of its RPCs AND disconnect hooks so session managers
-                // enforce ownership and DropForOwner(CurrentClientId()) drops
-                // only this disconnecting client's sessions.
-                struct ClientIdGuard {
-                    explicit ClientIdGuard(std::uint64_t id) noexcept { t_currentClientId = id; }
-                    ~ClientIdGuard() noexcept { t_currentClientId = 0; }
-                } clientIdGuard(workerClientId);
+                // C-L6 + A-L20: Bind this worker's unique connection id and
+                // reset its per-client heavy-RPC latch for the full lifetime
+                // of its RPCs AND disconnect hooks.
+                struct ClientWorkerStateGuard {
+                    explicit ClientWorkerStateGuard(std::uint64_t id) noexcept {
+                        t_currentClientId   = id;
+                        t_clientRanHeavyRpc = false;
+                    }
+                    ~ClientWorkerStateGuard() noexcept {
+                        t_currentClientId   = 0;
+                        t_clientRanHeavyRpc = false;
+                    }
+                } clientStateGuard(workerClientId);
                 // Exception barrier for the WHOLE thread body. This is a detached
                 // std::thread, so anything escaping its function calls
                 // std::terminate and takes the GAME process down with it. Dispatch
                 // guards handler exceptions, but plenty of allocation happens
-                // outside that guard — ReadLine growing its buffer, WriteLine's
-                // string copy, the json id/cmd extraction in Dispatch itself, and
-                // even BuildError inside Dispatch's own catch (which re-throws if
-                // the original exception was bad_alloc). A DLL sharing a 32-bit
-                // game's 2 GB address space can genuinely hit bad_alloc on a large
-                // scan response. Losing one client beats killing the game.
+                // outside that guard — ReadLine growing its buffer, the json
+                // id/cmd extraction in Dispatch itself, and even BuildError inside
+                // Dispatch's own catch (which re-throws if the original exception
+                // was bad_alloc). A DLL sharing a 32-bit game's 2 GB address space
+                // can genuinely hit bad_alloc on a large scan response. Losing one
+                // client beats killing the game.
                 try {
                   ServeClient(pipe);
                 } catch (const std::exception& ex) {
@@ -461,19 +489,21 @@ void WorkerThread() {
                       // Snapshot the hook list under the mutex so a concurrent
                       // RegisterDisconnectHook (unlikely after init but cheap to
                       // be safe) doesn't race with iteration.
-                      std::vector<DisconnectHook> hooks;
+                      std::vector<std::pair<std::string, DisconnectHook>> hooks;
                       {
                           std::lock_guard lock(g_mutex);
                           hooks = g_disconnectHooks;
                       }
-                      for (const auto& h : hooks) {
-                          if (!h) continue;
+                      for (const auto& entry : hooks) {
+                          if (!entry.second) continue;
                           try {
-                              h();
+                              entry.second();
                           } catch (const std::exception& ex) {
-                              LogPipe(std::string("disconnect hook threw: ") + ex.what());
+                              LogPipe(std::string("disconnect hook '") + entry.first +
+                                      "' threw: " + ex.what());
                           } catch (...) {
-                              LogPipe("disconnect hook threw non-std exception");
+                              LogPipe(std::string("disconnect hook '") + entry.first +
+                                      "' threw non-std exception");
                           }
                       }
                   }
@@ -506,10 +536,27 @@ void RegisterHandler(std::string name, Handler handler) {
     g_handlers[std::move(name)] = std::move(handler);
 }
 
-void RegisterDisconnectHook(DisconnectHook hook) {
+void MarkHeavyCommands(std::initializer_list<const char*> names) {
+    std::lock_guard lock(g_mutex);
+    for (const char* name : names) {
+        if (name != nullptr && *name != '\0') {
+            g_heavyCommands.emplace(name);
+        }
+    }
+}
+
+void RegisterDisconnectHook(std::string key, DisconnectHook hook) {
     if (!hook) return;
     std::lock_guard lock(g_mutex);
-    g_disconnectHooks.push_back(std::move(hook));
+    // A-L2: Idempotent by key — update existing entry in-place to preserve order
+    // without appending duplicate hooks.
+    for (auto& entry : g_disconnectHooks) {
+        if (entry.first == key) {
+            entry.second = std::move(hook);
+            return;
+        }
+    }
+    g_disconnectHooks.emplace_back(std::move(key), std::move(hook));
 }
 
 void ClearDisconnectHooks() {
@@ -536,6 +583,10 @@ std::vector<std::string> RegisteredCommands() {
 
 std::uint64_t CurrentClientId() noexcept {
     return t_currentClientId;
+}
+
+bool CurrentClientRanHeavyRpc() noexcept {
+    return t_clientRanHeavyRpc;
 }
 
 bool Start() {

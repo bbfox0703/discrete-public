@@ -98,7 +98,7 @@
 - 成因：mutex 的擁有者是 loader thread；`OnDetach` 通常在其他 thread 執行，`ReleaseMutex` 回傳 `ERROR_NOT_OWNER`。閘門只依賴 `ERROR_ALREADY_EXISTS`，所以功能不受影響；owner thread 結束後 mutex 變成 abandoned，也沒有人等它。
 - 修法：改用 `bInitialOwner=FALSE` 並刪掉 `ReleaseMutex`，只保留 `CloseHandle`。
 
-**A-L2 · 文件與實作不一致 / 過時註解（含 AUDIT 訊號 2、3）**
+**A-L2 · 文件與實作不一致 / 過時註解（含 AUDIT 訊號 2、3） — ✅ FIXED (2026-11-27)**
 - 位置與內容：
   - `PipeServer.h:44-45`：宣稱 `RegisterDisconnectHook` 具 idempotent，但 `PipeServer.cpp:410-414` 只有 `push_back`（`std::function` 也沒辦法比對 target）。
   - `PipeServer.h:8-9`：「single in-flight client / multi-client deferred」，與 `kMaxPipeInstances = 4` + per-client thread 不符。
@@ -118,7 +118,7 @@
 - 成因：`Stop()` 一律 `ClearDisconnectHooks()`，但 `Discrete_StopPipe` 不會清掉 `g_initialized`，之後的 `StartPipe` 也就不會重新 `Discrete_Init`，GC drain 與「最後一個 client 離開時丟棄 session」的 hook 都不會再註冊。repo 內沒有人呼叫 `Discrete_StopPipe`（dead export），所以列為 Low。
 - 修法：把 `ClearDisconnectHooks()` 從 `Stop()` 移到 `Discrete_Shutdown`；或者直接移除 `Discrete_StopPipe` export。
 
-**A-L4 · `WriteLine` 為了附加 `'\n'` 複製整份回應**
+**A-L4 · `WriteLine` 為了附加 `'\n'` 複製整份回應 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/PipeServer.cpp:53-55`
 - 成因：大型回應（snapshot / scan）的尖峰記憶體變成兩倍，在 32-bit 下更容易 `bad_alloc`（會被 worker 的 catch 吃掉，client 被斷線）。
 - 修法：讓 `serialized` 直接 `push_back('\n')` 後以 move 傳入，或分成兩次 `WriteFile`。
@@ -148,11 +148,11 @@
 - 成因：API 失敗（存取被拒）時回傳 false → exit 2 → UI 顯示「ProcessPicker 誤判 bitness」，誤導使用者；`wprintf` 在 C locale 下遇到非 ASCII 的 DLL 路徑會在該字元停止輸出（僅影響 log）。
 - 修法：API 失敗時改走 exit 1，並帶 `GetLastError`；印路徑前先設定 `_setmode(_fileno(stdout), _O_U8TEXT)`，或改成手動轉 UTF-8 輸出。
 
-**A-L10 · Proxy 的小問題**
+**A-L10 · Proxy 的小問題 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/proxy/loader.cpp:141`、`:169`（`noexcept` 函式內建 `std::wstring`，`bad_alloc` 會 `terminate`）；`dll/src/proxy/version/version.cpp:68-75`、`dll/src/proxy/winmm/winmm.cpp:131-138`（`static fn_t fn` 跨執行緒非 atomic 讀寫，在 x86/x64 上是良性 data race，但形式上屬於 UB）；`dll/src/proxy/winmm/winmm.cpp:142-242`（只轉發 UnityPlayer.dll 用到的子集，遊戲另外帶的 middleware 若 import `waveOutSetVolume` / `waveOutPause` / `midiStream*` / `mixer*` 等，會出現「找不到程序進入點」而無法啟動；待驗證）。
 - 修法：`SystemDllPath` 改用固定大小的 `wchar_t` buffer；`fn` 改成 `std::atomic<fn_t>`（constant-init，符合 Pre-CRT rule 3 的精神）並用 relaxed load/store；建一份常見 middleware 的 winmm import 清單，用 `dumpbin /imports` 對照補齊。
 
-**A-L11 · Logger 跨模組併寫與 DllMain 內的例外風險**
+**A-L11 · Logger 跨模組併寫與 DllMain 內的例外風險 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/Logger.cpp:60`、`:167-173`、`:321-323`
 - 成因：proxy、backend 和「被跳過 init 的第二份 DLL」各有一份 Logger（各自的 `g_mutex`），卻寫同一個 `current.log`；CRT 的 append 是「seek 到檔尾 + write」，不是 atomic，跨模組可能互相覆寫；一方開著檔案時另一方 rotate 會遇到 sharing violation（程式已註明會留到下次重試）。`fs::temp_directory_path()` 用的是會丟例外的 overload，而且是在 DllMain 的 `Log::Init` 裡呼叫。
 - 修法：用 `CreateFileW(FILE_APPEND_DATA, FILE_SHARE_READ|WRITE|DELETE)` + `WriteFile` 取代 `ofstream`（核心保證 append 是 atomic，rename 也不會被擋）；改用 `temp_directory_path(ec)` 這個 overload。
@@ -200,7 +200,7 @@
 - 成因：「not built」只印 `[SKIP]`，不計入 failures，最後印 `PASS` 並 exit 0；一個什麼都沒測的閘門看起來跟通過一樣（同檔對 bitness 不符的處理反而有計為失敗，兩者不一致）。
 - 修法：沒有任何 proxy 被測到時回傳非 0，或至少印「NOTHING TESTED」並 exit 2。
 
-**A-L20 · Disconnect hook 在每次 client 斷線都觸發 full GC（跨模組觀察）**
+**A-L20 · Disconnect hook 在每次 client 斷線都觸發 full GC（跨模組觀察） — ✅ FIXED (2026-11-27)**
 - 位置：契約在 `dll/src/shared/PipeServer.h:26-45`；hook 本體在 `dll/src/shared/ExportAPI.cpp:10536-10556`、`:10560-10577`（Block C）
 - 成因：CE bridge 的設計是「短連線 burst」，每次 burst 斷線都會在遊戲裡跑一次 `mono_gc_collect(-1)` / `il2cpp_gc_collect(0)`（log 顯示約 50–200 ms），也就是每次 bridge 操作都造成一次可感知的卡頓。
 - 修法：GC drain 只在 `ActiveClientCount() == 1`（最後一個 client 離開）時執行，或者只在該 client 跑過標記為「重量級」的 RPC 後才執行。
