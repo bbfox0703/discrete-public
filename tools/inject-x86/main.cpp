@@ -86,16 +86,33 @@ int CmdVersion() {
 // not include MB_ERR_INVALID_CHARS — so a game under e.g. D:\遊戲\ failed with
 // a misleading "DLL not found" for a path that exists.
 
-bool TargetIsWow64(HANDLE hProc) {
+// A-L9: Convert UTF-16 strings to UTF-8 for stdout/stderr so non-ASCII paths
+// (e.g. CJK game folders) are never truncated by narrow-stream wprintf under
+// the default C locale.
+std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int needed = ::WideCharToMultiByte(
+        CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return {};
+    std::string out(static_cast<std::size_t>(needed), '\0');
+    ::WideCharToMultiByte(
+        CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), needed, nullptr, nullptr);
+    return out;
+}
+
+// A-L9: Distinguish IsWow64Process API failure (exit 1 with GetLastError) from
+// a confirmed x64 target (exit 2), so access-denied errors never report a bogus
+// bitness-mismatch message to the UI.
+bool QueryTargetIsWow64(HANDLE hProc, bool& outIsWow64, DWORD& outErr) {
     BOOL wow = FALSE;
     if (!::IsWow64Process(hProc, &wow)) {
-        // Older Windows or access-denied → treat as unknown. The caller
-        // verifies via bitness probe in C# anyway; this is a defensive
-        // guard for the pathological case (Windows version too old to
-        // expose IsWow64Process, which would be Win XP SP2 — pre-modern).
+        outErr = ::GetLastError();
+        outIsWow64 = false;
         return false;
     }
-    return wow == TRUE;
+    outErr = 0;
+    outIsWow64 = (wow == TRUE);
+    return true;
 }
 
 int CmdInject(int pid, const std::wstring& dllPath) {
@@ -121,9 +138,19 @@ int CmdInject(int pid, const std::wstring& dllPath) {
         return 1;
     }
 
-    bool wow64 = TargetIsWow64(hProc);
-    std::wprintf(L"inject-x86: pid=%d wow64=%s dll=%s\n",
-        pid, wow64 ? L"true" : L"false", dllPath.c_str());
+    bool wow64 = false;
+    DWORD wowErr = 0;
+    if (!QueryTargetIsWow64(hProc, wow64, wowErr)) {
+        std::fprintf(stderr,
+            "inject-x86: IsWow64Process(pid=%d) failed (Win32 error %lu). "
+            "Run elevated? Process exited?\n", pid, wowErr);
+        ::CloseHandle(hProc);
+        return 1;
+    }
+
+    const std::string dllPathUtf8 = WideToUtf8(dllPath);
+    std::printf("inject-x86: pid=%d wow64=%s dll=%s\n",
+        pid, wow64 ? "true" : "false", dllPathUtf8.c_str());
 
     // The injector is x86, so we can ONLY usefully inject into a 32-bit
     // target (== a WOW64 process on x64 Windows). If the target is x64,
@@ -138,9 +165,9 @@ int CmdInject(int pid, const std::wstring& dllPath) {
     // silently inject the wrong-bitness DLL.
     if (!wow64) {
         std::fprintf(stderr,
-            "inject-x86: target is NOT a 32-bit process (or the 32-bit "
-            "check failed). Refusing to inject x86 DLL into x64 target. "
-            "Use the in-process x64 injector for x64 targets.\n");
+            "inject-x86: target is NOT a 32-bit process. Refusing to inject "
+            "x86 DLL into x64 target. Use the in-process x64 injector for "
+            "x64 targets.\n");
         ::CloseHandle(hProc);
         return 2;
     }
@@ -276,7 +303,8 @@ int wmain(int argc, wchar_t** argv) {
     wchar_t* end = nullptr;
     long pid = std::wcstol(argv[1], &end, 10);
     if (end == argv[1] || pid <= 0 || pid > 0x7FFFFFFF) {
-        std::fprintf(stderr, "inject-x86: invalid PID argument '%ls'\n", argv[1]);
+        const std::string badPid = WideToUtf8(argv[1]);
+        std::fprintf(stderr, "inject-x86: invalid PID argument '%s'\n", badPid.c_str());
         return 1;
     }
 

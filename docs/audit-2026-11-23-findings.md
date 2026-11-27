@@ -138,12 +138,12 @@
 - 成因：讀到 `g_scanActive > 0` 之後、`store(true)` 之前，最後一個 Scope 可能已經離開並清掉旗標，結果留下一個「已 arm」的旗標。下一個 outermost Scope 進場時會清掉，所以只影響沒有持有 Scope 的 polling 端（註解說這種情況只是 advisory）。
 - 修法：用 CAS 迴圈，或在 Scope dtor 最後一位離開時再清一次（先 store false、再檢查 count）。
 
-**A-L8 · 注入器的成功判定與權限**
+**A-L8 · 注入器的成功判定與權限 — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI/Platform/WindowsDllInjector.cs:31`、`:48`、`:113-122`
 - 成因：x64 HMODULE 的低 32 位元在 64 KB 粒度的 ASLR 下約有 1/65536 機率剛好是 0，會被誤判成載入失敗；`0x1F0FFF` 是 XP 時代的 `PROCESS_ALL_ACCESS`，要求的權限遠多於需要（對受保護的行程更容易失敗）；沒有檢查 DLL 的 PE machine 是否與目標 bitness 相符（錯配時只會看到 `LoadLibraryW returned NULL`）。
 - 修法：失敗時再用 `EnumProcessModulesEx` / Toolhelp 確認模組是否已經載入；權限只要求 `CREATE_THREAD | VM_OPERATION | VM_WRITE | VM_READ | QUERY_INFORMATION`（與 `inject-x86` 的 `kAccess` 一致）；注入前讀 DLL 的 PE machine 並與 `IsWow64Process` 結果比對。
 
-**A-L9 · `inject-x86` 把 `IsWow64Process` 失敗回報成「目標是 x64」，非 ASCII 路徑會截斷 stdout**
+**A-L9 · `inject-x86` 把 `IsWow64Process` 失敗回報成「目標是 x64」，非 ASCII 路徑會截斷 stdout — ✅ FIXED (2026-11-27)**
 - 位置：`tools/inject-x86/main.cpp:89-98`、`:139-146`、`:125-126`
 - 成因：API 失敗（存取被拒）時回傳 false → exit 2 → UI 顯示「ProcessPicker 誤判 bitness」，誤導使用者；`wprintf` 在 C locale 下遇到非 ASCII 的 DLL 路徑會在該字元停止輸出（僅影響 log）。
 - 修法：API 失敗時改走 exit 1，並帶 `GetLastError`；印路徑前先設定 `_setmode(_fileno(stdout), _O_U8TEXT)`，或改成手動轉 UTF-8 輸出。
@@ -181,7 +181,7 @@
 - 成因：在主執行緒上 inline 執行的 closure 裡，`ThreadAttachGuard` 會判斷「不在 drain 中」而照樣做 attach / detach，正是 build #54 的問題型態；目前沒有實際會走到的路徑。
 - 修法：inline 執行期間比照 `Drain()` 設定並還原 `t_inside_work_item`。
 
-**A-L17 · Proxy deploy 的批次作業會作用在被 filter 隱藏的已選列；安裝不是原子操作**
+**A-L17 · Proxy deploy 的批次作業會作用在被 filter 隱藏的已選列；安裝不是原子操作 — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs:138-156`、`:207-209`；`ui/UnityDumpUI/Platform/WindowsProxyInstaller.cs:204-223`
 - 成因：選取狀態跨 filter 保留，Install / Uninstall 列舉的是 `Games` 而不是 `FilteredGames`；複製到一半失敗（例如遊戲在執行、檔案被鎖）會留下新舊版本混雜的 DLL，而另一個 proxy 已經先被刪除；`_scanCts` 從未 Dispose。
 - 修法：批次作業只處理 `FilteredGames`（或在確認對話框中列出隱藏的列）；先複製到 `*.tmp`，全部成功後再 `File.Move(overwrite)`；替換 `_scanCts` 前先 Dispose 舊的。

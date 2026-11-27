@@ -354,4 +354,181 @@ public class ProxyInstallerAndDeployViewModelTests
         Assert.True(vm.CanRefresh);
         Assert.True(vm.CanRunBulk);
     }
+
+    // ---------- A-L17 regression tests -----------------------------------
+
+    [Fact]
+    public async Task InstallSelected_AndUninstallSelected_OnlyActOnFilteredVisibleRows()
+    {
+        var g1 = new UnityGameEntry(
+            @"C:\Games\Alpha\Alpha.exe", @"C:\Games\Alpha", "AlphaGame",
+            UnityBackend.Mono, ExeBitness.X64, "Alpha_Data", ProxyKind.Version, "Steam",
+            installedProxyVersion: "0.1.0.200", sourceProxyVersion: "0.1.0.200");
+        var g2 = new UnityGameEntry(
+            @"C:\Games\Beta\Beta.exe", @"C:\Games\Beta", "BetaGame",
+            UnityBackend.Mono, ExeBitness.X64, "Beta_Data", ProxyKind.Version, "Steam",
+            installedProxyVersion: "0.1.0.200", sourceProxyVersion: "0.1.0.200");
+
+        var scanner = new StubScanner
+        {
+            OnScan = _ => Task.FromResult<IReadOnlyList<UnityGameEntry>>(new[] { g1, g2 }),
+        };
+        var uninstalled = new List<string>();
+        var installer = new StubInstaller();
+        var customInstaller = new TrackingInstaller(installer, uninstalled);
+
+        using var vm = new ProxyDeployViewModel(scanner, customInstaller);
+        await vm.RefreshCommand.ExecuteAsync(null).ConfigureAwait(true);
+
+        // Select both rows, then filter so only AlphaGame is visible.
+        vm.SelectAllCommand.Execute(null);
+        vm.Filter = "Alpha";
+        Assert.Single(vm.FilteredGames);
+        Assert.Contains("(1 hidden)", vm.SummaryText);
+
+        // A-L17: InstallSelected must ONLY touch AlphaGame (not hidden BetaGame).
+        await vm.InstallSelectedCommand.ExecuteAsync(null).ConfigureAwait(true);
+        var inst = Assert.Single(installer.InstallCalls);
+        Assert.Equal(@"C:\Games\Alpha\Alpha.exe", inst.Exe);
+
+        // A-L17: UninstallSelected must ONLY touch AlphaGame (not hidden BetaGame).
+        await vm.UninstallSelectedCommand.ExecuteAsync(null).ConfigureAwait(true);
+        var uninst = Assert.Single(uninstalled);
+        Assert.Equal(@"C:\Games\Alpha\Alpha.exe", uninst);
+    }
+
+    private sealed class TrackingInstaller(StubInstaller inner, List<string> uninstalls) : IProxyInstaller
+    {
+        public Task<ProxyInstallStatus> DetectAsync(string gameExePath, CancellationToken ct = default) =>
+            inner.DetectAsync(gameExePath, ct);
+
+        public Task<ProxyOperationResult> InstallAsync(string gameExePath, ProxyKind kind, CancellationToken ct = default) =>
+            inner.InstallAsync(gameExePath, kind, ct);
+
+        public Task<ProxyOperationResult> UninstallAsync(string gameExePath, CancellationToken ct = default)
+        {
+            uninstalls.Add(gameExePath);
+            return inner.UninstallAsync(gameExePath, ct);
+        }
+    }
+
+    [Fact]
+    public async Task Install_RollsBackAtomically_WhenTargetFileIsLocked_LeavingOtherProxyUntouched()
+    {
+        using var sb = new TempProxySandbox();
+        var installer = sb.CreateInstaller();
+
+        // Seed an older Discrete version.dll + Discrete-Mono.dll + Discrete-IL2CPP.dll install.
+        string versionPath = Path.Combine(sb.GameDir, "version.dll");
+        string winmmPath   = Path.Combine(sb.GameDir, "winmm.dll");
+        string monoPath    = Path.Combine(sb.GameDir, "Discrete-Mono.dll");
+        string il2cppPath  = Path.Combine(sb.GameDir, "Discrete-IL2CPP.dll");
+        File.WriteAllText(versionPath, "DISCRETE:0.1.0.100");
+        File.WriteAllText(monoPath,    "DISCRETE:0.1.0.100");
+        File.WriteAllText(il2cppPath,  "DISCRETE:0.1.0.100");
+
+        // Lock Discrete-Mono.dll exclusively (simulating a running game) and try to
+        // switch from version.dll -> winmm.dll. The atomic installer must fail,
+        // roll back winmm.dll, leave version.dll intact, and leave zero .tmp/.bak files.
+        using (new FileStream(monoPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            ProxyOperationResult res = await installer.InstallAsync(
+                sb.GameExe, ProxyKind.Winmm, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            Assert.False(res.Ok);
+            Assert.Contains("copy failed", res.Message);
+        }
+
+        Assert.True(File.Exists(versionPath));
+        Assert.Equal("DISCRETE:0.1.0.100", File.ReadAllText(versionPath));
+        Assert.Equal("DISCRETE:0.1.0.100", File.ReadAllText(monoPath));
+        Assert.Equal("DISCRETE:0.1.0.100", File.ReadAllText(il2cppPath));
+        Assert.False(File.Exists(winmmPath));
+        Assert.Empty(Directory.GetFiles(sb.GameDir, "*.discrete.tmp"));
+        Assert.Empty(Directory.GetFiles(sb.GameDir, "*.discrete.bak"));
+    }
+
+    [Fact]
+    public async Task ProxyDeployViewModel_Dispose_CancelsInFlightScanCleanly()
+    {
+        var scanStarted  = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scanCanceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scanner = new StubScanner
+        {
+            OnScan = async ct =>
+            {
+                scanStarted.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    scanCanceled.TrySetResult();
+                    throw;
+                }
+                return Array.Empty<UnityGameEntry>();
+            },
+        };
+
+        var vm = new ProxyDeployViewModel(scanner, new StubInstaller());
+        Task scanTask = vm.RefreshCommand.ExecuteAsync(null);
+        await scanStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)
+            .ConfigureAwait(true);
+
+        vm.Dispose();
+        await scanCanceled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)
+            .ConfigureAwait(true);
+        await scanTask.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)
+            .ConfigureAwait(true);
+    }
+
+    // ---------- A-L8 regression tests ------------------------------------
+
+    [Fact]
+    public void WindowsDllInjector_TryReadPeMachine_AndValidateDllMachineForTarget()
+    {
+        string tmpDir = Path.Combine(Path.GetTempPath(), "discrete_pe_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmpDir);
+        try
+        {
+            static void WriteMinimalPe(string path, ushort machine)
+            {
+                byte[] buf = new byte[0x90];
+                buf[0] = (byte)'M'; buf[1] = (byte)'Z';
+                BitConverter.TryWriteBytes(buf.AsSpan(0x3C, 4), 0x80);
+                buf[0x80] = (byte)'P'; buf[0x81] = (byte)'E';
+                BitConverter.TryWriteBytes(buf.AsSpan(0x84, 2), machine);
+                File.WriteAllBytes(path, buf);
+            }
+
+            string x86Dll  = Path.Combine(tmpDir, "x86.dll");
+            string x64Dll  = Path.Combine(tmpDir, "x64.dll");
+            string badFile = Path.Combine(tmpDir, "notpe.dll");
+            WriteMinimalPe(x86Dll, WindowsDllInjector.ImageFileMachineI386);
+            WriteMinimalPe(x64Dll, WindowsDllInjector.ImageFileMachineAmd64);
+            File.WriteAllText(badFile, "not a pe image");
+
+            ushort? m86 = WindowsDllInjector.TryReadPeMachine(x86Dll);
+            ushort? m64 = WindowsDllInjector.TryReadPeMachine(x64Dll);
+            ushort? mbad = WindowsDllInjector.TryReadPeMachine(badFile);
+
+            Assert.Equal(WindowsDllInjector.ImageFileMachineI386, m86);
+            Assert.Equal(WindowsDllInjector.ImageFileMachineAmd64, m64);
+            Assert.Null(mbad);
+
+            Assert.Null(WindowsDllInjector.ValidateDllMachineForTarget(m86, targetIsWow64: true));
+            Assert.Null(WindowsDllInjector.ValidateDllMachineForTarget(m64, targetIsWow64: false));
+            Assert.Contains("Architecture mismatch",
+                WindowsDllInjector.ValidateDllMachineForTarget(m64, targetIsWow64: true));
+            Assert.Contains("Architecture mismatch",
+                WindowsDllInjector.ValidateDllMachineForTarget(m86, targetIsWow64: false));
+            Assert.Contains("not a valid PE",
+                WindowsDllInjector.ValidateDllMachineForTarget(mbad, targetIsWow64: false));
+        }
+        finally
+        {
+            try { Directory.Delete(tmpDir, recursive: true); } catch { }
+        }
+    }
 }

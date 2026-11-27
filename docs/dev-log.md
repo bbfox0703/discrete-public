@@ -12,6 +12,25 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1587) — Fix A-L8 + A-L9 + A-L17 (least-privilege injector with PE-arch & loaded-module fallback, `inject-x86` `IsWow64Process` & UTF-8 fixes, filtered-only proxy bulk ops & atomic staged proxy install)
+
+- **Bug fixes (`A-L8`, `A-L9`, `A-L17`):**
+  - **`A-L8` (`ui/UnityDumpUI/Platform/WindowsDllInjector.cs`):**
+    - Replaced legacy `PROCESS_ALL_ACCESS (0x1F0FFF)` with least-privilege `PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION` (matching `inject-x86`'s `kAccess`).
+    - Added `TryReadPeMachine` and `ValidateDllMachineForTarget` to validate the DLL's PE COFF Machine (`0x014C` x86 vs `0x8664` x64) against `IsWow64Process` (failing loudly if `IsWow64Process` itself fails) before touching remote memory or spawning `inject-x86.exe`.
+    - Added AOT-safe `TryVerifyModuleLoaded` (`EnumProcessModulesEx` + `GetModuleFileNameExW`) fallback when `GetExitCodeThread` returns `0`, eliminating the ~1/65536 x64 ASLR low-32-bit-zero false-failure bug; set UTF-8 stdout/stderr encoding on `inject-x86.exe` `ProcessStartInfo`.
+  - **`A-L9` (`tools/inject-x86/main.cpp`):**
+    - Split `IsWow64Process` API failure (`QueryTargetIsWow64` returning `false` → exit `1` with `GetLastError`) from confirmed x64 targets (exit `2`) so access-denied errors never report a misleading bitness mismatch.
+    - Converted wide DLL path / invalid PID arguments to UTF-8 via `WideCharToMultiByte(CP_UTF8, ...)` before `printf`/`fprintf` so non-ASCII paths never truncate stdout under the default C locale.
+  - **`A-L17` (`ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs`, `ui/UnityDumpUI/Views/ProxyDeployWindow.axaml.cs`, `ui/UnityDumpUI/Platform/WindowsProxyInstaller.cs`):**
+    - Scoped `InstallSelectedAsync` and `UninstallSelectedAsync` to `FilteredGames.ToList()` so filter-hidden rows selected earlier are never modified silently (while surfacing `(+N hidden)` in `SummaryText`), and implemented `IDisposable` on `ProxyDeployViewModel` (wired on `ProxyDeployWindow.Closed`) to cancel and release `_scanCts` and row handlers.
+    - Rewrote `WindowsProxyInstaller.InstallSync` as a 3-phase atomic staged replacement (`*.discrete.tmp` staging → `.discrete.bak` backup + `File.Move(overwrite: true)` commit → delete backups and mutually-exclusive other Discrete proxy only after every required file succeeds, with full rollback on any lock/copy failure).
+  - Added 4 C# regression tests in `ui/UnityDumpUI.Tests/ProxyInstallerAndDeployViewModelTests.cs` (`InstallSelected_AndUninstallSelected_OnlyActOnFilteredVisibleRows`, `Install_RollsBackAtomically_WhenTargetFileIsLocked_LeavingOtherProxyUntouched`, `ProxyDeployViewModel_Dispose_CancelsInFlightScanCleanly`, `WindowsDllInjector_TryReadPeMachine_AndValidateDllMachineForTarget`).
+  - Marked `A-L8`, `A-L9`, and `A-L17` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1587) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, `inject-x86.exe`, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1262 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 964 passed (x64) / 964 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1586) — Fix A-L2 + A-L4 + A-L10 + A-L11 + A-L20 (keyed idempotent disconnect hooks & doc sync, zero-copy `WriteLine`, atomic proxy thunks & middleware `winmm` exports, atomic `FILE_APPEND_DATA` Logger, heavy-RPC-gated disconnect GC drain)
 
 - **Bug fixes (`A-L2`, `A-L4`, `A-L10`, `A-L11`, `A-L20`):**

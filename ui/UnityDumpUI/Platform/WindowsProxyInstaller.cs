@@ -242,23 +242,75 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
                 $"really want the {proxyName} proxy, or install the other proxy kind instead.", st0);
         }
 
+        // A-L17: Atomic staged install. Copy every required DLL to `<name>.discrete.tmp`
+        // first, commit each via File.Move(overwrite: true) (backing up existing files
+        // for rollback if any move fails — e.g. game is running and holds a file lock),
+        // and only remove the mutually-exclusive other Discrete proxy AFTER all new
+        // files have landed cleanly.
+        var stagedFiles = new List<(string Name, string TmpPath, string DstPath)>(required.Length);
+        var backups     = new List<(string BakPath, string DstPath)>(required.Length);
+        var createdNew  = new List<string>(required.Length);
         try
         {
-            // Mutex install: drop the OTHER proxy so the directory never holds
-            // both of OURS at once — but only when that file is actually ours.
-            // A foreign DLL in the other slot is left alone: the user gets to
-            // keep their existing tool, and the two can coexist (Windows loads
-            // both). Only OUR two proxies are mutually exclusive.
-            string otherPath = Path.Combine(dstDir, otherProxy);
-            if (File.Exists(otherPath) && _isOurDll(otherPath)) File.Delete(otherPath);
-
+            // Phase 1: stage all files into the target directory. Any source/disk/ACL
+            // failure aborts before a single live DLL in the game directory is modified.
             foreach (string f in required)
             {
-                File.Copy(Path.Combine(srcDir, f), Path.Combine(dstDir, f), overwrite: true);
+                string srcPath = Path.Combine(srcDir, f);
+                string dstPath = Path.Combine(dstDir, f);
+                string tmpPath = dstPath + ".discrete.tmp";
+                File.Copy(srcPath, tmpPath, overwrite: true);
+                stagedFiles.Add((f, tmpPath, dstPath));
             }
+
+            // Phase 2: commit staged files (move existing file to .bak first so any
+            // mid-install failure can roll back cleanly without leaving mixed versions).
+            foreach (var (_, tmpPath, dstPath) in stagedFiles)
+            {
+                if (File.Exists(dstPath))
+                {
+                    string bakPath = dstPath + ".discrete.bak";
+                    File.Move(dstPath, bakPath, overwrite: true);
+                    backups.Add((bakPath, dstPath));
+                }
+                else
+                {
+                    createdNew.Add(dstPath);
+                }
+                File.Move(tmpPath, dstPath, overwrite: true);
+            }
+
+            // Phase 3: all required files are in place. Clean up backups and drop the
+            // mutually-exclusive OTHER Discrete proxy (never touching a foreign DLL).
+            foreach (var (bakPath, _) in backups)
+            {
+                try { if (File.Exists(bakPath)) File.Delete(bakPath); } catch { /* best-effort */ }
+            }
+            string otherPath = Path.Combine(dstDir, otherProxy);
+            if (File.Exists(otherPath) && _isOurDll(otherPath)) File.Delete(otherPath);
         }
         catch (Exception ex)
         {
+            // Roll back any committed files and clean up leftover .tmp files so the
+            // game directory is never left with mixed old/new DLLs.
+            foreach (var (_, tmpPath, _) in stagedFiles)
+            {
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { /* best-effort */ }
+            }
+            foreach (string added in createdNew)
+            {
+                try { if (File.Exists(added)) File.Delete(added); } catch { /* best-effort */ }
+            }
+            for (int i = backups.Count - 1; i >= 0; --i)
+            {
+                var (bakPath, dstPath) = backups[i];
+                try
+                {
+                    if (File.Exists(bakPath))
+                        File.Move(bakPath, dstPath, overwrite: true);
+                }
+                catch { /* best-effort */ }
+            }
             var st0 = DetectSync(gameExePath);
             return new ProxyOperationResult(false, $"copy failed: {ex.Message}", st0);
         }

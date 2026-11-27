@@ -28,16 +28,73 @@ namespace UnityDumpUI.Platform;
 
 public sealed partial class WindowsDllInjector : IDllInjector
 {
-    private const uint PROCESS_ALL_ACCESS  = 0x1F0FFF;
+    // A-L8: Least-privilege process access mask matching inject-x86's kAccess
+    // (avoiding legacy XP-era PROCESS_ALL_ACCESS = 0x1F0FFF).
+    private const uint PROCESS_CREATE_THREAD     = 0x0002;
+    private const uint PROCESS_VM_OPERATION      = 0x0008;
+    private const uint PROCESS_VM_READ           = 0x0010;
+    private const uint PROCESS_VM_WRITE          = 0x0020;
+    private const uint PROCESS_QUERY_INFORMATION = 0x0400;
+    private const uint PROCESS_INJECT_ACCESS =
+        PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION |
+        PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION;
+
     private const uint MEM_COMMIT_RESERVE  = 0x3000;
     private const uint MEM_RELEASE         = 0x8000;
     private const uint PAGE_READWRITE      = 0x04;
     private const uint WAIT_OBJECT_0       = 0x00000000;
+    private const uint LIST_MODULES_ALL    = 0x03;
     private const uint REMOTE_THREAD_TIMEOUT_MS = 10_000;
+
+    internal const ushort ImageFileMachineI386  = 0x014C;
+    internal const ushort ImageFileMachineAmd64 = 0x8664;
 
     public Task<InjectResult> InjectAsync(int pid, string dllPath, CancellationToken ct = default)
     {
         return Task.Run(() => InjectSync(pid, dllPath), ct);
+    }
+
+    /// <summary>
+    /// A-L8: Read the PE COFF Machine field from <paramref name="path"/> so
+    /// injection can reject x86/x64 bitness mismatches before spawning a remote
+    /// thread or helper process. Returns null if the file is unreadable or not
+    /// a valid PE image.
+    /// </summary>
+    internal static ushort? TryReadPeMachine(string path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var br = new BinaryReader(fs);
+            if (fs.Length < 0x40) return null;
+            if (br.ReadUInt16() != 0x5A4D) return null;            // "MZ"
+            fs.Position = 0x3C;
+            int peOff = br.ReadInt32();                             // e_lfanew
+            if (peOff <= 0 || peOff + 6 > fs.Length) return null;
+            fs.Position = peOff;
+            if (br.ReadUInt32() != 0x0000_4550u) return null;       // "PE\0\0"
+            return br.ReadUInt16();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// A-L8: Validate that a DLL's PE Machine matches the target process bitness.
+    /// Returns null when valid, or an actionable error message on mismatch.
+    /// </summary>
+    internal static string? ValidateDllMachineForTarget(ushort? peMachine, bool targetIsWow64)
+    {
+        if (peMachine is null)
+            return "Selected DLL is not a valid PE image.";
+        if (targetIsWow64 && peMachine.Value != ImageFileMachineI386)
+            return $"Architecture mismatch: target process is 32-bit (WOW64), but DLL PE machine is 0x{peMachine.Value:X4} (expected x86 0x{ImageFileMachineI386:X4}).";
+        if (!targetIsWow64 && peMachine.Value != ImageFileMachineAmd64)
+            return $"Architecture mismatch: target process is 64-bit, but DLL PE machine is 0x{peMachine.Value:X4} (expected x64 0x{ImageFileMachineAmd64:X4}).";
+        return null;
     }
 
     private static InjectResult InjectSync(int pid, string dllPath)
@@ -45,7 +102,9 @@ public sealed partial class WindowsDllInjector : IDllInjector
         if (!File.Exists(dllPath))
             return InjectResult.Failure($"DLL not found: {dllPath}");
 
-        IntPtr hProc = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
+        ushort? dllMachine = TryReadPeMachine(dllPath);
+
+        IntPtr hProc = OpenProcess(PROCESS_INJECT_ACCESS, false, pid);
         if (hProc == IntPtr.Zero)
         {
             int err = Marshal.GetLastWin32Error();
@@ -54,11 +113,22 @@ public sealed partial class WindowsDllInjector : IDllInjector
 
         try
         {
+            if (!IsWow64Process(hProc, out bool wow64))
+            {
+                int err = Marshal.GetLastWin32Error();
+                return InjectResult.Failure($"IsWow64Process failed (Win32 {err}).");
+            }
+
+            // A-L8: Verify DLL PE architecture matches the target process before
+            // touching remote memory or spawning inject-x86.exe.
+            if (ValidateDllMachineForTarget(dllMachine, wow64) is string archError)
+                return InjectResult.Failure(archError);
+
             // Phase 12d-5: cross-bitness inject. WOW64 = target is 32-bit; shell out
             // to dist/x86/inject-x86.exe so the LoadLibraryW call runs from a
             // same-bitness world. The caller is expected to have supplied an x86
             // DLL path (MainWindowViewModel routes through dist/x86/ on row.IsWow64).
-            if (IsWow64Process(hProc, out bool wow64) && wow64)
+            if (wow64)
             {
                 CloseHandle(hProc);
                 hProc = IntPtr.Zero;
@@ -115,6 +185,13 @@ public sealed partial class WindowsDllInjector : IDllInjector
 
                     if (exitCode == 0)
                     {
+                        // A-L8: On x64, GetExitCodeThread truncates HMODULE to its low
+                        // 32 bits; under 64 KB ASLR alignment there is a ~1/65536 chance
+                        // a valid 64-bit HMODULE ends in 0x00000000. Double-check the
+                        // target's loaded module list before declaring failure.
+                        if (TryVerifyModuleLoaded(hProc, dllPath))
+                            return InjectResult.Success(0);
+
                         return InjectResult.Failure(
                             "LoadLibraryW returned NULL — DLL failed to load. " +
                             "Check %LOCALAPPDATA%\\discrete\\Logs.");
@@ -134,8 +211,64 @@ public sealed partial class WindowsDllInjector : IDllInjector
         }
         finally
         {
-            CloseHandle(hProc);
+            if (hProc != IntPtr.Zero)
+                CloseHandle(hProc);
         }
+    }
+
+    /// <summary>
+    /// A-L8: Enumerate loaded modules in <paramref name="hProc"/> to check
+    /// whether <paramref name="dllPath"/> actually loaded despite a zero low
+    /// 32-bit thread exit code.
+    /// </summary>
+    private static bool TryVerifyModuleLoaded(IntPtr hProc, string dllPath)
+    {
+        try
+        {
+            string fullTarget = Path.GetFullPath(dllPath);
+            string targetFileName = Path.GetFileName(fullTarget);
+            var modules = new IntPtr[1024];
+            if (!EnumProcessModulesEx(
+                    hProc, modules, (uint)(modules.Length * IntPtr.Size),
+                    out uint needed, LIST_MODULES_ALL))
+            {
+                return false;
+            }
+            int count = (int)(needed / (uint)IntPtr.Size);
+            if (count > modules.Length)
+            {
+                modules = new IntPtr[count];
+                if (!EnumProcessModulesEx(
+                        hProc, modules, (uint)(modules.Length * IntPtr.Size),
+                        out needed, LIST_MODULES_ALL))
+                {
+                    return false;
+                }
+                count = Math.Min(modules.Length, (int)(needed / (uint)IntPtr.Size));
+            }
+            var nameBuf = new ushort[1024];
+            for (int i = 0; i < count; i++)
+            {
+                uint chars = GetModuleFileNameExW(hProc, modules[i], nameBuf, (uint)nameBuf.Length);
+                if (chars == 0 || chars >= nameBuf.Length) continue;
+                string loaded = new string(MemoryMarshal.Cast<ushort, char>(nameBuf.AsSpan(0, (int)chars)));
+                if (string.Equals(loaded, fullTarget, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                try
+                {
+                    if (string.Equals(Path.GetFullPath(loaded), fullTarget, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                catch { /* ignore malformed device path */ }
+                if (!string.IsNullOrEmpty(targetFileName) &&
+                    string.Equals(Path.GetFileName(loaded), targetFileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+        catch { /* best-effort */ }
+        return false;
     }
 
     /// <summary>
@@ -168,6 +301,8 @@ public sealed partial class WindowsDllInjector : IDllInjector
             CreateNoWindow         = true,
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding  = Encoding.UTF8,
         };
         psi.ArgumentList.Add(pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
         psi.ArgumentList.Add(dllPath);
@@ -300,4 +435,13 @@ public sealed partial class WindowsDllInjector : IDllInjector
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool IsWow64Process(IntPtr hProcess, [MarshalAs(UnmanagedType.Bool)] out bool wow64);
+
+    [LibraryImport("psapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool EnumProcessModulesEx(
+        IntPtr hProcess, [Out] IntPtr[] lphModule, uint cb, out uint lpcbNeeded, uint dwFilterFlag);
+
+    [LibraryImport("psapi.dll", EntryPoint = "GetModuleFileNameExW", SetLastError = true)]
+    private static partial uint GetModuleFileNameExW(
+        IntPtr hProcess, IntPtr hModule, [Out] ushort[] lpFilename, uint nSize);
 }

@@ -28,7 +28,7 @@ using UnityDumpUI.Models;
 
 namespace UnityDumpUI.ViewModels;
 
-public sealed partial class ProxyDeployViewModel : ObservableObject
+public sealed partial class ProxyDeployViewModel : ObservableObject, IDisposable
 {
     private readonly IUnityGameScanner _scanner;
     private readonly IProxyInstaller   _installer;
@@ -170,9 +170,12 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     private async Task InstallSelectedAsync()
     {
         ProxyKind kind = DefaultKindWinmm ? ProxyKind.Winmm : ProxyKind.Version;
+        // A-L17: Act ONLY on currently visible (FilteredGames) rows so hidden
+        // rows selected before changing the filter are never modified silently.
         await RunBulkAsync("Install", row => _installer
             .InstallAsync(row.ExePath, kind, default),
-            row => row.IsSelected && row.IsSupported).ConfigureAwait(true);
+            row => row.IsSelected && row.IsSupported,
+            useFiltered: true).ConfigureAwait(true);
     }
 
     [RelayCommand(CanExecute = nameof(CanRunBulk))]
@@ -182,9 +185,11 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         // fallback. After the version-stamping work most rows live in
         // DeployedCurrent / DeployedOutdated — earlier code checked only
         // ProxyDeployStatus.Deployed and silently skipped them all.
+        // A-L17: Scope selection-based bulk ops to visible FilteredGames rows.
         await RunBulkAsync("Uninstall", row => _installer
             .UninstallAsync(row.ExePath, default),
-            row => row.IsSelected && IsDeployed(row)).ConfigureAwait(true);
+            row => row.IsSelected && IsDeployed(row),
+            useFiltered: true).ConfigureAwait(true);
     }
 
     /// <summary>
@@ -197,7 +202,8 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     {
         await RunBulkAsync("Update", row => _installer
             .InstallAsync(row.ExePath, row.Game.InstalledProxy, default),
-            row => row.Game.InstalledProxy != ProxyKind.None && IsDeployed(row))
+            row => row.Game.InstalledProxy != ProxyKind.None && IsDeployed(row),
+            useFiltered: false)
             .ConfigureAwait(true);
     }
 
@@ -226,7 +232,8 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     private async Task RunBulkAsync(
         string verb,
         Func<ProxyGameRow, Task<ProxyOperationResult>> op,
-        Func<ProxyGameRow, bool> rowFilter)
+        Func<ProxyGameRow, bool> rowFilter,
+        bool useFiltered)
     {
         if (IsBusy || IsScanning) return;
         IsBusy          = true;
@@ -238,8 +245,10 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         {
             // Snapshot the row list before awaiting any IO so a concurrent
             // collection mutation can never throw InvalidOperationException
-            // mid-foreach (A-M10).
-            foreach (ProxyGameRow row in Games.ToList())
+            // mid-foreach (A-M10). Selection-driven ops snapshot FilteredGames
+            // so filter-hidden rows are never modified unexpectedly (A-L17).
+            var snapshot = useFiltered ? FilteredGames.ToList() : Games.ToList();
+            foreach (ProxyGameRow row in snapshot)
             {
                 if (!rowFilter(row)) { ++skipped; continue; }
                 try
@@ -308,19 +317,27 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
                 FilteredGames.Add(r);
             }
         }
+        UpdateSummary();
     }
 
     private void UpdateSummary()
     {
-        int selected = 0, deployed = 0, outdated = 0;
+        int visibleSelected = 0, totalSelected = 0, deployed = 0, outdated = 0;
+        var visibleSet = new HashSet<ProxyGameRow>(FilteredGames);
         foreach (ProxyGameRow r in Games)
         {
-            if (r.IsSelected) ++selected;
+            if (r.IsSelected)
+            {
+                ++totalSelected;
+                if (visibleSet.Contains(r)) ++visibleSelected;
+            }
             if (IsDeployed(r)) ++deployed;
             if (r.DeployStatus == ProxyDeployStatus.DeployedOutdated) ++outdated;
         }
+        int hiddenSelected = totalSelected - visibleSelected;
+        string hiddenSuffix = hiddenSelected > 0 ? $" ({hiddenSelected} hidden)" : string.Empty;
         string outdatedSuffix = outdated > 0 ? $" ({outdated} outdated)" : string.Empty;
-        SummaryText = $"{selected} selected · {deployed} deployed{outdatedSuffix} · {Games.Count} total";
+        SummaryText = $"{visibleSelected} selected{hiddenSuffix} · {deployed} deployed{outdatedSuffix} · {Games.Count} total";
     }
 
     private void OnRowPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -336,5 +353,16 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     {
         foreach (ProxyGameRow r in Games)
             r.PropertyChanged -= OnRowPropertyChanged;
+    }
+
+    /// <summary>A-L17: Cancel any active library scan and release row handlers.</summary>
+    public void Dispose()
+    {
+        CancellationTokenSource? cts = Interlocked.Exchange(ref _scanCts, null);
+        if (cts is not null)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+        }
+        UnregisterRowHandlers();
     }
 }
