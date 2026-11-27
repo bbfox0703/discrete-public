@@ -12,6 +12,24 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1568) — Fix D-M1 + D-M2 + D-M3 (page-by-page readable-span fallback for Rust chain/xref scans, compile-time x64/x86 ABI layout checks for all 14 FFI structs, v38/v39 per-table stride/count validation + `tablesDegraded` + tests)
+
+- **Bug fixes (`D-M1`, `D-M2`, `D-M3`):**
+  - **`D-M1` (`dll/rust/src/ffi.rs`, `dll/rust/src/chain/mod.rs`, `dll/rust/src/xref/mod.rs`):**
+    - Added `Reader::scan_readable_spans` in `ffi.rs` and wired both `chain::detect` and `xref::scan_rip` through it: keeps the single-read 1 MiB + overlap fast path bit-for-bit identical on fully readable sections, and falls back to 4 KiB page-by-page coalesced readable spans when an anti-cheat stripped (`PAGE_NOACCESS` / `PAGE_GUARD`) page fails a chunk read — preserving all readable code before and after the bad page with chunk-boundary overlap and counting `failed_reads` per unreadable page instead of dropping up to 1 MiB of preceding code.
+  - **`D-M2` (`dll/rust/src/lib.rs`, `dll/src/shared/RustCore.cpp`):**
+    - Added compile-time `size_of` / `align_of` / `offset_of!` assertions on the Rust side (`lib.rs`) mirrored identically by C++ `static_assert(sizeof/alignof/offsetof)` in `RustCore.cpp` for all 14 `#[repr(C)]` FFI structs in `discrete_core.h` (`DcBytes`, `DcTypeDef`, `DcFieldDef`, `DcMethodDef`, `DcParameterDef`, `DcImageDef`, `DcFieldDefault`, `DcAobResult`, `DcChainMatch`, `DcChainStats`, `DcXrefSection`, `DcXrefRipHit`, `DcXrefRange`, `DcXrefInstHit`) under both 64-bit and 32-bit pointer widths.
+  - **`D-M3` (`dll/rust/src/metadata/parser.rs`, `dll/rust/src/metadata/ffi.rs`, `dll/rust/include/discrete_core.h`, `dll/src/il2cpp/MetadataParser.h`, `dll/src/il2cpp/MetadataParserRs.cpp`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/Services/ProtocolModels.cs`):**
+    - Added per-table v38/v39 validation (`section.size == section.count * stride` and `section.size % stride == 0`) after bounds checks for `typeDefinitions`, `fields`, `fieldDefaults`, `methods`, `parameters`, and `images`: any mismatched table is zeroed, logged with `WARN`, and sets `tables_degraded = true`.
+    - Logged `WARN` and set `tables_degraded = true` when v38+ `type_index_size` inference from `parameters` fails (instead of silently falling back to 4), and when `validate_type_table` demotes a file to strings-only.
+    - Exported `dc_md_tables_degraded` through `Parser::tablesDegraded()` to IL2CPP `getMetadataStats` (`tablesDegraded`) and `MetadataStatsResult.TablesDegraded`.
+  - **Tests:**
+    - Added `unreadable_middle_page_preserves_preceding_and_following_chains` (`chain/tests.rs`), updated `rip_unreadable_page_preserves_preceding_and_following_readable_pages` (`xref/tests.rs`), and added `v38_mismatched_method_and_image_table_strides_zero_only_corrupt_tables` (`metadata/tests.rs`).
+  - Marked `D-M1`, `D-M2`, and `D-M3` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1568) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1229 passed (0 failed, 0 skipped); Rust core tests 112 passed (x64) / 113 passed (i686); C++ `discrete_dll_test` 778 checks passed (x64) / 778 checks passed (x86).
+
+-----
+
 ## 2026-11-27 (build 1567) — Fix E-M4 (bounded-timeout CE Lua bridge pipe RPC via `connectToPipe` + `createThread`/`pump` + tests)
 
 - **Bug fixes (`E-M4` — completes 100% of Block E High & Medium findings, 2/2 High + 7/7 Medium):**

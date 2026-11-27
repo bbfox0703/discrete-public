@@ -526,6 +526,9 @@ public sealed class MetadataStatsResult
     [JsonPropertyName("max_name_length")]    public int      MaxNameLength     { get; set; }
     [JsonPropertyName("strip_ratio")]        public double?  StripRatio        { get; set; }
     [JsonPropertyName("verdict")]            public string?  Verdict           { get; set; }
+    /// <summary>D-M3: true when any IL2CPP metadata table was zeroed/demoted
+    /// due to v38+ stride/count validation failure or TypeDef[0] mismatch.</summary>
+    [JsonPropertyName("tablesDegraded")]     public bool     TablesDegraded    { get; set; }
     [JsonPropertyName("error")]              public string?  Error             { get; set; }
 }
 

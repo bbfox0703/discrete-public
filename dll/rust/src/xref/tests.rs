@@ -102,20 +102,23 @@ fn rip_section_end_cuts_the_tail() {
 }
 
 #[test]
-fn rip_unreadable_chunk_skips_4k() {
-    // Hole in chunk 1: the whole first read fails, pos advances by 4 KiB at
-    // a time and each retry reads [pos, pos + 1 MiB + 16) — still covering
-    // the hole until pos passes it.
+fn rip_unreadable_page_preserves_preceding_and_following_readable_pages() {
+    // D-M1: A hole in page 1 (0x1000..0x2000) must NOT drop readable page 0
+    // before it — page-by-page fallback preserves 0x0800 AND 0x2800 / 0x5800,
+    // skipping only the unreadable page 1 (0x1200).
     let size = 0x6000;
     let t = BASE + 0x20;
     let mut b = vec![0x90u8; size];
-    put_rip(&mut b, 0x0800, &[0x8B, 0x05], t); // in the first 4 KiB: lost
-    put_rip(&mut b, 0x2800, &[0x8B, 0x05], t); // after the hole: found
+    put_rip(&mut b, 0x0800, &[0x8B, 0x05], t); // page 0 (before hole): MUST be found
+    put_rip(&mut b, 0x1200, &[0x8B, 0x05], t); // page 1 (unreadable page): skipped
+    put_rip(&mut b, 0x2800, &[0x8B, 0x05], t); // page 2 (after hole): found
     put_rip(&mut b, 0x5800, &[0x48, 0x8D, 0x05], t);
     let hole = (BASE + 0x1800, BASE + 0x1801);
     let m = mem(b, vec![hole]);
-    // pos 0 fails, 0x1000 fails (covers 0x1800), 0x2000 reads to the end.
-    assert_eq!(rip(&m, &[DcXrefSection { va: BASE, size }], t), vec![(0x2800, 0x8B), (0x5800, 0x8D)]);
+    assert_eq!(
+        rip(&m, &[DcXrefSection { va: BASE, size }], t),
+        vec![(0x0800, 0x8B), (0x2800, 0x8B), (0x5800, 0x8D)]
+    );
 }
 
 #[test]

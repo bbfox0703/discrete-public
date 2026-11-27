@@ -624,17 +624,17 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### Medium
 
-**D-M1 · Chain detector 和 RIP xref scan 碰到不可讀的 page 時，會連帶丟掉它前面最多 1 MiB 的可讀程式碼**
+**D-M1 · Chain detector 和 RIP xref scan 碰到不可讀的 page 時，會連帶丟掉它前面最多 1 MiB 的可讀程式碼 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/chain/mod.rs:395-409`；`dll/rust/src/xref/mod.rs:44-45`、`:140-150`
 - 成因：每個 chunk 用一次 `reader.read(sec_va+pos, 1 MiB+overlap)` 整塊讀取，任何一頁讀取失敗就整塊失敗，接著 `pos += 4096` 再讀一次「新的」1 MiB。只要壞頁還落在新的 chunk 裡，讀取就會繼續失敗；每失敗一次，`pos` 推進的那 4 KiB 都沒有被掃描。所以單一壞頁（anti-cheat 把 `.text` 部分頁面設成 `PAGE_NOACCESS`，正是註解「AC-stripped page」描述的情境）會讓壞頁之前、同一個 chunk 範圍內的所有可讀程式碼都被跳過，而不只是壞頁本身。每個壞頁還會觸發最多 256 次、每次接近 1 MiB 的 SEH 讀取。這個行為和 legacy C++ 一樣（逐行移植），所以 golden 檢查抓不到。
 - 修法：整塊讀取失敗時，改成在同一個 chunk 內以 4 KiB 為單位逐頁讀取：可讀的頁照常掃描（頁與頁之間保留 overlap），只跳過真正讀不到的頁，`failed_reads` 改成以頁為單位計數。也可以先用 `VirtualQuery` 把 section 切成可讀的區段再掃描。改完之後要重新錄製 `r2_golden.json`。
 
-**D-M2 · `discrete_core.h` 與 Rust `#[repr(C)]` 沒有任何編譯期對照，struct layout 漂移不會被抓到（audit-2026-11-23-plan.md 訊號 1）**
+**D-M2 · `discrete_core.h` 與 Rust `#[repr(C)]` 沒有任何編譯期對照，struct layout 漂移不會被抓到（audit-2026-11-23-plan.md 訊號 1） — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/include/discrete_core.h:68-127`、`:186-196`、`:239-305`；`dll/rust/src/metadata/ffi.rs:41-133`；`dll/rust/src/chain/mod.rs:68-90`；唯一的 layout 測試在 `aob.rs:1206-1214`、`xref/tests.rs:326-329`
 - 成因：`lib.rs:24-25` 明訂「手動同步、不用 cbindgen」，但兩邊都沒有補上檢查：C++ 端完全沒有 `static_assert(sizeof/offsetof(Dc*))`；Rust 端只測了 `DcAobResult` 和 4 個 `DcXref*`，其餘 metadata 的 7 個 row struct（`DcTypeDef` 中 `uint16_t` 與 `int32_t` 交錯，靠隱含 padding 對齊）、`DcChainMatch`、`DcChainStats` 都沒有測試。這次逐欄位人工比對了 14 個 struct 與約 40 個函式簽章，x86 / x64 **目前都一致**；但只要任何一邊加了欄位或調換順序，就會在執行期靜默讀到錯誤資料，i686 的 padding 又和 x64 不同。
 - 修法：Rust 端對每個 `#[repr(C)]` 用 `const _: () = assert!(offset_of!(..) == ..)` 寫死 x86 / x64 兩組數值；C++ 端在對應的 `*Rs.cpp` 加上同一組 `static_assert(offsetof(DcTypeDef, field_count) == ...)`。成本更低的作法是讓 Rust 匯出一個 `dc_layout_probe(DcLayout* out)`，回傳各 struct 的 size / offset，`RustCore::Init()` 再和 C++ 的 `sizeof` / `offsetof` 比對，不一致就寫 log 並停用 Rust 路徑。
 
-**D-M3 · v38 / v39 的可變寬度 index 推斷只驗證 TypeDef[0]，method / parameter / image / field 表的 stride 錯了也不會被發現**
+**D-M3 · v38 / v39 的可變寬度 index 推斷只驗證 TypeDef[0]，method / parameter / image / field 表的 stride 錯了也不會被發現 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/metadata/parser.rs:734-751`（`type_index_size` 由 params 的 row size 推出，推不出時靜默保留 4）、`:746-750`（`get_index_size` 的邊界）、`:873-909`（`validate_type_table` 只看 TypeDef[0]）、`:1012-1021`、`:1173-1182`、`:1287-1296`、`:1373-1382`（各表的 count 都是 `size / stride` 取整，不檢查餘數）、`:1214-1250`、`:1397-1409`
 - 成因：v38 的 TypeDefinition stride 是 `68 + 3·TIS + GCIS`，MethodDefinition 是 `24/20 + TDIS + TIS (+PIS) + GCIS`，Image 是 `32 + 2·TDIS`，各自依賴不同的寬度組合。`validate_type_table` 只能抓到 TIS / GCIS 錯誤；TDIS / PIS 錯了（例如某張表的 row count 剛好等於 255 / 65535，而 `get_index_size` 的 `<=` 和 runtime 實際規則差一，或 IL2CPP 未來調整規則），method 名稱、參數、image 範圍就會整批錯位，`loaded()` / `tables_loaded` 卻仍然是 true。`metadata-cli` 的符號輸出、`il2cppGetMetadata*` 系列 RPC 會照單全收。v38 header 中每個 section 都有 `count` 欄位，可以直接驗證，但目前只有 parameters 讀了它。
 - 修法：v38+ 載入時，對每張表檢查 `section.size == section.count * stride`，再加上 `size % stride == 0`；不一致就把該表的 count 設成 0、寫 log，並在 `getMetadataStats` 回報 `tablesDegraded`。`type_index_size` 推不出來（`inferred ∉ {1,2,4}`）時也要寫 log，不能靜默沿用 4。

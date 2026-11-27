@@ -333,6 +333,19 @@ pub unsafe extern "C" fn dc_md_loaded(md: *const DcMetadata) -> i32 {
     })
 }
 
+/// D-M3: returns 1 when any metadata table was zeroed/demoted due to stride or
+/// section-count validation failure, 0 otherwise.
+///
+/// # Safety
+/// `md` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_md_tables_degraded(md: *const DcMetadata) -> i32 {
+    guard("dc_md_tables_degraded", 0, || {
+        // SAFETY: caller contract.
+        unsafe { parser(md) }.map_or(0, |p| i32::from(p.tables_degraded()))
+    })
+}
+
 /// # Safety
 /// `md` must be NULL or a live handle.
 #[unsafe(no_mangle)]

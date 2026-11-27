@@ -41,8 +41,6 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 /// ... plus a 16-byte overlap so a 7-byte candidate starting near the end of
 /// a chunk is still complete (candidates only *start* in the owned part).
 const OVERLAP: usize = 16;
-/// An unreadable chunk skips this many bytes.
-const SKIP_UNREADABLE: usize = 4096;
 /// Zydis never looks past 15 bytes; the decoder adapter is verified on
 /// windows of up to 16, so longer remainders are cut to that.
 const DECODE_WINDOW: usize = 16;
@@ -136,63 +134,60 @@ pub(crate) fn scan_rip(reader: &Reader, sections: &[DcXrefSection], target: usiz
     let mut buf = try_buffer(CHUNK_SIZE + OVERLAP)?;
 
     for sec in sections {
-        let mut pos: usize = 0;
-        while pos < sec.size {
-            let want = if sec.size - pos < CHUNK_SIZE { sec.size - pos } else { CHUNK_SIZE };
-            let mut read_want = want + OVERLAP;
-            if pos.wrapping_add(read_want) > sec.size {
-                read_want = sec.size - pos;
-            }
-            if !reader.read(sec.va.wrapping_add(pos), &mut buf[..read_want]) {
-                // Unreadable (AC-stripped) page: skip 4 KiB and continue.
-                pos = pos.wrapping_add(SKIP_UNREADABLE);
-                continue;
-            }
-            // Candidates start only in the owned part; a 7-byte read must fit.
-            let emit_end = want;
-            if read_want < 7 {
-                pos = pos.wrapping_add(want);
-                continue;
-            }
-            let scan_end = emit_end.min(read_want - 7 + 1);
+        let mut failed_pages = 0usize;
+        reader.scan_readable_spans(
+            sec.va,
+            sec.size,
+            CHUNK_SIZE,
+            OVERLAP,
+            &mut buf,
+            &mut failed_pages,
+            |span_va, span, owned_len| {
+                let read_want = span.len();
+                // Candidates start only in the owned part; a 7-byte read must fit.
+                if read_want < 7 {
+                    return true;
+                }
+                let scan_end = owned_len.min(read_want - 7 + 1);
 
-            for p in 0..scan_end {
-                let b0 = buf[p];
+                for p in 0..scan_end {
+                    let b0 = span[p];
 
-                // 7-byte REX form first, so the 6-byte form can skip the
-                // duplicate one byte later.
-                if is_rex(b0) {
-                    let b1 = buf[p + 1];
-                    if is_candidate_opcode(b1) && is_rip_relative_modrm(buf[p + 2]) {
-                        let disp = read_i32_le(&buf[p + 3..p + 7]);
-                        let start_ip = sec.va.wrapping_add(pos).wrapping_add(p);
-                        let end_ip = start_ip.wrapping_add(7);
+                    // 7-byte REX form first, so the 6-byte form can skip the
+                    // duplicate one byte later.
+                    if is_rex(b0) {
+                        let b1 = span[p + 1];
+                        if is_candidate_opcode(b1) && is_rip_relative_modrm(span[p + 2]) {
+                            let disp = read_i32_le(&span[p + 3..p + 7]);
+                            let start_ip = span_va.wrapping_add(p);
+                            let end_ip = start_ip.wrapping_add(7);
+                            let hit_target = end_ip.wrapping_add(disp as isize as usize);
+                            if hit_target == target {
+                                out.push(DcXrefRipHit { ip: start_ip, opcode: b1 });
+                                continue;
+                            }
+                        }
+                    }
+
+                    // 6-byte form, skipped right after a REX byte (that would be
+                    // the 7-byte form starting one byte earlier).
+                    if p > 0 && is_rex(span[p - 1]) {
+                        continue;
+                    }
+
+                    if is_candidate_opcode(b0) && is_rip_relative_modrm(span[p + 1]) {
+                        let disp = read_i32_le(&span[p + 2..p + 6]);
+                        let start_ip = span_va.wrapping_add(p);
+                        let end_ip = start_ip.wrapping_add(6);
                         let hit_target = end_ip.wrapping_add(disp as isize as usize);
                         if hit_target == target {
-                            out.push(DcXrefRipHit { ip: start_ip, opcode: b1 });
-                            continue;
+                            out.push(DcXrefRipHit { ip: start_ip, opcode: b0 });
                         }
                     }
                 }
-
-                // 6-byte form, skipped right after a REX byte (that would be
-                // the 7-byte form starting one byte earlier).
-                if p > 0 && is_rex(buf[p - 1]) {
-                    continue;
-                }
-
-                if is_candidate_opcode(b0) && is_rip_relative_modrm(buf[p + 1]) {
-                    let disp = read_i32_le(&buf[p + 2..p + 6]);
-                    let start_ip = sec.va.wrapping_add(pos).wrapping_add(p);
-                    let end_ip = start_ip.wrapping_add(6);
-                    let hit_target = end_ip.wrapping_add(disp as isize as usize);
-                    if hit_target == target {
-                        out.push(DcXrefRipHit { ip: start_ip, opcode: b0 });
-                    }
-                }
-            }
-            pos = pos.wrapping_add(want);
-        }
+                true
+            },
+        );
     }
     Some(out)
 }

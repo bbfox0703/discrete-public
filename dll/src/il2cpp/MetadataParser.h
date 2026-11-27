@@ -29,6 +29,7 @@ public:
     static const Parser& Get();
 
     bool         loaded() const noexcept  { return loaded_; }
+    bool         tablesDegraded() const noexcept;
     std::int32_t version() const noexcept { return version_; }
 
     // For v24 metadata, returns the auto-detected sub-version label

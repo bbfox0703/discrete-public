@@ -374,6 +374,10 @@ pub struct Parser {
 
     // Segment 2 — populated for v24 / v27 / v29 / v31 / v32-v39.
     tables_loaded: bool,
+    /// D-M3: true when any v38+ table failed section.size == section.count * stride
+    /// (or size % stride == 0), type_index_size inference failed, or TypeDef[0]
+    /// validation demoted the file to strings-only.
+    tables_degraded: bool,
     type_definitions_offset: i32,
     type_definitions_size: i32,
     fields_offset: i32,
@@ -454,6 +458,7 @@ impl Parser {
                 // Stride mismatch detected — demote to strings-only so callers
                 // don't consume silently-corrupt type rows. loaded stays true.
                 self.tables_loaded = false;
+                self.tables_degraded = true;
             }
         }
 
@@ -480,6 +485,12 @@ impl Parser {
 
     pub fn version(&self) -> i32 {
         self.version
+    }
+
+    /// D-M3: true when any metadata table was zeroed/demoted due to stride/count
+    /// validation failure (e.g. v38+ variable-width index drift).
+    pub fn tables_degraded(&self) -> bool {
+        self.tables_degraded
     }
 
     /// C++ `v24SubVersionLabel`: "v24.0" / "v24.1" / "v24" for v24 metadata,
@@ -735,12 +746,26 @@ impl Parser {
             // Il2CppParameterDefinition = uint nameIndex + uint token +
             // TypeIndex typeIndex, so size = 8 + TIS. The other widths come
             // from the respective table's row count.
-            if params_count > 0 && params_size >= params_count {
+            if params_count > 0 {
+                let exact_div = params_size % params_count == 0;
                 let parm_row = i64::from(params_size) / i64::from(params_count);
                 // C++ `static_cast<int>(parmRow - 8)`: modular int64 -> int.
                 let inferred = (parm_row - 8) as i32;
-                if matches!(inferred, 1 | 2 | 4) {
+                if exact_div && matches!(inferred, 1 | 2 | 4) {
                     self.index_sizes.type_index_size = inferred;
+                } else {
+                    self.tables_degraded = true;
+                    let warn = format!(
+                        "MetadataParser: WARN v{} could not infer typeIndexSize from \
+                         parameters (size={} count={} row={} rem={}) — defaulting to 4 \
+                         and marking tablesDegraded",
+                        self.version,
+                        params_size,
+                        params_count,
+                        parm_row,
+                        params_size % params_count
+                    );
+                    log_md_truncated(256, warn.as_bytes());
                 }
             }
             self.index_sizes.type_definition_index_size =
@@ -809,6 +834,101 @@ impl Parser {
         {
             log_md("MetadataParser: tables out of bounds");
             return false;
+        }
+        // D-M3: After bounds checking, validate EVERY v38+ table's byte size
+        // against `section.count * stride` (and `size % stride == 0`) so drifted
+        // TDIS/TIS/PIS/GCIS never silently misalign method/field/param/image rows.
+        if self.version >= 38 {
+            use header_v38 as h;
+            let type_defs_count = rd_u32(&self.data, h::TYPE_DEFINITIONS + section::COUNT);
+            let fields_count = rd_u32(&self.data, h::FIELDS + section::COUNT);
+            let field_defaults_count =
+                rd_u32(&self.data, h::FIELD_DEFAULT_VALUES + section::COUNT);
+            let methods_count = rd_u32(&self.data, h::METHODS + section::COUNT);
+            let params_count = rd_u32(&self.data, h::PARAMETERS + section::COUNT);
+            let images_count = rd_u32(&self.data, h::IMAGES + section::COUNT);
+
+            let check_v38_table = |name: &str,
+                                   size_field: &mut i32,
+                                   stride: usize,
+                                   header_count: u32,
+                                   degraded: &mut bool,
+                                   ver: i32| {
+                let sz_i32 = *size_field;
+                if sz_i32 == 0 && header_count == 0 {
+                    return;
+                }
+                let ok = sz_i32 >= 0
+                    && stride > 0
+                    && (sz_i32 as u64) % (stride as u64) == 0
+                    && u64::from(header_count).checked_mul(stride as u64) == Some(sz_i32 as u64);
+                if !ok {
+                    *size_field = 0;
+                    *degraded = true;
+                    let warn = format!(
+                        "MetadataParser: WARN v{} table '{}' stride/count mismatch \
+                         (size={} headerCount={} stride={}) — zeroing table and \
+                         marking tablesDegraded",
+                        ver, name, sz_i32, header_count, stride
+                    );
+                    log_md_truncated(256, warn.as_bytes());
+                }
+            };
+            let ver = self.version;
+            let td_stride = self.type_def_sizeof();
+            let f_stride = self.field_def_sizeof();
+            let fd_stride = self.field_default_value_sizeof();
+            let m_stride = self.method_def_sizeof();
+            let p_stride = self.parameter_def_sizeof();
+            let i_stride = self.image_def_sizeof();
+            check_v38_table(
+                "typeDefinitions",
+                &mut self.type_definitions_size,
+                td_stride,
+                type_defs_count,
+                &mut self.tables_degraded,
+                ver,
+            );
+            check_v38_table(
+                "fields",
+                &mut self.fields_size,
+                f_stride,
+                fields_count,
+                &mut self.tables_degraded,
+                ver,
+            );
+            check_v38_table(
+                "fieldDefaults",
+                &mut self.field_defaults_size,
+                fd_stride,
+                field_defaults_count,
+                &mut self.tables_degraded,
+                ver,
+            );
+            check_v38_table(
+                "methods",
+                &mut self.methods_size,
+                m_stride,
+                methods_count,
+                &mut self.tables_degraded,
+                ver,
+            );
+            check_v38_table(
+                "parameters",
+                &mut self.parameters_size,
+                p_stride,
+                params_count,
+                &mut self.tables_degraded,
+                ver,
+            );
+            check_v38_table(
+                "images",
+                &mut self.images_size,
+                i_stride,
+                images_count,
+                &mut self.tables_degraded,
+                ver,
+            );
         }
         if self.version == 24 {
             self.detect_v24_variant();

@@ -8733,6 +8733,7 @@ void RegisterCoreHandlers() {
         }
         json out = buildStatsJson(s);
         out["scope"] = "metadata_all";
+        out["tablesDegraded"] = mp.tablesDegraded();
         return out;
     });
 

@@ -458,6 +458,34 @@ fn unreadable_chunk_counts_failed_read_and_skips_a_page() {
 }
 
 #[test]
+fn unreadable_middle_page_preserves_preceding_and_following_chains() {
+    // D-M1: A bad page in the middle of a chunk (page 1 = 0x1000..0x2000) must
+    // NOT wipe out readable chains on page 0 before it or page 2 after it.
+    let mut code = vec![0x90u8; 0x3000];
+    let mut a0 = Asm { code: vec![0x90; 0x100] };
+    let h1_before = a0.ip();
+    a0.hop1(slot(0)).raw(&HOP2_RAX);
+    let h3_before = a0.ip();
+    a0.raw(&HOP3_READ_RAX_10);
+    code[..a0.code.len()].copy_from_slice(&a0.code);
+
+    let mut a2 = Asm { code: vec![0x90; 0x2100] };
+    let h1_after = a2.ip();
+    a2.hop1(slot(0)).raw(&HOP2_RAX);
+    let h3_after = a2.ip();
+    a2.raw(&HOP3_READ_RAX_10);
+    code[0x2100..a2.code.len()].copy_from_slice(&a2.code[0x2100..]);
+
+    let mut m = Module::new(&code);
+    // Mark middle page (page 1) unreadable.
+    m.mem.holes.push((BASE + TEXT_RVA + 0x1500, BASE + TEXT_RVA + 0x1504));
+    let r = m.run(&[slot(0)], SFO, 0x10, 100);
+    assert_eq!(hits(&r), vec![(h3_before, h1_before, 0), (h3_after, h1_after, 0)]);
+    assert_eq!(r.stats.failed_reads, 1);
+    assert_eq!(r.stats.bytes_scanned, 0x2000);
+}
+
+#[test]
 fn candidate_in_chunk_overlap_is_traced_with_context() {
     // A chain whose hop 1 starts a few bytes before the 1 MiB chunk end: the
     // trace reads into the 128-byte overlap; the next chunk does not re-emit
