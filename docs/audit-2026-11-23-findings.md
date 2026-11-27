@@ -832,7 +832,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：live 模式已經在 leaf 層級修正（`Live.cs:122-129`），template / CSX / SDK / AddressLookup 沒有。x86 遊戲上，`IntPtr` 欄位以 8 bytes 讀取會與下一個欄位重疊，CSX 的結構大小也會被高估。
 - 修法：`UnityTypeMap.Resolve` 加上 `pointerSize` 參數；Browser 的 `CurrentExportOptions` 帶入 `GamePointerSize`（與 Inspector 的 `ResolveExportOptions` 一致）。
 
-**E-L5 · CE 匯出的 `VariableType` / `Vartype` 用了 CE 不認得的 `12 Bytes` / `16 Bytes` / `24 Bytes`（待驗證）**
+**E-L5 · CE 匯出的 `VariableType` / `Vartype` 用了 CE 不認得的 `12 Bytes` / `16 Bytes` / `24 Bytes`（待驗證） — ✅ FIXED (2026-11-27)**
 - 位置：`UnityTypeMap.cs:64-71`；使用處 `CeXmlExporter.cs:426-429`（template leaf）、`CsxExporter.cs:173`
 - 成因：CE 的 variable type 只有 `Byte` / `2 Bytes` / `4 Bytes` / `8 Bytes` / `Float` / `Double` / `String` / `Array of byte` 等固定名稱。`Vector3` 等 value type 在 template 模式會被輸出成一個未知型別的 leaf，CE 可能以預設型別讀取，或拒絕載入整筆 entry。
 - 修法：value struct 改成展開為 x / y / z 的 `Float` 子項（live 模式已經這樣做），或輸出 `Array of byte` 加上 `<ByteLength>`。
@@ -842,7 +842,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：混淆過的 IL2CPP 名稱，或 live 模式描述中附帶的 `f.String` 值（`Live.cs:101-102`、`:1042-1043`，也就是遊戲中的字串內容），可能含有 `\u0001`、孤立的 surrogate 等字元。這類字元會讓 CE 的 XML parser 拒絕整份表格。
 - 修法：`< 0x20`（tab / LF / CR 除外）與孤立的 surrogate 一律替換成 `?` 或 `\uXXXX` 文字。
 
-**E-L7 · Lua bridge 內嵌的 JSON 編解碼不完整**
+**E-L7 · Lua bridge 內嵌的 JSON 編解碼不完整 — ✅ FIXED (2026-11-27)**
 - 位置：`scripts/unity_symbols.lua:135`（`quote()` 只跳脫 `"`，不處理 `\` 與控制字元）、`:84`（`\n` / `\uXXXX` 被解成字面字元）、`:119-121`（無法辨識的字元會讓 `#m` 對 nil 取長度）、`:160-161`（`resp == nil` 時直接 `parseValue(nil)`）；`scripts/unity_invoke.lua:117-136`（`😀` 這類 surrogate pair 會解成 CESU-8）、`:235-238`（`inf` / `nan` 輸出 `inf` / `-nan`，不是合法的 JSON）
 - 成因：兩支腳本各自維護一份 parser，修補的程度也不同（`unity_invoke.lua` 已經處理了大部分轉義，`unity_symbols.lua` 沒有）。
 - 修法：抽出一份共用的 JSON 小模組（例如放進 `utils.lua` 或成為獨立的 embedded 檔案），兩支腳本共用；至少讓 `unity_symbols.lua` 的 `rpc` 在 `resp == nil` 時給出明確的錯誤。
@@ -857,12 +857,12 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`bootstrap()` / `teardown()` 開頭沒有重設 `DISCRETE_HAD_ERROR`，同一個 CE session 中只要之前有一次失敗，之後就永遠不會關閉 Lua Engine；`os.execute('mkdir ...')` 每次都會閃出一個 console 視窗。
 - 修法：入口呼叫 `rawset(_G, "DISCRETE_HAD_ERROR", false)`；建立目錄改用 CE 的 `createDir`（如果 `celua.txt` 有）或 `pcall(io.open)` 探測。
 
-**E-L10 · Backend-agnostic 規則的破口（audit-2026-11-23-plan.md 訊號 1）**
+**E-L10 · Backend-agnostic 規則的破口（audit-2026-11-23-plan.md 訊號 1） — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs:1480`（symbol export 以 `Backend2 == "IL2CPP"` 控制）；`ui/UnityDumpUI/Views/MainWindow.axaml.cs:1378-1380`（以 backend 字首判斷 `supportsSignatureMatch`，實際效果等同「有連線」）；`ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs:1845-1860`（`GuessBackend` 優先採用 handshake 的值，但 fallback 仍先比對 `mono` 子字串，正是註解自承的誤判來源）
 - 成因：UI 直接依 backend 字串做功能分支，與「所有 Mono / IL2CPP 差異都藏在 pipe 協定之後」的規則不符。三處都只影響功能可用性或標籤，不影響資料正確性，所以列為 Low。
 - 修法：handshake 加上 capability 旗標（例如 `stableModuleRelativeMethods`），UI 改以旗標控制；`supportsSignatureMatch` 改成 `IsConnected`；`GuessBackend` 的 fallback 先比對 `gameassembly`，或只採用 handshake / DB 中記錄的值。
 
-**E-L11 · 早期版本遺留的 dead code 與過時註解**
+**E-L11 · 早期版本遺留的 dead code 與過時註解 — ✅ FIXED (2026-11-27)**
 - `CsxExporter.cs:87-100`、`:190-202`：同步的 `Render` → `EmitElements` 路徑完全沒有用到 `childRenderer` / `options` / `lookup` / `visited` 這四個參數（dead parameter）。
 - `CeXmlExporter.cs:237-247`：兩段連續的 `<summary>`，第一段描述的方法（回傳 primitive hint 的版本）已經不存在。
 - `MonoRegisterSymbolAaScriptGenerator.cs:101-121`：手動內嵌了一份與 `AaLuaLoader.AppendSelfLoad` 相同的 loader，兩份未來容易漂移。

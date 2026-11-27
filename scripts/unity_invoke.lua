@@ -114,22 +114,35 @@ local function parseValue(s, i)
                 elseif nx == 'n' then out[#out + 1] = '\n'
                 elseif nx == 'r' then out[#out + 1] = '\r'
                 elseif nx == 't' then out[#out + 1] = '\t'
+                elseif nx == 'b' then out[#out + 1] = '\b'
+                elseif nx == 'f' then out[#out + 1] = '\f'
                 elseif nx == 'u' then
-                    -- Decode \uXXXX → UTF-8. Method bodies that round-trip
-                    -- managed-string returns may carry non-ASCII (e.g.
-                    -- Vector3.ToString uses culture-formatted floats with
-                    -- non-breaking-space separators on some locales).
+                    -- E-L7: Decode \uXXXX (and UTF-16 surrogate pairs \uD800-\uDBFF
+                    -- + \uDC00-\uDFFF) to valid UTF-8 (never CESU-8).
                     local hex = s:sub(j + 2, j + 5)
                     local cp = tonumber(hex, 16) or 0xFFFD
+                    if cp >= 0xD800 and cp <= 0xDBFF and s:sub(j + 6, j + 7) == '\\u' then
+                        local low = tonumber(s:sub(j + 8, j + 11), 16)
+                        if low and low >= 0xDC00 and low <= 0xDFFF then
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00)
+                            j = j + 6
+                        end
+                    end
                     if     cp < 0x80 then
                         out[#out + 1] = string.char(cp)
                     elseif cp < 0x800 then
                         out[#out + 1] = string.char(
                             0xC0 + (cp >> 6),
                             0x80 + (cp & 0x3F))
-                    else
+                    elseif cp < 0x10000 then
                         out[#out + 1] = string.char(
                             0xE0 + (cp >> 12),
+                            0x80 + ((cp >> 6) & 0x3F),
+                            0x80 + (cp & 0x3F))
+                    else
+                        out[#out + 1] = string.char(
+                            0xF0 + (cp >> 18),
+                            0x80 + ((cp >> 12) & 0x3F),
                             0x80 + ((cp >> 6) & 0x3F),
                             0x80 + (cp & 0x3F))
                     end
@@ -228,6 +241,11 @@ serialize = function(v)
     if v == nil           then return "null" end
     if ty == "boolean"    then return v and "true" or "false" end
     if ty == "number"     then
+        -- E-L7: JSON RFC 8259 forbids NaN / Infinity (Lua tostring emits "inf"
+        -- / "-nan", which breaks downstream JSON parsers). Encode as null.
+        if v ~= v or v == math.huge or v == -math.huge then
+            return "null"
+        end
         -- Avoid scientific notation for integer-valued numbers — keeps the
         -- wire output readable when the user inspects the request line in
         -- a log file. Lua's default tostring(1e6) → "1000000" but tostring

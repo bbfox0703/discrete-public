@@ -2002,6 +2002,13 @@ json BuildHandshakeJson() {
     j["game_pointer_size"] = mem.pointerSize;
     j["game_working_set"]  = mem.workingSet;
     j["game_private_usage"] = mem.privateUsage;
+    // E-L10: backend-agnostic capability flag so the UI doesn't branch on the
+    // backend name to decide whether module-relative method symbols can export.
+#if defined(DISCRETE_BACKEND_IL2CPP)
+    j["stable_module_relative_methods"] = true;
+#else
+    j["stable_module_relative_methods"] = false;
+#endif
     return j;
 }
 

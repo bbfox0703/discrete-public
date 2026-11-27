@@ -12,6 +12,25 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1573) — Fix E-L5 + E-L7 + E-L10 + E-L11 (completes 100% of Block E: CE math-struct expansion, Lua UTF-16 surrogate & JSON hardening, handshake capability flag, dead-code & doc cleanup + tests)
+
+- **Bug fixes (`E-L5`, `E-L7`, `E-L10`, `E-L11` — completes 100% of Block E Critical/High/Medium/Low findings):**
+  - **`E-L5` (`UnityTypeMap.cs`, `CeXmlExporter.cs`, `CsxExporter.cs`):**
+    - Replaced non-standard CE keywords (`12 Bytes` / `16 Bytes` / `24 Bytes`) in `UnityTypeMap.Resolve` with `Array of byte` (with `<ByteLength>` emission in `CeXmlExporter.EmitLeaf`) and added `UnityTypeMap.TryGetKnownMathComponents` covering `Vector2`/`Vector3`/`Vector4`/`Quaternion`/`Color`/`Color32`/`Rect`/`Bounds`.
+    - Expanded known Unity math structs into typed `Float` / `Byte` sub-fields across `CeXmlExporter` (fields & arrays) and `CsxExporter` (`Render`, `RenderAsync`, and arrays).
+  - **`E-L7` (`scripts/unity_symbols.lua`, `scripts/unity_invoke.lua`):**
+    - Upgraded `unity_symbols.lua` with full JSON string escaping (`escapeStr` covering `\`, `"`, `\b`/`\f`/`\n`/`\r`/`\t`, control chars `< 0x20`), full JSON unescaping including UTF-16 surrogate pairs (`\uD800-\uDBFF` + `\uDC00-\uDFFF` -> 4-byte UTF-8), strict malformed-token errors, `resp == nil` / `pcall(parseValue)` guards, and `null` encoding for non-finite numbers.
+    - Upgraded `unity_invoke.lua` to decode UTF-16 surrogate pairs into valid 4-byte UTF-8 (fixing CESU-8 output), decode `\b`/`\f`, and serialize `NaN`/`Infinity`/`-Infinity` as JSON `null`.
+  - **`E-L10` (`dll/src/shared/ExportAPI.cpp`, `ProtocolModels.cs`, `MainWindowViewModel.cs`, `MainWindow.axaml.cs`, `SnapshotViewModel.cs`):**
+    - Added `stable_module_relative_methods` capability flag to DLL handshake (`HandshakeResult.StableModuleRelativeMethods`), wired `MainWindowViewModel.CanExportSymbols()` to `SupportsStableMethodSymbols` (with fallback for older DLLs), simplified `MainWindow.axaml.cs` `supportsSignatureMatch` to `vm.IsConnected`, and checked `gameassembly`/`userassembly`/`il2cpp` before `mono` in `SnapshotViewModel.GuessBackend()`.
+  - **`E-L11` (`CeXmlExporter.cs`, `CeXmlExporter.Live.cs`, `MonoRegisterSymbolAaScriptGenerator.cs`, `AaLuaLoader.cs`, `UnityTypeMap.cs`, `SdkHeaderExporter.cs`, `docs/ui-spec.md`):**
+    - Deduplicated `MonoRegisterSymbolAaScriptGenerator`'s CT Lua loader onto `AaLuaLoader.AppendSelfLoad` (with optional `missingHint`), rejected multi-parameter generics in `UnityTypeMap.ExtractElementClass`, fell back to a pointer leaf in `CeXmlExporter.Live.cs` when legacy DLL dictionary pairs omit `Index`, removed the duplicate obsolete `<summary>` in `CeXmlExporter.cs`, fixed `docs/Architecture.md` -> `docs/Archiutecture.md` comments, and updated `docs/ui-spec.md` line reference (`MainWindow.axaml:3804`).
+  - **Tests:** Added 6 new xUnit tests across `CeXmlAndCsxTemplateExporterTests`, `CeXmlExporterLiveTests`, `BridgeLuaResourcesTests`, and `ValueScanWireAndDtoContractTests`, plus verified `unity_symbols.lua` and `unity_invoke.lua` codecs with a real `lua.EXE` behavioral test (`EL7_EL8_LUA_TESTS_PASSED`).
+  - Marked `E-L5`, `E-L7`, `E-L10`, and `E-L11` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1573) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1254 passed (0 failed, 0 skipped, locked mode); Rust core dev 112/113 + release `+crt-static` 112/113 passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1571) — Fix E-L1 + E-L2 + E-L3 + E-L6 + E-L8 (AA error()/HAD_ERROR/literal hardening, XML 1.0 control-char escaping, unconditional Lua error reporting + tests)
 
 - **Branch milestone:** Merged all High & Medium audit fixes from `dev` into `main` via PR #3 (`143154b`).

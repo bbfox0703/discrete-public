@@ -244,11 +244,6 @@ public static partial class CeXmlExporter
     }
 
     /// <summary>
-    /// Like <see cref="UnityTypeMap.ExtractElementClass"/> but also returns
-    /// primitive-class hints (System.Int32 etc.) so the live walker can emit
-    /// per-slot scalar leaves without losing the type label.
-    /// </summary>
-    /// <summary>
     /// Strip <c>[]</c> / <c>List`1&lt;…&gt;</c> wrapping from a managed type
     /// string and return the bare element type (e.g. <c>System.Byte[]</c> →
     /// <c>System.Byte</c>). Returns null when the input isn't recognisably
@@ -437,6 +432,29 @@ public static partial class CeXmlExporter
 
         if (!shape.IsPointer)
         {
+            // E-L5: built-in Unity math structs (Vector2/3/4, Quaternion, Color,
+            // Color32, Rect, Bounds) expand into typed Float/Byte leaves instead
+            // of invalid CE VariableTypes ("12 Bytes" / "16 Bytes" / "24 Bytes").
+            if (UnityTypeMap.TryGetKnownMathComponents(f.Type) is { } comps)
+            {
+                OpenGroup(sb, indent, ids, desc, addr,
+                          offsets: null,
+                          collapsed: options.CollapsePointerNodes,
+                          varType: null, showAsHex: false);
+                foreach (var comp in comps)
+                {
+                    ManagedTypeShape cs = UnityTypeMap.Resolve(comp.ClrType);
+                    (bool chex, bool csigned) = UnityTypeMap.CeDisplay(comp.ClrType);
+                    EmitLeaf(sb, indent + "  ", ids,
+                             FieldDesc(comp.Name, comp.ClrType, options,
+                                       options.DescShowOffset ? comp.Offset : null),
+                             vartype: cs.CeTypeKeyword,
+                             showAsHex: chex, showAsSigned: csigned,
+                             address: RelAddr(comp.Offset), offsets: null);
+                }
+                CloseGroup(sb, indent);
+                return;
+            }
             (bool hex, bool signed) = UnityTypeMap.CeDisplay(f.Type);
             string vartype = TemplateExportHelpers.IsNativeIntType(f.Type)
                 ? PointerVartype(options)
@@ -444,7 +462,8 @@ public static partial class CeXmlExporter
             EmitLeaf(sb, indent, ids, desc,
                      vartype: vartype,
                      showAsHex: hex, showAsSigned: signed,
-                     address: addr, offsets: null);
+                     address: addr, offsets: null,
+                     byteLength: vartype == "Array of byte" ? shape.SizeBytes : null);
             return;
         }
 
@@ -608,16 +627,44 @@ public static partial class CeXmlExporter
             if (!elemShape.IsPointer)
             {
                 int stride = TemplateExportHelpers.IsNativeIntType(elementType) ? ptr : elemShape.SizeBytes;
-                string vt  = TemplateExportHelpers.IsNativeIntType(elementType)
-                    ? PointerVartype(options)
-                    : elemShape.CeTypeKeyword;
-                (bool hex, bool signed) = UnityTypeMap.CeDisplay(elementType);
-                for (int i = 0; i < options.ArrayLimit; ++i)
+                if (UnityTypeMap.TryGetKnownMathComponents(elementType) is { } comps)
                 {
-                    EmitLeaf(sb, elemIndent, ids, $"[{i}]",
-                             vartype: vt, showAsHex: hex, showAsSigned: signed,
-                             address: RelAddr(dataOff + i * stride), offsets: null,
-                             color: RecordColorFor(options, i));
+                    for (int i = 0; i < options.ArrayLimit; ++i)
+                    {
+                        OpenGroup(sb, elemIndent, ids, $"[{i}]",
+                                  RelAddr(dataOff + i * stride),
+                                  offsets: null,
+                                  collapsed: options.CollapsePointerNodes,
+                                  varType: null, showAsHex: false,
+                                  color: RecordColorFor(options, i));
+                        foreach (var comp in comps)
+                        {
+                            ManagedTypeShape cs = UnityTypeMap.Resolve(comp.ClrType);
+                            (bool chex, bool csigned) = UnityTypeMap.CeDisplay(comp.ClrType);
+                            EmitLeaf(sb, elemIndent + "  ", ids,
+                                     FieldDesc(comp.Name, comp.ClrType, options,
+                                               options.DescShowOffset ? comp.Offset : null),
+                                     vartype: cs.CeTypeKeyword,
+                                     showAsHex: chex, showAsSigned: csigned,
+                                     address: RelAddr(comp.Offset), offsets: null);
+                        }
+                        CloseGroup(sb, elemIndent);
+                    }
+                }
+                else
+                {
+                    string vt  = TemplateExportHelpers.IsNativeIntType(elementType)
+                        ? PointerVartype(options)
+                        : elemShape.CeTypeKeyword;
+                    (bool hex, bool signed) = UnityTypeMap.CeDisplay(elementType);
+                    for (int i = 0; i < options.ArrayLimit; ++i)
+                    {
+                        EmitLeaf(sb, elemIndent, ids, $"[{i}]",
+                                 vartype: vt, showAsHex: hex, showAsSigned: signed,
+                                 address: RelAddr(dataOff + i * stride), offsets: null,
+                                 color: RecordColorFor(options, i),
+                                 byteLength: vt == "Array of byte" ? elemShape.SizeBytes : null);
+                    }
                 }
             }
             else if (IsManagedString(elementType))
@@ -771,7 +818,7 @@ public static partial class CeXmlExporter
         StringBuilder sb, string indent, IdGen ids,
         string description, string vartype, bool showAsHex,
         string address, int[]? offsets, bool showAsSigned = false,
-        string? color = null)
+        string? color = null, int? byteLength = null)
     {
         sb.Append(indent).Append("<CheatEntry>\n");
         sb.Append(indent).Append("  <ID>").Append(ids.Next()).Append("</ID>\n");
@@ -782,6 +829,8 @@ public static partial class CeXmlExporter
             sb.Append(indent).Append("  <ShowAsHex>1</ShowAsHex>\n");
         sb.Append(indent).Append("  <ShowAsSigned>").Append(showAsSigned ? '1' : '0').Append("</ShowAsSigned>\n");
         sb.Append(indent).Append("  <VariableType>").Append(vartype).Append("</VariableType>\n");
+        if (byteLength is > 0 && string.Equals(vartype, "Array of byte", StringComparison.Ordinal))
+            sb.Append(indent).Append("  <ByteLength>").Append(byteLength.Value.ToString(CultureInfo.InvariantCulture)).Append("</ByteLength>\n");
         sb.Append(indent).Append("  <Address>").Append(XmlEscape(address)).Append("</Address>\n");
         EmitOffsets(sb, indent + "  ", offsets);
         sb.Append(indent).Append("</CheatEntry>\n");

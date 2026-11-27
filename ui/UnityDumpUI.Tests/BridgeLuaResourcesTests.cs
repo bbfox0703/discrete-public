@@ -282,4 +282,22 @@ public class BridgeLuaResourcesTests
         Assert.Contains("refusing to pick first", symbols);
         Assert.DoesNotContain("matched %d overloads; using first", symbols);
     }
+
+    [Fact]
+    public void LuaJsonCodecs_HandleSurrogatePairs_ControlEscapes_AndNonFiniteNumbers()
+    {
+        // E-L7: both unity_symbols.lua and unity_invoke.lua must decode UTF-16
+        // surrogate pairs into 4-byte UTF-8 (never CESU-8), escape backslashes/
+        // control chars in outgoing requests, and encode NaN/Infinity as JSON null.
+        foreach (string file in new[] { "unity_symbols.lua", "unity_invoke.lua" })
+        {
+            string src = BridgeLuaResources.Read(file);
+            Assert.DoesNotContain("\r", src);
+            Assert.Contains("0xD800", src);
+            Assert.Contains("0xDC00", src);
+            Assert.Contains("0xF0 + (cp >> 18)", src);
+            Assert.Contains("math.huge", src);
+            Assert.Contains("escapeStr", src);
+        }
+    }
 }

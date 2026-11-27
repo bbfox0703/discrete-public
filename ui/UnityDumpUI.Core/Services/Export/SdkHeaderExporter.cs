@@ -1,5 +1,5 @@
 // SdkHeaderExporter.cs — emits a compile-ready C/C++ header describing the
-// memory layout of a Unity managed class. Mirror of docs/Architecture.md
+// memory layout of a Unity managed class. Mirror of docs/Archiutecture.md
 // §"SDK Header (.h)".
 //
 // Layout guarantees (E-M7):

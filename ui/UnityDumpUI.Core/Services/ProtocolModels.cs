@@ -72,6 +72,9 @@ public sealed class HandshakeResult
     /// <summary>B-M6 / C-M7 — non-null when a runtime lock fault poisoned the DLL.</summary>
     [JsonPropertyName("runtime_poisoned")]     public bool    RuntimePoisoned     { get; set; }
     [JsonPropertyName("runtime_fault_reason")] public string? RuntimeFaultReason  { get; set; }
+    /// <summary>E-L10 — backend-agnostic capability flag: true when managed
+    /// methods have stable module-relative RVAs (supports symbol export).</summary>
+    [JsonPropertyName("stable_module_relative_methods")] public bool? StableModuleRelativeMethods { get; set; }
     [JsonPropertyName("error")]                public string? Error               { get; set; }
 }
 

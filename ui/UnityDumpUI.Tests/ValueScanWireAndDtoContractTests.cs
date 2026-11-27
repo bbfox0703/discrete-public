@@ -357,4 +357,34 @@ public class ValueScanWireAndDtoContractTests
             await server.DisposeAsync().ConfigureAwait(true);
         }
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Handshake_DeserializesStableModuleRelativeMethodsCapability(bool flag)
+    {
+        // E-L10: backend-agnostic capability flag on HandshakeResult.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string response = $$"""
+        {
+          "engine": "Unity",
+          "backend": "CustomBackend",
+          "protocol": 1,
+          "build": 1572,
+          "stable_module_relative_methods": {{(flag ? "true" : "false")}}
+        }
+        """;
+        var (adapter, serverTask, server, client) = await StartPairAsync(response, ct);
+        try
+        {
+            HandshakeResult hs = await adapter.HandshakeAsync(ct).ConfigureAwait(true);
+            _ = await serverTask.ConfigureAwait(true);
+            Assert.Equal(flag, hs.StableModuleRelativeMethods);
+        }
+        finally
+        {
+            await client.DisposeAsync().ConfigureAwait(true);
+            await server.DisposeAsync().ConfigureAwait(true);
+        }
+    }
 }

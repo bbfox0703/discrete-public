@@ -100,26 +100,15 @@ public static class MonoRegisterSymbolAaScriptGenerator
         // If the helper file is missing — user hasn't run "Inject Discrete
         // Bridge" yet — print a clear instruction and bail. No silent
         // no-op (the worst failure mode from Phase 22 live smoke).
+        // E-L11: delegate to the shared AaLuaLoader helper instead of keeping a
+        // hand-inlined copy that can drift from the other AA generators.
         sb.AppendLine("-- Lazy-load DLL-free Mono helpers from the cheat table.");
         sb.AppendLine("-- Idempotent across multiple register AAs on the same CT.");
-        sb.AppendLine("if _G.discrete_mono_registerSymbolEx == nil then");
-        sb.Append("  local f = findTableFile('").Append(HelpersFileName).AppendLine("')");
-        sb.AppendLine("  if not f then");
-        sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
-        sb.Append("    error('[Discrete] ").Append(HelpersFileName)
-          .AppendLine(" missing from CT. Run DiscreteUI -> Tools -> Inject Discrete Bridge into CE Table first.')");
-        sb.AppendLine("  end");
-        sb.AppendLine("  local ss = createStringStream()");
-        sb.AppendLine("  ss.copyFrom(f.Stream, f.Stream.Size)");
-        sb.Append("  local chunk, err = load(ss.DataString, '@").Append(HelpersFileName).AppendLine("')");
-        sb.AppendLine("  ss.destroy()");
-        sb.AppendLine("  if not chunk then");
-        sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
-        sb.Append("    error('[Discrete] parse error in ").Append(HelpersFileName)
-          .AppendLine(": ' .. tostring(err))");
-        sb.AppendLine("  end");
-        sb.AppendLine("  chunk()");
-        sb.AppendLine("end");
+        AaLuaLoader.AppendSelfLoad(
+            sb,
+            HelpersFileName,
+            "discrete_mono_registerSymbolEx",
+            "Run DiscreteUI -> Tools -> Inject Discrete Bridge into CE Table first.");
         sb.AppendLine();
 
         // One register call per overload. `discrete_mono_registerSymbolEx`

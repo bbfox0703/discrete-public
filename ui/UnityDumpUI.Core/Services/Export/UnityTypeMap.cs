@@ -1,7 +1,7 @@
 // UnityTypeMap.cs — single source of truth for Unity-managed-type ⇒
 // CE-Structure-Dissect / C-header type mapping.
 //
-// Mirror of docs/Architecture.md §"Export Formats" → §"CSX". Any edit here
+// Mirror of docs/Archiutecture.md §"Export Formats" → §"CSX". Any edit here
 // must also be reflected there. The fall-through rule for unmapped types is:
 //   * value type (struct, primitive enum)  → treat as opaque bytes
 //   * reference type (class / interface / delegate / array / List<T>)
@@ -63,14 +63,20 @@ public static class UnityTypeMap
             "System.IntPtr"            => Value(ptr, ptr == 4 ? "4 Bytes" : "8 Bytes", ptr == 4 ? "int32_t"  : "intptr_t"),
             "System.UIntPtr"           => Value(ptr, ptr == 4 ? "4 Bytes" : "8 Bytes", ptr == 4 ? "uint32_t" : "uintptr_t"),
 
-            "UnityEngine.Vector2"      => Value(8,  "8 Bytes",  "Vector2"),
-            "UnityEngine.Vector3"      => Value(12, "12 Bytes", "Vector3"),
-            "UnityEngine.Vector4"      => Value(16, "16 Bytes", "Vector4"),
-            "UnityEngine.Quaternion"   => Value(16, "16 Bytes", "Quaternion"),
-            "UnityEngine.Color"        => Value(16, "16 Bytes", "Color"),
-            "UnityEngine.Color32"      => Value(4,  "4 Bytes",  "Color32"),
-            "UnityEngine.Rect"         => Value(16, "16 Bytes", "Rect"),
-            "UnityEngine.Bounds"       => Value(24, "24 Bytes", "Bounds"),
+            // E-L5: Cheat Engine only recognises standard VariableType keywords
+            // (Byte, 2 Bytes, 4 Bytes, 8 Bytes, Float, Double, Array of byte, …),
+            // NOT "12 Bytes" / "16 Bytes" / "24 Bytes". Template exporters expand
+            // these math structs into typed component leaves via
+            // TryGetKnownMathComponents; fallback leaves use "Array of byte" +
+            // ByteLength = SizeBytes.
+            "UnityEngine.Vector2"      => Value(8,  "Array of byte", "Vector2"),
+            "UnityEngine.Vector3"      => Value(12, "Array of byte", "Vector3"),
+            "UnityEngine.Vector4"      => Value(16, "Array of byte", "Vector4"),
+            "UnityEngine.Quaternion"   => Value(16, "Array of byte", "Quaternion"),
+            "UnityEngine.Color"        => Value(16, "Array of byte", "Color"),
+            "UnityEngine.Color32"      => Value(4,  "Array of byte", "Color32"),
+            "UnityEngine.Rect"         => Value(16, "Array of byte", "Rect"),
+            "UnityEngine.Bounds"       => Value(24, "Array of byte", "Bounds"),
 
             "System.String"            => Pointer("void* /* MonoString / Il2CppString */", ptr),
             "System.Collections.Generic.List`1"
@@ -90,6 +96,81 @@ public static class UnityTypeMap
         => new(size, false, ce, c);
     private static ManagedTypeShape Pointer(string c, int pointerSize = 8)
         => new(pointerSize, true, "Pointer", c);
+
+    /// <summary>Component descriptor for built-in Unity math value structs
+    /// (used by template CE XML / CSX exporters for E-L5 expansion).</summary>
+    public readonly record struct MathComponent(string Name, string ClrType, int Offset);
+
+    private static readonly MathComponent[] s_vec2 =
+    {
+        new("x", "System.Single", 0),
+        new("y", "System.Single", 4),
+    };
+    private static readonly MathComponent[] s_vec3 =
+    {
+        new("x", "System.Single", 0),
+        new("y", "System.Single", 4),
+        new("z", "System.Single", 8),
+    };
+    private static readonly MathComponent[] s_vec4 =
+    {
+        new("x", "System.Single", 0),
+        new("y", "System.Single", 4),
+        new("z", "System.Single", 8),
+        new("w", "System.Single", 12),
+    };
+    private static readonly MathComponent[] s_color =
+    {
+        new("r", "System.Single", 0),
+        new("g", "System.Single", 4),
+        new("b", "System.Single", 8),
+        new("a", "System.Single", 12),
+    };
+    private static readonly MathComponent[] s_color32 =
+    {
+        new("r", "System.Byte", 0),
+        new("g", "System.Byte", 1),
+        new("b", "System.Byte", 2),
+        new("a", "System.Byte", 3),
+    };
+    private static readonly MathComponent[] s_rect =
+    {
+        new("x",      "System.Single", 0),
+        new("y",      "System.Single", 4),
+        new("width",  "System.Single", 8),
+        new("height", "System.Single", 12),
+    };
+    private static readonly MathComponent[] s_bounds =
+    {
+        new("center.x",  "System.Single", 0),
+        new("center.y",  "System.Single", 4),
+        new("center.z",  "System.Single", 8),
+        new("extents.x", "System.Single", 12),
+        new("extents.y", "System.Single", 16),
+        new("extents.z", "System.Single", 20),
+    };
+
+    /// <summary>
+    /// E-L5: Return the fixed component layout for built-in Unity math value
+    /// structs so template CE XML / CSX exports emit valid CE Float/Byte leaves
+    /// instead of unsupported "12 Bytes" / "16 Bytes" / "24 Bytes" keywords.
+    /// </summary>
+    public static MathComponent[]? TryGetKnownMathComponents(string? unityType)
+    {
+        if (string.IsNullOrWhiteSpace(unityType)) return null;
+        return unityType.Trim() switch
+        {
+            "UnityEngine.Vector2"    => s_vec2,
+            "UnityEngine.Vector3"    => s_vec3,
+            "UnityEngine.Vector4"    => s_vec4,
+            "UnityEngine.Quaternion" => s_vec4,
+            "UnityEngine.Color"      => s_color,
+            "UnityEngine.Color32"    => s_color32,
+            "UnityEngine.Rect"       => s_rect,
+            "UnityEngine.Bounds"     => s_bounds,
+            _                        => null,
+        };
+    }
 
     // ---------- Drilldown helpers ----------------------------------------
 
@@ -117,6 +198,9 @@ public static class UnityTypeMap
         {
             string outer = t.Substring(0, lt);
             string inner = t.Substring(lt + 1, t.Length - lt - 2).Trim();
+            // E-L11: multi-parameter generics (e.g. Dictionary`2<K,V>) have no
+            // single element type — return null instead of querying "K,V".
+            if (inner.IndexOf(',') >= 0) return null;
             if (outer == "System.Collections.Generic.List`1" ||
                 outer == "System.Collections.Generic.IList`1" ||
                 outer == "System.Collections.Generic.IEnumerable`1" ||
@@ -125,7 +209,7 @@ public static class UnityTypeMap
             {
                 return ExtractElementClass(inner);
             }
-            // Custom generic container (e.g. MainGame.ClassAry<T>) — recurse on inner.
+            // Custom single-parameter generic container (e.g. MainGame.ClassAry<T>).
             return ExtractElementClass(inner);
         }
 
