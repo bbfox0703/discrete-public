@@ -293,12 +293,12 @@
 - 成因：同一個 backend 中，`ClassPointerScanner`、`LazyInitSlotScanner`、`FieldXref` 都已經用 `SafeRead*` 防範 anti-cheat 把頁面拔掉（註解反覆提到「AC page-strip」），只有這個 scanner 直接讀 `.data` / `.rdata`（可能上百 MB）。只要有一頁被設成 `PAGE_NOACCESS` / guard，pipe worker 就會 AV，遊戲崩潰。
 - 修法：比照 `IL2CPPClassPointerScanner.cpp:112-150`，以 1 MB 的 `SafeReadBytes` chunk 複製到本地 buffer 再比對（chunk 之間保留 `kRegBytes` 的重疊）；PE header 改用 `Memory::SafeRead`；`GetTypeTag` 改用 `SafeReadBytes(types + idx)`。
 
-**B-M8 · Mono `findFieldReferences` 只比對 FieldDef token：泛型類別的欄位（以及跨 assembly 的存取）一律 0 筆，結果卻標成 `exact`**
+**B-M8 · Mono `findFieldReferences` 只比對 FieldDef token：泛型類別的欄位（以及跨 assembly 的存取）一律 0 筆，結果卻標成 `exact` — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/mono/MonoFieldXref.cpp:284-286`（`tok == targetToken`）、`:16-18`（v1 範圍註解）；`MonoFieldXref.h:7-10`（宣稱「Exact, no false positives」）
 - 成因：ECMA-335 規定，參考**泛型型別**的欄位時，IL operand 必須是 MemberRef（`0x0A`，parent 為 TypeSpec），即使存取發生在同一個類別內也一樣。所以 `Singleton<T>.instance`、`Pool<T>._items` 這類欄位，在同一個 assembly 內的所有讀寫都是 MemberRef，walker 會回傳 0 筆，`truncated = false`，與「欄位沒有被使用」無法區分。標頭只說明了跨 assembly 的限制，沒有提到這一點。
 - 修法：遇到 `0x0A` token 時，用 `mono_field_from_token(image, tok, &klass, NULL)`（`MONO_API`，需要加 optional bind）解析出 `MonoClassField*`；如果 parent 是 generic instance，取它的 generic definition 與欄位名稱，再和目標欄位比對；至少在目標類別是泛型時，於結果中加上 `note`。
 
-**B-M9 · IL2CPP field xref 的 `FindEnclosing` 沒有上界，其他 image 的程式碼命中會被歸給目標 image 的方法，而且標成 `exact`**
+**B-M9 · IL2CPP field xref 的 `FindEnclosing` 沒有上界，其他 image 的程式碼命中會被歸給目標 image 的方法，而且標成 `exact` — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/il2cpp/IL2CPPFieldXref.cpp:170-181`、`:466-470`（emitHit）、`:690-695`（v2 chain）；與註解 `:10-16`、`:453` 宣稱的「其他 assembly 的 hit 會被濾掉」不符
 - 成因：method index 只收錄目標 image 的方法。`upper_bound - 1` 會回傳「位址 ≤ ip 的最後一個目標方法」，只要 ip 大於目標 image 的最小方法位址就一定有結果。AOT 碼在 `GameAssembly.dll` 中並不是依 assembly 連續排列（泛型共享碼、其他 assembly 的方法都可能夾在中間），所以跨 image 的命中幾乎都會被安插到一個不相干的目標方法上。`droppedNoEnclose` 只會計到「位址低於最小方法」的那一小部分。
 - 修法：用 `RtlLookupFunctionEntry`（x64 `.pdata`）取得命中點所在函式的精確起點，再以「起點 == 某個 index entry 的 address」做精確比對，不相等就算 not enclosed；或者把 method index 擴大到所有 image，並保留每筆 entry 的 image，最後再過濾。
@@ -347,7 +347,7 @@
 - 成因：沒有檢查 namespace，使用者自己定義在其他 namespace、名為 `Enum` 的類別的子類別會被誤判；Mono 端則用 `class_is_enum`（雙胞胎行為不同）。
 - 修法：加上 `class_get_namespace(parent) == "System"`，或綁定 `il2cpp_class_is_enum`（v24 以後的 runtime 都有 export）。
 
-**B-L7 · IL2CPP instance field xref 的兩個 recall 缺口**
+**B-L7 · IL2CPP instance field xref 的兩個 recall 缺口 — ✅ FIXED (2026-11-27)**
 - 位置：`IL2CPPFieldXref.cpp:851`、`:914`
 - 成因：(1) 宣告類別是 **struct** 時，`this` 是 unboxed 指標，AOT 碼的 disp 是 `offset - kObjectHeader`，scanner 卻用含 header 的 offset，所以會全部漏掉，同時產生 false positive。(2) 透過 `FindClass` 的 `.` → nested fallback（ns = `Ns.Outer`、name = `Inner`）解析出來的巢狀類別，method index 裡記錄的是 `ns = "Ns"`、`className = "Outer/Inner"`，`m.ns != ns` 會讓宣告類別的方法數變成 0，靜默回傳 0 筆。
 - 修法：值型別時 disp 減去 header；比對改用 `ce.klass == target.klass`（在 `MethodIndexEntry` 中記錄 `Il2CppClass*`），不要比字串。

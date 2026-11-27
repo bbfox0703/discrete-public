@@ -161,6 +161,8 @@ void DoResolve() {
     optBind("mono_method_header_get_code",      g_resolver.method_header_get_code);
     optBind("mono_metadata_free_mh",            g_resolver.metadata_free_mh);
     optBind("mono_class_get_field_token",       g_resolver.class_get_field_token);
+    optBind("mono_field_from_token",            g_resolver.field_from_token);
+    optBind("mono_field_get_parent",            g_resolver.field_get_parent);
 
     // Disconnect-time GC drain — closes the "game shutdown is slow after
     // a Phase 28 IL walker run" complaint. Exported by every BDWGC-based

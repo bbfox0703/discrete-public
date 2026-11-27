@@ -5181,13 +5181,17 @@ void RegisterCoreHandlers() {
             });
         }
 
-        return json{
+        json resp = {
             {"ok",              true},
             {"field",           std::move(fieldInfo)},
-            {"references",     std::move(refs)},
+            {"references",      std::move(refs)},
             {"scanned_methods", fr.scannedMethods},
             {"truncated",       fr.truncated},
         };
+        if (!fr.note.empty()) {
+            resp["note"] = fr.note;
+        }
+        return resp;
     });
 
     PipeServer::RegisterHandler(MagicStrings::CmdGetFieldInfo,

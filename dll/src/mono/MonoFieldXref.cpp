@@ -5,17 +5,17 @@
 // `mono_method_get_header` + `mono_method_header_get_code`, then walks the
 // bytecode op-by-op. At each `ldfld` / `stfld` / `ldsfld` / `stsfld`
 // (plus the address-loading variants `ldflda` / `ldsflda`, which count as
-// reads), we read the 4-byte little-endian metadata token operand and
-// compare against the target field's `mono_class_get_field_token`.
+// reads), we read the 4-byte little-endian metadata token operand:
+//   * FieldDef (0x04xxxxxx): direct comparison against `target.token`.
+//   * MemberRef (0x0Axxxxxx, B-M8): resolved once per unique token via
+//     `mono_field_from_token` (memoized across the walk) and matched against
+//     the target field's identity (field pointer, same-image FieldDef token,
+//     or same-image declaring definition `(ns, Outer/Inner)` + field name for
+//     closed generic instantiations like `Singleton<Player>.instance`).
 //
 // Generic methods are scanned once at the open-generic level — instantiated
 // versions share the same IL body, so a token match in the open generic
-// counts for every instantiation. Matches dnSpy / ILSpy navigation
-// semantics.
-//
-// Scope (v1): same-assembly references only. Cross-assembly access uses
-// MemberRef tokens (0x0Axxxxxx) which would need
-// `mono_field_from_token` resolution — deferred to v2 if a consumer asks.
+// counts for every instantiation. Matches dnSpy / ILSpy navigation semantics.
 
 #include "MonoFieldXref.h"
 
@@ -23,6 +23,7 @@
 #include "MonoDomain.h"
 #include "MonoResolver.h"
 #include "MonoThreadAttach.h"
+#include "../shared/FieldXrefHelpers.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/RuntimeHealth.h"
@@ -33,6 +34,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 
 namespace Discrete::Mono {
 
@@ -50,9 +52,6 @@ constexpr std::uint8_t kOpFePrefix   = 0xFE;
 // Operand byte counts for one-byte IL opcodes. Sentinels:
 //   -1 = InlineSwitch (4-byte count + 4*count targets)
 //   -2 = 0xFE prefix (caller dispatches to two-byte table)
-// Unallocated opcodes left at 0 — robust against vendor / future opcodes:
-// at worst we mis-advance by a few bytes and miss a field op, but the
-// next IL boundary aligns back.
 constexpr int kOpLen1[256] = {
     /* 0x00..0x0F */  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
     /* 0x10..0x1F */  1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -99,10 +98,6 @@ const char* OpKind(std::uint8_t op) noexcept {
     }
 }
 
-// Returns how far to advance to reach the next IL instruction starting at
-// `*p` (already known to be < end). Outputs the recognized field opcode
-// in `*outFieldOp` (0 when not a field op). Returns 0 if the operand bytes
-// would extend past `remaining`, signalling end-of-buffer to the caller.
 std::size_t IlOpAdvance(const std::uint8_t* p, std::size_t remaining,
                         std::uint8_t* outFieldOp) noexcept {
     if (remaining < 1) { *outFieldOp = 0; return 0; }
@@ -122,28 +117,26 @@ std::size_t IlOpAdvance(const std::uint8_t* p, std::size_t remaining,
 
     int operandLen = kOpLen1[op];
     if (operandLen == -1) {
-        // switch: 4-byte count + 4*count targets.
+        // B-L11: overflow-safe switch advance on both x64 and 32-bit x86.
         if (remaining < 5) return 0;
         std::uint32_t count = ReadTokenLE(p + 1);
-        std::size_t targetsSize = static_cast<std::size_t>(count) * 4u;
-        std::size_t total = 1u + 4u + targetsSize;
-        return (remaining >= total) ? total : 0;
+        return FieldXref::SafeIlSwitchAdvance(count, remaining);
     }
     if (operandLen < 0) operandLen = 0;
     std::size_t total = 1u + static_cast<std::size_t>(operandLen);
     return (remaining >= total) ? total : 0;
 }
 
-// SEH leaf helpers — each wraps ONE call to a Mono runtime function so the
-// __try blocks never share a frame with C++ objects that need destruction.
-// Same pattern as MonoClassWalker.cpp.
+// SEH leaf helpers — each wraps ONE call to a Mono runtime function.
 #pragma warning(push)
 #pragma warning(disable: 4509)
 MonoMethod* SehNextMethod(fn_class_get_methods fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+    __try { return fn(k, iter); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoMethodHeader* SehGetHeader(fn_method_get_header fn, MonoMethod* m) {
-    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const std::uint8_t* SehGetCode(fn_method_header_get_code fn,
                                MonoMethodHeader* h,
@@ -157,7 +150,8 @@ const std::uint8_t* SehGetCode(fn_method_header_get_code fn,
     }
 }
 void SehFreeHeader(fn_metadata_free_mh fn, MonoMethodHeader* h) {
-    __try { fn(h); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {}
+    __try { fn(h); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {}
 }
 MonoClassField* SehNextField(fn_class_get_fields fn, MonoClass* k, void** iter) {
     unsigned long code = 0;
@@ -169,18 +163,111 @@ MonoClassField* SehNextField(fn_class_get_fields fn, MonoClass* k, void** iter) 
     }
 }
 std::uint32_t SehGetFieldToken(fn_class_get_field_token fn, MonoClassField* f) {
-    __try { return fn(f); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
+const char* SehFieldName(fn_field_get_name fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+std::uint32_t SehFieldFlags(fn_field_get_flags fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
+}
+int SehFieldOffset(fn_field_get_offset fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
+MonoType* SehFieldType(fn_field_get_type fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+MonoClassField* SehFieldFromToken(fn_field_from_token fn,
+                                  MonoImage* img,
+                                  std::uint32_t tok,
+                                  MonoClass** outKlass) {
+    __try { return fn(img, tok, outKlass, nullptr); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {
+        if (outKlass) *outKlass = nullptr;
+        return nullptr;
+    }
+}
+MonoClass* SehFieldGetParent(fn_field_get_parent fn, MonoClassField* f) {
+    __try { return fn(f); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+MonoImage* SehClassImage(fn_class_get_image fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+const char* SehClassName(fn_class_get_name fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+const char* SehClassNs(fn_class_get_namespace fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+MonoClass* SehClassNesting(fn_class_get_nesting_type fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+const char* SehMethodName(fn_method_get_name fn, MonoMethod* m) {
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+std::uint32_t SehMethodToken(fn_method_get_token fn, MonoMethod* m) {
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
+}
+std::uint32_t SehMethodFlags(fn_method_get_flags fn, MonoMethod* m, std::uint32_t* iflags) {
+    __try { return fn(m, iflags); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 #pragma warning(pop)
 
+// Build the canonical `(ns, Outer/Inner)` name for `k`, matching
+// EnumerateClasses / DescribeClass so nested and generic definitions compare
+// consistently regardless of whether the caller passed `Ns.Outer` + `Inner`
+// or `Ns` + `Outer/Inner`.
+void DescribeClassCanonical(MonoClass* k, std::string& outNs, std::string& outName) {
+    outNs.clear();
+    outName.clear();
+    if (k == nullptr) return;
+    const auto& r = GetResolver();
+    if (r.class_get_name == nullptr) return;
+    const char* leafC = SehClassName(r.class_get_name, k);
+    if (leafC == nullptr) return;
+    std::string full = leafC;
+    MonoClass* cur   = k;
+    MonoClass* outer = k;
+    if (r.class_get_nesting_type != nullptr) {
+        for (int depth = 0; depth < 16; ++depth) {
+            MonoClass* nest = SehClassNesting(r.class_get_nesting_type, cur);
+            if (nest == nullptr) break;
+            const char* nm = SehClassName(r.class_get_name, nest);
+            if (nm != nullptr && *nm != '\0') full = std::string{nm} + "/" + full;
+            outer = nest;
+            cur   = nest;
+        }
+    }
+    outName = std::move(full);
+    if (r.class_get_namespace != nullptr) {
+        if (const char* nsC = SehClassNs(r.class_get_namespace, outer)) {
+            outNs = nsC;
+        }
+    }
+}
+
 struct ResolvedField {
-    MonoClass*       klass    = nullptr;
-    MonoClassField*  field    = nullptr;
-    std::uint32_t    token    = 0;
-    bool             isStatic = false;
-    std::string      typeName;
-    int              offset   = 0;
-    std::string      error;
+    MonoClass*                   klass    = nullptr;
+    MonoClassField*              field    = nullptr;
+    std::uint32_t                token    = 0;
+    bool                         isStatic = false;
+    std::string                  typeName;
+    int                          offset   = 0;
+    FieldXref::MonoFieldIdentity identity;
+    std::string                  error;
 };
 
 ResolvedField ResolveTargetField(MonoImage* image,
@@ -208,23 +295,24 @@ ResolvedField ResolveTargetField(MonoImage* image,
     }
 
     void* iter = nullptr;
+    std::uint32_t fflags = 0;
     for (;;) {
         MonoClassField* f = SehNextField(r.class_get_fields, out.klass, &iter);
         if (f == nullptr) break;
-        const char* name = r.field_get_name(f);
+        const char* name = SehFieldName(r.field_get_name, f);
         if (name == nullptr) continue;
         if (fieldName == name) {
             out.field = f;
             out.token = SehGetFieldToken(r.class_get_field_token, f);
             if (r.field_get_flags != nullptr) {
-                std::uint32_t flags = r.field_get_flags(f);
-                out.isStatic = (flags & 0x10u) != 0;  // FieldAttributes::Static
+                fflags = SehFieldFlags(r.field_get_flags, f);
+                out.isStatic = (fflags & 0x10u) != 0;  // FieldAttributes::Static
             }
             if (r.field_get_offset != nullptr) {
-                out.offset = r.field_get_offset(f);
+                out.offset = SehFieldOffset(r.field_get_offset, f);
             }
             if (r.field_get_type != nullptr && r.type_get_name != nullptr) {
-                if (MonoType* ft = r.field_get_type(f)) {
+                if (MonoType* ft = SehFieldType(r.field_get_type, f)) {
                     if (char* tn = r.type_get_name(ft)) {
                         out.typeName = tn;
                         if (r.free != nullptr) r.free(tn);
@@ -242,42 +330,77 @@ ResolvedField ResolveTargetField(MonoImage* image,
         out.error = "mono_class_get_field_token returned 0 for target field";
         return out;
     }
-    // FieldAttributes::Literal (0x40) — `const` fields and enum members.
-    // The C# compiler inlines literals at every use site (`ldc.i4 <value>`
-    // / `ldc.r4` / `ldstr`), so the field's metadata token NEVER appears
-    // in any method's IL body. A walk would honestly return 0 matches —
-    // semantically correct but misleading to the user, who'd assume the
-    // field is unreferenced. Surface the limit explicitly so they know
-    // it's a constraint of inlined constants, not a backend miss.
-    // Mono reads field flags via `field_get_flags`; we picked them up
-    // when iterating above. (The Static bit is 0x10, Literal is 0x40 —
-    // checking the Literal bit alone catches both `const` static fields
-    // and enum members, which always have Static|Literal set.)
-    if (out.field != nullptr) {
-        std::uint32_t fflags = 0;
-        if (GetResolver().field_get_flags != nullptr) {
-            fflags = GetResolver().field_get_flags(out.field);
-        }
-        if ((fflags & 0x40u) != 0) {
-            out.error =
-                "literal const field (or enum member) — the C# compiler "
-                "inlines the value at every use site (`ldc.i4 <value>` "
-                "etc.), so the field's metadata token never appears in IL "
-                "and there's nothing for Phase 28 to match against. "
-                "This is a semantic limitation of inlined constants, not "
-                "a backend bug.";
-            return out;
-        }
+    if ((fflags & 0x40u) != 0) {
+        out.error =
+            "literal const field (or enum member) — the C# compiler "
+            "inlines the value at every use site (`ldc.i4 <value>` "
+            "etc.), so the field's metadata token never appears in IL "
+            "and there's nothing for Phase 28 to match against. "
+            "This is a semantic limitation of inlined constants, not "
+            "a backend bug.";
+        return out;
     }
+
+    out.identity.fieldPtr   = out.field;
+    out.identity.imagePtr   = (r.class_get_image != nullptr) ? SehClassImage(r.class_get_image, out.klass) : image;
+    out.identity.fieldToken = out.token;
+    out.identity.fieldName  = fieldName;
+    DescribeClassCanonical(out.klass, out.identity.ns, out.identity.className);
     return out;
 }
 
-// Pure function — walks one method's IL body, appends every match into
-// `outMatches`. Returns true if the limit cap was hit (truncation flag).
-// Caller has already gathered IL bytes + size; this routine touches no
-// Mono runtime state, so no SEH guard needed.
+// B-M8: resolve a MemberRef (`0x0Axxxxxx`) operand once per unique token in
+// `image`, returning true iff it resolves to `target.identity`. Memoized so
+// repeated references pay a single hash lookup.
+bool MemberRefMatchesTarget(MonoImage* image,
+                            std::uint32_t tok,
+                            const FieldXref::MonoFieldIdentity& target,
+                            std::unordered_map<std::uint32_t, bool>& cache,
+                            std::size_t& unresolvedMemberRefs) {
+    auto it = cache.find(tok);
+    if (it != cache.end()) return it->second;
+
+    const auto& r = GetResolver();
+    if (r.field_from_token == nullptr) {
+        ++unresolvedMemberRefs;
+        cache.emplace(tok, false);
+        return false;
+    }
+
+    MonoClass* retKlass = nullptr;
+    MonoClassField* rf = SehFieldFromToken(r.field_from_token, image, tok, &retKlass);
+    if (rf == nullptr) {
+        ++unresolvedMemberRefs;
+        cache.emplace(tok, false);
+        return false;
+    }
+    if (retKlass == nullptr && r.field_get_parent != nullptr) {
+        retKlass = SehFieldGetParent(r.field_get_parent, rf);
+    }
+
+    FieldXref::MonoFieldIdentity cand;
+    cand.fieldPtr = rf;
+    if (retKlass != nullptr) {
+        cand.imagePtr = (r.class_get_image != nullptr) ? SehClassImage(r.class_get_image, retKlass) : nullptr;
+        DescribeClassCanonical(retKlass, cand.ns, cand.className);
+    }
+    if (r.class_get_field_token != nullptr) {
+        cand.fieldToken = SehGetFieldToken(r.class_get_field_token, rf);
+    }
+    if (r.field_get_name != nullptr) {
+        if (const char* fn = SehFieldName(r.field_get_name, rf)) {
+            cand.fieldName = fn;
+        }
+    }
+
+    const bool matched = FieldXref::MatchesMonoFieldIdentity(cand, target);
+    cache.emplace(tok, matched);
+    return matched;
+}
+
+template <typename TokenMatcherFn>
 bool ScanIlForFieldRefs(const std::uint8_t* code, std::size_t codeSize,
-                        std::uint32_t targetToken, FieldRefKind kindFilter,
+                        TokenMatcherFn&& tokenMatches, FieldRefKind kindFilter,
                         std::size_t matchCap,
                         const std::string& ns, const std::string& className,
                         std::string methodName, std::uint32_t methodToken,
@@ -292,7 +415,7 @@ bool ScanIlForFieldRefs(const std::uint8_t* code, std::size_t codeSize,
 
         if (fieldOp != 0 && advance >= 5) {
             std::uint32_t tok = ReadTokenLE(code + pos + 1);
-            if (tok == targetToken) {
+            if (tokenMatches(tok)) {
                 const char* k = OpKind(fieldOp);
                 bool emit = true;
                 if (kindFilter == FieldRefKind::Read  && std::strcmp(k, "read")  != 0) emit = false;
@@ -330,6 +453,7 @@ FindFieldRefsResult FindFieldReferences(MonoImage*         image,
                                         std::size_t        limit) {
     FindFieldRefsResult result;
     if (image == nullptr) { result.error = "image is null"; return result; }
+    if (limit == 0) limit = 200;
 
     const auto& r = GetResolver();
     if (!r.resolved) { result.error = "mono runtime not resolved"; return result; }
@@ -345,13 +469,24 @@ FindFieldRefsResult FindFieldReferences(MonoImage*         image,
     MonoDomain* domain = GetRootDomain();
     if (domain == nullptr) { result.error = "mono root domain unavailable"; return result; }
 
-    // Outer guard — nested helpers reentrancy-balance via MonoThreadAttach.
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) { result.error = "mono thread attach failed"; return result; }
 
     ResolvedField target = ResolveTargetField(image, ns, className, fieldName);
     if (!target.error.empty()) { result.error = std::move(target.error); return result; }
     result.fieldToken = target.token;
+
+    // B-M8: per-walk memo of MemberRef (0x0Axxxxxx) tokens in `image`.
+    std::unordered_map<std::uint32_t, bool> memberRefCache;
+    std::size_t unresolvedMemberRefs = 0;
+    auto tokenMatches = [&](std::uint32_t tok) -> bool {
+        if (tok == target.token) return true;
+        if (FieldXref::IsMemberRefToken(tok)) {
+            return MemberRefMatchesTarget(image, tok, target.identity,
+                                          memberRefCache, unresolvedMemberRefs);
+        }
+        return false;
+    };
 
     auto classes = EnumerateClasses(image);
     for (const auto& ce : classes) {
@@ -385,24 +520,22 @@ FindFieldRefsResult FindFieldReferences(MonoImage*         image,
                                                   hdr, &codeSize, &maxStack);
 
             if (code != nullptr && codeSize > 0) {
-                // Snapshot method metadata once per method (saves a few SEH
-                // calls per matching op and keeps the inner loop tight).
                 std::string mname;
                 if (r.method_get_name != nullptr) {
-                    if (const char* mn = r.method_get_name(m)) mname = mn;
+                    if (const char* mn = SehMethodName(r.method_get_name, m)) mname = mn;
                 }
                 std::uint32_t mtoken = 0;
-                if (r.method_get_token != nullptr) mtoken = r.method_get_token(m);
+                if (r.method_get_token != nullptr) mtoken = SehMethodToken(r.method_get_token, m);
                 std::uint32_t mflags = 0;
                 bool mstatic = false;
                 if (r.method_get_flags != nullptr) {
                     std::uint32_t iflags = 0;
-                    mflags = r.method_get_flags(m, &iflags);
+                    mflags = SehMethodFlags(r.method_get_flags, m, &iflags);
                     mstatic = (mflags & 0x10u) != 0;
                 }
 
                 bool capped = ScanIlForFieldRefs(
-                    code, codeSize, target.token, kindFilter, limit,
+                    code, codeSize, tokenMatches, kindFilter, limit,
                     ce.ns, ce.name,
                     std::move(mname), mtoken, mflags, mstatic, target.isStatic,
                     result.matches);
@@ -414,6 +547,25 @@ FindFieldRefsResult FindFieldReferences(MonoImage*         image,
             }
 
             if (result.truncated) break;
+        }
+    }
+
+    // B-M8: surface a clear advisory when the declaring class is generic and
+    // either mono_field_from_token was unbound or open-generic MemberRef
+    // tokens (using type parameters like !0) couldn't be resolved without a
+    // generic context.
+    if (FieldXref::IsGenericTypeName(target.identity.className)) {
+        if (r.field_from_token == nullptr) {
+            result.note =
+                "Declaring class is generic: references to fields on generic types use "
+                "MemberRef (0x0A) tokens in IL, and this Mono runtime does not export "
+                "mono_field_from_token — results may miss generic references.";
+        } else if (unresolvedMemberRefs > 0 && result.matches.empty()) {
+            result.note =
+                "Declaring class is generic: closed-generic MemberRef (0x0A) references "
+                "were scanned via mono_field_from_token, but open-generic self-references "
+                "(bound to type parameters like !0) require a generic context and may not "
+                "appear here.";
         }
     }
 

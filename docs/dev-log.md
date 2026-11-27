@@ -12,6 +12,28 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1562) — Fix B-M8 + B-M9 (+ B-L7) (Mono MemberRef `0x0A` generic/cross-assembly field xref resolution, IL2CPP `.pdata`-bounded exact enclosing-method attribution via `RtlLookupFunctionEntry`, IL2CPP struct unboxed offset & `Il2CppClass*` nested-class matching + tests)
+
+- **Bug fixes (`B-M8`, `B-M9`, `B-L7` + field-xref parts of `B-L11` & `B-L12` — completes 100% of Block B High & Medium findings, 2/2 High + 11/11 Medium):**
+  - **`B-M8` (`dll/src/shared/FieldXrefHelpers.h`, `MonoResolver.{h,cpp}`, `MonoFieldXref.{h,cpp}`, `ExportAPI.cpp`):**
+    - Added optional bindings for `mono_field_from_token` and `mono_field_get_parent` in `MonoResolver`.
+    - Extended `MonoFieldXref.cpp` to resolve `0x0Axxxxxx` MemberRef operands (used by ECMA-335 for generic types like `Singleton<T>.instance` / `Pool<T>._items` and cross-assembly field accesses) once per unique token via `mono_field_from_token` with a per-walk memo cache, matching against target field pointer, same-image FieldDef token, or same-image canonical declaring definition `(ns, Outer/Inner)` + field name (`MatchesMonoFieldIdentity`).
+    - Added `FindFieldRefsResult::note` (surfaced in `ExportAPI.cpp` `CmdFindFieldReferences`) to emit a clear advisory when the declaring class is generic and either `mono_field_from_token` is unbound or unresolved open-generic MemberRef tokens exist with 0 matches.
+    - Fixed x86 `size_t` overflow in IL `switch` operand advance (`SafeIlSwitchAdvance`), guarded `limit == 0`, and wrapped all Mono metadata accessors in `MonoFieldXref.cpp` in SEH leaves.
+  - **`B-M9` (`dll/src/shared/FieldXrefHelpers.h`, `dll/src/il2cpp/IL2CPPFieldXref.{h,cpp}`):**
+    - Replaced unbounded `upper_bound - 1` enclosing-method attribution in `IL2CPPFieldXref.cpp` with `FindEnclosingMethodExact` backed by Win64 `RtlLookupFunctionEntry` (PE `.pdata` unwind table): when `.pdata` knows `[funcBegin, funcEnd)` for `ip`, `methodIndex` must match `entry.address == funcBegin` exactly, cleanly dropping hits inside interleaved functions from other assemblies instead of misattributing them to the target image as `exact`.
+    - Added a bounded leaf-function fallback (`< 256 B`) that still rejects hits falling past a preceding `.pdata`-bounded method's `EndAddress`, and clamped per-method decode ranges in `FindInstanceFieldReferences` to `.pdata`'s `EndAddress`.
+    - Guarded `limit == 0` and updated the stale `FieldRefKind::Write` comment in `IL2CPPFieldXref.h` (`B-L12`).
+  - **`B-L7` (`dll/src/shared/FieldXrefHelpers.h`, `dll/src/il2cpp/IL2CPPFieldXref.cpp`):**
+    - Adjusted `FindInstanceFieldReferences` to subtract `ManagedLayout::kObjectHeader` when the declaring class is a value type (`struct`, where AOT `this` is unboxed; `ComputeIl2CppInstanceScanOffset`).
+    - Recorded `Il2CppClass* klass` in `MethodIndexEntry` and matched declaring-class methods by pointer equality (`m.klass == target.klass`) instead of `(ns, className)` strings, fixing 0-match recalls on nested classes resolved via dot-fallback (`Ns.Outer` + `Inner` vs `Ns` + `Outer/Inner`).
+  - **Tests:**
+    - Added `Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset` (+35 checks x64 / +32 checks x86) to `dll/tests/dll_core_test.cpp` verifying token classification, generic `MatchesMonoFieldIdentity` (direct/token/name/cross-image/mismatch), x86-safe `SafeIlSwitchAdvance` overflow guards, `FindEnclosingMethodExact` across interleaved other-assembly functions & leaf fallbacks plus live Win64 `RtlLookupFunctionEntry`, and `ComputeIl2CppInstanceScanOffset`.
+  - Marked `B-M8`, `B-M9`, and `B-L7` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1562) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1217 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 707 checks passed (x64) / 707 checks passed (x86).
+
+-----
+
 ## 2026-11-26 (build 1561) — Fix B-M6 + B-M7 + B-M11 (noexcept `OnAssembly` & global targeted SEH filter + `RuntimeHealth` poison gate, SEH-protected chunked `IL2CPPMetadataRegistration` scan with page fallback, unified Mono `IsPlausibleVTable` domain validation + tests)
 
 - **Bug fixes (`B-M6`, `B-M7`, `B-M11`):**

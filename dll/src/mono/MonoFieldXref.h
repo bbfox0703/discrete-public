@@ -5,9 +5,12 @@
 // field via ldfld/stfld/ldsfld/stsfld/ldflda/ldsflda.
 //
 // Exact, no false positives — IL operand tokens uniquely identify the field
-// even across overloads. Generic methods are scanned once at the open-generic
-// level; instantiated versions share the same IL, so a token match at the
-// open-generic level counts for every instantiation (mirrors dnSpy).
+// even across overloads. Handles both same-assembly FieldDef tokens (0x04)
+// and MemberRef tokens (0x0A, used for fields on generic types and
+// cross-assembly references) via mono_field_from_token when bound (B-M8).
+// Generic methods are scanned once at the open-generic level; instantiated
+// versions share the same IL, so a token match at the open-generic level
+// counts for every instantiation (mirrors dnSpy).
 #pragma once
 
 #include "MonoTypes.h"
@@ -48,13 +51,16 @@ struct FindFieldRefsResult {
     std::vector<FieldRefMatch> matches;
     std::size_t   scannedMethods = 0;
     bool          truncated = false;
+    // B-M8: optional advisory note (e.g. generic declaring class where open-
+    // generic MemberRef operands require a generic context or when
+    // mono_field_from_token is unbound).
+    std::string   note;
 };
 
 // Resolves `image` + `ns` + `class` + `fieldName` to a MonoClassField, then
 // walks every class in `image` and every declared method's IL body looking
-// for `ld/stfld` ops whose token immediate matches the field's
-// `mono_class_get_field_token`. Scope: same-assembly references only —
-// cross-assembly references (MemberRef tokens) are not resolved in v1.
+// for `ld/stfld` ops matching the target field's FieldDef token (0x04) or
+// resolving via MemberRef (0x0A) through `mono_field_from_token` (B-M8).
 // Match cap: `limit` (caller validated against 5000).
 FindFieldRefsResult FindFieldReferences(MonoImage*         image,
                                         const std::string& ns,

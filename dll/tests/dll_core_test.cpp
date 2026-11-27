@@ -14,6 +14,7 @@
 
 #include "AddressBounds.h"
 #include "ExportHelpers.h"
+#include "FieldXrefHelpers.h"
 #include "MainThreadDispatcher.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
@@ -1995,6 +1996,133 @@ void Test_BM6_BM7_BM11_RuntimeHealthSafePeScanAndVtableValidation() {
     }
 }
 
+// ============================================================================
+// B-M8 + B-M9 + B-L7 (+ B-L11 switch overflow) — Mono MemberRef matching,
+// IL2CPP .pdata-bounded enclosing method attribution, and value-type offset
+// ============================================================================
+void Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset() {
+    using namespace Discrete::FieldXref;
+
+    // 1. B-M8: Token classification + generic name detection + MemberRef identity matching
+    {
+        CHECK(IsFieldDefToken(0x04000012u));
+        CHECK(!IsFieldDefToken(0x0A000012u));
+        CHECK(IsMemberRefToken(0x0A000042u));
+        CHECK(!IsMemberRefToken(0x04000042u));
+        CHECK(IsGenericTypeName("Singleton`1"));
+        CHECK(IsGenericTypeName("Outer`1/Inner"));
+        CHECK(!IsGenericTypeName("PlayerController"));
+
+        int fDef = 1, fInflated = 2, fOther = 3, imgA = 10, imgB = 20;
+        MonoFieldIdentity target{&fDef, &imgA, 0x04000007u, "Game", "Singleton`1", "instance"};
+
+        // Direct pointer match
+        CHECK(MatchesMonoFieldIdentity(target, target));
+
+        // Inflated generic field sharing FieldDef token in same image -> MATCH
+        MonoFieldIdentity inflatedByTok{&fInflated, &imgA, 0x04000007u, "Game", "Singleton`1", "instance"};
+        CHECK(MatchesMonoFieldIdentity(inflatedByTok, target));
+
+        // Inflated generic field with token==0 matched by (image, ns, defName, fieldName) -> MATCH
+        MonoFieldIdentity inflatedByName{&fInflated, &imgA, 0u, "Game", "Singleton`1", "instance"};
+        CHECK(MatchesMonoFieldIdentity(inflatedByName, target));
+
+        // Same token / name in a DIFFERENT image -> REJECTED
+        MonoFieldIdentity wrongImg{&fOther, &imgB, 0x04000007u, "Game", "Singleton`1", "instance"};
+        CHECK(!MatchesMonoFieldIdentity(wrongImg, target));
+
+        // Different field name in same generic class -> REJECTED
+        MonoFieldIdentity wrongField{&fOther, &imgA, 0x04000008u, "Game", "Singleton`1", "other"};
+        CHECK(!MatchesMonoFieldIdentity(wrongField, target));
+
+        // Null field pointer -> REJECTED
+        MonoFieldIdentity nullCand{nullptr, &imgA, 0x04000007u, "Game", "Singleton`1", "instance"};
+        CHECK(!MatchesMonoFieldIdentity(nullCand, target));
+    }
+
+    // 2. B-L11: Overflow-safe IL switch advance (critical on 32-bit x86!)
+    {
+        CHECK(SafeIlSwitchAdvance(0u, 5u) == 5u);
+        CHECK(SafeIlSwitchAdvance(3u, 17u) == 17u);
+        CHECK(SafeIlSwitchAdvance(3u, 16u) == 0u);
+        CHECK(SafeIlSwitchAdvance(0u, 4u) == 0u);
+        // 0x40000001 * 4 wraps to 4 in 32-bit size_t — must NOT pass remaining==16!
+        CHECK(SafeIlSwitchAdvance(0x40000001u, 16u) == 0u);
+        CHECK(SafeIlSwitchAdvance(0xFFFFFFFFu, 1024u) == 0u);
+    }
+
+    // 3. B-M9: FindEnclosingMethodExact with synthetic .pdata function table
+    {
+        struct FakeMethod {
+            std::uintptr_t address;
+            const char*    name;
+        };
+        // Target image owns methods at 0x1000 and 0x3000; another assembly owns
+        // an interleaved function at 0x2000..0x2200, and a tiny leaf at 0x1100.
+        std::vector<FakeMethod> idx = {
+            {0x1000u, "TargetA"},
+            {0x3000u, "TargetB"},
+            {0x4000u, "TargetLeaf"},
+        };
+        auto fakePdata = [](std::uintptr_t ip, std::uintptr_t& b, std::uintptr_t& e) -> bool {
+            if (ip >= 0x1000u && ip < 0x1080u) { b = 0x1000u; e = 0x1080u; return true; }
+            if (ip >= 0x2000u && ip < 0x2200u) { b = 0x2000u; e = 0x2200u; return true; }
+            if (ip >= 0x3000u && ip < 0x3100u) { b = 0x3000u; e = 0x3100u; return true; }
+            return false;  // no .pdata (e.g. leaf function or gap)
+        };
+
+        // Inside TargetA [0x1000, 0x1080) -> exact hit TargetA
+        const FakeMethod* h1 = FindEnclosingMethodExact(idx, 0x1040u, fakePdata);
+        CHECK(h1 != nullptr && std::strcmp(h1->name, "TargetA") == 0);
+
+        // Inside OTHER assembly's interleaved function [0x2000, 0x2200) -> REJECTED (NOT TargetA!)
+        CHECK(FindEnclosingMethodExact(idx, 0x2050u, fakePdata) == nullptr);
+
+        // Inside un-indexed leaf at 0x1100 (after TargetA's .pdata end 0x1080) -> REJECTED!
+        CHECK(FindEnclosingMethodExact(idx, 0x1100u, fakePdata) == nullptr);
+
+        // Inside TargetB [0x3000, 0x3100) -> exact hit TargetB
+        const FakeMethod* h2 = FindEnclosingMethodExact(idx, 0x30F0u, fakePdata);
+        CHECK(h2 != nullptr && std::strcmp(h2->name, "TargetB") == 0);
+
+        // Inside TargetLeaf (no .pdata, within kLeafFallbackMaxBytes) -> accepted
+        const FakeMethod* hLeaf = FindEnclosingMethodExact(idx, 0x4020u, fakePdata);
+        CHECK(hLeaf != nullptr && std::strcmp(hLeaf->name, "TargetLeaf") == 0);
+
+        // Way past TargetLeaf (> kLeafFallbackMaxBytes) -> REJECTED
+        CHECK(FindEnclosingMethodExact(idx, 0x4500u, fakePdata) == nullptr);
+
+        // Before first indexed method -> REJECTED
+        CHECK(FindEnclosingMethodExact(idx, 0x0500u, fakePdata) == nullptr);
+
+        // Also sanity-check live RtlLookupFunctionEntry on x64 with our own test function!
+#if defined(_M_AMD64)
+        DWORD64 imgBase = 0;
+        const std::uintptr_t selfFn = reinterpret_cast<std::uintptr_t>(&Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset);
+        PRUNTIME_FUNCTION rf = ::RtlLookupFunctionEntry(static_cast<DWORD64>(selfFn), &imgBase, nullptr);
+        CHECK(rf != nullptr && imgBase != 0);
+        if (rf != nullptr) {
+            CHECK(static_cast<std::uintptr_t>(imgBase + rf->BeginAddress) <= selfFn);
+            CHECK(static_cast<std::uintptr_t>(imgBase + rf->EndAddress) > selfFn);
+        }
+#endif
+    }
+
+    // 4. B-L7: Value-type struct unboxed instance offset adjustment
+    {
+        // Reference type: offset unchanged (includes 0x10 header on x64)
+        CHECK(ComputeIl2CppInstanceScanOffset(0x18u, false, 0x10u) == 0x18u);
+        // Value type (struct) on x64: boxed offset 0x10/0x14/0x18 -> unboxed 0x00/0x04/0x08
+        CHECK(ComputeIl2CppInstanceScanOffset(0x10u, true, 0x10u) == 0x00u);
+        CHECK(ComputeIl2CppInstanceScanOffset(0x14u, true, 0x10u) == 0x04u);
+        CHECK(ComputeIl2CppInstanceScanOffset(0x18u, true, 0x10u) == 0x08u);
+        // Value type on x86 (0x08 header): boxed 0x0C -> unboxed 0x04
+        CHECK(ComputeIl2CppInstanceScanOffset(0x0Cu, true, 0x08u) == 0x04u);
+        // Guard against underflow if a runtime already reports offset < header
+        CHECK(ComputeIl2CppInstanceScanOffset(0x04u, true, 0x10u) == 0x04u);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2016,6 +2144,7 @@ int main() {
     Test_BM4_BM5_StaticFieldStorageAndUtf8Names();
     Test_BM1_BM2_BM3_MethodInvokeValidationAndGcRoots();
     Test_BM6_BM7_BM11_RuntimeHealthSafePeScanAndVtableValidation();
+    Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

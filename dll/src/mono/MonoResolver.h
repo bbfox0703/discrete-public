@@ -111,6 +111,11 @@ using fn_method_get_header      = MonoMethodHeader* (*)(MonoMethod*);
 using fn_method_header_get_code = const unsigned char* (*)(MonoMethodHeader*, std::uint32_t* /*code_size*/, std::uint32_t* /*max_stack*/);
 using fn_metadata_free_mh       = void           (*)(MonoMethodHeader*);
 using fn_class_get_field_token  = std::uint32_t  (*)(MonoClassField*);
+// B-M8 — MemberRef (0x0Axxxxxx) resolution for generic / cross-assembly field
+// references in Mono IL bodies. Optional: missing on minimal builds just falls
+// back to FieldDef-only matching with an advisory note on generic classes.
+using fn_field_from_token       = MonoClassField* (*)(MonoImage*, std::uint32_t /*token*/, MonoClass** /*retklass*/, void* /*generic_context*/);
+using fn_field_get_parent       = MonoClass*     (*)(MonoClassField*);
 
 // --- Disconnect-time GC drain (build #547 follow-up) ----------------------
 // `mono_gc_collect(int generation)` triggers a Mono / BDWGC collection
@@ -220,6 +225,8 @@ struct Resolver {
     fn_method_header_get_code method_header_get_code = nullptr;
     fn_metadata_free_mh       metadata_free_mh       = nullptr;
     fn_class_get_field_token  class_get_field_token  = nullptr;
+    fn_field_from_token       field_from_token       = nullptr;
+    fn_field_get_parent       field_get_parent       = nullptr;
 
     // Disconnect-time GC drain — see header comment on fn_gc_collect.
     fn_gc_collect             gc_collect             = nullptr;
